@@ -8,10 +8,17 @@ case "$EXPECTED_RESOURCE" in
   gcp-performance|gcp-performance-soak-long)
     EXPECTED_VCPUS=8
     EXPECTED_MEMORY_GIB=28
+    EXPECTED_DISK_GIB=180
     ;;
   gcp-performance-soak|gcp-interop)
     EXPECTED_VCPUS=4
     EXPECTED_MEMORY_GIB=14
+    EXPECTED_DISK_GIB=180
+    ;;
+  gcp-proxy-interop)
+    EXPECTED_VCPUS=2
+    EXPECTED_MEMORY_GIB=7
+    EXPECTED_DISK_GIB=90
     ;;
   *)
     echo "unsupported preflight resource class: $EXPECTED_RESOURCE" >&2
@@ -35,13 +42,14 @@ DISK_BYTES="$(df --output=size -B1 / | tail -n 1 | tr -d ' ')"
 test "$ACTUAL_VCPUS" -ge "$EXPECTED_VCPUS"
 test "$NOFILE_LIMIT" -ge 262144
 test "$MEMORY_KIB" -ge "$(( EXPECTED_MEMORY_GIB * 1024 * 1024 ))"
-test "$DISK_BYTES" -ge "$(( 180 * 1024 * 1024 * 1024 ))"
+test "$DISK_BYTES" -ge "$(( EXPECTED_DISK_GIB * 1024 * 1024 * 1024 ))"
 
 for program in cargo cmake git jq pkg-config protoc rustc; do
   command -v "$program" >/dev/null
 done
 
-if [[ "$EXPECTED_RESOURCE" == gcp-interop ]]; then
+if [[ "$EXPECTED_RESOURCE" == gcp-interop \
+  || "$EXPECTED_RESOURCE" == gcp-proxy-interop ]]; then
   command -v sipp >/dev/null
   command -v tshark >/dev/null
   command -v docker >/dev/null

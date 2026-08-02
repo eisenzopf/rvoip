@@ -168,7 +168,7 @@ class GateFrameworkTests(unittest.TestCase):
 
     def test_remote_preflight_recreates_the_complete_gcp_worker_shape(self) -> None:
         selected = self.catalog["profiles"]["remote-preflight"]
-        self.assertEqual(len(selected), 16)
+        self.assertEqual(len(selected), 18)
         by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
         matrix = gates.matrix_for(
             [{"id": gate_id, "decision": "RUN"} for gate_id in selected],
@@ -181,6 +181,7 @@ class GateFrameworkTests(unittest.TestCase):
                 "gcp-performance-soak",
                 "gcp-performance-soak-long",
                 "gcp-interop",
+                "gcp-proxy-interop",
             )
         }
         self.assertEqual(
@@ -190,13 +191,15 @@ class GateFrameworkTests(unittest.TestCase):
                 "gcp-performance-soak": 7,
                 "gcp-performance-soak-long": 2,
                 "gcp-interop": 1,
+                "gcp-proxy-interop": 2,
             },
         )
-        self.assertEqual(len(matrix), 16)
+        self.assertEqual(len(matrix), 18)
         self.assertEqual(
             sum(int(shard["machine_type"].rsplit("-", 1)[1]) for shard in matrix),
-            96,
+            100,
         )
+        self.assertEqual(sum(int(shard["disk_size_gb"]) for shard in matrix), 3400)
         self.assertTrue(all(not shard["hosted"] for shard in matrix))
         self.assertTrue(all(len(shard["gates"]) == 1 for shard in matrix))
         for gate_id in selected:
@@ -208,7 +211,7 @@ class GateFrameworkTests(unittest.TestCase):
                     gate["command"],
                 )
 
-    def test_remote_release_uses_the_same_96_vcpu_gcp_shape(self) -> None:
+    def test_remote_release_uses_the_same_100_vcpu_gcp_shape(self) -> None:
         selected = self.catalog["profiles"]["remote-release"]
         by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
         matrix = gates.matrix_for(
@@ -223,6 +226,7 @@ class GateFrameworkTests(unittest.TestCase):
                 "gcp-performance-soak",
                 "gcp-performance-soak-long",
                 "gcp-interop",
+                "gcp-proxy-interop",
             )
         }
         self.assertEqual(
@@ -232,13 +236,15 @@ class GateFrameworkTests(unittest.TestCase):
                 "gcp-performance-soak": 7,
                 "gcp-performance-soak-long": 2,
                 "gcp-interop": 1,
+                "gcp-proxy-interop": 2,
             },
         )
-        self.assertEqual(len(gcp), 16)
+        self.assertEqual(len(gcp), 18)
         self.assertEqual(
             sum(int(shard["machine_type"].rsplit("-", 1)[1]) for shard in gcp),
-            96,
+            100,
         )
+        self.assertEqual(sum(int(shard["disk_size_gb"]) for shard in gcp), 3400)
         hosted = [shard for shard in matrix if shard["hosted"]]
         standard = [
             shard for shard in hosted if shard["resource_class"] == "github-standard"
@@ -261,7 +267,8 @@ class GateFrameworkTests(unittest.TestCase):
                 "perf.monolithic-soak",
                 "source.clean-start",
                 "source.remote-clean",
-            },
+            }
+            | set(builder.PROXY_INTEROP_GATE_IDS),
         )
         by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
         matrix = gates.matrix_for(
@@ -269,7 +276,11 @@ class GateFrameworkTests(unittest.TestCase):
         )
         self.assertEqual(
             {shard["resource_class"] for shard in matrix},
-            {"gcp-interop", "gcp-performance-soak-long", "github-evidence"},
+            {
+                "gcp-proxy-interop",
+                "gcp-performance-soak-long",
+                "github-evidence",
+            },
         )
         self.assertEqual(
             {
@@ -278,13 +289,13 @@ class GateFrameworkTests(unittest.TestCase):
                 for gate_id in shard["gates"]
                 if shard["resource_class"].startswith("gcp-")
             },
-            set(requested),
+            set(builder.PROXY_INTEROP_GATE_IDS) | {"perf.monolithic-soak"},
         )
 
         invalid_cases = (
             ([], "requires at least one"),
-            (["core.rvoip"], "executable GCP gates only"),
-            (["perf.media-burst-matrix"], "executable GCP gates only"),
+            (["core.rvoip"], "executable GCP gates"),
+            (["perf.media-burst-matrix"], "executable GCP gates"),
             (["not.a.gate"], "must belong to remote-release"),
             ([f"gate-{index}" for index in range(21)], "at most 20"),
         )
@@ -378,15 +389,32 @@ class GateFrameworkTests(unittest.TestCase):
                 self.assertIn("infra/release-runners/pbx/**", gate["affected_paths"])
 
     def test_remote_proxy_gate_persists_full_failure_evidence(self) -> None:
-        gate = next(
-            gate
-            for gate in self.catalog["gates"]
-            if gate["id"] == "interop.remote-proxies"
+        by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
+        row_ids = set(builder.PROXY_INTEROP_GATE_IDS)
+        aggregate = by_id["interop.remote-proxies"]
+        self.assertEqual(aggregate["executor"], "aggregate")
+        self.assertEqual(set(aggregate["dependencies"]), row_ids)
+
+        for gate_id in row_ids:
+            gate = by_id[gate_id]
+            with self.subTest(gate=gate_id):
+                self.assertEqual(gate["resource_class"], "gcp-proxy-interop")
+                self.assertIn(
+                    "PROXY_INTEROP_ARTIFACT_DIR={artifact_dir}/proxy-interop",
+                    gate["command"],
+                )
+                self.assertEqual(gate["command"][-3:], gate_id.split(".")[-3:])
+
+        matrix = gates.matrix_for(
+            [{"id": gate_id, "decision": "RUN"} for gate_id in row_ids],
+            by_id,
         )
-        self.assertIn(
-            "PROXY_INTEROP_ARTIFACT_DIR={artifact_dir}/proxy-interop",
-            gate["command"],
+        self.assertEqual(len(matrix), 2)
+        self.assertTrue(all(len(shard["gates"]) == 6 for shard in matrix))
+        self.assertTrue(
+            all(shard["machine_type"] == "n2-standard-2" for shard in matrix)
         )
+        self.assertTrue(all(shard["disk_size_gb"] == 100 for shard in matrix))
 
     def test_definition_digest_is_key_order_independent(self) -> None:
         first = {"id": "a", "command": ["true"]}

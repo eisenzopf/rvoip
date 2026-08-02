@@ -27,13 +27,14 @@ class GcpReleaseFanoutTests(unittest.TestCase):
         resource: str = "gcp-performance",
         machine: str = "n2-standard-8",
         gates: str = "perf.one,perf.two",
+        disk_size_gb: int = 200,
     ) -> dict[str, object]:
         return {
             "id": shard,
             "resource_class": resource,
             "machine_type": machine,
             "disk_type": "pd-standard",
-            "disk_size_gb": 200,
+            "disk_size_gb": disk_size_gb,
             "gates_csv": gates,
         }
 
@@ -91,6 +92,32 @@ class GcpReleaseFanoutTests(unittest.TestCase):
                         )
                     ]
                 },
+                candidate=self.candidate,
+                environment_id="release-environment",
+                run_id="1",
+                run_attempt="1",
+            )
+
+        proxy = self.matrix_entry(
+            "gcp-proxy-interop-1",
+            resource="gcp-proxy-interop",
+            machine="n2-standard-2",
+            gates="interop.remote-proxies.kamailio.rvoip-first.udp",
+            disk_size_gb=100,
+        )
+        manifest = fanout.prepare_manifest(
+            matrix={"include": [proxy]},
+            candidate=self.candidate,
+            environment_id="release-environment",
+            run_id="1",
+            run_attempt="1",
+        )
+        self.assertEqual(manifest["required_vcpus"], 2)
+        self.assertEqual(manifest["workers"][0]["disk_size_gb"], 100)
+        proxy["disk_size_gb"] = 200
+        with self.assertRaisesRegex(fanout.FanoutError, "must use a 100 GB boot disk"):
+            fanout.prepare_manifest(
+                matrix={"include": [proxy]},
                 candidate=self.candidate,
                 environment_id="release-environment",
                 run_id="1",

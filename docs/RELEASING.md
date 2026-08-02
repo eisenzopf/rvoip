@@ -26,7 +26,7 @@ the lockfile transactionally.
 
 After the preparation PR merges, run **Release qualification** for that exact
 `main` commit. After release-orchestration changes merge, use
-`remote-preflight` first. It launches the same 16-worker, 96-vCPU GCP shape as
+`remote-preflight` first. It launches the same 18-worker, 100-vCPU GCP shape as
 a full run, but
 executes short infrastructure probes so credentials, quota, VM startup, OS
 limits, tool installation, repository checkout, GCS evidence transfer,
@@ -99,18 +99,22 @@ between qualifications.
 
 The current full profile is balanced across six `n2-standard-8` short-performance
 workers, two `n2-standard-8` one-hour-soak workers, seven `n2-standard-4`
-burst/soak workers, and one `n2-standard-4` interoperability worker. The two
+burst/soak workers, one `n2-standard-4` stateful interoperability worker, and
+two `n2-standard-2` proxy-interoperability workers. Each proxy worker runs six
+of the twelve required peer/order/transport rows. The two
 long soaks receive the additional cores because exact release compilation is
-on their critical path; the total remains 96 N2 vCPUs. These are real
+on their critical path; the total is 100 N2 vCPUs. These are real
 performance machines; the workflow
 does not substitute GitHub-hosted capacity or reduce workloads and thresholds.
 The `remote-preflight` profile recreates that complete capacity shape, including
-all 16 concurrent VM creations, but its short probes never substitute for the
+all 18 concurrent VM creations, but its short probes never substitute for the
 real performance, interoperability, and soak commands in `remote-release`.
 The one-hour soak establishes a physical lower bound of one hour for a fresh
 qualification, plus provisioning, build, evidence, and cleanup time. Gates
 whose exact source, dependency, definition, environment, and threshold digests
 remain unchanged may reuse successful prior evidence on a later candidate.
+Each proxy row has its own stable gate ID, so a later diagnostic can rerun only
+the failed combination without rerunning the other eleven rows.
 
 All GCP workers use a verified, pinned `sccache` binary and a private,
 lifecycle-managed GCS compiler-cache bucket. The cache is content-addressed,

@@ -111,7 +111,8 @@ apt-get install -y --no-install-recommends \
   build-essential ca-certificates cmake curl git jq libasound2-dev libopus-dev \
   libssl-dev pkg-config protobuf-compiler
 
-if [[ "$RESOURCE_CLASS" == "gcp-interop" ]]; then
+if [[ "$RESOURCE_CLASS" == "gcp-interop" \
+  || "$RESOURCE_CLASS" == "gcp-proxy-interop" ]]; then
   # Ubuntu packages the SIPp binary as `sip-tester`; `sipp` is not a package.
   # Keep these heavyweight, network-facing tools off performance-only workers.
   apt-get install -y --no-install-recommends \
