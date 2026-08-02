@@ -119,6 +119,23 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertGreaterEqual(specialty.count("matrix.gate == 'release-tooling'"), 2)
         self.assertIn("max-parallel: 6", specialty)
 
+    def test_release_prepare_installs_native_validation_dependencies(self) -> None:
+        text = (ROOT / ".github/workflows/release-prepare.yml").read_text()
+        dependency_step = text.index("Install release validation dependencies")
+        validation_step = text.index("Prepare all workspace versions")
+
+        self.assertLess(dependency_step, validation_step)
+        for package in (
+            "libasound2-dev",
+            "libopus-dev",
+            "libssl-dev",
+            "protobuf-compiler",
+            "pkg-config",
+            "cmake",
+        ):
+            with self.subTest(package=package):
+                self.assertIn(package, text[dependency_step:validation_step])
+
     def test_parallel_gcp_workspace_is_ephemeral_and_fail_closed(self) -> None:
         workflow = (ROOT / ".github/workflows/gcp-qualification-pilot.yml").read_text()
         startup = (ROOT / "infra/release-runners/gcp-pilot-startup.sh").read_text()
