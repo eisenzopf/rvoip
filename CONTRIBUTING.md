@@ -19,7 +19,8 @@ specialty gates declared for the changed paths. It balances that work into no
 more than four shards and runs tests and Clippy on the same warm build graph.
 Public API changes compile a representative example contract set on the PR;
 the Main Gate still tests all 44 crates, doctests, and every standalone
-example. The large SIP integration inventory is duration-balanced across
+example. Main also runs the deferred long SIP target in its own lane instead
+of returning it to a monolithic workspace shard. The large SIP integration inventory is duration-balanced across
 bounded PR lanes. Process-based fixtures share one cache-backed lane so their
 example binaries are built once, while SIP core tests and Clippy run in
 parallel. The ten-minute audio round-trip target runs on Main Gate and release
