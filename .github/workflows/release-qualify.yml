@@ -41,7 +41,9 @@ permissions:
   actions: read
 
 concurrency:
-  group: release-qualification-${{ inputs.profile }}-${{ inputs.candidate }}
+  # Supersede the same qualification request, but allow disjoint diagnostic
+  # gate sets for one candidate to use independent GCP workers concurrently.
+  group: release-qualification-${{ inputs.profile }}-${{ inputs.candidate }}-${{ inputs.gates || 'all' }}
   cancel-in-progress: ${{ inputs.profile == 'remote-preflight' || inputs.profile == 'remote-diagnostic' }}
 
 env:

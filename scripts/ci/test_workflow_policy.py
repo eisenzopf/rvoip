@@ -231,6 +231,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('args+=(--only-gates "$DIAGNOSTIC_GATES")', workflow)
         self.assertIn('test "$PROFILE" = remote-diagnostic', workflow)
         self.assertIn("inputs.profile != 'remote-diagnostic'", workflow)
+        self.assertIn("inputs.gates || 'all'", workflow)
         self.assertIn("at most five prior evidence runs may be combined", workflow)
         self.assertIn('--dir "target/prior-evidence/$run_id"', workflow)
         self.assertIn(
