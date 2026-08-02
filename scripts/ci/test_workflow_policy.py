@@ -38,6 +38,16 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("run_checks.py sip-fixtures", text)
         self.assertIn("sip-integration", text)
 
+    def test_lockfile_changes_compile_amazon_connects_optional_aws_client(self) -> None:
+        policy = json.loads((ROOT / "scripts/ci/policy.json").read_text())
+        rules = {
+            rule["gate"]: set(rule["patterns"])
+            for rule in policy["specialty_rules"]
+        }
+        self.assertIn("amazon-connect-aws-control", rules)
+        self.assertIn("Cargo.lock", rules["amazon-connect-aws-control"])
+        self.assertIn("examples/Cargo.lock", rules["amazon-connect-aws-control"])
+
     def test_every_sip_process_fixture_is_prebuilt_by_the_dedicated_lane(self) -> None:
         policy = json.loads((ROOT / "scripts/ci/policy.json").read_text())
         mapping = policy["pr_sip_fixture_examples"]

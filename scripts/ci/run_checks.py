@@ -309,6 +309,36 @@ def specialty_commands(
         ]
     if gate == "rtp-interop":
         return [(["bash", "scripts/test_libsrtp_interop.sh"], None, None)]
+    if gate == "amazon-connect-aws-control":
+        return [
+            (
+                [
+                    "cargo",
+                    "check",
+                    "--locked",
+                    "-p",
+                    "rvoip-amazon-connect",
+                    "--features",
+                    "aws-control",
+                    "--all-targets",
+                ],
+                None,
+                None,
+            ),
+            (
+                [
+                    "cargo",
+                    "check",
+                    "--manifest-path",
+                    str(root / "examples/13-sip-to-amazon-connect/Cargo.toml"),
+                    "--locked",
+                    "--all-features",
+                    "--all-targets",
+                ],
+                None,
+                None,
+            ),
+        ]
     if gate == "webrtc-runtime":
         commands = []
         for feature_args in ([], ["--no-default-features"], ["--all-features"]):

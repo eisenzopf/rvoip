@@ -107,6 +107,19 @@ class RunChecksTests(unittest.TestCase):
         self.assertTrue(any("e2e_full_stack" in command for command in argv))
         self.assertTrue(any("voip-3" in command for command in argv))
 
+    def test_amazon_connect_gate_compiles_the_optional_control_plane(self) -> None:
+        commands = run_checks.specialty_commands(
+            "amazon-connect-aws-control", Path("/workspace")
+        )
+        self.assertEqual(len(commands), 2)
+        self.assertIn("aws-control", commands[0][0])
+        self.assertIn("rvoip-amazon-connect", commands[0][0])
+        self.assertIn("--all-features", commands[1][0])
+        self.assertIn(
+            "/workspace/examples/13-sip-to-amazon-connect/Cargo.toml",
+            commands[1][0],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
