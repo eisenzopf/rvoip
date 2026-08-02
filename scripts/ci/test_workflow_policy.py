@@ -264,6 +264,17 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("bundle digest mismatch", helper)
         self.assertIn("exact candidate", helper)
 
+    def test_gcp_artifact_uploads_stream_regular_files(self) -> None:
+        for relative in (
+            "infra/release-runners/gcp-performance-prebuild-startup.sh",
+            "infra/release-runners/gcp-release-startup.sh",
+            "infra/release-runners/gcp-pilot-startup.sh",
+        ):
+            startup = (ROOT / relative).read_text()
+            with self.subTest(startup=relative):
+                self.assertIn('--upload-file "${source}"', startup)
+                self.assertNotIn("--data-binary", startup)
+
     def test_release_infrastructure_preflight_is_full_shape_and_non_publishing(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
         startup = (ROOT / "infra/release-runners/gcp-release-startup.sh").read_text()

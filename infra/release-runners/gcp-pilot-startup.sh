@@ -53,7 +53,7 @@ upload() {
     -X POST \
     -H "Authorization: Bearer ${token}" \
     -H 'Content-Type: application/octet-stream' \
-    --data-binary "@${source}" \
+    --upload-file "${source}" \
     "https://storage.googleapis.com/upload/storage/v1/b/${BUCKET}/o?uploadType=media&name=${encoded}"
 }
 
