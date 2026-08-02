@@ -426,8 +426,8 @@ rcgen = "0.14"
 rustls = { workspace = true }
 clap = { workspace = true }
 cpal = "0.15"
-crossterm = "0.27"
-ratatui = "0.26"
+crossterm = "0.29"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 criterion = { workspace = true }
 futures = { workspace = true }
 proptest = { workspace = true }
