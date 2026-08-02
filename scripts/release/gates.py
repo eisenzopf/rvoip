@@ -434,6 +434,10 @@ def matrix_for(plan_gates: list[dict[str, Any]], by_id: dict[str, dict[str, Any]
         "gcp-performance": 6,
         "gcp-performance-soak": 7,
         "gcp-performance-soak-long": 2,
+        # The twelve proxy rows have independent ephemeral peer labs. Two
+        # workers fit the complete release fanout inside the 100-vCPU regional
+        # quota, while a failed row can still be retried alone.
+        "gcp-proxy-interop": 2,
         # Interoperability gates share one stateful peer lab. Keep their
         # lifecycle dependency chain in one shard so start/matrix/stop/restore
         # operations cannot race across ephemeral jobs.
@@ -455,12 +459,14 @@ def matrix_for(plan_gates: list[dict[str, Any]], by_id: dict[str, dict[str, Any]
                     "runs_on": runs_on,
                     "hosted": not resource.startswith("gcp-"),
                     "machine_type": (
-                        "n2-standard-4"
+                        "n2-standard-2"
+                        if resource == "gcp-proxy-interop"
+                        else "n2-standard-4"
                         if resource in {"gcp-interop", "gcp-performance-soak"}
                         else "n2-standard-8"
                     ),
                     "disk_type": "pd-standard",
-                    "disk_size_gb": 200,
+                    "disk_size_gb": 100 if resource == "gcp-proxy-interop" else 200,
                     "gates": gate_ids,
                     "gates_csv": ",".join(gate_ids),
                     "needs_nightly": any(
@@ -510,12 +516,15 @@ def profile_selection(
     invalid = sorted(
         gate_id
         for gate_id in requested
-        if not by_id[gate_id]["resource_class"].startswith("gcp-")
-        or by_id[gate_id]["executor"] != "argv"
+        if gate_id != "interop.remote-proxies"
+        and (
+            not by_id[gate_id]["resource_class"].startswith("gcp-")
+            or by_id[gate_id]["executor"] != "argv"
+        )
     )
     if invalid:
         raise GateError(
-            "remote-diagnostic accepts executable GCP gates only: "
+            "remote-diagnostic accepts executable GCP gates or the proxy-matrix aggregate only: "
             + ", ".join(invalid)
         )
 

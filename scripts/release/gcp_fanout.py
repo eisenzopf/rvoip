@@ -26,8 +26,13 @@ RESOURCE_MACHINES = {
     "gcp-performance": "n2-standard-8",
     "gcp-performance-soak": "n2-standard-4",
     "gcp-performance-soak-long": "n2-standard-8",
+    "gcp-proxy-interop": "n2-standard-2",
+}
+RESOURCE_DISK_GB = {
+    "gcp-proxy-interop": 100,
 }
 MACHINE_VCPUS = {
+    "n2-standard-2": 2,
     "n2-standard-4": 4,
     "n2-standard-8": 8,
 }
@@ -110,8 +115,11 @@ def prepare_manifest(
         if disk_type != "pd-standard":
             raise FanoutError(f"{shard_id} must use pd-standard storage")
         disk_size_gb = raw.get("disk_size_gb")
-        if disk_size_gb != 200:
-            raise FanoutError(f"{shard_id} must use a 200 GB boot disk")
+        expected_disk_gb = RESOURCE_DISK_GB.get(resource_class, 200)
+        if disk_size_gb != expected_disk_gb:
+            raise FanoutError(
+                f"{shard_id} must use a {expected_disk_gb} GB boot disk"
+            )
 
         gates_csv = require_string(raw, "gates_csv", shard_id)
         gates = gates_csv.split(",")

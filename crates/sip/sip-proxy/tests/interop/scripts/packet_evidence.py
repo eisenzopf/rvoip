@@ -224,14 +224,59 @@ def call_id(row: dict[str, str]) -> str:
     return row.get("sip.Call-ID", "")
 
 
+def row_call_ids(row: dict[str, str]) -> set[str]:
+    """Return every SIP message identity decoded from one packet row.
+
+    TShark reports repeated SIP PDUs in a coalesced TCP frame as pipe-separated
+    field occurrences. Treating that field as one opaque Call-ID loses the
+    individual messages and can make complete burst traffic look incomplete.
+    """
+    return split_occurrences(row.get("sip.Call-ID"))
+
+
+def call_ids_for_request(row: dict[str, str], method: str) -> set[str]:
+    identities = occurrence_list(row.get("sip.Call-ID"))
+    methods = occurrence_list(row.get("sip.Method"))
+    if len(identities) == len(methods):
+        return {
+            identity
+            for identity, observed_method in zip(identities, methods, strict=True)
+            if observed_method == method
+        }
+    if len(identities) == 1 and method in methods:
+        return set(identities)
+    return set()
+
+
+def call_ids_for_response(
+    row: dict[str, str], status: int, method: str
+) -> set[str]:
+    identities = occurrence_list(row.get("sip.Call-ID"))
+    statuses = occurrence_list(row.get("sip.Status-Code"))
+    cseq_methods = occurrence_list(row.get("sip.CSeq.method"))
+    if len(identities) == len(statuses) == len(cseq_methods):
+        return {
+            identity
+            for identity, observed_status, observed_method in zip(
+                identities, statuses, cseq_methods, strict=True
+            )
+            if observed_status == str(status) and observed_method == method
+        }
+    if (
+        len(identities) == 1
+        and str(status) in statuses
+        and method in cseq_methods
+    ):
+        return set(identities)
+    return set()
+
+
 def call_ids_with_status(
     rows: list[dict[str, str]], status: int, method: str
 ) -> set[str]:
-    return {
-        call_id(row)
-        for row in rows
-        if call_id(row) and response_has_status(row, status, method)
-    }
+    return set().union(
+        *(call_ids_for_response(row, status, method) for row in rows)
+    )
 
 
 def row_has_via(row: dict[str, str], address: str, port: int) -> bool:
@@ -782,20 +827,21 @@ def check_capacity_packet_contract(
         if response_has_status(row, 503, "INVITE")
         and endpoint(row, "src") == (args.rvoip_address, str(args.rvoip_port))
     ]
-    overloaded = {call_id(row) for row in rvoip_overload_rows if call_id(row)}
+    overloaded = set().union(
+        *(call_ids_for_response(row, 503, "INVITE") for row in rvoip_overload_rows)
+    )
     expected_upstream_status = 500 if args.order == "peer-first" else 503
     upstream_overloaded = call_ids_with_status(rows, expected_upstream_status, "INVITE")
     busy = call_ids_with_status(rows, 486, "INVITE")
-    forwarded = {
-        call_id(row)
-        for row in downstream_requests(rows, args, "INVITE")
-        if call_id(row)
-    }
-    invite_calls = {
-        call_id(row)
-        for row in rows
-        if request_has_method(row, "INVITE") and call_id(row)
-    }
+    forwarded = set().union(
+        *(
+            call_ids_for_request(row, "INVITE")
+            for row in downstream_requests(rows, args, "INVITE")
+        )
+    )
+    invite_calls = set().union(
+        *(call_ids_for_request(row, "INVITE") for row in rows)
+    )
     check(
         assertions,
         "capacity-overload-single-rejected-call",
@@ -1148,13 +1194,14 @@ def analyze_sip(
 ) -> dict[str, Any]:
     rows = collect_fields(args.tshark, captures, "sip", SIP_FIELDS)
     marker = f"x-interop-scenario: {args.scenario}".lower()
-    call_ids = {
-        row.get("sip.Call-ID", "")
-        for row in rows
-        if marker in row.get("sip.msg_hdr", "").lower()
-    }
-    call_ids.discard("")
-    selected = [row for row in rows if row.get("sip.Call-ID", "") in call_ids]
+    call_ids = set().union(
+        *(
+            row_call_ids(row)
+            for row in rows
+            if marker in row.get("sip.msg_hdr", "").lower()
+        )
+    )
+    selected = [row for row in rows if row_call_ids(row) & call_ids]
     methods = {
         method
         for row in selected

@@ -51,6 +51,15 @@ BURST_SCENARIOS = [
     "high-density-media-burst",
     "buffer-ab-legacy",
 ]
+PROXY_INTEROP_PEERS = ["kamailio", "opensips"]
+PROXY_INTEROP_ORDERS = ["rvoip-first", "peer-first"]
+PROXY_INTEROP_TRANSPORTS = ["udp", "tcp", "tls"]
+PROXY_INTEROP_GATE_IDS = [
+    f"interop.remote-proxies.{peer}.{order}.{transport}"
+    for peer in PROXY_INTEROP_PEERS
+    for order in PROXY_INTEROP_ORDERS
+    for transport in PROXY_INTEROP_TRANSPORTS
+]
 COMMAND_OVERRIDES = {
     "security.advisory-audit": [
         "cargo",
@@ -441,13 +450,57 @@ def synthetic_gate(
     }
 
 
+def proxy_interop_gates() -> list[dict[str, Any]]:
+    paths = [
+        "crates/sip/sip-proxy/**",
+        "crates/sip/sip-transport/**",
+        "crates/sip/sip-core/**",
+    ]
+    result = []
+    for peer in PROXY_INTEROP_PEERS:
+        for order in PROXY_INTEROP_ORDERS:
+            for transport in PROXY_INTEROP_TRANSPORTS:
+                gate = synthetic_gate(
+                    f"interop.remote-proxies.{peer}.{order}.{transport}",
+                    f"{peer} {order} {transport} proxy interoperability",
+                    executor="argv",
+                    command=[
+                        "env",
+                        "PROXY_INTEROP_ARTIFACT_DIR={artifact_dir}/proxy-interop",
+                        "bash",
+                        "crates/sip/sip-proxy/tests/interop/scripts/beta_gate.sh",
+                        peer,
+                        order,
+                        transport,
+                    ],
+                    resource="gcp-proxy-interop",
+                    dependencies=["source.remote-clean"],
+                    paths=paths,
+                )
+                gate["estimated_seconds"] = 240
+                gate["timeout_minutes"] = 30
+                result.append(gate)
+
+    result.append(
+        synthetic_gate(
+            "interop.remote-proxies",
+            "complete Kamailio and OpenSIPS proxy matrix",
+            executor="aggregate",
+            dependencies=PROXY_INTEROP_GATE_IDS,
+            paths=paths,
+        )
+    )
+    return result
+
+
 def infrastructure_preflight_gates() -> list[dict[str, Any]]:
     """Build the full-shape, short-running GCP orchestration acceptance profile.
 
     The release profile uses six short-performance workers, seven burst/soak
-    workers, two long-soak workers, and one interoperability worker. Keep the
-    same 96-vCPU fanout here so a controller, quota, startup, evidence, or
-    cleanup defect is found before a real hour-long qualification begins.
+    workers, two long-soak workers, one stateful interoperability worker, and
+    two proxy-interoperability workers. Keep the same 100-vCPU fanout here so a
+    controller, quota, startup, evidence, or cleanup defect is found before a
+    real hour-long qualification begins.
     """
     paths = [
         ".github/workflows/release-qualify.yml",
@@ -464,6 +517,7 @@ def infrastructure_preflight_gates() -> list[dict[str, Any]]:
         ("gcp-performance-soak", 7),
         ("gcp-performance-soak-long", 2),
         ("gcp-interop", 1),
+        ("gcp-proxy-interop", 2),
     ):
         suffix = resource.removeprefix("gcp-")
         for index in range(1, count + 1):
@@ -610,20 +664,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
             dependencies=["source.remote-clean"],
             paths=["scripts/test_libsrtp_interop.sh", "crates/media/rtp-core/**"],
         ),
-        synthetic_gate(
-            "interop.remote-proxies",
-            "Kamailio and OpenSIPS proxy matrix",
-            executor="argv",
-            command=[
-                "env",
-                "PROXY_INTEROP_ARTIFACT_DIR={artifact_dir}/proxy-interop",
-                "bash",
-                "crates/sip/sip-proxy/tests/interop/scripts/beta_gate.sh",
-            ],
-            resource="gcp-interop",
-            dependencies=["source.remote-clean"],
-            paths=["crates/sip/sip-proxy/**", "crates/sip/sip-transport/**", "crates/sip/sip-core/**"],
-        ),
+        *proxy_interop_gates(),
         synthetic_gate(
             "interop.browser-dtmf",
             "real Chromium outbound RFC 4733 interoperability (BridgeFu issue #54)",
@@ -703,6 +744,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
             + [
                 "interop.remote-libsrtp",
                 "interop.remote-proxies",
+                *PROXY_INTEROP_GATE_IDS,
                 "interop.browser-dtmf",
                 "report.remote-aggregate",
                 "source.remote-final",
@@ -728,6 +770,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
                 set(
                     [record["id"] for record in records]
                     + ["source.remote-clean", "interop.remote-proxies"]
+                    + PROXY_INTEROP_GATE_IDS
                     + [f"perf.media-burst.{scenario}" for scenario in BURST_SCENARIOS]
                 )
             ),
