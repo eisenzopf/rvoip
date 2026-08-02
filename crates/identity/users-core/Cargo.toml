@@ -39,7 +39,7 @@ argon2 = "0.5"
 password-hash = "0.5"
 
 # JWT
-jsonwebtoken = "9.3"
+jsonwebtoken.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 

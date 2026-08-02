@@ -84,6 +84,15 @@ fn mint(claims: &TestClaims) -> String {
     .expect("encode test JWT")
 }
 
+fn mint_json(claims: &serde_json::Value) -> String {
+    encode(
+        &Header::default(),
+        claims,
+        &EncodingKey::from_secret(HMAC_SECRET),
+    )
+    .expect("encode test JWT")
+}
+
 #[tokio::test]
 async fn valid_hmac_token_yields_user_authorized() {
     let validator = JwtValidator::from_hmac_secret(HMAC_SECRET);
@@ -294,6 +303,20 @@ async fn expired_token_rejects() {
         matches!(result, Err(BearerAuthError::Invalid(_))),
         "expired token must be rejected"
     );
+}
+
+#[tokio::test]
+async fn non_numeric_expiration_claim_fails_closed() {
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET);
+    let token = mint_json(&serde_json::json!({
+        "sub": "id_alice",
+        "exp": "not-a-numeric-date"
+    }));
+
+    assert!(matches!(
+        validator.validate(&token).await,
+        Err(BearerAuthError::Invalid(_))
+    ));
 }
 
 #[tokio::test]

@@ -31,7 +31,7 @@ x509-parser.workspace = true
 mime = "0.3"
 
 # JWS cryptographic primitives; wire framing is General JSON, not JWT.
-jsonwebtoken = "9.3"
+jsonwebtoken.workspace = true
 
 thiserror = "1.0"
 

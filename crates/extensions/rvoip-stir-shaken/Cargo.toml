@@ -32,7 +32,7 @@ rvoip-sip-core.workspace = true
 rvoip-sip-dialog.workspace = true
 
 # JWS / JWT for PASSporT (RFC 8225)
-jsonwebtoken = "9.3"
+jsonwebtoken.workspace = true
 
 # Certificate parsing for SHAKEN profile checks (TNAuthList, JWT Claim Constraints)
 x509-parser = "0.18"

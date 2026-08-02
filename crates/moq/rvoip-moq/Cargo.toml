@@ -44,7 +44,7 @@ sha2.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-jsonwebtoken = "9.3"
+jsonwebtoken.workspace = true
 rand.workspace = true
 rcgen.workspace = true
 tempfile = "3.14"
