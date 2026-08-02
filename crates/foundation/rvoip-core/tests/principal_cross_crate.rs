@@ -25,16 +25,14 @@ fn principal_cross_crate_event_redacts_tenant_authorization_context() {
 
     let wire = event.to_cross_crate();
     let encoded = serde_json::to_string(&wire).expect("serialize cross-crate event");
-    let RvoipCrossCrateEvent::Core(RvoipCoreCrossCrateEvent::IdentityAssuranceChanged {
+    let RvoipCrossCrateEvent::Core(RvoipCoreCrossCrateEvent::ConnectionPrincipalAuthenticated {
         connection_id: wire_connection_id,
-        identity_id,
     }) = wire
     else {
         panic!("expected redacted authentication lifecycle event");
     };
 
     assert_eq!(wire_connection_id, connection_id.to_string());
-    assert_eq!(identity_id, None);
     for sensitive in [
         "user-42",
         "tenant-a",

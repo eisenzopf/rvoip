@@ -549,7 +549,9 @@ impl Event {
     /// Translate the rich in-process event to the primitive-payload wire form
     /// published through `infra-common::GlobalEventCoordinator`. The
     /// `RvoipCrossCrateEvent::Core` variant lives in infra-common per the
-    /// CARVE_PLAN events.rs commitment.
+    /// CARVE_PLAN events.rs commitment. The match below intentionally has no
+    /// wildcard: adding a core event is a compile-time request to review and
+    /// declare its cross-crate export and redaction policy.
     pub fn to_cross_crate(&self) -> RvoipCrossCrateEvent {
         use Event::*;
         let inner = match self {
@@ -597,18 +599,15 @@ impl Event {
             }
             ConnectionAuthenticated { connection_id, .. } => {
                 // Authentication context is tenant-sensitive. The global
-                // cross-crate bus is not tenant-authorized, so it receives
-                // only a lifecycle marker; rich identity stays on the typed
-                // in-process event and connection route.
-                RvoipCoreCrossCrateEvent::IdentityAssuranceChanged {
+                // cross-crate bus receives only the correctly typed lifecycle
+                // marker; rich identity stays on the in-process event.
+                RvoipCoreCrossCrateEvent::ConnectionAuthenticated {
                     connection_id: connection_id.to_string(),
-                    identity_id: None,
                 }
             }
             ConnectionPrincipalAuthenticated { connection_id, .. } => {
-                RvoipCoreCrossCrateEvent::IdentityAssuranceChanged {
+                RvoipCoreCrossCrateEvent::ConnectionPrincipalAuthenticated {
                     connection_id: connection_id.to_string(),
-                    identity_id: None,
                 }
             }
             ConnectionProgress {
@@ -659,9 +658,9 @@ impl Event {
                 connection_id,
                 status,
                 ..
-            } => RvoipCoreCrossCrateEvent::ConnectionProgress {
+            } => RvoipCoreCrossCrateEvent::ConnectionTransferStatus {
                 connection_id: connection_id.to_string(),
-                kind: format!("transfer:{status:?}"),
+                status: format!("{status:?}"),
             },
             ParticipantJoined {
                 session_id,
@@ -841,37 +840,43 @@ impl Event {
                 packet_loss_pct: snapshot.packet_loss_pct,
                 mos: snapshot.mos,
             },
-            BargeInDetected { connection_id, .. } => {
-                // No dedicated cross-crate variant yet; surface as
-                // IdentityAssuranceChanged with None identity so
-                // downstream services notice an event on the bus.
-                RvoipCoreCrossCrateEvent::IdentityAssuranceChanged {
+            BargeInDetected {
+                connection_id,
+                ai_attachment_id,
+                ..
+            } => RvoipCoreCrossCrateEvent::BargeInDetected {
+                connection_id: connection_id.to_string(),
+                ai_attachment_id: ai_attachment_id.to_string(),
+            },
+            ActiveSpeakerChanged {
+                session_id,
+                connection_id,
+                audio_level_dbov,
+                ..
+            } => RvoipCoreCrossCrateEvent::ActiveSpeakerChanged {
+                session_id: session_id.to_string(),
+                connection_id: connection_id.to_string(),
+                audio_level_dbov: *audio_level_dbov,
+            },
+            IdentityStepUpRequested {
+                connection_id,
+                required,
+                ..
+            } => RvoipCoreCrossCrateEvent::IdentityStepUpRequested {
+                connection_id: connection_id.to_string(),
+                required: format!("{required:?}"),
+            },
+            IdentityStepUpResponseReceived {
+                connection_id,
+                method,
+                credential: _,
+                ..
+            } => {
+                // The credential is intentionally absent from both the wire
+                // payload and its Debug representation.
+                RvoipCoreCrossCrateEvent::IdentityStepUpResponseReceived {
                     connection_id: connection_id.to_string(),
-                    identity_id: None,
-                }
-            }
-            ActiveSpeakerChanged { connection_id, .. } => {
-                // No dedicated wire variant yet — surface as MediaQuality
-                // with zero loss so downstream crates that don't know
-                // about ActiveSpeaker still see *something* on the bus.
-                RvoipCoreCrossCrateEvent::MediaQuality {
-                    connection_id: connection_id.to_string(),
-                    jitter_ms: 0.0,
-                    packet_loss_pct: 0.0,
-                    mos: None,
-                }
-            }
-            IdentityStepUpRequested { connection_id, .. }
-            | IdentityStepUpResponseReceived { connection_id, .. } => {
-                // P12.6 — no dedicated cross-crate variant yet; surface
-                // as IdentityAssuranceChanged with None identity_id so
-                // downstream services see the round-trip on the bus.
-                // The actual assurance change still emits a separate
-                // IdentityAssuranceChanged event when the consumer calls
-                // `complete_step_up`.
-                RvoipCoreCrossCrateEvent::IdentityAssuranceChanged {
-                    connection_id: connection_id.to_string(),
-                    identity_id: None,
+                    method: method.clone(),
                 }
             }
         };
@@ -882,6 +887,69 @@ impl Event {
 #[cfg(test)]
 mod credential_diagnostic_tests {
     use super::*;
+
+    fn projected_core(event: Event) -> RvoipCoreCrossCrateEvent {
+        let RvoipCrossCrateEvent::Core(inner) = event.to_cross_crate() else {
+            panic!("core event projected outside the core namespace");
+        };
+        inner
+    }
+
+    #[test]
+    fn unsupported_aliases_have_dedicated_semantic_projections() {
+        let connection_id = ConnectionId::new();
+        let session_id = SessionId::new();
+        let ai_attachment_id = AiAttachmentId::new();
+
+        let barge = projected_core(Event::BargeInDetected {
+            connection_id: connection_id.clone(),
+            ai_attachment_id: ai_attachment_id.clone(),
+            at: Utc::now(),
+        });
+        assert!(matches!(
+            barge,
+            RvoipCoreCrossCrateEvent::BargeInDetected { .. }
+        ));
+
+        let speaker = projected_core(Event::ActiveSpeakerChanged {
+            session_id,
+            connection_id: connection_id.clone(),
+            audio_level_dbov: -17,
+            at: Utc::now(),
+        });
+        assert!(matches!(
+            speaker,
+            RvoipCoreCrossCrateEvent::ActiveSpeakerChanged {
+                audio_level_dbov: -17,
+                ..
+            }
+        ));
+
+        let requested = projected_core(Event::IdentityStepUpRequested {
+            connection_id: connection_id.clone(),
+            required: crate::capability::IdentityAssuranceRequirement::UserAuthorized,
+            at: Utc::now(),
+        });
+        assert!(matches!(
+            requested,
+            RvoipCoreCrossCrateEvent::IdentityStepUpRequested { .. }
+        ));
+
+        const CREDENTIAL: &str = "step-up-secret-canary";
+        let response = projected_core(Event::IdentityStepUpResponseReceived {
+            connection_id,
+            method: "bearer".into(),
+            credential: CREDENTIAL.into(),
+            at: Utc::now(),
+        });
+        assert!(matches!(
+            &response,
+            RvoipCoreCrossCrateEvent::IdentityStepUpResponseReceived { .. }
+        ));
+        assert!(!serde_json::to_string(&response)
+            .expect("serialize redacted response")
+            .contains(CREDENTIAL));
+    }
 
     #[test]
     fn enclosing_step_up_event_redacts_credential_and_keeps_live_value() {
