@@ -31,6 +31,8 @@ jobs:
       shard_count: ${{ steps.plan.outputs.shard_count }}
       specialty: ${{ steps.plan.outputs.specialty }}
       specialty_count: ${{ steps.plan.outputs.specialty_count }}
+      sip_jobs: ${{ steps.plan.outputs.sip_jobs }}
+      sip_job_count: ${{ steps.plan.outputs.sip_job_count }}
     steps:
       - name: Check out candidate merge
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -55,6 +57,7 @@ jobs:
             --base "$base" \
             --head "$head" \
             --candidate HEAD \
+            --job-mode combined \
             --github-output "$GITHUB_OUTPUT"
 
       - name: Summarize selection
@@ -67,6 +70,7 @@ jobs:
             echo "- Candidate: \`${{ steps.plan.outputs.candidate_sha }}\`"
             echo "- Reason: ${{ steps.plan.outputs.reason }}"
             echo "- Crate shards: ${{ steps.plan.outputs.shard_count }}"
+            echo "- SIP lanes: ${{ steps.plan.outputs.sip_job_count }}"
             echo "- Specialty gates: ${{ steps.plan.outputs.specialty_count }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -113,7 +117,7 @@ jobs:
           if-no-files-found: warn
 
   crate-tests:
-    name: Crate shard ${{ matrix.shard_id }} (${{ matrix.check }})
+    name: Crate shard ${{ matrix.shard_id }} (test + lint)
     needs: plan
     if: needs.plan.outputs.shard_job_count != '0'
     runs-on: ubuntu-latest
@@ -133,26 +137,26 @@ jobs:
       - name: Restore content-addressed Rust cache
         uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
-          shared-key: pr-shard-${{ matrix.shard_id }}-${{ matrix.check }}
+          shared-key: pr-shard-${{ matrix.shard_id }}
 
       - name: Install system dependencies
         run: >-
           sudo apt-get update && sudo apt-get install -y
           libasound2-dev libopus-dev protobuf-compiler pkg-config cmake lsof
 
-      - name: Run selected crate check
+      - name: Test and lint selected crates on one warm build graph
         run: >-
-          python3 scripts/ci/run_checks.py shard-${{ matrix.check }}
-          --name shard-${{ matrix.shard_id }}-${{ matrix.check }}
+          python3 scripts/ci/run_checks.py shard
+          --name shard-${{ matrix.shard_id }}-all
           --packages '${{ matrix.packages_csv }}'
-          --output target/ci-receipts/shard-${{ matrix.shard_id }}-${{ matrix.check }}.json
+          --output target/ci-receipts/shard-${{ matrix.shard_id }}-all.json
 
       - name: Upload shard receipt
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: pr-evidence-shard-${{ matrix.shard_id }}-${{ matrix.check }}
-          path: target/ci-receipts/shard-${{ matrix.shard_id }}-${{ matrix.check }}.json
+          name: pr-evidence-shard-${{ matrix.shard_id }}-all
+          path: target/ci-receipts/shard-${{ matrix.shard_id }}-all.json
           retention-days: 14
           if-no-files-found: warn
 
@@ -228,10 +232,62 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  sip-tests:
+    name: SIP ${{ matrix.id }}
+    needs: plan
+    if: needs.plan.outputs.sip_job_count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.sip_jobs) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.91.0
+          components: clippy
+
+      - name: Restore SIP lane cache
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          shared-key: pr-sip-${{ matrix.id }}
+
+      - name: Install system dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libasound2-dev libopus-dev protobuf-compiler pkg-config cmake lsof
+
+      - name: Test and lint SIP core
+        if: matrix.kind == 'core'
+        run: >-
+          python3 scripts/ci/run_checks.py sip-pr-core
+          --name sip-${{ matrix.id }}
+          --output target/ci-receipts/sip-${{ matrix.id }}.json
+
+      - name: Run bounded SIP integration partition
+        if: matrix.kind == 'integration'
+        run: >-
+          python3 scripts/ci/run_checks.py sip-integration
+          --name sip-${{ matrix.id }}
+          --targets '${{ matrix.targets_csv }}'
+          --output target/ci-receipts/sip-${{ matrix.id }}.json
+
+      - name: Upload SIP lane receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr-evidence-sip-${{ matrix.id }}
+          path: target/ci-receipts/sip-${{ matrix.id }}.json
+          retention-days: 14
+          if-no-files-found: warn
+
   pr-gate:
     name: PR Gate
     if: always()
-    needs: [plan, policy, crate-tests, specialty]
+    needs: [plan, policy, crate-tests, specialty, sip-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -254,7 +310,8 @@ jobs:
             --job 'plan=${{ needs.plan.result }}' \
             --job 'policy=${{ needs.policy.result }}' \
             --job 'crate-tests=${{ needs.crate-tests.result }}' \
-            --job 'specialty=${{ needs.specialty.result }}'
+            --job 'specialty=${{ needs.specialty.result }}' \
+            --job 'sip-tests=${{ needs.sip-tests.result }}'
 
       - name: Publish receipt summary
         if: always()
@@ -267,6 +324,7 @@ jobs:
               echo "- Status: \`$(jq -r .status target/pr-receipt/pr-receipt.json)\`"
               echo "- Mode: \`$(jq -r .plan.mode target/pr-receipt/pr-receipt.json)\`"
               echo "- Selected crates: $(jq '.plan.selected_crates | length' target/pr-receipt/pr-receipt.json)"
+              echo "- SIP lanes: $(jq '.plan.sip_jobs | length' target/pr-receipt/pr-receipt.json)"
               echo "- Specialty gates: $(jq '.plan.specialty_gates | length' target/pr-receipt/pr-receipt.json)"
             } >> "$GITHUB_STEP_SUMMARY"
           fi

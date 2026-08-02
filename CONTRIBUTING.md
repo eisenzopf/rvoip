@@ -15,8 +15,15 @@ documentation, and focused features are welcome.
 
 You do not need to run the complete release suite on your computer. CI chooses
 the directly affected workspace crates, their reverse dependencies, and any
-specialty gates declared for the changed paths. Changes to shared or unmapped
-build inputs deliberately select the full workspace.
+specialty gates declared for the changed paths. It balances that work into no
+more than four shards and runs tests and Clippy on the same warm build graph.
+Public API changes compile a representative example contract set on the PR;
+the Main Gate still tests all 44 crates, doctests, and every standalone
+example. The large SIP integration inventory is duration-balanced across
+three PR lanes; its ten-minute audio round-trip target runs on Main Gate and
+release qualification instead of holding every SIP PR open. Changes to shared
+or unmapped build inputs deliberately select the full workspace, while
+CI-policy-only changes run the planner and policy tests.
 
 ## Pull request expectations
 

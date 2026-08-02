@@ -166,6 +166,13 @@ def sip_core_commands() -> list[tuple[list[str], Path | None, dict[str, str] | N
     ]
 
 
+def sip_pr_core_commands() -> list[tuple[list[str], Path | None, dict[str, str] | None]]:
+    return [
+        *sip_core_commands(),
+        (["cargo", "clippy", "--locked", "-p", "rvoip-sip", "--all-targets"], None, None),
+    ]
+
+
 def sip_integration_commands(
     targets_csv: str,
 ) -> list[tuple[list[str], Path | None, dict[str, str] | None]]:
@@ -460,6 +467,7 @@ def main(argv: list[str] | None = None) -> int:
             "specialty",
             "doctest",
             "sip-core",
+            "sip-pr-core",
             "sip-integration",
         ),
     )
@@ -488,6 +496,8 @@ def main(argv: list[str] | None = None) -> int:
             ]
         elif args.kind == "sip-core":
             commands = sip_core_commands()
+        elif args.kind == "sip-pr-core":
+            commands = sip_pr_core_commands()
         elif args.kind == "sip-integration":
             commands = sip_integration_commands(args.targets)
         else:

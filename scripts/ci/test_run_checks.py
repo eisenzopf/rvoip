@@ -47,6 +47,12 @@ class RunChecksTests(unittest.TestCase):
             ],
         )
 
+    def test_pr_sip_core_reuses_build_before_clippy(self) -> None:
+        commands = run_checks.sip_pr_core_commands()
+        self.assertEqual(commands[0][0][0:2], ["cargo", "test"])
+        self.assertEqual(commands[1][0][0:2], ["cargo", "clippy"])
+        self.assertIn("--all-targets", commands[1][0])
+
     def test_sip_target_arguments_reject_shell_metacharacters(self) -> None:
         with self.assertRaises(run_checks.CheckError):
             run_checks.sip_integration_commands("safe; touch compromised")

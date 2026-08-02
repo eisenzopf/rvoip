@@ -1,6 +1,6 @@
 {
   "schema": "rvoip-ci-impact-policy-v1",
-  "max_shards": 6,
+  "max_shards": 4,
   "target_shard_weight": 12,
   "full_paths": [
     "Cargo.toml",
@@ -8,9 +8,6 @@
     "rust-toolchain",
     "rust-toolchain.toml",
     ".cargo/**",
-    ".github/workflows/**",
-    "scripts/ci/**",
-    "scripts/test_all.sh",
     "deny.toml"
   ],
   "known_policy_paths": [
@@ -18,6 +15,9 @@
     ".github/dependabot.yml",
     ".github/pull_request_template.md",
     ".github/release.yml",
+    ".github/workflows/**",
+    "scripts/ci/**",
+    "scripts/test_all.sh",
     "CONTRIBUTING.md",
     "SECURITY.md",
     "LICENSE",
@@ -40,6 +40,21 @@
     "13-sip-to-amazon-connect",
     "14-vapi-agent"
   ],
+  "pr_example_projects": [
+    "01-quickstart-p2p",
+    "06-attended-transfer",
+    "11-ai-harness-demo"
+  ],
+  "pr_sip_partitions": 3,
+  "pr_deferred_sip_targets": [
+    "audio_roundtrip_integration"
+  ],
+  "pr_sip_target_weights": {
+    "endpoint_unified_auth": 90,
+    "blind_transfer_integration": 55,
+    "bridge_roundtrip_integration": 35,
+    "endpoint_audio_roundtrip_integration": 20
+  },
   "specialty_rules": [
     {
       "gate": "browser-smoke",
@@ -73,6 +88,7 @@
         "scripts/release/**",
         "scripts/release_*.py",
         "scripts/test_release*.py",
+        "infra/release-runners/**",
         "docs/RELEASING.md"
       ]
     },

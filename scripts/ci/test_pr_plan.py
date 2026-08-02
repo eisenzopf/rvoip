@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import copy
 import json
 from pathlib import Path
 import sys
@@ -50,19 +51,22 @@ class PlannerTests(unittest.TestCase):
         self.policy = {
             "max_shards": 3,
             "target_shard_weight": 3,
-            "full_paths": ["Cargo.toml", "Cargo.lock", "scripts/ci/**"],
-            "known_policy_paths": ["README.md"],
+            "full_paths": ["Cargo.toml", "Cargo.lock"],
+            "known_policy_paths": ["README.md", ".github/workflows/**", "scripts/ci/**"],
             "specialty_rules": [
-                {"gate": "browser-smoke", "patterns": ["tests/browser/**"]}
+                {"gate": "browser-smoke", "patterns": ["tests/browser/**"]},
+                {"gate": "examples", "patterns": ["examples/**", "crates/delta/src/api/**"]},
+                {"gate": "release-tooling", "patterns": ["infra/release/**"]},
             ],
-            "example_projects": [],
+            "example_projects": ["one", "two"],
+            "pr_example_projects": ["one"],
             "package_weights": {"alpha": 3, "beta": 2},
         }
 
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def plan(self, *paths: str):
+    def plan(self, *paths: str, job_mode: str = "combined"):
         return pr_plan.make_plan(
             root=self.root,
             metadata=self.metadata,
@@ -71,6 +75,7 @@ class PlannerTests(unittest.TestCase):
             base="base",
             head="head",
             candidate=None,
+            job_mode=job_mode,
         )
 
     def test_direct_change_selects_all_reverse_dependency_kinds(self) -> None:
@@ -89,12 +94,23 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(plan["shards"], [])
         self.assertEqual(plan["shard_jobs"], [])
 
-    def test_root_lockfile_and_planner_changes_select_full_workspace(self) -> None:
-        for path in ("Cargo.lock", "scripts/ci/policy.json"):
+    def test_root_manifest_and_lockfile_select_full_workspace(self) -> None:
+        for path in ("Cargo.toml", "Cargo.lock"):
             with self.subTest(path=path):
                 plan = self.plan(path)
                 self.assertEqual(plan["mode"], "full")
                 self.assertEqual(set(plan["selected_crates"]), {"alpha", "beta", "gamma", "delta"})
+
+    def test_ci_only_change_runs_policy_without_workspace_crates(self) -> None:
+        plan = self.plan("scripts/ci/pr_plan.py", ".github/workflows/pr-gate.yml")
+        self.assertEqual(plan["mode"], "policy")
+        self.assertEqual(plan["selected_crates"], [])
+        self.assertEqual(plan["shard_jobs"], [])
+
+    def test_ci_and_crate_change_remains_targeted(self) -> None:
+        plan = self.plan("scripts/ci/pr_plan.py", "crates/delta/src/lib.rs")
+        self.assertEqual(plan["mode"], "targeted")
+        self.assertEqual(plan["selected_crates"], ["delta"])
 
     def test_unmapped_source_path_fails_safe_to_full(self) -> None:
         plan = self.plan("crates/removed-crate/src/lib.rs")
@@ -106,6 +122,12 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(plan["mode"], "targeted")
         self.assertEqual(plan["selected_crates"], [])
         self.assertEqual(plan["specialty_gates"], ["browser-smoke"])
+
+    def test_release_runner_path_uses_specialty_instead_of_full_workspace(self) -> None:
+        plan = self.plan("infra/release/startup.sh")
+        self.assertEqual(plan["mode"], "targeted")
+        self.assertEqual(plan["selected_crates"], [])
+        self.assertEqual(plan["specialty_gates"], ["release-tooling"])
 
     def test_rename_records_old_and_new_paths(self) -> None:
         payload = b"R100\0crates/alpha/old.rs\0crates/beta/new.rs\0D\0crates/delta/gone.rs\0"
@@ -122,18 +144,24 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(sorted(flattened), ["alpha", "beta", "delta", "gamma"])
         self.assertLessEqual(len(first), 3)
 
-    def test_each_shard_has_parallel_test_and_clippy_jobs(self) -> None:
+    def test_each_shard_has_one_combined_test_and_clippy_job(self) -> None:
         plan = self.plan("Cargo.lock")
         expected = {
-            (shard["id"], check, shard["packages_csv"])
+            (shard["id"], "all", shard["packages_csv"])
             for shard in plan["shards"]
-            for check in ("test", "clippy")
         }
         actual = {
             (job["shard_id"], job["check"], job["packages_csv"])
             for job in plan["shard_jobs"]
         }
         self.assertEqual(actual, expected)
+
+    def test_split_jobs_remain_available_for_gcp_workspace_workers(self) -> None:
+        plan = self.plan("Cargo.lock", job_mode="split")
+        self.assertEqual(
+            {job["check"] for job in plan["shard_jobs"]},
+            {"test", "clippy"},
+        )
 
     def test_github_outputs_are_single_line_json(self) -> None:
         path = self.root / "github-output"
@@ -142,8 +170,67 @@ class PlannerTests(unittest.TestCase):
         values = dict(line.split("=", 1) for line in path.read_text().splitlines())
         self.assertEqual(values["mode"], "targeted")
         jobs = json.loads(values["shard_jobs"])["include"]
-        self.assertEqual({job["check"] for job in jobs}, {"test", "clippy"})
+        self.assertEqual({job["check"] for job in jobs}, {"all"})
         self.assertTrue(all(job["packages"] == ["delta"] for job in jobs))
+        shards = json.loads(values["shards"])["include"]
+        self.assertEqual(shards, plan["shards"])
+        self.assertEqual(values["sip_job_count"], "0")
+        self.assertEqual(json.loads(values["sip_jobs"])["include"], [])
+
+    def test_public_api_change_uses_bounded_example_contract_set(self) -> None:
+        plan = self.plan("crates/delta/src/api/client.rs")
+        self.assertEqual(plan["specialty_gates"], ["example--one"])
+
+    def test_example_only_change_builds_only_touched_project(self) -> None:
+        plan = self.plan("examples/two/src/main.rs")
+        self.assertEqual(plan["specialty_gates"], ["example--two"])
+
+    def test_invalid_pr_example_contract_set_fails_closed(self) -> None:
+        self.policy["pr_example_projects"] = ["missing"]
+        with self.assertRaises(pr_plan.PlanError):
+            self.plan("crates/delta/src/api/client.rs")
+
+    def test_sip_uses_partitioned_pr_lanes_and_defers_declared_long_target(self) -> None:
+        metadata = copy.deepcopy(self.metadata)
+        package_root = self.root / "crates" / "rvoip-sip"
+        package_root.mkdir(parents=True)
+        manifest = package_root / "Cargo.toml"
+        manifest.write_text("[package]\nname = 'rvoip-sip'\n")
+        package_id = f"path+file://{package_root}#rvoip-sip@1.0.0"
+        metadata["workspace_members"].append(package_id)
+        metadata["packages"].append(
+            {
+                "id": package_id,
+                "name": "rvoip-sip",
+                "manifest_path": str(manifest),
+                "dependencies": [],
+                "targets": [
+                    {"name": "rvoip_sip", "kind": ["lib"]},
+                    {"name": "audio_roundtrip_integration", "kind": ["test"]},
+                    {"name": "event_tests", "kind": ["test"]},
+                    {"name": "srtp_call_integration", "kind": ["test"]},
+                ],
+            }
+        )
+        policy = copy.deepcopy(self.policy)
+        policy["pr_deferred_sip_targets"] = ["audio_roundtrip_integration"]
+        policy["pr_sip_partitions"] = 2
+        plan = pr_plan.make_plan(
+            root=self.root,
+            metadata=metadata,
+            policy=policy,
+            paths=["crates/rvoip-sip/src/lib.rs"],
+            base="base",
+            head="head",
+            candidate=None,
+            job_mode="combined",
+        )
+        self.assertEqual(plan["deferred_sip_targets"], ["audio_roundtrip_integration"])
+        self.assertEqual([job["id"] for job in plan["sip_jobs"]], ["core", "integration-1", "integration-2"])
+        self.assertNotIn(
+            "rvoip-sip",
+            [package for shard in plan["shards"] for package in shard["packages"]],
+        )
 
 
 if __name__ == "__main__":

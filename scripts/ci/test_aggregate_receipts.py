@@ -29,7 +29,7 @@ class AggregateTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def write_plan(self, *, shards=None, shard_jobs=None, specialty=None) -> None:
+    def write_plan(self, *, shards=None, shard_jobs=None, specialty=None, sip_jobs=None) -> None:
         self.plan.write_text(
             json.dumps(
                 {
@@ -38,6 +38,7 @@ class AggregateTests(unittest.TestCase):
                     "shards": shards or [],
                     "shard_jobs": shard_jobs if shard_jobs is not None else [],
                     "specialty_gates": specialty or [],
+                    "sip_jobs": sip_jobs or [],
                 }
             )
         )
@@ -54,7 +55,7 @@ class AggregateTests(unittest.TestCase):
             )
         )
 
-    def invoke(self, *jobs: str) -> int:
+    def invoke(self, *jobs: str, shard_layout: str = "jobs") -> int:
         argv = [
             "--plan",
             str(self.plan),
@@ -62,9 +63,13 @@ class AggregateTests(unittest.TestCase):
             str(self.evidence),
             "--output",
             str(self.output),
+            "--shard-layout",
+            shard_layout,
         ]
         for job in jobs:
             argv.extend(["--job", job])
+        if not any(job.startswith("sip-tests=") for job in jobs):
+            argv.extend(["--job", "sip-tests=skipped"])
         return aggregate.main(argv)
 
     def test_docs_plan_accepts_skipped_matrix_jobs(self) -> None:
@@ -128,6 +133,43 @@ class AggregateTests(unittest.TestCase):
             1,
         )
         self.assertIn("instead of", json.loads(self.output.read_text())["failures"][0])
+
+    def test_main_layout_accepts_one_combined_receipt_per_shard(self) -> None:
+        self.write_plan(
+            shards=[{"id": "1"}],
+            shard_jobs=[
+                {"shard_id": "1", "check": "test"},
+                {"shard_id": "1", "check": "clippy"},
+            ],
+        )
+        self.write_receipt("policy")
+        self.write_receipt("shard-1")
+        self.assertEqual(
+            self.invoke(
+                "plan=success",
+                "policy=success",
+                "crate-tests=success",
+                "specialty=skipped",
+                shard_layout="shards",
+            ),
+            0,
+        )
+
+    def test_sip_lanes_are_required_and_bound_to_the_candidate(self) -> None:
+        self.write_plan(sip_jobs=[{"id": "core"}, {"id": "integration-1"}])
+        self.write_receipt("policy")
+        self.write_receipt("sip-core")
+        self.write_receipt("sip-integration-1")
+        self.assertEqual(
+            self.invoke(
+                "plan=success",
+                "policy=success",
+                "crate-tests=skipped",
+                "specialty=skipped",
+                "sip-tests=success",
+            ),
+            0,
+        )
 
 
 if __name__ == "__main__":
