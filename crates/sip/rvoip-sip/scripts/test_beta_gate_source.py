@@ -417,7 +417,6 @@ class BetaGateCompatibilitySourceTests(unittest.TestCase):
             (WORKSPACE_ROOT / "Cargo.toml").read_text(encoding="utf-8")
         )
         version = root_manifest["workspace"]["package"]["version"]
-        self.assertEqual(version, "0.3.5")
 
         active_files = [
             WORKSPACE_ROOT / "README.md",

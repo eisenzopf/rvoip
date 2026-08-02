@@ -373,6 +373,48 @@ rvoip-rtc = { path = "../rvoip-rtc" }
                 edits[stack_manifest].decode(),
             )
 
+    def test_planned_release_metadata_edits_update_all_active_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            active_files = {
+                Path("README.md"): (
+                    "> **Unified `0.3.5` release train.**\n"
+                    'rvoip-sip = "0.3.5"\n'
+                ),
+                Path("crates/sip/rvoip-sip/docs/BETA_RELEASE_CHECKLIST.md"): (
+                    "Current candidate and runtime crate version: `0.3.5`.\n"
+                ),
+                Path("crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md"): (
+                    "# rvoip 0.3.5 Release Candidate Notes\n"
+                ),
+            }
+            for relative_path, body in active_files.items():
+                path = root / relative_path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(body, encoding="utf-8")
+
+            edits = release.planned_release_metadata_edits(
+                root, "0.3.5", "0.3.6"
+            )
+
+            self.assertEqual(set(edits), {root / path for path in active_files})
+            for payload in edits.values():
+                self.assertIn("0.3.6", payload.decode())
+                self.assertNotIn("0.3.5", payload.decode())
+
+    def test_planned_release_metadata_edits_fail_closed_on_missing_marker(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "README.md").write_text("no active marker\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                release.ReleaseError, "does not reference workspace version"
+            ):
+                release.planned_release_metadata_edits(
+                    root, "0.3.5", "0.3.6"
+                )
+
     def test_member_dependency_versions_reject_stale_renamed_requirement(
         self,
     ) -> None:
