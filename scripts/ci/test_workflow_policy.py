@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import re
+import tomllib
 import unittest
 
 
@@ -31,12 +33,81 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("run_checks.py shard", text)
         self.assertIn("shard-${{ matrix.shard_id }}-all", text)
         self.assertNotIn("run_checks.py shard-${{ matrix.check }}", text)
-        self.assertIn("sip-pr-core", text)
+        self.assertIn("run_checks.py sip-core", text)
+        self.assertIn("run_checks.py sip-clippy", text)
+        self.assertIn("run_checks.py sip-fixtures", text)
         self.assertIn("sip-integration", text)
+
+    def test_lockfile_changes_compile_amazon_connects_optional_aws_client(self) -> None:
+        policy = json.loads((ROOT / "scripts/ci/policy.json").read_text())
+        rules = {
+            rule["gate"]: set(rule["patterns"])
+            for rule in policy["specialty_rules"]
+        }
+        self.assertIn("amazon-connect-aws-control", rules)
+        self.assertIn("Cargo.lock", rules["amazon-connect-aws-control"])
+        self.assertIn("examples/Cargo.lock", rules["amazon-connect-aws-control"])
+
+    def test_lockfile_changes_compile_the_optional_otel_exporter(self) -> None:
+        policy = json.loads((ROOT / "scripts/ci/policy.json").read_text())
+        rules = {
+            rule["gate"]: set(rule["patterns"])
+            for rule in policy["specialty_rules"]
+        }
+        self.assertIn("infra-otel", rules)
+        self.assertIn("Cargo.lock", rules["infra-otel"])
+
+    def test_every_sip_process_fixture_is_prebuilt_by_the_dedicated_lane(self) -> None:
+        policy = json.loads((ROOT / "scripts/ci/policy.json").read_text())
+        mapping = policy["pr_sip_fixture_examples"]
+        test_root = ROOT / "crates/sip/rvoip-sip/tests"
+        fixture_targets = {
+            path.stem
+            for path in test_root.glob("*.rs")
+            if "build_examples(" in path.read_text()
+        }
+        self.assertEqual(set(mapping), fixture_targets)
+
+        manifest = tomllib.loads(
+            (ROOT / "crates/sip/rvoip-sip/Cargo.toml").read_text()
+        )
+        declared_examples = {item["name"] for item in manifest.get("example", [])}
+        mapped_examples = {
+            example for examples in mapping.values() for example in examples
+        }
+        self.assertEqual(mapped_examples - declared_examples, set())
+
+    def test_nextest_defers_exactly_the_catalogued_sip_process_fixtures(self) -> None:
+        policy = json.loads((ROOT / "scripts/ci/policy.json").read_text())
+        mapping = policy["pr_sip_fixture_examples"]
+        config_text = (ROOT / ".config/nextest.toml").read_text()
+        config = tomllib.loads(config_text)
+        default_filter = config["profile"]["ci"]["default-filter"]
+        deferred = set(re.findall(r"binary\(=([a-z0-9_]+)\)", default_filter))
+
+        self.assertEqual(deferred, set(mapping))
+        self.assertIn(
+            "test(=adapters::session_event_handler::tests::"
+            "malformed_inbound_sdes_update_returns_one_cached_488_without_state_mutation)",
+            config_text,
+        )
+        self.assertIn('threads-required = "num-test-threads"', config_text)
+
+        workflow = (ROOT / ".github/workflows/nextest-parity.yml").read_text()
+        self.assertIn("target/nextest/ci/junit.xml", workflow)
+        self.assertIn("if-no-files-found: error", workflow)
 
     def test_main_aggregates_one_receipt_per_combined_shard(self) -> None:
         text = (ROOT / ".github/workflows/main-ci.yml").read_text()
         self.assertIn("--shard-layout shards", text)
+        self.assertIn("--job-mode combined", text)
+        self.assertIn("--deferred-sip-mode separate", text)
+        self.assertIn("Full SIP ${{ matrix.id }}", text)
+        self.assertIn("run_checks.py sip-core", text)
+        self.assertIn("run_checks.py sip-clippy", text)
+        self.assertIn("run_checks.py sip-fixtures", text)
+        self.assertIn("run_checks.py sip-integration", text)
+        self.assertIn("--job 'sip-tests=${{ needs.sip-tests.result }}'", text)
 
     def test_main_release_tooling_installs_its_fuzz_toolchain(self) -> None:
         text = (ROOT / ".github/workflows/main-ci.yml").read_text()
@@ -88,15 +159,20 @@ class WorkflowPolicyTests(unittest.TestCase):
     def test_release_workers_install_interop_tools_only_for_interop(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
         startup = (ROOT / "infra/release-runners/gcp-release-startup.sh").read_text()
+        fanout = (ROOT / "scripts/release/gcp_fanout.py").read_text()
 
-        self.assertIn("RESOURCE_CLASS: ${{ matrix.resource_class }}", workflow)
-        self.assertIn("rvoip-resource-class=${RESOURCE_CLASS}", workflow)
+        self.assertIn('resource_class="$(jq -r .resource_class', workflow)
+        self.assertIn("rvoip-resource-class=${resource_class}", workflow)
         self.assertIn('RESOURCE_CLASS="$(metadata rvoip-resource-class)"', startup)
         self.assertIn('if [[ "$RESOURCE_CLASS" == "gcp-interop" ]]', startup)
+        self.assertIn('"gcp-interop": "n2-standard-4"', fanout)
+        self.assertIn('"gcp-performance": "n2-standard-8"', fanout)
+        self.assertIn('"gcp-performance-soak": "n2-standard-4"', fanout)
         self.assertIn("sip-tester", startup)
         self.assertIn("tshark", startup)
         self.assertIn("docker-compose-v2", startup)
-        self.assertIn('elif [[ ",$GATES," == *",perf.sipp-parity,"* ]]', startup)
+        self.assertIn('",$GATES," == *",perf.sipp-parity,"*', startup)
+        self.assertIn('",$GATES," == *",preflight.performance-01,"*', startup)
         self.assertGreaterEqual(startup.count("command -v sipp >/dev/null"), 2)
         self.assertIn("command -v tshark >/dev/null", startup)
         self.assertIn("docker compose version >/dev/null", startup)
@@ -104,6 +180,61 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('test "$(ulimit -n)" -ge 262144', startup)
         self.assertIn("-name '*.jsonl'", startup)
         self.assertNotRegex(startup, r"apt-get install[^\n]*\bsipp\b")
+
+    def test_release_infrastructure_preflight_is_full_shape_and_non_publishing(self) -> None:
+        workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
+        startup = (ROOT / "infra/release-runners/gcp-release-startup.sh").read_text()
+        probe = (
+            ROOT / "infra/release-runners/release-infrastructure-preflight.sh"
+        ).read_text()
+
+        self.assertIn("remote-preflight", workflow)
+        self.assertIn('test "$PROFILE" = remote-preflight', workflow)
+        self.assertIn("Require candidate to belong to protected origin/main", workflow)
+        self.assertIn("RVOIP_GCP_WORKLOAD_IDENTITY_PROVIDER", workflow)
+        self.assertNotIn("RVOIP_GCP_PILOT_PROVIDER", workflow)
+        self.assertIn('export RVOIP_RELEASE_RESOURCE_CLASS="$RESOURCE_CLASS"', startup)
+        self.assertIn('export RVOIP_RELEASE_CANDIDATE="$CANDIDATE"', startup)
+        self.assertIn('export RVOIP_RELEASE_GATES="$GATES"', startup)
+        self.assertIn("expected 44 publishable workspace packages", probe)
+        self.assertIn("for _ in range(4096)", probe)
+        self.assertIn('test "$NOFILE_LIMIT" -ge 262144', probe)
+        self.assertIn('test -z "${CARGO_REGISTRY_TOKEN:-}"', probe)
+        self.assertIn('test -z "${CRATES_IO_TOKEN:-}"', probe)
+        self.assertIn('"publishing_credentials_present": False', probe)
+
+    def test_remote_diagnostics_are_exact_gate_fresh_and_non_publishing(self) -> None:
+        workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
+        publication = (ROOT / ".github/workflows/release-publish.yml").read_text()
+
+        self.assertIn("remote-diagnostic", workflow)
+        self.assertIn("diagnostic_gates:", workflow)
+        self.assertIn('args+=(--only-gates "$DIAGNOSTIC_GATES")', workflow)
+        self.assertIn('test "$PROFILE" = remote-diagnostic', workflow)
+        self.assertIn("inputs.profile != 'remote-diagnostic'", workflow)
+        self.assertIn("at most five prior evidence runs may be combined", workflow)
+        self.assertIn('--dir "target/prior-evidence/$run_id"', workflow)
+        self.assertIn(
+            'test "$(jq -r .profile "$aggregate")" = remote-release',
+            publication,
+        )
+
+    def test_release_gcp_workers_do_not_consume_one_github_job_each(self) -> None:
+        workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
+        controller = workflow.split("\n  gate-gcp:\n", maxsplit=1)[1].split(
+            "\n  cleanup-gcp:\n", maxsplit=1
+        )[0]
+
+        self.assertNotIn("strategy:", controller)
+        self.assertNotIn("matrix: ${{ fromJSON", controller)
+        self.assertIn("Run all ephemeral GCP release shards", controller)
+        self.assertIn("gcp_fanout.py prepare", controller)
+        self.assertIn("Create every ephemeral release worker concurrently", controller)
+        self.assertIn('pids+=("$!")', controller)
+        self.assertIn("Wait for every immutable worker result", controller)
+        self.assertIn("gcp_fanout.py verify", controller)
+        self.assertIn("Delete all workers and attached disks", controller)
+        self.assertIn("release-gate-shard-gcp-controller", controller)
 
     def test_release_pbx_lifecycle_uses_tracked_templates(self) -> None:
         lifecycle = (ROOT / "infra/release-runners/interop-lifecycle.sh").read_text()

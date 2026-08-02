@@ -47,15 +47,38 @@ class RunChecksTests(unittest.TestCase):
             ],
         )
 
-    def test_pr_sip_core_reuses_build_before_clippy(self) -> None:
-        commands = run_checks.sip_pr_core_commands()
-        self.assertEqual(commands[0][0][0:2], ["cargo", "test"])
-        self.assertEqual(commands[1][0][0:2], ["cargo", "clippy"])
-        self.assertIn("--all-targets", commands[1][0])
+    def test_pr_sip_core_and_clippy_are_independent_lanes(self) -> None:
+        core = run_checks.sip_core_commands()
+        clippy = run_checks.sip_clippy_commands()
+        self.assertEqual(len(core), 1)
+        self.assertEqual(core[0][0][0:2], ["cargo", "test"])
+        self.assertEqual(len(clippy), 1)
+        self.assertEqual(clippy[0][0][0:2], ["cargo", "clippy"])
+        self.assertIn("--all-targets", clippy[0][0])
+
+    def test_sip_fixture_lane_prebuilds_examples_in_the_shared_target(self) -> None:
+        root = Path("/workspace")
+        commands = run_checks.sip_fixture_commands(
+            "cancel_integration,blind_transfer_integration",
+            "cancel_bob,cancel_alice",
+            root,
+        )
+        self.assertEqual(commands[0][0][0:2], ["cargo", "build"])
+        self.assertEqual(
+            commands[0][0][-4:],
+            ["--example", "cancel_alice", "--example", "cancel_bob"],
+        )
+        self.assertEqual(commands[1][0][0:2], ["cargo", "test"])
+        self.assertEqual(
+            commands[1][2]["RVOIP_SIP_PREBUILT_EXAMPLE_DIR"],
+            "/workspace/target/debug/examples",
+        )
 
     def test_sip_target_arguments_reject_shell_metacharacters(self) -> None:
         with self.assertRaises(run_checks.CheckError):
             run_checks.sip_integration_commands("safe; touch compromised")
+        with self.assertRaises(run_checks.CheckError):
+            run_checks.sip_fixture_commands("safe", "unsafe;example", Path("/workspace"))
 
     def test_example_smoke_preserves_the_hardware_free_matrix(self) -> None:
         commands = run_checks.specialty_commands("examples-smoke", Path("/workspace"))
@@ -66,12 +89,43 @@ class RunChecksTests(unittest.TestCase):
             5,
         )
 
+    def test_example_smoke_partition_runs_one_release_demo(self) -> None:
+        commands = run_checks.specialty_commands(
+            "example-smoke--07-secure-call-srtp", Path("/workspace")
+        )
+        self.assertEqual(len(commands), 2)
+        self.assertEqual(commands[0][0], ["cargo", "build", "--release", "--locked"])
+        self.assertEqual(commands[1][0], ["timeout", "120", "./run_demo.sh"])
+        self.assertEqual(
+            commands[0][1], Path("/workspace/examples/07-secure-call-srtp")
+        )
+
     def test_vcon_gate_contains_live_store_and_boundary_checks(self) -> None:
         commands = run_checks.specialty_commands("vcon-postgres", Path("/workspace"))
         argv = [item[0] for item in commands]
         self.assertTrue(any("rvoip-vcon-postgres" in command for command in argv))
         self.assertTrue(any("e2e_full_stack" in command for command in argv))
         self.assertTrue(any("voip-3" in command for command in argv))
+
+    def test_amazon_connect_gate_compiles_the_optional_control_plane(self) -> None:
+        commands = run_checks.specialty_commands(
+            "amazon-connect-aws-control", Path("/workspace")
+        )
+        self.assertEqual(len(commands), 2)
+        self.assertIn("aws-control", commands[0][0])
+        self.assertIn("rvoip-amazon-connect", commands[0][0])
+        self.assertIn("--all-features", commands[1][0])
+        self.assertIn(
+            "/workspace/examples/13-sip-to-amazon-connect/Cargo.toml",
+            commands[1][0],
+        )
+
+    def test_otel_gate_compiles_the_optional_exporter(self) -> None:
+        commands = run_checks.specialty_commands("infra-otel", Path("/workspace"))
+        self.assertEqual(len(commands), 1)
+        self.assertIn("rvoip-infra-common", commands[0][0])
+        self.assertIn("otel", commands[0][0])
+        self.assertIn("--all-targets", commands[0][0])
 
 
 if __name__ == "__main__":

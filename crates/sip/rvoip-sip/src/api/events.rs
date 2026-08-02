@@ -399,6 +399,16 @@ pub enum Event {
         sdp: Option<String>,
     },
 
+    /// The INVITE dialog reached the established state.
+    ///
+    /// This role-neutral lifecycle event is emitted for both outgoing and
+    /// incoming calls. On an incoming (UAS) call it is emitted only after the
+    /// caller's ACK commits the `Answering` to `Active` transition.
+    CallEstablished {
+        /// Session identifier for the established call.
+        call_id: CallId,
+    },
+
     /// Provisional call progress response received for an outgoing call.
     ///
     /// Emitted for SIP 1xx responses such as `180 Ringing` and
@@ -877,6 +887,7 @@ impl std::fmt::Debug for Event {
                 .field("sdp_present", &sdp.is_some())
                 .field("sdp_bytes", &sdp.as_ref().map_or(0, String::len))
                 .finish(),
+            Self::CallEstablished { .. } => formatter.write_str("CallEstablished"),
             Self::CallProgress {
                 status_code,
                 reason,
@@ -1156,6 +1167,7 @@ impl Event {
             Event::IncomingCall { call_id, .. }
             | Event::IncomingCallAuthenticated { call_id, .. }
             | Event::CallAnswered { call_id, .. }
+            | Event::CallEstablished { call_id, .. }
             | Event::CallProgress { call_id, .. }
             | Event::CallEnded { call_id, .. }
             | Event::CallFailed { call_id, .. }
@@ -1220,6 +1232,7 @@ impl Event {
             Event::IncomingCall { .. }
                 | Event::IncomingCallAuthenticated { .. }
                 | Event::CallAnswered { .. }
+                | Event::CallEstablished { .. }
                 | Event::CallProgress { .. }
                 | Event::CallEnded { .. }
                 | Event::CallFailed { .. }

@@ -14,6 +14,30 @@ integration tests, binaries, examples, doctests, and Clippy. `smoke` substitutes
 an all-target WebRTC dependency check for the full workspace suite. Neither
 profile publishes crates, creates a tag, or creates a GitHub release.
 
-This pilot does not claim coverage for the external PBX, long-soak, or
-performance gates that still require structured remote replacements. The
-`remote-release` profile remains fail-closed until those mappings exist.
+This older pilot does not claim coverage for the external PBX, long-soak, or
+performance gates. Those gates now have structured replacements in the
+protected `remote-release` profile; its coverage ledger still fails closed if
+any canonical gate becomes unmapped.
+
+The protected `Release qualification` workflow uses the same ephemeral model
+for the complete gate catalog. Its `remote-preflight` profile launches the full
+release capacity shape—seven `n2-standard-8` performance workers, nine
+`n2-standard-4` soak workers, and one `n2-standard-4` interoperability
+worker—but runs short infrastructure probes. That makes controller, quota,
+startup, OS-limit, dependency, evidence-transfer, and cleanup defects visible
+before a full qualification begins. It is non-publishing and cannot qualify a
+release.
+
+Its `remote-diagnostic` profile accepts only named executable GCP gates already
+present in `remote-release`. It expands their dependency closure and uses the
+same machines, startup path, commands, workloads, thresholds, immutable
+evidence, and cleanup. It cannot publish or qualify a release. A later complete
+qualification can combine exact receipts from up to five prior runs, avoiding
+a full rerun after a corrected or transient isolated failure.
+
+For both preflight and the complete `remote-release` profile, a single GitHub
+controller launches every duration-balanced GCP shard concurrently rather than
+consuming one GitHub job slot per cloud worker. Each worker is bound to one
+candidate SHA and gate list, uploads an immutable result and evidence archive,
+shuts down, and is deleted with its auto-delete disk. Controller and follow-up
+sweep cleanup both run on failure; there is no idle release fleet.

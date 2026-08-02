@@ -25,11 +25,37 @@ the lockfile transactionally.
 ## Verify
 
 After the preparation PR merges, run **Release qualification** for that exact
-`main` commit. Use `remote-core` for a hosted-runner dry run and
-`remote-release` for the complete release profile. The first candidate should
-set `first_candidate=true`; after a fix, provide the prior qualification run
-and the previous candidate SHA so exact matching evidence can be reused while
-failed and affected gates are rerun.
+`main` commit. After release-orchestration changes merge, use
+`remote-preflight` first. It launches the same 17-worker, 96-vCPU GCP shape as a full run, but
+executes short infrastructure probes so credentials, quota, VM startup, OS
+limits, tool installation, repository checkout, GCS evidence transfer,
+controller reconciliation, and cleanup fail within a target of 15 minutes.
+The preflight is deliberately non-publishing and is not release evidence.
+
+Use `remote-core` for a hosted-runner dry run and `remote-release` for the
+complete release profile. Do not start the full profile unless the exact
+release machinery has a recent successful preflight. The first candidate
+should set `first_candidate=true`; after a fix, provide the prior qualification
+run and the previous candidate SHA, and set `first_candidate=false`, so exact
+matching evidence can be reused while failed and affected gates are rerun.
+Diagnose and reproduce a failed gate by itself before spending another complete
+qualification run.
+
+For a real GCP performance, soak, or interoperability failure, dispatch
+`remote-diagnostic` on protected `main` and enter one or more exact catalog gate
+IDs in `diagnostic_gates`, separated by commas. The planner accepts only
+executable GCP gates from `remote-release`, adds their declared dependencies,
+and forces them to run fresh with their release commands, machines, workloads,
+and thresholds. At most 20 gates may be requested. The resulting profile is
+non-publishing and cannot qualify a release.
+
+The next complete qualification may combine up to five evidence runs by
+entering their comma-separated IDs in `prior_run_id`. This lets it consume the
+successful receipts from a failed full run plus corrected diagnostic runs,
+while still rerunning anything failed, changed, stale, missing, or
+digest-mismatched. Candidate inventory and final aggregate receipts are always
+regenerated. Use `changed_since` for the previous candidate SHA after a code
+fix; unknown mappings still invalidate the full profile.
 
 The workflow produces a candidate-bound plan, per-gate receipts, and one
 aggregate qualification receipt. A gate can be reused only when its source,
@@ -62,16 +88,25 @@ crates.io, so archive hashes are completed during the topological publication
 run.
 
 The `remote-core` profile uses GitHub-hosted runners. The complete
-`remote-release` profile also schedules performance, soak, and PBX/SIPp gates
-to ephemeral runners with the labels `self-hosted`, `rvoip-release`, and the
-resource class (`gcp-performance`, `gcp-performance-soak`, or `gcp-interop`).
-Those runners must be provisioned separately with workload identity and a
-single-job cleanup policy; they never receive the crates.io token. The
-`remote-release` workflow also requires the repository variable
-`RVOIP_GCP_RUNNERS_READY=true`, which should be set only after that fleet is
-verified. Until then, use `remote-core` for dry runs and retain the legacy beta
-wrapper for the unautomated specialty evidence rather than treating a queued
-job as a release result.
+`remote-release` profile sends performance, soak, and PBX/SIPp gates to real
+ephemeral Compute Engine workers. One GitHub controller creates all planned
+workers concurrently through workload identity, monitors their immutable GCS
+results, verifies and merges their evidence, and deletes every instance and
+auto-delete disk. A separate cleanup job sweeps interrupted runs. The workers
+never receive the crates.io token and no release worker remains provisioned
+between qualifications.
+
+The current full profile is balanced across seven `n2-standard-8` performance
+workers, nine `n2-standard-4` soak workers, and one `n2-standard-4`
+interoperability worker. These are real performance machines; the workflow
+does not substitute GitHub-hosted capacity or reduce workloads and thresholds.
+The `remote-preflight` profile recreates that complete capacity shape, including
+all 17 concurrent VM creations, but its short probes never substitute for the
+real performance, interoperability, and soak commands in `remote-release`.
+The one-hour soak establishes a physical lower bound of one hour for a fresh
+qualification, plus provisioning, build, evidence, and cleanup time. Gates
+whose exact source, dependency, definition, environment, and threshold digests
+remain unchanged may reuse successful prior evidence on a later candidate.
 
 This verification is the version/package delta boundary. It does not claim
 that a prior beta run exercised a later version-only commit.

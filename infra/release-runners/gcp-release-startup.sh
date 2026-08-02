@@ -111,7 +111,8 @@ if [[ "$RESOURCE_CLASS" == "gcp-interop" ]]; then
   command -v sipp >/dev/null
   command -v tshark >/dev/null
   docker compose version >/dev/null
-elif [[ ",$GATES," == *",perf.sipp-parity,"* ]]; then
+elif [[ ",$GATES," == *",perf.sipp-parity,"* \
+  || ",$GATES," == *",preflight.performance-01,"* ]]; then
   # This performance test otherwise treats a missing external SIPp binary as a
   # local-development skip. Release qualification must execute it, not skip it.
   apt-get install -y --no-install-recommends sip-tester
@@ -136,6 +137,12 @@ test "$(git rev-parse HEAD)" = "$CANDIDATE"
 # future image cannot provide it.
 ulimit -n 262144
 test "$(ulimit -n)" -ge 262144
+
+export RVOIP_RELEASE_CANDIDATE="$CANDIDATE"
+export RVOIP_RELEASE_GATES="$GATES"
+export RVOIP_RELEASE_RESOURCE_CLASS="$RESOURCE_CLASS"
+export RVOIP_RELEASE_RUN_ID="$RUN_ID"
+export RVOIP_RELEASE_SHARD_ID="$SHARD_ID"
 
 python3 scripts/release/gates.py run-shard \
   --candidate "$CANDIDATE" \

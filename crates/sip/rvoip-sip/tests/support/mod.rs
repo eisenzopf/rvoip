@@ -42,6 +42,7 @@ pub use traces::{
 };
 
 const ISOLATED_EXAMPLE_TARGET: &str = "rvoip-sip-integration-examples";
+const PREBUILT_EXAMPLE_DIR_ENV: &str = "RVOIP_SIP_PREBUILT_EXAMPLE_DIR";
 
 fn cargo_bin() -> String {
     env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
@@ -62,10 +63,30 @@ pub fn isolated_example_target_dir() -> PathBuf {
     outer_target_dir.join(ISOLATED_EXAMPLE_TARGET)
 }
 
+fn prebuilt_example_dir() -> Option<PathBuf> {
+    env::var_os(PREBUILT_EXAMPLE_DIR_ENV).map(PathBuf::from)
+}
+
+fn example_path(directory: &Path, name: &str) -> PathBuf {
+    directory.join(format!("{name}{}", env::consts::EXE_SUFFIX))
+}
+
 /// Build the named process-fixture examples without contending on the outer
 /// `cargo test` target lock.
 pub fn build_examples(names: &[&str]) {
     assert!(!names.is_empty(), "at least one example must be requested");
+
+    if let Some(directory) = prebuilt_example_dir() {
+        for name in names {
+            let binary = example_path(&directory, name);
+            assert!(
+                binary.is_file(),
+                "prebuilt example binary is missing: {}",
+                binary.display()
+            );
+        }
+        return;
+    }
 
     let target_dir = isolated_example_target_dir();
     let mut command = Command::new(cargo_bin());
@@ -88,10 +109,9 @@ pub fn build_examples(names: &[&str]) {
 
 /// Resolve one example produced by [`build_examples`] for direct execution.
 pub fn example_binary(name: &str) -> PathBuf {
-    let binary = isolated_example_target_dir()
-        .join("debug")
-        .join("examples")
-        .join(format!("{name}{}", env::consts::EXE_SUFFIX));
+    let directory = prebuilt_example_dir()
+        .unwrap_or_else(|| isolated_example_target_dir().join("debug").join("examples"));
+    let binary = example_path(&directory, name);
     assert!(
         binary.is_file(),
         "built example binary is missing: {}",

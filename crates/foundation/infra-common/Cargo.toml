@@ -44,12 +44,12 @@ bytes = { workspace = true }
 
 # P12.7 — OpenTelemetry span hierarchy. Optional, gated on the
 # `otel` feature so consumers that don't want the OTLP exporter
-# don't pay the dep cost. Pinned to the 0.27 line which matches
-# the current `tracing-opentelemetry` API surface.
-opentelemetry = { version = "0.27", default-features = false, features = ["trace"], optional = true }
-opentelemetry_sdk = { version = "0.27", default-features = false, features = ["trace", "rt-tokio"], optional = true }
-opentelemetry-otlp = { version = "0.27", default-features = false, features = ["http-proto", "trace", "reqwest-blocking-client"], optional = true }
-tracing-opentelemetry = { version = "0.28", default-features = false, optional = true }
+# don't pay the dep cost. Keep the API, SDK, OTLP exporter, and tracing bridge
+# on their mutually compatible 0.32/0.33 lines.
+opentelemetry = { version = "0.32", default-features = false, features = ["trace"], optional = true }
+opentelemetry_sdk = { version = "0.32.1", default-features = false, features = ["trace"], optional = true }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "trace", "reqwest-blocking-client"], optional = true }
+tracing-opentelemetry = { version = "0.33", default-features = false, optional = true }
 
 [features]
 # Disable the mimalloc `#[global_allocator]` in `lib.rs`. Required by

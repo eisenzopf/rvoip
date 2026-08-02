@@ -59,6 +59,9 @@ def command_record(
         exit_code = 127
     finally:
         print("::endgroup::", flush=True)
+    environment_overrides = {
+        key: value for key, value in (env or {}).items() if os.environ.get(key) != value
+    }
     return {
         "argv": argv,
         "working_directory": (cwd or root).relative_to(root).as_posix()
@@ -67,6 +70,7 @@ def command_record(
         "started_at": started,
         "duration_seconds": round(time.monotonic() - start, 3),
         "exit_code": exit_code,
+        "environment_overrides": environment_overrides,
     }
 
 
@@ -166,10 +170,13 @@ def sip_core_commands() -> list[tuple[list[str], Path | None, dict[str, str] | N
     ]
 
 
-def sip_pr_core_commands() -> list[tuple[list[str], Path | None, dict[str, str] | None]]:
+def sip_clippy_commands() -> list[tuple[list[str], Path | None, dict[str, str] | None]]:
     return [
-        *sip_core_commands(),
-        (["cargo", "clippy", "--locked", "-p", "rvoip-sip", "--all-targets"], None, None),
+        (
+            ["cargo", "clippy", "--locked", "-p", "rvoip-sip", "--all-targets"],
+            None,
+            None,
+        )
     ]
 
 
@@ -185,6 +192,36 @@ def sip_integration_commands(
     return [(argv, None, None)]
 
 
+def sip_fixture_commands(
+    targets_csv: str,
+    examples_csv: str,
+    root: Path,
+) -> list[tuple[list[str], Path | None, dict[str, str] | None]]:
+    targets = sorted(set(filter(None, targets_csv.split(","))))
+    examples = sorted(set(filter(None, examples_csv.split(","))))
+    if not targets or any(not TARGET.fullmatch(target) for target in targets):
+        raise CheckError(f"invalid SIP process-fixture target selection: {targets_csv!r}")
+    if not examples or any(not TARGET.fullmatch(example) for example in examples):
+        raise CheckError(f"invalid SIP process-fixture example selection: {examples_csv!r}")
+
+    target_root = Path(os.environ.get("CARGO_TARGET_DIR", root / "target"))
+    if not target_root.is_absolute():
+        target_root = root / target_root
+    prebuilt_dir = target_root / "debug" / "examples"
+    fixture_env = {
+        **os.environ,
+        "RVOIP_SIP_PREBUILT_EXAMPLE_DIR": str(prebuilt_dir),
+    }
+
+    build = ["cargo", "build", "--locked", "-p", "rvoip-sip"]
+    for example in examples:
+        build.extend(("--example", example))
+    test = ["cargo", "test", "--locked", "-p", "rvoip-sip"]
+    for target in targets:
+        test.extend(("--test", target))
+    return [(build, None, None), (test, None, fixture_env)]
+
+
 def specialty_commands(
     gate: str, root: Path
 ) -> list[tuple[list[str], Path | None, dict[str, str] | None]]:
@@ -198,14 +235,23 @@ def specialty_commands(
         return [
             (["cargo", "build", "--manifest-path", str(manifest), "--locked"], None, None)
         ]
+    smoke_examples = (
+        "01-quickstart-p2p",
+        "02-softphone-audio",
+        "06-attended-transfer",
+        "07-secure-call-srtp",
+        "10-call-center-b2bua",
+    )
+    if gate.startswith("example-smoke--"):
+        example = gate.removeprefix("example-smoke--")
+        if example not in smoke_examples:
+            raise CheckError(f"unknown example smoke project: {example}")
+        directory = root / "examples" / example
+        return [
+            (["cargo", "build", "--release", "--locked"], directory, None),
+            (["timeout", "120", "./run_demo.sh"], directory, None),
+        ]
     if gate == "examples-smoke":
-        smoke_examples = (
-            "01-quickstart-p2p",
-            "02-softphone-audio",
-            "06-attended-transfer",
-            "07-secure-call-srtp",
-            "10-call-center-b2bua",
-        )
         commands: list[tuple[list[str], Path | None, dict[str, str] | None]] = []
         for example in smoke_examples:
             directory = root / "examples" / example
@@ -226,6 +272,7 @@ def specialty_commands(
                     "scripts/test_release.py",
                     "scripts/test_release_carry_forward_attestation.py",
                     "scripts/test_release_exception_attestation.py",
+                    "scripts/test_release_gcp_fanout.py",
                     "scripts/test_release_gates.py",
                 ],
                 None,
@@ -262,6 +309,53 @@ def specialty_commands(
         ]
     if gate == "rtp-interop":
         return [(["bash", "scripts/test_libsrtp_interop.sh"], None, None)]
+    if gate == "amazon-connect-aws-control":
+        return [
+            (
+                [
+                    "cargo",
+                    "check",
+                    "--locked",
+                    "-p",
+                    "rvoip-amazon-connect",
+                    "--features",
+                    "aws-control",
+                    "--all-targets",
+                ],
+                None,
+                None,
+            ),
+            (
+                [
+                    "cargo",
+                    "check",
+                    "--manifest-path",
+                    str(root / "examples/13-sip-to-amazon-connect/Cargo.toml"),
+                    "--locked",
+                    "--all-features",
+                    "--all-targets",
+                ],
+                None,
+                None,
+            ),
+        ]
+    if gate == "infra-otel":
+        return [
+            (
+                [
+                    "cargo",
+                    "check",
+                    "--locked",
+                    "-p",
+                    "rvoip-infra-common",
+                    "--features",
+                    "otel",
+                    "--all-targets",
+                ],
+                None,
+                None,
+            )
+        ]
     if gate == "webrtc-runtime":
         commands = []
         for feature_args in ([], ["--no-default-features"], ["--all-features"]):
@@ -467,14 +561,16 @@ def main(argv: list[str] | None = None) -> int:
             "specialty",
             "doctest",
             "sip-core",
-            "sip-pr-core",
+            "sip-clippy",
             "sip-integration",
+            "sip-fixtures",
         ),
     )
     parser.add_argument("--name", required=True)
     parser.add_argument("--packages", default="")
     parser.add_argument("--gate", default="")
     parser.add_argument("--targets", default="")
+    parser.add_argument("--examples", default="")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parents[2]
@@ -496,10 +592,12 @@ def main(argv: list[str] | None = None) -> int:
             ]
         elif args.kind == "sip-core":
             commands = sip_core_commands()
-        elif args.kind == "sip-pr-core":
-            commands = sip_pr_core_commands()
+        elif args.kind == "sip-clippy":
+            commands = sip_clippy_commands()
         elif args.kind == "sip-integration":
             commands = sip_integration_commands(args.targets)
+        elif args.kind == "sip-fixtures":
+            commands = sip_fixture_commands(args.targets, args.examples, root)
         else:
             if args.gate == "vcon-postgres":
                 postgres_name = start_postgres(root, records)

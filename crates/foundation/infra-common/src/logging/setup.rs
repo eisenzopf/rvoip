@@ -135,8 +135,8 @@ fn setup_logging_with_otel(
         .build()
         .map_err(|e| Error::Config(format!("OTLP exporter init failed: {}", e)))?;
 
-    let provider = opentelemetry_sdk::trace::TracerProvider::builder()
-        .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
         .build();
     let tracer = provider.tracer(config.app_name.clone());
 

@@ -25,6 +25,7 @@ PLAN_SCHEMA = "rvoip-release-gate-plan-v1"
 RECEIPT_SCHEMA = "rvoip-release-gate-receipt-v1"
 AGGREGATE_SCHEMA = "rvoip-release-qualification-v1"
 DEFAULT_CATALOG = Path("scripts/release/gates.json")
+MAX_DIAGNOSTIC_GATES = 20
 COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -473,6 +474,60 @@ def matrix_for(plan_gates: list[dict[str, Any]], by_id: dict[str, dict[str, Any]
     return matrix
 
 
+def profile_selection(
+    catalog: dict[str, Any], profile: str, only_gates: list[str] | None = None
+) -> list[str]:
+    profiles = catalog["profiles"]
+    if profile != "remote-diagnostic":
+        if profile not in profiles:
+            raise GateError(f"unknown release profile {profile!r}")
+        if only_gates:
+            raise GateError("--only-gates is allowed only with remote-diagnostic")
+        return profiles[profile]
+
+    requested = sorted(set(only_gates or []))
+    if not requested:
+        raise GateError("remote-diagnostic requires at least one --only-gates ID")
+    if len(requested) > MAX_DIAGNOSTIC_GATES:
+        raise GateError(
+            f"remote-diagnostic accepts at most {MAX_DIAGNOSTIC_GATES} requested gates"
+        )
+
+    release_ids = set(profiles["remote-release"])
+    by_id = gate_map(catalog)
+    unknown = sorted(set(requested) - release_ids)
+    if unknown:
+        raise GateError(
+            "remote-diagnostic gate IDs must belong to remote-release: "
+            + ", ".join(unknown)
+        )
+    invalid = sorted(
+        gate_id
+        for gate_id in requested
+        if not by_id[gate_id]["resource_class"].startswith("gcp-")
+        or by_id[gate_id]["executor"] != "argv"
+    )
+    if invalid:
+        raise GateError(
+            "remote-diagnostic accepts executable GCP gates only: "
+            + ", ".join(invalid)
+        )
+
+    selected = set(requested)
+    pending = list(requested)
+    while pending:
+        gate_id = pending.pop()
+        for dependency in by_id[gate_id].get("dependencies", []):
+            if dependency not in release_ids:
+                raise GateError(
+                    f"remote-diagnostic dependency {dependency!r} is outside remote-release"
+                )
+            if dependency not in selected:
+                selected.add(dependency)
+                pending.append(dependency)
+    return sorted(selected)
+
+
 def create_plan(
     *,
     root: Path,
@@ -483,10 +538,9 @@ def create_plan(
     prior_path: Path | None,
     first_candidate: bool,
     changed_since: str | None,
+    only_gates: list[str] | None = None,
 ) -> dict[str, Any]:
-    profiles = catalog["profiles"]
-    if profile not in profiles:
-        raise GateError(f"unknown release profile {profile!r}")
+    selected = profile_selection(catalog, profile, only_gates)
     if profile == "remote-release":
         missing = catalog.get("remote_release_legacy_coverage", {}).get(
             "unautomated_legacy_ids", []
@@ -500,7 +554,6 @@ def create_plan(
     resolved_candidate = git(root, "rev-parse", f"{candidate}^{{commit}}")
     if head != resolved_candidate:
         raise GateError(f"checkout HEAD {head} does not match candidate {resolved_candidate}")
-    selected = profiles[profile]
     by_id = gate_map(catalog)
     inputs = all_input_records(root, catalog, selected, environment_id)
     prior = load_prior_receipts(prior_path)
@@ -1089,7 +1142,21 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("validate")
     plan = commands.add_parser("plan")
-    plan.add_argument("--profile", choices=("remote-core", "remote-release", "legacy-full"), required=True)
+    plan.add_argument(
+        "--profile",
+        choices=(
+            "remote-preflight",
+            "remote-diagnostic",
+            "remote-core",
+            "remote-release",
+            "legacy-full",
+        ),
+        required=True,
+    )
+    plan.add_argument(
+        "--only-gates",
+        help="comma-separated exact GCP gate IDs for remote-diagnostic",
+    )
     plan.add_argument("--candidate", required=True)
     plan.add_argument("--environment-id", required=True)
     plan.add_argument("--prior-evidence", type=Path)
@@ -1134,6 +1201,13 @@ def main(argv: list[str] | None = None) -> int:
                 prior_path=prior,
                 first_candidate=args.first_candidate,
                 changed_since=args.changed_since,
+                only_gates=sorted(
+                    {
+                        value.strip()
+                        for value in (args.only_gates or "").split(",")
+                        if value.strip()
+                    }
+                ),
             )
             output = args.output if args.output.is_absolute() else root / args.output
             output.parent.mkdir(parents=True, exist_ok=True)

@@ -2717,6 +2717,16 @@ pub enum RvoipCoreCrossCrateEvent {
     ConnectionConnected {
         connection_id: String,
     },
+    /// Authentication completed. Identity, tenant, scope, and principal
+    /// details are deliberately omitted from the process-wide event bus.
+    ConnectionAuthenticated {
+        connection_id: String,
+    },
+    /// Principal authentication completed. The principal itself is retained
+    /// only on rvoip-core's tenant-authorized in-process event.
+    ConnectionPrincipalAuthenticated {
+        connection_id: String,
+    },
     ConnectionProgress {
         connection_id: String,
         kind: String,
@@ -2744,6 +2754,10 @@ pub enum RvoipCoreCrossCrateEvent {
     ConnectionTransferred {
         connection_id: String,
         target: String,
+    },
+    ConnectionTransferStatus {
+        connection_id: String,
+        status: String,
     },
 
     // --- Participant lifecycle ---
@@ -2836,6 +2850,16 @@ pub enum RvoipCoreCrossCrateEvent {
         connection_id: String,
         identity_id: Option<String>,
     },
+    IdentityStepUpRequested {
+        connection_id: String,
+        required: String,
+    },
+    /// A step-up response arrived. The credential is never copied onto the
+    /// process-wide event bus.
+    IdentityStepUpResponseReceived {
+        connection_id: String,
+        method: String,
+    },
 
     // --- Registration ---
     RegistrationChanged {
@@ -2868,6 +2892,15 @@ pub enum RvoipCoreCrossCrateEvent {
         packet_loss_pct: f32,
         mos: Option<f32>,
     },
+    BargeInDetected {
+        connection_id: String,
+        ai_attachment_id: String,
+    },
+    ActiveSpeakerChanged {
+        session_id: String,
+        connection_id: String,
+        audio_level_dbov: i8,
+    },
 }
 
 impl fmt::Debug for RvoipCoreCrossCrateEvent {
@@ -2892,12 +2925,17 @@ impl RvoipCoreCrossCrateEvent {
             Self::ConnectionInbound { .. } => "rvoip_core.connection_inbound",
             Self::ConnectionOutbound { .. } => "rvoip_core.connection_outbound",
             Self::ConnectionConnected { .. } => "rvoip_core.connection_connected",
+            Self::ConnectionAuthenticated { .. } => "rvoip_core.connection_authenticated",
+            Self::ConnectionPrincipalAuthenticated { .. } => {
+                "rvoip_core.connection_principal_authenticated"
+            }
             Self::ConnectionProgress { .. } => "rvoip_core.connection_progress",
             Self::ConnectionEnded { .. } => "rvoip_core.connection_ended",
             Self::ConnectionFailed { .. } => "rvoip_core.connection_failed",
             Self::ConnectionsBridged { .. } => "rvoip_core.connections_bridged",
             Self::ConnectionsUnbridged { .. } => "rvoip_core.connections_unbridged",
             Self::ConnectionTransferred { .. } => "rvoip_core.connection_transferred",
+            Self::ConnectionTransferStatus { .. } => "rvoip_core.connection_transfer_status",
             Self::ParticipantJoined { .. } => "rvoip_core.participant_joined",
             Self::ParticipantLeft { .. } => "rvoip_core.participant_left",
             Self::AiAttached { .. } => "rvoip_core.ai_attached",
@@ -2917,12 +2955,18 @@ impl RvoipCoreCrossCrateEvent {
             Self::VconReady { .. } => "rvoip_core.vcon_ready",
             Self::VconRedacted { .. } => "rvoip_core.vcon_redacted",
             Self::IdentityAssuranceChanged { .. } => "rvoip_core.identity_assurance_changed",
+            Self::IdentityStepUpRequested { .. } => "rvoip_core.identity_step_up_requested",
+            Self::IdentityStepUpResponseReceived { .. } => {
+                "rvoip_core.identity_step_up_response_received"
+            }
             Self::RegistrationChanged { .. } => "rvoip_core.registration_changed",
             Self::RegistrationHeartbeat { .. } => "rvoip_core.registration_heartbeat",
             Self::CapacityReport { .. } => "rvoip_core.capacity_report",
             Self::UsageRecord { .. } => "rvoip_core.usage_record",
             Self::Anomaly { .. } => "rvoip_core.anomaly",
             Self::MediaQuality { .. } => "rvoip_core.media_quality",
+            Self::BargeInDetected { .. } => "rvoip_core.barge_in_detected",
+            Self::ActiveSpeakerChanged { .. } => "rvoip_core.active_speaker_changed",
         }
     }
 
@@ -2937,12 +2981,15 @@ impl RvoipCoreCrossCrateEvent {
         "rvoip_core.connection_inbound",
         "rvoip_core.connection_outbound",
         "rvoip_core.connection_connected",
+        "rvoip_core.connection_authenticated",
+        "rvoip_core.connection_principal_authenticated",
         "rvoip_core.connection_progress",
         "rvoip_core.connection_ended",
         "rvoip_core.connection_failed",
         "rvoip_core.connections_bridged",
         "rvoip_core.connections_unbridged",
         "rvoip_core.connection_transferred",
+        "rvoip_core.connection_transfer_status",
         "rvoip_core.participant_joined",
         "rvoip_core.participant_left",
         "rvoip_core.ai_attached",
@@ -2962,12 +3009,16 @@ impl RvoipCoreCrossCrateEvent {
         "rvoip_core.vcon_ready",
         "rvoip_core.vcon_redacted",
         "rvoip_core.identity_assurance_changed",
+        "rvoip_core.identity_step_up_requested",
+        "rvoip_core.identity_step_up_response_received",
         "rvoip_core.registration_changed",
         "rvoip_core.registration_heartbeat",
         "rvoip_core.capacity_report",
         "rvoip_core.usage_record",
         "rvoip_core.anomaly",
         "rvoip_core.media_quality",
+        "rvoip_core.barge_in_detected",
+        "rvoip_core.active_speaker_changed",
     ];
 }
 
@@ -3006,6 +3057,66 @@ mod tests {
             CrossCrateEvent::event_type(&deserialized),
             CrossCrateEvent::event_type(&event)
         );
+    }
+
+    #[test]
+    fn core_projection_variants_round_trip_with_distinct_registered_types() {
+        let events = [
+            RvoipCoreCrossCrateEvent::ConnectionAuthenticated {
+                connection_id: "conn-auth".into(),
+            },
+            RvoipCoreCrossCrateEvent::ConnectionPrincipalAuthenticated {
+                connection_id: "conn-principal".into(),
+            },
+            RvoipCoreCrossCrateEvent::ConnectionTransferStatus {
+                connection_id: "conn-transfer".into(),
+                status: "Accepted".into(),
+            },
+            RvoipCoreCrossCrateEvent::IdentityStepUpRequested {
+                connection_id: "conn-request".into(),
+                required: "UserAuthorized".into(),
+            },
+            RvoipCoreCrossCrateEvent::IdentityStepUpResponseReceived {
+                connection_id: "conn-response".into(),
+                method: "bearer".into(),
+            },
+            RvoipCoreCrossCrateEvent::BargeInDetected {
+                connection_id: "conn-barge".into(),
+                ai_attachment_id: "ai-1".into(),
+            },
+            RvoipCoreCrossCrateEvent::ActiveSpeakerChanged {
+                session_id: "session-1".into(),
+                connection_id: "conn-speaker".into(),
+                audio_level_dbov: -24,
+            },
+        ];
+
+        for inner in events {
+            let expected_type = inner.event_type();
+            assert!(RvoipCoreCrossCrateEvent::ALL_EVENT_TYPES.contains(&expected_type));
+            let encoded = serde_json::to_string(&RvoipCrossCrateEvent::Core(inner))
+                .expect("serialize core projection");
+            let decoded: RvoipCrossCrateEvent =
+                serde_json::from_str(&encoded).expect("deserialize core projection");
+            assert_eq!(CrossCrateEvent::event_type(&decoded), expected_type);
+        }
+
+        let unique: std::collections::HashSet<_> = RvoipCoreCrossCrateEvent::ALL_EVENT_TYPES
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(
+            unique.len(),
+            RvoipCoreCrossCrateEvent::ALL_EVENT_TYPES.len()
+        );
+    }
+
+    #[test]
+    fn unknown_future_core_variant_fails_closed_instead_of_being_retyped() {
+        let encoded = r#"{"Core":{"FutureSecurityDecision":{"allowed":true}}}"#;
+        let error = serde_json::from_str::<RvoipCrossCrateEvent>(encoded)
+            .expect_err("an unknown semantic event must not fall back to a known variant");
+        assert!(error.to_string().contains("unknown variant"));
     }
 
     #[test]

@@ -154,6 +154,96 @@ class GateFrameworkTests(unittest.TestCase):
         self.assertEqual(aggregate["executor"], "aggregate")
         self.assertEqual(set(aggregate["dependencies"]), scenario_ids)
 
+    def test_remote_preflight_recreates_the_complete_gcp_worker_shape(self) -> None:
+        selected = self.catalog["profiles"]["remote-preflight"]
+        self.assertEqual(len(selected), 17)
+        by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
+        matrix = gates.matrix_for(
+            [{"id": gate_id, "decision": "RUN"} for gate_id in selected],
+            by_id,
+        )
+        counts = {
+            resource: sum(shard["resource_class"] == resource for shard in matrix)
+            for resource in (
+                "gcp-performance",
+                "gcp-performance-soak",
+                "gcp-interop",
+            )
+        }
+        self.assertEqual(
+            counts,
+            {
+                "gcp-performance": 7,
+                "gcp-performance-soak": 9,
+                "gcp-interop": 1,
+            },
+        )
+        self.assertEqual(len(matrix), 17)
+        self.assertEqual(
+            sum(int(shard["machine_type"].rsplit("-", 1)[1]) for shard in matrix),
+            96,
+        )
+        self.assertTrue(all(not shard["hosted"] for shard in matrix))
+        self.assertTrue(all(len(shard["gates"]) == 1 for shard in matrix))
+        for gate_id in selected:
+            with self.subTest(gate=gate_id):
+                gate = by_id[gate_id]
+                self.assertTrue(gate["always_fresh"])
+                self.assertIn(
+                    "infra/release-runners/release-infrastructure-preflight.sh",
+                    gate["command"],
+                )
+
+    def test_remote_diagnostic_runs_only_exact_gcp_gates_and_dependencies(self) -> None:
+        requested = ["interop.remote-proxies", "perf.monolithic-soak"]
+        selected = gates.profile_selection(
+            self.catalog, "remote-diagnostic", requested
+        )
+        self.assertEqual(
+            set(selected),
+            {
+                "interop.remote-proxies",
+                "perf.monolithic-soak",
+                "source.clean-start",
+                "source.remote-clean",
+            },
+        )
+        by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
+        matrix = gates.matrix_for(
+            [{"id": gate_id, "decision": "RUN"} for gate_id in selected], by_id
+        )
+        self.assertEqual(
+            {shard["resource_class"] for shard in matrix},
+            {"gcp-interop", "gcp-performance-soak", "github-evidence"},
+        )
+        self.assertEqual(
+            {
+                gate_id
+                for shard in matrix
+                for gate_id in shard["gates"]
+                if shard["resource_class"].startswith("gcp-")
+            },
+            set(requested),
+        )
+
+        invalid_cases = (
+            ([], "requires at least one"),
+            (["core.rvoip"], "executable GCP gates only"),
+            (["perf.media-burst-matrix"], "executable GCP gates only"),
+            (["not.a.gate"], "must belong to remote-release"),
+            ([f"gate-{index}" for index in range(21)], "at most 20"),
+        )
+        for gate_ids, message in invalid_cases:
+            with self.subTest(gates=gate_ids):
+                with self.assertRaisesRegex(gates.GateError, message):
+                    gates.profile_selection(
+                        self.catalog, "remote-diagnostic", gate_ids
+                    )
+        with self.assertRaisesRegex(gates.GateError, "allowed only"):
+            gates.profile_selection(
+                self.catalog, "remote-release", ["perf.monolithic-soak"]
+            )
+
     def test_remote_release_requires_bridgefu_chromium_dtmf_regression(self) -> None:
         gate_id = "interop.browser-dtmf"
         self.assertIn(gate_id, self.catalog["profiles"]["remote-release"])
@@ -347,6 +437,35 @@ class GateFrameworkTests(unittest.TestCase):
                 [receipt], {"always_fresh": True}, inputs, "environment"
             )
         )
+
+    def test_prior_receipts_combine_failed_full_and_passing_diagnostic_runs(self) -> None:
+        inputs = {
+            "gate_definition_sha256": "d" * 64,
+            "input_sha256": "i" * 64,
+            "environment_sha256": "e" * 64,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for run_id, status in (("100", "FAIL"), ("101", "PASS")):
+                gate_dir = root / run_id / "release-evidence" / "perf.example"
+                gate_dir.mkdir(parents=True)
+                receipt = {
+                    "schema": gates.RECEIPT_SCHEMA,
+                    "gate_id": "perf.example",
+                    "candidate_sha": ("a" if status == "FAIL" else "b") * 40,
+                    "status": status,
+                    **inputs,
+                }
+                (gate_dir / "receipt.json").write_text(json.dumps(receipt))
+
+            combined = gates.load_prior_receipts(root)["perf.example"]
+            self.assertEqual([item["status"] for item in combined], ["FAIL", "PASS"])
+            self.assertEqual(
+                gates.exact_reusable(
+                    combined, {"always_fresh": False}, inputs, "environment"
+                )["status"],
+                "PASS",
+            )
 
     def test_failed_gate_invalidates_reverse_dependency_closure(self) -> None:
         by_id = {

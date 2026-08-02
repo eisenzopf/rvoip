@@ -11,6 +11,7 @@ import os
 from pathlib import Path, PurePosixPath
 import subprocess
 import sys
+import tomllib
 from typing import Any, Iterable
 
 
@@ -26,6 +27,13 @@ class Package:
     name: str
     root: str
     dependencies: frozenset[str]
+
+
+@dataclass(frozen=True, order=True)
+class LockPackage:
+    name: str
+    version: str
+    source: str
 
 
 def run(argv: list[str], root: Path) -> str:
@@ -97,6 +105,171 @@ def load_metadata(root: Path, metadata_file: Path | None) -> dict[str, Any]:
             root,
         )
     )
+
+
+def lockfile_graph(
+    payload: str,
+) -> tuple[
+    dict[LockPackage, dict[str, Any]],
+    dict[LockPackage, frozenset[LockPackage]],
+    dict[LockPackage, frozenset[str]],
+]:
+    document = tomllib.loads(payload)
+    raw_packages = document.get("package", [])
+    if not isinstance(raw_packages, list):
+        raise PlanError("Cargo.lock package inventory is not a list")
+    packages: dict[LockPackage, dict[str, Any]] = {}
+    by_name: dict[str, list[LockPackage]] = {}
+    for raw in raw_packages:
+        if not isinstance(raw, dict):
+            raise PlanError("Cargo.lock contains a non-table package")
+        try:
+            identity = LockPackage(
+                name=str(raw["name"]),
+                version=str(raw["version"]),
+                source=str(raw.get("source", "")),
+            )
+        except KeyError as error:
+            raise PlanError("Cargo.lock package is missing name or version") from error
+        if identity in packages:
+            raise PlanError(f"Cargo.lock contains duplicate package {identity}")
+        packages[identity] = raw
+        by_name.setdefault(identity.name, []).append(identity)
+    if not packages:
+        raise PlanError("Cargo.lock contains no packages")
+
+    def resolve_dependency(reference: str) -> LockPackage | None:
+        fields = reference.split(" ")
+        name = fields[0]
+        version = fields[1] if len(fields) >= 2 and fields[1][:1].isdigit() else None
+        source = " ".join(fields[2:]).removeprefix("(").removesuffix(")")
+        candidates = [
+            identity
+            for identity in by_name.get(name, [])
+            if version is None or identity.version == version
+            if not source or identity.source == source
+        ]
+        return candidates[0] if len(candidates) == 1 else None
+
+    dependencies: dict[LockPackage, frozenset[LockPackage]] = {}
+    unresolved: dict[LockPackage, frozenset[str]] = {}
+    for identity, raw in packages.items():
+        references = raw.get("dependencies", [])
+        if not isinstance(references, list):
+            raise PlanError(f"Cargo.lock dependencies are invalid for {identity.name}")
+        resolved = [
+            (str(reference), resolve_dependency(str(reference)))
+            for reference in references
+        ]
+        dependencies[identity] = frozenset(
+            dependency
+            for _, dependency in resolved
+            if dependency is not None
+        )
+        unresolved[identity] = frozenset(
+            reference for reference, dependency in resolved if dependency is None
+        )
+    return packages, dependencies, unresolved
+
+
+def parse_lockfile(payload: str) -> dict[LockPackage, str]:
+    packages, dependencies, unresolved = lockfile_graph(payload)
+    fingerprints: dict[LockPackage, str] = {}
+    for identity, raw in packages.items():
+        canonical = dict(raw)
+        canonical["dependencies"] = [
+            ["package", dependency.name, dependency.version, dependency.source]
+            for dependency in sorted(dependencies[identity])
+        ] + [["unresolved", reference] for reference in sorted(unresolved[identity])]
+        fingerprints[identity] = json.dumps(
+            canonical, sort_keys=True, separators=(",", ":")
+        )
+    return fingerprints
+
+
+def lockfile_dependency_closure(payload: str, roots: set[str]) -> set[LockPackage]:
+    packages, dependencies, _unresolved = lockfile_graph(payload)
+    by_name: dict[str, list[LockPackage]] = {}
+    for identity in packages:
+        by_name.setdefault(identity.name, []).append(identity)
+
+    pending: list[LockPackage] = []
+    for name in sorted(roots):
+        candidates = [
+            identity
+            for identity in by_name.get(name, [])
+            if not identity.source
+        ]
+        if len(candidates) != 1:
+            raise PlanError(f"Cargo.lock is missing workspace root {name!r}")
+        pending.append(candidates[0])
+    visited: set[LockPackage] = set()
+    while pending:
+        identity = pending.pop()
+        if identity in visited:
+            continue
+        # Cargo may retain a target-specific dependency reference without
+        # materializing that package for the current resolver target. Keep the
+        # exact reference in the package fingerprint, but there is no package
+        # identity to traverse or attribute to another workspace crate.
+        visited.add(identity)
+        pending.extend(sorted(dependencies[identity] - visited))
+    return visited
+
+
+def lockfile_delta(
+    base_payload: str, head_payload: str
+) -> tuple[set[LockPackage], set[LockPackage]]:
+    base_packages = parse_lockfile(base_payload)
+    head_packages = parse_lockfile(head_payload)
+    changed_base = {
+        identity
+        for identity, fingerprint in base_packages.items()
+        if head_packages.get(identity) != fingerprint
+    }
+    changed_head = {
+        identity
+        for identity, fingerprint in head_packages.items()
+        if base_packages.get(identity) != fingerprint
+    }
+    return changed_base, changed_head
+
+
+def validate_scoped_lockfile(
+    *,
+    root: Path,
+    packages: dict[str, Package],
+    paths: list[str],
+    base: str,
+    head: str,
+) -> list[str]:
+    manifest_roots = {
+        package.name
+        for package in packages.values()
+        if f"{package.root}/Cargo.toml" in paths
+    }
+    if not manifest_roots:
+        raise PlanError("Cargo.lock changed without a workspace crate manifest")
+    base_payload = run(["git", "show", f"{base}:Cargo.lock"], root)
+    head_payload = run(["git", "show", f"{head}:Cargo.lock"], root)
+    changed_base, changed_head = lockfile_delta(base_payload, head_payload)
+    if not changed_base and not changed_head:
+        raise PlanError("Cargo.lock changed without a package graph delta")
+    base_reachable = lockfile_dependency_closure(base_payload, manifest_roots)
+    head_reachable = lockfile_dependency_closure(head_payload, manifest_roots)
+    changed_in_place = changed_base & changed_head
+    unexplained_common = changed_in_place - (base_reachable | head_reachable)
+    unexplained_head = (changed_head - changed_in_place) - head_reachable
+    unexplained_base = (changed_base - changed_in_place) - base_reachable
+    if unexplained_common or unexplained_head or unexplained_base:
+        unexplained = sorted(
+            unexplained_common | unexplained_head | unexplained_base
+        )
+        detail = ", ".join(
+            f"{identity.name}@{identity.version}" for identity in unexplained
+        )
+        raise PlanError("lockfile delta escapes changed manifest closure: " + detail)
+    return sorted({identity.name for identity in changed_base | changed_head})
 
 
 def workspace_packages(root: Path, metadata: dict[str, Any]) -> dict[str, Package]:
@@ -246,10 +419,29 @@ def make_plan(
     head: str,
     candidate: str | None = None,
     job_mode: str = "split",
+    deferred_sip_mode: str = "defer",
+    validated_scoped_paths: set[str] | None = None,
+    lockfile_changed_packages: list[str] | None = None,
 ) -> dict[str, Any]:
     if job_mode not in {"split", "combined"}:
         raise PlanError(f"unsupported shard job mode: {job_mode!r}")
+    if deferred_sip_mode not in {"defer", "separate"}:
+        raise PlanError(f"unsupported deferred SIP mode: {deferred_sip_mode!r}")
     normalized = sorted({normalize_path(path) for path in paths})
+    validated_scoped = {
+        normalize_path(path) for path in (validated_scoped_paths or set())
+    }
+    declared_scoped = set(policy.get("scoped_full_paths", []))
+    undeclared_scoped = sorted(
+        path
+        for path in validated_scoped
+        if not matches_any(path, declared_scoped)
+    )
+    if undeclared_scoped:
+        raise PlanError(
+            "validated scoped inputs are not declared by policy: "
+            + ", ".join(undeclared_scoped)
+        )
     packages = workspace_packages(root, metadata)
     known_policy_paths = set(policy.get("known_policy_paths", []))
     specialty_set = {
@@ -257,9 +449,21 @@ def make_plan(
             for rule in policy.get("specialty_rules", [])
             if any(matches_any(path, rule.get("patterns", [])) for path in normalized)
         }
+    projects = policy.get("example_projects", [])
+    if "examples-smoke" in specialty_set:
+        specialty_set.remove("examples-smoke")
+        smoke_projects = policy.get("pr_example_smoke_projects", [])
+        unknown_smoke_projects = sorted(set(smoke_projects) - set(projects))
+        if not smoke_projects or unknown_smoke_projects:
+            raise PlanError(
+                "PR example smoke set is empty or unknown: "
+                + ", ".join(unknown_smoke_projects)
+            )
+        specialty_set.update(
+            f"example-smoke--{project}" for project in smoke_projects
+        )
     if "examples" in specialty_set:
         specialty_set.remove("examples")
-        projects = policy.get("example_projects", [])
         directly_changed = {
             project
             for project in projects
@@ -286,6 +490,11 @@ def make_plan(
     full_reasons = [
         path for path in normalized if matches_any(path, policy.get("full_paths", []))
     ]
+    full_reasons.extend(
+        path
+        for path in normalized
+        if matches_any(path, declared_scoped) and path not in validated_scoped
+    )
     docs_only = bool(normalized) and all(
         documentation_path(path, known_policy_paths) for path in normalized
     )
@@ -296,6 +505,8 @@ def make_plan(
             owner = owning_package(path, packages)
             if owner:
                 direct.add(owner)
+            elif path in validated_scoped:
+                continue
             elif not matches_any(path, known_policy_paths):
                 # Specialty-only trees are mapped even though they are not Cargo members.
                 if not any(
@@ -329,24 +540,93 @@ def make_plan(
     shard_selection = set(selected)
     sip_jobs: list[dict[str, Any]] = []
     deferred_sip_targets: list[str] = []
+    separate_sip_targets: list[str] = []
     if job_mode == "combined" and "rvoip-sip" in shard_selection:
         shard_selection.remove("rvoip-sip")
         all_sip_targets = integration_test_targets(metadata, "rvoip-sip")
-        deferred_sip_targets = sorted(set(policy.get("pr_deferred_sip_targets", [])))
-        unknown_deferred = sorted(set(deferred_sip_targets) - set(all_sip_targets))
+        declared_deferred_sip_targets = sorted(
+            set(policy.get("pr_deferred_sip_targets", []))
+        )
+        unknown_deferred = sorted(
+            set(declared_deferred_sip_targets) - set(all_sip_targets)
+        )
         if unknown_deferred:
             raise PlanError(
                 "unknown deferred SIP test targets: " + ", ".join(unknown_deferred)
             )
-        runnable_sip_targets = sorted(set(all_sip_targets) - set(deferred_sip_targets))
-        requested_partitions = max(1, int(policy.get("pr_sip_partitions", 3)))
-        partition_count = min(requested_partitions, len(runnable_sip_targets))
-        partitions = partition_named_targets(
-            runnable_sip_targets,
-            partition_count,
-            policy.get("pr_sip_target_weights", {}),
+        fixture_examples = policy.get("pr_sip_fixture_examples", {})
+        if not isinstance(fixture_examples, dict):
+            raise PlanError("pr_sip_fixture_examples must be an object")
+        unknown_fixture_targets = sorted(set(fixture_examples) - set(all_sip_targets))
+        if unknown_fixture_targets:
+            raise PlanError(
+                "unknown SIP process-fixture targets: "
+                + ", ".join(unknown_fixture_targets)
+            )
+        for target, examples in fixture_examples.items():
+            if (
+                not isinstance(examples, list)
+                or not examples
+                or any(
+                    not isinstance(example, str)
+                    or not example
+                    or any(
+                        not (character.isalnum() or character in "_-")
+                        for character in example
+                    )
+                    for example in examples
+                )
+            ):
+                raise PlanError(
+                    f"SIP process-fixture target {target!r} has invalid examples"
+                )
+        deferred_sip_targets = (
+            declared_deferred_sip_targets if deferred_sip_mode == "defer" else []
         )
-        sip_jobs.append({"id": "core", "kind": "core", "targets_csv": ""})
+        separate_sip_targets = (
+            declared_deferred_sip_targets if deferred_sip_mode == "separate" else []
+        )
+        runnable_sip_targets = (
+            set(all_sip_targets) - set(declared_deferred_sip_targets)
+        )
+        fixture_targets = sorted(runnable_sip_targets & set(fixture_examples))
+        regular_sip_targets = sorted(runnable_sip_targets - set(fixture_targets))
+        requested_partitions = max(1, int(policy.get("pr_sip_partitions", 3)))
+        partition_count = min(requested_partitions, len(regular_sip_targets))
+        partitions = (
+            partition_named_targets(
+                regular_sip_targets,
+                partition_count,
+                policy.get("pr_sip_target_weights", {}),
+            )
+            if partition_count
+            else []
+        )
+        # Keep the two independent compile-heavy commands parallel. Process
+        # fixture tests share a stable lane so their example binaries are
+        # built once instead of rebuilding the dependency graph per shard.
+        sip_jobs.extend(
+            [
+                {"id": "core-test", "kind": "core-test", "targets_csv": ""},
+                {"id": "clippy", "kind": "clippy", "targets_csv": ""},
+            ]
+        )
+        if fixture_targets:
+            examples = sorted(
+                {
+                    example
+                    for target in fixture_targets
+                    for example in fixture_examples[target]
+                }
+            )
+            sip_jobs.append(
+                {
+                    "id": "fixtures",
+                    "kind": "fixtures",
+                    "targets_csv": ",".join(fixture_targets),
+                    "examples_csv": ",".join(examples),
+                }
+            )
         sip_jobs.extend(
             {
                 "id": f"integration-{index}",
@@ -356,6 +636,27 @@ def make_plan(
             }
             for index, partition in enumerate(partitions, start=1)
         )
+        for target in separate_sip_targets:
+            if target in fixture_examples:
+                sip_jobs.append(
+                    {
+                        "id": f"long-{target}",
+                        "kind": "fixtures",
+                        "targets_csv": target,
+                        "examples_csv": ",".join(sorted(set(fixture_examples[target]))),
+                    }
+                )
+            else:
+                sip_jobs.append(
+                    {
+                        "id": f"long-{target}",
+                        "kind": "integration",
+                        "targets_csv": target,
+                        "estimated_seconds": int(
+                            policy.get("pr_sip_target_weights", {}).get(target, 5)
+                        ),
+                    }
+                )
 
     shards = make_shards(shard_selection, policy)
     shard_checks = ("all",) if job_mode == "combined" else ("test", "clippy")
@@ -391,8 +692,11 @@ def make_plan(
         "direct_crates": sorted(direct),
         "selected_crates": sorted(selected),
         "specialty_gates": specialty,
+        "validated_scoped_paths": sorted(validated_scoped),
+        "lockfile_changed_packages": sorted(lockfile_changed_packages or []),
         "sip_jobs": sip_jobs,
         "deferred_sip_targets": deferred_sip_targets,
+        "separate_sip_targets": separate_sip_targets,
         "shards": shards,
         "shard_jobs": shard_jobs,
     }
@@ -442,6 +746,12 @@ def parser() -> argparse.ArgumentParser:
         help="emit separate test/clippy jobs or one warm combined job per shard",
     )
     result.add_argument(
+        "--deferred-sip-mode",
+        choices=("defer", "separate"),
+        default="defer",
+        help="defer long SIP targets from PRs or run each in its own lane",
+    )
+    result.add_argument(
         "--policy", type=Path, default=Path("scripts/ci/policy.json")
     )
     result.add_argument("--output", type=Path, default=Path("target/ci-plan/plan.json"))
@@ -454,19 +764,44 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(__file__).resolve().parents[2]
     try:
         policy_path = args.policy if args.policy.is_absolute() else root / args.policy
+        policy = json.loads(policy_path.read_text())
         metadata_file = args.metadata_file
         if metadata_file and not metadata_file.is_absolute():
             metadata_file = root / metadata_file
         paths = args.changed_file or changed_paths(root, args.base, args.head)
+        needs_lockfile_scope = "Cargo.lock" in paths and matches_any(
+            "Cargo.lock", policy.get("scoped_full_paths", [])
+        )
+        metadata = load_metadata(root, metadata_file)
+        validated_scoped_paths: set[str] = set()
+        lockfile_changed_packages: list[str] = []
+        if needs_lockfile_scope:
+            try:
+                lockfile_changed_packages = validate_scoped_lockfile(
+                    root=root,
+                    packages=workspace_packages(root, metadata),
+                    paths=paths,
+                    base=args.base,
+                    head=args.head,
+                )
+                validated_scoped_paths.add("Cargo.lock")
+            except PlanError as error:
+                # An unexplained or unresolvable lockfile edit must not make
+                # the planner fail open. The ordinary full-workspace path
+                # remains selected and records Cargo.lock as its reason.
+                print(f"Scoped lockfile analysis fell back to full: {error}", file=sys.stderr)
         plan = make_plan(
             root=root,
-            metadata=load_metadata(root, metadata_file),
-            policy=json.loads(policy_path.read_text()),
+            metadata=metadata,
+            policy=policy,
             paths=paths,
             base=args.base,
             head=args.head,
             candidate=args.candidate,
             job_mode=args.job_mode,
+            deferred_sip_mode=args.deferred_sip_mode,
+            validated_scoped_paths=validated_scoped_paths,
+            lockfile_changed_packages=lockfile_changed_packages,
         )
         for gate in args.specialty_gate:
             if not gate or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for character in gate):

@@ -439,6 +439,50 @@ def synthetic_gate(
     }
 
 
+def infrastructure_preflight_gates() -> list[dict[str, Any]]:
+    """Build the full-shape, short-running GCP orchestration acceptance profile.
+
+    The release profile currently uses seven performance workers, nine soak
+    workers, and one interoperability worker.  Keep the same fanout here so a
+    controller, quota, startup, evidence, or cleanup defect is found before a
+    real hour-long qualification begins.
+    """
+    paths = [
+        ".github/workflows/release-qualify.yml",
+        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "scripts/release/build_gate_catalog.py",
+        "scripts/release/gates.py",
+        "scripts/release/gates.json",
+        "scripts/release/gcp_fanout.py",
+    ]
+    result = []
+    for resource, count in (
+        ("gcp-performance", 7),
+        ("gcp-performance-soak", 9),
+        ("gcp-interop", 1),
+    ):
+        suffix = resource.removeprefix("gcp-")
+        for index in range(1, count + 1):
+            result.append(
+                synthetic_gate(
+                    f"preflight.{suffix}-{index:02d}",
+                    f"{resource} worker {index:02d} infrastructure acceptance",
+                    executor="argv",
+                    command=[
+                        "bash",
+                        "infra/release-runners/release-infrastructure-preflight.sh",
+                        resource,
+                        "{artifact_dir}",
+                    ],
+                    resource=resource,
+                    paths=paths,
+                    always_fresh=True,
+                )
+            )
+    return result
+
+
 def security_gates() -> list[dict[str, Any]]:
     result = [
         synthetic_gate(
@@ -605,6 +649,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
         ),
     ]
     synthetic.extend(burst_scenario_gates())
+    preflight = infrastructure_preflight_gates()
     core = [core_gate(package, root, weights) for package in package_rows]
     security = security_gates()
     remote_without_final = [gate["id"] for gate in synthetic + core + security]
@@ -624,7 +669,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
             always_fresh=True,
         ),
     ]
-    gates = legacy + synthetic + core + security + final
+    gates = legacy + synthetic + preflight + core + security + final
 
     direct_legacy = [gate["id"] for gate in legacy if gate["executor"] == "argv"]
     structured_legacy = [
@@ -683,6 +728,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
                     + [f"perf.media-burst.{scenario}" for scenario in BURST_SCENARIOS]
                 )
             ),
+            "remote-preflight": sorted(gate["id"] for gate in preflight),
             "remote-core": remote_core,
             "remote-release": remote_release,
         },
