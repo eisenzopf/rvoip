@@ -108,6 +108,7 @@ fn retention_drain_horizon_covers_invite_state_ttl_with_margin() {
             + support::soak::BURST_RSS_DIAGNOSTIC_SETTLE_SECS
             + support::soak::BURST_RSS_QUIET_TAIL_SECS
     );
+    assert_eq!(support::soak::BURST_RSS_PRE_GATE_SETTLE_SECS, 300);
 }
 
 #[ignore]

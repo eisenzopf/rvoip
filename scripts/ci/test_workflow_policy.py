@@ -343,7 +343,7 @@ class WorkflowPolicyTests(unittest.TestCase):
             runner,
         )
 
-    def test_burst_rss_gate_precedes_final_structural_snapshot(self) -> None:
+    def test_burst_rss_gate_is_bracketed_by_structural_proofs(self) -> None:
         for path in (
             "crates/sip/rvoip-sip/tests/perf/perf_burst_caller.rs",
             "crates/sip/rvoip-sip/tests/perf/perf_burst_receiver.rs",
@@ -351,15 +351,37 @@ class WorkflowPolicyTests(unittest.TestCase):
             source = (ROOT / path).read_text()
             with self.subTest(path=path):
                 periodic_stop = source.index("retention_sampler.stop_periodic()")
+                pre_retention = source.index(
+                    '"before_rss_settle"', periodic_stop
+                )
                 settled_window = source.index("sample_settled_rss_window(", periodic_stop)
                 rss_gate = source.index("rss_result_metrics(", settled_window)
                 final_retention = source.index(
                     "capture_endpoint_retention_sample(", rss_gate
                 )
-                self.assertLess(periodic_stop, settled_window)
+                self.assertLess(periodic_stop, pre_retention)
+                self.assertLess(pre_retention, settled_window)
                 self.assertLess(settled_window, rss_gate)
                 self.assertLess(rss_gate, final_retention)
                 self.assertIn("&settled_resources", source[rss_gate : rss_gate + 250])
+
+    def test_burst_caller_signals_receiver_before_post_load_qualification(self) -> None:
+        caller = (
+            ROOT / "crates/sip/rvoip-sip/tests/perf/perf_burst_caller.rs"
+        ).read_text()
+        active_end = caller.index("let active_wall = started.elapsed();")
+        stop_write = caller.index("std::fs::write(&path", active_end)
+        periodic_stop = caller.index("retention_sampler.stop_periodic()", stop_write)
+        self.assertLess(active_end, stop_write)
+        self.assertLess(stop_write, periodic_stop)
+
+        runner = (
+            ROOT / "crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh"
+        ).read_text()
+        self.assertEqual(runner.count("cargo test"), 1)
+        self.assertIn("--test perf_burst_receiver", runner)
+        self.assertIn("--test perf_burst_caller", runner)
+        self.assertEqual(runner.count("--build-target perf_burst_"), 2)
 
     def test_release_memory_gates_isolate_structural_diagnostics(self) -> None:
         receiver = (
