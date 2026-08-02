@@ -36,9 +36,26 @@ Use `remote-core` for a hosted-runner dry run and `remote-release` for the
 complete release profile. Do not start the full profile unless the exact
 release machinery has a recent successful preflight. The first candidate
 should set `first_candidate=true`; after a fix, provide the prior qualification
-run and the previous candidate SHA so exact matching evidence can be reused
-while failed and affected gates are rerun. Diagnose and reproduce a failed gate
-by itself before spending another complete qualification run.
+run and the previous candidate SHA, and set `first_candidate=false`, so exact
+matching evidence can be reused while failed and affected gates are rerun.
+Diagnose and reproduce a failed gate by itself before spending another complete
+qualification run.
+
+For a real GCP performance, soak, or interoperability failure, dispatch
+`remote-diagnostic` on protected `main` and enter one or more exact catalog gate
+IDs in `diagnostic_gates`, separated by commas. The planner accepts only
+executable GCP gates from `remote-release`, adds their declared dependencies,
+and forces them to run fresh with their release commands, machines, workloads,
+and thresholds. At most 20 gates may be requested. The resulting profile is
+non-publishing and cannot qualify a release.
+
+The next complete qualification may combine up to five evidence runs by
+entering their comma-separated IDs in `prior_run_id`. This lets it consume the
+successful receipts from a failed full run plus corrected diagnostic runs,
+while still rerunning anything failed, changed, stale, missing, or
+digest-mismatched. Candidate inventory and final aggregate receipts are always
+regenerated. Use `changed_since` for the previous candidate SHA after a code
+fix; unknown mappings still invalidate the full profile.
 
 The workflow produces a candidate-bound plan, per-gate receipts, and one
 aggregate qualification receipt. A gate can be reused only when its source,

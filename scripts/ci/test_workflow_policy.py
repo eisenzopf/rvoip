@@ -150,10 +150,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         ).read_text()
 
         self.assertIn("remote-preflight", workflow)
-        self.assertIn(
-            'test "$FIRST_CANDIDATE" = true || test "$PROFILE" = remote-preflight',
-            workflow,
-        )
+        self.assertIn('test "$PROFILE" = remote-preflight', workflow)
         self.assertIn("Require candidate to belong to protected origin/main", workflow)
         self.assertIn("RVOIP_GCP_WORKLOAD_IDENTITY_PROVIDER", workflow)
         self.assertNotIn("RVOIP_GCP_PILOT_PROVIDER", workflow)
@@ -166,6 +163,22 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('test -z "${CARGO_REGISTRY_TOKEN:-}"', probe)
         self.assertIn('test -z "${CRATES_IO_TOKEN:-}"', probe)
         self.assertIn('"publishing_credentials_present": False', probe)
+
+    def test_remote_diagnostics_are_exact_gate_fresh_and_non_publishing(self) -> None:
+        workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
+        publication = (ROOT / ".github/workflows/release-publish.yml").read_text()
+
+        self.assertIn("remote-diagnostic", workflow)
+        self.assertIn("diagnostic_gates:", workflow)
+        self.assertIn('args+=(--only-gates "$DIAGNOSTIC_GATES")', workflow)
+        self.assertIn('test "$PROFILE" = remote-diagnostic', workflow)
+        self.assertIn("inputs.profile != 'remote-diagnostic'", workflow)
+        self.assertIn("at most five prior evidence runs may be combined", workflow)
+        self.assertIn('--dir "target/prior-evidence/$run_id"', workflow)
+        self.assertIn(
+            'test "$(jq -r .profile "$aggregate")" = remote-release',
+            publication,
+        )
 
     def test_release_gcp_workers_do_not_consume_one_github_job_each(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
