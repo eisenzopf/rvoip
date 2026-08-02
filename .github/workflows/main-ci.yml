@@ -113,6 +113,8 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
+      # Keep hosted capacity available for PR feedback and release controllers.
+      max-parallel: 3
       matrix: ${{ fromJSON(needs.plan.outputs.shards) }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -181,6 +183,8 @@ jobs:
     timeout-minutes: 45
     strategy:
       fail-fast: false
+      # Full-main coverage is background work; do not starve pull requests.
+      max-parallel: 4
       matrix: ${{ fromJSON(needs.plan.outputs.sip_jobs) }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -248,7 +252,7 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
-      max-parallel: 6
+      max-parallel: 3
       matrix: ${{ fromJSON(needs.plan.outputs.specialty) }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

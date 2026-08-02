@@ -117,7 +117,23 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("Install nightly for release fuzz validation", specialty)
         self.assertIn("cargo-fuzz@0.13.2", specialty)
         self.assertGreaterEqual(specialty.count("matrix.gate == 'release-tooling'"), 2)
-        self.assertIn("max-parallel: 6", specialty)
+        self.assertIn("max-parallel: 3", specialty)
+
+    def test_main_preserves_capacity_for_pr_and_release_feedback(self) -> None:
+        text = (ROOT / ".github/workflows/main-ci.yml").read_text()
+        crate_tests = text.split("\n  crate-tests:\n", maxsplit=1)[1].split(
+            "\n  doctests:\n", maxsplit=1
+        )[0]
+        sip_tests = text.split("\n  sip-tests:\n", maxsplit=1)[1].split(
+            "\n  specialty:\n", maxsplit=1
+        )[0]
+        specialty = text.split("\n  specialty:\n", maxsplit=1)[1].split(
+            "\n  main-gate:\n", maxsplit=1
+        )[0]
+
+        self.assertIn("max-parallel: 3", crate_tests)
+        self.assertIn("max-parallel: 4", sip_tests)
+        self.assertIn("max-parallel: 3", specialty)
 
     def test_release_prepare_installs_native_validation_dependencies(self) -> None:
         text = (ROOT / ".github/workflows/release-prepare.yml").read_text()
