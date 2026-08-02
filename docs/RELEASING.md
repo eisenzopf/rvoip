@@ -25,11 +25,20 @@ the lockfile transactionally.
 ## Verify
 
 After the preparation PR merges, run **Release qualification** for that exact
-`main` commit. Use `remote-core` for a hosted-runner dry run and
-`remote-release` for the complete release profile. The first candidate should
-set `first_candidate=true`; after a fix, provide the prior qualification run
-and the previous candidate SHA so exact matching evidence can be reused while
-failed and affected gates are rerun.
+`main` commit. After release-orchestration changes merge, use
+`remote-preflight` first. It launches the same 17-worker, 96-vCPU GCP shape as a full run, but
+executes short infrastructure probes so credentials, quota, VM startup, OS
+limits, tool installation, repository checkout, GCS evidence transfer,
+controller reconciliation, and cleanup fail within a target of 15 minutes.
+The preflight is deliberately non-publishing and is not release evidence.
+
+Use `remote-core` for a hosted-runner dry run and `remote-release` for the
+complete release profile. Do not start the full profile unless the exact
+release machinery has a recent successful preflight. The first candidate
+should set `first_candidate=true`; after a fix, provide the prior qualification
+run and the previous candidate SHA so exact matching evidence can be reused
+while failed and affected gates are rerun. Diagnose and reproduce a failed gate
+by itself before spending another complete qualification run.
 
 The workflow produces a candidate-bound plan, per-gate receipts, and one
 aggregate qualification receipt. A gate can be reused only when its source,
@@ -74,6 +83,9 @@ The current full profile is balanced across seven `n2-standard-8` performance
 workers, nine `n2-standard-4` soak workers, and one `n2-standard-4`
 interoperability worker. These are real performance machines; the workflow
 does not substitute GitHub-hosted capacity or reduce workloads and thresholds.
+The `remote-preflight` profile recreates that complete capacity shape, including
+all 17 concurrent VM creations, but its short probes never substitute for the
+real performance, interoperability, and soak commands in `remote-release`.
 The one-hour soak establishes a physical lower bound of one hour for a fresh
 qualification, plus provisioning, build, evidence, and cleanup time. Gates
 whose exact source, dependency, definition, environment, and threshold digests

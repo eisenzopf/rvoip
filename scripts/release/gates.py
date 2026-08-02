@@ -1089,7 +1089,11 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("validate")
     plan = commands.add_parser("plan")
-    plan.add_argument("--profile", choices=("remote-core", "remote-release", "legacy-full"), required=True)
+    plan.add_argument(
+        "--profile",
+        choices=("remote-preflight", "remote-core", "remote-release", "legacy-full"),
+        required=True,
+    )
     plan.add_argument("--candidate", required=True)
     plan.add_argument("--environment-id", required=True)
     plan.add_argument("--prior-evidence", type=Path)

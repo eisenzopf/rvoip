@@ -132,7 +132,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("sip-tester", startup)
         self.assertIn("tshark", startup)
         self.assertIn("docker-compose-v2", startup)
-        self.assertIn('elif [[ ",$GATES," == *",perf.sipp-parity,"* ]]', startup)
+        self.assertIn('",$GATES," == *",perf.sipp-parity,"*', startup)
+        self.assertIn('",$GATES," == *",preflight.performance-01,"*', startup)
         self.assertGreaterEqual(startup.count("command -v sipp >/dev/null"), 2)
         self.assertIn("command -v tshark >/dev/null", startup)
         self.assertIn("docker compose version >/dev/null", startup)
@@ -140,6 +141,31 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('test "$(ulimit -n)" -ge 262144', startup)
         self.assertIn("-name '*.jsonl'", startup)
         self.assertNotRegex(startup, r"apt-get install[^\n]*\bsipp\b")
+
+    def test_release_infrastructure_preflight_is_full_shape_and_non_publishing(self) -> None:
+        workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
+        startup = (ROOT / "infra/release-runners/gcp-release-startup.sh").read_text()
+        probe = (
+            ROOT / "infra/release-runners/release-infrastructure-preflight.sh"
+        ).read_text()
+
+        self.assertIn("remote-preflight", workflow)
+        self.assertIn(
+            'test "$FIRST_CANDIDATE" = true || test "$PROFILE" = remote-preflight',
+            workflow,
+        )
+        self.assertIn("Require candidate to belong to protected origin/main", workflow)
+        self.assertIn("RVOIP_GCP_WORKLOAD_IDENTITY_PROVIDER", workflow)
+        self.assertNotIn("RVOIP_GCP_PILOT_PROVIDER", workflow)
+        self.assertIn('export RVOIP_RELEASE_RESOURCE_CLASS="$RESOURCE_CLASS"', startup)
+        self.assertIn('export RVOIP_RELEASE_CANDIDATE="$CANDIDATE"', startup)
+        self.assertIn('export RVOIP_RELEASE_GATES="$GATES"', startup)
+        self.assertIn("expected 44 publishable workspace packages", probe)
+        self.assertIn("for _ in range(4096)", probe)
+        self.assertIn('test "$NOFILE_LIMIT" -ge 262144', probe)
+        self.assertIn('test -z "${CARGO_REGISTRY_TOKEN:-}"', probe)
+        self.assertIn('test -z "${CRATES_IO_TOKEN:-}"', probe)
+        self.assertIn('"publishing_credentials_present": False', probe)
 
     def test_release_gcp_workers_do_not_consume_one_github_job_each(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()

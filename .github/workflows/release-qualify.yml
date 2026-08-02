@@ -9,11 +9,12 @@ on:
         default: main
         type: string
       profile:
-        description: Core dry run or complete release qualification
+        description: Infrastructure preflight, core dry run, or complete qualification
         required: true
         default: remote-core
         type: choice
         options:
+          - remote-preflight
           - remote-core
           - remote-release
       first_candidate:
@@ -35,8 +36,8 @@ permissions:
   actions: read
 
 concurrency:
-  group: release-qualification-${{ inputs.candidate }}
-  cancel-in-progress: false
+  group: release-qualification-${{ inputs.profile }}-${{ inputs.candidate }}
+  cancel-in-progress: ${{ inputs.profile == 'remote-preflight' }}
 
 env:
   RELEASE_ENVIRONMENT_ID: rvoip-release-v1-rust-1.91-nextest-0.9.140
@@ -72,7 +73,7 @@ jobs:
         with:
           toolchain: 1.91.0
 
-      - name: Require candidate to belong to origin/main
+      - name: Require candidate to belong to protected origin/main
         run: |
           git fetch origin main
           git merge-base --is-ancestor HEAD origin/main || {
@@ -94,7 +95,7 @@ jobs:
           PY
 
       - name: Download prior qualification evidence
-        if: inputs.prior_run_id != ''
+        if: inputs.profile != 'remote-preflight' && inputs.prior_run_id != ''
         env:
           GH_TOKEN: ${{ github.token }}
           PRIOR_RUN_ID: ${{ inputs.prior_run_id }}
@@ -121,13 +122,13 @@ jobs:
             --output target/release-plan/plan.json
             --github-output "$GITHUB_OUTPUT"
           )
-          if test "$FIRST_CANDIDATE" = true; then
+          if test "$FIRST_CANDIDATE" = true || test "$PROFILE" = remote-preflight; then
             args+=(--first-candidate)
           fi
-          if test -n "$PRIOR_RUN_ID"; then
+          if test "$PROFILE" != remote-preflight && test -n "$PRIOR_RUN_ID"; then
             args+=(--prior-evidence target/prior-evidence)
           fi
-          if test -n "$CHANGED_SINCE"; then
+          if test "$PROFILE" != remote-preflight && test -n "$CHANGED_SINCE"; then
             args+=(--changed-since "$CHANGED_SINCE")
           fi
           python3 scripts/release/gates.py plan "${args[@]}"
@@ -236,7 +237,7 @@ jobs:
     steps:
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
-          workload_identity_provider: ${{ vars.RVOIP_GCP_PILOT_PROVIDER }}
+          workload_identity_provider: ${{ vars.RVOIP_GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ vars.RVOIP_GCP_PROVISIONER_SERVICE_ACCOUNT }}
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
       - name: Require all compute and disk quota before creating workers
@@ -307,7 +308,7 @@ jobs:
       - name: Authenticate to Google Cloud without a key
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
-          workload_identity_provider: ${{ vars.RVOIP_GCP_PILOT_PROVIDER }}
+          workload_identity_provider: ${{ vars.RVOIP_GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ vars.RVOIP_GCP_PROVISIONER_SERVICE_ACCOUNT }}
 
       - name: Install Google Cloud CLI
@@ -550,7 +551,7 @@ jobs:
     steps:
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
-          workload_identity_provider: ${{ vars.RVOIP_GCP_PILOT_PROVIDER }}
+          workload_identity_provider: ${{ vars.RVOIP_GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ vars.RVOIP_GCP_PROVISIONER_SERVICE_ACCOUNT }}
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
       - name: Sweep workers left by interrupted controllers

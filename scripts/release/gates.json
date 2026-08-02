@@ -5801,6 +5801,669 @@
       "working_directory": "."
     },
     {
+      "affected_crates": [],
+      "affected_paths": [
+        ".github/workflows/release-qualify.yml",
+        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "scripts/release/build_gate_catalog.py",
+        "scripts/release/gates.py",
+        "scripts/release/gates.json",
+        "scripts/release/gcp_fanout.py"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "bash",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "gcp-performance",
+        "{artifact_dir}"
+      ],
+      "dependencies": [],
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance {artifact_dir}",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "preflight.performance-01",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "gcp-performance worker 01 infrastructure acceptance",
+      "resource_class": "gcp-performance",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        ".github/workflows/release-qualify.yml",
+        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "scripts/release/build_gate_catalog.py",
+        "scripts/release/gates.py",
+        "scripts/release/gates.json",
+        "scripts/release/gcp_fanout.py"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "bash",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "gcp-performance",
+        "{artifact_dir}"
+      ],
+      "dependencies": [],
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance {artifact_dir}",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "preflight.performance-02",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "gcp-performance worker 02 infrastructure acceptance",
+      "resource_class": "gcp-performance",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        ".github/workflows/release-qualify.yml",
+        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "scripts/release/build_gate_catalog.py",
+        "scripts/release/gates.py",
+        "scripts/release/gates.json",
+        "scripts/release/gcp_fanout.py"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "bash",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "gcp-performance",
+        "{artifact_dir}"
+      ],
+      "dependencies": [],
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance {artifact_dir}",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "preflight.performance-03",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "gcp-performance worker 03 infrastructure acceptance",
+      "resource_class": "gcp-performance",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        ".github/workflows/release-qualify.yml",
+        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "scripts/release/build_gate_catalog.py",
+        "scripts/release/gates.py",
+        "scripts/release/gates.json",
+        "scripts/release/gcp_fanout.py"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "bash",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "gcp-performance",
+        "{artifact_dir}"
+      ],
+      "dependencies": [],
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance {artifact_dir}",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "preflight.performance-04",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "gcp-performance worker 04 infrastructure acceptance",
+      "resource_class": "gcp-performance",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        ".github/workflows/release-qualify.yml",
+        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "scripts/release/build_gate_catalog.py",
+        "scripts/release/gates.py",
+        "scripts/release/gates.json",
+        "scripts/release/gcp_fanout.py"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "bash",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "gcp-performance",
+        "{artifact_dir}"
+      ],
+      "dependencies": [],
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance {artifact_dir}",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "preflight.performance-05",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "gcp-performance worker 05 infrastructure acceptance",
+      "resource_class": "gcp-performance",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        ".github/workflows/release-qualify.yml",
+        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "scripts/release/build_gate_catalog.py",
+        "scripts/release/gates.py",
+        "scripts/release/gates.json",
+        "scripts/release/gcp_fanout.py"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "bash",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "gcp-performance",
+        "{artifact_dir}"
+      ],
+      "dependencies": [],
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance {artifact_dir}",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "preflight.performance-06",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "gcp-performance worker 06 infrastructure acceptance",
+      "resource_class": "gcp-performance",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        ".github/workflows/release-qualify.yml",
+        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "scripts/release/build_gate_catalog.py",
+        "scripts/release/gates.py",
+        "scripts/release/gates.json",
+        "scripts/release/gcp_fanout.py"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "bash",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "gcp-performance",
+        "{artifact_dir}"
+      ],
+      "dependencies": [],
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance {artifact_dir}",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "preflight.performance-07",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "gcp-performance worker 07 infrastructure acceptance",
+      "resource_class": "gcp-performance",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        ".github/workflows/release-qualify.yml",
+        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "scripts/release/build_gate_catalog.py",
+        "scripts/release/gates.py",
+        "scripts/release/gates.json",
+        "scripts/release/gcp_fanout.py"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "bash",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "gcp-performance-soak",
+        "{artifact_dir}"
+      ],
+      "dependencies": [],
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance-soak {artifact_dir}",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "preflight.performance-soak-01",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "gcp-performance-soak worker 01 infrastructure acceptance",
+      "resource_class": "gcp-performance-soak",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        ".github/workflows/release-qualify.yml",
+        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "scripts/release/build_gate_catalog.py",
+        "scripts/release/gates.py",
+        "scripts/release/gates.json",
+        "scripts/release/gcp_fanout.py"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "bash",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "gcp-performance-soak",
+        "{artifact_dir}"
+      ],
+      "dependencies": [],
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance-soak {artifact_dir}",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "preflight.performance-soak-02",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "gcp-performance-soak worker 02 infrastructure acceptance",
+      "resource_class": "gcp-performance-soak",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        ".github/workflows/release-qualify.yml",
+        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "scripts/release/build_gate_catalog.py",
+        "scripts/release/gates.py",
+        "scripts/release/gates.json",
+        "scripts/release/gcp_fanout.py"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "bash",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "gcp-performance-soak",
+        "{artifact_dir}"
+      ],
+      "dependencies": [],
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance-soak {artifact_dir}",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "preflight.performance-soak-03",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "gcp-performance-soak worker 03 infrastructure acceptance",
+      "resource_class": "gcp-performance-soak",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        ".github/workflows/release-qualify.yml",
+        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "scripts/release/build_gate_catalog.py",
+        "scripts/release/gates.py",
+        "scripts/release/gates.json",
+        "scripts/release/gcp_fanout.py"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "bash",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "gcp-performance-soak",
+        "{artifact_dir}"
+      ],
+      "dependencies": [],
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance-soak {artifact_dir}",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "preflight.performance-soak-04",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "gcp-performance-soak worker 04 infrastructure acceptance",
+      "resource_class": "gcp-performance-soak",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        ".github/workflows/release-qualify.yml",
+        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "scripts/release/build_gate_catalog.py",
+        "scripts/release/gates.py",
+        "scripts/release/gates.json",
+        "scripts/release/gcp_fanout.py"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "bash",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "gcp-performance-soak",
+        "{artifact_dir}"
+      ],
+      "dependencies": [],
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance-soak {artifact_dir}",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "preflight.performance-soak-05",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "gcp-performance-soak worker 05 infrastructure acceptance",
+      "resource_class": "gcp-performance-soak",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        ".github/workflows/release-qualify.yml",
+        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "scripts/release/build_gate_catalog.py",
+        "scripts/release/gates.py",
+        "scripts/release/gates.json",
+        "scripts/release/gcp_fanout.py"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "bash",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "gcp-performance-soak",
+        "{artifact_dir}"
+      ],
+      "dependencies": [],
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance-soak {artifact_dir}",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "preflight.performance-soak-06",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "gcp-performance-soak worker 06 infrastructure acceptance",
+      "resource_class": "gcp-performance-soak",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        ".github/workflows/release-qualify.yml",
+        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "scripts/release/build_gate_catalog.py",
+        "scripts/release/gates.py",
+        "scripts/release/gates.json",
+        "scripts/release/gcp_fanout.py"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "bash",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "gcp-performance-soak",
+        "{artifact_dir}"
+      ],
+      "dependencies": [],
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance-soak {artifact_dir}",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "preflight.performance-soak-07",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "gcp-performance-soak worker 07 infrastructure acceptance",
+      "resource_class": "gcp-performance-soak",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        ".github/workflows/release-qualify.yml",
+        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "scripts/release/build_gate_catalog.py",
+        "scripts/release/gates.py",
+        "scripts/release/gates.json",
+        "scripts/release/gcp_fanout.py"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "bash",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "gcp-performance-soak",
+        "{artifact_dir}"
+      ],
+      "dependencies": [],
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance-soak {artifact_dir}",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "preflight.performance-soak-08",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "gcp-performance-soak worker 08 infrastructure acceptance",
+      "resource_class": "gcp-performance-soak",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        ".github/workflows/release-qualify.yml",
+        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "scripts/release/build_gate_catalog.py",
+        "scripts/release/gates.py",
+        "scripts/release/gates.json",
+        "scripts/release/gcp_fanout.py"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "bash",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "gcp-performance-soak",
+        "{artifact_dir}"
+      ],
+      "dependencies": [],
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance-soak {artifact_dir}",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "preflight.performance-soak-09",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "gcp-performance-soak worker 09 infrastructure acceptance",
+      "resource_class": "gcp-performance-soak",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        ".github/workflows/release-qualify.yml",
+        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "scripts/release/build_gate_catalog.py",
+        "scripts/release/gates.py",
+        "scripts/release/gates.json",
+        "scripts/release/gcp_fanout.py"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "bash",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "gcp-interop",
+        "{artifact_dir}"
+      ],
+      "dependencies": [],
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-interop {artifact_dir}",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "preflight.interop-01",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "gcp-interop worker 01 infrastructure acceptance",
+      "resource_class": "gcp-interop",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
       "affected_crates": [
         "rvoip"
       ],
@@ -8529,6 +9192,25 @@
       "test.workspace-doctest",
       "test.workspace-integration",
       "test.workspace-unit"
+    ],
+    "remote-preflight": [
+      "preflight.interop-01",
+      "preflight.performance-01",
+      "preflight.performance-02",
+      "preflight.performance-03",
+      "preflight.performance-04",
+      "preflight.performance-05",
+      "preflight.performance-06",
+      "preflight.performance-07",
+      "preflight.performance-soak-01",
+      "preflight.performance-soak-02",
+      "preflight.performance-soak-03",
+      "preflight.performance-soak-04",
+      "preflight.performance-soak-05",
+      "preflight.performance-soak-06",
+      "preflight.performance-soak-07",
+      "preflight.performance-soak-08",
+      "preflight.performance-soak-09"
     ],
     "remote-release": [
       "build.claimed-lower-crates",
