@@ -144,6 +144,21 @@ class PlannerTests(unittest.TestCase):
                 validated_scoped_paths={"Cargo.lock"},
             )
 
+    def test_lockfile_delta_canonicalizes_dependency_references(self) -> None:
+        explicit = """\
+version = 4
+[[package]]
+name = "alpha"
+version = "1.0.0"
+dependencies = ["external 2.0.0"]
+[[package]]
+name = "external"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+"""
+        implicit = explicit.replace("external 2.0.0", "external", 1)
+        self.assertEqual(pr_plan.lockfile_delta(explicit, implicit), (set(), set()))
+
     def test_lockfile_validator_accepts_only_reachable_dependency_delta(self) -> None:
         metadata = copy.deepcopy(self.metadata)
         base_lock = """\

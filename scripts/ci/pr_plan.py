@@ -107,12 +107,15 @@ def load_metadata(root: Path, metadata_file: Path | None) -> dict[str, Any]:
     )
 
 
-def parse_lockfile(payload: str) -> dict[LockPackage, str]:
+def lockfile_graph(
+    payload: str,
+) -> tuple[dict[LockPackage, dict[str, Any]], dict[LockPackage, frozenset[LockPackage]]]:
     document = tomllib.loads(payload)
     raw_packages = document.get("package", [])
     if not isinstance(raw_packages, list):
         raise PlanError("Cargo.lock package inventory is not a list")
-    packages: dict[LockPackage, str] = {}
+    packages: dict[LockPackage, dict[str, Any]] = {}
+    by_name: dict[str, list[LockPackage]] = {}
     for raw in raw_packages:
         if not isinstance(raw, dict):
             raise PlanError("Cargo.lock contains a non-table package")
@@ -126,29 +129,10 @@ def parse_lockfile(payload: str) -> dict[LockPackage, str]:
             raise PlanError("Cargo.lock package is missing name or version") from error
         if identity in packages:
             raise PlanError(f"Cargo.lock contains duplicate package {identity}")
-        packages[identity] = json.dumps(raw, sort_keys=True, separators=(",", ":"))
+        packages[identity] = raw
+        by_name.setdefault(identity.name, []).append(identity)
     if not packages:
         raise PlanError("Cargo.lock contains no packages")
-    return packages
-
-
-def lockfile_dependency_closure(payload: str, roots: set[str]) -> set[LockPackage]:
-    document = tomllib.loads(payload)
-    raw_packages = document.get("package", [])
-    identities: dict[LockPackage, dict[str, Any]] = {}
-    by_name: dict[str, list[LockPackage]] = {}
-    for raw in raw_packages:
-        if not isinstance(raw, dict) or "name" not in raw or "version" not in raw:
-            raise PlanError("Cargo.lock contains an invalid package entry")
-        identity = LockPackage(
-            name=str(raw["name"]),
-            version=str(raw["version"]),
-            source=str(raw.get("source", "")),
-        )
-        if identity in identities:
-            raise PlanError(f"Cargo.lock contains duplicate package {identity}")
-        identities[identity] = raw
-        by_name.setdefault(identity.name, []).append(identity)
 
     def resolve_dependency(reference: str) -> LockPackage:
         fields = reference.split(" ")
@@ -164,6 +148,38 @@ def lockfile_dependency_closure(payload: str, roots: set[str]) -> set[LockPackag
         if len(candidates) != 1:
             raise PlanError(f"Cargo.lock dependency reference is ambiguous: {reference!r}")
         return candidates[0]
+
+    dependencies: dict[LockPackage, frozenset[LockPackage]] = {}
+    for identity, raw in packages.items():
+        references = raw.get("dependencies", [])
+        if not isinstance(references, list):
+            raise PlanError(f"Cargo.lock dependencies are invalid for {identity.name}")
+        dependencies[identity] = frozenset(
+            resolve_dependency(str(reference)) for reference in references
+        )
+    return packages, dependencies
+
+
+def parse_lockfile(payload: str) -> dict[LockPackage, str]:
+    packages, dependencies = lockfile_graph(payload)
+    fingerprints: dict[LockPackage, str] = {}
+    for identity, raw in packages.items():
+        canonical = dict(raw)
+        canonical["dependencies"] = [
+            [dependency.name, dependency.version, dependency.source]
+            for dependency in sorted(dependencies[identity])
+        ]
+        fingerprints[identity] = json.dumps(
+            canonical, sort_keys=True, separators=(",", ":")
+        )
+    return fingerprints
+
+
+def lockfile_dependency_closure(payload: str, roots: set[str]) -> set[LockPackage]:
+    packages, dependencies = lockfile_graph(payload)
+    by_name: dict[str, list[LockPackage]] = {}
+    for identity in packages:
+        by_name.setdefault(identity.name, []).append(identity)
 
     pending: list[LockPackage] = []
     for name in sorted(roots):
@@ -181,12 +197,7 @@ def lockfile_dependency_closure(payload: str, roots: set[str]) -> set[LockPackag
         if identity in visited:
             continue
         visited.add(identity)
-        raw_dependencies = identities[identity].get("dependencies", [])
-        if not isinstance(raw_dependencies, list):
-            raise PlanError(f"Cargo.lock dependencies are invalid for {identity.name}")
-        pending.extend(
-            resolve_dependency(str(reference)) for reference in raw_dependencies
-        )
+        pending.extend(sorted(dependencies[identity] - visited))
     return visited
 
 
