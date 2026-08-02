@@ -58,6 +58,7 @@ class PlannerTests(unittest.TestCase):
                 {"gate": "release-tooling", "patterns": ["infra/release/**"]},
             ],
             "example_projects": ["one", "two"],
+            "pr_example_projects": ["one"],
             "package_weights": {"alpha": 3, "beta": 2},
         }
 
@@ -165,13 +166,18 @@ class PlannerTests(unittest.TestCase):
         shards = json.loads(values["shards"])["include"]
         self.assertEqual(shards, plan["shards"])
 
-    def test_public_api_change_uses_bounded_example_contract_lane(self) -> None:
+    def test_public_api_change_uses_bounded_example_contract_set(self) -> None:
         plan = self.plan("crates/delta/src/api/client.rs")
-        self.assertEqual(plan["specialty_gates"], ["examples-contract"])
+        self.assertEqual(plan["specialty_gates"], ["example--one"])
 
     def test_example_only_change_builds_only_touched_project(self) -> None:
         plan = self.plan("examples/two/src/main.rs")
         self.assertEqual(plan["specialty_gates"], ["example--two"])
+
+    def test_invalid_pr_example_contract_set_fails_closed(self) -> None:
+        self.policy["pr_example_projects"] = ["missing"]
+        with self.assertRaises(pr_plan.PlanError):
+            self.plan("crates/delta/src/api/client.rs")
 
 
 if __name__ == "__main__":

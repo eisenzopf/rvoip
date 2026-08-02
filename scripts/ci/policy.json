@@ -40,6 +40,11 @@
     "13-sip-to-amazon-connect",
     "14-vapi-agent"
   ],
+  "pr_example_projects": [
+    "01-quickstart-p2p",
+    "06-attended-transfer",
+    "11-ai-harness-demo"
+  ],
   "specialty_rules": [
     {
       "gate": "browser-smoke",

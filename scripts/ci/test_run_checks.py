@@ -60,15 +60,6 @@ class RunChecksTests(unittest.TestCase):
             5,
         )
 
-    def test_example_contract_is_one_bounded_representative_lane(self) -> None:
-        commands = run_checks.specialty_commands("examples-contract", Path("/workspace"))
-        manifests = [command[0][command[0].index("--manifest-path") + 1] for command in commands]
-        self.assertEqual(len(manifests), 4)
-        self.assertTrue(any("01-quickstart-p2p" in manifest for manifest in manifests))
-        self.assertTrue(any("06-attended-transfer" in manifest for manifest in manifests))
-        self.assertTrue(any("11-ai-harness-demo" in manifest for manifest in manifests))
-        self.assertTrue(any("13-sip-to-amazon-connect" in manifest for manifest in manifests))
-
     def test_vcon_gate_contains_live_store_and_boundary_checks(self) -> None:
         commands = run_checks.specialty_commands("vcon-postgres", Path("/workspace"))
         argv = [item[0] for item in commands]

@@ -191,30 +191,6 @@ def specialty_commands(
         return [
             (["cargo", "build", "--manifest-path", str(manifest), "--locked"], None, None)
         ]
-    if gate == "examples-contract":
-        # A bounded cross-section for public facade/API compatibility on PRs.
-        # Main Gate builds all standalone examples before code can qualify for
-        # a release.
-        representative_examples = (
-            "01-quickstart-p2p",
-            "06-attended-transfer",
-            "11-ai-harness-demo",
-            "13-sip-to-amazon-connect",
-        )
-        return [
-            (
-                [
-                    "cargo",
-                    "build",
-                    "--manifest-path",
-                    str(root / "examples" / example / "Cargo.toml"),
-                    "--locked",
-                ],
-                None,
-                None,
-            )
-            for example in representative_examples
-        ]
     if gate == "examples-smoke":
         smoke_examples = (
             "01-quickstart-p2p",

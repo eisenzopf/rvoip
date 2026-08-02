@@ -221,12 +221,21 @@ def make_plan(
             if any(path.startswith(f"examples/{project}/") for path in normalized)
         }
         # Changes contained within examples build only those projects. Public
-        # API/facade changes use one representative contract lane on PRs;
-        # Main Gate still builds every standalone example.
+        # API/facade changes use a small representative set in parallel on
+        # PRs; Main Gate still builds every standalone example.
         if directly_changed and all(path.startswith("examples/") for path in normalized):
             specialty_set.update(f"example--{project}" for project in directly_changed)
         else:
-            specialty_set.add("examples-contract")
+            representative_projects = policy.get("pr_example_projects", [])
+            unknown_projects = sorted(set(representative_projects) - set(projects))
+            if not representative_projects or unknown_projects:
+                raise PlanError(
+                    "PR example contract set is empty or unknown: "
+                    + ", ".join(unknown_projects)
+                )
+            specialty_set.update(
+                f"example--{project}" for project in representative_projects
+            )
     specialty = sorted(specialty_set)
 
     full_reasons = [
