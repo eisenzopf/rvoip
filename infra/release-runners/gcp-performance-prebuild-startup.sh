@@ -133,12 +133,18 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
   build-essential ca-certificates cmake curl git libasound2-dev libopus-dev \
-  libssl-dev pigz pkg-config protobuf-compiler
+  libssl-dev lld pigz pkg-config protobuf-compiler
 
 curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
   https://sh.rustup.rs -o /tmp/rustup-init.sh
 sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain 1.91.0
 export PATH=/root/.cargo/bin:$PATH
+command -v ld.lld >/dev/null
+ld.lld --version
+# GNU ld dominates an otherwise cache-hot exact-candidate prebuild. Keep the
+# linker choice explicit and release-environment-versioned so evidence built
+# with a different linker can never be reused accidentally.
+export RUSTFLAGS="-C link-arg=-fuse-ld=lld"
 
 git clone --filter=blob:none https://github.com/eisenzopf/rvoip.git "$WORKSPACE"
 cd "$WORKSPACE"
@@ -163,7 +169,7 @@ if curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
   export SCCACHE_CACHE_SIZE=40G
   export SCCACHE_DIR=/var/cache/rvoip-sccache
   export SCCACHE_GCS_BUCKET="$CACHE_BUCKET"
-  export SCCACHE_GCS_KEY_PREFIX=rvoip-release-v1/rust-1.91.0/x86_64-unknown-linux-gnu
+  export SCCACHE_GCS_KEY_PREFIX=rvoip-release-v2-lld/rust-1.91.0/x86_64-unknown-linux-gnu
   export SCCACHE_GCS_RW_MODE=READ_WRITE
   export SCCACHE_IDLE_TIMEOUT=0
   export SCCACHE_MULTILEVEL_CHAIN=disk,gcs

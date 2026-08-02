@@ -47,7 +47,7 @@ concurrency:
   cancel-in-progress: ${{ inputs.profile == 'remote-preflight' || inputs.profile == 'remote-diagnostic' }}
 
 env:
-  RELEASE_ENVIRONMENT_ID: rvoip-release-v3-rust-1.91-nextest-0.9.140-prebuilt-perf-v1
+  RELEASE_ENVIRONMENT_ID: rvoip-release-v4-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
