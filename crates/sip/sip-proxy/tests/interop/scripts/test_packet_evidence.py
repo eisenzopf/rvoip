@@ -837,6 +837,57 @@ class PacketEvidenceTests(unittest.TestCase):
             assertions["capacity-overload-upstream-status-for-order"]["passed"]
         )
 
+    def test_capacity_evidence_expands_responses_coalesced_in_one_tcp_frame(self) -> None:
+        held = ["held-0@example.test", "held-1@example.test"]
+        rows = [
+            *[
+                row(
+                    call_id=identity,
+                    marker="capacity-overload",
+                    method="INVITE",
+                )
+                for identity in held
+            ],
+            row(
+                call_id="|".join(held),
+                marker="capacity-overload",
+                status="486|486",
+                cseq_method="INVITE|INVITE",
+            ),
+            row(
+                call_id="overloaded@example.test",
+                marker="capacity-overload",
+                method="INVITE",
+                vias=("192.0.2.10", "25070"),
+            ),
+            row(
+                call_id="overloaded@example.test",
+                marker="capacity-overload",
+                status="503",
+                cseq_method="INVITE",
+                source=("127.0.0.1", "25060"),
+                destination=("192.0.2.10", "45000"),
+                vias=("127.0.0.1", "25060"),
+            ),
+            row(
+                call_id="overloaded@example.test",
+                marker="capacity-overload",
+                status="500",
+                cseq_method="INVITE",
+                source=("192.0.2.10", "25070"),
+                destination=("127.0.0.1", "25090"),
+                vias=("192.0.2.10", "25070"),
+            ),
+        ]
+
+        assertions = self.assertions(self.analyze("capacity-overload", rows))
+        for name in (
+            "capacity-overload-forwarded-calls-all-finished-486",
+            "capacity-overload-exact-final-call-partition",
+        ):
+            with self.subTest(name=name):
+                self.assertTrue(assertions[name]["passed"])
+
     def test_multiple_2xx_acks_follow_contact_and_reversed_routes(self) -> None:
         routes = "sip:rvoip.test:5060;lr|sip:peer.test:5070;lr"
         reversed_routes = "sip:peer.test:5070;lr|sip:rvoip.test:5060;lr"
