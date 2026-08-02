@@ -339,6 +339,23 @@ def specialty_commands(
                 None,
             ),
         ]
+    if gate == "infra-otel":
+        return [
+            (
+                [
+                    "cargo",
+                    "check",
+                    "--locked",
+                    "-p",
+                    "rvoip-infra-common",
+                    "--features",
+                    "otel",
+                    "--all-targets",
+                ],
+                None,
+                None,
+            )
+        ]
     if gate == "webrtc-runtime":
         commands = []
         for feature_args in ([], ["--no-default-features"], ["--all-features"]):

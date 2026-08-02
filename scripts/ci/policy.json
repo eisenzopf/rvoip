@@ -127,6 +127,14 @@
       ]
     },
     {
+      "gate": "infra-otel",
+      "patterns": [
+        "Cargo.lock",
+        "crates/foundation/infra-common/Cargo.toml",
+        "crates/foundation/infra-common/src/logging/**"
+      ]
+    },
+    {
       "gate": "examples",
       "patterns": [
         "examples/**",

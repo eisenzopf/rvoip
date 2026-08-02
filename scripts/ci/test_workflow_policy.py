@@ -48,6 +48,15 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("Cargo.lock", rules["amazon-connect-aws-control"])
         self.assertIn("examples/Cargo.lock", rules["amazon-connect-aws-control"])
 
+    def test_lockfile_changes_compile_the_optional_otel_exporter(self) -> None:
+        policy = json.loads((ROOT / "scripts/ci/policy.json").read_text())
+        rules = {
+            rule["gate"]: set(rule["patterns"])
+            for rule in policy["specialty_rules"]
+        }
+        self.assertIn("infra-otel", rules)
+        self.assertIn("Cargo.lock", rules["infra-otel"])
+
     def test_every_sip_process_fixture_is_prebuilt_by_the_dedicated_lane(self) -> None:
         policy = json.loads((ROOT / "scripts/ci/policy.json").read_text())
         mapping = policy["pr_sip_fixture_examples"]
