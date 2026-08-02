@@ -26,13 +26,14 @@ use support::burst::{
     BURST_ALICE_MEDIA_START, BURST_BOB_MEDIA_END, BURST_BOB_MEDIA_START,
 };
 use support::soak::{
-    admission_diagnostics, burst_retention_drain_wait, capture_endpoint_retention_sample,
-    diagnostic_artifact_path, diagnostic_sample_path, endpoint_metric, endpoint_retention_summary,
-    in_process_resource_sampler_enabled, media_receive_diagnostics, media_setup_raw_diagnostics,
-    media_setup_timing_diagnostics, memory_diagnostic_interval, memory_diagnostic_summary,
-    read_required_u16_env, resource_sampling_diagnostics, round2, sample_settled_rss_window,
-    sip_dialog_raw_diagnostics, sip_dialog_timing_diagnostics, sip_udp_diagnostics, DhatProfile,
-    EndpointRetentionSampler, MemoryDiagnosticSampler, RssGrowthGate,
+    admission_diagnostics, burst_retention_drain_wait, burst_retention_periodic_limit,
+    capture_endpoint_retention_sample, diagnostic_artifact_path, diagnostic_sample_path,
+    endpoint_metric, endpoint_retention_summary, in_process_resource_sampler_enabled,
+    media_receive_diagnostics, media_setup_raw_diagnostics, media_setup_timing_diagnostics,
+    memory_diagnostic_interval, memory_diagnostic_summary, read_required_u16_env,
+    resource_sampling_diagnostics, round2, sample_settled_rss_window, sip_dialog_raw_diagnostics,
+    sip_dialog_timing_diagnostics, sip_udp_diagnostics, DhatProfile, EndpointRetentionSampler,
+    MemoryDiagnosticSampler, RssGrowthGate,
 };
 use support::{
     CallSetupDiagnostics, LoadProfile, ResourceSampler, ResourceSummary, ScenarioReport,
@@ -159,10 +160,15 @@ async fn perf_burst_receiver() {
     } else {
         None
     };
-    let retention_sampler = EndpointRetentionSampler::start(
+    let maximum_hold = max_hold(&scenario);
+    let retention_sampler = EndpointRetentionSampler::start_with_periodic_limit(
         "burst_receiver",
         receiver.coordinator.clone(),
         support::soak::RETENTION_DIAGNOSTIC_SAMPLE_INTERVAL,
+        Some(burst_retention_periodic_limit(
+            scenario.duration_secs(),
+            maximum_hold,
+        )),
     );
     let memory_sampler = MemoryDiagnosticSampler::start(
         "burst_receiver",
@@ -173,7 +179,7 @@ async fn perf_burst_receiver() {
 
     let started = std::time::Instant::now();
     let max_wait = Duration::from_secs(scenario.duration_secs())
-        + max_hold(&scenario)
+        + maximum_hold
         + retention_drain_wait
         + Duration::from_secs(300);
     let mut stop_seen = false;
@@ -191,12 +197,10 @@ async fn perf_burst_receiver() {
 
     let mut retention_series = retention_sampler.stop_periodic().await;
     // Structural snapshots walk every owned runtime index and perturb the
-    // allocator. Keep the complete drain/RSS window quiet, then capture the
-    // exact final retention evidence after process sampling has stopped.
+    // allocator. Keep the complete drain/RSS window quiet.
     tokio::time::sleep(retention_drain_wait).await;
-    // End process sampling at the declared drain boundary. Retention capture
-    // and report construction allocate diagnostic data and are not part of
-    // the runtime-under-test RSS window.
+    // End active-process sampling at the declared drain boundary. The separate
+    // settled sampler below is the authoritative memory-growth window.
     let mut resources = match sampler {
         Some(sampler) => sampler.stop().await,
         None => ResourceSummary::empty(),
@@ -205,23 +209,6 @@ async fn perf_burst_receiver() {
         Some(sampler) => Some(sampler.stop().await),
         None => None,
     };
-    let final_sample = capture_endpoint_retention_sample(
-        "burst_receiver",
-        "after_drain",
-        started,
-        &receiver.coordinator,
-    )
-    .await;
-    retention_series.record_sample("burst_receiver", final_sample);
-    let final_retention = retention_series
-        .final_sample
-        .clone()
-        .unwrap_or_else(|| json!({}));
-    let retained_after_drain = retention_series.final_retained_objects;
-    let active_audio_receivers_after_drain = active_audio_receivers.load(Ordering::Relaxed);
-    let completed_audio_receivers = completed_audio_receivers.load(Ordering::Relaxed);
-    let received_frames = received_frames.load(Ordering::Relaxed);
-    let incoming_calls = incoming_calls.load(Ordering::Relaxed);
     let (mut settled_resources, settled_observation) = if in_process_resource_sampling {
         sample_settled_rss_window(
             "burst_receiver",
@@ -245,6 +232,25 @@ async fn perf_burst_receiver() {
     } else {
         "reported_only_short_settled_window"
     };
+    // Capture exact structural proof only after authoritative RSS sampling has
+    // stopped so the proof cannot manufacture the growth it is meant to find.
+    let final_sample = capture_endpoint_retention_sample(
+        "burst_receiver",
+        "after_drain",
+        started,
+        &receiver.coordinator,
+    )
+    .await;
+    retention_series.record_sample("burst_receiver", final_sample);
+    let final_retention = retention_series
+        .final_sample
+        .clone()
+        .unwrap_or_else(|| json!({}));
+    let retained_after_drain = retention_series.final_retained_objects;
+    let active_audio_receivers_after_drain = active_audio_receivers.load(Ordering::Relaxed);
+    let completed_audio_receivers = completed_audio_receivers.load(Ordering::Relaxed);
+    let received_frames = received_frames.load(Ordering::Relaxed);
+    let incoming_calls = incoming_calls.load(Ordering::Relaxed);
     resources.samples.clear();
     settled_resources.samples.clear();
     let dhat_diagnostics = dhat_profile.finish();

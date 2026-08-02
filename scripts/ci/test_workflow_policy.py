@@ -335,19 +335,41 @@ class WorkflowPolicyTests(unittest.TestCase):
             runner,
         )
 
-    def test_burst_rss_gate_uses_post_retention_settled_window(self) -> None:
+    def test_burst_rss_gate_precedes_final_structural_snapshot(self) -> None:
         for path in (
             "crates/sip/rvoip-sip/tests/perf/perf_burst_caller.rs",
             "crates/sip/rvoip-sip/tests/perf/perf_burst_receiver.rs",
         ):
             source = (ROOT / path).read_text()
             with self.subTest(path=path):
-                final_retention = source.index("capture_endpoint_retention_sample(")
-                settled_window = source.index("sample_settled_rss_window(", final_retention)
+                periodic_stop = source.index("retention_sampler.stop_periodic()")
+                settled_window = source.index("sample_settled_rss_window(", periodic_stop)
                 rss_gate = source.index("rss_result_metrics(", settled_window)
-                self.assertLess(final_retention, settled_window)
+                final_retention = source.index(
+                    "capture_endpoint_retention_sample(", rss_gate
+                )
+                self.assertLess(periodic_stop, settled_window)
                 self.assertLess(settled_window, rss_gate)
+                self.assertLess(rss_gate, final_retention)
                 self.assertIn("&settled_resources", source[rss_gate : rss_gate + 250])
+
+    def test_release_memory_gates_isolate_structural_diagnostics(self) -> None:
+        receiver = (
+            ROOT / "crates/sip/rvoip-sip/tests/perf/perf_burst_receiver.rs"
+        ).read_text()
+        self.assertIn(
+            "EndpointRetentionSampler::start_with_periodic_limit(", receiver
+        )
+        self.assertIn("burst_retention_periodic_limit(", receiver)
+
+        for path in (
+            "crates/sip/rvoip-sip/tests/perf/perf_soak_30min.rs",
+            "crates/sip/rvoip-sip/tests/perf/perf_soak_caller.rs",
+            "crates/sip/rvoip-sip/tests/perf/perf_soak_receiver.rs",
+        ):
+            with self.subTest(path=path):
+                source = (ROOT / path).read_text()
+                self.assertIn("long_soak_retention_periodic_limit(", source)
 
 
 if __name__ == "__main__":

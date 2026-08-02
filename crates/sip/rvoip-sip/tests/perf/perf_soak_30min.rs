@@ -9,7 +9,7 @@
 //!
 //! - `latency_drift_pct` — `(setup p99 in last minute) / (setup p99 in
 //!   first minute) - 1`. Should stay well under 50 % on a healthy run.
-//! - `rss_gate_growth_mb_per_hr` — projection of the final 600 seconds under
+//! - `rss_gate_growth_mb_per_hr` — projection of the final 1,200 seconds under
 //!   active load for a long soak. Short diagnostic runs fall back to the
 //!   post-drain or final tail slope. Qualifying the active window prevents a
 //!   per-call leak from being hidden by the plateau after load stops.
@@ -393,7 +393,7 @@ async fn perf_soak_30min() {
         Arc::clone(&alice),
         Arc::clone(&bob.coordinator),
         support::soak::RETENTION_DIAGNOSTIC_SAMPLE_INTERVAL,
-        (duration_secs >= 600).then(|| Duration::from_secs(duration_secs - 600)),
+        support::soak::long_soak_retention_periodic_limit(duration_secs),
     );
 
     // Cycling active media pool. Replenishment stops early enough to avoid
@@ -2326,6 +2326,24 @@ mod tests {
         let diagnostic = series.diagnostic_summary(0);
         assert_eq!(diagnostic["storage"], "streamed_lossless");
         assert!(diagnostic.get("samples").is_none());
+    }
+
+    #[test]
+    fn structural_diagnostic_limits_leave_authoritative_rss_windows_quiet() {
+        assert_eq!(support::soak::long_soak_retention_periodic_limit(599), None);
+        assert_eq!(support::soak::long_soak_retention_periodic_limit(600), None);
+        assert_eq!(
+            support::soak::long_soak_retention_periodic_limit(1_200),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            support::soak::long_soak_retention_periodic_limit(3_600),
+            Some(Duration::from_secs(2_400))
+        );
+        assert_eq!(
+            support::soak::burst_retention_periodic_limit(130, Duration::from_secs(360)),
+            Duration::from_secs(490)
+        );
     }
 
     #[test]
