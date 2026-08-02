@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 SCRIPT = Path(__file__).with_name("pr_plan.py")
@@ -37,6 +38,8 @@ class PlannerTests(unittest.TestCase):
                 {
                     "id": f"path+file://{package_root}#{name}@1.0.0",
                     "name": name,
+                    "version": "1.0.0",
+                    "source": None,
                     "manifest_path": str(manifest),
                     "dependencies": [
                         {"name": dependency, "kind": "dev" if name == "gamma" else None}
@@ -51,7 +54,8 @@ class PlannerTests(unittest.TestCase):
         self.policy = {
             "max_shards": 3,
             "target_shard_weight": 3,
-            "full_paths": ["Cargo.toml", "Cargo.lock"],
+            "full_paths": ["Cargo.toml"],
+            "scoped_full_paths": ["Cargo.lock"],
             "known_policy_paths": [
                 "README.md",
                 ".config/nextest.toml",
@@ -105,6 +109,118 @@ class PlannerTests(unittest.TestCase):
                 plan = self.plan(path)
                 self.assertEqual(plan["mode"], "full")
                 self.assertEqual(set(plan["selected_crates"]), {"alpha", "beta", "gamma", "delta"})
+
+    def test_validated_lockfile_delta_uses_changed_manifest_closure(self) -> None:
+        plan = pr_plan.make_plan(
+            root=self.root,
+            metadata=self.metadata,
+            policy=self.policy,
+            paths=["Cargo.lock", "crates/alpha/Cargo.toml"],
+            base="base",
+            head="head",
+            candidate=None,
+            job_mode="combined",
+            validated_scoped_paths={"Cargo.lock"},
+            lockfile_changed_packages=["alpha", "external"],
+        )
+        self.assertEqual(plan["mode"], "targeted")
+        self.assertEqual(plan["direct_crates"], ["alpha"])
+        self.assertEqual(plan["selected_crates"], ["alpha", "beta", "gamma"])
+        self.assertEqual(plan["validated_scoped_paths"], ["Cargo.lock"])
+        self.assertEqual(plan["lockfile_changed_packages"], ["alpha", "external"])
+
+    def test_lockfile_scope_requires_policy_declaration(self) -> None:
+        policy = copy.deepcopy(self.policy)
+        policy["scoped_full_paths"] = []
+        with self.assertRaisesRegex(pr_plan.PlanError, "not declared"):
+            pr_plan.make_plan(
+                root=self.root,
+                metadata=self.metadata,
+                policy=policy,
+                paths=["Cargo.lock", "crates/alpha/Cargo.toml"],
+                base="base",
+                head="head",
+                candidate=None,
+                validated_scoped_paths={"Cargo.lock"},
+            )
+
+    def test_lockfile_delta_canonicalizes_dependency_references(self) -> None:
+        explicit = """\
+version = 4
+[[package]]
+name = "alpha"
+version = "1.0.0"
+dependencies = ["external 2.0.0"]
+[[package]]
+name = "external"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+"""
+        implicit = explicit.replace("external 2.0.0", "external", 1)
+        self.assertEqual(pr_plan.lockfile_delta(explicit, implicit), (set(), set()))
+
+    def test_lockfile_validator_accepts_only_reachable_dependency_delta(self) -> None:
+        metadata = copy.deepcopy(self.metadata)
+        base_lock = """\
+version = 4
+[[package]]
+name = "alpha"
+version = "1.0.0"
+dependencies = ["external 1.0.0"]
+[[package]]
+name = "external"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+"""
+        head_lock = """\
+version = 4
+[[package]]
+name = "alpha"
+version = "1.0.0"
+dependencies = ["external 2.0.0"]
+[[package]]
+name = "external"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+"""
+        with mock.patch.object(pr_plan, "run", side_effect=[base_lock, head_lock]):
+            changed = pr_plan.validate_scoped_lockfile(
+                root=self.root,
+                packages=pr_plan.workspace_packages(self.root, metadata),
+                paths=["Cargo.lock", "crates/alpha/Cargo.toml"],
+                base="base",
+                head="head",
+            )
+        self.assertEqual(changed, ["alpha", "external"])
+
+    def test_lockfile_validator_rejects_unrelated_package_delta(self) -> None:
+        base_lock = """\
+version = 4
+[[package]]
+name = "alpha"
+version = "1.0.0"
+[[package]]
+name = "unrelated"
+version = "1.0.0"
+"""
+        head_lock = """\
+version = 4
+[[package]]
+name = "alpha"
+version = "1.0.0"
+[[package]]
+name = "unrelated"
+version = "2.0.0"
+"""
+        with mock.patch.object(pr_plan, "run", side_effect=[base_lock, head_lock]):
+            with self.assertRaisesRegex(pr_plan.PlanError, "escapes"):
+                pr_plan.validate_scoped_lockfile(
+                    root=self.root,
+                    packages=pr_plan.workspace_packages(self.root, self.metadata),
+                    paths=["Cargo.lock", "crates/alpha/Cargo.toml"],
+                    base="base",
+                    head="head",
+                )
 
     def test_ci_only_change_runs_policy_without_workspace_crates(self) -> None:
         plan = self.plan("scripts/ci/pr_plan.py", ".github/workflows/pr-gate.yml")

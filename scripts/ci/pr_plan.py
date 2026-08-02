@@ -11,6 +11,7 @@ import os
 from pathlib import Path, PurePosixPath
 import subprocess
 import sys
+import tomllib
 from typing import Any, Iterable
 
 
@@ -26,6 +27,13 @@ class Package:
     name: str
     root: str
     dependencies: frozenset[str]
+
+
+@dataclass(frozen=True, order=True)
+class LockPackage:
+    name: str
+    version: str
+    source: str
 
 
 def run(argv: list[str], root: Path) -> str:
@@ -97,6 +105,151 @@ def load_metadata(root: Path, metadata_file: Path | None) -> dict[str, Any]:
             root,
         )
     )
+
+
+def lockfile_graph(
+    payload: str,
+) -> tuple[dict[LockPackage, dict[str, Any]], dict[LockPackage, frozenset[LockPackage]]]:
+    document = tomllib.loads(payload)
+    raw_packages = document.get("package", [])
+    if not isinstance(raw_packages, list):
+        raise PlanError("Cargo.lock package inventory is not a list")
+    packages: dict[LockPackage, dict[str, Any]] = {}
+    by_name: dict[str, list[LockPackage]] = {}
+    for raw in raw_packages:
+        if not isinstance(raw, dict):
+            raise PlanError("Cargo.lock contains a non-table package")
+        try:
+            identity = LockPackage(
+                name=str(raw["name"]),
+                version=str(raw["version"]),
+                source=str(raw.get("source", "")),
+            )
+        except KeyError as error:
+            raise PlanError("Cargo.lock package is missing name or version") from error
+        if identity in packages:
+            raise PlanError(f"Cargo.lock contains duplicate package {identity}")
+        packages[identity] = raw
+        by_name.setdefault(identity.name, []).append(identity)
+    if not packages:
+        raise PlanError("Cargo.lock contains no packages")
+
+    def resolve_dependency(reference: str) -> LockPackage:
+        fields = reference.split(" ")
+        name = fields[0]
+        version = fields[1] if len(fields) >= 2 and fields[1][:1].isdigit() else None
+        source = " ".join(fields[2:]).removeprefix("(").removesuffix(")")
+        candidates = [
+            identity
+            for identity in by_name.get(name, [])
+            if version is None or identity.version == version
+            if not source or identity.source == source
+        ]
+        if len(candidates) != 1:
+            raise PlanError(f"Cargo.lock dependency reference is ambiguous: {reference!r}")
+        return candidates[0]
+
+    dependencies: dict[LockPackage, frozenset[LockPackage]] = {}
+    for identity, raw in packages.items():
+        references = raw.get("dependencies", [])
+        if not isinstance(references, list):
+            raise PlanError(f"Cargo.lock dependencies are invalid for {identity.name}")
+        dependencies[identity] = frozenset(
+            resolve_dependency(str(reference)) for reference in references
+        )
+    return packages, dependencies
+
+
+def parse_lockfile(payload: str) -> dict[LockPackage, str]:
+    packages, dependencies = lockfile_graph(payload)
+    fingerprints: dict[LockPackage, str] = {}
+    for identity, raw in packages.items():
+        canonical = dict(raw)
+        canonical["dependencies"] = [
+            [dependency.name, dependency.version, dependency.source]
+            for dependency in sorted(dependencies[identity])
+        ]
+        fingerprints[identity] = json.dumps(
+            canonical, sort_keys=True, separators=(",", ":")
+        )
+    return fingerprints
+
+
+def lockfile_dependency_closure(payload: str, roots: set[str]) -> set[LockPackage]:
+    packages, dependencies = lockfile_graph(payload)
+    by_name: dict[str, list[LockPackage]] = {}
+    for identity in packages:
+        by_name.setdefault(identity.name, []).append(identity)
+
+    pending: list[LockPackage] = []
+    for name in sorted(roots):
+        candidates = [
+            identity
+            for identity in by_name.get(name, [])
+            if not identity.source
+        ]
+        if len(candidates) != 1:
+            raise PlanError(f"Cargo.lock is missing workspace root {name!r}")
+        pending.append(candidates[0])
+    visited: set[LockPackage] = set()
+    while pending:
+        identity = pending.pop()
+        if identity in visited:
+            continue
+        visited.add(identity)
+        pending.extend(sorted(dependencies[identity] - visited))
+    return visited
+
+
+def lockfile_delta(
+    base_payload: str, head_payload: str
+) -> tuple[set[LockPackage], set[LockPackage]]:
+    base_packages = parse_lockfile(base_payload)
+    head_packages = parse_lockfile(head_payload)
+    changed_base = {
+        identity
+        for identity, fingerprint in base_packages.items()
+        if head_packages.get(identity) != fingerprint
+    }
+    changed_head = {
+        identity
+        for identity, fingerprint in head_packages.items()
+        if base_packages.get(identity) != fingerprint
+    }
+    return changed_base, changed_head
+
+
+def validate_scoped_lockfile(
+    *,
+    root: Path,
+    packages: dict[str, Package],
+    paths: list[str],
+    base: str,
+    head: str,
+) -> list[str]:
+    manifest_roots = {
+        package.name
+        for package in packages.values()
+        if f"{package.root}/Cargo.toml" in paths
+    }
+    if not manifest_roots:
+        raise PlanError("Cargo.lock changed without a workspace crate manifest")
+    base_payload = run(["git", "show", f"{base}:Cargo.lock"], root)
+    head_payload = run(["git", "show", f"{head}:Cargo.lock"], root)
+    changed_base, changed_head = lockfile_delta(base_payload, head_payload)
+    if not changed_base and not changed_head:
+        raise PlanError("Cargo.lock changed without a package graph delta")
+    base_reachable = lockfile_dependency_closure(base_payload, manifest_roots)
+    head_reachable = lockfile_dependency_closure(head_payload, manifest_roots)
+    unexplained_head = changed_head - head_reachable
+    unexplained_base = changed_base - base_reachable
+    if unexplained_head or unexplained_base:
+        unexplained = sorted(unexplained_head | unexplained_base)
+        detail = ", ".join(
+            f"{identity.name}@{identity.version}" for identity in unexplained
+        )
+        raise PlanError("lockfile delta escapes changed manifest closure: " + detail)
+    return sorted({identity.name for identity in changed_base | changed_head})
 
 
 def workspace_packages(root: Path, metadata: dict[str, Any]) -> dict[str, Package]:
@@ -247,12 +400,28 @@ def make_plan(
     candidate: str | None = None,
     job_mode: str = "split",
     deferred_sip_mode: str = "defer",
+    validated_scoped_paths: set[str] | None = None,
+    lockfile_changed_packages: list[str] | None = None,
 ) -> dict[str, Any]:
     if job_mode not in {"split", "combined"}:
         raise PlanError(f"unsupported shard job mode: {job_mode!r}")
     if deferred_sip_mode not in {"defer", "separate"}:
         raise PlanError(f"unsupported deferred SIP mode: {deferred_sip_mode!r}")
     normalized = sorted({normalize_path(path) for path in paths})
+    validated_scoped = {
+        normalize_path(path) for path in (validated_scoped_paths or set())
+    }
+    declared_scoped = set(policy.get("scoped_full_paths", []))
+    undeclared_scoped = sorted(
+        path
+        for path in validated_scoped
+        if not matches_any(path, declared_scoped)
+    )
+    if undeclared_scoped:
+        raise PlanError(
+            "validated scoped inputs are not declared by policy: "
+            + ", ".join(undeclared_scoped)
+        )
     packages = workspace_packages(root, metadata)
     known_policy_paths = set(policy.get("known_policy_paths", []))
     specialty_set = {
@@ -289,6 +458,11 @@ def make_plan(
     full_reasons = [
         path for path in normalized if matches_any(path, policy.get("full_paths", []))
     ]
+    full_reasons.extend(
+        path
+        for path in normalized
+        if matches_any(path, declared_scoped) and path not in validated_scoped
+    )
     docs_only = bool(normalized) and all(
         documentation_path(path, known_policy_paths) for path in normalized
     )
@@ -299,6 +473,8 @@ def make_plan(
             owner = owning_package(path, packages)
             if owner:
                 direct.add(owner)
+            elif path in validated_scoped:
+                continue
             elif not matches_any(path, known_policy_paths):
                 # Specialty-only trees are mapped even though they are not Cargo members.
                 if not any(
@@ -484,6 +660,8 @@ def make_plan(
         "direct_crates": sorted(direct),
         "selected_crates": sorted(selected),
         "specialty_gates": specialty,
+        "validated_scoped_paths": sorted(validated_scoped),
+        "lockfile_changed_packages": sorted(lockfile_changed_packages or []),
         "sip_jobs": sip_jobs,
         "deferred_sip_targets": deferred_sip_targets,
         "separate_sip_targets": separate_sip_targets,
@@ -554,20 +732,44 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(__file__).resolve().parents[2]
     try:
         policy_path = args.policy if args.policy.is_absolute() else root / args.policy
+        policy = json.loads(policy_path.read_text())
         metadata_file = args.metadata_file
         if metadata_file and not metadata_file.is_absolute():
             metadata_file = root / metadata_file
         paths = args.changed_file or changed_paths(root, args.base, args.head)
+        needs_lockfile_scope = "Cargo.lock" in paths and matches_any(
+            "Cargo.lock", policy.get("scoped_full_paths", [])
+        )
+        metadata = load_metadata(root, metadata_file)
+        validated_scoped_paths: set[str] = set()
+        lockfile_changed_packages: list[str] = []
+        if needs_lockfile_scope:
+            try:
+                lockfile_changed_packages = validate_scoped_lockfile(
+                    root=root,
+                    packages=workspace_packages(root, metadata),
+                    paths=paths,
+                    base=args.base,
+                    head=args.head,
+                )
+                validated_scoped_paths.add("Cargo.lock")
+            except PlanError as error:
+                # An unexplained or unresolvable lockfile edit must not make
+                # the planner fail open. The ordinary full-workspace path
+                # remains selected and records Cargo.lock as its reason.
+                print(f"Scoped lockfile analysis fell back to full: {error}", file=sys.stderr)
         plan = make_plan(
             root=root,
-            metadata=load_metadata(root, metadata_file),
-            policy=json.loads(policy_path.read_text()),
+            metadata=metadata,
+            policy=policy,
             paths=paths,
             base=args.base,
             head=args.head,
             candidate=args.candidate,
             job_mode=args.job_mode,
             deferred_sip_mode=args.deferred_sip_mode,
+            validated_scoped_paths=validated_scoped_paths,
+            lockfile_changed_packages=lockfile_changed_packages,
         )
         for gate in args.specialty_gate:
             if not gate or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for character in gate):

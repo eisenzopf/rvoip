@@ -4,11 +4,13 @@
   "target_shard_weight": 12,
   "full_paths": [
     "Cargo.toml",
-    "Cargo.lock",
     "rust-toolchain",
     "rust-toolchain.toml",
     ".cargo/**",
     "deny.toml"
+  ],
+  "scoped_full_paths": [
+    "Cargo.lock"
   ],
   "known_policy_paths": [
     ".config/nextest.toml",
