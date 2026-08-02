@@ -57,6 +57,60 @@ class GcpReleaseFanoutTests(unittest.TestCase):
             run_attempt="2",
         )
 
+    def cutoff_manifest(self) -> dict[str, object]:
+        return fanout.prepare_manifest(
+            matrix={
+                "include": [
+                    self.matrix_entry("bounded"),
+                    self.matrix_entry(
+                        "long-soak",
+                        resource="gcp-performance-soak-long",
+                        machine="n2-standard-8",
+                        gates="perf.long-soak",
+                    ),
+                    self.matrix_entry(
+                        "pbx-interop",
+                        resource="gcp-interop",
+                        machine="n2-standard-4",
+                        gates="interop.pbx",
+                    ),
+                ]
+            },
+            candidate=self.candidate,
+            environment_id="release-environment",
+            run_id="123456789",
+            run_attempt="2",
+        )
+
+    @staticmethod
+    def write_result_only(
+        root: Path,
+        manifest: dict[str, object],
+        shard: str,
+        *,
+        status: str,
+        candidate: str | None = None,
+    ) -> None:
+        worker = next(item for item in manifest["workers"] if item["id"] == shard)
+        directory = root / shard
+        directory.mkdir(parents=True, exist_ok=True)
+        fanout.write_json(
+            directory / "result.json",
+            {
+                "schema": fanout.RESULT_SCHEMA,
+                "candidate_sha": candidate or manifest["candidate_sha"],
+                "github_run_id": (
+                    f"{manifest['github_run_id']}-{manifest['github_run_attempt']}"
+                ),
+                "shard_id": shard,
+                "gates": sorted(worker["gates"]),
+                "exit_code": 0 if status == "PASS" else 1,
+                "status": status,
+                "evidence_archive_sha256": "0" * 64,
+                "publishing_attempted": False,
+            },
+        )
+
     def test_prepare_is_deterministic_and_capacity_aware(self) -> None:
         manifest = self.manifest()
         self.assertEqual(manifest["worker_count"], 2)
@@ -147,6 +201,102 @@ class GcpReleaseFanoutTests(unittest.TestCase):
                 run_id="1",
                 run_attempt="1",
             )
+
+    def test_early_failure_cutoff_waits_for_every_bounded_worker(self) -> None:
+        manifest = self.cutoff_manifest()
+        states = {worker["name"]: "RUNNING" for worker in manifest["workers"]}
+        with tempfile.TemporaryDirectory() as directory:
+            downloads = Path(directory)
+            decision = fanout.early_failure_decision(
+                manifest=manifest, downloads=downloads, states=states
+            )
+            self.assertEqual(decision["early_expected"], 1)
+            self.assertEqual(decision["early_settled"], 0)
+            self.assertFalse(decision["should_stop"])
+            self.assertEqual(len(decision["deferred_running"]), 2)
+
+            self.write_result_only(
+                downloads, manifest, "long-soak", status="FAIL"
+            )
+            decision = fanout.early_failure_decision(
+                manifest=manifest, downloads=downloads, states=states
+            )
+            self.assertEqual(decision["failed_shards"], ["long-soak"])
+            self.assertFalse(decision["should_stop"])
+
+    def test_early_failure_cutoff_stops_only_deferred_workers_after_failure(self) -> None:
+        manifest = self.cutoff_manifest()
+        states = {worker["name"]: "RUNNING" for worker in manifest["workers"]}
+        with tempfile.TemporaryDirectory() as directory:
+            downloads = Path(directory)
+            self.write_result_only(downloads, manifest, "bounded", status="FAIL")
+            decision = fanout.early_failure_decision(
+                manifest=manifest, downloads=downloads, states=states
+            )
+            self.assertTrue(decision["should_stop"])
+            self.assertEqual(decision["early_settled"], 1)
+            self.assertEqual(decision["failed_shards"], ["bounded"])
+            deferred_names = {
+                worker["name"]
+                for worker in manifest["workers"]
+                if worker["resource_class"] in fanout.DEFERRED_RESOURCE_CLASSES
+            }
+            self.assertEqual(set(decision["deferred_running"]), deferred_names)
+
+    def test_early_failure_cutoff_never_stops_a_clean_candidate(self) -> None:
+        manifest = self.cutoff_manifest()
+        states = {worker["name"]: "RUNNING" for worker in manifest["workers"]}
+        with tempfile.TemporaryDirectory() as directory:
+            downloads = Path(directory)
+            self.write_result_only(downloads, manifest, "bounded", status="PASS")
+            decision = fanout.early_failure_decision(
+                manifest=manifest, downloads=downloads, states=states
+            )
+            self.assertEqual(decision["early_settled"], 1)
+            self.assertEqual(decision["failed_shards"], [])
+            self.assertFalse(decision["should_stop"])
+
+    def test_early_failure_cutoff_fails_closed_on_invalid_or_missing_evidence(self) -> None:
+        manifest = self.cutoff_manifest()
+        states = {worker["name"]: "RUNNING" for worker in manifest["workers"]}
+        with tempfile.TemporaryDirectory() as directory:
+            downloads = Path(directory)
+            self.write_result_only(
+                downloads,
+                manifest,
+                "bounded",
+                status="PASS",
+                candidate="d" * 40,
+            )
+            decision = fanout.early_failure_decision(
+                manifest=manifest, downloads=downloads, states=states
+            )
+            self.assertTrue(decision["should_stop"])
+            self.assertIn("bounded", decision["invalid_results"])
+
+        with tempfile.TemporaryDirectory() as directory:
+            downloads = Path(directory)
+            bounded = next(
+                worker for worker in manifest["workers"] if worker["id"] == "bounded"
+            )
+            states[bounded["name"]] = "TERMINATED"
+            decision = fanout.early_failure_decision(
+                manifest=manifest, downloads=downloads, states=states
+            )
+            self.assertTrue(decision["should_stop"])
+            self.assertEqual(decision["failed_shards"], ["bounded"])
+
+    def test_instance_state_csv_is_strict(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "states.csv"
+            path.write_text("worker-1,RUNNING\nworker-2,TERMINATED\n")
+            self.assertEqual(
+                fanout.load_instance_states(path),
+                {"worker-1": "RUNNING", "worker-2": "TERMINATED"},
+            )
+            path.write_text("worker-1,RUNNING,extra\n")
+            with self.assertRaisesRegex(fanout.FanoutError, "invalid GCP"):
+                fanout.load_instance_states(path)
 
     @staticmethod
     def write_archive(path: Path, member_name: str, payload: bytes) -> str:

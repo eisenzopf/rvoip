@@ -62,10 +62,14 @@ class PlannerTests(unittest.TestCase):
                 ".github/workflows/**",
                 "scripts/ci/**",
             ],
+            "specialty_only_paths": ["crates/delta/tests/harness/**"],
             "specialty_rules": [
                 {"gate": "browser-smoke", "patterns": ["tests/browser/**"]},
                 {"gate": "examples", "patterns": ["examples/**", "crates/delta/src/api/**"]},
-                {"gate": "release-tooling", "patterns": ["infra/release/**"]},
+                {
+                    "gate": "release-tooling",
+                    "patterns": ["infra/release/**", "crates/delta/tests/harness/**"],
+                },
             ],
             "example_projects": ["one", "two"],
             "pr_example_projects": ["one"],
@@ -320,6 +324,30 @@ version = "2.0.0"
         self.assertEqual(plan["mode"], "targeted")
         self.assertEqual(plan["selected_crates"], [])
         self.assertEqual(plan["specialty_gates"], ["release-tooling"])
+
+    def test_owned_test_harness_uses_specialty_without_crate_closure(self) -> None:
+        plan = self.plan("crates/delta/tests/harness/run.sh")
+        self.assertEqual(plan["mode"], "targeted")
+        self.assertEqual(plan["selected_crates"], [])
+        self.assertEqual(plan["specialty_gates"], ["release-tooling"])
+
+    def test_unowned_specialty_only_path_fails_closed(self) -> None:
+        policy = copy.deepcopy(self.policy)
+        policy["specialty_rules"] = [
+            rule for rule in policy["specialty_rules"] if rule["gate"] != "release-tooling"
+        ]
+        plan = pr_plan.make_plan(
+            root=self.root,
+            metadata=self.metadata,
+            policy=policy,
+            paths=["crates/delta/tests/harness/run.sh"],
+            base="base",
+            head="head",
+            candidate=None,
+            job_mode="combined",
+        )
+        self.assertEqual(plan["mode"], "full")
+        self.assertIn("harness/run.sh", plan["reason"])
 
     def test_rename_records_old_and_new_paths(self) -> None:
         payload = b"R100\0crates/alpha/old.rs\0crates/beta/new.rs\0D\0crates/delta/gone.rs\0"

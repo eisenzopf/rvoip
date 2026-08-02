@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import csv
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
@@ -30,6 +31,10 @@ RESOURCE_MACHINES = {
 }
 RESOURCE_DISK_GB = {
     "gcp-proxy-interop": 100,
+}
+DEFERRED_RESOURCE_CLASSES = {
+    "gcp-interop",
+    "gcp-performance-soak-long",
 }
 MACHINE_VCPUS = {
     "n2-standard-2": 2,
@@ -263,6 +268,80 @@ def validate_result(
     )
 
 
+def load_instance_states(path: Path) -> dict[str, str]:
+    """Load the controller's exact GCE instance-name/status snapshot."""
+    try:
+        with path.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.reader(handle))
+    except OSError as error:
+        raise FanoutError(f"cannot read GCP instance states {path}: {error}") from error
+    states: dict[str, str] = {}
+    for row in rows:
+        if len(row) != 2 or not row[0] or not row[1]:
+            raise FanoutError(f"invalid GCP instance-state row: {row!r}")
+        if row[0] in states:
+            raise FanoutError(f"duplicate GCP instance-state row: {row[0]}")
+        states[row[0]] = row[1]
+    return states
+
+
+def early_failure_decision(
+    *, manifest: dict[str, Any], downloads: Path, states: dict[str, str]
+) -> dict[str, Any]:
+    """Decide whether failed bounded work makes deferred work unnecessary."""
+    validate_manifest(manifest)
+    early_expected = 0
+    early_settled = 0
+    failed_shards: list[str] = []
+    invalid_results: dict[str, str] = {}
+    deferred_running: list[str] = []
+
+    for worker in manifest["workers"]:
+        shard = worker["id"]
+        is_deferred = worker["resource_class"] in DEFERRED_RESOURCE_CLASSES
+        if not is_deferred:
+            early_expected += 1
+        result_path = downloads / shard / "result.json"
+        if result_path.is_file():
+            try:
+                result = load_json(result_path, f"{shard} result")
+                passed = validate_result(
+                    worker=worker, result=result, manifest=manifest
+                )
+            except FanoutError as error:
+                passed = False
+                invalid_results[shard] = str(error)
+            if not passed:
+                failed_shards.append(shard)
+            if not is_deferred:
+                early_settled += 1
+            continue
+
+        if states.get(worker["name"]) == "TERMINATED":
+            failed_shards.append(shard)
+            if not is_deferred:
+                early_settled += 1
+        elif is_deferred:
+            deferred_running.append(worker["name"])
+
+    failed_shards.sort()
+    deferred_running.sort()
+    return {
+        "schema": "rvoip-gcp-early-failure-decision-v1",
+        "early_expected": early_expected,
+        "early_settled": early_settled,
+        "failed_shards": failed_shards,
+        "invalid_results": invalid_results,
+        "deferred_running": deferred_running,
+        "should_stop": bool(
+            early_expected > 0
+            and early_settled == early_expected
+            and failed_shards
+            and deferred_running
+        ),
+    }
+
+
 def verify_fanout(
     *, manifest: dict[str, Any], downloads: Path, output: Path
 ) -> dict[str, Any]:
@@ -362,6 +441,11 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--manifest", type=Path, required=True)
     verify.add_argument("--downloads", type=Path, required=True)
     verify.add_argument("--output", type=Path, required=True)
+
+    cutoff = commands.add_parser("early-failure-decision")
+    cutoff.add_argument("--manifest", type=Path, required=True)
+    cutoff.add_argument("--downloads", type=Path, required=True)
+    cutoff.add_argument("--states", type=Path, required=True)
     return parser
 
 
@@ -377,7 +461,7 @@ def main(argv: list[str] | None = None) -> int:
                 run_attempt=args.run_attempt,
             )
             write_json(args.output, manifest)
-        else:
+        elif args.command == "verify":
             receipt = verify_fanout(
                 manifest=load_json(args.manifest, "GCP fanout manifest"),
                 downloads=args.downloads,
@@ -386,6 +470,13 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(receipt, sort_keys=True))
             if receipt["status"] != "PASS":
                 return 1
+        else:
+            decision = early_failure_decision(
+                manifest=load_json(args.manifest, "GCP fanout manifest"),
+                downloads=args.downloads,
+                states=load_instance_states(args.states),
+            )
+            print(json.dumps(decision, sort_keys=True))
     except FanoutError as error:
         print(f"GCP release fanout error: {error}", flush=True)
         return 1

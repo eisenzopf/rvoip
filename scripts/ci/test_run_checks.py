@@ -127,6 +127,23 @@ class RunChecksTests(unittest.TestCase):
         self.assertIn("otel", commands[0][0])
         self.assertIn("--all-targets", commands[0][0])
 
+    def test_release_tooling_gate_owns_proxy_harness_tests(self) -> None:
+        commands = run_checks.specialty_commands("release-tooling", Path("/workspace"))
+        argv = [item[0] for item in commands]
+        self.assertIn(
+            [
+                "python3",
+                "-m",
+                "unittest",
+                "discover",
+                "-s",
+                "crates/sip/sip-proxy/tests/interop/scripts",
+                "-p",
+                "test_*.py",
+            ],
+            argv,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -12,6 +12,12 @@ WORKSPACE_ROOT=$(git -C "$INTEROP_DIR" rev-parse --show-toplevel)
 SIPP_BIN=${SIPP_BIN:-sipp}
 TCPDUMP_BIN=${TCPDUMP_BIN:-tcpdump}
 TSHARK_BIN=${TSHARK_BIN:-tshark}
+# The capacity-overload scenario deliberately emits hundreds of packets in a
+# short interval.  libpcap's small default socket buffer can drop part of that
+# proof on a correctly functioning proxy, leaving packet evidence with an
+# impossible partial call partition.  Keep the capture lossless instead of
+# weakening the packet assertions.
+TCPDUMP_BUFFER_KIB=${PROXY_INTEROP_TCPDUMP_BUFFER_KIB:-32768}
 PEERS=${PROXY_INTEROP_PEERS:-"kamailio opensips"}
 TRANSPORTS=${PROXY_INTEROP_TRANSPORTS:-"udp tcp tls"}
 ORDERS=${PROXY_INTEROP_ORDERS:-"rvoip-first peer-first"}
@@ -89,6 +95,10 @@ for tool in docker "$SIPP_BIN" "$TCPDUMP_BIN" "$TSHARK_BIN" python3 cargo git se
 done
 if ! docker info >/dev/null 2>&1; then
   echo "Docker is not reachable" >&2
+  exit 1
+fi
+if [[ ! "$TCPDUMP_BUFFER_KIB" =~ ^[1-9][0-9]*$ ]]; then
+  echo "PROXY_INTEROP_TCPDUMP_BUFFER_KIB must be a positive integer" >&2
   exit 1
 fi
 if [[ ! -x "$STATE_SNAPSHOT" && ! -f "$STATE_SNAPSHOT" ]]; then
@@ -642,7 +652,7 @@ start_captures() {
     capture_interface_available "$interface" || continue
     safe_name=${interface//[^a-zA-Z0-9_.-]/_}
     local capture_path="$row_dir/${scenario}--$safe_name.pcap"
-    "${tcpdump_args[@]}" -i "$interface" -U -s 0 -n \
+    "${tcpdump_args[@]}" -B "$TCPDUMP_BUFFER_KIB" -i "$interface" -U -s 0 -n \
       -w "$capture_path" "$filter" \
       >"$row_dir/scenarios/$scenario/tcpdump-$safe_name.log" 2>&1 &
     pid=$!
