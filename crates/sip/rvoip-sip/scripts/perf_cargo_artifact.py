@@ -204,6 +204,7 @@ def write_artifact_manifest(
     profile: str,
     features: str,
     default_features: bool,
+    build_targets: list[str] | None = None,
 ) -> pathlib.Path:
     executable, message = resolve_cargo_test_artifact(
         messages_path, expected_name, expected_source
@@ -215,6 +216,16 @@ def write_artifact_manifest(
             f"{source_at_build_path} has no valid source fingerprint"
         )
 
+    invocation_targets = list(build_targets or [expected_name])
+    if (
+        not invocation_targets
+        or expected_name not in invocation_targets
+        or len(invocation_targets) != len(set(invocation_targets))
+    ):
+        raise ArtifactResolutionError(
+            "Cargo build targets must be unique and include the attested target"
+        )
+
     command = [
         "cargo",
         "test",
@@ -223,13 +234,12 @@ def write_artifact_manifest(
         "--release" if profile == "release" else f"--profile={profile}",
         "--features",
         features,
-        "--test",
-        expected_name,
-        "--no-run",
-        "--message-format=json-render-diagnostics",
     ]
     if not default_features:
         command.insert(5, "--no-default-features")
+    for target_name in invocation_targets:
+        command.extend(("--test", target_name))
+    command.extend(("--no-run", "--message-format=json-render-diagnostics"))
 
     target = message.get("target") or {}
     cargo_profile = message.get("profile") or {}
@@ -250,6 +260,7 @@ def write_artifact_manifest(
             "command": command,
             "package": package,
             "profile": profile,
+            "test_targets": invocation_targets,
             "features_requested": [item for item in features.split(",") if item],
             "default_features": default_features,
             "environment": {
@@ -301,6 +312,11 @@ def _parser() -> argparse.ArgumentParser:
     resolve.add_argument("--profile", required=True)
     resolve.add_argument("--features", required=True)
     resolve.add_argument(
+        "--build-target",
+        action="append",
+        help="test target included in the Cargo invocation; repeat for combined builds",
+    )
+    resolve.add_argument(
         "--default-features", choices=("enabled", "disabled"), required=True
     )
     return parser
@@ -326,6 +342,7 @@ def main(argv: list[str] | None = None) -> int:
                 profile=args.profile,
                 features=args.features,
                 default_features=args.default_features == "enabled",
+                build_targets=args.build_target,
             )
             print(executable)
         else:  # pragma: no cover - argparse enforces the choices.

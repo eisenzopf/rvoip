@@ -128,7 +128,44 @@ class CargoArtifactTests(unittest.TestCase):
             ["perf-tests", "perf-media-diagnostics"],
         )
         self.assertTrue(manifest["cargo_invocation"]["default_features"])
+        self.assertEqual(manifest["cargo_invocation"]["test_targets"], ["perf_fixture"])
         self.assertTrue(manifest["cargo_artifact"]["fresh"])
+
+    def test_combined_build_attests_every_target_in_the_actual_invocation(self):
+        companion_source = self.workspace / "tests" / "perf_companion.rs"
+        companion_source.write_text("#[test] fn companion() {}\n", encoding="utf-8")
+        companion_binary = self.binary.with_name("perf_companion-1")
+        companion_binary.write_bytes(b"companion cargo executable")
+        companion_binary.chmod(0o755)
+        self.write_messages(
+            self.compiler_artifact(),
+            self.compiler_artifact(
+                executable=companion_binary,
+                name="perf_companion",
+                source=companion_source,
+            ),
+        )
+        manifest_path = self.root / "combined-artifact.json"
+
+        artifact.write_artifact_manifest(
+            messages_path=self.messages,
+            manifest_path=manifest_path,
+            workspace_root=self.workspace,
+            source_at_build_path=self.source_at_build,
+            expected_name="perf_fixture",
+            expected_source=self.test_source,
+            package="rvoip-sip",
+            profile="release",
+            features="perf-tests",
+            default_features=True,
+            build_targets=["perf_fixture", "perf_companion"],
+        )
+
+        invocation = json.loads(manifest_path.read_text())["cargo_invocation"]
+        self.assertEqual(invocation["test_targets"], ["perf_fixture", "perf_companion"])
+        self.assertEqual(invocation["command"].count("--test"), 2)
+        self.assertIn("perf_fixture", invocation["command"])
+        self.assertIn("perf_companion", invocation["command"])
 
     def test_unrelated_targets_are_ignored(self):
         self.write_messages(
