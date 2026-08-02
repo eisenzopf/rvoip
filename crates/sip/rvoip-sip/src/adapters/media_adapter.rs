@@ -548,6 +548,13 @@ fn validate_uac_audio_answer(
     Ok((payload_type, codec, clock_rate, channels))
 }
 
+fn exact_initial_uac_offer(session: &SessionState) -> Option<&str> {
+    session
+        .initial_invite_offer_sdp
+        .as_deref()
+        .or(session.local_sdp.as_deref())
+}
+
 /// Build the SDP answer that declines an offered audio m-line per
 /// RFC 3264 §6 / RFC 4568 §7.3. Port=0 signals refusal; the proto is
 /// echoed from the offer so the peer can distinguish a policy
@@ -1685,9 +1692,7 @@ impl MediaAdapter {
         let (remote_ip, remote_port) = self.parse_sdp_connection(remote_sdp)?;
         let parsed_answer = SdpSession::from_str(remote_sdp)
             .map_err(|_| bounded_sdp_failure("remote-answer", "syntax"))?;
-        let parsed_offer = session
-            .local_sdp
-            .as_deref()
+        let parsed_offer = exact_initial_uac_offer(session)
             .ok_or_else(|| bounded_sdp_failure("remote-answer", "missing-local-offer"))
             .and_then(|offer| {
                 SdpSession::from_str(offer)
@@ -5630,6 +5635,21 @@ a=fmtp:101 0-15\r\n";
             .build()
             .unwrap();
         assert!(validate_uac_audio_answer(&offer, &missing_dynamic_map, true).is_err());
+    }
+
+    #[test]
+    fn initial_uac_answer_uses_the_exact_retained_wire_offer() {
+        let mut session = SessionState::new(
+            SessionId("retained-initial-offer".to_string()),
+            crate::state_table::Role::UAC,
+        );
+        session.local_sdp = Some("v=0\r\na=x-later-working-description\r\n".to_string());
+        session.initial_invite_offer_sdp = Some("v=0\r\nm=audio 16000 RTP/AVP 0\r\n".to_string());
+
+        assert_eq!(
+            exact_initial_uac_offer(&session),
+            Some("v=0\r\nm=audio 16000 RTP/AVP 0\r\n")
+        );
     }
 
     #[tokio::test]

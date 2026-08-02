@@ -818,7 +818,11 @@ wait_for_pbx_tls_ready() {
       echo
       echo "## attempt $i"
       if [ "$provider" = "freeswitch" ] && command -v docker >/dev/null 2>&1; then
-        docker exec rvoip-freeswitch fs_cli -x "sofia status profile rvoip_tls_srtp" 2>&1 | sed -n '1,80p'
+        # fs_cli is useful diagnostic evidence, but the profile may still be
+        # starting. Under `set -e` that expected probe failure must not abort
+        # the readiness loop before the authoritative socket checks below.
+        docker exec rvoip-freeswitch fs_cli -x "sofia status profile rvoip_tls_srtp" 2>&1 \
+          | sed -n '1,80p' || true
       fi
       if command -v nc >/dev/null 2>&1; then
         nc -z -w 2 "$host" "$port"

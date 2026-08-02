@@ -234,6 +234,10 @@ pub struct SessionStateCold {
     pub pending_bye_reason: Option<(String, u16, Option<String>)>,
     pub pending_invite_options:
         Option<Arc<crate::api::send::outbound_call::OutboundCallOptionsSnapshot>>,
+    /// Exact body placed on the initial INVITE wire, retained through
+    /// authentication and timer retries until the final response consumes
+    /// the offer/answer exchange.
+    pub(crate) initial_invite_offer_sdp: Option<String>,
     pub pending_reinvite_options:
         Option<Arc<rvoip_sip_dialog::api::unified::ReInviteRequestOptions>>,
     pub pending_register_options:
@@ -590,6 +594,10 @@ impl fmt::Debug for SessionState {
             .field(
                 "pending_invite_options_present",
                 &self.pending_invite_options.is_some(),
+            )
+            .field(
+                "initial_invite_offer_sdp_present",
+                &self.initial_invite_offer_sdp.is_some(),
             )
             .field(
                 "pending_reinvite_options_present",
@@ -968,6 +976,7 @@ impl SessionState {
                 transfer_target_last_progress: None,
                 pending_bye_reason: None,
                 pending_invite_options: None,
+                initial_invite_offer_sdp: None,
                 pending_reinvite_options: None,
                 pending_register_options: None,
                 pending_refer_options: None,
@@ -1138,6 +1147,7 @@ impl SessionState {
     pub(crate) fn clear_pending_request_state_for_final_transition(&mut self) {
         let cold = self.cold.as_ref();
         let needs_clear = cold.pending_invite_options.is_some()
+            || cold.initial_invite_offer_sdp.is_some()
             || !cold.invite_authorization_credentials.is_empty()
             || cold.invite_auth_retry_count != 0
             || cold.pending_auth.is_some()
@@ -1172,6 +1182,7 @@ impl SessionState {
 
         let cold = Arc::make_mut(&mut self.cold);
         cold.pending_invite_options = None;
+        cold.initial_invite_offer_sdp = None;
         cold.invite_authorization_credentials.clear();
         cold.invite_auth_retry_count = 0;
         cold.pending_auth = None;

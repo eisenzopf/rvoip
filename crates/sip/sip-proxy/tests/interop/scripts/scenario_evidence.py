@@ -168,8 +168,12 @@ def read_messages(path: Path) -> list[SipMessage]:
     lines = text.splitlines()
     messages: list[SipMessage] = []
     index = 0
+    # SIPp has emitted both `received [577] bytes :` and
+    # `sent (497 bytes):` across supported releases. Accept those wire-log
+    # headings without weakening any of the SIP assertions that follow.
     header = re.compile(
-        r"^(UDP|TCP|TLS) message (sent|received) \[\d+\] bytes:$",
+        r"^(UDP|TCP|TLS) message (sent|received)\s+"
+        r"(?:\[\d+\]\s+bytes|\(\d+\s+bytes\))\s*:$",
         re.IGNORECASE,
     )
     while index < len(lines):
