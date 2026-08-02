@@ -126,7 +126,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
   build-essential ca-certificates cmake curl git jq libasound2-dev libopus-dev \
-  libssl-dev pkg-config protobuf-compiler
+  libssl-dev lld pkg-config protobuf-compiler
 
 if [[ "$RESOURCE_CLASS" == "gcp-interop" \
   || "$RESOURCE_CLASS" == "gcp-proxy-interop" ]]; then
@@ -150,6 +150,12 @@ curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
 sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain 1.91.0 \
   --component clippy,rustfmt
 export PATH=/root/.cargo/bin:$PATH
+command -v ld.lld >/dev/null
+ld.lld --version
+# Match the exact-candidate prebuilder. Some non-performance GCP gates compile
+# directly on their worker, so both paths must use the same versioned linker
+# contract.
+export RUSTFLAGS="-C link-arg=-fuse-ld=lld"
 
 git clone --filter=blob:none https://github.com/eisenzopf/rvoip.git "$WORKSPACE"
 cd "$WORKSPACE"
@@ -210,7 +216,7 @@ if install_sccache; then
   export SCCACHE_CACHE_SIZE=20G
   export SCCACHE_DIR=/var/cache/rvoip-sccache
   export SCCACHE_GCS_BUCKET="$CACHE_BUCKET"
-  export SCCACHE_GCS_KEY_PREFIX=rvoip-release-v1/rust-1.91.0/x86_64-unknown-linux-gnu
+  export SCCACHE_GCS_KEY_PREFIX=rvoip-release-v2-lld/rust-1.91.0/x86_64-unknown-linux-gnu
   export SCCACHE_GCS_RW_MODE=READ_WRITE
   cache_service_account="$(curl --fail --silent --show-error \
     -H 'Metadata-Flavor: Google' \

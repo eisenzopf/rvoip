@@ -264,6 +264,22 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("bundle digest mismatch", helper)
         self.assertIn("exact candidate", helper)
 
+    def test_gcp_release_builds_use_the_versioned_lld_environment(self) -> None:
+        workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
+        worker = (ROOT / "infra/release-runners/gcp-release-startup.sh").read_text()
+        builder = (
+            ROOT / "infra/release-runners/gcp-performance-prebuild-startup.sh"
+        ).read_text()
+
+        self.assertIn("prebuilt-perf-v2-lld", workflow)
+        for startup in (builder, worker):
+            with self.subTest(startup=startup):
+                self.assertIn("libssl-dev lld", startup)
+                self.assertIn("command -v ld.lld >/dev/null", startup)
+                self.assertIn("ld.lld --version", startup)
+                self.assertIn('RUSTFLAGS="-C link-arg=-fuse-ld=lld"', startup)
+                self.assertIn("rvoip-release-v2-lld", startup)
+
     def test_gcp_artifact_uploads_stream_regular_files(self) -> None:
         for relative in (
             "infra/release-runners/gcp-performance-prebuild-startup.sh",
