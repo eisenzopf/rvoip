@@ -258,6 +258,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("install-bundle", startup)
         self.assertIn("RVOIP_PERF_PREBUILT_MANIFEST", startup)
         self.assertIn("performance-prebuilt.tar.gz", builder)
+        self.assertIn('download "${PREFIX}/performance-manifest.json"', builder)
+        self.assertIn("performance-manifest-readback.json", builder)
         self.assertIn("publishing_attempted", builder)
         self.assertIn("bundle digest mismatch", helper)
         self.assertIn("exact candidate", helper)

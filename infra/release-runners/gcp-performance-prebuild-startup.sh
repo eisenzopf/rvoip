@@ -49,6 +49,18 @@ upload() {
     "https://storage.googleapis.com/upload/storage/v1/b/${BUCKET}/o?uploadType=media&name=${encoded}"
 }
 
+download() {
+  local object="$1"
+  local destination="$2"
+  local access_token encoded
+  access_token="$(token)"
+  encoded="$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$object")"
+  curl --fail --silent --show-error --retry 3 --retry-all-errors \
+    -H "Authorization: Bearer ${access_token}" \
+    "https://storage.googleapis.com/download/storage/v1/b/${BUCKET}/o/${encoded}?alt=media" \
+    -o "$destination"
+}
+
 finish() {
   local exit_code=$?
   local ended_at duration status
@@ -185,3 +197,10 @@ tar -C /tmp -I 'pigz -3' -cf "$BUNDLE" performance-prebuilt
 BUNDLE_SHA="$(sha256sum "$BUNDLE" | awk '{print $1}')"
 upload "$BUNDLE_ROOT/manifest.json" "${PREFIX}/performance-manifest.json"
 upload "$BUNDLE" "${PREFIX}/performance-prebuilt.tar.gz"
+
+# Prove that the runtime service account can read evidence before deleting the
+# builder and creating the measurement fleet. Upload-only IAM otherwise fails
+# one VM later and obscures an infrastructure defect as a gate failure.
+download "${PREFIX}/performance-manifest.json" /tmp/performance-manifest-readback.json
+echo "${MANIFEST_SHA}  /tmp/performance-manifest-readback.json" \
+  | sha256sum --check --status

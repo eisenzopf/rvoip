@@ -50,3 +50,11 @@ created. Runtime workers still use their catalogued real GCP machine types,
 workloads, durations, and thresholds; they verify the bundle and executable
 hashes instead of recompiling the same graph. This makes compilation a shared
 setup phase without contaminating performance or soak measurements.
+
+The release-runner service account requires both
+`roles/storage.objectCreator` and `roles/storage.objectViewer` on the evidence
+bucket. Creator access stores immutable receipts and logs; viewer access lets
+runtime workers download the exact-candidate performance bundle. The builder
+performs an authenticated manifest read-back before its result can pass, so a
+missing viewer grant fails during shared setup rather than after measurement
+workers are provisioned.
