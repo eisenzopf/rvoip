@@ -290,7 +290,7 @@ jobs:
           PY
 
   gate-gcp:
-    name: ${{ matrix.resource_class }} / ${{ matrix.id }}
+    name: Run all ephemeral GCP release shards
     if: needs.plan.outputs.gcp_shard_count != '0'
     needs: [plan, preflight-gcp]
     runs-on: ubuntu-latest
@@ -298,9 +298,6 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.gcp_matrix) }}
     steps:
       - name: Check out controller definition
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -316,17 +313,34 @@ jobs:
       - name: Install Google Cloud CLI
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
 
-      - name: Create an ephemeral release worker
-        id: worker
+      - name: Bind every worker to the exact candidate and gate shard
         env:
           CANDIDATE: ${{ needs.plan.outputs.candidate_sha }}
           ENVIRONMENT_ID: ${{ needs.plan.outputs.environment_id }}
-          GATES: ${{ matrix.gates_csv }}
-          SHARD_ID: ${{ matrix.id }}
-          RESOURCE_CLASS: ${{ matrix.resource_class }}
-          MACHINE_TYPE: ${{ matrix.machine_type }}
-          DISK_TYPE: ${{ matrix.disk_type }}
-          DISK_SIZE_GB: ${{ matrix.disk_size_gb }}
+          GCP_MATRIX: ${{ needs.plan.outputs.gcp_matrix }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/gcp-controller
+          printf '%s\n' "$GCP_MATRIX" > target/gcp-controller/matrix.json
+          python3 scripts/release/gcp_fanout.py prepare \
+            --matrix target/gcp-controller/matrix.json \
+            --candidate "$CANDIDATE" \
+            --environment-id "$ENVIRONMENT_ID" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --output target/gcp-controller/workers.json
+          {
+            echo "## Ephemeral GCP fanout"
+            echo
+            echo "- GitHub controller jobs: 1"
+            echo "- GCP workers: $(jq -r .worker_count target/gcp-controller/workers.json)"
+            echo "- N2 vCPUs: $(jq -r .required_vcpus target/gcp-controller/workers.json)"
+            echo "- Idle workers retained after the run: 0"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create every ephemeral release worker concurrently
+        env:
+          CANDIDATE: ${{ needs.plan.outputs.candidate_sha }}
           PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
           ZONE: ${{ vars.RVOIP_GCP_ZONE }}
           NETWORK: ${{ vars.RVOIP_GCP_NETWORK }}
@@ -335,94 +349,193 @@ jobs:
           RUNNER_SERVICE_ACCOUNT: ${{ vars.RVOIP_GCP_RUNNER_SERVICE_ACCOUNT }}
         run: |
           set -euo pipefail
-          worker="rvoip-rel-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD_ID}"
-          prefix="release/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${SHARD_ID}"
-          gates_b64="$(printf '%s' "$GATES" | base64 -w0)"
-          environment_b64="$(printf '%s' "$ENVIRONMENT_ID" | base64 -w0)"
-          echo "name=$worker" >> "$GITHUB_OUTPUT"
-          echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
-          gcloud compute instances create "$worker" \
-            --project "$PROJECT" \
-            --zone "$ZONE" \
-            --machine-type "$MACHINE_TYPE" \
-            --network "$NETWORK" \
-            --subnet "$SUBNET" \
-            --image-family ubuntu-2404-lts-amd64 \
-            --image-project ubuntu-os-cloud \
-            --boot-disk-type "$DISK_TYPE" \
-            --boot-disk-size "${DISK_SIZE_GB}GB" \
-            --boot-disk-auto-delete \
-            --service-account "$RUNNER_SERVICE_ACCOUNT" \
-            --scopes cloud-platform \
-            --shielded-secure-boot \
-            --shielded-vtpm \
-            --shielded-integrity-monitoring \
-            --labels rvoip-role=release-gate,managed-by=github-actions \
-            --metadata "rvoip-candidate=${CANDIDATE},rvoip-run-id=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT},rvoip-shard-id=${SHARD_ID},rvoip-resource-class=${RESOURCE_CLASS},rvoip-evidence-bucket=${BUCKET},rvoip-prefix=${prefix},rvoip-gates-b64=${gates_b64},rvoip-environment-b64=${environment_b64}" \
-            --metadata-from-file startup-script=infra/release-runners/gcp-release-startup.sh
+          mkdir -p target/gcp-controller/create-logs
+          pids=()
+          while IFS= read -r descriptor; do
+            shard_id="$(jq -r .id <<< "$descriptor")"
+            worker="$(jq -r .name <<< "$descriptor")"
+            prefix="$(jq -r .prefix <<< "$descriptor")"
+            resource_class="$(jq -r .resource_class <<< "$descriptor")"
+            machine_type="$(jq -r .machine_type <<< "$descriptor")"
+            disk_type="$(jq -r .disk_type <<< "$descriptor")"
+            disk_size_gb="$(jq -r .disk_size_gb <<< "$descriptor")"
+            gates_b64="$(jq -r .gates_b64 <<< "$descriptor")"
+            environment_b64="$(jq -r .environment_b64 <<< "$descriptor")"
+            (
+              gcloud compute instances create "$worker" \
+                --project "$PROJECT" \
+                --zone "$ZONE" \
+                --machine-type "$machine_type" \
+                --network "$NETWORK" \
+                --subnet "$SUBNET" \
+                --image-family ubuntu-2404-lts-amd64 \
+                --image-project ubuntu-os-cloud \
+                --boot-disk-type "$disk_type" \
+                --boot-disk-size "${disk_size_gb}GB" \
+                --boot-disk-auto-delete \
+                --service-account "$RUNNER_SERVICE_ACCOUNT" \
+                --scopes cloud-platform \
+                --shielded-secure-boot \
+                --shielded-vtpm \
+                --shielded-integrity-monitoring \
+                --labels rvoip-role=release-gate,managed-by=github-actions \
+                --metadata "rvoip-candidate=${CANDIDATE},rvoip-run-id=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT},rvoip-shard-id=${shard_id},rvoip-resource-class=${resource_class},rvoip-evidence-bucket=${BUCKET},rvoip-prefix=${prefix},rvoip-gates-b64=${gates_b64},rvoip-environment-b64=${environment_b64}" \
+                --metadata-from-file startup-script=infra/release-runners/gcp-release-startup.sh
+            ) > "target/gcp-controller/create-logs/${shard_id}.log" 2>&1 &
+            pids+=("$!")
+          done < <(jq -c '.workers[]' target/gcp-controller/workers.json)
 
-      - name: Wait for immutable worker evidence
-        env:
-          PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
-          ZONE: ${{ vars.RVOIP_GCP_ZONE }}
-          BUCKET: ${{ vars.RVOIP_GCP_EVIDENCE_BUCKET }}
-          WORKER: ${{ steps.worker.outputs.name }}
-          PREFIX: ${{ steps.worker.outputs.prefix }}
-        run: |
-          set -euo pipefail
-          for attempt in $(seq 1 340); do
-            if gcloud storage cat "gs://${BUCKET}/${PREFIX}/result.json" > result.json 2>/dev/null; then
-              exit 0
-            fi
-            state="$(gcloud compute instances describe "$WORKER" --project "$PROJECT" --zone "$ZONE" --format='value(status)' 2>/dev/null || true)"
-            if [[ "$state" == TERMINATED ]]; then
-              echo "worker terminated without uploading a result" >&2
-              exit 1
-            fi
-            sleep 30
+          status=0
+          for pid in "${pids[@]}"; do
+            wait "$pid" || status=1
           done
-          echo "release shard exceeded its 170-minute evidence deadline" >&2
-          exit 1
-
-      - name: Download and verify shard evidence
-        if: always() && steps.worker.outputs.prefix != ''
-        env:
-          BUCKET: ${{ vars.RVOIP_GCP_EVIDENCE_BUCKET }}
-          PREFIX: ${{ steps.worker.outputs.prefix }}
-          CANDIDATE: ${{ needs.plan.outputs.candidate_sha }}
-          SHARD_ID: ${{ matrix.id }}
-        run: |
-          set -euo pipefail
-          gcloud storage cp "gs://${BUCKET}/${PREFIX}/qualification.log" qualification.log || true
-          test -f result.json
-          gcloud storage cp "gs://${BUCKET}/${PREFIX}/release-shard.tar.gz" release-shard.tar.gz
-          echo "$(jq -r .evidence_archive_sha256 result.json)  release-shard.tar.gz" | sha256sum --check
-          mkdir -p target
-          tar -C target -xzf release-shard.tar.gz
-          jq -e \
-            --arg candidate "$CANDIDATE" \
-            --arg shard "$SHARD_ID" \
-            '.candidate_sha == $candidate and .shard_id == $shard and .status == "PASS" and .publishing_attempted == false' \
-            result.json
-
-      - name: Delete worker and attached disk
-        if: always() && steps.worker.outputs.name != ''
-        env:
-          PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
-          ZONE: ${{ vars.RVOIP_GCP_ZONE }}
-          WORKER: ${{ steps.worker.outputs.name }}
-        run: |
-          if gcloud compute instances describe "$WORKER" --project "$PROJECT" --zone "$ZONE" >/dev/null 2>&1; then
-            gcloud compute instances delete "$WORKER" --project "$PROJECT" --zone "$ZONE" --quiet
+          if (( status != 0 )); then
+            tail -n 100 target/gcp-controller/create-logs/*.log
+            exit "$status"
           fi
 
-      - name: Upload GCP shard evidence
+      - name: Wait for every immutable worker result
+        env:
+          PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
+          ZONE: ${{ vars.RVOIP_GCP_ZONE }}
+          BUCKET: ${{ vars.RVOIP_GCP_EVIDENCE_BUCKET }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/gcp-controller/downloads
+          expected="$(jq -r .worker_count target/gcp-controller/workers.json)"
+          object_root="gs://${BUCKET}/release/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          run_prefix="rvoip-rel-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-"
+          for attempt in $(seq 1 340); do
+            gcloud storage ls --recursive "${object_root}/" \
+              > target/gcp-controller/objects.txt 2>/dev/null || true
+            gcloud compute instances list \
+              --project "$PROJECT" \
+              --filter="name~'^${run_prefix}'" \
+              --format='csv[no-heading](name,status)' \
+              > target/gcp-controller/states.csv
+            completed=0
+            terminated_without_result=()
+            while IFS= read -r descriptor; do
+              shard_id="$(jq -r .id <<< "$descriptor")"
+              worker="$(jq -r .name <<< "$descriptor")"
+              prefix="$(jq -r .prefix <<< "$descriptor")"
+              directory="target/gcp-controller/downloads/${shard_id}"
+              result_uri="gs://${BUCKET}/${prefix}/result.json"
+              mkdir -p "$directory"
+              if [[ ! -f "${directory}/result.json" ]] \
+                && grep -Fqx "$result_uri" target/gcp-controller/objects.txt; then
+                gcloud storage cp "$result_uri" "${directory}/result.json"
+              fi
+              if [[ -f "${directory}/result.json" ]]; then
+                completed=$((completed + 1))
+                continue
+              fi
+              state="$(awk -F, -v worker="$worker" '$1 == worker { print $2 }' target/gcp-controller/states.csv)"
+              if [[ "$state" == TERMINATED ]]; then
+                # The result upload and instance-state update can cross between
+                # the two bulk polls. Check the exact object once more before
+                # treating a stopped worker as an evidence failure.
+                if gcloud storage cp "$result_uri" "${directory}/result.json" 2>/dev/null; then
+                  completed=$((completed + 1))
+                  continue
+                fi
+                terminated_without_result+=("$worker")
+              fi
+            done < <(jq -c '.workers[]' target/gcp-controller/workers.json)
+            settled=$((completed + ${#terminated_without_result[@]}))
+            if (( settled == expected )); then
+              if (( ${#terminated_without_result[@]} != 0 )); then
+                printf '%s\n' "${terminated_without_result[@]}" \
+                  > target/gcp-controller/terminated-without-result.txt
+                echo "GCP workers terminated without immutable results: ${terminated_without_result[*]}" >&2
+              fi
+              exit 0
+            fi
+            echo "GCP release evidence: ${completed} complete, ${#terminated_without_result[@]} failed without a result, ${expected} total (poll ${attempt}/340)"
+            sleep 30
+          done
+          echo "GCP release fanout exceeded its 170-minute evidence deadline" >&2
+          exit 1
+
+      - name: Download and verify every shard evidence bundle
+        if: always()
+        env:
+          BUCKET: ${{ vars.RVOIP_GCP_EVIDENCE_BUCKET }}
+        run: |
+          set -euo pipefail
+          pids=()
+          while IFS= read -r descriptor; do
+            shard_id="$(jq -r .id <<< "$descriptor")"
+            prefix="$(jq -r .prefix <<< "$descriptor")"
+            directory="target/gcp-controller/downloads/${shard_id}"
+            (
+              mkdir -p "$directory"
+              if [[ ! -f "${directory}/result.json" ]]; then
+                gcloud storage cp \
+                  "gs://${BUCKET}/${prefix}/result.json" \
+                  "${directory}/result.json" || true
+              fi
+              if [[ -f "${directory}/result.json" ]]; then
+                gcloud storage cp \
+                  "gs://${BUCKET}/${prefix}/release-shard.tar.gz" \
+                  "${directory}/release-shard.tar.gz"
+                gcloud storage cp \
+                  "gs://${BUCKET}/${prefix}/qualification.log" \
+                  "${directory}/qualification.log" || true
+              fi
+            ) > "target/gcp-controller/download-${shard_id}.log" 2>&1 &
+            pids+=("$!")
+          done < <(jq -c '.workers[]' target/gcp-controller/workers.json)
+
+          status=0
+          for pid in "${pids[@]}"; do
+            wait "$pid" || status=1
+          done
+          if (( status != 0 )); then
+            tail -n 100 target/gcp-controller/download-*.log
+          fi
+          python3 scripts/release/gcp_fanout.py verify \
+            --manifest target/gcp-controller/workers.json \
+            --downloads target/gcp-controller/downloads \
+            --output target/release-shard
+
+      - name: Delete all workers and attached disks
+        if: always()
+        env:
+          PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
+          ZONE: ${{ vars.RVOIP_GCP_ZONE }}
+        run: |
+          set -euo pipefail
+          run_prefix="rvoip-rel-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-"
+          mapfile -t workers < <(
+            gcloud compute instances list \
+              --project "$PROJECT" \
+              --filter="labels.managed-by=github-actions AND name~'^${run_prefix}'" \
+              --format='value(name)'
+          )
+          if (( ${#workers[@]} != 0 )); then
+            gcloud compute instances delete "${workers[@]}" \
+              --project "$PROJECT" \
+              --zone "$ZONE" \
+              --quiet
+          fi
+
+      - name: Upload merged GCP shard evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: release-gate-shard-${{ matrix.id }}
+          name: release-gate-shard-gcp-controller
           path: target/release-shard/
           retention-days: 90
+          if-no-files-found: warn
+
+      - name: Upload GCP controller diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-gcp-controller-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/gcp-controller/
+          retention-days: 30
           if-no-files-found: warn
 
   cleanup-gcp:
