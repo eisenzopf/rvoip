@@ -1,6 +1,6 @@
 {
   "schema": "rvoip-ci-impact-policy-v1",
-  "max_shards": 6,
+  "max_shards": 4,
   "target_shard_weight": 12,
   "full_paths": [
     "Cargo.toml",
@@ -8,9 +8,6 @@
     "rust-toolchain",
     "rust-toolchain.toml",
     ".cargo/**",
-    ".github/workflows/**",
-    "scripts/ci/**",
-    "scripts/test_all.sh",
     "deny.toml"
   ],
   "known_policy_paths": [
@@ -18,6 +15,9 @@
     ".github/dependabot.yml",
     ".github/pull_request_template.md",
     ".github/release.yml",
+    ".github/workflows/**",
+    "scripts/ci/**",
+    "scripts/test_all.sh",
     "CONTRIBUTING.md",
     "SECURITY.md",
     "LICENSE",
@@ -73,6 +73,7 @@
         "scripts/release/**",
         "scripts/release_*.py",
         "scripts/test_release*.py",
+        "infra/release-runners/**",
         "docs/RELEASING.md"
       ]
     },

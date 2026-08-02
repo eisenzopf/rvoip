@@ -113,7 +113,7 @@ jobs:
           if-no-files-found: warn
 
   crate-tests:
-    name: Crate shard ${{ matrix.shard_id }} (${{ matrix.check }})
+    name: Crate shard ${{ matrix.shard_id }} (test + lint)
     needs: plan
     if: needs.plan.outputs.shard_job_count != '0'
     runs-on: ubuntu-latest
@@ -133,26 +133,26 @@ jobs:
       - name: Restore content-addressed Rust cache
         uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
-          shared-key: pr-shard-${{ matrix.shard_id }}-${{ matrix.check }}
+          shared-key: pr-shard-${{ matrix.shard_id }}
 
       - name: Install system dependencies
         run: >-
           sudo apt-get update && sudo apt-get install -y
           libasound2-dev libopus-dev protobuf-compiler pkg-config cmake lsof
 
-      - name: Run selected crate check
+      - name: Test and lint selected crates on one warm build graph
         run: >-
-          python3 scripts/ci/run_checks.py shard-${{ matrix.check }}
-          --name shard-${{ matrix.shard_id }}-${{ matrix.check }}
+          python3 scripts/ci/run_checks.py shard
+          --name shard-${{ matrix.shard_id }}-all
           --packages '${{ matrix.packages_csv }}'
-          --output target/ci-receipts/shard-${{ matrix.shard_id }}-${{ matrix.check }}.json
+          --output target/ci-receipts/shard-${{ matrix.shard_id }}-all.json
 
       - name: Upload shard receipt
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: pr-evidence-shard-${{ matrix.shard_id }}-${{ matrix.check }}
-          path: target/ci-receipts/shard-${{ matrix.shard_id }}-${{ matrix.check }}.json
+          name: pr-evidence-shard-${{ matrix.shard_id }}-all
+          path: target/ci-receipts/shard-${{ matrix.shard_id }}-all.json
           retention-days: 14
           if-no-files-found: warn
 

@@ -130,7 +130,7 @@ def matches_any(path: str, patterns: Iterable[str]) -> bool:
 
 
 def documentation_path(path: str, known_policy_paths: set[str]) -> bool:
-    if path in known_policy_paths:
+    if matches_any(path, known_policy_paths):
         return True
     if path.startswith("docs/") and path.endswith((".md", ".txt")):
         return True
@@ -220,15 +220,13 @@ def make_plan(
             for project in projects
             if any(path.startswith(f"examples/{project}/") for path in normalized)
         }
-        # An API/facade change can affect every standalone example. A change
-        # contained within examples only needs the directly touched projects.
-        selected_examples = (
-            directly_changed
-            if directly_changed
-            and all(path.startswith("examples/") for path in normalized)
-            else set(projects)
-        )
-        specialty_set.update(f"example--{project}" for project in selected_examples)
+        # Changes contained within examples build only those projects. Public
+        # API/facade changes use one representative contract lane on PRs;
+        # Main Gate still builds every standalone example.
+        if directly_changed and all(path.startswith("examples/") for path in normalized):
+            specialty_set.update(f"example--{project}" for project in directly_changed)
+        else:
+            specialty_set.add("examples-contract")
     specialty = sorted(specialty_set)
 
     full_reasons = [
@@ -258,9 +256,13 @@ def make_plan(
         full_reasons.extend(unknown)
 
     if docs_only:
-        mode = "docs"
+        mode = (
+            "docs"
+            if all(path.endswith((".md", ".txt")) for path in normalized)
+            else "policy"
+        )
         selected: set[str] = set()
-        reason = "documentation and repository policy only"
+        reason = "documentation or repository policy only"
     elif full_reasons:
         mode = "full"
         selected = set(packages)
@@ -273,15 +275,14 @@ def make_plan(
     shards = make_shards(selected, policy)
     shard_jobs = [
         {
-            "id": f"{shard['id']}-{check}",
+            "id": f"{shard['id']}-all",
             "shard_id": shard["id"],
-            "check": check,
+            "check": "all",
             "packages": shard["packages"],
             "packages_csv": shard["packages_csv"],
             "weight": shard["weight"],
         }
         for shard in shards
-        for check in ("test", "clippy")
     ]
     candidate_sha = (
         run(["git", "rev-parse", f"{candidate}^{{commit}}"], root).strip()
@@ -309,12 +310,14 @@ def make_plan(
 
 def write_github_outputs(path: Path, plan: dict[str, Any]) -> None:
     shard_jobs = {"include": plan["shard_jobs"]}
+    shards = {"include": plan["shards"]}
     specialty = {"include": [{"gate": gate} for gate in plan["specialty_gates"]]}
     values = {
         "mode": plan["mode"],
         "reason": plan["reason"],
         "candidate_sha": plan["candidate_sha"] or "",
         "shard_jobs": json.dumps(shard_jobs, separators=(",", ":")),
+        "shards": json.dumps(shards, separators=(",", ":")),
         "shard_job_count": str(len(plan["shard_jobs"])),
         "shard_count": str(len(plan["shards"])),
         "specialty": json.dumps(specialty, separators=(",", ":")),

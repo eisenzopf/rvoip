@@ -26,6 +26,12 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn("contents: write", text)
         self.assertNotIn("pull_request_target", text)
 
+    def test_pr_gate_reuses_each_shard_build_for_tests_and_lint(self) -> None:
+        text = (ROOT / ".github/workflows/pr-gate.yml").read_text()
+        self.assertIn("run_checks.py shard", text)
+        self.assertIn("shard-${{ matrix.shard_id }}-all", text)
+        self.assertNotIn("run_checks.py shard-${{ matrix.check }}", text)
+
     def test_main_release_tooling_installs_its_fuzz_toolchain(self) -> None:
         text = (ROOT / ".github/workflows/main-ci.yml").read_text()
         specialty = text.split("\n  specialty:\n", maxsplit=1)[1].split(
