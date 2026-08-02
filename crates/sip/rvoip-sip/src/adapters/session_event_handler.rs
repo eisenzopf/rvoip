@@ -3538,6 +3538,11 @@ impl SessionCrossCrateEventHandler {
         }
 
         let api_event = match event {
+            crate::state_machine::executor::SessionEvent::CallEstablished { session_id } => {
+                Some(crate::api::events::Event::CallEstablished {
+                    call_id: session_id,
+                })
+            }
             crate::state_machine::executor::SessionEvent::CallCancelled { session_id } => {
                 debug!(
                     "Ignoring state-machine CallCancelled for {}; terminal cancellation is published by the dialog event handler after wire teardown",

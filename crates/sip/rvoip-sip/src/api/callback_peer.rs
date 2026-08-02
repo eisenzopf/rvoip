@@ -2584,6 +2584,7 @@ impl<H: CallHandler> CallbackPeer<H> {
                 // can also pattern-match on the detailed variant via
                 // `handler.on_event(...)`.
                 | Event::IncomingCallAuthenticated { .. }
+                | Event::CallEstablished { .. }
                 | Event::CallProgressDetailed(_)
                 | Event::CallEstablishedDetailed(_)
                 | Event::CallFailedDetailed(_) => {}

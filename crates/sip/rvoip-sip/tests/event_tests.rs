@@ -230,6 +230,18 @@ fn test_call_on_hold_event() {
 }
 
 #[test]
+fn test_call_established_event() {
+    let id = test_id();
+    let event = Event::CallEstablished {
+        call_id: id.clone(),
+    };
+    assert_eq!(event.call_id(), Some(&id));
+    assert!(event.is_call_event());
+    assert!(!event.is_call_state_event());
+    assert_eq!(format!("{event:?}"), "CallEstablished");
+}
+
+#[test]
 fn test_call_resumed_event() {
     let id = test_id();
     let e = Event::CallResumed {

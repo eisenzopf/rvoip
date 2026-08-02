@@ -129,6 +129,21 @@ async fn srtp_call_negotiates_and_establishes_end_to_end() {
         _ => unreachable!(),
     }
 
+    // The UAS becomes established only when Alice's ACK reaches Bob. This is
+    // the public lifecycle signal a B2BUA needs before it treats the received
+    // leg as connected.
+    let bob_established = wait_for(&mut bob_events, Duration::from_secs(8), |event| {
+        matches!(
+            event,
+            Event::CallEstablished { call_id } if call_id == &bob_session_id
+        )
+    })
+    .await;
+    assert!(
+        bob_established.is_some(),
+        "bob did not receive CallEstablished after the inbound ACK"
+    );
+
     // Cleanup: hang up both sides and let background tasks settle.
     bob.terminate_current_session().await.ok();
     alice.terminate_current_session().await.ok();
