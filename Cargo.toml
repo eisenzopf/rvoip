@@ -312,7 +312,6 @@ chromiumoxide = { version = "0.7", default-features = false, features = ["tokio-
 sha2 = "0.10"
 zeroize = "1.9"
 hmac = "0.12"
-jsonwebtoken = { version = "10.4", features = ["rust_crypto"] }
 aes = "0.8"
 md-5 = "0.10"
 ring = "0.17"

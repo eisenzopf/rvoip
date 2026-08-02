@@ -44,7 +44,7 @@ sha2.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-jsonwebtoken.workspace = true
+jsonwebtoken = { version = "10.4", features = ["rust_crypto"] }
 rand.workspace = true
 rcgen.workspace = true
 tempfile = "3.14"
