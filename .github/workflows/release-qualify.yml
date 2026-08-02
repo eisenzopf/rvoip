@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       candidate:
-        description: Protected main commit or ref to diagnose or qualify
+        description: Main commit to qualify, or same-repository branch head to diagnose
         required: true
         default: main
         type: string
@@ -80,13 +80,26 @@ jobs:
         with:
           toolchain: 1.91.0
 
-      - name: Require candidate to belong to protected origin/main
+      - name: Require protected main candidate or trusted diagnostic branch head
+        env:
+          PROFILE: ${{ inputs.profile }}
         run: |
+          set -euo pipefail
           git fetch origin main
-          git merge-base --is-ancestor HEAD origin/main || {
-            echo "release candidates must be commits on origin/main" >&2
-            exit 1
-          }
+          if [[ "$PROFILE" == remote-diagnostic ]]; then
+            candidate="$(git rev-parse HEAD)"
+            git ls-remote --heads origin \
+              | awk -v candidate="$candidate" '$1 == candidate { found = 1 } END { exit !found }' \
+              || {
+                echo "diagnostic candidates must be the exact head of a branch in this repository" >&2
+                exit 1
+              }
+          else
+            git merge-base --is-ancestor HEAD origin/main || {
+              echo "release candidates must be commits on origin/main" >&2
+              exit 1
+            }
+          fi
 
       - name: Require complete structured release coverage
         if: inputs.profile == 'remote-release'
@@ -173,6 +186,9 @@ jobs:
             echo "- Fresh gates: ${{ steps.plan.outputs.run_count }}"
             echo "- Reused gates: ${{ steps.plan.outputs.reuse_count }}"
             echo "- Runner shards: ${{ steps.plan.outputs.shard_count }}"
+            if [[ '${{ inputs.profile }}' == remote-diagnostic ]]; then
+              echo "- Reusable for release: no"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload qualification plan
@@ -640,12 +656,13 @@ jobs:
           --output target/release-qualification/aggregate.json
 
       - name: Attest release qualification bundle
+        if: inputs.profile != 'remote-diagnostic'
         uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
         with:
           subject-path: target/release-qualification/aggregate.json
 
       - name: Upload reusable release evidence
-        if: always()
+        if: always() && inputs.profile != 'remote-diagnostic'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-gate-evidence
@@ -654,4 +671,16 @@ jobs:
             target/release-evidence/
             target/release-qualification/aggregate.json
           retention-days: 90
+          if-no-files-found: warn
+
+      - name: Upload non-reusable diagnostic evidence
+        if: always() && inputs.profile == 'remote-diagnostic'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: diagnostic-gate-evidence
+          path: |
+            target/release-plan/plan.json
+            target/release-evidence/
+            target/release-qualification/aggregate.json
+          retention-days: 30
           if-no-files-found: warn

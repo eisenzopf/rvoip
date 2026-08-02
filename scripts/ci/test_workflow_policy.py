@@ -247,7 +247,10 @@ class WorkflowPolicyTests(unittest.TestCase):
 
         self.assertIn("remote-preflight", workflow)
         self.assertIn('test "$PROFILE" = remote-preflight', workflow)
-        self.assertIn("Require candidate to belong to protected origin/main", workflow)
+        self.assertIn(
+            "Require protected main candidate or trusted diagnostic branch head",
+            workflow,
+        )
         self.assertIn("RVOIP_GCP_WORKLOAD_IDENTITY_PROVIDER", workflow)
         self.assertNotIn("RVOIP_GCP_PILOT_PROVIDER", workflow)
         self.assertIn('export RVOIP_RELEASE_RESOURCE_CLASS="$RESOURCE_CLASS"', startup)
@@ -272,6 +275,11 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('test "$PROFILE" = remote-diagnostic', workflow)
         self.assertIn("inputs.profile != 'remote-diagnostic'", workflow)
         self.assertIn("inputs.diagnostic_gates || 'all'", workflow)
+        self.assertIn("diagnostic candidates must be the exact head", workflow)
+        self.assertIn("git ls-remote --heads origin", workflow)
+        self.assertIn("Upload non-reusable diagnostic evidence", workflow)
+        self.assertIn("name: diagnostic-gate-evidence", workflow)
+        self.assertIn("Reusable for release: no", workflow)
         self.assertIn("at most five prior evidence runs may be combined", workflow)
         self.assertIn('--dir "target/prior-evidence/$run_id"', workflow)
         self.assertIn(
