@@ -166,10 +166,19 @@ test "$(git rev-parse HEAD)" = "$CANDIDATE"
 prebuilt_gate_ids="$(python3 scripts/release/prebuilt_performance.py select-gates \
   --catalog scripts/release/gates.json --gates "$GATES")"
 if [[ -n "$prebuilt_gate_ids" ]]; then
-  expected_prefix="gs://${BUCKET}/release/${RUN_ID}/prebuild/"
-  if [[ "$PREBUILT_URI" != "${expected_prefix}"* \
-    || ! "$PREBUILT_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+  run_bundle_prefix="gs://${BUCKET}/release/${RUN_ID}/prebuild/"
+  cache_bundle_prefix="gs://${BUCKET}/release-cache/performance-prebuilt-v1/"
+  if [[ ! "$PREBUILT_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
     echo "performance worker lacks an exact-run prebuilt bundle" >&2
+    exit 1
+  fi
+  if [[ "$PREBUILT_URI" == "${run_bundle_prefix}"* ]]; then
+    : # Compatibility with run-scoped bundles created before cache rollout.
+  elif [[ "$PREBUILT_URI" == "${cache_bundle_prefix}"* \
+    && "$PREBUILT_URI" == *"/bundles/${PREBUILT_SHA256}.tar.gz" ]]; then
+    : # Verified controller cache hits are content-addressed by this digest.
+  else
+    echo "performance worker lacks an exact-run or content-addressed cached bundle" >&2
     exit 1
   fi
   prebuilt_object="${PREBUILT_URI#"gs://${BUCKET}/"}"

@@ -257,6 +257,18 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("rvoip-prebuilt-sha256=${PREBUILT_SHA256}", workflow)
         self.assertIn("install-bundle", startup)
         self.assertIn("RVOIP_PERF_PREBUILT_MANIFEST", startup)
+        self.assertIn(
+            'run_bundle_prefix="gs://${BUCKET}/release/${RUN_ID}/prebuild/"',
+            startup,
+        )
+        self.assertIn(
+            'cache_bundle_prefix="gs://${BUCKET}/release-cache/performance-prebuilt-v1/"',
+            startup,
+        )
+        self.assertIn(
+            '"/bundles/${PREBUILT_SHA256}.tar.gz"',
+            startup,
+        )
         self.assertIn("performance-prebuilt.tar.gz", builder)
         self.assertIn('download "$MANIFEST_OBJECT"', builder)
         self.assertIn("performance-manifest-readback.json", builder)
