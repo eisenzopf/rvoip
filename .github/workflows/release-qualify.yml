@@ -425,60 +425,86 @@ jobs:
             exit 0
           fi
 
+          cache_started="$(date +%s)"
+          cache_key="$(python3 scripts/release/prebuilt_performance.py cache-key \
+            --candidate "$CANDIDATE" \
+            --environment-id "$ENVIRONMENT_ID" \
+            --gates "$gates_csv")"
+          cache_prefix="release-cache/performance-prebuilt-v1/${cache_key}"
+          cache_result_uri="gs://${BUCKET}/${cache_prefix}/prebuild-result.json"
+          cache_hit=false
+          if gcloud storage cp "$cache_result_uri" \
+            target/gcp-controller/prebuild/cached-result.json 2>/dev/null \
+            && python3 scripts/release/prebuilt_performance.py verify-result \
+              --result target/gcp-controller/prebuild/cached-result.json \
+              --candidate "$CANDIDATE" \
+              --environment-id "$ENVIRONMENT_ID" \
+              --gates "$gates_csv" \
+              --cache-key "$cache_key"; then
+            mv target/gcp-controller/prebuild/cached-result.json \
+              target/gcp-controller/prebuild/prebuild-result.json
+            cache_hit=true
+          else
+            rm -f target/gcp-controller/prebuild/cached-result.json
+          fi
+
           builder="rvoip-rel-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-prebuild"
           prefix="release/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/prebuild"
-          gates_b64="$(printf '%s' "$gates_csv" | base64 -w0)"
-          environment_b64="$(printf '%s' "$ENVIRONMENT_ID" | base64 -w0)"
-          cleanup_builder() {
-            gcloud compute instances delete "$builder" \
-              --project "$PROJECT" --zone "$ZONE" --quiet >/dev/null 2>&1 || true
-          }
-          trap cleanup_builder EXIT
+          if [[ "$cache_hit" != true ]]; then
+            gates_b64="$(printf '%s' "$gates_csv" | base64 -w0)"
+            environment_b64="$(printf '%s' "$ENVIRONMENT_ID" | base64 -w0)"
+            cleanup_builder() {
+              gcloud compute instances delete "$builder" \
+                --project "$PROJECT" --zone "$ZONE" --quiet >/dev/null 2>&1 || true
+            }
+            trap cleanup_builder EXIT
 
-          gcloud compute instances create "$builder" \
-            --project "$PROJECT" \
-            --zone "$ZONE" \
-            --machine-type n2-standard-32 \
-            --network "$NETWORK" \
-            --subnet "$SUBNET" \
-            --image-family ubuntu-2404-lts-amd64 \
-            --image-project ubuntu-os-cloud \
-            --boot-disk-type pd-balanced \
-            --boot-disk-size 200GB \
-            --boot-disk-auto-delete \
-            --service-account "$RUNNER_SERVICE_ACCOUNT" \
-            --scopes cloud-platform \
-            --shielded-secure-boot \
-            --shielded-vtpm \
-            --shielded-integrity-monitoring \
-            --labels rvoip-role=release-prebuild,managed-by=github-actions \
-            --metadata "rvoip-candidate=${CANDIDATE},rvoip-run-id=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT},rvoip-evidence-bucket=${BUCKET},rvoip-cache-bucket=${CACHE_BUCKET},rvoip-prefix=${prefix},rvoip-gates-b64=${gates_b64},rvoip-environment-b64=${environment_b64}" \
-            --metadata-from-file startup-script=infra/release-runners/gcp-performance-prebuild-startup.sh \
-            > target/gcp-controller/prebuild/create.log
+            gcloud compute instances create "$builder" \
+              --project "$PROJECT" \
+              --zone "$ZONE" \
+              --machine-type n2-standard-32 \
+              --network "$NETWORK" \
+              --subnet "$SUBNET" \
+              --image-family ubuntu-2404-lts-amd64 \
+              --image-project ubuntu-os-cloud \
+              --boot-disk-type pd-balanced \
+              --boot-disk-size 200GB \
+              --boot-disk-auto-delete \
+              --service-account "$RUNNER_SERVICE_ACCOUNT" \
+              --scopes cloud-platform \
+              --shielded-secure-boot \
+              --shielded-vtpm \
+              --shielded-integrity-monitoring \
+              --labels rvoip-role=release-prebuild,managed-by=github-actions \
+              --metadata "rvoip-candidate=${CANDIDATE},rvoip-run-id=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT},rvoip-evidence-bucket=${BUCKET},rvoip-cache-bucket=${CACHE_BUCKET},rvoip-prefix=${prefix},rvoip-prebuild-cache-key=${cache_key},rvoip-gates-b64=${gates_b64},rvoip-environment-b64=${environment_b64}" \
+              --metadata-from-file startup-script=infra/release-runners/gcp-performance-prebuild-startup.sh \
+              > target/gcp-controller/prebuild/create.log
 
-          result_uri="gs://${BUCKET}/${prefix}/prebuild-result.json"
-          for attempt in $(seq 1 120); do
-            if gcloud storage cp "$result_uri" \
-              target/gcp-controller/prebuild/prebuild-result.json 2>/dev/null; then
-              break
-            fi
-            state="$(gcloud compute instances describe "$builder" \
-              --project "$PROJECT" --zone "$ZONE" --format='value(status)' || true)"
-            if [[ "$state" == TERMINATED ]]; then
-              echo "performance prebuilder stopped without an immutable result" >&2
-              break
-            fi
-            echo "Waiting for exact-candidate performance bundle (poll ${attempt}/120)"
-            sleep 20
-          done
-          gcloud storage cp "gs://${BUCKET}/${prefix}/prebuild.log" \
-            target/gcp-controller/prebuild/prebuild.log 2>/dev/null || true
+            result_uri="gs://${BUCKET}/${prefix}/prebuild-result.json"
+            for attempt in $(seq 1 120); do
+              if gcloud storage cp "$result_uri" \
+                target/gcp-controller/prebuild/prebuild-result.json 2>/dev/null; then
+                break
+              fi
+              state="$(gcloud compute instances describe "$builder" \
+                --project "$PROJECT" --zone "$ZONE" --format='value(status)' || true)"
+              if [[ "$state" == TERMINATED ]]; then
+                echo "performance prebuilder stopped without an immutable result" >&2
+                break
+              fi
+              echo "Waiting for exact-candidate performance bundle (poll ${attempt}/120)"
+              sleep 20
+            done
+            gcloud storage cp "gs://${BUCKET}/${prefix}/prebuild.log" \
+              target/gcp-controller/prebuild/prebuild.log 2>/dev/null || true
+          fi
           test -f target/gcp-controller/prebuild/prebuild-result.json
           python3 scripts/release/prebuilt_performance.py verify-result \
             --result target/gcp-controller/prebuild/prebuild-result.json \
             --candidate "$CANDIDATE" \
             --environment-id "$ENVIRONMENT_ID" \
             --gates "$gates_csv" \
+            --cache-key "$cache_key" \
             --github-output "$GITHUB_OUTPUT"
           manifest_uri="$(jq -r .manifest_uri target/gcp-controller/prebuild/prebuild-result.json)"
           manifest_sha="$(jq -r .manifest_sha256 target/gcp-controller/prebuild/prebuild-result.json)"
@@ -493,8 +519,14 @@ jobs:
             echo "### Shared exact-candidate performance build"
             echo
             echo "- Selected gates: ${count}"
-            echo "- Builder: ephemeral n2-standard-32"
-            echo "- Build and package duration: ${duration}s"
+            if [[ "$cache_hit" == true ]]; then
+              echo "- Bundle source: verified exact-candidate GCS cache"
+              echo "- Cache lookup and verification: $(( $(date +%s) - cache_started ))s"
+              echo "- Original build and package duration avoided: ${duration}s"
+            else
+              echo "- Bundle source: ephemeral n2-standard-32 builder"
+              echo "- Build and package duration: ${duration}s"
+            fi
             echo "- Builder retained after this step: no"
           } >> "$GITHUB_STEP_SUMMARY"
 

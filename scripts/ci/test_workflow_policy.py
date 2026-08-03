@@ -258,11 +258,34 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("install-bundle", startup)
         self.assertIn("RVOIP_PERF_PREBUILT_MANIFEST", startup)
         self.assertIn("performance-prebuilt.tar.gz", builder)
-        self.assertIn('download "${PREFIX}/performance-manifest.json"', builder)
+        self.assertIn('download "$MANIFEST_OBJECT"', builder)
         self.assertIn("performance-manifest-readback.json", builder)
         self.assertIn("publishing_attempted", builder)
         self.assertIn("bundle digest mismatch", helper)
         self.assertIn("exact candidate", helper)
+
+    def test_exact_candidate_performance_bundle_is_reused_fail_closed(self) -> None:
+        workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
+        builder = (
+            ROOT / "infra/release-runners/gcp-performance-prebuild-startup.sh"
+        ).read_text()
+        helper = (ROOT / "scripts/release/prebuilt_performance.py").read_text()
+
+        self.assertIn("release-cache/performance-prebuilt-v1", workflow)
+        self.assertIn("cache-key", workflow)
+        self.assertIn("--cache-key", workflow)
+        self.assertLess(
+            workflow.index("cached-result.json"),
+            workflow.index("gcloud compute instances create \"$builder\""),
+        )
+        self.assertIn("rvoip-prebuild-cache-key=${cache_key}", workflow)
+        self.assertIn('CACHE_KEY="$(metadata rvoip-prebuild-cache-key)"', builder)
+        self.assertIn("bundles/${BUNDLE_SHA}.tar.gz", builder)
+        self.assertIn("manifests/${MANIFEST_SHA}.json", builder)
+        self.assertIn('if (( exit_code == 0 )); then', builder)
+        self.assertIn('upload "$RESULT" "${CACHE_PREFIX}/prebuild-result.json"', builder)
+        self.assertIn("cache_key_sha256", helper)
+        self.assertIn("outside the expected cache namespace", helper)
 
     def test_gcp_release_builds_use_the_versioned_lld_environment(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()

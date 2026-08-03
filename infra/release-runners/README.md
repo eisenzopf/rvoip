@@ -46,7 +46,11 @@ For diagnostics and `remote-release` runs that select executable performance
 gates, the controller first creates one ephemeral `n2-standard-32` builder. It
 compiles the exact candidate once, packages only the selected test executables,
 uploads a SHA-256-bound bundle, and is deleted before the measurement fleet is
-created. Runtime workers still use their catalogued real GCP machine types,
+created. A rerun of the identical candidate, environment, and selected gate set
+reuses that finished bundle from GCS and does not create the builder. Cache
+objects are content-addressed; the controller and workers recheck the cache
+key, result, manifest, bundle, and executable hashes before use. Runtime workers
+still use their catalogued real GCP machine types,
 workloads, durations, and thresholds; they verify the bundle and executable
 hashes instead of recompiling the same graph. This makes compilation a shared
 setup phase without contaminating performance or soak measurements.

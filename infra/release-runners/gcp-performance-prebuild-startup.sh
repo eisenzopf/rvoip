@@ -15,6 +15,7 @@ RUN_ID="$(metadata rvoip-run-id)"
 BUCKET="$(metadata rvoip-evidence-bucket)"
 CACHE_BUCKET="$(metadata rvoip-cache-bucket)"
 PREFIX="$(metadata rvoip-prefix)"
+CACHE_KEY="$(metadata rvoip-prebuild-cache-key)"
 GATES="$(metadata rvoip-gates-b64 | base64 --decode)"
 ENVIRONMENT_ID="$(metadata rvoip-environment-b64 | base64 --decode)"
 WORKSPACE=/opt/rvoip
@@ -25,8 +26,9 @@ STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 START_SECONDS="$(date +%s)"
 BUNDLE_SHA=""
 MANIFEST_SHA=""
-BUNDLE_URI="gs://${BUCKET}/${PREFIX}/performance-prebuilt.tar.gz"
-MANIFEST_URI="gs://${BUCKET}/${PREFIX}/performance-manifest.json"
+CACHE_PREFIX="release-cache/performance-prebuilt-v1/${CACHE_KEY}"
+BUNDLE_URI=""
+MANIFEST_URI=""
 
 token() {
   curl --fail --silent --show-error \
@@ -79,6 +81,7 @@ finish() {
     upload /tmp/prebuild-sccache-stats.txt "${PREFIX}/prebuild-sccache-stats.txt" || true
   fi
   python3 - "$RESULT" "$CANDIDATE" "$RUN_ID" "$ENVIRONMENT_ID" "$GATES" \
+    "$CACHE_KEY" \
     "$STARTED_AT" "$ended_at" "$duration" "$exit_code" "$status" \
     "$BUNDLE_URI" "$BUNDLE_SHA" "$MANIFEST_URI" "$MANIFEST_SHA" <<'PY'
 import json
@@ -90,6 +93,7 @@ import sys
     run_id,
     environment_id,
     gates,
+    cache_key,
     started,
     ended,
     duration,
@@ -106,6 +110,7 @@ payload = {
     "github_run_id": run_id,
     "environment_id": environment_id,
     "selected_gate_ids": sorted({value for value in gates.split(",") if value}),
+    "cache_key_sha256": cache_key,
     "started_at": started,
     "ended_at": ended,
     "duration_seconds": int(duration),
@@ -123,6 +128,12 @@ with open(path, "w", encoding="utf-8") as handle:
 PY
   upload "$LOG" "${PREFIX}/prebuild.log" || true
   upload "$RESULT" "${PREFIX}/prebuild-result.json" || true
+  # The run-scoped result remains authoritative for this invocation. Publish
+  # the cache pointer only after every content-addressed object exists and the
+  # build has passed, so interrupted builders can never create a false hit.
+  if (( exit_code == 0 )); then
+    upload "$RESULT" "${CACHE_PREFIX}/prebuild-result.json" || true
+  fi
   sync
   shutdown -h now || true
   exit "$exit_code"
@@ -201,12 +212,16 @@ python3 scripts/release/prebuilt_performance.py build \
 MANIFEST_SHA="$(sha256sum "$BUNDLE_ROOT/manifest.json" | awk '{print $1}')"
 tar -C /tmp -I 'pigz -3' -cf "$BUNDLE" performance-prebuilt
 BUNDLE_SHA="$(sha256sum "$BUNDLE" | awk '{print $1}')"
-upload "$BUNDLE_ROOT/manifest.json" "${PREFIX}/performance-manifest.json"
-upload "$BUNDLE" "${PREFIX}/performance-prebuilt.tar.gz"
+BUNDLE_OBJECT="${CACHE_PREFIX}/bundles/${BUNDLE_SHA}.tar.gz"
+MANIFEST_OBJECT="${CACHE_PREFIX}/manifests/${MANIFEST_SHA}.json"
+BUNDLE_URI="gs://${BUCKET}/${BUNDLE_OBJECT}"
+MANIFEST_URI="gs://${BUCKET}/${MANIFEST_OBJECT}"
+upload "$BUNDLE_ROOT/manifest.json" "$MANIFEST_OBJECT"
+upload "$BUNDLE" "$BUNDLE_OBJECT"
 
 # Prove that the runtime service account can read evidence before deleting the
 # builder and creating the measurement fleet. Upload-only IAM otherwise fails
 # one VM later and obscures an infrastructure defect as a gate failure.
-download "${PREFIX}/performance-manifest.json" /tmp/performance-manifest-readback.json
+download "$MANIFEST_OBJECT" /tmp/performance-manifest-readback.json
 echo "${MANIFEST_SHA}  /tmp/performance-manifest-readback.json" \
   | sha256sum --check --status
