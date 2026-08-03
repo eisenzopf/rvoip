@@ -74,6 +74,7 @@ jobs:
       - name: Resolve and preflight aggregate
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
         run: |
           aggregate="$(find target/downloaded-qualification -name aggregate.json -type f -print -quit)"

@@ -410,6 +410,15 @@ class WorkflowPolicyTests(unittest.TestCase):
             publication,
         )
 
+    def test_release_publish_attestation_preflight_receives_github_token(self) -> None:
+        publication = (ROOT / ".github/workflows/release-publish.yml").read_text()
+        preflight = publication.split(
+            "      - name: Resolve and preflight aggregate\n", maxsplit=1
+        )[1].split("      - name: Fresh package and source verification\n", maxsplit=1)[0]
+
+        self.assertIn("GH_TOKEN: ${{ github.token }}", preflight)
+        self.assertIn('gh attestation verify "$aggregate"', preflight)
+
     def test_release_gcp_workers_do_not_consume_one_github_job_each(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
         controller = workflow.split("\n  gate-gcp:\n", maxsplit=1)[1].split(
