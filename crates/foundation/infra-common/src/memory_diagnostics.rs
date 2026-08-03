@@ -215,17 +215,15 @@ pub fn allocator_snapshot() -> Value {
     #[cfg(not(feature = "no-global-allocator"))]
     {
         let process = allocator_process_info();
-        let version = unsafe { libmimalloc_sys::mi_version() };
+        let stats_json = mimalloc::MiMalloc::stats_json()
+            .ok()
+            .and_then(|stats| stats.to_str().ok().map(str::to_owned))
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
         json!({
             "enabled": true,
             "active_allocator": active_allocator(),
-            "allocator_version": version,
             "process": process,
-            // mimalloc v2 exposes portable process counters but not the v3
-            // JSON stats API. Process counters plus the RVOIP live-object
-            // registry remain available without changing allocator behavior.
-            "stats": null,
-            "stats_unavailable_reason": "mimalloc v2 does not expose JSON statistics",
+            "stats": stats_json,
         })
     }
 }

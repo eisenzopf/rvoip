@@ -33,11 +33,7 @@ dashmap.workspace = true
 # Crate-specific dependencies
 config = "0.14"
 once_cell = "1.18.0"
-# Keep the production allocator on mimalloc's mature v2 engine. The v3 engine
-# showed delayed resident-page growth after large SIP burst teardown even when
-# every instrumented allocation had been released. Release performance gates
-# exercise this exact production allocator selection.
-mimalloc = { version = "0.1", default-features = false, features = ["v2"] }
+mimalloc = { version = "0.1", default-features = false }
 libmimalloc-sys = { version = "0.1", default-features = false, features = ["extended"], optional = true }
 anyhow = "1.0"
 tokio-util = "0.7.16"
