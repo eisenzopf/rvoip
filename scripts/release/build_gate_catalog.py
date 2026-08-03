@@ -408,7 +408,7 @@ def core_gate(package: dict[str, Any], root: Path, weights: dict[str, int]) -> d
         "retry_on_exit_codes": [75],
         "max_infrastructure_retries": 1,
         "affected_crates": [name],
-        "affected_paths": [f"{crate_root}/**"],
+        "affected_paths": [f"{crate_root}/**", "scripts/ci/run_checks.py"],
         "expected_outputs": ["receipt.json", "command.log", "nested-ci-receipt.json"],
         "estimated_seconds": int(weights.get(name, 2)) * 60,
         "always_fresh": False,

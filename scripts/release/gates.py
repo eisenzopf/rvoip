@@ -27,6 +27,11 @@ AGGREGATE_SCHEMA = "rvoip-release-qualification-v1"
 DEFAULT_CATALOG = Path("scripts/release/gates.json")
 MAX_DIAGNOSTIC_GATES = 20
 COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+RUNTIME_EVIDENCE_NEUTRAL_PATHS = (
+    "docs/**",
+    "scripts/ci/test_*.py",
+    "scripts/test_release*.py",
+)
 
 
 class GateError(RuntimeError):
@@ -278,7 +283,6 @@ def input_record(
             "Cargo.lock",
             "rust-toolchain.toml",
             "scripts/release/gates.py",
-            "scripts/ci/**",
             ".config/**",
             ".github/workflows/**",
             "deny.toml",
@@ -359,9 +363,38 @@ def exact_reusable(
     return None
 
 
+def parse_name_status_z(output: str) -> list[str]:
+    """Return both sides of rename/copy records from ``git diff -z`` output."""
+
+    fields = output.split("\0")
+    if fields and fields[-1] == "":
+        fields.pop()
+    paths: set[str] = set()
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        index += 1
+        path_count = 2 if status.startswith(("R", "C")) else 1
+        if not status or index + path_count > len(fields):
+            raise GateError("malformed NUL-delimited git name-status output")
+        paths.update(fields[index : index + path_count])
+        index += path_count
+    return sorted(paths)
+
+
 def changed_files(root: Path, base: str, candidate: str) -> list[str]:
-    output = git(root, "diff", "--name-only", "--find-renames", f"{base}...{candidate}")
-    return sorted(set(filter(None, output.splitlines())))
+    output = run(
+        [
+            "git",
+            "diff",
+            "--name-status",
+            "-z",
+            "--find-renames",
+            f"{base}...{candidate}",
+        ],
+        root=root,
+    ).stdout
+    return parse_name_status_z(output)
 
 
 def unknown_change(
@@ -375,8 +408,27 @@ def unknown_change(
     return [
         path
         for path in paths
-        if not any(matches(path, gate.get("affected_paths", [])) for gate in meaningful)
+        if not matches(path, RUNTIME_EVIDENCE_NEUTRAL_PATHS)
+        and not any(matches(path, gate.get("affected_paths", [])) for gate in meaningful)
     ]
+
+
+def directly_changed_gate_ids(
+    paths: list[str], selected_gates: list[dict[str, Any]]
+) -> set[str]:
+    """Return runtime gates whose declared inputs intersect the candidate diff.
+
+    Always-fresh source and reporting gates regenerate their own receipts for
+    every candidate.  Their broad ``**`` mappings must not invalidate every
+    runtime gate that depends on those bookkeeping receipts.
+    """
+
+    return {
+        gate["id"]
+        for gate in selected_gates
+        if not gate.get("always_fresh")
+        and any(matches(path, gate.get("affected_paths", [])) for path in paths)
+    }
 
 
 def reverse_gate_dependencies(selected: list[str], by_id: dict[str, dict[str, Any]]) -> dict[str, set[str]]:
@@ -581,11 +633,9 @@ def create_plan(
     }
     reverse_dependencies = reverse_gate_dependencies(selected, by_id)
     invalidated_by_failure = dependent_closure(previous_failures, reverse_dependencies)
-    changed_gate_ids = {
-        gate_id
-        for gate_id in selected
-        if any(matches(path, by_id[gate_id].get("affected_paths", [])) for path in changed)
-    }
+    changed_gate_ids = directly_changed_gate_ids(
+        changed, [by_id[gate_id] for gate_id in selected]
+    )
     invalidated_by_change = dependent_closure(changed_gate_ids, reverse_dependencies)
     reusable_receipts = {
         gate_id: exact_reusable(

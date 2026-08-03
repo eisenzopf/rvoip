@@ -45,6 +45,12 @@ class GateFrameworkTests(unittest.TestCase):
             self.catalog["remote_release_legacy_coverage"]["required_legacy_count"],
             108,
         )
+        core_gates = [
+            gate for gate in self.catalog["gates"] if gate["id"].startswith("core.")
+        ]
+        self.assertTrue(
+            all("scripts/ci/run_checks.py" in gate["affected_paths"] for gate in core_gates)
+        )
 
     def test_checked_in_catalog_is_reproducible(self) -> None:
         generated = builder.build_catalog(
@@ -581,6 +587,50 @@ class GateFrameworkTests(unittest.TestCase):
             {"changed", "consumer", "consumer-of-consumer"},
         )
 
+    def test_always_fresh_bookkeeping_does_not_invalidate_runtime_gates(self) -> None:
+        selected = [
+            {
+                "id": "source.clean",
+                "always_fresh": True,
+                "affected_paths": ["**"],
+            },
+            {
+                "id": "interop.freeswitch",
+                "always_fresh": False,
+                "affected_paths": ["infra/release-runners/interop-lifecycle.sh"],
+            },
+            {
+                "id": "core.unrelated",
+                "always_fresh": False,
+                "affected_paths": ["crates/core/**"],
+            },
+        ]
+        self.assertEqual(
+            gates.directly_changed_gate_ids(
+                ["infra/release-runners/interop-lifecycle.sh"], selected
+            ),
+            {"interop.freeswitch"},
+        )
+
+    def test_changed_path_parser_keeps_rename_copy_and_delete_sources(self) -> None:
+        self.assertEqual(
+            gates.parse_name_status_z(
+                "R100\0crates/old.rs\0docs/new.md\0"
+                "C090\0crates/source.rs\0crates/copy.rs\0"
+                "D\0crates/deleted.rs\0M\0crates/modified.rs\0"
+            ),
+            [
+                "crates/copy.rs",
+                "crates/deleted.rs",
+                "crates/modified.rs",
+                "crates/old.rs",
+                "crates/source.rs",
+                "docs/new.md",
+            ],
+        )
+        with self.assertRaises(gates.GateError):
+            gates.parse_name_status_z("R100\0only-old-path\0")
+
     def test_shard_runs_gate_dependencies_before_dependents(self) -> None:
         by_id = {
             "c": {"dependencies": ["b"]},
@@ -610,6 +660,54 @@ class GateFrameworkTests(unittest.TestCase):
             gates.unknown_change(["crates/unknown/lib.rs"], selected),
             ["crates/unknown/lib.rs"],
         )
+        self.assertEqual(
+            gates.unknown_change(
+                [
+                    "docs/release-notes.md",
+                    "scripts/ci/test_workflow_policy.py",
+                    "scripts/test_release_gates.py",
+                ],
+                selected,
+            ),
+            [],
+        )
+
+    def test_ci_policy_tests_do_not_change_unrelated_gate_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner = root / "scripts/release/gates.py"
+            policy_test = root / "scripts/ci/test_workflow_policy.py"
+            runner.parent.mkdir(parents=True)
+            policy_test.parent.mkdir(parents=True)
+            runner.write_text("runner-v1\n")
+            policy_test.write_text("test-v1\n")
+            gate = {
+                "id": "gate-a",
+                "resource_class": "github-standard",
+                "affected_paths": ["crates/a/**"],
+                "affected_crates": [],
+                "dependencies": [],
+                "command": ["true"],
+            }
+            definitions = {"gate-a": gate}
+
+            def record() -> dict:
+                return gates.input_record(
+                    root=root,
+                    gate=gate,
+                    environment_id="environment-v1",
+                    files=[
+                        "scripts/release/gates.py",
+                        "scripts/ci/test_workflow_policy.py",
+                    ],
+                    package_roots={},
+                    package_dependencies={},
+                    gate_definitions=definitions,
+                )
+
+            first = record()
+            policy_test.write_text("test-v2\n")
+            self.assertEqual(first, record())
 
     def test_collector_rejects_tampered_log_and_accepts_exact_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

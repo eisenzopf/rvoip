@@ -6993,7 +6993,8 @@
         "rvoip"
       ],
       "affected_paths": [
-        "crates/rvoip/**"
+        "crates/rvoip/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -7036,7 +7037,8 @@
         "rvoip-amazon-connect"
       ],
       "affected_paths": [
-        "crates/webrtc/rvoip-amazon-connect/**"
+        "crates/webrtc/rvoip-amazon-connect/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -7079,7 +7081,8 @@
         "rvoip-audio-device"
       ],
       "affected_paths": [
-        "crates/media/rvoip-audio-device/**"
+        "crates/media/rvoip-audio-device/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -7122,7 +7125,8 @@
         "rvoip-audit"
       ],
       "affected_paths": [
-        "crates/extensions/rvoip-audit/**"
+        "crates/extensions/rvoip-audit/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -7165,7 +7169,8 @@
         "rvoip-auth-core"
       ],
       "affected_paths": [
-        "crates/identity/auth-core/**"
+        "crates/identity/auth-core/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -7208,7 +7213,8 @@
         "rvoip-client"
       ],
       "affected_paths": [
-        "crates/rvoip-client/**"
+        "crates/rvoip-client/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -7251,7 +7257,8 @@
         "rvoip-codec-core"
       ],
       "affected_paths": [
-        "crates/media/codec-core/**"
+        "crates/media/codec-core/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -7294,7 +7301,8 @@
         "rvoip-core"
       ],
       "affected_paths": [
-        "crates/foundation/rvoip-core/**"
+        "crates/foundation/rvoip-core/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -7337,7 +7345,8 @@
         "rvoip-core-traits"
       ],
       "affected_paths": [
-        "crates/foundation/rvoip-core-traits/**"
+        "crates/foundation/rvoip-core-traits/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -7380,7 +7389,8 @@
         "rvoip-harness"
       ],
       "affected_paths": [
-        "crates/extensions/rvoip-harness/**"
+        "crates/extensions/rvoip-harness/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -7423,7 +7433,8 @@
         "rvoip-identity"
       ],
       "affected_paths": [
-        "crates/identity/rvoip-identity/**"
+        "crates/identity/rvoip-identity/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -7466,7 +7477,8 @@
         "rvoip-ims-aka"
       ],
       "affected_paths": [
-        "crates/extensions/rvoip-ims-aka/**"
+        "crates/extensions/rvoip-ims-aka/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -7509,7 +7521,8 @@
         "rvoip-infra-common"
       ],
       "affected_paths": [
-        "crates/foundation/infra-common/**"
+        "crates/foundation/infra-common/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -7552,7 +7565,8 @@
         "rvoip-keycloak"
       ],
       "affected_paths": [
-        "crates/extensions/rvoip-keycloak/**"
+        "crates/extensions/rvoip-keycloak/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -7595,7 +7609,8 @@
         "rvoip-ldap"
       ],
       "affected_paths": [
-        "crates/extensions/rvoip-ldap/**"
+        "crates/extensions/rvoip-ldap/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -7638,7 +7653,8 @@
         "rvoip-media-core"
       ],
       "affected_paths": [
-        "crates/media/media-core/**"
+        "crates/media/media-core/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -7681,7 +7697,8 @@
         "rvoip-moq"
       ],
       "affected_paths": [
-        "crates/moq/rvoip-moq/**"
+        "crates/moq/rvoip-moq/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -7724,7 +7741,8 @@
         "rvoip-moq-native"
       ],
       "affected_paths": [
-        "crates/moq/rvoip-moq-native/**"
+        "crates/moq/rvoip-moq-native/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -7767,7 +7785,8 @@
         "rvoip-moq-relay"
       ],
       "affected_paths": [
-        "crates/moq/rvoip-moq-relay/**"
+        "crates/moq/rvoip-moq-relay/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -7810,7 +7829,8 @@
         "rvoip-moq-transport"
       ],
       "affected_paths": [
-        "crates/moq/rvoip-moq-transport/**"
+        "crates/moq/rvoip-moq-transport/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -7853,7 +7873,8 @@
         "rvoip-oidc"
       ],
       "affected_paths": [
-        "crates/extensions/rvoip-oidc/**"
+        "crates/extensions/rvoip-oidc/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -7896,7 +7917,8 @@
         "rvoip-quic"
       ],
       "affected_paths": [
-        "crates/uctp/rvoip-quic/**"
+        "crates/uctp/rvoip-quic/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -7939,7 +7961,8 @@
         "rvoip-redis"
       ],
       "affected_paths": [
-        "crates/extensions/rvoip-redis/**"
+        "crates/extensions/rvoip-redis/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -7982,7 +8005,8 @@
         "rvoip-rtc"
       ],
       "affected_paths": [
-        "crates/webrtc/rvoip-rtc/**"
+        "crates/webrtc/rvoip-rtc/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -8025,7 +8049,8 @@
         "rvoip-rtp-core"
       ],
       "affected_paths": [
-        "crates/media/rtp-core/**"
+        "crates/media/rtp-core/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -8068,7 +8093,8 @@
         "rvoip-saml"
       ],
       "affected_paths": [
-        "crates/extensions/rvoip-saml/**"
+        "crates/extensions/rvoip-saml/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -8111,7 +8137,8 @@
         "rvoip-scim"
       ],
       "affected_paths": [
-        "crates/extensions/rvoip-scim/**"
+        "crates/extensions/rvoip-scim/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -8154,7 +8181,8 @@
         "rvoip-sip"
       ],
       "affected_paths": [
-        "crates/sip/rvoip-sip/**"
+        "crates/sip/rvoip-sip/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -8197,7 +8225,8 @@
         "rvoip-sip-core"
       ],
       "affected_paths": [
-        "crates/sip/sip-core/**"
+        "crates/sip/sip-core/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -8240,7 +8269,8 @@
         "rvoip-sip-dialog"
       ],
       "affected_paths": [
-        "crates/sip/sip-dialog/**"
+        "crates/sip/sip-dialog/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -8283,7 +8313,8 @@
         "rvoip-sip-proxy"
       ],
       "affected_paths": [
-        "crates/sip/sip-proxy/**"
+        "crates/sip/sip-proxy/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -8326,7 +8357,8 @@
         "rvoip-sip-registrar"
       ],
       "affected_paths": [
-        "crates/sip/sip-registrar/**"
+        "crates/sip/sip-registrar/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -8369,7 +8401,8 @@
         "rvoip-sip-transport"
       ],
       "affected_paths": [
-        "crates/sip/sip-transport/**"
+        "crates/sip/sip-transport/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -8412,7 +8445,8 @@
         "rvoip-stir-shaken"
       ],
       "affected_paths": [
-        "crates/extensions/rvoip-stir-shaken/**"
+        "crates/extensions/rvoip-stir-shaken/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -8455,7 +8489,8 @@
         "rvoip-uctp"
       ],
       "affected_paths": [
-        "crates/uctp/rvoip-uctp/**"
+        "crates/uctp/rvoip-uctp/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -8498,7 +8533,8 @@
         "rvoip-users-core"
       ],
       "affected_paths": [
-        "crates/identity/users-core/**"
+        "crates/identity/users-core/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -8541,7 +8577,8 @@
         "rvoip-vapi"
       ],
       "affected_paths": [
-        "crates/extensions/rvoip-vapi/**"
+        "crates/extensions/rvoip-vapi/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -8584,7 +8621,8 @@
         "rvoip-vcon"
       ],
       "affected_paths": [
-        "crates/extensions/rvoip-vcon/**"
+        "crates/extensions/rvoip-vcon/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -8627,7 +8665,8 @@
         "rvoip-vcon-postgres"
       ],
       "affected_paths": [
-        "crates/extensions/rvoip-vcon-postgres/**"
+        "crates/extensions/rvoip-vcon-postgres/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -8670,7 +8709,8 @@
         "rvoip-webauthn"
       ],
       "affected_paths": [
-        "crates/extensions/rvoip-webauthn/**"
+        "crates/extensions/rvoip-webauthn/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -8713,7 +8753,8 @@
         "rvoip-webrtc"
       ],
       "affected_paths": [
-        "crates/webrtc/rvoip-webrtc/**"
+        "crates/webrtc/rvoip-webrtc/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -8756,7 +8797,8 @@
         "rvoip-webrtc-stack"
       ],
       "affected_paths": [
-        "crates/webrtc/rvoip-webrtc-stack/**"
+        "crates/webrtc/rvoip-webrtc-stack/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -8799,7 +8841,8 @@
         "rvoip-websocket"
       ],
       "affected_paths": [
-        "crates/uctp/rvoip-websocket/**"
+        "crates/uctp/rvoip-websocket/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
@@ -8842,7 +8885,8 @@
         "rvoip-webtransport"
       ],
       "affected_paths": [
-        "crates/uctp/rvoip-webtransport/**"
+        "crates/uctp/rvoip-webtransport/**",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Parallel 44-crate core",
