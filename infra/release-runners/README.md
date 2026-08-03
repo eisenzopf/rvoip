@@ -55,6 +55,10 @@ workloads, durations, and thresholds; they verify the bundle and executable
 hashes instead of recompiling the same graph. This makes compilation a shared
 setup phase without contaminating performance or soak measurements.
 
+The evidence bucket lifecycle deletes only the `release-cache/` prefix after
+14 days. Run-scoped receipts, logs, and release evidence use different prefixes
+and are not covered by that transient-build-cache rule.
+
 The release-runner service account requires both
 `roles/storage.objectCreator` and `roles/storage.objectViewer` on the evidence
 bucket. Creator access stores immutable receipts and logs; viewer access lets

@@ -127,6 +127,8 @@ dividing the continuous soak requirement. Any missing object or cache-key,
 manifest, bundle, or executable digest mismatch fails closed. Gates
 whose exact source, dependency, definition, environment, and threshold digests
 remain unchanged may reuse successful prior evidence on a later candidate.
+The GCS lifecycle expires only `release-cache/` objects after 14 days; it does
+not apply to the durable run-scoped qualification receipts and logs.
 Each proxy row has its own stable gate ID, so a later diagnostic can rerun only
 the failed combination without rerunning the other eleven rows.
 
