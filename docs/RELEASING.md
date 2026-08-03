@@ -119,11 +119,16 @@ all 18 concurrent VM creations, but its short probes never substitute for the
 real performance, interoperability, and soak commands in `remote-release`.
 The one-hour soak establishes a physical lower bound of one hour for a fresh
 qualification, plus short provisioning and evidence overhead. The shared build
-stage is intentionally outside the measured workloads and can be reused only
-within its exact workflow run; it removes duplicate compilation but does not
-shorten or divide the continuous soak requirement. Gates
+stage is intentionally outside the measured workloads. Its finished bundle is
+reused across workflow reruns only when the exact candidate SHA, release
+environment, and selected performance gate set produce the same cache key. A
+hit avoids the approximately full-LTO build delay without shortening or
+dividing the continuous soak requirement. Any missing object or cache-key,
+manifest, bundle, or executable digest mismatch fails closed. Gates
 whose exact source, dependency, definition, environment, and threshold digests
 remain unchanged may reuse successful prior evidence on a later candidate.
+The GCS lifecycle expires only `release-cache/` objects after 14 days; it does
+not apply to the durable run-scoped qualification receipts and logs.
 Each proxy row has its own stable gate ID, so a later diagnostic can rerun only
 the failed combination without rerunning the other eleven rows.
 

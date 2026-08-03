@@ -88,16 +88,25 @@ class PrebuiltPerformanceTests(unittest.TestCase):
 
     def test_result_is_bound_to_candidate_environment_and_gate_set(self) -> None:
         candidate = "a" * 40
+        cache_key = prebuilt.cache_key(
+            candidate=candidate,
+            environment_id="environment-v1",
+            gate_ids=["perf.two", "perf.one"],
+        )
+        cache_root = (
+            "gs://bucket/release-cache/performance-prebuilt-v1/" + cache_key
+        )
         payload = {
             "schema": prebuilt.RESULT_SCHEMA,
             "candidate_sha": candidate,
             "environment_id": "environment-v1",
             "selected_gate_ids": ["perf.one", "perf.two"],
+            "cache_key_sha256": cache_key,
             "status": "PASS",
             "exit_code": 0,
-            "bundle_uri": "gs://bucket/release/1/prebuild/performance-prebuilt.tar.gz",
+            "bundle_uri": f"{cache_root}/bundles/{'b' * 64}.tar.gz",
             "bundle_sha256": "b" * 64,
-            "manifest_uri": "gs://bucket/release/1/prebuild/performance-manifest.json",
+            "manifest_uri": f"{cache_root}/manifests/{'d' * 64}.json",
             "manifest_sha256": "d" * 64,
             "publishing_attempted": False,
         }
@@ -109,6 +118,7 @@ class PrebuiltPerformanceTests(unittest.TestCase):
                 candidate=candidate,
                 environment_id="environment-v1",
                 gate_ids=["perf.two", "perf.one"],
+                expected_cache_key=cache_key,
             )
             self.assertEqual(verified["bundle_sha256"], "b" * 64)
             payload["candidate_sha"] = "c" * 40
@@ -119,6 +129,72 @@ class PrebuiltPerformanceTests(unittest.TestCase):
                     candidate=candidate,
                     environment_id="environment-v1",
                     gate_ids=["perf.one", "perf.two"],
+                    expected_cache_key=cache_key,
+                )
+
+    def test_cache_key_is_order_independent_and_exact_candidate_bound(self) -> None:
+        first = prebuilt.cache_key(
+            candidate="a" * 40,
+            environment_id="environment-v1",
+            gate_ids=["perf.two", "perf.one", "perf.two"],
+        )
+        reordered = prebuilt.cache_key(
+            candidate="a" * 40,
+            environment_id="environment-v1",
+            gate_ids=["perf.one", "perf.two"],
+        )
+        other_candidate = prebuilt.cache_key(
+            candidate="b" * 40,
+            environment_id="environment-v1",
+            gate_ids=["perf.one", "perf.two"],
+        )
+        other_environment = prebuilt.cache_key(
+            candidate="a" * 40,
+            environment_id="environment-v2",
+            gate_ids=["perf.one", "perf.two"],
+        )
+        other_gates = prebuilt.cache_key(
+            candidate="a" * 40,
+            environment_id="environment-v1",
+            gate_ids=["perf.one"],
+        )
+        self.assertEqual(first, reordered)
+        self.assertEqual(len(first), 64)
+        self.assertEqual(
+            len({first, other_candidate, other_environment, other_gates}), 4
+        )
+
+    def test_cached_result_rejects_non_content_addressed_objects(self) -> None:
+        candidate = "a" * 40
+        key = prebuilt.cache_key(
+            candidate=candidate,
+            environment_id="environment-v1",
+            gate_ids=["perf.one"],
+        )
+        payload = {
+            "schema": prebuilt.RESULT_SCHEMA,
+            "candidate_sha": candidate,
+            "environment_id": "environment-v1",
+            "selected_gate_ids": ["perf.one"],
+            "cache_key_sha256": key,
+            "status": "PASS",
+            "exit_code": 0,
+            "bundle_uri": "gs://bucket/mutable/performance-prebuilt.tar.gz",
+            "bundle_sha256": "b" * 64,
+            "manifest_uri": "gs://bucket/mutable/performance-manifest.json",
+            "manifest_sha256": "d" * 64,
+            "publishing_attempted": False,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            result = Path(directory) / "result.json"
+            result.write_text(json.dumps(payload))
+            with self.assertRaisesRegex(prebuilt.PrebuiltError, "content-addressed"):
+                prebuilt.validate_result(
+                    result,
+                    candidate=candidate,
+                    environment_id="environment-v1",
+                    gate_ids=["perf.one"],
+                    expected_cache_key=key,
                 )
 
     def test_bundle_rejects_path_traversal_before_extraction(self) -> None:
