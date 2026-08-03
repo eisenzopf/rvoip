@@ -24,6 +24,9 @@ PREBUILT_SHA256="$(metadata rvoip-prebuilt-sha256)"
 EXTERNAL_MEMORY_DIAGNOSTICS="$(
   metadata rvoip-external-memory-diagnostics 2>/dev/null || printf '0'
 )"
+MIMALLOC_ALLOW_THP_OVERRIDE="$(
+  metadata rvoip-mimalloc-allow-thp 2>/dev/null || true
+)"
 WORKSPACE=/opt/rvoip
 EVIDENCE=/tmp/release-shard
 ARCHIVE=/tmp/release-shard.tar.gz
@@ -135,6 +138,7 @@ capture_host_memory_policy() {
   local path
   {
     echo "captured_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "mimalloc_allow_thp_override=${MIMALLOC_ALLOW_THP_OVERRIDE:-unset}"
     uname -a
     for path in \
       /sys/kernel/mm/transparent_hugepage/enabled \
@@ -352,6 +356,18 @@ export RVOIP_RELEASE_GATES="$GATES"
 export RVOIP_RELEASE_RESOURCE_CLASS="$RESOURCE_CLASS"
 export RVOIP_RELEASE_RUN_ID="$RUN_ID"
 export RVOIP_RELEASE_SHARD_ID="$SHARD_ID"
+
+case "$MIMALLOC_ALLOW_THP_OVERRIDE" in
+  "") ;;
+  0|1)
+    export MIMALLOC_ALLOW_THP="$MIMALLOC_ALLOW_THP_OVERRIDE"
+    echo "mimalloc THP override set to ${MIMALLOC_ALLOW_THP} for diagnostic A/B"
+    ;;
+  *)
+    echo "rvoip-mimalloc-allow-thp must be 0, 1, or unset" >&2
+    exit 1
+    ;;
+esac
 
 if [[ "$EXTERNAL_MEMORY_DIAGNOSTICS" == "1" ]]; then
   capture_host_memory_policy

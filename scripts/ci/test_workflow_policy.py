@@ -272,6 +272,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("capture_external_memory", startup)
         self.assertIn("AnonHugePages", startup)
         self.assertIn("thp_collapse_alloc", startup)
+        self.assertIn("rvoip-mimalloc-allow-thp", startup)
+        self.assertIn('export MIMALLOC_ALLOW_THP="$MIMALLOC_ALLOW_THP_OVERRIDE"', startup)
         self.assertIn(
             '"/bundles/${PREBUILT_SHA256}.tar.gz"',
             startup,
@@ -282,6 +284,14 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("publishing_attempted", builder)
         self.assertIn("bundle digest mismatch", helper)
         self.assertIn("exact candidate", helper)
+
+    def test_production_allocator_disables_transparent_huge_pages(self) -> None:
+        manifest = tomllib.loads(
+            (ROOT / "crates/foundation/infra-common/Cargo.toml").read_text()
+        )
+        mimalloc = manifest["dependencies"]["mimalloc"]
+        self.assertFalse(mimalloc["default-features"])
+        self.assertIn("no_thp", mimalloc["features"])
 
     def test_exact_candidate_performance_bundle_is_reused_fail_closed(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
