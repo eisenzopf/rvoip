@@ -42,6 +42,16 @@ candidate SHA and gate list, uploads an immutable result and evidence archive,
 shuts down, and is deleted with its auto-delete disk. Controller and follow-up
 sweep cleanup both run on failure; there is no idle release fleet.
 
+Release builders and workers use N2 machines with an `Intel Cascade Lake`
+minimum CPU platform. Every worker keeps a 262,144 descriptor limit, sets
+64 MiB receive and send UDP ceilings, and proves an 8 MiB SIP socket-buffer
+request with `getsockopt` before load. Performance evidence records the actual
+CPU model, process limits, file-table state, port ranges, UDP memory limits,
+pressure/swap state, and Linux `/proc` UDP, softnet, socket, and loopback-drop
+counters. Release burst gates fail closed when mandatory Linux counters are
+missing or when receive-buffer, send-buffer, softnet, or loopback drops rise
+during the measured scenario.
+
 For diagnostics and `remote-release` runs that select executable performance
 gates, the controller first creates one ephemeral `n2-standard-32` builder. It
 compiles the exact candidate once, packages only the selected test executables,

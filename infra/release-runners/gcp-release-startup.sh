@@ -344,11 +344,13 @@ ulimit -n 262144
 test "$(ulimit -n)" -ge 262144
 
 # Stateful proxy qualification captures a dense packet burst on both the
-# loopback and aggregate interfaces.  Raise the receive ceiling before
-# tcpdump requests its explicit 32 MiB capture buffer; otherwise a healthy
-# capacity-overload run can lose evidence in the kernel and fail spuriously.
+# loopback and aggregate interfaces, while SIP performance recipes request
+# 8 MiB in both directions. Keep symmetric ceilings so the kernel can grant
+# every declared receive and send request; the preflight reads both back.
 sysctl -w net.core.rmem_max=67108864
+sysctl -w net.core.wmem_max=67108864
 test "$(sysctl -n net.core.rmem_max)" -ge 67108864
+test "$(sysctl -n net.core.wmem_max)" -ge 67108864
 
 export RVOIP_RELEASE_CANDIDATE="$CANDIDATE"
 export RVOIP_RELEASE_ENVIRONMENT_ID="$ENVIRONMENT_ID"

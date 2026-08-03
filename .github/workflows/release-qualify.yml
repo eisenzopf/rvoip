@@ -47,7 +47,8 @@ concurrency:
   cancel-in-progress: ${{ inputs.profile == 'remote-preflight' || inputs.profile == 'remote-diagnostic' }}
 
 env:
-  RELEASE_ENVIRONMENT_ID: rvoip-release-v4-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld
+  RELEASE_ENVIRONMENT_ID: rvoip-release-v5-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-n2-cascade-lake
+  MIN_CPU_PLATFORM: Intel Cascade Lake
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
@@ -463,6 +464,7 @@ jobs:
               --project "$PROJECT" \
               --zone "$ZONE" \
               --machine-type n2-standard-32 \
+              --min-cpu-platform "$MIN_CPU_PLATFORM" \
               --network "$NETWORK" \
               --subnet "$SUBNET" \
               --image-family ubuntu-2404-lts-amd64 \
@@ -562,6 +564,7 @@ jobs:
                 --project "$PROJECT" \
                 --zone "$ZONE" \
                 --machine-type "$machine_type" \
+                --min-cpu-platform "$MIN_CPU_PLATFORM" \
                 --network "$NETWORK" \
                 --subnet "$SUBNET" \
                 --image-family ubuntu-2404-lts-amd64 \

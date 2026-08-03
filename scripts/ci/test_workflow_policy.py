@@ -214,6 +214,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("docker compose version >/dev/null", startup)
         self.assertIn("ulimit -n 262144", startup)
         self.assertIn('test "$(ulimit -n)" -ge 262144', startup)
+        self.assertIn("sysctl -w net.core.rmem_max=67108864", startup)
+        self.assertIn("sysctl -w net.core.wmem_max=67108864", startup)
         self.assertIn("-name '*.jsonl'", startup)
         self.assertNotRegex(startup, r"apt-get install[^\n]*\bsipp\b")
 
@@ -351,6 +353,9 @@ class WorkflowPolicyTests(unittest.TestCase):
         probe = (
             ROOT / "infra/release-runners/release-infrastructure-preflight.sh"
         ).read_text()
+        burst = (
+            ROOT / "crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh"
+        ).read_text()
 
         self.assertIn("remote-preflight", workflow)
         self.assertIn('test "$PROFILE" = remote-preflight', workflow)
@@ -364,11 +369,21 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('export RVOIP_RELEASE_CANDIDATE="$CANDIDATE"', startup)
         self.assertIn('export RVOIP_RELEASE_GATES="$GATES"', startup)
         self.assertIn("sysctl -w net.core.rmem_max=67108864", startup)
+        self.assertIn("sysctl -w net.core.wmem_max=67108864", startup)
+        self.assertEqual(workflow.count('--min-cpu-platform "$MIN_CPU_PLATFORM"'), 2)
+        self.assertIn("MIN_CPU_PLATFORM: Intel Cascade Lake", workflow)
+        self.assertIn("n2-cascade-lake", workflow)
         self.assertIn("expected 44 publishable workspace packages", probe)
         self.assertIn("gcp-performance|gcp-performance-soak-long", probe)
         self.assertIn("gcp-proxy-interop", probe)
         self.assertIn("for _ in range(4096)", probe)
-        self.assertIn('test "$NOFILE_LIMIT" -ge 262144', probe)
+        self.assertIn('test "$NOFILE_SOFT" -ge 262144', probe)
+        self.assertIn('test "$RMEM_MAX" -ge 8388608', probe)
+        self.assertIn('test "$WMEM_MAX" -ge 8388608', probe)
+        self.assertIn("linux_performance_host.py snapshot", probe)
+        self.assertIn("socket-buffer-probe.json", probe)
+        self.assertIn("linux_performance_host.py", burst)
+        self.assertIn("--require-zero-drops", burst)
         self.assertIn('test -z "${CARGO_REGISTRY_TOKEN:-}"', probe)
         self.assertIn('test -z "${CRATES_IO_TOKEN:-}"', probe)
         self.assertIn('"publishing_credentials_present": False', probe)
