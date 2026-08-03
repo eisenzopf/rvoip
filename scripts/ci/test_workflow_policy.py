@@ -421,11 +421,11 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('gh attestation verify "$aggregate"', preflight)
         self.assertIn('candidate="$(jq -r .candidate_sha "$aggregate")"', preflight)
         self.assertIn('git merge-base --is-ancestor "$candidate" origin/main', preflight)
-        self.assertIn('git checkout --detach "$candidate"', preflight)
+        self.assertIn('git checkout -B main "$candidate"', preflight)
         self.assertIn('test "$(git rev-parse HEAD)" = "$candidate"', preflight)
         self.assertLess(
             preflight.index('gh attestation verify "$aggregate"'),
-            preflight.index('git checkout --detach "$candidate"'),
+            preflight.index('git checkout -B main "$candidate"'),
         )
 
     def test_release_gcp_workers_do_not_consume_one_github_job_each(self) -> None:
