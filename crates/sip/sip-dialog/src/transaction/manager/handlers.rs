@@ -585,6 +585,80 @@ impl TransactionManager {
         }
     }
 
+    /// Answer a request that matched a server transaction which has already
+    /// left its active lifecycle.
+    ///
+    /// Two shapes reach here. A genuine retransmission from the peer that owns
+    /// the transaction gets that transaction's last response replayed onto the
+    /// route the retransmission arrived on — which is how a peer that
+    /// reconnected under a new flow still gets answered. Anything else is a
+    /// branch collision from a different peer: replaying would hand it another
+    /// peer's response, and staying quiet would hang it until its own timeout,
+    /// so it gets a stateless failure instead.
+    async fn answer_retired_server_transaction(
+        &self,
+        transaction: &Arc<dyn ServerTransaction>,
+        request: &Request,
+        ingress_context: &SipRequestIngressContext,
+    ) -> Result<()> {
+        if request.method() == Method::Ack {
+            return Ok(());
+        }
+
+        let ingress_route = ingress_context.response_route();
+        if !TransactionManager::routes_identify_same_peer(
+            &ingress_route,
+            &transaction.data().response_route,
+        ) {
+            warn!(
+                transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction.id()),
+                method=%crate::transaction::safe_diagnostics::SafeMethod::new(&request.method()),
+                source = %ingress_context.source,
+                "Rejecting request whose branch collides with a retiring transaction owned by another peer"
+            );
+            return send_stateless_final_response(
+                request,
+                ingress_route,
+                &self.transport,
+                StatusCode::ServerInternalError,
+                Some(1),
+                "Failed to send stateless retired-transaction collision response",
+            )
+            .await;
+        }
+
+        let last_response = transaction.data().last_response.lock().await.clone();
+        let Some(response) = last_response else {
+            // The transaction retired without ever producing a final response.
+            // Nothing can be replayed, so the peer is told rather than left
+            // waiting.
+            return send_stateless_final_response(
+                request,
+                ingress_route,
+                &self.transport,
+                StatusCode::ServerInternalError,
+                Some(1),
+                "Failed to send stateless retired-transaction response",
+            )
+            .await;
+        };
+
+        let wire_bytes = bytes::Bytes::from(Message::Response(response.clone()).to_bytes());
+        self.send_cached_response(
+            response,
+            wire_bytes,
+            ingress_route,
+            "Failed to replay retired server transaction response",
+        )
+        .await
+        .map_err(|error| {
+            Error::transport_error(
+                error,
+                "Failed to replay retired server transaction response",
+            )
+        })
+    }
+
     async fn enforce_ingress_authorization(
         &self,
         transaction: &Arc<dyn ServerTransaction>,
@@ -720,6 +794,12 @@ impl TransactionManager {
                         diagnostics::record_duplicate_invite_cache_miss();
                     }
                     debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), ?lifecycle, "Skipping request processing for non-active transaction");
+                    // A retiring transaction no longer runs the timers that
+                    // would retransmit its own final response, so nothing
+                    // downstream will answer this request. RFC 3261 §17.2.1
+                    // still owes the peer that response.
+                    self.answer_retired_server_transaction(&transaction, &request, ingress_context)
+                        .await?;
                     return Ok(());
                 }
                 if request.method() == Method::Invite
@@ -823,7 +903,35 @@ impl TransactionManager {
                 .await?;
                 return Ok(());
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                // A creation failure must never leave the request unanswered.
+                // The dominant case is a transaction key still reserved by
+                // post-transaction retention — the INVITE 2xx response cache,
+                // the server-INVITE ACK index, or a compact Timer J tombstone
+                // — after the transaction itself is gone. RFC 3261 §17.2.1
+                // wants the retained final response replayed there, and the
+                // duplicate-detection block above already tried exactly that.
+                // Whatever reaches here cannot be served, so tell the peer
+                // instead of letting it wait out its own timeout. Retention is
+                // transient by construction, so the condition is retriable.
+                warn!(
+                    error=%crate::transaction::safe_diagnostics::SafeTransactionError::new(&error),
+                    method=%crate::transaction::safe_diagnostics::SafeMethod::new(&request.method()),
+                    source = %ingress_context.source,
+                    transport = %ingress_context.transport_type,
+                    "Rejecting inbound SIP request that could not open a server transaction"
+                );
+                send_stateless_final_response(
+                    &request,
+                    ingress_context.response_route(),
+                    &self.transport,
+                    StatusCode::ServerInternalError,
+                    Some(1),
+                    "Failed to send stateless server-transaction creation failure response",
+                )
+                .await?;
+                return Ok(());
+            }
         };
         if let Some(started) = create_started {
             diagnostics::record_server_transaction_create(started.elapsed());
@@ -1354,15 +1462,53 @@ async fn send_stateless_transaction_overload(
     response_route: TransportRoute,
     transport: &Arc<dyn Transport>,
 ) -> Result<()> {
+    send_stateless_final_response(
+        request,
+        response_route,
+        transport,
+        StatusCode::ServiceUnavailable,
+        Some(1),
+        "Failed to send stateless transaction overload response",
+    )
+    .await
+}
+
+/// Answer without a transaction when server-transaction allocation itself
+/// failed. An inbound request must never be left unanswered: the peer would
+/// otherwise wait out its own timeout with nothing on the wire to explain it.
+async fn send_stateless_final_response(
+    request: &Request,
+    response_route: TransportRoute,
+    transport: &Arc<dyn Transport>,
+    status: StatusCode,
+    retry_after_secs: Option<u32>,
+    context: &'static str,
+) -> Result<()> {
     // ACK never receives a response. It is normally handled before this path,
     // but retain the RFC rule defensively.
     if request.method() == Method::Ack {
         return Ok(());
     }
 
-    let mut builder = ResponseBuilder::new(StatusCode::ServiceUnavailable, None).header(
-        TypedHeader::RetryAfter(rvoip_sip_core::types::retry_after::RetryAfter::new(1)),
-    );
+    // Without a Via there is nothing to stamp the response against and no
+    // stateless route back through any intermediary. Dropping is the only
+    // option left, so make it visible instead of silent.
+    let Some(via) = request.header(&HeaderName::Via) else {
+        warn!(
+            method=%crate::transaction::safe_diagnostics::SafeMethod::new(&request.method()),
+            destination = %response_route.destination,
+            context,
+            "Dropping inbound request with no Via; a stateless response cannot be routed"
+        );
+        return Ok(());
+    };
+
+    let mut builder = ResponseBuilder::new(status, None);
+    if let Some(secs) = retry_after_secs {
+        builder = builder.header(TypedHeader::RetryAfter(
+            rvoip_sip_core::types::retry_after::RetryAfter::new(secs),
+        ));
+    }
     if let Some(to) = request.to() {
         builder = builder.header(TypedHeader::To(to.clone()));
     }
@@ -1375,17 +1521,10 @@ async fn send_stateless_transaction_overload(
     if let Some(cseq) = request.cseq() {
         builder = builder.header(TypedHeader::CSeq(cseq.clone()));
     }
-    if let Some(via) = request.header(&HeaderName::Via) {
-        builder = builder.header(via.clone());
-    }
+    builder = builder.header(via.clone());
 
     transport
         .send_message_via(Message::Response(builder.build()), response_route)
         .await
-        .map_err(|error| {
-            Error::transport_error(
-                error,
-                "Failed to send stateless transaction overload response",
-            )
-        })
+        .map_err(|error| Error::transport_error(error, context))
 }

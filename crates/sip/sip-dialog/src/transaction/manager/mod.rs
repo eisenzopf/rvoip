@@ -2133,7 +2133,7 @@ async fn process_transaction_dispatch_event(
     let kind = queued.kind;
     let handler_started = timing_enabled.then(Instant::now);
     if let Err(e) = manager.handle_transport_event(queued.event).await {
-        error!(error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error handling transport message");
+        error!(error=%crate::transaction::safe_diagnostics::SafeTransactionError::new(&e), "Error handling transport message");
     }
     if let Some(started) = handler_started {
         diagnostics::record_transaction_handler(kind.as_str(), started.elapsed());
@@ -5963,7 +5963,7 @@ impl TransactionManager {
                                         &fallback_dispatch_worker,
                                     ).await;
                                 } else if let Err(e) = manager_arc.handle_transport_event(control_event).await {
-                                    error!(error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error handling transport control event");
+                                    error!(error=%crate::transaction::safe_diagnostics::SafeTransactionError::new(&e), "Error handling transport control event");
                                 }
                             }
                         } else {
@@ -5993,7 +5993,7 @@ impl TransactionManager {
                                 ).await;
                             } else {
                                 if let Err(e) = manager_arc.handle_transport_event(message_event).await {
-                                    error!(error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error handling transport message");
+                                    error!(error=%crate::transaction::safe_diagnostics::SafeTransactionError::new(&e), "Error handling transport message");
                                 }
                             }
                         } else {
@@ -7384,6 +7384,37 @@ impl TransactionManager {
         }
     }
 
+    /// Whether two routes lead to the same peer, for the purpose of replaying
+    /// a response that peer is already owed.
+    ///
+    /// Address, transport and virtual authority identify the peer. The ingress
+    /// flow deliberately does not: a connection-oriented peer that reconnects
+    /// carries a new flow id and is still the same peer, and demanding the
+    /// original one strands every retransmission that arrives after a
+    /// reconnect.
+    ///
+    /// TLS and WSS are the exception. There a single IP:port can carry
+    /// distinct authenticated authorities, so address equality is not peer
+    /// identity and the flow has to match exactly — otherwise one authority
+    /// would receive another's response.
+    pub(crate) fn routes_identify_same_peer(left: &TransportRoute, right: &TransportRoute) -> bool {
+        if left.destination != right.destination
+            || left.transport_type != right.transport_type
+            || left.authority != right.authority
+        {
+            return false;
+        }
+
+        if matches!(
+            left.transport_type,
+            Some(TransportType::Tls | TransportType::Wss)
+        ) {
+            return left.flow_id == right.flow_id;
+        }
+
+        true
+    }
+
     pub(crate) async fn retransmit_cached_invite_2xx_response_on_route(
         &self,
         transaction_id: &TransactionKey,
@@ -7408,12 +7439,11 @@ impl TransactionManager {
             return Ok(false);
         }
 
-        // A cached response remains bound to the exact authenticated ingress
-        // flow that created it. Address equality is insufficient when TLS or
-        // WSS virtual authorities share an IP:port; a duplicate on another
-        // flow must pass through normal authorization instead of redirecting
-        // cached bytes.
-        if ingress_route != entry.route {
+        // A cached response never leaves the peer that produced it. It does
+        // follow that peer onto a new flow: replaying onto the route the
+        // duplicate actually arrived on is what keeps RFC 3261 §17.2.1 true
+        // after a connection-oriented peer reconnects.
+        if !Self::routes_identify_same_peer(&ingress_route, &entry.route) {
             return Ok(false);
         }
 
@@ -7423,7 +7453,7 @@ impl TransactionManager {
         self.send_cached_response(
             entry.response,
             entry.wire_bytes,
-            entry.route,
+            ingress_route,
             "Failed to retransmit cached INVITE 2xx",
         )
         .await

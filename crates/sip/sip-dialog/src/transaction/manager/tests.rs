@@ -4750,10 +4750,10 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn cached_invite_2xx_never_crosses_coaddressed_tcp_flows() -> Result<()> {
-        let (cached_flow, other_flow) = two_live_tcp_flow_ids().await;
-        assert_ne!(cached_flow, other_flow);
+    async fn manager_with_cached_invite_2xx(
+        transaction_id: &TransactionKey,
+        cached_route: rvoip_sip_transport::TransportRoute,
+    ) -> Result<(Arc<MockTransport>, TransactionManager)> {
         let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
         let (_transport_tx, transport_rx) = mpsc::channel(16);
         let (manager, _event_rx) =
@@ -4762,12 +4762,6 @@ mod tests {
 
         let invite = create_test_invite().map_err(|error| Error::Other(error.to_string()))?;
         let response = create_test_response(&invite, StatusCode::Ok, Some("OK"));
-        let transaction_id =
-            TransactionKey::new("z9hG4bK.exact-cache-flow".into(), Method::Invite, true);
-        let destination: SocketAddr = "192.0.2.100:5060".parse().unwrap();
-        let cached_route = rvoip_sip_transport::TransportRoute::new(destination)
-            .with_transport_type(TransportType::Tcp)
-            .with_flow_id(cached_flow);
         let now = Instant::now();
         let wire_bytes = bytes::Bytes::from(Message::Response(response.clone()).to_bytes());
         manager.insert_invite_2xx_response_cache_entry(
@@ -4775,7 +4769,7 @@ mod tests {
             Invite2xxResponseCacheEntry {
                 response,
                 wire_bytes,
-                route: cached_route.clone(),
+                route: cached_route,
                 created_at: now,
                 acked_at: None,
                 expires_at: now + Duration::from_secs(90),
@@ -4785,13 +4779,31 @@ mod tests {
                 _admission_owner: None,
             },
         );
+        Ok((transport, manager))
+    }
+
+    /// TLS and WSS can carry distinct authenticated authorities on one
+    /// IP:port, so there the cached response stays bound to the exact flow
+    /// that produced it.
+    #[tokio::test]
+    async fn cached_invite_2xx_never_crosses_coaddressed_tls_flows() -> Result<()> {
+        let (cached_flow, other_flow) = two_live_tcp_flow_ids().await;
+        assert_ne!(cached_flow, other_flow);
+        let transaction_id =
+            TransactionKey::new("z9hG4bK.exact-cache-flow".into(), Method::Invite, true);
+        let destination: SocketAddr = "192.0.2.100:5061".parse().unwrap();
+        let cached_route = rvoip_sip_transport::TransportRoute::new(destination)
+            .with_transport_type(TransportType::Tls)
+            .with_flow_id(cached_flow);
+        let (transport, manager) =
+            manager_with_cached_invite_2xx(&transaction_id, cached_route.clone()).await?;
 
         let wrong_route = rvoip_sip_transport::TransportRoute::new(destination)
-            .with_transport_type(TransportType::Tcp)
+            .with_transport_type(TransportType::Tls)
             .with_flow_id(other_flow);
         assert!(
             !manager
-                .retransmit_cached_invite_2xx_response_on_route(&transaction_id, wrong_route,)
+                .retransmit_cached_invite_2xx_response_on_route(&transaction_id, wrong_route)
                 .await?
         );
         assert_eq!(transport.raw_send_count(), 0);
@@ -4806,6 +4818,73 @@ mod tests {
         );
         assert_eq!(transport.raw_send_count(), 1);
         assert_eq!(transport.raw_routes().await, vec![cached_route]);
+        Ok(())
+    }
+
+    /// RFC 3261 §17.2.1: a TCP peer that reconnects and retransmits its INVITE
+    /// still has to get the retained final response. The replay follows the
+    /// flow the duplicate arrived on, never the dead one it was cached with.
+    #[tokio::test]
+    async fn cached_invite_2xx_replays_onto_a_reconnected_tcp_flow() -> Result<()> {
+        let (cached_flow, reconnected_flow) = two_live_tcp_flow_ids().await;
+        assert_ne!(cached_flow, reconnected_flow);
+        let transaction_id =
+            TransactionKey::new("z9hG4bK.reconnect-cache-flow".into(), Method::Invite, true);
+        let destination: SocketAddr = "192.0.2.100:5060".parse().unwrap();
+        let cached_route = rvoip_sip_transport::TransportRoute::new(destination)
+            .with_transport_type(TransportType::Tcp)
+            .with_flow_id(cached_flow);
+        let (transport, manager) =
+            manager_with_cached_invite_2xx(&transaction_id, cached_route).await?;
+
+        let reconnected_route = rvoip_sip_transport::TransportRoute::new(destination)
+            .with_transport_type(TransportType::Tcp)
+            .with_flow_id(reconnected_flow);
+        assert!(
+            manager
+                .retransmit_cached_invite_2xx_response_on_route(
+                    &transaction_id,
+                    reconnected_route.clone(),
+                )
+                .await?
+        );
+        assert_eq!(transport.raw_send_count(), 1);
+        assert_eq!(transport.raw_routes().await, vec![reconnected_route]);
+        Ok(())
+    }
+
+    /// Peer identity is still enforced: a different address never receives
+    /// another peer's cached response.
+    #[tokio::test]
+    async fn cached_invite_2xx_never_crosses_peer_addresses() -> Result<()> {
+        let (cached_flow, other_flow) = two_live_tcp_flow_ids().await;
+        let transaction_id =
+            TransactionKey::new("z9hG4bK.peer-bound-cache".into(), Method::Invite, true);
+        let cached_route =
+            rvoip_sip_transport::TransportRoute::new("192.0.2.100:5060".parse().unwrap())
+                .with_transport_type(TransportType::Tcp)
+                .with_flow_id(cached_flow);
+        let (transport, manager) =
+            manager_with_cached_invite_2xx(&transaction_id, cached_route).await?;
+
+        let other_peer =
+            rvoip_sip_transport::TransportRoute::new("192.0.2.101:5060".parse().unwrap())
+                .with_transport_type(TransportType::Tcp)
+                .with_flow_id(other_flow);
+        assert!(
+            !manager
+                .retransmit_cached_invite_2xx_response_on_route(&transaction_id, other_peer)
+                .await?
+        );
+        let other_transport =
+            rvoip_sip_transport::TransportRoute::new("192.0.2.100:5060".parse().unwrap())
+                .with_transport_type(TransportType::Udp);
+        assert!(
+            !manager
+                .retransmit_cached_invite_2xx_response_on_route(&transaction_id, other_transport)
+                .await?
+        );
+        assert_eq!(transport.raw_send_count(), 0);
         Ok(())
     }
 
