@@ -265,6 +265,13 @@ class WorkflowPolicyTests(unittest.TestCase):
             'cache_bundle_prefix="gs://${BUCKET}/release-cache/performance-prebuilt-v1/"',
             startup,
         )
+        self.assertIn("rvoip-external-memory-diagnostics", workflow)
+        self.assertIn(
+            "inputs.profile == 'remote-diagnostic' && '1' || '0'", workflow
+        )
+        self.assertIn("capture_external_memory", startup)
+        self.assertIn("AnonHugePages", startup)
+        self.assertIn("thp_collapse_alloc", startup)
         self.assertIn(
             '"/bundles/${PREBUILT_SHA256}.tar.gz"',
             startup,
