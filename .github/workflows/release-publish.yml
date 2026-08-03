@@ -98,7 +98,7 @@ jobs:
             exit 1
           }
           qualification="$(realpath "$aggregate")"
-          git checkout --detach "$candidate"
+          git checkout -B main "$candidate"
           test "$(git rev-parse HEAD)" = "$candidate"
           echo "QUALIFIED_CANDIDATE=$candidate" >> "$GITHUB_ENV"
           echo "REMOTE_QUALIFICATION=$qualification" >> "$GITHUB_ENV"
