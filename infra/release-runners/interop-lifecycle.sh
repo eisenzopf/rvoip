@@ -38,6 +38,42 @@ wait_udp_port() {
   return 1
 }
 
+wait_freeswitch_control_plane() {
+  local container="$1"
+  local password="$2"
+  local attempts="${RVOIP_FREESWITCH_READY_ATTEMPTS:-180}"
+  local consecutive_ready=0
+  local sofia_status=""
+
+  for _ in $(seq 1 "$attempts"); do
+    if sofia_status="$(
+      docker exec "$container" fs_cli -p "$password" \
+        -x "sofia status" 2>&1
+    )" && grep -Eq 'rvoip_udp[[:space:]].*RUNNING' <<<"$sofia_status" \
+      && grep -Eq 'rvoip_tls_srtp[[:space:]].*RUNNING' <<<"$sofia_status"; then
+      consecutive_ready="$((consecutive_ready + 1))"
+      if [[ "$consecutive_ready" -ge 2 ]]; then
+        return 0
+      fi
+    else
+      consecutive_ready=0
+    fi
+
+    if ! docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null \
+      | grep -qx true; then
+      echo "$container exited before the FreeSWITCH control plane became ready" >&2
+      docker logs "$container" >&2 || true
+      return 1
+    fi
+    sleep 1
+  done
+
+  echo "FreeSWITCH control plane did not become ready in $container" >&2
+  printf 'sofia status:\n%s\n' "$sofia_status" >&2
+  docker logs "$container" >&2 || true
+  return 1
+}
+
 down() {
   docker rm -f "$1" >/dev/null 2>&1 || true
 }
@@ -134,6 +170,7 @@ PY
     -e FS_EXTERNAL_RTP_IP=127.0.0.1 \
     rvoip-release-freeswitch >/dev/null
   wait_udp_port rvoip-freeswitch 5062
+  wait_freeswitch_control_plane rvoip-freeswitch ClueCon
   cat > "$LOCAL_ENV_ROOT/freeswitch/freeswitch-local.env" <<'EOF'
 FREESWITCH_ADDR=127.0.0.1:5060
 FREESWITCH_IP=127.0.0.1

@@ -814,15 +814,24 @@ wait_for_pbx_tls_ready() {
   while [ "$i" -le "$attempts" ]; do
     nc_rc=1
     openssl_rc=1
+    fs_cli_rc=0
     {
       echo
       echo "## attempt $i"
       if [ "$provider" = "freeswitch" ] && command -v docker >/dev/null 2>&1; then
-        # fs_cli is useful diagnostic evidence, but the profile may still be
-        # starting. Under `set -e` that expected probe failure must not abort
-        # the readiness loop before the authoritative socket checks below.
-        docker exec rvoip-freeswitch fs_cli -x "sofia status profile rvoip_tls_srtp" 2>&1 \
-          | sed -n '1,80p' || true
+        fs_cli_rc=1
+        if fs_cli_output=$(docker exec rvoip-freeswitch \
+          fs_cli -p "${FREESWITCH_EVENT_SOCKET_PASSWORD:-ClueCon}" \
+          -x "sofia status" 2>&1); then
+          printf '%s\n' "$fs_cli_output" | sed -n '1,80p'
+          if printf '%s\n' "$fs_cli_output" \
+            | grep -Eq 'rvoip_tls_srtp[[:space:]].*RUNNING'; then
+            fs_cli_rc=0
+          fi
+        else
+          printf '%s\n' "$fs_cli_output" | sed -n '1,80p'
+        fi
+        echo "fs_cli_rc=$fs_cli_rc"
       fi
       if command -v nc >/dev/null 2>&1; then
         if nc -z -w 2 "$host" "$port"; then
@@ -832,31 +841,33 @@ wait_for_pbx_tls_ready() {
         fi
         echo "nc_rc=$nc_rc"
       else
-        nc_rc=0
-        echo "nc not found; skipping TCP socket probe"
+        echo "nc not found; TLS readiness requires the TCP socket probe"
       fi
       if command -v openssl >/dev/null 2>&1; then
-        if printf '' \
-          | openssl s_client -connect "$host:$port" -servername "$host" -brief 2>&1 \
-          | sed -n '1,80p'; then
+        if openssl_output=$(printf '' \
+          | openssl s_client -connect "$host:$port" -servername "$host" -brief 2>&1); then
           openssl_rc=0
         else
           openssl_rc=$?
         fi
+        printf '%s\n' "$openssl_output" | sed -n '1,80p'
         echo "openssl_rc=$openssl_rc"
       else
-        openssl_rc=0
-        echo "openssl not found; skipping TLS handshake probe"
+        echo "openssl not found; TLS readiness requires the handshake probe"
       fi
     } >>"$ready_log" 2>&1
-    if [ "$nc_rc" -eq 0 ]; then
+    if [ "$nc_rc" -eq 0 ] && [ "$openssl_rc" -eq 0 ] && [ "$fs_cli_rc" -eq 0 ]; then
       echo "ready_at_attempt=$i" >>"$ready_log"
       return 0
     fi
     sleep "$sleep_secs"
     i=$((i + 1))
   done
-  echo "PBX TLS socket was not ready at $host:$port after $attempts attempts; see $ready_log" >&2
+  if [ "$provider" = "freeswitch" ] && command -v docker >/dev/null 2>&1; then
+    capture_command "$out_dir/freeswitch-container.log" \
+      docker logs rvoip-freeswitch
+  fi
+  echo "PBX TLS service was not ready at $host:$port after $attempts attempts; see $ready_log" >&2
   return 1
 }
 
@@ -895,6 +906,12 @@ run_prewarm_one() {
   ) >>"$log" 2>&1
   rc=$?
   set -e
+
+  if [ "$rc" -ne 0 ] && [ "$provider" = "freeswitch" ] \
+    && command -v docker >/dev/null 2>&1; then
+    capture_command "$out_dir/freeswitch-container.log" \
+      docker logs rvoip-freeswitch
+  fi
 
   ended_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   duration=$(( $(date +%s) - start_epoch ))
