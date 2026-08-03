@@ -292,11 +292,19 @@ class GateFrameworkTests(unittest.TestCase):
             set(builder.PROXY_INTEROP_GATE_IDS) | {"perf.monolithic-soak"},
         )
 
+        preflight = gates.profile_selection(
+            self.catalog, "remote-diagnostic", ["preflight.performance-01"]
+        )
+        self.assertEqual(
+            set(preflight),
+            {"preflight.performance-01"},
+        )
+
         invalid_cases = (
             ([], "requires at least one"),
             (["core.rvoip"], "executable GCP gates"),
             (["perf.media-burst-matrix"], "executable GCP gates"),
-            (["not.a.gate"], "must belong to remote-release"),
+            (["not.a.gate"], "must belong to remote-release or remote-preflight"),
             ([f"gate-{index}" for index in range(21)], "at most 20"),
         )
         for gate_ids, message in invalid_cases:

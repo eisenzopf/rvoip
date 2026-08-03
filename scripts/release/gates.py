@@ -505,12 +505,12 @@ def profile_selection(
             f"remote-diagnostic accepts at most {MAX_DIAGNOSTIC_GATES} requested gates"
         )
 
-    release_ids = set(profiles["remote-release"])
+    diagnostic_ids = set(profiles["remote-release"]) | set(profiles["remote-preflight"])
     by_id = gate_map(catalog)
-    unknown = sorted(set(requested) - release_ids)
+    unknown = sorted(set(requested) - diagnostic_ids)
     if unknown:
         raise GateError(
-            "remote-diagnostic gate IDs must belong to remote-release: "
+            "remote-diagnostic gate IDs must belong to remote-release or remote-preflight: "
             + ", ".join(unknown)
         )
     invalid = sorted(
@@ -533,9 +533,9 @@ def profile_selection(
     while pending:
         gate_id = pending.pop()
         for dependency in by_id[gate_id].get("dependencies", []):
-            if dependency not in release_ids:
+            if dependency not in diagnostic_ids:
                 raise GateError(
-                    f"remote-diagnostic dependency {dependency!r} is outside remote-release"
+                    f"remote-diagnostic dependency {dependency!r} is outside the release and preflight profiles"
                 )
             if dependency not in selected:
                 selected.add(dependency)

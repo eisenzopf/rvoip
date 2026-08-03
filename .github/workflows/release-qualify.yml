@@ -19,7 +19,7 @@ on:
           - remote-core
           - remote-release
       diagnostic_gates:
-        description: Comma-separated exact GCP gate IDs for remote-diagnostic
+        description: Comma-separated exact release or preflight GCP gate IDs for remote-diagnostic
         required: false
         type: string
       first_candidate:
