@@ -239,11 +239,16 @@ non-publishing dry run:
 scripts/release.sh publish --version X.Y.Z
 ```
 
-The workflow resolves and verifies the signed aggregate, checks that it binds
-the current `main` commit and current gate catalog, and runs the complete
-topological package preflight. The crates.io token exists only in the
-approval-protected `release-publish` environment and is never available to PR,
-nightly, or performance runners.
+The workflow resolves and verifies the signed aggregate before trusting its
+candidate SHA. The candidate must be the current `main` commit or an ancestor
+of it, and the aggregate must bind that exact commit and its gate catalog. The
+workflow then checks out the qualified product commit on its local `main`
+branch and runs the complete topological package preflight with reviewed
+release tooling captured from the protected workflow revision. This allows a
+publishing-only workflow fix without relabeling a newer product commit as
+qualified. The crates.io token exists only in the approval-protected
+`release-publish` environment and is never available to PR, nightly, or
+performance runners.
 
 After environment approval, set `execute=true` in the workflow to publish:
 
@@ -251,12 +256,14 @@ After environment approval, set `execute=true` in the workflow to publish:
 scripts/release.sh publish --version X.Y.Z --execute
 ```
 
-Publication requires a clean `main` equal to `origin/main`, the matching
-verification receipt, and an unused `vX.Y.Z` tag. Each crate is packaged and
-dry-run immediately before publication, and its file manifest must match the
-verified receipt. The tool records the final archive hash, waits for each
-version to become visible on crates.io, and only then packages and publishes
-dependents.
+Publication normally requires a clean `main` equal to `origin/main`. The
+protected workflow may instead supply the exact signed qualification SHA; in
+that mode the clean local `main` must equal that full SHA and it must be an
+ancestor of live `origin/main`. Both modes require the matching verification
+receipt and an unused `vX.Y.Z` tag. Each crate is packaged and dry-run
+immediately before publication, and its file manifest must match the verified
+receipt. The tool records the final archive hash, waits for each version to
+become visible on crates.io, and only then packages and publishes dependents.
 
 An interrupted run is resumable. A version already on crates.io is skipped
 only when its registry checksum matches the locally verified `.crate` artifact;

@@ -98,17 +98,21 @@ jobs:
             exit 1
           }
           qualification="$(realpath "$aggregate")"
+          cp scripts/release.py target/release-tool.py
+          release_tool="$(realpath target/release-tool.py)"
           git checkout -B main "$candidate"
           test "$(git rev-parse HEAD)" = "$candidate"
           echo "QUALIFIED_CANDIDATE=$candidate" >> "$GITHUB_ENV"
+          echo "RELEASE_TOOL=$release_tool" >> "$GITHUB_ENV"
           echo "REMOTE_QUALIFICATION=$qualification" >> "$GITHUB_ENV"
 
       - name: Fresh package and source verification
         env:
           VERSION: ${{ inputs.version }}
         run: >-
-          python3 scripts/release.py verify
+          python3 "$RELEASE_TOOL" verify
           --version "$VERSION"
+          --qualified-head "$QUALIFIED_CANDIDATE"
           --remote-qualification "$REMOTE_QUALIFICATION"
 
       - name: Dry-run or execute resumable topological publication
@@ -117,11 +121,15 @@ jobs:
           EXECUTE: ${{ inputs.execute }}
           VERSION: ${{ inputs.version }}
         run: |
-          args=(publish --version "$VERSION")
+          args=(
+            publish
+            --version "$VERSION"
+            --qualified-head "$QUALIFIED_CANDIDATE"
+          )
           if test "$EXECUTE" = true; then
             args+=(--execute)
           fi
-          python3 scripts/release.py "${args[@]}"
+          python3 "$RELEASE_TOOL" "${args[@]}"
 
       - name: Attest published package archives
         if: inputs.execute

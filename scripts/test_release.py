@@ -1079,6 +1079,46 @@ rvoip-rtc = { path = "../rvoip-rtc" }
                 ]
             )
 
+    def test_qualified_head_requires_remote_qualification(self) -> None:
+        with self.assertRaisesRegex(
+            release.ReleaseError, "requires an exact --remote-qualification"
+        ):
+            release.verify(
+                Path("/repo"),
+                "0.3.6",
+                None,
+                None,
+                None,
+                None,
+                None,
+                "a" * 40,
+            )
+
+    def test_qualified_publish_requires_remote_release_receipt(self) -> None:
+        head = "a" * 40
+        receipt = {
+            "beta_qualification": {
+                "mode": "strict",
+                "git_commit": head,
+            }
+        }
+        with (
+            mock.patch.object(release, "ensure_release_state", return_value=head),
+            mock.patch.object(release, "validate_workspace", return_value=({}, [])),
+            mock.patch.object(
+                release, "read_verification_receipt", return_value=receipt
+            ),
+            self.assertRaisesRegex(
+                release.ReleaseError, "matching remote-release evidence"
+            ),
+        ):
+            release.publish(
+                Path("/repo"),
+                "0.3.6",
+                execute=False,
+                qualified_head=head,
+            )
+
     def test_visibility_timeout_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             log = release.ReleaseLog(Path(directory), "0.3.0", "test")
@@ -1129,6 +1169,75 @@ rvoip-rtc = { path = "../rvoip-rtc" }
         ):
             release.ensure_release_state(
                 Path("/repo"), "0.3.0", require_no_tag=True
+            )
+
+    def test_qualified_ancestor_release_state_succeeds(self) -> None:
+        head = "a" * 40
+        remote_head = "b" * 40
+        remote = release.subprocess.CompletedProcess(
+            ["git", "ls-remote"],
+            0,
+            stdout=f"{remote_head}\trefs/heads/main\n",
+            stderr="",
+        )
+        ancestor = release.subprocess.CompletedProcess(
+            ["git", "merge-base"], 0, stdout="", stderr=""
+        )
+        fetched = release.subprocess.CompletedProcess(
+            ["git", "fetch"], 0, stdout="", stderr=""
+        )
+        with (
+            mock.patch.object(
+                release,
+                "git_output",
+                side_effect=["", "main", head],
+            ),
+            mock.patch.object(
+                release, "run", side_effect=[remote, fetched, ancestor]
+            ),
+        ):
+            actual = release.ensure_release_state(
+                Path("/repo"),
+                "0.3.6",
+                require_no_tag=False,
+                qualified_head=head,
+            )
+
+        self.assertEqual(actual, head)
+
+    def test_qualified_non_ancestor_release_state_fails_closed(self) -> None:
+        head = "a" * 40
+        remote_head = "b" * 40
+        remote = release.subprocess.CompletedProcess(
+            ["git", "ls-remote"],
+            0,
+            stdout=f"{remote_head}\trefs/heads/main\n",
+            stderr="",
+        )
+        not_ancestor = release.subprocess.CompletedProcess(
+            ["git", "merge-base"], 1, stdout="", stderr=""
+        )
+        fetched = release.subprocess.CompletedProcess(
+            ["git", "fetch"], 0, stdout="", stderr=""
+        )
+        with (
+            mock.patch.object(
+                release,
+                "git_output",
+                side_effect=["", "main", head],
+            ),
+            mock.patch.object(
+                release,
+                "run",
+                side_effect=[remote, fetched, not_ancestor],
+            ),
+            self.assertRaises(release.ReleaseError),
+        ):
+            release.ensure_release_state(
+                Path("/repo"),
+                "0.3.6",
+                require_no_tag=False,
+                qualified_head=head,
             )
 
     def test_current_workspace_has_all_44_unique_publishable_packages(self) -> None:

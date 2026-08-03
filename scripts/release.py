@@ -215,17 +215,42 @@ def ensure_clean(root: Path) -> None:
         raise ReleaseError(f"working tree must be clean:\n{status}")
 
 
-def ensure_release_state(root: Path, version: str, *, require_no_tag: bool) -> str:
+def ensure_release_state(
+    root: Path,
+    version: str,
+    *,
+    require_no_tag: bool,
+    qualified_head: str | None = None,
+) -> str:
     ensure_clean(root)
     branch = git_output(root, "branch", "--show-current")
     if branch != "main":
         raise ReleaseError(f"release commands require branch main, found {branch!r}")
     head = git_output(root, "rev-parse", "HEAD")
+    if qualified_head is not None:
+        if not COMMIT_SHA.fullmatch(qualified_head):
+            raise ReleaseError("qualified release HEAD must be a full commit SHA")
+        if qualified_head != head:
+            raise ReleaseError("qualified release HEAD does not match the checkout")
     remote = run(
         ["git", "ls-remote", "origin", "refs/heads/main"], cwd=root
     ).stdout.split()
-    if not remote or remote[0] != head:
+    if not remote:
+        raise ReleaseError("current origin/main could not be resolved")
+    remote_head = remote[0]
+    if remote_head != head and qualified_head != head:
         raise ReleaseError("HEAD must exactly match the current origin/main")
+    if remote_head != head:
+        run(["git", "fetch", "--no-tags", "origin", remote_head], cwd=root)
+        ancestor = run(
+            ["git", "merge-base", "--is-ancestor", head, remote_head],
+            cwd=root,
+            check=False,
+        )
+        if ancestor.returncode:
+            raise ReleaseError(
+                "qualified release HEAD must be an ancestor of current origin/main"
+            )
     tag = f"v{version}"
     if require_no_tag:
         local_tag = run(
@@ -1366,8 +1391,18 @@ def verify(
     beta_carry_forward_attestation: str | None,
     targeted_delta_attestation: str | None,
     remote_qualification: str | None,
+    qualified_head: str | None = None,
 ) -> None:
-    head = ensure_release_state(root, version, require_no_tag=True)
+    if qualified_head is not None and remote_qualification is None:
+        raise ReleaseError(
+            "--qualified-head requires an exact --remote-qualification aggregate"
+        )
+    head = ensure_release_state(
+        root,
+        version,
+        require_no_tag=True,
+        qualified_head=qualified_head,
+    )
     packages, ordered = validate_workspace(root, version, locked=True)
     log = ReleaseLog(root, version, "verify")
     log.event("start", operation="verify", version=version, git_commit=head)
@@ -1798,10 +1833,26 @@ def publish(
     version: str,
     *,
     execute: bool,
+    qualified_head: str | None = None,
 ) -> None:
-    head = ensure_release_state(root, version, require_no_tag=True)
+    head = ensure_release_state(
+        root,
+        version,
+        require_no_tag=True,
+        qualified_head=qualified_head,
+    )
     packages, ordered = validate_workspace(root, version, locked=True)
     receipt = read_verification_receipt(root, version, head, ordered)
+    if qualified_head is not None:
+        qualification = receipt.get("beta_qualification")
+        if (
+            not isinstance(qualification, dict)
+            or qualification.get("mode") != "remote-release"
+            or qualification.get("git_commit") != qualified_head
+        ):
+            raise ReleaseError(
+                "qualified ancestor publication requires matching remote-release evidence"
+            )
     verified_hashes = receipt.get("package_sha256")
     verified_file_hashes = receipt.get("package_file_manifest_sha256")
     if (
@@ -1937,6 +1988,15 @@ def parser() -> argparse.ArgumentParser:
     for name in ("prepare", "verify", "publish"):
         command = commands.add_parser(name)
         command.add_argument("--version", required=True)
+        if name in ("verify", "publish"):
+            command.add_argument(
+                "--qualified-head",
+                default=os.environ.get("RVOIP_RELEASE_QUALIFIED_HEAD"),
+                help=(
+                    "allow an attested ancestor of origin/main as the exact "
+                    "release checkout"
+                ),
+            )
         if name == "verify":
             report_group = command.add_mutually_exclusive_group()
             report_group.add_argument(
@@ -1987,9 +2047,15 @@ def main(argv: list[str] | None = None) -> int:
                     args.beta_carry_forward_attestation,
                     args.targeted_delta_attestation,
                     args.remote_qualification,
+                    args.qualified_head,
                 )
             elif args.command == "publish":
-                publish(root, version, execute=args.execute)
+                publish(
+                    root,
+                    version,
+                    execute=args.execute,
+                    qualified_head=args.qualified_head,
+                )
     except ReleaseError as error:
         print(f"release: FAIL: {error}", file=sys.stderr)
         return 1
