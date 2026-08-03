@@ -30,10 +30,10 @@ use support::soak::{
     endpoint_metric, endpoint_retained_total, endpoint_retention_summary,
     in_process_resource_sampler_enabled, media_receive_diagnostics, media_setup_raw_diagnostics,
     media_setup_timing_diagnostics, memory_diagnostic_interval, memory_diagnostic_summary,
-    read_required_u16_env, resource_sampling_diagnostics, round2, round4,
+    read_required_u16_env, resource_sampling_diagnostics, round2, round4, rss_window_meets_minimum,
     sample_settled_rss_window, sip_dialog_raw_diagnostics, sip_dialog_timing_diagnostics,
-    sip_udp_diagnostics, DhatProfile, EndpointRetentionSampler, MemoryDiagnosticSampler,
-    RssGrowthGate,
+    sip_udp_diagnostics, wait_for_burst_rss_quiescence, BurstRssQuiescence, DhatProfile,
+    EndpointRetentionSampler, MemoryDiagnosticSampler, RssGrowthGate,
 };
 use support::{
     CallSetupDiagnostics, LatencyHistogram, LoadProfile, ResourceSampler, ResourceSummary,
@@ -308,6 +308,10 @@ async fn perf_burst_caller() {
         );
         RssGrowthGate::resolve(&first_alice_cfg, &receiver_cfg)
     };
+    let rss_limit = scenario
+        .acceptance
+        .max_rss_growth_mb_per_hr
+        .unwrap_or(rss_gate.effective_mb_per_hr);
     let retention_drain_wait = burst_retention_drain_wait();
     let skip_audio_source = read_bool_env(SKIP_AUDIO_SOURCE_ENV);
     let call_timeout = Duration::from_secs(
@@ -422,12 +426,18 @@ async fn perf_burst_caller() {
         Some(sampler) => Some(sampler.stop().await),
         None => None,
     };
-    let (mut settled_resources, settled_observation) = if in_process_resource_sampling {
-        sample_settled_rss_window("burst_caller", scenario.acceptance.min_rss_gate_window_secs)
-            .await
+    let rss_quiescence = if in_process_resource_sampling {
+        wait_for_burst_rss_quiescence("burst_caller", rss_limit).await
     } else {
-        (ResourceSummary::empty(), Duration::ZERO)
+        BurstRssQuiescence::not_sampled(rss_limit)
     };
+    let (mut settled_resources, settled_observation) =
+        if in_process_resource_sampling && rss_quiescence.achieved {
+            sample_settled_rss_window("burst_caller", scenario.acceptance.min_rss_gate_window_secs)
+                .await
+        } else {
+            (ResourceSummary::empty(), Duration::ZERO)
+        };
     let rss = support::soak::rss_result_metrics(
         &settled_resources,
         0.0,
@@ -435,12 +445,20 @@ async fn perf_burst_caller() {
         settled_observation.as_secs_f64(),
         support::soak::RssGatePolicy::SettledFull,
     );
-    let rss_gate_enforced =
-        rss.post_drain_window_secs >= scenario.acceptance.min_rss_gate_window_secs;
-    let rss_gate_reason = if rss_gate_enforced {
+    let rss_gate_enforced = in_process_resource_sampling
+        && rss_quiescence.achieved
+        && rss_window_meets_minimum(
+            rss.post_drain_window_secs,
+            scenario.acceptance.min_rss_gate_window_secs,
+        );
+    let rss_gate_reason = if !in_process_resource_sampling {
+        "in_process_sampling_disabled"
+    } else if !rss_quiescence.achieved {
+        "rss_quiescence_not_achieved"
+    } else if rss_gate_enforced {
         "settled_window_meets_minimum"
     } else {
-        "reported_only_short_settled_window"
+        "settled_window_incomplete"
     };
     // Capture exact structural proof only after authoritative RSS sampling has
     // stopped so the proof cannot manufacture the growth it is meant to find.
@@ -582,13 +600,8 @@ async fn perf_burst_caller() {
         .result("rss_gate_window", rss.gate_window)
         .result("rss_gate_enforced", rss_gate_enforced)
         .result("rss_gate_reason", rss_gate_reason)
-        .result(
-            "rss_acceptance_limit_mb_per_hr",
-            scenario
-                .acceptance
-                .max_rss_growth_mb_per_hr
-                .unwrap_or(rss_gate.effective_mb_per_hr),
-        )
+        .result("rss_quiescence_achieved", rss_quiescence.achieved)
+        .result("rss_acceptance_limit_mb_per_hr", rss_limit)
         .result_block("rss_gate", rss_gate.to_json())
         .result("retained_objects_after_drain", retained_after_drain)
         .result(
@@ -653,6 +666,7 @@ async fn perf_burst_caller() {
                 "post_drain_window_secs": round2(rss.post_drain_window_secs),
             }),
         )
+        .diagnostic_block("rss_quiescence", rss_quiescence.to_json())
         .diagnostic_block(
             "memory_diagnostics",
             memory_diagnostic_summary(memory_series.as_ref()),
@@ -703,10 +717,6 @@ async fn perf_burst_caller() {
     drop(clients);
 
     let mut gate_failures = Vec::new();
-    let rss_limit = scenario
-        .acceptance
-        .max_rss_growth_mb_per_hr
-        .unwrap_or(rss_gate.effective_mb_per_hr);
     if asr < scenario.acceptance.min_asr {
         gate_failures.push(format!(
             "ASR {:.4} below {:.4}",
@@ -786,6 +796,18 @@ async fn perf_burst_caller() {
     if retained_after_drain > scenario.acceptance.max_retained_after_drain {
         gate_failures.push(format!(
             "caller_retained_objects_after_drain={retained_after_drain}"
+        ));
+    }
+    if in_process_resource_sampling && !rss_quiescence.achieved {
+        gate_failures.push(format!(
+            "caller RSS did not become quiescent within {} bounded probes at {:.2} MB/hr",
+            support::soak::BURST_RSS_QUIESCENCE_MAX_PROBES,
+            rss_limit,
+        ));
+    } else if in_process_resource_sampling && !rss_gate_enforced {
+        gate_failures.push(format!(
+            "caller RSS gate captured only {:.3}s of the required {:.3}s window",
+            rss.post_drain_window_secs, scenario.acceptance.min_rss_gate_window_secs,
         ));
     }
     if rss_gate_enforced && rss.gate_growth_mb_per_hr > rss_limit {

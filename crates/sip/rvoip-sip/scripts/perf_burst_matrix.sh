@@ -6,6 +6,7 @@ WORKSPACE_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 CRATE_DIR="${WORKSPACE_ROOT}/crates/sip/rvoip-sip"
 PERF_DIR="${RVOIP_PERF_RESULTS:-${WORKSPACE_ROOT}/target/perf-results}"
 CARGO_ARTIFACT_HELPER="${SCRIPT_DIR}/perf_cargo_artifact.py"
+LINUX_PERF_HOST_EVIDENCE="${WORKSPACE_ROOT}/scripts/release/linux_performance_host.py"
 
 export CARGO_MANIFEST_DIR="${CRATE_DIR}"
 
@@ -162,6 +163,10 @@ normalise_scenarios() {
 
 capture_host_udp_stats() {
   local path="$1"
+  if [[ "$(uname -s)" == "Linux" ]]; then
+    python3 "${LINUX_PERF_HOST_EVIDENCE}" snapshot --output "${path}"
+    return
+  fi
   {
     echo "timestamp_epoch=$(date +%s)"
     echo "command=netstat -s -p udp"
@@ -213,6 +218,18 @@ write_host_udp_delta() {
   local before="$1"
   local after="$2"
   local out="$3"
+  if [[ "$(uname -s)" == "Linux" ]]; then
+    local strict_args=()
+    if [[ -n "${RVOIP_RELEASE_CANDIDATE:-}" ]]; then
+      strict_args+=(--require-zero-drops)
+    fi
+    python3 "${LINUX_PERF_HOST_EVIDENCE}" delta \
+      --before "${before}" \
+      --after "${after}" \
+      --output "${out}" \
+      "${strict_args[@]}"
+    return
+  fi
   {
     echo "before=${before}"
     echo "after=${after}"

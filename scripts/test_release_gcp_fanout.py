@@ -299,11 +299,21 @@ class GcpReleaseFanoutTests(unittest.TestCase):
                 fanout.load_instance_states(path)
 
     @staticmethod
-    def write_archive(path: Path, member_name: str, payload: bytes) -> str:
+    def write_archive(
+        path: Path,
+        member_name: str,
+        payload: bytes,
+        *,
+        sidecars: dict[str, bytes] | None = None,
+    ) -> str:
         with tarfile.open(path, "w:gz") as bundle:
             member = tarfile.TarInfo(member_name)
             member.size = len(payload)
             bundle.addfile(member, io.BytesIO(payload))
+            for sidecar_name, sidecar_payload in (sidecars or {}).items():
+                sidecar = tarfile.TarInfo(sidecar_name)
+                sidecar.size = len(sidecar_payload)
+                bundle.addfile(sidecar, io.BytesIO(sidecar_payload))
         return hashlib.sha256(path.read_bytes()).hexdigest()
 
     def populate_downloads(
@@ -322,7 +332,14 @@ class GcpReleaseFanoutTests(unittest.TestCase):
                 if unsafe and index == 0
                 else f"release-shard/{shard}/receipt.json"
             )
-            archive_sha = self.write_archive(archive, member, b'{"status":"PASS"}\n')
+            archive_sha = self.write_archive(
+                archive,
+                member,
+                b'{"status":"PASS"}\n',
+                sidecars={
+                    "release-shard/_sccache-stats.txt": f"{shard}\n".encode()
+                },
+            )
             result = {
                 "schema": fanout.RESULT_SCHEMA,
                 "candidate_sha": manifest["candidate_sha"],
@@ -352,6 +369,15 @@ class GcpReleaseFanoutTests(unittest.TestCase):
             self.assertEqual(receipt["worker_count"], 2)
             for worker in manifest["workers"]:
                 self.assertTrue((output / worker["id"] / "receipt.json").is_file())
+                self.assertEqual(
+                    (
+                        output
+                        / fanout.WORKER_EVIDENCE_DIR
+                        / worker["id"]
+                        / "_sccache-stats.txt"
+                    ).read_text(),
+                    f"{worker['id']}\n",
+                )
                 self.assertTrue(
                     (
                         output
@@ -364,6 +390,66 @@ class GcpReleaseFanoutTests(unittest.TestCase):
                 (output / "_gcp-controller" / "fanout-receipt.json").read_text()
             )
             self.assertFalse(fanout_receipt["publishing_attempted"])
+
+    def test_verify_keeps_gate_evidence_duplicates_fail_closed(self) -> None:
+        manifest = self.manifest()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            downloads = root / "downloads"
+            downloads.mkdir()
+            self.populate_downloads(downloads, manifest)
+            for worker in manifest["workers"]:
+                shard = worker["id"]
+                archive = downloads / shard / "release-shard.tar.gz"
+                archive_sha = self.write_archive(
+                    archive,
+                    "release-shard/perf.shared/receipt.json",
+                    b'{"status":"PASS"}\n',
+                )
+                result_path = downloads / shard / "result.json"
+                result = json.loads(result_path.read_text())
+                result["evidence_archive_sha256"] = archive_sha
+                fanout.write_json(result_path, result)
+
+            receipt = fanout.verify_fanout(
+                manifest=manifest,
+                downloads=downloads,
+                output=root / "release-shard",
+            )
+            self.assertEqual(receipt["status"], "FAIL")
+            self.assertEqual(receipt["trusted_shards"], [manifest["workers"][0]["id"]])
+            self.assertTrue(
+                any("duplicate evidence path" in error for error in receipt["errors"])
+            )
+
+    def test_verify_rejects_worker_archives_using_controller_namespaces(self) -> None:
+        manifest = self.manifest()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            downloads = root / "downloads"
+            downloads.mkdir()
+            self.populate_downloads(downloads, manifest)
+            worker = manifest["workers"][0]
+            archive = downloads / worker["id"] / "release-shard.tar.gz"
+            archive_sha = self.write_archive(
+                archive,
+                "release-shard/_gcp-controller/injected.json",
+                b"{}\n",
+            )
+            result_path = downloads / worker["id"] / "result.json"
+            result = json.loads(result_path.read_text())
+            result["evidence_archive_sha256"] = archive_sha
+            fanout.write_json(result_path, result)
+
+            receipt = fanout.verify_fanout(
+                manifest=manifest,
+                downloads=downloads,
+                output=root / "release-shard",
+            )
+            self.assertEqual(receipt["status"], "FAIL")
+            self.assertTrue(
+                any("reserved controller path" in error for error in receipt["errors"])
+            )
 
     def test_verify_rejects_tampering_and_archive_traversal(self) -> None:
         manifest = self.manifest()

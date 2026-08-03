@@ -21,12 +21,19 @@ GATES="$(metadata rvoip-gates-b64 | base64 --decode)"
 ENVIRONMENT_ID="$(metadata rvoip-environment-b64 | base64 --decode)"
 PREBUILT_URI="$(metadata rvoip-prebuilt-uri)"
 PREBUILT_SHA256="$(metadata rvoip-prebuilt-sha256)"
+EXTERNAL_MEMORY_DIAGNOSTICS="$(
+  metadata rvoip-external-memory-diagnostics 2>/dev/null || printf '0'
+)"
+MIMALLOC_ALLOW_THP_OVERRIDE="$(
+  metadata rvoip-mimalloc-allow-thp 2>/dev/null || true
+)"
 WORKSPACE=/opt/rvoip
 EVIDENCE=/tmp/release-shard
 ARCHIVE=/tmp/release-shard.tar.gz
 RESULT=/tmp/result.json
 STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 START_SECONDS="$(date +%s)"
+EXTERNAL_MEMORY_SAMPLER_PID=""
 
 upload() {
   local source="$1"
@@ -64,6 +71,11 @@ finish() {
   local exit_code=$?
   local ended_at duration archive_sha
   trap - EXIT
+  if [[ -n "$EXTERNAL_MEMORY_SAMPLER_PID" ]]; then
+    kill "$EXTERNAL_MEMORY_SAMPLER_PID" >/dev/null 2>&1 || true
+    wait "$EXTERNAL_MEMORY_SAMPLER_PID" 2>/dev/null || true
+    EXTERNAL_MEMORY_SAMPLER_PID=""
+  fi
   ended_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   duration="$(( $(date +%s) - START_SECONDS ))"
   archive_sha=""
@@ -122,6 +134,82 @@ PY
 }
 trap finish EXIT
 
+capture_host_memory_policy() {
+  local path
+  {
+    echo "captured_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "mimalloc_allow_thp_override=${MIMALLOC_ALLOW_THP_OVERRIDE:-unset}"
+    uname -a
+    for path in \
+      /sys/kernel/mm/transparent_hugepage/enabled \
+      /sys/kernel/mm/transparent_hugepage/defrag \
+      /sys/kernel/mm/transparent_hugepage/shmem_enabled \
+      /sys/kernel/mm/transparent_hugepage/khugepaged/scan_sleep_millisecs \
+      /sys/kernel/mm/transparent_hugepage/khugepaged/alloc_sleep_millisecs \
+      /sys/kernel/mm/transparent_hugepage/khugepaged/pages_to_scan; do
+      if [[ -r "$path" ]]; then
+        printf '%s=' "$path"
+        cat "$path"
+      fi
+    done
+  } > "$EVIDENCE/_host-memory-policy.txt"
+}
+
+capture_external_memory() {
+  local output="$EVIDENCE/_external-process-memory.tsv"
+  local process pid cmdline role process_memory thp_memory now uptime
+  printf '%s\n' \
+    $'captured_at_utc\tuptime_secs\tpid\trole\trss_kb\tpss_kb\tpss_anon_kb\tpss_file_kb\tprivate_clean_kb\tprivate_dirty_kb\tanonymous_kb\tlazy_free_kb\tanon_huge_pages_kb\tswap_kb\tthp_collapse_alloc\tthp_collapse_alloc_failed\tthp_fault_alloc\tthp_fault_fallback\tthp_split_page\tthp_deferred_split_page\tthp_split_pmd' \
+    > "$output"
+  while true; do
+    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    uptime="$(awk '{print $1}' /proc/uptime)"
+    thp_memory="$(awk '
+      BEGIN { names["thp_collapse_alloc"]; names["thp_collapse_alloc_failed"];
+              names["thp_fault_alloc"]; names["thp_fault_fallback"];
+              names["thp_split_page"]; names["thp_deferred_split_page"];
+              names["thp_split_pmd"] }
+      $1 in names { value[$1] = $2 }
+      END { printf "%s\t%s\t%s\t%s\t%s\t%s\t%s",
+        value["thp_collapse_alloc"] + 0,
+        value["thp_collapse_alloc_failed"] + 0,
+        value["thp_fault_alloc"] + 0,
+        value["thp_fault_fallback"] + 0,
+        value["thp_split_page"] + 0,
+        value["thp_deferred_split_page"] + 0,
+        value["thp_split_pmd"] + 0 }
+    ' /proc/vmstat)"
+    for process in /proc/[0-9]*; do
+      pid="${process##*/}"
+      [[ -r "$process/cmdline" && -r "$process/smaps_rollup" ]] || continue
+      cmdline="$(tr '\0' ' ' < "$process/cmdline" 2>/dev/null || true)"
+      case "$cmdline" in
+        *perf_burst_receiver*) role=burst_receiver ;;
+        *perf_burst_caller*) role=burst_caller ;;
+        *perf_soak_receiver*) role=soak_receiver ;;
+        *perf_soak_caller*) role=soak_caller ;;
+        *) continue ;;
+      esac
+      process_memory="$(awk '
+        /^(Rss|Pss|Pss_Anon|Pss_File|Private_Clean|Private_Dirty|Anonymous|LazyFree|AnonHugePages|Swap):/ {
+          name=$1; sub(/:$/, "", name); value[name]=$2
+        }
+        END { printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s",
+          value["Rss"] + 0, value["Pss"] + 0, value["Pss_Anon"] + 0,
+          value["Pss_File"] + 0, value["Private_Clean"] + 0,
+          value["Private_Dirty"] + 0, value["Anonymous"] + 0,
+          value["LazyFree"] + 0, value["AnonHugePages"] + 0,
+          value["Swap"] + 0 }
+      ' "$process/smaps_rollup" 2>/dev/null || true)"
+      [[ -n "$process_memory" ]] || continue
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$now" "$uptime" "$pid" "$role" "$process_memory" "$thp_memory" \
+        >> "$output"
+    done
+    sleep 5
+  done
+}
+
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
@@ -166,10 +254,19 @@ test "$(git rev-parse HEAD)" = "$CANDIDATE"
 prebuilt_gate_ids="$(python3 scripts/release/prebuilt_performance.py select-gates \
   --catalog scripts/release/gates.json --gates "$GATES")"
 if [[ -n "$prebuilt_gate_ids" ]]; then
-  expected_prefix="gs://${BUCKET}/release/${RUN_ID}/prebuild/"
-  if [[ "$PREBUILT_URI" != "${expected_prefix}"* \
-    || ! "$PREBUILT_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+  run_bundle_prefix="gs://${BUCKET}/release/${RUN_ID}/prebuild/"
+  cache_bundle_prefix="gs://${BUCKET}/release-cache/performance-prebuilt-v1/"
+  if [[ ! "$PREBUILT_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
     echo "performance worker lacks an exact-run prebuilt bundle" >&2
+    exit 1
+  fi
+  if [[ "$PREBUILT_URI" == "${run_bundle_prefix}"* ]]; then
+    : # Compatibility with run-scoped bundles created before cache rollout.
+  elif [[ "$PREBUILT_URI" == "${cache_bundle_prefix}"* \
+    && "$PREBUILT_URI" == *"/bundles/${PREBUILT_SHA256}.tar.gz" ]]; then
+    : # Verified controller cache hits are content-addressed by this digest.
+  else
+    echo "performance worker lacks an exact-run or content-addressed cached bundle" >&2
     exit 1
   fi
   prebuilt_object="${PREBUILT_URI#"gs://${BUCKET}/"}"
@@ -247,11 +344,13 @@ ulimit -n 262144
 test "$(ulimit -n)" -ge 262144
 
 # Stateful proxy qualification captures a dense packet burst on both the
-# loopback and aggregate interfaces.  Raise the receive ceiling before
-# tcpdump requests its explicit 32 MiB capture buffer; otherwise a healthy
-# capacity-overload run can lose evidence in the kernel and fail spuriously.
+# loopback and aggregate interfaces, while SIP performance recipes request
+# 8 MiB in both directions. Keep symmetric ceilings so the kernel can grant
+# every declared receive and send request; the preflight reads both back.
 sysctl -w net.core.rmem_max=67108864
+sysctl -w net.core.wmem_max=67108864
 test "$(sysctl -n net.core.rmem_max)" -ge 67108864
+test "$(sysctl -n net.core.wmem_max)" -ge 67108864
 
 export RVOIP_RELEASE_CANDIDATE="$CANDIDATE"
 export RVOIP_RELEASE_ENVIRONMENT_ID="$ENVIRONMENT_ID"
@@ -260,8 +359,37 @@ export RVOIP_RELEASE_RESOURCE_CLASS="$RESOURCE_CLASS"
 export RVOIP_RELEASE_RUN_ID="$RUN_ID"
 export RVOIP_RELEASE_SHARD_ID="$SHARD_ID"
 
+case "$MIMALLOC_ALLOW_THP_OVERRIDE" in
+  "") ;;
+  0|1)
+    export MIMALLOC_ALLOW_THP="$MIMALLOC_ALLOW_THP_OVERRIDE"
+    echo "mimalloc THP override set to ${MIMALLOC_ALLOW_THP} for diagnostic A/B"
+    ;;
+  *)
+    echo "rvoip-mimalloc-allow-thp must be 0, 1, or unset" >&2
+    exit 1
+    ;;
+esac
+
+if [[ "$EXTERNAL_MEMORY_DIAGNOSTICS" == "1" ]]; then
+  capture_host_memory_policy
+  capture_external_memory &
+  EXTERNAL_MEMORY_SAMPLER_PID="$!"
+  echo "external process memory and THP diagnostics enabled"
+fi
+
+set +e
 python3 scripts/release/gates.py run-shard \
   --candidate "$CANDIDATE" \
   --environment-id "$ENVIRONMENT_ID" \
   --gates "$GATES" \
   --output "$EVIDENCE"
+SHARD_STATUS=$?
+set -e
+
+if [[ -n "$EXTERNAL_MEMORY_SAMPLER_PID" ]]; then
+  kill "$EXTERNAL_MEMORY_SAMPLER_PID" >/dev/null 2>&1 || true
+  wait "$EXTERNAL_MEMORY_SAMPLER_PID" 2>/dev/null || true
+  EXTERNAL_MEMORY_SAMPLER_PID=""
+fi
+exit "$SHARD_STATUS"

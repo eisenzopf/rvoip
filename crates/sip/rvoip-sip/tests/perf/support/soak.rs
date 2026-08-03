@@ -28,6 +28,9 @@ pub const DEFAULT_RETENTION_DRAIN_WAIT_SECS: usize = MIN_RETENTION_DRAIN_WAIT_SE
 pub const BURST_RSS_DIAGNOSTIC_SETTLE_SECS: usize = 5;
 pub const BURST_RSS_QUIET_TAIL_SECS: usize = 60;
 pub const BURST_SETTLED_RSS_SAMPLE_INTERVAL_SECS: u64 = 5;
+pub const BURST_RSS_QUIESCENCE_WINDOW_SECS: u64 = 60;
+pub const BURST_RSS_QUIESCENCE_MAX_PROBES: usize = 5;
+pub const RSS_WINDOW_COVERAGE_TOLERANCE_SECS: f64 = 0.5;
 pub const MIN_BURST_RETENTION_DRAIN_WAIT_SECS: usize =
     MIN_RETENTION_DRAIN_WAIT_SECS + BURST_RSS_DIAGNOSTIC_SETTLE_SECS + BURST_RSS_QUIET_TAIL_SECS;
 pub const LONG_SOAK_ACTIVE_WINDOW_SECS: u64 = 1_200;
@@ -116,6 +119,128 @@ pub fn burst_retention_periodic_limit(
     maximum_hold: Duration,
 ) -> Duration {
     Duration::from_secs(active_duration_secs).saturating_add(maximum_hold)
+}
+
+#[derive(Debug)]
+pub struct BurstRssQuiescence {
+    pub attempted: bool,
+    pub achieved: bool,
+    pub max_growth_mb_per_hr: f64,
+    pub probes: Vec<Value>,
+}
+
+impl BurstRssQuiescence {
+    pub fn not_sampled(max_growth_mb_per_hr: f64) -> Self {
+        Self {
+            attempted: false,
+            achieved: false,
+            max_growth_mb_per_hr,
+            probes: Vec::new(),
+        }
+    }
+
+    pub fn to_json(&self) -> Value {
+        json!({
+            "attempted": self.attempted,
+            "achieved": self.achieved,
+            "max_growth_mb_per_hr": round2(self.max_growth_mb_per_hr),
+            "probe_window_secs": BURST_RSS_QUIESCENCE_WINDOW_SECS,
+            "max_probes": BURST_RSS_QUIESCENCE_MAX_PROBES,
+            "probes": self.probes.clone(),
+        })
+    }
+}
+
+pub fn rss_window_meets_minimum(observed_secs: f64, minimum_secs: f64) -> bool {
+    observed_secs.is_finite()
+        && minimum_secs.is_finite()
+        && observed_secs + RSS_WINDOW_COVERAGE_TOLERANCE_SECS >= minimum_secs
+}
+
+pub fn burst_rss_probe_is_quiescent(
+    observed_secs: f64,
+    minimum_secs: f64,
+    growth_mb_per_hr: f64,
+    max_growth_mb_per_hr: f64,
+) -> bool {
+    growth_mb_per_hr.is_finite()
+        && max_growth_mb_per_hr.is_finite()
+        && rss_window_meets_minimum(observed_secs, minimum_secs)
+        && growth_mb_per_hr <= max_growth_mb_per_hr
+}
+
+/// Require the process to demonstrate a quiet RSS interval before opening the
+/// independent authoritative gate window. This is a bounded precondition, not
+/// a retry of the gate: a process that keeps growing exhausts the probes and
+/// fails without receiving a new authoritative window.
+pub async fn wait_for_burst_rss_quiescence(
+    role: &'static str,
+    max_growth_mb_per_hr: f64,
+) -> BurstRssQuiescence {
+    assert!(
+        max_growth_mb_per_hr.is_finite() && max_growth_mb_per_hr >= 0.0,
+        "burst RSS quiescence limit must be finite and non-negative"
+    );
+
+    let minimum_window_secs = BURST_RSS_QUIESCENCE_WINDOW_SECS as f64;
+    let observation = Duration::from_secs(
+        BURST_RSS_QUIESCENCE_WINDOW_SECS.saturating_add(BURST_SETTLED_RSS_SAMPLE_INTERVAL_SECS),
+    );
+    let mut probes = Vec::with_capacity(BURST_RSS_QUIESCENCE_MAX_PROBES);
+
+    for attempt in 1..=BURST_RSS_QUIESCENCE_MAX_PROBES {
+        let sample_kind = format!("rss_quiescence_probe_{attempt}");
+        let sampler = ResourceSampler::start_with_output(
+            Duration::from_secs(BURST_SETTLED_RSS_SAMPLE_INTERVAL_SECS),
+            diagnostic_sample_path(role, &sample_kind),
+        );
+        tokio::time::sleep(observation).await;
+        let mut resources = sampler.stop().await;
+        let metrics = rss_result_metrics(
+            &resources,
+            0.0,
+            0.0,
+            observation.as_secs_f64(),
+            RssGatePolicy::SettledFull,
+        );
+        let quiescent = burst_rss_probe_is_quiescent(
+            metrics.post_drain_window_secs,
+            minimum_window_secs,
+            metrics.gate_growth_mb_per_hr,
+            max_growth_mb_per_hr,
+        );
+        probes.push(json!({
+            "attempt": attempt,
+            "observation_secs": round2(observation.as_secs_f64()),
+            "sample_count": resources.sample_count,
+            "samples_path": resources.samples_path.as_ref().map(|path| path.display().to_string()),
+            "baseline_rss_mb": round2(resources.baseline_rss_mb),
+            "peak_rss_mb": round2(resources.peak_rss_mb),
+            "window_secs": round2(metrics.post_drain_window_secs),
+            "growth_mb_per_hr": round2(metrics.gate_growth_mb_per_hr),
+            "complete": rss_window_meets_minimum(
+                metrics.post_drain_window_secs,
+                minimum_window_secs,
+            ),
+            "quiescent": quiescent,
+        }));
+        resources.samples.clear();
+        if quiescent {
+            return BurstRssQuiescence {
+                attempted: true,
+                achieved: true,
+                max_growth_mb_per_hr,
+                probes,
+            };
+        }
+    }
+
+    BurstRssQuiescence {
+        attempted: true,
+        achieved: false,
+        max_growth_mb_per_hr,
+        probes,
+    }
 }
 
 /// Measure RSS after teardown and after periodic structural diagnostics have
@@ -2720,5 +2845,26 @@ fn ratio(numerator: u64, denominator: u64) -> f64 {
         0.0
     } else {
         numerator as f64 / denominator as f64
+    }
+}
+
+#[cfg(test)]
+mod rss_quiescence_tests {
+    use super::*;
+
+    #[test]
+    fn rss_window_coverage_tolerates_sampler_jitter_but_not_a_missing_sample() {
+        assert!(rss_window_meets_minimum(119.999_661_976, 120.0));
+        assert!(!rss_window_meets_minimum(119.4, 120.0));
+        assert!(!rss_window_meets_minimum(f64::NAN, 120.0));
+    }
+
+    #[test]
+    fn burst_quiescence_fails_closed_for_growth_or_unknown_evidence() {
+        assert!(burst_rss_probe_is_quiescent(60.0, 60.0, -3.0, 15.0));
+        assert!(burst_rss_probe_is_quiescent(59.999, 60.0, 15.0, 15.0));
+        assert!(!burst_rss_probe_is_quiescent(60.0, 60.0, 15.01, 15.0));
+        assert!(!burst_rss_probe_is_quiescent(55.0, 60.0, 0.0, 15.0));
+        assert!(!burst_rss_probe_is_quiescent(60.0, 60.0, f64::NAN, 15.0,));
     }
 }

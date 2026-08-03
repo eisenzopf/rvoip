@@ -33,7 +33,10 @@ dashmap.workspace = true
 # Crate-specific dependencies
 config = "0.14"
 once_cell = "1.18.0"
-mimalloc = { version = "0.1", default-features = false }
+# Linux transparent huge-page promotion can commit partially used mimalloc
+# regions long after a burst has drained. Keep mimalloc's performance and
+# disable only its MADV_HUGEPAGE path so RSS follows live 4 KiB pages.
+mimalloc = { version = "0.1", default-features = false, features = ["no_thp"] }
 libmimalloc-sys = { version = "0.1", default-features = false, features = ["extended"], optional = true }
 anyhow = "1.0"
 tokio-util = "0.7.16"

@@ -22,6 +22,15 @@ COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 RUN_NUMBER = re.compile(r"^[1-9][0-9]*$")
 SHARD_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 GATE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+CONTROLLER_EVIDENCE_DIR = "_gcp-controller"
+WORKER_EVIDENCE_DIR = "_gcp-workers"
+WORKER_SIDECAR_NAMES = frozenset(
+    {
+        "_external-process-memory.tsv",
+        "_host-memory-policy.txt",
+        "_sccache-stats.txt",
+    }
+)
 RESOURCE_MACHINES = {
     "gcp-interop": "n2-standard-4",
     "gcp-performance": "n2-standard-8",
@@ -210,17 +219,33 @@ def safe_archive_members(archive: Path) -> list[tarfile.TarInfo]:
             or path.parts[0] != "release-shard"
         ):
             raise FanoutError(f"unsafe evidence archive path: {member.name!r}")
+        relative = path.relative_to("release-shard")
+        if relative.parts and relative.parts[0] in {
+            CONTROLLER_EVIDENCE_DIR,
+            WORKER_EVIDENCE_DIR,
+        }:
+            raise FanoutError(
+                f"evidence archive uses a reserved controller path: {member.name!r}"
+            )
         if not (member.isdir() or member.isfile()):
             raise FanoutError(f"unsupported evidence archive member: {member.name!r}")
     return members
 
 
-def merge_archive(archive: Path, destination: Path) -> None:
+def merge_archive(archive: Path, destination: Path, shard_id: str) -> None:
+    if not SHARD_ID.fullmatch(shard_id):
+        raise FanoutError(f"unsafe GCP shard id: {shard_id!r}")
     members = safe_archive_members(archive)
     with tarfile.open(archive, "r:gz") as bundle:
         for member in members:
             relative = PurePosixPath(member.name).relative_to("release-shard")
-            target = destination.joinpath(*relative.parts)
+            if member.isfile() and str(relative) in WORKER_SIDECAR_NAMES:
+                # These files describe an individual worker rather than a release
+                # gate. Preserve each copy without weakening duplicate detection
+                # for the shared gate-evidence namespace.
+                target = destination / WORKER_EVIDENCE_DIR / shard_id / relative.name
+            else:
+                target = destination.joinpath(*relative.parts)
             if member.isdir():
                 target.mkdir(parents=True, exist_ok=True)
                 continue
@@ -354,7 +379,7 @@ def verify_fanout(
     output.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{output.name}-", dir=output.parent))
     try:
-        controller = staging / "_gcp-controller"
+        controller = staging / CONTROLLER_EVIDENCE_DIR
         controller.mkdir()
         errors: list[str] = []
         failed_shards: list[str] = []
@@ -393,7 +418,7 @@ def verify_fanout(
                 failed_shards.append(shard)
                 continue
             try:
-                merge_archive(archive_path, staging)
+                merge_archive(archive_path, staging, shard)
             except FanoutError as error:
                 errors.append(str(error))
                 failed_shards.append(shard)

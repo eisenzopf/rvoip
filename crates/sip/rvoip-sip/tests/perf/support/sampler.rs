@@ -269,6 +269,10 @@ impl ResourceSampler {
     }
 
     fn start_inner(interval: Duration, samples_path: Option<PathBuf>) -> Self {
+        assert!(
+            !interval.is_zero(),
+            "resource sample interval must be non-zero"
+        );
         let samples: Arc<Mutex<Vec<ResourceSample>>> = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let samples_task = Arc::clone(&samples);
@@ -278,7 +282,13 @@ impl ResourceSampler {
         let pid = Pid::from_u32(std::process::id());
         let task_samples_path = samples_path.clone();
 
-        let task = tokio::spawn(async move {
+        // Keep procfs reads and JSONL writes on one dedicated OS thread. A
+        // movable async task can resume on a different Tokio worker after
+        // every tick; under mimalloc that touches another thread-local heap
+        // and can make the observer itself look like sustained process RSS
+        // growth. `spawn_blocking` gives this long-lived sampler one stable
+        // worker while retaining the existing async join handle.
+        let task = tokio::task::spawn_blocking(move || {
             #[cfg(not(target_os = "linux"))]
             let mut sys = System::new();
             #[cfg(target_os = "linux")]
@@ -292,10 +302,7 @@ impl ResourceSampler {
                 }
                 BufWriter::new(File::create(path).expect("create resource sample JSONL"))
             });
-            let mut ticker = tokio::time::interval(interval);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                ticker.tick().await;
                 // Refresh CPU + memory for our PID. Both backends report the
                 // first CPU reading as 0 because there is no preceding sample;
                 // it is retained and excluded from the final CPU average.
@@ -329,6 +336,7 @@ impl ResourceSampler {
                 if stop_task.load(Ordering::Relaxed) {
                     break;
                 }
+                std::thread::sleep(interval);
             }
         });
 
@@ -694,6 +702,31 @@ mod tests {
         assert_eq!(summary.samples.len(), summary.sample_count);
         assert_eq!(summary.samples_path.as_deref(), Some(path.as_path()));
         std::fs::remove_file(path).expect("remove resource sample test output");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sampler_progress_is_independent_of_the_application_runtime() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "rvoip-dedicated-resource-samples-{}-{unique}.jsonl",
+            std::process::id()
+        ));
+        let sampler = ResourceSampler::start_with_output(Duration::from_millis(10), path.clone());
+
+        // Deliberately occupy the only Tokio worker. The resource sampler must
+        // continue collecting on its dedicated blocking worker.
+        std::thread::sleep(Duration::from_millis(80));
+
+        let summary = sampler.stop().await;
+        assert!(
+            summary.sample_count >= 3,
+            "dedicated sampler stalled with the application runtime: {} samples",
+            summary.sample_count
+        );
+        std::fs::remove_file(path).expect("remove dedicated sampler test output");
     }
 
     #[cfg(target_os = "linux")]

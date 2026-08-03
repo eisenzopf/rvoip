@@ -214,6 +214,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("docker compose version >/dev/null", startup)
         self.assertIn("ulimit -n 262144", startup)
         self.assertIn('test "$(ulimit -n)" -ge 262144', startup)
+        self.assertIn("sysctl -w net.core.rmem_max=67108864", startup)
+        self.assertIn("sysctl -w net.core.wmem_max=67108864", startup)
         self.assertIn("-name '*.jsonl'", startup)
         self.assertNotRegex(startup, r"apt-get install[^\n]*\bsipp\b")
 
@@ -257,12 +259,41 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("rvoip-prebuilt-sha256=${PREBUILT_SHA256}", workflow)
         self.assertIn("install-bundle", startup)
         self.assertIn("RVOIP_PERF_PREBUILT_MANIFEST", startup)
+        self.assertIn(
+            'run_bundle_prefix="gs://${BUCKET}/release/${RUN_ID}/prebuild/"',
+            startup,
+        )
+        self.assertIn(
+            'cache_bundle_prefix="gs://${BUCKET}/release-cache/performance-prebuilt-v1/"',
+            startup,
+        )
+        self.assertIn("rvoip-external-memory-diagnostics", workflow)
+        self.assertIn(
+            "inputs.profile == 'remote-diagnostic' && '1' || '0'", workflow
+        )
+        self.assertIn("capture_external_memory", startup)
+        self.assertIn("AnonHugePages", startup)
+        self.assertIn("thp_collapse_alloc", startup)
+        self.assertIn("rvoip-mimalloc-allow-thp", startup)
+        self.assertIn('export MIMALLOC_ALLOW_THP="$MIMALLOC_ALLOW_THP_OVERRIDE"', startup)
+        self.assertIn(
+            '"/bundles/${PREBUILT_SHA256}.tar.gz"',
+            startup,
+        )
         self.assertIn("performance-prebuilt.tar.gz", builder)
         self.assertIn('download "$MANIFEST_OBJECT"', builder)
         self.assertIn("performance-manifest-readback.json", builder)
         self.assertIn("publishing_attempted", builder)
         self.assertIn("bundle digest mismatch", helper)
         self.assertIn("exact candidate", helper)
+
+    def test_production_allocator_disables_transparent_huge_pages(self) -> None:
+        manifest = tomllib.loads(
+            (ROOT / "crates/foundation/infra-common/Cargo.toml").read_text()
+        )
+        mimalloc = manifest["dependencies"]["mimalloc"]
+        self.assertFalse(mimalloc["default-features"])
+        self.assertIn("no_thp", mimalloc["features"])
 
     def test_exact_candidate_performance_bundle_is_reused_fail_closed(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
@@ -322,6 +353,9 @@ class WorkflowPolicyTests(unittest.TestCase):
         probe = (
             ROOT / "infra/release-runners/release-infrastructure-preflight.sh"
         ).read_text()
+        burst = (
+            ROOT / "crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh"
+        ).read_text()
 
         self.assertIn("remote-preflight", workflow)
         self.assertIn('test "$PROFILE" = remote-preflight', workflow)
@@ -335,11 +369,21 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('export RVOIP_RELEASE_CANDIDATE="$CANDIDATE"', startup)
         self.assertIn('export RVOIP_RELEASE_GATES="$GATES"', startup)
         self.assertIn("sysctl -w net.core.rmem_max=67108864", startup)
+        self.assertIn("sysctl -w net.core.wmem_max=67108864", startup)
+        self.assertEqual(workflow.count('--min-cpu-platform "$MIN_CPU_PLATFORM"'), 2)
+        self.assertIn("MIN_CPU_PLATFORM: Intel Cascade Lake", workflow)
+        self.assertIn("n2-cascade-lake", workflow)
         self.assertIn("expected 44 publishable workspace packages", probe)
         self.assertIn("gcp-performance|gcp-performance-soak-long", probe)
         self.assertIn("gcp-proxy-interop", probe)
         self.assertIn("for _ in range(4096)", probe)
-        self.assertIn('test "$NOFILE_LIMIT" -ge 262144', probe)
+        self.assertIn('test "$NOFILE_SOFT" -ge 262144', probe)
+        self.assertIn('test "$RMEM_MAX" -ge 8388608', probe)
+        self.assertIn('test "$WMEM_MAX" -ge 8388608', probe)
+        self.assertIn("linux_performance_host.py snapshot", probe)
+        self.assertIn("socket-buffer-probe.json", probe)
+        self.assertIn("linux_performance_host.py", burst)
+        self.assertIn("--require-zero-drops", burst)
         self.assertIn('test -z "${CARGO_REGISTRY_TOKEN:-}"', probe)
         self.assertIn('test -z "${CRATES_IO_TOKEN:-}"', probe)
         self.assertIn('"publishing_credentials_present": False', probe)
