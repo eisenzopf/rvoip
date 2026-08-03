@@ -28,6 +28,7 @@ from typing import Any
 
 MANIFEST_SCHEMA = "rvoip-performance-prebuilt-v1"
 RESULT_SCHEMA = "rvoip-gcp-performance-prebuild-result-v1"
+CACHE_KEY_SCHEMA = "rvoip-performance-prebuilt-cache-key-v1"
 COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", re.DOTALL)
@@ -46,12 +47,43 @@ def canonical_bytes(value: Any) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
+def sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def cache_key(*, candidate: str, environment_id: str, gate_ids: list[str]) -> str:
+    """Bind a reusable bundle to one exact build request.
+
+    Candidate identity remains part of the key even when two commits have the
+    same Git tree. A future build script may legitimately consume commit
+    metadata, so cross-commit reuse would not be fail-closed.
+    """
+
+    if not COMMIT_SHA.fullmatch(candidate):
+        raise PrebuiltError("cache candidate must be a full lowercase commit SHA")
+    if not environment_id:
+        raise PrebuiltError("cache environment ID must be non-empty")
+    selected = sorted({gate_id for gate_id in gate_ids if gate_id})
+    if not selected:
+        raise PrebuiltError("cache gate set must be non-empty")
+    return sha256_bytes(
+        canonical_bytes(
+            {
+                "schema": CACHE_KEY_SCHEMA,
+                "candidate_sha": candidate,
+                "environment_id": environment_id,
+                "selected_gate_ids": selected,
+            }
+        )
+    )
 
 
 def load_json(path: Path, description: str) -> dict[str, Any]:
@@ -727,6 +759,7 @@ def validate_result(
     candidate: str,
     environment_id: str,
     gate_ids: list[str],
+    expected_cache_key: str | None = None,
 ) -> dict[str, Any]:
     result = load_json(result_path, "GCP prebuild result")
     expected = {
@@ -743,6 +776,14 @@ def validate_result(
         for key, value in expected.items()
         if result.get(key) != value
     ]
+    if expected_cache_key is not None:
+        if not HEX_SHA256.fullmatch(expected_cache_key):
+            raise PrebuiltError("expected performance cache key is invalid")
+        if result.get("cache_key_sha256") != expected_cache_key:
+            failures.append(
+                "cache_key_sha256: expected "
+                f"{expected_cache_key!r}, got {result.get('cache_key_sha256')!r}"
+            )
     if not HEX_SHA256.fullmatch(str(result.get("bundle_sha256", ""))):
         failures.append("bundle_sha256 is missing or invalid")
     if not HEX_SHA256.fullmatch(str(result.get("manifest_sha256", ""))):
@@ -750,9 +791,20 @@ def validate_result(
     uri = result.get("bundle_uri")
     if not isinstance(uri, str) or not uri.startswith("gs://"):
         failures.append("bundle_uri is missing or invalid")
+    elif not uri.endswith(f"/bundles/{result.get('bundle_sha256')}.tar.gz"):
+        failures.append("bundle_uri is not content-addressed by bundle_sha256")
     manifest_uri = result.get("manifest_uri")
     if not isinstance(manifest_uri, str) or not manifest_uri.startswith("gs://"):
         failures.append("manifest_uri is missing or invalid")
+    elif not manifest_uri.endswith(
+        f"/manifests/{result.get('manifest_sha256')}.json"
+    ):
+        failures.append("manifest_uri is not content-addressed by manifest_sha256")
+    if expected_cache_key is not None:
+        required_fragment = f"/performance-prebuilt-v1/{expected_cache_key}/"
+        for label, value in (("bundle_uri", uri), ("manifest_uri", manifest_uri)):
+            if isinstance(value, str) and required_fragment not in value:
+                failures.append(f"{label} is outside the expected cache namespace")
     if failures:
         raise PrebuiltError(
             "GCP prebuild result verification failed:\n- " + "\n- ".join(failures)
@@ -767,6 +819,11 @@ def parser() -> argparse.ArgumentParser:
     select = commands.add_parser("select-gates")
     select.add_argument("--catalog", type=Path, required=True)
     select.add_argument("--gates", required=True)
+
+    cache = commands.add_parser("cache-key")
+    cache.add_argument("--candidate", required=True)
+    cache.add_argument("--environment-id", required=True)
+    cache.add_argument("--gates", required=True)
 
     build = commands.add_parser("build")
     build.add_argument("--workspace", type=Path, required=True)
@@ -809,6 +866,7 @@ def parser() -> argparse.ArgumentParser:
     verify.add_argument("--candidate", required=True)
     verify.add_argument("--environment-id", required=True)
     verify.add_argument("--gates", required=True)
+    verify.add_argument("--cache-key")
     verify.add_argument("--github-output", type=Path)
     return result
 
@@ -832,6 +890,14 @@ def main(argv: list[str] | None = None) -> int:
                     gate_id
                     for gate_id in selected
                     if gate_definition(by_id[gate_id]) is not None
+                )
+            )
+        elif args.command == "cache-key":
+            print(
+                cache_key(
+                    candidate=args.candidate,
+                    environment_id=args.environment_id,
+                    gate_ids=csv_values(args.gates),
                 )
             )
         elif args.command == "build":
@@ -899,6 +965,7 @@ def main(argv: list[str] | None = None) -> int:
                 candidate=args.candidate,
                 environment_id=args.environment_id,
                 gate_ids=csv_values(args.gates),
+                expected_cache_key=args.cache_key,
             )
             if args.github_output:
                 with args.github_output.open("a", encoding="utf-8") as handle:
