@@ -421,12 +421,16 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('gh attestation verify "$aggregate"', preflight)
         self.assertIn('candidate="$(jq -r .candidate_sha "$aggregate")"', preflight)
         self.assertIn('git merge-base --is-ancestor "$candidate" origin/main', preflight)
+        self.assertIn("cp scripts/release.py target/release-tool.py", preflight)
         self.assertIn('git checkout -B main "$candidate"', preflight)
         self.assertIn('test "$(git rev-parse HEAD)" = "$candidate"', preflight)
         self.assertLess(
             preflight.index('gh attestation verify "$aggregate"'),
             preflight.index('git checkout -B main "$candidate"'),
         )
+        self.assertIn('python3 "$RELEASE_TOOL" verify', publication)
+        self.assertIn('--qualified-head "$QUALIFIED_CANDIDATE"', publication)
+        self.assertIn('python3 "$RELEASE_TOOL" "${args[@]}"', publication)
 
     def test_release_gcp_workers_do_not_consume_one_github_job_each(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
