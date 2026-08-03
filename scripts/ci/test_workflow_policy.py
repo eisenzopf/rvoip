@@ -439,6 +439,14 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn("nc -z 127.0.0.1", lifecycle)
         self.assertIn("--name rvoip-freeswitch", lifecycle)
         self.assertIn("wait_udp_port rvoip-freeswitch 5062", lifecycle)
+        self.assertIn("wait_freeswitch_control_plane", lifecycle)
+        self.assertIn(
+            "wait_freeswitch_control_plane rvoip-freeswitch ClueCon", lifecycle
+        )
+        self.assertIn('fs_cli -p "$password"', lifecycle)
+        self.assertIn('-x "sofia status"', lifecycle)
+        self.assertIn('rvoip_udp[[:space:]].*RUNNING', lifecycle)
+        self.assertIn('rvoip_tls_srtp[[:space:]].*RUNNING', lifecycle)
         self.assertNotIn("--name rvoip-release-freeswitch", lifecycle)
         self.assertNotIn("down rvoip-release-freeswitch", lifecycle)
         for path in (
@@ -449,6 +457,22 @@ class WorkflowPolicyTests(unittest.TestCase):
         ):
             with self.subTest(path=path):
                 self.assertTrue((ROOT / path).is_file())
+
+        pbx_runner = (
+            ROOT / "crates/sip/rvoip-sip/examples/pbx/run.sh"
+        ).read_text()
+        self.assertIn('fs_cli_rc=0', pbx_runner)
+        self.assertIn('FREESWITCH_EVENT_SOCKET_PASSWORD:-ClueCon', pbx_runner)
+        self.assertIn('[ "$openssl_rc" -eq 0 ]', pbx_runner)
+        self.assertIn('[ "$fs_cli_rc" -eq 0 ]', pbx_runner)
+        self.assertIn(
+            "nc not found; TLS readiness requires the TCP socket probe", pbx_runner
+        )
+        self.assertIn(
+            "openssl not found; TLS readiness requires the handshake probe",
+            pbx_runner,
+        )
+        self.assertIn('freeswitch-container.log', pbx_runner)
 
     def test_linux_proxy_helpers_share_the_reviewed_host_network(self) -> None:
         common = (
