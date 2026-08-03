@@ -36,7 +36,7 @@ jobs:
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
-      - name: Check out current main
+      - name: Check out publication workflow revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: main
@@ -71,23 +71,37 @@ jobs:
           --name release-gate-evidence
           --dir target/downloaded-qualification
 
-      - name: Resolve and preflight aggregate
+      - name: Resolve, verify, and check out qualified candidate
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
         run: |
+          set -euo pipefail
           aggregate="$(find target/downloaded-qualification -name aggregate.json -type f -print -quit)"
           test -n "$aggregate" || {
             echo "qualification aggregate is missing" >&2
             exit 1
           }
+          gh attestation verify "$aggregate" --repo "$REPOSITORY"
           test "$(jq -r .schema "$aggregate")" = rvoip-release-qualification-v1
           test "$(jq -r .status "$aggregate")" = PASS
           test "$(jq -r .profile "$aggregate")" = remote-release
-          test "$(jq -r .candidate_sha "$aggregate")" = "$(git rev-parse HEAD)"
-          gh attestation verify "$aggregate" --repo "$REPOSITORY"
-          echo "REMOTE_QUALIFICATION=$aggregate" >> "$GITHUB_ENV"
+          candidate="$(jq -r .candidate_sha "$aggregate")"
+          [[ "$candidate" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "qualification candidate is not a full commit SHA" >&2
+            exit 1
+          }
+          git cat-file -e "$candidate^{commit}"
+          git merge-base --is-ancestor "$candidate" origin/main || {
+            echo "qualified candidate is not an ancestor of origin/main" >&2
+            exit 1
+          }
+          qualification="$(realpath "$aggregate")"
+          git checkout --detach "$candidate"
+          test "$(git rev-parse HEAD)" = "$candidate"
+          echo "QUALIFIED_CANDIDATE=$candidate" >> "$GITHUB_ENV"
+          echo "REMOTE_QUALIFICATION=$qualification" >> "$GITHUB_ENV"
 
       - name: Fresh package and source verification
         env:
