@@ -361,8 +361,10 @@ class BetaGateCompatibilitySourceTests(unittest.TestCase):
     def test_pbx_tls_readiness_tolerates_expected_startup_probe_failures(self) -> None:
         pbx = (CRATE_DIR / "examples/pbx/run.sh").read_text(encoding="utf-8")
         self.assertIn('if nc -z -w 2 "$host" "$port"; then', pbx)
-        self.assertIn("if printf '' \\\n", pbx)
+        self.assertIn("if openssl_output=$(printf '' \\\n", pbx)
         self.assertIn('openssl s_client -connect "$host:$port"', pbx)
+        self.assertIn("openssl_rc=$?", pbx)
+        self.assertIn("printf '%s\\n' \"$openssl_output\"", pbx)
 
     def test_all_thirteen_standalone_manifests_are_independent_gates(self) -> None:
         examples = shell_function("run_standalone_example_gates")
