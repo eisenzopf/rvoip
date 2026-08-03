@@ -63,6 +63,43 @@ download() {
     -o "$destination"
 }
 
+ensure_content_addressed() {
+  local source="$1"
+  local object="$2"
+  local expected_sha="$3"
+  local readback
+  readback="$(mktemp /tmp/rvoip-prebuilt-object.XXXXXX)"
+
+  # ObjectCreator deliberately cannot overwrite. An interrupted or concurrent
+  # builder may already have created this digest path, so verify those bytes
+  # instead of requiring broader storage permissions.
+  if download "$object" "$readback" >/dev/null 2>&1; then
+    if echo "${expected_sha}  ${readback}" | sha256sum --check --status; then
+      rm -f "$readback"
+      return 0
+    fi
+    rm -f "$readback"
+    echo "content-addressed object digest mismatch: ${object}" >&2
+    return 1
+  fi
+  rm -f "$readback"
+
+  if upload "$source" "$object"; then
+    return 0
+  fi
+
+  # A second builder can win after the first read and before this upload.
+  readback="$(mktemp /tmp/rvoip-prebuilt-object.XXXXXX)"
+  if download "$object" "$readback" >/dev/null 2>&1 \
+    && echo "${expected_sha}  ${readback}" | sha256sum --check --status; then
+    rm -f "$readback"
+    return 0
+  fi
+  rm -f "$readback"
+  echo "unable to create or verify content-addressed object: ${object}" >&2
+  return 1
+}
+
 finish() {
   local exit_code=$?
   local ended_at duration status
@@ -216,8 +253,8 @@ BUNDLE_OBJECT="${CACHE_PREFIX}/bundles/${BUNDLE_SHA}.tar.gz"
 MANIFEST_OBJECT="${CACHE_PREFIX}/manifests/${MANIFEST_SHA}.json"
 BUNDLE_URI="gs://${BUCKET}/${BUNDLE_OBJECT}"
 MANIFEST_URI="gs://${BUCKET}/${MANIFEST_OBJECT}"
-upload "$BUNDLE_ROOT/manifest.json" "$MANIFEST_OBJECT"
-upload "$BUNDLE" "$BUNDLE_OBJECT"
+ensure_content_addressed "$BUNDLE_ROOT/manifest.json" "$MANIFEST_OBJECT" "$MANIFEST_SHA"
+ensure_content_addressed "$BUNDLE" "$BUNDLE_OBJECT" "$BUNDLE_SHA"
 
 # Prove that the runtime service account can read evidence before deleting the
 # builder and creating the measurement fleet. Upload-only IAM otherwise fails

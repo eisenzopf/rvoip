@@ -282,6 +282,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('CACHE_KEY="$(metadata rvoip-prebuild-cache-key)"', builder)
         self.assertIn("bundles/${BUNDLE_SHA}.tar.gz", builder)
         self.assertIn("manifests/${MANIFEST_SHA}.json", builder)
+        self.assertIn("ensure_content_addressed", builder)
+        self.assertIn("content-addressed object digest mismatch", builder)
         self.assertIn('if (( exit_code == 0 )); then', builder)
         self.assertIn('upload "$RESULT" "${CACHE_PREFIX}/prebuild-result.json"', builder)
         self.assertIn("cache_key_sha256", helper)
