@@ -1864,12 +1864,12 @@ pub(crate) async fn execute_action(
             // a bodyless 200 OK back. Attaching `session.local_sdp` here
             // would turn the response into an unsolicited offer with no
             // ACK or further request to carry an answer back on.
-            let response_body = if matches!(triggering_event, EventType::UpdateReceived { sdp: None })
-            {
-                None
-            } else {
-                session.local_sdp.clone()
-            };
+            let response_body =
+                if matches!(triggering_event, EventType::UpdateReceived { sdp: None }) {
+                    None
+                } else {
+                    session.local_sdp.clone()
+                };
             let mut terminal_error = None;
             if response_is_final && initial_invite_response {
                 let terminal = send_exact_initial_invite_final_response(
@@ -2373,7 +2373,8 @@ pub(crate) async fn execute_action(
             // later answer in either, so this can't go through the
             // delayed-offer path below. SendSIPResponse separately knows
             // not to attach a body for this triggering event.
-            let bodyless_update = matches!(triggering_event, EventType::UpdateReceived { sdp: None });
+            let bodyless_update =
+                matches!(triggering_event, EventType::UpdateReceived { sdp: None });
             // Skip negotiation when caller supplied the answer SDP ahead of
             // time via `accept_call_with_sdp`. Same reasoning as
             // `GenerateLocalSDP` above.
@@ -2519,8 +2520,7 @@ pub(crate) async fn execute_action(
                             .await
                         {
                             Ok(config) => {
-                                let (sample_rate, channels) =
-                                    negotiated_audio_shape(&config.codec);
+                                let (sample_rate, channels) = negotiated_audio_shape(&config.codec);
                                 session.negotiated_config =
                                     Some(crate::session_store::state::NegotiatedConfig {
                                         local_addr: config.local_addr,

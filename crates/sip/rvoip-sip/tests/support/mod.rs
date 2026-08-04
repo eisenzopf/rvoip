@@ -41,6 +41,41 @@ pub use traces::{
 
 const ISOLATED_EXAMPLE_TARGET: &str = "rvoip-sip-integration-examples";
 
+/// Reserve a UDP port the kernel says is free right now.
+///
+/// Hard-coded port numbers make a test depend on nothing else on the machine
+/// having claimed them, which is not a property any developer box or CI runner
+/// offers. `wsdd`, avahi, a softphone and a local SIP service all bind ports in
+/// the ranges these tests used to assume, and 5060 in particular is the one
+/// port a SIP developer's machine is most likely to have taken.
+///
+/// The socket is dropped before the port is returned, so this is advisory: the
+/// port can in principle be claimed between the probe and the bind. In practice
+/// that window is microseconds, against a collision risk that is otherwise
+/// permanent.
+pub fn free_udp_port() -> u16 {
+    std::net::UdpSocket::bind("127.0.0.1:0")
+        .expect("bind an ephemeral UDP port")
+        .local_addr()
+        .expect("read the ephemeral port")
+        .port()
+}
+
+/// Reserve `count` distinct free UDP ports at once.
+///
+/// All probe sockets stay open until every port has been picked, so the ports
+/// are distinct from each other.
+pub fn free_udp_ports<const N: usize>() -> [u16; N] {
+    let sockets: Vec<std::net::UdpSocket> = (0..N)
+        .map(|_| std::net::UdpSocket::bind("127.0.0.1:0").expect("bind an ephemeral UDP port"))
+        .collect();
+    let mut ports = [0u16; N];
+    for (slot, socket) in ports.iter_mut().zip(sockets.iter()) {
+        *slot = socket.local_addr().expect("read the ephemeral port").port();
+    }
+    ports
+}
+
 fn cargo_bin() -> String {
     env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
 }

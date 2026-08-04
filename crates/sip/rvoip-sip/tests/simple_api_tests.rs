@@ -6,32 +6,51 @@
 //! send_audio, reject) have been migrated to use the StreamPeer / UnifiedCoordinator
 //! APIs.
 
+mod support;
+
 use rvoip_sip::api::unified::Config;
 use rvoip_sip::SessionId;
 use rvoip_sip::StreamPeer;
 use serial_test::serial;
 use std::time::Duration;
+use support::{free_udp_port, free_udp_ports};
 use tokio::time::timeout;
 
-/// Create a test configuration with unique ports
-fn test_config(base_port: u16) -> Config {
-    let mut config = Config::local("test", base_port);
-    config.media_port_start = base_port + 1000;
-    config.media_port_end = base_port + 2000;
+/// Create a test configuration on a port the kernel reports free.
+///
+/// The media range is derived from a second free port rather than from the SIP
+/// port, so a busy neighbour on `sip_port + 1000` cannot break the range.
+fn test_config() -> Config {
+    let [sip_port, media_base] = free_udp_ports::<2>();
+    let mut config = Config::local("test", sip_port);
+    config.media_port_start = media_base;
+    config.media_port_end = media_base + 100;
     config
 }
 
+/// `StreamPeer::new` is the single-instance convenience constructor: it takes
+/// `Config::default()`, which binds the SIP well-known port 5060.
+///
+/// That port cannot be assumed free — on a SIP developer's machine it is the
+/// one most likely to be taken, and two `new` peers in one process would
+/// collide with each other anyway. So the binding half is exercised through
+/// `with_config` on a free port, and the part `new` uniquely owns, the default
+/// configuration it derives, is asserted without binding anything.
 #[tokio::test]
 #[serial]
 async fn test_create_peer() {
-    let peer = StreamPeer::new("alice").await;
+    let defaults = Config::default();
+    assert_eq!(defaults.sip_port, 5060);
+    assert_eq!(defaults.bind_addr.port(), 5060);
+
+    let peer = StreamPeer::with_config(test_config()).await;
     assert!(peer.is_ok());
 }
 
 #[tokio::test]
 #[serial]
 async fn test_make_outgoing_call() {
-    let peer = StreamPeer::with_config(test_config(15100)).await.unwrap();
+    let peer = StreamPeer::with_config(test_config()).await.unwrap();
 
     // Make a call - returns a SessionHandle
     let handle = peer.invite("sip:bob@localhost:15101").send().await;
@@ -42,7 +61,7 @@ async fn test_make_outgoing_call() {
 #[serial]
 async fn test_hold_resume_call_via_coordinator() {
     // Hold/resume is available via UnifiedCoordinator
-    let config = test_config(15102);
+    let config = test_config();
     let coordinator = rvoip_sip::UnifiedCoordinator::new(config).await.unwrap();
 
     // Make a call
@@ -67,7 +86,7 @@ async fn test_hold_resume_call_via_coordinator() {
 #[tokio::test]
 #[serial]
 async fn test_send_dtmf_via_coordinator() {
-    let config = test_config(15104);
+    let config = test_config();
     let coordinator = rvoip_sip::UnifiedCoordinator::new(config).await.unwrap();
 
     // Make a call
@@ -96,7 +115,7 @@ async fn test_send_dtmf_via_coordinator() {
 #[tokio::test]
 #[serial]
 async fn test_recording_via_coordinator() {
-    let config = test_config(15109);
+    let config = test_config();
     let coordinator = rvoip_sip::UnifiedCoordinator::new(config).await.unwrap();
 
     // Make a call
@@ -119,7 +138,7 @@ async fn test_recording_via_coordinator() {
 #[tokio::test]
 #[serial]
 async fn test_conference_creation_via_coordinator() {
-    let config = test_config(15111);
+    let config = test_config();
     let coordinator = rvoip_sip::UnifiedCoordinator::new(config).await.unwrap();
 
     // Make first call
@@ -156,7 +175,7 @@ async fn test_conference_creation_via_coordinator() {
 #[tokio::test]
 #[serial]
 async fn test_wait_for_incoming_with_timeout() {
-    let mut peer = StreamPeer::with_config(test_config(15115)).await.unwrap();
+    let mut peer = StreamPeer::with_config(test_config()).await.unwrap();
 
     // Wait for incoming call with timeout - should timeout since no caller
     let wait_result = timeout(Duration::from_millis(100), peer.wait_for_incoming()).await;
@@ -168,7 +187,7 @@ async fn test_wait_for_incoming_with_timeout() {
 #[tokio::test]
 #[serial]
 async fn test_accept_reject_incoming_via_coordinator() {
-    let config = test_config(15116);
+    let config = test_config();
     let coordinator = rvoip_sip::UnifiedCoordinator::new(config).await.unwrap();
 
     // Simulate accepting a call (would need real session ID)
@@ -191,7 +210,7 @@ async fn test_accept_reject_incoming_via_coordinator() {
 #[tokio::test]
 #[serial]
 async fn test_hangup_call() {
-    let peer = StreamPeer::with_config(test_config(15117)).await.unwrap();
+    let peer = StreamPeer::with_config(test_config()).await.unwrap();
 
     // Make a call
     let call_id = peer.invite("sip:bob@localhost:15118").send().await.unwrap();
@@ -207,8 +226,8 @@ async fn test_hangup_call() {
 #[serial]
 async fn test_peer_to_peer_call() {
     // Create two peers
-    let alice = StreamPeer::with_config(test_config(15119)).await.unwrap();
-    let _bob = StreamPeer::with_config(test_config(15120)).await.unwrap();
+    let alice = StreamPeer::with_config(test_config()).await.unwrap();
+    let _bob = StreamPeer::with_config(test_config()).await.unwrap();
 
     // Alice calls Bob
     let call_id = alice

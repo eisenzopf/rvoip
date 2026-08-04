@@ -17,18 +17,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+mod support;
+
 use rvoip_sip::api::events::Event;
 use rvoip_sip::api::stream_peer::EventReceiver;
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
+use support::free_udp_ports;
 
-/// SIP-standard ports for the PAI integration tests. Each test fn
-/// gets its own (alice, bob) pair so transport sockets from a prior
-/// test don't need to fully release before the next test boots — even
-/// though the workspace cargo config (`.cargo/config.toml`) sets
-/// `RUST_TEST_THREADS=1` and the tests run serially.
-const PAIR_CONFIG_PAI: (u16, u16) = (5060, 5070);
-const PAIR_PER_CALL_PAI: (u16, u16) = (5080, 5090);
-const PAIR_NO_PAI: (u16, u16) = (5100, 5110);
+/// Each test fn takes its own (alice, bob) pair, allocated from ports the
+/// kernel reports free at that moment. The pair used to be hard-coded around
+/// 5060, which fails on any machine already running SIP — the one thing a SIP
+/// developer's box is most likely to be doing.
 
 /// Wait for the next event matching `pred` on `events`, up to `timeout`.
 async fn wait_for<F>(events: &mut EventReceiver, timeout: Duration, mut pred: F) -> Option<Event>
@@ -84,7 +83,7 @@ async fn config_pai_uri_surfaces_on_inbound_call() {
     let _ = tracing_subscriber::fmt::try_init();
 
     let pai = "sip:alice@trusted.carrier.example.com".to_string();
-    let (alice_port, bob_port) = PAIR_CONFIG_PAI;
+    let [alice_port, bob_port] = free_udp_ports::<2>();
     let (alice, bob) = boot_pair(alice_port, bob_port, Some(pai.clone())).await;
 
     let mut bob_events = bob.events().await.expect("bob events");
@@ -133,7 +132,7 @@ async fn per_call_pai_overrides_config() {
 
     let cfg_pai = "sip:alice@cfg.example.com".to_string();
     let per_call_pai = "sip:alice@override.example.com".to_string();
-    let (alice_port, bob_port) = PAIR_PER_CALL_PAI;
+    let [alice_port, bob_port] = free_udp_ports::<2>();
     let (alice, bob) = boot_pair(alice_port, bob_port, Some(cfg_pai.clone())).await;
 
     let mut bob_events = bob.events().await.expect("bob events");
@@ -181,7 +180,7 @@ async fn per_call_pai_overrides_config() {
 async fn no_pai_when_neither_config_nor_per_call() {
     let _ = tracing_subscriber::fmt::try_init();
 
-    let (alice_port, bob_port) = PAIR_NO_PAI;
+    let [alice_port, bob_port] = free_udp_ports::<2>();
     let (alice, bob) = boot_pair(alice_port, bob_port, None).await;
 
     let mut bob_events = bob.events().await.expect("bob events");

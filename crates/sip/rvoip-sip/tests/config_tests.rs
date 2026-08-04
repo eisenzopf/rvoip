@@ -428,7 +428,7 @@ fn advertised_address_builders_separate_private_bind_and_public_wire_addresses()
         .with_sip_advertised_addr(signaling)
         .with_media_public_addr(media);
 
-    assert_eq!(c.bind_addr, "10.0.0.10:5060".parse().unwrap());
+    assert_eq!(c.bind_addr, "10.0.0.10:5060".parse::<SocketAddr>().unwrap());
     assert_eq!(c.sip_advertised_addr, Some(signaling));
     assert_eq!(c.media_public_addr, Some(media));
     c.validate().expect("valid split bind/advertise config");
