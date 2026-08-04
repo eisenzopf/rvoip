@@ -875,12 +875,22 @@ async fn missing_heartbeat_response_is_terminal() {
 }
 
 #[tokio::test]
-async fn startup_audio_overflow_fails_closed() {
+async fn inbound_audio_burst_degrades_instead_of_terminating_the_session() {
+    // Vapi's WebSocket transport is a raw byte stream: its documentation
+    // specifies `"container": "raw"` and the sample encoding, but no frame
+    // size, no chunk size, and no pacing guarantee. Measured against a live
+    // assistant, chunks are 170-743 bytes with a p50 inter-arrival of 50 ms
+    // and a minimum of 0 ms, i.e. coalesced bursts.
+    //
+    // A burst that outruns the 20 ms-per-frame drain must cost audio, not the
+    // call. Before this behaviour changed, a transient backlog terminated the
+    // media session permanently and silently.
     let (api_base, _state, _observed, server) = start_mock(Duration::ZERO).await;
     let mut config = VapiConfig::new(VapiApiKey::new("mock-api-key").expect("mock key"))
         .with_api_base(api_base)
         .with_loopback_test_transport();
-    config.startup_audio_frames = 1;
+    // A jitter buffer far too small for the mock's burst.
+    config.inbound_queue_capacity = 1;
     config.heartbeat_interval = Duration::from_secs(60);
     let adapter = VapiAdapter::new(config).expect("adapter");
     let mut events = adapter.subscribe_events();
@@ -908,13 +918,15 @@ async fn startup_audio_overflow_fails_closed() {
         events.recv().await.expect("connected event"),
         AdapterEvent::Connected { .. }
     ));
-    assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(1), events.recv())
-            .await
-            .expect("overflow terminal timeout")
-            .expect("overflow terminal"),
-        AdapterEvent::Failed { .. }
-    ));
+
+    // The session must stay up despite the overflowing burst.
+    if let Ok(Some(event)) = tokio::time::timeout(Duration::from_secs(1), events.recv()).await {
+        assert!(
+            !matches!(event, AdapterEvent::Failed { .. }),
+            "an inbound burst terminated the session; it should have dropped \
+             frames and continued"
+        );
+    }
     server.abort();
 }
 
