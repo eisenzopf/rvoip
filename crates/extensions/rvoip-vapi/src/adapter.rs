@@ -863,6 +863,8 @@ async fn run_websocket_session(
     let mut incoming_frames = VecDeque::<Bytes>::new();
     let mut outgoing_frames = VecDeque::<Bytes>::new();
     let mut timestamp_rtp = 0u32;
+    let mut inbound_dropped: u64 = 0;
+    let mut inbound_drop_reported = false;
     let mut incoming_tick = tokio::time::interval(std::time::Duration::from_millis(20));
     incoming_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     incoming_tick.tick().await;
@@ -983,18 +985,35 @@ async fn run_websocket_session(
                 }
                 match message {
                     Some(Ok(WebSocketMessage::Binary(payload))) => {
-                        let max_queued = config
-                            .startup_audio_frames
-                            .saturating_sub(route.stream.incoming_pending_frames());
-                        if append_bounded_frames(
-                            &mut incoming_framer,
-                            &payload,
-                            &mut incoming_frames,
-                            max_queued,
-                            config.max_message_bytes,
-                        ).is_err() {
-                            metrics::counter!("rvoip_vapi_queue_overflow_total", "direction" => "in").increment(1);
-                            break SessionOutcome::Failed("Vapi inbound media buffer overflow");
+                        if payload.len() > config.max_message_bytes {
+                            break SessionOutcome::Failed("Vapi audio message exceeded size limit");
+                        }
+                        // Vapi's transport is a raw byte stream with no framing
+                        // or pacing guarantee, and it delivers coalesced bursts.
+                        // A transient backlog must degrade the jitter buffer, not
+                        // terminate the session: dropping the oldest frame costs
+                        // 20 ms of audio, whereas failing here silently ends the
+                        // call for its remaining duration.
+                        incoming_framer.push(&payload);
+                        while let Some(frame) = incoming_framer.next_frame() {
+                            if incoming_frames.len() >= config.inbound_queue_capacity {
+                                incoming_frames.pop_front();
+                                inbound_dropped = inbound_dropped.saturating_add(1);
+                                metrics::counter!(
+                                    "rvoip_vapi_inbound_frames_dropped_total"
+                                ).increment(1);
+                            }
+                            incoming_frames.push_back(frame);
+                        }
+                        // Report once per contiguous episode rather than per
+                        // frame, so a burst does not flood the log.
+                        if inbound_dropped > 0 && !inbound_drop_reported {
+                            inbound_drop_reported = true;
+                            tracing::warn!(
+                                capacity = config.inbound_queue_capacity,
+                                "inbound Vapi audio is arriving faster than it drains; \
+                                 dropping the oldest frames"
+                            );
                         }
                     }
                     Some(Ok(WebSocketMessage::Text(text))) => {
@@ -1041,6 +1060,12 @@ async fn run_websocket_session(
         }
     };
 
+    if inbound_dropped > 0 {
+        tracing::warn!(
+            dropped_frames = inbound_dropped,
+            "Vapi session dropped inbound audio frames to keep the jitter buffer bounded"
+        );
+    }
     match &outcome {
         SessionOutcome::Local(_) => {
             wait_for_vapi_shutdown(config, global_events, route, &mut socket).await;
@@ -1162,7 +1187,11 @@ async fn finish_route(
         SessionOutcome::RemoteClosed => {
             metrics::counter!("rvoip_vapi_disconnects_total", "outcome" => "abnormal").increment(1);
         }
-        SessionOutcome::Failed(_) => {
+        SessionOutcome::Failed(detail) => {
+            // Previously this incremented a counter and discarded `detail`,
+            // so a terminated media session was invisible to anyone not
+            // scraping metrics mid-call.
+            tracing::warn!(detail, "Vapi session failed");
             metrics::counter!("rvoip_vapi_disconnects_total", "outcome" => "failed").increment(1);
         }
         SessionOutcome::Local(_) => {}

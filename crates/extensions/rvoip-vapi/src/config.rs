@@ -61,7 +61,24 @@ pub struct VapiConfig {
     pub control_queue_capacity: usize,
     pub event_queue_capacity: usize,
     pub max_message_bytes: usize,
+    /// Frames buffered before the first is handed downstream.
+    ///
+    /// Historically this also served as the inbound queue bound. It no longer
+    /// does: see [`VapiConfig::inbound_queue_capacity`].
     pub startup_audio_frames: usize,
+    /// Inbound jitter buffer depth, in frames.
+    ///
+    /// Vapi's WebSocket transport is a *raw byte stream*: the documentation
+    /// specifies the sample encoding and `"container": "raw"`, but no frame
+    /// size, no chunk size, and no pacing guarantee. Measured against a live
+    /// assistant, chunks are 170-743 bytes with a p50 inter-arrival of 50 ms
+    /// and a **minimum of 0 ms** — i.e. coalesced bursts carrying ~90 ms of
+    /// audio at once, against a drain that emits one 20 ms frame per tick.
+    ///
+    /// This must therefore absorb a burst. It is deliberately not capped the
+    /// way `startup_audio_frames` is, because the appropriate depth depends on
+    /// the peer's burst behaviour rather than on startup latency.
+    pub inbound_queue_capacity: usize,
     pub(crate) allow_insecure_transport: bool,
 }
 
@@ -84,6 +101,7 @@ impl VapiConfig {
             event_queue_capacity: 100,
             max_message_bytes: 1024 * 1024,
             startup_audio_frames: 100,
+            inbound_queue_capacity: 200,
             allow_insecure_transport: false,
         }
     }
@@ -124,6 +142,7 @@ impl VapiConfig {
             || self.control_queue_capacity == 0
             || self.event_queue_capacity == 0
             || self.startup_audio_frames == 0
+            || self.inbound_queue_capacity == 0
         {
             return Err(VapiError::InvalidConfiguration(
                 "queue capacities must be non-zero",
@@ -164,6 +183,7 @@ impl fmt::Debug for VapiConfig {
             .field("event_queue_capacity", &self.event_queue_capacity)
             .field("max_message_bytes", &self.max_message_bytes)
             .field("startup_audio_frames", &self.startup_audio_frames)
+            .field("inbound_queue_capacity", &self.inbound_queue_capacity)
             .field("insecure_transport", &self.allow_insecure_transport)
             .finish()
     }

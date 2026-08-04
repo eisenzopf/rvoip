@@ -112,12 +112,6 @@ impl VapiMediaStream {
             .map_err(|_| VapiError::MediaQueueOverflow)
     }
 
-    pub(crate) fn incoming_pending_frames(&self) -> usize {
-        self.incoming_tx
-            .max_capacity()
-            .saturating_sub(self.incoming_tx.capacity())
-    }
-
     pub(crate) fn incoming_has_capacity(&self) -> bool {
         self.incoming_tx.capacity() > 0 && !self.incoming_tx.is_closed()
     }
