@@ -16,6 +16,7 @@ use crate::adapters::{DialogAdapter, MediaAdapter};
 use crate::api::lifecycle::{
     ExactTerminalClaim, ExactTerminalCompletion, LifecycleIndex, SessionEventPublisher,
 };
+use crate::api::unified::ReferDefaultAction;
 use crate::cleanup_diag::{self, CleanupStage};
 use crate::errors::{Result as SessionResult, SessionError};
 use crate::retained_tasks::RetainedTasks;
@@ -51,7 +52,6 @@ use tracing::{debug, error, info, warn};
 
 const STATE_MACHINE_DISPATCH_JOIN_FAILURE: &str =
     "SIP state-machine dispatch task failed (class=join)";
-const REFER_DEFAULT_ACTION_DELAY: Duration = Duration::from_millis(500);
 const REFER_DEFAULT_ACTION_COMPLETION_GRACE: Duration = Duration::from_secs(2);
 
 type StateMachineProcessResult =
@@ -1722,6 +1722,9 @@ pub struct SessionCrossCrateEventHandler {
     /// Immediately accept inbound calls after the state machine records them.
     fast_auto_accept_incoming_calls: bool,
 
+    /// What happens to an inbound REFER the application leaves undecided.
+    refer_default_action: ReferDefaultAction,
+
     /// Config-owned cap for server-side inbound call admission.
     server_call_admission_limit: Option<usize>,
 
@@ -2839,6 +2842,7 @@ impl SessionCrossCrateEventHandler {
             registry,
             incoming_call_tx: None,
             fast_auto_accept_incoming_calls: false,
+            refer_default_action: ReferDefaultAction::default(),
             server_call_admission_limit: None,
             server_call_admission_soft_limit: None,
             server_call_admission_pacing_delay_ms: None,
@@ -2880,6 +2884,7 @@ impl SessionCrossCrateEventHandler {
             registry,
             incoming_call_tx: Some(incoming_call_tx),
             fast_auto_accept_incoming_calls: false,
+            refer_default_action: ReferDefaultAction::default(),
             server_call_admission_limit: None,
             server_call_admission_soft_limit: None,
             server_call_admission_pacing_delay_ms: None,
@@ -2937,6 +2942,12 @@ impl SessionCrossCrateEventHandler {
         debug_assert!(Arc::ptr_eq(&self.state_machine, &helpers.state_machine));
         self.helpers = helpers;
         self.retained_tasks = retained_tasks;
+        self
+    }
+
+    /// Install the configured policy for undecided inbound REFERs.
+    pub(crate) fn with_refer_default_action(mut self, action: ReferDefaultAction) -> Self {
+        self.refer_default_action = action;
         self
     }
 
@@ -5442,6 +5453,7 @@ impl SessionCrossCrateEventHandler {
             },
         );
 
+        let policy = self.refer_default_action;
         let state_machine = Arc::clone(&self.state_machine);
         let authority = Arc::clone(state_machine.store.authority());
         let operation_key = lifecycle_handle.key().clone();
@@ -5449,7 +5461,9 @@ impl SessionCrossCrateEventHandler {
         let refer_to_for_default = refer_to.clone();
         let transfer_type_for_default = transfer_type.clone();
         let transaction_for_default = transaction_id.clone();
-        let hard_timeout = REFER_DEFAULT_ACTION_DELAY
+        let publisher_for_default = self.app_event_publisher.clone();
+        let hard_timeout = policy
+            .wait()
             .saturating_add(self.dialog_adapter.non_invite_transaction_timeout())
             .saturating_add(REFER_DEFAULT_ACTION_COMPLETION_GRACE);
         let scheduled = authority
@@ -5469,7 +5483,7 @@ impl SessionCrossCrateEventHandler {
                         .await;
                     };
                     tokio::select! {
-                        _ = tokio::time::sleep(REFER_DEFAULT_ACTION_DELAY) => {}
+                        _ = tokio::time::sleep(policy.wait()) => {}
                         () = wait_for_owned_operation_cancellation(&mut cancellation) => {
                             return rollback_owned_delayed_signaling(
                                 operation,
@@ -5502,6 +5516,54 @@ impl SessionCrossCrateEventHandler {
                         // response won the race, so the causal delivery is
                         // already terminal and the delayed default is a no-op.
                         return rollback_owned_delayed_signaling(operation, Ok(())).await;
+                    }
+
+                    if let ReferDefaultAction::RequireApplicationDecision {
+                        on_timeout_status, ..
+                    } = policy
+                    {
+                        // The application owns this decision and did not make
+                        // one in time. Reject explicitly: a server non-INVITE
+                        // transaction that is never answered does not expire on
+                        // its own (RFC 3261 §17.2.2), so leaving it open would
+                        // hold a transaction and this session's staged transfer
+                        // state until the session itself ends.
+                        let rejected = state_machine
+                            .reject_refer_exact(&lifecycle_handle, on_timeout_status)
+                            .await;
+                        return match rejected {
+                            Ok(()) => {
+                                warn!(
+                                    session_id = %lifecycle_handle.session_id(),
+                                    status = on_timeout_status,
+                                    "Rejecting undecided inbound REFER after the application decision timeout"
+                                );
+                                publisher_for_default.publish_exact(
+                                    &lifecycle_handle,
+                                    crate::api::events::Event::ReferDefaultActionApplied {
+                                        call_id: lifecycle_handle.session_id().clone(),
+                                        transaction_id: transaction_for_default,
+                                        status_code: on_timeout_status,
+                                        accepted: false,
+                                    },
+                                );
+                                commit_owned_delayed_signaling_ack(operation).await
+                            }
+                            Err(error) => {
+                                let detail = error.to_string();
+                                tracing::error!(
+                                    session_id = %lifecycle_handle.session_id(),
+                                    "Failed to reject undecided TransferRequested: {detail}"
+                                );
+                                rollback_owned_delayed_signaling(
+                                    operation,
+                                    Err(format!(
+                                        "undecided REFER rejection failed before a classified final response: {detail}"
+                                    )),
+                                )
+                                .await
+                            }
+                        };
                     }
 
                     let dispatch = state_machine
@@ -5562,6 +5624,20 @@ impl SessionCrossCrateEventHandler {
                     // lane-owned working state; the transition's canonical commit
                     // is the only writer. No post-transition repair write is
                     // needed here.
+                    //
+                    // The 202 went out under rvoip-sip's name, not the
+                    // application's, and it also confirmed the RFC 3515 implicit
+                    // subscription. Say so, because nothing else in the public
+                    // surface distinguishes this from an application decision.
+                    publisher_for_default.publish_exact(
+                        &lifecycle_handle,
+                        crate::api::events::Event::ReferDefaultActionApplied {
+                            call_id: lifecycle_handle.session_id().clone(),
+                            transaction_id: transaction_for_default,
+                            status_code: 202,
+                            accepted: true,
+                        },
+                    );
                     commit_owned_delayed_signaling_ack(operation).await
                 },
             )
@@ -5570,6 +5646,19 @@ impl SessionCrossCrateEventHandler {
                     "REFER default action was not admitted for exact session {session_id}: {error}"
                 )
             })?;
+
+        if !policy.accepts_on_expiry() {
+            // Nothing will answer this REFER on the application's behalf, so
+            // the causal acknowledgement owed to dialog-core is already final:
+            // the transfer is staged and `ReferReceived` is published. Waiting
+            // here would pin this dialog-to-session dispatch shard for the whole
+            // decision timeout, and shards are shared by session hash, so it
+            // would stall unrelated sessions. Dropping the waiter does not
+            // cancel the bounded rejector: `spawn_owned` retains its own
+            // supervisor and hard deadline.
+            drop(scheduled);
+            return Ok(());
+        }
 
         let processing_ack = scheduled.await.map_err(|error| {
             anyhow::anyhow!(
@@ -5631,18 +5720,17 @@ impl SessionCrossCrateEventHandler {
                 "Tearing down session {} after failed delayed-offer ACK negotiation",
                 session_id
             );
-            let _ = self.state_machine.store.update_session_exact_with(
-                handle,
-                None,
-                |session| {
+            let _ = self
+                .state_machine
+                .store
+                .update_session_exact_with(handle, None, |session| {
                     session.needs_teardown_after_failed_ack_negotiation = false;
                     session.pending_bye_reason = Some((
                         "SIP".to_string(),
                         488,
                         Some("Delayed offer negotiation failed".to_string()),
                     ));
-                },
-            );
+                });
             if let Err(error) = self
                 .state_machine
                 .process_event_exact(handle, EventType::HangupCall)
@@ -7511,6 +7599,14 @@ mod tests {
         assert!(delayed_default < yaml_dispatch);
         assert!(handler.contains("EventType::TransferRequested"));
         assert!(!handler.contains("record_transfer_request_exact"));
+        assert!(
+            handler.contains("Event::ReferDefaultActionApplied"),
+            "an answer sent for the application must be observable by it"
+        );
+        assert!(
+            !handler.contains("REFER_DEFAULT_ACTION_DELAY"),
+            "the default-action wait is config-owned, not a compiled constant"
+        );
     }
 
     #[test]
@@ -7524,11 +7620,25 @@ mod tests {
         let admission = handler
             .find(".spawn_owned_exact(")
             .expect("exact retained REFER admission");
+        let early_return = handler
+            .find("if !policy.accepts_on_expiry() {")
+            .expect("a policy that never answers releases the dispatch shard early");
         let waiter = handler
             .find("let processing_ack = scheduled.await")
             .expect("causal ACK waits for retained REFER completion");
 
-        assert!(admission < waiter);
+        assert!(admission < early_return);
+        assert!(early_return < waiter);
+        assert!(
+            handler.contains("drop(scheduled);"),
+            "the decision-required policy must drop the waiter instead of \
+             pinning the shard for the whole decision timeout"
+        );
+        assert!(
+            handler.contains(".reject_refer_exact(&lifecycle_handle, on_timeout_status)"),
+            "an expired decision window must send an explicit rejection, not \
+             leave the server non-INVITE transaction open forever"
+        );
         assert!(handler.contains("exact_response_failure_processing_ack("));
         assert!(handler.contains("cancelled before a classified final response"));
         assert!(handler.contains("ended before a classified final response"));

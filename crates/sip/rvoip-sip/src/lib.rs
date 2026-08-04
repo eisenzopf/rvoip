@@ -601,8 +601,9 @@ pub use api::lifecycle::{
 
 // Configuration & registration
 pub use api::unified::{
-    AudioSource, BridgeError, BridgeHandle, MediaSessionControllerConfig, Registration, RelUsage,
-    RtpSessionBufferConfig, RtpTransportBufferConfig, SipNatConfig, SymmetricRtpPolicy,
+    AudioSource, BridgeError, BridgeHandle, MediaSessionControllerConfig, ReferDefaultAction,
+    Registration, RelUsage, RtpSessionBufferConfig, RtpTransportBufferConfig, SipNatConfig,
+    SymmetricRtpPolicy,
 };
 pub use api::{
     Config, MediaMode, RegistrationHandle, RegistrationInfo, RegistrationStatus, SipContactMode,

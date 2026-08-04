@@ -2564,6 +2564,10 @@ impl<H: CallHandler> CallbackPeer<H> {
 
                 Event::SessionRefreshed { .. }
                 | Event::SessionRefreshFailed { .. }
+                // rvoip-sip already answered this REFER because the hook did
+                // not decide in time. There is nothing left for a hook to do,
+                // so it is observation-only through `handler.on_event(...)`.
+                | Event::ReferDefaultActionApplied { .. }
                 | Event::CallMuted { .. }
                 | Event::CallUnmuted { .. }
                 | Event::MediaQualityChanged { .. }

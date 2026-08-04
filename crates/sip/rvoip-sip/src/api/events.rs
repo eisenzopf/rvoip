@@ -384,10 +384,20 @@ pub enum Event {
     // ===== Transfer Events =====
     /// REFER request received
     ///
-    /// Callback handlers may accept or reject the REFER through their return
-    /// value. Stream/unified users can call `accept_refer` or `reject_refer`;
-    /// if they do nothing, rvoip-sip preserves the legacy behavior and
-    /// accepts the REFER after a short grace period.
+    /// Answer it with `accept_refer` or `reject_refer` on the session handle.
+    /// Callback handlers can return a decision from their `on_refer_received`
+    /// hook, which the callback surface turns into the same two calls.
+    ///
+    /// Under the default [`crate::ReferDefaultAction::AcceptAfter`] policy the
+    /// decision is a race: whichever lands first wins, and if the application
+    /// has not answered within the configured delay rvoip-sip sends
+    /// `202 Accepted` on its behalf and publishes
+    /// [`Event::ReferDefaultActionApplied`]. This applies to callback handlers
+    /// too — a hook that takes longer than the delay loses the race, and its
+    /// later decision fails because the transaction is already answered.
+    /// Applications that need to decide on their own schedule should configure
+    /// [`crate::ReferDefaultAction::RequireApplicationDecision`], which never
+    /// answers for them.
     ReferReceived {
         /// Session identifier for the dialog that received REFER.
         call_id: CallId,
@@ -408,6 +418,29 @@ pub enum Event {
         /// `None` for legacy publish sites that have not been migrated
         /// yet.
         request: Option<crate::api::incoming::IncomingRequest>,
+    },
+
+    /// rvoip-sip answered an inbound REFER because the application did not.
+    ///
+    /// Published after the configured [`crate::ReferDefaultAction`] sends a
+    /// final response for a REFER the application left undecided. It is the
+    /// only signal that the library, and not the application, owns that
+    /// answer: by the time it arrives the transaction is closed, a later
+    /// `accept_refer` / `reject_refer` will fail, and under the accepting
+    /// policy the RFC 3515 implicit subscription has already been confirmed.
+    ///
+    /// An application that never wants to see this event should configure
+    /// [`crate::ReferDefaultAction::RequireApplicationDecision`], where it is
+    /// only emitted if the decision timeout itself expires.
+    ReferDefaultActionApplied {
+        /// Session identifier for the dialog that received the REFER.
+        call_id: CallId,
+        /// Dialog-core transaction ID of the answered REFER.
+        transaction_id: String,
+        /// Final status rvoip-sip sent on the application's behalf.
+        status_code: u16,
+        /// Whether the REFER was accepted rather than rejected.
+        accepted: bool,
     },
 
     /// Transfer accepted by recipient
@@ -844,6 +877,17 @@ impl std::fmt::Debug for Event {
                 .field("realm_present", &!realm.is_empty())
                 .field("realm_bytes", &realm.len())
                 .finish(),
+            Self::ReferDefaultActionApplied {
+                transaction_id,
+                status_code,
+                accepted,
+                ..
+            } => formatter
+                .debug_struct("ReferDefaultActionApplied")
+                .field("transaction_id_bytes", &transaction_id.len())
+                .field("status_code", status_code)
+                .field("accepted", accepted)
+                .finish(),
             Self::ReferReceived {
                 refer_to,
                 referred_by,
@@ -1085,6 +1129,7 @@ impl Event {
             | Event::SessionRefreshFailed { call_id, .. }
             | Event::CallAuthRetrying { call_id, .. }
             | Event::ReferReceived { call_id, .. }
+            | Event::ReferDefaultActionApplied { call_id, .. }
             | Event::TransferAccepted { call_id, .. }
             | Event::TransferFailed { call_id, .. }
             | Event::ReferProgress { call_id, .. }
@@ -1176,6 +1221,7 @@ impl Event {
         matches!(
             self,
             Event::ReferReceived { .. }
+                | Event::ReferDefaultActionApplied { .. }
                 | Event::TransferAccepted { .. }
                 | Event::ReferCompleted { .. }
                 | Event::TransferFailed { .. }

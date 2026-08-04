@@ -50,6 +50,16 @@ impl SessionBuilder {
         self
     }
 
+    /// Choose what happens to an inbound REFER the application leaves
+    /// undecided. Defaults to the historical 500 ms auto-accept.
+    pub fn with_refer_default_action(
+        mut self,
+        action: crate::api::unified::ReferDefaultAction,
+    ) -> Self {
+        self.config = self.config.with_refer_default_action(action);
+        self
+    }
+
     /// Enable or disable immediate session-path accept for inbound INVITEs.
     pub fn with_fast_auto_accept_incoming_calls(mut self, enabled: bool) -> Self {
         self.config = self.config.with_fast_auto_accept_incoming_calls(enabled);

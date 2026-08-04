@@ -1451,6 +1451,8 @@ pub struct EndpointConfig {
     pub auto_100_trying: Option<bool>,
     /// Whether inbound INVITEs are immediately accepted before app callbacks.
     pub fast_auto_accept_incoming_calls: Option<bool>,
+    /// What happens to an inbound REFER the application leaves undecided.
+    pub refer_default_action: Option<crate::api::unified::ReferDefaultAction>,
     /// Cleanup-stage timing diagnostics.
     pub cleanup_diagnostics: Option<bool>,
     /// Per-operation cleanup diagnostic event logs.
@@ -1496,6 +1498,7 @@ impl fmt::Debug for EndpointConfig {
             .field("performance_configured", &self.performance.is_some())
             .field("auto_180_ringing", &self.auto_180_ringing)
             .field("auto_100_trying", &self.auto_100_trying)
+            .field("refer_default_action", &self.refer_default_action)
             .field(
                 "fast_auto_accept_incoming_calls",
                 &self.fast_auto_accept_incoming_calls,
@@ -1838,6 +1841,7 @@ pub struct EndpointBuilder {
     srtp_mode: Option<EndpointSrtpMode>,
     auto_180_ringing: Option<bool>,
     auto_100_trying: Option<bool>,
+    refer_default_action: Option<crate::api::unified::ReferDefaultAction>,
     fast_auto_accept_incoming_calls: Option<bool>,
     cleanup_diagnostics: Option<bool>,
     cleanup_diagnostic_events: Option<bool>,
@@ -1889,6 +1893,7 @@ impl EndpointBuilder {
             srtp_mode: None,
             auto_180_ringing: None,
             auto_100_trying: None,
+            refer_default_action: None,
             fast_auto_accept_incoming_calls: None,
             cleanup_diagnostics: None,
             cleanup_diagnostic_events: None,
@@ -1941,6 +1946,9 @@ impl EndpointBuilder {
 
         if let Some(account) = config.account {
             builder = builder.endpoint_account(account.try_into()?);
+        }
+        if let Some(action) = config.refer_default_action {
+            builder = builder.refer_default_action(action);
         }
         if let Some(auto_180_ringing) = config.auto_180_ringing {
             builder = builder.auto_180_ringing(auto_180_ringing);
@@ -2291,6 +2299,13 @@ impl EndpointBuilder {
         self
     }
 
+    /// Choose what happens to an inbound REFER the application leaves
+    /// undecided. Defaults to the historical 500 ms auto-accept.
+    pub fn refer_default_action(mut self, action: crate::api::unified::ReferDefaultAction) -> Self {
+        self.refer_default_action = Some(action);
+        self
+    }
+
     /// Enable or disable immediate session-path accept for inbound INVITEs.
     pub fn fast_auto_accept_incoming_calls(mut self, enabled: bool) -> Self {
         self.fast_auto_accept_incoming_calls = Some(enabled);
@@ -2487,6 +2502,9 @@ impl EndpointBuilder {
         }
         if let Some(auto_100_trying) = self.auto_100_trying {
             config.auto_100_trying = auto_100_trying;
+        }
+        if let Some(action) = self.refer_default_action {
+            config.refer_default_action = action;
         }
         if let Some(fast_auto_accept) = self.fast_auto_accept_incoming_calls {
             config.fast_auto_accept_incoming_calls = fast_auto_accept;

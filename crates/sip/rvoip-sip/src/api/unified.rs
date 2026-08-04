@@ -324,6 +324,88 @@ pub enum SipContactMode {
     RegisteredFlowSymmetric,
 }
 
+/// What rvoip-sip does with an inbound REFER the application has not answered.
+///
+/// An inbound REFER publishes [`crate::Event::ReferReceived`] and then waits
+/// for `accept_refer` / `reject_refer`. This decides what happens when the
+/// application does not answer in time.
+///
+/// The default is [`ReferDefaultAction::AcceptAfter`] with 500 ms, which is
+/// the historical behaviour. It is a poor fit for any application that has to
+/// consult another service before deciding: losing that race turns "not
+/// decided yet" into a `202 Accepted` sent on the application's behalf, along
+/// with the RFC 3515 §2.4.5 `100 Trying` NOTIFY that confirms the implicit
+/// subscription. The application cannot detect or undo that afterwards.
+/// Deployments that make real decisions should use
+/// [`ReferDefaultAction::RequireApplicationDecision`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReferDefaultAction {
+    /// Accept the REFER on the application's behalf after the given delay.
+    ///
+    /// The delay is also how long the dialog-to-session dispatch shard stays
+    /// occupied by this REFER, because the causal processing acknowledgement
+    /// owed to dialog-core is only classified once the default action reaches
+    /// a final response. Sessions are assigned to shards by hash, so a long
+    /// delay here holds up unrelated sessions. Prefer
+    /// [`ReferDefaultAction::RequireApplicationDecision`] over a large delay.
+    AcceptAfter(Duration),
+
+    /// Never answer a REFER for the application.
+    ///
+    /// The REFER stays pending until `accept_refer` or `reject_refer` is
+    /// called. `timeout` bounds that wait: a server non-INVITE transaction
+    /// that is never answered does not expire on its own (RFC 3261 §17.2.2),
+    /// so an unbounded wait would accumulate open transactions and staged
+    /// transfer state until transaction admission capacity is exhausted, which
+    /// degrades every request and not just REFER. On expiry the REFER is
+    /// rejected with `on_timeout_status`, which is an explicit "no" rather
+    /// than an invented "yes".
+    RequireApplicationDecision {
+        /// How long the REFER may stay undecided.
+        timeout: Duration,
+        /// Final status sent when `timeout` elapses with no decision.
+        on_timeout_status: u16,
+    },
+}
+
+impl Default for ReferDefaultAction {
+    fn default() -> Self {
+        Self::AcceptAfter(Self::DEFAULT_ACCEPT_DELAY)
+    }
+}
+
+impl ReferDefaultAction {
+    /// Historical auto-accept delay, kept as the default for compatibility.
+    pub const DEFAULT_ACCEPT_DELAY: Duration = Duration::from_millis(500);
+    /// Default bound on an application decision.
+    pub const DEFAULT_DECISION_TIMEOUT: Duration = Duration::from_secs(10);
+    /// Default rejection when the application does not decide in time.
+    pub const DEFAULT_DECISION_TIMEOUT_STATUS: u16 = 603;
+
+    /// Require an explicit application decision, bounded by `timeout` and
+    /// rejected with `603 Decline` on expiry.
+    pub const fn require_application_decision(timeout: Duration) -> Self {
+        Self::RequireApplicationDecision {
+            timeout,
+            on_timeout_status: Self::DEFAULT_DECISION_TIMEOUT_STATUS,
+        }
+    }
+
+    /// How long this policy waits before acting on its own.
+    pub const fn wait(self) -> Duration {
+        match self {
+            Self::AcceptAfter(delay) => delay,
+            Self::RequireApplicationDecision { timeout, .. } => timeout,
+        }
+    }
+
+    /// Whether an undecided REFER is accepted rather than rejected.
+    pub const fn accepts_on_expiry(self) -> bool {
+        matches!(self, Self::AcceptAfter(_))
+    }
+}
+
 /// Which SRTP keying mechanism to offer when [`Config::offer_srtp`] is set.
 ///
 /// The two are mutually exclusive on the wire: SDES carries the raw
@@ -1909,6 +1991,15 @@ pub struct Config {
     /// final response path.
     pub fast_auto_accept_incoming_calls: bool,
 
+    /// What happens to an inbound REFER the application has not answered.
+    ///
+    /// Default: [`ReferDefaultAction::AcceptAfter`] with 500 ms, preserving
+    /// the historical auto-accept. Applications that consult another service
+    /// before deciding a transfer should set
+    /// [`ReferDefaultAction::RequireApplicationDecision`] so that an undecided
+    /// REFER never becomes a `202 Accepted` sent on their behalf.
+    pub refer_default_action: ReferDefaultAction,
+
     /// Maximum seconds a locally-initiated setup teardown state may wait for
     /// its matching dialog event before rvoip-sip synthesizes the existing
     /// `DialogTimeout` transition and releases local resources.
@@ -2895,6 +2986,7 @@ impl Config {
             auto_180_ringing: true,
             auto_100_trying: true,
             fast_auto_accept_incoming_calls: false,
+            refer_default_action: ReferDefaultAction::default(),
             setup_teardown_timeout_secs: Self::DEFAULT_SETUP_TEARDOWN_TIMEOUT_SECS,
             active_call_no_media_timeout_secs: 0,
             active_call_media_idle_timeout_secs: 0,
@@ -3014,6 +3106,7 @@ impl Config {
             auto_180_ringing: true,
             auto_100_trying: true,
             fast_auto_accept_incoming_calls: false,
+            refer_default_action: ReferDefaultAction::default(),
             setup_teardown_timeout_secs: Self::DEFAULT_SETUP_TEARDOWN_TIMEOUT_SECS,
             active_call_no_media_timeout_secs: 0,
             active_call_media_idle_timeout_secs: 0,
@@ -3587,6 +3680,30 @@ impl Config {
     /// response is expected well before Timer 100 would fire.
     pub fn with_auto_100_trying(mut self, enabled: bool) -> Self {
         self.auto_100_trying = enabled;
+        self
+    }
+
+    /// Choose what happens to an inbound REFER the application leaves
+    /// undecided.
+    ///
+    /// The default keeps the historical 500 ms auto-accept. Applications that
+    /// take longer than that to decide a transfer should require an explicit
+    /// decision instead, so that a slow decision is never mistaken for
+    /// consent.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use std::time::Duration;
+    /// use rvoip_sip::{Config, ReferDefaultAction};
+    ///
+    /// let config = Config::local("alice", 5060).with_refer_default_action(
+    ///     ReferDefaultAction::require_application_decision(Duration::from_secs(15)),
+    /// );
+    /// assert!(!config.refer_default_action.accepts_on_expiry());
+    /// ```
+    pub fn with_refer_default_action(mut self, action: ReferDefaultAction) -> Self {
+        self.refer_default_action = action;
         self
     }
 
@@ -8795,6 +8912,7 @@ impl UnifiedCoordinator {
             .set_app_event_publisher(app_event_publisher.clone())
             .await;
         let fast_auto_accept_incoming_calls = config.fast_auto_accept_incoming_calls;
+        let refer_default_action = config.refer_default_action;
         let fast_auto_accept_queue_capacity = config.incoming_call_channel_capacity;
         let server_call_admission_limit = config.server_call_admission_limit;
         let server_call_admission_soft_limit = config.server_call_admission_soft_limit;
@@ -8895,6 +9013,7 @@ impl UnifiedCoordinator {
                 fast_auto_accept_incoming_calls,
                 fast_auto_accept_queue_capacity,
             )
+            .with_refer_default_action(refer_default_action)
             .with_server_call_admission(
                 server_call_admission_limit,
                 server_call_admission_soft_limit,
