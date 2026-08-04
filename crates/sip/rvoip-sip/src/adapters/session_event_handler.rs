@@ -2184,17 +2184,16 @@ impl SessionCrossCrateEventHandler {
                 {
                     let offered_sdp = sdp.clone().expect("checked Some above");
                     let transaction_id = inbound_response.transaction_id()?.clone();
-                    let _ = self.state_machine.store.update_session_exact_with(
-                        handle,
-                        None,
-                        |session| {
-                            session.pending_incoming_reinvite =
-                                Some(crate::session_store::state::PendingIncomingReinvite {
-                                    transaction_id,
-                                    offered_sdp: offered_sdp.clone(),
-                                });
-                        },
-                    );
+                    let _ = self
+                        .state_machine
+                        .stage_incoming_reinvite_exact(
+                            handle,
+                            crate::session_store::state::PendingIncomingReinvite {
+                                transaction_id,
+                                offered_sdp: offered_sdp.clone(),
+                            },
+                        )
+                        .await;
                     self.app_event_publisher.publish_exact(
                         handle,
                         crate::api::events::Event::IncomingReinvite {
@@ -5720,17 +5719,21 @@ impl SessionCrossCrateEventHandler {
                 "Tearing down session {} after failed delayed-offer ACK negotiation",
                 session_id
             );
-            let _ = self
+            let claimed = self
                 .state_machine
-                .store
-                .update_session_exact_with(handle, None, |session| {
-                    session.needs_teardown_after_failed_ack_negotiation = false;
-                    session.pending_bye_reason = Some((
+                .claim_failed_ack_negotiation_teardown_exact(
+                    handle,
+                    (
                         "SIP".to_string(),
                         488,
                         Some("Delayed offer negotiation failed".to_string()),
-                    ));
-                });
+                    ),
+                )
+                .await
+                .unwrap_or(false);
+            if !claimed {
+                return Ok(());
+            }
             if let Err(error) = self
                 .state_machine
                 .process_event_exact(handle, EventType::HangupCall)

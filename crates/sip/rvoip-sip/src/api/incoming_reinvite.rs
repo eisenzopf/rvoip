@@ -87,7 +87,7 @@ impl IncomingReinvite {
     /// a B2BUA that derives the answer from another leg rather than from
     /// this process's own media stack.
     pub async fn accept_with_answer(self, answer_sdp: String) -> Result<()> {
-        let pending = self.take_pending()?;
+        let pending = self.take_pending().await?;
         let dialog_adapter = Arc::clone(self.coordinator.dialog_adapter());
         crate::state_machine::actions::send_exact_sip_response_on_fresh_task(
             dialog_adapter,
@@ -103,13 +103,12 @@ impl IncomingReinvite {
         self.coordinator
             .helpers
             .state_machine
-            .store
-            .update_session_exact_with(&self.lifecycle_handle, None, |session| {
-                session.local_sdp = Some(answer_sdp);
-                session.remote_sdp = Some(pending.offered_sdp.clone());
-                session.pending_remote_offer = None;
-                session.sdp_negotiated = true;
-            })
+            .commit_incoming_reinvite_answer_exact(
+                &self.lifecycle_handle,
+                answer_sdp,
+                pending.offered_sdp.clone(),
+            )
+            .await
             .map_err(|error| SessionError::InvalidTransition(error.to_string()))?;
         Ok(())
     }
@@ -128,7 +127,7 @@ impl IncomingReinvite {
                 "IncomingReinvite::reject status must be 3xx-6xx".to_string(),
             ));
         }
-        let pending = self.take_pending()?;
+        let pending = self.take_pending().await?;
         let dialog_adapter = Arc::clone(self.coordinator.dialog_adapter());
         let extra_headers = (!reason.is_empty()).then(|| {
             vec![rvoip_sip_core::types::TypedHeader::Warning(vec![
@@ -152,13 +151,12 @@ impl IncomingReinvite {
         // The failed offer is dropped without touching remote_sdp/local_sdp/
         // negotiated_config: RFC 3264 atomicity, same invariant the
         // automatic path (NegotiateSDPAsUAS) keeps.
-        let _ = self.coordinator.helpers.state_machine.store.update_session_exact_with(
-            &self.lifecycle_handle,
-            None,
-            |session| {
-                session.pending_remote_offer = None;
-            },
-        );
+        let _ = self
+            .coordinator
+            .helpers
+            .state_machine
+            .clear_pending_remote_offer_exact(&self.lifecycle_handle)
+            .await;
         Ok(())
     }
 
@@ -167,14 +165,12 @@ impl IncomingReinvite {
     /// second `IncomingReinvite` built from the same event) gets a
     /// deterministic error instead of double-responding on the same
     /// transaction.
-    fn take_pending(&self) -> Result<PendingIncomingReinvite> {
+    async fn take_pending(&self) -> Result<PendingIncomingReinvite> {
         self.coordinator
             .helpers
             .state_machine
-            .store
-            .update_session_exact_with(&self.lifecycle_handle, None, |session| {
-                session.pending_incoming_reinvite.take()
-            })
+            .take_pending_incoming_reinvite_exact(&self.lifecycle_handle)
+            .await
             .map_err(|error| SessionError::InvalidTransition(error.to_string()))?
             .ok_or_else(|| {
                 SessionError::InvalidTransition(
@@ -263,8 +259,7 @@ mod tests {
         )
         .await;
 
-        let script =
-            exact_response_dispatch_test_hook::install(&session_id, vec![Step::Written]);
+        let script = exact_response_dispatch_test_hook::install(&session_id, vec![Step::Written]);
 
         let reinvite = IncomingReinvite::for_call(Arc::clone(&coord), session_id.clone())
             .expect("pending re-INVITE is visible");
@@ -289,10 +284,7 @@ mod tests {
             .get_session_snapshot_exact(&handle)
             .expect("read post-accept snapshot");
         assert_eq!(snapshot.local_sdp.as_deref(), Some("v=0\r\na=x-answer\r\n"));
-        assert_eq!(
-            snapshot.remote_sdp.as_deref(),
-            Some("v=0\r\na=x-offer\r\n")
-        );
+        assert_eq!(snapshot.remote_sdp.as_deref(), Some("v=0\r\na=x-offer\r\n"));
         assert!(snapshot.sdp_negotiated);
         assert!(snapshot.pending_incoming_reinvite.is_none());
 
@@ -319,8 +311,7 @@ mod tests {
         )
         .await;
 
-        let script =
-            exact_response_dispatch_test_hook::install(&session_id, vec![Step::Written]);
+        let script = exact_response_dispatch_test_hook::install(&session_id, vec![Step::Written]);
 
         let reinvite = IncomingReinvite::for_call(Arc::clone(&coord), session_id.clone())
             .expect("pending re-INVITE is visible");

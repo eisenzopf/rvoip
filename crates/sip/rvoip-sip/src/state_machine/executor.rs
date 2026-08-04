@@ -2433,6 +2433,100 @@ impl StateMachine {
         Ok(())
     }
 
+    /// Claim the failed delayed-offer teardown and arm the BYE reason the
+    /// following `HangupCall` will carry.
+    ///
+    /// Clearing the marker under the same lane that arms the reason is what
+    /// makes the teardown claimable exactly once: a second observation of the
+    /// same ACK sees the marker already cleared and does not hang up twice.
+    /// Returns whether this caller is the one that claimed it.
+    pub(crate) async fn claim_failed_ack_negotiation_teardown_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        bye_reason: (String, u16, Option<String>),
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        let _state_machine_lane = self.acquire_state_machine_lane_exact(handle).await?;
+        let mut session = self.store.get_session_exact(handle).await?;
+        if !session.needs_teardown_after_failed_ack_negotiation {
+            return Ok(false);
+        }
+        session.needs_teardown_after_failed_ack_negotiation = false;
+        session.pending_bye_reason = Some(bye_reason);
+        commit_lane_state(&self.store, session)?;
+        Ok(true)
+    }
+
+    /// Stage an application-controlled inbound re-INVITE offer for the
+    /// captured exact lifetime.
+    ///
+    /// The dialog ingress publishes `IncomingReinvite` right after this, and
+    /// the application answers it later through `IncomingReinvite`. Both ends
+    /// of that handoff go through this lane so the offer cannot interleave
+    /// with a state-machine transition writing the same session.
+    pub(crate) async fn stage_incoming_reinvite_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        pending: crate::session_store::state::PendingIncomingReinvite,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _state_machine_lane = self.acquire_state_machine_lane_exact(handle).await?;
+        let mut session = self.store.get_session_exact(handle).await?;
+        session.pending_incoming_reinvite = Some(pending);
+        commit_lane_state(&self.store, session)?;
+        Ok(())
+    }
+
+    /// Claim the staged re-INVITE decision, so exactly one caller can answer
+    /// the transaction.
+    ///
+    /// Returns `None` when there is nothing staged, which is how a second
+    /// accept/reject on the same offer is turned into a deterministic error
+    /// instead of a second response on the same transaction.
+    pub(crate) async fn take_pending_incoming_reinvite_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Result<
+        Option<crate::session_store::state::PendingIncomingReinvite>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        let _state_machine_lane = self.acquire_state_machine_lane_exact(handle).await?;
+        let mut session = self.store.get_session_exact(handle).await?;
+        let pending = session.pending_incoming_reinvite.take();
+        if pending.is_some() {
+            commit_lane_state(&self.store, session)?;
+        }
+        Ok(pending)
+    }
+
+    /// Commit the application's answer to an inbound re-INVITE offer.
+    pub(crate) async fn commit_incoming_reinvite_answer_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        answer_sdp: String,
+        offered_sdp: String,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _state_machine_lane = self.acquire_state_machine_lane_exact(handle).await?;
+        let mut session = self.store.get_session_exact(handle).await?;
+        session.local_sdp = Some(answer_sdp);
+        session.remote_sdp = Some(offered_sdp);
+        session.pending_remote_offer = None;
+        session.sdp_negotiated = true;
+        commit_lane_state(&self.store, session)?;
+        Ok(())
+    }
+
+    /// Drop a rejected inbound offer without touching the media state the
+    /// previous exchange negotiated (RFC 3264 atomicity).
+    pub(crate) async fn clear_pending_remote_offer_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _state_machine_lane = self.acquire_state_machine_lane_exact(handle).await?;
+        let mut session = self.store.get_session_exact(handle).await?;
+        session.pending_remote_offer = None;
+        commit_lane_state(&self.store, session)?;
+        Ok(())
+    }
+
     /// Apply one parsed REFER progress NOTIFY and dispatch the existing YAML
     /// `ReceiveNOTIFY` transition while holding the captured exact lifetime's
     /// lane. The returned observation descriptor is released only after the

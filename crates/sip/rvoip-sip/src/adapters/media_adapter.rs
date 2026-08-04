@@ -1559,6 +1559,12 @@ impl MediaAdapter {
         remote_pwd: String,
     ) {
         let this = self.clone();
+        // Capture the exact lifetime before spawning, the same way every
+        // other delayed observation in this adapter does. Resolving it inside
+        // the task would bind the eventual event to whatever generation of
+        // this session id happens to be live minutes later, not the one whose
+        // ICE check this is.
+        let lifecycle_handle = self.store.lifecycle_handle(&session_id);
         tokio::spawn(async move {
             match agent.connect(remote_ufrag, remote_pwd).await {
                 Ok(selected_addr) => {
@@ -1579,7 +1585,8 @@ impl MediaAdapter {
                         session_id.0,
                         selected_addr
                     );
-                    this.publish_ice_connected(&session_id, selected_addr).await;
+                    this.publish_ice_connected(lifecycle_handle, &session_id, selected_addr)
+                        .await;
                 }
                 Err(e) => {
                     tracing::error!(
@@ -1593,20 +1600,43 @@ impl MediaAdapter {
     }
 
     #[cfg(feature = "ice")]
-    async fn publish_ice_connected(&self, session_id: &SessionId, selected_addr: SocketAddr) {
+    /// Publish `IceConnected` the same way every other delayed media
+    /// observation in this adapter is published: bound to the exact session
+    /// lifetime that produced it, and falling back to the observational
+    /// cross-crate channel rather than the generic signaling publish.
+    async fn publish_ice_connected(
+        &self,
+        lifecycle_handle: Option<SessionRegistryHandle>,
+        session_id: &SessionId,
+        selected_addr: SocketAddr,
+    ) {
         let event = Event::IceConnected {
             call_id: session_id.clone(),
             selected_addr,
         };
+
+        let Some(lifecycle_handle) = lifecycle_handle else {
+            tracing::debug!(
+                "IceConnected publish skipped for session {}: no exact lifetime at spawn",
+                session_id.0
+            );
+            return;
+        };
+
         if let Some(publisher) = self.app_event_publisher.read().await.clone() {
-            publisher.publish(event);
+            publisher.publish_exact(&lifecycle_handle, event);
         } else if let Some(coordinator) = self.global_coordinator.read().await.clone() {
-            let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(event);
-            spawn_memory_tracked("sip.media_adapter.ice_connected_publish_task", async move {
-                if let Err(e) = coordinator.publish(wrapped).await {
-                    tracing::warn!("Failed to publish IceConnected event: {}", e);
-                }
-            });
+            let public = crate::adapters::SessionApiCrossCrateEvent::new(
+                crate::adapters::sanitize_session_api_observation(&event),
+            );
+            if let Err(e) = coordinator.publish_observational(public).await {
+                tracing::warn!("Failed to publish IceConnected event: {}", e);
+            }
+        } else {
+            tracing::debug!(
+                "IceConnected publish skipped for session {}: no event publisher yet",
+                session_id.0
+            );
         }
     }
 
@@ -2630,24 +2660,30 @@ impl MediaAdapter {
             contexts_installed,
         };
 
-        match self.store.get_session(session_id).await {
-            Ok(mut session) => {
-                session.media_security = Some(state.clone());
-                if let Err(e) = self.store.update_session(session).await {
-                    tracing::warn!(
-                        "Failed to persist media security state for session {}: {}",
+        // Take the media lane and commit through the snapshot, the same way
+        // every other media-derived write in this adapter does. Reading the
+        // session, mutating the copy and writing the whole snapshot back would
+        // discard anything the state machine committed while the handshake was
+        // running, which for a multi-second DTLS handshake is a wide window.
+        let (_lane, snapshot, mut session) =
+            match self.lock_and_load_exact_media_session(session_id).await {
+                Ok(loaded) => loaded,
+                Err(e) => {
+                    tracing::debug!(
+                        "Session {} not available while recording media security state: {}",
                         session_id.0,
                         e
                     );
+                    return;
                 }
-            }
-            Err(e) => {
-                tracing::debug!(
-                    "Session {} not found while recording media security state: {}",
-                    session_id.0,
-                    e
-                );
-            }
+            };
+        session.media_security = Some(state);
+        if let Err(e) = self.commit_media_lane_state(&snapshot, &session).await {
+            tracing::warn!(
+                "Failed to persist media security state for session {}: {}",
+                session_id.0,
+                e
+            );
         }
     }
 
