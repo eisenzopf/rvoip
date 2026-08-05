@@ -24,6 +24,12 @@ impl VapiAudioFormat {
         }
     }
 
+    /// Duration of one frame in milliseconds. Both formats are 20 ms; this
+    /// exists so health figures can be expressed as delay rather than counts.
+    pub const fn frame_ms(self) -> u32 {
+        20
+    }
+
     pub const fn timestamp_increment(self) -> u32 {
         match self {
             Self::MuLaw8Khz => 160,
