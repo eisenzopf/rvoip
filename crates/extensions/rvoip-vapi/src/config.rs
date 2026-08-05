@@ -98,7 +98,19 @@ pub struct VapiConfig {
     /// times over while capping added delay below the point where turn-taking
     /// and barge-in break down.
     pub inbound_queue_capacity: usize,
-    /// Depth the jitter buffers converge back down to, in frames.
+    /// Floor for the adaptive jitter target, in milliseconds.
+    ///
+    /// The target is measured (RFC 3550 §6.4.1 over frame arrivals, held at 3x)
+    /// rather than assumed, because the right depth differs between a LAN and a
+    /// congested WAN. This bounds it from below: starting shallow on a bursty
+    /// source underruns audibly, and an estimate is not trustworthy in the
+    /// first few frames of a call.
+    pub jitter_target_floor_ms: u32,
+    /// Ceiling for the adaptive jitter target, in milliseconds. Above this the
+    /// added delay costs more than the underrun it prevents.
+    pub jitter_target_ceiling_ms: u32,
+    /// Fallback target depth in frames, used before the estimator has enough
+    /// history. Superseded at runtime by the measured target.
     ///
     /// A capacity alone only *bounds* delay; it does not remove it. Because the
     /// drain releases one frame per tick, a queue that fills stays filled, so a
@@ -110,11 +122,18 @@ pub struct VapiConfig {
     /// `skip_timer`: above a threshold the read loop yields instead of waiting
     /// the tick, draining faster than real time until depth recovers.
     ///
-    /// This is the same valve. Above `jitter_target_frames` the drain releases
-    /// up to `max_catchup_frames_per_tick` extra frames per tick, so a backlog
-    /// re-converges instead of persisting for the rest of the call. Audio is
-    /// preserved rather than dropped: frames carry sequential RTP timestamps,
-    /// so the receiver's own buffer absorbs the early arrival.
+    /// This is the same valve, but **it is largely inert in this topology and
+    /// the queue cap is the real latency control.** Measured on live calls it
+    /// releases ~11 extra frames while wanting to release 300-900
+    /// (`catchup_ticks` vs `catchup_blocked_ticks`): the downstream consumer is
+    /// itself paced at real time, and nothing can drain faster than real time
+    /// into a real-time consumer. FreeSWITCH's `skip_timer` works because it
+    /// *is* the RTP sender and owns the final pacing; this sits behind another
+    /// paced stage.
+    ///
+    /// Retained because it is cheap and does help whenever the downstream has
+    /// slack, but do not expect it to bound latency. Making acceleration
+    /// effective would mean moving it into the stage that owns final pacing.
     pub jitter_target_frames: usize,
     /// Extra frames the drain may release per tick while re-converging. One
     /// extra frame is 2x real time, which clears a full 500 ms buffer in 500 ms
@@ -153,6 +172,8 @@ impl VapiConfig {
             inbound_queue_capacity: 25,
             outbound_queue_capacity: 25,
             jitter_target_frames: 5,
+            jitter_target_floor_ms: 60,
+            jitter_target_ceiling_ms: 400,
             max_catchup_frames_per_tick: 1,
             allow_insecure_transport: false,
         }

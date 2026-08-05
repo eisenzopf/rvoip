@@ -25,11 +25,16 @@ pub(crate) struct MediaHealthState {
     barge_in_dropped: AtomicU64,
     underrun_ticks: AtomicU64,
     catchup_ticks: AtomicU64,
+    catchup_blocked_ticks: AtomicU64,
     media_write_timeouts: AtomicU64,
     /// Largest single WebSocket binary message observed. The burst envelope:
     /// if this ever approaches the jitter buffer, drop-oldest is discarding
     /// most of an utterance rather than trimming latency.
     largest_inbound_chunk_bytes: AtomicUsize,
+    /// Measured RFC 3550 jitter in tenths of a millisecond, so the adaptive
+    /// target can be checked against reality rather than trusted.
+    jitter_tenths_ms: AtomicU64,
+    jitter_target_frames: AtomicUsize,
     inbound_frames: AtomicU64,
     outbound_frames: AtomicU64,
 }
@@ -72,8 +77,21 @@ impl MediaHealthState {
         self.catchup_ticks.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// The drain was above target but could not release an extra frame,
+    /// because the downstream consumer is itself rate-paced.
+    pub(crate) fn tick_catchup_blocked(&self) {
+        self.catchup_blocked_ticks.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub(crate) fn tick_write_timeout(&self) {
         self.media_write_timeouts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn set_jitter(&self, jitter_ms: f32, target_frames: usize) {
+        self.jitter_tenths_ms
+            .store((jitter_ms * 10.0).round().max(0.0) as u64, Ordering::Relaxed);
+        self.jitter_target_frames
+            .store(target_frames, Ordering::Relaxed);
     }
 
     pub(crate) fn add_inbound_frames(&self, n: u64) {
@@ -99,8 +117,11 @@ impl MediaHealthState {
             barge_in_dropped: count(&self.barge_in_dropped),
             underrun_ticks: count(&self.underrun_ticks),
             catchup_ticks: count(&self.catchup_ticks),
+            catchup_blocked_ticks: count(&self.catchup_blocked_ticks),
             media_write_timeouts: count(&self.media_write_timeouts),
             largest_inbound_chunk_bytes: depth(&self.largest_inbound_chunk_bytes),
+            measured_jitter_ms: count(&self.jitter_tenths_ms) as f32 / 10.0,
+            jitter_target_ms: depth(&self.jitter_target_frames) as u64 * frame_ms,
         }
     }
 }
@@ -109,7 +130,7 @@ impl MediaHealthState {
 ///
 /// Durations are in milliseconds because that is what the numbers *mean*:
 /// queue depth on a fixed-rate drain is added one-way delay, not a count.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[non_exhaustive]
 pub struct VapiMediaHealth {
     /// Current inbound jitter-buffer depth, i.e. added delay toward the caller.
@@ -133,13 +154,22 @@ pub struct VapiMediaHealth {
     /// Ticks with no audio available. The agent is silent most of a call, so
     /// this is normally the majority.
     pub underrun_ticks: u64,
-    /// Ticks that released extra frames to re-converge latency.
+    /// Ticks that actually released extra frames to re-converge latency.
     pub catchup_ticks: u64,
+    /// Ticks that were above target but could not accelerate, because the
+    /// downstream consumer is itself paced at real time. A high value here
+    /// against a low `catchup_ticks` means the valve cannot do its job in this
+    /// topology and the queue cap is the only real latency control.
+    pub catchup_blocked_ticks: u64,
     pub media_write_timeouts: u64,
     /// Largest single inbound WebSocket message seen. Compare against the
     /// jitter buffer: if it approaches it, a burst is being truncated rather
     /// than merely delayed.
     pub largest_inbound_chunk_bytes: usize,
+    /// RFC 3550 interarrival jitter measured over frame arrivals.
+    pub measured_jitter_ms: f32,
+    /// Depth the drain is currently converging to, derived from the above.
+    pub jitter_target_ms: u64,
 }
 
 impl VapiMediaHealth {

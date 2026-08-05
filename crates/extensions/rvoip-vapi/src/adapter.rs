@@ -966,6 +966,7 @@ async fn run_websocket_session(
     let mut outbound_dropped: u64 = 0;
     let mut outbound_drop_reported = false;
     let mut barge_in_dropped: u64 = 0;
+    let mut jitter = crate::jitter::JitterEstimator::default();
     let mut incoming_tick = tokio::time::interval(std::time::Duration::from_millis(20));
     incoming_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     incoming_tick.tick().await;
@@ -1006,9 +1007,14 @@ async fn run_websocket_session(
                 // rate exactly, so a backlog never recovers and its depth
                 // becomes permanent delay. Above the target depth, release
                 // extra frames to run faster than real time until converged.
-                let over_target = incoming_frames
-                    .len()
-                    .saturating_sub(config.jitter_target_frames);
+                // Measured, not assumed. Falls back to the floor until the
+                // estimator has enough history to trust.
+                let target = jitter.target_frames(
+                    route.options.audio_format.frame_ms(),
+                    config.jitter_target_floor_ms,
+                    config.jitter_target_ceiling_ms,
+                );
+                let over_target = incoming_frames.len().saturating_sub(target);
                 let release = 1 + over_target.min(config.max_catchup_frames_per_tick);
                 let mut overflowed = false;
                 let mut sent = 0usize;
@@ -1039,10 +1045,20 @@ async fn run_websocket_session(
                     // as a broken stream.
                     break SessionOutcome::Failed("Vapi inbound media queue overflow");
                 }
-                if over_target > 0 {
+                if sent > 1 {
                     route.health.tick_catchup();
-                    metrics::counter!("rvoip_vapi_jitter_catchup_frames_total").increment(1);
+                    metrics::counter!("rvoip_vapi_jitter_catchup_frames_total")
+                        .increment((sent - 1) as u64);
                 }
+                if over_target > 0 && sent <= 1 {
+                    // Wanted to accelerate and could not: the downstream is
+                    // itself paced, so there was nowhere to put the extra
+                    // frame. Distinguishing this from a successful catch-up
+                    // matters — one means the valve works, the other means it
+                    // cannot.
+                    route.health.tick_catchup_blocked();
+                }
+                route.health.set_jitter(jitter.jitter_ms(), target);
                 route.health.add_inbound_frames(sent as u64);
                 route.health.set_inbound_depth(incoming_frames.len());
                 // Keep the RTP clock honest. One tick is one frame duration of
@@ -1192,6 +1208,7 @@ async fn run_websocket_session(
                         // 20 ms of audio, whereas failing here silently ends the
                         // call for its remaining duration.
                         route.health.record_inbound_chunk(payload.len());
+                        let frames_before = incoming_frames.len();
                         incoming_framer.push(&payload);
                         while let Some(frame) = incoming_framer.next_frame() {
                             if incoming_frames.len() >= config.inbound_queue_capacity {
@@ -1206,6 +1223,11 @@ async fn run_websocket_session(
                         }
                         // Report once per contiguous episode rather than per
                         // frame, so a burst does not flood the log.
+                        jitter.observe(
+                            tokio::time::Instant::now().into_std(),
+                            incoming_frames.len().saturating_sub(frames_before),
+                            route.options.audio_format.frame_ms(),
+                        );
                         route.health.set_inbound_depth(incoming_frames.len());
                         if inbound_dropped > 0 && !inbound_drop_reported {
                             inbound_drop_reported = true;
@@ -1305,7 +1327,10 @@ async fn run_websocket_session(
             outbound_frames = health.outbound_frames,
             underrun_ticks = health.underrun_ticks,
             catchup_ticks = health.catchup_ticks,
+            catchup_blocked_ticks = health.catchup_blocked_ticks,
             largest_inbound_chunk_bytes = health.largest_inbound_chunk_bytes,
+            measured_jitter_ms = health.measured_jitter_ms,
+            jitter_target_ms = health.jitter_target_ms,
             "Vapi media health at session end"
         );
         if health.is_burst_envelope_exceeded(
