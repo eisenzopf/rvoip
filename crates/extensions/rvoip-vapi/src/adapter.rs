@@ -28,7 +28,7 @@ use rvoip_core::{CapabilityDescriptor, NegotiatedCodecs};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
-use tracing::warn;
+use tracing::{warn, Instrument};
 
 use crate::client::{connect_websocket, VapiHttpClient, VapiSocket};
 use crate::config::VapiConfig;
@@ -821,6 +821,15 @@ async fn activate_route_worker(
         lifecycle: environment.lifecycle.clone(),
     };
     let task_route = Arc::clone(&route);
+    // M4: every media log line inside this task — the overflow warnings, the
+    // underrun counters, the end-of-session health snapshot — is otherwise
+    // unattributable. At any concurrency an operator can see that *a* call lost
+    // 1.7s of assistant audio but not which one, and cannot join it to a CDR, a
+    // recording, or a customer complaint. One span stamps all of them.
+    let session_span = tracing::info_span!(
+        "vapi_session",
+        connection_id = %route.connection_id
+    );
     tokio::spawn(async move {
         let outcome = run_websocket_session(
             &runtime_environment.config,
@@ -832,7 +841,7 @@ async fn activate_route_worker(
         )
         .await;
         finish_route(&runtime_environment, task_route, outcome).await;
-    });
+    }.instrument(session_span));
     Ok(receipt)
 }
 
@@ -897,14 +906,30 @@ impl WriterFault {
 /// Returns the sink so the caller can reunite it for the shutdown handshake.
 async fn run_socket_writer(
     mut sink: futures::stream::SplitSink<VapiSocket, WebSocketMessage>,
-    mut requests: mpsc::Receiver<WriteRequest>,
+    mut media: mpsc::Receiver<WriteRequest>,
+    mut control: mpsc::Receiver<WriteRequest>,
     faults: mpsc::Sender<WriterFault>,
     config: VapiConfig,
     route: Arc<Route>,
 ) -> futures::stream::SplitSink<VapiSocket, WebSocketMessage> {
     use futures::SinkExt;
     let mut consecutive_media_timeouts: u32 = 0;
-    while let Some(request) = requests.recv().await {
+    loop {
+        // M3: control and media used to share one channel, so an uplink stall
+        // backed Pings, Pongs and commands up behind a media queue that drains
+        // at 1/media_write_timeout. The 100-slot channel filled in ~2.2s
+        // against ~50 frames/s, and the heartbeat then failed roughly 5x sooner
+        // than media_write_timeout_limit implies — the session died of an
+        // apparent control fault while the real problem was backpressure.
+        //
+        // Biased select: control liveness must never be measured through a
+        // media backlog.
+        let request = tokio::select! {
+            biased;
+            Some(request) = control.recv() => request,
+            Some(request) = media.recv() => request,
+            else => break,
+        };
         let (message, deadline, is_media) = match request {
             WriteRequest::Media(message) => (message, config.media_write_timeout, true),
             WriteRequest::Control(message) => (message, config.websocket_io_timeout, false),
@@ -963,10 +988,15 @@ async fn run_websocket_session(
     // loop. Reunited before the shutdown handshake, which needs both halves.
     let (sink, mut stream) = futures::StreamExt::split(socket);
     let (write_tx, write_rx) = mpsc::channel::<WriteRequest>(config.media_queue_capacity);
+    // Control gets its own small channel, polled with priority (M3). Sharing
+    // the media channel meant an uplink stall could kill the session through a
+    // heartbeat failure long before the media-stall limit was reached.
+    let (control_tx, control_rx) = mpsc::channel::<WriteRequest>(8);
     let (fault_tx, mut fault_rx) = mpsc::channel::<WriterFault>(4);
     let writer = tokio::spawn(run_socket_writer(
         sink,
         write_rx,
+        control_rx,
         fault_tx,
         config.clone(),
         Arc::clone(route),
@@ -1149,7 +1179,7 @@ async fn run_websocket_session(
                 if awaiting_heartbeat_response {
                     continue;
                 }
-                if write_tx
+                if control_tx
                     .try_send(WriteRequest::Control(WebSocketMessage::Ping(Bytes::new())))
                     .is_err()
                 {
@@ -1201,7 +1231,7 @@ async fn run_websocket_session(
                 let Some(json) = command else {
                     break SessionOutcome::Local(EndReason::Normal);
                 };
-                if write_tx
+                if control_tx
                     .try_send(WriteRequest::Control(WebSocketMessage::Text(json.into())))
                     .is_err()
                 {
@@ -1282,7 +1312,7 @@ async fn run_websocket_session(
                         }
                     }
                     Some(Ok(WebSocketMessage::Ping(payload))) => {
-                        if write_tx
+                        if control_tx
                             .try_send(WriteRequest::Control(WebSocketMessage::Pong(payload)))
                             .is_err()
                         {
@@ -1320,6 +1350,7 @@ async fn run_websocket_session(
     // Stop the writer and take the sink back so the shutdown handshake, which
     // both reads and writes, still has a whole socket.
     drop(write_tx);
+    drop(control_tx);
     let mut socket = match writer.await {
         Ok(sink) => match stream.reunite(sink) {
             Ok(socket) => socket,
