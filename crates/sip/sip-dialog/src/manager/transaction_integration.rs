@@ -2378,7 +2378,23 @@ impl DialogManager {
                         "Outbound request contains an unusable Route header",
                     )
                 })?;
-            let candidates = self.resolve_uri_to_candidates(&next_hop).await;
+            let mut candidates = self.resolve_uri_to_candidates(&next_hop).await;
+
+            // When an inbound peer supplied an unspecified Contact, dialog
+            // setup retained the exact validated packet source. Use that
+            // source only for a direct dialog (never across a Route set), and
+            // preserve the Contact-derived URI on the wire as Request-URI.
+            // Reusing the resolved candidate's transport also preserves UDP,
+            // TCP, or TLS selection without inventing transport state here.
+            if template.route_set.is_empty() {
+                if let (Some(observed_source), Some(candidate)) =
+                    (dialog.last_known_remote_addr, candidates.first_mut())
+                {
+                    candidate.addr = observed_source;
+                    candidate.expires = None;
+                    candidates.truncate(1);
+                }
+            }
 
             if candidates.is_empty() {
                 return Err(crate::errors::DialogError::routing_error(
