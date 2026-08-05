@@ -135,9 +135,16 @@ pub struct VapiConfig {
     /// slack, but do not expect it to bound latency. Making acceleration
     /// effective would mean moving it into the stage that owns final pacing.
     pub jitter_target_frames: usize,
-    /// Extra frames the drain may release per tick while re-converging. One
-    /// extra frame is 2x real time, which clears a full 500 ms buffer in 500 ms
+    /// Extra frames the drain may release per tick while re-converging. Two
+    /// extra frames is 3x real time, clearing a full 500 ms backlog in ~250 ms
     /// without flooding the peer.
+    ///
+    /// The media stream's inbound capacity is sized from this value
+    /// (`+1`), because the valve gates each extra frame on the stream having
+    /// room. That coupling was previously broken — the stream was constructed
+    /// with a hardcoded capacity of 1 — which made the valve 1.8-2.3%
+    /// effective and turned any downlink stall into permanent speech loss for
+    /// the rest of the call.
     pub max_catchup_frames_per_tick: usize,
     /// Outbound jitter buffer depth, in frames. **This is a latency ceiling**,
     /// with the same semantics as [`Self::inbound_queue_capacity`].
@@ -174,7 +181,7 @@ impl VapiConfig {
             jitter_target_frames: 5,
             jitter_target_floor_ms: 60,
             jitter_target_ceiling_ms: 400,
-            max_catchup_frames_per_tick: 1,
+            max_catchup_frames_per_tick: 2,
             allow_insecure_transport: false,
         }
     }
