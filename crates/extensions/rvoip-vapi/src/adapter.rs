@@ -913,7 +913,10 @@ async fn run_websocket_session(
             _ = &mut heartbeat_deadline, if awaiting_heartbeat_response => {
                 break SessionOutcome::Failed("Vapi WebSocket heartbeat response timed out");
             }
-            _ = incoming_tick.tick(), if !incoming_frames.is_empty() => {
+            // Deliberately unguarded: the RTP clock must advance with wall
+            // time even when no audio is available. The agent is silent
+            // whenever it is not speaking, which is most of a call.
+            _ = incoming_tick.tick() => {
                 if route.stream.incoming_is_closed() {
                     break SessionOutcome::Local(EndReason::BridgeTorn);
                 }
@@ -926,6 +929,7 @@ async fn run_websocket_session(
                     .saturating_sub(config.jitter_target_frames);
                 let release = 1 + over_target.min(config.max_catchup_frames_per_tick);
                 let mut overflowed = false;
+                let mut sent = 0usize;
                 for _ in 0..release {
                     if !route.stream.incoming_has_capacity() {
                         break;
@@ -940,6 +944,7 @@ async fn run_websocket_session(
                         overflowed = true;
                         break;
                     }
+                    sent += 1;
                     timestamp_rtp = timestamp_rtp
                         .wrapping_add(route.options.audio_format.timestamp_increment());
                     metrics::counter!(
@@ -954,6 +959,18 @@ async fn run_websocket_session(
                 }
                 if over_target > 0 {
                     metrics::counter!("rvoip_vapi_jitter_catchup_frames_total").increment(1);
+                }
+                // Keep the RTP clock honest. One tick is one frame duration of
+                // wall time whether or not audio was available; without this,
+                // a silent stretch is invisible to the receiver and the next
+                // utterance claims a sampling instant milliseconds after the
+                // previous one instead of seconds. Sending N frames in a
+                // catch-up tick advances by N: those frames really are N frame
+                // durations of audio.
+                if sent == 0 {
+                    timestamp_rtp = timestamp_rtp
+                        .wrapping_add(route.options.audio_format.timestamp_increment());
+                    metrics::counter!("rvoip_vapi_inbound_underrun_ticks_total").increment(1);
                 }
             }
             _ = outgoing_tick.tick(), if !outgoing_frames.is_empty() => {
