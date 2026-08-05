@@ -1,6 +1,5 @@
 //! Vapi REST call creation and authenticated WebSocket setup.
 
-use std::time::Duration;
 
 use bytes::BytesMut;
 use reqwest::Client;
@@ -156,20 +155,6 @@ pub(crate) async fn connect_websocket(
     Ok(socket)
 }
 
-pub(crate) async fn send_with_timeout<S>(
-    timeout: Duration,
-    socket: &mut WebSocketStream<S>,
-    message: tokio_tungstenite::tungstenite::Message,
-) -> Result<()>
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    use futures::SinkExt;
-    tokio::time::timeout(timeout, socket.send(message))
-        .await
-        .map_err(|_| VapiError::WebSocketTimeout)?
-        .map_err(|_| VapiError::WebSocketIo)
-}
 
 #[cfg(test)]
 mod tests {

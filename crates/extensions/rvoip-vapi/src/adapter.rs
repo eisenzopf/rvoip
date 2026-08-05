@@ -30,7 +30,7 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
 use tracing::warn;
 
-use crate::client::{connect_websocket, send_with_timeout, VapiHttpClient, VapiSocket};
+use crate::client::{connect_websocket, VapiHttpClient, VapiSocket};
 use crate::config::VapiConfig;
 use crate::error::{Result, VapiError};
 use crate::events::{VapiEvent, VapiEventEnvelope};
@@ -821,48 +821,6 @@ async fn close_vapi_socket(config: &VapiConfig, socket: &mut VapiSocket) {
     let _ = tokio::time::timeout(config.graceful_shutdown_timeout, shutdown).await;
 }
 
-enum SessionSendFailure {
-    Cancelled,
-    /// A media write missed its deadline. Recoverable: drop the frame and
-    /// continue rather than tearing down a call for one slow write.
-    TimedOut,
-    Failed,
-}
-
-/// Send one media frame under a short deadline.
-///
-/// Separate from [`cancellable_session_send`] because a media write is awaited
-/// inside the session select loop: it must not be allowed to hold that loop for
-/// the control-traffic timeout. A `TimedOut` result means "drop this frame and
-/// keep going", not "the connection is broken".
-async fn cancellable_media_send(
-    config: &VapiConfig,
-    route: &Route,
-    socket: &mut VapiSocket,
-    message: WebSocketMessage,
-) -> std::result::Result<(), SessionSendFailure> {
-    tokio::select! {
-        _ = route.cancel.cancelled() => Err(SessionSendFailure::Cancelled),
-        result = send_with_timeout(config.media_write_timeout, socket, message) => {
-            result.map_err(|_| SessionSendFailure::TimedOut)
-        }
-    }
-}
-
-async fn cancellable_session_send(
-    config: &VapiConfig,
-    route: &Route,
-    socket: &mut VapiSocket,
-    message: WebSocketMessage,
-) -> std::result::Result<(), SessionSendFailure> {
-    tokio::select! {
-        _ = route.cancel.cancelled() => Err(SessionSendFailure::Cancelled),
-        result = send_with_timeout(config.websocket_io_timeout, socket, message) => {
-            result.map_err(|_| SessionSendFailure::Failed)
-        }
-    }
-}
-
 fn requested_local_outcome(route: &Route) -> SessionOutcome {
     SessionOutcome::Local(
         route
@@ -873,14 +831,108 @@ fn requested_local_outcome(route: &Route) -> SessionOutcome {
     )
 }
 
+/// What the session loop hands the writer task.
+enum WriteRequest {
+    Media(WebSocketMessage),
+    Control(WebSocketMessage),
+}
+
+/// Why the writer stopped.
+#[derive(Clone, Copy)]
+enum WriterFault {
+    MediaStalled,
+    ControlFailed,
+    Failed,
+}
+
+impl WriterFault {
+    fn detail(self) -> &'static str {
+        match self {
+            Self::MediaStalled => "Vapi WebSocket audio writes stalled",
+            Self::ControlFailed => "Vapi WebSocket control write failed",
+            Self::Failed => "Vapi WebSocket write failed",
+        }
+    }
+}
+
+/// Owns the socket's sink half so a slow write cannot park the session loop.
+///
+/// FreeSWITCH's media model rests on the media thread never blocking on a
+/// network write: its only media-thread write is UDP `sendto` into a large
+/// kernel buffer, and every stallable transport is moved to its own thread
+/// reached through a bounded buffer. TCP/TLS silently breaks that assumption,
+/// so the write belongs here rather than inline in the select loop.
+///
+/// Returns the sink so the caller can reunite it for the shutdown handshake.
+async fn run_socket_writer(
+    mut sink: futures::stream::SplitSink<VapiSocket, WebSocketMessage>,
+    mut requests: mpsc::Receiver<WriteRequest>,
+    faults: mpsc::Sender<WriterFault>,
+    config: VapiConfig,
+) -> futures::stream::SplitSink<VapiSocket, WebSocketMessage> {
+    use futures::SinkExt;
+    let mut consecutive_media_timeouts: u32 = 0;
+    while let Some(request) = requests.recv().await {
+        let (message, deadline, is_media) = match request {
+            WriteRequest::Media(message) => (message, config.media_write_timeout, true),
+            WriteRequest::Control(message) => (message, config.websocket_io_timeout, false),
+        };
+        match tokio::time::timeout(deadline, sink.send(message)).await {
+            Ok(Ok(())) => {
+                if is_media {
+                    consecutive_media_timeouts = 0;
+                }
+            }
+            Ok(Err(_)) => {
+                let _ = faults
+                    .send(if is_media {
+                        WriterFault::Failed
+                    } else {
+                        WriterFault::ControlFailed
+                    })
+                    .await;
+                break;
+            }
+            Err(_) => {
+                if !is_media {
+                    let _ = faults.send(WriterFault::ControlFailed).await;
+                    break;
+                }
+                // A media frame that missed its deadline is stale. Drop it and
+                // keep going; only a sustained run means the peer is gone.
+                consecutive_media_timeouts = consecutive_media_timeouts.saturating_add(1);
+                metrics::counter!("rvoip_vapi_media_write_timeouts_total").increment(1);
+                if consecutive_media_timeouts == 1 {
+                    tracing::warn!(
+                        timeout_ms = config.media_write_timeout.as_millis() as u64,
+                        "a Vapi audio write exceeded its deadline; dropping the frame"
+                    );
+                }
+                if consecutive_media_timeouts >= config.media_write_timeout_limit {
+                    let _ = faults.send(WriterFault::MediaStalled).await;
+                    break;
+                }
+            }
+        }
+    }
+    sink
+}
+
 async fn run_websocket_session(
     config: &VapiConfig,
     global_events: &broadcast::Sender<VapiEventEnvelope>,
     route: &Arc<Route>,
-    mut socket: VapiSocket,
+    socket: VapiSocket,
     mut outgoing: mpsc::Receiver<rvoip_core::MediaFrame>,
     mut commands: mpsc::Receiver<String>,
 ) -> SessionOutcome {
+    // The write goes to a per-session task so a slow socket cannot park this
+    // loop. Reunited before the shutdown handshake, which needs both halves.
+    let (sink, mut stream) = futures::StreamExt::split(socket);
+    let (write_tx, write_rx) = mpsc::channel::<WriteRequest>(config.media_queue_capacity);
+    let (fault_tx, mut fault_rx) = mpsc::channel::<WriterFault>(4);
+    let writer = tokio::spawn(run_socket_writer(sink, write_rx, fault_tx, config.clone()));
+
     let mut incoming_framer = AudioFramer::new(route.options.audio_format);
     let mut outgoing_framer = AudioFramer::new(route.options.audio_format);
     let mut incoming_frames = VecDeque::<Bytes>::new();
@@ -890,7 +942,6 @@ async fn run_websocket_session(
     let mut inbound_drop_reported = false;
     let mut outbound_dropped: u64 = 0;
     let mut outbound_drop_reported = false;
-    let mut media_write_timeouts: u32 = 0;
     let mut barge_in_dropped: u64 = 0;
     let mut incoming_tick = tokio::time::interval(std::time::Duration::from_millis(20));
     incoming_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -909,6 +960,14 @@ async fn run_websocket_session(
         tokio::select! {
             _ = route.cancel.cancelled() => {
                 break requested_local_outcome(route);
+            }
+            fault = fault_rx.recv() => {
+                // The writer gave up. It owns the only view of write health,
+                // so this is how a dead peer reaches the session.
+                break match fault {
+                    Some(fault) => SessionOutcome::Failed(fault.detail()),
+                    None => SessionOutcome::Failed("Vapi WebSocket writer stopped"),
+                };
             }
             _ = &mut heartbeat_deadline, if awaiting_heartbeat_response => {
                 break SessionOutcome::Failed("Vapi WebSocket heartbeat response timed out");
@@ -977,37 +1036,27 @@ async fn run_websocket_session(
                 let Some(frame) = outgoing_frames.pop_front() else {
                     continue;
                 };
-                match cancellable_media_send(
-                    config,
-                    route,
-                    &mut socket,
-                    WebSocketMessage::Binary(frame),
-                ).await {
+                match write_tx.try_send(WriteRequest::Media(WebSocketMessage::Binary(frame))) {
                     Ok(()) => {
-                        media_write_timeouts = 0;
                         metrics::counter!(
                             "rvoip_vapi_audio_frames_total", "direction" => "out"
                         ).increment(1);
                     }
-                    Err(SessionSendFailure::Cancelled) => break requested_local_outcome(route),
-                    Err(SessionSendFailure::TimedOut) => {
-                        // Real-time audio is better dropped than delayed, and
-                        // holding the loop here starves inbound processing and
-                        // outlives the downstream slow-consumer budget.
-                        media_write_timeouts = media_write_timeouts.saturating_add(1);
-                        metrics::counter!("rvoip_vapi_media_write_timeouts_total").increment(1);
-                        if media_write_timeouts >= config.media_write_timeout_limit {
-                            break SessionOutcome::Failed("Vapi WebSocket audio writes stalled");
-                        }
-                        if media_write_timeouts == 1 {
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        // The writer is behind. Dropping here is the same
+                        // policy as the jitter buffer: stale audio, not a
+                        // stalled loop.
+                        outbound_dropped = outbound_dropped.saturating_add(1);
+                        metrics::counter!("rvoip_vapi_outbound_frames_dropped_total").increment(1);
+                        if !outbound_drop_reported {
+                            outbound_drop_reported = true;
                             tracing::warn!(
-                                timeout_ms = config.media_write_timeout.as_millis() as u64,
-                                "a Vapi audio write exceeded its deadline; dropping the frame"
+                                "the Vapi socket writer is behind; dropping outbound frames"
                             );
                         }
                     }
-                    Err(SessionSendFailure::Failed) => {
-                        break SessionOutcome::Failed("Vapi WebSocket audio write failed");
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        break SessionOutcome::Failed("Vapi WebSocket writer stopped");
                     }
                 }
             }
@@ -1015,17 +1064,11 @@ async fn run_websocket_session(
                 if awaiting_heartbeat_response {
                     continue;
                 }
-                match cancellable_session_send(
-                    config,
-                    route,
-                    &mut socket,
-                    WebSocketMessage::Ping(Bytes::new()),
-                ).await {
-                    Ok(()) => {}
-                    Err(SessionSendFailure::Cancelled) => break requested_local_outcome(route),
-                    Err(SessionSendFailure::Failed | SessionSendFailure::TimedOut) => {
-                        break SessionOutcome::Failed("Vapi WebSocket heartbeat failed");
-                    }
+                if write_tx
+                    .try_send(WriteRequest::Control(WebSocketMessage::Ping(Bytes::new())))
+                    .is_err()
+                {
+                    break SessionOutcome::Failed("Vapi WebSocket heartbeat failed");
                 }
                 heartbeat_deadline
                     .as_mut()
@@ -1074,20 +1117,14 @@ async fn run_websocket_session(
                 let Some(json) = command else {
                     break SessionOutcome::Local(EndReason::Normal);
                 };
-                match cancellable_session_send(
-                    config,
-                    route,
-                    &mut socket,
-                    WebSocketMessage::Text(json.into()),
-                ).await {
-                    Ok(()) => {}
-                    Err(SessionSendFailure::Cancelled) => break requested_local_outcome(route),
-                    Err(SessionSendFailure::Failed | SessionSendFailure::TimedOut) => {
-                        break SessionOutcome::Failed("Vapi WebSocket control write failed");
-                    }
+                if write_tx
+                    .try_send(WriteRequest::Control(WebSocketMessage::Text(json.into())))
+                    .is_err()
+                {
+                    break SessionOutcome::Failed("Vapi WebSocket control write failed");
                 }
             }
-            message = socket.next() => {
+            message = futures::StreamExt::next(&mut stream) => {
                 if matches!(message.as_ref(), Some(Ok(_))) {
                     awaiting_heartbeat_response = false;
                 }
@@ -1151,17 +1188,11 @@ async fn run_websocket_session(
                         }
                     }
                     Some(Ok(WebSocketMessage::Ping(payload))) => {
-                        match cancellable_session_send(
-                            config,
-                            route,
-                            &mut socket,
-                            WebSocketMessage::Pong(payload),
-                        ).await {
-                            Ok(()) => {}
-                            Err(SessionSendFailure::Cancelled) => break requested_local_outcome(route),
-                            Err(SessionSendFailure::Failed | SessionSendFailure::TimedOut) => {
-                                break SessionOutcome::Failed("Vapi WebSocket pong failed");
-                            }
+                        if write_tx
+                            .try_send(WriteRequest::Control(WebSocketMessage::Pong(payload)))
+                            .is_err()
+                        {
+                            break SessionOutcome::Failed("Vapi WebSocket pong failed");
                         }
                     }
                     Some(Ok(WebSocketMessage::Pong(_))) => {}
@@ -1190,6 +1221,17 @@ async fn run_websocket_session(
                 }
             }
         }
+    };
+
+    // Stop the writer and take the sink back so the shutdown handshake, which
+    // both reads and writes, still has a whole socket.
+    drop(write_tx);
+    let mut socket = match writer.await {
+        Ok(sink) => match stream.reunite(sink) {
+            Ok(socket) => socket,
+            Err(_) => return outcome,
+        },
+        Err(_) => return outcome,
     };
 
     if inbound_dropped > 0 || outbound_dropped > 0 || barge_in_dropped > 0 {
