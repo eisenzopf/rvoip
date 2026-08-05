@@ -113,7 +113,12 @@ impl MediaHealthState {
 #[non_exhaustive]
 pub struct VapiMediaHealth {
     /// Current inbound jitter-buffer depth, i.e. added delay toward the caller.
+    /// This is the steady-state figure and the one to alert on.
     pub inbound_queue_ms: u64,
+    /// Peak depth over the whole call. Interpret with care: call
+    /// establishment reliably produces a one-off spike (measured 340-500 ms
+    /// outbound while steady state was 0 ms), so a high value here does NOT by
+    /// itself mean the call carried that much delay.
     pub inbound_queue_high_water_ms: u64,
     /// Current outbound depth, i.e. added delay toward the agent.
     pub outbound_queue_ms: u64,
@@ -138,9 +143,11 @@ pub struct VapiMediaHealth {
 }
 
 impl VapiMediaHealth {
-    /// Whether the buffers are sitting deep rather than transiting. A fixed-rate
-    /// drain cannot recover on its own below the catch-up threshold, so a
-    /// persistently deep queue is permanent added delay.
+    /// Whether the buffers are sitting deep rather than transiting.
+    ///
+    /// Deliberately reads *current* depth, not high-water: establishment
+    /// produces a one-off spike on every healthy call, so alerting on the peak
+    /// would fire constantly and mean nothing.
     pub fn is_latency_degraded(&self, budget_ms: u64) -> bool {
         self.inbound_queue_ms > budget_ms || self.outbound_queue_ms > budget_ms
     }
@@ -174,6 +181,23 @@ mod tests {
         let snapshot = state.snapshot(20);
         assert!(snapshot.is_latency_degraded(500));
         assert!(!snapshot.is_latency_degraded(1_000));
+    }
+
+    /// Every healthy call spikes during establishment and then settles. Judging
+    /// on the peak would flag all of them; judging on current depth flags none.
+    /// Measured live: outbound peaked at 500 ms and ended at 0 ms.
+    #[test]
+    fn an_establishment_spike_is_not_reported_as_degraded() {
+        let state = MediaHealthState::default();
+        state.set_inbound_depth(25);
+        state.set_inbound_depth(0);
+        let snapshot = state.snapshot(20);
+        assert_eq!(snapshot.inbound_queue_high_water_ms, 500);
+        assert_eq!(snapshot.inbound_queue_ms, 0);
+        assert!(
+            !snapshot.is_latency_degraded(400),
+            "a settled call must not be flagged on its startup peak"
+        );
     }
 
     /// The risk this exists to catch: a burst larger than the buffer means

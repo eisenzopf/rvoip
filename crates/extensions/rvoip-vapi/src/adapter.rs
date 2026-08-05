@@ -1060,34 +1060,58 @@ async fn run_websocket_session(
                 }
             }
             _ = outgoing_tick.tick(), if !outgoing_frames.is_empty() => {
-                let Some(frame) = outgoing_frames.pop_front() else {
-                    continue;
-                };
-                match write_tx.try_send(WriteRequest::Media(WebSocketMessage::Binary(frame))) {
-                    Ok(()) => {
-                        route.health.add_outbound_frames(1);
-                        metrics::counter!(
-                            "rvoip_vapi_audio_frames_total", "direction" => "out"
-                        ).increment(1);
-                    }
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        // The writer is behind. Dropping here is the same
-                        // policy as the jitter buffer: stale audio, not a
-                        // stalled loop.
-                        outbound_dropped = outbound_dropped.saturating_add(1);
-                        route.health.add_outbound_dropped(1);
-                        metrics::counter!("rvoip_vapi_outbound_frames_dropped_total").increment(1);
-                        if !outbound_drop_reported {
-                            outbound_drop_reported = true;
-                            tracing::warn!(
-                                "the Vapi socket writer is behind; dropping outbound frames"
-                            );
+                // Same burst-drain valve as the inbound path. Without it this
+                // direction drains at exactly the source rate, so a backlog
+                // never recovers and its depth becomes permanent delay toward
+                // the agent. Telemetry caught this: outbound high-water sat at
+                // 320-500 ms across live calls while inbound stayed at
+                // 120-240 ms, purely because only inbound had the valve.
+                let over_target = outgoing_frames
+                    .len()
+                    .saturating_sub(config.jitter_target_frames);
+                let release = 1 + over_target.min(config.max_catchup_frames_per_tick);
+                if over_target > 0 {
+                    route.health.tick_catchup();
+                }
+                let mut writer_gone = false;
+                for _ in 0..release {
+                    let Some(frame) = outgoing_frames.pop_front() else {
+                        break;
+                    };
+                    match write_tx.try_send(WriteRequest::Media(WebSocketMessage::Binary(frame))) {
+                        Ok(()) => {
+                            route.health.add_outbound_frames(1);
+                            metrics::counter!(
+                                "rvoip_vapi_audio_frames_total", "direction" => "out"
+                            ).increment(1);
+                        }
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            // The writer is behind. Dropping here is the same
+                            // policy as the jitter buffer: stale audio, not a
+                            // stalled loop.
+                            outbound_dropped = outbound_dropped.saturating_add(1);
+                            route.health.add_outbound_dropped(1);
+                            metrics::counter!(
+                                "rvoip_vapi_outbound_frames_dropped_total"
+                            ).increment(1);
+                            if !outbound_drop_reported {
+                                outbound_drop_reported = true;
+                                tracing::warn!(
+                                    "the Vapi socket writer is behind; dropping outbound frames"
+                                );
+                            }
+                            break;
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            writer_gone = true;
+                            break;
                         }
                     }
-                    Err(mpsc::error::TrySendError::Closed(_)) => {
-                        break SessionOutcome::Failed("Vapi WebSocket writer stopped");
-                    }
                 }
+                if writer_gone {
+                    break SessionOutcome::Failed("Vapi WebSocket writer stopped");
+                }
+                route.health.set_outbound_depth(outgoing_frames.len());
             }
             _ = heartbeat.tick() => {
                 if awaiting_heartbeat_response {
@@ -1116,12 +1140,9 @@ async fn run_websocket_session(
                     break SessionOutcome::Failed("Vapi outbound audio frame exceeded size limit");
                 }
                 // Symmetric with the inbound path: a transient backlog must
-                // degrade, not end the call. This direction backs up whenever a
-                // WebSocket write stalls, because `cancellable_session_send` is
-                // awaited inside the select arm and blocks the whole loop for up
-                // to `websocket_io_timeout`. Caller RTP keeps arriving during
-                // that window, so the queue can be flooded on resume by a peer
-                // that is behaving perfectly.
+                // degrade, not end the call. Caller RTP keeps arriving while
+                // the writer works through a slow socket, so this queue can be
+                // flooded by a peer that is behaving perfectly.
                 outgoing_framer.push(&media.payload);
                 while let Some(frame) = outgoing_framer.next_frame() {
                     if outgoing_frames.len() >= config.outbound_queue_capacity {
@@ -1276,7 +1297,9 @@ async fn run_websocket_session(
         // Always emitted: a call that looks fine but sat at 400ms of buffer
         // depth is the failure this exists to surface.
         tracing::info!(
+            inbound_queue_ms = health.inbound_queue_ms,
             inbound_queue_high_water_ms = health.inbound_queue_high_water_ms,
+            outbound_queue_ms = health.outbound_queue_ms,
             outbound_queue_high_water_ms = health.outbound_queue_high_water_ms,
             inbound_frames = health.inbound_frames,
             outbound_frames = health.outbound_frames,
