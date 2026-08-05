@@ -1,6 +1,5 @@
 //! Raw-audio framing and the rvoip media-stream boundary.
 
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -197,35 +196,6 @@ impl MediaStream for VapiMediaStream {
     }
 }
 
-pub(crate) fn append_bounded_frames(
-    framer: &mut AudioFramer,
-    payload: &[u8],
-    queued: &mut VecDeque<Bytes>,
-    max_frames: usize,
-    max_payload_bytes: usize,
-) -> Result<()> {
-    if payload.len() > max_payload_bytes {
-        return Err(VapiError::MediaQueueOverflow);
-    }
-    let buffered = framer
-        .buffer
-        .len()
-        .checked_add(payload.len())
-        .ok_or(VapiError::MediaQueueOverflow)?;
-    let complete_frames = buffered / framer.frame_bytes;
-    if complete_frames > max_frames.saturating_sub(queued.len()) {
-        return Err(VapiError::MediaQueueOverflow);
-    }
-    framer.push(payload);
-    while let Some(frame) = framer.next_frame() {
-        if queued.len() >= max_frames {
-            return Err(VapiError::MediaQueueOverflow);
-        }
-        queued.push_back(frame);
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,24 +223,21 @@ mod tests {
     }
 
     #[test]
-    fn bounded_outgoing_frames_fail_closed() {
+    fn framer_reassembles_a_burst_into_whole_frames() {
+        // The session loop now bounds its own queues with drop-oldest instead
+        // of the removed append_bounded_frames helper, which failed closed on
+        // overflow. What remains to verify here is that a single oversized
+        // burst still reassembles into exact frames without reordering.
         let mut framer = AudioFramer::new(VapiAudioFormat::MuLaw8Khz);
-        let mut queued = VecDeque::new();
-        assert_eq!(
-            append_bounded_frames(&mut framer, &vec![0; 320], &mut queued, 1, 1024),
-            Err(VapiError::MediaQueueOverflow)
-        );
-    }
-
-    #[test]
-    fn oversized_payload_is_rejected_before_buffering() {
-        let mut framer = AudioFramer::new(VapiAudioFormat::MuLaw8Khz);
-        let mut queued = VecDeque::new();
-        assert_eq!(
-            append_bounded_frames(&mut framer, &vec![0; 2048], &mut queued, 100, 1024),
-            Err(VapiError::MediaQueueOverflow)
-        );
-        assert_eq!(framer.buffered_bytes(), 0);
-        assert!(queued.is_empty());
+        framer.push(&vec![7; 743]);
+        let mut frames = 0;
+        while let Some(frame) = framer.next_frame() {
+            assert_eq!(frame.len(), 160);
+            assert!(frame.iter().all(|byte| *byte == 7));
+            frames += 1;
+        }
+        // 743 bytes is four whole frames with 103 bytes left buffered.
+        assert_eq!(frames, 4);
+        assert_eq!(framer.buffered_bytes(), 103);
     }
 }

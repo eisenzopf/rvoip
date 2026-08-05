@@ -34,7 +34,7 @@ use crate::client::{connect_websocket, send_with_timeout, VapiHttpClient, VapiSo
 use crate::config::VapiConfig;
 use crate::error::{Result, VapiError};
 use crate::events::{VapiEvent, VapiEventEnvelope};
-use crate::media::{append_bounded_frames, AudioFramer, VapiMediaStream};
+use crate::media::{AudioFramer, VapiMediaStream};
 use crate::types::{AddedMessage, VapiCallOptions, VapiCommand};
 
 pub const ADAPTER_EVENT_CAPACITY: usize = 256;
@@ -865,6 +865,8 @@ async fn run_websocket_session(
     let mut timestamp_rtp = 0u32;
     let mut inbound_dropped: u64 = 0;
     let mut inbound_drop_reported = false;
+    let mut outbound_dropped: u64 = 0;
+    let mut outbound_drop_reported = false;
     let mut incoming_tick = tokio::time::interval(std::time::Duration::from_millis(20));
     incoming_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     incoming_tick.tick().await;
@@ -951,15 +953,34 @@ async fn run_websocket_session(
                     metrics::counter!("rvoip_vapi_dtmf_frames_dropped_total").increment(1);
                     continue;
                 }
-                if append_bounded_frames(
-                    &mut outgoing_framer,
-                    &media.payload,
-                    &mut outgoing_frames,
-                    config.media_queue_capacity,
-                    config.max_message_bytes,
-                ).is_err() {
-                    metrics::counter!("rvoip_vapi_queue_overflow_total", "direction" => "out").increment(1);
-                    break SessionOutcome::Failed("Vapi outbound media queue overflow");
+                if media.payload.len() > config.max_message_bytes {
+                    break SessionOutcome::Failed("Vapi outbound audio frame exceeded size limit");
+                }
+                // Symmetric with the inbound path: a transient backlog must
+                // degrade, not end the call. This direction backs up whenever a
+                // WebSocket write stalls, because `cancellable_session_send` is
+                // awaited inside the select arm and blocks the whole loop for up
+                // to `websocket_io_timeout`. Caller RTP keeps arriving during
+                // that window, so the queue can be flooded on resume by a peer
+                // that is behaving perfectly.
+                outgoing_framer.push(&media.payload);
+                while let Some(frame) = outgoing_framer.next_frame() {
+                    if outgoing_frames.len() >= config.media_queue_capacity {
+                        outgoing_frames.pop_front();
+                        outbound_dropped = outbound_dropped.saturating_add(1);
+                        metrics::counter!(
+                            "rvoip_vapi_outbound_frames_dropped_total"
+                        ).increment(1);
+                    }
+                    outgoing_frames.push_back(frame);
+                }
+                if outbound_dropped > 0 && !outbound_drop_reported {
+                    outbound_drop_reported = true;
+                    tracing::warn!(
+                        capacity = config.media_queue_capacity,
+                        "outbound audio is queueing faster than the WebSocket \
+                         drains; dropping the oldest frames"
+                    );
                 }
             }
             command = commands.recv() => {
@@ -1060,10 +1081,11 @@ async fn run_websocket_session(
         }
     };
 
-    if inbound_dropped > 0 {
+    if inbound_dropped > 0 || outbound_dropped > 0 {
         tracing::warn!(
-            dropped_frames = inbound_dropped,
-            "Vapi session dropped inbound audio frames to keep the jitter buffer bounded"
+            inbound_dropped,
+            outbound_dropped,
+            "Vapi session dropped audio frames to keep its jitter buffers bounded"
         );
     }
     match &outcome {
