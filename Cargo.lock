@@ -6646,7 +6646,7 @@ dependencies = [
  "chrono",
  "rvoip-client",
  "rvoip-core",
- "rvoip-core-traits",
+ "rvoip-core-traits 0.3.5",
  "rvoip-harness",
  "rvoip-identity",
  "rvoip-quic",
@@ -6685,7 +6685,7 @@ dependencies = [
  "rvoip-core",
  "rvoip-media-core",
  "rvoip-sip",
- "rvoip-sip-core",
+ "rvoip-sip-core 0.3.5",
  "rvoip-webrtc",
  "serde",
  "serde_json",
@@ -6739,8 +6739,8 @@ dependencies = [
  "rand 0.8.7",
  "reqwest",
  "ring",
- "rvoip-core-traits",
- "rvoip-infra-common",
+ "rvoip-core-traits 0.3.5",
+ "rvoip-infra-common 0.3.5",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -6764,7 +6764,7 @@ dependencies = [
  "rustls 0.23.42",
  "rvoip-auth-core",
  "rvoip-core",
- "rvoip-core-traits",
+ "rvoip-core-traits 0.3.5",
  "rvoip-quic",
  "rvoip-sip",
  "rvoip-uctp",
@@ -6802,9 +6802,9 @@ dependencies = [
  "quinn",
  "rustls 0.23.42",
  "rvoip-auth-core",
- "rvoip-core-traits",
+ "rvoip-core-traits 0.3.5",
  "rvoip-harness",
- "rvoip-infra-common",
+ "rvoip-infra-common 0.3.5",
  "rvoip-media-core",
  "rvoip-quic",
  "rvoip-sip",
@@ -6838,12 +6838,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "rvoip-core-traits"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "efd3dd6caa0538530d29460cd50b8ba5dad9f51d1d9a2d018edc196615aab0f2"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+ "tokio",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "rvoip-harness"
 version = "0.3.5"
 dependencies = [
  "async-trait",
  "bytes",
- "rvoip-core-traits",
+ "rvoip-core-traits 0.3.5",
  "tokio",
 ]
 
@@ -6904,13 +6922,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "rvoip-infra-common"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b80f4d5f88b7cab657f5897bbe04a962e644627e9a9a626643756eceb7deaf0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "config",
+ "dashmap",
+ "futures",
+ "mimalloc",
+ "once_cell",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "rvoip-keycloak"
 version = "0.3.5"
 dependencies = [
  "async-trait",
  "reqwest",
  "rvoip-auth-core",
- "rvoip-core-traits",
+ "rvoip-core-traits 0.3.5",
  "serde",
  "thiserror 1.0.69",
  "tokio",
@@ -6924,7 +6965,7 @@ dependencies = [
  "async-trait",
  "ldap3",
  "rvoip-auth-core",
- "rvoip-core-traits",
+ "rvoip-core-traits 0.3.5",
  "thiserror 1.0.69",
  "tokio",
 ]
@@ -6950,7 +6991,7 @@ dependencies = [
  "rand 0.8.7",
  "rustfft",
  "rvoip-codec-core",
- "rvoip-infra-common",
+ "rvoip-infra-common 0.3.5",
  "rvoip-rtp-core",
  "serde",
  "serde_json",
@@ -6976,7 +7017,7 @@ dependencies = [
  "rand 0.8.7",
  "rcgen 0.14.8",
  "rvoip-auth-core",
- "rvoip-core-traits",
+ "rvoip-core-traits 0.3.5",
  "rvoip-moq-native",
  "rvoip-moq-relay",
  "rvoip-moq-transport",
@@ -7074,7 +7115,7 @@ dependencies = [
  "async-trait",
  "reqwest",
  "rvoip-auth-core",
- "rvoip-core-traits",
+ "rvoip-core-traits 0.3.5",
  "serde",
  "thiserror 1.0.69",
  "tokio",
@@ -7114,7 +7155,7 @@ dependencies = [
  "chrono",
  "redis",
  "rvoip-auth-core",
- "rvoip-core-traits",
+ "rvoip-core-traits 0.3.5",
  "rvoip-moq",
  "sha2 0.10.9",
  "thiserror 1.0.69",
@@ -7185,7 +7226,7 @@ dependencies = [
  "parking_lot",
  "rand 0.8.7",
  "rcgen 0.14.8",
- "rvoip-infra-common",
+ "rvoip-infra-common 0.3.5",
  "sha1",
  "sha2 0.10.9",
  "thiserror 1.0.69",
@@ -7222,7 +7263,7 @@ dependencies = [
  "chrono",
  "parking_lot",
  "rvoip-auth-core",
- "rvoip-core-traits",
+ "rvoip-core-traits 0.3.5",
  "rvoip-users-core",
  "serde",
  "serde_json",
@@ -7264,9 +7305,9 @@ dependencies = [
  "rvoip-audit",
  "rvoip-auth-core",
  "rvoip-core",
- "rvoip-core-traits",
+ "rvoip-core-traits 0.3.5",
  "rvoip-ims-aka",
- "rvoip-infra-common",
+ "rvoip-infra-common 0.3.5",
  "rvoip-keycloak",
  "rvoip-ldap",
  "rvoip-media-core",
@@ -7275,11 +7316,11 @@ dependencies = [
  "rvoip-rtp-core",
  "rvoip-saml",
  "rvoip-scim",
- "rvoip-sip-core",
+ "rvoip-sip-core 0.3.5",
  "rvoip-sip-dialog",
  "rvoip-sip-proxy",
  "rvoip-sip-registrar",
- "rvoip-sip-transport",
+ "rvoip-sip-transport 0.3.5",
  "rvoip-users-core",
  "rvoip-webauthn",
  "serde",
@@ -7319,6 +7360,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rvoip-sip-core"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27817bc4225a6f34b9c62a95847b0090f8917d24dd520fad6d6e9c3893aa371f"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "log",
+ "nom 7.1.3",
+ "ordered-float",
+ "rand 0.8.7",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "rvoip-sip-dialog"
 version = "0.3.5"
 dependencies = [
@@ -7331,10 +7392,10 @@ dependencies = [
  "futures",
  "http 1.4.2",
  "rand 0.8.7",
- "rvoip-core-traits",
- "rvoip-infra-common",
- "rvoip-sip-core",
- "rvoip-sip-transport",
+ "rvoip-core-traits 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "rvoip-infra-common 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "rvoip-sip-core 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "rvoip-sip-transport 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -7351,9 +7412,9 @@ version = "0.3.5"
 dependencies = [
  "async-trait",
  "dashmap",
- "rvoip-sip-core",
+ "rvoip-sip-core 0.3.5",
  "rvoip-sip-dialog",
- "rvoip-sip-transport",
+ "rvoip-sip-transport 0.3.5",
  "sha2 0.10.9",
  "thiserror 1.0.69",
  "tokio",
@@ -7371,7 +7432,7 @@ dependencies = [
  "dashmap",
  "quick-xml",
  "rvoip-auth-core",
- "rvoip-infra-common",
+ "rvoip-infra-common 0.3.5",
  "rvoip-sip-dialog",
  "serde",
  "serde_json",
@@ -7401,8 +7462,8 @@ dependencies = [
  "rustls 0.23.42",
  "rustls-native-certs 0.8.4",
  "rustls-pemfile",
- "rvoip-infra-common",
- "rvoip-sip-core",
+ "rvoip-infra-common 0.3.5",
+ "rvoip-sip-core 0.3.5",
  "sha2 0.10.9",
  "socket2 0.5.10",
  "tempfile",
@@ -7412,6 +7473,34 @@ dependencies = [
  "tokio-tungstenite 0.29.0",
  "tracing",
  "tracing-subscriber",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "rvoip-sip-transport"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ff576ffb6ecada18ecaf037dd1ff0fce0653fc136fb1040482d3c136190d202"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "fastrand",
+ "futures-util",
+ "hickory-resolver",
+ "http 1.4.2",
+ "rustls 0.23.42",
+ "rustls-native-certs 0.8.4",
+ "rustls-pemfile",
+ "rvoip-infra-common 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "rvoip-sip-core 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sha2 0.10.9",
+ "socket2 0.5.10",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tokio-tungstenite 0.29.0",
+ "tracing",
  "webpki-roots 0.26.11",
 ]
 
@@ -7427,7 +7516,7 @@ dependencies = [
  "reqwest",
  "rustls-pki-types",
  "rustls-webpki 0.103.13",
- "rvoip-sip-core",
+ "rvoip-sip-core 0.3.5",
  "rvoip-sip-dialog",
  "serde",
  "serde_json",
@@ -7503,7 +7592,7 @@ dependencies = [
  "reqwest",
  "rsa",
  "rvoip-auth-core",
- "rvoip-core-traits",
+ "rvoip-core-traits 0.3.5",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -7633,7 +7722,7 @@ dependencies = [
  "rvoip-quic",
  "rvoip-rtc",
  "rvoip-sip",
- "rvoip-sip-core",
+ "rvoip-sip-core 0.3.5",
  "rvoip-uctp",
  "rvoip-webrtc-stack",
  "serde",

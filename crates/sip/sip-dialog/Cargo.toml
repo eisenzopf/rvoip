@@ -21,15 +21,17 @@ description = "RFC 3261 SIP Dialog Management Layer for RVOIP"
 workspace = true
 
 [dependencies]
-# 🎯 INTERNAL CRATES - Use workspace dependencies
-rvoip-sip-core.workspace = true
+# Keep this backport consumable as a single Git-patched crate: its public type
+# graph must resolve to the published 0.3.5 crates rather than pulling sibling
+# workspace paths from this Git revision.
+rvoip-sip-core = "=0.3.5"
 # `dns` activates `HickoryResolver` + NAPTR/SRV/A ladder. Phase 5
 # default behaviour preserves pre-Phase-5 URI resolution; consumers
 # that want a leaner build can `default-features = false` on this
 # crate and re-add only the features they need.
-rvoip-sip-transport = { workspace = true, features = ["dns"] }
-rvoip-infra-common.workspace = true
-rvoip-core-traits.workspace = true
+rvoip-sip-transport = { version = "=0.3.5", features = ["dns"] }
+rvoip-infra-common = "=0.3.5"
+rvoip-core-traits = "=0.3.5"
 # transaction-core has been merged into this crate
 
 # External dependencies from workspace
@@ -60,7 +62,7 @@ tracing-subscriber = "0.3"
 # Benchmarks
 criterion = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "test-util"] }
-rvoip-sip-core = { workspace = true }
+rvoip-sip-core = "=0.3.5"
 dashmap = { workspace = true }
 
 # Performance benchmarks. See `crates/sip/rvoip-sip/docs/PROFILING.md`.
