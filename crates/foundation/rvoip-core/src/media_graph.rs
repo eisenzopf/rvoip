@@ -2197,6 +2197,18 @@ fn update_sink_group(
     sink.target_codec = codec.clone();
     sink.target_pt = target_pt;
     sink.group_key = group_key.clone();
+    // Re-arm the establishment warm-up. A renegotiated consumer (re-INVITE,
+    // hold/resume, ICE restart, codec change) restarts its pacing and is slow
+    // to drain again for exactly the reason it was at call setup. A one-shot
+    // warm-up guards only the first seconds of a call; FreeSWITCH re-arms its
+    // equivalent from every path that disturbs timing, and this is that path.
+    //
+    // Clearing the history alongside the anchor is required for the same
+    // reason the warm-up skips the push: retained drops would otherwise evict
+    // on the first offer after the new warm-up expired.
+    sink.warmup_since = None;
+    sink.history.clear();
+    sink.rolling_drops = 0;
     groups.retain(|_, group| !group.sinks.is_empty());
     groups
         .entry(group_key)
@@ -3039,6 +3051,38 @@ mod tests {
             assert!(
                 !sink.record_offer(at, false, &policy),
                 "a healthy sink was evicted by drops from its warm-up"
+            );
+        }
+    }
+
+    /// A renegotiated consumer restarts its pacing, so it must get a fresh
+    /// establishment window. A one-shot warm-up would leave a re-INVITE or a
+    /// hold/resume exposed to exactly the bug the warm-up exists to prevent.
+    #[tokio::test]
+    async fn renegotiation_rearms_the_establishment_warmup() {
+        let policy = warmup_policy();
+        let start = Instant::now();
+        let mut sink = eviction_test_sink(1, start);
+
+        // Steady state reached, then a rough patch that has armed the window.
+        let after = start + Duration::from_secs(4);
+        for index in 0..40u32 {
+            sink.record_offer(after + Duration::from_millis(u64::from(index) * 20), true, &policy);
+        }
+        assert!(sink.rolling_drop_counts().0 > 0, "window should be populated");
+
+        // Renegotiation: same reset update_sink_group performs.
+        sink.warmup_since = None;
+        sink.history.clear();
+        sink.rolling_drops = 0;
+
+        // A freshly restarted consumer drops heavily again and must survive it.
+        let renegotiated = after + Duration::from_secs(10);
+        for index in 0..50u32 {
+            let at = renegotiated + Duration::from_millis(u64::from(index) * 20);
+            assert!(
+                !sink.record_offer(at, index % 50 < 36, &policy),
+                "offer {index} evicted a consumer that had just renegotiated"
             );
         }
     }
