@@ -90,14 +90,21 @@ pub struct MediaGraphPolicy {
     /// an add command enters the bounded control queue, so concurrent callers
     /// cannot oversubscribe the graph.
     pub max_sinks: usize,
-    /// Frames buffered per sink before offers are dropped.
+    /// Frames buffered per sink before offers are dropped. **This is also a
+    /// latency ceiling**, because a queue that fills does not drain back down
+    /// on its own: for a real-time consumer, depth becomes added delay.
     ///
-    /// This must absorb the gap between a source that produces on its own
-    /// schedule and a consumer that is not yet draining at line rate. Ten
-    /// frames is 200 ms, which leaves almost no headroom while a freshly
-    /// established peer starts up: a bridge between a paced SIP leg and a
-    /// WebSocket writer was observed dropping 36 of its first 50 offers
-    /// because the writer's session task had not begun draining.
+    /// It must absorb the gap between a source producing on its own schedule
+    /// and a consumer not yet draining at line rate. Ten frames is 200 ms,
+    /// which left almost no headroom while a freshly established peer started
+    /// up: a bridge between a paced SIP leg and a WebSocket writer was
+    /// observed dropping 36 of its first 50 offers because the writer's
+    /// session task had not begun draining. 25 frames (500 ms) gives that
+    /// headroom without letting a filled queue add a full second of delay.
+    ///
+    /// Note this is not the primary defence against establishment drops —
+    /// [`Self::eviction_warmup`] is. Depth only reduces how much audio is lost
+    /// while a consumer starts.
     pub sink_queue_frames: usize,
     /// Frames retained before the first sink is registered. The buffer is
     /// always bounded and drops its oldest frame on overflow.
@@ -126,9 +133,10 @@ impl Default for MediaGraphPolicy {
     fn default() -> Self {
         Self {
             max_sinks: DEFAULT_MEDIA_GRAPH_MAX_SINKS,
-            // One second of audio, sized for a bursty source rather than a
-            // perfectly paced one. See the field documentation.
-            sink_queue_frames: 50,
+            // 500 ms: enough headroom for a bursty source and a slow-starting
+            // consumer, bounded so a filled queue cannot become a second of
+            // conversational delay. See the field documentation.
+            sink_queue_frames: 25,
             pre_sink_buffer_frames: 10,
             eviction_window: Duration::from_secs(10),
             eviction_drop_ratio: 0.25,
