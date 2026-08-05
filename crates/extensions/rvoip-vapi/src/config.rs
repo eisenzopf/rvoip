@@ -98,6 +98,28 @@ pub struct VapiConfig {
     /// times over while capping added delay below the point where turn-taking
     /// and barge-in break down.
     pub inbound_queue_capacity: usize,
+    /// Depth the jitter buffers converge back down to, in frames.
+    ///
+    /// A capacity alone only *bounds* delay; it does not remove it. Because the
+    /// drain releases one frame per tick, a queue that fills stays filled, so a
+    /// 500 ms ceiling becomes a permanent 500 ms of delay. FreeSWITCH hit this
+    /// on RTP and concluded a cap was insufficient
+    /// (signalwire/freeswitch#2069: "I noticed it was not
+    /// accelerating/shrinking... we decided to cap the maximum size" — the cap
+    /// was tried first and judged not to be the fix). Its remedy is
+    /// `skip_timer`: above a threshold the read loop yields instead of waiting
+    /// the tick, draining faster than real time until depth recovers.
+    ///
+    /// This is the same valve. Above `jitter_target_frames` the drain releases
+    /// up to `max_catchup_frames_per_tick` extra frames per tick, so a backlog
+    /// re-converges instead of persisting for the rest of the call. Audio is
+    /// preserved rather than dropped: frames carry sequential RTP timestamps,
+    /// so the receiver's own buffer absorbs the early arrival.
+    pub jitter_target_frames: usize,
+    /// Extra frames the drain may release per tick while re-converging. One
+    /// extra frame is 2x real time, which clears a full 500 ms buffer in 500 ms
+    /// without flooding the peer.
+    pub max_catchup_frames_per_tick: usize,
     /// Outbound jitter buffer depth, in frames. **This is a latency ceiling**,
     /// with the same semantics as [`Self::inbound_queue_capacity`].
     ///
@@ -130,6 +152,8 @@ impl VapiConfig {
             startup_audio_frames: 100,
             inbound_queue_capacity: 25,
             outbound_queue_capacity: 25,
+            jitter_target_frames: 5,
+            max_catchup_frames_per_tick: 1,
             allow_insecure_transport: false,
         }
     }

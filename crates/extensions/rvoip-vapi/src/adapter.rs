@@ -916,19 +916,44 @@ async fn run_websocket_session(
                 if route.stream.incoming_is_closed() {
                     break SessionOutcome::Local(EndReason::BridgeTorn);
                 }
-                if !route.stream.incoming_has_capacity() {
-                    continue;
+                // Burst-drain valve. One frame per tick matches the source
+                // rate exactly, so a backlog never recovers and its depth
+                // becomes permanent delay. Above the target depth, release
+                // extra frames to run faster than real time until converged.
+                let over_target = incoming_frames
+                    .len()
+                    .saturating_sub(config.jitter_target_frames);
+                let release = 1 + over_target.min(config.max_catchup_frames_per_tick);
+                let mut overflowed = false;
+                for _ in 0..release {
+                    if !route.stream.incoming_has_capacity() {
+                        break;
+                    }
+                    let Some(frame) = incoming_frames.pop_front() else {
+                        break;
+                    };
+                    if route.stream.try_push_incoming(frame, timestamp_rtp).is_err() {
+                        metrics::counter!(
+                            "rvoip_vapi_queue_overflow_total", "direction" => "in"
+                        ).increment(1);
+                        overflowed = true;
+                        break;
+                    }
+                    timestamp_rtp = timestamp_rtp
+                        .wrapping_add(route.options.audio_format.timestamp_increment());
+                    metrics::counter!(
+                        "rvoip_vapi_audio_frames_total", "direction" => "in"
+                    ).increment(1);
                 }
-                let Some(frame) = incoming_frames.pop_front() else {
-                    continue;
-                };
-                if route.stream.try_push_incoming(frame, timestamp_rtp).is_err() {
-                    metrics::counter!("rvoip_vapi_queue_overflow_total", "direction" => "in").increment(1);
+                if overflowed {
+                    // The downstream stream rejected a frame it had just
+                    // reported capacity for. Not a transient backlog; treat it
+                    // as a broken stream.
                     break SessionOutcome::Failed("Vapi inbound media queue overflow");
                 }
-                timestamp_rtp = timestamp_rtp
-                    .wrapping_add(route.options.audio_format.timestamp_increment());
-                metrics::counter!("rvoip_vapi_audio_frames_total", "direction" => "in").increment(1);
+                if over_target > 0 {
+                    metrics::counter!("rvoip_vapi_jitter_catchup_frames_total").increment(1);
+                }
             }
             _ = outgoing_tick.tick(), if !outgoing_frames.is_empty() => {
                 let Some(frame) = outgoing_frames.pop_front() else {
