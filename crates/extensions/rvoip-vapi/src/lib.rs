@@ -16,6 +16,7 @@ pub mod config;
 pub mod error;
 pub mod events;
 pub mod health;
+mod jitter;
 pub mod types;
 
 pub use adapter::{
