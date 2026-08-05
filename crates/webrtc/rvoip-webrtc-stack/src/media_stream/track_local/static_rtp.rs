@@ -202,33 +202,35 @@ impl TrackLocal for TrackLocalStaticRTP {
     }
 
     async fn write_rtp(&self, packet: rtp::Packet) -> Result<()> {
-        let ctx_opt = self.ctx.lock().await;
-        if let Some(ctx) = &*ctx_opt {
-            ctx.driver_event_tx
-                .send(PeerConnectionDriverEvent::SenderRtp(
-                    ctx.rtp_sender_id,
-                    packet,
-                ))
-                .await
-                .map_err(|e| Error::Other(e.to_string()))
-        } else {
-            Err(Error::Other("track is not binding yet".to_string()))
-        }
+        let ctx = self
+            .ctx
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| Error::Other("track is not binding yet".to_string()))?;
+        ctx.driver_event_tx
+            .send(PeerConnectionDriverEvent::SenderRtp(
+                ctx.rtp_sender_id,
+                packet,
+            ))
+            .await
+            .map_err(|e| Error::Other(e.to_string()))
     }
 
     async fn write_rtcp(&self, packets: Vec<Box<dyn rtcp::Packet>>) -> Result<()> {
-        let ctx_opt = self.ctx.lock().await;
-        if let Some(ctx) = &*ctx_opt {
-            ctx.driver_event_tx
-                .send(PeerConnectionDriverEvent::SenderRtcp(
-                    ctx.rtp_sender_id,
-                    packets,
-                ))
-                .await
-                .map_err(|e| Error::Other(e.to_string()))
-        } else {
-            Err(Error::Other("track is not binding yet".to_string()))
-        }
+        let ctx = self
+            .ctx
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| Error::Other("track is not binding yet".to_string()))?;
+        ctx.driver_event_tx
+            .send(PeerConnectionDriverEvent::SenderRtcp(
+                ctx.rtp_sender_id,
+                packets,
+            ))
+            .await
+            .map_err(|e| Error::Other(e.to_string()))
     }
 }
 
@@ -273,6 +275,13 @@ mod tests {
         assert!(
             !blocked.is_finished(),
             "a full driver queue must apply backpressure, not fail the media pump"
+        );
+        tokio::time::timeout(Duration::from_secs(1), track.unbind())
+            .await
+            .expect("unbind must not wait on a backpressured driver send");
+        assert!(
+            track.write_rtp(rtp::Packet::default()).await.is_err(),
+            "new writes after unbind must fail closed"
         );
 
         assert!(matches!(
