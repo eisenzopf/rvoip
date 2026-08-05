@@ -58,8 +58,12 @@ struct MockMediaStream {
 
 impl MockMediaStream {
     fn new(codec_name: &str) -> Arc<Self> {
+        Self::with_output_capacity(codec_name, 64)
+    }
+
+    fn with_output_capacity(codec_name: &str, output_capacity: usize) -> Arc<Self> {
         let (external_in_tx, in_rx) = mpsc::channel::<MediaFrame>(64);
-        let (out_tx, external_out_rx) = mpsc::channel::<MediaFrame>(64);
+        let (out_tx, external_out_rx) = mpsc::channel::<MediaFrame>(output_capacity);
         Arc::new(Self {
             id: StreamId::new(),
             codec: CodecInfo {
@@ -631,6 +635,48 @@ async fn setup_two_connection_orchestrator(
     (orchestrator, stream_a, stream_b, conn_a, conn_b)
 }
 
+async fn setup_amazon_connect_bridge_orchestrator() -> (
+    Arc<Orchestrator>,
+    Arc<MockMediaStream>,
+    Arc<MockMediaStream>,
+    ConnectionId,
+    ConnectionId,
+) {
+    let sip_adapter = MockAdapter::new(Transport::Sip);
+    let connect_adapter = MockAdapter::new(Transport::AmazonConnect);
+    let sip_connection = ConnectionId::new();
+    let connect_connection = ConnectionId::new();
+    let sip_stream = MockMediaStream::new("opus");
+    let connect_stream = MockMediaStream::with_output_capacity("opus", 1);
+    sip_adapter.register_connection(sip_connection.clone(), Arc::clone(&sip_stream));
+    connect_adapter.register_connection(connect_connection.clone(), Arc::clone(&connect_stream));
+
+    let orchestrator = Orchestrator::new(Config::default());
+    orchestrator
+        .register(sip_adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .expect("register SIP adapter");
+    orchestrator
+        .register(connect_adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .expect("register Amazon Connect adapter");
+
+    let session = SessionId::new();
+    sip_adapter
+        .announce(sip_connection.clone(), session.clone())
+        .await;
+    connect_adapter
+        .announce(connect_connection.clone(), session)
+        .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    (
+        orchestrator,
+        sip_stream,
+        connect_stream,
+        sip_connection,
+        connect_connection,
+    )
+}
+
 async fn wait_for_data_message_count(adapter: &MockAdapter, expected: usize) {
     tokio::time::timeout(Duration::from_secs(2), async {
         while adapter.sent_data_messages().len() < expected {
@@ -1156,6 +1202,64 @@ async fn directional_bridge_consumes_only_enabled_sources_and_routes_each_half_i
     orch.unbridge_connections(bridge)
         .await
         .expect("unbridge B-to-A");
+}
+
+#[tokio::test]
+async fn amazon_connect_cross_transport_bridge_survives_startup_backpressure() {
+    const STARTUP_FRAMES: usize = 75;
+    let (orchestrator, sip_stream, connect_stream, sip_connection, connect_connection) =
+        setup_amazon_connect_bridge_orchestrator().await;
+    let mut connect_output = connect_stream.take_external_out();
+    let bridge = orchestrator
+        .bridge_connections_directional(
+            sip_connection.clone(),
+            connect_connection,
+            DirectionalMediaBridgePlan::new(true, false).unwrap(),
+        )
+        .await
+        .expect("SIP-to-Connect directional bridge");
+    let graph = orchestrator
+        .media_graph_for_connection(sip_connection)
+        .await
+        .expect("SIP source graph");
+
+    for value in 0..STARTUP_FRAMES {
+        sip_stream
+            .inject(mk_frame(sip_stream.id(), value as u8))
+            .await;
+    }
+    let snapshot = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let snapshot = graph.snapshot().await;
+            if snapshot.source_frames >= STARTUP_FRAMES as u64 {
+                return snapshot;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("graph consumes startup burst");
+    assert_eq!(snapshot.evictions, 0);
+    assert_eq!(snapshot.sinks.len(), 1);
+    assert!(snapshot.dropped_frames > 0);
+
+    connect_output.recv().await.expect("release startup stall");
+    sip_stream.inject(mk_frame(sip_stream.id(), 255)).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(frame) = connect_output.recv().await {
+            if frame.payload[0] == 255 {
+                return;
+            }
+        }
+        panic!("Connect output closed after startup stall");
+    })
+    .await
+    .expect("post-stall media reaches Connect");
+
+    orchestrator
+        .unbridge_connections(bridge)
+        .await
+        .expect("remove Connect bridge");
 }
 
 #[tokio::test]
