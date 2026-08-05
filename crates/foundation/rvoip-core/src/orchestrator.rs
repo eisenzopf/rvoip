@@ -9944,6 +9944,24 @@ impl Orchestrator {
     /// Return the latest retained operational snapshot for a connection's
     /// reusable source graph. The snapshot is aggregate-safe and contains no
     /// tenant, participant, or packet payload data.
+    /// Discard queued media on a connection's graph — barge-in.
+    ///
+    /// Audio already queued for playout is stale the moment the far party
+    /// starts speaking. Without this the jitter-buffer depth becomes the
+    /// barge-in latency floor: the agent keeps talking for the buffer's worth
+    /// of time after the caller interrupts. Asterisk (`FLUSH_MEDIA`), Twilio
+    /// (`clear`) and jambonz (`killAudio`) all expose the same primitive.
+    ///
+    /// Returns the number of frames discarded, or `None` if the connection has
+    /// no media graph.
+    pub async fn flush_media_graph(&self, connection_id: &ConnectionId) -> Option<usize> {
+        let graph = self
+            .media_graphs
+            .get(connection_id)
+            .map(|entry| entry.value().clone())?;
+        graph.flush_sinks_and_wait().await.ok()
+    }
+
     pub fn media_graph_latest_snapshot(
         &self,
         connection_id: &ConnectionId,

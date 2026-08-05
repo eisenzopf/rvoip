@@ -891,6 +891,7 @@ async fn run_websocket_session(
     let mut outbound_dropped: u64 = 0;
     let mut outbound_drop_reported = false;
     let mut media_write_timeouts: u32 = 0;
+    let mut barge_in_dropped: u64 = 0;
     let mut incoming_tick = tokio::time::interval(std::time::Duration::from_millis(20));
     incoming_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     incoming_tick.tick().await;
@@ -1112,6 +1113,21 @@ async fn run_websocket_session(
                         }
                         let event = VapiEvent::parse(text.as_str());
                         let terminal = event.is_terminal_status();
+                        if event.is_user_speech_start() {
+                            // Barge-in. Everything queued toward the caller is
+                            // stale: without dropping it, the jitter buffer's
+                            // depth becomes the barge-in latency floor and the
+                            // agent talks over the interruption.
+                            let stale = incoming_frames.len();
+                            if stale > 0 {
+                                incoming_frames.clear();
+                                incoming_framer.reset();
+                                barge_in_dropped = barge_in_dropped.saturating_add(stale as u64);
+                                metrics::counter!("rvoip_vapi_barge_in_frames_dropped_total")
+                                    .increment(stale as u64);
+                            }
+                            route.stream.request_flush();
+                        }
                         publish_vapi_event(global_events, route, event);
                         if terminal {
                             break SessionOutcome::RemoteEnded;
@@ -1159,10 +1175,11 @@ async fn run_websocket_session(
         }
     };
 
-    if inbound_dropped > 0 || outbound_dropped > 0 {
+    if inbound_dropped > 0 || outbound_dropped > 0 || barge_in_dropped > 0 {
         tracing::warn!(
             inbound_dropped,
             outbound_dropped,
+            barge_in_dropped,
             "Vapi session dropped audio frames to keep its jitter buffers bounded"
         );
     }

@@ -407,6 +407,11 @@ enum Command {
         route_id: MediaRouteId,
         ack: Option<oneshot::Sender<bool>>,
     },
+    /// Discard queued media on every sink. For barge-in: queued audio is stale
+    /// the moment the far party starts speaking.
+    Flush {
+        ack: Option<oneshot::Sender<usize>>,
+    },
     UpdateSourceCodec {
         codec: CodecInfo,
         source_pt: u8,
@@ -586,6 +591,24 @@ impl MediaGraphHandle {
     /// Queue a removal command. The return value reports whether the command
     /// was accepted, not whether the route existed. Use
     /// `remove_sink_and_wait` when route-existence acknowledgement matters.
+    /// Discard queued media on every sink, returning how many frames went.
+    ///
+    /// For barge-in. Queued audio is stale the instant the far party starts
+    /// speaking, and without this the jitter-buffer depth becomes the barge-in
+    /// latency floor. Best-effort: a full control queue means the flush is
+    /// skipped rather than blocking the caller.
+    pub fn flush_sinks(&self) -> bool {
+        self.commands.try_send(Command::Flush { ack: None }).is_ok()
+    }
+
+    /// As [`Self::flush_sinks`], awaiting the actor and reporting the count.
+    pub async fn flush_sinks_and_wait(&self) -> Result<usize> {
+        let (ack, done) = oneshot::channel();
+        self.send_control(Command::Flush { ack: Some(ack) }).await?;
+        done.await
+            .map_err(|_| RvoipError::InvalidState("media graph actor stopped during flush"))
+    }
+
     pub fn remove_sink(&self, route_id: MediaRouteId) -> bool {
         self.commands
             .try_send(Command::Remove {
@@ -841,6 +864,18 @@ impl SinkQueue {
         };
         self.notify.notify_one();
         result
+    }
+
+    /// Discard everything queued, returning how many frames were dropped.
+    ///
+    /// Used for barge-in: when the far party starts speaking, audio already
+    /// queued for playout is stale and must not continue. Without this, the
+    /// jitter buffer depth becomes the barge-in latency floor.
+    fn flush(&self) -> usize {
+        let mut state = self.state.lock().expect("media sink queue poisoned");
+        let dropped = state.frames.len();
+        state.frames.clear();
+        dropped
     }
 
     async fn receive(&self) -> Option<MediaFrame> {
@@ -1652,6 +1687,20 @@ fn start_media_graph_with_activity_interval(
                                         );
                                     }
                                 }
+                            }
+                        }
+                        Command::Flush { ack } => {
+                            // Barge-in: everything queued is stale. Drop it on
+                            // every sink so playout stops now rather than
+                            // after the jitter buffer drains.
+                            let dropped: usize =
+                                sinks.values().map(|sink| sink.queue.flush()).sum();
+                            if dropped > 0 {
+                                metrics::counter!("rvoip_media_graph_flushed_frames_total")
+                                    .increment(dropped as u64);
+                            }
+                            if let Some(ack) = ack {
+                                let _ = ack.send(dropped);
                             }
                         }
                         Command::Remove { route_id, ack } => {
@@ -3129,6 +3178,46 @@ mod tests {
             sink.record_offer(start + Duration::from_millis(60), true, &policy),
             "with no warm-up the fourth all-dropped offer must evict"
         );
+    }
+
+    /// Barge-in: queued playout audio is stale the instant the far party
+    /// starts speaking. Without a flush, the jitter-buffer depth becomes the
+    /// barge-in latency floor — the agent keeps talking over the interruption
+    /// for a full buffer's worth of time.
+    #[tokio::test]
+    async fn flush_discards_queued_playout_for_barge_in() {
+        let policy = MediaGraphPolicy {
+            sink_queue_frames: 50,
+            ..MediaGraphPolicy::default()
+        };
+        let (source_tx, source_rx) = mpsc::channel(64);
+        let graph = start_media_graph(source_rx, codec("pcmu", 8_000), policy).unwrap();
+        // A consumer that is not reading, so frames accumulate in the queue.
+        let (target_tx, _target_rx) = mpsc::channel(1);
+        graph.add_sink(codec("pcmu", 8_000), target_tx).unwrap();
+        graph.snapshot().await;
+
+        for value in 0..20 {
+            source_tx.send(frame(value)).await.unwrap();
+        }
+        wait_until(|| graph.latest_snapshot().sink_offers >= 20).await;
+
+        let dropped = graph.flush_sinks_and_wait().await.expect("flush");
+        assert!(
+            dropped > 0,
+            "flush must discard queued audio, dropped {dropped}"
+        );
+
+        // Flushing must not remove the route: the call continues, and fresh
+        // audio still flows after the interruption.
+        let snapshot = graph.snapshot().await;
+        assert_eq!(snapshot.sinks.len(), 1, "flush must not evict the route");
+
+        let before = graph.latest_snapshot().sink_offers;
+        source_tx.send(frame(99)).await.unwrap();
+        wait_until(|| graph.latest_snapshot().sink_offers > before).await;
+
+        graph.shutdown();
     }
 
     /// A graph whose routes have all gone away still consumes its source. That
