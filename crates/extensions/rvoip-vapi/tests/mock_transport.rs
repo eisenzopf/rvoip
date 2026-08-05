@@ -46,6 +46,8 @@ enum SocketBehavior {
     DelayedEndAck,
     DelayedUpgrade,
     NormalClose,
+    /// A close frame carrying no body. Explicitly legal per RFC 6455 §5.5.1.
+    BodylessClose,
     Silent,
     RejectUpgrade,
     HttpError,
@@ -111,6 +113,10 @@ async fn mock_websocket(mut socket: WebSocket, state: MockState) {
     if matches!(state.socket_behavior, SocketBehavior::Silent) {
         std::future::pending::<()>().await;
         drop(socket);
+        return;
+    }
+    if matches!(state.socket_behavior, SocketBehavior::BodylessClose) {
+        let _ = socket.send(AxumWsMessage::Close(None)).await;
         return;
     }
     if matches!(state.socket_behavior, SocketBehavior::NormalClose) {
@@ -573,6 +579,57 @@ async fn normal_websocket_close_is_a_normal_remote_end() {
             ..
         }
     ));
+    server.abort();
+}
+
+#[tokio::test]
+async fn bodyless_websocket_close_is_a_normal_remote_end() {
+    // RFC 6455 §5.5.1 permits a Close frame with no body, and this adapter's
+    // own close is bodyless. Reporting it as AdapterEvent::Failed marked calls
+    // as failures when the peer had simply hung up and the audio was fine.
+    let (api_base, _state, _observed, server) =
+        start_mock_with_behavior(Duration::ZERO, SocketBehavior::BodylessClose, Vec::new()).await;
+    let mut config = VapiConfig::new(VapiApiKey::new("mock-api-key").expect("mock key"))
+        .with_api_base(api_base)
+        .with_loopback_test_transport();
+    config.heartbeat_interval = Duration::from_secs(60);
+    let adapter = VapiAdapter::new(config).expect("adapter");
+    let mut events = adapter.subscribe_events();
+    let request = OriginateRequest::new(
+        SessionId::new(),
+        ParticipantId::new(),
+        "vapi.websocket",
+        Direction::Outbound,
+        VapiAudioFormat::MuLaw8Khz.capabilities(),
+    )
+    .with_transport(Transport::Vapi)
+    .with_context(VapiCallOptions::new(VapiAssistant::saved("assistant-mock")));
+    let connection_id = adapter
+        .originate(request)
+        .await
+        .expect("prepare route")
+        .connection
+        .id;
+    adapter
+        .activate_outbound_with_receipt(connection_id)
+        .await
+        .expect("activate route");
+
+    assert!(matches!(
+        events.recv().await.expect("connected event"),
+        AdapterEvent::Connected { .. }
+    ));
+    match tokio::time::timeout(Duration::from_secs(1), events.recv())
+        .await
+        .expect("terminal event timeout")
+        .expect("terminal event")
+    {
+        AdapterEvent::Ended { .. } => {}
+        AdapterEvent::Failed { detail, .. } => {
+            panic!("a bodyless close was reported as a failure: {detail}")
+        }
+        other => panic!("unexpected terminal event: {other:?}"),
+    }
     server.abort();
 }
 

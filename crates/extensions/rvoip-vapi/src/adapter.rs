@@ -823,7 +823,30 @@ async fn close_vapi_socket(config: &VapiConfig, socket: &mut VapiSocket) {
 
 enum SessionSendFailure {
     Cancelled,
+    /// A media write missed its deadline. Recoverable: drop the frame and
+    /// continue rather than tearing down a call for one slow write.
+    TimedOut,
     Failed,
+}
+
+/// Send one media frame under a short deadline.
+///
+/// Separate from [`cancellable_session_send`] because a media write is awaited
+/// inside the session select loop: it must not be allowed to hold that loop for
+/// the control-traffic timeout. A `TimedOut` result means "drop this frame and
+/// keep going", not "the connection is broken".
+async fn cancellable_media_send(
+    config: &VapiConfig,
+    route: &Route,
+    socket: &mut VapiSocket,
+    message: WebSocketMessage,
+) -> std::result::Result<(), SessionSendFailure> {
+    tokio::select! {
+        _ = route.cancel.cancelled() => Err(SessionSendFailure::Cancelled),
+        result = send_with_timeout(config.media_write_timeout, socket, message) => {
+            result.map_err(|_| SessionSendFailure::TimedOut)
+        }
+    }
 }
 
 async fn cancellable_session_send(
@@ -867,6 +890,7 @@ async fn run_websocket_session(
     let mut inbound_drop_reported = false;
     let mut outbound_dropped: u64 = 0;
     let mut outbound_drop_reported = false;
+    let mut media_write_timeouts: u32 = 0;
     let mut incoming_tick = tokio::time::interval(std::time::Duration::from_millis(20));
     incoming_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     incoming_tick.tick().await;
@@ -910,19 +934,39 @@ async fn run_websocket_session(
                 let Some(frame) = outgoing_frames.pop_front() else {
                     continue;
                 };
-                match cancellable_session_send(
+                match cancellable_media_send(
                     config,
                     route,
                     &mut socket,
                     WebSocketMessage::Binary(frame),
                 ).await {
-                    Ok(()) => {}
+                    Ok(()) => {
+                        media_write_timeouts = 0;
+                        metrics::counter!(
+                            "rvoip_vapi_audio_frames_total", "direction" => "out"
+                        ).increment(1);
+                    }
                     Err(SessionSendFailure::Cancelled) => break requested_local_outcome(route),
+                    Err(SessionSendFailure::TimedOut) => {
+                        // Real-time audio is better dropped than delayed, and
+                        // holding the loop here starves inbound processing and
+                        // outlives the downstream slow-consumer budget.
+                        media_write_timeouts = media_write_timeouts.saturating_add(1);
+                        metrics::counter!("rvoip_vapi_media_write_timeouts_total").increment(1);
+                        if media_write_timeouts >= config.media_write_timeout_limit {
+                            break SessionOutcome::Failed("Vapi WebSocket audio writes stalled");
+                        }
+                        if media_write_timeouts == 1 {
+                            tracing::warn!(
+                                timeout_ms = config.media_write_timeout.as_millis() as u64,
+                                "a Vapi audio write exceeded its deadline; dropping the frame"
+                            );
+                        }
+                    }
                     Err(SessionSendFailure::Failed) => {
                         break SessionOutcome::Failed("Vapi WebSocket audio write failed");
                     }
                 }
-                metrics::counter!("rvoip_vapi_audio_frames_total", "direction" => "out").increment(1);
             }
             _ = heartbeat.tick() => {
                 if awaiting_heartbeat_response {
@@ -936,7 +980,7 @@ async fn run_websocket_session(
                 ).await {
                     Ok(()) => {}
                     Err(SessionSendFailure::Cancelled) => break requested_local_outcome(route),
-                    Err(SessionSendFailure::Failed) => {
+                    Err(SessionSendFailure::Failed | SessionSendFailure::TimedOut) => {
                         break SessionOutcome::Failed("Vapi WebSocket heartbeat failed");
                     }
                 }
@@ -965,7 +1009,7 @@ async fn run_websocket_session(
                 // that is behaving perfectly.
                 outgoing_framer.push(&media.payload);
                 while let Some(frame) = outgoing_framer.next_frame() {
-                    if outgoing_frames.len() >= config.media_queue_capacity {
+                    if outgoing_frames.len() >= config.outbound_queue_capacity {
                         outgoing_frames.pop_front();
                         outbound_dropped = outbound_dropped.saturating_add(1);
                         metrics::counter!(
@@ -977,7 +1021,7 @@ async fn run_websocket_session(
                 if outbound_dropped > 0 && !outbound_drop_reported {
                     outbound_drop_reported = true;
                     tracing::warn!(
-                        capacity = config.media_queue_capacity,
+                        capacity = config.outbound_queue_capacity,
                         "outbound audio is queueing faster than the WebSocket \
                          drains; dropping the oldest frames"
                     );
@@ -995,7 +1039,7 @@ async fn run_websocket_session(
                 ).await {
                     Ok(()) => {}
                     Err(SessionSendFailure::Cancelled) => break requested_local_outcome(route),
-                    Err(SessionSendFailure::Failed) => {
+                    Err(SessionSendFailure::Failed | SessionSendFailure::TimedOut) => {
                         break SessionOutcome::Failed("Vapi WebSocket control write failed");
                     }
                 }
@@ -1057,17 +1101,26 @@ async fn run_websocket_session(
                         ).await {
                             Ok(()) => {}
                             Err(SessionSendFailure::Cancelled) => break requested_local_outcome(route),
-                            Err(SessionSendFailure::Failed) => {
+                            Err(SessionSendFailure::Failed | SessionSendFailure::TimedOut) => {
                                 break SessionOutcome::Failed("Vapi WebSocket pong failed");
                             }
                         }
                     }
                     Some(Ok(WebSocketMessage::Pong(_))) => {}
                     Some(Ok(WebSocketMessage::Close(frame))) => {
+                        // A close frame carrying no body is explicitly legal
+                        // (RFC 6455 §5.5.1) and is how this adapter itself
+                        // closes. Treating it as abnormal reported a failure on
+                        // calls whose audio was fine and whose peer simply hung
+                        // up, inflating the observed failure rate.
                         break match frame.map(|frame| frame.code) {
-                            Some(CloseCode::Normal | CloseCode::Away) => {
-                                SessionOutcome::RemoteEnded
-                            }
+                            None
+                            | Some(
+                                CloseCode::Normal
+                                | CloseCode::Away
+                                | CloseCode::Restart
+                                | CloseCode::Again,
+                            ) => SessionOutcome::RemoteEnded,
                             _ => SessionOutcome::RemoteClosed,
                         };
                     }
