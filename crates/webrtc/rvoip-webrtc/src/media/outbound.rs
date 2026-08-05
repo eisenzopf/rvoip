@@ -8,8 +8,8 @@ use rtc::rtp;
 use rtc::rtp::extension::HeaderExtension;
 use rtc::shared::marshal::{Marshal, MarshalSize};
 use tokio::sync::Mutex;
-use webrtc::media_stream::track_local::TrackLocal;
 use webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP;
+use webrtc::media_stream::track_local::TrackLocal;
 
 use crate::peer::builder::HDREXT_SDES_MID;
 
