@@ -36,6 +36,12 @@ impl AudioFramer {
         self.buffer.extend_from_slice(bytes);
     }
 
+    /// Discard any partial frame. Used on barge-in, where buffered bytes are
+    /// stale and would otherwise be spliced onto the next utterance.
+    pub(crate) fn reset(&mut self) {
+        self.buffer.clear();
+    }
+
     pub(crate) fn next_frame(&mut self) -> Option<Bytes> {
         (self.buffer.len() >= self.frame_bytes)
             .then(|| self.buffer.split_to(self.frame_bytes).freeze())
@@ -109,6 +115,25 @@ impl VapiMediaStream {
         self.incoming_tx
             .try_send(frame)
             .map_err(|_| VapiError::MediaQueueOverflow)
+    }
+
+    /// Drop frames already handed downstream, returning how many went.
+    ///
+    /// Barge-in: audio queued for the caller is stale the instant they start
+    /// speaking. This clears what this stream still owns; the media graph's
+    /// own sink queues are flushed separately via
+    /// `Orchestrator::flush_media_graph`, since only the orchestrator can
+    /// reach them.
+    pub(crate) fn request_flush(&self) -> usize {
+        let mut dropped = 0;
+        if let Ok(mut guard) = self.incoming_rx.lock() {
+            if let Some(rx) = guard.as_mut() {
+                while rx.try_recv().is_ok() {
+                    dropped += 1;
+                }
+            }
+        }
+        dropped
     }
 
     pub(crate) fn incoming_has_capacity(&self) -> bool {
