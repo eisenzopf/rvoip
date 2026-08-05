@@ -537,11 +537,15 @@ pub(crate) fn spawn_outbound_pump_with_writer_tracked(
             // created only at this transport boundary. The route-owned writer
             // serializes this packet with same-SSRC telephone events so their
             // sequence and timestamp timelines cannot race or reorder.
-            if writer
+            if let Err(error) = writer
                 .write_audio(payload_type, frame.timestamp_rtp, frame.payload)
                 .await
-                .is_err()
             {
+                warn!(
+                    %error,
+                    payload_type,
+                    "outbound WebRTC media pump stopped after a track write failure"
+                );
                 return;
             }
         }
