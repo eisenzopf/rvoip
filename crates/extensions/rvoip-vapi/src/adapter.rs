@@ -87,9 +87,25 @@ impl Route {
         config: &VapiConfig,
     ) -> Arc<Self> {
         let cancel = tokio_util::sync::CancellationToken::new();
+        // M1: this was a literal `1`, which made the inbound catch-up valve
+        // structurally inert. The valve gates each extra frame on
+        // `incoming_has_capacity()` (`capacity() > 0`), so with a single slot
+        // `release = 1 + over_target.min(..)` could never deliver its second
+        // frame — measured at 1.8-2.3% effective across two 100-call soaks,
+        // 1,831 released against 78,465 blocked.
+        //
+        // The consequence only shows on an imperfect link: after a downlink
+        // stall the queue pins at capacity and every later frame evicts an
+        // older one for the rest of the call. Over cellular that cost ~24% of
+        // calls up to 1.72s of assistant speech, removed in 20ms slices
+        // mid-word.
+        //
+        // Sized to `max_catchup_frames_per_tick + 1` so the drain can always
+        // deliver the frames the valve decides to release.
+        let incoming_capacity = config.max_catchup_frames_per_tick.saturating_add(1).max(2);
         let stream = VapiMediaStream::new(
             options.audio_format,
-            1,
+            incoming_capacity,
             config.media_queue_capacity,
             cancel.clone(),
         );
