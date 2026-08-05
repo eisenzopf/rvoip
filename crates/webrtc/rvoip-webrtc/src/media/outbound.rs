@@ -8,6 +8,7 @@ use rtc::rtp;
 use rtc::rtp::extension::HeaderExtension;
 use rtc::shared::marshal::{Marshal, MarshalSize};
 use tokio::sync::Mutex;
+use webrtc::media_stream::track_local::TrackLocal;
 use webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP;
 
 use crate::peer::builder::HDREXT_SDES_MID;
@@ -198,19 +199,22 @@ impl OutboundAudioRtpWriter {
             .mid
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-            .ok_or_else(|| {
-                webrtc::error::Error::Other(
-                    "outbound audio MID is not committed by final SDP".into(),
-                )
-            })?;
-        let extension = sdes_mid_header_extension(&mid);
+            .clone();
+        let extension = mid.as_deref().map(sdes_mid_header_extension);
         loop {
-            match self
-                .track
-                .write_rtp_with_extensions(packet.clone(), std::slice::from_ref(&extension))
-                .await
-            {
+            let result = if let Some(extension) = extension.as_ref() {
+                self.track
+                    .write_rtp_with_extensions(packet.clone(), std::slice::from_ref(extension))
+                    .await
+            } else {
+                // The primary audio SSRC is declared by the negotiated
+                // sender and remains unambiguous without SDES MID. Some
+                // endpoints, including Amazon Connect, do not negotiate the
+                // MID header extension. Only supplemental, unsignalled SSRCs
+                // such as RFC 4733 DTMF must fail closed without a MID.
+                self.track.write_rtp(packet.clone()).await
+            };
+            match result {
                 Err(error) if error.to_string().contains("not binding") => {
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
@@ -268,5 +272,23 @@ mod tests {
         assert_eq!(state.allocate_audio_timestamp(10_000, 960), 10_000);
         assert_eq!(state.allocate_audio_timestamp(10_960, 960), 10_960);
         assert_eq!(state.allocate_audio_timestamp(100, 960), 11_920);
+    }
+
+    #[tokio::test]
+    async fn primary_audio_without_negotiated_mid_waits_for_track_binding() {
+        let track = audio_track(0x5060_7080);
+        let writer = OutboundAudioRtpWriter::new(track, 0x5060_7080, 48_000);
+        let write = tokio::spawn(async move {
+            writer
+                .write_audio(111, 0, Bytes::from_static(&[0xf8, 0xff, 0xfe]))
+                .await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert!(
+            !write.is_finished(),
+            "missing MID must not terminate primary audio before the track binds"
+        );
+        write.abort();
     }
 }
