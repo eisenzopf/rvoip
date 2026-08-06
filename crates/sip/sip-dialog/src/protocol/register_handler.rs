@@ -189,12 +189,35 @@ impl DialogManager {
             })
     }
 
-    /// Extract Expires value from request
+    /// Default expiration used when the request states none, in seconds.
+    const DEFAULT_REGISTER_EXPIRES: u32 = 3600;
+
+    /// Extract the requested expiration from a REGISTER, in the order RFC 3261
+    /// §10.3 step 7 mandates:
+    ///
+    /// > -  If the field value has an "expires" parameter, that value MUST be
+    /// >    taken as the requested expiration.
+    /// > -  If there is no such parameter, but the request has an Expires
+    /// >    header field, that value MUST be taken as the requested expiration.
+    /// > -  If there is neither, a locally-configured default value MUST be
+    /// >    taken as the requested expiration.
+    ///
+    /// The `Contact` parameter used to be skipped entirely, which inverted the
+    /// meaning of the most common way to de-register. A UA sending
+    /// `Contact: <sip:alice@host>;expires=0` and no `Expires` header was read
+    /// as asking for the one hour default, so the registrar answered 200 OK
+    /// and kept a binding the device had just asked it to drop. Calls then
+    /// routed to an endpoint that was gone, with nothing logged as an error.
     pub fn extract_expires(&self, request: &Request) -> u32 {
         request
-            .typed_header::<rvoip_sip_core::types::expires::Expires>()
-            .map(|exp| exp.0)
-            .unwrap_or(3600) // Default to 1 hour
+            .typed_header::<rvoip_sip_core::types::contact::Contact>()
+            .and_then(|contact| contact.expires())
+            .or_else(|| {
+                request
+                    .typed_header::<rvoip_sip_core::types::expires::Expires>()
+                    .map(|exp| exp.0)
+            })
+            .unwrap_or(Self::DEFAULT_REGISTER_EXPIRES)
     }
 
     /// Compatibility facade for the retired auto-registrar mode.
