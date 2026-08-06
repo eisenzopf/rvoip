@@ -2683,7 +2683,7 @@ impl MediaAdapter {
         // session, mutating the copy and writing the whole snapshot back would
         // discard anything the state machine committed while the handshake was
         // running, which for a multi-second DTLS handshake is a wide window.
-        let (_lane, snapshot, mut session) =
+        let (lane, snapshot, mut session) =
             match self.lock_and_load_exact_media_session(session_id).await {
                 Ok(loaded) => loaded,
                 Err(e) => {
@@ -2695,13 +2695,36 @@ impl MediaAdapter {
                     return;
                 }
             };
+
+        let previous_security = session.media_security.clone();
         session.media_security = Some(state);
+
+        // Persisting is only half of it: the application learns that media is
+        // secured from `MediaSecurityNegotiated`, and this DTLS path recorded
+        // the state without ever publishing it. Every SDES path publishes, so
+        // a DTLS-SRTP call silently skipped the event its own integration test
+        // waits for. Same construction as those paths: only on an actual
+        // change, bound to the exact lifetime, after the commit succeeds.
+        let security_observation = (session.media_security != previous_security)
+            .then(|| {
+                session
+                    .lifecycle_handle
+                    .clone()
+                    .zip(session.media_security.clone())
+            })
+            .flatten();
+
+        drop(lane);
         if let Err(e) = self.commit_media_lane_state(&snapshot, &session).await {
             tracing::warn!(
                 "Failed to persist media security state for session {}: {}",
                 session_id.0,
                 e
             );
+            return;
+        }
+        if let Some((lifecycle_handle, state)) = security_observation {
+            self.publish_media_security_observation(lifecycle_handle, state);
         }
     }
 
