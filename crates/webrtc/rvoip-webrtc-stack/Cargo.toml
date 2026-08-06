@@ -203,9 +203,7 @@ version = "0.3.31"
 version = "0.4.29"
 
 [dependencies.rtc]
-version = "0.3.6"
-path = "../rvoip-rtc"
-package = "rvoip-rtc"
+workspace = true
 
 [dependencies.tokio]
 version = "1.49.0"
