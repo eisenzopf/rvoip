@@ -8,6 +8,8 @@ pub enum WebRtcError {
     Sdp(String),
     Signaling(String),
     Timeout(&'static str),
+    UdpPortRangeExhausted,
+    InvalidUdpPortRange,
     ConnectionNotFound,
     IncompatibleCapabilities,
     WrongRole {
@@ -37,6 +39,8 @@ impl WebRtcError {
             Self::Sdp(_) => "sdp",
             Self::Signaling(_) => "signaling",
             Self::Timeout(_) => "timeout",
+            Self::UdpPortRangeExhausted => "udp-port-range-exhausted",
+            Self::InvalidUdpPortRange => "invalid-udp-port-range",
             Self::ConnectionNotFound => "connection-not-found",
             Self::IncompatibleCapabilities => "incompatible-capabilities",
             Self::WrongRole { .. } => "wrong-role",
@@ -76,7 +80,19 @@ impl std::error::Error for WebRtcError {}
 
 impl From<webrtc::error::Error> for WebRtcError {
     fn from(e: webrtc::error::Error) -> Self {
-        Self::Webrtc(format!("{e}"))
+        match e {
+            webrtc::error::Error::OtherPeerConnectionErr(detail)
+                if detail == "udp-port-range-exhausted" =>
+            {
+                Self::UdpPortRangeExhausted
+            }
+            webrtc::error::Error::OtherPeerConnectionErr(detail)
+                if detail == "invalid-udp-port-range" =>
+            {
+                Self::InvalidUdpPortRange
+            }
+            other => Self::Webrtc(format!("{other}")),
+        }
     }
 }
 

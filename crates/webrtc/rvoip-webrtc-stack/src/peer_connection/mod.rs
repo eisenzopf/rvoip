@@ -5,7 +5,7 @@ pub(crate) mod ice_gatherer;
 
 use log::error;
 use std::collections::{HashMap, HashSet};
-use std::net::ToSocketAddrs;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -56,6 +56,26 @@ pub use rtc::peer_connection::{
     },
     transport::{RTCIceCandidate, RTCIceCandidateInit, RTCIceCandidateType, RTCIceProtocol},
 };
+
+const INVALID_UDP_PORT_RANGE: &str = "invalid-udp-port-range";
+const UDP_PORT_RANGE_EXHAUSTED: &str = "udp-port-range-exhausted";
+
+fn bind_udp_from_range(bind_ip: IpAddr, port_start: u16, port_end: u16) -> Result<UdpSocket> {
+    if port_start == 0 || port_start > port_end {
+        return Err(Error::OtherPeerConnectionErr(INVALID_UDP_PORT_RANGE.into()));
+    }
+
+    for port in port_start..=port_end {
+        match UdpSocket::bind(SocketAddr::new(bind_ip, port)) {
+            Ok(socket) => return Ok(socket),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(Error::OtherPeerConnectionErr(
+        UDP_PORT_RANGE_EXHAUSTED.into(),
+    ))
+}
 
 /// Trait for handling peer connection events asynchronously
 ///
@@ -116,6 +136,7 @@ where
     runtime: Option<Arc<dyn Runtime>>,
     handler: Option<Arc<dyn PeerConnectionEventHandler>>,
     udp_addrs: Vec<A>,
+    udp_port_range: Option<(IpAddr, u16, u16)>,
     tcp_addrs: Vec<A>,
 }
 
@@ -126,6 +147,7 @@ impl<A: ToSocketAddrs> Default for PeerConnectionBuilder<A, NoopInterceptor> {
             runtime: None,
             handler: None,
             udp_addrs: vec![],
+            udp_port_range: None,
             tcp_addrs: vec![],
         }
     }
@@ -168,6 +190,7 @@ where
             runtime: self.runtime,
             handler: self.handler,
             udp_addrs: self.udp_addrs,
+            udp_port_range: self.udp_port_range,
             tcp_addrs: self.tcp_addrs,
         }
     }
@@ -184,6 +207,14 @@ where
 
     pub fn with_udp_addrs(mut self, udp_addrs: Vec<A>) -> Self {
         self.udp_addrs = udp_addrs;
+        self
+    }
+
+    /// Bind exactly one UDP socket from an inclusive deployment-controlled
+    /// range. The operating-system bind is the allocation primitive, so
+    /// concurrent peer construction cannot claim the same port.
+    pub fn with_udp_port_range(mut self, bind_ip: IpAddr, port_start: u16, port_end: u16) -> Self {
+        self.udp_port_range = Some((bind_ip, port_start, port_end));
         self
     }
 
@@ -214,6 +245,7 @@ where
                 .ok_or_else(|| std::io::Error::other("no event handler found"))?,
             opts,
             self.udp_addrs,
+            self.udp_port_range,
             self.tcp_addrs,
         )
         .await
@@ -361,20 +393,30 @@ where
         handler: Arc<dyn PeerConnectionEventHandler>,
         opts: RTCIceGatherOptions,
         udp_addrs: Vec<A>,
+        udp_port_range: Option<(IpAddr, u16, u16)>,
         _tcp_addrs: Vec<A>,
     ) -> Result<Self> {
         let mut local_addrs = vec![];
         let mut async_udp_sockets = HashMap::new();
-        for addr in udp_addrs {
-            let socket = std::net::UdpSocket::bind(addr)?;
+        if let Some((bind_ip, port_start, port_end)) = udp_port_range {
+            let socket = bind_udp_from_range(bind_ip, port_start, port_end)?;
             socket.set_nonblocking(true)?;
             let local_addr = socket.local_addr()?;
             let async_udp_socket = runtime.wrap_udp_socket(socket)?;
-            if async_udp_sockets
-                .insert(local_addr, async_udp_socket)
-                .is_none()
-            {
-                local_addrs.push(local_addr);
+            async_udp_sockets.insert(local_addr, async_udp_socket);
+            local_addrs.push(local_addr);
+        } else {
+            for addr in udp_addrs {
+                let socket = std::net::UdpSocket::bind(addr)?;
+                socket.set_nonblocking(true)?;
+                let local_addr = socket.local_addr()?;
+                let async_udp_socket = runtime.wrap_udp_socket(socket)?;
+                if async_udp_sockets
+                    .insert(local_addr, async_udp_socket)
+                    .is_none()
+                {
+                    local_addrs.push(local_addr);
+                }
             }
         }
 
@@ -408,6 +450,68 @@ where
         *peer_connection.driver_handle.lock().await = Some(driver_handle);
 
         Ok(peer_connection)
+    }
+}
+
+#[cfg(test)]
+mod udp_port_range_tests {
+    use super::*;
+    use std::sync::{Arc as StdArc, Barrier};
+
+    fn available_two_port_range() -> (u16, u16) {
+        for start in 30_000u16..=60_000u16 {
+            let Ok(first) = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, start)) else {
+                continue;
+            };
+            let Ok(second) = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, start + 1)) else {
+                continue;
+            };
+            drop((first, second));
+            return (start, start + 1);
+        }
+        panic!("no two-port loopback range available");
+    }
+
+    #[test]
+    fn bounded_udp_allocator_is_atomic_exhaustible_and_reusable() {
+        let (start, end) = available_two_port_range();
+        let bind_ip = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+        let barrier = StdArc::new(Barrier::new(3));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let barrier = StdArc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                bind_udp_from_range(bind_ip, start, end).expect("allocate bounded UDP port")
+            }));
+        }
+        barrier.wait();
+        let sockets: Vec<UdpSocket> = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("allocator worker"))
+            .collect();
+        let mut ports: Vec<u16> = sockets
+            .iter()
+            .map(|socket| socket.local_addr().expect("local address").port())
+            .collect();
+        ports.sort_unstable();
+        assert_eq!(ports, vec![start, end]);
+
+        let exhausted = bind_udp_from_range(bind_ip, start, end).expect_err("range exhausted");
+        assert!(exhausted.to_string().contains(UDP_PORT_RANGE_EXHAUSTED));
+
+        drop(sockets);
+        let reused = bind_udp_from_range(bind_ip, start, end).expect("released port reusable");
+        assert!((start..=end).contains(&reused.local_addr().expect("local address").port()));
+    }
+
+    #[test]
+    fn bounded_udp_allocator_rejects_zero_and_reversed_ranges() {
+        let bind_ip = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+        for (start, end) in [(0, 1), (40_001, 40_000)] {
+            let error = bind_udp_from_range(bind_ip, start, end).expect_err("invalid range");
+            assert!(error.to_string().contains(INVALID_UDP_PORT_RANGE));
+        }
     }
 }
 

@@ -2,8 +2,8 @@
 
 use rtc::interceptor::Registry;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
 pub use rtc::peer_connection::configuration::media_engine::MIME_TYPE_TELEPHONE_EVENT;
+use rtc::peer_connection::configuration::media_engine::MediaEngine;
 use rtc::peer_connection::configuration::setting_engine::SettingEngine;
 use rtc::peer_connection::configuration::{
     RTCConfiguration, RTCConfigurationBuilder, RTCIceServer, RTCIceTransportPolicy,
@@ -358,16 +358,19 @@ pub async fn build_peer_connection(
         setting_engine.set_nat_1to1_ips(config.nat_1to1_ips.clone(), candidate_type);
     }
 
-    let pc = PeerConnectionBuilder::new()
+    let builder = PeerConnectionBuilder::<String>::new()
         .with_configuration(rtc_config)
         .with_media_engine(media_engine)
         .with_setting_engine(setting_engine)
         .with_interceptor_registry(registry)
         .with_handler(handler)
-        .with_runtime(runtime)
-        .with_udp_addrs(vec![config.udp_bind.clone()])
-        .build()
-        .await?;
+        .with_runtime(runtime);
+    let builder = if let Some(range) = &config.udp_port_range {
+        builder.with_udp_port_range(range.bind_ip, range.port_start, range.port_end)
+    } else {
+        builder.with_udp_addrs(vec![config.udp_bind.clone()])
+    };
+    let pc = builder.build().await?;
 
     Ok(Arc::new(pc))
 }
