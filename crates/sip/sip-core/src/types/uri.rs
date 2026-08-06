@@ -740,11 +740,11 @@ impl fmt::Display for Uri {
 
         // User info (username and optional password)
         if let Some(ref user) = self.user {
-            let escaped_user = escape_user_info(user);
+            let escaped_user = escape_user(user);
             write!(f, "{}", escaped_user)?;
 
             if let Some(ref password) = self.password {
-                let escaped_password = escape_user_info(password);
+                let escaped_password = escape_password(password);
                 write!(f, ":{}", escaped_password)?;
             }
 
@@ -853,21 +853,19 @@ impl<'a> From<&'a str> for Uri {
 
 // --- Helper functions (escape/unescape, validation) ---
 
-/// Escape URI user info component according to RFC 3261
+/// Percent-encode every character outside `keep`, which must list the
+/// sub-delimiters an ABNF production allows on top of `unreserved`.
 ///
-/// This escapes characters in the user info component (username/password)
-/// using percent-encoding as specified in the RFC.
-///
-/// # Parameters
-/// - `s`: The string to escape
-///
-/// # Returns
-/// The escaped string
-fn escape_user_info(s: &str) -> String {
+/// RFC 3261 §19.1.4 makes this more than cosmetic: only characters *outside*
+/// the RFC 2396 `reserved` set are equivalent to their `%HEX HEX` form. Every
+/// character in `user-unreserved` is reserved there, so escaping one produces
+/// a URI that a compliant peer compares as different.
+fn escape_userinfo_component(s: &str, keep: &[char]) -> String {
     let mut result = String::with_capacity(s.len() * 3); // Worst case: all chars need escaping (×3)
 
     for c in s.chars() {
         match c {
+            // RFC 3261 §25.1 `unreserved = alphanum / mark`
             'a'..='z'
             | 'A'..='Z'
             | '0'..='9'
@@ -882,6 +880,9 @@ fn escape_user_info(s: &str) -> String {
             | ')' => {
                 result.push(c);
             }
+            _ if keep.contains(&c) => {
+                result.push(c);
+            }
             _ => {
                 // Escape all other characters
                 for byte in c.to_string().bytes() {
@@ -893,6 +894,29 @@ fn escape_user_info(s: &str) -> String {
     }
 
     result
+}
+
+/// Escape the `user` part of a SIP URI according to RFC 3261 §25.1
+///
+/// `user = 1*( unreserved / escaped / user-unreserved )`, so the eight
+/// `user-unreserved` characters are emitted literally. Escaping them would
+/// change the URI's identity under §19.1.4 — the case that matters in
+/// practice is the leading `+` of an E.164 number, where a gateway comparing
+/// literally will not match `%2B`.
+///
+/// `:` and `@` are absent from every allowed set on purpose: they delimit the
+/// password and the host, so they still get escaped.
+fn escape_user(s: &str) -> String {
+    escape_userinfo_component(s, &['&', '=', '+', '$', ',', ';', '?', '/'])
+}
+
+/// Escape the `password` part of a SIP URI according to RFC 3261 §25.1
+///
+/// `password = *( unreserved / escaped / "&" / "=" / "+" / "$" / "," )` — a
+/// strictly smaller set than `user`, which is why this is not the same
+/// function. `;`, `?` and `/` are not permitted here and stay escaped.
+fn escape_password(s: &str) -> String {
+    escape_userinfo_component(s, &['&', '=', '+', '$', ','])
 }
 
 /// Escape URI parameters and headers
