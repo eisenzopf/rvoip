@@ -13,14 +13,14 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use rvoip_media_core::codec::audio::{
-    payload_type::PCM_S16LE, AudioCodec, OpusApplication, OpusCodec, OpusConfig, PcmS16LeCodec,
+    AudioCodec, OpusApplication, OpusCodec, OpusConfig, PcmS16LeCodec, payload_type::PCM_S16LE,
 };
 use rvoip_media_core::codec::factory::CodecFactory;
 use rvoip_media_core::error::CodecError;
 use rvoip_media_core::processing::format::{ConversionParams, FormatConverter};
 use rvoip_media_core::types::SampleRate;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot, watch, Notify};
+use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::AbortHandle;
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -1215,15 +1215,21 @@ fn make_transcoder(
     target_codec: &CodecInfo,
     target_pt: u8,
 ) -> Option<ConfiguredTranscoder> {
-    (CodecGroupKey::new(source_codec, source_pt) != CodecGroupKey::new(target_codec, target_pt))
-        .then(|| {
-            ConfiguredTranscoder::new(
-                source_codec.clone(),
-                source_pt,
-                target_codec.clone(),
-                target_pt,
-            )
-        })
+    let source_key = CodecGroupKey::new(source_codec, source_pt);
+    let target_key = CodecGroupKey::new(target_codec, target_pt);
+    let opus_payload_is_compatible = source_key.name == "opus"
+        && target_key.name == "opus"
+        && source_key.payload_type == target_key.payload_type
+        && source_key.clock_rate_hz == target_key.clock_rate_hz
+        && source_key.channels == target_key.channels;
+    (source_key != target_key && !opus_payload_is_compatible).then(|| {
+        ConfiguredTranscoder::new(
+            source_codec.clone(),
+            source_pt,
+            target_codec.clone(),
+            target_pt,
+        )
+    })
 }
 
 #[derive(Default)]
@@ -2693,11 +2699,13 @@ mod tests {
             MediaGraphRouteState::Terminal(MediaGraphRouteTerminalReason::OwnerRemoved)
         );
         assert!(graph.latest_snapshot().sinks.is_empty());
-        assert!(graph
-            .route_statuses
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_empty());
+        assert!(
+            graph
+                .route_statuses
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+        );
         graph.shutdown_and_wait().await.unwrap();
     }
 
@@ -2745,11 +2753,13 @@ mod tests {
         assert!(snapshot.codec_groups.is_empty());
         assert_eq!(snapshot.sink_offers, 0);
         assert_eq!(graph.sink_admission.in_use.load(Ordering::Acquire), 0);
-        assert!(graph
-            .route_statuses
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_empty());
+        assert!(
+            graph
+                .route_statuses
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+        );
         assert!(matches!(
             tokio::time::timeout(Duration::from_secs(1), target_rx.recv()).await,
             Ok(None)
@@ -2834,11 +2844,13 @@ mod tests {
                 status.wait_terminal().await,
                 MediaGraphRouteTerminalReason::OwnerRemoved
             );
-            assert!(graph
-                .route_statuses
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .is_empty());
+            assert!(
+                graph
+                    .route_statuses
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .is_empty()
+            );
         }
         assert!(graph.latest_snapshot().sinks.is_empty());
         graph.shutdown_and_wait().await.unwrap();
@@ -3079,8 +3091,8 @@ mod tests {
     #[tokio::test]
     async fn frames_discarded_with_no_sinks_are_counted() {
         let (source_tx, source_rx) = mpsc::channel(64);
-        let graph =
-            start_media_graph(source_rx, codec("pcmu", 8_000), MediaGraphPolicy::default()).unwrap();
+        let graph = start_media_graph(source_rx, codec("pcmu", 8_000), MediaGraphPolicy::default())
+            .unwrap();
         let (target_tx, target_rx) = mpsc::channel(64);
         let route = graph.add_sink(codec("pcmu", 8_000), target_tx).unwrap();
         graph.snapshot().await;
@@ -3600,6 +3612,29 @@ mod tests {
         group_sizes.sort_unstable();
         assert_eq!(group_sizes, vec![1, 2]);
         graph.shutdown();
+    }
+
+    #[tokio::test]
+    async fn opus_fmtp_asymmetry_preserves_the_encoded_payload_without_transcoding() {
+        let (source_tx, source_rx) = mpsc::channel(1);
+        let mut source_codec = codec("opus", 48_000);
+        source_codec.fmtp = Some("minptime=10;useinbandfec=1".into());
+        let graph = start_media_graph(source_rx, source_codec, Default::default()).unwrap();
+        let (target_tx, mut target_rx) = mpsc::channel(1);
+        graph.add_sink(codec("opus", 48_000), target_tx).unwrap();
+
+        let mut frame = frame_at(0x7f, 960);
+        frame.payload_type = Some(111);
+        source_tx.send(frame).await.unwrap();
+        let received = target_rx.recv().await.unwrap();
+        assert_eq!(received.payload.len(), 160);
+        assert!(received.payload.iter().all(|byte| *byte == 0x7f));
+        assert_eq!(received.payload_type, Some(111));
+        let snapshot = graph.snapshot().await;
+        assert!(!snapshot.codec_groups[0].transcoding);
+        assert_eq!(snapshot.transcode_operations, 0);
+        assert_eq!(snapshot.transcode_errors, 0);
+        graph.shutdown_and_wait().await.unwrap();
     }
 
     #[test]
