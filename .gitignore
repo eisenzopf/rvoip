@@ -160,3 +160,13 @@ config.stamp
 
 ## CCD session state — never publish.
 .claude/
+
+## Re-includes for tracked paths the broad rules above would swallow.
+# `release/` (build output, intentionally unanchored) also matches scripts/release/,
+# which holds the release-qualification tooling that .github/workflows/release-qualify.yml
+# invokes. Re-include the directory so its contents are tracked.
+!scripts/release/
+
+# `*.wav` ignores generated roundtrip output, but this one is a committed test input
+# read by crates/media/codec-core/.../g711/tests/wav_roundtrip_test.rs.
+!crates/media/codec-core/src/codecs/g711/tests/test_data/OSR_us_000_0010_8k.wav
