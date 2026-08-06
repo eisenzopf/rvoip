@@ -22,6 +22,7 @@ use std::time::Duration;
 use rvoip_sip::api::events::Event;
 use rvoip_sip::api::stream_peer::EventReceiver;
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
+use rvoip_sip::{SipTraceConfig, SipTraceDirection};
 
 async fn wait_for<F>(events: &mut EventReceiver, timeout: Duration, mut pred: F) -> Option<Event>
 where
@@ -151,4 +152,108 @@ async fn ice_call_negotiates_and_connects_end_to_end() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ice_and_dtls_srtp_coexist_on_the_same_call() {
     run_ice_call(37291, 37301, true).await;
+}
+
+/// TEST-NET-3 (RFC 5737), so an address on no interface of any machine: an
+/// `a=candidate` carrying it can only have come from the external mapping.
+const EXTERNAL_MEDIA_IP: &str = "203.0.113.10";
+
+/// `Config::media_public_addr` reaches the ICE candidates, not just the SDP
+/// `c=` line.
+///
+/// This is the static-NAT case: the process listens on a private address and
+/// the world reaches it on a public one. Advertising the public address in `c=`
+/// while ICE advertises the private one is how a call connects silent, so the
+/// two have to agree.
+///
+/// The assertion is on the offer rather than on connectivity, deliberately:
+/// the mapped address is unroutable from this machine by construction, so no
+/// connectivity check can succeed against it. What matters here is what goes
+/// on the wire.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn media_public_addr_reaches_the_ice_candidates_on_the_wire() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let (alice_port, bob_port) = (37311, 37321);
+
+    let mut alice_cfg = Config::local("alice", alice_port);
+    alice_cfg.enable_ice = true;
+    alice_cfg.media_public_addr = Some(
+        format!("{EXTERNAL_MEDIA_IP}:0")
+            .parse()
+            .expect("external media address"),
+    );
+
+    let mut bob_cfg = Config::local("bob", bob_port);
+    bob_cfg.enable_ice = true;
+    // Bob traces so the assertion reads Alice's offer exactly as it arrived,
+    // rather than a re-serialization of it.
+    bob_cfg.sip_trace = SipTraceConfig {
+        enabled: true,
+        redact_sensitive_headers: false,
+        include_body: true,
+        ..SipTraceConfig::default()
+    };
+    // The booleans above still leave production-safe redaction in place; the
+    // verbatim packet an SDP assertion needs requires this test-only opt-in.
+    let bob_cfg = bob_cfg.trace_passthrough_for_development();
+
+    let alice = UnifiedCoordinator::new(alice_cfg)
+        .await
+        .expect("alice coordinator");
+    let bob = UnifiedCoordinator::new(bob_cfg)
+        .await
+        .expect("bob coordinator");
+
+    let mut bob_events = bob.events().await.expect("bob events");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let _alice_session = alice
+        .invite(
+            Some("sip:alice@127.0.0.1".to_string()),
+            format!("sip:bob@127.0.0.1:{bob_port}"),
+        )
+        .send()
+        .await
+        .expect("alice invite.send()");
+
+    let invite = wait_for(&mut bob_events, Duration::from_secs(8), |event| {
+        matches!(
+            event,
+            Event::SipTrace(trace)
+                if trace.direction == SipTraceDirection::Inbound
+                    && trace.start_line.starts_with("INVITE")
+        )
+    })
+    .await
+    .expect("bob never received Alice's INVITE");
+
+    let offer = match invite {
+        Event::SipTrace(trace) => trace.raw_message,
+        _ => unreachable!(),
+    };
+
+    let candidates: Vec<&str> = offer
+        .lines()
+        .filter(|line| line.starts_with("a=candidate:"))
+        .collect();
+    assert!(
+        !candidates.is_empty(),
+        "the offer carried no ICE candidates:\n{offer}"
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|line| line.contains(EXTERNAL_MEDIA_IP)),
+        "no ICE candidate carried the configured public address {EXTERNAL_MEDIA_IP}: {candidates:?}"
+    );
+    assert!(
+        !candidates.iter().any(|line| line.contains("127.0.0.1")),
+        "the private address is still advertised alongside the public one, so SDP and ICE \
+         disagree about where media arrives: {candidates:?}"
+    );
+
+    bob.terminate_current_session().await.ok();
+    alice.terminate_current_session().await.ok();
+    tokio::time::sleep(Duration::from_millis(200)).await;
 }

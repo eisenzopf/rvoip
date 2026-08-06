@@ -13,7 +13,7 @@ use rvoip_sip::SessionId;
 use rvoip_sip::StreamPeer;
 use serial_test::serial;
 use std::time::Duration;
-use support::{free_udp_port, free_udp_ports};
+use support::free_udp_ports;
 use tokio::time::timeout;
 
 /// Create a test configuration on a port the kernel reports free.
