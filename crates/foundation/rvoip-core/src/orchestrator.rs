@@ -10299,13 +10299,20 @@ mod cross_crate_publisher_tests {
             (Transport::Sip, Transport::AmazonConnect),
             (Transport::AmazonConnect, Transport::Sip),
         ] {
+            let default = MediaGraphPolicy::default();
             let policy = directional_bridge_media_graph_policy(left, right);
             assert_eq!(
                 policy.minimum_eviction_samples,
                 AMAZON_CONNECT_MINIMUM_EVICTION_SAMPLES
             );
-            assert_eq!(policy.sink_queue_frames, 10);
-            assert_eq!(policy.pre_sink_buffer_frames, 10);
+            // The Connect policy overrides only minimum_eviction_samples, so the
+            // queue sizes must track the default rather than a literal. Asserting
+            // the v0.3.5 values here is what broke when the default moved to 25.
+            assert_eq!(policy.sink_queue_frames, default.sink_queue_frames);
+            assert_eq!(
+                policy.pre_sink_buffer_frames,
+                default.pre_sink_buffer_frames
+            );
         }
     }
 
