@@ -1650,26 +1650,23 @@ pub fn detect_peer_100rel_support(request: &Request) -> (bool, bool) {
     (supports, requires)
 }
 
-/// Inject the configured `100rel` option tag into an outgoing INVITE
-/// (adds to existing `Supported`/`Require` headers if present).
-///
-/// `NotSupported` is a no-op — no header is added. `Supported` appends
-/// `100rel` to any existing `Supported` header or creates one. `Required`
-/// does the same for `Require`.
-/// Advertise the `replaces` option tag on an outgoing request.
+/// Advertise the `replaces` option tag in a `Supported` header list.
 ///
 /// RFC 3891 §6.2: "UAs which support the Replaces header MUST include the
 /// 'replaces' option tag in a Supported header field." This stack implements
 /// the §3 UAS behaviour, so the tag is unconditional rather than configurable.
 ///
-/// Only ever appended to `Supported`, never to `Require`. Requiring it would
-/// make peers that do not implement RFC 3891 reject perfectly ordinary calls
-/// with 420, and §6.2 leaves that choice to UAs that want explicit failure
-/// notification.
-pub fn inject_replaces_support(request: &mut Request) {
-    use rvoip_sip_core::types::{Supported, TypedHeader};
+/// Appends to an existing `Supported` rather than adding a second one, since
+/// splitting the option tag set across two headers reads as a smaller set to
+/// some peers.
+///
+/// Only ever `Supported`, never `Require`. Requiring it would make peers that
+/// do not implement RFC 3891 reject perfectly ordinary calls with 420, and
+/// §6.2 leaves that choice to UAs that want explicit failure notification.
+fn inject_replaces_support_into(headers: &mut Vec<TypedHeader>) {
+    use rvoip_sip_core::types::Supported;
 
-    for header in request.headers.iter_mut() {
+    for header in headers.iter_mut() {
         if let TypedHeader::Supported(ref mut supported) = header {
             if !supported.supports("replaces") {
                 supported.option_tags.push("replaces".to_string());
@@ -1678,11 +1675,25 @@ pub fn inject_replaces_support(request: &mut Request) {
         }
     }
 
-    request
-        .headers
-        .push(TypedHeader::Supported(Supported::new(vec![
-            "replaces".to_string()
-        ])));
+    headers.push(TypedHeader::Supported(Supported::new(vec![
+        "replaces".to_string()
+    ])));
+}
+
+/// Advertise `replaces` on an outgoing request. See
+/// [`inject_replaces_support_into`].
+pub fn inject_replaces_support(request: &mut Request) {
+    inject_replaces_support_into(&mut request.headers);
+}
+
+/// Advertise `replaces` on an outgoing response. See
+/// [`inject_replaces_support_into`].
+///
+/// Responses matter as much as requests here: the transfer *target* is a UAS,
+/// and a response is the only place it gets to say it understands `Replaces`
+/// before someone tries to use it.
+pub fn inject_replaces_support_response(response: &mut Response) {
+    inject_replaces_support_into(&mut response.headers);
 }
 
 #[cfg(test)]
@@ -1755,6 +1766,67 @@ mod replaces_advertisement_tests {
         assert_eq!(option_tags(&request), vec!["replaces".to_string()]);
     }
 
+    /// The stack's shared response builder is what authors every rejection it
+    /// sends, including the 481 a Replaces INVITE gets when no dialog matches.
+    /// Advertising there tells the peer the dialog was missing rather than the
+    /// extension, which are very different things to debug.
+    #[test]
+    fn the_shared_response_builder_advertises_replaces() {
+        use crate::transaction::utils::response_builders::create_response;
+        use rvoip_sip_core::StatusCode;
+
+        for status in [
+            StatusCode::CallOrTransactionDoesNotExist,
+            StatusCode::BadRequest,
+            StatusCode::Decline,
+            StatusCode::BusyHere,
+            StatusCode::Ok,
+        ] {
+            let response = create_response(&invite(), status);
+            let tags: Vec<String> = response
+                .headers
+                .iter()
+                .filter_map(|header| match header {
+                    TypedHeader::Supported(supported) => Some(supported.option_tags.clone()),
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            assert!(
+                tags.contains(&"replaces".to_string()),
+                "{:?} response must advertise the replaces option tag, got {:?}",
+                status,
+                tags
+            );
+        }
+    }
+
+    /// A transfer target is a UAS, so a response is the only place it gets to
+    /// say it understands Replaces before someone tries to use it.
+    #[test]
+    fn the_response_variant_behaves_like_the_request_one() {
+        use super::inject_replaces_support_response;
+        use crate::transaction::utils::response_builders::create_response;
+        use rvoip_sip_core::StatusCode;
+
+        let mut response = create_response(&invite(), StatusCode::Ringing);
+        // Already stamped by the builder; a second pass must not duplicate.
+        inject_replaces_support_response(&mut response);
+
+        assert_eq!(
+            response
+                .headers
+                .iter()
+                .filter(|header| matches!(header, TypedHeader::Supported(_)))
+                .count(),
+            1
+        );
+        assert!(!response
+            .headers
+            .iter()
+            .any(|header| matches!(header, TypedHeader::Require(_))));
+    }
+
     /// RFC 3891 section 6.2 leaves Require to UAs that want explicit failure
     /// notification. Putting it there by default would make peers without
     /// RFC 3891 reject ordinary calls with 420.
@@ -1769,6 +1841,12 @@ mod replaces_advertisement_tests {
     }
 }
 
+/// Inject the configured `100rel` option tag into an outgoing INVITE
+/// (adds to existing `Supported`/`Require` headers if present).
+///
+/// `NotSupported` is a no-op — no header is added. `Supported` appends
+/// `100rel` to any existing `Supported` header or creates one. `Required`
+/// does the same for `Require`.
 pub fn inject_100rel_policy(request: &mut Request, policy: RelUsage) {
     use rvoip_sip_core::types::{Require, Supported, TypedHeader};
 

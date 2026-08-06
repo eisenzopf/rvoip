@@ -210,3 +210,47 @@ async fn options_falls_back_to_200_when_capability_query_is_not_mappable(
     assert_single_options_ok(&manager, &transaction_manager, &transport).await;
     Ok(())
 }
+
+/// RFC 3891 §6.2: "UAs which support the Replaces header MUST include the
+/// 'replaces' option tag in a Supported header field."
+///
+/// Asserted on a response that actually reached the transport, not on the
+/// helper that builds it. A transfer target is a UAS, so its responses are the
+/// only place it gets to advertise the capability, and OPTIONS is exactly the
+/// request a peer sends to ask.
+#[tokio::test]
+async fn options_response_advertises_the_replaces_option_tag(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (manager, transaction_manager, transport) =
+        manager_with_options_config(true, false).await?;
+
+    manager
+        .handle_options(options_request(), "192.0.2.10:5060".parse()?)
+        .await?;
+
+    let response = assert_single_options_ok(&manager, &transaction_manager, &transport).await;
+
+    let tags: Vec<String> = response
+        .headers
+        .iter()
+        .filter_map(|header| match header {
+            TypedHeader::Supported(supported) => Some(supported.option_tags.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+
+    assert!(
+        tags.contains(&"replaces".to_string()),
+        "an outgoing response must advertise `replaces`, got {tags:?}"
+    );
+    assert!(
+        !response
+            .headers
+            .iter()
+            .any(|header| matches!(header, TypedHeader::Require(_))),
+        "the tag belongs in Supported, never Require"
+    );
+
+    Ok(())
+}

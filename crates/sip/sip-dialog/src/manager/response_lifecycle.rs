@@ -360,6 +360,12 @@ impl DialogManager {
             }
         }
 
+        // RFC 3891 §6.2: advertise that we understand `Replaces`. A transfer
+        // target is a UAS, so its responses are the only place it gets to say
+        // so before a transferee tries to use it. Synchronous and infallible,
+        // so it does not disturb the send/commit ordering below.
+        crate::manager::transaction_integration::inject_replaces_support_response(&mut response);
+
         // Reject malformed custom reasons, bodies, and headers before the
         // response reaches transaction-core. Transaction-core validates again
         // at its wire boundary; this earlier pass keeps zero-wire input

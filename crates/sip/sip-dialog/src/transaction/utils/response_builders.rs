@@ -31,7 +31,14 @@ pub fn create_response(request: &Request, status: StatusCode) -> Response {
     // Add Content-Length: 0
     builder = builder.header(TypedHeader::ContentLength(ContentLength::new(0)));
 
-    builder.build()
+    let mut response = builder.build();
+    // RFC 3891 §6.2: every response this stack authors says it understands
+    // `Replaces`. Stamped here rather than at each call site because this is
+    // the shared builder behind the stack's own rejections, and a 481 that
+    // still advertises the capability tells the peer the dialog was missing
+    // rather than the extension.
+    crate::manager::transaction_integration::inject_replaces_support_response(&mut response);
+    response
 }
 
 /// Convenience method to create a 100 Trying response
