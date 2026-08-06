@@ -31,7 +31,22 @@ use rvoip_sip_core::types::Method;
 use rvoip_sip_core::Message;
 use rvoip_sip_transport::transport::ws::WebSocketTransport;
 use rvoip_sip_transport::transport::TransportType;
-use rvoip_sip_transport::{Transport, TransportEvent};
+use rvoip_sip_transport::{Transport, TransportEvent, TransportFlowId, TransportRoute};
+
+/// The route a server replies on: the peer it heard from, over the exact
+/// WebSocket flow the request arrived on.
+///
+/// RFC 7118 leaves no alternative — a server cannot dial a WebSocket client
+/// back, so the ingress connection is the only way home. Since
+/// `fix(sip): bind signaling to exact transport flows` the transport enforces
+/// that, refusing a response routed by address alone: a connection can close
+/// and another peer can take the same source port, which is exactly how a
+/// response reaches the wrong party.
+fn reply_route(source: SocketAddr, flow_id: TransportFlowId) -> TransportRoute {
+    TransportRoute::new(source)
+        .with_transport_type(TransportType::Ws)
+        .with_flow_id(flow_id)
+}
 
 fn loopback(port: u16) -> SocketAddr {
     format!("127.0.0.1:{port}").parse().unwrap()
@@ -257,14 +272,18 @@ async fn server_sends_ringing_back_through_ws_connection() {
 
     // Wait for the server to receive the INVITE. The `source` is the TCP
     // address the server must reply to.
-    let client_tcp_src = next_matching(
+    let (client_tcp_src, client_flow) = next_matching(
         &mut server_rx,
         |ev| match ev {
             TransportEvent::MessageReceived {
                 message: Message::Request(ref req),
                 source,
+                flow_id,
                 ..
-            } if req.method() == Method::Invite => Some(source),
+            } if req.method() == Method::Invite => Some((
+                source,
+                flow_id.expect("inbound WebSocket request carries its flow"),
+            )),
             _ => None,
         },
         Duration::from_secs(3),
@@ -275,7 +294,10 @@ async fn server_sends_ringing_back_through_ws_connection() {
     // connection in the pool (via `connect_to`'s pool-hit branch) and
     // writes to it — no new TCP dial.
     server
-        .send_message(build_ringing("ringing-ws"), client_tcp_src)
+        .send_message_via(
+            build_ringing("ringing-ws"),
+            reply_route(client_tcp_src, client_flow),
+        )
         .await
         .expect("server send 180");
 
@@ -323,14 +345,18 @@ async fn server_sends_ok_back_through_ws_connection() {
         .await
         .expect("client send INVITE");
 
-    let client_tcp_src = next_matching(
+    let (client_tcp_src, client_flow) = next_matching(
         &mut server_rx,
         |ev| match ev {
             TransportEvent::MessageReceived {
                 message: Message::Request(ref req),
                 source,
+                flow_id,
                 ..
-            } if req.method() == Method::Invite => Some(source),
+            } if req.method() == Method::Invite => Some((
+                source,
+                flow_id.expect("inbound WebSocket request carries its flow"),
+            )),
             _ => None,
         },
         Duration::from_secs(3),
@@ -338,7 +364,7 @@ async fn server_sends_ok_back_through_ws_connection() {
     .await;
 
     server
-        .send_message(build_ok("ok-ws"), client_tcp_src)
+        .send_message_via(build_ok("ok-ws"), reply_route(client_tcp_src, client_flow))
         .await
         .expect("server send 200 OK");
 
@@ -397,7 +423,7 @@ async fn parallel_connections_each_receive_only_their_response() {
         .expect("client_b send");
 
     // Drain two INVITE events from the server and collect their TCP sources.
-    let mut sources: Vec<SocketAddr> = Vec::new();
+    let mut sources: Vec<(SocketAddr, TransportFlowId)> = Vec::new();
     for _ in 0..2 {
         let src = next_matching(
             &mut server_rx,
@@ -405,8 +431,12 @@ async fn parallel_connections_each_receive_only_their_response() {
                 TransportEvent::MessageReceived {
                     message: Message::Request(ref req),
                     source,
+                    flow_id,
                     ..
-                } if req.method() == Method::Invite => Some(source),
+                } if req.method() == Method::Invite => Some((
+                    source,
+                    flow_id.expect("inbound WebSocket request carries its flow"),
+                )),
                 _ => None,
             },
             Duration::from_secs(3),
@@ -417,7 +447,7 @@ async fn parallel_connections_each_receive_only_their_response() {
 
     assert_eq!(sources.len(), 2, "server must receive from both clients");
     assert_ne!(
-        sources[0], sources[1],
+        sources[0].0, sources[1].0,
         "the two clients must have distinct source addresses"
     );
 
@@ -426,11 +456,11 @@ async fn parallel_connections_each_receive_only_their_response() {
     // Server sends 180 → src0, 200 → src1 (arbitrary split — we verify
     // no cross-routing by checking which client gets which code).
     server
-        .send_message(build_ringing("parallel-a"), src0)
+        .send_message_via(build_ringing("parallel-a"), reply_route(src0.0, src0.1))
         .await
         .expect("server -> src0 180");
     server
-        .send_message(build_ok("parallel-b"), src1)
+        .send_message_via(build_ok("parallel-b"), reply_route(src1.0, src1.1))
         .await
         .expect("server -> src1 200");
 
