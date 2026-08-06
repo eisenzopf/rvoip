@@ -76,6 +76,15 @@ struct WebSocketTransportInner {
     /// for `wss://` (matches pre-Phase-4-polish behaviour).
     #[cfg(feature = "wss")]
     tls_connector: Option<TlsConnector>,
+    /// Per-call outbound identities this transport has resolved, each with its
+    /// own trust context and connector.
+    ///
+    /// Mirrors `TlsTransport`: the trust context is minted per distinct
+    /// identity rather than hashed from it, because a `u64` collision would
+    /// mean two trust policies sharing one validated connection — the exact
+    /// failure this keying prevents.
+    #[cfg(feature = "wss")]
+    outbound_identities: Mutex<HashMap<TlsClientConfig, (u64, TlsConnector)>>,
 }
 
 #[derive(Clone)]
@@ -533,6 +542,8 @@ impl WebSocketTransport {
                 )),
                 inbound_trust_context: next_trust_context(),
                 outbound_trust_context: next_trust_context(),
+                #[cfg(feature = "wss")]
+                outbound_identities: Mutex::new(HashMap::new()),
                 tls_connector,
             }),
         };
@@ -604,6 +615,8 @@ impl WebSocketTransport {
                 )),
                 inbound_trust_context: next_trust_context(),
                 outbound_trust_context: next_trust_context(),
+                #[cfg(feature = "wss")]
+                outbound_identities: Mutex::new(HashMap::new()),
             }),
         };
 
@@ -1048,17 +1061,69 @@ impl WebSocketTransport {
     /// context. WSS derives both `Host` and SNI from that one authority, so a
     /// connection authenticated for one virtual host is never reused for a
     /// different virtual host on the same address.
+    /// Resolve the trust context and connector a call should use.
+    ///
+    /// `None` is this transport's own identity — unchanged behaviour for every
+    /// caller that does not ask for an override. `Some` mints a trust context
+    /// the first time that identity is seen and reuses it afterwards, so the
+    /// pool key separates it from every other identity reaching the same host
+    /// under the same authority.
+    #[cfg(feature = "wss")]
+    pub(crate) async fn resolve_outbound_identity(
+        &self,
+        identity: Option<&TlsClientConfig>,
+    ) -> Result<(u64, Option<TlsConnector>)> {
+        let Some(identity) = identity else {
+            return Ok((
+                self.inner.outbound_trust_context,
+                self.inner.tls_connector.clone(),
+            ));
+        };
+
+        let mut registry = self.inner.outbound_identities.lock().await;
+        if let Some((trust_context, connector)) = registry.get(identity) {
+            return Ok((*trust_context, Some(connector.clone())));
+        }
+        let connector = TlsConnector::from(Arc::new(crate::transport::tls::build_client_config(
+            identity,
+        )?));
+        let trust_context = next_trust_context();
+        registry.insert(identity.clone(), (trust_context, connector.clone()));
+        Ok((trust_context, Some(connector)))
+    }
+
     #[cfg(feature = "ws")]
     async fn connect_to(
         &self,
         addr: SocketAddr,
         authority: WebSocketAuthority,
     ) -> Result<Arc<WebSocketConnection>> {
+        self.connect_to_with_identity(addr, authority, None).await
+    }
+
+    /// Same as [`Self::connect_to`], with an optional per-call client identity
+    /// selecting which trust context's connection to reuse or dial.
+    #[cfg(feature = "ws")]
+    async fn connect_to_with_identity(
+        &self,
+        addr: SocketAddr,
+        authority: WebSocketAuthority,
+        identity: Option<TlsClientConfig>,
+    ) -> Result<Arc<WebSocketConnection>> {
+        #[cfg(feature = "wss")]
+        let (trust_context, identity_connector) =
+            self.resolve_outbound_identity(identity.as_ref()).await?;
+        #[cfg(not(feature = "wss"))]
+        let trust_context = {
+            let _ = &identity;
+            self.inner.outbound_trust_context
+        };
+
         let deadline = tokio::time::Instant::now() + self.inner.handshake_admission.timeout;
         let key = WebSocketConnectionKey::outbound(
             addr,
             authority.clone(),
-            self.inner.outbound_trust_context,
+            trust_context,
             self.inner.secure,
         );
         {
@@ -1080,7 +1145,7 @@ impl WebSocketTransport {
         // obvious and doesn't depend on whether the destination is
         // listening.
         #[cfg(feature = "wss")]
-        if self.inner.secure && self.inner.tls_connector.is_none() {
+        if self.inner.secure && identity_connector.is_none() {
             return Err(Error::NotImplemented(
                 "WSS client requires TlsClientConfig — use \
                  WebSocketTransport::bind_with_client_tls"
@@ -1112,6 +1177,8 @@ impl WebSocketTransport {
             } => {
                 let coordinator_for_task = coordinator.clone();
                 let pending_permit = _pending;
+                #[cfg(feature = "wss")]
+                let dial_connector = identity_connector.clone();
                 managed_tasks
                     .run(async move {
                         let mut cancellation = cancellation;
@@ -1155,7 +1222,7 @@ impl WebSocketTransport {
                                     ) = if inner.secure {
                                         #[cfg(feature = "wss")]
                                         {
-                                            let connector = inner.tls_connector.as_ref().expect(
+                                            let connector = dial_connector.as_ref().expect(
                                                 "pre-flight guarantees configured WSS connector",
                                             );
                                             let server_name = authority.server_name()?;
@@ -1374,6 +1441,48 @@ impl Transport for WebSocketTransport {
 
     async fn send_message_via(&self, message: Message, route: TransportRoute) -> Result<()> {
         self.send_message_on_route(message, route).await.map(|_| ())
+    }
+
+    /// Send under a per-call client identity, overriding the one this
+    /// transport was constructed with.
+    ///
+    /// The identity selects the trust context, so this send can only reuse a
+    /// connection established under the same identity, and dials its own
+    /// otherwise. It also supplies the connector, which is what lets a client
+    /// bound without any `TlsClientConfig` place `wss://` calls at all.
+    ///
+    /// `None` is the transport's own identity and behaves exactly like
+    /// [`Transport::send_message`].
+    #[cfg(feature = "wss")]
+    async fn send_message_with_tls_identity(
+        &self,
+        message: Message,
+        destination: SocketAddr,
+        identity: Option<&crate::transport::tls::OutboundTlsConfig>,
+    ) -> Result<()> {
+        let Some(identity) = identity else {
+            return self.send_message(message, destination).await;
+        };
+
+        // Explicit per-call SNI wins, as it does on the TLS transport: the
+        // authority drives both the HTTP `Host` and the TLS SNI for this dial.
+        let authority = match (&identity.server_name, &message) {
+            (Some(name), _) => WebSocketAuthority::from_transport(
+                &TransportAuthority::Dns(name.clone()),
+                destination.port(),
+            ),
+            (None, Message::Request(request)) => WebSocketAuthority::from_transport(
+                &transport_authority_for_request(request)?,
+                destination.port(),
+            ),
+            // A response has no next hop to derive an authority from.
+            (None, Message::Response(_)) => WebSocketAuthority::for_address(destination),
+        };
+
+        let connection = self
+            .connect_to_with_identity(destination, authority, Some(identity.client.clone()))
+            .await?;
+        connection.send_message(&message).await
     }
 
     async fn prepare_message_route(
