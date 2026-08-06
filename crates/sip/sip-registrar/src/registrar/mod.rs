@@ -84,6 +84,16 @@ impl Registrar {
             .await
     }
 
+    /// Stage removal of every binding for an AOR (`Contact: *`, RFC 3261
+    /// §10.3 step 6).
+    pub(crate) async fn prepare_clear_bindings(
+        &self,
+        aor: &AddressOfRecord,
+    ) -> Result<PreparedRegistrationMutation> {
+        let aor = self.canonicalize_aor(aor)?;
+        self.registry.prepare_clear_bindings(aor.as_str()).await
+    }
+
     pub async fn register_contacts(
         &self,
         aor: &AddressOfRecord,

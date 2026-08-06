@@ -125,7 +125,11 @@ pub struct PreparedAorRegistration {
     mutation: crate::registrar::PreparedRegistrationMutation,
     event_bus: Option<Arc<rvoip_infra_common::events::system::EventSystem>>,
     user: String,
-    contact: ContactInfo,
+    /// The binding being written, or `None` when the mutation removes every
+    /// binding for the AOR (`Contact: *`). The two publish different events,
+    /// and reporting a wildcard de-registration as `UserRegistered` would tell
+    /// subscribers the opposite of what happened.
+    contact: Option<ContactInfo>,
 }
 
 impl PreparedAorRegistration {
@@ -142,11 +146,11 @@ impl PreparedAorRegistration {
         mutation.commit();
         if let Some(bus) = event_bus {
             let publisher = bus.create_publisher::<RegistrarEvent>();
-            if publisher
-                .publish(RegistrarEvent::UserRegistered { user, contact })
-                .await
-                .is_err()
-            {
+            let event = match contact {
+                Some(contact) => RegistrarEvent::UserRegistered { user, contact },
+                None => RegistrarEvent::UserUnregistered { user },
+            };
+            if publisher.publish(event).await.is_err() {
                 warn!(
                     stage = "event-publish",
                     event_type = std::any::type_name::<RegistrarEvent>(),
@@ -634,7 +638,25 @@ impl RegistrarService {
             mutation,
             event_bus: self.event_bus.clone(),
             user: aor.to_string(),
-            contact,
+            contact: Some(contact),
+        })
+    }
+
+    /// Validate and serialize the removal of every binding for an AOR without
+    /// publishing it, for the `Contact: *` de-registration of RFC 3261 §10.3
+    /// step 6. Same commit discipline as [`Self::prepare_register_aor`].
+    #[doc(hidden)]
+    pub async fn prepare_clear_bindings(
+        &self,
+        aor: &AddressOfRecord,
+    ) -> Result<PreparedAorRegistration> {
+        self.validate_identity_for_registration(aor).await?;
+        let mutation = self.registrar.prepare_clear_bindings(aor).await?;
+        Ok(PreparedAorRegistration {
+            mutation,
+            event_bus: self.event_bus.clone(),
+            user: aor.to_string(),
+            contact: None,
         })
     }
 

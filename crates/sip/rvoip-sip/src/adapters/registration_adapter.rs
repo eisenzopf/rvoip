@@ -23,7 +23,7 @@ use rvoip_sip_registrar::{
     AddressOfRecord, ContactInfo, ContactReachability, RegistrarService, Transport,
 };
 use std::sync::{Arc, OnceLock};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Handles server-side REGISTER requests by coordinating authentication
 pub struct RegistrationAdapter {
@@ -119,6 +119,56 @@ impl CrossCrateEvent for RegistrationAdapterInstall {
     }
 }
 
+/// How the `Contact` header of an inbound REGISTER should be treated, per
+/// RFC 3261 §10.3 step 6.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegisterContactDisposition {
+    /// No wildcard. Ordinary binding refresh, addition or single removal.
+    Ordinary,
+    /// `Contact: *` with `Expires: 0`. Every binding for the AOR goes.
+    RemoveAllBindings,
+    /// A wildcard alongside other contacts, or with a non-zero expiration.
+    /// §10.3 requires 400 rather than a best-effort interpretation.
+    InvalidWildcard,
+}
+
+/// Classify the `Contact` header of an inbound REGISTER.
+///
+/// > the registrar checks if there is one Contact field value that contains
+/// > the special value "*" and an Expires field. If the request has additional
+/// > Contact fields or an expiration time other than zero, the request is
+/// > invalid, and the server MUST return a 400 (Invalid Request)
+///
+/// The expiration consulted here is the `Expires` header, since a wildcard
+/// contact has no parameters of its own to carry one.
+fn classify_register_contacts(request: &rvoip_sip_core::Request) -> RegisterContactDisposition {
+    use rvoip_sip_core::types::contact::{Contact, ContactValue};
+    use rvoip_sip_core::types::headers::HeaderAccess;
+
+    let contacts: Vec<&Contact> = request.typed_headers::<Contact>();
+    let has_wildcard = contacts
+        .iter()
+        .any(|contact| contact.0.iter().any(|value| *value == ContactValue::Star));
+
+    if !has_wildcard {
+        return RegisterContactDisposition::Ordinary;
+    }
+
+    // A wildcard must stand alone: one header, one value, and nothing else.
+    let total_values: usize = contacts.iter().map(|contact| contact.0.len()).sum();
+    if total_values != 1 {
+        return RegisterContactDisposition::InvalidWildcard;
+    }
+
+    let expires = request
+        .typed_header::<rvoip_sip_core::types::expires::Expires>()
+        .map(|expires| expires.0);
+    match expires {
+        Some(0) => RegisterContactDisposition::RemoveAllBindings,
+        _ => RegisterContactDisposition::InvalidWildcard,
+    }
+}
+
 impl RegistrationAdapter {
     /// Create a registration adapter whose dialog transaction owner is
     /// installed by the authoritative router when [`Self::start`] runs.
@@ -203,6 +253,7 @@ impl RegistrationAdapter {
         contact_uri: String,
         expires: u32,
         authorization: Option<String>,
+        remove_all_bindings: bool,
     ) -> Result<()> {
         // Refuse the request before authentication or registrar mutation when
         // no exact transaction response capability is installed. Accepting a
@@ -270,18 +321,33 @@ impl RegistrationAdapter {
             // until the exact response reaches a terminal written/wire-unknown
             // outcome. Proven ZeroWire drops this prepared value and preserves
             // the prior binding, including replacement and removal cases.
-            let prepared_registration = self
-                .registrar
-                .prepare_register_aor(&aor, contact, Some(expires))
-                .await
-                .map_err(Self::registrar_storage_failure)?;
+            // RFC 3261 §10.3 step 6: `Contact: *` with `Expires: 0` asks for
+            // every binding of this AOR to go, not for one contact to be
+            // matched and removed. Only the staged mutation differs; the
+            // ordering below is the same, so the binding still survives a
+            // response that never reaches the wire.
+            let prepared_registration = if remove_all_bindings {
+                self.registrar
+                    .prepare_clear_bindings(&aor)
+                    .await
+                    .map_err(Self::registrar_storage_failure)?
+            } else {
+                self.registrar
+                    .prepare_register_aor(&aor, contact, Some(expires))
+                    .await
+                    .map_err(Self::registrar_storage_failure)?
+            };
 
             let response = crate::api::respond::register_response::RegisterResponseEventFields {
                 transaction_id,
                 status_code: 200,
                 reason: "OK".to_string(),
                 www_authenticate: None,
-                contact: Some(contact_uri),
+                contact: if remove_all_bindings {
+                    None
+                } else {
+                    Some(contact_uri)
+                },
                 expires: Some(expires),
                 min_expires: None,
                 service_route: Vec::new(),
@@ -360,6 +426,49 @@ impl RegistrationAdapter {
             })
             .unwrap_or_else(|| from_uri.clone());
 
+        // RFC 3261 §10.3 step 6, read off the wire because the flattened
+        // event cannot express a wildcard: `extract_contact_uri` has no `*` to
+        // return, so it falls back to the From URI and the request becomes
+        // indistinguishable from an ordinary self-registration.
+        let contact_disposition = raw_request
+            .as_ref()
+            .and_then(|bytes| {
+                rvoip_sip_core::parse_message_with_mode(bytes, rvoip_sip_core::ParseMode::Strict)
+                    .ok()
+            })
+            .and_then(|message| match message {
+                rvoip_sip_core::Message::Request(request) => {
+                    Some(classify_register_contacts(&request))
+                }
+                rvoip_sip_core::Message::Response(_) => None,
+            })
+            .unwrap_or(RegisterContactDisposition::Ordinary);
+
+        // "If the request has additional Contact fields or an expiration time
+        // other than zero, the request is invalid, and the server MUST return
+        // a 400 (Invalid Request)."
+        //
+        // Answered before authentication on purpose: this is a syntactic
+        // defect in the request itself, refusing it leaks nothing, and it
+        // keeps a malformed wildcard from reaching registrar mutation at all.
+        if contact_disposition == RegisterContactDisposition::InvalidWildcard {
+            warn!("REGISTER carries a malformed wildcard Contact; rejecting with 400");
+            let rejection = crate::api::respond::register_response::RegisterResponseEventFields {
+                transaction_id: transaction_id.clone(),
+                status_code: 400,
+                reason: "Bad Request".to_string(),
+                www_authenticate: None,
+                contact: None,
+                expires: None,
+                min_expires: None,
+                service_route: Vec::new(),
+                path_echo: false,
+                associated_uri: Vec::new(),
+                extra_headers: Vec::new(),
+            };
+            return self.send_register_response(&rejection).await;
+        }
+
         self.handle_incoming_register(
             transaction_id.clone(),
             from_uri.clone(),
@@ -367,6 +476,7 @@ impl RegistrationAdapter {
             contact_uri.clone(),
             *expires,
             authorization.clone(),
+            contact_disposition == RegisterContactDisposition::RemoveAllBindings,
         )
         .await
     }
@@ -420,6 +530,109 @@ impl RegistrationAdapter {
 
     fn registration_event_install_failure<E>(_source: E) -> SessionError {
         SessionError::InternalError("registration event handler installation failed".into())
+    }
+}
+
+#[cfg(test)]
+mod wildcard_contact_tests {
+    use super::{classify_register_contacts, RegisterContactDisposition};
+    use rvoip_sip_core::{parse_message, Message, Request};
+
+    fn register_with(headers: &str) -> Request {
+        let raw = format!(
+            "REGISTER sip:example.test SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 192.0.2.10:5060;branch=z9hG4bK-reg\r\n\
+             Max-Forwards: 70\r\n\
+             From: <sip:alice@example.test>;tag=alice-tag\r\n\
+             To: <sip:alice@example.test>\r\n\
+             Call-ID: wildcard-contact-test\r\n\
+             CSeq: 3 REGISTER\r\n\
+             {}\
+             Content-Length: 0\r\n\
+             \r\n",
+            headers
+        );
+        match parse_message(raw.as_bytes()).expect("parse REGISTER") {
+            Message::Request(request) => request,
+            Message::Response(_) => panic!("expected a request"),
+        }
+    }
+
+    /// The form this exists for: log out of every device at once.
+    #[test]
+    fn a_lone_wildcard_with_expires_zero_removes_every_binding() {
+        let request = register_with("Contact: *\r\nExpires: 0\r\n");
+        assert_eq!(
+            classify_register_contacts(&request),
+            RegisterContactDisposition::RemoveAllBindings
+        );
+    }
+
+    /// "If the request has additional Contact fields [...] the request is
+    /// invalid, and the server MUST return a 400."
+    #[test]
+    fn a_wildcard_beside_another_contact_is_invalid() {
+        let request = register_with(
+            "Contact: *\r\n\
+             Contact: <sip:alice@192.0.2.10:5060>\r\n\
+             Expires: 0\r\n",
+        );
+        assert_eq!(
+            classify_register_contacts(&request),
+            RegisterContactDisposition::InvalidWildcard
+        );
+    }
+
+    /// "[...] or an expiration time other than zero [...]"
+    #[test]
+    fn a_wildcard_with_a_nonzero_expiration_is_invalid() {
+        let request = register_with("Contact: *\r\nExpires: 3600\r\n");
+        assert_eq!(
+            classify_register_contacts(&request),
+            RegisterContactDisposition::InvalidWildcard
+        );
+    }
+
+    /// A wildcard says nothing about how long, so an absent Expires cannot be
+    /// read as zero. Treating it as a removal would delete bindings the peer
+    /// never asked to drop.
+    #[test]
+    fn a_wildcard_without_an_expires_header_is_invalid() {
+        let request = register_with("Contact: *\r\n");
+        assert_eq!(
+            classify_register_contacts(&request),
+            RegisterContactDisposition::InvalidWildcard
+        );
+    }
+
+    /// Ordinary registrations must be untouched by any of this, including the
+    /// single-contact removal that already worked.
+    #[test]
+    fn ordinary_contacts_are_left_alone() {
+        for headers in [
+            "Contact: <sip:alice@192.0.2.10:5060>\r\n",
+            "Contact: <sip:alice@192.0.2.10:5060>;expires=0\r\n",
+            "Contact: <sip:alice@192.0.2.10:5060>\r\nExpires: 0\r\n",
+            "Contact: <sip:alice@192.0.2.10:5060>\r\nContact: <sip:alice@10.0.0.5:5060>\r\n",
+        ] {
+            let request = register_with(headers);
+            assert_eq!(
+                classify_register_contacts(&request),
+                RegisterContactDisposition::Ordinary,
+                "{headers:?} carries no wildcard"
+            );
+        }
+    }
+
+    /// A REGISTER with no Contact at all is a query for current bindings
+    /// (§10.3 step 6 skips to the last step), never a removal.
+    #[test]
+    fn a_register_without_any_contact_is_ordinary() {
+        let request = register_with("");
+        assert_eq!(
+            classify_register_contacts(&request),
+            RegisterContactDisposition::Ordinary
+        );
     }
 }
 

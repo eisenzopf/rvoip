@@ -188,6 +188,27 @@ impl UserRegistry {
             .await
     }
 
+    /// Stage the removal of every binding for an address-of-record, for the
+    /// `Contact: *` de-registration of RFC 3261 §10.3 step 6.
+    ///
+    /// An address-of-record with no bindings is not an error. The wildcard
+    /// asks for the binding list to end up empty, and it already is, so the
+    /// request succeeds and the 200 simply carries no Contact.
+    pub(crate) async fn prepare_clear_bindings(
+        &self,
+        key: &str,
+    ) -> Result<PreparedRegistrationMutation> {
+        let lease = self.acquire_mutation_lease(key).await;
+        Ok(PreparedRegistrationMutation {
+            users: Arc::clone(&self.users),
+            key: key.to_string(),
+            next: None,
+            contact_present: false,
+            contact_bytes: 0,
+            lease,
+        })
+    }
+
     pub async fn register_contacts(
         &self,
         aor: &AddressOfRecord,
@@ -696,6 +717,71 @@ mod tests {
         assert_eq!(reg.user_id, "alice");
         assert_eq!(reg.contacts.len(), 1);
         assert_eq!(reg.contacts[0].uri, contact.uri);
+    }
+
+    /// RFC 3261 §10.3 step 6: `Contact: *` removes every binding, not one
+    /// matched by URI. Two devices registered against the same AOR must both
+    /// go, which is the case a per-contact removal cannot express.
+    #[tokio::test]
+    async fn prepare_clear_bindings_removes_every_contact() {
+        let registry = UserRegistry::new();
+        registry
+            .register("carol", contact("sip:carol@192.0.2.10:5060", 1.0), 3600)
+            .await
+            .unwrap();
+        registry
+            .register("carol", contact("sip:carol@10.0.0.5:5060", 0.5), 3600)
+            .await
+            .unwrap();
+        assert_eq!(
+            registry
+                .get_registration("carol")
+                .await
+                .unwrap()
+                .contacts
+                .len(),
+            2
+        );
+
+        registry
+            .prepare_clear_bindings("carol")
+            .await
+            .unwrap()
+            .commit();
+
+        assert!(!registry.is_registered("carol").await);
+    }
+
+    /// Same commit discipline as every other staged mutation: dropping the
+    /// prepared value must leave the bindings exactly as they were, so a 200
+    /// that never reaches the wire cannot log anyone out.
+    #[tokio::test]
+    async fn prepare_clear_bindings_is_a_noop_until_commit() {
+        let registry = UserRegistry::new();
+        registry
+            .register("dave", contact("sip:dave@192.0.2.10:5060", 1.0), 3600)
+            .await
+            .unwrap();
+
+        drop(registry.prepare_clear_bindings("dave").await.unwrap());
+
+        assert!(
+            registry.is_registered("dave").await,
+            "an uncommitted wildcard removal must not touch the binding"
+        );
+    }
+
+    /// A wildcard against an AOR with nothing registered is not an error. The
+    /// request asks for the binding list to end up empty, and it already is.
+    #[tokio::test]
+    async fn prepare_clear_bindings_tolerates_an_unknown_aor() {
+        let registry = UserRegistry::new();
+        registry
+            .prepare_clear_bindings("nobody")
+            .await
+            .expect("a wildcard against an empty AOR succeeds")
+            .commit();
+        assert!(!registry.is_registered("nobody").await);
     }
 
     #[tokio::test]
