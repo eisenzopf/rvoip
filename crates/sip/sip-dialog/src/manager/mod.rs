@@ -18,6 +18,7 @@ pub mod identity_verify;
 pub mod message_routing;
 pub mod outbound_flow;
 pub mod protocol_handlers;
+pub mod replaces;
 pub mod request_lifecycle;
 pub mod response_lifecycle;
 pub mod session_coordination;

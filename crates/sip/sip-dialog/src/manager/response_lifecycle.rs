@@ -123,10 +123,22 @@ impl ResponseLifecycle for DialogManager {
     /// Post-send hook for UAS responses
     async fn post_send_response(
         &self,
-        _dialog_id: &DialogId,
-        _response: &Response,
+        dialog_id: &DialogId,
+        response: &Response,
     ) -> DialogResult<()> {
-        // Currently a no-op, but provided for future extensibility
+        // RFC 3891 §3: a dialog displaced by an INVITE carrying `Replaces:` is
+        // shut down only *after* that INVITE has been accepted. This runs past
+        // the synchronous lifecycle commit on purpose, so the BYE can never be
+        // the reason the new call fails, and so a rejected INVITE leaves "the
+        // matched dialog unchanged".
+        //
+        // Anything with no replacement pending falls straight through, which
+        // is every ordinary call.
+        match response.status_code() {
+            200..=299 => self.complete_pending_replacement(dialog_id).await,
+            300..=699 => self.discard_pending_replacement(dialog_id),
+            _ => {}
+        }
         Ok(())
     }
 }

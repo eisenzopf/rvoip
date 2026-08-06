@@ -237,19 +237,21 @@ fn an_e164_blind_target_parses_with_its_plus_intact() {
     );
 }
 
-/// Serialising that same URI escapes the `+` to `%2B`, and the two forms are
-/// not interchangeable to a peer that compares literally.
+/// Serialising that same URI keeps the `+` unescaped, so the target survives
+/// the round trip a blind transfer to an E.164 number depends on.
 ///
-/// Tracked in RELATORIO-PENDENCIAS-2026-08-04.md §5.3. It is a `sip-core`
-/// serialisation issue, not a transfer one, and the fix needs RFC 3261 §19.1.4
-/// read first — so this test states the current behaviour rather than the
-/// desired one, and will need inverting once that is settled.
+/// This test used to assert the opposite, pinning the serialiser's behaviour
+/// while the RFC question was still open. RFC 3261 §19.1.4 settled it:
+/// "Characters other than those in the `reserved` set (see RFC 2396) are
+/// equivalent to their `"%" HEX HEX` encoding", and RFC 2396's reserved set
+/// contains `+`. So `%2B` is a *different* URI, not a synonym, and escaping it
+/// is an interop bug rather than cosmetics.
 ///
 /// It lives here because blind transfer to an E.164 target is exactly where
 /// the mismatch bites, and losing that connection would make the bug look
 /// academic.
 #[test]
-fn e164_serialisation_escapes_the_plus_today() {
+fn e164_serialisation_keeps_the_plus_unescaped() {
     let refer = SimpleRequestBuilder::new(Method::Refer, "sip:alice@example.test")
         .expect("builder")
         .from("bob", "sip:bob@example.test", Some("bobtag"))
@@ -265,9 +267,8 @@ fn e164_serialisation_escapes_the_plus_today() {
         .uri()
         .to_string();
     assert_eq!(
-        rendered, "sip:%2B15551234567@gateway.example.test",
-        "if this now renders the `+` unescaped, §5.3 was fixed and this test \
-         should be inverted to assert the unescaped form"
+        rendered, "sip:+15551234567@gateway.example.test",
+        "a gateway comparing the E.164 target literally will not match %2B"
     );
 }
 

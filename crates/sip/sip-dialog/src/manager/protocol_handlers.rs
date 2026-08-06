@@ -383,18 +383,19 @@ impl MethodHandler for DialogManager {
                 .get_header_value(&rvoip_sip_core::HeaderName::ReferredBy)
                 .map(|s| s.to_string());
 
-            // Extract optional Replaces header (for attended transfer)
-            // Note: Replaces is not a standard HeaderName in sip-core yet,
-            // so we'll look for it as a raw header
+            // Extract an optional Replaces header (RFC 3891) for the
+            // application. This used to be read with `split(':').nth(1)`,
+            // which truncates any Call-ID carrying a port; sip-core now parses
+            // the header properly, so the value is taken from the typed form.
+            //
+            // Note this is not where an attended transfer's Replaces normally
+            // travels. A conforming transferor puts it in the `Refer-To` URI
+            // (`<sip:target?Replaces=...>`), and the transferee then copies it
+            // onto its INVITE, which is where the UAS acts on it. This lookup
+            // stays for peers that also repeat it on the REFER itself.
             let replaces = request
-                .all_headers()
-                .iter()
-                .find(|h| h.name().to_string().eq_ignore_ascii_case("replaces"))
-                .map(|h| {
-                    let header_str = h.to_string();
-                    header_str.split(':').nth(1).map(|s| s.trim().to_string())
-                })
-                .flatten();
+                .typed_header::<rvoip_sip_core::types::replaces::Replaces>()
+                .map(|replaces| replaces.to_string());
 
             // Forward to session layer FIRST - let session-core decide Accept/Reject
             // Session-core will send the appropriate response (202 Accepted or 4xx/5xx rejection)

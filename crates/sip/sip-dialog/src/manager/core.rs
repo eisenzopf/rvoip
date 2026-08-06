@@ -652,6 +652,16 @@ pub struct DialogManager {
     /// dialogs for new INVITEs that do not have a To tag.
     pub(crate) early_dialog_lookup: Arc<DashMap<String, DialogId>>,
 
+    /// Dialogs an inbound INVITE carrying `Replaces:` is waiting to displace,
+    /// keyed by the *new* dialog (RFC 3891 §3).
+    ///
+    /// The entry is written when the header matches a replaceable dialog and
+    /// consumed only once the new dialog is confirmed, which is what keeps the
+    /// ordering §3 requires: accept first, shut the old dialog down after. If
+    /// the application rejects the call instead, the entry is dropped without
+    /// ever being acted on, leaving "the matched dialog unchanged".
+    pub(crate) replaces_pending: Arc<DashMap<DialogId, DialogId>>,
+
     /// Recently terminated BYE lookup by call-id + tags. This preserves
     /// idempotent 200 OK handling for late BYE retransmits after the full
     /// dialog record has been removed from the hot lookup maps.
@@ -1115,6 +1125,7 @@ impl DialogManager {
             dialogs,
             dialog_lookup,
             early_dialog_lookup: Arc::new(DashMap::with_capacity(index_capacity)),
+            replaces_pending: Arc::new(DashMap::new()),
             terminated_bye_lookup: Arc::new(DashMap::with_capacity(index_capacity.min(4_096))),
             terminated_bye_deadlines: Arc::new(std::sync::Mutex::new(
                 TerminatedByeDeadlineQueue::default(),
@@ -1853,6 +1864,7 @@ impl DialogManager {
             dialogs,
             dialog_lookup,
             early_dialog_lookup: Arc::new(DashMap::with_capacity(index_capacity)),
+            replaces_pending: Arc::new(DashMap::new()),
             terminated_bye_lookup: Arc::new(DashMap::with_capacity(index_capacity.min(4_096))),
             terminated_bye_deadlines: Arc::new(std::sync::Mutex::new(
                 TerminatedByeDeadlineQueue::default(),

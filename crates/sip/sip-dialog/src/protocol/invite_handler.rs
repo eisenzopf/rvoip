@@ -26,6 +26,7 @@ use crate::diagnostics::safe_log::SafeTransactionKey;
 use crate::dialog::DialogId;
 use crate::errors::{DialogError, DialogResult};
 use crate::events::SessionCoordinationEvent;
+use crate::manager::replaces::ReplacesDisposition;
 use crate::manager::transaction_integration::detect_peer_100rel_support;
 use crate::manager::{DialogLookup, DialogManager};
 use crate::transaction::utils::response_builders;
@@ -243,9 +244,33 @@ impl DialogManager {
             }
         }
 
+        // RFC 3891 §3: an INVITE carrying `Replaces:` names an existing dialog
+        // to displace. Settled before any dialog is created, so a rejection
+        // costs nothing and, as §3 requires, leaves the matched dialog
+        // unchanged.
+        let replaces_disposition = self.evaluate_replaces(&request);
+        if let ReplacesDisposition::Reject(status) = replaces_disposition {
+            warn!(
+                "Rejecting INVITE with {} per RFC 3891 §3 Replaces handling",
+                status
+            );
+            let response = response_builders::create_response(&request, status);
+            self.send_unowned_final_response_classified(&transaction_id, response)
+                .await?;
+            return Ok(None);
+        }
+
         // Create early dialog
         let dialog_id = self.create_early_dialog_from_invite(&request).await?;
         tracing::debug!("🔍 INVITE HANDLER: Created early dialog {}", dialog_id);
+
+        // The replacement is only remembered here, never performed. It is
+        // acted on when the dialog reaches Confirmed, which is what keeps the
+        // §3 ordering: accept the new INVITE first, shut the old one down
+        // after.
+        if let ReplacesDisposition::Replace(replaced_dialog_id) = &replaces_disposition {
+            self.register_pending_replacement(&dialog_id, replaced_dialog_id);
+        }
 
         // Capture INVITE CSeq + peer 100rel support on the dialog so the UAS
         // can emit reliable 18x and the PRACK handler can validate `RAck`.
@@ -319,6 +344,7 @@ impl DialogManager {
                     self.send_unowned_final_response_classified(&transaction_id, response)
                         .await?;
                     self.retire_unowned_response_indexes(&dialog_id, &transaction_id);
+                    self.discard_pending_replacement(&dialog_id);
                     self.remove_dialog_storage(&dialog_id);
                     return Ok(None);
                 }
