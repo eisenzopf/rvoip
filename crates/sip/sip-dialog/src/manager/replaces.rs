@@ -730,6 +730,68 @@ mod tests {
         );
     }
 
+    /// An early dialog we initiated has no 2xx to BYE, so RFC 3891 §3 tears it
+    /// down with a CANCEL of its own INVITE instead.
+    ///
+    /// Worth a real transaction rather than a stub: picking the wrong verb
+    /// here would leave the consultation INVITE outstanding, and the failure
+    /// would only show up as a call that never stops ringing.
+    #[tokio::test]
+    async fn accepting_the_new_invite_cancels_an_early_dialog_we_initiated() {
+        use rvoip_sip_core::builder::SimpleRequestBuilder;
+
+        let transport = RecordingTransport::new();
+        let manager = make_manager_with(transport.clone()).await;
+        let replaced = store_dialog_in_state(
+            &manager,
+            "consult-call",
+            "charlie-tag",
+            "bob-tag",
+            DialogState::Early,
+            true,
+        )
+        .await;
+
+        // A real client INVITE transaction, because that is what a CANCEL has
+        // to target.
+        let invite = SimpleRequestBuilder::new(Method::Invite, "sip:bob@127.0.0.1:5062")
+            .expect("builder")
+            .from("charlie", "sip:charlie@example.test", Some("charlie-tag"))
+            .to("bob", "sip:bob@127.0.0.1:5062", None)
+            .call_id("consult-call")
+            .cseq(1)
+            .via("127.0.0.1:5060", "UDP", Some("z9hG4bK-consult"))
+            .max_forwards(70)
+            .contact("sip:charlie@127.0.0.1:5060", None)
+            .build();
+        let invite_tx_id = manager
+            .transaction_manager()
+            .create_client_transaction(invite, "127.0.0.1:5062".parse().unwrap())
+            .await
+            .expect("create client INVITE transaction");
+        manager.link_transaction_to_dialog_indexed(&invite_tx_id, &replaced);
+
+        let new_dialog = DialogId::new();
+        manager.register_pending_replacement(&new_dialog, &replaced);
+        manager.complete_pending_replacement(&new_dialog).await;
+
+        let sent = transport.methods_sent();
+        assert!(
+            sent.contains(&Method::Cancel),
+            "RFC 3891 §3 shuts an early dialog down with a CANCEL, got {:?}",
+            sent
+        );
+        assert!(
+            !sent.contains(&Method::Bye),
+            "an early dialog has no 2xx to BYE, got {:?}",
+            sent
+        );
+        assert!(
+            manager.replaces_pending.get(&new_dialog).is_none(),
+            "the pending replacement must be consumed"
+        );
+    }
+
     /// A replacement is consumed once. A later response on the same dialog,
     /// a re-INVITE for instance, must not resurrect it and BYE a second time.
     #[tokio::test]
