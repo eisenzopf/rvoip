@@ -106,6 +106,86 @@ impl Replaces {
     pub fn as_local_remote_tags(&self) -> (&str, &str) {
         (&self.to_tag, &self.from_tag)
     }
+
+    /// Percent-encode this value for use as a `Replaces` URI header parameter
+    /// inside a `Refer-To` URI, as `<sip:target?Replaces=...>`.
+    ///
+    /// This is where an attended transfer's `Replaces` actually travels. RFC
+    /// 3891 §6.1 defines the header "only for INVITE requests", so a REFER
+    /// cannot carry it directly; it goes in the `Refer-To` URI and the
+    /// transferee copies it onto the INVITE it then sends.
+    ///
+    /// Everything outside `unreserved` is escaped. The `hvalue` production of
+    /// RFC 3261 §25.1 is `*( hnv-unreserved / unreserved / escaped )`, so the
+    /// seven `hnv-unreserved` characters could legally be emitted literally,
+    /// but `escaped` is accepted everywhere `hvalue` is, which makes the
+    /// conservative set always valid and never ambiguous. The `;` and `=`
+    /// separating the tags have to be escaped either way, or they would read
+    /// as URI syntax rather than as part of the value.
+    ///
+    /// There is a second reason to stay conservative: this crate's URI parser
+    /// rejects a literal `:` inside a header value even though
+    /// `hnv-unreserved` permits it. A Call-ID carrying a port hits exactly
+    /// that, so emitting `%3A` is what keeps such a value readable back. The
+    /// parser bug is real and worth fixing separately; escaping here does not
+    /// depend on it being fixed.
+    pub fn to_uri_header_value(&self) -> String {
+        let mut escaped = String::new();
+        for c in self.to_string().chars() {
+            match c {
+                // unreserved = alphanum / mark
+                'a'..='z'
+                | 'A'..='Z'
+                | '0'..='9'
+                | '-'
+                | '_'
+                | '.'
+                | '!'
+                | '~'
+                | '*'
+                | '\''
+                | '('
+                | ')' => escaped.push(c),
+                _ => {
+                    for byte in c.to_string().bytes() {
+                        escaped.push('%');
+                        escaped.push_str(&format!("{:02X}", byte));
+                    }
+                }
+            }
+        }
+        escaped
+    }
+
+    /// Read the `Replaces` a `Refer-To` URI carries, if any.
+    ///
+    /// This is the transferee's side of the exchange: it receives a REFER
+    /// whose `Refer-To` names both the transfer target and the dialog to
+    /// replace, and has to lift the second one onto the INVITE it sends.
+    ///
+    /// The parser has already undone the percent-encoding by the time the
+    /// value reaches `Uri::headers`, so it is parsed here as an ordinary
+    /// header value.
+    pub fn from_refer_to_uri(uri: &crate::types::uri::Uri) -> Option<Self> {
+        uri.headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("replaces"))
+            .and_then(|(_, value)| Self::from_str(value).ok())
+    }
+
+    /// Append this value to a target URI as a `Replaces` URI header, producing
+    /// the `Refer-To` URI of an attended transfer.
+    ///
+    /// Uses `&` when the target already carries a URI header, `?` otherwise.
+    pub fn append_to_refer_to_uri(&self, target_uri: &str) -> String {
+        let separator = if target_uri.contains('?') { '&' } else { '?' };
+        format!(
+            "{}{}Replaces={}",
+            target_uri,
+            separator,
+            self.to_uri_header_value()
+        )
+    }
 }
 
 impl fmt::Display for Replaces {
@@ -217,6 +297,36 @@ mod tests {
             Replaces::from_header(&header).expect("from_header"),
             original
         );
+    }
+
+    #[test]
+    fn survives_a_round_trip_through_a_refer_to_uri() {
+        use crate::types::uri::Uri;
+
+        let original = Replaces::new("consult@192.168.0.1:5060", "charlie-tag", "bob-tag");
+        let refer_to = original.append_to_refer_to_uri("sip:charlie@example.test");
+
+        // The separators inside the value must not read as URI syntax.
+        assert!(!refer_to.contains(";to-tag="));
+        assert!(refer_to.starts_with("sip:charlie@example.test?Replaces="));
+
+        let uri = Uri::from_str(&refer_to).expect("parse Refer-To URI");
+        assert_eq!(Replaces::from_refer_to_uri(&uri), Some(original));
+    }
+
+    #[test]
+    fn appends_with_an_ampersand_when_the_target_already_has_a_uri_header() {
+        let replaces = Replaces::new("cid", "t1", "f1");
+        let appended = replaces.append_to_refer_to_uri("sip:charlie@example.test?Subject=call");
+        assert!(appended.contains("?Subject=call&Replaces="));
+    }
+
+    #[test]
+    fn a_refer_to_uri_without_replaces_yields_none() {
+        use crate::types::uri::Uri;
+
+        let uri = Uri::from_str("sip:charlie@example.test").expect("parse plain URI");
+        assert_eq!(Replaces::from_refer_to_uri(&uri), None);
     }
 
     #[test]

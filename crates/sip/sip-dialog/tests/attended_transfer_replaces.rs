@@ -1,8 +1,10 @@
-//! RFC 3891 `Replaces` — the half of attended transfer that is missing.
+//! RFC 3891 `Replaces` — the wire format of attended transfer.
 //!
-//! These tests define the target before the implementation exists, so "done"
-//! is not decided by whoever writes the code. Several of them fail today, on
-//! purpose. Each one says in its own assertion what it means when it fails.
+//! These tests pin the format and the conventions that carry a transfer
+//! between the three parties. The UAS decision table of §3, and the ordering
+//! between accepting the new INVITE and shutting the replaced dialog down,
+//! live in `src/manager/replaces.rs` instead, because they need the dialog
+//! index and that is `pub(crate)`.
 //!
 //! # Where `Replaces` actually travels
 //!
@@ -12,14 +14,14 @@
 //! 2. Bob ↔ Charlie, the consultation call.
 //! 3. Bob REFERs Alice, with the consultation dialog carried as a **URI
 //!    parameter inside `Refer-To`** — `<sip:charlie@host?Replaces=...>` — not
-//!    as a header on the REFER.
+//!    as a header on the REFER, since §6.1 defines the header only for INVITE.
 //! 4. Alice INVITEs Charlie with a **`Replaces` header** on that INVITE.
 //! 5. Charlie matches it to his dialog with Bob, accepts Alice, and BYEs Bob.
 //!
-//! Step 5 is where the transfer actually happens, and it happens on the
-//! transfer *target*, in an inbound INVITE. Looking for `Replaces` on the
-//! inbound REFER — which is what `manager/protocol_handlers.rs` does today —
-//! inspects a header that a conforming peer never sends.
+//! Step 5 is where the transfer happens, and it happens on the transfer
+//! *target*, in an inbound INVITE. Step 3 is the one that used to be wrong:
+//! the value went out as a header on the REFER, where a conforming transferee
+//! never looks, so the whole chain stopped there.
 //!
 //! # Blind transfer
 //!
@@ -328,4 +330,87 @@ fn reversed_replaces_tags_do_not_address_the_same_dialog() {
         correct, reversed,
         "the dialog key must be direction-sensitive, or Replaces matching cannot be validated"
     );
+}
+
+// ── The handoff: transferor to transferee ────────────────────────────────────
+
+/// The `Replaces` of an attended transfer travels inside the `Refer-To` URI,
+/// not as a header on the REFER.
+///
+/// RFC 3891 §6.1 defines the header "only for INVITE requests", so a REFER
+/// cannot carry it directly. A transferee that follows the spec reads
+/// `Refer-To`; if the value were only on the REFER it would find nothing,
+/// send a plain INVITE, and the transfer would silently degrade to a blind
+/// one with the consultation call left hanging.
+#[test]
+fn the_dialog_to_replace_rides_in_the_refer_to_uri() {
+    use rvoip_sip_core::types::replaces::Replaces;
+    use rvoip_sip_core::types::uri::Uri;
+    use std::str::FromStr;
+
+    let replaces = Replaces::new("consult@192.168.0.1:5060", "charlietag", "bobtag-consult");
+    let refer_to_uri = replaces.append_to_refer_to_uri("sip:charlie@example.test");
+
+    let refer = SimpleRequestBuilder::new(Method::Refer, "sip:alice@example.test")
+        .expect("builder")
+        .from("bob", "sip:bob@example.test", Some("bobtag"))
+        .to("alice", "sip:alice@example.test", Some("alicetag"))
+        .call_id("attended-handoff")
+        .cseq(2)
+        .refer_to_uri(refer_to_uri)
+        .build();
+
+    // Nothing named Replaces may sit on the REFER itself.
+    assert!(
+        !refer
+            .all_headers()
+            .iter()
+            .any(|header| header.name().to_string().eq_ignore_ascii_case("replaces")),
+        "RFC 3891 §6.1 defines Replaces only for INVITE, so it must not be a REFER header"
+    );
+
+    // The transferee reads it back off the Refer-To URI.
+    let refer_to = refer.typed_header::<ReferTo>().expect("Refer-To");
+    let recovered = Replaces::from_refer_to_uri(refer_to.uri())
+        .expect("the transferee must find the dialog to replace in the Refer-To URI");
+    assert_eq!(recovered, replaces);
+
+    // And the target it should INVITE is still reachable alongside it.
+    assert_eq!(
+        refer_to.uri().user.as_deref(),
+        Some("charlie"),
+        "embedding Replaces must not damage the transfer target"
+    );
+
+    // What the transferee puts on its INVITE is exactly the header form.
+    assert_eq!(
+        recovered.to_string(),
+        "consult@192.168.0.1:5060;to-tag=charlietag;from-tag=bobtag-consult"
+    );
+    assert_eq!(
+        Uri::from_str(&recovered.append_to_refer_to_uri("sip:charlie@example.test"))
+            .ok()
+            .and_then(|uri| Replaces::from_refer_to_uri(&uri)),
+        Some(replaces),
+        "the encoding must survive a second trip, so proxies forwarding it do no damage"
+    );
+}
+
+/// A blind REFER carries no `Replaces` anywhere, and the target is untouched.
+#[test]
+fn a_blind_refer_to_uri_gains_no_replaces() {
+    use rvoip_sip_core::types::replaces::Replaces;
+
+    let refer = SimpleRequestBuilder::new(Method::Refer, "sip:alice@example.test")
+        .expect("builder")
+        .from("bob", "sip:bob@example.test", Some("bobtag"))
+        .to("alice", "sip:alice@example.test", Some("alicetag"))
+        .call_id("blind-handoff")
+        .cseq(2)
+        .refer_to_uri("sip:charlie@example.test")
+        .build();
+
+    let refer_to = refer.typed_header::<ReferTo>().expect("Refer-To");
+    assert_eq!(Replaces::from_refer_to_uri(refer_to.uri()), None);
+    assert_eq!(refer_to.uri().to_string(), "sip:charlie@example.test");
 }

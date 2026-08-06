@@ -2751,21 +2751,35 @@ impl UnifiedDialogApi {
         // RFC 3892 (Referred-By), and RFC 4538 (Target-Dialog) ride on
         // the request as real typed headers below — never as additional
         // body lines.
-        let body = format!("Refer-To: {}\r\n", opts.refer_to);
+        // RFC 3891 §6.1 defines `Replaces` "only for INVITE requests", so it
+        // cannot ride on the REFER itself. It belongs in the `Refer-To` URI as
+        // an embedded header, which is where the transferee looks for it
+        // before copying it onto the INVITE it sends to the target.
+        //
+        // Parsing the caller's value first means a malformed one is refused
+        // here rather than travelling as an unusable URI parameter.
+        let refer_to = match &opts.replaces {
+            Some(value) => {
+                let replaces = value
+                    .parse::<rvoip_sip_core::types::replaces::Replaces>()
+                    .map_err(|_| ApiError::Configuration {
+                        message:
+                            "Replaces must be `call-id;to-tag=<tag>;from-tag=<tag>` (RFC 3891 §6.1)"
+                                .to_string(),
+                    })?;
+                replaces.append_to_refer_to_uri(&opts.refer_to)
+            }
+            None => opts.refer_to.clone(),
+        };
+        let body = format!("Refer-To: {}\r\n", refer_to);
 
-        // RFC 3891 + 3892 + 4538 — typed headers added on the request
-        // alongside any application extras.
+        // RFC 3892 + 4538 — typed headers added on the request alongside any
+        // application extras.
         let mut extras: Vec<TypedHeader> = opts.extra_headers.clone();
         if let Some(rb) = &opts.referred_by {
             extras.push(TypedHeader::Other(
                 HeaderName::Other("Referred-By".to_string()),
                 HeaderValue::Raw(rb.clone().into_bytes()),
-            ));
-        }
-        if let Some(rep) = &opts.replaces {
-            extras.push(TypedHeader::Other(
-                HeaderName::Other("Replaces".to_string()),
-                HeaderValue::Raw(rep.clone().into_bytes()),
             ));
         }
         if let Some(td) = &opts.target_dialog {

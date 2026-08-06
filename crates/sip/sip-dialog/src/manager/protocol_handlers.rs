@@ -22,6 +22,7 @@ use crate::errors::{DialogError, DialogResult};
 use crate::transaction::TransactionKey;
 use rvoip_sip_core::types::header::{HeaderName, TypedHeader};
 use rvoip_sip_core::types::refer_to::ReferTo;
+use rvoip_sip_core::types::replaces::Replaces;
 use rvoip_sip_core::{Method, Request, Response, StatusCode};
 
 // Import all the specialized protocol handlers
@@ -383,18 +384,21 @@ impl MethodHandler for DialogManager {
                 .get_header_value(&rvoip_sip_core::HeaderName::ReferredBy)
                 .map(|s| s.to_string());
 
-            // Extract an optional Replaces header (RFC 3891) for the
-            // application. This used to be read with `split(':').nth(1)`,
-            // which truncates any Call-ID carrying a port; sip-core now parses
-            // the header properly, so the value is taken from the typed form.
+            // The dialog an attended transfer is meant to replace (RFC 3891).
             //
-            // Note this is not where an attended transfer's Replaces normally
-            // travels. A conforming transferor puts it in the `Refer-To` URI
-            // (`<sip:target?Replaces=...>`), and the transferee then copies it
-            // onto its INVITE, which is where the UAS acts on it. This lookup
-            // stays for peers that also repeat it on the REFER itself.
-            let replaces = request
-                .typed_header::<rvoip_sip_core::types::replaces::Replaces>()
+            // It travels inside the `Refer-To` URI, as
+            // `<sip:target?Replaces=...>`, because §6.1 defines the header
+            // "only for INVITE requests" and so a REFER cannot carry it
+            // directly. That is the form checked first. The header on the
+            // REFER is accepted as a fallback, since some peers send it there
+            // anyway, and it used to be the only place this code looked.
+            //
+            // Whichever form it arrives in, the value handed up is the parsed
+            // and re-serialised one, so the application can put it straight
+            // onto the INVITE it sends to the target. The previous
+            // `split(':').nth(1)` truncated any Call-ID carrying a port.
+            let replaces = Replaces::from_refer_to_uri(refer_to.uri())
+                .or_else(|| request.typed_header::<Replaces>().cloned())
                 .map(|replaces| replaces.to_string());
 
             // Forward to session layer FIRST - let session-core decide Accept/Reject
