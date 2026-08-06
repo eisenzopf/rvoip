@@ -350,6 +350,12 @@ criterion = { version = "0.5", features = ["html_reports"] }
 
 # 🔧 Optimization Profiles for Binary Size Reduction
 
+
+# Optional perf-test instrumentation (rvoip-sip `perf-tests` feature).
+console-subscriber = "0.4"
+dhat = "0.3"
+hdrhistogram = "7.5"
+sysinfo = "0.31"
 [profile.release]
 # Speed-optimized release for a perf-sensitive networking library.
 # Was previously `opt-level = "s"` (size) — switched to 3 after

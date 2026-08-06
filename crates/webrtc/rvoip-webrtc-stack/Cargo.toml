@@ -191,16 +191,16 @@ name = "tokio_only_runtime"
 path = "tests/tokio_only_runtime.rs"
 
 [dependencies.async-trait]
-version = "0.1.89"
+workspace = true
 
 [dependencies.bytes]
 version = "1.11.1"
 
 [dependencies.futures]
-version = "0.3.31"
+workspace = true
 
 [dependencies.log]
-version = "0.4.29"
+workspace = true
 
 [dependencies.rtc]
 workspace = true
@@ -216,20 +216,20 @@ features = [
 ]
 
 [dev-dependencies.anyhow]
-version = "1.0.102"
+workspace = true
 
 [dev-dependencies.chrono]
 version = "0.4.43"
 
 [dev-dependencies.clap]
-version = "4.5.59"
+workspace = true
 features = ["derive"]
 
 [dev-dependencies.ctrlc]
 version = "3.5.2"
 
 [dev-dependencies.env_logger]
-version = "0.11.8"
+workspace = true
 
 [dev-dependencies.hyper]
 version = "0.14.32"
@@ -239,7 +239,7 @@ features = ["full"]
 version = "0.10.0"
 
 [dev-dependencies.serde_json]
-version = "1.0.149"
+workspace = true
 
 [dev-dependencies.signal]
 version = "0.20.0-alpha.1"
