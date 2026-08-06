@@ -1207,12 +1207,19 @@ impl MediaSessionController {
     /// (`rtp_core::dtls_srtp::generate_identity`) is also called directly
     /// by `rvoip-sip` rather than through a controller method.
     #[cfg(feature = "ice")]
+    ///
+    /// `external_ips` announces those addresses as host candidates in place of
+    /// the local interface addresses (1:1 NAT mapping). It is what makes ICE
+    /// usable behind static NAT: `stun_servers` cannot, because `webrtc-ice`
+    /// gathers no server-reflexive candidates over the shared socket this
+    /// agent multiplexes on.
     pub async fn create_ice_agent(
         &self,
         dialog_id: &DialogId,
         role: nat_core::IceRole,
         stun_servers: Vec<String>,
         ip_filter: Option<Arc<dyn Fn(std::net::IpAddr) -> bool + Send + Sync>>,
+        external_ips: Vec<String>,
     ) -> Result<Arc<nat_core::IceAgent>> {
         let session_arc = self
             .rtp_sessions
@@ -1238,11 +1245,12 @@ impl MediaSessionController {
         };
 
         let agent = Arc::new(
-            nat_core::IceAgent::new_with_shared_socket_and_ip_filter(
+            nat_core::IceAgent::new_with_shared_socket_and_external_ips(
                 role,
                 &stun_servers,
                 socket_adapter,
                 ip_filter,
+                &external_ips,
             )
             .await
             .map_err(|e| Error::config(format!("create_ice_agent: {e}")))?,

@@ -1427,6 +1427,22 @@ impl MediaAdapter {
     /// `a=candidate` lines. `None` when ICE isn't our policy or agent
     /// creation/gathering fails — logged, not fatal, same tolerance
     /// `dtls_offer_identity` gives a failed identity generation.
+    /// External addresses announced as ICE host candidates.
+    ///
+    /// Reuses the same public RTP address the SDP `c=` / `o=` lines already
+    /// carry, so a deployment behind static NAT configures one thing and both
+    /// the SDP and the ICE candidates agree. Announcing a private address in
+    /// one and a public one in the other is how a call connects silent.
+    ///
+    /// Empty when no public address is configured or discovered, which leaves
+    /// gathering on the local interface addresses, exactly as before.
+    #[cfg(feature = "ice")]
+    fn ice_external_ips(&self) -> Vec<String> {
+        self.public_rtp_addr()
+            .map(|address| vec![address.ip().to_string()])
+            .unwrap_or_default()
+    }
+
     #[cfg(feature = "ice")]
     async fn ice_offer_agent(
         &self,
@@ -1443,6 +1459,7 @@ impl MediaAdapter {
                 rvoip_nat_core::IceRole::Controlling,
                 self.ice_stun_servers.clone(),
                 self.ice_ip_filter(),
+                self.ice_external_ips(),
             )
             .await
         {
@@ -1494,6 +1511,7 @@ impl MediaAdapter {
                 rvoip_nat_core::IceRole::Controlled,
                 self.ice_stun_servers.clone(),
                 self.ice_ip_filter(),
+                self.ice_external_ips(),
             )
             .await
         {

@@ -173,7 +173,69 @@ impl IceAgent {
         socket: Arc<dyn SharedIceSocket>,
         ip_filter: Option<Arc<dyn Fn(std::net::IpAddr) -> bool + Send + Sync>>,
     ) -> Result<Self> {
-        let (urls, candidate_types) = parse_stun_servers(stun_servers)?;
+        Self::new_with_shared_socket_and_external_ips(role, stun_servers, socket, ip_filter, &[])
+            .await
+    }
+
+    /// Same as [`IceAgent::new_with_shared_socket_and_ip_filter`], but
+    /// advertises `external_ips` in place of the local interface addresses
+    /// (RFC 8445 1:1 NAT mapping).
+    ///
+    /// This is the setting for static NAT, the ordinary media-server
+    /// topology: the process listens on a private address and the world
+    /// reaches it on a public one with the same ports. Without it the SDP
+    /// carries a private address, the peer sends RTP there, and the call
+    /// connects silent.
+    ///
+    /// Each entry is either `"203.0.113.10"` — one external address standing
+    /// in for every local interface — or `"203.0.113.10/192.168.1.50"`, an
+    /// external/local pair for multi-homed hosts.
+    ///
+    /// Prefer the unpaired form. With pairs, an entry whose local side is not
+    /// currently an interface address maps nothing, and if that happens for
+    /// every interface the whole gathering fails with
+    /// `ErrCandidateIpNotFound` rather than degrading to local addresses. A
+    /// container rebuild or a DHCP lease change is enough to trigger it.
+    ///
+    /// Two behaviours worth knowing before turning this on:
+    ///
+    /// - The mapped address **replaces** the local one. Host candidates carry
+    ///   only `external_ips`, so peers on the same LAN start depending on the
+    ///   router's hairpin NAT, which not every router does. A call that worked
+    ///   on the LAN can stop working once this is set.
+    /// - `stun_servers` is ignored here, and that is not a limitation of this
+    ///   function: `webrtc-ice` skips server-reflexive gathering entirely on a
+    ///   multiplexed socket. External IP mapping is the mechanism that does
+    ///   work on this path, which is why it exists.
+    pub async fn new_with_shared_socket_and_external_ips(
+        role: IceRole,
+        stun_servers: &[String],
+        socket: Arc<dyn SharedIceSocket>,
+        ip_filter: Option<Arc<dyn Fn(std::net::IpAddr) -> bool + Send + Sync>>,
+        external_ips: &[String],
+    ) -> Result<Self> {
+        let (mut urls, mut candidate_types) = parse_stun_servers(stun_servers)?;
+
+        // `webrtc-ice` skips server-reflexive gathering on a muxed socket
+        // (`agent_gather.rs`, `UDPNetwork::Muxed(_) => continue`), and does it
+        // silently. Keeping `ServerReflexive` in `candidate_types` here would
+        // leave the agent advertising an intent it never acts on, so drop it
+        // and say why once, rather than let the next person rediscover it.
+        //
+        // The URLs go with it: `AgentConfig` rejects a configuration that
+        // carries STUN URLs no selected candidate type consumes
+        // ("agent does not need URL with selected candidate types").
+        if candidate_types.contains(&CandidateType::ServerReflexive) {
+            tracing::warn!(
+                stun_servers = stun_servers.len(),
+                external_ips = external_ips.len(),
+                "STUN servers ignored on a shared ICE socket: webrtc-ice gathers no \
+                 server-reflexive candidates over a multiplexed socket. Announce an \
+                 external address instead (new_with_shared_socket_and_external_ips)."
+            );
+            candidate_types.retain(|kind| *kind != CandidateType::ServerReflexive);
+            urls.clear();
+        }
 
         let mux = SharedIceMux::new(socket);
 
@@ -191,6 +253,12 @@ impl IceAgent {
             udp_network: UDPNetwork::Muxed(mux.clone() as Arc<dyn UDPMux + Send + Sync>),
             ip_filter: Arc::new(Some(ip_filter)),
             include_loopback,
+            // Empty `nat_1to1_ips` leaves the mapper uninstalled, so the
+            // delegating constructors keep their previous behaviour exactly.
+            nat_1to1_ips: external_ips.to_vec(),
+            // Host is the only type the muxed gathering path honours; it reads
+            // the mapper solely when `candidate_type == Host`.
+            nat_1to1_ip_candidate_type: CandidateType::Host,
             ..Default::default()
         };
 
