@@ -55,6 +55,23 @@ fn retain_only_48khz_telephone_event(sdp: &str) -> String {
     output
 }
 
+/// Drop every SDES MID `a=extmap` line, reproducing an endpoint such as
+/// Amazon Connect that never negotiates the MID header extension. The `a=mid:`
+/// attribute itself is retained so BUNDLE grouping is unchanged.
+fn strip_sdes_mid_extmap(sdp: &str) -> String {
+    let mut output = String::with_capacity(sdp.len());
+    for line in sdp.lines() {
+        if line.starts_with("a=extmap:")
+            && line.contains("urn:ietf:params:rtp-hdrext:sdes:mid")
+        {
+            continue;
+        }
+        output.push_str(line);
+        output.push_str("\r\n");
+    }
+    output
+}
+
 fn decode_event(payload: &[u8]) -> Option<(u8, bool, u8, u16)> {
     if payload.len() < 4 {
         return None;
@@ -371,6 +388,139 @@ async fn public_media_stream_decodes_the_negotiated_dynamic_dtmf_mapping() {
     assert_eq!(event.duration_ms, 120);
 
     stream.close().await.expect("close media stream");
+    receiver.close().await.ok();
+    sender.close().await.ok();
+}
+
+
+/// Regression: an endpoint that does not negotiate the SDES MID header
+/// extension must still receive RFC 4733 telephone events.
+///
+/// Since telephone events were moved onto the primary negotiated audio SSRC,
+/// they are exactly as demuxable as primary audio. Primary audio is already
+/// allowed to be written without a MID, so DTMF must not fail closed where
+/// audio succeeds -- otherwise audio reaches the peer and IVR digits do not.
+#[tokio::test]
+async fn dtmf_reaches_a_peer_that_never_negotiates_the_sdes_mid_extension() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let config = WebRtcConfig::loopback();
+
+    let receiver = RvoipPeerConnection::new(&config, PeerRole::Offerer)
+        .await
+        .expect("receiver");
+    receiver
+        .prepare_receive_only_offer()
+        .await
+        .expect("receive-only offer");
+    let original_offer = receiver.create_offer_and_gather().await.expect("offer");
+    assert!(
+        original_offer.contains("urn:ietf:params:rtp-hdrext:sdes:mid"),
+        "baseline offer must advertise the MID extension so stripping is meaningful"
+    );
+    let offer = strip_sdes_mid_extmap(&original_offer);
+    assert!(!offer.contains("urn:ietf:params:rtp-hdrext:sdes:mid"));
+    assert!(offer.contains("a=mid:"), "BUNDLE grouping must be preserved");
+
+    let sender = RvoipPeerConnection::new(&config, PeerRole::Answerer)
+        .await
+        .expect("sender");
+    let answer = sender
+        .accept_offer_and_gather(&offer)
+        .await
+        .expect("answer without the MID extension");
+    receiver
+        .set_remote_answer(&answer)
+        .await
+        .expect("install answer");
+
+    // Preconditions: DTMF is negotiated, but no MID was agreed.
+    assert!(
+        matches!(
+            sender.outbound_dtmf_negotiation(),
+            OutboundDtmfNegotiation::Negotiated(_)
+        ),
+        "telephone-event must still negotiate without the MID extension"
+    );
+    assert!(
+        sender.negotiated_outbound_audio_mid().is_none(),
+        "this test is only meaningful when no MID is negotiated"
+    );
+    let expected_ssrc = sender.local_audio_ssrc().expect("primary audio SSRC");
+
+    let timeout = Duration::from_secs(config.connection_timeout_secs);
+    tokio::try_join!(
+        receiver.wait_connected(timeout),
+        sender.wait_connected(timeout)
+    )
+    .expect("connected peers");
+
+    let captured: Arc<parking_lot::Mutex<Vec<(u8, bool, u32, bool)>>> =
+        Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let captured_for_watcher = Arc::clone(&captured);
+    let receiver_for_watcher = Arc::clone(&receiver);
+    let watcher = tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut pollers = Vec::new();
+        while tokio::time::Instant::now() < deadline {
+            if let Some(track) = receiver_for_watcher.try_recv_remote_track().await {
+                let captured = Arc::clone(&captured_for_watcher);
+                pollers.push(tokio::spawn(async move {
+                    loop {
+                        let Some(TrackRemoteEvent::OnRtpPacket(packet)) =
+                            tokio::time::timeout(Duration::from_millis(100), track.poll())
+                                .await
+                                .ok()
+                                .flatten()
+                        else {
+                            continue;
+                        };
+                        if packet.header.payload_type == TELEPHONE_EVENT_PT {
+                            if let Some((event, end, _, _)) = decode_event(&packet.payload) {
+                                captured.lock().push((
+                                    event,
+                                    end,
+                                    packet.header.ssrc,
+                                    packet.header.extension,
+                                ));
+                            }
+                        }
+                    }
+                }));
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        for poller in pollers {
+            poller.abort();
+        }
+    });
+
+    // The regression itself: this returned Err(IncompatibleCapabilities)
+    // before the fix, without writing a single packet.
+    send_dtmf(&sender, "7", 120)
+        .await
+        .expect("DTMF must not fail closed merely because no MID was negotiated");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    watcher.abort();
+
+    let events = captured.lock().clone();
+    assert!(
+        !events.is_empty(),
+        "expected telephone-event packets on the wire without a negotiated MID"
+    );
+    assert!(events.iter().all(|(event, ..)| *event == 7));
+    assert!(
+        events.iter().any(|(_, end, _, _)| *end),
+        "expected an end-of-event packet"
+    );
+    assert!(
+        events.iter().all(|event| event.2 == expected_ssrc),
+        "telephone events must use the primary audio source"
+    );
+    assert!(
+        events.iter().all(|event| !event.3),
+        "no RTP header extension may be written when no MID was negotiated"
+    );
+
     receiver.close().await.ok();
     sender.close().await.ok();
 }

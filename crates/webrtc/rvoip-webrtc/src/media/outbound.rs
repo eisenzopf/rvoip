@@ -249,16 +249,18 @@ impl OutboundAudioRtpWriter {
             .mid
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-            .ok_or_else(|| {
-                webrtc::error::Error::Other(
-                    "outbound audio MID is not committed by final SDP".into(),
-                )
-            })?;
-        let result = self
-            .track
-            .write_rtp_with_extensions(packet, &[sdes_mid_header_extension(&mid)])
-            .await;
+            .clone();
+        // Telephone events share the primary negotiated audio SSRC, so they
+        // are exactly as demuxable as primary audio and must degrade the same
+        // way when the peer does not negotiate SDES MID.
+        let extension = mid.as_deref().map(sdes_mid_header_extension);
+        let result = if let Some(extension) = extension.as_ref() {
+            self.track
+                .write_rtp_with_extensions(packet, std::slice::from_ref(extension))
+                .await
+        } else {
+            self.track.write_rtp(packet).await
+        };
         drop(state);
         result
     }
@@ -302,8 +304,7 @@ impl OutboundAudioRtpWriter {
                 // The primary audio SSRC is declared by the negotiated
                 // sender and remains unambiguous without SDES MID. Some
                 // endpoints, including Amazon Connect, do not negotiate the
-                // MID header extension. Only supplemental, unsignalled SSRCs
-                // such as RFC 4733 DTMF must fail closed without a MID.
+                // MID header extension.
                 self.track.write_rtp(packet.clone()).await
             };
             match result {
@@ -385,6 +386,23 @@ mod tests {
             "8 kHz events retain the audio timestamp base"
         );
         assert_eq!(state.last_wire_timestamp, Some(61_440));
+    }
+
+    #[tokio::test]
+    async fn telephone_events_without_negotiated_mid_are_not_rejected_outright() {
+        let track = audio_track(0x5060_7081);
+        let writer = OutboundAudioRtpWriter::new(track, 0x5060_7081, 48_000);
+        // No `set_mid`, so the writer is in the state produced by an endpoint
+        // that never negotiates the SDES MID extension.
+        let error = writer
+            .write_supplemental_audio(101, 0, true, Bytes::from_static(&[7, 0x0a, 0, 0]))
+            .await
+            .expect_err("an unbound test track cannot complete the write");
+        let error = error.to_string();
+        assert!(
+            !error.contains("MID"),
+            "a missing MID must not reject the telephone event itself; got: {error}"
+        );
     }
 
     #[tokio::test]
