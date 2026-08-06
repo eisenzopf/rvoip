@@ -147,10 +147,14 @@ pub struct TlsClientConfig {
 /// overriding whatever identity the transport was constructed with for
 /// just this one call.
 ///
-/// Reserved for a future per-call identity integration — not yet applied
-/// by [`TlsTransport`]'s connection pool, which currently keys purely by
-/// destination and this instance's own baked-in trust context. `None`
-/// anywhere this type is accepted means "use the transport's default
+/// Lets a single process — a gateway fronting several tenants or upstream
+/// carriers — place simultaneous outbound calls under different client
+/// certificates and trust stores, instead of one identity baked into the
+/// transport for its whole lifetime.
+///
+/// [`TlsTransport`]'s connection pool keys on the identity, so a call under
+/// one trust policy never reuses a connection another policy validated.
+/// `None` anywhere this type is accepted means "use the transport's default
 /// identity", preserving today's behavior exactly.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct OutboundTlsConfig {
@@ -290,7 +294,20 @@ pub struct TlsTransport {
 
     inbound_established: Arc<Semaphore>,
     outbound_established: Arc<Semaphore>,
+    /// Trust context for outbound calls that carry no per-call identity, i.e.
+    /// the identity this transport was constructed with.
     outbound_trust_context: u64,
+    /// Per-call outbound identities this transport has resolved, each holding
+    /// its own trust context and connector.
+    ///
+    /// The trust context is minted per distinct identity rather than hashed
+    /// from it. A hash could collide, and a collision here is not a slow
+    /// lookup — it is two different trust policies sharing one validated
+    /// connection, which is the exact failure this keying exists to prevent.
+    ///
+    /// The connector is memoised alongside it because building one reads CA
+    /// material from disk, and a per-call identity is used once per call.
+    outbound_identities: Arc<tokio::sync::Mutex<HashMap<TlsClientConfig, (u64, TlsConnector)>>>,
 }
 
 impl fmt::Debug for TlsTransport {
@@ -607,6 +624,7 @@ impl TlsTransport {
             inbound_established: inbound_established.clone(),
             outbound_established,
             outbound_trust_context,
+            outbound_identities: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         };
 
         let started = tasks
@@ -739,6 +757,7 @@ impl TlsTransport {
                     lifecycle.max_established_per_direction,
                 )),
                 outbound_trust_context: next_trust_context(),
+                outbound_identities: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             },
             rx,
         ))
@@ -1132,6 +1151,22 @@ impl TlsTransport {
         prefer_inbound: bool,
         exact_flow: Option<TransportFlowId>,
     ) -> Result<TransportFlowId> {
+        self.send_to_addr_with_identity(data, addr, server_name, prefer_inbound, exact_flow, None)
+            .await
+    }
+
+    /// Same as [`Self::send_to_addr`], with an optional per-call client
+    /// identity selecting which trust context's connection to reuse or dial.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_to_addr_with_identity(
+        &self,
+        data: Bytes,
+        addr: SocketAddr,
+        server_name: Option<ServerName<'static>>,
+        prefer_inbound: bool,
+        exact_flow: Option<TransportFlowId>,
+        identity: Option<TlsClientConfig>,
+    ) -> Result<TransportFlowId> {
         if let Some(flow_id) = exact_flow {
             let sender = {
                 let connections =
@@ -1161,8 +1196,8 @@ impl TlsTransport {
             return Ok(flow_id);
         }
         let server_name = server_name.unwrap_or_else(|| ip_to_server_name(addr));
-        let outbound_key =
-            TlsConnectionKey::outbound(addr, &server_name, self.outbound_trust_context);
+        let (trust_context, _) = self.resolve_outbound_identity(identity.as_ref()).await?;
+        let outbound_key = TlsConnectionKey::outbound(addr, &server_name, trust_context);
         let existing = {
             let connections =
                 tokio::time::timeout(self.handshake_admission.timeout, self.connections.lock())
@@ -1193,8 +1228,10 @@ impl TlsTransport {
             )));
         }
 
-        // Auto-dial.
-        self.connect_with_server_name(addr, server_name).await?;
+        // Auto-dial under the call's own identity, so the connection this
+        // registers lands on the same key the lookup above missed.
+        self.connect_with_identity(addr, server_name, identity)
+            .await?;
 
         let (sender, flow_id) = {
             let connections =
@@ -1245,19 +1282,48 @@ impl TlsTransport {
     /// applied — per-call outbound TLS client identity override is not
     /// wired into the connection pool; every dial uses this transport's
     /// own baked-in default identity (`self.connector`).
+    /// Resolve the trust context and connector a call should use.
+    ///
+    /// `None` is this transport's own identity, which is what every caller
+    /// that does not ask for a per-call override gets — unchanged behaviour.
+    /// `Some` mints a trust context the first time that identity is seen and
+    /// reuses it afterwards, so the pool key separates it from every other
+    /// identity reaching the same host under the same SNI.
+    pub(crate) async fn resolve_outbound_identity(
+        &self,
+        identity: Option<&TlsClientConfig>,
+    ) -> Result<(u64, TlsConnector)> {
+        let Some(identity) = identity else {
+            return Ok((self.outbound_trust_context, self.connector.clone()));
+        };
+
+        let mut registry = self.outbound_identities.lock().await;
+        if let Some(resolved) = registry.get(identity) {
+            return Ok(resolved.clone());
+        }
+        let connector = TlsConnector::from(Arc::new(build_client_config(identity)?));
+        let resolved = (next_trust_context(), connector);
+        registry.insert(identity.clone(), resolved.clone());
+        Ok(resolved)
+    }
+
     pub async fn connect_with_identity(
         &self,
         remote_addr: SocketAddr,
         server_name: ServerName<'static>,
-        _identity: Option<TlsClientConfig>,
+        identity: Option<TlsClientConfig>,
     ) -> Result<()> {
         if self.is_closed() {
             return Err(Error::TransportClosed);
         }
         let deadline = tokio::time::Instant::now() + self.handshake_admission.timeout;
 
-        let key =
-            TlsConnectionKey::outbound(remote_addr, &server_name, self.outbound_trust_context);
+        // Trust context and connector come from the call's identity, so a dial
+        // under one trust policy can neither reuse nor be reused by another.
+        let (trust_context, identity_connector) =
+            self.resolve_outbound_identity(identity.as_ref()).await?;
+
+        let key = TlsConnectionKey::outbound(remote_addr, &server_name, trust_context);
         {
             let mut connections = tokio::time::timeout_at(deadline, self.connections.lock())
                 .await
@@ -1279,7 +1345,7 @@ impl TlsTransport {
             "TLS dial"
         );
 
-        let connector = self.connector.clone();
+        let connector = identity_connector;
         let connections = self.connections.clone();
         let event_tx = self
             .event_tx
@@ -1539,6 +1605,63 @@ impl Transport for TlsTransport {
         self.send_message_via(message, route).await
     }
 
+    /// Send under a per-call client identity, overriding the one this
+    /// transport was constructed with.
+    ///
+    /// The identity selects the trust context, so this send can only reuse a
+    /// connection established under the same identity, and dials its own
+    /// otherwise. That isolation is the point: a call that trusts nothing must
+    /// never inherit a session another call validated against its own private
+    /// CA.
+    ///
+    /// `None` is the transport's own identity and behaves exactly like
+    /// [`Transport::send_message`].
+    async fn send_message_with_tls_identity(
+        &self,
+        message: rvoip_sip_core::Message,
+        destination: SocketAddr,
+        identity: Option<&OutboundTlsConfig>,
+    ) -> Result<()> {
+        let Some(identity) = identity else {
+            return self.send_message(message, destination).await;
+        };
+
+        // Explicit per-call SNI wins; otherwise fall back to the same
+        // next-hop-URI derivation `send_message` uses.
+        let server_name = match &identity.server_name {
+            Some(name) => Some(ServerName::try_from(name.clone()).map_err(|error| {
+                Error::TlsHandshakeFailed(format!(
+                    "invalid per-call SNI server_name (len={}): {}",
+                    name.len(),
+                    error
+                ))
+            })?),
+            // No explicit SNI: derive it from the request's next-hop authority,
+            // the same derivation `send_message_via` performs. A response has
+            // no next hop to derive from, so `send_to_addr` falls back to the
+            // destination address.
+            None => match &message {
+                rvoip_sip_core::Message::Request(request) => {
+                    Some(server_name_for_transport_authority(
+                        &transport_authority_for_request(request)?,
+                    )?)
+                }
+                rvoip_sip_core::Message::Response(_) => None,
+            },
+        };
+
+        self.send_to_addr_with_identity(
+            Bytes::from(message.to_bytes()),
+            destination,
+            server_name,
+            false,
+            None,
+            Some(identity.client.clone()),
+        )
+        .await
+        .map(|_| ())
+    }
+
     async fn send_message_via(
         &self,
         message: rvoip_sip_core::Message,
@@ -1761,6 +1884,97 @@ impl Transport for TlsTransport {
         self.send_to_addr(bytes, route.destination, Some(server_name), false, None)
             .await
             .map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod trust_isolation_tests {
+    use super::*;
+
+    fn server_name(name: &str) -> ServerName<'static> {
+        ServerName::try_from(name.to_string()).expect("server name")
+    }
+
+    /// The pool key must separate two calls that reach the same address under
+    /// the same SNI but different trust policies.
+    ///
+    /// This is the property `tls_per_call_identity_test`'s
+    /// `distinct_identities_to_same_destination_do_not_share_a_pooled_connection`
+    /// asserts end to end: a call that trusts a private CA opens and validates
+    /// a connection, and a later call that does *not* trust it must dial fresh
+    /// and fail, never inherit the first call's validated session.
+    ///
+    /// `TlsConnectionKey` has the right shape for it — `trust_context` is
+    /// exactly that dimension — but the value is minted once per transport
+    /// (`outbound_trust_context = next_trust_context()` at construction), so
+    /// every outbound connection from one transport carries the same one. Two
+    /// identities to the same host therefore produce an identical key and share
+    /// the connection.
+    ///
+    /// This test pins the requirement rather than today's behaviour: it fails
+    /// while `trust_context` is per-transport and passes once it is derived
+    /// from the per-call identity.
+    #[test]
+    fn pool_key_separates_calls_with_different_trust_policies() {
+        let destination: std::net::SocketAddr = "192.0.2.10:5061".parse().unwrap();
+        let sni = server_name("shared.example.test");
+
+        // A real CA on disk: resolving an identity now builds its connector,
+        // which reads the trust material.
+        let directory = tempfile::tempdir().expect("tempdir");
+        let ca_path = directory.path().join("tenant-a-ca.pem");
+        let ca = rcgen::generate_simple_self_signed(vec!["tenant-a.example.test".to_string()])
+            .expect("rcgen CA");
+        std::fs::write(&ca_path, ca.cert.pem()).expect("write CA");
+
+        let trusting = TlsClientConfig {
+            extra_ca_path: Some(ca_path),
+            insecure_skip_verify: false,
+            ..Default::default()
+        };
+        let distrusting = TlsClientConfig::default();
+        assert_ne!(
+            trusting, distrusting,
+            "the two identities must differ, or the test proves nothing"
+        );
+
+        // One transport resolving both identities — the situation a gateway
+        // placing calls for several tenants is actually in.
+        let transport = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(async {
+                TlsTransport::client_only(
+                    "127.0.0.1:0".parse().unwrap(),
+                    None,
+                    TlsClientConfig::default(),
+                )
+                .await
+                .expect("client transport")
+                .0
+            });
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let (trust_a, _) = runtime
+            .block_on(transport.resolve_outbound_identity(Some(&trusting)))
+            .expect("resolve trusting identity");
+        let (trust_b, _) = runtime
+            .block_on(transport.resolve_outbound_identity(Some(&distrusting)))
+            .expect("resolve distrusting identity");
+
+        let key_trusting = TlsConnectionKey::outbound(destination, &sni, trust_a);
+        let key_distrusting = TlsConnectionKey::outbound(destination, &sni, trust_b);
+
+        assert_ne!(
+            key_trusting, key_distrusting,
+            "two different trust policies to the same host produced the same pool key, so \
+             a call that trusts nothing would reuse a connection another call validated \
+             against its own private CA"
+        );
     }
 }
 
