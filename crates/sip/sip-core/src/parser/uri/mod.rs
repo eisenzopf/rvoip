@@ -203,15 +203,29 @@ fn parse_sip_uri_fixed(input: &[u8]) -> ParseResult<'_, Uri> {
 
     // Special check for non-numeric port values
     // If there's a colon not followed by digits, treat it as an error
-    if let Some(colon_pos) = input.iter().position(|&c| c == b':') {
+    //
+    // Scoped to the hostport component only. `;` opens the URI parameters and
+    // `?` opens the URI headers, and both may legitimately contain a colon:
+    // RFC 3261 §25.1 lists ":" in `hnv-unreserved`, so an `hvalue` may carry
+    // one unescaped. Scanning the whole remainder used to find such a colon
+    // and apply port rules to it, so a URI header value holding something like
+    // `cid:5060;...` was rejected as a malformed port.
+    let hostport_end = input
+        .iter()
+        .position(|&c| c == b';' || c == b'?')
+        .unwrap_or(input.len());
+    let hostport_slice = &input[..hostport_end];
+
+    if let Some(colon_pos) = hostport_slice.iter().position(|&c| c == b':') {
         // First check if this is inside an IPv6 reference
         // Look for opening bracket before this position
-        let has_ipv6_before = input[..colon_pos].iter().any(|&c| c == b'[');
-        let ipv6_reference_open = has_ipv6_before && !input[..colon_pos].iter().any(|&c| c == b']');
+        let has_ipv6_before = hostport_slice[..colon_pos].iter().any(|&c| c == b'[');
+        let ipv6_reference_open =
+            has_ipv6_before && !hostport_slice[..colon_pos].iter().any(|&c| c == b']');
 
         // Skip validation if we're inside an IPv6 reference (this is not a port colon)
-        if !ipv6_reference_open && colon_pos + 1 < input.len() {
-            let port_start = &input[colon_pos + 1..];
+        if !ipv6_reference_open && colon_pos + 1 < hostport_slice.len() {
+            let port_start = &hostport_slice[colon_pos + 1..];
 
             // Skip the check if the colon is immediately followed by an opening bracket (IPv6 in host)
             if !port_start.is_empty() && port_start[0] != b'[' {
@@ -372,15 +386,29 @@ fn parse_sips_uri_fixed(input: &[u8]) -> ParseResult<'_, Uri> {
 
     // Special check for non-numeric port values
     // If there's a colon not followed by digits, treat it as an error
-    if let Some(colon_pos) = input.iter().position(|&c| c == b':') {
+    //
+    // Scoped to the hostport component only. `;` opens the URI parameters and
+    // `?` opens the URI headers, and both may legitimately contain a colon:
+    // RFC 3261 §25.1 lists ":" in `hnv-unreserved`, so an `hvalue` may carry
+    // one unescaped. Scanning the whole remainder used to find such a colon
+    // and apply port rules to it, so a URI header value holding something like
+    // `cid:5060;...` was rejected as a malformed port.
+    let hostport_end = input
+        .iter()
+        .position(|&c| c == b';' || c == b'?')
+        .unwrap_or(input.len());
+    let hostport_slice = &input[..hostport_end];
+
+    if let Some(colon_pos) = hostport_slice.iter().position(|&c| c == b':') {
         // First check if this is inside an IPv6 reference
         // Look for opening bracket before this position
-        let has_ipv6_before = input[..colon_pos].iter().any(|&c| c == b'[');
-        let ipv6_reference_open = has_ipv6_before && !input[..colon_pos].iter().any(|&c| c == b']');
+        let has_ipv6_before = hostport_slice[..colon_pos].iter().any(|&c| c == b'[');
+        let ipv6_reference_open =
+            has_ipv6_before && !hostport_slice[..colon_pos].iter().any(|&c| c == b']');
 
         // Skip validation if we're inside an IPv6 reference (this is not a port colon)
-        if !ipv6_reference_open && colon_pos + 1 < input.len() {
-            let port_start = &input[colon_pos + 1..];
+        if !ipv6_reference_open && colon_pos + 1 < hostport_slice.len() {
+            let port_start = &hostport_slice[colon_pos + 1..];
 
             // Skip the check if the colon is immediately followed by an opening bracket (IPv6 in host)
             if !port_start.is_empty() && port_start[0] != b'[' {

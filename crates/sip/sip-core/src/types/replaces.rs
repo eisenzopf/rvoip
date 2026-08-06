@@ -123,12 +123,12 @@ impl Replaces {
     /// separating the tags have to be escaped either way, or they would read
     /// as URI syntax rather than as part of the value.
     ///
-    /// There is a second reason to stay conservative: this crate's URI parser
-    /// rejects a literal `:` inside a header value even though
-    /// `hnv-unreserved` permits it. A Call-ID carrying a port hits exactly
-    /// that, so emitting `%3A` is what keeps such a value readable back. The
-    /// parser bug is real and worth fixing separately; escaping here does not
-    /// depend on it being fixed.
+    /// Staying conservative also keeps this off the sharp edge that a literal
+    /// `:` in a header value turned out to be. This crate's own port screen
+    /// used to mistake one for a malformed port; that is fixed, but the same
+    /// over-eager screen is an easy mistake for any stack to make, and a
+    /// Call-ID carrying a port hits it squarely. `%3A` is understood
+    /// everywhere.
     pub fn to_uri_header_value(&self) -> String {
         let mut escaped = String::new();
         for c in self.to_string().chars() {
