@@ -2,6 +2,80 @@
 
 ## Unreleased
 
+## 0.3.7 — 2026-08-06
+
+This coordinated 44-crate patch release hardens voice-AI and WebRTC media under
+backpressure, exposes inbound SIP auth/context on the app facade, and repairs
+SIP/WebRTC edge cases that dropped audio, DTMF, or late tracks.
+
+### Vapi and media reliability
+
+- Bound inbound/outbound audio queues so bursts and uplink stalls no longer kill
+  the session; keep the RTP clock advancing across underruns and re-converge
+  jitter depth on renegotiation.
+- Adaptive jitter target, working inbound catch-up, and a symmetric outbound
+  drain valve; flush stale playout audio on barge-in.
+- Move WebSocket writes off the media loop, isolate control from media
+  backpressure, and attribute media logs and health telemetry per call
+  (`VapiMediaHealth`, current depth vs high-water, catch-up blocked ticks).
+
+### WebRTC, Connect, and SIP
+
+- Preserve media and unbind under driver backpressure; tolerate WebRTC startup
+  backpressure without evicting Connect media routes or sinks.
+- Allow primary audio and DTMF when a peer never negotiates MID; attach late
+  remote audio tracks; bound per-peer UDP allocation; preserve remote codec
+  preference order.
+- Route wildcard contacts via the observed source address.
+- Surface listener auth and inbound context policy on `SipConfig`
+  (`tenant`, `trusted_trunk`, `capture_headers`) so facade apps can do
+  DID-based routing and trunk admission.
+
+### Release and workspace
+
+- Publish the exact qualified candidate, keep qualification checkout on `main`,
+  and allow signed ancestor release publication when attestation requires it.
+- Inherit remaining third-party and `rtc` dependency pins from the workspace so
+  version bumps stay single-source.
+
+### Qualification
+
+`0.3.7` requires a fresh, source-bound strict full-beta PASS. Historical
+`0.3.2` exception, `0.3.4` carry-forward, and prior `0.3.6` qualification
+evidence do not qualify it.
+
+## 0.3.6 — 2026-08-02
+
+This coordinated 44-crate patch release moves full release qualification onto
+ephemeral GCP workers, repairs remote gate false failures, and lands SIP/core
+correctness fixes needed for reliable attestation.
+
+### Release qualification
+
+- Run complete release qualification on ephemeral GCP workers with parallel
+  performance, soak, proxy-interop, and diagnostic profiles.
+- Cache exact performance build bundles, stream large artifacts from disk, and
+  reuse selective evidence only when digests match.
+- Reject failed candidates before deferred gates finish; accelerate long soaks;
+  harden burst RSS and FreeSWITCH/PBX readiness checks.
+- Automate active release metadata updates in `README.md`,
+  `BETA_RELEASE_CHECKLIST.md`, and `RELEASE_NOTES_NEXT.md`.
+
+### SIP, core, and security dependencies
+
+- Publish the established event only after ACK; consume non-2xx ACK at the write
+  boundary; tolerate legal final-response retransmission in soak evidence.
+- Preserve cross-crate event semantics and make filtered message pagination
+  deterministic.
+- Send browser DTMF on the negotiated audio source.
+- Upgrade jsonwebtoken, OpenTelemetry, and SIP terminal UI dependencies; remove
+  the legacy AWS rustls adapter.
+
+### Qualification
+
+`0.3.6` requires a fresh, source-bound strict full-beta PASS. Historical
+`0.3.2` exception and `0.3.4` carry-forward evidence do not qualify it.
+
 ## 0.3.5 — 2026-07-30
 
 This coordinated 44-crate patch release hardens security and media state,

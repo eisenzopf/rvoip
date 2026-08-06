@@ -13,13 +13,13 @@ DTMF, hold/resume, custom SIP headers, and app-visible events so Rust
 applications can behave like programmable SIP endpoints without owning SIP
 transaction or RTP details directly.
 
-The workspace is preparing the strict-gate `0.3.5` release candidate. It can
+The workspace is preparing the strict-gate `0.3.7` release candidate. It can
 publish only after a fresh full-beta run passes without skipped gates and is
 bound to the exact clean release source. The generated
 [beta release report](docs/BETA_RELEASE_REPORT.md) is authoritative for the
 tested PBX, proxy, SIPp, strict-UA, security, performance, and soak boundaries.
 Historical exception and carry-forward reports remain immutable history and
-do not qualify `0.3.5`.
+do not qualify `0.3.7`.
 
 ## At a glance
 
@@ -45,7 +45,7 @@ is **Rust 1.91**.
 
 ```toml
 [dependencies]
-rvoip-sip = "0.3.5"
+rvoip-sip = "0.3.7"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -138,7 +138,7 @@ is documented in [`examples/sip_client/README.md`](examples/sip_client/README.md
 
 ## Interoperability status
 
-The `0.3.5` candidate requires revision-bound PASS evidence for Asterisk,
+The `0.3.7` candidate requires revision-bound PASS evidence for Asterisk,
 FreeSWITCH, Kamailio, and OpenSIPS. Kamailio and OpenSIPS must each pass both
 adjacency orders over UDP, TCP, and verified TLS. Publication remains blocked
 unless the generated report records the complete required matrix as PASS.
@@ -238,7 +238,7 @@ third-party telephony intermediary is required between rvoip and Vapi.
 Enable the facade integration with:
 
 ```toml
-rvoip = { version = "0.3.2", features = ["sip", "vapi"] }
+rvoip = { version = "0.3.7", features = ["sip", "vapi"] }
 ```
 
 See the complete [`rvoip-vapi` README](../../extensions/rvoip-vapi/README.md),

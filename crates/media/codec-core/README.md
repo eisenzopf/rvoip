@@ -25,7 +25,7 @@ isolation:
 
 ```toml
 [dependencies]
-rvoip-codec-core = "0.3.5"
+rvoip-codec-core = "0.3.7"
 ```
 
 ## License
