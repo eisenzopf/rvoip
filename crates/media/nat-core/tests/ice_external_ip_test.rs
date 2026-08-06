@@ -161,3 +161,68 @@ async fn stun_servers_alone_gather_no_reflexive_candidate_on_a_shared_socket() {
 
     agent.close().await.expect("close agent");
 }
+
+/// A well-formed pair whose local side is not an address this host has is
+/// refused when the agent is built, naming the offending entry.
+///
+/// Left to `webrtc-ice`, the same input builds fine and fails much later, at
+/// gathering, with `ErrCandidateIpNotFound` and no indication of which entry
+/// caused it. Refusing beats the alternative of dropping the entry: that would
+/// fall back to announcing the private address, which is the silent call this
+/// mapping exists to prevent.
+#[tokio::test]
+async fn a_pair_naming_a_local_address_this_host_lacks_is_refused_up_front() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    // TEST-NET-1, reserved for documentation, so it is on no real interface.
+    let bogus_local = "192.0.2.99";
+
+    let built = IceAgent::new_with_shared_socket_and_external_ips(
+        IceRole::Controlling,
+        &[],
+        null_socket(),
+        Some(loopback_only()),
+        &[format!("{EXTERNAL_IP}/{bogus_local}")],
+    )
+    .await;
+
+    let message = match built {
+        Ok(_) => panic!("a mapping that maps nothing must not build"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        message.contains(bogus_local),
+        "the error must name the offending local address: {message}"
+    );
+    assert!(
+        message.contains("ErrCandidateIpNotFound"),
+        "the error must say what would have happened otherwise: {message}"
+    );
+}
+
+/// The paired form is accepted when its local side really is an interface
+/// address, so the validation rejects the broken case and not the shape.
+#[tokio::test]
+async fn a_pair_naming_a_real_local_address_is_accepted() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let agent = IceAgent::new_with_shared_socket_and_external_ips(
+        IceRole::Controlling,
+        &[],
+        null_socket(),
+        Some(loopback_only()),
+        &[format!("{EXTERNAL_IP}/127.0.0.1")],
+    )
+    .await
+    .expect("a mapping whose local side exists must build");
+
+    let candidates = agent.gather_candidates().await.expect("gather candidates");
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.address == external_ip()),
+        "the paired mapping did not take effect: {candidates:?}"
+    );
+
+    agent.close().await.expect("close agent");
+}

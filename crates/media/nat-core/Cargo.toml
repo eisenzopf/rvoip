@@ -34,7 +34,12 @@ parking_lot = "0.12.1"
 webrtc-ice = { version = "0.17", optional = true }
 # Only the shared `Conn` trait is used from this — same role it plays for
 # the DTLS bridge in `rvoip-rtp-core`.
-webrtc-util = { version = "0.17", optional = true, default-features = false, features = ["conn"] }
+webrtc-util = { version = "0.17", optional = true, default-features = false, features = [
+    "conn",
+    # Interface enumeration, used to reject a 1:1 NAT mapping whose local side
+    # is not an address this host actually has.
+    "ifaces",
+] }
 # Parses the STUN USERNAME attribute for ufrag-based routing in the
 # shared-socket bridge (`bridge::SharedIceMux`) — same version webrtc-ice
 # itself depends on.

@@ -98,6 +98,60 @@ fn parse_stun_servers(stun_servers: &[String]) -> Result<(Vec<Url>, Vec<Candidat
     Ok((urls, candidate_types))
 }
 
+/// Reject a 1:1 NAT mapping whose local side is not an address this host has.
+///
+/// `ExternalIpMapper` already rejects malformed entries when the agent is
+/// built, but a well-formed pair pointing at an address that is not on any
+/// interface passes that check and only fails later, during gathering, where
+/// `find_external_ip` maps nothing for every interface and the whole gather
+/// returns `ErrCandidateIpNotFound`. A container rebuild or a DHCP lease
+/// change is enough to get there, and the error names nothing.
+///
+/// Failing here instead is deliberate, and failing rather than dropping the
+/// bad entry is too: falling back to the local address would announce a
+/// private address to the peer, which is exactly the silent call this mapping
+/// exists to prevent. Better to refuse loudly than to connect mute.
+fn validate_external_ip_pairs(external_ips: &[String]) -> Result<()> {
+    let paired: Vec<(&str, IpAddr)> = external_ips
+        .iter()
+        .filter_map(|entry| entry.split_once('/'))
+        .filter_map(|(external, local)| local.parse::<IpAddr>().ok().map(|ip| (external, ip)))
+        .collect();
+    if paired.is_empty() {
+        return Ok(());
+    }
+
+    // An enumeration hiccup must not become a hard failure on a mapping that
+    // may well be correct; skip the check and let gathering speak instead.
+    let interfaces = match webrtc_util::ifaces::ifaces() {
+        Ok(interfaces) => interfaces,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "could not enumerate local interfaces; skipping 1:1 NAT mapping validation"
+            );
+            return Ok(());
+        }
+    };
+    let local_addresses: Vec<IpAddr> = interfaces
+        .iter()
+        .filter_map(|interface| interface.addr.map(|addr| addr.ip()))
+        .collect();
+
+    for (external, local) in paired {
+        if !local_addresses.contains(&local) {
+            return Err(Error::Agent(format!(
+                "1:1 NAT mapping \"{external}/{local}\" names a local address this host does \
+                 not have, so it would map nothing and ICE gathering would fail with \
+                 ErrCandidateIpNotFound. Use the unpaired form \"{external}\" to map every \
+                 interface, or correct the local address."
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 impl IceAgent {
     /// Create a new agent. `stun_servers` are `stun:host:port` URLs (same
     /// convention as `rvoip-sip`'s `Config::stun_server`); an empty list
@@ -214,6 +268,8 @@ impl IceAgent {
         ip_filter: Option<Arc<dyn Fn(std::net::IpAddr) -> bool + Send + Sync>>,
         external_ips: &[String],
     ) -> Result<Self> {
+        validate_external_ip_pairs(external_ips)?;
+
         let (mut urls, mut candidate_types) = parse_stun_servers(stun_servers)?;
 
         // `webrtc-ice` skips server-reflexive gathering on a muxed socket
