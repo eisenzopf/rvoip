@@ -47,6 +47,10 @@ name = "rtc"
 path = "src/lib.rs"
 
 [[test]]
+name = "answer_codec_preference_order"
+path = "tests/answer_codec_preference_order.rs"
+
+[[test]]
 name = "data_channels_close_by_rtc_interop"
 path = "tests/data_channels_close_by_rtc_interop.rs"
 

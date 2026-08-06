@@ -13,14 +13,14 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use rvoip_media_core::codec::audio::{
-    AudioCodec, OpusApplication, OpusCodec, OpusConfig, PcmS16LeCodec, payload_type::PCM_S16LE,
+    payload_type::PCM_S16LE, AudioCodec, OpusApplication, OpusCodec, OpusConfig, PcmS16LeCodec,
 };
 use rvoip_media_core::codec::factory::CodecFactory;
 use rvoip_media_core::error::CodecError;
 use rvoip_media_core::processing::format::{ConversionParams, FormatConverter};
 use rvoip_media_core::types::SampleRate;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Notify, mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch, Notify};
 use tokio::task::AbortHandle;
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -2699,13 +2699,11 @@ mod tests {
             MediaGraphRouteState::Terminal(MediaGraphRouteTerminalReason::OwnerRemoved)
         );
         assert!(graph.latest_snapshot().sinks.is_empty());
-        assert!(
-            graph
-                .route_statuses
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .is_empty()
-        );
+        assert!(graph
+            .route_statuses
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty());
         graph.shutdown_and_wait().await.unwrap();
     }
 
@@ -2753,13 +2751,11 @@ mod tests {
         assert!(snapshot.codec_groups.is_empty());
         assert_eq!(snapshot.sink_offers, 0);
         assert_eq!(graph.sink_admission.in_use.load(Ordering::Acquire), 0);
-        assert!(
-            graph
-                .route_statuses
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .is_empty()
-        );
+        assert!(graph
+            .route_statuses
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty());
         assert!(matches!(
             tokio::time::timeout(Duration::from_secs(1), target_rx.recv()).await,
             Ok(None)
@@ -2844,13 +2840,11 @@ mod tests {
                 status.wait_terminal().await,
                 MediaGraphRouteTerminalReason::OwnerRemoved
             );
-            assert!(
-                graph
-                    .route_statuses
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .is_empty()
-            );
+            assert!(graph
+                .route_statuses
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty());
         }
         assert!(graph.latest_snapshot().sinks.is_empty());
         graph.shutdown_and_wait().await.unwrap();
