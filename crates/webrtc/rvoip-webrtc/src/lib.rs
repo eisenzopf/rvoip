@@ -43,7 +43,7 @@ pub use adapter::{
     WebRtcAdapter, WebRtcMetrics, WebRtcTransportHandle, ADAPTER_EVENT_CAP,
     MAX_INBOUND_ADMISSION_CONFIRMATION_TIMEOUT,
 };
-pub use config::{IceServerConfig, Nat1To1CandidateType, OpusSettings, WebRtcConfig};
+pub use config::{IceServerConfig, Nat1To1CandidateType, OpusSettings, UdpPortRangeConfig, WebRtcConfig};
 pub use errors::{Result, WebRtcError};
 pub use media::WebRtcStatsSnapshot;
 #[cfg(feature = "tls-rustls")]

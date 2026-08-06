@@ -1,6 +1,7 @@
 use rvoip_core::capability::CapabilityDescriptor;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::net::IpAddr;
 use zeroize::Zeroize;
 
 use crate::identity::DtlsFingerprint;
@@ -93,6 +94,16 @@ impl IceServerConfig {
     }
 }
 
+/// Inclusive UDP port range used to allocate exactly one ICE/media socket per
+/// peer connection. This gives deployments a security-group boundary while
+/// preserving independent sockets for concurrent browser and provider legs.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UdpPortRangeConfig {
+    pub bind_ip: IpAddr,
+    pub port_start: u16,
+    pub port_end: u16,
+}
+
 impl Drop for IceServerConfig {
     fn drop(&mut self) {
         if let Some(username) = self.username.as_mut() {
@@ -110,6 +121,11 @@ pub struct WebRtcConfig {
     /// UDP bind address passed to `PeerConnectionBuilder::with_udp_addrs`.
     /// Use `"0.0.0.0:0"` or `"127.0.0.1:0"` for ephemeral ports.
     pub udp_bind: String,
+
+    /// Optional bounded alternative to `udp_bind`. When present, each peer
+    /// atomically binds the first available port in this inclusive range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub udp_port_range: Option<UdpPortRangeConfig>,
 
     /// Static public IPs advertised by ICE for one-to-one NAT deployments.
     /// Empty retains normal host/STUN/TURN candidate discovery.
@@ -238,6 +254,7 @@ impl fmt::Debug for WebRtcConfig {
         formatter
             .debug_struct("WebRtcConfig")
             .field("udp_bind_present", &!self.udp_bind.is_empty())
+            .field("udp_port_range_present", &self.udp_port_range.is_some())
             .field("nat_1to1_ip_count", &self.nat_1to1_ips.len())
             .field("nat_1to1_candidate_type", &self.nat_1to1_candidate_type)
             .field("ice_server_count", &self.ice_servers.len())
@@ -378,6 +395,7 @@ impl Default for WebRtcConfig {
     fn default() -> Self {
         Self {
             udp_bind: "0.0.0.0:0".into(),
+            udp_port_range: None,
             nat_1to1_ips: Vec::new(),
             nat_1to1_candidate_type: Nat1To1CandidateType::Host,
             ice_servers: vec![IceServerConfig::stun("stun:stun.l.google.com:19302")],
@@ -407,6 +425,7 @@ impl WebRtcConfig {
     pub fn loopback() -> Self {
         Self {
             udp_bind: "127.0.0.1:0".into(),
+            udp_port_range: None,
             nat_1to1_ips: Vec::new(),
             nat_1to1_candidate_type: Nat1To1CandidateType::Host,
             ice_servers: vec![],
