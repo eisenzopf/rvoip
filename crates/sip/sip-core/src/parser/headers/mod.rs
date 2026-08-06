@@ -40,6 +40,7 @@ pub mod reason;
 pub mod record_route;
 pub mod refer_to;
 pub mod referred_by;
+pub mod replaces; // Added for Replaces header (RFC 3891)
 pub mod reply_to;
 pub mod require;
 pub mod retry_after;
@@ -107,6 +108,7 @@ pub use reason::parse_reason;
 pub use record_route::parse_record_route;
 pub use refer_to::parse_refer_to;
 pub use referred_by::parse_referred_by;
+pub use replaces::{parse_replaces_header, parse_replaces_value}; // Added for Replaces (RFC 3891)
 pub use reply_to::parse_reply_to;
 pub use require::parse_require;
 pub use retry_after::parse_retry_after;

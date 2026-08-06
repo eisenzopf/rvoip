@@ -75,6 +75,8 @@ pub enum HeaderName {
     ReferTo,
     /// Referred-By: Identity of referrer in REFER
     ReferredBy,
+    /// Replaces: Dialog the incoming INVITE shuts down and replaces (RFC 3891)
+    Replaces,
     /// RAck: Acknowledge receipt of a reliable provisional response
     RAck,
     /// WWW-Authenticate: Challenge for authentication
@@ -228,6 +230,7 @@ impl HeaderName {
             HeaderName::SubscriptionState => "Subscription-State",
             HeaderName::ReferTo => "Refer-To",
             HeaderName::ReferredBy => "Referred-By",
+            HeaderName::Replaces => "Replaces",
             HeaderName::RAck => "RAck",
             HeaderName::WwwAuthenticate => "WWW-Authenticate",
             HeaderName::Accept => "Accept",
@@ -350,6 +353,8 @@ impl FromStr for HeaderName {
             "subscription-state" => Ok(HeaderName::SubscriptionState),
             "refer-to" | "r" => Ok(HeaderName::ReferTo),
             "referred-by" | "b" => Ok(HeaderName::ReferredBy),
+            // RFC 3891 defines no compact form for Replaces.
+            "replaces" => Ok(HeaderName::Replaces),
             "rack" => Ok(HeaderName::RAck),
             "www-authenticate" => Ok(HeaderName::WwwAuthenticate),
             "accept" => Ok(HeaderName::Accept),

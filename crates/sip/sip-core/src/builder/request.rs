@@ -1204,6 +1204,7 @@ impl SimpleRequestBuilder {
             TypedHeader::ContentType(_) |
             TypedHeader::ContentLength(_) |
             TypedHeader::SessionExpires(_) |
+            TypedHeader::Replaces(_) |
             TypedHeader::UserAgent(_) |
             TypedHeader::Server(_) |
             TypedHeader::Organization(_) |

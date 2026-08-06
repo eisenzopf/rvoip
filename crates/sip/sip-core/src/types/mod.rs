@@ -475,6 +475,8 @@ pub use user_agent::UserAgent;
 pub mod mime_version;
 pub mod min_expires;
 pub mod min_se;
+pub mod replaces;
 pub use mime_version::MimeVersion;
 pub use min_expires::MinExpires;
 pub use min_se::MinSE;
+pub use replaces::Replaces;

@@ -1592,6 +1592,7 @@ impl SimpleResponseBuilder {
             TypedHeader::ContentLength(_) |
             TypedHeader::Expires(_) |
             TypedHeader::SessionExpires(_) |
+            TypedHeader::Replaces(_) |
             TypedHeader::UserAgent(_) |
             TypedHeader::Server(_) |
             TypedHeader::Organization(_) |

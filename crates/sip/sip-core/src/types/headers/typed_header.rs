@@ -48,6 +48,7 @@ use crate::types::param::Param;
 use crate::types::record_route::RecordRoute;
 use crate::types::refer_to::ReferTo;
 use crate::types::referred_by::ReferredBy;
+use crate::types::replaces::Replaces;
 use crate::types::reply_to::ReplyTo;
 use crate::types::require::Require;
 use crate::types::retry_after::RetryAfter;
@@ -124,6 +125,7 @@ pub enum TypedHeader {
     ReplyTo(ReplyTo),                       // Use types::ReplyTo
     ReferTo(ReferTo),                       // Add ReferTo variant
     ReferredBy(ReferredBy),                 // Add ReferredBy variant
+    Replaces(Replaces),                     // RFC 3891 attended transfer
     Require(Require),                       // Use types::Require
     Warning(Vec<Warning>),                  // Use types::Warning
     ContentDisposition(ContentDisposition), // Use types::ContentDisposition
@@ -256,6 +258,7 @@ impl TypedHeader {
             TypedHeader::ReplyTo(_) => HeaderName::ReplyTo,
             TypedHeader::ReferTo(_) => HeaderName::ReferTo,
             TypedHeader::ReferredBy(_) => HeaderName::ReferredBy,
+            TypedHeader::Replaces(_) => HeaderName::Replaces,
             TypedHeader::Warning(_) => HeaderName::Warning,
             TypedHeader::ContentDisposition(_) => HeaderName::ContentDisposition,
             TypedHeader::ContentEncoding(_) => HeaderName::ContentEncoding,
@@ -444,6 +447,11 @@ impl TypedHeader {
             {
                 Some(unsafe { &*(h as *const _ as *const T) })
             }
+            TypedHeader::Replaces(h)
+                if type_id_t == std::any::TypeId::of::<crate::types::replaces::Replaces>() =>
+            {
+                Some(unsafe { &*(h as *const _ as *const T) })
+            }
             TypedHeader::ReferredBy(h)
                 if type_id_t == std::any::TypeId::of::<crate::types::referred_by::ReferredBy>() =>
             {
@@ -499,6 +507,9 @@ impl fmt::Display for TypedHeader {
             TypedHeader::ReferTo(refer_to) => write!(f, "{}: {}", HeaderName::ReferTo, refer_to),
             TypedHeader::ReferredBy(referred_by) => {
                 write!(f, "{}: {}", HeaderName::ReferredBy, referred_by)
+            }
+            TypedHeader::Replaces(replaces) => {
+                write!(f, "{}: {}", HeaderName::Replaces, replaces)
             }
             TypedHeader::Warning(warnings) => {
                 write!(f, "{}: ", HeaderName::Warning)?;
@@ -1493,6 +1504,10 @@ impl TryFrom<&Header> for TypedHeader {
                     Err(e) => Err(Error::from(e.to_owned())),
                 }
             }
+            HeaderName::Replaces => match parser::headers::parse_replaces_value(value_bytes) {
+                Ok((_, replaces)) => Ok(TypedHeader::Replaces(replaces)),
+                Err(e) => Err(Error::from(e.to_owned())),
+            },
             HeaderName::ReferredBy => {
                 match all_consuming(parser::headers::parse_referred_by)(value_bytes) {
                     Ok((_, addr)) => Ok(TypedHeader::ReferredBy(ReferredBy::new(addr))),
