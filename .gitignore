@@ -13,6 +13,10 @@
 target/
 debug/
 release/
+# `release/` above is a bare pattern for nested cargo profile dirs, so it also
+# matches scripts/release/ — the gate catalog and runners that
+# .github/workflows/release-qualify.yml invokes. Keep them tracked.
+!scripts/release/
 *.rs.bk
 *.pdb
 *.rlib
@@ -65,6 +69,10 @@ crates/media/codec-core/src/codecs/g711/tests/test_data/sweep-r.*
 crates/media/codec-core/src/codecs/g711/tests/test_data/*_roundtrip_*.wav
 # Audio test outputs (.wav covers most regenerated audio fixtures).
 *.wav
+# ...but the G.711 roundtrip *input* is a tracked fixture, not an output.
+# Untracking it makes wav_roundtrip_test download over the network and panic
+# when offline. The `*_roundtrip_*.wav` rule above already covers the outputs.
+!crates/media/codec-core/src/codecs/g711/tests/test_data/OSR_us_000_0010_8k.wav
 # Scratch analysis output.
 outputs/
 
