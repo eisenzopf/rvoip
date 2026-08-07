@@ -10,7 +10,12 @@ CALLER_PORT=5060
 CALLEE_PORT=5061
 
 PIDS=()
-cleanup() { for pid in "${PIDS[@]:-}"; do kill "$pid" 2>/dev/null || true; done; }
+cleanup() {
+  for pid in "${PIDS[@]:-}"; do kill "$pid" 2>/dev/null || true; done
+  sleep 0.1
+  for pid in "${PIDS[@]:-}"; do kill -9 "$pid" 2>/dev/null || true; done
+  wait 2>/dev/null || true
+}
 trap cleanup EXIT
 
 mkdir -p logs
