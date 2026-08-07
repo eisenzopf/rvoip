@@ -1,19 +1,42 @@
 use crate::error::{Error, Result};
 use crate::transport::{next_transport_flow_id, validate_typed_outbound_message, TransportFlowId};
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use rvoip_sip_core::framing::{inspect_sip_frame_with_policy, SipFrameStatus, SipFramingPolicy};
 use rvoip_sip_core::{parse_message, Message};
 use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tracing::{debug, trace, warn};
 
 // Buffer sizes
 const INITIAL_BUFFER_SIZE: usize = 8192;
+
+/// Depth of the queue feeding the writer task. Mirrors the default
+/// `writer_queue_capacity` the TLS and WebSocket transports derive from
+/// their handshake admission policy, so a stalled peer costs a bounded
+/// amount of memory before senders start waiting.
+const WRITER_QUEUE_CAPACITY: usize = 128;
+
+/// Ceiling on one `write_all` + `flush` pair. Matches the default
+/// handshake timeout the other stream transports use for the same
+/// purpose: a peer that stops reading must not pin the writer task, and
+/// through it the connection, forever.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Work handed to the per-connection writer task.
+enum WriteCommand {
+    /// Bytes to put on the wire, already framed by the caller.
+    Data(Bytes),
+    /// Flush whatever is queued ahead of this, then shut the write half
+    /// down. The ack carries the `shutdown` result back to `close`.
+    Shutdown(oneshot::Sender<io::Result<()>>),
+}
 
 /// A frame pulled off a stream-oriented SIP connection. RFC 5626 §3.5.1
 /// introduces two non-SIP frames the wire may carry — a single CRLF
@@ -61,10 +84,14 @@ impl std::fmt::Debug for ReceivedFrame {
 pub struct TcpConnection {
     /// Opaque identity for this concrete socket lifetime.
     flow_id: TransportFlowId,
-    /// Owned write half. Held under a mutex so concurrent senders
-    /// serialise their writes (RFC 3261 §7.5 requires atomic message
-    /// delivery over stream transports).
-    write_half: Mutex<OwnedWriteHalf>,
+    /// Bounded queue into the single writer task that owns the write
+    /// half. One task doing every write is what keeps message delivery
+    /// atomic (RFC 3261 §7.5 requires it over stream transports) without
+    /// any sender ever waiting on the socket: senders hand over bytes
+    /// and return, rather than holding a lock across `write_all` and
+    /// `flush` while every other call on this connection queues behind
+    /// the syscall.
+    writer_tx: mpsc::Sender<WriteCommand>,
     /// Owned read half. Expected to be consumed by a single reader
     /// task; concurrent `receive_frame` callers serialise via the
     /// mutex but that usage pattern is not recommended.
@@ -74,8 +101,10 @@ pub struct TcpConnection {
     local_addr: SocketAddr,
     /// The peer's address
     peer_addr: SocketAddr,
-    /// Whether the connection is closed
-    closed: AtomicBool,
+    /// Whether the connection is closed. Shared with the writer task,
+    /// which sets it when a write fails or times out so the next send
+    /// fails fast instead of queueing onto a dead socket.
+    closed: Arc<AtomicBool>,
     /// Wakes a blocked read immediately when pool/transport lifecycle closes
     /// this exact socket.
     close_signal: watch::Sender<bool>,
@@ -92,17 +121,31 @@ impl TcpConnection {
         Self::from_stream(stream, addr)
     }
 
-    /// Creates a TCP connection from an existing stream
+    /// Creates a TCP connection from an existing stream.
+    ///
+    /// Spawns the per-connection writer task, so it must be called from
+    /// within a Tokio runtime. The task ends on its own when the
+    /// connection is dropped: the command queue closes, and the write
+    /// half drops with the task.
     pub fn from_stream(stream: TcpStream, peer_addr: SocketAddr) -> Result<Self> {
         let local_addr = stream.local_addr().map_err(Error::LocalAddrFailed)?;
         let (read_half, write_half) = stream.into_split();
+        let closed = Arc::new(AtomicBool::new(false));
+        let (writer_tx, writer_rx) = mpsc::channel(WRITER_QUEUE_CAPACITY);
+        tokio::spawn(writer_task(
+            write_half,
+            writer_rx,
+            Arc::clone(&closed),
+            peer_addr,
+        ));
+
         Ok(Self {
             flow_id: next_transport_flow_id(),
-            write_half: Mutex::new(write_half),
+            writer_tx,
             read_half: Mutex::new(read_half),
             local_addr,
             peer_addr,
-            closed: AtomicBool::new(false),
+            closed,
             close_signal: watch::channel(false).0,
             recv_buffer: Mutex::new(BytesMut::with_capacity(INITIAL_BUFFER_SIZE)),
         })
@@ -123,7 +166,19 @@ impl TcpConnection {
         Ok(self.local_addr)
     }
 
-    /// Sends a SIP message over the connection
+    /// Sends a SIP message over the connection.
+    ///
+    /// Returns once the message is queued for the writer task, not once
+    /// it reaches the wire, the same as the TLS transport. (The
+    /// WebSocket transport queues too, but its callers then wait on a
+    /// reply, so a send there still costs the socket round trip.) A
+    /// write that fails afterwards marks the connection closed, so the
+    /// next send reports it; a request whose send fails this way is left
+    /// to the transaction layer's timeout, since RFC 3261 §17.1.1.2
+    /// turns off request retransmission over reliable transports.
+    ///
+    /// Syntax rejection stays synchronous: nothing is queued until the
+    /// message passes validation.
     pub async fn send_message(&self, message: &Message) -> Result<()> {
         if self.is_closed() {
             return Err(Error::TransportClosed);
@@ -131,52 +186,39 @@ impl TcpConnection {
         validate_typed_outbound_message(message)?;
 
         let message_bytes = message.to_bytes();
-        let mut writer = self.write_half.lock().await;
+        let length = message_bytes.len();
+        self.queue_write(Bytes::from(message_bytes)).await?;
 
-        writer.write_all(&message_bytes).await.map_err(|e| {
-            if e.kind() == io::ErrorKind::BrokenPipe || e.kind() == io::ErrorKind::ConnectionReset {
-                self.closed.store(true, Ordering::Relaxed);
-                Error::ConnectionReset
-            } else {
-                Error::SendFailed(self.peer_addr, e)
-            }
-        })?;
-
-        writer
-            .flush()
-            .await
-            .map_err(|e| Error::SendFailed(self.peer_addr, e))?;
-
-        trace!("Sent {} bytes to {}", message_bytes.len(), self.peer_addr);
+        trace!("Queued {} bytes for {}", length, self.peer_addr);
         Ok(())
     }
 
     /// Writes raw bytes over the connection without any SIP framing.
     /// Used for RFC 5626 §3.5.1 CRLFCRLF keep-alive pings / CRLF pongs.
-    /// Mirrors `send_message` for error handling — a broken pipe marks
-    /// the connection closed so the next send fails fast.
+    /// Queued the same way as [`send_message`](Self::send_message), so
+    /// pings keep their order relative to the messages around them.
     pub async fn send_raw_bytes(&self, data: &[u8]) -> Result<()> {
         if self.is_closed() {
             return Err(Error::TransportClosed);
         }
 
-        let mut writer = self.write_half.lock().await;
+        self.queue_write(Bytes::copy_from_slice(data)).await?;
 
-        writer.write_all(data).await.map_err(|e| {
-            if e.kind() == io::ErrorKind::BrokenPipe || e.kind() == io::ErrorKind::ConnectionReset {
-                self.closed.store(true, Ordering::Relaxed);
-                Error::ConnectionReset
-            } else {
-                Error::SendFailed(self.peer_addr, e)
-            }
-        })?;
+        trace!("Queued {} raw bytes for {}", data.len(), self.peer_addr);
+        Ok(())
+    }
 
-        writer
-            .flush()
-            .await
-            .map_err(|e| Error::SendFailed(self.peer_addr, e))?;
-
-        trace!("Sent {} raw bytes to {}", data.len(), self.peer_addr);
+    /// Hands bytes to the writer task, waiting only if the queue is
+    /// full. A full queue means the peer is not draining; making the
+    /// caller wait there is deliberate, since dropping a SIP message on
+    /// a reliable transport has no recovery path.
+    async fn queue_write(&self, bytes: Bytes) -> Result<()> {
+        if self.writer_tx.send(WriteCommand::Data(bytes)).await.is_err() {
+            // The writer task only ends after a failed write, a write
+            // timeout, or a shutdown. This socket is gone in all three.
+            self.closed.store(true, Ordering::Relaxed);
+            return Err(Error::ConnectionReset);
+        }
         Ok(())
     }
 
@@ -330,7 +372,10 @@ impl TcpConnection {
         Ok(Some((message, raw_bytes)))
     }
 
-    /// Closes the TCP connection
+    /// Closes the TCP connection.
+    ///
+    /// Everything already queued is written before the shutdown, so a
+    /// send followed by a close still puts the message on the wire.
     pub async fn close(&self) -> Result<()> {
         if self.closed.swap(true, Ordering::Relaxed) {
             // Already closed
@@ -339,20 +384,134 @@ impl TcpConnection {
         self.close_signal.send_replace(true);
 
         // Shutting down the write half closes the socket from both
-        // directions (read half will return EOF on its next poll).
-        let mut writer = self.write_half.lock().await;
-        if let Err(e) = writer.shutdown().await {
-            if e.kind() != io::ErrorKind::NotConnected {
-                return Err(Error::IoError(e));
-            }
+        // directions (read half will return EOF on its next poll). The
+        // writer task owns that half, so the shutdown goes through the
+        // same queue as the writes it has to follow.
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if self
+            .writer_tx
+            .send(WriteCommand::Shutdown(ack_tx))
+            .await
+            .is_err()
+        {
+            // Writer task already gone, and the write half dropped with
+            // it. The socket is closed either way.
+            return Ok(());
         }
 
-        Ok(())
+        match ack_rx.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(Error::IoError(e)),
+            // Task ended without answering, which only happens if it was
+            // already unwinding. The half is dropped, so treat it as shut.
+            Err(_) => Ok(()),
+        }
     }
 
     /// Returns whether the connection is closed
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Relaxed)
+    }
+}
+
+/// Owns the write half and is the only thing that touches it.
+///
+/// Runs until the connection is dropped (the command queue closes), a
+/// write fails or times out, or `close` asks for a shutdown.
+async fn writer_task(
+    mut writer: OwnedWriteHalf,
+    mut commands: mpsc::Receiver<WriteCommand>,
+    closed: Arc<AtomicBool>,
+    peer_addr: SocketAddr,
+) {
+    // Reused across iterations so a burst of sends costs one allocation
+    // for the connection rather than one per batch.
+    let mut batch = BytesMut::new();
+
+    loop {
+        let Some(command) = commands.recv().await else {
+            break;
+        };
+
+        batch.clear();
+        let mut pending_shutdown = match command {
+            WriteCommand::Data(bytes) => {
+                batch.put_slice(&bytes);
+                None
+            }
+            WriteCommand::Shutdown(ack) => Some(ack),
+        };
+
+        // Whatever else is already queued goes out in the same write.
+        // RFC 3261 §7.5 asks that a message not be interleaved with
+        // another, not that each get its own syscall; on a stream
+        // transport the peer frames on Content-Length either way, so
+        // concatenating whole messages is what it already expects.
+        if pending_shutdown.is_none() {
+            while let Ok(next) = commands.try_recv() {
+                match next {
+                    WriteCommand::Data(more) => batch.put_slice(&more),
+                    WriteCommand::Shutdown(ack) => {
+                        pending_shutdown = Some(ack);
+                        break;
+                    }
+                }
+            }
+        }
+
+        if !batch.is_empty() && !write_batch(&mut writer, &batch, peer_addr, &closed).await {
+            if let Some(ack) = pending_shutdown {
+                // The socket is already unusable, which is what the
+                // caller wanted out of the shutdown anyway.
+                let _ = ack.send(Ok(()));
+            }
+            break;
+        }
+
+        if let Some(ack) = pending_shutdown {
+            let _ = ack.send(shutdown_writer(&mut writer).await);
+            break;
+        }
+    }
+}
+
+/// Writes one batch and flushes it. Returns whether the connection is
+/// still usable; a failure marks it closed before returning.
+async fn write_batch(
+    writer: &mut OwnedWriteHalf,
+    batch: &[u8],
+    peer_addr: SocketAddr,
+    closed: &AtomicBool,
+) -> bool {
+    let write = async {
+        writer.write_all(batch).await?;
+        writer.flush().await
+    };
+
+    match tokio::time::timeout(WRITE_TIMEOUT, write).await {
+        Ok(Ok(())) => {
+            trace!("Sent {} bytes to {}", batch.len(), peer_addr);
+            true
+        }
+        Ok(Err(e)) => {
+            closed.store(true, Ordering::Relaxed);
+            warn!(destination = %peer_addr, "Failed to write to TCP stream: {}", e);
+            false
+        }
+        Err(_) => {
+            closed.store(true, Ordering::Relaxed);
+            warn!(destination = %peer_addr, "TCP write timed out");
+            false
+        }
+    }
+}
+
+/// A write half that was never connected is already in the state
+/// `shutdown` would leave it in, so that error is not one.
+async fn shutdown_writer(writer: &mut OwnedWriteHalf) -> io::Result<()> {
+    match writer.shutdown().await {
+        Err(e) if e.kind() != io::ErrorKind::NotConnected => Err(e),
+        _ => Ok(()),
     }
 }
 
@@ -824,5 +983,79 @@ mod tests {
         assert_eq!(received, b"\r\n\r\n");
 
         connection.close().await.unwrap();
+    }
+
+    /// Every send on one connection goes through a single writer task,
+    /// which is what keeps RFC 3261 §7.5 atomic message delivery once
+    /// concurrent callers no longer serialise on a write mutex. Each
+    /// sender uses its own Call-ID, and every message has to come back
+    /// off the wire whole and well framed.
+    #[tokio::test]
+    async fn concurrent_sends_never_interleave_on_the_wire() {
+        const SENDERS: usize = 32;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            TcpConnection::from_stream(socket, peer).unwrap()
+        });
+        let sender = Arc::new(TcpConnection::connect(server_addr).await.unwrap());
+        let receiver = accept.await.unwrap();
+
+        let mut sends = Vec::with_capacity(SENDERS);
+        for index in 0..SENDERS {
+            let connection = Arc::clone(&sender);
+            sends.push(tokio::spawn(async move {
+                let call_id = format!("call{index}@example.com");
+                let request = SimpleRequestBuilder::new(Method::Register, "sip:example.com")
+                    .unwrap()
+                    .from("alice", "sip:alice@example.com", Some("tag1"))
+                    .to("bob", "sip:bob@example.com", None)
+                    .call_id(&call_id)
+                    .cseq(1)
+                    .build();
+                connection.send_message(&request.into()).await.unwrap();
+            }));
+        }
+        for send in sends {
+            send.await.unwrap();
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..SENDERS {
+            let message = receiver.receive_message().await.unwrap().unwrap();
+            let Message::Request(request) = message else {
+                panic!("expected a request");
+            };
+            assert_eq!(request.method(), Method::Register);
+            assert!(
+                seen.insert(request.call_id().unwrap().to_string()),
+                "every Call-ID must arrive exactly once",
+            );
+        }
+
+        let expected: std::collections::HashSet<String> = (0..SENDERS)
+            .map(|index| format!("call{index}@example.com"))
+            .collect();
+        assert_eq!(seen, expected);
+
+        sender.close().await.unwrap();
+    }
+
+    /// The shutdown travels the same queue as the writes, so a message
+    /// handed over immediately before `close` still reaches the peer
+    /// rather than dying with the socket.
+    #[tokio::test]
+    async fn close_flushes_writes_queued_before_it() {
+        let (connection, mut client) = buffered_test_connection().await;
+
+        let raw = b"OPTIONS sip:service.example SIP/2.0\r\nContent-Length: 0\r\n\r\n";
+        connection.send_raw_bytes(raw).await.unwrap();
+        connection.close().await.unwrap();
+
+        let mut received = Vec::new();
+        client.read_to_end(&mut received).await.unwrap();
+        assert_eq!(received, raw);
     }
 }
