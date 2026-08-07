@@ -84,6 +84,17 @@ impl VapiEvent {
         }
     }
 
+    /// Whether this event means the caller has started speaking over the
+    /// agent, i.e. a barge-in. Queued agent audio is stale from this instant.
+    pub(crate) fn is_user_speech_start(&self) -> bool {
+        matches!(
+            self,
+            Self::SpeechUpdate { status, role }
+                if status.eq_ignore_ascii_case("started")
+                    && role.as_deref().is_some_and(|role| role.eq_ignore_ascii_case("user"))
+        )
+    }
+
     pub(crate) fn is_terminal_status(&self) -> bool {
         matches!(
             self,
@@ -189,6 +200,23 @@ mod tests {
             VapiEvent::parse("{bad"),
             VapiEvent::Malformed { byte_len: 4 }
         ));
+    }
+
+    #[test]
+    fn user_speech_start_is_recognised_as_barge_in() {
+        let user = VapiEvent::parse(r#"{"type":"speech-update","status":"started","role":"user"}"#);
+        assert!(user.is_user_speech_start());
+        // The assistant starting to speak is not a barge-in, and neither is
+        // the user stopping.
+        assert!(!VapiEvent::parse(
+            r#"{"type":"speech-update","status":"started","role":"assistant"}"#
+        )
+        .is_user_speech_start());
+        assert!(
+            !VapiEvent::parse(r#"{"type":"speech-update","status":"stopped","role":"user"}"#)
+                .is_user_speech_start()
+        );
+        assert!(!VapiEvent::parse(r#"{"type":"transcript","role":"user"}"#).is_user_speech_start());
     }
 
     #[test]

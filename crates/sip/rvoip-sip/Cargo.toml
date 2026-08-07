@@ -683,22 +683,16 @@ required-features = ["perf-tests"]
 # Profiling-only optional deps. Off by default; enabled via the `dhat`
 # and `tokio-console` features. See `crates/sip/rvoip-sip/docs/PROFILING.md`.
 [dependencies.dhat]
-version = "0.3"
+workspace = true
 optional = true
 
 [dependencies.console-subscriber]
-version = "0.4"
+workspace = true
 optional = true
-
-# perf-tests optional deps. Off by default; enabled via the `perf-tests`
-# feature. These live in `[dependencies]` (not `[dev-dependencies]`)
-# because Cargo does not allow `optional = true` on dev-dependencies —
-# same idiom as `dhat` and `console-subscriber` above. They are pulled
-# in only when the feature is enabled, so default builds are untouched.
 [dependencies.hdrhistogram]
-version = "7.5"
+workspace = true
 optional = true
 
 [dependencies.sysinfo]
-version = "0.31"
+workspace = true
 optional = true

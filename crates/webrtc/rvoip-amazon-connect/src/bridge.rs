@@ -15,6 +15,19 @@ use rvoip_core::stream::MediaStream;
 
 use crate::errors::{ConnectError, Result};
 
+// Amazon Connect can briefly stop draining the outbound WebRTC driver while
+// the contact and DTLS/SRTP state converge. Keep the graph's bounded,
+// drop-oldest latency behavior, but do not classify that startup pause as a
+// persistently slow consumer after only one second of 20 ms audio.
+const CONNECT_MINIMUM_EVICTION_SAMPLES: usize = 250;
+
+fn connect_media_graph_policy() -> MediaGraphPolicy {
+    MediaGraphPolicy {
+        minimum_eviction_samples: CONNECT_MINIMUM_EVICTION_SAMPLES,
+        ..MediaGraphPolicy::default()
+    }
+}
+
 /// Handle to a running bidirectional bridge. Dropping it (or calling
 /// [`StreamBridge::stop`]) aborts both pump tasks.
 pub struct StreamBridge {
@@ -71,14 +84,14 @@ pub fn bridge_streams(a: Arc<dyn MediaStream>, b: Arc<dyn MediaStream>) -> Resul
         a.try_frames_in()
             .map_err(|error| ConnectError::Mapping(error.to_string()))?,
         a_codec.clone(),
-        MediaGraphPolicy::default(),
+        connect_media_graph_policy(),
     )
     .map_err(|error| ConnectError::Mapping(error.to_string()))?;
     let b_graph = start_media_graph(
         b.try_frames_in()
             .map_err(|error| ConnectError::Mapping(error.to_string()))?,
         b_codec.clone(),
-        MediaGraphPolicy::default(),
+        connect_media_graph_policy(),
     )
     .map_err(|error| ConnectError::Mapping(error.to_string()))?;
     let a_to_b = a_graph

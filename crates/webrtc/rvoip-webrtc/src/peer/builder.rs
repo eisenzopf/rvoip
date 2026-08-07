@@ -358,6 +358,19 @@ pub async fn build_peer_connection(
         setting_engine.set_nat_1to1_ips(config.nat_1to1_ips.clone(), candidate_type);
     }
 
+    if let Some(range) = &config.udp_port_range {
+        let pc = PeerConnectionBuilder::<String>::new()
+            .with_configuration(rtc_config)
+            .with_media_engine(media_engine)
+            .with_setting_engine(setting_engine)
+            .with_interceptor_registry(registry)
+            .with_handler(handler)
+            .with_runtime(runtime)
+            .build_with_udp_port_range(range.bind_ip, range.port_start, range.port_end)
+            .await?;
+        return Ok(Arc::new(pc));
+    }
+
     let pc = PeerConnectionBuilder::new()
         .with_configuration(rtc_config)
         .with_media_engine(media_engine)

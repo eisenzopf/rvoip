@@ -28,13 +28,14 @@ use rvoip_core::{CapabilityDescriptor, NegotiatedCodecs};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
-use tracing::warn;
+use tracing::{warn, Instrument};
 
-use crate::client::{connect_websocket, send_with_timeout, VapiHttpClient, VapiSocket};
+use crate::client::{connect_websocket, VapiHttpClient, VapiSocket};
 use crate::config::VapiConfig;
 use crate::error::{Result, VapiError};
 use crate::events::{VapiEvent, VapiEventEnvelope};
-use crate::media::{append_bounded_frames, AudioFramer, VapiMediaStream};
+use crate::health::VapiMediaHealth;
+use crate::media::{AudioFramer, VapiMediaStream};
 use crate::types::{AddedMessage, VapiCallOptions, VapiCommand};
 
 pub const ADAPTER_EVENT_CAPACITY: usize = 256;
@@ -76,6 +77,7 @@ struct Route {
     events: broadcast::Sender<VapiEvent>,
     initial_events: Mutex<Option<broadcast::Receiver<VapiEvent>>>,
     finished: tokio_util::sync::CancellationToken,
+    health: crate::health::MediaHealthState,
 }
 
 impl Route {
@@ -85,9 +87,25 @@ impl Route {
         config: &VapiConfig,
     ) -> Arc<Self> {
         let cancel = tokio_util::sync::CancellationToken::new();
+        // M1: this was a literal `1`, which made the inbound catch-up valve
+        // structurally inert. The valve gates each extra frame on
+        // `incoming_has_capacity()` (`capacity() > 0`), so with a single slot
+        // `release = 1 + over_target.min(..)` could never deliver its second
+        // frame — measured at 1.8-2.3% effective across two 100-call soaks,
+        // 1,831 released against 78,465 blocked.
+        //
+        // The consequence only shows on an imperfect link: after a downlink
+        // stall the queue pins at capacity and every later frame evicts an
+        // older one for the rest of the call. Over cellular that cost ~24% of
+        // calls up to 1.72s of assistant speech, removed in 20ms slices
+        // mid-word.
+        //
+        // Sized to `max_catchup_frames_per_tick + 1` so the drain can always
+        // deliver the frames the valve decides to release.
+        let incoming_capacity = config.max_catchup_frames_per_tick.saturating_add(1).max(2);
         let stream = VapiMediaStream::new(
             options.audio_format,
-            1,
+            incoming_capacity,
             config.media_queue_capacity,
             cancel.clone(),
         );
@@ -111,6 +129,7 @@ impl Route {
             events,
             initial_events: Mutex::new(Some(initial_events)),
             finished: tokio_util::sync::CancellationToken::new(),
+            health: crate::health::MediaHealthState::default(),
         })
     }
 
@@ -184,6 +203,18 @@ impl VapiAdapter {
             vapi_events,
             lifecycle: AdapterLifecycleSinkSlot::default(),
         }))
+    }
+
+    /// Live media health for one call.
+    ///
+    /// A TCP-to-RTP bridge fails in ways that report success: a queue that
+    /// fills becomes permanent delay, and a burst larger than the buffer
+    /// truncates an utterance rather than delaying it. Neither raises an
+    /// error. This is the counter set that makes those visible.
+    pub fn media_health(&self, connection_id: &ConnectionId) -> Option<VapiMediaHealth> {
+        let route = self.routes.get(connection_id)?;
+        let frame_ms = u64::from(route.options.audio_format.frame_ms());
+        Some(route.health.snapshot(frame_ms))
     }
 
     pub fn subscribe_vapi_events(&self) -> broadcast::Receiver<VapiEventEnvelope> {
@@ -790,18 +821,30 @@ async fn activate_route_worker(
         lifecycle: environment.lifecycle.clone(),
     };
     let task_route = Arc::clone(&route);
-    tokio::spawn(async move {
-        let outcome = run_websocket_session(
-            &runtime_environment.config,
-            &runtime_environment.vapi_events,
-            &task_route,
-            socket,
-            outgoing,
-            command_rx,
-        )
-        .await;
-        finish_route(&runtime_environment, task_route, outcome).await;
-    });
+    // M4: every media log line inside this task — the overflow warnings, the
+    // underrun counters, the end-of-session health snapshot — is otherwise
+    // unattributable. At any concurrency an operator can see that *a* call lost
+    // 1.7s of assistant audio but not which one, and cannot join it to a CDR, a
+    // recording, or a customer complaint. One span stamps all of them.
+    let session_span = tracing::info_span!(
+        "vapi_session",
+        connection_id = %route.connection_id
+    );
+    tokio::spawn(
+        async move {
+            let outcome = run_websocket_session(
+                &runtime_environment.config,
+                &runtime_environment.vapi_events,
+                &task_route,
+                socket,
+                outgoing,
+                command_rx,
+            )
+            .await;
+            finish_route(&runtime_environment, task_route, outcome).await;
+        }
+        .instrument(session_span),
+    );
     Ok(receipt)
 }
 
@@ -821,25 +864,6 @@ async fn close_vapi_socket(config: &VapiConfig, socket: &mut VapiSocket) {
     let _ = tokio::time::timeout(config.graceful_shutdown_timeout, shutdown).await;
 }
 
-enum SessionSendFailure {
-    Cancelled,
-    Failed,
-}
-
-async fn cancellable_session_send(
-    config: &VapiConfig,
-    route: &Route,
-    socket: &mut VapiSocket,
-    message: WebSocketMessage,
-) -> std::result::Result<(), SessionSendFailure> {
-    tokio::select! {
-        _ = route.cancel.cancelled() => Err(SessionSendFailure::Cancelled),
-        result = send_with_timeout(config.websocket_io_timeout, socket, message) => {
-            result.map_err(|_| SessionSendFailure::Failed)
-        }
-    }
-}
-
 fn requested_local_outcome(route: &Route) -> SessionOutcome {
     SessionOutcome::Local(
         route
@@ -850,19 +874,148 @@ fn requested_local_outcome(route: &Route) -> SessionOutcome {
     )
 }
 
+/// What the session loop hands the writer task.
+enum WriteRequest {
+    Media(WebSocketMessage),
+    Control(WebSocketMessage),
+}
+
+/// Why the writer stopped.
+#[derive(Clone, Copy)]
+enum WriterFault {
+    MediaStalled,
+    ControlFailed,
+    Failed,
+}
+
+impl WriterFault {
+    fn detail(self) -> &'static str {
+        match self {
+            Self::MediaStalled => "Vapi WebSocket audio writes stalled",
+            Self::ControlFailed => "Vapi WebSocket control write failed",
+            Self::Failed => "Vapi WebSocket write failed",
+        }
+    }
+}
+
+/// Owns the socket's sink half so a slow write cannot park the session loop.
+///
+/// FreeSWITCH's media model rests on the media thread never blocking on a
+/// network write: its only media-thread write is UDP `sendto` into a large
+/// kernel buffer, and every stallable transport is moved to its own thread
+/// reached through a bounded buffer. TCP/TLS silently breaks that assumption,
+/// so the write belongs here rather than inline in the select loop.
+///
+/// Returns the sink so the caller can reunite it for the shutdown handshake.
+async fn run_socket_writer(
+    mut sink: futures::stream::SplitSink<VapiSocket, WebSocketMessage>,
+    mut media: mpsc::Receiver<WriteRequest>,
+    mut control: mpsc::Receiver<WriteRequest>,
+    faults: mpsc::Sender<WriterFault>,
+    config: VapiConfig,
+    route: Arc<Route>,
+) -> futures::stream::SplitSink<VapiSocket, WebSocketMessage> {
+    use futures::SinkExt;
+    let mut consecutive_media_timeouts: u32 = 0;
+    loop {
+        // M3: control and media used to share one channel, so an uplink stall
+        // backed Pings, Pongs and commands up behind a media queue that drains
+        // at 1/media_write_timeout. The 100-slot channel filled in ~2.2s
+        // against ~50 frames/s, and the heartbeat then failed roughly 5x sooner
+        // than media_write_timeout_limit implies — the session died of an
+        // apparent control fault while the real problem was backpressure.
+        //
+        // Biased select: control liveness must never be measured through a
+        // media backlog.
+        let request = tokio::select! {
+            biased;
+            Some(request) = control.recv() => request,
+            Some(request) = media.recv() => request,
+            else => break,
+        };
+        let (message, deadline, is_media) = match request {
+            WriteRequest::Media(message) => (message, config.media_write_timeout, true),
+            WriteRequest::Control(message) => (message, config.websocket_io_timeout, false),
+        };
+        match tokio::time::timeout(deadline, sink.send(message)).await {
+            Ok(Ok(())) => {
+                if is_media {
+                    consecutive_media_timeouts = 0;
+                }
+            }
+            Ok(Err(_)) => {
+                let _ = faults
+                    .send(if is_media {
+                        WriterFault::Failed
+                    } else {
+                        WriterFault::ControlFailed
+                    })
+                    .await;
+                break;
+            }
+            Err(_) => {
+                if !is_media {
+                    let _ = faults.send(WriterFault::ControlFailed).await;
+                    break;
+                }
+                // A media frame that missed its deadline is stale. Drop it and
+                // keep going; only a sustained run means the peer is gone.
+                consecutive_media_timeouts = consecutive_media_timeouts.saturating_add(1);
+                route.health.tick_write_timeout();
+                metrics::counter!("rvoip_vapi_media_write_timeouts_total").increment(1);
+                if consecutive_media_timeouts == 1 {
+                    tracing::warn!(
+                        timeout_ms = config.media_write_timeout.as_millis() as u64,
+                        "a Vapi audio write exceeded its deadline; dropping the frame"
+                    );
+                }
+                if consecutive_media_timeouts >= config.media_write_timeout_limit {
+                    let _ = faults.send(WriterFault::MediaStalled).await;
+                    break;
+                }
+            }
+        }
+    }
+    sink
+}
+
 async fn run_websocket_session(
     config: &VapiConfig,
     global_events: &broadcast::Sender<VapiEventEnvelope>,
     route: &Arc<Route>,
-    mut socket: VapiSocket,
+    socket: VapiSocket,
     mut outgoing: mpsc::Receiver<rvoip_core::MediaFrame>,
     mut commands: mpsc::Receiver<String>,
 ) -> SessionOutcome {
+    // The write goes to a per-session task so a slow socket cannot park this
+    // loop. Reunited before the shutdown handshake, which needs both halves.
+    let (sink, mut stream) = futures::StreamExt::split(socket);
+    let (write_tx, write_rx) = mpsc::channel::<WriteRequest>(config.media_queue_capacity);
+    // Control gets its own small channel, polled with priority (M3). Sharing
+    // the media channel meant an uplink stall could kill the session through a
+    // heartbeat failure long before the media-stall limit was reached.
+    let (control_tx, control_rx) = mpsc::channel::<WriteRequest>(8);
+    let (fault_tx, mut fault_rx) = mpsc::channel::<WriterFault>(4);
+    let writer = tokio::spawn(run_socket_writer(
+        sink,
+        write_rx,
+        control_rx,
+        fault_tx,
+        config.clone(),
+        Arc::clone(route),
+    ));
+
     let mut incoming_framer = AudioFramer::new(route.options.audio_format);
     let mut outgoing_framer = AudioFramer::new(route.options.audio_format);
     let mut incoming_frames = VecDeque::<Bytes>::new();
     let mut outgoing_frames = VecDeque::<Bytes>::new();
     let mut timestamp_rtp = 0u32;
+    let mut inbound_dropped: u64 = 0;
+    let mut inbound_drop_reported = false;
+    let mut outbound_dropped: u64 = 0;
+    let mut outbound_drop_reported = false;
+    let mut barge_in_dropped: u64 = 0;
+    let mut jitter = crate::jitter::JitterEstimator::default();
     let mut incoming_tick = tokio::time::interval(std::time::Duration::from_millis(20));
     incoming_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     incoming_tick.tick().await;
@@ -881,60 +1034,159 @@ async fn run_websocket_session(
             _ = route.cancel.cancelled() => {
                 break requested_local_outcome(route);
             }
+            fault = fault_rx.recv() => {
+                // The writer gave up. It owns the only view of write health,
+                // so this is how a dead peer reaches the session.
+                break match fault {
+                    Some(fault) => SessionOutcome::Failed(fault.detail()),
+                    None => SessionOutcome::Failed("Vapi WebSocket writer stopped"),
+                };
+            }
             _ = &mut heartbeat_deadline, if awaiting_heartbeat_response => {
                 break SessionOutcome::Failed("Vapi WebSocket heartbeat response timed out");
             }
-            _ = incoming_tick.tick(), if !incoming_frames.is_empty() => {
+            // Deliberately unguarded: the RTP clock must advance with wall
+            // time even when no audio is available. The agent is silent
+            // whenever it is not speaking, which is most of a call.
+            _ = incoming_tick.tick() => {
                 if route.stream.incoming_is_closed() {
                     break SessionOutcome::Local(EndReason::BridgeTorn);
                 }
-                if !route.stream.incoming_has_capacity() {
-                    continue;
+                // Burst-drain valve. One frame per tick matches the source
+                // rate exactly, so a backlog never recovers and its depth
+                // becomes permanent delay. Above the target depth, release
+                // extra frames to run faster than real time until converged.
+                // Measured, not assumed. Falls back to the floor until the
+                // estimator has enough history to trust.
+                let target = jitter.target_frames(
+                    route.options.audio_format.frame_ms(),
+                    config.jitter_target_floor_ms,
+                    config.jitter_target_ceiling_ms,
+                );
+                let over_target = incoming_frames.len().saturating_sub(target);
+                let release = 1 + over_target.min(config.max_catchup_frames_per_tick);
+                let mut overflowed = false;
+                let mut sent = 0usize;
+                for _ in 0..release {
+                    if !route.stream.incoming_has_capacity() {
+                        break;
+                    }
+                    let Some(frame) = incoming_frames.pop_front() else {
+                        break;
+                    };
+                    if route.stream.try_push_incoming(frame, timestamp_rtp).is_err() {
+                        metrics::counter!(
+                            "rvoip_vapi_queue_overflow_total", "direction" => "in"
+                        ).increment(1);
+                        overflowed = true;
+                        break;
+                    }
+                    sent += 1;
+                    timestamp_rtp = timestamp_rtp
+                        .wrapping_add(route.options.audio_format.timestamp_increment());
+                    metrics::counter!(
+                        "rvoip_vapi_audio_frames_total", "direction" => "in"
+                    ).increment(1);
                 }
-                let Some(frame) = incoming_frames.pop_front() else {
-                    continue;
-                };
-                if route.stream.try_push_incoming(frame, timestamp_rtp).is_err() {
-                    metrics::counter!("rvoip_vapi_queue_overflow_total", "direction" => "in").increment(1);
+                if overflowed {
+                    // The downstream stream rejected a frame it had just
+                    // reported capacity for. Not a transient backlog; treat it
+                    // as a broken stream.
                     break SessionOutcome::Failed("Vapi inbound media queue overflow");
                 }
-                timestamp_rtp = timestamp_rtp
-                    .wrapping_add(route.options.audio_format.timestamp_increment());
-                metrics::counter!("rvoip_vapi_audio_frames_total", "direction" => "in").increment(1);
+                if sent > 1 {
+                    route.health.tick_catchup();
+                    metrics::counter!("rvoip_vapi_jitter_catchup_frames_total")
+                        .increment((sent - 1) as u64);
+                }
+                if over_target > 0 && sent <= 1 {
+                    // Wanted to accelerate and could not: the downstream is
+                    // itself paced, so there was nowhere to put the extra
+                    // frame. Distinguishing this from a successful catch-up
+                    // matters — one means the valve works, the other means it
+                    // cannot.
+                    route.health.tick_catchup_blocked();
+                }
+                route.health.set_jitter(jitter.jitter_ms(), target);
+                route.health.add_inbound_frames(sent as u64);
+                route.health.set_inbound_depth(incoming_frames.len());
+                // Keep the RTP clock honest. One tick is one frame duration of
+                // wall time whether or not audio was available; without this,
+                // a silent stretch is invisible to the receiver and the next
+                // utterance claims a sampling instant milliseconds after the
+                // previous one instead of seconds. Sending N frames in a
+                // catch-up tick advances by N: those frames really are N frame
+                // durations of audio.
+                if sent == 0 {
+                    timestamp_rtp = timestamp_rtp
+                        .wrapping_add(route.options.audio_format.timestamp_increment());
+                    route.health.tick_underrun();
+                    metrics::counter!("rvoip_vapi_inbound_underrun_ticks_total").increment(1);
+                }
             }
             _ = outgoing_tick.tick(), if !outgoing_frames.is_empty() => {
-                let Some(frame) = outgoing_frames.pop_front() else {
-                    continue;
-                };
-                match cancellable_session_send(
-                    config,
-                    route,
-                    &mut socket,
-                    WebSocketMessage::Binary(frame),
-                ).await {
-                    Ok(()) => {}
-                    Err(SessionSendFailure::Cancelled) => break requested_local_outcome(route),
-                    Err(SessionSendFailure::Failed) => {
-                        break SessionOutcome::Failed("Vapi WebSocket audio write failed");
+                // Same burst-drain valve as the inbound path. Without it this
+                // direction drains at exactly the source rate, so a backlog
+                // never recovers and its depth becomes permanent delay toward
+                // the agent. Telemetry caught this: outbound high-water sat at
+                // 320-500 ms across live calls while inbound stayed at
+                // 120-240 ms, purely because only inbound had the valve.
+                let over_target = outgoing_frames
+                    .len()
+                    .saturating_sub(config.jitter_target_frames);
+                let release = 1 + over_target.min(config.max_catchup_frames_per_tick);
+                if over_target > 0 {
+                    route.health.tick_catchup();
+                }
+                let mut writer_gone = false;
+                for _ in 0..release {
+                    let Some(frame) = outgoing_frames.pop_front() else {
+                        break;
+                    };
+                    match write_tx.try_send(WriteRequest::Media(WebSocketMessage::Binary(frame))) {
+                        Ok(()) => {
+                            route.health.add_outbound_frames(1);
+                            metrics::counter!(
+                                "rvoip_vapi_audio_frames_total", "direction" => "out"
+                            ).increment(1);
+                        }
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            // The writer is behind. Dropping here is the same
+                            // policy as the jitter buffer: stale audio, not a
+                            // stalled loop.
+                            outbound_dropped = outbound_dropped.saturating_add(1);
+                            route.health.add_outbound_dropped(1);
+                            metrics::counter!(
+                                "rvoip_vapi_outbound_frames_dropped_total"
+                            ).increment(1);
+                            if !outbound_drop_reported {
+                                outbound_drop_reported = true;
+                                tracing::warn!(
+                                    "the Vapi socket writer is behind; dropping outbound frames"
+                                );
+                            }
+                            break;
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => {
+                            writer_gone = true;
+                            break;
+                        }
                     }
                 }
-                metrics::counter!("rvoip_vapi_audio_frames_total", "direction" => "out").increment(1);
+                if writer_gone {
+                    break SessionOutcome::Failed("Vapi WebSocket writer stopped");
+                }
+                route.health.set_outbound_depth(outgoing_frames.len());
             }
             _ = heartbeat.tick() => {
                 if awaiting_heartbeat_response {
                     continue;
                 }
-                match cancellable_session_send(
-                    config,
-                    route,
-                    &mut socket,
-                    WebSocketMessage::Ping(Bytes::new()),
-                ).await {
-                    Ok(()) => {}
-                    Err(SessionSendFailure::Cancelled) => break requested_local_outcome(route),
-                    Err(SessionSendFailure::Failed) => {
-                        break SessionOutcome::Failed("Vapi WebSocket heartbeat failed");
-                    }
+                if control_tx
+                    .try_send(WriteRequest::Control(WebSocketMessage::Ping(Bytes::new())))
+                    .is_err()
+                {
+                    break SessionOutcome::Failed("Vapi WebSocket heartbeat failed");
                 }
                 heartbeat_deadline
                     .as_mut()
@@ -949,52 +1201,90 @@ async fn run_websocket_session(
                     metrics::counter!("rvoip_vapi_dtmf_frames_dropped_total").increment(1);
                     continue;
                 }
-                if append_bounded_frames(
-                    &mut outgoing_framer,
-                    &media.payload,
-                    &mut outgoing_frames,
-                    config.media_queue_capacity,
-                    config.max_message_bytes,
-                ).is_err() {
-                    metrics::counter!("rvoip_vapi_queue_overflow_total", "direction" => "out").increment(1);
-                    break SessionOutcome::Failed("Vapi outbound media queue overflow");
+                if media.payload.len() > config.max_message_bytes {
+                    break SessionOutcome::Failed("Vapi outbound audio frame exceeded size limit");
+                }
+                // Symmetric with the inbound path: a transient backlog must
+                // degrade, not end the call. Caller RTP keeps arriving while
+                // the writer works through a slow socket, so this queue can be
+                // flooded by a peer that is behaving perfectly.
+                outgoing_framer.push(&media.payload);
+                while let Some(frame) = outgoing_framer.next_frame() {
+                    if outgoing_frames.len() >= config.outbound_queue_capacity {
+                        outgoing_frames.pop_front();
+                        outbound_dropped = outbound_dropped.saturating_add(1);
+                        route.health.add_outbound_dropped(1);
+                        metrics::counter!(
+                            "rvoip_vapi_outbound_frames_dropped_total"
+                        ).increment(1);
+                    }
+                    outgoing_frames.push_back(frame);
+                }
+                route.health.set_outbound_depth(outgoing_frames.len());
+                if outbound_dropped > 0 && !outbound_drop_reported {
+                    outbound_drop_reported = true;
+                    tracing::warn!(
+                        capacity = config.outbound_queue_capacity,
+                        "outbound audio is queueing faster than the WebSocket \
+                         drains; dropping the oldest frames"
+                    );
                 }
             }
             command = commands.recv() => {
                 let Some(json) = command else {
                     break SessionOutcome::Local(EndReason::Normal);
                 };
-                match cancellable_session_send(
-                    config,
-                    route,
-                    &mut socket,
-                    WebSocketMessage::Text(json.into()),
-                ).await {
-                    Ok(()) => {}
-                    Err(SessionSendFailure::Cancelled) => break requested_local_outcome(route),
-                    Err(SessionSendFailure::Failed) => {
-                        break SessionOutcome::Failed("Vapi WebSocket control write failed");
-                    }
+                if control_tx
+                    .try_send(WriteRequest::Control(WebSocketMessage::Text(json.into())))
+                    .is_err()
+                {
+                    break SessionOutcome::Failed("Vapi WebSocket control write failed");
                 }
             }
-            message = socket.next() => {
+            message = futures::StreamExt::next(&mut stream) => {
                 if matches!(message.as_ref(), Some(Ok(_))) {
                     awaiting_heartbeat_response = false;
                 }
                 match message {
                     Some(Ok(WebSocketMessage::Binary(payload))) => {
-                        let max_queued = config
-                            .startup_audio_frames
-                            .saturating_sub(route.stream.incoming_pending_frames());
-                        if append_bounded_frames(
-                            &mut incoming_framer,
-                            &payload,
-                            &mut incoming_frames,
-                            max_queued,
-                            config.max_message_bytes,
-                        ).is_err() {
-                            metrics::counter!("rvoip_vapi_queue_overflow_total", "direction" => "in").increment(1);
-                            break SessionOutcome::Failed("Vapi inbound media buffer overflow");
+                        if payload.len() > config.max_message_bytes {
+                            break SessionOutcome::Failed("Vapi audio message exceeded size limit");
+                        }
+                        // Vapi's transport is a raw byte stream with no framing
+                        // or pacing guarantee, and it delivers coalesced bursts.
+                        // A transient backlog must degrade the jitter buffer, not
+                        // terminate the session: dropping the oldest frame costs
+                        // 20 ms of audio, whereas failing here silently ends the
+                        // call for its remaining duration.
+                        route.health.record_inbound_chunk(payload.len());
+                        let frames_before = incoming_frames.len();
+                        incoming_framer.push(&payload);
+                        while let Some(frame) = incoming_framer.next_frame() {
+                            if incoming_frames.len() >= config.inbound_queue_capacity {
+                                incoming_frames.pop_front();
+                                inbound_dropped = inbound_dropped.saturating_add(1);
+                                route.health.add_inbound_dropped(1);
+                                metrics::counter!(
+                                    "rvoip_vapi_inbound_frames_dropped_total"
+                                ).increment(1);
+                            }
+                            incoming_frames.push_back(frame);
+                        }
+                        // Report once per contiguous episode rather than per
+                        // frame, so a burst does not flood the log.
+                        jitter.observe(
+                            tokio::time::Instant::now().into_std(),
+                            incoming_frames.len().saturating_sub(frames_before),
+                            route.options.audio_format.frame_ms(),
+                        );
+                        route.health.set_inbound_depth(incoming_frames.len());
+                        if inbound_dropped > 0 && !inbound_drop_reported {
+                            inbound_drop_reported = true;
+                            tracing::warn!(
+                                capacity = config.inbound_queue_capacity,
+                                "inbound Vapi audio is arriving faster than it drains; \
+                                 dropping the oldest frames"
+                            );
                         }
                     }
                     Some(Ok(WebSocketMessage::Text(text))) => {
@@ -1003,31 +1293,50 @@ async fn run_websocket_session(
                         }
                         let event = VapiEvent::parse(text.as_str());
                         let terminal = event.is_terminal_status();
+                        if event.is_user_speech_start() {
+                            // Barge-in. Everything queued toward the caller is
+                            // stale: without dropping it, the jitter buffer's
+                            // depth becomes the barge-in latency floor and the
+                            // agent talks over the interruption.
+                            let stale = incoming_frames.len();
+                            if stale > 0 {
+                                incoming_frames.clear();
+                                incoming_framer.reset();
+                                barge_in_dropped = barge_in_dropped.saturating_add(stale as u64);
+                                route.health.add_barge_in_dropped(stale as u64);
+                                metrics::counter!("rvoip_vapi_barge_in_frames_dropped_total")
+                                    .increment(stale as u64);
+                            }
+                            route.stream.request_flush();
+                        }
                         publish_vapi_event(global_events, route, event);
                         if terminal {
                             break SessionOutcome::RemoteEnded;
                         }
                     }
                     Some(Ok(WebSocketMessage::Ping(payload))) => {
-                        match cancellable_session_send(
-                            config,
-                            route,
-                            &mut socket,
-                            WebSocketMessage::Pong(payload),
-                        ).await {
-                            Ok(()) => {}
-                            Err(SessionSendFailure::Cancelled) => break requested_local_outcome(route),
-                            Err(SessionSendFailure::Failed) => {
-                                break SessionOutcome::Failed("Vapi WebSocket pong failed");
-                            }
+                        if control_tx
+                            .try_send(WriteRequest::Control(WebSocketMessage::Pong(payload)))
+                            .is_err()
+                        {
+                            break SessionOutcome::Failed("Vapi WebSocket pong failed");
                         }
                     }
                     Some(Ok(WebSocketMessage::Pong(_))) => {}
                     Some(Ok(WebSocketMessage::Close(frame))) => {
+                        // A close frame carrying no body is explicitly legal
+                        // (RFC 6455 §5.5.1) and is how this adapter itself
+                        // closes. Treating it as abnormal reported a failure on
+                        // calls whose audio was fine and whose peer simply hung
+                        // up, inflating the observed failure rate.
                         break match frame.map(|frame| frame.code) {
-                            Some(CloseCode::Normal | CloseCode::Away) => {
-                                SessionOutcome::RemoteEnded
-                            }
+                            None
+                            | Some(
+                                CloseCode::Normal
+                                | CloseCode::Away
+                                | CloseCode::Restart
+                                | CloseCode::Again,
+                            ) => SessionOutcome::RemoteEnded,
                             _ => SessionOutcome::RemoteClosed,
                         };
                     }
@@ -1041,6 +1350,59 @@ async fn run_websocket_session(
         }
     };
 
+    // Stop the writer and take the sink back so the shutdown handshake, which
+    // both reads and writes, still has a whole socket.
+    drop(write_tx);
+    drop(control_tx);
+    let mut socket = match writer.await {
+        Ok(sink) => match stream.reunite(sink) {
+            Ok(socket) => socket,
+            Err(_) => return outcome,
+        },
+        Err(_) => return outcome,
+    };
+
+    {
+        let health = route
+            .health
+            .snapshot(u64::from(route.options.audio_format.frame_ms()));
+        // Always emitted: a call that looks fine but sat at 400ms of buffer
+        // depth is the failure this exists to surface.
+        tracing::info!(
+            inbound_queue_ms = health.inbound_queue_ms,
+            inbound_queue_high_water_ms = health.inbound_queue_high_water_ms,
+            outbound_queue_ms = health.outbound_queue_ms,
+            outbound_queue_high_water_ms = health.outbound_queue_high_water_ms,
+            inbound_frames = health.inbound_frames,
+            outbound_frames = health.outbound_frames,
+            underrun_ticks = health.underrun_ticks,
+            catchup_ticks = health.catchup_ticks,
+            catchup_blocked_ticks = health.catchup_blocked_ticks,
+            largest_inbound_chunk_bytes = health.largest_inbound_chunk_bytes,
+            measured_jitter_ms = health.measured_jitter_ms,
+            jitter_target_ms = health.jitter_target_ms,
+            "Vapi media health at session end"
+        );
+        if health.is_burst_envelope_exceeded(
+            config.inbound_queue_capacity * route.options.audio_format.frame_bytes(),
+        ) {
+            tracing::warn!(
+                largest_inbound_chunk_bytes = health.largest_inbound_chunk_bytes,
+                buffer_bytes =
+                    config.inbound_queue_capacity * route.options.audio_format.frame_bytes(),
+                "a single inbound burst approached the jitter buffer; drop-oldest \
+                 discards speech rather than trimming delay at this size"
+            );
+        }
+    }
+    if inbound_dropped > 0 || outbound_dropped > 0 || barge_in_dropped > 0 {
+        tracing::warn!(
+            inbound_dropped,
+            outbound_dropped,
+            barge_in_dropped,
+            "Vapi session dropped audio frames to keep its jitter buffers bounded"
+        );
+    }
     match &outcome {
         SessionOutcome::Local(_) => {
             wait_for_vapi_shutdown(config, global_events, route, &mut socket).await;
@@ -1162,7 +1524,11 @@ async fn finish_route(
         SessionOutcome::RemoteClosed => {
             metrics::counter!("rvoip_vapi_disconnects_total", "outcome" => "abnormal").increment(1);
         }
-        SessionOutcome::Failed(_) => {
+        SessionOutcome::Failed(detail) => {
+            // Previously this incremented a counter and discarded `detail`,
+            // so a terminated media session was invisible to anyone not
+            // scraping metrics mid-call.
+            tracing::warn!(detail, "Vapi session failed");
             metrics::counter!("rvoip_vapi_disconnects_total", "outcome" => "failed").increment(1);
         }
         SessionOutcome::Local(_) => {}

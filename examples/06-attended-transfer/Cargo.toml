@@ -1,13 +1,13 @@
 [package]
 name = "rvoip-example-attended-transfer"
-version = "0.3.2"
+version = "0.3.7"
 edition = "2021"
 rust-version = "1.91"
 publish = false
 
 [dependencies]
-# Copying into your own project? Drop `path` and keep: rvoip-sip = "0.3.2"
-rvoip-sip = { version = "0.3.2", path = "../../crates/sip/rvoip-sip" }
+# Copying into your own project? Drop `path` and keep: rvoip-sip = "0.3.7"
+rvoip-sip = { version = "0.3.7", path = "../../crates/sip/rvoip-sip" }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

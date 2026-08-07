@@ -211,7 +211,6 @@ impl ConnectMediaConnector for ChimeWebRtcMediaConnector {
             ConnectError::Signaling("connected peer has no local audio SSRC".into())
         })?;
         let remote = peer.wait_remote_track(Duration::from_millis(500)).await;
-        let await_remote_audio = remote.is_none();
         let (native_dtmf_tx, native_dtmf_rx) = mpsc::channel(32);
         let stream = from_tracks_with_dtmf_events(
             StreamId::new(),
@@ -229,7 +228,6 @@ impl ConnectMediaConnector for ChimeWebRtcMediaConnector {
             negotiated,
             vec![stream],
             native_dtmf_rx,
-            await_remote_audio,
         )))
     }
 }
@@ -257,7 +255,6 @@ impl ChimeWebRtcMediaSession {
         negotiated: NegotiatedCodecs,
         streams: Vec<Arc<WebRtcMediaStream>>,
         mut native_dtmf_rx: mpsc::Receiver<rvoip_webrtc::media::dtmf::DecodedDtmfEvent>,
-        await_remote_audio: bool,
     ) -> Self {
         let mut chime_terminal = chime.subscribe_terminal();
         let initial_health = chime.health();
@@ -274,7 +271,7 @@ impl ChimeWebRtcMediaSession {
             let peer_failed = peer_for_supervisor.wait_failed();
             tokio::pin!(peer_failed);
             let mut dtmf_open = true;
-            let mut remote_audio_pending = await_remote_audio && stream_for_late_audio.is_some();
+            let monitor_remote_audio = stream_for_late_audio.is_some();
             loop {
                 if cancelled_for_supervisor.load(Ordering::Acquire) {
                     break;
@@ -307,13 +304,21 @@ impl ChimeWebRtcMediaSession {
                             dtmf_open = false;
                         }
                     }
-                    _ = tokio::time::sleep(Duration::from_millis(50)), if remote_audio_pending => {
-                        if let (Some(stream), Some(remote)) = (
-                            stream_for_late_audio.as_ref(),
-                            peer_for_supervisor.discover_remote_audio_track().await,
-                        ) {
-                            stream.attach_remote(remote);
-                            remote_audio_pending = false;
+                    _ = tokio::time::sleep(Duration::from_millis(50)), if monitor_remote_audio => {
+                        if let Some(stream) = stream_for_late_audio.as_ref() {
+                            // Chime can publish an early media track before the
+                            // agent joins and then deliver the agent on a later
+                            // remote-track event. Keep draining events for the
+                            // session lifetime instead of stopping after the
+                            // first attachment. WebRtcMediaStream deduplicates
+                            // track identities, so the transceiver fallback is
+                            // safe on every pass and covers an event-channel race.
+                            while let Some(remote) = peer_for_supervisor.try_recv_remote_track().await {
+                                stream.attach_remote(remote);
+                            }
+                            if let Some(remote) = peer_for_supervisor.discover_remote_audio_track().await {
+                                stream.attach_remote(remote);
+                            }
                         }
                     }
                 }
@@ -585,6 +590,7 @@ mod tests {
         sdk_signal_frame::Type as FrameType, SdkJoinAckFrame, SdkPingPongFrame, SdkPingPongType,
         SdkSignalFrame, SdkSubscribeAckFrame,
     };
+    use rvoip_webrtc::media::{dtmf::send_dtmf, send_fixture_media_burst};
 
     const TEST_FRAME_TYPE_RTC: u8 = 0x05;
 
@@ -743,6 +749,17 @@ mod tests {
                 .wait_connected(Duration::from_secs(5))
                 .await
                 .expect("local answerer connected");
+            let answerer_media = Arc::clone(&answerer);
+            let media_sender = tokio::spawn(async move {
+                // Establish the primary audio track first, then introduce the
+                // telephone-event track after the connector has returned and
+                // its lifetime supervisor owns late-track attachment.
+                send_fixture_media_burst(&answerer_media, false).await;
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                send_dtmf(&answerer_media, "6", 80)
+                    .await
+                    .expect("send delayed remote DTMF");
+            });
 
             loop {
                 let frame = recv_test_frame(&mut ws).await;
@@ -767,6 +784,7 @@ mod tests {
                     }
                 }
             }
+            media_sender.await.expect("remote media sender");
             answerer.close().await.expect("close local answerer");
         });
 
@@ -785,6 +803,14 @@ mod tests {
         assert_eq!(session.streams().len(), 1);
         assert!(session.health().peer_connected);
         assert!(session.health().signaling_running);
+        let mut remote_dtmf = session
+            .take_dtmf_events()
+            .expect("take remote DTMF receiver");
+        let event = tokio::time::timeout(Duration::from_secs(3), remote_dtmf.recv())
+            .await
+            .expect("delayed remote DTMF deadline")
+            .expect("delayed remote DTMF event");
+        assert_eq!(event.digit, '6');
         session.hold().await.expect("hold local media");
         session.resume().await.expect("resume local media");
         session.send_dtmf("5", 80).await.expect("send local DTMF");

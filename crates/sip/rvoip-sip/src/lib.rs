@@ -566,6 +566,10 @@ pub use api::trace_redactor::{
     BodyRedactionDecision, DefaultTraceRedactor, PassthroughRedactor, RedactionDecision,
     TraceRedactor, REDACTED_BODY_MARKER,
 };
+/// Re-exported so callers can build a `SipListenerAuthPolicy` trusted-CIDR
+/// mapping without taking their own `ipnet` dependency.
+pub use ipnet::IpNet;
+
 pub use auth::{
     AAuthValidator, AkaClientConfig, AkaClientProvider, AkaVectorProvider, ApiKeyVerifier,
     AuditFailurePolicy, AuthAttemptAdmission, AuthAttemptReservation, AuthAuditEvent,

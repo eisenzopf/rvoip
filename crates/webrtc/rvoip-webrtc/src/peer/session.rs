@@ -528,10 +528,12 @@ impl RvoipPeerConnection {
 
     /// Exact SDES MID value negotiated for locally-originated audio RTP.
     ///
-    /// Supplemental SSRCs are intentionally absent from SDP, so RFC 4733
-    /// packets require this header-extension value for browser demux. `None`
-    /// means negotiation is pending, absent, or ambiguous and callers must not
-    /// write supplemental RTP.
+    /// Primary audio and RFC 4733 telephone events share one SSRC, so this
+    /// value is a BUNDLE demux optimization rather than a correctness
+    /// requirement. `None` means negotiation is pending, absent, or ambiguous;
+    /// outbound RTP is then written without the header extension, exactly as
+    /// primary audio is. Whether DTMF may be written at all is decided by
+    /// [`Self::outbound_dtmf_negotiation`], not by this value.
     #[must_use]
     pub fn negotiated_outbound_audio_mid(&self) -> Option<String> {
         self.outbound_audio_mid

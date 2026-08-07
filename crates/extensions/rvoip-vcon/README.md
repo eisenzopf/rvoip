@@ -5,7 +5,7 @@
 vCon (Virtualized Conversation) document model, builder, signer, validator, and
 store, pinned to `draft-ietf-vcon-vcon-core` working-group commit `2342aba`.
 Core Session finalization exposes persisted documents through `VconReady`.
-`RecordingComplete.vcon_ref` wiring remains outside the 0.3.3 scope.
+`RecordingComplete.vcon_ref` wiring remains outside the current 0.3.7 scope.
 
 Part of the [**rvoip**](https://github.com/eisenzopf/rvoip) workspace (the "rvoip 3"
 unified real-time-communications stack). Published so the
