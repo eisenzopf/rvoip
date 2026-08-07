@@ -36,7 +36,7 @@ REVIEWED_DEBS = {
         "20d83193399a9ee02b8c3f1cc2fbe311231ec22c0b43656add63f77110a68545"
     ),
     "opensips-tls-openssl-module_3.6.7-1_amd64.deb": (
-        "05e0c80de73b352390981352f08183f9acc3dd0187577688c4c174f94fd9bc68"
+        "690c52e06b9d0f8d76483900a4185f3a3d7cc3ec30a752ff762bdca254750209"
     ),
 }
 MODULES = {
@@ -47,7 +47,7 @@ MODULES = {
         "f2726bc731dbdf840bd40dbc7209eded8f16899034177b8dabed481da60662d2"
     ),
     "/usr/lib/x86_64-linux-gnu/opensips/modules/tls_openssl.so": (
-        "ec8dbf7164f48b8ae6298f4d014980f567ef4d7cc426ce39d83071b4a4ca956e"
+        "77714d25e26933b4a18408b3ef65bad75400d5840d1bcf58efde99292e21ba6f"
     ),
 }
 

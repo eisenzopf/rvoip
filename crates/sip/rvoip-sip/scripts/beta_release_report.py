@@ -374,7 +374,7 @@ PROXY_INTEROP_OPENSIPS_TLS_DOCKERFILE = (
     "crates/sip/sip-proxy/tests/interop/images/opensips-tls/Dockerfile"
 )
 PROXY_INTEROP_OPENSIPS_TLS_DOCKERFILE_SHA256 = (
-    "0093ff1117307b11db1d3783b54f01ea63c3c016c3993e2bf4ec52100aebf312"
+    "2ad332bdbb48e707c3995e0e95500053857a908c178de025d8180f6133d4501c"
 )
 PROXY_INTEROP_OPENSIPS_TLS_PACKAGES = {
     "opensips": {"version": "3.6.7-1"},
@@ -393,7 +393,7 @@ PROXY_INTEROP_OPENSIPS_TLS_PACKAGES = {
     "opensips-tls-openssl-module": {
         "version": "3.6.7-1",
         "deb_sha256": (
-            "05e0c80de73b352390981352f08183f9acc3dd0187577688c4c174f94fd9bc68"
+            "690c52e06b9d0f8d76483900a4185f3a3d7cc3ec30a752ff762bdca254750209"
         ),
     },
 }
@@ -408,7 +408,7 @@ PROXY_INTEROP_OPENSIPS_TLS_MODULES = {
     },
     "tls_openssl.so": {
         "path": "/usr/lib/x86_64-linux-gnu/opensips/modules/tls_openssl.so",
-        "sha256": ("ec8dbf7164f48b8ae6298f4d014980f567ef4d7cc426ce39d83071b4a4ca956e"),
+        "sha256": ("77714d25e26933b4a18408b3ef65bad75400d5840d1bcf58efde99292e21ba6f"),
     },
 }
 
