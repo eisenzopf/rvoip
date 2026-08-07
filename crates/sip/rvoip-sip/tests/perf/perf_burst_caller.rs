@@ -1119,7 +1119,18 @@ async fn run_one_call(
         Err(err) => {
             counters.pending_setups.fetch_sub(1, Ordering::Relaxed);
             let is_timeout = matches!(&err, rvoip_sip::SessionError::Timeout(_));
-            let looks_like_overload = looks_like_overload(&err);
+            let hangup_started = Instant::now();
+            let hangup_result = handle.hangup_and_wait(Some(call_timeout)).await;
+            let lifecycle_after_hangup = handle.lifecycle().await.ok();
+            // The immediate wait error can lose the typed SIP response while
+            // the exact call lifecycle still retains it. Classify from both
+            // sources so a terminal 503 cannot be mistaken for an unrelated
+            // failure, but never use terminal evidence to mask a timeout.
+            let looks_like_overload = !is_timeout
+                && (looks_like_overload(&err)
+                    || lifecycle_after_hangup
+                        .as_ref()
+                        .is_some_and(lifecycle_reports_overload));
             if is_timeout {
                 counters.timeout.fetch_add(1, Ordering::Relaxed);
             } else {
@@ -1129,13 +1140,6 @@ async fn run_one_call(
                 }
             }
             phase.record_failed(in_stable_recovery, looks_like_overload, phase_elapsed);
-            let hangup_started = Instant::now();
-            let hangup_result = handle.hangup_and_wait(Some(call_timeout)).await;
-            let lifecycle_after_hangup = handle
-                .lifecycle()
-                .await
-                .ok()
-                .map(|snapshot| lifecycle_snapshot_json(&snapshot));
             call_failure_trace.record(json!({
                 "kind": if is_timeout { "answer_timeout" } else { "answer_failed" },
                 "call_seq": call_seq,
@@ -1154,7 +1158,9 @@ async fn run_one_call(
                     Ok(reason) => json!({"ok": true, "reason": reason}),
                     Err(err) => json!({"ok": false, "error": err.to_string()}),
                 },
-                "lifecycle_after_hangup": lifecycle_after_hangup,
+                "lifecycle_after_hangup": lifecycle_after_hangup
+                    .as_ref()
+                    .map(lifecycle_snapshot_json),
             }));
             return;
         }
@@ -1701,6 +1707,16 @@ fn looks_like_overload(err: &rvoip_sip::SessionError) -> bool {
     text.contains("503") || text.contains("service unavailable") || text.contains("overload")
 }
 
+fn lifecycle_reports_overload(snapshot: &rvoip_sip::CallLifecycleSnapshot) -> bool {
+    matches!(
+        snapshot.terminal.as_ref(),
+        Some(rvoip_sip::CallTerminalInfo::Failed {
+            status_code: 503,
+            ..
+        })
+    )
+}
+
 fn update_atomic_max(target: &AtomicU64, value: u64) {
     let mut current = target.load(Ordering::Relaxed);
     while value > current {
@@ -1729,7 +1745,7 @@ fn soak_like_settings(scenario: &BurstScenario) -> support::soak::SoakLoadSettin
 
 #[cfg(test)]
 mod tests {
-    use super::looks_like_overload;
+    use super::{lifecycle_reports_overload, looks_like_overload};
 
     #[test]
     fn overload_classifier_uses_typed_detail_without_unredacting_reports() {
@@ -1741,6 +1757,32 @@ mod tests {
         assert!(!error.to_string().contains("503"));
         assert!(!looks_like_overload(&rvoip_sip::SessionError::Other(
             "call failed before answer: 486 Busy Here".to_string(),
+        )));
+    }
+
+    #[test]
+    fn overload_classifier_uses_authoritative_terminal_status() {
+        let snapshot = |terminal| rvoip_sip::CallLifecycleSnapshot {
+            call_id: rvoip_sip::SessionId::new(),
+            state: None,
+            progress: Vec::new(),
+            answered: None,
+            media_security: None,
+            terminal: Some(terminal),
+            latest_transfer_outcome: None,
+        };
+
+        assert!(lifecycle_reports_overload(&snapshot(
+            rvoip_sip::CallTerminalInfo::Failed {
+                status_code: 503,
+                reason: "Service Unavailable".to_string(),
+            },
+        )));
+        assert!(!lifecycle_reports_overload(&snapshot(
+            rvoip_sip::CallTerminalInfo::Failed {
+                status_code: 486,
+                reason: "Busy Here".to_string(),
+            },
         )));
     }
 }

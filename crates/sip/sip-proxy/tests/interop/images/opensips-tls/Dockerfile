@@ -4,7 +4,7 @@ ARG OPENSIPS_VERSION=3.6.7-1
 ARG OPENSIPS_POOL=https://apt.opensips.org/pool/bullseye/3.6-releases/o/opensips
 ARG PROTO_TLS_SHA256=685f704faf2ce6b9015a0c059a32333bf789cabd8a467c7068aa1cea363de799
 ARG TLS_MGM_SHA256=20d83193399a9ee02b8c3f1cc2fbe311231ec22c0b43656add63f77110a68545
-ARG TLS_OPENSSL_SHA256=05e0c80de73b352390981352f08183f9acc3dd0187577688c4c174f94fd9bc68
+ARG TLS_OPENSSL_SHA256=690c52e06b9d0f8d76483900a4185f3a3d7cc3ec30a752ff762bdca254750209
 
 LABEL org.opencontainers.image.title="rvoip OpenSIPS 3.6.7 TLS interop peer" \
       org.opencontainers.image.description="Pinned OpenSIPS beta-gate peer with only the reviewed TLS modules added" \
