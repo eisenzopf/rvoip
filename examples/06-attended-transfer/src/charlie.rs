@@ -21,7 +21,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    let charlie_port = env_port("CHARLIE_PORT", 5062);
+    // Defaults avoid the combined examples-smoke ports used by quickstart-p2p
+    // (5060/5061) and secure-call-srtp (5060).
+    let charlie_port = env_port("CHARLIE_PORT", 5082);
 
     let mut charlie = StreamPeer::with_config(Config::local("charlie", charlie_port)).await?;
     println!("[CHARLIE] Waiting for consultation call from Bob...");

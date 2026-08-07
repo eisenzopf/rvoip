@@ -25,17 +25,20 @@ new call to the consultation leg.
 
 ## Demo flow
 
-1. Alice (`:5060`) calls Bob (`:5061`); Bob answers (the *original* call).
-2. Bob calls Charlie (`:5062`) — the *consultation* call — and waits for answer.
+1. Alice (`:5080`) calls Bob (`:5081`); Bob answers (the *original* call).
+2. Bob calls Charlie (`:5082`) — the *consultation* call — and waits for answer.
 3. Bob reads the consultation's `dialog_identity`, formats `Replaces`, and calls
    `transfer_attended` on the Alice leg.
 4. Alice receives the REFER (with `Replaces`), hangs up with Bob, and calls the
    Refer-To target. Charlie answers the transferred call. ✅
 
+Ports default to `5080`–`5082` so the combined `examples-smoke` suite does not
+collide with quickstart-p2p / SRTP demos that use `5060`/`5061`.
+
 ## Architecture
 
 ```
-   Alice (:5060) ── INVITE ─▶ Bob (:5061) ── INVITE (consult) ─▶ Charlie (:5062)
+   Alice (:5080) ── INVITE ─▶ Bob (:5081) ── INVITE (consult) ─▶ Charlie (:5082)
         │  ◀── REFER (Refer-To: Charlie; Replaces=consult dialog) ──┘
         │ hangup Bob
         └──────────────── INVITE (completes transfer) ─▶ Charlie  ✅ connected
@@ -50,15 +53,15 @@ new call to the consultation leg.
 Or manually, in three terminals (defaults shown):
 
 ```sh
-CHARLIE_PORT=5062 cargo run --bin charlie
-BOB_PORT=5061 CHARLIE_PORT=5062 cargo run --bin bob
-ALICE_PORT=5060 BOB_PORT=5061 cargo run --bin alice
+CHARLIE_PORT=5082 cargo run --bin charlie
+BOB_PORT=5081 CHARLIE_PORT=5082 cargo run --bin bob
+ALICE_PORT=5080 BOB_PORT=5081 cargo run --bin alice
 ```
 
 ## Expected output
 
 ```text
-  [ALICE] Got REFER to sip:charlie@127.0.0.1:5062
+  [ALICE] Got REFER to sip:charlie@127.0.0.1:5082
   [ALICE] Replaces = Some("session-…@rvoip-sip;to-tag=…;from-tag=…")
   [ALICE] ✅ Connected to Charlie (attended transfer complete).
   [BOB] Consultation with Charlie established.
