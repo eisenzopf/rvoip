@@ -270,12 +270,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-thiserror = "1.0"
+thiserror = "2.0"
 anyhow = "1.0"
 bytes = { version = "1.5", features = ["serde"] }
 uuid = { version = "1.7", features = ["v4", "serde"] }
-axum = "0.7"
-tower = "0.4"
+axum = "0.8"
+tower = "0.5"
 tower-http = { version = "0.5", features = ["trace", "cors"] }
 proptest = "1.4"
 async-trait = "0.1"
@@ -288,11 +288,11 @@ clap = { version = "4.0", features = ["derive"] }
 
 # Additional dependencies used by various crates
 serde_bytes = "0.11"
-base64 = "0.22"
-nom = "7.1"
+base64 = "0.23"
+nom = "8.0"
 log = "0.4"
-ordered-float = { version = "4.2.0", features = ["serde"] }
-socket2 = { version = "0.5", features = ["all"] }
+ordered-float = { version = "5.3.0", features = ["serde"] }
+socket2 = { version = "0.6", features = ["all"] }
 mio = { version = "0.8", features = ["os-poll", "net"] }
 # default-features=false drops rustls's default `aws_lc_rs` provider AND
 # `prefer-post-quantum` (which also requires aws_lc_rs) — otherwise the process
@@ -303,22 +303,22 @@ rustls-pemfile = "2.0"
 url = "2"
 # Used by rvoip-webrtc tls-rustls feature for in-process HTTPS/WSS termination.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
-axum-server = { version = "0.7", features = ["tls-rustls"] }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
 # Headless-Chromium driver for rvoip-webrtc's interop-browser dev-only test.
 # Requires a Chromium binary on PATH at test time. Default features disabled
 # to avoid pulling chromiumoxide_cdp's heavy proc-macro chain when the
 # feature isn't selected.
-chromiumoxide = { version = "0.7", default-features = false, features = ["tokio-runtime"] }
+chromiumoxide = { version = "0.8", default-features = false, features = ["tokio-runtime"] }
 sha2 = "0.10"
 zeroize = "1.9"
 hmac = "0.12"
-aes = "0.8"
+aes = "0.9"
 md-5 = "0.10"
 ring = "0.17"
 rcgen = "0.14"
 x509-parser = "0.18"
-webpki-roots = "0.26"
-serial_test = "3.1"
+webpki-roots = "1.0"
+serial_test = "4.0"
 fastrand = "2.0"
 
 # UCTP substrate deps — QUIC, WebTransport, length-prefix codec, metrics.
@@ -331,7 +331,7 @@ quinn = { version = "0.11", default-features = false, features = ["runtime-tokio
 web-transport-quinn = { version = "0.11", default-features = false, features = ["ring"] }
 web-transport = "0.10.6"
 tokio-util = { version = "0.7", features = ["codec", "compat"] }
-metrics = "0.23"
+metrics = "0.24"
 # Qualified, attributed MOQT draft-19 forks. Package aliases retain the
 # upstream Rust crate names while the registry identities remain rvoip-owned.
 moq-transport = { package = "rvoip-moq-transport", path = "crates/moq/rvoip-moq-transport", version = "0.3.7" }
@@ -346,16 +346,16 @@ webrtc = { package = "rvoip-webrtc-stack", path = "crates/webrtc/rvoip-webrtc-st
 hickory-resolver = { version = "0.26.1", default-features = false, features = ["tokio", "system-config"] }
 tracing-appender = "0.2"
 env_logger = "0.11"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 # 🔧 Optimization Profiles for Binary Size Reduction
 
 
 # Optional perf-test instrumentation (rvoip-sip `perf-tests` feature).
-console-subscriber = "0.4"
+console-subscriber = "0.5"
 dhat = "0.3"
 hdrhistogram = "7.5"
-sysinfo = "0.31"
+sysinfo = "0.39"
 [profile.release]
 # Speed-optimized release for a perf-sensitive networking library.
 # Was previously `opt-level = "s"` (size) — switched to 3 after
