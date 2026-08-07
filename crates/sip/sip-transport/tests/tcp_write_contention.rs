@@ -14,8 +14,11 @@
 //!     write mutex this includes the socket work of everyone ahead of
 //!     you; behind a writer task it is a queue push.
 //!
+//! Ignored by default: this is a measurement tool, not a correctness
+//! check, and it only produces comparable numbers in a release build.
+//!
 //! Run with: cargo test -p rvoip-sip-transport --release
-//!           --test tcp_write_contention -- --nocapture
+//!           --test tcp_write_contention -- --ignored --nocapture
 
 use rvoip_sip_core::builder::SimpleRequestBuilder;
 use rvoip_sip_core::{Message, Method};
@@ -45,6 +48,7 @@ fn sample_message(index: usize) -> Message {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "measurement tool; run explicitly with --release --ignored"]
 async fn concurrent_senders_on_one_connection() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let server_addr = listener.local_addr().unwrap();
