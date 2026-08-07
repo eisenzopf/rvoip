@@ -3116,9 +3116,16 @@ mod tests {
         // Steady state reached, then a rough patch that has armed the window.
         let after = start + Duration::from_secs(4);
         for index in 0..40u32 {
-            sink.record_offer(after + Duration::from_millis(u64::from(index) * 20), true, &policy);
+            sink.record_offer(
+                after + Duration::from_millis(u64::from(index) * 20),
+                true,
+                &policy,
+            );
         }
-        assert!(sink.rolling_drop_counts().0 > 0, "window should be populated");
+        assert!(
+            sink.rolling_drop_counts().0 > 0,
+            "window should be populated"
+        );
 
         // Renegotiation: same reset update_sink_group performs.
         sink.warmup_since = None;

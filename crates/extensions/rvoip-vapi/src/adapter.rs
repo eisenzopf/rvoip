@@ -830,18 +830,21 @@ async fn activate_route_worker(
         "vapi_session",
         connection_id = %route.connection_id
     );
-    tokio::spawn(async move {
-        let outcome = run_websocket_session(
-            &runtime_environment.config,
-            &runtime_environment.vapi_events,
-            &task_route,
-            socket,
-            outgoing,
-            command_rx,
-        )
-        .await;
-        finish_route(&runtime_environment, task_route, outcome).await;
-    }.instrument(session_span));
+    tokio::spawn(
+        async move {
+            let outcome = run_websocket_session(
+                &runtime_environment.config,
+                &runtime_environment.vapi_events,
+                &task_route,
+                socket,
+                outgoing,
+                command_rx,
+            )
+            .await;
+            finish_route(&runtime_environment, task_route, outcome).await;
+        }
+        .instrument(session_span),
+    );
     Ok(receipt)
 }
 
@@ -1385,8 +1388,8 @@ async fn run_websocket_session(
         ) {
             tracing::warn!(
                 largest_inbound_chunk_bytes = health.largest_inbound_chunk_bytes,
-                buffer_bytes = config.inbound_queue_capacity
-                    * route.options.audio_format.frame_bytes(),
+                buffer_bytes =
+                    config.inbound_queue_capacity * route.options.audio_format.frame_bytes(),
                 "a single inbound burst approached the jitter buffer; drop-oldest \
                  discards speech rather than trimming delay at this size"
             );

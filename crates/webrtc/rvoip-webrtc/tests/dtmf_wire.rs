@@ -61,9 +61,7 @@ fn retain_only_48khz_telephone_event(sdp: &str) -> String {
 fn strip_sdes_mid_extmap(sdp: &str) -> String {
     let mut output = String::with_capacity(sdp.len());
     for line in sdp.lines() {
-        if line.starts_with("a=extmap:")
-            && line.contains("urn:ietf:params:rtp-hdrext:sdes:mid")
-        {
+        if line.starts_with("a=extmap:") && line.contains("urn:ietf:params:rtp-hdrext:sdes:mid") {
             continue;
         }
         output.push_str(line);
@@ -392,7 +390,6 @@ async fn public_media_stream_decodes_the_negotiated_dynamic_dtmf_mapping() {
     sender.close().await.ok();
 }
 
-
 /// Regression: an endpoint that does not negotiate the SDES MID header
 /// extension must still receive RFC 4733 telephone events.
 ///
@@ -419,7 +416,10 @@ async fn dtmf_reaches_a_peer_that_never_negotiates_the_sdes_mid_extension() {
     );
     let offer = strip_sdes_mid_extmap(&original_offer);
     assert!(!offer.contains("urn:ietf:params:rtp-hdrext:sdes:mid"));
-    assert!(offer.contains("a=mid:"), "BUNDLE grouping must be preserved");
+    assert!(
+        offer.contains("a=mid:"),
+        "BUNDLE grouping must be preserved"
+    );
 
     let sender = RvoipPeerConnection::new(&config, PeerRole::Answerer)
         .await

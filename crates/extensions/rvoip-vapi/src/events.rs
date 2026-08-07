@@ -204,9 +204,7 @@ mod tests {
 
     #[test]
     fn user_speech_start_is_recognised_as_barge_in() {
-        let user = VapiEvent::parse(
-            r#"{"type":"speech-update","status":"started","role":"user"}"#,
-        );
+        let user = VapiEvent::parse(r#"{"type":"speech-update","status":"started","role":"user"}"#);
         assert!(user.is_user_speech_start());
         // The assistant starting to speak is not a barge-in, and neither is
         // the user stopping.
@@ -214,10 +212,10 @@ mod tests {
             r#"{"type":"speech-update","status":"started","role":"assistant"}"#
         )
         .is_user_speech_start());
-        assert!(!VapiEvent::parse(
-            r#"{"type":"speech-update","status":"stopped","role":"user"}"#
-        )
-        .is_user_speech_start());
+        assert!(
+            !VapiEvent::parse(r#"{"type":"speech-update","status":"stopped","role":"user"}"#)
+                .is_user_speech_start()
+        );
         assert!(!VapiEvent::parse(r#"{"type":"transcript","role":"user"}"#).is_user_speech_start());
     }
 

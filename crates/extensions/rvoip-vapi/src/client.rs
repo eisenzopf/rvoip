@@ -1,6 +1,5 @@
 //! Vapi REST call creation and authenticated WebSocket setup.
 
-
 use bytes::BytesMut;
 use reqwest::Client;
 use serde::Deserialize;
@@ -154,7 +153,6 @@ pub(crate) async fn connect_websocket(
     .map_err(|_| VapiError::WebSocketSetup)?;
     Ok(socket)
 }
-
 
 #[cfg(test)]
 mod tests {

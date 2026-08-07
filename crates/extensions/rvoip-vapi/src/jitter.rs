@@ -57,19 +57,14 @@ impl JitterEstimator {
     /// Falls back to the floor until there is enough history to trust: an
     /// estimate from two packets is noise, and starting shallow on a bursty
     /// source causes audible underrun.
-    pub(crate) fn target_frames(
-        &self,
-        frame_ms: u32,
-        floor_ms: u32,
-        ceiling_ms: u32,
-    ) -> usize {
+    pub(crate) fn target_frames(&self, frame_ms: u32, floor_ms: u32, ceiling_ms: u32) -> usize {
         let frame_ms = frame_ms.max(1);
         let floor_frames = floor_ms.div_ceil(frame_ms) as usize;
         if self.observations < 16 {
             return floor_frames;
         }
-        let wanted_ms = (self.jitter_ms * TARGET_JITTER_MULTIPLE)
-            .clamp(floor_ms as f32, ceiling_ms as f32);
+        let wanted_ms =
+            (self.jitter_ms * TARGET_JITTER_MULTIPLE).clamp(floor_ms as f32, ceiling_ms as f32);
         let frames = (wanted_ms / frame_ms as f32).ceil() as usize;
         frames.max(floor_frames)
     }

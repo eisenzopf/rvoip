@@ -88,8 +88,10 @@ impl MediaHealthState {
     }
 
     pub(crate) fn set_jitter(&self, jitter_ms: f32, target_frames: usize) {
-        self.jitter_tenths_ms
-            .store((jitter_ms * 10.0).round().max(0.0) as u64, Ordering::Relaxed);
+        self.jitter_tenths_ms.store(
+            (jitter_ms * 10.0).round().max(0.0) as u64,
+            Ordering::Relaxed,
+        );
         self.jitter_target_frames
             .store(target_frames, Ordering::Relaxed);
     }

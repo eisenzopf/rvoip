@@ -37,6 +37,9 @@ use rvoip_core::message::{ContentType, Message, MessageOrigin, MessageRecipients
 use rvoip_core::orchestrator::Orchestrator;
 use rvoip_core::session::SessionMedium;
 use rvoip_core::store::MessageFilter;
+use rvoip_core_traits::identity::{
+    AuthenticatedPrincipal, AuthenticationMethod, IdentityAssurance,
+};
 use rvoip_sip::server::contact_resolver::{
     ContactRequest, ContactResolver, RegistrarContactResolver, ResolvedContact,
 };
@@ -44,7 +47,6 @@ use rvoip_sip::{
     Config as LowSipConfig, IpNet, SipAdapter, SipInboundContextPolicy, SipListenerAuthPolicy,
     UnifiedCoordinator,
 };
-use rvoip_core_traits::identity::{AuthenticatedPrincipal, AuthenticationMethod, IdentityAssurance};
 use rvoip_webrtc::{
     WebRtcAdapter, WebRtcConfig as LowWebRtcConfig, WebRtcServer, WebRtcServerBuilder,
 };
@@ -739,10 +741,8 @@ impl RvoipAppBuilder {
                             "trusted trunk CIDR {cidr:?} is not valid, e.g. 203.0.113.0/24"
                         ))
                     })?;
-                    policy = policy.with_trusted_cidr(
-                        parsed,
-                        trusted_trunk_principal(subject, &tenant),
-                    );
+                    policy =
+                        policy.with_trusted_cidr(parsed, trusted_trunk_principal(subject, &tenant));
                 }
                 UnifiedCoordinator::new_with_listener_auth(low_sip, policy).await
             }
@@ -760,11 +760,13 @@ impl RvoipAppBuilder {
             let adapter = if sip.captured_headers.is_empty() {
                 SipAdapter::new(Arc::clone(&coordinator)).await
             } else {
-                let policy = SipInboundContextPolicy::new(&sip.captured_headers)
-                    .map_err(|error| AppError::Policy(format!(
-                        "inbound header allowlist rejected: {error:?}. \
+                let policy =
+                    SipInboundContextPolicy::new(&sip.captured_headers).map_err(|error| {
+                        AppError::Policy(format!(
+                            "inbound header allowlist rejected: {error:?}. \
                          Only X-* headers are eligible."
-                    )))?;
+                        ))
+                    })?;
                 SipAdapter::new_with_inbound_context_policy(Arc::clone(&coordinator), policy).await
             }
             .map_err(|error| AppError::Sip(error.to_string()))?;
