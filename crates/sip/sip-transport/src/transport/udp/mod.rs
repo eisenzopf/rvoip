@@ -8,7 +8,7 @@ pub use socket::UdpSocketOptions;
 
 use std::fmt;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -31,6 +31,16 @@ const DEFAULT_CHANNEL_CAPACITY: usize = 1000;
 const DEFAULT_PARSE_WORKERS: usize = 1;
 const MAX_PARSE_WORKERS: usize = 64;
 const UDP_RECEIVE_DRAIN_BATCH: usize = 64;
+
+/// How often the dropped-datagram warning repeats once shedding starts.
+/// The first drop always logs; after that one line per this many keeps the
+/// condition visible without the log itself becoming the bottleneck.
+const UDP_DROP_LOG_INTERVAL: u64 = 1_000;
+
+/// Process-wide count of datagrams dropped because a parse worker queue was
+/// full. Drives only the log rate limit; the reportable figure is the
+/// `queue_full` counter in `diagnostics`.
+static UDP_WORKER_QUEUE_DROPS: AtomicU64 = AtomicU64::new(0);
 
 /// RFC 3261 §18.1.1 — outbound SIP requests larger than this MUST be
 /// shipped over a congestion-controlled transport (TCP) rather than UDP
@@ -494,10 +504,19 @@ fn enqueue_udp_datagram(
         Ok(()) => diagnostics::record_udp_worker_queue_enqueued(),
         Err(TrySendError::Full(_)) => {
             diagnostics::record_udp_worker_queue_full();
-            if diagnostics::enabled() {
+            // Warn without waiting for diagnostics to be turned on. Dropping
+            // here is a real loss of a SIP message, and because UDP leaves
+            // recovery to the sender's retransmission timer it reaches the
+            // application as a slow call or a timeout, never as a send error.
+            // Rate limited because at overload this fires per datagram, and a
+            // log flood is its own outage.
+            let dropped = UDP_WORKER_QUEUE_DROPS.fetch_add(1, Ordering::Relaxed) + 1;
+            if dropped == 1 || dropped % UDP_DROP_LOG_INTERVAL == 0 {
                 warn!(
                     worker_index,
-                    "UDP parse worker queue full; dropping datagram"
+                    dropped_total = dropped,
+                    "UDP parse worker queue full, dropping datagram; raise \
+                     sip_udp_parse_workers or the UDP receive buffer"
                 );
             }
         }

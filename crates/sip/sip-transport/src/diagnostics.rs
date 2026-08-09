@@ -568,8 +568,17 @@ pub(crate) fn record_udp_worker_queue_enqueued() {
     increment(&UDP_WORKER_QUEUE_ENQUEUED);
 }
 
+/// Counted even with diagnostics off, unlike its siblings.
+///
+/// A full parse queue means a SIP datagram was dropped. UDP has no
+/// retransmission of its own, so the loss surfaces one layer up as the
+/// sender's timer firing, which reads as latency and timeouts rather
+/// than as an error anyone can attribute. Leaving the only record of it
+/// behind an opt-in flag makes a server that is shedding traffic look
+/// healthy. The cost is one relaxed increment on a path that is already
+/// the exceptional one.
 pub(crate) fn record_udp_worker_queue_full() {
-    increment(&UDP_WORKER_QUEUE_FULL);
+    increment_always(&UDP_WORKER_QUEUE_FULL);
 }
 
 pub(crate) fn record_udp_parse_ok() {
@@ -1425,6 +1434,30 @@ mod tests {
         fn drop(&mut self) {
             replace_enabled_for_tests(self.previous);
         }
+    }
+
+    /// A dropped SIP datagram must be countable on a server nobody
+    /// thought to turn diagnostics on for, which is every server that has
+    /// not had the problem yet. Every other UDP counter stays opt-in.
+    #[test]
+    fn dropped_datagrams_are_counted_with_diagnostics_off() {
+        let _test_lock = DIAGNOSTICS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _enabled_override = TestEnabledOverrideGuard::new(false);
+        reset();
+
+        record_udp_datagram_received();
+        record_udp_worker_queue_enqueued();
+        record_udp_worker_queue_full();
+
+        let snapshot = snapshot();
+        assert_eq!(
+            snapshot.udp_worker_queue_full, 1,
+            "shed datagrams must be counted even with diagnostics off",
+        );
+        assert_eq!(snapshot.udp_datagrams_received, 0);
+        assert_eq!(snapshot.udp_worker_queue_enqueued, 0);
     }
 
     #[test]
