@@ -14,7 +14,7 @@ where we actually are.
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Foundations: types, feature flags, ADR, oracle qualification | 🟡 **In progress** — code landed, external items outstanding |
-| 1 | RFC 4867 payload format + AMR file storage format | ⚪ Not started |
+| 1 | RFC 4867 payload format + AMR file storage format | 🟡 **Core done** — three optional extensions deferred |
 | 2 | SDP negotiation + relay path | ⚪ Not started |
 | 3 | `common/` DSP layer + oracle harness | ⚪ Not started |
 | 4 | AMR-WB decoder, fixed point | ⚪ Not started |
@@ -26,6 +26,58 @@ where we actually are.
 **There is no working AMR encoder or decoder yet.** `AmrCodec` constructs and
 negotiates, but `encode`/`decode` return `FeatureNotEnabled` naming the phase
 that will supply them.
+
+---
+
+## Phase 1 — RFC 4867 payload format
+
+### Done
+
+| Item | Where |
+|---|---|
+| MSB-first bit reader/writer (bandwidth-efficient framing is not octet-aligned) | `src/codecs/amr/bits.rs` |
+| Bandwidth-efficient **and** octet-aligned framing | `src/codecs/amr/payload.rs` |
+| CMR, ToC chains, F/FT/Q bits, multi-frame packets | `src/codecs/amr/payload.rs` |
+| `NO_DATA` (FT 15) and `SPEECH_LOST` (FT 14, WB only) | `src/codecs/amr/payload.rs` |
+| Reserved-FT rejection (RFC 4867: discard the packet) | `src/codecs/amr/mode.rs` |
+| AMR file storage format, whole-file and incremental readers | `src/codecs/amr/storage.rs` |
+
+**Verification:** 62 AMR tests, 215 codec-core tests overall. Notable coverage:
+
+- Round-trip over **every** (variant × mode × framing) combination, and every
+  frame count from 1 to the 32-frame limit.
+- Truncation rejected at **every byte prefix** of a valid payload.
+- Both framings asserted byte-for-byte against the RFC bit diagrams, and
+  asserted *not* to be interoperable — decoding one as the other must fail
+  rather than yield plausible garbage. That is the most frequently reported AMR
+  interop bug, so it gets an explicit test.
+- Cross-variant frames rejected on pack: NB and WB frame sizes collide, so
+  packing one into the other's stream would silently corrupt the payload.
+- Storage frames feed the payload packer without conversion, which is what will
+  let 3GPP conformance vectors drive the payload tests directly.
+
+### Deferred — the three optional octet-aligned extensions
+
+Frame CRC, robust sorting, and interleaving are **not implemented**. Configuring
+any of them is rejected at construction rather than silently ignored, because
+misparsing a payload that uses them yields plausible garbage rather than an
+obvious failure. All three are optional parameters a receiver may legitimately
+decline to negotiate, so this is a valid interoperable subset — but it is a
+narrowing of the Phase 1 scope in the plan, recorded here rather than glossed.
+
+Frame CRC has an additional blocker for wideband: RFC 4867 defers the AMR-WB
+class A bit counts to TS 26.201 instead of tabulating them, so
+`AmrMode::class_a_bits()` returns `None` for WB. NB CRC is implementable today.
+
+### Remaining for Phase 1
+
+- [ ] `PayloadFormat` adapter and dynamic PT registration — blocked on **Q1**
+      below (where the packetizer lives relative to `rtp-core`).
+- [ ] `cargo fuzz` target in `crates/media/fuzz`. The in-module sweep over short
+      arbitrary inputs is a stand-in, not a substitute.
+- [ ] Byte-for-byte comparison against captured real-world AMR pcaps via the
+      Wireshark dissector. Needs sample captures.
+- [ ] The three deferred extensions above, if we decide to negotiate them.
 
 ---
 
@@ -95,7 +147,17 @@ settles whether Phase 5 needs its 2–3 week fallback budget (risk R8).
 
 ## Open questions
 
-**Q1 — Where does the RFC 4867 packetizer live?** *(decide in Phase 1)*
+**Q1 — Where does the RFC 4867 packetizer live?** *(decided: option (c))*
+
+**Resolved.** The packetizer lives in `codec-core` beside the codec, at
+`src/codecs/amr/payload.rs`. RFC 4867 framing is codec framing rather than
+transport, and it needs the mode tables intimately. This diverges from the
+existing convention that payload formats live in `rtp-core` (`g711.rs`,
+`opus.rs`, `vp8.rs`), so the `PayloadFormat` adapter in `rtp-core` will need
+either a dependency edge or a thin re-declaration — still to be settled when
+that adapter is written.
+
+Original framing of the question, retained for context:
 
 `rtp-core` does **not** depend on `codec-core`; both are consumed by
 `media-core`. But the packetizer needs the frame-size tables that now live in
@@ -110,8 +172,7 @@ settles whether Phase 5 needs its 2–3 week fallback budget (risk R8).
   payload formats live in `rtp-core` (`g711.rs`, `opus.rs`, `vp8.rs`).
 - **(d)** Extract shared AMR constants into a small crate both depend on.
 
-Leaning **(c)**: RFC 4867 framing is codec framing, not transport, and it needs
-the mode tables intimately. To be settled at the start of Phase 1.
+Chose **(c)**.
 
 **Q2 — Crate placement.** Keep AMR inside `rvoip-codec-core`, or split into a
 standalone publishable crate? A pure-Rust AMR crate would be the first in the
@@ -126,6 +187,25 @@ support in Phase 1, and only then if we choose to implement CRC at all.
 ---
 
 ## Changelog
+
+### 2026-08-08 — Phase 1 core complete
+
+RFC 4867 payload format (both framings) and the AMR file storage format, with
+62 AMR tests. Three optional octet-aligned extensions deferred; see above.
+
+Worth flagging:
+
+- The two framings differ in size for the same content — an AMR-WB mode 0 frame
+  is 18 octets bandwidth-efficient and 19 octet-aligned. That saving is the
+  point of the framing, and it is exactly why the two are not interoperable.
+  There is an explicit test asserting cross-decoding fails.
+- `unpack` rejects a whole trailing octet beyond what the ToC accounts for.
+  Sub-octet padding is legitimate; a full octet means the sender's frame sizes
+  disagree with ours, which is better caught at the boundary than delivered to
+  the decoder as misaligned bits.
+- The ToC chain is bounded at 32 frames (640 ms). RFC 4867 sets no hard limit —
+  it is governed by `maxptime` — but an unbounded F-bit chain in a hostile
+  payload would otherwise loop until the buffer ran out.
 
 ### 2026-08-08 — Phase 0 code complete
 

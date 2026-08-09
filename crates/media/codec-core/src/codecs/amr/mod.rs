@@ -22,9 +22,14 @@ use crate::types::{
     AudioCodec, CodecConfig, CodecInfo, CodecType, CodedFrame, VariableRateCodec,
 };
 
+mod bits;
 pub mod mode;
+pub mod payload;
+pub mod storage;
 
 pub use mode::{AmrFrameType, AmrMode, AmrModeSet, AmrVariant};
+pub use payload::{AmrPacket, AmrPayloadCodec, AmrPayloadConfig, AmrPayloadFrame};
+pub use storage::AmrStorageReader;
 
 /// AMR-NB / AMR-WB codec.
 ///
