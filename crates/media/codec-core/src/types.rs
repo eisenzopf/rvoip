@@ -106,6 +106,178 @@ pub trait AudioCodecExt: AudioCodec {
     fn max_decoded_size(&self, input_bytes: usize) -> usize;
 }
 
+/// What a single coded frame carries, independent of any particular codec.
+///
+/// Fixed-rate codecs can signal frame type through output length — G.729 emits
+/// 10 bytes for speech, 2 for SID and 0 for untransmitted. Variable-rate codecs
+/// cannot: AMR frame sizes collide across variants, and an empty payload is
+/// ambiguous between "deliberately not sent" and "lost in transit", which drive
+/// completely different decoder behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FrameKind {
+    /// Active speech, coded in the frame's mode.
+    Speech,
+    /// Comfort noise (a SID frame) produced by discontinuous transmission.
+    ComfortNoise,
+    /// Nothing was transmitted for this frame. The sender chose silence; the
+    /// decoder should continue comfort-noise generation, not conceal a loss.
+    NoData,
+    /// The frame was lost or is unusable. The decoder should run packet loss
+    /// concealment.
+    Lost,
+}
+
+impl FrameKind {
+    /// Whether the decoder should treat this frame as a gap needing
+    /// concealment rather than as data.
+    #[must_use]
+    pub const fn needs_concealment(self) -> bool {
+        matches!(self, Self::Lost)
+    }
+}
+
+/// One coded frame together with the metadata a variable-rate codec needs.
+///
+/// For AMR this maps onto the RFC 4867 table-of-contents entry: `kind` and
+/// `mode` together are the FT field, and `quality_ok` is the Q bit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodedFrame {
+    /// What this frame carries.
+    pub kind: FrameKind,
+    /// Codec mode index. Meaningful when `kind` is [`FrameKind::Speech`];
+    /// ignored otherwise.
+    pub mode: u8,
+    /// `false` when the frame is known to be damaged. A decoder should treat a
+    /// bad frame as degraded input rather than trusting its bits — for AMR this
+    /// is the RFC 4867 Q bit driving `SPEECH_BAD` / `SID_BAD` handling.
+    pub quality_ok: bool,
+    /// The coded payload, excluding any RTP payload headers.
+    pub data: Vec<u8>,
+}
+
+impl CodedFrame {
+    /// Create a speech frame.
+    #[must_use]
+    pub const fn speech(mode: u8, data: Vec<u8>) -> Self {
+        Self {
+            kind: FrameKind::Speech,
+            mode,
+            quality_ok: true,
+            data,
+        }
+    }
+
+    /// Create a comfort-noise (SID) frame.
+    #[must_use]
+    pub const fn comfort_noise(data: Vec<u8>) -> Self {
+        Self {
+            kind: FrameKind::ComfortNoise,
+            mode: 0,
+            quality_ok: true,
+            data,
+        }
+    }
+
+    /// Create a frame representing nothing transmitted.
+    #[must_use]
+    pub const fn no_data() -> Self {
+        Self {
+            kind: FrameKind::NoData,
+            mode: 0,
+            quality_ok: true,
+            data: Vec::new(),
+        }
+    }
+
+    /// Create a frame representing a loss, for driving concealment.
+    #[must_use]
+    pub const fn lost() -> Self {
+        Self {
+            kind: FrameKind::Lost,
+            mode: 0,
+            quality_ok: false,
+            data: Vec::new(),
+        }
+    }
+
+    /// Mark this frame as damaged.
+    #[must_use]
+    pub const fn with_bad_quality(mut self) -> Self {
+        self.quality_ok = false;
+        self
+    }
+}
+
+/// Codecs whose bit rate is negotiated and may change from frame to frame.
+///
+/// [`AudioCodec`] assumes one fixed frame size and one implied rate, which is
+/// true for G.711, G.729 and Opus as used here but not for AMR: the mode is an
+/// *input* chosen per frame, a peer can demand a different one mid-call through
+/// a codec mode request, and the decoder must report which mode it actually
+/// received.
+///
+/// This is a separate trait rather than an extension of [`AudioCodec`] so
+/// existing fixed-rate codecs are unaffected. Implementors provide both: the
+/// [`AudioCodec`] methods operate at the currently selected mode.
+pub trait VariableRateCodec: AudioCodec {
+    /// Modes this codec may use, as negotiated. For AMR this is the SDP
+    /// `mode-set` intersection, which is a hard restriction rather than a
+    /// preference order.
+    fn allowed_modes(&self) -> Vec<u8>;
+
+    /// The mode the encoder will use for the next frame.
+    fn current_mode(&self) -> u8;
+
+    /// Select the encoder's mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `mode` is not in [`Self::allowed_modes`], or is
+    /// not a valid mode index for this codec.
+    fn set_mode(&mut self, mode: u8) -> Result<()>;
+
+    /// Apply a codec mode request received from the peer.
+    ///
+    /// `None` means the peer expressed no preference (the RFC 4867 CMR value
+    /// 15). A request for a mode outside [`Self::allowed_modes`] is ignored
+    /// rather than treated as an error, since it originates from the network.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if applying an otherwise valid mode fails.
+    fn apply_mode_request(&mut self, mode: Option<u8>) -> Result<()> {
+        if let Some(mode) = mode {
+            if self.allowed_modes().contains(&mode) {
+                self.set_mode(mode)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Encode one frame, reporting what kind of frame was produced.
+    ///
+    /// With discontinuous transmission enabled this may return a comfort-noise
+    /// or no-data frame instead of speech.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input frame is the wrong size or encoding
+    /// fails.
+    fn encode_frame(&mut self, samples: &[i16]) -> Result<CodedFrame>;
+
+    /// Decode one frame, given its type.
+    ///
+    /// Passing a [`FrameKind::Lost`] frame runs packet loss concealment; a
+    /// [`FrameKind::NoData`] frame continues comfort noise. Both produce a full
+    /// frame of output samples.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the frame's payload does not match the size
+    /// implied by its kind and mode, or decoding fails.
+    fn decode_frame(&mut self, frame: &CodedFrame) -> Result<Vec<i16>>;
+}
+
 /// Audio codec information
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodecInfo {
@@ -143,6 +315,11 @@ pub enum CodecType {
     G729BA,
     /// Opus modern codec
     Opus,
+    /// AMR narrowband (3GPP TS 26.071), 8 kHz, 8 modes from 4.75 to 12.2 kbit/s
+    AmrNb,
+    /// AMR wideband (3GPP TS 26.171 / ITU-T G.722.2), 16 kHz, 9 modes from 6.6
+    /// to 23.85 kbit/s. The HD-voice codec offered by mobile and IMS networks.
+    AmrWb,
 }
 
 impl CodecType {
@@ -157,6 +334,8 @@ impl CodecType {
             Self::G729A => "G729A",
             Self::G729BA => "G729BA",
             Self::Opus => "opus",
+            Self::AmrNb => "AMR",
+            Self::AmrWb => "AMR-WB",
         }
     }
 
@@ -164,7 +343,13 @@ impl CodecType {
     #[must_use]
     pub const fn default_sample_rate(self) -> u32 {
         match self {
-            Self::G711Pcmu | Self::G711Pcma | Self::G729 | Self::G729A | Self::G729BA => 8000,
+            Self::G711Pcmu
+            | Self::G711Pcma
+            | Self::G729
+            | Self::G729A
+            | Self::G729BA
+            | Self::AmrNb => 8000,
+            Self::AmrWb => 16000,
             Self::Opus => 48000,
         }
     }
@@ -175,6 +360,10 @@ impl CodecType {
         match self {
             Self::G711Pcmu | Self::G711Pcma | Self::Opus => 64000,
             Self::G729 | Self::G729A | Self::G729BA => 8000,
+            // Field-proven defaults: rtpengine uses these as its default
+            // (highest) rates for AMR and AMR-WB respectively.
+            Self::AmrNb => 6700,
+            Self::AmrWb => 14250,
         }
     }
 
@@ -186,7 +375,9 @@ impl CodecType {
             Self::G711Pcma => Some(8),
 
             Self::G729 | Self::G729A | Self::G729BA => Some(18),
-            Self::Opus => None, // Dynamic payload type
+            // Opus and both AMR variants use dynamic payload types. AMR and
+            // AMR-WB must always be distinct payload types (RFC 4867 S4.1).
+            Self::Opus | Self::AmrNb | Self::AmrWb => None,
         }
     }
 
@@ -194,7 +385,13 @@ impl CodecType {
     #[must_use]
     pub const fn supported_sample_rates(self) -> &'static [u32] {
         match self {
-            Self::G711Pcmu | Self::G711Pcma | Self::G729 | Self::G729A | Self::G729BA => &[8000],
+            Self::G711Pcmu
+            | Self::G711Pcma
+            | Self::G729
+            | Self::G729A
+            | Self::G729BA
+            | Self::AmrNb => &[8000],
+            Self::AmrWb => &[16000],
             Self::Opus => &[8000, 12000, 16000, 24000, 48000],
         }
     }
@@ -203,7 +400,13 @@ impl CodecType {
     #[must_use]
     pub const fn supported_channels(self) -> &'static [u8] {
         match self {
-            Self::G711Pcmu | Self::G711Pcma | Self::G729 | Self::G729A | Self::G729BA => &[1],
+            Self::G711Pcmu
+            | Self::G711Pcma
+            | Self::G729
+            | Self::G729A
+            | Self::G729BA
+            | Self::AmrNb
+            | Self::AmrWb => &[1],
             Self::Opus => &[1, 2],
         }
     }
@@ -440,6 +643,39 @@ impl CodecConfig {
         Self::new(CodecType::Opus)
     }
 
+    /// Create an AMR narrowband configuration with RFC 4867 defaults.
+    #[must_use]
+    pub fn amr_nb() -> Self {
+        Self::new(CodecType::AmrNb)
+    }
+
+    /// Create an AMR wideband configuration with RFC 4867 defaults.
+    #[must_use]
+    pub fn amr_wb() -> Self {
+        Self::new(CodecType::AmrWb)
+    }
+
+    /// Select octet-aligned or bandwidth-efficient AMR framing.
+    #[must_use]
+    pub const fn with_amr_octet_align(mut self, octet_align: bool) -> Self {
+        self.parameters.amr.octet_align = octet_align;
+        self
+    }
+
+    /// Restrict the AMR mode set. An empty slice means all modes.
+    #[must_use]
+    pub fn with_amr_mode_set(mut self, modes: &[u8]) -> Self {
+        self.parameters.amr.mode_set = AmrParameters::mode_set_from_indices(modes);
+        self
+    }
+
+    /// Enable AMR voice activity detection and discontinuous transmission.
+    #[must_use]
+    pub const fn with_amr_dtx(mut self, dtx: bool) -> Self {
+        self.parameters.amr.dtx = dtx;
+        self
+    }
+
     /// Set sample rate
     #[must_use]
     pub const fn with_sample_rate(mut self, sample_rate: SampleRate) -> Self {
@@ -598,6 +834,9 @@ impl CodecType {
 
             Self::G729 | Self::G729A | Self::G729BA => (8000, 8000),
             Self::Opus => (6_000, 510_000),
+            // Lowest and highest speech modes; see codecs::amr::AmrMode.
+            Self::AmrNb => (4_750, 12_200),
+            Self::AmrWb => (6_600, 23_850),
         }
     }
 }
@@ -612,6 +851,104 @@ pub struct CodecParameters {
     pub g729: G729Parameters,
     /// Opus specific parameters
     pub opus: OpusParameters,
+    /// AMR-NB / AMR-WB specific parameters
+    pub amr: AmrParameters,
+}
+
+/// AMR-NB / AMR-WB parameters, mirroring the SDP attributes of RFC 4867 §8.1.
+///
+/// Defaults match the RFC's defaults so a configuration built without explicit
+/// AMR settings negotiates the same way a bare `a=rtpmap` line would.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AmrParameters {
+    /// Use octet-aligned framing rather than bandwidth-efficient.
+    ///
+    /// RFC 4867 defaults to bandwidth-efficient (`octet-align=0`). Both are
+    /// common in the field and the two are not interoperable, so an answer must
+    /// preserve whatever the offer specified — getting this wrong is the most
+    /// frequently reported AMR interop failure.
+    pub octet_align: bool,
+
+    /// Permitted mode indices, as a bitmask: bit `n` set means mode `n` is
+    /// allowed. Zero means all modes, the RFC default when `mode-set` is absent.
+    ///
+    /// A bitmask rather than a list because it is `Copy` (keeping
+    /// [`CodecConfig::with_parameters`] usable in const context), it cannot
+    /// contain duplicates, and negotiation is then a bitwise AND. Build it with
+    /// [`Self::mode_set_from_indices`].
+    ///
+    /// This is a restriction, not a preference list: a sender must not use a
+    /// mode outside the set, and an empty negotiated intersection means the
+    /// payload type must be rejected.
+    pub mode_set: u16,
+
+    /// Frame-blocks between permitted mode changes: 1 (any frame) or 2.
+    pub mode_change_period: u8,
+
+    /// Restrict mode changes to neighbouring modes in the active set.
+    pub mode_change_neighbor: bool,
+
+    /// Include a per-frame CRC over the class A bits. Implies `octet_align`.
+    pub crc: bool,
+
+    /// Use robust sorting. Implies `octet_align`.
+    pub robust_sorting: bool,
+
+    /// Maximum frame-blocks in an interleaving group. `None` disables
+    /// interleaving. Implies `octet_align` when set.
+    pub interleaving: Option<u8>,
+
+    /// Enable voice activity detection and discontinuous transmission.
+    pub dtx: bool,
+}
+
+impl Default for AmrParameters {
+    fn default() -> Self {
+        Self {
+            // RFC 4867 default is bandwidth-efficient.
+            octet_align: false,
+            // Zero means "all modes", matching an absent mode-set.
+            mode_set: 0,
+            mode_change_period: 1,
+            mode_change_neighbor: false,
+            crc: false,
+            robust_sorting: false,
+            interleaving: None,
+            dtx: false,
+        }
+    }
+}
+
+impl AmrParameters {
+    /// Whether these parameters require octet-aligned framing, either because
+    /// it was requested directly or because an option implies it.
+    #[must_use]
+    pub const fn requires_octet_align(&self) -> bool {
+        self.octet_align || self.crc || self.robust_sorting || self.interleaving.is_some()
+    }
+
+    /// Build a [`Self::mode_set`] bitmask from mode indices.
+    ///
+    /// Indices above 15 are ignored here; range checking against the specific
+    /// variant happens when the codec is constructed, where the variant is
+    /// known.
+    #[must_use]
+    pub fn mode_set_from_indices(modes: &[u8]) -> u16 {
+        modes
+            .iter()
+            .filter(|&&index| index < 16)
+            .fold(0u16, |mask, &index| mask | (1u16 << index))
+    }
+
+    /// The mode indices in [`Self::mode_set`], ascending. Empty when the mask is
+    /// zero, which means "all modes" rather than "no modes".
+    #[must_use]
+    pub fn mode_set_indices(&self) -> Vec<u8> {
+        (0u8..16)
+            .filter(|&index| self.mode_set & (1u16 << index) != 0)
+            .collect()
+    }
 }
 
 /// G.711 codec parameters
@@ -746,6 +1083,9 @@ impl CodecType {
 
             Self::G729 | Self::G729A | Self::G729BA => 85,
             Self::Opus => 95,
+            Self::AmrNb => 80,
+            // Wideband speech; the point of carrying AMR at all.
+            Self::AmrWb => 92,
         }
     }
 }

@@ -145,6 +145,13 @@
 //!
 //! ### Core Codecs (enabled by default)
 //! - `g711`: G.711 μ-law/A-law codecs
+//!
+//! ### Optional Codecs
+//! - `g729`: G.729A/G.729AB
+//! - `opus`: Opus, backed by libopus
+//! - `amr-nb` / `amr-wb` / `amr`: AMR narrowband and wideband. **Types and mode
+//!   negotiation only at present — the encoder and decoder are not implemented.**
+//!   See `docs/AMR_IMPLEMENTATION_PLAN.md`.
 
 #![deny(missing_docs)]
 #![warn(clippy::all)]
@@ -161,7 +168,8 @@ pub mod utils;
 pub use codecs::{CodecFactory, CodecRegistry};
 pub use error::{CodecError, Result};
 pub use types::{
-    AudioCodec, AudioFrame, CodecCapability, CodecConfig, CodecInfo, CodecType, SampleRate,
+    AudioCodec, AudioFrame, CodecCapability, CodecConfig, CodecInfo, CodecType, CodedFrame,
+    FrameKind, SampleRate, VariableRateCodec,
 };
 
 /// Version information for the codec library
@@ -181,6 +189,10 @@ pub const SUPPORTED_CODECS: &[&str] = &[
     "G729BA",
     #[cfg(feature = "opus")]
     "opus",
+    #[cfg(feature = "amr-nb")]
+    "AMR",
+    #[cfg(feature = "amr-wb")]
+    "AMR-WB",
 ];
 
 /// Initialize the codec library

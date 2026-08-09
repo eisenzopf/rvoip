@@ -77,6 +77,9 @@ vapi     = ["dep:rvoip-vapi"]
 
 # ── SIP media add-ons ──
 g729 = ["sip", "rvoip-sip/g729"]
+amr-nb = ["sip", "rvoip-sip/amr-nb"]
+amr-wb = ["sip", "rvoip-sip/amr-wb"]
+amr = ["amr-nb", "amr-wb"]
 
 # ── SIP add-on (requires SIP): RFC 8224 caller-ID attestation ──
 sip-stir-shaken = ["sip", "dep:rvoip-stir-shaken"]
