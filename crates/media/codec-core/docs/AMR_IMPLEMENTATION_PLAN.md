@@ -37,10 +37,12 @@ Four decisions are now fixed for this branch:
   `build.rs`, and no change to the workspace's cross-compilation or `cargo deny` posture.
 - **Transcoding is required from day one.** Pass-through/relay alone is not sufficient;
   AMR must bridge to G.711 and Opus.
-- **Open-source libraries are used as a development-time oracle.** `opencore-amr` and
-  `vo-amrwbenc` (both Apache-2.0) generate per-stage reference vectors offline. They are
-  never linked into the shipped crate and never appear in the workspace dependency graph.
-  See §1.2.1.
+- **A two-tier development-time oracle generates per-stage reference vectors offline.**
+  The **3GPP reference C** (TS 26.073 / 26.173) is the authority — in-house use for product
+  design is expressly permitted, though it may not be redistributed, so it is fetched and
+  never committed (§2.3). `opencore-amr` and `vo-amrwbenc` (Apache-2.0) supply
+  redistribution-safe fixtures. Neither tier is linked into the shipped crate or appears in
+  the workspace dependency graph. See §1.2.1.
 - **AMR-WB is built first.** WB is the deliverable that matters (HD voice); NB follows.
 
   An earlier revision of this plan put NB first as a de-risking warm-up: simpler
@@ -72,41 +74,49 @@ Bit-exact ACELP is tractable when you can diff each DSP stage against a known-go
 implementation, and intractable when you can only compare final bitstreams. The oracle is
 what buys that, turning "debug a 244-bit mismatch" into "diff stage 6".
 
-**Chosen oracles** (both Apache-2.0, both distributed from the same SourceForge project,
-both on this workspace's `deny.toml` allow-list):
+**Two-tier oracle.** The 3GPP reference is the authority; the Apache-2.0 libraries are the
+redistribution-safe convenience layer.
 
-| Path | Oracle | Provenance |
-|---|---|---|
-| AMR-NB encode | `opencore-amr` | OpenCORE / AOSP, 3GPP-reference-derived |
-| AMR-NB decode | `opencore-amr` | same |
-| AMR-WB decode | `opencore-amr` | same |
-| AMR-WB encode | `vo-amrwbenc` | VisualOn, via Android Stagefright — **independent implementation, not reference-derived** |
+| Tier | Oracle | Covers | Provenance | Vendored? |
+|---|---|---|---|---|
+| **Primary — authority** | **TS 26.073** (NB fixed-point), **TS 26.173** (WB fixed-point) | NB enc+dec, WB enc+dec | **The normative definition of bit-exactness** — conformance is defined *as* agreement with it | **No — fetched, never committed** (§2.3) |
+| Secondary — convenience | `opencore-amr` | NB enc+dec, WB dec | OpenCORE / AOSP, 3GPP-reference-derived | Yes, Apache-2.0 |
+| Secondary — convenience | `vo-amrwbenc` | WB enc | VisualOn / Android Stagefright, **independent implementation** | Yes, Apache-2.0 |
+
+Why keep both tiers rather than just the reference:
+
+- The **reference settles correctness**. It is the thing the spec says an implementation
+  must agree with, so a mismatch against it is dispositive — no judgement call, no
+  "well, this implementation does it differently."
+- The **Apache-2.0 libraries produce redistributable fixtures**. Their output can be
+  committed without waiting on IP-2 question 2 (§2.3), so CI has trustworthy data from
+  day one regardless of how the 3GPP-output question is answered.
+
+Phase 0 qualification therefore becomes cheap and decisive: run `opencore-amr` and
+`vo-amrwbenc` against the 3GPP reference over an arbitrary corpus (not just the published
+sequences) and record which agree bit-exactly. Where they agree, commit their fixtures and
+treat them as authoritative. Where they do not — most likely `vo-amrwbenc`, which is not
+reference-derived — fall back to reference-generated dumps held locally, pending IP-2.
 
 **Architecture — out-of-tree, vector-generating.** The oracle lives in a standalone Cargo
-project *excluded from the workspace*, at `crates/media/codec-core/tools/amr-oracle/`. Its
-`build.rs` compiles the vendored C and applies instrumentation patches that dump each
-stage's inputs and outputs. It runs offline, on a developer machine, and writes compact
-fixtures into `crates/media/codec-core/tests/vectors/amr/`. **The committed test suite
-reads only those checked-in fixtures** — a normal `cargo test` needs no C toolchain, and
-the shipped crate's dependency graph is unchanged. A nightly job can regenerate and diff
-to catch drift.
+project *excluded from the workspace*, at `crates/media/codec-core/tools/amr-oracle/`. It
+**vendors** the Apache-2.0 sources and **fetches** the 3GPP reference (a `make fetch` step
+that downloads TS 26.073 / 26.173 and unpacks them into a git-ignored directory — nothing
+3GPP-copyrighted is ever committed). `build.rs` compiles both with `cc` and applies
+instrumentation patches that dump each stage's inputs and outputs. It runs offline, on a
+developer machine, and writes compact fixtures into
+`crates/media/codec-core/tests/vectors/amr/`. **The committed test suite reads only those
+checked-in fixtures** — a normal `cargo test` needs no C toolchain and no 3GPP download,
+and the shipped crate's dependency graph is unchanged.
 
 This is why the pure-Rust decision and the oracle decision are not in tension: the oracle
 is build-time-only tooling that produces data, not a runtime component.
 
-**Caveat that matters, because WB-first moves it onto the critical path.** `opencore-amr`
-is derived from the 3GPP reference and should be bit-exact. `vo-amrwbenc` is an
-*independent* VisualOn implementation, so it may not be bit-exact with TS 26.173 — and it
-is the oracle for the AMR-WB **encoder**, now Phase 5 rather than the final phase. Do not
-assume; **qualify each oracle in Phase 0** — before any DSP work — by running it against
-the 3GPP conformance vectors and recording which are bit-exact. This is a cheap experiment
-that settles an assumption the whole schedule rests on.
-
-If `vo-amrwbenc` turns out not to be bit-exact, Phase 5 falls back to: TS 26.174 encoder
-vectors as the authority, a reduced float model for ISF quantisation and codebook search
-(fallback 3 below), and brute-force search validation. Budget an extra 2–3 weeks for
-Phase 5 in that case. This is the single largest schedule uncertainty in the plan, and
-Phase 0 resolves it.
+**What this resolves.** The previous revision's largest open risk was that `vo-amrwbenc`
+might not be bit-exact, leaving the AMR-WB encoder — the HD-voice milestone, and now
+Phase 5 — without a trustworthy per-stage oracle. **TS 26.173 removes that risk entirely**:
+the WB encoder now has a normative oracle by definition. Risk R8 is downgraded accordingly,
+and the 2–3 week fallback budget on Phase 5 is no longer expected to be needed.
 
 **Retained regardless of oracle quality** — cheap, independent of any implementation's
 reading of the spec, and the fallback if oracle qualification disappoints:
@@ -129,11 +139,22 @@ reading of the spec, and the fallback if oracle qualification disappoints:
 ### 1.3 The one thing to get right before writing code
 
 **Patent expiry and source-code copyright are two different things, and only one of them
-has expired.** See §2. The published 3GPP reference C (TS 26.073 / 26.173) is *not*
-clearly licensed for redistribution — the repo the search turned up
-(`pschatzmann/codec-amr`) says so itself: *"The license of the code from 3gpp is
-unclear!"*. Our port must be written against the **specification text**, not by
-transliterating anyone's C. This is a hard constraint that shapes §6 and §7.
+has expired.** See §2. The AMR patents appear to have lapsed; the copyright on the
+reference implementations has not.
+
+The useful distinction — and one an earlier revision of this plan got wrong by being too
+cautious — is **verification versus distribution**. 3GPP expressly permits "in-house copies
+… for product design purposes", so building and instrumenting the reference C (TS 26.073 /
+26.173) to validate our implementation is allowed, and it is the best oracle available.
+What is prohibited is distributing "verbatim copies of source code (or lightly modified
+copies)". So:
+
+- **Verify against the reference freely.** Fetch it, build it, instrument it — locally.
+- **Distribute nothing derived from it.** It never enters the repository, and our Rust must
+  be structured from the spec's block diagram rather than transliterated from the C, or it
+  risks being a "lightly modified copy" of something we may not redistribute.
+
+Full detail and the quoted terms are in §2.3; the consequences shape §1.2.1, §6 and §9.2.
 
 ---
 
@@ -166,8 +187,8 @@ parallel.
 
 | Source | License | Can we copy code from it? |
 |---|---|---|
-| 3GPP TS 26.073 / 26.104 (NB C), TS 26.173 / 26.204 (WB C) | 3GPP copyright, redistribution terms unclear | **No** |
-| `pschatzmann/codec-amr` | Wraps the above; author states license "unclear" | **No** |
+| 3GPP TS 26.073 / 26.104 (NB C), TS 26.173 / 26.204 (WB C) | 3GPP copyright. **In-house use for product design is expressly permitted; redistribution is not** — see §2.3 | **Run and instrument locally: yes. Redistribute or transliterate: no** |
+| `pschatzmann/codec-amr` | Wraps the above; author states license "unclear" — and it *redistributes* 3GPP source, which §2.3 indicates requires permission | **No** |
 | FFmpeg `libavcodec/amrnbdec.c`, `amrwbdec.c` (native decoders) | LGPL-2.1-or-later | **No** — LGPL is not on this workspace's `deny.toml` allow-list, and porting from it creates derivative-work exposure |
 | Wireshark `epan/dissectors/packet-amr.c` | GPL-2.0 | **No** |
 | rtpengine (AMR transcoding + CMR logic) | GPL-3.0 | **No** |
@@ -177,36 +198,68 @@ parallel.
 
 The workspace publishes under **MIT** (`Cargo.toml:113`) and `deny.toml` allows
 MIT / Apache-2.0 / BSD / ISC / Zlib / 0BSD / BSL-1.0 / MPL-2.0 / CDLA-Permissive-2.0 /
-CC0-1.0 — **no (L)GPL**. So the GPL/LGPL implementations above are usable as *behavioural
-references you read to understand the standard*, but their code cannot enter the tree, and
-we should avoid line-by-line study of them entirely to keep the clean-room story simple.
+CC0-1.0 — **no (L)GPL**. The copyleft implementations above (FFmpeg, Wireshark, rtpengine)
+are therefore the genuinely off-limits ones: their code cannot enter the tree, and we should
+avoid studying their source at all. Run their *binaries* freely — `ffmpeg` as a black-box
+cross-check and Wireshark as a packet dissector are both fine and useful — but do not read
+them.
+
+### 2.3 The 3GPP reference code — usable as an oracle, not redistributable
+
+An earlier revision of this plan treated the 3GPP reference C as entirely off-limits,
+following the "license unclear" note on `pschatzmann/codec-amr`. **That was too
+conservative.** 3GPP's published terms draw a sharp and useful line:
+
+> "Other than for **in-house copies for the purpose of further development of the 3GPP
+> standard or for product design purposes**, you may not reproduce any part of a 3GPP TS
+> or TR without seeking permission from 3GPP."
+
+> "You must not provide **verbatim copies of source code (or lightly modified copies)**
+> without seeking permission from 3GPP."
+
+So:
+
+- **Downloading TS 26.073 / 26.173, building them, running them, and instrumenting them
+  locally to validate our implementation is squarely "product design purposes" — expressly
+  permitted.** Verifying an independent implementation is what the reference code is for.
+- **Redistributing that source is not.** Nothing 3GPP-copyrighted enters the repository;
+  the oracle harness **fetches rather than vendors** (§1.2.1).
+- **A line-by-line Rust transliteration of the 3GPP C would plausibly be a "lightly
+  modified copy"** and is therefore off the table. This is a sharper and more useful
+  constraint than "unclear license": it restricts what we *distribute*, not how we
+  *verify*.
+
+This is also why `pschatzmann/codec-amr` stays unusable — not because its terms are unclear
+in the abstract, but because it redistributes 3GPP source, which the second clause above
+indicates requires permission it does not claim to hold.
 
 **Working rule for the port:** implement from TS 26.090 / TS 26.190 (and the companion
-specs in §3) plus our own reading of the ETSI basic-operator definitions. Where behaviour
-is ambiguous, resolve it against the **3GPP conformance sequences, the spec-defined
-homing-frame outputs, and the Apache-2.0 oracle's observed behaviour** — never against the
-3GPP reference C or any (L)GPL implementation.
+specs in §3). Verify against the 3GPP reference, the conformance sequences, and the
+spec-defined homing-frame outputs. Never read or copy the *copyleft* implementations
+(FFmpeg, Wireshark, rtpengine) — those are the ones whose licenses genuinely conflict with
+this workspace's MIT posture.
 
-Note the asymmetry that makes this work: `opencore-amr` and `vo-amrwbenc` are
-**permissively licensed**, so reading and even instrumenting their source is lawful. The
-clean-room discipline in this section exists for the *unclearly-licensed* 3GPP C and the
-*copyleft* FFmpeg/Wireshark/rtpengine code, not for the Apache-2.0 oracle. In practice,
-prefer black-box use (feed input, compare output) even where reading is permitted — it
-keeps the provenance story simple and produces a spec-shaped implementation rather than a
-C-shaped one — but instrumenting the oracle to dump stage boundaries is explicitly fine
-and is the whole point of §1.2.1.
+Structure the Rust from the **spec's block diagram**, not from any C implementation's file
+layout or identifiers. That is the operative discipline now: the risk is not "we looked at
+the reference" (permitted) but "what we ship reads as a lightly modified copy of it"
+(prohibited). Only the second failure mode matters.
 
-**Action IP-2 (do during Phase 0):** confirm whether the 3GPP **test sequences**
-(TS 26.074 for NB, TS 26.174 for WB) may be vendored into the repo. If not, use the opt-in
-external-fixture pattern in §9.3. Do not check them in until this is answered. They remain
-the authority for any conformance claim, and the tiebreaker wherever oracle qualification
-came back weak (R8).
+**Action IP-2 (do during Phase 0):** two related questions.
+
+1. May the 3GPP **test sequences** (TS 26.074 / 26.174) be vendored into the repo? If not,
+   use the opt-in external-fixture pattern in §9.3.
+2. May **per-stage vectors generated by running** the reference code be committed? Program
+   output is generally not a derivative work of the program, and 3GPP itself publishes
+   reference-codec output as the conformance sequences — but confirm rather than assume.
+   Until answered, prefer `opencore-amr`-derived fixtures for committed data (Apache-2.0,
+   unambiguous) and keep 3GPP-derived dumps local.
 
 **Action IP-3:** the oracle harness vendors Apache-2.0 C (`opencore-amr`,
 `vo-amrwbenc`) under `tools/amr-oracle/`. Even though it is build-time-only tooling that
 never ships in the crate, add `THIRD_PARTY_NOTICES.md` entries and retain the upstream
 `LICENSE` / `NOTICE` files in the vendored tree — Apache-2.0 §4 attribution applies to
-distribution of the source repository, not just to binaries.
+distribution of the source repository, not just to binaries. The 3GPP reference needs no
+such entry precisely because it is never redistributed.
 
 ---
 
@@ -226,8 +279,8 @@ starting Phase 4.
 | TS 26.093 | Source-controlled rate operation | DTX / SID cadence |
 | TS 26.094 | Voice Activity Detector (VAD) | VAD option 1 and option 2 |
 | TS 26.101 | AMR frame structure | Bit ordering, class A/B/C sorting, IF1/IF2 |
-| TS 26.073 | ANSI-C source (fixed point) | **Reference only — do not copy** |
-| TS 26.104 | ANSI-C source (floating point) | Reference only |
+| **TS 26.073** | **AMR ANSI-C source (fixed point)** | **Primary oracle** — fetch, build, instrument locally; never redistribute (§2.3) |
+| TS 26.104 | ANSI-C source (floating point) | Secondary reference; same terms |
 | TS 26.074 | Test sequences | Conformance vectors |
 
 ### AMR-WB
@@ -241,8 +294,8 @@ starting Phase 4.
 | TS 26.193 | Source-controlled rate operation | DTX |
 | TS 26.194 | Voice Activity Detector | VAD |
 | TS 26.201 | AMR-WB frame structure | Bit ordering |
-| TS 26.173 | ANSI-C source (fixed point) | Reference only — do not copy |
-| TS 26.204 | ANSI-C source (floating point) | Reference only |
+| **TS 26.173** | **AMR-WB ANSI-C source (fixed point)** | **Primary oracle** — normative for WB encode; same terms (§2.3) |
+| TS 26.204 | ANSI-C source (floating point) | Secondary reference; same terms |
 | TS 26.174 | Test sequences | Conformance vectors |
 
 ### Transport
@@ -434,7 +487,12 @@ inherit C-shaped code structure into a codebase with an established idiom (see t
 module layout), and produce something harder to reason about than a spec-derived
 implementation. **If schedule pressure becomes acute, this is a more attractive fallback
 than the FFI backend** — it preserves the pure-Rust property and costs only license
-attribution. Flagged for the Phase 5 checkpoint (risk R10).
+attribution. Flagged for the Phase 4 checkpoint (risk R10).
+
+Note the asymmetry with the 3GPP reference: the same transliteration applied to TS 26.073 /
+26.173 is **not** available, because 3GPP's terms prohibit distributing "verbatim copies of
+source code (or lightly modified copies)" (§2.3). The Apache-2.0 route is lawful precisely
+because Apache-2.0 grants what 3GPP withholds.
 
 ---
 
@@ -643,12 +701,11 @@ not; DSP bit-exactness work is notoriously spiky.
 
 - [ ] Acquire and archive all specs from §3.
 - [ ] Legal actions **IP-1** and **IP-2** opened; IP-2 answered in this phase.
-- [ ] **Oracle qualification** — the highest-value task in this phase. Build
-      `opencore-amr` and `vo-amrwbenc`, run each against the TS 26.074 / TS 26.174
-      conformance sequences, and record for all four paths (NB enc, NB dec, WB enc, WB dec)
-      whether the library is **bit-exact** with the 3GPP reference. This is a cheap
-      experiment that settles an assumption the whole schedule rests on, and it determines
-      whether Phase 5 needs its 2–3 week fallback budget (§1.2.1).
+- [ ] **Oracle qualification.** Fetch and build the 3GPP reference (TS 26.073 / 26.173);
+      build `opencore-amr` and `vo-amrwbenc`. Run all three over a shared corpus and record,
+      for each of the four paths (NB enc, NB dec, WB enc, WB dec), whether the Apache-2.0
+      library is bit-exact with the reference. Determines which fixtures can be committed
+      directly and which need the external-fixture pattern (§1.2.1).
 - [ ] `CodecType::AmrNb` / `CodecType::AmrWb`, `AmrParameters`, feature flags wired
       end-to-end (`rvoip` → `rvoip-sip` → `media-core` → `codec-core`) with a stub codec
       that returns `feature_not_enabled`.
@@ -711,9 +768,10 @@ than growing it from an order-10 LSP-only base.
 - [ ] `common/homing.rs` — EHF/DHF per TS 26.071/26.101, plus the checkpoint/resynchronise
       test helper described in §1.2.1.
 - [ ] **Oracle harness** at `tools/amr-oracle/` (excluded from the workspace): vendored
-      `opencore-amr` + `vo-amrwbenc`, `build.rs` with `cc`, instrumentation patches that
-      dump per-stage inputs/outputs, and a generator that writes fixtures into
-      `tests/vectors/amr/`.
+      `opencore-amr` + `vo-amrwbenc`; a `make fetch` step that downloads the 3GPP reference
+      (TS 26.073 / 26.173) into a **git-ignored** directory — never committed (§2.3);
+      `build.rs` with `cc`; instrumentation patches that dump per-stage inputs/outputs; and
+      a generator that writes fixtures into `tests/vectors/amr/`.
 - [ ] **Stage-diff harness** in the test suite: replays a checked-in fixture through one
       Rust stage and reports the first divergence by frame and stage.
 
@@ -749,10 +807,10 @@ quantisation → bitstream → VAD (26.194) / DTX (26.193) / SID.
 The codebook searches are the bulk of the work. Validate each against a brute-force
 exhaustive search over a single subframe (§9.2) before trusting it on a sequence.
 
-**This is the phase most exposed to oracle quality.** If Phase 0 qualification showed
-`vo-amrwbenc` is not bit-exact with TS 26.173, fall back to TS 26.174 vectors as the
-authority plus a reduced float model for ISF quantisation and codebook search, and add
-2–3 weeks.
+Oracle: **TS 26.173 is normative for WB encode**, so this phase has an authoritative
+per-stage reference. If Phase 0 found `vo-amrwbenc` not bit-exact, that only affects which
+fixtures can be committed (use reference-generated dumps via the external-fixture pattern),
+not whether the phase is debuggable.
 
 **Exit:** bit-exact against TS 26.174 encoder sequences, all 9 modes, DTX on and off.
 **AMR-WB ↔ Opus/G.711 transcoding — the HD-voice goal — is reachable here.**
@@ -843,20 +901,24 @@ of downstream bugs.
 This is what makes bit-exactness tractable: a failure localises to one stage instead of one
 frame. Three mechanisms, in descending order of how much load they carry.
 
-**(a) Per-stage oracle vectors.** The out-of-tree harness (§1.2.1) runs the instrumented
-Apache-2.0 C implementations over a speech corpus and dumps every stage's inputs and
-outputs. Those dumps are checked in as compact fixtures; each Rust module gets a test that
-replays its stage against them. Because both sides are fixed-point implementations of the
-same spec, comparison is **exact equality**, not tolerance-based — which is precisely why
-this beats the float model it replaced.
+**(a) Per-stage oracle vectors.** The out-of-tree harness (§1.2.1) runs the instrumented C
+implementations over a speech corpus and dumps every stage's inputs and outputs. Those
+dumps become compact fixtures; each Rust module gets a test that replays its stage against
+them. Because every side is a fixed-point implementation of the same spec, comparison is
+**exact equality**, not tolerance-based — which is precisely why this beats the float model
+it replaced.
+
+Weight by tier. A mismatch against the **3GPP reference** (TS 26.073 / 26.173) is
+dispositive — conformance is *defined* as agreement with it, so there is no judgement call.
+A mismatch against `opencore-amr` or `vo-amrwbenc` is dispositive only where Phase 0 found
+that library bit-exact with the reference; otherwise it is a lead to investigate.
+
+Fixture provenance follows IP-2 q2 (§2.3): prefer Apache-2.0-derived dumps for committed
+data, and hold reference-derived dumps locally (external-fixture pattern, §9.3) until the
+question is answered.
 
 Keep fixtures small (a few hundred KB total) — sample a diverse subset of frames
 (voiced / unvoiced / onset / silence / DTMF / music / clipping) rather than whole files.
-
-Weight each oracle by its Phase 0 qualification result. Where a library was found bit-exact
-with the 3GPP reference, an exact-match failure is dispositive. Where it was not — expected
-to be `vo-amrwbenc` for WB encode — a mismatch is a *lead*, not a verdict, and TS 26.174 is
-the authority.
 
 **(b) Homing frames as checkpoints.** TS 26.071/26.101 define encoder and decoder homing
 frames that drive every bit-exactly-specified function into a predefined home state, and
@@ -864,8 +926,7 @@ consecutive homing frames must produce homing frames at the output. Two uses:
 
 - A standalone conformance test: feed homing frames, assert the exact specified output.
   Cheap, spec-mandated, catches whole classes of state bugs with no test vectors at all,
-  and — critically — it is independent of *any* implementation's reading of the spec, so
-  it still holds where the oracle is untrustworthy.
+  and available from Phase 3 before any oracle fixtures are generated.
 - Resynchronisation: injecting a homing frame mid-sequence resets state, so a failure at
   frame 900 can be isolated without replaying frames 1–899 and without one early bug
   poisoning every subsequent comparison.
@@ -875,12 +936,13 @@ approximating a well-defined optimum. For a single subframe the optimum is compu
 exhaustively. Test the fast search against the slow one over a corpus of subframes; the
 same technique applies to the LSP/ISF VQ codebook searches. This remains necessary even
 with a good oracle, because it validates the *search* rather than one implementation's
-result — and it is the main fallback for Phase 5 if `vo-amrwbenc` does not qualify.
+result. Useful independently of oracle quality, and cheap.
 
-**(d) Reduced float model — conditional.** Only if Phase 0 qualification comes back weak,
-and scoped to the affected stages (expected: WB encoder ISF quantisation and codebook
-search). The previous revision's float-model-first approach for the whole codec is dropped
-as redundant (§6.4).
+**(d) Reduced float model — now unlikely to be needed.** It existed as insurance against
+having no trustworthy WB-encode oracle. TS 26.173 supplies one, so this drops to a
+contingency: build it only if a specific stage resists diagnosis, scoped to that stage. The
+previous revisions' float-model-first approach for the whole codec is dropped as redundant
+(§6.4).
 
 ### 9.3 Layer 2 — 3GPP conformance sequences (the proof)
 
@@ -945,13 +1007,14 @@ that is what catches instrumentation drift (risk R11). Interop runs go there too
 | # | Risk | Impact | Mitigation |
 |---|---|---|---|
 | R1 | Patent expiry relied on secondary sources | Legal | **IP-1** before Phase 3; Phases 0–2 are RFC-only and unaffected |
-| R2 | 3GPP reference C is not redistributable; accidental contamination | Legal | Clean-room rule (§2.2); no third-party codec source read during the port at all |
+| R2 | 3GPP reference C or copyleft source is accidentally redistributed | Legal | 3GPP reference is fetched into a git-ignored dir, never committed (§2.3); no copyleft source read at all; see also R13 on structural similarity |
 | R3 | 3GPP test sequences can't be vendored | Weakens conformance claim | **IP-2**; opt-in external fixtures (§9.3) meanwhile |
 | R4 | Bit-exactness proves harder than G.729A — 17 modes, two codecs | Schedule | Per-stage oracle vectors + homing frames + brute-force searches (§9.2); decoder before encoder within each codec; one stage green before the next |
 | R5 | `AudioCodec` trait can't express variable rate | Blocks everything downstream | `VariableRateCodec` extension trait decided in Phase 0 (§7.1) |
 | R6 | Dynamic-PT handling hardcoded to Opus (`media_adapter.rs:379`) | Blocks Phase 2 | Size the refactor as its own item; it unblocks future dynamic-PT codecs too |
 | R7 | Bandwidth-efficient vs octet-aligned interop bugs | Field failures | Both framings from Phase 1; explicit regression tests; Wireshark validation |
-| **R8** | **`vo-amrwbenc` is not bit-exact with TS 26.173, leaving the AMR-WB encoder — the HD-voice milestone — without a trustworthy per-stage oracle** | **Phase 5 slips 2–3 weeks; WB encode is the hardest phase to debug unaided** | Highest-severity open risk, and the reason WB-first raises the stakes on Phase 0. **Qualify all four oracle paths in Phase 0** before any DSP work. If it fails: TS 26.174 vectors as authority, brute-force search validation, reduced float model for ISF quant + codebook search, +2–3 weeks budgeted |
+| R8 | `vo-amrwbenc` is not bit-exact with TS 26.173, so its WB-encode stage dumps cannot be trusted | Low — **downgraded from the previous revision.** TS 26.173 is now the primary oracle and is normative by definition, so the WB encoder has an authoritative reference regardless. The only residual cost is that WB-encode fixtures may not be committable until IP-2 q2 is answered | Qualify all four paths against the 3GPP reference in Phase 0. Where a library disagrees, use reference-generated dumps locally and the external-fixture pattern for CI |
+| R13 | Our implementation ends up structurally close enough to the reference C to read as a "lightly modified copy" | Legal — this is the constraint 3GPP's terms actually impose (§2.3) | Structure modules from the spec's block diagram, not the C's file layout; do not carry over identifiers; the existing G.729 module layout is the house idiom to follow. Review at each phase exit |
 | R9 | CMR thrash causing audible mode oscillation | Quality | `CMR-interval` damper (§5); soak test with an adversarial peer |
 | R10 | Effort underestimated; port stalls mid-way with no transcoding delivered | Sunk cost — transcoding is a day-one requirement and does not arrive until ~month 4–5 | Two recovery options, in preference order: (a) direct Rust port of the Apache-2.0 C (§6.5) — keeps the pure-Rust property, costs only license attribution; (b) the FFI backend (§6.2), ~1–2 weeks from zero. Decide at the Phase 4 exit checkpoint |
 | R11 | Oracle instrumentation patches drift from upstream, or dumps encode a subtly different stage boundary than the Rust code | Wasted debugging on a phantom mismatch | Pin the vendored upstream revision; keep instrumentation patches minimal and reviewed; when a mismatch resists explanation, check the stage boundary before the arithmetic |
@@ -966,11 +1029,12 @@ that is what catches instrumentation drift (risk R11). Interop runs go there too
 1. **Strategy** — ✅ **Pure Rust in the shipped crate.** No FFI backend, not even opt-in.
 2. **Scope** — ✅ **Transcoding required from day one.** The codec kernel is on the
    critical path; relay is a by-product, not the goal.
-3. **Oracle** — ✅ **Use the open-source libraries as a development-time oracle.**
-   `opencore-amr` + `vo-amrwbenc`, both Apache-2.0, instrumented out-of-tree to generate
-   checked-in per-stage vectors (§1.2.1). The shipped dependency graph is unchanged. The
-   full float reference model is dropped as redundant; a reduced one survives only as a
-   conditional fallback.
+3. **Oracle** — ✅ **Two-tier, out-of-tree, vector-generating.** The **3GPP reference C**
+   (TS 26.073 / 26.173) is the authority: in-house use for product design is expressly
+   permitted, so it is fetched and instrumented locally but never committed (§2.3).
+   `opencore-amr` + `vo-amrwbenc` (Apache-2.0) supply redistribution-safe fixtures. The
+   shipped dependency graph is unchanged. The float reference model is dropped as
+   redundant.
 4. **Ordering** — ✅ **WB first, NB second.** WB is the priority and the HD-voice
    deliverable. The earlier NB-first recommendation was premised on WB bugs being expensive
    to debug unaided; the oracle decision largely removes that premise, and WB-first moves
@@ -978,9 +1042,10 @@ that is what catches instrumentation drift (risk R11). Interop runs go there too
 
 ### Still open
 
-5. **IP-2** — can the 3GPP test sequences be vendored? Still Phase 0. Less critical than
-   in the previous revision now that a real oracle exists, but still the authority for
-   conformance claims and the tiebreaker wherever the oracle is untrusted (R8).
+5. **IP-2** — two parts, both Phase 0 (§2.3): (a) may the 3GPP test sequences be vendored?
+   (b) may per-stage vectors *generated by running* the reference code be committed?
+   Neither blocks the work — the external-fixture pattern covers both — but the answers
+   determine how much of the test suite runs unaided in CI.
 
 6. **Crate placement** — keep AMR inside `rvoip-codec-core` alongside G.711/G.729/Opus, or
    split it into a standalone publishable crate? A standalone pure-Rust AMR crate would be
@@ -1004,6 +1069,9 @@ that is what catches instrumentation drift (risk R11). Interop runs go there too
 - [Patent expiry dates and software for AMR, AMR-WB, and AMR-WB+ (HydrogenAudio)](https://hydrogenaudio.org/index.php/topic,114506.0.html)
 - [VoiceAge — AMR-WB essential patent portfolio](https://voiceage.com/Patent-Portfolio-Essential.html)
 - [VoiceAge AMR-WB/G.722.2 patent pool launch (2010)](https://www.prnewswire.com/news-releases/voiceage-announces-the-launch-of-the-amr-wbg7222-speech-compression-standards-patent-pool-83263272.html)
+- [3GPP FAQs — copyright and reproduction terms](https://www.3gpp.org/about-us/3gpp-faqs) ("in-house copies … for product design purposes"; "verbatim copies of source code (or lightly modified copies)")
+- [3GPP Terms of Use](https://www.3gpp.org/terms-of-use)
+- [3GPP Legal Matters](https://www.3gpp.org/about-us/legal-matters)
 - [opencore-amr (SourceForge)](https://sourceforge.net/projects/opencore-amr/)
 - [mstorsjo/vo-amrwbenc — VisualOn AMR-WB encoder](https://github.com/mstorsjo/vo-amrwbenc)
 - [pschatzmann/codec-amr](https://github.com/pschatzmann/codec-amr)
