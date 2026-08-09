@@ -25,12 +25,16 @@ use crate::types::{
 mod bits;
 pub mod mode;
 pub mod payload;
+pub mod rate;
+pub mod sdp;
 pub mod storage;
 
 pub use mode::{AmrFrameType, AmrMode, AmrModeSet, AmrVariant};
 pub use payload::{
     AmrInterleaving, AmrPacket, AmrPayloadCodec, AmrPayloadConfig, AmrPayloadFrame,
 };
+pub use rate::{CmrDamper, ModeChangePolicy};
+pub use sdp::{AmrCapabilities, AmrFmtp};
 pub use storage::AmrStorageReader;
 
 /// AMR-NB / AMR-WB codec.

@@ -312,9 +312,20 @@ impl AmrFrameType {
 /// The set of modes a stream is permitted to use, per the SDP `mode-set`
 /// parameter (RFC 4867 §8.1).
 ///
-/// `mode-set` is a hard restriction, not a preference list: a sender must not
-/// use a mode outside the negotiated set, and an empty intersection means the
-/// payload type has to be rejected rather than defaulted.
+/// Two properties matter and are easy to get wrong:
+///
+/// - **It is a hard restriction, not a preference list.** RFC 4867: "If
+///   mode-set is specified, it MUST be abided, and frames encoded with modes
+///   outside of the subset MUST NOT be sent in any RTP payload or used in codec
+///   mode requests."
+/// - **It is bi-directional.** The negotiated set applies to media both sent
+///   and received by every party, not per-direction.
+///
+/// Note that SID and `NO_DATA` frames are never members: "The SID frame type 8
+/// and `NO_DATA` (frame type 15) are never included in the mode set, but can
+/// always be used." This type holds speech modes only, so that falls out
+/// naturally — but it means mode-set must never be consulted when deciding
+/// whether comfort noise or a no-data frame may be sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AmrModeSet {
     variant: AmrVariant,
@@ -396,14 +407,20 @@ impl AmrModeSet {
         self.modes().first().copied()
     }
 
-    /// Intersect two mode sets, as offer/answer negotiation requires.
+    /// Modes present in both sets.
+    ///
+    /// **This is a plain set operation, not the SDP negotiation rule.**
+    /// RFC 4867 §8.3.1 does *not* intersect mode sets: "If a mode set was
+    /// supplied in the offer, the answerer SHALL return the mode-set unmodified
+    /// or reject the payload type." Use [`Self::is_superset_of`] to decide
+    /// whether an offered set is acceptable, and see the `sdp` module for the
+    /// actual answer construction. This method is for questions like "which
+    /// modes can both endpoints encode", which is a different question.
     ///
     /// # Errors
     ///
     /// Returns [`CodecError::InvalidConfig`] when the variants differ, or when
-    /// the intersection is empty — the latter is the case RFC 4867 says must
-    /// lead to rejecting the payload type, so it is surfaced as an error rather
-    /// than an empty set.
+    /// the intersection is empty.
     pub fn intersect(&self, other: &Self) -> Result<Self> {
         if self.variant != other.variant {
             return Err(CodecError::invalid_config(
@@ -420,6 +437,16 @@ impl AmrModeSet {
             variant: self.variant,
             mask,
         })
+    }
+
+    /// Whether every mode in `other` is also in `self`.
+    ///
+    /// This is the test RFC 4867 §8.3.1 actually calls for: an answerer can
+    /// accept an offered mode-set only if it supports every mode in it, since
+    /// it must then return that set unmodified.
+    #[must_use]
+    pub fn is_superset_of(&self, other: &Self) -> bool {
+        self.variant == other.variant && self.mask & other.mask == other.mask
     }
 
     /// Render as the value of an SDP `mode-set` parameter, e.g. `0,2,4`.
@@ -608,7 +635,25 @@ mod tests {
     }
 
     #[test]
-    fn mode_set_intersection_follows_offer_answer_rules() {
+    fn superset_test_is_what_offer_answer_needs() {
+        // RFC 4867 §8.3.1: an offered mode-set must be returned unmodified or
+        // the payload type rejected. So the answerer's question is "do I
+        // support every offered mode", not "what do we have in common".
+        let variant = AmrVariant::WideBand;
+        let local = AmrModeSet::from_indices(variant, &[0, 1, 2, 3, 4]).unwrap();
+
+        assert!(local.is_superset_of(&AmrModeSet::from_indices(variant, &[0, 2]).unwrap()));
+        assert!(local.is_superset_of(&local));
+        // Offered set includes mode 8, which we do not support -> reject.
+        assert!(!local.is_superset_of(&AmrModeSet::from_indices(variant, &[2, 8]).unwrap()));
+        // Never across variants.
+        assert!(!local.is_superset_of(&AmrModeSet::all(AmrVariant::NarrowBand)));
+        // Everything is a subset of "all modes".
+        assert!(AmrModeSet::all(variant).is_superset_of(&local));
+    }
+
+    #[test]
+    fn mode_set_intersection_is_a_plain_set_operation() {
         let variant = AmrVariant::WideBand;
         let offer = AmrModeSet::from_indices(variant, &[0, 1, 2, 3]).unwrap();
         let answer = AmrModeSet::from_indices(variant, &[2, 3, 4, 5]).unwrap();
