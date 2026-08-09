@@ -22,6 +22,12 @@ pub const RTP_PAYLOAD_TYPE_PARAMETER: &str = "rtp_payload_type";
 pub const RTP_CLOCK_RATE_PARAMETER: &str = "rtp_clock_rate";
 /// `MediaConfig::parameters` key carrying the negotiated audio channel count.
 pub const AUDIO_CHANNELS_PARAMETER: &str = "audio_channels";
+/// `MediaConfig::parameters` key carrying the negotiated `a=fmtp` parameters.
+///
+/// Codec-agnostic and deliberately unparsed. For AMR these select the wire
+/// framing itself, which makes them part of a session's media identity rather
+/// than a tuning detail — see [`super::bridge`].
+pub const NEGOTIATED_FMTP_PARAMETER: &str = "negotiated_fmtp";
 
 /// Media configuration for a session
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +65,14 @@ impl MediaConfig {
             .insert(RTP_CLOCK_RATE_PARAMETER.to_string(), clock_rate.to_string());
         self.parameters
             .insert(AUDIO_CHANNELS_PARAMETER.to_string(), channels.to_string());
+        self
+    }
+
+    /// Record the negotiated `a=fmtp` parameter string.
+    #[must_use]
+    pub fn with_negotiated_fmtp(mut self, fmtp: impl Into<String>) -> Self {
+        self.parameters
+            .insert(NEGOTIATED_FMTP_PARAMETER.to_string(), fmtp.into());
         self
     }
 }

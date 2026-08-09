@@ -9,6 +9,13 @@
 //! - Both sessions must already have a remote RTP address (media flow ready).
 //! - Both sessions must have negotiated the same RTP payload type. Mismatches
 //!   return [`BridgeError::CodecMismatch`] — no transcoding is performed.
+//! - Both sessions must agree on any format parameters that change the wire
+//!   bytes. A matching payload type is **not** sufficient for every codec:
+//!   two AMR legs can share a payload type while one uses RFC 4867
+//!   bandwidth-efficient framing and the other octet-aligned, which are
+//!   different bit layouts. Forwarding between them delivers payloads the far
+//!   end cannot parse — silent audio failure rather than a clean error — so it
+//!   returns [`BridgeError::FormatMismatch`].
 //! - Neither session may already be bridged to another session.
 //!
 //! DTMF (RFC 2833) packets ride the same stream and are forwarded
@@ -36,6 +43,7 @@ use crate::types::DialogId;
 use rvoip_rtp_core::session::RtpSessionEvent;
 use rvoip_rtp_core::RtpSession;
 
+use super::types::NEGOTIATED_FMTP_PARAMETER;
 use super::MediaSessionController;
 
 /// Errors specific to bridge creation and teardown.
@@ -48,6 +56,26 @@ pub enum BridgeError {
     /// bridge only after both legs reach the `Active` state.
     #[error("session {0} has no remote RTP address — not ready to bridge")]
     SessionNotActive(String),
+
+    /// Format parameters differ in a way that changes the wire bytes, so the
+    /// payloads are not interchangeable even though the payload type matches.
+    #[error(
+        "codec format mismatch on PT={payload_type}: session {a} negotiated {a_fmtp:?}, \
+         session {b} negotiated {b_fmtp:?}; relaying between them would deliver \
+         unparseable payloads"
+    )]
+    FormatMismatch {
+        /// First session.
+        a: String,
+        /// Second session.
+        b: String,
+        /// The payload type both sessions share.
+        payload_type: u8,
+        /// First session's negotiated fmtp parameters.
+        a_fmtp: String,
+        /// Second session's negotiated fmtp parameters.
+        b_fmtp: String,
+    },
 
     /// Negotiated payload types differ. Transparent relay can't re-encode.
     #[error("codec payload-type mismatch: session {a} uses PT={a_pt}, session {b} uses PT={b_pt}")]
@@ -133,8 +161,8 @@ impl MediaSessionController {
 
         // Preflight: both sessions exist, have remote addresses, and use
         // matching payload types.
-        let (a_session_arc, a_pt) = self.read_bridge_preconditions(&a).await?;
-        let (b_session_arc, b_pt) = self.read_bridge_preconditions(&b).await?;
+        let (a_session_arc, a_pt, a_fmtp) = self.read_bridge_preconditions(&a).await?;
+        let (b_session_arc, b_pt, b_fmtp) = self.read_bridge_preconditions(&b).await?;
 
         if a_pt != b_pt {
             return Err(BridgeError::CodecMismatch {
@@ -142,6 +170,21 @@ impl MediaSessionController {
                 b: b.to_string(),
                 a_pt,
                 b_pt,
+            });
+        }
+
+        // A matching payload type does not imply interchangeable payloads.
+        // AMR is the case that forces this: the same payload type carries
+        // either bandwidth-efficient or octet-aligned framing depending on
+        // `octet-align`, and those are different bit layouts. Relaying across
+        // the boundary would hand the far end bytes it cannot parse.
+        if !wire_formats_are_interchangeable(&a_fmtp, &b_fmtp) {
+            return Err(BridgeError::FormatMismatch {
+                a: a.to_string(),
+                b: b.to_string(),
+                payload_type: a_pt,
+                a_fmtp,
+                b_fmtp,
             });
         }
 
@@ -232,13 +275,15 @@ impl MediaSessionController {
         }
     }
 
-    /// Read the RTP session Arc and negotiated payload type for `id`.
+    /// Read the RTP session Arc, negotiated payload type, and negotiated
+    /// format parameters for `id`.
+    ///
     /// Returns [`BridgeError::SessionNotFound`] if the session is missing
     /// and [`BridgeError::SessionNotActive`] if it has no remote address.
     async fn read_bridge_preconditions(
         &self,
         id: &DialogId,
-    ) -> std::result::Result<(Arc<Mutex<RtpSession>>, u8), BridgeError> {
+    ) -> std::result::Result<(Arc<Mutex<RtpSession>>, u8, String), BridgeError> {
         // Snapshot the session Arc + remote-addr check from the
         // DashMap shard. The shard guard drops at the end of the
         // closure — no await held while a shard is locked.
@@ -255,21 +300,77 @@ impl MediaSessionController {
             })
             .ok_or_else(|| BridgeError::SessionNotFound(id.to_string()))??;
 
-        let pt = self
+        let (pt, fmtp) = self
             .sessions
             .get(id)
             .map(|r| {
-                r.value()
-                    .config
+                let config = &r.value().config;
+                let pt = config
                     .preferred_codec
                     .as_ref()
                     .and_then(|codec| self.codec_mapper.codec_to_payload(codec))
-                    .unwrap_or(0)
+                    .unwrap_or(0);
+                let fmtp = config
+                    .parameters
+                    .get(NEGOTIATED_FMTP_PARAMETER)
+                    .cloned()
+                    .unwrap_or_default();
+                (pt, fmtp)
             })
             .ok_or_else(|| BridgeError::SessionNotFound(id.to_string()))?;
 
-        Ok((session_arc, pt))
+        Ok((session_arc, pt, fmtp))
     }
+}
+
+/// Whether two negotiated `a=fmtp` strings describe the same wire format.
+///
+/// Only parameters that change the bytes on the wire matter here. For AMR,
+/// RFC 4867 §8.3.1 names exactly those: "Each combination of the RTP payload
+/// transport format configuration parameters (octet-align, crc,
+/// robust-sorting, interleaving, and channels) is unique in its bit-pattern
+/// and not compatible with any other combination."
+///
+/// Everything else — `mode-set`, `mode-change-period`, `max-red` — constrains
+/// which modes may be used or when they may change, not how a frame is laid
+/// out, so it does not prevent relaying. A mode-set difference is a real
+/// concern for a transcoding B2BUA but not for a transparent one: the frames
+/// still parse, and each leg's own negotiation already bound its peer.
+fn wire_formats_are_interchangeable(a: &str, b: &str) -> bool {
+    /// The transport-format parameters, defaulting to RFC 4867's defaults.
+    fn transport_shape(fmtp: &str) -> (bool, bool, bool, bool, u8) {
+        let mut octet_align = false;
+        let mut crc = false;
+        let mut robust_sorting = false;
+        let mut interleaving = false;
+        let mut channels = 1u8;
+        for part in fmtp.split(';') {
+            let Some((name, value)) = part.trim().split_once('=') else {
+                continue;
+            };
+            let value = value.trim().trim_matches('"');
+            match name.trim().to_ascii_lowercase().as_str() {
+                "octet-align" => octet_align = value == "1",
+                "crc" => crc = value == "1",
+                "robust-sorting" => robust_sorting = value == "1",
+                "interleaving" => interleaving = true,
+                "channels" => channels = value.parse().unwrap_or(1),
+                _ => {}
+            }
+        }
+        // crc, robust-sorting and interleaving each imply octet alignment, so
+        // normalise before comparing — `crc=1` alone and `octet-align=1; crc=1`
+        // describe the same wire format.
+        (
+            octet_align || crc || robust_sorting || interleaving,
+            crc,
+            robust_sorting,
+            interleaving,
+            channels,
+        )
+    }
+
+    transport_shape(a) == transport_shape(b)
 }
 
 /// Forwarder task: subscribe to `src`'s RTP events and replay each inbound
@@ -435,6 +536,149 @@ mod tests {
         // immediately, not on task completion.
         assert!(!controller.is_bridged(&a));
         assert!(!controller.is_bridged(&b));
+    }
+
+    #[test]
+    fn identical_and_default_fmtp_are_interchangeable() {
+        assert!(wire_formats_are_interchangeable("", ""));
+        assert!(wire_formats_are_interchangeable(
+            "octet-align=1",
+            "octet-align=1"
+        ));
+        // Absent and explicitly-default mean the same wire format.
+        assert!(wire_formats_are_interchangeable("", "octet-align=0"));
+        assert!(wire_formats_are_interchangeable("mode-set=0,1", ""));
+    }
+
+    #[test]
+    fn amr_framing_difference_is_not_interchangeable() {
+        // The case this guard exists for. Both legs would carry the same
+        // payload type, but bandwidth-efficient and octet-aligned are
+        // different bit layouts, so relaying between them delivers payloads
+        // the far end cannot parse.
+        assert!(!wire_formats_are_interchangeable("", "octet-align=1"));
+        assert!(!wire_formats_are_interchangeable(
+            "octet-align=0; mode-set=0,1",
+            "octet-align=1; mode-set=0,1"
+        ));
+    }
+
+    #[test]
+    fn transport_options_that_change_the_bytes_are_compared() {
+        for (a, b) in [
+            ("octet-align=1", "octet-align=1; crc=1"),
+            ("octet-align=1", "octet-align=1; robust-sorting=1"),
+            ("octet-align=1", "octet-align=1; interleaving=2"),
+            ("octet-align=1", "octet-align=1; channels=2"),
+        ] {
+            assert!(
+                !wire_formats_are_interchangeable(a, b),
+                "{a:?} vs {b:?} must not be interchangeable"
+            );
+        }
+    }
+
+    #[test]
+    fn options_implying_octet_align_normalise_before_comparison() {
+        // RFC 4867: crc, robust-sorting and interleaving each imply
+        // octet-aligned operation, so stating it explicitly changes nothing.
+        assert!(wire_formats_are_interchangeable("crc=1", "octet-align=1; crc=1"));
+        assert!(wire_formats_are_interchangeable(
+            "robust-sorting=1",
+            "octet-align=1; robust-sorting=1"
+        ));
+    }
+
+    #[test]
+    fn parameters_that_do_not_change_the_layout_still_bridge() {
+        // mode-set and friends restrict which modes may be used, not how a
+        // frame is laid out. The frames still parse, and each leg's own
+        // negotiation already bound its peer, so a transparent relay can
+        // forward across the difference.
+        assert!(wire_formats_are_interchangeable(
+            "octet-align=1; mode-set=0,1,2",
+            "octet-align=1; mode-set=3,4"
+        ));
+        assert!(wire_formats_are_interchangeable(
+            "octet-align=1; mode-change-period=2",
+            "octet-align=1; max-red=220"
+        ));
+    }
+
+    #[test]
+    fn fmtp_comparison_tolerates_real_world_spacing_and_case() {
+        assert!(wire_formats_are_interchangeable(
+            "OCTET-ALIGN=1;Mode-Set=0,1",
+            "  octet-align = 1 ; mode-set=0,1  "
+        ));
+        // Quoted values appear in the field too.
+        assert!(wire_formats_are_interchangeable(
+            "octet-align=\"1\"",
+            "octet-align=1"
+        ));
+    }
+
+    /// A config carrying an explicit negotiated fmtp string.
+    fn test_config_with_fmtp(codec: &str, fmtp: &str) -> MediaConfig {
+        let mut config = test_config(codec);
+        config
+            .parameters
+            .insert(NEGOTIATED_FMTP_PARAMETER.to_string(), fmtp.to_string());
+        config
+    }
+
+    #[tokio::test]
+    async fn bridge_rejects_mismatched_amr_framing() {
+        // End to end through bridge_sessions: same codec, same payload type,
+        // different framing. Without the format check this bridges
+        // "successfully" and then delivers unparseable audio — a silent
+        // failure rather than an error.
+        let controller = MediaSessionController::new();
+        let a = DialogId::new("amr-a");
+        let b = DialogId::new("amr-b");
+
+        controller
+            .start_media(a.clone(), test_config_with_fmtp("PCMU", ""))
+            .await
+            .unwrap();
+        controller
+            .start_media(b.clone(), test_config_with_fmtp("PCMU", "octet-align=1"))
+            .await
+            .unwrap();
+
+        let err = expect_err(controller.bridge_sessions(a, b).await);
+        assert!(
+            matches!(err, BridgeError::FormatMismatch { .. }),
+            "expected FormatMismatch, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bridge_accepts_matching_amr_framing() {
+        // The guard must not reject legs that genuinely can relay: same
+        // framing, differing only in parameters that do not change the layout.
+        let controller = MediaSessionController::new();
+        let a = DialogId::new("amr-ok-a");
+        let b = DialogId::new("amr-ok-b");
+
+        controller
+            .start_media(
+                a.clone(),
+                test_config_with_fmtp("PCMU", "octet-align=1; mode-set=0,1,2"),
+            )
+            .await
+            .unwrap();
+        controller
+            .start_media(
+                b.clone(),
+                test_config_with_fmtp("PCMU", "octet-align=1; mode-set=3,4"),
+            )
+            .await
+            .unwrap();
+
+        let handle = expect_ok(controller.bridge_sessions(a.clone(), b.clone()).await);
+        assert!(controller.is_bridged(&a));
+        drop(handle);
     }
 
     #[tokio::test]
