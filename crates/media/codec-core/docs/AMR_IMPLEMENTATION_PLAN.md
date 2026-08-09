@@ -22,51 +22,109 @@ Three separable pieces of work, in increasing order of cost:
 | **L2 — SDP / signalling** | `mode-set`, `octet-align`, `mode-change-*`, `crc`, `robust-sorting`, dynamic PT allocation, offer/answer intersection, CMR-driven rate adaptation | Yes | ~2–3 weeks |
 | **L3 — Codec kernel** | The actual ACELP encoder/decoder for 8 NB modes + 9 WB modes, VAD/DTX/CNG, error concealment | No | months (see §7) |
 
-**L1 + L2 alone are worth shipping on their own.** They let rvoip act as a signalling-aware
-SBC/B2BUA that *relays* AMR-WB end-to-end without transcoding — which is the single most
-common production requirement, is 100 % clean-room, and carries no IP or licensing risk.
-L3 is where the real cost is.
+**L1 + L2 alone let rvoip act as a signalling-aware SBC/B2BUA that *relays* AMR-WB
+end-to-end without transcoding** — useful, and delivered at ~week 6 as a by-product. But
+transcoding is a day-one requirement here (§1.2), so L3 is on the critical path and is
+where essentially all of the cost lives. L1 also carries the AMR file-storage-format reader
+that loads test vectors, which is why it is sequenced first.
 
 ### 1.2 Decided approach
 
-Two decisions were taken up front and are now fixed for this branch:
+Four decisions are now fixed for this branch:
 
-- **Pure Rust from the start.** No FFI backend, not even an opt-in one. Everything in the
-  tree is Rust written from the specification text.
+- **Pure Rust in the shipped crate.** No FFI backend, not even an opt-in one. Everything
+  that ships is Rust written from the specification text, with no C dependency, no
+  `build.rs`, and no change to the workspace's cross-compilation or `cargo deny` posture.
 - **Transcoding is required from day one.** Pass-through/relay alone is not sufficient;
   AMR must bridge to G.711 and Opus.
+- **Open-source libraries are used as a development-time oracle.** `opencore-amr` and
+  `vo-amrwbenc` (both Apache-2.0) generate per-stage reference vectors offline. They are
+  never linked into the shipped crate and never appear in the workspace dependency graph.
+  See §1.2.1.
+- **AMR-WB is built first.** WB is the deliverable that matters (HD voice); NB follows.
 
-Together these put the codec kernel (L3) on the critical path immediately, and they have
-one consequence worth stating plainly before work starts:
+  An earlier revision of this plan put NB first as a de-risking warm-up: simpler
+  quantisers, no resampler, no high-band synthesis, so a bit-exactness bug costs days
+  instead of weeks. **That argument is largely bought out by the oracle decision above.**
+  It assumed hard, unaided debugging — but `opencore-amr` gives per-stage ground truth for
+  the WB decoder, which is where most of the new machinery (order-16 ISP, S-MSVQ, 12.8 kHz
+  resampling, high-band synthesis) first appears. WB-first does not cost much *total* time
+  (the shared `common/` work happens either way, just under a harder first consumer); it
+  front-loads the difficulty and delivers the goal roughly 2–3 months sooner.
 
-> **Transcoding requires both an encoder and a decoder.** Building both, bit-exact, in
-> pure Rust means the *first* working transcode path (AMR-NB ↔ G.711) lands around
-> month 5, and AMR-WB ↔ Opus — the actual HD-voice goal — around month 9–11. There is no
-> shortcut that preserves "pure Rust from the start". Phases 1–2 still ship useful relay
-> capability at ~week 6, but relay is explicitly not the goal here.
+  The residual exposure is the WB **encoder**: its oracle (`vo-amrwbenc`) is the one that
+  may not be bit-exact, and WB-first moves it from last phase to mid-project. This raises
+  the stakes on Phase 0 oracle qualification — see the caveat below.
 
-Order of work: **L1 (payload format) → L2 (SDP) → `common/` DSP layer → NB decoder → NB
-encoder → WB decoder → WB encoder → transcoding + interop.** L1 comes first not for its
-own sake but because the AMR file-storage-format reader it contains is what loads the
-3GPP test sequences — it is test infrastructure for everything after it.
+Order of work: **L1 (payload format) → L2 (SDP) → `common/` DSP layer + oracle harness →
+WB decoder → WB encoder → NB decoder → NB encoder → transcoding + interop.** L1 comes
+first not for its own sake but because the AMR file-storage-format reader it contains is
+what loads the 3GPP test sequences and the oracle dumps — it is test infrastructure for
+everything after it.
 
-### 1.2.1 Replacing the oracle
+> **Transcoding requires both an encoder and a decoder**, so AMR-WB ↔ Opus — the HD-voice
+> goal — lands around month 4–5, with AMR-NB following at month 6–7. Phases 1–2 ship relay
+> capability at ~week 6, but relay is not the goal here. See the timeline table in §8.
 
-The usual way to make a bit-exact ACELP port tractable is to diff each DSP stage against a
-known-good implementation. With no external oracle, three in-tree substitutes carry that
-load; see §9.2 for detail. In short:
+### 1.2.1 Oracle strategy
 
-1. **A floating-point reference model in Rust, written first**, mirroring the role TS
-   26.104 / 26.204 play relative to the fixed-point specs. Readable, obviously-correct,
-   `f64`, no Q-format juggling. It becomes the per-stage oracle for the fixed-point port.
-2. **Homing frames (EHF/DHF)** — the spec's own testing mechanism. Special inband frames
+Bit-exact ACELP is tractable when you can diff each DSP stage against a known-good
+implementation, and intractable when you can only compare final bitstreams. The oracle is
+what buys that, turning "debug a 244-bit mismatch" into "diff stage 6".
+
+**Chosen oracles** (both Apache-2.0, both distributed from the same SourceForge project,
+both on this workspace's `deny.toml` allow-list):
+
+| Path | Oracle | Provenance |
+|---|---|---|
+| AMR-NB encode | `opencore-amr` | OpenCORE / AOSP, 3GPP-reference-derived |
+| AMR-NB decode | `opencore-amr` | same |
+| AMR-WB decode | `opencore-amr` | same |
+| AMR-WB encode | `vo-amrwbenc` | VisualOn, via Android Stagefright — **independent implementation, not reference-derived** |
+
+**Architecture — out-of-tree, vector-generating.** The oracle lives in a standalone Cargo
+project *excluded from the workspace*, at `crates/media/codec-core/tools/amr-oracle/`. Its
+`build.rs` compiles the vendored C and applies instrumentation patches that dump each
+stage's inputs and outputs. It runs offline, on a developer machine, and writes compact
+fixtures into `crates/media/codec-core/tests/vectors/amr/`. **The committed test suite
+reads only those checked-in fixtures** — a normal `cargo test` needs no C toolchain, and
+the shipped crate's dependency graph is unchanged. A nightly job can regenerate and diff
+to catch drift.
+
+This is why the pure-Rust decision and the oracle decision are not in tension: the oracle
+is build-time-only tooling that produces data, not a runtime component.
+
+**Caveat that matters, because WB-first moves it onto the critical path.** `opencore-amr`
+is derived from the 3GPP reference and should be bit-exact. `vo-amrwbenc` is an
+*independent* VisualOn implementation, so it may not be bit-exact with TS 26.173 — and it
+is the oracle for the AMR-WB **encoder**, now Phase 5 rather than the final phase. Do not
+assume; **qualify each oracle in Phase 0** — before any DSP work — by running it against
+the 3GPP conformance vectors and recording which are bit-exact. This is a cheap experiment
+that settles an assumption the whole schedule rests on.
+
+If `vo-amrwbenc` turns out not to be bit-exact, Phase 5 falls back to: TS 26.174 encoder
+vectors as the authority, a reduced float model for ISF quantisation and codebook search
+(fallback 3 below), and brute-force search validation. Budget an extra 2–3 weeks for
+Phase 5 in that case. This is the single largest schedule uncertainty in the plan, and
+Phase 0 resolves it.
+
+**Retained regardless of oracle quality** — cheap, independent of any implementation's
+reading of the spec, and the fallback if oracle qualification disappoints:
+
+1. **Homing frames (EHF/DHF)** — the spec's own testing mechanism. Special inband frames
    force every bit-exactly-defined function into a predefined home state, and consecutive
-   homing frames must produce homing frames at the output. This gives self-synchronising
+   homing frames must produce homing frames at the output. Gives self-synchronising
    checkpoints, so a conformance sequence can be entered mid-stream and a failure
    localised to a frame range instead of poisoning everything downstream.
-3. **Brute-force reference searches** in test code — the ACELP codebook searches are fast
+2. **Brute-force reference searches** in test code — the ACELP codebook searches are fast
    heuristics approximating an optimum that can be computed exhaustively for a single
-   subframe. The slow version is the oracle for the fast one.
+   subframe. The slow version is the oracle for the fast one. This remains necessary even
+   with a good oracle, because it validates the *search* rather than one implementation's
+   result.
+3. **A reduced float reference model**, scoped to wherever oracle qualification comes back
+   weak — expected to be the WB encoder's ISF quantisation and codebook search, and
+   nothing else. The full float-model-first approach from the previous revision is
+   dropped: with a bit-exact oracle it is redundant, and it cost 2–3 weeks.
 
 ### 1.3 The one thing to get right before writing code
 
@@ -125,20 +183,30 @@ we should avoid line-by-line study of them entirely to keep the clean-room story
 
 **Working rule for the port:** implement from TS 26.090 / TS 26.190 (and the companion
 specs in §3) plus our own reading of the ETSI basic-operator definitions. Where behaviour
-is ambiguous, resolve it against the **3GPP conformance sequences and the spec-defined
-homing-frame outputs** — never by reading anyone's implementation of the ambiguous part.
-Since the pure-Rust decision (§6) removed the black-box oracle, ambiguity resolution is
-now entirely spec-and-vectors driven; this is the substance of risk R8.
+is ambiguous, resolve it against the **3GPP conformance sequences, the spec-defined
+homing-frame outputs, and the Apache-2.0 oracle's observed behaviour** — never against the
+3GPP reference C or any (L)GPL implementation.
+
+Note the asymmetry that makes this work: `opencore-amr` and `vo-amrwbenc` are
+**permissively licensed**, so reading and even instrumenting their source is lawful. The
+clean-room discipline in this section exists for the *unclearly-licensed* 3GPP C and the
+*copyleft* FFmpeg/Wireshark/rtpengine code, not for the Apache-2.0 oracle. In practice,
+prefer black-box use (feed input, compare output) even where reading is permitted — it
+keeps the provenance story simple and produces a spec-shaped implementation rather than a
+C-shaped one — but instrumenting the oracle to dump stage boundaries is explicitly fine
+and is the whole point of §1.2.1.
 
 **Action IP-2 (do during Phase 0):** confirm whether the 3GPP **test sequences**
 (TS 26.074 for NB, TS 26.174 for WB) may be vendored into the repo. If not, use the opt-in
-external-fixture pattern in §9.3. Do not check them in until this is answered. Priority is
-raised relative to the original draft because, without an oracle, these vectors are the
-*only* independent check on our reading of the spec.
+external-fixture pattern in §9.3. Do not check them in until this is answered. They remain
+the authority for any conformance claim, and the tiebreaker wherever oracle qualification
+came back weak (R8).
 
-**Action IP-3:** no third-party code is vendored under the current plan, so
-`THIRD_PARTY_NOTICES.md` needs no AMR entry. Revisit only if risk R10 forces the FFI
-recovery path.
+**Action IP-3:** the oracle harness vendors Apache-2.0 C (`opencore-amr`,
+`vo-amrwbenc`) under `tools/amr-oracle/`. Even though it is build-time-only tooling that
+never ships in the crate, add `THIRD_PARTY_NOTICES.md` entries and retain the upstream
+`LICENSE` / `NOTICE` files in the vendored tree — Apache-2.0 §4 attribution applies to
+distribution of the source repository, not just to binaries.
 
 ---
 
@@ -284,8 +352,8 @@ SDP parameters: `octet-align` (0/1, dflt 0), `mode-set` (subset of 0–7 / 0–8
 
 | Project | Scope | License | Use for us |
 |---|---|---|---|
-| `opencore-amr` (SourceForge; AOSP-derived) | AMR-NB enc+dec, AMR-WB **dec only** | Apache-2.0 | **Not used** — pure-Rust decision (§1.2). License would permit it; kept here as the fallback if the port stalls |
-| `mstorsjo/vo-amrwbenc` | AMR-WB **enc** | Apache-2.0 | **Not used** — same |
+| `opencore-amr` (SourceForge; AOSP-derived) | AMR-NB enc+dec, AMR-WB **dec only** | Apache-2.0 | **Development-time oracle** for NB encode/decode and WB decode (§1.2.1). Instrumented out-of-tree to dump per-stage vectors; never linked into the shipped crate |
+| `mstorsjo/vo-amrwbenc` | AMR-WB **enc** | Apache-2.0 | **Development-time oracle** for WB encode. VisualOn-derived, so bit-exactness with TS 26.173 is **unverified** — qualify in Phase 0 |
 | 3GPP TS 26.073 / 26.173 | NB + WB, fixed point, normative | Unclear | Do not use |
 | `pschatzmann/codec-amr` (the repo you found) | C++ wrapper over 3GPP C, NB+WB, enc+dec, Arduino-oriented | **Author says license unclear** | Do not use. Useful only as a pointer to the 3GPP sources |
 | FFmpeg native `amrnbdec.c` / `amrwbdec.c` | NB+WB decoders written from spec | LGPL-2.1+ | Proof that a clean-room from-spec decoder is achievable at reasonable size. **Do not read while porting** |
@@ -313,36 +381,60 @@ Behavioural notes worth stealing from rtpengine's docs (requirements, not code):
 
 ## 6. Architecture decision
 
-**Decided: pure-Rust from-spec port, no FFI backend at any point** (§1.2). The
+**Decided: pure-Rust from-spec port in the shipped crate, with Apache-2.0 C
+implementations used out-of-tree as a development-time oracle** (§1.2, §1.2.1). The
 alternatives are recorded below so the decision is reviewable, not to reopen it.
 
-### 6.1 Chosen — pure-Rust from-spec port
+### 6.1 Chosen — pure-Rust from-spec port, oracle-assisted
 
 Mirrors what this repo already did for G.729A (`crates/media/codec-core/src/codecs/g729/`,
-~120 files of fixed-point Rust with per-module Q-format documentation). No C toolchain, no
-`build.rs`, `no_std`-able later, cross-compiles everywhere, MIT-clean, and the first such
-implementation in the Rust ecosystem. Cost: by far the largest effort, and bit-exactness
-is unforgiving.
+~120 files of fixed-point Rust with per-module Q-format documentation). No C toolchain in
+the build, no `build.rs`, `no_std`-able later, cross-compiles everywhere, MIT-clean, and
+the first such implementation in the Rust ecosystem.
 
-The **two-stage float-then-fixed** structure (§9.2) is what makes this viable without an
-external oracle, and it is a deliberate change from how G.729A was built here. It front-
-loads ~3–4 weeks of work that produces no shippable artefact, and it is worth it: every
-subsequent fixed-point bug becomes a diff against a model that is already known correct.
+The key structural insight is that **"pure Rust" is a property of the shipped artefact,
+not of the development process.** An oracle that runs offline and emits data files gives
+the full per-stage debugging benefit while leaving the dependency graph, the license
+posture, and the cross-compilation story untouched. This is strictly better than either
+extreme: shipping FFI (§6.2) or developing blind (§6.4).
 
-### 6.2 Rejected — FFI to `opencore-amr` + `vo-amrwbenc`
+### 6.2 Rejected — FFI to `opencore-amr` + `vo-amrwbenc` as a shipped backend
 
 Would have given working AMR-NB/WB in ~1–2 weeks, and both are Apache-2.0 and
-allow-listed by `deny.toml`. Rejected because it introduces a C build dependency into a
-workspace that has almost none (only the optional `opus` crate and `env-libvpx-sys` in
-`rvoip-webrtc`), complicates cross-compilation and `cargo deny`, and adds Apache-2.0
-attribution obligations to an MIT project. Retained in §5 as the recovery option if the
-port stalls (risk R10).
+allow-listed by `deny.toml`. Rejected as a *runtime* component because it introduces a C
+build dependency into a workspace that has almost none (only the optional `opus` crate and
+`env-libvpx-sys` in `rvoip-webrtc`), complicates cross-compilation and `cargo deny`, and
+adds Apache-2.0 attribution obligations to an MIT project. The same libraries are adopted
+as build-time tooling instead (§6.1), and remain the recovery option if the port stalls
+(risk R10).
 
 ### 6.3 Rejected — payload format only, no codec kernel
 
 Cheap and clean-room, but transcoding is a day-one requirement (§1.2), so a kernel-free
 build does not meet the goal. Phases 1–2 still deliver this capability as a by-product at
 ~week 6.
+
+### 6.4 Rejected — float-model-first, no external oracle
+
+The previous revision of this plan front-loaded a full `f64` reference model (~3–4 weeks,
+no shippable artefact) to serve as the per-stage oracle. Superseded: a real bit-exact
+oracle does the same job better and for less. A **reduced** float model survives, scoped
+only to wherever Phase 0 oracle qualification comes back weak — expected to be the WB
+encoder's ISF quantisation and codebook search, and nothing else.
+
+### 6.5 Considered and not taken — direct port of `opencore-amr` C to Rust
+
+Worth recording because it is legally available and much faster than a from-spec
+implementation. Apache-2.0 permits derivative works, so transliterating the C into Rust
+would be a lawful route to a pure-Rust codec, subject to retaining copyright notices,
+stating changes, and adding a `THIRD_PARTY_NOTICES.md` entry.
+
+Not taken because it would make parts of `codec-core` Apache-2.0-derived rather than MIT,
+inherit C-shaped code structure into a codebase with an established idiom (see the G.729
+module layout), and produce something harder to reason about than a spec-derived
+implementation. **If schedule pressure becomes acute, this is a more attractive fallback
+than the FFI backend** — it preserves the pure-Rust property and costs only license
+attribution. Flagged for the Phase 5 checkpoint (risk R10).
 
 ---
 
@@ -361,8 +453,14 @@ src/codecs/mod.rs                 CodecFactory::create / create_by_name /
                                   create_by_payload_type; supported_codecs();
                                   CodecCapabilities::get_all()
 src/codecs/amr/                   NEW — see §7.5 for the module tree
+tests/vectors/amr/                NEW — checked-in per-stage oracle fixtures (§1.2.1)
+tools/amr-oracle/                 NEW — standalone Cargo project, EXCLUDED from the
+                                  workspace. Vendors opencore-amr + vo-amrwbenc, builds
+                                  them with cc, dumps per-stage vectors. Never a
+                                  dependency of the shipped crate
 Cargo.toml                        features: amr-nb, amr-wb, amr = [both],
-                                  all-codecs += amr. No FFI feature (§6.2)
+                                  all-codecs += amr. No FFI feature (§6.2).
+                                  [workspace] exclude = ["…/tools/amr-oracle"]
 ```
 
 **Blocking API gap.** The `AudioCodec` trait (`src/types.rs:13`) is
@@ -494,9 +592,10 @@ src/codecs/amr/
 │   └── dsp/                  autocorrelation, lag windowing, Levinson-Durbin,
 │                             A(z)↔LSP/ISP, interpolation, residual + synthesis filters,
 │                             weighting filter, correlation helpers
-├── reference/                TEST-ONLY float model — never shipped. Same DSP chain in
-│                             f64, transcribed from the spec for obviousness, not speed.
-│                             Per-stage oracle for the fixed-point code (§9.2a)
+├── reference/                CONDITIONAL, TEST-ONLY float model — only if Phase 0 oracle
+│                             qualification comes back weak, and scoped to the affected
+│                             stages (expected: WB encoder ISF quant + codebook search).
+│                             Never shipped. See §9.2d
 ├── nb/
 │   ├── tables/               windows, LSP codebooks (MA-predicted split VQ + SMQ for
 │   │                         MR122), gain codebooks, grids, bit-ordering tables
@@ -543,23 +642,26 @@ not; DSP bit-exactness work is notoriously spiky.
 ### Phase 0 — Foundations (1 week)
 
 - [ ] Acquire and archive all specs from §3.
-- [ ] Legal actions **IP-1** and **IP-2** opened. IP-2 must be *answered* in this phase —
-      without an external oracle the 3GPP vectors are the only independent correctness
-      check (risk R8), so their availability changes the plan, not just the CI config.
-- [ ] Decide **NB-first vs WB-first** (§11 Q3) — it moves the HD-voice date by ~3 months.
+- [ ] Legal actions **IP-1** and **IP-2** opened; IP-2 answered in this phase.
+- [ ] **Oracle qualification** — the highest-value task in this phase. Build
+      `opencore-amr` and `vo-amrwbenc`, run each against the TS 26.074 / TS 26.174
+      conformance sequences, and record for all four paths (NB enc, NB dec, WB enc, WB dec)
+      whether the library is **bit-exact** with the 3GPP reference. This is a cheap
+      experiment that settles an assumption the whole schedule rests on, and it determines
+      whether Phase 5 needs its 2–3 week fallback budget (§1.2.1).
 - [ ] `CodecType::AmrNb` / `CodecType::AmrWb`, `AmrParameters`, feature flags wired
       end-to-end (`rvoip` → `rvoip-sip` → `media-core` → `codec-core`) with a stub codec
       that returns `feature_not_enabled`.
 - [ ] ADR recorded for the `VariableRateCodec` trait (§7.1).
 
 **Exit:** `cargo build --all-features` green; AMR appears in `supported_codecs()` behind
-its feature; no behaviour yet.
+its feature; oracle bit-exactness recorded per path; no codec behaviour yet.
 
 ### Phase 1 — RFC 4867 payload format + file storage format (2–3 weeks) ← *test infrastructure*
 
 This comes first because the **AMR file storage format reader is what loads the 3GPP test
-sequences**. Everything from Phase 3 onward depends on it. The wire-format work is a
-by-product that happens to also enable relay.
+sequences and the oracle's bitstream dumps**. Everything from Phase 3 onward depends on it.
+The wire-format work is a by-product that happens to also enable relay.
 
 
 - [ ] `AmrPacketizer` / `AmrDepacketizer`: bandwidth-efficient **and** octet-aligned.
@@ -578,7 +680,7 @@ dissected with Wireshark; `cargo fuzz` target in the existing `crates/media/fuzz
 ### Phase 2 — SDP negotiation + relay path (2–3 weeks) ← *can run in parallel with Phase 3+*
 
 Independent of the codec kernel, so a second engineer can own this concurrently with the
-DSP work. If staffed by one person, it can also be deferred until after Phase 4 without
+DSP work. If staffed by one person, it can also be deferred until after Phase 5 without
 blocking anything — but doing it now means every later phase has a real call path to test
 against instead of a synthetic harness.
 
@@ -594,72 +696,93 @@ against instead of a synthetic harness.
 **Exit:** rvoip completes an AMR-WB call as a relaying B2BUA against Asterisk and against
 Kamailio+rtpengine, in both framings, with a mode switch observed mid-call.
 
-### Phase 3 — `common/` layer + float reference model (3–4 weeks) ← *the oracle substitute*
+### Phase 3 — `common/` layer + oracle harness (2–3 weeks)
 
 Produces no shippable artefact. It is the foundation everything else is debugged against,
-and skipping or rushing it is the single most likely cause of Phase 4–7 overrunning.
+and skipping or rushing it is the single most likely cause of Phases 4–7 overrunning.
+Because WB comes first, build `common/` order-16- and ISP-capable from the outset rather
+than growing it from an order-10 LSP-only base.
 
 - [ ] `common/basicop.rs` — the full ETSI basic-operator set, with the exhaustive tests in
       §9.1. **Nothing else starts until this is green.**
-- [ ] `common/dsp/` — autocorrelation, lag windowing, Levinson-Durbin, A(z)↔LSP/ISP,
-      interpolation, residual/synthesis/weighting filters, correlation helpers.
+- [ ] `common/dsp/` — autocorrelation, lag windowing, Levinson-Durbin, A(z)↔LSP **and**
+      A(z)↔ISP, interpolation, residual/synthesis/weighting filters, correlation helpers.
 - [ ] `common/bits.rs` — bit pack/unpack, class A/B/C reordering.
-- [ ] **`reference/` float model** (`#[cfg(test)]` or a `dev-model` feature, never
-      shipped): the same DSP chain in plain `f64`, written for obviousness rather than
-      speed — direct transcription of the spec's equations, no Q-formats, no saturation
-      juggling. This is the per-stage oracle for Phases 4–7.
-- [ ] **Stage-dump harness**: a test-only tracing facility that lets any stage emit its
-      inputs/outputs so fixed-point and float runs can be diffed frame-by-frame,
-      stage-by-stage, with the first divergence reported.
-- [ ] **Homing-frame support** (EHF/DHF per TS 26.071/26.101) in both models, plus the
-      checkpoint/resynchronise test helper described in §1.2.1.
+- [ ] `common/homing.rs` — EHF/DHF per TS 26.071/26.101, plus the checkpoint/resynchronise
+      test helper described in §1.2.1.
+- [ ] **Oracle harness** at `tools/amr-oracle/` (excluded from the workspace): vendored
+      `opencore-amr` + `vo-amrwbenc`, `build.rs` with `cc`, instrumentation patches that
+      dump per-stage inputs/outputs, and a generator that writes fixtures into
+      `tests/vectors/amr/`.
+- [ ] **Stage-diff harness** in the test suite: replays a checked-in fixture through one
+      Rust stage and reports the first divergence by frame and stage.
 
-**Exit:** basic operators exhaustively tested; float model reproduces a full LP-analysis →
-LSP → synthesis round trip on speech input with sane output; stage-diff harness
-demonstrated on a deliberately injected bug.
+**Exit:** basic operators exhaustively tested; oracle builds and emits per-stage fixtures
+for at least one WB decode sequence; stage-diff harness demonstrated on a deliberately
+injected bug; `cargo test` green with no C toolchain present.
 
-### Phase 4 — AMR-NB decoder, fixed point (4–6 weeks)
+### Phase 4 — AMR-WB decoder, fixed point (5–7 weeks)
 
-Order: `basicop` → bit unpacking + frame structure → LSP dequant → adaptive codebook →
-fixed codebook decode → gain dequant → synthesis filter → postfilter → PLC → CNG.
+Order: bit unpacking + frame structure (TS 26.201) → ISF dequant (S-MSVQ) → adaptive
+codebook → fixed codebook decode → gain dequant → synthesis filter → de-emphasis →
+12.8→16 kHz interpolation → high-band synthesis (incl. mode-8 transmitted HB gain) →
+post-processing → PLC (26.191) → CNG (26.192).
 
-Each stage is written twice: float model first (fast, obviously correct), then the
-fixed-point version diffed against it via the Phase 3 harness before moving on. Do not
-batch — one stage at a time, green before the next.
+The resampler and the high-band synthesis are the two places where "close enough" passes
+casual listening and fails bit-exactness. Diff them against the oracle aggressively.
 
-**Exit:** bit-exact against TS 26.074 decoder test sequences for all 8 modes + SID +
-NO_DATA + the erroneous-frame sequences.
+One stage at a time, green against the oracle before the next. Do not batch.
 
-### Phase 5 — AMR-NB encoder, fixed point (6–8 weeks)
+Carries the first-codec tax: the `common/` layer gets shaken out here rather than in a
+simpler NB pass, which is the cost of WB-first (§1.2).
 
-Order: preproc → LP analysis → LSP quant → open-loop pitch → closed-loop pitch → fixed
-codebook search (per-mode) → gain quant → bitstream → VAD/DTX/SID.
+**Exit:** bit-exact against TS 26.174 decoder sequences, all 9 modes + SID + NO_DATA +
+SPEECH_LOST + the erroneous-frame sequences.
 
-The per-mode algebraic codebook searches are the bulk of the work; MR122's 10-pulse search
-is the hardest single item. Validate each search against a brute-force exhaustive search
-over a single subframe (§9.2) before trusting it on a sequence.
+### Phase 5 — AMR-WB encoder, fixed point (6–8 weeks) ← *the HD-voice milestone*
 
-**Exit:** bit-exact against TS 26.074 encoder test sequences for all 8 modes, DTX on and
-off. **First working transcode path: AMR-NB ↔ G.711/Opus.**
+Order: preproc (HP filter, 16→12.8 kHz decimation, pre-emphasis) → order-16 LP analysis →
+ISF quantisation (S-MSVQ) → open-loop pitch → closed-loop pitch (1/4 and 1/2 resolution) →
+algebraic codebook search (4 tracks × 16 positions, 1–6 pulses/track by mode) → gain
+quantisation → bitstream → VAD (26.194) / DTX (26.193) / SID.
 
-### Phase 6 — AMR-WB decoder, fixed point (5–7 weeks)
+The codebook searches are the bulk of the work. Validate each against a brute-force
+exhaustive search over a single subframe (§9.2) before trusting it on a sequence.
 
-Adds over Phase 4: order-16 ISP/ISF dequant (S-MSVQ), 12.8→16 kHz interpolation,
-de-emphasis, high-band synthesis, mode-8 transmitted HB gain.
-
-The 12.8↔16 kHz resampler and the high-band synthesis are the two places where "close
-enough" silently passes casual listening and fails bit-exactness. Diff them against the
-float model aggressively.
-
-**Exit:** bit-exact against TS 26.174 decoder sequences, all 9 modes + SID.
-
-### Phase 7 — AMR-WB encoder, fixed point (7–9 weeks)
-
-Adds over Phase 5: 16→12.8 kHz decimation, pre-emphasis, order-16 analysis, ISF S-MSVQ,
-4-track/1–6-pulse codebook searches, WB VAD (26.194).
+**This is the phase most exposed to oracle quality.** If Phase 0 qualification showed
+`vo-amrwbenc` is not bit-exact with TS 26.173, fall back to TS 26.174 vectors as the
+authority plus a reduced float model for ISF quantisation and codebook search, and add
+2–3 weeks.
 
 **Exit:** bit-exact against TS 26.174 encoder sequences, all 9 modes, DTX on and off.
 **AMR-WB ↔ Opus/G.711 transcoding — the HD-voice goal — is reachable here.**
+
+### Phase 6 — AMR-NB decoder, fixed point (2–3 weeks)
+
+Order: bit unpacking + frame structure (TS 26.101) → LSP dequant → adaptive codebook →
+fixed codebook decode → gain dequant → synthesis filter → postfilter → PLC (26.091) →
+CNG (26.092).
+
+Substantially cheaper than the same phase would have been first: `common/`, the oracle
+harness, the stage-diff workflow, and the bitstream machinery are all proven by now, and
+NB is the simpler codec (order-10 LSP, no resampler, no high band).
+
+**Exit:** bit-exact against TS 26.074 decoder sequences, all 8 modes + SID + NO_DATA + the
+erroneous-frame sequences.
+
+### Phase 7 — AMR-NB encoder, fixed point (3–5 weeks)
+
+Order: preproc → LP analysis (two analyses per frame in MR122) → LSP quant (split VQ with
+MA prediction for MR475–MR102; SMQ for MR122) → open-loop pitch → closed-loop pitch (1/6
+and 1/3 fractional) → per-mode fixed codebook search → gain quant → bitstream →
+VAD (26.094) / DTX (26.093) / SID.
+
+Eight per-mode algebraic codebook searches are the bulk of the work; MR122's 10-pulse
+search is the hardest single item. `opencore-amr` is a 3GPP-reference-derived oracle here,
+so this phase should be the best-supported of the four.
+
+**Exit:** bit-exact against TS 26.074 encoder sequences, all 8 modes, DTX on and off.
+**AMR-NB ↔ G.711/Opus transcoding complete.**
 
 ### Phase 8 — Transcoding, interop, performance, hardening (3–4 weeks)
 
@@ -673,18 +796,29 @@ Adds over Phase 5: 16→12.8 kHz decimation, pre-emphasis, order-16 analysis, IS
 
 ### Timeline summary
 
-| Milestone | Earliest |
-|---|---|
-| AMR-WB relay / pass-through calls (no transcoding) | ~week 6 |
-| `common/` + float model + stage-diff harness | ~week 10 |
-| AMR-NB decode, bit-exact | ~month 4 |
-| **AMR-NB ↔ G.711 transcoding** | **~month 5** |
-| AMR-WB decode, bit-exact | ~month 7 |
-| **AMR-WB ↔ Opus transcoding (the HD-voice goal)** | **~month 9–11** |
+Single engineer familiar with the existing G.729 code, with Phase 2 parallelised onto a
+second person (it is the only phase that parallelises cleanly — Phases 3–7 are one
+dependency chain).
 
-Single engineer familiar with the existing G.729 code. Phases 1–2 can be parallelised onto
-a second person, pulling the transcoding milestones in by ~4–6 weeks. Phases 3–7 do not
-usefully parallelise — they are one dependency chain.
+| Milestone | Phase | Earliest |
+|---|---|---|
+| AMR-WB relay / pass-through calls (no transcoding) | 1–2 | ~week 6 |
+| `common/` + oracle harness + stage-diff workflow | 3 | ~week 8 |
+| AMR-WB decode, bit-exact | 4 | ~month 3–4 |
+| **AMR-WB ↔ Opus transcoding — the HD-voice goal** | **5** | **~month 4–5** |
+| AMR-NB decode, bit-exact | 6 | ~month 5–6 |
+| **AMR-NB ↔ G.711 transcoding** | 7 | ~month 6–7 |
+| Interop, transcoding matrix, hardening | 8 | ~month 7–8 |
+
+Add 2–3 weeks to Phase 5 if Phase 0 finds `vo-amrwbenc` is not bit-exact (§1.2.1) — the
+largest single schedule uncertainty.
+
+**Effect of the two revisions to this plan.** WB-first moves the HD-voice milestone from
+~month 9–11 to ~month 4–5. Roughly half of that comes from reordering (WB no longer waits
+behind NB) and roughly half from the oracle decision (per-stage debugging, and dropping
+the 3–4 week float-model phase). Total time to *both* codecs is only modestly reduced —
+~7–8 months against ~8–11 — because the work is largely the same; what changed is which
+codec lands first and how fast each phase debugs.
 
 ---
 
@@ -706,46 +840,47 @@ of downstream bugs.
 
 ### 9.2 Layer 1 — per-stage differential testing (the workhorse)
 
-With no external oracle, three in-tree mechanisms replace it. Together they are the
-difference between a tractable port and an intractable one.
+This is what makes bit-exactness tractable: a failure localises to one stage instead of one
+frame. Three mechanisms, in descending order of how much load they carry.
 
-**(a) Float model as per-stage oracle.** Every DSP stage exists twice: an `f64` model
-transcribed directly from the spec's equations, and the shipped fixed-point version. The
-Phase 3 stage-dump harness runs both over the same input and reports the first stage and
-frame where they diverge beyond a per-stage tolerance. The float model is not merely a
-debugging aid — it is the artefact that makes a bug *localisable*, so it must be written
-before the fixed-point code for each stage, not retrofitted.
+**(a) Per-stage oracle vectors.** The out-of-tree harness (§1.2.1) runs the instrumented
+Apache-2.0 C implementations over a speech corpus and dumps every stage's inputs and
+outputs. Those dumps are checked in as compact fixtures; each Rust module gets a test that
+replays its stage against them. Because both sides are fixed-point implementations of the
+same spec, comparison is **exact equality**, not tolerance-based — which is precisely why
+this beats the float model it replaced.
 
-Note the tolerance question is real: float and fixed-point legitimately differ. The
-harness therefore compares against **per-stage tolerances calibrated once on known-good
-frames**, and tightens to exact equality only for stages that are integer-valued
-(quantiser indices, pitch lags, pulse positions, bit fields). Those integer checkpoints —
-not the float sample values — are where bit-exactness is actually pinned down, and there
-are enough of them per frame to localise almost any bug.
+Keep fixtures small (a few hundred KB total) — sample a diverse subset of frames
+(voiced / unvoiced / onset / silence / DTMF / music / clipping) rather than whole files.
+
+Weight each oracle by its Phase 0 qualification result. Where a library was found bit-exact
+with the 3GPP reference, an exact-match failure is dispositive. Where it was not — expected
+to be `vo-amrwbenc` for WB encode — a mismatch is a *lead*, not a verdict, and TS 26.174 is
+the authority.
 
 **(b) Homing frames as checkpoints.** TS 26.071/26.101 define encoder and decoder homing
 frames that drive every bit-exactly-specified function into a predefined home state, and
 consecutive homing frames must produce homing frames at the output. Two uses:
 
 - A standalone conformance test: feed homing frames, assert the exact specified output.
-  This is a cheap, powerful, spec-mandated check that catches whole classes of state bugs
-  with no test vectors at all — and it is available from Phase 3, long before the 3GPP
-  sequences are wired up.
+  Cheap, spec-mandated, catches whole classes of state bugs with no test vectors at all,
+  and — critically — it is independent of *any* implementation's reading of the spec, so
+  it still holds where the oracle is untrustworthy.
 - Resynchronisation: injecting a homing frame mid-sequence resets state, so a failure at
   frame 900 can be isolated without replaying frames 1–899 and without one early bug
   poisoning every subsequent comparison.
 
 **(c) Brute-force reference searches.** The ACELP codebook searches are fast heuristics
 approximating a well-defined optimum. For a single subframe the optimum is computable
-exhaustively. Test the fast search against the slow one over a corpus of subframes. Same
-technique applies to the LSP/ISF VQ codebook searches. This is the only stage where "the
-spec describes a search, not a result" makes differential testing against a float model
-insufficient on its own.
+exhaustively. Test the fast search against the slow one over a corpus of subframes; the
+same technique applies to the LSP/ISF VQ codebook searches. This remains necessary even
+with a good oracle, because it validates the *search* rather than one implementation's
+result — and it is the main fallback for Phase 5 if `vo-amrwbenc` does not qualify.
 
-Frozen golden vectors are still checked in once a stage is green, so regressions are
-caught without re-running the float model. Keep them small (a few hundred KB total) —
-sample a diverse subset of frames (voiced / unvoiced / onset / silence / DTMF / music /
-clipping) rather than whole files.
+**(d) Reduced float model — conditional.** Only if Phase 0 qualification comes back weak,
+and scoped to the affected stages (expected: WB encoder ISF quantisation and codebook
+search). The previous revision's float-model-first approach for the whole codec is dropped
+as redundant (§6.4).
 
 ### 9.3 Layer 2 — 3GPP conformance sequences (the proof)
 
@@ -797,9 +932,11 @@ default `cargo test` silently skips feature-gated targets and gives a false gree
 cargo test -p rvoip-codec-core --all-features
 ```
 
-Add AMR jobs to `.github/workflows/pr-gate.yml` and `main-ci.yml`. The float reference
-model is test-only and must never be reachable from a release build — assert this with a
-compile check, not just convention. Interop runs go in `nightly-interop.yml`.
+Add AMR jobs to `.github/workflows/pr-gate.yml` and `main-ci.yml`. These must run **with no
+C toolchain assumptions** — they consume checked-in fixtures only, which is the property
+that keeps the oracle out of the shipped build. Add a `nightly-interop.yml` job that
+rebuilds the oracle, regenerates fixtures, and fails on any diff against what is committed;
+that is what catches instrumentation drift (risk R11). Interop runs go there too.
 
 ---
 
@@ -810,14 +947,15 @@ compile check, not just convention. Interop runs go in `nightly-interop.yml`.
 | R1 | Patent expiry relied on secondary sources | Legal | **IP-1** before Phase 3; Phases 0–2 are RFC-only and unaffected |
 | R2 | 3GPP reference C is not redistributable; accidental contamination | Legal | Clean-room rule (§2.2); no third-party codec source read during the port at all |
 | R3 | 3GPP test sequences can't be vendored | Weakens conformance claim | **IP-2**; opt-in external fixtures (§9.3) meanwhile |
-| R4 | Bit-exactness proves harder than G.729A — 17 modes, two codecs | Schedule | Float model + homing frames + brute-force searches (§9.2); NB before WB; decoder before encoder; one stage green before the next |
+| R4 | Bit-exactness proves harder than G.729A — 17 modes, two codecs | Schedule | Per-stage oracle vectors + homing frames + brute-force searches (§9.2); decoder before encoder within each codec; one stage green before the next |
 | R5 | `AudioCodec` trait can't express variable rate | Blocks everything downstream | `VariableRateCodec` extension trait decided in Phase 0 (§7.1) |
 | R6 | Dynamic-PT handling hardcoded to Opus (`media_adapter.rs:379`) | Blocks Phase 2 | Size the refactor as its own item; it unblocks future dynamic-PT codecs too |
 | R7 | Bandwidth-efficient vs octet-aligned interop bugs | Field failures | Both framings from Phase 1; explicit regression tests; Wireshark validation |
-| **R8** | **No external oracle — a stage can be "green vs. our own float model" and still be wrong, if both share a misreading of the spec** | **Silent non-conformance discovered late, at the 3GPP-vector stage** | Highest-severity residual risk of the pure-Rust decision. Mitigate by treating homing-frame outputs (spec-defined, independent of our reading) as the primary early check; wire up at least one 3GPP conformance sequence per codec as soon as Phase 1 can load them, rather than waiting for the phase exit; have a second person review each stage against the spec text |
+| **R8** | **`vo-amrwbenc` is not bit-exact with TS 26.173, leaving the AMR-WB encoder — the HD-voice milestone — without a trustworthy per-stage oracle** | **Phase 5 slips 2–3 weeks; WB encode is the hardest phase to debug unaided** | Highest-severity open risk, and the reason WB-first raises the stakes on Phase 0. **Qualify all four oracle paths in Phase 0** before any DSP work. If it fails: TS 26.174 vectors as authority, brute-force search validation, reduced float model for ISF quant + codebook search, +2–3 weeks budgeted |
 | R9 | CMR thrash causing audible mode oscillation | Quality | `CMR-interval` damper (§5); soak test with an adversarial peer |
-| R10 | Effort underestimated; port stalls mid-way with no transcoding delivered | Sunk cost — transcoding is a day-one requirement and does not arrive until ~month 5 | Recovery option: the Apache-2.0 FFI path (§6.2) remains available and is ~1–2 weeks from zero. Decide at the Phase 5 exit checkpoint whether the schedule is holding |
-| R11 | Float model's tolerances mask a real fixed-point defect | False confidence | Pin exact equality on all integer-valued outputs (quantiser indices, lags, pulse positions, bit fields), not just float tolerances (§9.2a) |
+| R10 | Effort underestimated; port stalls mid-way with no transcoding delivered | Sunk cost — transcoding is a day-one requirement and does not arrive until ~month 4–5 | Two recovery options, in preference order: (a) direct Rust port of the Apache-2.0 C (§6.5) — keeps the pure-Rust property, costs only license attribution; (b) the FFI backend (§6.2), ~1–2 weeks from zero. Decide at the Phase 4 exit checkpoint |
+| R11 | Oracle instrumentation patches drift from upstream, or dumps encode a subtly different stage boundary than the Rust code | Wasted debugging on a phantom mismatch | Pin the vendored upstream revision; keep instrumentation patches minimal and reviewed; when a mismatch resists explanation, check the stage boundary before the arithmetic |
+| R12 | WB-first means `common/` is shaken out under the harder codec, inflating Phase 4 | Schedule | Accepted cost of WB-first (§1.2), already priced into Phase 4's 5–7 weeks. Build `common/` order-16/ISP-capable from the start rather than retrofitting |
 
 ---
 
@@ -825,39 +963,33 @@ compile check, not just convention. Interop runs go in `nightly-interop.yml`.
 
 ### Resolved
 
-1. **Strategy** — ✅ **Pure Rust from the start.** No FFI backend, not even opt-in. The
-   float reference model replaces the external oracle (§1.2.1, §9.2).
+1. **Strategy** — ✅ **Pure Rust in the shipped crate.** No FFI backend, not even opt-in.
 2. **Scope** — ✅ **Transcoding required from day one.** The codec kernel is on the
    critical path; relay is a by-product, not the goal.
+3. **Oracle** — ✅ **Use the open-source libraries as a development-time oracle.**
+   `opencore-amr` + `vo-amrwbenc`, both Apache-2.0, instrumented out-of-tree to generate
+   checked-in per-stage vectors (§1.2.1). The shipped dependency graph is unchanged. The
+   full float reference model is dropped as redundant; a reduced one survives only as a
+   conditional fallback.
+4. **Ordering** — ✅ **WB first, NB second.** WB is the priority and the HD-voice
+   deliverable. The earlier NB-first recommendation was premised on WB bugs being expensive
+   to debug unaided; the oracle decision largely removes that premise, and WB-first moves
+   the goal milestone from ~month 9–11 to ~month 4–5 (§1.2, §8).
 
 ### Still open
 
-3. **NB-first or WB-first?** ← *the live question, and it materially moves the goal date*
+5. **IP-2** — can the 3GPP test sequences be vendored? Still Phase 0. Less critical than
+   in the previous revision now that a real oracle exists, but still the authority for
+   conformance claims and the tiebreaker wherever the oracle is untrusted (R8).
 
-   The plan currently does **NB → WB**. AMR-NB is the better learning vehicle: simpler
-   quantisers (order-10 LSP vs. order-16 ISF S-MSVQ), no resampler, no high-band
-   synthesis, and it exercises most of `common/` first. But AMR-WB is the codec that
-   actually delivers HD voice, and NB-first puts it ~3 months further out.
-
-   Going WB-first is viable — `common/` is shared either way — at the cost of debugging
-   order-16 ISF quantisation and the 12.8 kHz resampler with no simpler warm-up. Given
-   that HD voice is the stated motivation, this is worth an explicit decision rather than
-   inheriting the default. **Recommendation: still NB-first**, because a bit-exactness bug
-   found in NB costs days and the same bug found first in WB costs weeks — but if AMR-NB
-   has no independent deployment requirement, the argument is close.
-
-4. **IP-2** — can the 3GPP test sequences be vendored? This changes the CI story
-   materially, and given R8 it now also gates how early we can detect a spec misreading.
-   **Raised in priority: this should be answered during Phase 0, not Phase 3.**
-
-5. **Crate placement** — keep AMR inside `rvoip-codec-core` alongside G.711/G.729/Opus, or
+6. **Crate placement** — keep AMR inside `rvoip-codec-core` alongside G.711/G.729/Opus, or
    split it into a standalone publishable crate? A standalone pure-Rust AMR crate would be
    the first in the Rust ecosystem and has value beyond rvoip; note the name `amr` is
    already taken on crates.io by an unrelated GPL-3.0 project.
 
-6. **Staffing** — Phases 1–2 parallelise cleanly onto a second engineer and pull the
-   transcoding milestones in by ~4–6 weeks. Phases 3–7 are one dependency chain and do
-   not. Is a second person available?
+7. **Staffing** — Phase 2 parallelises cleanly onto a second engineer and pulls the
+   HD-voice milestone in by ~2–3 weeks. Phases 3–7 are one dependency chain and do not. Is
+   a second person available?
 
 ---
 
