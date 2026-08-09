@@ -27,7 +27,7 @@
 use super::traits::PayloadFormat;
 use bytes::Bytes;
 use codec_core::codecs::amr::{
-    AmrMode, AmrPacket, AmrPayloadCodec, AmrPayloadConfig, AmrPayloadFrame, AmrVariant,
+    AmrFmtp, AmrMode, AmrPacket, AmrPayloadCodec, AmrPayloadConfig, AmrPayloadFrame, AmrVariant,
 };
 use codec_core::codecs::amr::mode::AmrFrameType;
 use std::any::Any;
@@ -87,6 +87,47 @@ impl AmrPayloadFormat {
             AmrPayloadConfig::bandwidth_efficient(variant),
             AmrMode::new(variant, top)?,
         )
+    }
+
+    /// Build a handler from a negotiated SDP codec name and `a=fmtp` string.
+    ///
+    /// This is the path from signalling to the wire. `codec_name` is the
+    /// `a=rtpmap` encoding name (`AMR` or `AMR-WB`) and `fmtp` is the raw
+    /// parameter string, or `None` when the payload type carried no `a=fmtp`
+    /// line — which is not missing information but a positive statement that
+    /// every RFC 4867 default applies.
+    ///
+    /// **Using defaults instead of the negotiated parameters is not a
+    /// degraded mode, it is a broken one:** `octet-align` selects the framing,
+    /// so guessing it wrong produces a stream the peer cannot parse at all.
+    ///
+    /// The starting mode is the highest the negotiated `mode-set` permits; a
+    /// peer can move it with a codec mode request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `codec_name` is not an AMR encoding name, or when
+    /// `fmtp` is malformed or requests a configuration this build cannot
+    /// produce.
+    pub fn from_negotiated(
+        payload_type: u8,
+        codec_name: &str,
+        fmtp: Option<&str>,
+    ) -> Result<Self, codec_core::error::CodecError> {
+        let variant = if codec_name.eq_ignore_ascii_case("AMR-WB") {
+            AmrVariant::WideBand
+        } else if codec_name.eq_ignore_ascii_case("AMR") {
+            AmrVariant::NarrowBand
+        } else {
+            return Err(codec_core::error::CodecError::unsupported_codec(codec_name));
+        };
+
+        let parsed = AmrFmtp::parse(variant, fmtp.unwrap_or(""))?;
+        let mode = parsed
+            .active_modes()
+            .highest()
+            .ok_or_else(|| codec_core::error::CodecError::invalid_config("empty AMR mode-set"))?;
+        Self::new(payload_type, parsed.payload_config(), mode)
     }
 
     /// The underlying typed codec, for callers that need the full RFC 4867
@@ -329,6 +370,91 @@ mod tests {
 
         let mut fmt = wb_format();
         assert!(fmt.set_mode(nb_mode).is_err());
+    }
+
+    // ---- signalling -> wire ----
+
+    #[test]
+    fn negotiated_octet_align_actually_changes_the_framing() {
+        // The reason the fmtp has to reach this layer at all. The two framings
+        // produce different bytes for identical content, and a relay that
+        // guesses emits a stream the peer cannot parse.
+        let be = AmrPayloadFormat::from_negotiated(104, "AMR-WB", None).unwrap();
+        let oa =
+            AmrPayloadFormat::from_negotiated(105, "AMR-WB", Some("octet-align=1")).unwrap();
+
+        let coded = coded_frame(be.mode(), 3);
+        let be_bytes = be.pack(&coded, 0);
+        let oa_bytes = oa.pack(&coded, 0);
+        assert_ne!(be_bytes, oa_bytes, "framings must differ on the wire");
+        assert_eq!(oa_bytes.len(), be_bytes.len() + 1);
+
+        // Each parses its own and not the other's.
+        assert_eq!(be.unpack(&be_bytes, 0).as_ref(), coded.as_slice());
+        assert_eq!(oa.unpack(&oa_bytes, 0).as_ref(), coded.as_slice());
+        assert_ne!(oa.unpack(&be_bytes, 0).as_ref(), coded.as_slice());
+    }
+
+    #[test]
+    fn absent_fmtp_selects_the_rfc_defaults_rather_than_failing() {
+        // No a=fmtp line is a positive statement, not missing data.
+        let fmt = AmrPayloadFormat::from_negotiated(104, "AMR-WB", None).unwrap();
+        assert_eq!(fmt.variant(), AmrVariant::WideBand);
+        assert!(!fmt.codec().config().octet_aligned);
+        // All modes allowed, so we start at the top.
+        assert_eq!(fmt.mode().index(), 8);
+    }
+
+    #[test]
+    fn negotiated_mode_set_bounds_the_starting_mode() {
+        let fmt =
+            AmrPayloadFormat::from_negotiated(104, "AMR-WB", Some("mode-set=0,1,2")).unwrap();
+        assert_eq!(fmt.mode().index(), 2, "start at the highest permitted mode");
+
+        let nb = AmrPayloadFormat::from_negotiated(106, "AMR", Some("mode-set=0")).unwrap();
+        assert_eq!(nb.variant(), AmrVariant::NarrowBand);
+        assert_eq!(nb.mode().index(), 0);
+    }
+
+    #[test]
+    fn variant_comes_from_the_rtpmap_name_and_is_case_insensitive() {
+        for name in ["AMR-WB", "amr-wb", "Amr-Wb"] {
+            let fmt = AmrPayloadFormat::from_negotiated(104, name, None).unwrap();
+            assert_eq!(fmt.variant(), AmrVariant::WideBand, "{name}");
+            assert_eq!(fmt.clock_rate(), 16_000);
+        }
+        for name in ["AMR", "amr"] {
+            let fmt = AmrPayloadFormat::from_negotiated(106, name, None).unwrap();
+            assert_eq!(fmt.variant(), AmrVariant::NarrowBand, "{name}");
+            assert_eq!(fmt.clock_rate(), 8_000);
+        }
+    }
+
+    #[test]
+    fn non_amr_and_malformed_fmtp_are_rejected() {
+        assert!(AmrPayloadFormat::from_negotiated(104, "opus", None).is_err());
+        assert!(AmrPayloadFormat::from_negotiated(104, "AMR-WB", Some("octet-align=2")).is_err());
+        // Mode 8 does not exist for narrowband.
+        assert!(AmrPayloadFormat::from_negotiated(106, "AMR", Some("mode-set=8")).is_err());
+        // A configuration this build cannot produce.
+        assert!(
+            AmrPayloadFormat::from_negotiated(104, "AMR-WB", Some("octet-align=0; crc=1")).is_err()
+        );
+    }
+
+    #[test]
+    fn crc_and_robust_sorting_survive_negotiation_to_the_wire() {
+        let fmt = AmrPayloadFormat::from_negotiated(
+            104,
+            "AMR-WB",
+            Some("octet-align=1; crc=1; robust-sorting=1"),
+        )
+        .unwrap();
+        let config = fmt.codec().config();
+        assert!(config.octet_aligned && config.crc && config.robust_sorting);
+
+        let coded = coded_frame(fmt.mode(), 7);
+        assert_eq!(fmt.unpack(&fmt.pack(&coded, 0), 0).as_ref(), coded.as_slice());
     }
 
     #[test]

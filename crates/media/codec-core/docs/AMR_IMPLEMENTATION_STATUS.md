@@ -41,6 +41,8 @@ that will supply them.
 | `CmrDamper` — CMR-interval damping | `src/codecs/amr/rate.rs` |
 | Dynamic PT resolution from `a=rtpmap` instead of assumed Opus | `rvoip-sip/src/adapters/media_adapter.rs` |
 | AMR payload types, rtpmap and fmtp in offers | `rvoip-sip/src/adapters/media_adapter.rs` |
+| Negotiated `a=fmtp` carried to the media layer | `NegotiatedConfig::negotiated_fmtp` |
+| `AmrPayloadFormat::from_negotiated` — signalling to wire | `media-core/src/rtp_processing/payload/amr.rs` |
 
 ### A phase 0 mistake, corrected
 
@@ -88,15 +90,35 @@ RFC's "separate payload types" guidance:
 avoid collisions. A *peer's* AMR payload type is identified from its rtpmap, not
 from these numbers — they are only our own assignments.
 
+### Signalling now reaches the wire
+
+`NegotiatedConfig` gained `negotiated_fmtp: Option<String>` — the raw `a=fmtp`
+parameters agreed for the negotiated payload type. It is deliberately
+**unparsed**: interpreting format parameters is the codec layer's job, and
+keeping the string opaque means the signalling layer needs no AMR knowledge.
+The field is generic rather than AMR-specific, so other codecs can use it.
+
+`AmrPayloadFormat::from_negotiated(pt, codec_name, fmtp)` closes the loop.
+`None` for the fmtp is a positive statement — every RFC 4867 default applies —
+not missing data.
+
+Why this mattered enough to do before the relay: **using defaults instead of the
+negotiated parameters is not a degraded mode, it is a broken one.**
+`octet-align` selects the framing itself, so guessing it wrong yields a stream
+the peer cannot parse at all. There is a test asserting the two framings produce
+different bytes for identical content and that each rejects the other's.
+
+Which SDP is authoritative differs by role, and both are handled: the UAC reads
+the answer (what the peer will send), while the UAS reads the **offer**, since
+RFC 4867 §8.3.1 requires the answerer to echo transport parameters unmodified —
+reading back our own answer would be circular.
+
 ### Remaining for Phase 2
 
-- [ ] **Wire the negotiated `AmrFmtp` through to the media layer.** Negotiation
-      currently resolves a codec *name* and clock rate; the AMR parameters
-      (`octet-align`, `mode-set`) are parsed and validated but do not yet reach
-      `AmrPayloadCodec`. **Without this the relay would frame packets using
-      defaults rather than what was negotiated**, which for `octet-align` means
-      an unparseable stream. This is the next piece of work.
-- [ ] Pass-through/relay path: AMR in → AMR out with no codec kernel.
+- [ ] Pass-through/relay path: AMR in → AMR out with no codec kernel. The
+      pieces exist — `AmrPayloadCodec` for framing, `from_negotiated` for
+      configuration, `ModeChangePolicy` and `CmrDamper` for rate — but nothing
+      yet drives them from `media-core/src/relay/controller/`.
 - [ ] Mode-change policy and CMR damper driven from the live stream.
 - [ ] **Exit criterion not yet met:** an AMR-WB call completed as a relaying
       B2BUA against Asterisk and Kamailio+rtpengine, in both framings, with a
@@ -304,6 +326,13 @@ now returns `usize` for both variants and WB CRC works. See the Phase 1 section.
 ---
 
 ## Changelog
+
+### 2026-08-09 — Negotiated parameters reach the media layer
+
+`NegotiatedConfig::negotiated_fmtp` plus `AmrPayloadFormat::from_negotiated`.
+The signalling layer carries the fmtp string without interpreting it; the codec
+layer parses it. Closes the gap flagged in the previous entry, where a relay
+would have framed packets with defaults rather than what was negotiated.
 
 ### 2026-08-08 — Phase 2 negotiation layer
 

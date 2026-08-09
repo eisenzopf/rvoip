@@ -280,21 +280,6 @@ pub(crate) const AMR_NB_BE_PT: u8 = 106;
 /// AMR-NB, octet-aligned framing.
 pub(crate) const AMR_NB_OA_PT: u8 = 107;
 
-/// Whether a payload type is one of our AMR offers, and which variant it is.
-///
-/// Returns `None` for every other payload type. Note this identifies *our own*
-/// offered assignments; a peer's AMR payload type is identified from its
-/// `a=rtpmap` encoding name instead, since these numbers are dynamic.
-const fn local_amr_pt(payload_type: u8) -> Option<(bool, bool)> {
-    // (is_wideband, is_octet_aligned)
-    match payload_type {
-        AMR_WB_BE_PT => Some((true, false)),
-        AMR_WB_OA_PT => Some((true, true)),
-        AMR_NB_BE_PT => Some((false, false)),
-        AMR_NB_OA_PT => Some((false, true)),
-        _ => None,
-    }
-}
 
 /// NEXT_STEPS C2 — `a=fmtp:` value for payload types that require
 /// one. Returns `None` for codecs that work fine without an fmtp.
@@ -330,6 +315,21 @@ fn parse_annex_b_param(parameters: &str) -> Option<bool> {
             _ => None,
         }
     })
+}
+
+/// The raw `a=fmtp` parameter string for `payload_type` in the audio stream.
+///
+/// Returns `None` when the payload type has no `a=fmtp` line, which is
+/// meaningful rather than missing data: for AMR it selects every RFC 4867
+/// default (bandwidth-efficient framing, all modes).
+fn audio_fmtp_params(session: &SdpSession, payload_type: u8) -> Option<String> {
+    let format = payload_type.to_string();
+    session
+        .media_descriptions
+        .iter()
+        .find(|m| m.media.eq_ignore_ascii_case("audio"))
+        .and_then(|m| m.get_fmtp(&format))
+        .map(|fmtp| fmtp.parameters.clone())
 }
 
 fn audio_fmtp_annex_b(session: &SdpSession, payload_type: u8) -> Option<bool> {
@@ -715,6 +715,16 @@ pub struct NegotiatedConfig {
     pub clock_rate: u32,
     #[serde(default = "default_negotiated_channels")]
     pub channels: u8,
+    /// Raw `a=fmtp` parameters agreed for `payload_type`, if the negotiated
+    /// SDP carried any.
+    ///
+    /// Deliberately unparsed. Interpreting format parameters is the codec
+    /// layer's job — for AMR they select the wire framing itself
+    /// (`octet-align`) and the permitted bit rates (`mode-set`), and a relay
+    /// that ignores them frames packets the peer cannot parse. Carrying the
+    /// string keeps that knowledge out of the signalling layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub negotiated_fmtp: Option<String>,
     pub local_direction: crate::types::MediaDirection,
     pub remote_direction: crate::types::MediaDirection,
 }
@@ -1878,6 +1888,7 @@ impl MediaAdapter {
             payload_type,
             clock_rate,
             channels,
+            negotiated_fmtp: audio_fmtp_params(&parsed_answer, payload_type),
             local_direction: local_direction_from_remote_answer(&answer_direction),
             remote_direction: answer_direction
                 .map(sip_direction_to_session)
@@ -2107,6 +2118,9 @@ impl MediaAdapter {
                 payload_type: 0,
                 clock_rate: 8_000,
                 channels: 1,
+                // A port-zero rejection carries no media, so no format
+                // parameters apply.
+                negotiated_fmtp: None,
                 local_direction: crate::types::MediaDirection::Inactive,
                 remote_direction: crate::types::MediaDirection::Inactive,
             };
@@ -2259,6 +2273,10 @@ impl MediaAdapter {
             payload_type: negotiated_payload_type,
             clock_rate,
             channels,
+            // RFC 4867 §8.3.1 requires the answerer to echo the transport
+            // parameters unmodified, so the offer is the authority here.
+            // Reading back our own answer would be circular.
+            negotiated_fmtp: audio_fmtp_params(&parsed_offer, negotiated_payload_type),
             local_direction: answer_direction,
             remote_direction: offered_direction
                 .map(sip_direction_to_session)
@@ -6264,6 +6282,39 @@ a=fmtp:101 0-15\r\n";
 
     #[test]
     #[cfg(feature = "amr-wb")]
+    fn negotiated_fmtp_is_carried_verbatim_to_the_media_layer() {
+        // The signalling layer must not interpret format parameters, but it
+        // must not lose them either: for AMR they select the wire framing, so
+        // a relay that never sees them frames packets the peer cannot parse.
+        let offer = SdpBuilder::new("Session")
+            .origin("-", "1", "1", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16_000, "RTP/AVP")
+            .formats(&["100"])
+            .rtpmap("100", "AMR-WB/16000")
+            .fmtp("100", "octet-align=1; mode-set=0,1,2")
+            .done()
+            .build()
+            .unwrap();
+
+        let params = audio_fmtp_params(&offer, 100).expect("fmtp must be carried");
+        assert!(params.contains("octet-align=1"), "{params}");
+        assert!(params.contains("mode-set=0,1,2"), "{params}");
+    }
+
+    #[test]
+    fn a_payload_type_without_fmtp_reports_none_rather_than_empty() {
+        // Absent is meaningful for AMR — it selects every RFC 4867 default —
+        // so it must be distinguishable from an empty parameter string.
+        let offer = dynamic_audio_offer("100", "AMR-WB/16000");
+        assert_eq!(audio_fmtp_params(&offer, 100), None);
+        // And a payload type that is not present at all.
+        assert_eq!(audio_fmtp_params(&offer, 99), None);
+    }
+
+    #[test]
+    #[cfg(feature = "amr-wb")]
     fn amr_offers_advertise_each_framing_as_its_own_payload_type() {
         // RFC 4867 §8.3.1: transport configurations are mutually incompatible
         // bit patterns, so they are separate payload types rather than
@@ -6742,6 +6793,7 @@ a=fmtp:101 0-15\r\n";
                 payload_type: 0,
                 clock_rate: 8_000,
                 channels: 1,
+                negotiated_fmtp: None,
                 local_direction: crate::types::MediaDirection::SendRecv,
                 remote_direction: crate::types::MediaDirection::SendRecv,
             },
@@ -6811,6 +6863,7 @@ a=fmtp:101 0-15\r\n";
                 payload_type: 0,
                 clock_rate: 8_000,
                 channels: 1,
+                negotiated_fmtp: None,
                 local_direction: crate::types::MediaDirection::SendRecv,
                 remote_direction: crate::types::MediaDirection::SendRecv,
             },
@@ -6912,6 +6965,7 @@ a=fmtp:101 0-15\r\n";
                     payload_type: 8,
                     clock_rate: 8_000,
                     channels: 1,
+                    negotiated_fmtp: None,
                     local_direction: crate::types::MediaDirection::Inactive,
                     remote_direction: crate::types::MediaDirection::SendRecv,
                 },
@@ -7108,6 +7162,7 @@ a=fmtp:101 0-15\r\n";
                     payload_type: 8,
                     clock_rate: 8_000,
                     channels: 1,
+                    negotiated_fmtp: None,
                     local_direction: crate::types::MediaDirection::Inactive,
                     remote_direction: crate::types::MediaDirection::SendRecv,
                 },
