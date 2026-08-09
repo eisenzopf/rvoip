@@ -4,6 +4,8 @@
 //! as defined in RFC 3551 and other RFCs. Moved from rtp-core as part
 //! of the Transport/Media plane separation.
 
+#[cfg(any(feature = "amr-nb", feature = "amr-wb"))]
+pub mod amr;
 pub mod g711;
 pub mod g722;
 pub mod opus;
@@ -12,6 +14,8 @@ pub mod traits;
 pub mod vp8;
 pub mod vp9;
 
+#[cfg(any(feature = "amr-nb", feature = "amr-wb"))]
+pub use amr::AmrPayloadFormat;
 pub use g711::{G711APayloadFormat, G711UPayloadFormat};
 pub use g722::G722PayloadFormat;
 pub use opus::{OpusBandwidth, OpusPayloadFormat};

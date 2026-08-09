@@ -14,7 +14,7 @@ where we actually are.
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Foundations: types, feature flags, ADR, oracle qualification | 🟡 **In progress** — code landed, external items outstanding |
-| 1 | RFC 4867 payload format + AMR file storage format | 🟡 **Core done** — three optional extensions deferred |
+| 1 | RFC 4867 payload format + AMR file storage format | 🟢 **Complete** |
 | 2 | SDP negotiation + relay path | ⚪ Not started |
 | 3 | `common/` DSP layer + oracle harness | ⚪ Not started |
 | 4 | AMR-WB decoder, fixed point | ⚪ Not started |
@@ -41,8 +41,13 @@ that will supply them.
 | `NO_DATA` (FT 15) and `SPEECH_LOST` (FT 14, WB only) | `src/codecs/amr/payload.rs` |
 | Reserved-FT rejection (RFC 4867: discard the packet) | `src/codecs/amr/mode.rs` |
 | AMR file storage format, whole-file and incremental readers | `src/codecs/amr/storage.rs` |
+| Frame CRC, robust sorting, interleaving fields | `src/codecs/amr/payload.rs` |
+| AMR-WB class A bit table (TS 26.201 Table 2) | `src/codecs/amr/mode.rs` |
+| `PayloadFormat` adapter for the existing pipeline | `media-core/src/rtp_processing/payload/amr.rs` |
+| `amr_unpack` fuzz target + seed corpus | `crates/media/fuzz/` |
 
-**Verification:** 62 AMR tests, 215 codec-core tests overall. Notable coverage:
+**Verification:** 77 AMR tests in codec-core (230 total) plus 9 in media-core,
+and **20 million fuzz iterations with zero crashes**. Notable coverage:
 
 - Round-trip over **every** (variant × mode × framing) combination, and every
   frame count from 1 to the 32-frame limit.
@@ -55,29 +60,64 @@ that will supply them.
   packing one into the other's stream would silently corrupt the payload.
 - Storage frames feed the payload packer without conversion, which is what will
   let 3GPP conformance vectors drive the payload tests directly.
+- The CRC is cross-checked against a second, independently written
+  implementation of the RFC's prose description, over every mode and several
+  data patterns — the two agree.
+- The CRC is shown to detect damage to a class A bit and to *ignore* damage to a
+  class B bit, which is the behaviour unequal error protection is for.
+- Robust sorting is round-tripped with frames of mixed lengths, including
+  zero-length ones; short frames dropping out of later rounds is the part of
+  §4.4.3 easiest to get wrong.
+- A `cargo fuzz` target (`amr_unpack`) sweeps all framing/extension
+  combinations, asserting not just no-panic but that anything which unpacks
+  re-packs and re-parses to the same packet.
 
-### Deferred — the three optional octet-aligned extensions
+### The three optional octet-aligned extensions — now implemented
 
-Frame CRC, robust sorting, and interleaving are **not implemented**. Configuring
-any of them is rejected at construction rather than silently ignored, because
-misparsing a payload that uses them yields plausible garbage rather than an
-obvious failure. All three are optional parameters a receiver may legitimately
-decline to negotiate, so this is a valid interoperable subset — but it is a
-narrowing of the Phase 1 scope in the plan, recorded here rather than glossed.
+| Extension | State |
+|---|---|
+| Frame CRC (§4.4.2.1) | Implemented for **both** variants |
+| Robust sorting (§4.4.3) | Implemented |
+| Interleaving (§4.4.1) | ILL/ILP **carried**, reordering deliberately not performed |
 
-Frame CRC has an additional blocker for wideband: RFC 4867 defers the AMR-WB
-class A bit counts to TS 26.201 instead of tabulating them, so
-`AmrMode::class_a_bits()` returns `None` for WB. NB CRC is implementable today.
+**The WB CRC blocker is gone.** An earlier revision recorded that RFC 4867
+defers the AMR-WB class A counts to TS 26.201 and that we did not have them.
+They were extracted from TS 26.201 Table 2 and are now in `mode.rs`:
+
+| Mode | 6.60 | 8.85 | 12.65 | 14.25 | 15.85 | 18.25 | 19.85 | 23.05 | 23.85 |
+|---|---|---|---|---|---|---|---|---|---|
+| Class A | 54 | 64 | 72 | 72 | 72 | 72 | 72 | 72 | 72 |
+
+Cross-check: class A + B + C from TS 26.201 equals the frame total from RFC
+4867 for all nine modes — two independent sources agreeing.
+
+TS 26.201 also settles *which* bits the CRC covers: "when the AMR-WB codec mode
+is 6.60, then the Class A bits are d(0)..d(53)". Class A bits are the frame's
+**leading** bits in importance order, so the CRC is computed over the first
+`class_a_bits()` bits of the payload. `class_a_bits()` consequently returns
+`usize` rather than `Option<usize>`.
+
+**Interleaving is carried, not applied.** ILL/ILP are emitted and parsed and
+exposed on `AmrPacket`, but reassembling frame-block order means holding frames
+from up to `ill + 1` packets and emitting them out of arrival order. That is
+jitter-buffer work; doing it in the payload format would duplicate reordering
+logic that layer already owns. Documented on `AmrInterleaving`.
+
+### One RFC ambiguity resolved by choice
+
+RFC 4867 §4.4.2.1 says the CRC list follows the table of contents but does not
+say whether frames carrying no data get a CRC entry. We follow TS 26.201 —
+"When Frame Type Index of table 1a is 14 or 15, the CRC field is not included"
+— so `NO_DATA` and `SPEECH_LOST` contribute no CRC octet. **If a peer disagrees,
+every CRC after the first no-data frame will misalign.** Worth confirming
+against a real implementation during Phase 8 interop; it is the one place in
+Phase 1 where we guessed.
 
 ### Remaining for Phase 1
 
-- [ ] `PayloadFormat` adapter and dynamic PT registration — blocked on **Q1**
-      below (where the packetizer lives relative to `rtp-core`).
-- [ ] `cargo fuzz` target in `crates/media/fuzz`. The in-module sweep over short
-      arbitrary inputs is a stand-in, not a substitute.
 - [ ] Byte-for-byte comparison against captured real-world AMR pcaps via the
-      Wireshark dissector. Needs sample captures.
-- [ ] The three deferred extensions above, if we decide to negotiate them.
+      Wireshark dissector. **Needs sample captures, which we do not have.**
+      Deferred to Phase 8 interop, where live traffic is available anyway.
 
 ---
 
@@ -149,13 +189,16 @@ settles whether Phase 5 needs its 2–3 week fallback budget (risk R8).
 
 **Q1 — Where does the RFC 4867 packetizer live?** *(decided: option (c))*
 
-**Resolved.** The packetizer lives in `codec-core` beside the codec, at
-`src/codecs/amr/payload.rs`. RFC 4867 framing is codec framing rather than
-transport, and it needs the mode tables intimately. This diverges from the
-existing convention that payload formats live in `rtp-core` (`g711.rs`,
-`opus.rs`, `vp8.rs`), so the `PayloadFormat` adapter in `rtp-core` will need
-either a dependency edge or a thin re-declaration — still to be settled when
-that adapter is written.
+**Fully resolved, and the follow-up dissolved.** The packetizer lives in
+`codec-core` beside the codec (`src/codecs/amr/payload.rs`): RFC 4867 framing is
+codec framing rather than transport, and it needs the mode tables intimately.
+
+The worry about a dependency edge turned out to be unfounded — the payload
+formats do **not** live in `rtp-core` any more. They were moved to
+`media-core/src/rtp_processing/payload/`, and `media-core` already depends on
+both `rtp-core` and `codec-core`. So the `PayloadFormat` adapter sits there
+alongside `g711.rs` and `opus.rs` with **no new dependency edge and no
+duplicated tables**.
 
 Original framing of the question, retained for context:
 
@@ -179,14 +222,32 @@ standalone publishable crate? A pure-Rust AMR crate would be the first in the
 Rust ecosystem. Note `amr` is taken on crates.io by an unrelated GPL-3.0 project.
 No urgency; revisit once there is a working kernel.
 
-**Q3 — AMR-WB class A bit counts.** `AmrMode::class_a_bits()` returns `None` for
-wideband: RFC 4867 defers the table to TS 26.201 rather than reproducing it. The
-octet-aligned payload CRC option is blocked on adding it. Not needed until CRC
-support in Phase 1, and only then if we choose to implement CRC at all.
+**Q3 — AMR-WB class A bit counts.** *(resolved)* Extracted from TS 26.201
+Table 2 and cross-checked against the RFC 4867 frame totals. `class_a_bits()`
+now returns `usize` for both variants and WB CRC works. See the Phase 1 section.
 
 ---
 
 ## Changelog
+
+### 2026-08-08 — Phase 1 complete
+
+Closed out the remainder: frame CRC (both variants), robust sorting,
+interleaving fields, the `PayloadFormat` adapter, and a fuzz target.
+
+- The AMR-WB CRC blocker was resolved by extracting TS 26.201 Table 2. Class A
+  + B + C from that table equals the RFC 4867 frame total for all nine modes,
+  which is a genuine two-source cross-check rather than an assumption.
+- TS 26.201 also confirmed class A bits are the frame's *leading* bits
+  ("d(0)..d(53)" for mode 6.60), which is what makes a CRC over the first N
+  bits correct.
+- The `PayloadFormat` adapter needed no new dependency edge after all: payload
+  formats had already been moved out of `rtp-core` into `media-core`, which
+  depends on both crates. Q1's follow-up dissolved.
+- A test failure caught a real convention issue: a frame is `mode.bits()` bits,
+  not `octet_aligned_bytes()` bytes, so trailing bits of the final octet are
+  padding and do not survive a round trip. Now documented on `pack` and pinned
+  by a test rather than left to be rediscovered.
 
 ### 2026-08-08 — Phase 1 core complete
 

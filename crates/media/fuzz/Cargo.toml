@@ -14,6 +14,9 @@ rvoip-rtp-core = { path = "../rtp-core" }
 # default-features = false keeps the fuzz build lean (no libopus / C deps); the
 # g711 payload path is pure Rust and does not need the optional codec features.
 rvoip-media-core = { path = "../media-core", default-features = false }
+# AMR payload parsing lives in codec-core. `amr` alone keeps the build lean --
+# no libopus, no C deps -- and the RFC 4867 path is pure Rust.
+rvoip-codec-core = { path = "../codec-core", default-features = false, features = ["amr"] }
 
 [[bin]]
 name = "rtp_packet"
@@ -53,6 +56,13 @@ bench = false
 [[bin]]
 name = "g711_unpack"
 path = "fuzz_targets/g711_unpack.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "amr_unpack"
+path = "fuzz_targets/amr_unpack.rs"
 test = false
 doc = false
 bench = false

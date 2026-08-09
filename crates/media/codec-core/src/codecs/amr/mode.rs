@@ -71,6 +71,10 @@ impl AmrVariant {
     }
 
     /// SID payload size in bits: 39 for narrowband, 40 for wideband.
+    ///
+    /// Every SID bit is class A. RFC 4867 lists 39 of 39 for narrowband, and
+    /// TS 26.201 states the wideband comfort-noise bits "are all mapped to
+    /// Class A".
     #[must_use]
     pub const fn sid_bits(self) -> usize {
         match self {
@@ -110,7 +114,8 @@ const NB_BITS: [usize; 8] = [95, 103, 118, 134, 148, 159, 204, 244];
 /// AMR-NB class A bit counts, indexed by mode. RFC 4867 §3.6.
 ///
 /// Class A bits are the perceptually critical ones; they are what the optional
-/// payload CRC covers and what unequal error protection prioritises.
+/// payload CRC covers and what unequal error protection prioritises. They are
+/// the frame's leading bits — see [`AmrMode::class_a_bits`].
 const NB_CLASS_A: [usize; 8] = [42, 49, 55, 58, 61, 75, 65, 81];
 
 /// AMR-NB bit rates in bit/s, indexed by mode. 3GPP TS 26.071.
@@ -118,6 +123,13 @@ const NB_BITRATE: [u32; 8] = [4_750, 5_150, 5_900, 6_700, 7_400, 7_950, 10_200, 
 
 /// AMR-WB speech frame sizes in bits, indexed by mode. RFC 4867 §3.7.
 const WB_BITS: [usize; 9] = [132, 177, 253, 285, 317, 365, 397, 461, 477];
+
+/// AMR-WB class A bit counts, indexed by mode. 3GPP TS 26.201 Table 2.
+///
+/// RFC 4867 tabulates the narrowband counts but defers the wideband ones to
+/// TS 26.201, so these come from that table directly. Cross-check: class
+/// A + B + C equals the frame total in [`WB_BITS`] for every mode.
+const WB_CLASS_A: [usize; 9] = [54, 64, 72, 72, 72, 72, 72, 72, 72];
 
 /// AMR-WB bit rates in bit/s, indexed by mode. 3GPP TS 26.171.
 const WB_BITRATE: [u32; 9] = [
@@ -183,15 +195,16 @@ impl AmrMode {
 
     /// Number of class A bits in this mode.
     ///
-    /// Returns `None` for AMR-WB: RFC 4867 defers the wideband class A counts to
-    /// 3GPP TS 26.201 rather than tabulating them, and this crate does not yet
-    /// carry that table. Wideband payload CRC (an octet-aligned-only option) is
-    /// blocked on adding it.
+    /// Class A bits are the error-sensitive ones the optional payload CRC
+    /// covers. Crucially they are the frame's *leading* bits: TS 26.201 states
+    /// that for AMR-WB mode 6.60 "the Class A bits are d(0)..d(53)", and the
+    /// narrowband frame structure is ordered the same way. So a CRC over the
+    /// first `class_a_bits()` bits of the payload is the CRC the spec means.
     #[must_use]
-    pub const fn class_a_bits(self) -> Option<usize> {
+    pub const fn class_a_bits(self) -> usize {
         match self.variant {
-            AmrVariant::NarrowBand => Some(NB_CLASS_A[self.index as usize]),
-            AmrVariant::WideBand => None,
+            AmrVariant::NarrowBand => NB_CLASS_A[self.index as usize],
+            AmrVariant::WideBand => WB_CLASS_A[self.index as usize],
         }
     }
 
@@ -442,29 +455,47 @@ mod tests {
             let mode = AmrMode::new(AmrVariant::NarrowBand, index).unwrap();
             assert_eq!(mode.bitrate(), bitrate, "mode {index} bitrate");
             assert_eq!(mode.bits(), bits, "mode {index} bits");
-            assert_eq!(mode.class_a_bits(), Some(class_a), "mode {index} class A");
+            assert_eq!(mode.class_a_bits(), class_a, "mode {index} class A");
             assert_eq!(mode.octet_aligned_bytes(), bytes, "mode {index} bytes");
         }
     }
 
     #[test]
     fn wb_frame_sizes_match_rfc4867() {
+        // Frame sizes from RFC 4867 §3.7; class A counts from TS 26.201 Table 2.
         let expected = [
-            (0, 6_600, 132, 17),
-            (1, 8_850, 177, 23),
-            (2, 12_650, 253, 32),
-            (3, 14_250, 285, 36),
-            (4, 15_850, 317, 40),
-            (5, 18_250, 365, 46),
-            (6, 19_850, 397, 50),
-            (7, 23_050, 461, 58),
-            (8, 23_850, 477, 60),
+            (0, 6_600, 132, 54, 17),
+            (1, 8_850, 177, 64, 23),
+            (2, 12_650, 253, 72, 32),
+            (3, 14_250, 285, 72, 36),
+            (4, 15_850, 317, 72, 40),
+            (5, 18_250, 365, 72, 46),
+            (6, 19_850, 397, 72, 50),
+            (7, 23_050, 461, 72, 58),
+            (8, 23_850, 477, 72, 60),
         ];
-        for (index, bitrate, bits, bytes) in expected {
+        for (index, bitrate, bits, class_a, bytes) in expected {
             let mode = AmrMode::new(AmrVariant::WideBand, index).unwrap();
             assert_eq!(mode.bitrate(), bitrate, "mode {index} bitrate");
             assert_eq!(mode.bits(), bits, "mode {index} bits");
+            assert_eq!(mode.class_a_bits(), class_a, "mode {index} class A");
             assert_eq!(mode.octet_aligned_bytes(), bytes, "mode {index} bytes");
+        }
+    }
+
+    #[test]
+    fn class_a_bits_never_exceed_the_frame() {
+        // TS 26.201 Table 2 gives class A + B + C = total. We only carry the
+        // class A column, so the invariant we can assert is that it fits.
+        for variant in [AmrVariant::NarrowBand, AmrVariant::WideBand] {
+            for mode in AmrMode::all(variant) {
+                assert!(
+                    mode.class_a_bits() <= mode.bits(),
+                    "{mode}: {} class A bits in a {}-bit frame",
+                    mode.class_a_bits(),
+                    mode.bits()
+                );
+            }
         }
     }
 
