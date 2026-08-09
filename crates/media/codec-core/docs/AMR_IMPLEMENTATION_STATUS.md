@@ -15,7 +15,7 @@ where we actually are.
 |---|---|---|
 | 0 | Foundations: types, feature flags, ADR, oracle qualification | 🟡 **In progress** — code landed, external items outstanding |
 | 1 | RFC 4867 payload format + AMR file storage format | 🟢 **Complete** |
-| 2 | SDP negotiation + relay path | ⚪ Not started |
+| 2 | SDP negotiation + relay path | 🟡 **Negotiation done** — relay path outstanding |
 | 3 | `common/` DSP layer + oracle harness | ⚪ Not started |
 | 4 | AMR-WB decoder, fixed point | ⚪ Not started |
 | 5 | **AMR-WB encoder — the HD-voice milestone** | ⚪ Not started |
@@ -26,6 +26,81 @@ where we actually are.
 **There is no working AMR encoder or decoder yet.** `AmrCodec` constructs and
 negotiates, but `encode`/`decode` return `FeatureNotEnabled` naming the phase
 that will supply them.
+
+---
+
+## Phase 2 — SDP negotiation and relay
+
+### Done
+
+| Item | Where |
+|---|---|
+| RFC 4867 §8.1 fmtp parsing and emission | `src/codecs/amr/sdp.rs` |
+| RFC 4867 §8.3.1 offer/answer rules | `src/codecs/amr/sdp.rs` |
+| `ModeChangePolicy` — `mode-change-period` / `mode-change-neighbor` | `src/codecs/amr/rate.rs` |
+| `CmrDamper` — CMR-interval damping | `src/codecs/amr/rate.rs` |
+| Dynamic PT resolution from `a=rtpmap` instead of assumed Opus | `rvoip-sip/src/adapters/media_adapter.rs` |
+| AMR payload types, rtpmap and fmtp in offers | `rvoip-sip/src/adapters/media_adapter.rs` |
+
+### A phase 0 mistake, corrected
+
+`AmrModeSet::intersect` was documented as implementing offer/answer
+negotiation. **It does not, and building negotiation on it would have been a
+compliance bug.** RFC 4867 §8.3.1:
+
+> "If a mode set was supplied in the offer, the answerer SHALL return the
+> mode-set unmodified or reject the payload type."
+
+`mode-set` is **match-or-reject, and bi-directional** — it binds media sent
+*and* received by both parties. An answerer that narrows it is non-compliant,
+and the peer would keep sending modes we implied were acceptable. `intersect`
+survives as a plain set operation with corrected docs; `is_superset_of` is the
+test the rule actually needs.
+
+Two further rules that are easy to get wrong, both now implemented and tested:
+
+- `octet-align`, `crc`, `robust-sorting`, `interleaving` and `channels` must be
+  **echoed verbatim** by the answerer. Each combination is a distinct bit
+  pattern, so changing one yields a stream the offerer cannot parse. Endpoints
+  supporting several should offer them as separate payload types.
+- `mode-change-period` and `mode-change-capability` are a declarative pair:
+  requiring `period=2` of a peer is only permitted if that peer declared
+  `capability=2` or `period=2` itself.
+
+### The dynamic payload-type blocker is gone
+
+`media_adapter.rs` hardcoded the entire 96–127 range to Opus, so any AMR offer
+on a dynamic PT was rejected. Dynamic payload types now dispatch on the
+`a=rtpmap` encoding name. Widening the range did **not** make it a wildcard —
+an unknown encoding is still rejected, and there is a test pinning that.
+
+Our own offers use four payload types, one per transport configuration, per the
+RFC's "separate payload types" guidance:
+
+| PT | Codec | Framing | fmtp |
+|---|---|---|---|
+| 104 | AMR-WB | bandwidth-efficient | *(none — it is the default)* |
+| 105 | AMR-WB | octet-aligned | `octet-align=1` |
+| 106 | AMR-NB | bandwidth-efficient | *(none)* |
+| 107 | AMR-NB | octet-aligned | `octet-align=1` |
+
+96–98 are H.264/VP8/VP9 and 111 is Opus in this stack, so these were chosen to
+avoid collisions. A *peer's* AMR payload type is identified from its rtpmap, not
+from these numbers — they are only our own assignments.
+
+### Remaining for Phase 2
+
+- [ ] **Wire the negotiated `AmrFmtp` through to the media layer.** Negotiation
+      currently resolves a codec *name* and clock rate; the AMR parameters
+      (`octet-align`, `mode-set`) are parsed and validated but do not yet reach
+      `AmrPayloadCodec`. **Without this the relay would frame packets using
+      defaults rather than what was negotiated**, which for `octet-align` means
+      an unparseable stream. This is the next piece of work.
+- [ ] Pass-through/relay path: AMR in → AMR out with no codec kernel.
+- [ ] Mode-change policy and CMR damper driven from the live stream.
+- [ ] **Exit criterion not yet met:** an AMR-WB call completed as a relaying
+      B2BUA against Asterisk and Kamailio+rtpengine, in both framings, with a
+      mid-call mode switch observed.
 
 ---
 
@@ -229,6 +304,15 @@ now returns `usize` for both variants and WB CRC works. See the Phase 1 section.
 ---
 
 ## Changelog
+
+### 2026-08-08 — Phase 2 negotiation layer
+
+SDP parameters, offer/answer, rate adaptation, and the dynamic payload-type
+refactor. The relay path itself is still outstanding — see above.
+
+The significant find was that phase 0's `mode-set` intersection was wrong:
+RFC 4867 requires match-or-reject, not narrowing. Caught by reading §8.3.1
+directly rather than trusting the summary that led to the original code.
 
 ### 2026-08-08 — Phase 1 complete
 

@@ -259,7 +259,39 @@ pub(crate) fn rtpmap_for_pt(pt: u8) -> Option<&'static str> {
         13 => Some("CN/8000"),
         18 => Some("G729/8000"),
         101 => Some("telephone-event/8000"),
+        // RFC 4867 transport configurations are mutually incompatible bit
+        // patterns, so each is offered as its own payload type rather than
+        // negotiated down. Wideband first: it is the HD-voice codec.
+        AMR_WB_BE_PT => Some("AMR-WB/16000"),
+        AMR_WB_OA_PT => Some("AMR-WB/16000"),
+        AMR_NB_BE_PT => Some("AMR/8000"),
+        AMR_NB_OA_PT => Some("AMR/8000"),
         111 => Some("opus/48000/2"),
+        _ => None,
+    }
+}
+
+/// AMR-WB, bandwidth-efficient framing (the RFC 4867 default).
+pub(crate) const AMR_WB_BE_PT: u8 = 104;
+/// AMR-WB, octet-aligned framing.
+pub(crate) const AMR_WB_OA_PT: u8 = 105;
+/// AMR-NB, bandwidth-efficient framing.
+pub(crate) const AMR_NB_BE_PT: u8 = 106;
+/// AMR-NB, octet-aligned framing.
+pub(crate) const AMR_NB_OA_PT: u8 = 107;
+
+/// Whether a payload type is one of our AMR offers, and which variant it is.
+///
+/// Returns `None` for every other payload type. Note this identifies *our own*
+/// offered assignments; a peer's AMR payload type is identified from its
+/// `a=rtpmap` encoding name instead, since these numbers are dynamic.
+const fn local_amr_pt(payload_type: u8) -> Option<(bool, bool)> {
+    // (is_wideband, is_octet_aligned)
+    match payload_type {
+        AMR_WB_BE_PT => Some((true, false)),
+        AMR_WB_OA_PT => Some((true, true)),
+        AMR_NB_BE_PT => Some((false, false)),
+        AMR_NB_OA_PT => Some((false, true)),
         _ => None,
     }
 }
@@ -276,6 +308,10 @@ pub(crate) fn fmtp_for_pt_with_g729_annex_b(pt: u8, g729_annex_b: bool) -> Optio
         18 if g729_annex_b => Some("annexb=yes"),
         18 => Some("annexb=no"),
         101 => Some("0-15"),
+        // Bandwidth-efficient is the RFC 4867 default, so those payload types
+        // need no fmtp at all. Omitting it also leaves mode-set absent, which
+        // is what an endpoint supporting every mode should do.
+        AMR_WB_OA_PT | AMR_NB_OA_PT => Some("octet-align=1"),
         // Opus (PT 111) defaults are fine for VoIP without fmtp; a
         // production deployment may want `useinbandfec=1; minptime=10`.
         _ => None,
@@ -336,6 +372,8 @@ fn codec_name_for_payload(payload_type: u8, g729_annex_b: bool) -> String {
         18 if g729_annex_b => "G729BA",
         18 => "G729A",
         101 => "telephone-event",
+        AMR_WB_BE_PT | AMR_WB_OA_PT => "AMR-WB",
+        AMR_NB_BE_PT | AMR_NB_OA_PT => "AMR",
         111 => "opus",
         _ => return format!("PT{}", payload_type),
     }
@@ -347,6 +385,8 @@ fn payload_codec_available(payload_type: u8) -> bool {
         0 | 8 | 13 | 101 => true,
         18 => cfg!(feature = "g729"),
         111 => cfg!(feature = "opus"),
+        AMR_WB_BE_PT | AMR_WB_OA_PT => cfg!(feature = "amr-wb"),
+        AMR_NB_BE_PT | AMR_NB_OA_PT => cfg!(feature = "amr-nb"),
         // G.722 remains wire-parseable but has no encoder/decoder.
         9 => false,
         _ => false,
@@ -376,7 +416,14 @@ fn sdp_payload_codec_available(session: &SdpSession, payload_type: u8) -> bool {
         // Telephone-event uses a dynamic PT in this stack and therefore
         // always requires an explicit RFC 4733 mapping.
         101 => mapping_matches("telephone-event", 8_000, &[1]),
-        96..=127 => cfg!(feature = "opus") && mapping_matches("opus", 48_000, &[1, 2]),
+        // Dynamic payload types carry no fixed meaning, so dispatch on the
+        // encoding name the peer declared rather than assuming one codec owns
+        // the whole range. This is what lets AMR and Opus coexist above 96.
+        96..=127 => {
+            mapping_matches("opus", 48_000, &[1, 2]) && cfg!(feature = "opus")
+                || mapping_matches("AMR-WB", 16_000, &[1]) && cfg!(feature = "amr-wb")
+                || mapping_matches("AMR", 8_000, &[1]) && cfg!(feature = "amr-nb")
+        }
         _ => false,
     }
 }
@@ -441,6 +488,16 @@ fn negotiated_audio_shape_from_sdp(
             return Err(bounded_sdp_failure("codec", "opus-disabled"));
         }
         "opus"
+    } else if wire_name.eq_ignore_ascii_case("AMR-WB") {
+        if !cfg!(feature = "amr-wb") {
+            return Err(bounded_sdp_failure("codec", "amr-wb-disabled"));
+        }
+        "AMR-WB"
+    } else if wire_name.eq_ignore_ascii_case("AMR") {
+        if !cfg!(feature = "amr-nb") {
+            return Err(bounded_sdp_failure("codec", "amr-nb-disabled"));
+        }
+        "AMR"
     } else if wire_name.eq_ignore_ascii_case("G722") {
         return Err(bounded_sdp_failure("codec", "g722-unsupported"));
     } else {
@@ -449,6 +506,10 @@ fn negotiated_audio_shape_from_sdp(
 
     let valid_shape = if canonical.eq_ignore_ascii_case("opus") {
         clock_rate == 48_000 && matches!(channels, 1 | 2)
+    } else if canonical.eq_ignore_ascii_case("AMR-WB") {
+        // AMR-WB is the one 16 kHz codec here. Its clock rate is what
+        // distinguishes it from AMR on the wire when both are offered.
+        clock_rate == 16_000 && channels == 1
     } else {
         clock_rate == 8_000 && channels == 1
     };
@@ -459,7 +520,13 @@ fn negotiated_audio_shape_from_sdp(
         0 => canonical == "PCMU",
         8 => canonical == "PCMA",
         18 => canonical.starts_with("G729"),
-        96..=127 if payload_type != 101 => canonical.eq_ignore_ascii_case("opus"),
+        // Any dynamic payload type may carry any of these; the rtpmap decided
+        // which, and the shape check above already validated the clock rate.
+        96..=127 if payload_type != 101 => {
+            canonical.eq_ignore_ascii_case("opus")
+                || canonical.eq_ignore_ascii_case("AMR-WB")
+                || canonical.eq_ignore_ascii_case("AMR")
+        }
         _ => false,
     };
     if !valid_payload_identity {
@@ -5053,6 +5120,10 @@ a=fmtp:101 0-15\r\n";
             Some(18)
         );
         assert_eq!(codec_name_for_payload(18, false), "G729A");
+        assert_eq!(codec_name_for_payload(AMR_WB_BE_PT, false), "AMR-WB");
+        assert_eq!(codec_name_for_payload(AMR_WB_OA_PT, false), "AMR-WB");
+        assert_eq!(codec_name_for_payload(AMR_NB_BE_PT, false), "AMR");
+        assert_eq!(codec_name_for_payload(AMR_NB_OA_PT, false), "AMR");
     }
 
     #[test]
@@ -6114,6 +6185,99 @@ a=fmtp:101 0-15\r\n";
     fn auxiliary_only_audio_formats_do_not_fall_back_to_pcmu() {
         let formats = vec!["13".to_string(), "101".to_string()];
         assert_eq!(select_primary_audio_payload(&formats), None);
+    }
+
+    /// A minimal audio offer with one dynamic payload type and its rtpmap.
+    fn dynamic_audio_offer(pt: &str, rtpmap: &str) -> SdpSession {
+        SdpBuilder::new("Session")
+            .origin("-", "1", "1", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16_000, "RTP/AVP")
+            .formats(&[pt])
+            .rtpmap(pt, rtpmap)
+            .done()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    #[cfg(feature = "amr-wb")]
+    fn dynamic_payload_types_are_resolved_from_the_rtpmap_not_assumed_to_be_opus() {
+        // The whole dynamic range used to be hardcoded to Opus, so an AMR-WB
+        // offer on any PT above 95 was rejected. Which codec a dynamic PT
+        // carries is decided by the encoding name the peer declared.
+        let offer = dynamic_audio_offer("100", "AMR-WB/16000");
+        assert!(sdp_payload_codec_available(&offer, 100));
+
+        let (codec, clock_rate, channels) =
+            negotiated_audio_shape_from_sdp(&offer, 100, false).unwrap();
+        assert_eq!(codec, "AMR-WB");
+        assert_eq!(clock_rate, 16_000);
+        assert_eq!(channels, 1);
+    }
+
+    #[test]
+    #[cfg(feature = "amr-nb")]
+    fn amr_narrowband_is_resolved_on_a_dynamic_payload_type() {
+        let offer = dynamic_audio_offer("98", "AMR/8000");
+        assert!(sdp_payload_codec_available(&offer, 98));
+        let (codec, clock_rate, _) = negotiated_audio_shape_from_sdp(&offer, 98, false).unwrap();
+        assert_eq!(codec, "AMR");
+        assert_eq!(clock_rate, 8_000);
+    }
+
+    #[test]
+    #[cfg(all(feature = "amr-wb", feature = "opus"))]
+    fn amr_and_opus_coexist_in_the_dynamic_range() {
+        // Both must be resolvable on arbitrary dynamic payload types, which is
+        // the point of dispatching on the encoding name.
+        let amr = dynamic_audio_offer("111", "AMR-WB/16000");
+        assert_eq!(
+            negotiated_audio_shape_from_sdp(&amr, 111, false).unwrap().0,
+            "AMR-WB"
+        );
+        let opus = dynamic_audio_offer("104", "opus/48000/2");
+        assert_eq!(
+            negotiated_audio_shape_from_sdp(&opus, 104, false).unwrap().0,
+            "opus"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "amr-wb")]
+    fn amr_wideband_with_the_wrong_clock_rate_is_rejected() {
+        // AMR-WB is 16 kHz. An offer claiming 8 kHz is malformed, and its
+        // clock rate is what distinguishes it from AMR when both are present.
+        let offer = dynamic_audio_offer("100", "AMR-WB/8000");
+        assert!(negotiated_audio_shape_from_sdp(&offer, 100, false).is_err());
+        assert!(!sdp_payload_codec_available(&offer, 100));
+    }
+
+    #[test]
+    fn unknown_dynamic_encodings_are_still_rejected() {
+        // Widening the dynamic range must not turn it into a wildcard.
+        let offer = dynamic_audio_offer("100", "SPEEX/16000");
+        assert!(!sdp_payload_codec_available(&offer, 100));
+        assert!(negotiated_audio_shape_from_sdp(&offer, 100, false).is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "amr-wb")]
+    fn amr_offers_advertise_each_framing_as_its_own_payload_type() {
+        // RFC 4867 §8.3.1: transport configurations are mutually incompatible
+        // bit patterns, so they are separate payload types rather than
+        // negotiated down. Bandwidth-efficient is the default and needs no
+        // fmtp; octet-aligned must say so.
+        assert_eq!(rtpmap_for_pt(AMR_WB_BE_PT), Some("AMR-WB/16000"));
+        assert_eq!(rtpmap_for_pt(AMR_WB_OA_PT), Some("AMR-WB/16000"));
+        assert_eq!(fmtp_for_pt_with_g729_annex_b(AMR_WB_BE_PT, false), None);
+        assert_eq!(
+            fmtp_for_pt_with_g729_annex_b(AMR_WB_OA_PT, false),
+            Some("octet-align=1")
+        );
+        assert!(payload_codec_available(AMR_WB_BE_PT));
+        assert!(payload_codec_available(AMR_WB_OA_PT));
     }
 
     #[test]
