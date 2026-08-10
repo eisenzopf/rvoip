@@ -113,12 +113,70 @@ the answer (what the peer will send), while the UAS reads the **offer**, since
 RFC 4867 §8.3.1 requires the answerer to echo transport parameters unmodified —
 reading back our own answer would be circular.
 
+### Interop peers
+
+`g729_call` in `rvoip-sip/examples/pbx` is the template for an AMR scenario; the
+runner is `./run.sh --pbx asterisk|freeswitch|both --api all --scenario ...`.
+Neither peer image shipped AMR, so both needed changes. **Everything below is
+outside this repo** — in `~/Developer/freeswitch` and `~/Developer/asterisk` —
+and each edited file has a timestamped `.pre-amr.*` backup, since neither
+directory is version-controlled.
+
+**FreeSWITCH — done and verified.** Its image already built FS 1.10.12 from
+source, so this was three `-dev` packages in the build stage, three runtime
+libraries, and two lines in `freeswitch-modules.conf`. Built as
+`rvoip-freeswitch:amr`, a **separate tag** so the working `:local` image is
+untouched. Verified: `mod_amr.so` and `mod_amrwb.so` present, linking
+`libopencore-amrnb`, `libopencore-amrwb` and `libvo-amrwbenc`, zero unresolved
+symbols.
+
+Two of its config knobs are directly useful for testing:
+`force-oa` originates octet-aligned (so both framings can be exercised against
+a real peer), and `mode-set-overwrite=0` mirrors the offered mode-set — which is
+the RFC 4867 §8.3.1-compliant behaviour our negotiation implements.
+
+**Asterisk — prepared, build blocked.** AMR is not a loadable module for
+Asterisk; it is a source patch, and the packaged Alpine Asterisk cannot take it.
+`Dockerfile.amr` (separate file and tag) builds Asterisk 20 from source and
+applies the patches from `traud/asterisk-amr`, with `config-amr/` carrying
+`allow = amrwb` / `allow = amr`.
+
+The patches document Asterisk 13/16 support, which looked like a serious
+forward-port risk across four major versions. **It is not.** Dry-run against
+Asterisk 20.20.1: every hunk applies, two with fuzz 1. They are purely additive
+— appending to alphabetically-ordered registration lists — and the APIs they
+touch (`ast_codec`, `CODEC_REGISTER_AND_CACHE`, `set_next_mime_type`,
+`add_static_payload`) have been stable since 13. Verifying this took two minutes
+and converted an open-ended risk into a known quantity; worth doing before a
+long build rather than after.
+
+The build is blocked only by the environment: **Docker containers currently have
+no outbound network** (HTTP, HTTPS and even Alpine's own repositories all
+refused) while the host does. The FreeSWITCH image built successfully earlier
+under the same Dockerfile pattern, so this is a recent change rather than
+anything wrong with the setup. Re-run when container networking returns:
+
+```sh
+cd ~/Developer/asterisk && docker build -f Dockerfile.amr -t rvoip-asterisk:amr .
+```
+
+The Dockerfile fails loudly rather than silently producing an AMR-less image: it
+asserts `configure` detected all three libraries, and that `codec_amr.so` and
+`res_format_attr_amr.so` both exist, before the runtime stage.
+
 ### Remaining for Phase 2
 
-- [ ] Pass-through/relay path: AMR in → AMR out with no codec kernel. The
-      pieces exist — `AmrPayloadCodec` for framing, `from_negotiated` for
-      configuration, `ModeChangePolicy` and `CmrDamper` for rate — but nothing
-      yet drives them from `media-core/src/relay/controller/`.
+- [x] **Pass-through/relay path — already existed.** `relay/controller/bridge.rs`
+      forwards RTP payload bytes without inspecting them, so AMR relays through
+      it with no codec kernel. What it lacked was a correctness check: it
+      compared payload types only, and two AMR legs can share a payload type
+      while disagreeing on framing. That now returns `BridgeError::FormatMismatch`
+      rather than relaying unparseable audio.
+- [ ] `amr_call` scenario in `rvoip-sip/examples/pbx`, modelled on `g729_call`.
+      **It cannot be audio-verifying the way `g729_call` is** — that scenario
+      pushes tones through rvoip's own codec, which for AMR does not exist. The
+      relay topology is what makes audio verification possible without one:
+      peer → rvoip (frames only) → peer, with the PBXes doing the codec work.
 - [ ] Mode-change policy and CMR damper driven from the live stream.
 - [ ] **Exit criterion not yet met:** an AMR-WB call completed as a relaying
       B2BUA against Asterisk and Kamailio+rtpengine, in both framings, with a
@@ -326,6 +384,16 @@ now returns `usize` for both variants and WB CRC works. See the Phase 1 section.
 ---
 
 ## Changelog
+
+### 2026-08-09 — Interop peers, and the relay that already existed
+
+FreeSWITCH AMR built and verified. Asterisk prepared; its build is blocked on
+container networking, not on anything in the patch — which dry-runs cleanly
+against Asterisk 20 despite targeting 13/16.
+
+The relay path turned out to be largely a discovery rather than a build: the
+transparent bridge is codec-agnostic. The work was closing a hole in its
+compatibility check, where matching payload types were treated as sufficient.
 
 ### 2026-08-09 — Negotiated parameters reach the media layer
 
