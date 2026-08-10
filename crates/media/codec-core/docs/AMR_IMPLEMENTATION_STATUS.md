@@ -130,6 +130,26 @@ untouched. Verified: `mod_amr.so` and `mod_amrwb.so` present, linking
 `libopencore-amrnb`, `libopencore-amrwb` and `libvo-amrwbenc`, zero unresolved
 symbols.
 
+**One trap worth recording:** FreeSWITCH has *two* module lists. `modules.conf`
+decides what gets **compiled**; `autoload_configs/modules.conf.xml` decides what
+gets **loaded**. Adding the codecs to the first is not enough — and this image's
+`docker-entrypoint.sh` overwrites the second with its own explicit list, so the
+sample config's AMR entries were being discarded. Only caught by starting the
+container and running `show codec`; the build looked perfectly healthy.
+
+With both fixed, FreeSWITCH registers four codecs:
+
+```
+AMR / Bandwidth Efficient      mod_amr
+AMR / Octet Aligned            mod_amr
+AMR-WB / Bandwidth Efficient   mod_amrwb
+AMR-WB / Octet Aligned         mod_amrwb
+```
+
+That is a real implementation independently arriving at the same shape as our
+four offered payload types (104–107): one per transport configuration, because
+the framings are not interchangeable.
+
 Two of its config knobs are directly useful for testing:
 `force-oa` originates octet-aligned (so both framings can be exercised against
 a real peer), and `mode-set-overwrite=0` mirrors the offered mode-set — which is
