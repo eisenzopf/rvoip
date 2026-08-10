@@ -29,6 +29,9 @@ pub mod rate;
 pub mod sdp;
 pub mod storage;
 
+#[cfg(feature = "amr-wb")]
+pub mod wb;
+
 pub use mode::{AmrFrameType, AmrMode, AmrModeSet, AmrVariant};
 pub use payload::{
     AmrInterleaving, AmrPacket, AmrPayloadCodec, AmrPayloadConfig, AmrPayloadFrame,

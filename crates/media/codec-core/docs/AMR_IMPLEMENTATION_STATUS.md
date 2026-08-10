@@ -16,7 +16,7 @@ where we actually are.
 | 0 | Foundations: types, feature flags, ADR, oracle qualification | 🟡 **In progress** — code landed, external items outstanding |
 | 1 | RFC 4867 payload format + AMR file storage format | 🟢 **Complete** |
 | 2 | SDP negotiation + relay path | 🟡 **Negotiation done** — relay path outstanding |
-| 3 | `common/` DSP layer + oracle harness | 🟡 **In progress** — operators + oracle done; fixed-point DSP not started |
+| 3 | `common/` DSP layer + oracle harness | 🟡 **In progress** — operators, oracle, fixed-point LP front end |
 | 4 | AMR-WB decoder, fixed point | ⚪ Not started |
 | 5 | **AMR-WB encoder — the HD-voice milestone** | ⚪ Not started |
 | 6 | AMR-NB decoder, fixed point | ⚪ Not started |
@@ -233,6 +233,38 @@ scans each polynomial over the whole grid independently, so no bracketed root
 can be lost, and the interlacing is then *asserted* rather than assumed. The
 fixed-point version will need the reference's cheaper approach; having this one
 to check against is the point.
+
+### First fixed-point DSP: LP analysis front end
+
+`codecs/amr/wb/lp/` now holds the real thing — TS 26.190 §5.2.1 in the
+arithmetic that defines the codec, built on the ETSI operators in
+`crate::fixed_point`.
+
+- `tables.rs` — the analysis window (384 Q15 values) and lag window (16
+  double-precision pairs), taken from TS 26.173 because they are normative
+  constants. **The window is not computed from the §5.2.1 formula**: it is
+  close, `round(w · 32767)` reproduces 377 of 384 entries, but seven differ by
+  one LSB and one LSB through `mult_r` changes the output bits. A test checks
+  the table against the formula to within 1 LSB, documenting the definition and
+  catching transcription errors without pretending the formula is authoritative.
+- `autocorr.rs` — windowing, the energy-estimate pre-shift, autocorrelation over
+  17 lags in double-precision format, and lag windowing.
+
+Two details worth naming, both invisible in a float model:
+
+- **The accumulator for `r[0]` starts at 1, not 0.** That is what stops a silent
+  frame producing `r(0) = 0` and making Levinson-Durbin divide by zero. It is
+  *not* the -40 dB noise floor, which lives in the lag window — a distinction
+  the prose spec blurs.
+- **One shared normalisation shift is applied to every lag.** Levinson-Durbin
+  only cares about ratios, so a common shift buys precision without changing
+  the answer; per-lag normalisation would corrupt the sequence.
+
+Tests cover the properties that catch scaling mistakes: `r(0)` dominates every
+other lag, `r(0)` lands in the top bits after normalisation, silence still gives
+a usable `r(0)`, the lag window leaves `r[0]` untouched while shrinking the
+rest, and doubling the input amplitude leaves the normalised sequence
+essentially unchanged.
 
 ### Course correction: fixed point, and the reference is the definition
 
