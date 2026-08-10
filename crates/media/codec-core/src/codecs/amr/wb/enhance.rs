@@ -27,10 +27,11 @@ use super::codebook::L_SUBFR;
 use super::gain_tables::{PH_IMP_LOW, PH_IMP_MID};
 use super::math::dot_product12;
 use crate::fixed_point::arith::{add, extract_h, mult, mult_r, negate, round, sub};
-use crate::fixed_point::arith32::{l_deposit_h, l_msu, l_mult};
+use crate::fixed_point::arith32::{l_add, l_deposit_h, l_mac, l_msu, l_mult};
+use crate::fixed_point::oper32::{l_extract, mpy_32_16};
 use crate::fixed_point::div::div_s;
 use crate::fixed_point::shift::{l_shl, norm_l, norm_s, shl, shr};
-use crate::fixed_point::types::{DspContext, Word16};
+use crate::fixed_point::types::{DspContext, Word16, Word32};
 
 /// Pitch gain of 0.6 in Q14 — the boundary below which a subframe counts as
 /// unvoiced for dispersion purposes.
@@ -265,9 +266,101 @@ pub fn enhance_strength(ctx: &mut DspContext, voice_fac: Word16) -> Word16 {
     add(ctx, scaled, Word16(4096))
 }
 
+/// How stable the LP filter is between frames: 1.0 stable, 0 unstable, Q15.
+///
+/// Measured as the squared distance between this frame's ISFs and the last
+/// frame's. A filter that moves a long way between frames is not describing a
+/// steady spectrum, and the noise enhancer only acts when it is safe to assume
+/// the signal is stationary noise rather than a transition.
+#[must_use]
+pub fn stability_factor(ctx: &mut DspContext, isf: &[Word16], isf_old: &[Word16]) -> Word16 {
+    let mut acc = Word32(0);
+    // The last ISF is excluded: it is the trailing predictor coefficient
+    // rather than a line frequency, so its motion says nothing about stability.
+    for i in 0..isf.len() - 1 {
+        let d = sub(ctx, isf[i], isf_old[i]);
+        acc = l_mac(ctx, acc, d, d);
+    }
+    let scaled = extract_h(l_shl(ctx, acc, 8));
+    let scaled = mult(ctx, scaled, Word16(26214));
+    // 1.25 - 0.8·distance, then Q14 to Q15 with saturation, floored at zero.
+    let tmp = sub(ctx, Word16(20480), scaled);
+    let stab = shl(ctx, tmp, 1);
+    if stab.0 < 0 {
+        Word16(0)
+    } else {
+        stab
+    }
+}
+
+/// The noise enhancer's carried threshold.
+///
+/// Tracks the code gain slowly, so a gain that is merely fluctuating around a
+/// steady level gets pulled back toward it.
+#[derive(Debug, Clone, Default)]
+pub struct NoiseEnhancer {
+    threshold: Word32,
+}
+
+impl NoiseEnhancer {
+    /// Fresh state.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            threshold: Word32(0),
+        }
+    }
+
+    /// Move the code gain toward the running threshold, Q16 in and out.
+    ///
+    /// Only acts when the frame is both **noisy** and **stable** — the blend
+    /// weight is the product of the two measures. On speech, or during a
+    /// transition, it does nothing, because smoothing gain there would blur
+    /// attacks. On stationary noise it halves the gain variation, which is
+    /// what stops a constant background sounding like it is breathing.
+    pub fn apply(
+        &mut self,
+        ctx: &mut DspContext,
+        gain_code: Word32,
+        voice_fac: Word16,
+        stab_fac: Word16,
+    ) -> Word32 {
+        // 1 when unvoiced, 0 when voiced.
+        let halved = shr(ctx, voice_fac, 1);
+        let noisiness = sub(ctx, Word16(16384), halved);
+        let fac = mult(ctx, stab_fac, noisiness);
+
+        let (hi, lo) = l_extract(gain_code);
+
+        // Step the threshold toward the gain by about 1.5 dB, never past it.
+        // The two constants are +1.19 and -0.84 in Q15/Q14 terms.
+        let stepped = if gain_code.0 < self.threshold.0 {
+            let raised = l_add(ctx, gain_code, mpy_32_16(hi, lo, Word16(6226)));
+            if raised.0 > self.threshold.0 {
+                self.threshold
+            } else {
+                raised
+            }
+        } else {
+            let lowered = mpy_32_16(hi, lo, Word16(27536));
+            if lowered.0 < self.threshold.0 {
+                self.threshold
+            } else {
+                lowered
+            }
+        };
+        self.threshold = stepped;
+
+        // Blend the original gain with the threshold, weighted by fac.
+        let kept = mpy_32_16(hi, lo, sub(ctx, Word16(32767), fac));
+        let (t_hi, t_lo) = l_extract(stepped);
+        l_add(ctx, kept, mpy_32_16(t_hi, t_lo, fac))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::super::lp::isp_to_lp::tests_support::{block_row, has_block};
+    use super::super::lp::isp_to_lp::tests_support::{block_row, block_row_i32, has_block};
     use super::*;
 
     fn expect(label: &str, got: &[Word16], blk: usize) {
@@ -362,6 +455,76 @@ mod tests {
             let enhanced = pitch_enhance_with(&mut ctx, &code, strength);
             expect("pitchenh", &enhanced, blk);
         }
+    }
+
+    #[test]
+    fn the_noise_enhancer_is_bit_exact_against_ts26173() {
+        let mut ctx = DspContext::default();
+        let mut enhancer = NoiseEnhancer::new();
+
+        for blk in 0..5usize {
+            // The same ISF pair the oracle builds.
+            let mut isf = [Word16(0); 16];
+            let mut isf_old = [Word16(0); 16];
+            for i in 0..16usize {
+                let base = 1000 + i16::try_from(i).expect("index") * 900;
+                isf[i] = Word16(base);
+                let offset =
+                    i16::try_from(blk * blk * 220 * (i % 3)).expect("perturbation fits");
+                isf_old[i] = Word16(base + offset);
+            }
+
+            let want = block_row_i32("enhance", &format!("nenh{blk}"));
+            let stab = stability_factor(&mut ctx, &isf, &isf_old);
+            assert_eq!(i32::from(stab.0), want[0], "block {blk}: stability factor");
+
+            let exc = excitation(blk);
+            let code = innovation(blk);
+            let meta = block_row("enhance", &format!("emeta{blk}"));
+            let voice_fac = voice_factor(
+                &mut ctx,
+                &exc,
+                -3,
+                Word16(meta[0]),
+                &code,
+                Word16(meta[1]),
+            );
+
+            let gain_code = Word32(want[2]);
+            let out = enhancer.apply(&mut ctx, gain_code, voice_fac, stab);
+
+            assert_eq!(enhancer.threshold.0, want[3], "block {blk}: threshold");
+            assert_eq!(out.0, want[4], "block {blk}: enhanced gain");
+        }
+    }
+
+    #[test]
+    fn the_enhancer_does_nothing_on_a_voiced_stable_frame() {
+        // The blend weight is noisiness x stability, so a strongly voiced
+        // frame must pass its gain through untouched -- smoothing gain during
+        // speech would blur attacks.
+        let mut ctx = DspContext::default();
+        let mut enhancer = NoiseEnhancer::new();
+        let gain = Word32(1_000_000);
+        let out = enhancer.apply(&mut ctx, gain, Word16(32767), Word16(32767));
+        let drift = (out.0 - gain.0).abs();
+        assert!(
+            drift * 200 < gain.0,
+            "a voiced frame's gain moved by {drift} of {}",
+            gain.0
+        );
+    }
+
+    #[test]
+    fn an_unstable_filter_scores_zero_stability() {
+        // A filter whose ISFs jump a long way between frames is in transition,
+        // and the enhancer must stand down.
+        let mut ctx = DspContext::default();
+        let line = |i: usize| i16::try_from(i).expect("index") * 900 + 1000;
+        let isf: [Word16; 16] = std::array::from_fn(|i| Word16(line(i)));
+        let far: [Word16; 16] = std::array::from_fn(|i| Word16(line(i) + 4000));
+        assert_eq!(stability_factor(&mut ctx, &isf, &far).0, 0);
+        assert!(stability_factor(&mut ctx, &isf, &isf).0 > 30000);
     }
 
     #[test]

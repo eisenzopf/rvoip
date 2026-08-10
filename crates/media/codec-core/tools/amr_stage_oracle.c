@@ -25,6 +25,7 @@ extern double cos(double);
 #include "basic_op.h"
 #include "cnst.h"
 #include "bits.h"   /* RX_State, Read_serial, Serial_parm */
+#include "oper_32b.h"  /* L_Extract, Mpy_32_16 */
 
 void Autocorr(Word16 x[], Word16 m, Word16 r_h[], Word16 r_l[]);
 void Lag_window(Word16 r_h[], Word16 r_l[]);
@@ -803,6 +804,59 @@ static void dump_enhancers(void) {
         }
         sprintf(name, "pitchenh%d", blk);
         dump(name, code2, 64);
+
+        /* Noise enhancer, with the ISF-distance stability factor it needs.
+         * The threshold state is carried across blocks. */
+        {
+            static Word32 L_gc_thres = 0;
+            Word16 isf[M], isfold[M], stab_fac, fac;
+            Word32 L_tmp, L_gain_code = 400000L * (blk + 1);
+            Word16 gc_hi, gc_lo;
+
+            /* Two ISF sets whose distance grows with the block, so both the
+             * stable and unstable ends of the range are covered. */
+            for (i = 0; i < M; i++) {
+                isf[i]    = (Word16)(1000 + i * 900);
+                /* The perturbation has to be large: stab_fac saturates at 1.0
+                 * for anything close to stable, so small differences would
+                 * leave every block at 32767 and test nothing. */
+                isfold[i] = (Word16)(1000 + i * 900 + blk * blk * 220 * (i % 3));
+            }
+
+            L_tmp = 0;
+            for (i = 0; i < M - 1; i++) {
+                Word16 d = sub(isf[i], isfold[i]);
+                L_tmp = L_mac(L_tmp, d, d);
+            }
+            tmp = extract_h(L_shl(L_tmp, 8));
+            tmp = mult(tmp, 26214);
+            tmp = sub(20480, tmp);
+            stab_fac = shl(tmp, 1);
+            if (stab_fac < 0) stab_fac = 0;
+
+            tmp = sub(16384, shr(voice_fac, 1));
+            fac = mult(stab_fac, tmp);
+
+            L_Extract(L_gain_code, &gc_hi, &gc_lo);
+            L_tmp = L_gain_code;
+            if (L_sub(L_tmp, L_gc_thres) < 0) {
+                L_tmp = L_add(L_tmp, Mpy_32_16(gc_hi, gc_lo, 6226));
+                if (L_sub(L_tmp, L_gc_thres) > 0) L_tmp = L_gc_thres;
+            } else {
+                L_tmp = Mpy_32_16(gc_hi, gc_lo, 27536);
+                if (L_sub(L_tmp, L_gc_thres) < 0) L_tmp = L_gc_thres;
+            }
+            L_gc_thres = L_tmp;
+
+            {
+                Word32 out = Mpy_32_16(gc_hi, gc_lo, sub(32767, fac));
+                Word16 t_hi, t_lo;
+                L_Extract(L_tmp, &t_hi, &t_lo);
+                out = L_add(out, Mpy_32_16(t_hi, t_lo, fac));
+                printf("  nenh%d %d %d %ld %ld %ld\n", blk, stab_fac, fac,
+                       (long)L_gain_code, (long)L_gc_thres, (long)out);
+            }
+        }
     }
 }
 
