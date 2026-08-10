@@ -56,10 +56,25 @@ TABLES = [
      "Slope of `acos` over each of the 64 intervals, Q12."),
     ("lsp.tab", "lsp_init_data", "LSP_INIT", 10, 10,
      "The decoder's reset-state LSPs — a flat spectrum."),
-    ("inter_36.tab", "inter_6", "INTER_6", None, 6,
-     "Fractional-delay interpolation filter for the adaptive codebook, Q15.\\n"
+    ("pred_lt.c", "inter_6", "INTER_6_PRED", 61, 6,
+     "Fractional-delay interpolation filter for the **adaptive codebook**,\\n"
+     "/// one-sixth resolution, Q15. 61 taps.\\n"
      "///\\n"
-     "/// One sixth resolution, where the wideband filter is one quarter."),
+     "/// The 1/3-resolution form every rate except 12.2 uses is this same\\n"
+     "/// table subsampled by two, so there is one filter rather than two.\\n"
+     "///\\n"
+     "/// **Not [`INTER_6_SEARCH`].** The reference declares a table called\\n"
+     "/// `inter_6` twice — this one file-local to `pred_lt.c`, the other in\\n"
+     "/// `inter_36.tab` — with different lengths and different values. Using\\n"
+     "/// the wrong one gives an adaptive codebook close enough to sound right\\n"
+     "/// at every lag and conformant at none."),
+    ("inter_36.tab", "inter_6", "INTER_6_SEARCH", 25, 6,
+     "Fractional-delay interpolation filter for the **encoder's closed-loop\\n"
+     "/// pitch search**, one-sixth resolution, Q15. 25 taps.\\n"
+     "///\\n"
+     "/// Shorter than [`INTER_6_PRED`] because the search only needs the\\n"
+     "/// filter's central lobe to rank candidate lags, while the decoder needs\\n"
+     "/// the whole response to reconstruct the excitation."),
     ("qua_gain.tab", "table_gain_highrates", "GAIN_HIGHRATES", None, 4,
      "Joint pitch/code gain codebook for the higher rates, four words per entry."),
     ("qua_gain.tab", "table_gain_lowrates", "GAIN_LOWRATES", None, 4,
@@ -201,7 +216,11 @@ for path, c_name, rust_name, count, per_line, doc in TABLES:
     if count is not None:
         assert len(vals) == count, f"{c_name}: got {len(vals)}, want {count}"
     extracted[rust_name] = vals
-    lines = [f"/// {doc}", f"pub const {rust_name}: [i16; {len(vals)}] = ["]
+    # The doc strings above carry `\n` as two characters so the table list
+    # stays readable; turn them into real line breaks here, or rustdoc
+    # renders a paragraph with backslashes in it.
+    lines = [f"/// {doc}".replace("\\n", "\n"),
+             f"pub const {rust_name}: [i16; {len(vals)}] = ["]
     for i in range(0, len(vals), per_line):
         lines.append("    " + ", ".join(str(v) for v in vals[i : i + per_line]) + ",")
     lines.append("];")
@@ -234,6 +253,17 @@ assert extracted["GAMMA4"] == extracted["GAMMA3_MR122"], (
 )
 assert extracted["GAMMA4"] != extracted["GAMMA4_MR122"], (
     "GAMMA4 and GAMMA4_MR122 are identical — the same declaration was read twice"
+)
+# The second name collision in this reference, and the more dangerous one: both
+# are called `inter_6`, both are 1/6-resolution interpolation filters, and they
+# differ in length and in every coefficient.
+assert len(extracted["INTER_6_PRED"]) != len(extracted["INTER_6_SEARCH"]), (
+    "the two inter_6 tables now have the same length; check which file each "
+    "was read from before trusting either"
+)
+assert extracted["INTER_6_PRED"][0] == 29443 and extracted["INTER_6_SEARCH"][0] == 29519, (
+    "the two inter_6 tables no longer start where they did; the generator may "
+    "have read one file twice"
 )
 
 HEADER = '''//! Decoder tables for AMR-NB, from the TS 26.073 reference.

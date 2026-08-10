@@ -33,12 +33,18 @@ pub const PAST_RQ_INIT: [i16; 80] = [
     -314, -191, -203, -330, -160, -103, -51, 131, 338, 515,
 ];
 
-/// Long-term mean LSF for the 3-split quantiser.\n///\n/// Distinct from [`MEAN_LSF_5`] despite sharing a name in the reference,\n/// where the two live in different translation units.
+/// Long-term mean LSF for the 3-split quantiser.
+///
+/// Distinct from [`MEAN_LSF_5`] despite sharing a name in the reference,
+/// where the two live in different translation units.
 pub const MEAN_LSF_3: [i16; 10] = [
     1546, 2272, 3778, 5488, 6972, 8382, 10047, 11229, 12766, 13714,
 ];
 
-/// Per-coefficient MA prediction factors for the 3-split quantiser.\n///\n/// Note these are per-coefficient, where AMR-WB uses a single scalar for\n/// all sixteen.
+/// Per-coefficient MA prediction factors for the 3-split quantiser.
+///
+/// Note these are per-coefficient, where AMR-WB uses a single scalar for
+/// all sixteen.
 pub const PRED_FAC_3: [i16; 10] = [
     9556, 10769, 12571, 13292, 14381, 11651, 10588, 9767, 8593, 6484,
 ];
@@ -1316,7 +1322,10 @@ pub const DICO5_LSF_5: [i16; 256] = [
     714, 711, 788, 750, 1076, 714, 1204, 753,
 ];
 
-/// `cos(x)` sampled at 65 points, Q15.\n///\n/// Half the resolution of the wideband table, because narrowband has ten\n/// line frequencies rather than sixteen. Not interchangeable.
+/// `cos(x)` sampled at 65 points, Q15.
+///
+/// Half the resolution of the wideband table, because narrowband has ten
+/// line frequencies rather than sixteen. Not interchangeable.
 pub const COS_TABLE: [i16; 65] = [
     32767, 32729, 32610, 32413, 32138, 31786, 31357, 30853, 30274, 29622,
     28899, 28106, 27246, 26320, 25330, 24279, 23170, 22006, 20788, 19520,
@@ -1343,8 +1352,38 @@ pub const LSP_INIT: [i16; 10] = [
     30000, 26000, 21000, 15000, 8000, 0, -8000, -15000, -21000, -26000,
 ];
 
-/// Fractional-delay interpolation filter for the adaptive codebook, Q15.\n///\n/// One sixth resolution, where the wideband filter is one quarter.
-pub const INTER_6: [i16; 25] = [
+/// Fractional-delay interpolation filter for the **adaptive codebook**,
+/// one-sixth resolution, Q15. 61 taps.
+///
+/// The 1/3-resolution form every rate except 12.2 uses is this same
+/// table subsampled by two, so there is one filter rather than two.
+///
+/// **Not [`INTER_6_SEARCH`].** The reference declares a table called
+/// `inter_6` twice — this one file-local to `pred_lt.c`, the other in
+/// `inter_36.tab` — with different lengths and different values. Using
+/// the wrong one gives an adaptive codebook close enough to sound right
+/// at every lag and conformant at none.
+pub const INTER_6_PRED: [i16; 61] = [
+    29443, 28346, 25207, 20449, 14701, 8693,
+    3143, -1352, -4402, -5865, -5850, -4673,
+    -2783, -672, 1211, 2536, 3130, 2991,
+    2259, 1170, 0, -1001, -1652, -1868,
+    -1666, -1147, -464, 218, 756, 1060,
+    1099, 904, 550, 135, -245, -514,
+    -634, -602, -451, -231, 0, 191,
+    308, 340, 296, 198, 78, -36,
+    -120, -163, -165, -132, -79, -19,
+    34, 73, 91, 89, 70, 38,
+    0,
+];
+
+/// Fractional-delay interpolation filter for the **encoder's closed-loop
+/// pitch search**, one-sixth resolution, Q15. 25 taps.
+///
+/// Shorter than [`INTER_6_PRED`] because the search only needs the
+/// filter's central lobe to rank candidate lags, while the decoder needs
+/// the whole response to reconstruct the excitation.
+pub const INTER_6_SEARCH: [i16; 25] = [
     29519, 28316, 24906, 19838, 13896, 7945,
     2755, -1127, -3459, -4304, -3969, -2899,
     -1561, -336, 534, 970, 1023, 823,
@@ -1562,7 +1601,10 @@ pub const DGRAY: [i16; 8] = [
     0, 1, 3, 2, 5, 6, 4, 7,
 ];
 
-/// Joint gain codebook for 4.75 kbit/s, four words per entry.\n///\n/// 4.75 is the one rate that quantises *two* subframes' gains with a\n/// single index, so each entry carries two (pitch, code) pairs.
+/// Joint gain codebook for 4.75 kbit/s, four words per entry.
+///
+/// 4.75 is the one rate that quantises *two* subframes' gains with a
+/// single index, so each entry carries two (pitch, code) pairs.
 pub const GAIN_MR475: [i16; 1024] = [
     812, 128, 542, 140,
     2873, 1135, 2266, 3402,
@@ -1828,7 +1870,11 @@ pub const QUA_GAIN_PITCH: [i16; 16] = [
     13926, 14746, 15565, 16384, 17203, 18022, 18842, 19661,
 ];
 
-/// Scalar code-gain correction codebook, three words per entry.\n///\n/// The triple is `(gain factor, log2 integer, log2 fraction)`; the last\n/// two feed the MA energy predictor's state update directly, which is\n/// why they are tabulated rather than recomputed.
+/// Scalar code-gain correction codebook, three words per entry.
+///
+/// The triple is `(gain factor, log2 integer, log2 fraction)`; the last
+/// two feed the MA energy predictor's state update directly, which is
+/// why they are tabulated rather than recomputed.
 pub const QUA_GAIN_CODE: [i16; 96] = [
     159, -3776, -22731,
     206, -3394, -20428,
@@ -1888,7 +1934,11 @@ pub const PH_IMP_LOW: [i16; 40] = [
     -5058, 5312, -2329, -3728, 6924, -3889, 675, -1775, 29, 10145,
 ];
 
-/// Phase-dispersion impulse response, medium dispersion, 4.75–6.70 kbit/s.\n///\n/// Identical in value to [`PH_IMP_MID_MR795`] in the reference, but kept\n/// separate because nothing guarantees that; the generator asserts the\n/// equality it observes rather than assuming it.
+/// Phase-dispersion impulse response, medium dispersion, 4.75–6.70 kbit/s.
+///
+/// Identical in value to [`PH_IMP_MID_MR795`] in the reference, but kept
+/// separate because nothing guarantees that; the generator asserts the
+/// equality it observes rather than assuming it.
 pub const PH_IMP_MID: [i16; 40] = [
     30274, 3831, -4036, 2972, -1048, -1002, 2477, -3043, 2815, -2231,
     1753, -1611, 1714, -1775, 1543, -1008, 429, -169, 472, -1264,
@@ -1896,7 +1946,11 @@ pub const PH_IMP_MID: [i16; 40] = [
     -2063, 2644, -3060, 2897, -1978, 557, 780, -1369, 842, 655,
 ];
 
-/// Per-subframe track start positions for the 9-bit two-pulse codebook.\n///\n/// Indexed by subframe and by the two pulses; 4.75 and 5.15 kbit/s vary\n/// their tracks across the four subframes, which is why this decoder\n/// alone takes a subframe number.
+/// Per-subframe track start positions for the 9-bit two-pulse codebook.
+///
+/// Indexed by subframe and by the two pulses; 4.75 and 5.15 kbit/s vary
+/// their tracks across the four subframes, which is why this decoder
+/// alone takes a subframe number.
 pub const START_POS_2I40_9: [i16; 16] = [
     0, 2, 0, 3,
     0, 2, 0, 3,
@@ -1914,7 +1968,10 @@ pub const START_POS2_2I40_11: [i16; 4] = [
     0, 1, 2, 4,
 ];
 
-/// `log2` mantissa table, 33 points.\n///\n/// AMR-NB's own — deliberately not shared with G.729 or with AMR-WB,\n/// each of which tabulates the same function over different points.
+/// `log2` mantissa table, 33 points.
+///
+/// AMR-NB's own — deliberately not shared with G.729 or with AMR-WB,
+/// each of which tabulates the same function over different points.
 pub const LOG2_TABLE: [i16; 33] = [
     0, 1455, 2866, 4236, 5568, 6863, 8124, 9352, 10549,
     11716, 12855, 13967, 15054, 16117, 17156, 18172, 19167, 20142,
@@ -1950,12 +2007,14 @@ pub const INV_SQRT_TABLE: [i16; 49] = [
     16782, 16646, 16514, 16384,
 ];
 
-/// Numerator bandwidth-expansion factors for the post-filter at 12.2 and\n/// 10.2 kbit/s, Q15.
+/// Numerator bandwidth-expansion factors for the post-filter at 12.2 and
+/// 10.2 kbit/s, Q15.
 pub const GAMMA3_MR122: [i16; 10] = [
     22938, 16057, 11240, 7868, 5508, 3856, 2699, 1889, 1322, 925,
 ];
 
-/// Numerator bandwidth-expansion factors for the post-filter at every\n/// other rate, Q15.
+/// Numerator bandwidth-expansion factors for the post-filter at every
+/// other rate, Q15.
 pub const GAMMA3: [i16; 10] = [
     18022, 9912, 5451, 2998, 1649, 907, 499, 274, 151, 83,
 ];
@@ -1965,54 +2024,87 @@ pub const GAMMA4_MR122: [i16; 10] = [
     24576, 18432, 13824, 10368, 7776, 5832, 4374, 3281, 2461, 1846,
 ];
 
-/// Denominator bandwidth-expansion factors at every other rate, Q15.\n///\n/// Numerically identical to [`GAMMA3_MR122`] — both are `0.7^n` — while\n/// [`GAMMA4_MR122`] is `0.75^n`. The generator asserts that coincidence\n/// rather than relying on it, so a revision where they diverge fails\n/// here instead of quietly detuning one rate's post-filter.
+/// Denominator bandwidth-expansion factors at every other rate, Q15.
+///
+/// Numerically identical to [`GAMMA3_MR122`] — both are `0.7^n` — while
+/// [`GAMMA4_MR122`] is `0.75^n`. The generator asserts that coincidence
+/// rather than relying on it, so a revision where they diverge fails
+/// here instead of quietly detuning one rate's post-filter.
 pub const GAMMA4: [i16; 10] = [
     22938, 16057, 11240, 7868, 5508, 3856, 2699, 1889, 1322, 925,
 ];
 
-/// Decoder homing frame parameters for MR475, TS 26.101.\n///\n/// Two consecutive homing frames must drive every bit-exactly defined\n/// function into its home state, so these double as a conformance\n/// checkpoint that needs no test vectors.
+/// Decoder homing frame parameters for MR475, TS 26.101.
+///
+/// Two consecutive homing frames must drive every bit-exactly defined
+/// function into its home state, so these double as a conformance
+/// checkpoint that needs no test vectors.
 pub const DHF_MR475: [i16; 17] = [
     248, 157, 28, 102, 0, 3, 40, 15,
     56, 1, 15, 49, 2, 8, 15, 38,
     3,
 ];
 
-/// Decoder homing frame parameters for MR515, TS 26.101.\n///\n/// Two consecutive homing frames must drive every bit-exactly defined\n/// function into its home state, so these double as a conformance\n/// checkpoint that needs no test vectors.
+/// Decoder homing frame parameters for MR515, TS 26.101.
+///
+/// Two consecutive homing frames must drive every bit-exactly defined
+/// function into its home state, so these double as a conformance
+/// checkpoint that needs no test vectors.
 pub const DHF_MR515: [i16; 19] = [
     248, 157, 28, 102, 0, 3, 55, 15,
     0, 3, 5, 15, 55, 3, 55, 15,
     35, 3, 31,
 ];
 
-/// Decoder homing frame parameters for MR59, TS 26.101.\n///\n/// Two consecutive homing frames must drive every bit-exactly defined\n/// function into its home state, so these double as a conformance\n/// checkpoint that needs no test vectors.
+/// Decoder homing frame parameters for MR59, TS 26.101.
+///
+/// Two consecutive homing frames must drive every bit-exactly defined
+/// function into its home state, so these double as a conformance
+/// checkpoint that needs no test vectors.
 pub const DHF_MR59: [i16; 19] = [
     248, 227, 47, 189, 0, 3, 55, 15,
     1, 3, 15, 96, 249, 3, 55, 15,
     0, 3, 55,
 ];
 
-/// Decoder homing frame parameters for MR67, TS 26.101.\n///\n/// Two consecutive homing frames must drive every bit-exactly defined\n/// function into its home state, so these double as a conformance\n/// checkpoint that needs no test vectors.
+/// Decoder homing frame parameters for MR67, TS 26.101.
+///
+/// Two consecutive homing frames must drive every bit-exactly defined
+/// function into its home state, so these double as a conformance
+/// checkpoint that needs no test vectors.
 pub const DHF_MR67: [i16; 19] = [
     248, 227, 47, 189, 2, 7, 0, 15,
     152, 7, 97, 96, 1477, 7, 0, 15,
     792, 7, 0,
 ];
 
-/// Decoder homing frame parameters for MR74, TS 26.101.\n///\n/// Two consecutive homing frames must drive every bit-exactly defined\n/// function into its home state, so these double as a conformance\n/// checkpoint that needs no test vectors.
+/// Decoder homing frame parameters for MR74, TS 26.101.
+///
+/// Two consecutive homing frames must drive every bit-exactly defined
+/// function into its home state, so these double as a conformance
+/// checkpoint that needs no test vectors.
 pub const DHF_MR74: [i16; 19] = [
     248, 227, 47, 189, 6, 15, 0, 27,
     520, 15, 98, 96, 7078, 15, 0, 27,
     6, 15, 0,
 ];
 
-/// Decoder homing frame parameters for MR795, TS 26.101.\n///\n/// Two consecutive homing frames must drive every bit-exactly defined\n/// function into its home state, so these double as a conformance\n/// checkpoint that needs no test vectors.
+/// Decoder homing frame parameters for MR795, TS 26.101.
+///
+/// Two consecutive homing frames must drive every bit-exactly defined
+/// function into its home state, so these double as a conformance
+/// checkpoint that needs no test vectors.
 pub const DHF_MR795: [i16; 23] = [
     194, 227, 47, 189, 6, 15, 10, 0,
     57, 7176, 7, 10, 11, 99, 4518, 15,
     1, 0, 57, 2464, 15, 2, 1,
 ];
 
-/// Decoder homing frame parameters for MR102, TS 26.101.\n///\n/// Two consecutive homing frames must drive every bit-exactly defined\n/// function into its home state, so these double as a conformance\n/// checkpoint that needs no test vectors.
+/// Decoder homing frame parameters for MR102, TS 26.101.
+///
+/// Two consecutive homing frames must drive every bit-exactly defined
+/// function into its home state, so these double as a conformance
+/// checkpoint that needs no test vectors.
 pub const DHF_MR102: [i16; 39] = [
     248, 227, 47, 69, 0, 0, 0, 0,
     0, 0, 0, 0, 27, 0, 1, 0,
@@ -2021,7 +2113,11 @@ pub const DHF_MR102: [i16; 39] = [
     0, 0, 0, 380, 533, 56, 48,
 ];
 
-/// Decoder homing frame parameters for MR122, TS 26.101.\n///\n/// Two consecutive homing frames must drive every bit-exactly defined\n/// function into its home state, so these double as a conformance\n/// checkpoint that needs no test vectors.
+/// Decoder homing frame parameters for MR122, TS 26.101.
+///
+/// Two consecutive homing frames must drive every bit-exactly defined
+/// function into its home state, so these double as a conformance
+/// checkpoint that needs no test vectors.
 pub const DHF_MR122: [i16; 57] = [
     4, 42, 219, 150, 42, 342, 11, 0,
     0, 0, 0, 0, 0, 0, 0, 0,

@@ -37,6 +37,7 @@
 //!   encoder shifts by a whole frame once per frame; using that cadence here
 //!   reads the history at the wrong offset for subframes 1 to 3.
 
+use super::decoder_tables::INTER_6_PRED;
 use super::{L_INTERPOL, L_SUBFR, PIT_MAX, PIT_MIN, PIT_MIN_MR122};
 use crate::fixed_point::arith::{add, mult, negate, round, sub};
 use crate::fixed_point::arith32::l_mac;
@@ -53,7 +54,17 @@ const UP_SAMP_MAX: usize = PHASE_COUNT as usize;
 const TAPS_PER_SIDE: usize = L_INTERPOL - 1;
 
 /// Length of the polyphase filter, `UP_SAMP_MAX * TAPS_PER_SIDE + 1`.
+/// Taps in the interpolation filter, `6 * 10 + 1`.
+///
+/// Not a free parameter: it is the length of [`INTER_6_PRED`], and the
+/// assertion below fails the build rather than a test if a regenerated table
+/// ever disagrees with the loop bounds here.
 const FIR_SIZE: usize = UP_SAMP_MAX * TAPS_PER_SIDE + 1;
+
+const _: () = assert!(
+    INTER_6_PRED.len() == FIR_SIZE,
+    "the generated interpolation filter is not the length this module indexes"
+);
 
 /// Past excitation retained ahead of the current subframe, `PIT_MAX +
 /// L_INTERPOL`.
@@ -96,33 +107,6 @@ const THIRD: Word16 = Word16(10923);
 /// decoder produces (at most a nine-bit index plus five).
 const SIXTH: Word16 = Word16(5462);
 
-/// One-sixth-resolution interpolation filter for the past excitation, Q15.
-///
-/// −3 dB at 3600 Hz. The one-third-resolution filter is the even-indexed
-/// subsample of this one, which is why [`Excitation::predict`] doubles the
-/// phase rather than consulting a second table.
-///
-/// # Not the table in [`super::decoder_tables`]
-///
-/// The reference has *two* tables named `inter_6`. This one lives in
-/// `pred_lt.c` itself and has 61 entries; the other, in `inter_36.tab`, has 25
-/// and belongs to the encoder's closed-loop pitch search. They differ from the
-/// first coefficient onward. The generated table module carries the 25-entry
-/// one, so this cannot be sourced from there — hence a distinct name and a test
-/// asserting the two do not agree.
-pub const INTER_6_PRED_LT: [i16; FIR_SIZE] = [
-    29443, //
-    28346, 25207, 20449, 14701, 8693, 3143, //
-    -1352, -4402, -5865, -5850, -4673, -2783, //
-    -672, 1211, 2536, 3130, 2991, 2259, //
-    1170, 0, -1001, -1652, -1868, -1666, //
-    -1147, -464, 218, 756, 1060, 1099, //
-    904, 550, 135, -245, -514, -634, //
-    -602, -451, -231, 0, 191, 308, //
-    340, 296, 198, 78, -36, -120, //
-    -163, -165, -132, -79, -19, 34, //
-    73, 91, 89, 70, 38, 0,
-];
 
 /// How finely a rate resolves the pitch lag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -612,13 +596,13 @@ impl Excitation {
                     ctx,
                     acc,
                     self.samples[backward - i],
-                    Word16(INTER_6_PRED_LT[lead + k]),
+                    Word16(INTER_6_PRED[lead + k]),
                 );
                 acc = l_mac(
                     ctx,
                     acc,
                     self.samples[forward + i],
-                    Word16(INTER_6_PRED_LT[trail + k]),
+                    Word16(INTER_6_PRED[trail + k]),
                 );
             }
 
@@ -631,12 +615,13 @@ impl Excitation {
 
 #[cfg(test)]
 mod tests {
-    use super::super::decoder_tables::INTER_6;
+    use super::super::decoder_tables::{INTER_6_PRED, INTER_6_SEARCH};
     use super::super::vectors;
     use super::{
+        FIR_SIZE,
         absolute_lag, delta_coding, delta_lag_1_3, delta_lag_1_6, delta_window, is_delta_coded,
         DeltaCoding, Excitation, LagResolution, LagWindow, PitchLag, EXC_LEN, HISTORY,
-        INTER_6_PRED_LT, MODE_MR795, TAPS_PER_SIDE, UP_SAMP_MAX,
+        MODE_MR795, TAPS_PER_SIDE, UP_SAMP_MAX,
     };
     use super::{L_INTERPOL, L_SUBFR, PIT_MAX, PIT_MIN};
     use crate::fixed_point::types::{DspContext, Word16};
@@ -1045,7 +1030,7 @@ mod tests {
         };
         let base = i32::try_from(HISTORY).expect("fits") - i32::from(t0) - back;
         let tap = |p: i32, k: usize| -> i64 {
-            i64::from(INTER_6_PRED_LT[usize::try_from(p).expect("phase") + k * 6])
+            i64::from(INTER_6_PRED[usize::try_from(p).expect("phase") + k * 6])
         };
 
         (0..L_SUBFR)
@@ -1134,8 +1119,8 @@ mod tests {
 
         let dc_gain: i32 = (0..TAPS_PER_SIDE)
             .map(|i| {
-                i32::from(INTER_6_PRED_LT[i * UP_SAMP_MAX])
-                    + i32::from(INTER_6_PRED_LT[6 + i * UP_SAMP_MAX])
+                i32::from(INTER_6_PRED[i * UP_SAMP_MAX])
+                    + i32::from(INTER_6_PRED[6 + i * UP_SAMP_MAX])
             })
             .sum();
         assert_eq!(dc_gain, 32723);
@@ -1148,15 +1133,16 @@ mod tests {
 
     #[test]
     fn this_is_not_the_encoders_interpolation_filter() {
-        // The reference has two tables called `inter_6`. The generated table
-        // module carries the 25-entry one from the closed-loop pitch search;
-        // using it here would low-pass the adaptive codebook with the wrong
-        // filter and still produce speech.
-        assert_eq!(INTER_6_PRED_LT.len(), 61);
-        assert_eq!(INTER_6.len(), 25);
-        assert_ne!(INTER_6_PRED_LT[0], INTER_6[0]);
-        assert_eq!(INTER_6_PRED_LT[0], 29443);
-        assert_eq!(INTER_6[0], 29519);
+        // The reference has two tables called `inter_6`: this 61-entry one,
+        // file-local to `pred_lt.c`, and a 25-entry one in `inter_36.tab` that
+        // belongs to the encoder's closed-loop pitch search. Using the search
+        // filter here would low-pass the adaptive codebook with the wrong
+        // response and still produce speech.
+        assert_eq!(FIR_SIZE, 61);
+        assert_eq!(INTER_6_SEARCH.len(), 25);
+        assert_ne!(INTER_6_PRED[0], INTER_6_SEARCH[0]);
+        assert_eq!(INTER_6_PRED[0], 29443);
+        assert_eq!(INTER_6_SEARCH[0], 29519);
     }
 
     #[test]
