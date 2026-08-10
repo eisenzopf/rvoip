@@ -2,10 +2,10 @@
 //!
 //! # Status
 //!
-//! **Wideband decoding works and is bit-exact against TS 26.173 at all nine
-//! rates.** Encoding, and narrowband decoding, still return
-//! [`CodecError::FeatureNotEnabled`] — loudly, naming the phase that will
-//! supply them, rather than returning silence.
+//! **Both decoders work and are bit-exact against the normative references** —
+//! AMR-WB against TS 26.173 at all nine rates, AMR-NB against TS 26.073 at all
+//! eight. Encoding still returns [`CodecError::FeatureNotEnabled`] — loudly,
+//! naming the phase that will supply it, rather than returning silence.
 //!
 //! See `docs/AMR_IMPLEMENTATION_PLAN.md` for the phased plan and
 //! `docs/AMR_IMPLEMENTATION_STATUS.md` for current progress.
@@ -25,11 +25,12 @@
 //! mode unambiguously. That is what this implementation does, and it errors
 //! rather than guessing when no mode matches.
 //!
-//! The length trick does *not* work across variants (an AMR-NB 12.2 frame and
-//! an AMR-WB 8.85 frame are both 31 bytes), which is why the codec's variant is
-//! fixed at construction, and it cannot express a lost frame or a SID frame
-//! distinct from "no bytes". [`VariableRateCodec::decode_frame`] carries all of
-//! that explicitly and is the interface the RTP path should use.
+//! The length trick does *not* work across variants — an AMR-NB 6.70 frame and
+//! an AMR-WB 6.60 frame are both 17 bytes — which is why the codec's variant is
+//! fixed at construction rather than inferred. Nor can a length express a lost
+//! frame or a SID frame distinct from "no bytes".
+//! [`VariableRateCodec::decode_frame`] carries all of that explicitly and is
+//! the interface the RTP path should use.
 
 use crate::error::{CodecError, Result};
 use crate::types::{
@@ -62,22 +63,54 @@ pub use storage::AmrStorageReader;
 ///
 /// # Not yet implemented
 ///
-/// Encoding, and narrowband decoding, fail with
-/// [`CodecError::FeatureNotEnabled`] naming the phase that will supply them,
-/// rather than returning silence or garbage — a codec that quietly produces
-/// wrong audio is far harder to diagnose than one that refuses.
+/// Encoding fails with [`CodecError::FeatureNotEnabled`] naming the phase that
+/// will supply it, rather than returning silence or garbage — a codec that
+/// quietly produces wrong audio is far harder to diagnose than one that
+/// refuses. So do comfort noise, gaps and lost frames, each naming the piece it
+/// needs.
 pub struct AmrCodec {
     variant: AmrVariant,
     mode_set: AmrModeSet,
     current_mode: AmrMode,
     octet_align: bool,
     dtx: bool,
-    /// The wideband decoder, present only when this instance codes wideband.
+    /// The decoder for this instance's variant.
     ///
-    /// Boxed because it carries several kilobytes of filter history and
+    /// Boxed because each carries several kilobytes of filter history and
     /// `AmrCodec` is otherwise a handful of words that callers move freely.
+    decoder: Decoder,
+}
+
+impl Decoder {
+    /// The decoder a variant needs, or [`Decoder::Absent`] where its feature
+    /// is off.
+    fn for_variant(variant: AmrVariant) -> Self {
+        match variant {
+            #[cfg(feature = "amr-nb")]
+            AmrVariant::NarrowBand => Self::NarrowBand(Box::default()),
+            #[cfg(not(feature = "amr-nb"))]
+            AmrVariant::NarrowBand => Self::Absent,
+            #[cfg(feature = "amr-wb")]
+            AmrVariant::WideBand => Self::WideBand(Box::default()),
+            #[cfg(not(feature = "amr-wb"))]
+            AmrVariant::WideBand => Self::Absent,
+        }
+    }
+}
+
+/// The variant-specific decoder, or none where the feature is off.
+enum Decoder {
+    #[cfg(feature = "amr-nb")]
+    NarrowBand(Box<nb::decoder::Decoder>),
     #[cfg(feature = "amr-wb")]
-    wb_decoder: Option<Box<wb::decoder::Decoder>>,
+    WideBand(Box<wb::decoder::Decoder>),
+    /// The variant's feature is not enabled in this build.
+    ///
+    /// Unreachable when both features are on, which is how the crate is
+    /// tested; it exists so a single-variant build still constructs, reports
+    /// its configuration and refuses to decode with a message that says why.
+    #[cfg_attr(all(feature = "amr-nb", feature = "amr-wb"), allow(dead_code))]
+    Absent,
 }
 
 impl AmrCodec {
@@ -122,11 +155,7 @@ impl AmrCodec {
             current_mode,
             octet_align: params.requires_octet_align(),
             dtx: params.dtx,
-            #[cfg(feature = "amr-wb")]
-            wb_decoder: match variant {
-                AmrVariant::WideBand => Some(Box::new(wb::decoder::Decoder::new())),
-                AmrVariant::NarrowBand => None,
-            },
+            decoder: Decoder::for_variant(variant),
         })
     }
 
@@ -148,27 +177,30 @@ impl AmrCodec {
     /// Split out so both decode interfaces share it: the difference between
     /// them is only how the mode is established.
     fn decode_speech(&mut self, mode: AmrMode, data: &[u8]) -> Result<Vec<i16>> {
-        match self.variant {
+        let short = || {
+            CodecError::decoding_failed(format!(
+                "{} {} kbit/s frame needs {} bytes, got {}",
+                self.variant,
+                f64::from(mode.bitrate()) / 1000.0,
+                mode.octet_aligned_bytes(),
+                data.len()
+            ))
+        };
+
+        match &mut self.decoder {
+            #[cfg(feature = "amr-nb")]
+            Decoder::NarrowBand(decoder) => decoder
+                .decode(mode.index(), data)
+                .map(Vec::from)
+                .ok_or_else(short),
             #[cfg(feature = "amr-wb")]
-            AmrVariant::WideBand => {
-                let decoder = self
-                    .wb_decoder
-                    .as_mut()
-                    .ok_or_else(|| CodecError::invalid_config("wideband decoder missing"))?;
-                decoder.decode(mode, data).map(Vec::from).ok_or_else(|| {
-                    CodecError::decoding_failed(format!(
-                        "AMR-WB {} kbit/s frame needs {} bytes, got {}",
-                        f64::from(mode.bitrate()) / 1000.0,
-                        mode.octet_aligned_bytes(),
-                        data.len()
-                    ))
-                })
+            Decoder::WideBand(decoder) => {
+                decoder.decode(mode, data).map(Vec::from).ok_or_else(short)
             }
-            #[cfg(not(feature = "amr-wb"))]
-            AmrVariant::WideBand => Err(CodecError::feature_not_enabled(
-                "AMR-WB decoding needs the amr-wb feature",
-            )),
-            AmrVariant::NarrowBand => Err(self.kernel_unimplemented("decode")),
+            Decoder::Absent => Err(CodecError::feature_not_enabled(format!(
+                "{} decoding needs its cargo feature enabled",
+                self.variant
+            ))),
         }
     }
 
@@ -251,10 +283,7 @@ impl AudioCodec for AmrCodec {
         // Mode selection deliberately survives a reset: it is negotiated state,
         // not stream state, and silently renegotiating the bit rate on a
         // discontinuity would be a much harder bug to find than a wrong sample.
-        #[cfg(feature = "amr-wb")]
-        if let Some(decoder) = self.wb_decoder.as_mut() {
-            **decoder = wb::decoder::Decoder::new();
-        }
+        self.decoder = Decoder::for_variant(self.variant);
         Ok(())
     }
 
@@ -432,7 +461,134 @@ mod tests {
         assert!(wb.decode_frame(&CodedFrame::comfort_noise(vec![0; 5])).is_err());
 
         let mut nb = AmrCodec::new(&CodecConfig::amr_nb()).unwrap();
-        assert!(nb.decode(&[0u8; 31]).is_err());
+        assert!(nb.encode(&vec![0i16; 160]).is_err());
+    }
+
+    #[cfg(feature = "amr-nb")]
+    mod narrowband {
+        use super::*;
+        use crate::codecs::amr::storage;
+
+        /// Reference PCM from TS 26.073's own decoder, 8 kHz mono
+        /// little-endian. AMR-NB's output is defined as 13-bit linear and the
+        /// reference clears the low three bits before writing.
+        fn reference_pcm(mode: u8) -> Vec<i16> {
+            let raw: &[u8] = match mode {
+                0 => include_bytes!("testdata/amrnb_mode0.pcm"),
+                1 => include_bytes!("testdata/amrnb_mode1.pcm"),
+                2 => include_bytes!("testdata/amrnb_mode2.pcm"),
+                3 => include_bytes!("testdata/amrnb_mode3.pcm"),
+                4 => include_bytes!("testdata/amrnb_mode4.pcm"),
+                5 => include_bytes!("testdata/amrnb_mode5.pcm"),
+                6 => include_bytes!("testdata/amrnb_mode6.pcm"),
+                7 => include_bytes!("testdata/amrnb_mode7.pcm"),
+                other => panic!("no reference PCM for mode {other}"),
+            };
+            raw.chunks_exact(2)
+                .map(|b| i16::from_le_bytes([b[0], b[1]]))
+                .collect()
+        }
+
+        fn fixture(mode: u8) -> &'static [u8] {
+            match mode {
+                0 => include_bytes!("testdata/amrnb_mode0.amr"),
+                1 => include_bytes!("testdata/amrnb_mode1.amr"),
+                2 => include_bytes!("testdata/amrnb_mode2.amr"),
+                3 => include_bytes!("testdata/amrnb_mode3.amr"),
+                4 => include_bytes!("testdata/amrnb_mode4.amr"),
+                5 => include_bytes!("testdata/amrnb_mode5.amr"),
+                6 => include_bytes!("testdata/amrnb_mode6.amr"),
+                7 => include_bytes!("testdata/amrnb_mode7.amr"),
+                other => panic!("no fixture for mode {other}"),
+            }
+        }
+
+        /// As for wideband: `nb::decoder` is bit-exact on its own, and this
+        /// asserts the public API reaches it without disturbing anything. A
+        /// wiring layer that reset state between frames would still produce
+        /// speech and pass any weaker test.
+        #[test]
+        fn the_public_api_decodes_bit_exactly_at_every_rate() {
+            for mode in 0..8u8 {
+                let want = reference_pcm(mode);
+                let (_, frames) = storage::read(fixture(mode)).expect("fixture parses");
+                assert!(!frames.is_empty(), "mode {mode} fixture is empty");
+
+                let mut codec = AmrCodec::new(&CodecConfig::amr_nb()).unwrap();
+                let mut got = Vec::with_capacity(want.len());
+                for frame in &frames {
+                    got.extend(codec.decode(&frame.data).expect("frame decodes"));
+                }
+
+                assert_eq!(got.len(), want.len(), "mode {mode} sample count");
+                assert_eq!(got, want, "mode {mode} is not bit-exact through the API");
+            }
+        }
+
+        /// A frame length can identify the mode within a variant but never the
+        /// variant, so the variant has to come from the negotiation.
+        ///
+        /// The colliding pair is computed rather than remembered: the first
+        /// version of this test asserted narrowband 12.2 and wideband 8.85 were
+        /// both 31 bytes, which is simply false, and the test caught the
+        /// mistake in its own premise.
+        #[test]
+        #[cfg(feature = "amr-wb")]
+        fn a_frame_length_cannot_identify_the_variant() {
+            let nb_lengths: Vec<usize> = AmrMode::all(AmrVariant::NarrowBand)
+                .iter()
+                .map(|m| m.octet_aligned_bytes())
+                .collect();
+            let collisions: Vec<(u8, u8, usize)> = AmrMode::all(AmrVariant::WideBand)
+                .iter()
+                .filter_map(|wb| {
+                    let len = wb.octet_aligned_bytes();
+                    nb_lengths.iter().position(|&n| n == len).map(|i| {
+                        (u8::try_from(i).expect("mode index"), wb.index(), len)
+                    })
+                })
+                .collect();
+            assert!(
+                !collisions.is_empty(),
+                "if the two variants' lengths ever became disjoint,                  AudioCodec::decode could infer the variant too"
+            );
+
+            // Decoding a colliding wideband frame as narrowband succeeds and
+            // produces narrowband-shaped output. That is the hazard, stated
+            // rather than guarded against: only the negotiated variant can
+            // resolve it.
+            let (nb_mode, _wb_mode, len) = collisions[0];
+            let mut nb = AmrCodec::new(&CodecConfig::amr_nb()).unwrap();
+            let (_, frames) =
+                storage::read(include_bytes!("testdata/amrwb_mode0.amr")).expect("parses");
+            let wb_frame = frames
+                .iter()
+                .find(|f| f.data.len() == len)
+                .expect("a wideband frame of the colliding length");
+            let decoded = nb.decode(&wb_frame.data).expect("a valid narrowband length");
+            assert_eq!(decoded.len(), 160, "decoded as narrowband mode {nb_mode}");
+        }
+
+        #[test]
+        fn reset_returns_the_decoder_to_its_start_state() {
+            let (_, frames) = storage::read(fixture(4)).expect("fixture parses");
+            let mut codec = AmrCodec::new(&CodecConfig::amr_nb()).unwrap();
+
+            let first: Vec<i16> = frames[..4]
+                .iter()
+                .flat_map(|f| codec.decode(&f.data).expect("decodes"))
+                .collect();
+            for f in &frames[4..12] {
+                codec.decode(&f.data).expect("decodes");
+            }
+            codec.reset().unwrap();
+
+            let again: Vec<i16> = frames[..4]
+                .iter()
+                .flat_map(|f| codec.decode(&f.data).expect("decodes"))
+                .collect();
+            assert_eq!(first, again, "reset did not clear the decoder state");
+        }
     }
 
     #[cfg(feature = "amr-wb")]
