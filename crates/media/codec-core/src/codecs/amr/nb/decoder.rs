@@ -1088,6 +1088,60 @@ mod tests {
         assert!(decoder.decode(4, &[]).is_none());
     }
 
+    /// Concealment is where a decoder is least likely to be right by accident:
+    /// it is pure state machine, it only runs once something has already gone
+    /// wrong, and getting it wrong sounds like a bad network rather than like a
+    /// bug. Every other fixture is a clean stream, so without this the
+    /// `FrameState::Bad` path had never been taken end to end.
+    ///
+    /// The erasure pattern in `tools/build-amr-erasure-fixtures.sh` is chosen
+    /// to move the state machine rather than to be representative: a single
+    /// loss, a burst of three, the first good frame after the burst — where
+    /// both gain concealers limit against the last known-good value — and then
+    /// an alternating pair that keeps the machine from settling.
+    #[test]
+    fn concealment_matches_the_reference_frame_for_frame() {
+        let bits: &[u8] = include_bytes!("../testdata/amrnb_erased.amr");
+        let want = reference(include_bytes!("../testdata/amrnb_erased.pcm"));
+        let (_, frames) = storage::read(bits).expect("fixture parses");
+
+        let erased: Vec<usize> = frames
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| !f.quality_ok)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            erased,
+            vec![5, 10, 11, 12, 20, 22],
+            "the fixture's erasure pattern moved; the test below assumes it"
+        );
+
+        let mut decoder = Decoder::new();
+        let mut compared = 0usize;
+        for (f, frame) in frames.iter().enumerate() {
+            let state = if frame.quality_ok {
+                FrameState::Good
+            } else {
+                FrameState::Bad
+            };
+            // A bad frame still carries bits, and the reference decodes them:
+            // the parameters are read normally and the concealment machinery
+            // then overrides the parts it does not trust.
+            let params = super::super::bitstream::parse(4, &frame.data).expect("parses");
+            let got = decoder.decode_parameters(4, &params, state);
+            for (i, &sample) in got.iter().enumerate() {
+                let index = f * L_FRAME + i;
+                assert_eq!(
+                    sample, want[index],
+                    "frame {f} ({state:?}) sample {i} differs"
+                );
+                compared += 1;
+            }
+        }
+        assert_eq!(compared, want.len(), "compared fewer samples than the fixture holds");
+    }
+
     /// Prints the first stage at which the Rust decoder leaves the reference,
     /// for diffing against `tools/trace-amrnb-reference.sh`.
     ///
