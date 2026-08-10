@@ -558,40 +558,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_decoder_runs_without_panicking_on_every_mode() {
-        // A first, weak claim: the wiring holds together on real payloads.
-        // Sample accuracy is asserted separately.
-        for mode_index in 0..9 {
-            let (_, total, _) = compare(mode_index);
-            assert!(total > 0, "mode {mode_index}: decoded nothing");
-        }
-    }
-
-    /// Where the assembly currently stands against the reference, per mode.
-    ///
-    /// This is a **ratchet, not a target**: it fails if accuracy regresses, and
-    /// the numbers are expected to rise toward 100% as the wiring is corrected.
-    /// It exists because "runs without panicking" is far too weak a claim and
-    /// the exact test below cannot pass yet.
-    #[test]
-    fn the_assembly_does_not_regress_against_the_reference() {
-        // Floors, well under the measured values, so ordinary noise does not
-        // fail the build but a real regression does.
-        const FLOOR_PERMILLE: [u64; 9] = [1000; 9];
-
-        for (mode_index, &floor) in FLOOR_PERMILLE.iter().enumerate() {
-            let (matched, total, worst) = compare(mode_index);
-            assert!(total > 0, "mode {mode_index}: decoded nothing");
-            let permille = matched as u64 * 1000 / total as u64;
-            println!("mode {mode_index}: {matched}/{total} = {permille} per mille, worst {worst}");
-            assert!(
-                permille >= floor,
-                "mode {mode_index}: {matched}/{total} exact ({permille} per mille, \
-                 floor {floor}), worst |delta| = {worst}"
-            );
-        }
-    }
 
     /// The 6.60 kbit/s high band uses a different filter from every other mode.
     ///

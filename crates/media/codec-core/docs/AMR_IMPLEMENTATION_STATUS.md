@@ -508,6 +508,57 @@ that was recognisably speech and steadily wrong.
 to 16 kHz PCM (`amrwb_mode*.pcm`, 25 frames each). Per-stage vectors cannot
 reach the state coupling *between* stages; this can.
 
+## AMR-WB DECODER: BIT-EXACT AT ALL NINE RATES
+
+Every sample of every frame of every fixture, 6.60 through 23.85 kbit/s, is
+identical to the TS 26.173 reference decoder. 8000/8000 per mode, worst error
+zero. Asserted by `the_decoder_matches_the_reference_sample_for_sample`.
+
+### How it got there, from 1–3%
+
+Six defects, in the order they were found. Every one was found by **diffing
+traced intermediates against the instrumented reference**, not by reading code
+or reasoning from output PCM — a full turn spent on the latter produced one
+speculative lead and no fixes.
+
+| # | Defect | Effect |
+|---|---|---|
+| 1 | Comparing 16-bit output against 14-bit reference PCM (`decoder.c` masks with `0xfffC`) | The 1–3% figure itself |
+| 2 | `Qsubfr`/`Q_old` seeded to 0 instead of `Q_MAX` | Mis-scaled the start of every stream |
+| 3 | Phase dispersion given a rescaled gain, not the Q16 high half | Wrong dispersion state |
+| 4 | 23.85's high-band gain parsed as a trailing block, not per subframe | 23.85 unusable |
+| 5 | 6.60/8.85 pitch-sharpening blend (`agc2`) missing entirely | Both low rates ~14% |
+| 6 | `Scale_sig` implemented as a truncating shift | **The entire residual** |
+
+Number 6 is the one worth remembering. `Scale_sig` is not a shift: the reference
+widens each sample to 32 bits, shifts, and *rounds* back, so scaling by −3 is
+`floor((x+4)/8)`, not `floor(x/8)`. Those differ on half of all inputs. Because
+the rescaled excitation feeds the voicing measure, the error reached the next
+subframe's spectral tilt, both enhancers, and the low-rate sharpening. Fixing it
+took modes from 71–81% to 100% in one step.
+
+Number 4 is the one worth learning from: **my oracle shared the wrong
+assumption**, so the parameter test passed while both were wrong. The
+bit-conservation check could not catch it either — the bit *count* was
+unchanged, only the assignment. This is the second time that trap fired (the
+VAD flag was the first).
+
+### The 6.60 high band
+
+The last mode needed its own path: it extrapolates an order-20 predictor from
+ISF *spacing* rather than borrowing the low band's order-16 filter. Wiring it
+required generalising `isp_to_lp` to any even order — above 16 the reference
+runs the same expansion four times smaller and shifts back, because twenty
+accumulations overflow Q23 where sixteen do not — and an order-20 shaper over
+the full memory at gamma 0.9.
+
+One detail that would have been silently wrong: the high-band ISF interpolation
+uses the plain complement `32767 - frac`, **not** the `+1` complement
+`interpolate_isp` uses. Reusing that helper would have been off by one LSB per
+subframe.
+
+### Superseded record
+
 ### CORRECTION: the 1–3% figure was mostly a wrong yardstick
 
 **TS 26.173's `decoder.c` masks its output with `0xfffC` before writing** — AMR-WB's

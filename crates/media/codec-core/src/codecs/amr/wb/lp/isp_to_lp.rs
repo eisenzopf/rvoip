@@ -36,9 +36,6 @@ use crate::fixed_point::oper32::{l_extract, mpy_32_16};
 use crate::fixed_point::shift::{l_shl, l_shr_r, shr_r};
 use crate::fixed_point::types::{DspContext, Word16, Word32};
 
-/// Half the predictor order: the number of ISP pairs.
-const NC: usize = LP_ORDER / 2;
-
 /// Expand one interlaced root set into its polynomial, in Q23.
 ///
 /// `isp` is read with a stride of two, starting from whichever of the two
