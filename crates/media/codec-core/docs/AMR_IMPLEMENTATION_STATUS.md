@@ -160,6 +160,32 @@ Levinson-Durbin is invariant to, so the predictor is identical. We follow the
 spec's placement; a test pins ours against the reference's documented values
 with the factor restored, so the equivalence is asserted rather than assumed.
 
+### Levinson-Durbin
+
+`codecs/amr/wb/lp/levinson.rs` implements §5.2.2 — the order-16 recursion
+solving the Yule-Walker system, returning predictor coefficients, reflection
+coefficients and residual energy.
+
+The recursion equations came through the PDF extraction scrambled, but unlike
+the window this needed no reconstruction: the spec defers the algorithm to a
+standard reference, so it is the textbook recursion. What is AMR-specific is the
+fixed-point formulation, which will be written against this float version.
+
+Validated by **an independent solve rather than a restatement**: the tests
+solve the same system by Gaussian elimination — O(M³), no knowledge of the
+Toeplitz structure — and require agreement. Also checked: the normal equations
+are satisfied directly, every reflection coefficient lies inside the unit circle
+(the stability condition that makes this recursion worth using over a general
+solve), residual energy never increases with order, and a tone is orders of
+magnitude more predictable than noise.
+
+One test failure was the test's fault, and worth recording: the "white noise"
+generator produced values in `0..2²⁴` minus 8192, so it carried a large DC
+offset — and a constant is perfectly predictable, which made the noise look
+highly structured. Centring it fixed the data, and the assertion was rewritten
+to compare prediction gain between a tone and noise rather than test an absolute
+threshold that depends on the analysis window's own spectral shape.
+
 ### Previously recorded as blocked (resolved)
 
 The next piece of Phase 3 is the LP-analysis chain — order-16 autocorrelation
