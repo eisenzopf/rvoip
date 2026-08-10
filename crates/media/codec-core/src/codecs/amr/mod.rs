@@ -40,6 +40,9 @@ mod bits;
 pub mod mode;
 pub mod nb;
 pub mod payload;
+/// Where the Apache-2.0 oracles agree with the normative references.
+#[cfg(test)]
+mod qualification;
 pub mod rate;
 pub mod sdp;
 pub mod storage;
