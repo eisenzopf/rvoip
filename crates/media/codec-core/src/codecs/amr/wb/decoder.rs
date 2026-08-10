@@ -69,10 +69,14 @@ pub struct Decoder {
     tilt_code: Word16,
     /// Whether any frame has been decoded yet.
     started: bool,
-    /// Scalar trace of the last decode, for comparison against the reference.
+    /// Scalar trace of the last decode.
+    ///
+    /// Exists to be diffed against the instrumented reference decoder — see
+    /// `tools/trace-amr-reference.sh`. Comparing intermediates found every bug
+    /// in this file so far; reasoning from output PCM found none of them.
     #[cfg(test)]
     pub(crate) trace: Vec<(&'static str, i64)>,
-    /// Vector trace of the last decode.
+    /// Vector trace of the last decode, same purpose.
     #[cfg(test)]
     pub(crate) vtrace: Vec<(&'static str, Vec<i16>)>,
 }
@@ -304,12 +308,14 @@ impl Decoder {
             for s in &mut hf {
                 *s = mult(&mut ctx, *s, hf_gain);
             }
+            vtrace!("hfnoise_scaled", hf);
             self.shaper.shape(&mut ctx, a, &mut hf);
             self.band_pass.filter(&mut ctx, &mut hf);
             if frame_bits >= 477 {
                 self.low_pass_7k.filter(&mut ctx, &mut hf);
             }
 
+            vtrace!("hfband", hf);
             let base = sf * L_SUBFR16K;
             for i in 0..L_SUBFR16K {
                 out[base + i] = add(&mut ctx, upsampled[i], hf[i]).0;
@@ -403,11 +409,15 @@ mod tests {
     /// Diagnostic for the assembly's remaining error, kept because it is how
     /// the next step starts rather than because it asserts anything.
     ///
-    /// Run with `--ignored --nocapture`. Current finding: the reference's early
-    /// samples are all multiples of 4 where ours are not, at similar
-    /// magnitudes — a two-bit scaling difference rather than a wrong
-    /// computation, which points at a prescale in the path that dominates
-    /// those samples.
+    /// Run with `--ignored --nocapture`, and compare against the instrumented
+    /// reference produced by `tools/trace-amr-reference.sh`. The two emit the
+    /// same intermediates under the same names.
+    ///
+    /// Verified matching for mode 12.65, frame 0, subframes 0 and 1: every
+    /// scalar (`T0`, gains, `Q_new`, `voice_fac`) and every vector (`pred`,
+    /// `code`, `exc_total`, `exc2_final`, `hfband`) is identical to the
+    /// reference. The remaining error is therefore downstream of the
+    /// excitation.
     #[test]
     #[ignore = "diagnostic, not an assertion"]
     fn where_does_it_diverge() {
@@ -419,8 +429,11 @@ mod tests {
         let mut dec = Decoder::new();
         let got = dec.decode(mode, &frames[0].data).expect("decodes");
 
-        for (k, v) in dec.vtrace.iter().take(4) {
-            println!("V {k}: {:?}", &v[..8.min(v.len())]);
+        for (k, v) in &dec.trace {
+            println!("S {k} = {v}");
+        }
+        for (k, v) in &dec.vtrace {
+            println!("V {k}: {:?}", &v[..6.min(v.len())]);
         }
         let first_bad = (0..FRAME_SIZE_16K).find(|&i| got[i] != want[i]);
         let first_nz = (0..FRAME_SIZE_16K).find(|&i| want[i] != 0);
