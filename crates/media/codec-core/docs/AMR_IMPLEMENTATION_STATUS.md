@@ -508,6 +508,59 @@ that was recognisably speech and steadily wrong.
 to 16 kHz PCM (`amrwb_mode*.pcm`, 25 frames each). Per-stage vectors cannot
 reach the state coupling *between* stages; this can.
 
+### CORRECTION: the 1–3% figure was mostly a wrong yardstick
+
+**TS 26.173's `decoder.c` masks its output with `0xfffC` before writing** — AMR-WB's
+output is defined as 14-bit linear, so the low two bits are deleted. I was
+comparing unmasked 16-bit output against 14-bit reference PCM. A decoder that was
+substantially correct scored 1–3%.
+
+With the mask applied and two real bugs fixed:
+
+| Mode | Before | After | Worst \|delta\| |
+|---|---|---|---|
+| 6.60 | 1.2% | 15.2% | 220 |
+| 8.85 | 1.4% | 13.1% | 220 |
+| 12.65 | 1.5% | **80.7%** | 16 |
+| 14.25 | 1.4% | **80.2%** | 24 |
+| 15.85 | 1.3% | **76.5%** | 16 |
+| 18.25 | 2.1% | **73.4%** | 12 |
+| 19.85 | 2.1% | **78.0%** | 12 |
+| 23.05 | 2.7% | **79.0%** | 8 |
+| 23.85 | 0.5% | 1.1% | 25 640 |
+
+The two real bugs, both found by tracing rather than reading:
+
+- **`Qsubfr[0..3]` and `Q_old` initialise to `Q_MAX` (8), not zero.** The shift is
+  bounded by the *minimum* of the four, so starting at zero pinned it to zero until
+  four subframes had run — mis-scaling the start of every stream, and with it the
+  synthesis filter's `a0`.
+- **Phase dispersion takes the high half of the Q16 code gain** (`L_Extract`), not a
+  rounded or rescaled version.
+
+**Method that worked, after one that did not.** A full turn spent reasoning from
+output PCM produced one speculative lead and no fixes. Instrumenting the reference
+decoder with trace points and diffing intermediates found all three issues in a
+single pass. That harness is now committed as `tools/instrument-amr-decoder.py` and
+`tools/trace-amr-reference.sh`, and the Rust decoder emits the same names under
+`cfg(test)`.
+
+Verified equal to the reference for mode 12.65, frame 0, subframes 0 and 1: every
+scalar (`T0`, `T0_frac`, `tilt_code`, `gain_pit`, `L_gain_code`, `Q_new`,
+`gain_code`, `voice_fac`) and every vector (`pred`, `code`, `exc_total`,
+`exc2_final`, `hfband`). The excitation chain is correct; the residual is
+downstream.
+
+**Remaining, in priority order:** 23.85 is badly broken (its transmitted high-band
+gain path); 6.60 and 8.85 share a mode-specific bug (they take the
+`nb_bits <= NBBITS_9k` branches — forced LTP filter, 6-bit gains, and a `pit_sharp`
+post-processing step the Rust omits entirely); modes 12.65–23.05 have a small
+residual worth 8–24 LSB.
+
+### Superseded: the assembly at 1–3%
+
+#### Original entry
+
 ### The assembly: fourteen exact stages, and a decoder that is 1–3% right
 
 The decoder is wired and runs on every mode without panicking, producing
