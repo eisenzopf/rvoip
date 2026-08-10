@@ -23,6 +23,43 @@
 //! [`super::storage`], [`super::mode`]).
 
 pub mod bitstream;
+pub mod codebook;
 pub mod decoder_tables;
+pub mod detect;
+pub mod gain;
+pub mod lag;
 pub mod lsp;
+pub mod math;
+pub mod postfilter;
+pub mod synthesis;
 pub mod tables;
+#[cfg(test)]
+pub mod vectors;
+
+/// Frame size in samples, 20 ms at 8 kHz.
+pub const L_FRAME: usize = 160;
+
+/// Subframe size in samples; four to a frame.
+pub const L_SUBFR: usize = 40;
+
+/// Minimum pitch lag for every rate except 12.2 kbit/s.
+pub const PIT_MIN: i16 = 20;
+
+/// Minimum pitch lag at 12.2 kbit/s, which resolves the lag more finely and so
+/// can afford to reach a shorter period.
+pub const PIT_MIN_MR122: i16 = 18;
+
+/// Maximum pitch lag, all rates.
+pub const PIT_MAX: i16 = 143;
+
+/// Length of the adaptive codebook's interpolation filter, one side plus one.
+pub const L_INTERPOL: usize = 11;
+
+/// Maximum pitch-sharpening factor, 0.7947 in Q14.
+pub const SHARPMAX: i16 = 13017;
+
+/// Tilt-compensation factor for the post-filter, 0.8 in Q15.
+pub const MU: i16 = 26214;
+
+/// Gain-smoothing factor for the post-filter's AGC, 0.9 in Q15.
+pub const AGC_FAC: i16 = 29491;
