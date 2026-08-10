@@ -1,4 +1,61 @@
-# AMR Implementation Status
+# AMR implementation status
+
+## Where things stand
+
+| Component | State |
+|---|---|
+| **AMR-WB decoder** | **Bit-exact against TS 26.173, all nine rates** |
+| AMR-WB erasure / DTX / homing | Not started — concealment code exists but is unreachable |
+| **AMR-NB bitstream layer** | **Bit-exact against TS 26.073, all eight rates** |
+| AMR-NB decoder DSP | Not started |
+| AMR-WB encoder | Not started |
+| AMR-NB encoder | Not started |
+| Codec-trait integration | Not started |
+
+Both references are fetched by script and never committed
+(`tools/build-amr-reference.sh`, `tools/build-amrnb-reference.sh`); only
+generated vectors and PCM are checked in, because they are output rather than
+source.
+
+## The two lessons that cost the most
+
+**1. An oracle that shares your assumption verifies nothing.** This fired three
+times. The VAD flag, 23.85's high-band gain index, and AMR-NB's `packed_size`
+convention were each wrong in my Rust *and* in the oracle I wrote to check it,
+so the test passed. The defence is a conservation law the shared assumption
+cannot satisfy — bit counts, permutation checks, cross-table agreement — plus
+comparing against something produced by a genuinely independent implementation.
+The `.amr` fixtures come from opencore-amr and vo-amrwbenc for exactly this
+reason.
+
+**2. Diff intermediates, do not reason from output.** A full turn spent
+reasoning about output PCM produced one speculative lead and no fixes.
+Instrumenting the reference decoder and diffing per-stage intermediates found
+every remaining bug in a single pass. `tools/instrument-amr-decoder.py` and
+`tools/trace-amr-reference.sh` exist so that is the first move next time, not
+the last.
+
+A third, smaller: **read the reference raw.** Both references interleave
+instrumentation counters (`test(); move16();`) on the same line as real
+assignments, so any filter that strips those lines silently strips real code.
+That removed four lines from one function before it was noticed.
+
+## Remaining work, in order
+
+1. **AMR-NB decoder DSP.** The bitstream layer is done. Everything downstream is
+   new: LSF dequantisation (two quantisers, mode-selected), LSP↔LSF, LSP→LP,
+   eight per-mode algebraic codebooks, separate pitch and code gain quantisers
+   for some modes, and a **decoder post-filter that AMR-WB does not have**.
+2. **AMR-WB erasure, DTX and homing.** Today the decoder always passes
+   `FrameQuality::Good`, so `GainDecoder::conceal` is dead code and a lost
+   packet produces garbage. Required for conformance and for the first real
+   packet loss.
+3. **Encoders.** The algebraic codebook search is the large piece; LP analysis,
+   Levinson-Durbin and LP→ISP are the prerequisites.
+4. **Integration.** Codec traits, registration, transcoding, CMR.
+
+## Detailed history
+
 
 Living tracker for the AMR-NB / AMR-WB work. The plan is in
 [`AMR_IMPLEMENTATION_PLAN.md`](AMR_IMPLEMENTATION_PLAN.md); this file records
