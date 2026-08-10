@@ -23,4 +23,5 @@
 //! [`super::storage`], [`super::mode`]).
 
 pub mod bitstream;
+pub mod decoder_tables;
 pub mod tables;

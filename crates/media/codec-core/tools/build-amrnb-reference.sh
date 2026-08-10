@@ -73,6 +73,13 @@ echo "==> building the reference decoder"
 
 echo "==> decoding the fixtures to reference PCM"
 # End-to-end ground truth: 8 kHz mono little-endian, 160 samples per frame.
+#
+# NOTE: AMR-NB's output is defined as 13-bit linear. The reference clears the
+# low three bits unless NO13BIT is defined, which it deliberately is not here,
+# so every sample below is a multiple of 8. Comparing unmasked 16-bit decoder
+# output against this scores near zero for a perfectly correct decoder -- the
+# wideband equivalent (14-bit, 0xfffC) cost a full debugging session before it
+# was noticed. Mask with `& !7` before comparing.
 for m in 0 1 2 3 4 5 6 7; do
   "$WORK/amrnb_dec" "$TESTDATA/amrnb_mode$m.amr" \
       "$TESTDATA/amrnb_mode$m.pcm" >/dev/null 2>&1
@@ -90,3 +97,5 @@ wc -l < "$TESTDATA/stages_nb.txt" | xargs echo "    lines:"
 echo "==> generating the bit-ordering and layout tables"
 python3 "$HERE/gen_nb_tables.py" "$SRC/bitno.tab" \
     "$HERE/../src/codecs/amr/nb/tables.rs"
+python3 "$HERE/gen_nb_decoder_tables.py" "$SRC" \
+    "$HERE/../src/codecs/amr/nb/decoder_tables.rs"
