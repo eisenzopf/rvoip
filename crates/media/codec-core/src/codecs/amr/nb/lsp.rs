@@ -262,6 +262,18 @@ impl LsfDecoder {
         lsf_to_lsp(&mut ctx, &lsf)
     }
 
+    /// The LSFs this decoder last produced, Q15.
+    ///
+    /// The frame assembly needs them twice after the spectral path is done:
+    /// `Int_lsf` interpolates the previous frame's against these for the
+    /// codebook-gain smoother, and the running LSF average is updated from
+    /// them. Both want LSFs rather than the LSPs [`decode`](Self::decode)
+    /// returns, and recomputing them from the LSPs would not round-trip.
+    #[must_use]
+    pub const fn last_lsf(&self) -> &[Word16; M] {
+        &self.past_lsf
+    }
+
     fn decode_good(
         &mut self,
         ctx: &mut DspContext,
