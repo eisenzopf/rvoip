@@ -508,6 +508,46 @@ that was recognisably speech and steadily wrong.
 to 16 kHz PCM (`amrwb_mode*.pcm`, 25 frames each). Per-stage vectors cannot
 reach the state coupling *between* stages; this can.
 
+### The assembly: fourteen exact stages, and a decoder that is 1–3% right
+
+The decoder is wired and runs on every mode without panicking, producing
+speech-shaped output. Against the reference PCM:
+
+| Mode | Exact samples | Worst \|delta\| |
+|---|---|---|
+| 6.60 | 1.2% | 8 493 |
+| 8.85 | 1.4% | 15 713 |
+| 12.65 | 1.5% | 6 972 |
+| 14.25 | 1.4% | 7 011 |
+| 15.85 | 1.3% | 7 899 |
+| 18.25 | 2.1% | 6 351 |
+| 19.85 | 2.1% | 5 673 |
+| 23.05 | 2.7% | 7 336 |
+| 23.85 | 0.5% | 28 241 |
+
+**Every stage is bit-exact in isolation and the composition is not.** The
+errors are therefore in the wiring: state carried between stages, order of
+operations, or an interface I have matched to the wrong thing. This is exactly
+the class of defect per-stage vectors cannot reach — which is why the
+end-to-end ground truth was built first, and why the earlier claim that "only
+the wiring remained" was worth distrusting even after the five missing stages
+were found.
+
+The suite now carries a **ratchet** test (fails on regression, floors set below
+current values) and an exact-match test marked `#[ignore]` with the figure in
+its reason. "Runs without panicking" is far too weak to be the only assertion,
+and prose in this document is not a substitute for a failing test.
+
+One concrete bug the assembly did surface: the excitation buffer was one sample
+too short. The adaptive codebook writes `L_SUBFR + 1` samples because the LTP
+low-pass reads one ahead, and no per-stage test ever asked for that length.
+
+**Debugging approach from here.** The per-stage vectors are still the lever:
+instrument the assembled decoder to dump the same intermediates the oracle
+already emits, run both on the same frame, and find the first stage whose
+output diverges. The divergence point localises the wiring error far faster
+than comparing PCM.
+
 ### High-band synthesis — the wideband half
 
 `wb/highband.rs` implements §6.10, bit-exact over three blocks covering both
