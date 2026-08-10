@@ -454,6 +454,28 @@ split is structural, not a rounding refinement.
 The excitation's per-subframe scaling is undone by shifting `a[0]` rather than
 the signal, so putting it back costs no precision.
 
+### Excitation assembly and upsampling
+
+`wb/excitation.rs` implements §6.5 and §6.9 — summing the two excitation
+contributions under the decoder's adaptive scaling, and resampling 12.8 → 16
+kHz. Bit-exact over a replayed four-subframe sequence.
+
+**The adaptive scaling is structural, not an optimisation.** The excitation
+buffer is held at a per-subframe shift, and the *whole* history is rescaled
+when that shift moves — because the adaptive codebook reads the history, so
+history and present must share a scale. Rescaling only the new subframe would
+make pitch prediction read at the wrong loudness.
+
+The shift is bounded by the **smallest** headroom across the last four
+subframes, not the current one. A fresh decoder therefore records four zeroes
+and cannot shift at all until four subframes have run. That looked like a bug
+in a test I wrote and is in fact the point: the scaling must not open up on the
+strength of one quiet subframe and then clip when the level returns.
+
+The fixture also caught a real bug: the upsampling filter is centred on its
+sample, so the read window starts `NB_COEF_UP - 1` taps earlier. I had omitted
+the reference's `x = x - nb_coef + 1` back-step, which read past the buffer.
+
 And one corrected premise: a median is **not** unchanged by an outlier —
 replacing the smallest of five values with the largest shifts it up one rank.
 The honest claim, which the test now makes, is that it moves far less than a
