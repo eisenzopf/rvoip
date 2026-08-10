@@ -16,6 +16,7 @@ pub mod bitstream;
 pub mod codebook;
 pub mod highband;
 pub mod lp;
+pub mod enhance;
 pub mod excitation;
 pub mod gain;
 pub mod gain_tables;

@@ -267,6 +267,35 @@ pub const HP_GAIN: [i16; 16] = [
     11210, 12206, 13391, 14844, 16770, 19655, 24289, 32728,
 ];
 
+/// Phase-dispersion impulse response, high dispersion, Q15.
+///
+/// Convolving the innovation with this spreads each pulse's energy over
+/// time. At low rates there are too few pulses to sound like speech --
+/// they read as clicks -- and smearing them trades peakiness for a more
+/// noise-like excitation.
+pub const PH_IMP_LOW: [i16; 64] = [
+    20182, 9693, 3270, -3437, 2864, -5240, 1589, -1357,
+    600, 3893, -1497, -698, 1203, -5249, 1199, 5371,
+    -1488, -705, -2887, 1976, 898, 721, -3876, 4227,
+    -5112, 6400, -1032, -4725, 4093, -4352, 3205, 2130,
+    -1996, -1835, 2648, -1786, -406, 573, 2484, -3608,
+    3139, -1363, -2566, 3808, -639, -2051, -541, 2376,
+    3932, -6262, 1432, -3601, 4889, 370, 567, -1163,
+    -2854, 1914, 39, -2418, 3454, 2975, -4021, 3431,
+];
+
+/// Phase-dispersion impulse response, moderate dispersion, Q15.
+pub const PH_IMP_MID: [i16; 64] = [
+    24098, 10460, -5263, -763, 2048, -927, 1753, -3323,
+    2212, 652, -2146, 2487, -3539, 4109, -2107, -374,
+    -626, 4270, -5485, 2235, 1858, -2769, 744, 1140,
+    -763, -1615, 4060, -4574, 2982, -1163, 731, -1098,
+    803, 167, -714, 606, -560, 639, 43, -1766,
+    3228, -2782, 665, 763, 233, -2002, 1291, 1871,
+    -3470, 1032, 2710, -4040, 3624, -4214, 5292, -4270,
+    1563, 108, -580, 1642, -2458, 957, 544, 2540,
+];
+
 /// Upsampling interpolation filter for 12.8 -> 16 kHz, Q14.
 ///
 /// One fifth-sample resolution: 24 taps at each of five phases, stored

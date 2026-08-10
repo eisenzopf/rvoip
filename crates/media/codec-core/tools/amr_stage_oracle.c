@@ -55,6 +55,10 @@ void Init_HP50_12k8(Word16 mem[]);
 void Scale_sig(Word16 x[], Word16 lg, Word16 exp);
 void Init_Oversamp_16k(Word16 mem[]);
 Word16 Random(Word16 *seed);
+Word16 voice_factor(Word16 exc[], Word16 Q_exc, Word16 gain_pit, Word16 code[],
+                    Word16 gain_code, Word16 L_subfr);
+void Phase_dispersion(Word16 gain_code, Word16 gain_pit, Word16 code[],
+                      Word16 mode, Word16 disp_mem[]);
 void Init_HP400_12k8(Word16 mem[]);
 void HP400_12k8(Word16 signal[], Word16 lg, Word16 mem[]);
 void Weight_a(Word16 a[], Word16 ap[], Word16 gamma, Word16 m);
@@ -736,6 +740,72 @@ static void dump_highband(void) {
     }
 }
 
+/* The enhancement stages between gain decoding and synthesis.
+ *
+ * These sit on the main data path even though the prose spec presents them as
+ * refinements, and they are what makes the excitation fed to the synthesis
+ * filter differ from the one written back to the adaptive-codebook history.
+ */
+static void dump_enhancers(void) {
+    Word16 disp_mem[8];
+    Word16 exc[64], code[64], code2[64];
+    int blk, n, i;
+    char name[24];
+
+    memset(disp_mem, 0, sizeof disp_mem);
+
+    printf("enhance\n");
+    for (blk = 0; blk < 5; blk++) {
+        /* Sweep the pitch gain across the dispersion state thresholds (0.6 and
+         * 0.9 in Q14) so every branch is exercised, and vary the code gain to
+         * trip the onset test. */
+        Word16 gain_pit  = (Word16)(4000 + blk * 3000);
+        Word16 gain_code = (Word16)(500 + blk * blk * 900);
+        Word16 voice_fac, tmp;
+
+        for (n = 0; n < 64; n++) {
+            exc[n]  = (Word16)(2500.0 * sin(2.0 * PI * (blk * 64 + n) / 31.0));
+            code[n] = ((n % 9) == blk % 9) ? ((n & 1) ? -512 : 512) : 0;
+        }
+        printf("  emeta%d %d %d\n", blk, gain_pit, gain_code);
+        sprintf(name, "eexc%d", blk);
+        dump(name, exc, 64);
+        sprintf(name, "ecode%d", blk);
+        dump(name, code, 64);
+
+        voice_fac = voice_factor(exc, -3, gain_pit, code, gain_code, 64);
+        printf("  vfac%d %d\n", blk, voice_fac);
+
+        /* Dispersion level by rate: 0 high, 1 low, 2 off. Cycle it so all
+         * three appear, and so the carried state sees each. */
+        Phase_dispersion(gain_code, gain_pit, code, (Word16)(blk % 3), disp_mem);
+        sprintf(name, "disp%d", blk);
+        dump(name, code, 64);
+        sprintf(name, "dmem%d", blk);
+        dump(name, disp_mem, 8);
+
+        /* Pitch enhancer: an HP filter of the innovation whose strength tracks
+         * voicing. */
+        tmp = add(shr(voice_fac, 3), 4096);
+        {
+            Word32 L_tmp = L_deposit_h(code[0]);
+            L_tmp = L_msu(L_tmp, code[1], tmp);
+            code2[0] = round(L_tmp);
+            for (i = 1; i < 63; i++) {
+                L_tmp = L_deposit_h(code[i]);
+                L_tmp = L_msu(L_tmp, code[i + 1], tmp);
+                L_tmp = L_msu(L_tmp, code[i - 1], tmp);
+                code2[i] = round(L_tmp);
+            }
+            L_tmp = L_deposit_h(code[63]);
+            L_tmp = L_msu(L_tmp, code[62], tmp);
+            code2[63] = round(L_tmp);
+        }
+        sprintf(name, "pitchenh%d", blk);
+        dump(name, code2, 64);
+    }
+}
+
 int main(int argc, char **argv) {
     for (int seed = 0; seed < 4; seed++) {
         Word16 x[L_WIN];
@@ -804,6 +874,7 @@ int main(int argc, char **argv) {
     dump_synthesis();
     dump_excitation();
     dump_highband();
+    dump_enhancers();
 
     if (argc > 1) {
         for (int m = 0; m < 9; m++) dump_bitstream(argv[1], m);

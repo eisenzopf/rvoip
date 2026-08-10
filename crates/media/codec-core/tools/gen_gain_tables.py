@@ -45,6 +45,15 @@ TABLES = [
      "High-band correction gains, Q14. Only 23.85 kbit/s transmits an index\n"
      "/// into this; every other mode estimates the gain from the low band's\n"
      "/// spectral tilt instead."),
+    ("ph_disp.c", "ph_imp_low", "PH_IMP_LOW", 64, 8,
+     "Phase-dispersion impulse response, high dispersion, Q15.\n"
+     "///\n"
+     "/// Convolving the innovation with this spreads each pulse's energy over\n"
+     "/// time. At low rates there are too few pulses to sound like speech --\n"
+     "/// they read as clicks -- and smearing them trades peakiness for a more\n"
+     "/// noise-like excitation."),
+    ("ph_disp.c", "ph_imp_mid", "PH_IMP_MID", 64, 8,
+     "Phase-dispersion impulse response, moderate dispersion, Q15."),
     ("decim54.c", "fir_up", "FIR_UP", 120, 5,
      "Upsampling interpolation filter for 12.8 -> 16 kHz, Q14.\n"
      "///\n"
