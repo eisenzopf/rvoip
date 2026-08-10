@@ -96,6 +96,18 @@ echo "==> generating per-stage vectors"
 "$WORK/amrnb_oracle" "$TESTDATA" > "$TESTDATA/stages_nb.txt"
 wc -l < "$TESTDATA/stages_nb.txt" | xargs echo "    lines:"
 
+echo "==> building the isolated-stage oracle"
+# Drives individual reference functions directly, so a failure localises to one
+# function rather than to a frame. Links most of the decoder because the
+# post-filter and the concealment gains reach a long way.
+# shellcheck disable=SC2046
+cc -O1 -w -I"$SRC" -o "$WORK/amrnb_stage_oracle" "$HERE/amrnb_stage_oracle.c" \
+   $(ls "$SRC"/*.c | grep -Ev '/(coder|decoder|sp_enc|sp_dec|cod_amr|dec_amr)\.c$') -lm
+
+echo "==> generating isolated-stage vectors"
+"$WORK/amrnb_stage_oracle" "$TESTDATA" > "$TESTDATA/nb_stages.txt"
+wc -l < "$TESTDATA/nb_stages.txt" | xargs echo "    lines:"
+
 echo "==> generating the bit-ordering and layout tables"
 python3 "$HERE/gen_nb_tables.py" "$SRC/bitno.tab" \
     "$HERE/../src/codecs/amr/nb/tables.rs"

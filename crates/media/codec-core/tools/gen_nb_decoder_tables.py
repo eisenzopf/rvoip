@@ -66,7 +66,92 @@ TABLES = [
      "Joint pitch/code gain codebook for the lower rates."),
     ("gray.tab", "gray", "GRAY", 8, 8, "Gray code used by the pulse-sign encoding."),
     ("gray.tab", "dgray", "DGRAY", 8, 8, "Inverse of [`GRAY`], used by the decoder."),
+    ("qgain475.tab", "table_gain_MR475", "GAIN_MR475", 1024, 4,
+     "Joint gain codebook for 4.75 kbit/s, four words per entry.\\n"
+     "///\\n"
+     "/// 4.75 is the one rate that quantises *two* subframes' gains with a\\n"
+     "/// single index, so each entry carries two (pitch, code) pairs."),
+    ("gains.tab", "qua_gain_pitch", "QUA_GAIN_PITCH", 16, 8,
+     "Scalar pitch-gain codebook, Q14. Used at 7.95 and 12.2 kbit/s."),
+    ("gains.tab", "qua_gain_code", "QUA_GAIN_CODE", 96, 3,
+     "Scalar code-gain correction codebook, three words per entry.\\n"
+     "///\\n"
+     "/// The triple is `(gain factor, log2 integer, log2 fraction)`; the last\\n"
+     "/// two feed the MA energy predictor's state update directly, which is\\n"
+     "/// why they are tabulated rather than recomputed."),
+    ("ph_disp.tab", "ph_imp_low_MR795", "PH_IMP_LOW_MR795", 40, 10,
+     "Phase-dispersion impulse response, full dispersion, 7.95 kbit/s. Q15."),
+    ("ph_disp.tab", "ph_imp_mid_MR795", "PH_IMP_MID_MR795", 40, 10,
+     "Phase-dispersion impulse response, medium dispersion, 7.95 kbit/s. Q15."),
+    ("ph_disp.tab", "ph_imp_low", "PH_IMP_LOW", 40, 10,
+     "Phase-dispersion impulse response, full dispersion, 4.75–6.70 kbit/s. Q15."),
+    ("ph_disp.tab", "ph_imp_mid", "PH_IMP_MID", 40, 10,
+     "Phase-dispersion impulse response, medium dispersion, 4.75–6.70 kbit/s.\\n"
+     "///\\n"
+     "/// Identical in value to [`PH_IMP_MID_MR795`] in the reference, but kept\\n"
+     "/// separate because nothing guarantees that; the generator asserts the\\n"
+     "/// equality it observes rather than assuming it."),
+    ("c2_9pf.tab", "startPos", "START_POS_2I40_9", 16, 4,
+     "Per-subframe track start positions for the 9-bit two-pulse codebook.\\n"
+     "///\\n"
+     "/// Indexed by subframe and by the two pulses; 4.75 and 5.15 kbit/s vary\\n"
+     "/// their tracks across the four subframes, which is why this decoder\\n"
+     "/// alone takes a subframe number."),
+    ("c2_11pf.tab", "startPos1", "START_POS1_2I40_11", 2, 2,
+     "First-pulse track start positions for the 11-bit two-pulse codebook."),
+    ("c2_11pf.tab", "startPos2", "START_POS2_2I40_11", 4, 4,
+     "Second-pulse track start positions for the 11-bit two-pulse codebook."),
+    ("log2.tab", "table", "LOG2_TABLE", 33, 9,
+     "`log2` mantissa table, 33 points.\\n"
+     "///\\n"
+     "/// AMR-NB's own — deliberately not shared with G.729 or with AMR-WB,\\n"
+     "/// each of which tabulates the same function over different points."),
+    ("pow2.tab", "table", "POW2_TABLE", 33, 9,
+     "`2^x` mantissa table, 33 points. AMR-NB's own; see [`LOG2_TABLE`]."),
+    ("sqrt_l.tab", "table", "SQRT_L_TABLE", 49, 9,
+     "`sqrt` mantissa table, 49 points, used by the excitation energy measure."),
+    ("inv_sqrt.tab", "table", "INV_SQRT_TABLE", 49, 9,
+     "`1/sqrt` mantissa table, 49 points, used by the gain predictor."),
+    # The post-filter's bandwidth-expansion factors live in pstfilt.c rather
+    # than in a .tab, because the reference keeps them file-local. They are
+    # normative all the same.
+    ("pstfilt.c", "gamma3_MR122", "GAMMA3_MR122", 10, 10,
+     "Numerator bandwidth-expansion factors for the post-filter at 12.2 and\\n"
+     "/// 10.2 kbit/s, Q15."),
+    ("pstfilt.c", "gamma3", "GAMMA3", 10, 10,
+     "Numerator bandwidth-expansion factors for the post-filter at every\\n"
+     "/// other rate, Q15."),
+    ("pstfilt.c", "gamma4_MR122", "GAMMA4_MR122", 10, 10,
+     "Denominator bandwidth-expansion factors at 12.2 and 10.2 kbit/s, Q15."),
+    ("pstfilt.c", "gamma4", "GAMMA4", 10, 10,
+     "Denominator bandwidth-expansion factors at every other rate, Q15.\\n"
+     "///\\n"
+     "/// Numerically identical to [`GAMMA3_MR122`] — both are `0.7^n` — while\\n"
+     "/// [`GAMMA4_MR122`] is `0.75^n`. The generator asserts that coincidence\\n"
+     "/// rather than relying on it, so a revision where they diverge fails\\n"
+     "/// here instead of quietly detuning one rate's post-filter."),
 ]
+
+# Decoder homing frames: one parameter vector per mode, all in one file, so
+# they are emitted as a group rather than listed individually above.
+DHF = [
+    ("MR475", "DHF_MR475"),
+    ("MR515", "DHF_MR515"),
+    ("MR59", "DHF_MR59"),
+    ("MR67", "DHF_MR67"),
+    ("MR74", "DHF_MR74"),
+    ("MR795", "DHF_MR795"),
+    ("MR102", "DHF_MR102"),
+    ("MR122", "DHF_MR122"),
+]
+for c_suffix, rust_name in DHF:
+    TABLES.append((
+        "d_homing.tab", f"dhf_{c_suffix}", rust_name, None, 8,
+        f"Decoder homing frame parameters for {c_suffix}, TS 26.101.\\n"
+        "///\\n"
+        "/// Two consecutive homing frames must drive every bit-exactly defined\\n"
+        "/// function into its home state, so these double as a conformance\\n"
+        "/// checkpoint that needs no test vectors."))
 
 
 def values(path, name):
@@ -129,6 +214,26 @@ assert extracted["MEAN_LSF_3"] != extracted["MEAN_LSF_5"], (
 )
 assert extracted["DICO1_LSF_3"] != extracted["DICO1_LSF_5"], (
     "DICO1_LSF_3 and DICO1_LSF_5 are identical — same problem"
+)
+
+# The opposite check, for a pair that *is* equal in this revision of the
+# reference. Recording it as an assertion rather than as a comment means a
+# future reference where they diverge fails here instead of silently making one
+# of the two dispersion levels wrong.
+assert extracted["PH_IMP_MID"] == extracted["PH_IMP_MID_MR795"], (
+    "the two medium-dispersion impulse responses have diverged; they are "
+    "separate tables in the reference and must now be treated as such"
+)
+assert extracted["PH_IMP_LOW"] != extracted["PH_IMP_LOW_MR795"], (
+    "the two full-dispersion impulse responses are identical — the same table "
+    "was read twice"
+)
+assert extracted["GAMMA4"] == extracted["GAMMA3_MR122"], (
+    "the post-filter's 0.7^n factors no longer agree between the two roles "
+    "they play; treat them as genuinely separate tables"
+)
+assert extracted["GAMMA4"] != extracted["GAMMA4_MR122"], (
+    "GAMMA4 and GAMMA4_MR122 are identical — the same declaration was read twice"
 )
 
 HEADER = '''//! Decoder tables for AMR-NB, from the TS 26.073 reference.
