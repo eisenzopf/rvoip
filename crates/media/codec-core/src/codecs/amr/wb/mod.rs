@@ -13,6 +13,7 @@
 //! identical audio.
 
 pub mod bitstream;
+pub mod codebook;
 pub mod lp;
 pub mod params;
 pub mod sort_tables;

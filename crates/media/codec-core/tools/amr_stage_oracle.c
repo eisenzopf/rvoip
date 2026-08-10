@@ -41,6 +41,8 @@ void Dpisf_2s_36b(Word16 *indice, Word16 *isf_q, Word16 *past_isfq,
                   Word16 *isfold, Word16 *isf_buf, Word16 bfi, Word16 enc_dec);
 void Set_zero(Word16 x[], Word16 L);
 void Copy(Word16 x[], Word16 y[], Word16 L);
+void DEC_ACELP_2t64_fx(Word16 index, Word16 code[]);
+void DEC_ACELP_4t64_fx(Word16 index[], Word16 nbbits, Word16 code[]);
 /* dec_main.c keeps this static, so it cannot be linked against; it is short
  * and exactly reproduced here. Evenly spaced ISFs -- a flat spectrum, which is
  * the decoder's documented reset state. */
@@ -322,6 +324,24 @@ static void dump_bitstream(const char *dir, int mode_no) {
             printf("  sf%d_%d %d %d %d %d", f, sf, T0, T0_frac, select, gain_index);
             for (i = 0; i < n_pulses; i++) printf(" %d", pulses[i]);
             printf("\n");
+
+            /* The algebraic codebook vector these indices expand to. Sparse --
+             * two pulses at 6.60 kbit/s, twenty-four at 23.85 -- but dumped in
+             * full, because a decoder that puts a pulse in the wrong track
+             * still produces the right number of pulses. */
+            {
+                Word16 code[64];
+                if (nb_bits <= NBBITS_7k)       DEC_ACELP_2t64_fx(pulses[0], code);
+                else if (nb_bits <= NBBITS_9k)  DEC_ACELP_4t64_fx(pulses, 20, code);
+                else if (nb_bits <= NBBITS_12k) DEC_ACELP_4t64_fx(pulses, 36, code);
+                else if (nb_bits <= NBBITS_14k) DEC_ACELP_4t64_fx(pulses, 44, code);
+                else if (nb_bits <= NBBITS_16k) DEC_ACELP_4t64_fx(pulses, 52, code);
+                else if (nb_bits <= NBBITS_18k) DEC_ACELP_4t64_fx(pulses, 64, code);
+                else if (nb_bits <= NBBITS_20k) DEC_ACELP_4t64_fx(pulses, 72, code);
+                else                            DEC_ACELP_4t64_fx(pulses, 88, code);
+                sprintf(name, "code%d_%d", f, sf);
+                dump(name, code, 64);
+            }
         }
 
         /* Whatever is left is the high-band gain, present only at 23.85. */
