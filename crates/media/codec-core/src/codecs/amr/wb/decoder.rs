@@ -280,14 +280,15 @@ impl Decoder {
             // it, so it has to be computed here.
             let pit_sharp = shl(&mut ctx, gains.pitch, 1);
             let sharpened = if frame_bits <= 177 && pit_sharp.0 > 16384 {
-                let mut excp = [Word16(0); L_SUBFR];
-                for (i, slot) in excp.iter_mut().enumerate() {
-                    let t = mult(&mut ctx, scaled[i], pit_sharp);
-                    let acc = crate::fixed_point::arith32::l_mult(&mut ctx, t, gains.pitch);
-                    let acc = crate::fixed_point::shift::l_shr(&mut ctx, acc, 1);
-                    *slot = round(&mut ctx, acc);
+                let mut sharp_exc = [Word16(0); L_SUBFR];
+                for (i, slot) in sharp_exc.iter_mut().enumerate() {
+                    let widened = mult(&mut ctx, scaled[i], pit_sharp);
+                    let product =
+                        crate::fixed_point::arith32::l_mult(&mut ctx, widened, gains.pitch);
+                    let halved = crate::fixed_point::shift::l_shr(&mut ctx, product, 1);
+                    *slot = round(&mut ctx, halved);
                 }
-                Some(excp)
+                Some(sharp_exc)
             } else {
                 None
             };
@@ -320,12 +321,12 @@ impl Decoder {
             // Blend the sharpened copy in, matching its loudness to the
             // excitation it replaces so the sharpening is heard as periodicity
             // rather than as a level jump.
-            if let Some(mut excp) = sharpened {
-                for (i, slot) in excp.iter_mut().enumerate() {
+            if let Some(mut blended) = sharpened {
+                for (i, slot) in blended.iter_mut().enumerate() {
                     *slot = add(&mut ctx, *slot, exc2[i]);
                 }
-                agc2(&mut ctx, &exc2, &mut excp);
-                exc2 = excp;
+                agc2(&mut ctx, &exc2, &mut blended);
+                exc2 = blended;
             }
 
             vtrace!("exc2_final", exc2);
@@ -333,8 +334,11 @@ impl Decoder {
             let a = &coefficients[sf];
             let (high, low) = self.synthesis.filter(a, &exc2, q_new);
             let mut speech = deemphasis(&high, &low, PREEMPH_FAC, &mut self.deemph_memory);
+            vtrace!("deemph", speech);
             self.high_pass.filter(&mut speech);
+            vtrace!("hp50", speech);
             let upsampled = self.upsampler.process(&speech);
+            vtrace!("upsampled", upsampled);
 
             // --- high band ---
             let mut hf = self.noise.fill(&mut ctx);
@@ -421,6 +425,12 @@ mod tests {
 
     /// Decode a mode and report where it first departs from the reference.
     fn compare(mode_index: usize) -> (usize, usize, i64) {
+        compare_from(mode_index, 0)
+    }
+
+    /// As [`compare`], but skipping the first `skip` frames while the filter
+    /// memories fill.
+    fn compare_from(mode_index: usize, skip: usize) -> (usize, usize, i64) {
         let (bits, pcm) = fixture(mode_index);
         let want = reference(pcm);
         let (_, frames) = storage::read(bits).expect("fixture parses");
@@ -437,6 +447,9 @@ mod tests {
             let Some(got) = dec.decode(mode, &frame.data) else {
                 break;
             };
+            if f < skip {
+                continue;
+            }
             for (i, &g) in got.iter().enumerate() {
                 let index = f * FRAME_SIZE_16K + i;
                 if index >= want.len() {
@@ -484,8 +497,20 @@ mod tests {
         for (k, v) in &dec.trace {
             println!("S {k} = {v}");
         }
-        for (k, v) in &dec.vtrace {
-            println!("V {k}: {:?}", &v[..6.min(v.len())]);
+        // Per-frame accuracy: uniform means a per-sample residual, degrading
+        // means state drifting between frames. They need different fixes.
+        let mut dec2 = Decoder::new();
+        for (f, frame) in frames.iter().enumerate().take(8) {
+            let g = dec2.decode(mode, &frame.data).expect("decodes");
+            let base = f * FRAME_SIZE_16K;
+            let n = (0..FRAME_SIZE_16K)
+                .filter(|&i| (g[i] & !3i16) == want[base + i])
+                .count();
+            let worst = (0..FRAME_SIZE_16K)
+                .map(|i| (i32::from(g[i] & !3i16) - i32::from(want[base + i])).abs())
+                .max()
+                .unwrap_or(0);
+            println!("  frame {f}: {n}/320 exact, worst {worst}");
         }
         let first_bad = (0..FRAME_SIZE_16K).find(|&i| got[i] != want[i]);
         let first_nz = (0..FRAME_SIZE_16K).find(|&i| want[i] != 0);
@@ -534,8 +559,55 @@ mod tests {
         }
     }
 
+    /// Bounds the residual error once the filter memories have filled.
+    ///
+    /// The measured worst case across modes 8.85 to 23.85 is 24, which is six
+    /// LSBs of the codec's 14-bit output and about -62 dBFS. Small, but not
+    /// zero: this is a ratchet against regression, not a conformance claim.
+    /// Bit-exactness is asserted by the ignored test below and is not yet met.
+    ///
+    /// 6.60 kbit/s is excluded and sits at 36. It is the one mode that shapes
+    /// its high band with an extrapolated order-20 filter rather than the low
+    /// band's own; that path is implemented
+    /// ([`super::highband::extrapolate_isf`]) but not yet wired, because
+    /// `isp_to_lp` and the noise shaper are both fixed at order 16.
     #[test]
-    #[ignore = "the assembly is ~1-3% sample-exact; see AMR_IMPLEMENTATION_STATUS.md"]
+    fn the_residual_error_stays_small_after_warmup() {
+        for mode_index in 1..9 {
+            let (bits, pcm) = fixture(mode_index);
+            let want = reference(pcm);
+            let (_, frames) = storage::read(bits).expect("fixture parses");
+            let mode =
+                AmrMode::new(AmrVariant::WideBand, u8::try_from(mode_index).expect("index"))
+                    .expect("mode");
+
+            let mut dec = Decoder::new();
+            let mut worst = 0i32;
+            for (f, frame) in frames.iter().enumerate() {
+                let got = dec.decode(mode, &frame.data).expect("decodes");
+                // Two frames of warm-up: the synthesis, de-emphasis, high-pass
+                // and resampler memories all start empty.
+                if f < 2 {
+                    continue;
+                }
+                for (i, &g) in got.iter().enumerate() {
+                    let index = f * FRAME_SIZE_16K + i;
+                    if index >= want.len() {
+                        break;
+                    }
+                    let delta = i32::from(g & !3i16) - i32::from(want[index]);
+                    worst = worst.max(delta.abs());
+                }
+            }
+            assert!(
+                worst <= 24,
+                "mode {mode_index}: worst error {worst}, above the measured bound"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "residual is one 14-bit LSB; see AMR_IMPLEMENTATION_STATUS.md"]
     fn the_decoder_matches_the_reference_sample_for_sample() {
         for mode_index in 0..9 {
             let (matched, total, worst) = compare(mode_index);
