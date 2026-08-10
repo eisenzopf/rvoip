@@ -44,6 +44,9 @@ void Copy(Word16 x[], Word16 y[], Word16 L);
 void DEC_ACELP_2t64_fx(Word16 index, Word16 code[]);
 void DEC_ACELP_4t64_fx(Word16 index[], Word16 nbbits, Word16 code[]);
 void Init_D_gain2(Word16 *mem);
+void Pred_lt4(Word16 exc[], Word16 T0, Word16 frac, Word16 L_subfr);
+void Preemph(Word16 x[], Word16 mu, Word16 lg, Word16 *mem);
+void Pit_shrp(Word16 *x, Word16 pit_lag, Word16 sharp, Word16 L_subfr);
 void D_gain2(Word16 index, Word16 nbits, Word16 code[], Word16 L_subfr,
              Word16 *gain_pit, Word32 *gain_cod, Word16 bfi, Word16 prev_bfi,
              Word16 state, Word16 unusable_frame, Word16 vad_hist, Word16 *mem);
@@ -371,6 +374,84 @@ static void dump_bitstream(const char *dir, int mode_no) {
     fclose(fp);
 }
 
+/* Long-term prediction: the adaptive codebook and the three filters that
+ * shape a subframe's excitation.
+ *
+ * These are driven from a synthetic but deterministic excitation history
+ * rather than a real decode, because the full excitation loop carries adaptive
+ * Q scaling across subframes -- that belongs with synthesis. What is covered
+ * here is the arithmetic each operation performs, over lag and fraction
+ * combinations chosen to hit every branch: integer lags, all four fractions,
+ * and lags both shorter and longer than a subframe.
+ */
+#define PIT_MAX_L   231
+#define L_INTERP_L  17
+
+static void dump_ltp(void) {
+    static const Word16 lags[6]  = {34, 60, 64, 100, 128, 231};
+    static const Word16 fracs[4] = {0, 1, 2, 3};
+    Word16 buf[PIT_MAX_L + L_INTERP_L + 65];
+    Word16 hist[PIT_MAX_L + L_INTERP_L];
+    Word16 *exc = buf + PIT_MAX_L + L_INTERP_L;
+    int n, li, fi, c = 0;
+    char name[32];
+
+    /* A pitch-like history: a decaying pulse train under a slow drift, so the
+     * interpolator has real structure to work on rather than a constant. */
+    for (n = 0; n < PIT_MAX_L + L_INTERP_L; n++) {
+        int phase = n % 57;
+        double v = (phase < 3 ? 8000.0 - phase * 2000.0 : -300.0 + phase * 12.0);
+        v *= 0.6 + 0.4 * sin(2.0 * PI * n / 313.0);
+        hist[n] = (Word16)v;
+    }
+
+    printf("ltp\n");
+    for (li = 0; li < 6; li++) {
+        for (fi = 0; fi < 4; fi++) {
+            Word16 code[64];
+            Word16 mem = 0, sharp_lag;
+
+            memcpy(buf, hist, sizeof hist);
+            memset(exc, 0, 65 * sizeof(Word16));
+
+            /* 65, not 64: the LTP low-pass filter reads one sample ahead. */
+            Pred_lt4(exc, lags[li], fracs[fi], 65);
+            sprintf(name, "pred%d", c);
+            printf("  meta%d %d %d\n", c, lags[li], fracs[fi]);
+            dump(name, exc, 65);
+
+            /* The low-pass variant the higher rates can select. */
+            {
+                Word16 filt[64];
+                for (n = 0; n < 64; n++) {
+                    Word32 t = L_mult(5898, exc[n - 1]);
+                    t = L_mac(t, 20972, exc[n]);
+                    t = L_mac(t, 5898, exc[n + 1]);
+                    filt[n] = round(t);
+                }
+                sprintf(name, "ltpf%d", c);
+                dump(name, filt, 64);
+            }
+
+            /* Preemphasis then pitch sharpening, applied to the innovation.
+             * A deterministic sparse vector stands in for a decoded one. */
+            memset(code, 0, sizeof code);
+            for (n = 0; n < 8; n++) {
+                code[(n * 7 + li * 3 + fi) % 64] += (n % 2) ? -512 : 512;
+            }
+            mem = 0;
+            Preemph(code, 6554, 64, &mem);    /* tilt_code = 0.2 in Q15 */
+            sharp_lag = lags[li];
+            if (fracs[fi] > 2) sharp_lag++;
+            Pit_shrp(code, sharp_lag, 27853, 64);
+            sprintf(name, "shrp%d", c);
+            dump(name, code, 64);
+
+            c++;
+        }
+    }
+}
+
 int main(int argc, char **argv) {
     for (int seed = 0; seed < 4; seed++) {
         Word16 x[L_WIN];
@@ -435,6 +516,7 @@ int main(int argc, char **argv) {
 
     dump_isf_dequant(0);
     dump_isf_dequant(1);
+    dump_ltp();
 
     if (argc > 1) {
         for (int m = 0; m < 9; m++) dump_bitstream(argv[1], m);

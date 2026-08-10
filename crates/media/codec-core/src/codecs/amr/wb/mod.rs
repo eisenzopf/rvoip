@@ -17,6 +17,7 @@ pub mod codebook;
 pub mod lp;
 pub mod gain;
 pub mod gain_tables;
+pub mod ltp;
 pub mod math;
 pub mod params;
 pub mod sort_tables;
