@@ -66,7 +66,9 @@ impl Excitation {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            buffer: vec![Word16(0); HISTORY + L_SUBFR],
+            // One past the subframe: the adaptive codebook writes an extra
+            // sample because the LTP low-pass filter reads one ahead.
+            buffer: vec![Word16(0); HISTORY + L_SUBFR + 1],
             q_subfr: [Word16(0); 4],
             q_old: 0,
         }
@@ -75,7 +77,7 @@ impl Excitation {
     /// The excitation history, most recent last.
     #[must_use]
     pub fn history(&self) -> &[Word16] {
-        &self.buffer[..self.buffer.len() - L_SUBFR]
+        &self.buffer[..HISTORY]
     }
 
     /// Mutable access to the whole buffer, for [`super::ltp::predict`].
@@ -84,8 +86,7 @@ impl Excitation {
     /// history, so it needs one contiguous buffer rather than two slices.
     #[must_use]
     pub fn buffer_mut(&mut self) -> (&mut [Word16], usize) {
-        let offset = self.buffer.len() - L_SUBFR;
-        (&mut self.buffer, offset)
+        (&mut self.buffer, HISTORY)
     }
 
     /// The shift the buffer is currently scaled by.
@@ -145,7 +146,7 @@ impl Excitation {
         self.rescale(&mut ctx, shift);
         self.q_old = q_new;
 
-        let offset = self.buffer.len() - L_SUBFR;
+        let offset = HISTORY;
         let mut out = [Word16(0); L_SUBFR];
         for i in 0..L_SUBFR {
             let mut acc = l_mult(&mut ctx, code[i], gain_code);
@@ -175,9 +176,8 @@ impl Excitation {
 
     /// Slide the buffer forward by one subframe, discarding the oldest history.
     pub fn advance(&mut self) {
-        self.buffer.copy_within(L_SUBFR.., 0);
-        let tail = self.buffer.len() - L_SUBFR;
-        self.buffer[tail..].fill(Word16(0));
+        self.buffer.copy_within(L_SUBFR..HISTORY + L_SUBFR, 0);
+        self.buffer[HISTORY..].fill(Word16(0));
     }
 
     /// The headroom recorded for the last four subframes, oldest last.
@@ -314,7 +314,7 @@ mod tests {
             // The adaptive contribution is written into the subframe first,
             // exactly as the pitch predictor would.
             let (buffer, offset) = exc.buffer_mut();
-            buffer[offset..].copy_from_slice(&adaptive(sf));
+            buffer[offset..offset + L_SUBFR].copy_from_slice(&adaptive(sf));
 
             let code = innovation(sf);
             expect("code", &code, sf);
@@ -344,7 +344,7 @@ mod tests {
         // scaling must not open up on the strength of one quiet subframe.
         for _ in 0..4 {
             let (buffer, offset) = exc.buffer_mut();
-            buffer[offset..].fill(Word16(100));
+            buffer[offset..offset + L_SUBFR].fill(Word16(100));
             exc.assemble(&[Word16(0); L_SUBFR], Word16(4096), Word32(1 << 20));
             exc.advance();
         }
@@ -376,7 +376,7 @@ mod tests {
         let mut exc = Excitation::new();
         for sf in 0..20 {
             let (buffer, offset) = exc.buffer_mut();
-            buffer[offset..].copy_from_slice(&adaptive(sf));
+            buffer[offset..offset + L_SUBFR].copy_from_slice(&adaptive(sf));
             let (_, q) = exc.assemble(&innovation(sf), Word16(8000), Word32(1));
             assert!(q <= Q_MAX, "subframe {sf} chose a shift of {q}");
             exc.advance();
