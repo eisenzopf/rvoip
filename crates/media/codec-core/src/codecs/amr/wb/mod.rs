@@ -21,3 +21,4 @@ pub mod ltp;
 pub mod math;
 pub mod params;
 pub mod sort_tables;
+pub mod synthesis;

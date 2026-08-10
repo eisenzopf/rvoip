@@ -72,7 +72,8 @@ cc -O1 -w -I"$SRC" -o "$WORK/stage_oracle" "$HERE/amr_stage_oracle.c" \
    "$SRC/weight_a.c" "$SRC/bits.c" "$SRC/d4t64fx.c" "$SRC/d2t64fx.c" \
    "$SRC/q_pulse.c" "$SRC/d_gain2.c" "$SRC/math_op.c" "$SRC/log2.c" \
    "$SRC/p_med_ol.c" "$SRC/hp_wsp.c" "$SRC/pred_lt4.c" "$SRC/preemph.c" \
-   "$SRC/pit_shrp.c" "$SRC/basicop2.c" \
+   "$SRC/pit_shrp.c" "$SRC/syn_filt.c" "$SRC/deemph.c" "$SRC/hp50.c" \
+   "$SRC/basicop2.c" \
    "$SRC/oper_32b.c" "$SRC/count.c" "$SRC/util.c" -lm
 
 echo "==> generating vectors"

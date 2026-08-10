@@ -47,6 +47,12 @@ void Init_D_gain2(Word16 *mem);
 void Pred_lt4(Word16 exc[], Word16 T0, Word16 frac, Word16 L_subfr);
 void Preemph(Word16 x[], Word16 mu, Word16 lg, Word16 *mem);
 void Pit_shrp(Word16 *x, Word16 pit_lag, Word16 sharp, Word16 L_subfr);
+void Syn_filt_32(Word16 a[], Word16 m, Word16 exc[], Word16 Qnew,
+                 Word16 sig_hi[], Word16 sig_lo[], Word16 lg);
+void Deemph_32(Word16 x_hi[], Word16 x_lo[], Word16 y[], Word16 mu, Word16 L,
+               Word16 *mem);
+void Init_HP50_12k8(Word16 mem[]);
+void HP50_12k8(Word16 signal[], Word16 lg, Word16 mem[]);
 void D_gain2(Word16 index, Word16 nbits, Word16 code[], Word16 L_subfr,
              Word16 *gain_pit, Word32 *gain_cod, Word16 bfi, Word16 prev_bfi,
              Word16 state, Word16 unusable_frame, Word16 vad_hist, Word16 *mem);
@@ -452,6 +458,67 @@ static void dump_ltp(void) {
     }
 }
 
+/* Low-band synthesis: excitation to 12.8 kHz speech.
+ *
+ * Three stages -- the LP synthesis filter, de-emphasis, and a 50 Hz high-pass
+ * -- each carrying state across subframes, so this runs a sequence rather than
+ * one block. The filter is driven by the real coefficient sets already dumped
+ * for the LP stages, and by a deterministic excitation.
+ */
+static void dump_synthesis(void) {
+    Word16 mem_syn_hi[M], mem_syn_lo[M], mem_deemph = 0, mem_hp[6];
+    Word16 synth_hi[M + 64], synth_lo[M + 64], synth[64], exc[64];
+    Word16 a[M + 1];
+    int blk, n, i;
+    char name[24];
+
+    /* A stable low-order predictor, expressed the way the codec carries it:
+     * Q12 with a[0] = 1.0. Taken from a real analysis so the filter has a
+     * plausible spectrum rather than an arbitrary one. */
+    static const Word16 a_real[M + 1] = {
+        4096, -3559, 1097, -175, -313, 292, -73, -119, 158, -83,
+        -20, 72, -60, 12, 25, -31, 12
+    };
+
+    memset(mem_syn_hi, 0, sizeof mem_syn_hi);
+    memset(mem_syn_lo, 0, sizeof mem_syn_lo);
+    Init_HP50_12k8(mem_hp);
+    Copy((Word16 *)a_real, a, M + 1);
+
+    printf("synth\n");
+    for (blk = 0; blk < 4; blk++) {
+        /* Deterministic excitation: a pulse train plus a drifting tone, which
+         * is close enough to a real one to exercise the filter's range. */
+        for (n = 0; n < 64; n++) {
+            int t = blk * 64 + n;
+            double v = (t % 53 == 0) ? 6000.0 : 0.0;
+            v += 900.0 * sin(2.0 * PI * t / 41.0);
+            exc[n] = (Word16)v;
+        }
+        sprintf(name, "exc%d", blk);
+        dump(name, exc, 64);
+
+        Copy(mem_syn_hi, synth_hi, M);
+        Copy(mem_syn_lo, synth_lo, M);
+        Syn_filt_32(a, M, exc, 0, synth_hi + M, synth_lo + M, 64);
+        Copy(synth_hi + 64, mem_syn_hi, M);
+        Copy(synth_lo + 64, mem_syn_lo, M);
+        sprintf(name, "synhi%d", blk);
+        dump(name, synth_hi + M, 64);
+        sprintf(name, "synlo%d", blk);
+        dump(name, synth_lo + M, 64);
+
+        Deemph_32(synth_hi + M, synth_lo + M, synth, 22282, 64, &mem_deemph);
+        sprintf(name, "deemph%d", blk);
+        dump(name, synth, 64);
+
+        HP50_12k8(synth, 64, mem_hp);
+        sprintf(name, "hp50_%d", blk);
+        dump(name, synth, 64);
+        (void)i;
+    }
+}
+
 int main(int argc, char **argv) {
     for (int seed = 0; seed < 4; seed++) {
         Word16 x[L_WIN];
@@ -517,6 +584,7 @@ int main(int argc, char **argv) {
     dump_isf_dequant(0);
     dump_isf_dequant(1);
     dump_ltp();
+    dump_synthesis();
 
     if (argc > 1) {
         for (int m = 0; m < 9; m++) dump_bitstream(argv[1], m);
