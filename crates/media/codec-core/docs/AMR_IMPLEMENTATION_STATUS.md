@@ -370,6 +370,24 @@ permanent test.
 read from the frame start, so any future caller would have walked straight back
 into this bug.
 
+### Algebraic codebook
+
+`wb/codebook.rs` implements §6.2 — pulse indices to the 64-sample innovation
+vector, all seven widths from 12 bits (two pulses) to 88 (twenty-four).
+Bit-exact on all 108 subframes of the fixtures: 9 modes × 3 frames × 4
+subframes, every sample.
+
+The interesting part is that the per-track codes are *combinatorial*. Two
+pulses fit in `2N+1` bits because the pair is unordered — the state freed by not
+distinguishing `(a, b)` from `(b, a)` carries a sign instead. The wider decoders
+are built recursively on that, splitting on a few leading bits that say how the
+pulses distribute between two half-ranges.
+
+The bite check here was chosen to match the failure mode: shifting one pulse by
+a single sample, which is the classic wrong-track bug. The excitation stays
+sparse and plausible while the pulses sit in the wrong places, so a
+count-the-pulses test would pass and only a sample-by-sample comparison fails.
+
 A bit-exact test can pass vacuously if the fixture reader silently returns
 nothing, so the reader is checked too: corrupting one value in the dump by a
 single LSB makes the corresponding test fail. Worth redoing whenever the dump
