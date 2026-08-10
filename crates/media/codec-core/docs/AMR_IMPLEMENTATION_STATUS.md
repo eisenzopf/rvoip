@@ -476,6 +476,32 @@ The fixture also caught a real bug: the upsampling filter is centred on its
 sample, so the read window starts `NB_COEF_UP - 1` taps earlier. I had omitted
 the reference's `x = x - nb_coef + 1` back-step, which read past the buffer.
 
+### High-band synthesis — the wideband half
+
+`wb/highband.rs` implements §6.10, bit-exact over three blocks covering both
+VAD weightings.
+
+**Below 23.85 kbit/s not one bit of the payload describes this band.** It is
+noise, scaled to the excitation's energy, levelled by the low band's spectral
+tilt, shaped by a bandwidth-expanded LP filter, and band-limited. That is not a
+shortcut: above about 6 kHz speech is mostly fricative energy with little
+perceptually relevant fine structure, so the ear cares that the band is
+*present* and at the right level far more than what is in it.
+
+Three details, each of which is the reason for a whole step:
+
+- **The noise is a defined sequence, not randomness.** Encoder and decoder must
+  generate identical noise, so "random" means unpredictable to the ear and
+  exactly reproducible to the codec.
+- **The level follows spectral tilt** because a flat noise level would make
+  vowels hiss. Voiced speech has a falling spectrum and gets far less.
+- **The shaping filter is bandwidth-expanded**, widening the formants. Sharp
+  resonances in a noise band sound like tones rather than like speech.
+
+**Not covered:** the 6.60 kbit/s branch, which extrapolates a separate order-20
+ISF set (`Isf_Extrapolation`) rather than reusing the low band's filter. Every
+other mode uses the implemented path.
+
 And one corrected premise: a median is **not** unchanged by an outlier —
 replacing the smallest of five values with the largest shifts it up one rank.
 The honest claim, which the test now makes, is that it moves far less than a
