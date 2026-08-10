@@ -263,6 +263,66 @@ impl NoiseShaper {
     }
 }
 
+/// Shape the high band with the extrapolated order-20 filter.
+///
+/// Only 6.60 kbit/s takes this path. Every other mode borrows the low band's
+/// own filter; at 6.60 there is too little spectral detail to borrow, so a
+/// wider filter is extrapolated from the ISF spacing and used over the full
+/// twenty-word memory rather than its last sixteen.
+impl NoiseShaper {
+    /// Shape with an order-20 predictor at a wider bandwidth expansion.
+    pub fn shape_wide(&mut self, ctx: &mut DspContext, a: &[Word16], hf: &mut [Word16]) {
+        let order = a.len() - 1;
+        let ap = weight_order(ctx, a, Word16(29491));
+
+        let mut y = vec![Word16(0); hf.len() + order];
+        y[..order].copy_from_slice(&self.memory[..order]);
+
+        let s = norm_s(ap[0]) - 2;
+        let a0 = shr(ctx, ap[0], 1);
+
+        for i in 0..hf.len() {
+            let mut acc = l_mult(ctx, hf[i], a0);
+            for j in 1..=order {
+                acc = crate::fixed_point::arith32::l_msu(ctx, acc, ap[j], y[order + i - j]);
+            }
+            let acc = l_shl(ctx, acc, 3 + s);
+            let sample = round(ctx, acc);
+            y[order + i] = sample;
+            hf[i] = sample;
+        }
+
+        self.memory[..order].copy_from_slice(&y[hf.len()..hf.len() + order]);
+    }
+
+    /// Clear the words the order-16 path does not use.
+    ///
+    /// The reference zeroes these on every non-6.60 subframe. In a fixed-mode
+    /// stream that is a no-op; it matters when a stream switches down into
+    /// 6.60 and the wider filter would otherwise start from stale memory.
+    pub fn clear_wide_tail(&mut self) {
+        self.memory[..M16K - M].fill(Word16(0));
+    }
+}
+
+/// Bandwidth-expand a predictor of any order.
+#[must_use]
+pub fn weight_order(ctx: &mut DspContext, a: &[Word16], gamma: Word16) -> Vec<Word16> {
+    let order = a.len() - 1;
+    let mut ap = vec![Word16(0); order + 1];
+    ap[0] = a[0];
+    let mut fac = gamma;
+    for i in 1..order {
+        let scaled = l_mult(ctx, a[i], fac);
+        ap[i] = round(ctx, scaled);
+        let next = l_mult(ctx, fac, gamma);
+        fac = round(ctx, next);
+    }
+    let last = l_mult(ctx, a[order], fac);
+    ap[order] = round(ctx, last);
+    ap
+}
+
 /// Bandwidth-expand a predictor: `ap[i] = a[i]·γ^i`.
 #[must_use]
 pub fn weight(ctx: &mut DspContext, a: &[Word16; M + 1], gamma: Word16) -> [Word16; M + 1] {

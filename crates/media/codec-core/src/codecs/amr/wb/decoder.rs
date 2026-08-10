@@ -28,13 +28,15 @@ use super::gain::{FrameQuality, GainDecoder};
 use super::highband::{self, BandFilter, NoiseGenerator, NoiseShaper, TiltFilter};
 use super::lp::autocorr::LP_ORDER;
 use super::math::scale_sig;
-use super::lp::isf::{interpolate_isp, isf_to_isp, NB_SUBFR};
+use super::lp::isf::{interpolate_isp, isf_to_isp, INTERPOL_FRAC, NB_SUBFR};
+use super::lp::isp_to_lp::isp_to_lp_order;
 use super::lp::isf_dequant::{IsfDecoder, IsfQuantizer, ISF_INIT};
 use super::ltp::{self, PIT_SHARP};
 use super::params::FrameParams;
 use super::synthesis::{deemphasis, HighPass50, SynthesisFilter, PREEMPH_FAC};
 use crate::codecs::amr::mode::AmrMode;
-use crate::fixed_point::arith::{add, mult, round};
+use crate::fixed_point::arith::{add, mult, round, sub};
+use crate::fixed_point::arith32::{l_mac, l_mult};
 use crate::fixed_point::oper32::l_extract;
 use crate::fixed_point::shift::{l_shl, shl, shr};
 use crate::fixed_point::types::{DspContext, Word16};
@@ -181,6 +183,9 @@ impl Decoder {
 
         let isf = self.isf.decode(quantizer, &params.isf_indices, false);
         let stab_fac = stability_factor(&mut ctx, &isf, &self.isf_old);
+        // The previous frame's ISFs, needed again below for the 6.60 high
+        // band, so capture before the update.
+        let isf_previous = self.isf_old;
         self.isf_old = isf;
 
         trace!("stab_fac", stab_fac.0);
@@ -198,14 +203,14 @@ impl Decoder {
         let gain_bits = if frame_bits <= 177 { 6 } else { 7 };
         let dispersion = DispersionLevel::for_frame_bits(frame_bits);
 
-        for (sf, sub) in params.subframes.iter().enumerate().take(NB_SUBFR) {
+        for (sf, subframe) in params.subframes.iter().enumerate().take(NB_SUBFR) {
             // Adaptive codebook. One extra sample: the low-pass reads ahead.
             let (buffer, offset) = self.excitation.buffer_mut();
             ltp::predict(
                 buffer,
                 offset,
-                sub.pitch_lag as usize,
-                sub.pitch_frac,
+                subframe.pitch_lag as usize,
+                subframe.pitch_frac,
                 L_SUBFR + 1,
             );
             #[cfg(test)]
@@ -214,28 +219,28 @@ impl Decoder {
             #[cfg(test)]
             self.vtrace.push(("pred", pred_snapshot));
             // Below 12.65 the filter is always on; above it the encoder picks.
-            if !sub.ltp_filter {
+            if !subframe.ltp_filter {
                 let smoothed = ltp::low_pass(&buffer[offset - 1..]);
                 buffer[offset..offset + L_SUBFR].copy_from_slice(&smoothed);
             }
 
-            trace!("T0", sub.pitch_lag);
-            trace!("T0_frac", sub.pitch_frac);
+            trace!("T0", subframe.pitch_lag);
+            trace!("T0_frac", subframe.pitch_frac);
             trace!("tilt_code_used", self.tilt_code.0);
             // Algebraic codebook, shaped by the previous subframe's tilt and
             // sharpened at the pitch period.
-            let mut code: [Word16; L_SUBFR] = codebook::decode(&sub.pulses, frame_bits)?.map(Word16);
+            let mut code: [Word16; L_SUBFR] = codebook::decode(&subframe.pulses, frame_bits)?.map(Word16);
             let mut discard = Word16(0);
             ltp::preemphasis(&mut code, self.tilt_code, &mut discard);
             ltp::sharpen(
                 &mut code,
-                ltp::sharpening_lag(sub.pitch_lag as usize, sub.pitch_frac),
+                ltp::sharpening_lag(subframe.pitch_lag as usize, subframe.pitch_frac),
                 PIT_SHARP,
             );
 
             vtrace!("code", code);
             let gains = self.gains.decode(
-                sub.gain_index,
+                subframe.gain_index,
                 gain_bits,
                 &code,
                 FrameQuality::Good,
@@ -357,7 +362,7 @@ impl Decoder {
             highband::match_energy(&mut ctx, &energy_source, &mut hf, q_new - 3);
 
             let tilt = highband::spectral_tilt(&mut ctx, &mut self.tilt_filter, &mut speech);
-            if let Some(index) = sub.hf_gain {
+            if let Some(index) = subframe.hf_gain {
                 // 23.85 transmits the gain, and applies it with an extra
                 // doubling the estimated path does not have: the reference is
                 // shl(mult(HF, gain), 1), not mult alone.
@@ -373,7 +378,28 @@ impl Decoder {
                 }
             }
             vtrace!("hfnoise_scaled", hf);
-            self.shaper.shape(&mut ctx, a, &mut hf);
+            if frame_bits <= 132 {
+                // 6.60 kbit/s has too little spectral detail to borrow the low
+                // band's filter, so a wider one is extrapolated from the ISF
+                // spacing. Note the plain complement here: this interpolation
+                // is *not* the one `interpolate_isp` performs, which adds one.
+                let mut hf_isf = vec![Word16(0); highband::M16K_ORDER];
+                let frac = INTERPOL_FRAC[sf];
+                let complement = sub(&mut ctx, Word16(32767), frac);
+                for (i, slot) in hf_isf.iter_mut().enumerate().take(LP_ORDER) {
+                    let acc = l_mult(&mut ctx, isf_previous[i], complement);
+                    let acc = l_mac(&mut ctx, acc, isf[i], frac);
+                    *slot = round(&mut ctx, acc);
+                }
+                highband::extrapolate_isf(&mut ctx, &mut hf_isf);
+
+                let mut hf_a = vec![Word16(0); highband::M16K_ORDER + 1];
+                isp_to_lp_order(&hf_isf, &mut hf_a);
+                self.shaper.shape_wide(&mut ctx, &hf_a, &mut hf);
+            } else {
+                self.shaper.clear_wide_tail();
+                self.shaper.shape(&mut ctx, a, &mut hf);
+            }
             self.band_pass.filter(&mut ctx, &mut hf);
             if frame_bits >= 477 {
                 self.low_pass_7k.filter(&mut ctx, &mut hf);
@@ -552,7 +578,7 @@ mod tests {
     fn the_assembly_does_not_regress_against_the_reference() {
         // Floors, well under the measured values, so ordinary noise does not
         // fail the build but a real regression does.
-        const FLOOR_PERMILLE: [u64; 9] = [860, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000];
+        const FLOOR_PERMILLE: [u64; 9] = [1000; 9];
 
         for (mode_index, &floor) in FLOOR_PERMILLE.iter().enumerate() {
             let (matched, total, worst) = compare(mode_index);
@@ -566,6 +592,19 @@ mod tests {
             );
         }
     }
+
+    /// The 6.60 kbit/s high band uses a different filter from every other mode.
+    ///
+    /// It extrapolates an order-20 predictor from the ISF spacing rather than
+    /// borrowing the low band's order-16 one. Guarding it separately because a
+    /// regression there would show up only at this one rate, and only in the
+    /// 5.5-7.5 kHz band, which is easy to miss in an aggregate figure.
+    #[test]
+    fn the_low_rate_high_band_uses_the_extrapolated_filter() {
+        let (matched, total, worst) = compare(0);
+        assert_eq!(matched, total, "6.60 kbit/s is not exact, worst {worst}");
+    }
+
 
     /// 6.60 kbit/s is the one mode not yet bit-exact.
     ///
@@ -610,15 +649,13 @@ mod tests {
         }
     }
 
-    /// Bit-exact against TS 26.173 for every mode except 6.60 kbit/s.
+    /// Bit-exact against TS 26.173 for every mode.
     ///
-    /// This is the conformance claim: every sample of every frame of every
-    /// fixture is identical to the reference decoder's output. 6.60 is
-    /// excluded pending its order-20 high-band filter — see
-    /// [`the_low_rate_mode_is_close_but_not_yet_exact`].
+    /// The conformance claim: every sample of every frame of every fixture is
+    /// identical to the reference decoder's output, at all nine rates.
     #[test]
     fn the_decoder_matches_the_reference_sample_for_sample() {
-        for mode_index in 1..9 {
+        for mode_index in 0..9 {
             let (matched, total, worst) = compare(mode_index);
             assert_eq!(
                 matched, total,

@@ -48,11 +48,25 @@ const NC: usize = LP_ORDER / 2;
 /// `f[k] ← f[k] - 2q·f[k-1] + f[k-2]` recursion, worked downwards so both
 /// referenced neighbours still hold their previous-order values.
 fn expand_roots(isp: &[Word16], f: &mut [Word32], n: usize) {
+    expand_roots_scaled(isp, f, n, Word16(1024), Word16(256));
+}
+
+/// [`expand_roots`] at a caller-chosen scale.
+///
+/// Order 20 runs the same recursion four times smaller and shifts back
+/// afterwards, because twenty accumulations overflow Q23 where sixteen do not.
+fn expand_roots_scaled(
+    isp: &[Word16],
+    f: &mut [Word32],
+    n: usize,
+    unit: Word16,
+    step: Word16,
+) {
     let mut ctx = DspContext::default();
 
-    // 1.0 and -2·q₀, both in Q23.
-    f[0] = l_mult(&mut ctx, Word16(4096), Word16(1024));
-    f[1] = l_mult(&mut ctx, isp[0], Word16(-256));
+    // 1.0 and -2·q₀.
+    f[0] = l_mult(&mut ctx, Word16(4096), unit);
+    f[1] = l_mult(&mut ctx, isp[0], Word16(-step.0));
 
     for i in 2..=n {
         // The new top coefficient starts from two orders down.
@@ -67,7 +81,7 @@ fn expand_roots(isp: &[Word16], f: &mut [Word32], n: usize) {
             f[k] = l_add(&mut ctx, f[k], f[k - 2]);
         }
         // The order-1 term has no f[k-2] neighbour; it just accumulates -2q.
-        f[1] = l_msu(&mut ctx, f[1], q, Word16(256));
+        f[1] = l_msu(&mut ctx, f[1], q, step);
     }
 }
 
@@ -80,23 +94,52 @@ fn expand_roots(isp: &[Word16], f: &mut [Word32], n: usize) {
 /// and the decoder path uses it disabled.
 #[must_use]
 pub fn isp_to_lp(isp: &[Word16; LP_ORDER]) -> [Word16; LP_ORDER + 1] {
-    let mut ctx = DspContext::default();
+    let mut a = [Word16(0); LP_ORDER + 1];
+    isp_to_lp_order(isp, &mut a);
+    a
+}
 
-    // f1 from the even-indexed roots, f2 from the odd.
-    let mut f1 = [Word32(0); NC + 1];
-    let mut f2 = [Word32(0); NC + 1];
-    expand_roots(&isp[0..], &mut f1, NC);
-    expand_roots(&isp[1..], &mut f2, NC - 1);
+/// Convert ISPs to predictor coefficients at any even order.
+///
+/// The high band uses order 20, so this cannot be fixed at [`LP_ORDER`].
+/// Above order 16 the polynomial expansion runs four times smaller and is
+/// shifted back, which is what keeps twenty accumulations inside Q23.
+///
+/// # Panics
+///
+/// If `a` is not exactly one longer than `isp`, or the order is odd.
+pub fn isp_to_lp_order(isp: &[Word16], a: &mut [Word16]) {
+    let order = isp.len();
+    assert_eq!(a.len(), order + 1, "a must be one longer than isp");
+    assert_eq!(order % 2, 0, "the predictor order must be even");
+    let nc = order / 2;
+    let wide = nc > 8;
+
+    let mut ctx = DspContext::default();
+    let mut f1 = vec![Word32(0); nc + 1];
+    let mut f2 = vec![Word32(0); nc + 1];
+
+    if wide {
+        expand_roots_scaled(&isp[0..], &mut f1, nc, Word16(256), Word16(64));
+        expand_roots_scaled(&isp[1..], &mut f2, nc - 1, Word16(256), Word16(64));
+        for v in f1.iter_mut().take(nc + 1) {
+            *v = l_shl(&mut ctx, *v, 2);
+        }
+        for v in f2.iter_mut().take(nc) {
+            *v = l_shl(&mut ctx, *v, 2);
+        }
+    } else {
+        expand_roots(&isp[0..], &mut f1, nc);
+        expand_roots(&isp[1..], &mut f2, nc - 1);
+    }
 
     // Multiply F2(z) by (1 - z⁻²), restoring the roots at z = ±1.
-    for i in (2..NC).rev() {
+    for i in (2..nc).rev() {
         f2[i] = l_sub(&mut ctx, f2[i], f2[i - 2]);
     }
 
-    // Scale F1 by (1 + q₁₅) and F2 by (1 - q₁₅). The last ISP is the final
-    // predictor coefficient rather than a root, and this is where it enters.
-    let last = isp[LP_ORDER - 1];
-    for i in 0..NC {
+    let last = isp[order - 1];
+    for i in 0..nc {
         let (hi, lo) = l_extract(f1[i]);
         let scaled = mpy_32_16(hi, lo, last);
         f1[i] = l_add(&mut ctx, f1[i], scaled);
@@ -106,29 +149,20 @@ pub fn isp_to_lp(isp: &[Word16; LP_ORDER]) -> [Word16; LP_ORDER + 1] {
         f2[i] = l_sub(&mut ctx, f2[i], scaled);
     }
 
-    // A(z) = (F1(z) + F2(z))/2. F1 is symmetric and F2 antisymmetric, so one
-    // pass fills both ends: the sum gives the front, the difference the back.
-    let mut a = [Word16(0); LP_ORDER + 1];
     a[0] = Word16(4096);
-    for i in 1..NC {
-        let j = LP_ORDER - i;
+    for i in 1..nc {
+        let j = order - i;
         let sum = l_add(&mut ctx, f1[i], f2[i]);
         a[i] = extract_l(l_shr_r(&mut ctx, sum, 12));
         let diff = l_sub(&mut ctx, f1[i], f2[i]);
         a[j] = extract_l(l_shr_r(&mut ctx, diff, 12));
     }
 
-    // The middle coefficient comes from F1 alone, since F2's antisymmetry makes
-    // its centre term vanish.
-    let (hi, lo) = l_extract(f1[NC]);
+    let (hi, lo) = l_extract(f1[nc]);
     let scaled = mpy_32_16(hi, lo, last);
-    let centre = l_add(&mut ctx, f1[NC], scaled);
-    a[NC] = extract_l(l_shr_r(&mut ctx, centre, 12));
-
-    // And the last coefficient is the last ISP, Q15 to Q12.
-    a[LP_ORDER] = shr_r(&mut ctx, last, 3);
-
-    a
+    let centre = l_add(&mut ctx, f1[nc], scaled);
+    a[nc] = extract_l(l_shr_r(&mut ctx, centre, 12));
+    a[order] = shr_r(&mut ctx, last, 3);
 }
 
 /// Readers for the TS 26.173 per-stage dump, shared across the LP modules.
