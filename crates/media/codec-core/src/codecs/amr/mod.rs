@@ -24,6 +24,7 @@ use crate::types::{
 
 mod bits;
 pub mod mode;
+pub mod nb;
 pub mod payload;
 pub mod rate;
 pub mod sdp;

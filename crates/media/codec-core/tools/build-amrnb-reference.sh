@@ -78,3 +78,15 @@ for m in 0 1 2 3 4 5 6 7; do
       "$TESTDATA/amrnb_mode$m.pcm" >/dev/null 2>&1
 done
 ls -l "$TESTDATA"/amrnb_mode0.pcm | awk '{print "    " $5 " bytes per mode"}'
+
+echo "==> building the per-stage oracle"
+cc -O1 -w -I"$SRC" -o "$WORK/amrnb_oracle" "$HERE/amrnb_oracle.c" \
+   "$SRC/bits2prm.c" "$SRC/basicop2.c" "$SRC/count.c" -lm
+
+echo "==> generating per-stage vectors"
+"$WORK/amrnb_oracle" "$TESTDATA" > "$TESTDATA/stages_nb.txt"
+wc -l < "$TESTDATA/stages_nb.txt" | xargs echo "    lines:"
+
+echo "==> generating the bit-ordering and layout tables"
+python3 "$HERE/gen_nb_tables.py" "$SRC/bitno.tab" \
+    "$HERE/../src/codecs/amr/nb/tables.rs"
