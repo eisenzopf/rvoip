@@ -186,6 +186,29 @@ highly structured. Centring it fixed the data, and the assertion was rewritten
 to compare prediction gain between a tone and noise rather than test an absolute
 threshold that depends on the analysis window's own spectral shape.
 
+### LP to ISP conversion
+
+`codecs/amr/wb/lp/isp.rs` implements §5.2.3: the sum and difference
+polynomials, the removal of the roots at `z = ±1`, and the root search that
+yields the 15 ISPs plus `a[16]`.
+
+The coefficient recursions were **derived from the polynomial identities rather
+than transcribed**, because the spec's recursion block did not survive PDF
+extraction. `f'1(z) = A(z) + z⁻¹⁶A(z⁻¹)` gives `f'1[i] = a[i] + a[16-i]`
+directly, and `f2 = f'2/(1-z⁻²)` gives `f2[i] = f'2[i] + f2[i-2]`. Both are
+then checked numerically against the identities they came from, so the
+derivation is verified rather than trusted.
+
+**One deliberate divergence from the reference.** The reference alternates
+between `f1` and `f2` while walking the grid, relying on the roots interlacing
+so each switch lands in the next bracket. That is efficient but fragile: when
+two roots fall inside one grid interval the search steps past one and then
+fails to find the rest — which is exactly what happened here first. This model
+scans each polynomial over the whole grid independently, so no bracketed root
+can be lost, and the interlacing is then *asserted* rather than assumed. The
+fixed-point version will need the reference's cheaper approach; having this one
+to check against is the point.
+
 ### Previously recorded as blocked (resolved)
 
 The next piece of Phase 3 is the LP-analysis chain — order-16 autocorrelation
