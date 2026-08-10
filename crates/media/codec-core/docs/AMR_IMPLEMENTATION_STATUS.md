@@ -267,6 +267,20 @@ arithmetic that defines the codec, built on the ETSI operators in
   correspondingly not the identity, which is why each direction is checked
   against the reference separately rather than only checking that they compose.
 
+- `isf_dequant.rs` + `isf_codebooks.rs` — §5.2.7/§6.1, indices to ISFs at both
+  rates, with erasure concealment. Two-stage split VQ: splitting is what makes
+  the codebooks tractable at all, since a joint 46-bit codebook over sixteen
+  dimensions would need 7 × 10¹³ entries.
+
+The dequantiser is **predictive, and therefore stateful** — a frame's output
+depends on the previous frame's residual — which changes what a useful test
+looks like. A single-frame vector would miss whether the state update is right,
+and that is precisely the bug that makes a decoder drift away from its encoder
+over seconds rather than failing outright. So the oracle runs a *sequence* from
+the reset state, dumping output and residual after each frame, and the Rust
+replays the whole sequence and checks both. The last frame is marked bad, so
+concealment and its distinct state update are covered as well.
+
 The interpolation weights are worth naming: `{0.45, 0.8, 0.96, 1.0}`, not
 uniform quarters. The weighting is pushed hard toward the new frame because the
 analysis window that produced it is itself concentrated at the end of the frame
@@ -303,7 +317,12 @@ blamed on the accumulation.
 
 **§5.2.4 ISP→LP matches exactly too** — all 17 coefficients, every case, on the
 first run. So do **§5.2.5 ISP→ISF, §5.2.6 ISF→ISP, and the subframe
-interpolation** (4 × 17 coefficients per case).
+interpolation** (4 × 17 coefficients per case), and **§5.2.7 ISF
+dequantisation** at both rates across a six-frame sequence including an
+erasure, checking the residual state as well as the output.
+
+That completes the decoder's spectral path: **indices → ISFs → ISPs →
+interpolated → per-subframe LP coefficients, every stage bit-exact.**
 
 A bit-exact test can pass vacuously if the fixture reader silently returns
 nothing, so the reader is checked too: corrupting one value in the dump by a
