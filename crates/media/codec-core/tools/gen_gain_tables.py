@@ -32,6 +32,13 @@ TABLES = [
      "`2^x` over one octave, sampled at 33 points, Q15."),
     ("log2_tab.h", "table", "LOG2_TABLE", 33, 10,
      "`log2(x)` over one octave, sampled at 33 points, Q15."),
+    ("decim54.c", "fir_up", "FIR_UP", 120, 5,
+     "Upsampling interpolation filter for 12.8 -> 16 kHz, Q14.\n"
+     "///\n"
+     "/// One fifth-sample resolution: 24 taps at each of five phases, stored\n"
+     "/// phase-interleaved. -1.5 dB at 6 kHz, -55 dB at 8 kHz -- steep, because\n"
+     "/// the 12.8 kHz signal has content right up to 6.4 kHz and anything above\n"
+     "/// it would alias into the band the high-band synthesis is about to fill."),
 ]
 
 HEADER = '''//! Gain quantiser and math tables for AMR-WB, from the TS 26.173 reference.

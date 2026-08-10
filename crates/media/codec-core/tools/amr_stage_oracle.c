@@ -52,6 +52,9 @@ void Syn_filt_32(Word16 a[], Word16 m, Word16 exc[], Word16 Qnew,
 void Deemph_32(Word16 x_hi[], Word16 x_lo[], Word16 y[], Word16 mu, Word16 L,
                Word16 *mem);
 void Init_HP50_12k8(Word16 mem[]);
+void Scale_sig(Word16 x[], Word16 lg, Word16 exp);
+void Init_Oversamp_16k(Word16 mem[]);
+void Oversamp_16k(Word16 sig12k8[], Word16 lg, Word16 sig16k[], Word16 mem[]);
 void HP50_12k8(Word16 signal[], Word16 lg, Word16 mem[]);
 void D_gain2(Word16 index, Word16 nbits, Word16 code[], Word16 L_subfr,
              Word16 *gain_pit, Word32 *gain_cod, Word16 bfi, Word16 prev_bfi,
@@ -519,6 +522,95 @@ static void dump_synthesis(void) {
     }
 }
 
+/* Excitation assembly and 12.8 -> 16 kHz upsampling.
+ *
+ * The assembly is where the decoder's adaptive scaling lives: the excitation
+ * buffer is kept at a per-subframe shift chosen from the code gain and the
+ * recent peak, and rescaled whole whenever that shift moves. Both the shift
+ * history and the buffer carry across subframes, so this replays a sequence.
+ */
+#define Q_MAX_L 8
+
+static void dump_excitation(void) {
+    Word16 buf[PIT_MAX_L + L_INTERP_L + 4 * 64];
+    Word16 *exc = buf + PIT_MAX_L + L_INTERP_L;
+    Word16 Qsubfr[4] = {0, 0, 0, 0};
+    Word16 Q_old = 0;
+    Word16 up_mem[24], sig16k[80];
+    Word16 code[64];
+    int sf, n, i;
+    char name[24];
+
+    memset(buf, 0, sizeof buf);
+    Init_Oversamp_16k(up_mem);
+
+    printf("excasm\n");
+    for (sf = 0; sf < 4; sf++) {
+        Word16 gain_pit = (Word16)(4000 + sf * 3000);      /* Q14 */
+        Word32 L_gain_code = 300000L * (sf + 1);           /* Q16 */
+        Word16 gain_code, Q_new, tmp, max;
+        Word16 speech[64];
+
+        /* A deterministic adaptive contribution and innovation. */
+        for (n = 0; n < 64; n++) {
+            exc[sf * 64 + n] = (Word16)(2000.0 * sin(2.0 * PI * (sf * 64 + n) / 37.0));
+            code[n] = ((n % 11) == sf % 11) ? ((n & 1) ? -512 : 512) : 0;
+        }
+
+        /* Pick the shift: the smallest of the last four subframes' headroom,
+         * capped, then grown while the code gain still has room. */
+        tmp = Qsubfr[0];
+        for (i = 1; i < 4; i++) if (Qsubfr[i] < tmp) tmp = Qsubfr[i];
+        if (tmp > Q_MAX_L) tmp = Q_MAX_L;
+
+        Q_new = 0;
+        {
+            Word32 L_tmp = L_gain_code;
+            while ((L_tmp < 0x08000000L) && (Q_new < tmp)) {
+                L_tmp = L_shl(L_tmp, 1);
+                Q_new = add(Q_new, 1);
+            }
+            gain_code = round(L_tmp);
+        }
+
+        Scale_sig(exc + sf * 64 - (PIT_MAX_L + L_INTERP_L),
+                  PIT_MAX_L + L_INTERP_L + 64, sub(Q_new, Q_old));
+        Q_old = Q_new;
+
+        for (n = 0; n < 64; n++) {
+            Word32 L_tmp = L_mult(code[n], gain_code);
+            L_tmp = L_shl(L_tmp, 5);
+            L_tmp = L_mac(L_tmp, exc[n + sf * 64], gain_pit);
+            L_tmp = L_shl(L_tmp, 1);
+            exc[n + sf * 64] = round(L_tmp);
+        }
+
+        max = 1;
+        for (n = 0; n < 64; n++) {
+            Word16 a = abs_s(exc[n + sf * 64]);
+            if (sub(a, max) > 0) max = a;
+        }
+        tmp = sub(add(norm_s(max), Q_new), 1);
+        Qsubfr[3] = Qsubfr[2]; Qsubfr[2] = Qsubfr[1];
+        Qsubfr[1] = Qsubfr[0]; Qsubfr[0] = tmp;
+
+        printf("  meta%d %d %d %ld\n", sf, gain_pit, gain_code, (long)L_gain_code);
+        sprintf(name, "code%d", sf);
+        dump(name, code, 64);
+        sprintf(name, "exc%d", sf);
+        dump(name, exc + sf * 64, 64);
+        sprintf(name, "q%d", sf);
+        dump(name, Qsubfr, 4);
+
+        /* Upsampling, driven by the assembled excitation so the two stages
+         * are exercised on the same data. */
+        Copy(exc + sf * 64, speech, 64);
+        Oversamp_16k(speech, 64, sig16k, up_mem);
+        sprintf(name, "up%d", sf);
+        dump(name, sig16k, 80);
+    }
+}
+
 int main(int argc, char **argv) {
     for (int seed = 0; seed < 4; seed++) {
         Word16 x[L_WIN];
@@ -585,6 +677,7 @@ int main(int argc, char **argv) {
     dump_isf_dequant(1);
     dump_ltp();
     dump_synthesis();
+    dump_excitation();
 
     if (argc > 1) {
         for (int m = 0; m < 9; m++) dump_bitstream(argv[1], m);

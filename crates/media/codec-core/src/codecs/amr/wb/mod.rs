@@ -15,6 +15,7 @@
 pub mod bitstream;
 pub mod codebook;
 pub mod lp;
+pub mod excitation;
 pub mod gain;
 pub mod gain_tables;
 pub mod ltp;
