@@ -177,6 +177,22 @@ impl AmrCodec {
     /// Split out so both decode interfaces share it: the difference between
     /// them is only how the mode is established.
     fn decode_speech(&mut self, mode: AmrMode, data: &[u8]) -> Result<Vec<i16>> {
+        self.decode_frame_bits(mode, data, true)
+    }
+
+    /// Decode one frame's bits, honouring the RFC 4867 quality bit.
+    ///
+    /// `quality_ok == false` is the Q bit clear: the bits arrived but the
+    /// transport does not vouch for them. That is *not* the same as a lost
+    /// frame — the reference still reads the codebook bits and only conceals
+    /// the parameters it will not trust — so it is a flag rather than a
+    /// separate entry point.
+    fn decode_frame_bits(
+        &mut self,
+        mode: AmrMode,
+        data: &[u8],
+        quality_ok: bool,
+    ) -> Result<Vec<i16>> {
         let short = || {
             CodecError::decoding_failed(format!(
                 "{} {} kbit/s frame needs {} bytes, got {}",
@@ -189,12 +205,29 @@ impl AmrCodec {
 
         match &mut self.decoder {
             #[cfg(feature = "amr-nb")]
-            Decoder::NarrowBand(decoder) => decoder
-                .decode(mode.index(), data)
-                .map(Vec::from)
-                .ok_or_else(short),
+            Decoder::NarrowBand(decoder) => {
+                let state = if quality_ok {
+                    nb::decoder::FrameState::Good
+                } else {
+                    nb::decoder::FrameState::Bad
+                };
+                let params = nb::bitstream::parse(mode.index(), data).ok_or_else(short)?;
+                Ok(decoder
+                    .decode_parameters(mode.index(), &params, state)
+                    .to_vec())
+            }
             #[cfg(feature = "amr-wb")]
             Decoder::WideBand(decoder) => {
+                if !quality_ok {
+                    // Narrowband conceals; wideband does not reach its
+                    // concealment from the frame path yet, and decoding
+                    // damaged bits as if they were good is the loud artefact
+                    // concealment exists to prevent.
+                    return Err(CodecError::feature_not_enabled(
+                        "AMR-WB error concealment for damaged frames is not implemented yet \
+                         (see codec-core/docs/AMR_IMPLEMENTATION_PLAN.md)",
+                    ));
+                }
                 decoder.decode(mode, data).map(Vec::from).ok_or_else(short)
             }
             Decoder::Absent => Err(CodecError::feature_not_enabled(format!(
@@ -326,18 +359,7 @@ impl VariableRateCodec for AmrCodec {
         match frame.kind {
             FrameKind::Speech => {
                 let mode = AmrMode::new(self.variant, frame.mode)?;
-                if !frame.quality_ok {
-                    // RFC 4867's Q bit says the bits arrived damaged. Decoding
-                    // them as if they were good produces a loud artefact, which
-                    // is exactly what error concealment exists to avoid — so
-                    // this refuses rather than doing it, until concealment is
-                    // wired up.
-                    return Err(CodecError::feature_not_enabled(
-                        "AMR error concealment for damaged frames is not implemented yet \
-                         (see codec-core/docs/AMR_IMPLEMENTATION_PLAN.md)",
-                    ));
-                }
-                self.decode_speech(mode, &frame.data)
+                self.decode_frame_bits(mode, &frame.data, frame.quality_ok)
             }
             FrameKind::ComfortNoise | FrameKind::NoData | FrameKind::Lost => {
                 Err(CodecError::feature_not_enabled(format!(
@@ -567,6 +589,39 @@ mod tests {
                 .expect("a wideband frame of the colliding length");
             let decoded = nb.decode(&wb_frame.data).expect("a valid narrowband length");
             assert_eq!(decoded.len(), 160, "decoded as narrowband mode {nb_mode}");
+        }
+
+        /// A damaged frame reaches concealment through the trait, and the
+        /// result matches the reference for the whole erased stream.
+        ///
+        /// This is the RFC 4867 Q bit doing its job end to end: the packetizer
+        /// reports it, `CodedFrame::quality_ok` carries it, and the decoder
+        /// conceals rather than decoding bits nobody vouches for.
+        #[test]
+        fn a_damaged_frame_is_concealed_rather_than_refused() {
+            let want: Vec<i16> = include_bytes!("testdata/amrnb_erased.pcm")
+                .chunks_exact(2)
+                .map(|b| i16::from_le_bytes([b[0], b[1]]))
+                .collect();
+            let (_, frames) =
+                storage::read(include_bytes!("testdata/amrnb_erased.amr")).expect("parses");
+            assert!(
+                frames.iter().any(|f| !f.quality_ok),
+                "the erased fixture carries no damaged frame"
+            );
+
+            let mut codec = AmrCodec::new(&CodecConfig::amr_nb()).unwrap();
+            let mut got = Vec::with_capacity(want.len());
+            for frame in &frames {
+                let coded = CodedFrame {
+                    kind: FrameKind::Speech,
+                    mode: 4,
+                    quality_ok: frame.quality_ok,
+                    data: frame.data.clone(),
+                };
+                got.extend(codec.decode_frame(&coded).expect("frame decodes"));
+            }
+            assert_eq!(got, want, "concealment through the trait is not bit-exact");
         }
 
         #[test]
