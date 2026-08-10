@@ -388,6 +388,39 @@ a single sample, which is the classic wrong-track bug. The excitation stays
 sparse and plausible while the pulses sit in the wrong places, so a
 count-the-pulses test would pass and only a sample-by-sample comparison fails.
 
+### Gains, and the AMR-WB math primitives
+
+`wb/gain.rs` implements §6.3 and `wb/math.rs` the primitives it needs — isqrt,
+pow2, log2, normalised dot product, median-of-five. Bit-exact on all 108
+subframes, replayed from reset because the code gain is predicted from the last
+four subframe energies.
+
+Two design points worth recording:
+
+- **The math primitives are AMR-WB's own, deliberately not shared with G.729.**
+  Both codecs have tables for the same functions with different values. Sharing
+  them would give a codec that sounds nearly right and is not conformant.
+- **The code gain is normalised by the innovation's own energy.** Without that,
+  a subframe whose pulses happened to land constructively would be louder than
+  one that did not, for the same transmitted index. The normalisation makes the
+  index mean intended loudness rather than an artefact of pulse placement.
+
+Three mistakes in this stage, all in work from the same sitting:
+
+- **The grep filter that strips the reference's instrumentation counters also
+  strips real assignments** that share a line with them. That silently removed
+  four lines from `Isqrt_n`, including two shifts. Reading the source raw is the
+  only safe way; the filtered view is for orientation, never for transcription.
+- The `log2`/`pow2` round trip was 2% off until the missing `& 0x7fff` mask on
+  the interpolation fraction was restored — same cause.
+- A test divided by `1i32 << 31`, which is `i32::MIN`, so a *correct* `isqrt`
+  looked sign-flipped. The function was right; the test's scaling was negative.
+
+And one corrected premise: a median is **not** unchanged by an outlier —
+replacing the smallest of five values with the largest shifts it up one rank.
+The honest claim, which the test now makes, is that it moves far less than a
+mean.
+
 A bit-exact test can pass vacuously if the fixture reader silently returns
 nothing, so the reader is checked too: corrupting one value in the dump by a
 single LSB makes the corresponding test fail. Worth redoing whenever the dump
