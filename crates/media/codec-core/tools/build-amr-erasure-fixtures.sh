@@ -73,14 +73,50 @@ erase "$TESTDATA/amrwb_mode2.amr" "$TESTDATA/amrwb_erased.amr" 9
 "$WB_WORK/amrwb_dec" -mime "$TESTDATA/amrwb_erased.amr" "$TESTDATA/amrwb_erased.pcm" >/dev/null 2>&1
 ls -l "$TESTDATA/amrwb_erased.pcm" | awk '{print "    reference PCM: " $5 " bytes"}'
 
+echo "==> AMR-WB: the same frames LOST rather than damaged"
+# A damaged frame and a lost one are different inputs, not two names for one.
+# A damaged frame still carries usable codebook bits and an LTP filter select
+# bit, and the reference decodes both; a lost one carries nothing and its
+# innovation becomes noise. Collapsing the two discards good pulses and sounds
+# hollow. Frame type 14 is AMR-WB's SPEECH_LOST, with a zero-length body.
+python3 - "$TESTDATA/amrwb_mode2.amr" "$TESTDATA/amrwb_lost.amr" "$ERASED" <<'LOSTEOF'
+import sys
+src, dst, erased = sys.argv[1], sys.argv[2], set(map(int, sys.argv[3].split()))
+WB = [17, 23, 32, 36, 40, 46, 50, 58, 60, 5] + [0] * 6
+data = open(src, "rb").read()
+out = bytearray(data[:9])
+pos, frame = 9, 0
+while pos < len(data):
+    toc = data[pos]
+    body = WB[(toc >> 3) & 0x0F]
+    if frame in erased:
+        # FT 14 with the quality bit still set: the transport knows the frame
+        # is gone, which is a different statement from "these bits may be
+        # wrong".
+        out.append((14 << 3) | 0x04)
+    else:
+        out.append(toc)
+        out += data[pos + 1 : pos + 1 + body]
+    pos += 1 + body
+    frame += 1
+open(dst, "wb").write(bytes(out))
+print(f"    {frame} frames, {len(erased)} lost")
+LOSTEOF
+"$WB_WORK/amrwb_dec" -mime "$TESTDATA/amrwb_lost.amr" "$TESTDATA/amrwb_lost.pcm" >/dev/null 2>&1
+ls -l "$TESTDATA/amrwb_lost.pcm" | awk '{print "    reference PCM: " $5 " bytes"}'
+
 echo "==> sanity check: the erased streams must NOT decode to the clean ones"
 # Otherwise the fixture proves nothing — the erasures would have had no effect,
 # which is what a mis-set quality bit looks like.
-for pair in "amrnb_erased.pcm amrnb_mode4.pcm" "amrwb_erased.pcm amrwb_mode2.pcm"; do
+for pair in "amrnb_erased.pcm amrnb_mode4.pcm" "amrwb_erased.pcm amrwb_mode2.pcm" \
+            "amrwb_lost.pcm amrwb_mode2.pcm" "amrwb_lost.pcm amrwb_erased.pcm"; do
   set -- $pair
   if cmp -s "$TESTDATA/$1" "$TESTDATA/$2"; then
     echo "    $1 is identical to the clean stream — the quality bit did not take" >&2
     exit 1
   fi
 done
-echo "    both differ from their clean streams, as they must"
+echo "    all four comparisons differ, as they must"
+# The last pair is the one that matters most: lost and damaged decode
+# differently, so a test that conflated the two would fail visibly rather
+# than merely be wrong.

@@ -218,17 +218,15 @@ impl AmrCodec {
             }
             #[cfg(feature = "amr-wb")]
             Decoder::WideBand(decoder) => {
-                if !quality_ok {
-                    // Narrowband conceals; wideband does not reach its
-                    // concealment from the frame path yet, and decoding
-                    // damaged bits as if they were good is the loud artefact
-                    // concealment exists to prevent.
-                    return Err(CodecError::feature_not_enabled(
-                        "AMR-WB error concealment for damaged frames is not implemented yet \
-                         (see codec-core/docs/AMR_IMPLEMENTATION_PLAN.md)",
-                    ));
-                }
-                decoder.decode(mode, data).map(Vec::from).ok_or_else(short)
+                let quality = if quality_ok {
+                    wb::gain::FrameQuality::Good
+                } else {
+                    wb::gain::FrameQuality::Bad
+                };
+                decoder
+                    .decode_frame(mode, data, quality)
+                    .map(Vec::from)
+                    .ok_or_else(short)
             }
             Decoder::Absent => Err(CodecError::feature_not_enabled(format!(
                 "{} decoding needs its cargo feature enabled",
@@ -361,10 +359,32 @@ impl VariableRateCodec for AmrCodec {
                 let mode = AmrMode::new(self.variant, frame.mode)?;
                 self.decode_frame_bits(mode, &frame.data, frame.quality_ok)
             }
-            FrameKind::ComfortNoise | FrameKind::NoData | FrameKind::Lost => {
+            // A frame that carried nothing usable. Wideband conceals it; the
+            // caller supplies the mode the stream was last using, because a
+            // lost frame has none of its own and only the receiver knows what
+            // the sequence numbers imply.
+            FrameKind::Lost => match &mut self.decoder {
+                #[cfg(feature = "amr-wb")]
+                Decoder::WideBand(decoder) => {
+                    let mode = AmrMode::new(self.variant, frame.mode)
+                        .unwrap_or(self.current_mode);
+                    decoder
+                        .decode_frame(mode, &[], wb::gain::FrameQuality::Unusable)
+                        .map(Vec::from)
+                        .ok_or_else(|| {
+                            CodecError::decoding_failed("AMR-WB concealment produced no frame")
+                        })
+                }
+                _ => Err(CodecError::feature_not_enabled(
+                    "AMR-NB concealment of a wholly lost frame needs the comfort-noise \
+                     path, which is not implemented yet \
+                     (see codec-core/docs/AMR_IMPLEMENTATION_PLAN.md)",
+                )),
+            },
+            FrameKind::ComfortNoise | FrameKind::NoData => {
                 Err(CodecError::feature_not_enabled(format!(
-                    "AMR {:?} frames need DTX/comfort-noise and concealment, which are \
-                     not implemented yet (see codec-core/docs/AMR_IMPLEMENTATION_PLAN.md)",
+                    "AMR {:?} frames need DTX and comfort noise, which are not \
+                     implemented yet (see codec-core/docs/AMR_IMPLEMENTATION_PLAN.md)",
                     frame.kind
                 )))
             }
@@ -479,8 +499,9 @@ mod tests {
         // Comfort noise, gaps and losses all need machinery that does not
         // exist yet, and each is a different kind of missing.
         assert!(wb.decode_frame(&CodedFrame::no_data()).is_err());
-        assert!(wb.decode_frame(&CodedFrame::lost()).is_err());
         assert!(wb.decode_frame(&CodedFrame::comfort_noise(vec![0; 5])).is_err());
+        // A lost frame is the one gap wideband can now fill.
+        assert_eq!(wb.decode_frame(&CodedFrame::lost()).unwrap().len(), 320);
 
         let mut nb = AmrCodec::new(&CodecConfig::amr_nb()).unwrap();
         assert!(nb.encode(&vec![0i16; 160]).is_err());
@@ -767,6 +788,57 @@ mod tests {
                 .flat_map(|f| codec.decode(&f.data).expect("decodes"))
                 .collect();
             assert_eq!(first, again, "reset did not clear the decoder state");
+        }
+
+        /// Damaged and lost frames both reach concealment through the trait,
+        /// and both match the reference for the whole stream.
+        #[test]
+        fn both_bad_frame_kinds_are_concealed_bit_exactly() {
+            for (bits, pcm, lost) in [
+                (
+                    include_bytes!("testdata/amrwb_erased.amr").as_slice(),
+                    include_bytes!("testdata/amrwb_erased.pcm").as_slice(),
+                    false,
+                ),
+                (
+                    include_bytes!("testdata/amrwb_lost.amr").as_slice(),
+                    include_bytes!("testdata/amrwb_lost.pcm").as_slice(),
+                    true,
+                ),
+            ] {
+                let want: Vec<i16> = pcm
+                    .chunks_exact(2)
+                    .map(|b| i16::from_le_bytes([b[0], b[1]]))
+                    .collect();
+                let (_, frames) = storage::read(bits).expect("fixture parses");
+                let mut codec = AmrCodec::new(&CodecConfig::amr_wb()).unwrap();
+                let mut got = Vec::with_capacity(want.len());
+
+                for frame in &frames {
+                    let speech = match frame.frame_type {
+                        AmrFrameType::SpeechLost => CodedFrame {
+                            kind: FrameKind::Lost,
+                            mode: 2,
+                            quality_ok: false,
+                            data: Vec::new(),
+                        },
+                        _ => CodedFrame {
+                            kind: FrameKind::Speech,
+                            mode: 2,
+                            quality_ok: frame.quality_ok,
+                            data: frame.data.clone(),
+                        },
+                    };
+                    got.extend(codec.decode_frame(&speech).expect("frame decodes"));
+                }
+
+                let masked: Vec<i16> = got.iter().map(|s| s & !3).collect();
+                assert_eq!(
+                    masked, want,
+                    "{} stream is not bit-exact through the trait",
+                    if lost { "lost" } else { "damaged" }
+                );
+            }
         }
 
         #[test]

@@ -136,13 +136,47 @@ pub struct GainDecoder {
     pitch_history: [Word16; L_LTPHIST],
     /// Recent code gains, for the concealment median.
     code_history: [Word16; L_LTPHIST],
-    /// Whether the previous frame was an erasure.
-    prev_bad: bool,
 }
 
 impl Default for GainDecoder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// What the gain decoder needs to know about the frame this subframe is in.
+///
+/// Grouped rather than passed loose because every field is frame-scoped while
+/// the call is per-subframe, and passing them separately invites exactly the
+/// mistake this struct was created to fix: `previous_frame_bad` was once kept
+/// inside the decoder and cleared after the first good *subframe*, where
+/// TS 26.173 keeps it for the whole *frame*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameContext {
+    /// Whether this frame is usable, damaged, or absent.
+    pub quality: FrameQuality,
+    /// Consecutive bad frames, saturating at 6; drives how hard concealment
+    /// attenuates.
+    pub erasure_state: usize,
+    /// Recent non-speech frames, from the encoder's VAD flag.
+    pub vad_history: i16,
+    /// The reference's `prev_bfi`. Set for **all four** subframes of the first
+    /// good frame after an erasure, where it caps a sudden jump in code gain —
+    /// a jump that is audible as a crack on exactly the frame concealment was
+    /// trying to hide.
+    pub previous_frame_bad: bool,
+}
+
+impl FrameContext {
+    /// The context for an ordinary frame of a clean stream.
+    #[must_use]
+    pub const fn good() -> Self {
+        Self {
+            quality: FrameQuality::Good,
+            erasure_state: 0,
+            vad_history: 0,
+            previous_frame_bad: false,
+        }
     }
 }
 
@@ -161,7 +195,6 @@ impl GainDecoder {
             prev_code: Word16(0),
             pitch_history: [Word16(0); L_LTPHIST],
             code_history: [Word16(0); L_LTPHIST],
-            prev_bad: false,
         }
     }
 
@@ -172,15 +205,21 @@ impl GainDecoder {
     /// energy normalisation. `erasure_state` counts consecutive bad frames,
     /// saturating at 6, and drives how hard concealment attenuates.
     /// `vad_history` is the count of recent non-speech frames.
+    ///
+    /// `previous_frame_bad` is the reference's `prev_bfi`, and it is a
+    /// **frame** flag rather than a subframe one: TS 26.173 assigns it once at
+    /// the end of `decoder()`, so all four subframes of the first good frame
+    /// after an erasure see it set. Tracking it inside this struct and clearing
+    /// it after the first good subframe would let subframes 1 to 3 of a
+    /// recovery frame skip the cap on a sudden jump in code gain — which is
+    /// audible as a crack on exactly the frame concealment was trying to hide.
     #[must_use]
     pub fn decode(
         &mut self,
         index: u16,
         bits: usize,
         code: &[Word16; L_SUBFR],
-        quality: FrameQuality,
-        erasure_state: usize,
-        vad_history: i16,
+        frame: FrameContext,
     ) -> Gains {
         let mut ctx = DspContext::default();
 
@@ -190,10 +229,16 @@ impl GainDecoder {
         let (inv_norm, exp) = isqrt_n(&mut ctx, (energy, exp - 24));
         let gcode_inov = extract_h(l_shl(&mut ctx, inv_norm, exp - 3));
 
-        if quality == FrameQuality::Good {
-            self.decode_good(&mut ctx, index, bits, gcode_inov)
+        if frame.quality == FrameQuality::Good {
+            self.decode_good(&mut ctx, index, bits, gcode_inov, frame.previous_frame_bad)
         } else {
-            self.conceal(&mut ctx, quality, erasure_state, vad_history, gcode_inov)
+            self.conceal(
+                &mut ctx,
+                frame.quality,
+                frame.erasure_state,
+                frame.vad_history,
+                gcode_inov,
+            )
         }
     }
 
@@ -204,6 +249,7 @@ impl GainDecoder {
         index: u16,
         bits: usize,
         gcode_inov: Word16,
+        previous_frame_bad: bool,
     ) -> Gains {
         // Predict this subframe's energy from the last four, in dB.
         let mut acc = l_shl(ctx, l_deposit_h(Word16(MEAN_ENER)), 8);
@@ -231,7 +277,7 @@ impl GainDecoder {
 
         // After an erasure the predictor is unreliable, so cap any sudden jump
         // in loudness. Without this a recovered frame can crack audibly.
-        if self.prev_bad {
+        if previous_frame_bad {
             let ceiling = l_mult(ctx, self.prev_code, Word16(5120));
             if code_gain.0 > ceiling.0 && code_gain.0 > 6_553_600 {
                 code_gain = ceiling;
@@ -256,7 +302,6 @@ impl GainDecoder {
         let energy = extract_l(l_shr(ctx, scaled, 3));
         self.push_energy(energy);
 
-        self.prev_bad = false;
         Gains { pitch, code }
     }
 
@@ -317,7 +362,6 @@ impl GainDecoder {
         // past_code is Q3, gcode_inov Q12, so the product is Q16.
         let code = l_mult(ctx, self.past_code, gcode_inov);
 
-        self.prev_bad = true;
         Gains {
             pitch: pitch_out,
             code,
@@ -394,14 +438,7 @@ mod tests {
                 for (sf, sub) in params.subframes.iter().enumerate() {
                     let code = codebook::decode(&sub.pulses, frame_bits).expect("code");
                     let code: [Word16; L_SUBFR] = code.map(Word16);
-                    let got = dec.decode(
-                        sub.gain_index,
-                        gain_bits,
-                        &code,
-                        FrameQuality::Good,
-                        0,
-                        0,
-                    );
+                    let got = dec.decode(sub.gain_index, gain_bits, &code, FrameContext::good());
 
                     let want = block_row_i32(&block, &format!("gain{f}_{sf}"));
                     assert_eq!(
@@ -440,12 +477,12 @@ mod tests {
         let code = [Word16(512); L_SUBFR];
         let mut dec = GainDecoder::new();
         for _ in 0..8 {
-            let _ = dec.decode(20, 7, &code, FrameQuality::Good, 0, 0);
+            let _ = dec.decode(20, 7, &code, FrameContext::good());
         }
 
         let mut previous = i64::MAX;
         for state in 1..7 {
-            let g = dec.decode(0, 7, &code, FrameQuality::Unusable, state, 0);
+            let g = dec.decode(0, 7, &code, FrameContext { quality: FrameQuality::Unusable, erasure_state: state, ..FrameContext::good() });
             let level = i64::from(g.pitch.0);
             assert!(
                 level <= previous,
@@ -464,10 +501,10 @@ mod tests {
         let mut dec = GainDecoder::new();
         // Drive the history high, then erase.
         for _ in 0..8 {
-            let _ = dec.decode(63, 7, &code, FrameQuality::Good, 0, 0);
+            let _ = dec.decode(63, 7, &code, FrameContext::good());
         }
         for state in 0..7 {
-            let g = dec.decode(0, 7, &code, FrameQuality::Unusable, state, 0);
+            let g = dec.decode(0, 7, &code, FrameContext { quality: FrameQuality::Unusable, erasure_state: state, ..FrameContext::good() });
             assert!(
                 g.pitch.0 < 16384,
                 "erasure state {state}: pitch gain {} would self-oscillate",
@@ -490,8 +527,8 @@ mod tests {
 
         let mut a = GainDecoder::new();
         let mut b = GainDecoder::new();
-        let g_sparse = a.decode(30, 7, &sparse, FrameQuality::Good, 0, 0);
-        let g_dense = b.decode(30, 7, &dense, FrameQuality::Good, 0, 0);
+        let g_sparse = a.decode(30, 7, &sparse, FrameContext::good());
+        let g_dense = b.decode(30, 7, &dense, FrameContext::good());
 
         assert!(
             g_sparse.code.0 > g_dense.code.0,
