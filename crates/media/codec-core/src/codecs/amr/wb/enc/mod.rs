@@ -33,6 +33,8 @@
 //! it fails loudly rather than quietly moving the target.
 
 pub mod analysis;
+pub mod codebook;
+pub mod gain_quant;
 pub mod isf_quant;
 pub mod pitch;
 pub mod preproc;

@@ -66,8 +66,13 @@ POINTS = [
     # dumped: comparing only the high half hides a whole class of error.
     ("    Autocorr(p_window, M, r_h, r_l);       /* Autocorrelations */",
      '\n    TRC1("Q_new", Q_new); TRC("window", p_window, L_WINDOW);', "after"),
+    # BEFORE the lag window, not after: anchoring "after" here dumped the
+    # windowed values under both names, so `r_h_pre` was a byte-identical copy
+    # of `r_h` and any test comparing the two compared nothing. That is the
+    # third time in this project a trace row has silently duplicated or vanished
+    # — an absent comparison looks exactly like a passing one.
     ("    Lag_window(r_h, r_l);                  /* Lag windowing    */",
-     '\n    TRC("r_h_pre", r_h, M + 1); TRC("r_l_pre", r_l, M + 1);', "after"),
+     '    TRC("r_h_pre", r_h, M + 1); TRC("r_l_pre", r_l, M + 1);\n', "before"),
     ("    Levinson(r_h, r_l, A, rc, st->mem_levinson);        /* Levinson Durbin  */",
      '\n    TRC("r_h", r_h, M + 1); TRC("r_l", r_l, M + 1);', "after"),
     ("    Az_isp(A, ispnew, st->ispold);         /* From A(z) to ISP */",

@@ -61,10 +61,18 @@ impl Default for Autocorrelation {
     }
 }
 
-/// Window a frame and compute its lag-windowed autocorrelations.
+/// Window a frame and compute its autocorrelations, TS 26.173 `Autocorr`.
 ///
 /// `speech` is 384 samples of pre-emphasised, down-scaled input at 12.8 kHz.
-/// The result is ready for Levinson-Durbin.
+/// The result is **not** lag-windowed: the caller applies [`lag_window`], as
+/// the reference does in two separate calls.
+///
+/// The two were fused here for a while, which was invisible because the only
+/// consumer wanted both — until an encoder test compared the pre-window values
+/// and found them equal to the post-window ones. They were equal because the
+/// *trace* had the same defect, dumping both under one name. Two independent
+/// copies of one mistake agreeing is the oldest failure in this project, and
+/// splitting the function is what makes the two values distinguishable at all.
 #[must_use]
 pub fn autocorrelation(speech: &[Word16; WINDOW_LEN]) -> Autocorrelation {
     let mut ctx = DspContext::default();
@@ -123,7 +131,6 @@ pub fn autocorrelation(speech: &[Word16; WINDOW_LEN]) -> Autocorrelation {
         result.low[lag] = lo;
     }
 
-    lag_window(&mut result);
     result
 }
 
@@ -225,7 +232,8 @@ mod tests {
                 *slot = Word16(v);
             }
 
-            let got = autocorrelation(&speech);
+            let mut got = autocorrelation(&speech);
+            lag_window(&mut got);
             let want_h = row(case, "r_h");
             let want_l = row(case, "r_l");
 
@@ -330,7 +338,8 @@ mod tests {
         // normalisation shift were applied inconsistently across lags this
         // would fail.
         for seed in 0..6u64 {
-            let r = autocorrelation(&speechlike(seed));
+            let mut r = autocorrelation(&speechlike(seed));
+            lag_window(&mut r);
             let r0 = value(&r, 0);
             assert!(r0 > 0, "seed {seed}: r(0) = {r0}");
             for lag in 1..=LP_ORDER {
@@ -349,7 +358,8 @@ mod tests {
         // that is the whole purpose of the norm_l step, and it is what gives
         // Levinson-Durbin its precision.
         for seed in 0..6u64 {
-            let r = autocorrelation(&speechlike(seed));
+            let mut r = autocorrelation(&speechlike(seed));
+            lag_window(&mut r);
             let r0 = value(&r, 0);
             assert!(r0 >= 1 << 29, "seed {seed}: r(0) = {r0} not normalised");
         }
@@ -359,7 +369,8 @@ mod tests {
     fn silence_still_produces_a_usable_r0() {
         // The accumulator starts at 1 rather than 0 precisely so a silent frame
         // cannot yield r(0) = 0 and make Levinson-Durbin divide by zero.
-        let r = autocorrelation(&[Word16(0); WINDOW_LEN]);
+        let mut r = autocorrelation(&[Word16(0); WINDOW_LEN]);
+        lag_window(&mut r);
         assert!(value(&r, 0) > 0, "silent frame gave r(0) = {}", value(&r, 0));
     }
 
@@ -395,8 +406,10 @@ mod tests {
         for slot in &mut loud {
             slot.0 = slot.0.saturating_mul(2);
         }
-        let rq = autocorrelation(&quiet);
-        let rl = autocorrelation(&loud);
+        let mut rq = autocorrelation(&quiet);
+        let mut rl = autocorrelation(&loud);
+        lag_window(&mut rq);
+        lag_window(&mut rl);
 
         for lag in 1..=LP_ORDER {
             let a = value(&rq, lag) as f64 / value(&rq, 0) as f64;

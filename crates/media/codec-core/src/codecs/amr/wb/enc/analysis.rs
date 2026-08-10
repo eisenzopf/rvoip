@@ -42,7 +42,9 @@
     clippy::unreadable_literal
 )]
 
-use super::super::lp::autocorr::{autocorrelation, Autocorrelation, LP_ORDER, WINDOW_LEN};
+use super::super::lp::autocorr::{
+    autocorrelation, lag_window, Autocorrelation, LP_ORDER, WINDOW_LEN,
+};
 use super::super::lp::isf::{interpolate_isp, isp_to_isf, NB_SUBFR};
 use super::super::math::scale_sig;
 use super::preproc::{Preprocessor, Scaling, L_FRAME, L_FRAME16K, L_TOTAL, NEW_SPEECH};
@@ -721,7 +723,14 @@ pub struct FrontEndFrame {
     /// must be rescaled by. **Not** the same as `scaling.exp`, which is what
     /// `old_exc`, `mem_syn` and `mem_w0` take.
     pub wsp_exp: i16,
-    /// Lag-windowed autocorrelations of the analysis window.
+    /// Autocorrelations of the analysis window, **before** the lag window.
+    ///
+    /// Carried separately because the two are separately traced, and because
+    /// they were indistinguishable for a while: the instrumentation dumped the
+    /// windowed values under both names and this crate's `autocorrelation`
+    /// fused the two steps, so a test comparing them compared nothing.
+    pub autocorr_raw: Autocorrelation,
+    /// Lag-windowed autocorrelations — what Levinson-Durbin consumes.
     pub autocorr: Autocorrelation,
     /// Unquantised predictor for the fourth subframe, Q12.
     pub a: [Word16; LP_ORDER + 1],
@@ -819,7 +828,11 @@ impl FrontEnd {
 
         // LP analysis, centred on the fourth subframe. `autocorrelation`
         // already applies the lag window on its way out.
-        let autocorr = autocorrelation(&window);
+        // Two calls, as in the reference: the lag window is a separate step
+        // and the values either side of it are separately traced.
+        let autocorr_raw = autocorrelation(&window);
+        let mut autocorr = autocorr_raw;
+        lag_window(&mut autocorr);
         let (a, rc) = levinson(&autocorr, &mut self.levinson);
         let isp = az_isp(&a, &self.isp_old);
 
@@ -838,6 +851,7 @@ impl FrontEnd {
             scaling,
             wsp_shift,
             wsp_exp,
+            autocorr_raw,
             autocorr,
             a,
             rc,
@@ -988,29 +1002,37 @@ mod tests {
 
     #[test]
     fn autocorrelation_is_bit_exact_against_ts26173() {
-        // `r_h_pre`/`r_l_pre` and `r_h`/`r_l` are identical in the committed
-        // trace: the instrumentation's "pre" point sits *after* `Lag_window`,
-        // not before it. Both are compared anyway, and their equality is
-        // asserted, so a future trace that fixes the instrumentation fails
-        // here loudly instead of silently comparing the wrong thing.
+        // Both sides of the lag window, which are genuinely different values —
+        // they were not always. The trace dumped the windowed pair under both
+        // names and this crate's `autocorrelation` fused the two steps, so this
+        // test passed while comparing one value against itself. Fixing either
+        // alone would still have passed; fixing both is what made it a test.
         let mut compared = 0usize;
         let count = replay(|frame, got| {
-            for label in ["r_h", "r_h_pre"] {
-                compared += compare(
-                    frame,
-                    label,
-                    &got.autocorr.high,
-                    &words(frame, label, LP_ORDER + 1),
-                );
-            }
-            for label in ["r_l", "r_l_pre"] {
-                compared += compare(
-                    frame,
-                    label,
-                    &got.autocorr.low,
-                    &words(frame, label, LP_ORDER + 1),
-                );
-            }
+            compared += compare(
+                frame,
+                "r_h_pre",
+                &got.autocorr_raw.high,
+                &words(frame, "r_h_pre", LP_ORDER + 1),
+            );
+            compared += compare(
+                frame,
+                "r_l_pre",
+                &got.autocorr_raw.low,
+                &words(frame, "r_l_pre", LP_ORDER + 1),
+            );
+            compared += compare(
+                frame,
+                "r_h",
+                &got.autocorr.high,
+                &words(frame, "r_h", LP_ORDER + 1),
+            );
+            compared += compare(
+                frame,
+                "r_l",
+                &got.autocorr.low,
+                &words(frame, "r_l", LP_ORDER + 1),
+            );
         });
         assert_eq!(count, 3, "the committed trace covers three frames");
         assert_eq!(compared, 3 * 4 * (LP_ORDER + 1), "204 lag values compared");
