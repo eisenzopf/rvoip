@@ -781,4 +781,85 @@ mod tests {
         assert_eq!(offer.active_modes(), answer.active_modes());
         assert_eq!(answer.active_modes().to_sdp_value(), "0,1,2,3");
     }
+
+    // ---- captured from a real implementation ----
+
+    /// The `a=fmtp` line `FreeSWITCH` 1.10.12 (`mod_amrwb`, `opencore-amrwb` +
+    /// `vo-amrwbenc`) actually emits when originating an AMR-WB call.
+    ///
+    /// Captured from a live container rather than written by hand, so it pins
+    /// this parser against a production stack instead of against our own
+    /// reading of the RFC. The offer arrived on `a=rtpmap:102 AMR-WB/16000` —
+    /// note the payload type is neither of the ones we offer, which is exactly
+    /// why dynamic payload types must be resolved from the rtpmap.
+    const FREESWITCH_AMRWB_OFFER: &str =
+        "octet-align=0; mode-set=8; max-red=0; mode-change-capability=2";
+
+    #[test]
+    fn parses_a_real_freeswitch_amr_wb_offer() {
+        let fmtp = AmrFmtp::parse(WB, FREESWITCH_AMRWB_OFFER).unwrap();
+
+        // Bandwidth-efficient, stated explicitly rather than by omission.
+        assert!(!fmtp.octet_align);
+        assert!(!fmtp.payload_config().octet_aligned);
+
+        // A single permitted mode: 23.85 kbit/s, matching mod_amrwb's
+        // `default-bitrate` of 8.
+        assert_eq!(fmtp.mode_set.as_ref().unwrap().to_sdp_value(), "8");
+        assert_eq!(fmtp.active_modes().highest().unwrap().index(), 8);
+
+        // FreeSWITCH declares it can restrict its mode changes, which is what
+        // lets a peer require mode-change-period=2 of it.
+        assert_eq!(fmtp.mode_change_capability, 2);
+        assert_eq!(fmtp.max_red, Some(0));
+    }
+
+    #[test]
+    fn answers_a_real_freeswitch_offer_compliantly() {
+        let offer = AmrFmtp::parse(WB, FREESWITCH_AMRWB_OFFER).unwrap();
+        let answer = AmrCapabilities::new(WB).answer(&offer).unwrap();
+
+        // The transport parameters come back untouched, so both ends frame
+        // identically — the property the relay depends on.
+        assert!(answer.same_transport_as(&offer));
+        assert!(!answer.octet_align);
+
+        // mode-set is returned unmodified. We support all nine modes, but
+        // narrowing to our own set here would be a protocol violation and
+        // FreeSWITCH would keep sending mode 8 regardless.
+        assert_eq!(answer.mode_set.as_ref().unwrap().to_sdp_value(), "8");
+        assert_eq!(answer.active_modes().highest().unwrap().index(), 8);
+
+        // And the negotiated framing is what the payload codec will use.
+        assert_eq!(answer.payload_config(), offer.payload_config());
+    }
+
+    #[test]
+    fn a_real_offer_survives_a_reparse_of_our_answer() {
+        // What actually goes on the wire is the rendered string, so the round
+        // trip through it has to preserve the negotiated meaning.
+        let offer = AmrFmtp::parse(WB, FREESWITCH_AMRWB_OFFER).unwrap();
+        let answer = AmrCapabilities::new(WB).answer(&offer).unwrap();
+
+        let rendered = answer.to_fmtp_value();
+        let reparsed = AmrFmtp::parse(WB, &rendered).unwrap();
+        assert_eq!(reparsed, answer, "rendered as {rendered:?}");
+        assert!(reparsed.same_transport_as(&offer));
+    }
+
+    #[test]
+    fn a_peer_restricted_to_one_mode_still_negotiates() {
+        // mode-set=8 alone is a legitimate and common gateway configuration.
+        // It must not be mistaken for an empty or invalid set.
+        let offer = AmrFmtp::parse(WB, FREESWITCH_AMRWB_OFFER).unwrap();
+        let modes = offer.active_modes();
+        assert_eq!(modes.modes().len(), 1);
+        assert_eq!(modes.lowest(), modes.highest());
+
+        // An endpoint that cannot do mode 8 must reject rather than negotiate
+        // down to something the peer will not send.
+        let limited =
+            AmrCapabilities::new(WB).with_modes(AmrModeSet::from_indices(WB, &[0, 1]).unwrap());
+        assert!(limited.answer(&offer).is_err());
+    }
 }

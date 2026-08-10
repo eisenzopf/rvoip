@@ -184,6 +184,35 @@ The Dockerfile fails loudly rather than silently producing an AMR-less image: it
 asserts `configure` detected all three libraries, and that `codec_amr.so` and
 `res_format_attr_amr.so` both exist, before the runtime stage.
 
+### First evidence against a real implementation
+
+FreeSWITCH 1.10.12 was started with AMR and asked to originate an AMR-WB call.
+The `a=fmtp` it emitted:
+
+```
+a=rtpmap:102 AMR-WB/16000
+a=fmtp:102 octet-align=0; mode-set=8; max-red=0; mode-change-capability=2
+```
+
+That line is now a checked-in fixture in `sdp.rs`, with tests asserting we parse
+it and answer it compliantly. **All four passed first run, with no changes to
+the implementation** — which is the point of testing against something other
+than our own reading of the RFC.
+
+Three things it independently confirms:
+
+- **The payload type is 102** — neither of the two we offer for AMR-WB. Dynamic
+  payload types genuinely must be resolved from the `a=rtpmap` encoding name,
+  which is the refactor in `989d97eb`.
+- **`mode-set=8` alone is a real, common configuration** (a gateway pinned to
+  23.85 kbit/s). Our answer returns it unmodified rather than widening it to the
+  nine modes we support — the §8.3.1 rule that phase 0 had wrong.
+- **`mode-change-capability=2`** appears in the wild, so the declarative pair we
+  implemented is not a theoretical corner.
+
+Still open: this validates *negotiation*. It does not exercise RTP framing,
+which needs the relay topology with media actually flowing.
+
 ### Remaining for Phase 2
 
 - [x] **Pass-through/relay path — already existed.** `relay/controller/bridge.rs`
@@ -404,6 +433,16 @@ now returns `usize` for both variants and WB CRC works. See the Phase 1 section.
 ---
 
 ## Changelog
+
+### 2026-08-09 — Negotiation validated against FreeSWITCH
+
+Captured a live AMR-WB offer from FreeSWITCH 1.10.12 and pinned it as a test
+fixture. Parser and answerer both handled it correctly on the first run.
+
+Also fixed a trap in the FreeSWITCH image: the codecs were compiled but never
+loaded, because the entrypoint overwrites the runtime module list. The build
+looked entirely healthy — only starting the container and running `show codec`
+revealed it.
 
 ### 2026-08-09 — Interop peers, and the relay that already existed
 
