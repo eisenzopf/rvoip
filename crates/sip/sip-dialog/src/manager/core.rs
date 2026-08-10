@@ -2341,7 +2341,7 @@ impl DialogManager {
 
         // Find the dialog associated with this transaction
         if let Some(dialog_id) = dialog_id {
-            if let Err(_error) = self
+            if let Err(error) = self
                 .process_transaction_event_with_causal_delivery(
                     &transaction_id,
                     &dialog_id,
@@ -2351,10 +2351,28 @@ impl DialogManager {
                 )
                 .await
             {
-                error!(
-                    "Failed to process transaction event for dialog {}",
-                    dialog_id
-                );
+                // `DialogError` renders only its diagnostic class, so naming
+                // the failure and the transaction leaks nothing and turns a
+                // line that only said "something went wrong" into one that
+                // says which class failed and on which transaction.
+                let transaction =
+                    crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id);
+
+                if is_late_event_for_a_gone_dialog(&error) {
+                    debug!(
+                        dialog=%dialog_id,
+                        %transaction,
+                        %error,
+                        "Transaction event arrived after its dialog was gone"
+                    );
+                } else {
+                    error!(
+                        dialog=%dialog_id,
+                        %transaction,
+                        %error,
+                        "Failed to process transaction event for dialog"
+                    );
+                }
             }
         } else if matches!(&event, TransactionEvent::AckReceived { .. }) {
             // A 2xx ACK is emitted by transaction-core with the exact matched
@@ -2963,8 +2981,12 @@ impl DialogManager {
         let hub = self.event_hub.read().await.clone();
         if let Some(hub) = hub {
             trace!("Delivering session coordination event to authoritative handler");
-            if let Err(_error) = hub.publish_session_coordination_event(event.clone()).await {
-                warn!("Authoritative session coordination delivery failed");
+            if let Err(error) = hub.publish_session_coordination_event(event.clone()).await {
+                warn!(
+                    class = session_coordination_event_kind(&event),
+                    %error,
+                    "Authoritative session coordination delivery failed"
+                );
             } else {
                 trace!("Delivered session coordination event");
                 if let Some(started) = publish_started {
@@ -4615,6 +4637,57 @@ async fn run_outbound_flow_loop(
     // future REGISTER 2xx for the same AoR can install a fresh flow.
     // Safe if `stop_outbound_ping` already removed us concurrently.
     manager.stop_outbound_ping(&flow.key);
+}
+
+/// Whether a failure to process a transaction event names a defect or the
+/// ordinary race of an event that outlived its dialog.
+///
+/// The transaction layer and dialog teardown advance independently, so a
+/// response can always reach the dispatcher after the dialog it belongs to has
+/// been removed: a BYE from the peer that won the race, or a call cleaned up
+/// while a 180 or a 200 was still in flight. Both handlers that can report this
+/// re-resolve the dialog after the dispatcher already looked it up, so the two
+/// lookups straddle an await and disagree exactly when a teardown lands between
+/// them. The event is correctly discarded and nothing is lost.
+///
+/// This is the same situation the sibling ACK branch already treats as
+/// expected, where recovering the binding by rematching tags is refused on
+/// purpose because it could route a stale ACK into a newer dialog generation.
+/// Reporting it as an error puts hundreds of lines into a teardown storm and
+/// hides the classes that do mean a defect.
+fn is_late_event_for_a_gone_dialog(error: &DialogError) -> bool {
+    matches!(error, DialogError::DialogNotFound { .. })
+}
+
+#[cfg(test)]
+mod late_transaction_event_tests {
+    //! The dispatcher reports two very different things through one result.
+    //! A dialog that is simply gone is a race SIP cannot avoid, and every
+    //! other class points at a defect worth an error line.
+
+    use super::is_late_event_for_a_gone_dialog;
+    use crate::errors::DialogError;
+
+    #[test]
+    fn a_response_that_outlived_its_dialog_is_not_a_defect() {
+        let error = DialogError::dialog_not_found("dialog-1");
+
+        assert!(is_late_event_for_a_gone_dialog(&error));
+    }
+
+    #[test]
+    fn a_protocol_failure_is_still_reported_as_one() {
+        let error = DialogError::protocol_error("malformed CSeq");
+
+        assert!(!is_late_event_for_a_gone_dialog(&error));
+    }
+
+    #[test]
+    fn an_internal_failure_is_still_reported_as_one() {
+        let error = DialogError::internal_error("state store poisoned", None);
+
+        assert!(!is_late_event_for_a_gone_dialog(&error));
+    }
 }
 
 #[cfg(test)]
