@@ -39,7 +39,7 @@ where
         .transpose()
 }
 
-fn normalized_codec_name(name: &str) -> String {
+pub(super) fn normalized_codec_name(name: &str) -> String {
     name.chars()
         .filter(|character| !matches!(character, '.' | '-' | '_' | ' '))
         .map(|character| character.to_ascii_uppercase())

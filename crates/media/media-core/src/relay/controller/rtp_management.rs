@@ -805,15 +805,17 @@ impl MediaSessionController {
             .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
 
         // Sprint 3.6 C1 follow-up — RFC 3389 Comfort Noise gating.
-        // When CN is enabled at the controller level, run the
-        // per-dialog VAD over the outgoing PCM frame and decide
-        // whether to send the audio normally, suppress it (a recent
-        // CN packet already covers this silence run), or emit one PT
-        // 13 CN packet now and then suppress.
-        if codec_runtime.format.clock_rate == 8_000
-            && self
-                .comfort_noise_enabled
-                .load(std::sync::atomic::Ordering::Relaxed)
+        // When CN is enabled at the controller level and the codec can
+        // carry a foreign payload type at all, run the per-dialog VAD
+        // over the outgoing PCM frame and decide whether to send the
+        // audio normally, suppress it (a recent CN packet already
+        // covers this silence run), or emit one PT 13 CN packet now
+        // and then suppress.
+        if crate::relay::controller::cn_gate::supports_rfc3389_comfort_noise(
+            &codec_runtime.format.name,
+        ) && self
+            .comfort_noise_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
         {
             // Build (or retrieve) the per-dialog gate. The gate's
             // CnTransmitter shares this dialog's RtpSession arc so PT

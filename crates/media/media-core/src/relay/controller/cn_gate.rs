@@ -43,6 +43,27 @@ use super::cn_transmitter::{CnTransmitter, DEFAULT_NOISE_LEVEL_DBOV};
 /// 160-byte packets per second) is meaningful.
 const CN_REFRESH_INTERVAL: Duration = Duration::from_millis(200);
 
+/// Whether a PT 13 comfort-noise packet may legally ride in this codec's
+/// stream.
+///
+/// The gate used to ask whether the clock rate was 8 kHz, which answers a
+/// different question. RFC 3389 CN is a *separate payload type* interleaved
+/// into the stream, so it is only available where the receiver's depacketizer
+/// tolerates a foreign payload type and the codec does not already signal
+/// silence in band. Clock rate says nothing about either. AMR-NB is 8 kHz and
+/// fails both halves: RFC 4867 §4 leaves no room for PT 13 between AMR frames,
+/// and AMR carries its own SID frames — so the old test would have started
+/// suppressing audio and emitting unparseable packets the moment AMR reached
+/// the relay path.
+///
+/// This is an allow-list rather than a deny-list, so a codec added later is
+/// excluded until someone classifies it deliberately. That failure mode costs
+/// a bandwidth optimisation; the other one corrupts a call.
+pub(super) fn supports_rfc3389_comfort_noise(codec_name: &str) -> bool {
+    let normalized = super::codec_runtime::normalized_codec_name(codec_name);
+    matches!(normalized.as_str(), "PCMU" | "PCMA") || normalized.starts_with("G729")
+}
+
 /// Decision returned by [`CnGate::process_frame`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CnGateDecision {
@@ -223,6 +244,92 @@ mod tests {
         };
         let session = RtpSession::new(cfg).await.unwrap();
         CnGate::new(Arc::new(Mutex::new(session))).unwrap()
+    }
+
+    #[test]
+    fn comfort_noise_is_offered_only_where_a_foreign_payload_type_is_legal() {
+        // G.711 in both flavours and every G.729 spelling the runtime
+        // resolves. These are what the gate was written for.
+        for name in ["PCMU", "pcmu", "PCMA", "G729", "G729A", "G729AB", "G.729"] {
+            assert!(
+                supports_rfc3389_comfort_noise(name),
+                "{name} should still be gated"
+            );
+        }
+        // AMR is the case that motivated this. Both variants, in the
+        // spellings SDP actually carries. AMR-NB is 8 kHz, so the old
+        // clock-rate test admitted it.
+        for name in ["AMR", "AMR-WB", "AMR-NB", "amr-wb"] {
+            assert!(
+                !supports_rfc3389_comfort_noise(name),
+                "{name} carries its own SID frames and RFC 4867 has no room for PT 13"
+            );
+        }
+        // Opus was already excluded, by clock rate rather than on
+        // purpose. Now it is on purpose, and so is anything unknown.
+        for name in ["opus", "G722", "not-a-codec", ""] {
+            assert!(!supports_rfc3389_comfort_noise(name), "{name}");
+        }
+    }
+
+    /// The rule this replaced was `clock_rate == 8_000`. Assert the two
+    /// actually disagree, so the change is not a restatement of the old
+    /// one in different words.
+    #[cfg(feature = "amr-nb")]
+    #[test]
+    fn the_clock_rate_proxy_would_have_admitted_amr_narrowband() {
+        use codec_core::codecs::amr::AmrVariant;
+        assert_eq!(AmrVariant::NarrowBand.clock_rate(), 8_000);
+        assert!(!supports_rfc3389_comfort_noise("AMR"));
+        // And the wideband variant is excluded for a reason that is not
+        // its clock rate, which the old test happened to get right.
+        assert_eq!(AmrVariant::WideBand.clock_rate(), 16_000);
+        assert!(!supports_rfc3389_comfort_noise("AMR-WB"));
+    }
+
+    #[test]
+    fn every_codec_the_runtime_resolves_is_classified_deliberately() {
+        // The allow-list lives next door to `resolve_codec`'s match, and
+        // this pins the two together: a codec that starts resolving
+        // without being classified shows up here as an unexpected
+        // `false`, which is the safe direction but should still be a
+        // decision someone made rather than one they missed.
+        use crate::relay::controller::codec_runtime::resolve_codec;
+        use crate::relay::MediaConfig;
+        use std::collections::HashMap;
+        use std::net::SocketAddr;
+
+        let expected = [
+            ("PCMU", true),
+            ("PCMA", true),
+            #[cfg(feature = "g729")]
+            ("G729", true),
+            #[cfg(feature = "opus")]
+            ("opus", false),
+        ];
+        let mut checked = 0;
+        for (requested, gated) in expected {
+            let config = MediaConfig {
+                local_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+                remote_addr: None,
+                preferred_codec: Some(requested.to_string()),
+                parameters: HashMap::new(),
+            };
+            let resolved = resolve_codec(&config)
+                .unwrap_or_else(|error| panic!("{requested} no longer resolves: {error}"));
+            assert_eq!(
+                supports_rfc3389_comfort_noise(&resolved.name),
+                gated,
+                "{requested} resolved to {} and changed CN classification",
+                resolved.name
+            );
+            checked += 1;
+        }
+        assert_eq!(
+            checked,
+            expected.len(),
+            "the loop skipped a codec instead of classifying it"
+        );
     }
 
     #[tokio::test]
