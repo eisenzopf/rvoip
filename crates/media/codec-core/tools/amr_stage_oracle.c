@@ -196,11 +196,17 @@ static void dump_bitstream(const char *dir, int mode_no) {
         int nb_bits;
         Word16 *p = prms;
         Word16 ind[7];
+        Word16 T0_min_carry = 0, vad_flag;
         int n_ind, i;
         char name[24];
 
         if (ok == 0) break;
         nb_bits = unpacked_size[mode];
+
+        /* The VAD flag is the very first bit of a speech frame -- read in
+         * dec_main.c before the ISFs, not after. Skipping it shifts every
+         * later field by one bit, which still yields plausible indices. */
+        vad_flag = Serial_parm(1, &p);
 
         /* The 6.60 kbit/s mode spends 36 bits on the spectrum, the rest 46. */
         n_ind = (mode == 0) ? 5 : 7;
@@ -215,12 +221,111 @@ static void dump_bitstream(const char *dir, int mode_no) {
             ind[6] = Serial_parm(5, &p);
         }
 
-        printf("  meta%d %d %d\n", f, mode, nb_bits);
+        printf("  meta%d %d %d %d\n", f, mode, nb_bits, vad_flag);
         sprintf(name, "bits%d", f);
         dump_bits_hex(name, prms, nb_bits);
         sprintf(name, "isfind%d", f);
         dump(name, ind, n_ind);
-        (void)i;
+
+        /* The excitation parameters, subframe by subframe, exactly as
+         * dec_main.c walks them. Pitch lag width and the presence of an LTP
+         * filter bit both depend on the mode, and subframes 1 and 3 (plus 2 at
+         * 6.60 kbit/s) code the lag relative to a window around the previous
+         * one -- so a layout error shows up as a plausible but wrong lag
+         * rather than an overrun. */
+        for (int sf = 0; sf < 4; sf++) {
+            Word16 T0, T0_frac, T0_min = 0, T0_max = 0, select, gain_index;
+            Word16 pulses[8];
+            int n_pulses = 0, pit_flag = sf * 64;
+            int index;
+
+            if (sf == 2 && nb_bits > NBBITS_7k) pit_flag = 0;
+
+            if (pit_flag == 0) {
+                if (nb_bits <= NBBITS_9k) {
+                    index = Serial_parm(8, &p);
+                    if (index < (PIT_FR1_8b - PIT_MIN) * 2) {
+                        T0 = PIT_MIN + (index >> 1);
+                        T0_frac = (index - ((T0 - PIT_MIN) << 1)) << 1;
+                    } else {
+                        T0 = index + PIT_FR1_8b - ((PIT_FR1_8b - PIT_MIN) * 2);
+                        T0_frac = 0;
+                    }
+                } else {
+                    index = Serial_parm(9, &p);
+                    if (index < (PIT_FR2 - PIT_MIN) * 4) {
+                        T0 = PIT_MIN + (index >> 2);
+                        T0_frac = index - ((T0 - PIT_MIN) << 2);
+                    } else if (index < ((PIT_FR2 - PIT_MIN) * 4 + (PIT_FR1_9b - PIT_FR2) * 2)) {
+                        index -= (PIT_FR2 - PIT_MIN) * 4;
+                        T0 = PIT_FR2 + (index >> 1);
+                        T0_frac = (index - ((T0 - PIT_FR2) << 1)) << 1;
+                    } else {
+                        T0 = index + (PIT_FR1_9b - ((PIT_FR2 - PIT_MIN) * 4)
+                                      - ((PIT_FR1_9b - PIT_FR2) * 2));
+                        T0_frac = 0;
+                    }
+                }
+                T0_min = T0 - 8;
+                if (T0_min < PIT_MIN) T0_min = PIT_MIN;
+                T0_max = T0_min + 15;
+                if (T0_max > PIT_MAX) { T0_max = PIT_MAX; T0_min = T0_max - 15; }
+            } else {
+                if (nb_bits <= NBBITS_9k) {
+                    index = Serial_parm(5, &p);
+                    T0 = T0_min_carry + (index >> 1);
+                    T0_frac = (index - ((T0 - T0_min_carry) << 1)) << 1;
+                } else {
+                    index = Serial_parm(6, &p);
+                    T0 = T0_min_carry + (index >> 2);
+                    T0_frac = index - ((T0 - T0_min_carry) << 2);
+                }
+            }
+            if (pit_flag == 0) T0_min_carry = T0_min;
+
+            select = (nb_bits <= NBBITS_9k) ? 0 : Serial_parm(1, &p);
+
+            if (nb_bits <= NBBITS_7k) {
+                pulses[0] = Serial_parm(12, &p); n_pulses = 1;
+            } else if (nb_bits <= NBBITS_9k) {
+                for (i = 0; i < 4; i++) pulses[i] = Serial_parm(5, &p);
+                n_pulses = 4;
+            } else if (nb_bits <= NBBITS_12k) {
+                for (i = 0; i < 4; i++) pulses[i] = Serial_parm(9, &p);
+                n_pulses = 4;
+            } else if (nb_bits <= NBBITS_14k) {
+                pulses[0] = Serial_parm(13, &p); pulses[1] = Serial_parm(13, &p);
+                pulses[2] = Serial_parm(9, &p);  pulses[3] = Serial_parm(9, &p);
+                n_pulses = 4;
+            } else if (nb_bits <= NBBITS_16k) {
+                for (i = 0; i < 4; i++) pulses[i] = Serial_parm(13, &p);
+                n_pulses = 4;
+            } else if (nb_bits <= NBBITS_18k) {
+                for (i = 0; i < 4; i++) pulses[i] = Serial_parm(2, &p);
+                for (i = 4; i < 8; i++) pulses[i] = Serial_parm(14, &p);
+                n_pulses = 8;
+            } else if (nb_bits <= NBBITS_20k) {
+                pulses[0] = Serial_parm(10, &p); pulses[1] = Serial_parm(10, &p);
+                pulses[2] = Serial_parm(2, &p);  pulses[3] = Serial_parm(2, &p);
+                pulses[4] = Serial_parm(10, &p); pulses[5] = Serial_parm(10, &p);
+                pulses[6] = Serial_parm(14, &p); pulses[7] = Serial_parm(14, &p);
+                n_pulses = 8;
+            } else {
+                for (i = 0; i < 4; i++) pulses[i] = Serial_parm(11, &p);
+                for (i = 4; i < 8; i++) pulses[i] = Serial_parm(11, &p);
+                n_pulses = 8;
+            }
+
+            gain_index = (nb_bits <= NBBITS_9k) ? Serial_parm(6, &p)
+                                                : Serial_parm(7, &p);
+
+            printf("  sf%d_%d %d %d %d %d", f, sf, T0, T0_frac, select, gain_index);
+            for (i = 0; i < n_pulses; i++) printf(" %d", pulses[i]);
+            printf("\n");
+        }
+
+        /* Whatever is left is the high-band gain, present only at 23.85. */
+        printf("  tail%d %d\n", f, nb_bits - (int)(p - prms));
     }
     Close_read_serial(rx);
     fclose(fp);

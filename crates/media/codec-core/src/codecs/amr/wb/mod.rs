@@ -14,4 +14,5 @@
 
 pub mod bitstream;
 pub mod lp;
+pub mod params;
 pub mod sort_tables;

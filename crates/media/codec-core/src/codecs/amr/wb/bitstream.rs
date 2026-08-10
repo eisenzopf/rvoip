@@ -139,20 +139,6 @@ pub const fn isf_index_widths(mode: AmrMode) -> &'static [usize] {
     }
 }
 
-/// Read a frame's ISF quantiser indices.
-///
-/// They come first in every mode's layout, so this consumes the front of the
-/// frame and leaves the cursor at the excitation parameters.
-///
-/// Returns `None` if the frame is too short.
-#[must_use]
-pub fn read_isf_indices(mode: AmrMode, bits: &mut CodecBits) -> Option<Vec<u16>> {
-    isf_index_widths(mode)
-        .iter()
-        .map(|&w| bits.take(w))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::lp::isp_to_lp::tests_support::{block_has, block_row, has_block};
@@ -217,7 +203,7 @@ mod tests {
 
                 let frame = frames.get(f).expect("fixture has this frame");
                 let mode = AmrMode::new(AmrVariant::WideBand, u8::try_from(mode_index).expect("mode index")).expect("mode");
-                let mut bits = CodecBits::unpack(mode, &frame.data).expect("unpacks");
+                let bits = CodecBits::unpack(mode, &frame.data).expect("unpacks");
 
                 assert_eq!(bits.len(), want_bits, "{block} frame {f}: bit count");
                 assert_eq!(
@@ -226,16 +212,6 @@ mod tests {
                     "{block} frame {f}: unsorted codec bits"
                 );
 
-                let got = read_isf_indices(mode, &mut bits).expect("ISF indices");
-                let want = block_row(&block, &format!("isfind{f}"));
-                assert_eq!(got.len(), want.len(), "{block} frame {f}: index count");
-                for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
-                    assert_eq!(
-                        i64::from(g),
-                        i64::from(w),
-                        "{block} frame {f}: ISF index {i} = {g} but the reference gives {w}"
-                    );
-                }
                 checked += 1;
             }
         }
