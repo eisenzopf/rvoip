@@ -416,6 +416,27 @@ Three mistakes in this stage, all in work from the same sitting:
 - A test divided by `1i32 << 31`, which is `i32::MIN`, so a *correct* `isqrt`
   looked sign-flipped. The function was right; the test's scaling was negative.
 
+### Long-term prediction
+
+`wb/ltp.rs` implements §6.1/§6.4 — the adaptive codebook with quarter-sample
+interpolation, the optional LTP low-pass, preemphasis by the excitation's tilt,
+and pitch sharpening. Bit-exact over all 24 combinations of six lags and four
+fractions.
+
+**The adaptive codebook must write in place, and this is not a detail.** There
+is no stored codebook: the vector is the excitation from one pitch period ago.
+When the lag is shorter than a subframe — common, since lags start at 34
+against a 64-sample subframe — the filter reads samples it wrote *earlier in
+the same subframe*. That self-reference is how a short lag makes a waveform
+repeat within the subframe.
+
+My first API took an immutable history and wrote to a separate output slice,
+which cannot express that. It read off the end of the history and panicked,
+which pointed straight at the design error — but only by luck of the buffer
+length. One element longer and it would have produced plausible, wrong samples
+for every lag below 64, and the bit-exact test would have been the only thing
+standing between that and shipping.
+
 And one corrected premise: a median is **not** unchanged by an outlier —
 replacing the smallest of five values with the largest shifts it up one rank.
 The honest claim, which the test now makes, is that it moves far less than a
