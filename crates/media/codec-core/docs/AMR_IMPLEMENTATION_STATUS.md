@@ -343,6 +343,33 @@ so the eight bits of the first ISF index arrive at payload positions 0, 31, 38,
 32, 10, 1, 2, 3. The bit-exact test caught it — the guessed property failed
 while the reference comparison passed.
 
+### The full parameter walk, and what an oracle cannot catch
+
+`wb/params.rs` reads a whole frame: VAD flag, ISF indices, and per subframe the
+pitch lag, LTP filter bit, algebraic codebook pulses and gain index, plus the
+high-band gains at 23.85. Bit-exact on the first three frames of all nine modes.
+
+**The first version was wrong, and the way it was wrong is the lesson.** The VAD
+flag is the first bit of a speech frame — `dec_main.c` reads it before the ISFs,
+not after — so every field was shifted by one bit. The commit before this one
+claimed "three independent implementations agree". That was overstated:
+opencore-amr and vo-amrwbenc produced the *bitstream*, but the field offsets
+came only from one reading of `dec_main.c`, copied into both the C oracle and
+the Rust. They agreed perfectly because they shared the mistake.
+
+**An oracle only checks what it does not share with you.** The generic defence
+is a conservation law — something that must hold regardless of whether the
+shared assumption is right. Here it is bit count: a field-offset error shifts
+later fields rather than overrunning, so leftover bits are the only signal.
+Every mode had exactly one bit left over, which is the signature of a one-bit
+shift at the front. Now every mode consumes its frame exactly — zero left for
+modes 0–7, sixteen at 23.85 for the high-band gains — and that check is a
+permanent test.
+
+`read_isf_indices` was removed from the bitstream module rather than fixed: it
+read from the frame start, so any future caller would have walked straight back
+into this bug.
+
 A bit-exact test can pass vacuously if the fixture reader silently returns
 nothing, so the reader is checked too: corrupting one value in the dump by a
 single LSB makes the corresponding test fail. Worth redoing whenever the dump
