@@ -2,10 +2,13 @@
 //!
 //! # Status
 //!
-//! **Both decoders work and are bit-exact against the normative references** —
-//! AMR-WB against TS 26.173 at all nine rates, AMR-NB against TS 26.073 at all
-//! eight. Encoding still returns [`CodecError::FeatureNotEnabled`] — loudly,
-//! naming the phase that will supply it, rather than returning silence.
+//! **All four codec paths are bit-exact against the normative references.**
+//! Both decoders reproduce the reference decoders sample for sample — AMR-WB
+//! against TS 26.173 at all nine rates, AMR-NB against TS 26.073 at all eight —
+//! and both encoders produce a byte-identical bitstream at every rate.
+//!
+//! What is not implemented is DTX: comfort noise and deliberate gaps refuse
+//! with a message naming what they need, rather than returning silence.
 //!
 //! See `docs/AMR_IMPLEMENTATION_PLAN.md` for the phased plan and
 //! `docs/AMR_IMPLEMENTATION_STATUS.md` for current progress.
@@ -63,11 +66,11 @@ pub use storage::AmrStorageReader;
 ///
 /// # Not yet implemented
 ///
-/// Encoding fails with [`CodecError::FeatureNotEnabled`] naming the phase that
-/// will supply it, rather than returning silence or garbage — a codec that
-/// quietly produces wrong audio is far harder to diagnose than one that
-/// refuses. So do comfort noise, gaps and lost frames, each naming the piece it
-/// needs.
+/// Comfort noise and deliberate gaps fail with
+/// [`CodecError::FeatureNotEnabled`] naming what they need, rather than
+/// returning silence — a codec that quietly produces wrong audio is far harder
+/// to diagnose than one that refuses. Everything else works: both directions,
+/// every rate, plus concealment of damaged and lost frames.
 pub struct AmrCodec {
     variant: AmrVariant,
     mode_set: AmrModeSet,
@@ -79,11 +82,43 @@ pub struct AmrCodec {
     /// Boxed because each carries several kilobytes of filter history and
     /// `AmrCodec` is otherwise a handful of words that callers move freely.
     decoder: Decoder,
+    /// The encoder for this instance's variant. Boxed for the same reason, and
+    /// separate from the decoder because a codec instance is full duplex: the
+    /// two directions carry unrelated state and must not share any.
+    encoder: Encoder,
 }
 
 impl Decoder {
     /// The decoder a variant needs, or [`Decoder::Absent`] where its feature
     /// is off.
+    fn for_variant(variant: AmrVariant) -> Self {
+        match variant {
+            #[cfg(feature = "amr-nb")]
+            AmrVariant::NarrowBand => Self::NarrowBand(Box::default()),
+            #[cfg(not(feature = "amr-nb"))]
+            AmrVariant::NarrowBand => Self::Absent,
+            #[cfg(feature = "amr-wb")]
+            AmrVariant::WideBand => Self::WideBand(Box::default()),
+            #[cfg(not(feature = "amr-wb"))]
+            AmrVariant::WideBand => Self::Absent,
+        }
+    }
+}
+
+/// The variant-specific encoder, or none where the feature is off.
+enum Encoder {
+    #[cfg(feature = "amr-nb")]
+    NarrowBand(Box<nb::enc::encoder::NbEncoder>),
+    #[cfg(feature = "amr-wb")]
+    WideBand(Box<wb::enc::encoder::WbEncoder>),
+    /// The variant's feature is not enabled in this build.
+    #[cfg_attr(all(feature = "amr-nb", feature = "amr-wb"), allow(dead_code))]
+    Absent,
+}
+
+impl Encoder {
+    /// The encoder a variant needs, or [`Encoder::Absent`] where its feature is
+    /// off.
     fn for_variant(variant: AmrVariant) -> Self {
         match variant {
             #[cfg(feature = "amr-nb")]
@@ -156,6 +191,7 @@ impl AmrCodec {
             octet_align: params.requires_octet_align(),
             dtx: params.dtx,
             decoder: Decoder::for_variant(variant),
+            encoder: Encoder::for_variant(variant),
         })
     }
 
@@ -235,6 +271,47 @@ impl AmrCodec {
         }
     }
 
+    /// Encode one frame of PCM in `mode`.
+    ///
+    /// `samples` must be exactly one frame — 160 at 8 kHz, 320 at 16 kHz.
+    /// A short or long buffer is an error rather than something to pad or
+    /// truncate: the encoder's analysis window reaches across frame
+    /// boundaries, so a caller that mis-frames the audio would get plausible
+    /// output that drifts from what the far end reconstructs.
+    fn encode_speech(&mut self, mode: AmrMode, samples: &[i16]) -> Result<Vec<u8>> {
+        let wanted = self.variant.frame_samples();
+        if samples.len() != wanted {
+            return Err(CodecError::encoding_failed(format!(
+                "{} takes exactly {wanted} samples per frame, got {}",
+                self.variant,
+                samples.len()
+            )));
+        }
+
+        match &mut self.encoder {
+            #[cfg(feature = "amr-nb")]
+            Encoder::NarrowBand(encoder) => {
+                let mut frame = [0i16; 160];
+                frame.copy_from_slice(samples);
+                let rate = nb::enc::encoder::Rate::from_index(mode.index())
+                    .ok_or_else(|| CodecError::encoding_failed("not an AMR-NB speech mode"))?;
+                Ok(encoder.encode_frame(&frame, rate))
+            }
+            #[cfg(feature = "amr-wb")]
+            Encoder::WideBand(encoder) => {
+                let mut frame = [0i16; 320];
+                frame.copy_from_slice(samples);
+                let rate = wb::enc::encoder::Rate::from_index(mode.index())
+                    .ok_or_else(|| CodecError::encoding_failed("not an AMR-WB speech mode"))?;
+                Ok(encoder.encode_frame(&frame, rate))
+            }
+            Encoder::Absent => Err(CodecError::feature_not_enabled(format!(
+                "{} encoding needs its cargo feature enabled",
+                self.variant
+            ))),
+        }
+    }
+
     /// The variant this instance codes.
     #[must_use]
     pub const fn variant(&self) -> AmrVariant {
@@ -265,25 +342,14 @@ impl AmrCodec {
         self.current_mode
     }
 
-    /// Error returned by every path that needs the unimplemented DSP kernel.
-    fn kernel_unimplemented(&self, operation: &str) -> CodecError {
-        let phase = match (self.variant, operation) {
-            (AmrVariant::WideBand, "decode") => "phase 4",
-            (AmrVariant::WideBand, _) => "phase 5",
-            (AmrVariant::NarrowBand, "decode") => "phase 6",
-            (AmrVariant::NarrowBand, _) => "phase 7",
-        };
-        CodecError::feature_not_enabled(format!(
-            "{} {operation} is not implemented yet (planned for {phase}; \
-             see codec-core/docs/AMR_IMPLEMENTATION_PLAN.md)",
-            self.variant
-        ))
-    }
 }
 
 impl AudioCodec for AmrCodec {
-    fn encode(&mut self, _samples: &[i16]) -> Result<Vec<u8>> {
-        Err(self.kernel_unimplemented("encode"))
+    fn encode(&mut self, samples: &[i16]) -> Result<Vec<u8>> {
+        // The currently selected mode, which a peer's codec mode request may
+        // have moved. `encode_frame` is the interface that reports which mode
+        // was actually used.
+        self.encode_speech(self.current_mode, samples)
     }
 
     fn decode(&mut self, data: &[u8]) -> Result<Vec<i16>> {
@@ -315,6 +381,7 @@ impl AudioCodec for AmrCodec {
         // not stream state, and silently renegotiating the bit rate on a
         // discontinuity would be a much harder bug to find than a wrong sample.
         self.decoder = Decoder::for_variant(self.variant);
+        self.encoder = Encoder::for_variant(self.variant);
         Ok(())
     }
 
@@ -349,8 +416,10 @@ impl VariableRateCodec for AmrCodec {
         Ok(())
     }
 
-    fn encode_frame(&mut self, _samples: &[i16]) -> Result<CodedFrame> {
-        Err(self.kernel_unimplemented("encode"))
+    fn encode_frame(&mut self, samples: &[i16]) -> Result<CodedFrame> {
+        let mode = self.current_mode;
+        let data = self.encode_speech(mode, samples)?;
+        Ok(CodedFrame::speech(mode.index(), data))
     }
 
     fn decode_frame(&mut self, frame: &CodedFrame) -> Result<Vec<i16>> {
@@ -485,26 +554,116 @@ mod tests {
     }
 
     #[test]
-    fn unimplemented_operations_fail_loudly_rather_than_returning_silence() {
+    fn unsupported_operations_fail_loudly_rather_than_returning_silence() {
         let mut wb = AmrCodec::new(&CodecConfig::amr_wb()).unwrap();
 
-        let err = wb.encode(&vec![0i16; 320]).unwrap_err();
-        assert!(matches!(err, CodecError::FeatureNotEnabled { .. }));
-        // The message should say what is missing and where to read about it.
-        let text = err.to_string();
-        assert!(text.contains("AMR-WB"), "{text}");
-        assert!(text.contains("not implemented"), "{text}");
-
-        assert!(wb.encode_frame(&vec![0i16; 320]).is_err());
-        // Comfort noise, gaps and losses all need machinery that does not
-        // exist yet, and each is a different kind of missing.
-        assert!(wb.decode_frame(&CodedFrame::no_data()).is_err());
-        assert!(wb.decode_frame(&CodedFrame::comfort_noise(vec![0; 5])).is_err());
-        // A lost frame is the one gap wideband can now fill.
+        // Comfort noise and deliberate gaps still need DTX, and each says so.
+        for frame in [CodedFrame::no_data(), CodedFrame::comfort_noise(vec![0; 5])] {
+            let err = wb.decode_frame(&frame).unwrap_err();
+            assert!(matches!(err, CodecError::FeatureNotEnabled { .. }));
+            assert!(err.to_string().contains("not"), "{err}");
+        }
+        // A lost frame is the one gap wideband can fill.
         assert_eq!(wb.decode_frame(&CodedFrame::lost()).unwrap().len(), 320);
 
+        // A mis-framed buffer is an error rather than something to pad: the
+        // analysis window reaches across frame boundaries, so a caller that
+        // mis-frames the audio would get plausible output that drifts from
+        // what the far end reconstructs.
+        assert!(wb.encode(&vec![0i16; 319]).is_err());
+        assert!(wb.encode(&vec![0i16; 321]).is_err());
+
         let mut nb = AmrCodec::new(&CodecConfig::amr_nb()).unwrap();
-        assert!(nb.encode(&vec![0i16; 160]).is_err());
+        assert!(nb.encode(&vec![0i16; 159]).is_err());
+    }
+
+    /// Encoding through the public API produces exactly the reference
+    /// bitstream, for both variants at every rate.
+    ///
+    /// The encoders are byte-exact in their own modules; this asserts the
+    /// wiring reaches them without disturbing anything — a layer that reset
+    /// state between frames, or mis-framed the audio, would still produce
+    /// plausible speech and pass any weaker test.
+    #[test]
+    fn the_public_api_encodes_byte_exactly_at_every_rate() {
+        for (variant, config, samples, input, refs) in [
+            (
+                AmrVariant::NarrowBand,
+                CodecConfig::amr_nb(),
+                160usize,
+                include_bytes!("testdata/amrnb_enc_input.pcm").as_slice(),
+                [
+                    include_bytes!("testdata/amrnb_enc_mode0.amr").as_slice(),
+                    include_bytes!("testdata/amrnb_enc_mode1.amr").as_slice(),
+                    include_bytes!("testdata/amrnb_enc_mode2.amr").as_slice(),
+                    include_bytes!("testdata/amrnb_enc_mode3.amr").as_slice(),
+                    include_bytes!("testdata/amrnb_enc_mode4.amr").as_slice(),
+                    include_bytes!("testdata/amrnb_enc_mode5.amr").as_slice(),
+                    include_bytes!("testdata/amrnb_enc_mode6.amr").as_slice(),
+                    include_bytes!("testdata/amrnb_enc_mode7.amr").as_slice(),
+                ]
+                .to_vec(),
+            ),
+            (
+                AmrVariant::WideBand,
+                CodecConfig::amr_wb(),
+                320,
+                include_bytes!("testdata/amrwb_enc_input.pcm").as_slice(),
+                [
+                    include_bytes!("testdata/amrwb_enc_mode0.amr").as_slice(),
+                    include_bytes!("testdata/amrwb_enc_mode1.amr").as_slice(),
+                    include_bytes!("testdata/amrwb_enc_mode2.amr").as_slice(),
+                    include_bytes!("testdata/amrwb_enc_mode3.amr").as_slice(),
+                    include_bytes!("testdata/amrwb_enc_mode4.amr").as_slice(),
+                    include_bytes!("testdata/amrwb_enc_mode5.amr").as_slice(),
+                    include_bytes!("testdata/amrwb_enc_mode6.amr").as_slice(),
+                    include_bytes!("testdata/amrwb_enc_mode7.amr").as_slice(),
+                    include_bytes!("testdata/amrwb_enc_mode8.amr").as_slice(),
+                ]
+                .to_vec(),
+            ),
+        ] {
+            let pcm: Vec<i16> = input
+                .chunks_exact(2)
+                .map(|b| i16::from_le_bytes([b[0], b[1]]))
+                .collect();
+            let magic = variant.storage_magic();
+
+            for (index, want) in refs.iter().enumerate() {
+                let mode = u8::try_from(index).expect("mode index");
+                let mut codec = AmrCodec::new(&config.clone().with_amr_mode_set(&[mode])).unwrap();
+                assert_eq!(codec.current_mode(), mode);
+
+                let mut got: Vec<u8> = magic.to_vec();
+                for frame in pcm.chunks_exact(samples) {
+                    got.push((mode << 3) | 0x04);
+                    got.extend(codec.encode(frame).expect("frame encodes"));
+                }
+                assert_eq!(got.len(), want.len(), "{variant} mode {mode}: length");
+                assert_eq!(&got, want, "{variant} mode {mode} is not byte-exact");
+            }
+        }
+    }
+
+    /// What the encoder emits, the decoder reads back — through the traits,
+    /// with the mode carried rather than inferred.
+    #[test]
+    fn a_coded_frame_round_trips_through_both_traits() {
+        let pcm: Vec<i16> = include_bytes!("testdata/amrwb_enc_input.pcm")
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect();
+
+        let mut encoder = AmrCodec::new(&CodecConfig::amr_wb()).unwrap();
+        let mut decoder = AmrCodec::new(&CodecConfig::amr_wb()).unwrap();
+        for frame in pcm.chunks_exact(320).take(10) {
+            let coded = encoder.encode_frame(frame).expect("encodes");
+            assert_eq!(coded.kind, FrameKind::Speech);
+            assert_eq!(coded.mode, 8, "the default mode-set starts at the top rate");
+            assert!(coded.quality_ok);
+            let pcm_out = decoder.decode_frame(&coded).expect("decodes");
+            assert_eq!(pcm_out.len(), 320);
+        }
     }
 
     #[cfg(feature = "amr-nb")]
