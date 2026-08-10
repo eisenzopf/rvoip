@@ -383,6 +383,57 @@ mod tests {
         (include_bytes!("testdata/amrwb_mode8.amr"), 8),
     ];
 
+    /// AMR-NB files from the same generator via `opencore-amr` 0.1.6, one per
+    /// mode, 25 frames each.
+    const REFERENCE_NB_FILES: [(&[u8], u8); 8] = [
+        (include_bytes!("testdata/amrnb_mode0.amr"), 0),
+        (include_bytes!("testdata/amrnb_mode1.amr"), 1),
+        (include_bytes!("testdata/amrnb_mode2.amr"), 2),
+        (include_bytes!("testdata/amrnb_mode3.amr"), 3),
+        (include_bytes!("testdata/amrnb_mode4.amr"), 4),
+        (include_bytes!("testdata/amrnb_mode5.amr"), 5),
+        (include_bytes!("testdata/amrnb_mode6.amr"), 6),
+        (include_bytes!("testdata/amrnb_mode7.amr"), 7),
+    ];
+
+    #[test]
+    fn reads_reference_narrowband_output_for_every_mode() {
+        for (bytes, expected_mode) in REFERENCE_NB_FILES {
+            let (variant, frames) = read(bytes)
+                .unwrap_or_else(|e| panic!("NB mode {expected_mode} failed to parse: {e}"));
+            assert_eq!(variant, AmrVariant::NarrowBand, "mode {expected_mode}");
+            assert_eq!(frames.len(), 25, "NB mode {expected_mode}");
+
+            let mode = AmrMode::new(AmrVariant::NarrowBand, expected_mode).unwrap();
+            let expected_len =
+                AmrVariant::NarrowBand.storage_magic().len() + 25 * (1 + mode.octet_aligned_bytes());
+            assert_eq!(bytes.len(), expected_len, "NB mode {expected_mode} file length");
+
+            for frame in &frames {
+                let AmrFrameType::Speech(got) = frame.frame_type else {
+                    panic!("NB mode {expected_mode}: {:?}", frame.frame_type);
+                };
+                assert_eq!(got.index(), expected_mode);
+            }
+            assert_eq!(write(variant, &frames).unwrap(), bytes, "NB mode {expected_mode}");
+        }
+    }
+
+    #[test]
+    fn reference_settles_the_narrowband_6_70_and_7_40_frame_sizes() {
+        // Several secondary sources, including Wikipedia's AMR page, transpose
+        // these two. RFC 4867 says 6.70 carries 134 bits (17 octets) and 7.40
+        // carries 148 (19). The reference encoder's file lengths decide it
+        // independently: transposed values would make mode 3 the larger file.
+        let len = |bytes: &[u8]| bytes.len();
+        let mode3 = len(REFERENCE_NB_FILES[3].0);
+        let mode4 = len(REFERENCE_NB_FILES[4].0);
+        let magic = AmrVariant::NarrowBand.storage_magic().len();
+        assert_eq!((mode3 - magic) / 25, 1 + 17, "6.70 is 134 bits => 17 octets");
+        assert_eq!((mode4 - magic) / 25, 1 + 19, "7.40 is 148 bits => 19 octets");
+        assert!(mode3 < mode4, "6.70 must be the smaller of the two");
+    }
+
     #[test]
     fn reads_reference_encoder_output_for_every_mode() {
         for (bytes, expected_mode) in REFERENCE_FILES {

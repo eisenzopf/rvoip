@@ -84,13 +84,25 @@ Apache-2.0 libraries, then regenerates the vectors:
 | `opencore-amr` 0.1.6 | AMR-NB encode/decode, AMR-WB decode |
 | `vo-amrwbenc` 0.1.3 | AMR-WB encode |
 
-**First result, and it validates the mode table outright.** The reference
-encoder was run at every AMR-WB mode; its frame sizes are 18, 24, 33, 37, 41,
-47, 51, 59, 61 octets including the 1-octet storage ToC — which is exactly
-`octet_aligned_bytes() + 1` for all nine modes. Independent confirmation of the
-entire table, which until now rested on RFC 4867 plus arithmetic.
+**It validates the whole mode table — all 17 modes.** The reference encoders
+were run at every mode of both variants, and every frame size is exactly
+`octet_aligned_bytes() + 1` (the extra octet being the storage ToC):
 
-225 reference frames are checked in at `src/codecs/amr/testdata/` (40 KB), with
+| AMR-WB | 18 | 24 | 33 | 37 | 41 | 47 | 51 | 59 | 61 |
+|---|---|---|---|---|---|---|---|---|---|
+| **AMR-NB** | 13 | 14 | 16 | 18 | 20 | 21 | 27 | 32 | |
+
+Independent confirmation of a table that until now rested on RFC 4867 plus
+arithmetic.
+
+**It also settles the 6.70 / 7.40 question raised at the top of the plan.**
+Several secondary sources, Wikipedia's AMR page among them, transpose those two
+frame sizes. RFC 4867 says 6.70 carries 134 bits (17 octets) and 7.40 carries
+148 (19), and the reference encoder's file lengths agree — mode 3 is the smaller
+file. Had they been transposed, the sizes would be the other way round. There is
+a test asserting exactly that, so the question cannot quietly reopen.
+
+425 reference frames are checked in at `src/codecs/amr/testdata/` (72 KB), with
 tests asserting that we read every mode correctly, that our frame sizes predict
 the file lengths exactly, that re-writing reproduces the files byte for byte,
 and that every frame survives both RFC 4867 framings. The generator also decodes

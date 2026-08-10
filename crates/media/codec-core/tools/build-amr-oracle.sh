@@ -59,7 +59,7 @@ echo "    all three libraries built"
 echo "==> generating vectors"
 cc -O2 -o "$WORK/gen_vectors" "$HERE/amr_gen_vectors.c" \
    -I"$WORK/install/include" -L"$WORK/install/lib" \
-   -lvo-amrwbenc -lopencore-amrwb -lm
+   -lvo-amrwbenc -lopencore-amrwb -lopencore-amrnb -lm
 mkdir -p "$TESTDATA"
 "$WORK/gen_vectors" "$TESTDATA"
 
