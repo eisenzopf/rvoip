@@ -437,6 +437,23 @@ length. One element longer and it would have produced plausible, wrong samples
 for every lag below 64, and the bit-exact test would have been the only thing
 standing between that and shipping.
 
+### Low-band synthesis
+
+`wb/synthesis.rs` implements §6.6–§6.8 — LP synthesis, de-emphasis, 50 Hz
+high-pass. Excitation in, 12.8 kHz speech out, bit-exact over a four-block
+sequence replayed from reset.
+
+**Two filters keep their recursive state in double precision, for the same
+reason.** `1/A(z)` is marginally stable by construction, and the 50 Hz
+high-pass at 12.8 kHz has poles very close to the unit circle. In a recursive
+filter, rounding error is fed back rather than discarded, so sixteen bits of
+state would let a sharp formant drift. That is why the synthesis filter hands
+its output onward as a `(high, low)` pair rather than a single `Word16` — the
+split is structural, not a rounding refinement.
+
+The excitation's per-subframe scaling is undone by shifting `a[0]` rather than
+the signal, so putting it back costs no precision.
+
 And one corrected premise: a median is **not** unchanged by an outlier —
 replacing the smallest of five values with the largest shifts it up one rank.
 The honest claim, which the test now makes, is that it moves far less than a
