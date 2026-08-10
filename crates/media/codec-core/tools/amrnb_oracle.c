@@ -15,11 +15,16 @@
 #include "cnst.h"
 #include "mode.h"
 #include "bits2prm.h"
+#include "d_plsf.h"
+#include "lsp_az.h"
+#include "int_lpc.h"
+#include "lsp_lsf.h"
 
 /* bitno.tab is a header-style table file; including it gives sort_ptr,
  * unpacked_size, packed_size and unused_size without linking. */
 #define MMS_IO
 #include "bitno.tab"
+#include "lsp.tab"
 
 #define MAX_BITS 244
 #define FRAMES_PER_MODE 3
@@ -50,6 +55,11 @@ static void dump_mode(const char *dir, int mode_no) {
     UWord8 toc, packet[64];
     Word16 bits[MAX_BITS], prm[PRMNO_MR122];
     char magic[8];
+    D_plsfState lsf_state;
+    Word16 lsp_old[M];
+
+    Init_D_plsf_3(&lsf_state, 0);
+    memcpy(lsp_old, lsp_init_data, sizeof lsp_old);
 
     sprintf(path, "%s/amrnb_mode%d.amr", dir, mode_no);
     fp = fopen(path, "rb");
@@ -94,6 +104,20 @@ static void dump_mode(const char *dir, int mode_no) {
         dump_bits_hex(name, bits, nbits);
         sprintf(name, "prm%d", f);
         dump(name, prm, prmno[mode]);
+
+        /* Spectral path. The 3-split quantiser covers every mode except 12.2;
+         * it carries MA-prediction state across frames, so this runs the whole
+         * fixture in sequence rather than decoding one frame in isolation. */
+        if (mode != MR122) {
+            Word16 lsp_new[M], Az[AZ_SIZE];
+            D_plsf_3(&lsf_state, (enum Mode)mode, 0, prm, lsp_new);
+            sprintf(name, "lsp%d", f);
+            dump(name, lsp_new, M);
+            Int_lpc_1to3(lsp_old, lsp_new, Az);
+            sprintf(name, "az%d", f);
+            dump(name, Az, AZ_SIZE);
+            memcpy(lsp_old, lsp_new, sizeof lsp_new);
+        }
     }
     fclose(fp);
 }

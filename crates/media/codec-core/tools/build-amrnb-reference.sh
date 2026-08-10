@@ -88,7 +88,9 @@ ls -l "$TESTDATA"/amrnb_mode0.pcm | awk '{print "    " $5 " bytes per mode"}'
 
 echo "==> building the per-stage oracle"
 cc -O1 -w -I"$SRC" -o "$WORK/amrnb_oracle" "$HERE/amrnb_oracle.c" \
-   "$SRC/bits2prm.c" "$SRC/basicop2.c" "$SRC/count.c" -lm
+   "$SRC/bits2prm.c" "$SRC/basicop2.c" "$SRC/count.c" "$SRC/d_plsf_3.c" \
+   "$SRC/lsp_az.c" "$SRC/int_lpc.c" "$SRC/lsp_lsf.c" "$SRC/reorder.c" \
+   "$SRC/oper_32b.c" "$SRC/copy.c" -lm
 
 echo "==> generating per-stage vectors"
 "$WORK/amrnb_oracle" "$TESTDATA" > "$TESTDATA/stages_nb.txt"

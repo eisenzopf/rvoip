@@ -24,4 +24,5 @@
 
 pub mod bitstream;
 pub mod decoder_tables;
+pub mod lsp;
 pub mod tables;
