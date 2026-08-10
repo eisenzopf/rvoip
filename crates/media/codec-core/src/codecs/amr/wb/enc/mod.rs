@@ -32,4 +32,7 @@
 //! byte for byte — so a trace point that changes behaviour rather than observing
 //! it fails loudly rather than quietly moving the target.
 
+pub mod analysis;
 pub mod isf_quant;
+pub mod pitch;
+pub mod preproc;
