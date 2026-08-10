@@ -16,7 +16,7 @@ where we actually are.
 | 0 | Foundations: types, feature flags, ADR, oracle qualification | 🟡 **In progress** — code landed, external items outstanding |
 | 1 | RFC 4867 payload format + AMR file storage format | 🟢 **Complete** |
 | 2 | SDP negotiation + relay path | 🟡 **Negotiation done** — relay path outstanding |
-| 3 | `common/` DSP layer + oracle harness | 🟡 **In progress** — operators, oracle and LP front end done |
+| 3 | `common/` DSP layer + oracle harness | 🟡 **In progress** — operators + oracle done; fixed-point DSP not started |
 | 4 | AMR-WB decoder, fixed point | ⚪ Not started |
 | 5 | **AMR-WB encoder — the HD-voice milestone** | ⚪ Not started |
 | 6 | AMR-NB decoder, fixed point | ⚪ Not started |
@@ -137,7 +137,32 @@ rather than raw stream decompression — it uses subset fonts with custom
 encodings, unlike TS 26.201, so naive extraction yields binary noise that looks
 like a failed download.
 
-### First DSP: the LP analysis front end
+### The float modules were removed
+
+`wb/lp/{window,levinson,isp}.rs` are gone. They had **no callers** — nothing
+outside their own directory referenced them, `AmrCodec` never reached them, and
+`encode`/`decode` still return `FeatureNotEnabled`. Dead code that could be
+mistaken for the codec.
+
+Evidence that float has no role here at all:
+
+- **TS 26.173, the normative reference**: `typedef short Word16; typedef long
+  Word32;` — pure fixed point.
+- **Zero files** across `opencore-amr` and `vo-amrwbenc` mention `float` or
+  `double`.
+- Every AMR implementation in this project's own lab — FreeSWITCH's `mod_amr`
+  and `mod_amrwb`, Asterisk's `codec_amr`, the oracle libraries — is fixed-point,
+  because they all link those same libraries.
+
+The float specs (TS 26.104 / 26.204) exist for research; they do not appear in
+telephony, which is why they were also dropped from the oracle roster.
+
+What the removed work actually produced is kept: the window formula verified
+against `ham_wind.tab` to within 1 LSB, and the noise-floor placement
+discrepancy. Both are recorded above. The code itself was not the codec and
+could not have become it.
+
+### Superseded: first DSP as floating-point reference models
 
 `codecs/amr/wb/lp/window.rs` implements TS 26.190 §5.2.1 — the asymmetric
 analysis window (L1=256, L2=128, 384 samples), autocorrelation, 60 Hz lag
