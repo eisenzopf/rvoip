@@ -43,6 +43,10 @@ void Set_zero(Word16 x[], Word16 L);
 void Copy(Word16 x[], Word16 y[], Word16 L);
 void DEC_ACELP_2t64_fx(Word16 index, Word16 code[]);
 void DEC_ACELP_4t64_fx(Word16 index[], Word16 nbbits, Word16 code[]);
+void Init_D_gain2(Word16 *mem);
+void D_gain2(Word16 index, Word16 nbits, Word16 code[], Word16 L_subfr,
+             Word16 *gain_pit, Word32 *gain_cod, Word16 bfi, Word16 prev_bfi,
+             Word16 state, Word16 unusable_frame, Word16 vad_hist, Word16 *mem);
 /* dec_main.c keeps this static, so it cannot be linked against; it is short
  * and exactly reproduced here. Evenly spaced ISFs -- a flat spectrum, which is
  * the decoder's documented reset state. */
@@ -178,6 +182,7 @@ static void dump_bitstream(const char *dir, int mode_no) {
     FILE *fp;
     RX_State *rx = NULL;
     Word16 prms[MAX_PRM], frame_type, mode;
+    Word16 dec_gain[23];
     char magic[16];
 
     sprintf(path, "%s/amrwb_mode%d.amr", dir, mode_no);
@@ -192,6 +197,7 @@ static void dump_bitstream(const char *dir, int mode_no) {
     }
 
     Init_read_serial(&rx);
+    Init_D_gain2(dec_gain);
     printf("bitstream%d\n", mode_no);
     for (int f = 0; f < FRAMES_PER_MODE; f++) {
         Word16 ok = Read_serial(fp, prms, &frame_type, &mode, rx, 2);
@@ -341,6 +347,20 @@ static void dump_bitstream(const char *dir, int mode_no) {
                 else                            DEC_ACELP_4t64_fx(pulses, 88, code);
                 sprintf(name, "code%d_%d", f, sf);
                 dump(name, code, 64);
+
+                /* Gains. The predictor runs across subframes and frames, so
+                 * dec_gain state is carried for the whole file rather than
+                 * reset per subframe -- decoding one in isolation would give a
+                 * different answer. */
+                {
+                    Word16 gain_pit;
+                    Word32 gain_cod;
+                    D_gain2(gain_index, (nb_bits <= NBBITS_9k) ? 6 : 7, code, 64,
+                            &gain_pit, &gain_cod, 0, 0, 0, 0, 0, dec_gain);
+                    /* The code gain is Q16 and does not fit a Word16, so it
+                     * is printed as a plain signed 32-bit value. */
+                    printf("  gain%d_%d %d %ld\n", f, sf, gain_pit, (long)gain_cod);
+                }
             }
         }
 

@@ -15,5 +15,8 @@
 pub mod bitstream;
 pub mod codebook;
 pub mod lp;
+pub mod gain;
+pub mod gain_tables;
+pub mod math;
 pub mod params;
 pub mod sort_tables;

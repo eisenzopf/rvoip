@@ -185,6 +185,20 @@ pub mod tests_support {
         block_lines(block).any(|l| l.split_whitespace().next() == Some(label))
     }
 
+    /// One labelled row of a named block, as 32-bit integers.
+    ///
+    /// Needed where a dumped value does not fit a `Word16` -- the Q16 code
+    /// gain, for instance.
+    pub fn block_row_i32(block: &str, label: &str) -> Vec<i32> {
+        for line in block_lines(block) {
+            let mut parts = line.split_whitespace();
+            if parts.next() == Some(label) {
+                return parts.map(|v| v.parse().expect("integer")).collect();
+            }
+        }
+        panic!("block {block:?} has no row {label:?}");
+    }
+
     /// One labelled row of a named block, as integers.
     pub fn block_row(block: &str, label: &str) -> Vec<i16> {
         for line in block_lines(block) {
