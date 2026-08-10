@@ -54,6 +54,19 @@ void Deemph_32(Word16 x_hi[], Word16 x_lo[], Word16 y[], Word16 mu, Word16 L,
 void Init_HP50_12k8(Word16 mem[]);
 void Scale_sig(Word16 x[], Word16 lg, Word16 exp);
 void Init_Oversamp_16k(Word16 mem[]);
+Word16 Random(Word16 *seed);
+void Init_HP400_12k8(Word16 mem[]);
+void HP400_12k8(Word16 signal[], Word16 lg, Word16 mem[]);
+void Weight_a(Word16 a[], Word16 ap[], Word16 gamma, Word16 m);
+void Syn_filt(Word16 a[], Word16 m, Word16 x[], Word16 y[], Word16 lg,
+              Word16 mem[], Word16 update);
+void Init_Filt_6k_7k(Word16 mem[]);
+void Filt_6k_7k(Word16 signal[], Word16 lg, Word16 mem[]);
+void Init_Filt_7k(Word16 mem[]);
+void Filt_7k(Word16 signal[], Word16 lg, Word16 mem[]);
+Word16 div_s(Word16 var1, Word16 var2);
+Word32 Dot_product12(Word16 x[], Word16 y[], Word16 lg, Word16 *exp);
+void Isqrt_n(Word32 *frac, Word16 *exp);
 void Oversamp_16k(Word16 sig12k8[], Word16 lg, Word16 sig16k[], Word16 mem[]);
 void HP50_12k8(Word16 signal[], Word16 lg, Word16 mem[]);
 void D_gain2(Word16 index, Word16 nbits, Word16 code[], Word16 L_subfr,
@@ -611,6 +624,118 @@ static void dump_excitation(void) {
     }
 }
 
+/* High-band synthesis.
+ *
+ * The 5.5-7.5 kHz band is not transmitted at all below 23.85 kbit/s: it is
+ * generated from noise whose energy matches the excitation and whose loudness
+ * is set by the low band's spectral tilt. This is what makes the codec
+ * wideband rather than 12.8 kHz speech resampled.
+ *
+ * Driven from deterministic excitation and synthesis, with the reference's own
+ * random generator so the noise sequence matches exactly.
+ */
+static void dump_highband(void) {
+    static const Word16 a_real[M + 1] = {
+        4096, -3559, 1097, -175, -313, 292, -73, -119, 158, -83,
+        -20, 72, -60, 12, 25, -31, 12
+    };
+    Word16 seed = 21845, mem_hp400[6], mem_syn_hf[M16k], mem_hf[30], mem_hf3[30];
+    Word16 exc[64], synth[64], HF[80], Ap[M16k + 1], a[M + 1];
+    Word16 ener, exp_ener, exp, tmp, fac, gain1, gain2, weight1, weight2;
+    Word32 L_tmp;
+    int blk, n, i;
+    char name[24];
+
+    Init_HP400_12k8(mem_hp400);
+    memset(mem_syn_hf, 0, sizeof mem_syn_hf);
+    Init_Filt_6k_7k(mem_hf);
+    Init_Filt_7k(mem_hf3);
+    Copy((Word16 *)a_real, a, M + 1);
+
+    printf("highband\n");
+    for (blk = 0; blk < 3; blk++) {
+        Word16 Q_new = 0;
+        Word16 vad_hist = (blk == 2) ? 3 : 0;   /* exercise both weightings */
+
+        for (n = 0; n < 64; n++) {
+            int t = blk * 64 + n;
+            exc[n]   = (Word16)(3000.0 * sin(2.0 * PI * t / 29.0));
+            synth[n] = (Word16)(6000.0 * sin(2.0 * PI * t / 61.0));
+        }
+        sprintf(name, "hexc%d", blk);
+        dump(name, exc, 64);
+        sprintf(name, "hsyn%d", blk);
+        dump(name, synth, 64);
+
+        for (i = 0; i < 80; i++) HF[i] = shr(Random(&seed), 3);
+        sprintf(name, "noise%d", blk);
+        dump(name, HF, 80);
+
+        /* Match the noise energy to the excitation's. */
+        Scale_sig(exc, 64, -3);
+        Q_new = sub(Q_new, 3);
+        ener = extract_h(Dot_product12(exc, exc, 64, &exp_ener));
+        exp_ener = sub(exp_ener, add(Q_new, Q_new));
+
+        tmp = extract_h(Dot_product12(HF, HF, 80, &exp));
+        if (sub(tmp, ener) > 0) { tmp = shr(tmp, 1); exp = add(exp, 1); }
+        L_tmp = L_deposit_h(div_s(tmp, ener));
+        exp = sub(exp, exp_ener);
+        Isqrt_n(&L_tmp, &exp);
+        L_tmp = L_shl(L_tmp, add(exp, 1));
+        tmp = extract_h(L_tmp);
+        for (i = 0; i < 80; i++) HF[i] = mult(HF[i], tmp);
+        sprintf(name, "matched%d", blk);
+        dump(name, HF, 80);
+
+        /* Tilt of the synthesis: r[1]/r[0] after a 400 Hz high-pass. */
+        HP400_12k8(synth, 64, mem_hp400);
+        sprintf(name, "hp400_%d", blk);
+        dump(name, synth, 64);
+
+        L_tmp = 1L;
+        for (i = 0; i < 64; i++) L_tmp = L_mac(L_tmp, synth[i], synth[i]);
+        exp = norm_l(L_tmp);
+        ener = extract_h(L_shl(L_tmp, exp));
+
+        L_tmp = 1L;
+        for (i = 1; i < 64; i++) L_tmp = L_mac(L_tmp, synth[i], synth[i - 1]);
+        tmp = extract_h(L_shl(L_tmp, exp));
+        fac = (tmp > 0) ? div_s(tmp, ener) : 0;
+
+        gain1 = sub(32767, fac);
+        gain2 = mult(sub(32767, fac), 20480);
+        gain2 = shl(gain2, 1);
+        if (vad_hist > 0) { weight1 = 0; weight2 = 32767; }
+        else              { weight1 = 32767; weight2 = 0; }
+        tmp = mult(weight1, gain1);
+        tmp = add(tmp, mult(weight2, gain2));
+        if (tmp != 0) tmp = add(tmp, 1);
+        if (sub(tmp, 3277) < 0) tmp = 3277;
+
+        printf("  hmeta%d %d %d\n", blk, fac, tmp);
+        for (i = 0; i < 80; i++) HF[i] = mult(HF[i], tmp);
+        sprintf(name, "tilted%d", blk);
+        dump(name, HF, 80);
+
+        /* Shape the noise with a bandwidth-expanded copy of the LP filter. */
+        Weight_a(a, Ap, 19661, M);
+        sprintf(name, "weighted%d", blk);
+        dump(name, Ap, M + 1);
+        Syn_filt(Ap, M, HF, HF, 80, mem_syn_hf + (M16k - M), 1);
+        sprintf(name, "shaped%d", blk);
+        dump(name, HF, 80);
+
+        Filt_6k_7k(HF, 80, mem_hf);
+        sprintf(name, "band%d", blk);
+        dump(name, HF, 80);
+
+        Filt_7k(HF, 80, mem_hf3);
+        sprintf(name, "lp7k%d", blk);
+        dump(name, HF, 80);
+    }
+}
+
 int main(int argc, char **argv) {
     for (int seed = 0; seed < 4; seed++) {
         Word16 x[L_WIN];
@@ -678,6 +803,7 @@ int main(int argc, char **argv) {
     dump_ltp();
     dump_synthesis();
     dump_excitation();
+    dump_highband();
 
     if (argc > 1) {
         for (int m = 0; m < 9; m++) dump_bitstream(argv[1], m);

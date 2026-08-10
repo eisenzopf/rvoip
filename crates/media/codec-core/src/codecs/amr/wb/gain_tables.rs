@@ -238,6 +238,35 @@ pub const LOG2_TABLE: [i16; 33] = [
     31266, 32023, 32767,
 ];
 
+/// Band-pass for the synthesised high band, Q15 with a gain of 4.
+///
+/// Confines the noise to roughly 6-7 kHz. The name is the design band;
+/// the input is pre-scaled by 1/4 to leave room for the filter's gain.
+pub const FIR_6K_7K: [i16; 31] = [
+    -32, 47, 32, -27, -369, 1122, -1421, 0,
+    3798, -8880, 12349, -10984, 3548, 7766, -18001, 22118,
+    -18001, 7766, 3548, -10984, 12349, -8880, 3798, 0,
+    -1421, 1122, -369, -27, 32, 47, -32,
+];
+
+/// Low-pass at 7 kHz, Q15. Applied only at 23.85 kbit/s, where the
+/// transmitted high-band gains make the band loud enough for content
+/// above 7 kHz to be audible.
+pub const FIR_7K: [i16; 31] = [
+    -21, 47, -89, 146, -203, 229, -177, 0,
+    335, -839, 1485, -2211, 2931, -3542, 3953, 28682,
+    3953, -3542, 2931, -2211, 1485, -839, 335, 0,
+    -177, 229, -203, 146, -89, 47, -21,
+];
+
+/// High-band correction gains, Q14. Only 23.85 kbit/s transmits an index
+/// into this; every other mode estimates the gain from the low band's
+/// spectral tilt instead.
+pub const HP_GAIN: [i16; 16] = [
+    3624, 4673, 5597, 6479, 7425, 8378, 9324, 10264,
+    11210, 12206, 13391, 14844, 16770, 19655, 24289, 32728,
+];
+
 /// Upsampling interpolation filter for 12.8 -> 16 kHz, Q14.
 ///
 /// One fifth-sample resolution: 24 taps at each of five phases, stored

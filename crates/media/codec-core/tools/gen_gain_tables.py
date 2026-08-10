@@ -32,6 +32,19 @@ TABLES = [
      "`2^x` over one octave, sampled at 33 points, Q15."),
     ("log2_tab.h", "table", "LOG2_TABLE", 33, 10,
      "`log2(x)` over one octave, sampled at 33 points, Q15."),
+    ("hp6k.c", "fir_6k_7k", "FIR_6K_7K", 31, 8,
+     "Band-pass for the synthesised high band, Q15 with a gain of 4.\n"
+     "///\n"
+     "/// Confines the noise to roughly 6-7 kHz. The name is the design band;\n"
+     "/// the input is pre-scaled by 1/4 to leave room for the filter's gain."),
+    ("hp7k.c", "fir_7k", "FIR_7K", 31, 8,
+     "Low-pass at 7 kHz, Q15. Applied only at 23.85 kbit/s, where the\n"
+     "/// transmitted high-band gains make the band loud enough for content\n"
+     "/// above 7 kHz to be audible."),
+    ("cod_main.c", "HP_gain", "HP_GAIN", 16, 8,
+     "High-band correction gains, Q14. Only 23.85 kbit/s transmits an index\n"
+     "/// into this; every other mode estimates the gain from the low band's\n"
+     "/// spectral tilt instead."),
     ("decim54.c", "fir_up", "FIR_UP", 120, 5,
      "Upsampling interpolation filter for 12.8 -> 16 kHz, Q14.\n"
      "///\n"
