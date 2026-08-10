@@ -266,6 +266,40 @@ a usable `r(0)`, the lag window leaves `r[0]` untouched while shrinking the
 rest, and doubling the input amplitude leaves the normalised sequence
 essentially unchanged.
 
+### Bit-exact against the normative reference
+
+`tools/build-amr-reference.sh` fetches TS 26.173 and drives its functions
+directly, dumping every intermediate of the LP analysis chain. The vectors are
+checked in at `testdata/lp_stages_wb.txt`; the source is not, since 3GPP permits
+in-house use but not redistribution.
+
+**The fixed-point autocorrelation matches the reference exactly** — all 17 lags,
+both halves of each double-precision pair, across every case. Two tests: one for
+the whole windowing-and-accumulation path, and one feeding the reference's own
+pre-lag values through `lag_window` in isolation so a failure there cannot be
+blamed on the accumulation.
+
+This is the only evidence that counts. Property tests can show output is
+*plausible*; conformance means matching these integers.
+
+Two things the harness needed, both worth recording for whoever runs it next:
+
+- **ETSI serves 403 to curl's default user agent.** A browser one gets 200. Bot
+  filtering, not an access restriction — the same trap that made me wrongly
+  record the spec as unreachable earlier.
+- **The reference's `typedefs.h` predates arm64** and stops with
+  `#error "can't determine architecture; adapt typedefs.h to your platform"`.
+  Its integer widths come from `limits.h` and are already right; only the
+  platform/endianness block needs a branch, which is what the error asks for.
+  The script adds it automatically.
+
+A first attempt at these vectors was worthless and the reason is worth keeping.
+Synthesising "ordered ISP-looking values" and feeding them to `Isp_Az` produced
+saturated output — `a[1] = 32246` in Q12 is 7.9, and several coefficients came
+out zero. Ordered values are not generally the roots of a minimum-phase filter.
+The vectors now come from running the reference's own analysis chain, so the
+ISPs are ones the codec could actually produce.
+
 ### Course correction: fixed point, and the reference is the definition
 
 **AMR is defined in fixed-point arithmetic.** TS 26.190 §8.1: "The adaptive
