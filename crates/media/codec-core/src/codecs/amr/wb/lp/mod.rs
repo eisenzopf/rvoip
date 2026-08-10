@@ -2,6 +2,8 @@
 
 pub mod autocorr;
 pub mod isf;
+pub mod isf_codebooks;
+pub mod isf_dequant;
 pub mod isf_tables;
 pub mod isp_to_lp;
 pub mod tables;

@@ -34,6 +34,19 @@ void Isp_Az(Word16 isp[], Word16 a[], Word16 m, Word16 adaptive_scaling);
 void Isp_isf(Word16 isp[], Word16 isf[], Word16 m);
 void Isf_isp(Word16 isf[], Word16 isp[], Word16 m);
 void Int_isp(Word16 isp_old[], Word16 isp_new[], Word16 frac[], Word16 Az[]);
+void Dpisf_2s_46b(Word16 *indice, Word16 *isf_q, Word16 *past_isfq,
+                  Word16 *isfold, Word16 *isf_buf, Word16 bfi, Word16 enc_dec);
+void Dpisf_2s_36b(Word16 *indice, Word16 *isf_q, Word16 *past_isfq,
+                  Word16 *isfold, Word16 *isf_buf, Word16 bfi, Word16 enc_dec);
+void Set_zero(Word16 x[], Word16 L);
+void Copy(Word16 x[], Word16 y[], Word16 L);
+/* dec_main.c keeps this static, so it cannot be linked against; it is short
+ * and exactly reproduced here. Evenly spaced ISFs -- a flat spectrum, which is
+ * the decoder's documented reset state. */
+static Word16 isf_init[M] = {
+    1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192,
+    9216, 10240, 11264, 12288, 13312, 14336, 15360, 3840
+};
 
 #define L_WIN 384
 
@@ -60,6 +73,65 @@ static void dump(const char *name, const Word16 *v, int n) {
     printf("  %s", name);
     for (int i = 0; i < n; i++) printf(" %d", v[i]);
     printf("\n");
+}
+
+/* ISF dequantisation.
+ *
+ * This is stateful: the quantiser is predictive, so a frame's output depends
+ * on the residual of the frame before it. Dumping a single frame would test
+ * almost nothing -- it would miss whether the state update is right, which is
+ * where a decoder silently diverges from its encoder. So each case runs a
+ * sequence of frames from the documented reset state, and the last frame is
+ * marked bad, which exercises the concealment path *and* its distinct state
+ * update.
+ *
+ * Indices are derived arithmetically rather than randomly so the vectors are
+ * reproducible from this file alone.
+ */
+#define N_ISF_FRAMES 6
+#define SIZE_BK1  256
+#define SIZE_BK2  256
+
+static const Word16 sizes_46b[7] = {SIZE_BK1, SIZE_BK2, 64, 128, 128, 32, 32};
+static const Word16 sizes_36b[5] = {SIZE_BK1, SIZE_BK2, 128, 128, 64};
+
+static void dump_isf_dequant(int variant) {
+    Word16 past_isfq[M], isfold[M], isf_buf[L_MEANBUF * M], isf_q[M];
+    Word16 indice[7];
+    int n_ind = variant == 0 ? 7 : 5;
+    const Word16 *sizes = variant == 0 ? sizes_46b : sizes_36b;
+
+    /* The reset state from dec_main.c: no past residual, and the ISF history
+     * primed with the initial vector rather than left at zero. */
+    Set_zero(past_isfq, M);
+    Copy(isf_init, isfold, M);
+    for (int j = 0; j < L_MEANBUF; j++) Copy(isf_init, &isf_buf[j * M], M);
+
+    printf("isfdq%d\n", variant);
+    for (int f = 0; f < N_ISF_FRAMES; f++) {
+        Word16 bfi = (f == N_ISF_FRAMES - 1) ? 1 : 0;
+        char name[24];
+
+        for (int i = 0; i < n_ind; i++) {
+            indice[i] = (Word16)((f * 37 + i * 101 + 13) % sizes[i]);
+        }
+
+        if (variant == 0)
+            Dpisf_2s_46b(indice, isf_q, past_isfq, isfold, isf_buf, bfi, 1);
+        else
+            Dpisf_2s_36b(indice, isf_q, past_isfq, isfold, isf_buf, bfi, 1);
+
+        sprintf(name, "ind%d", f);
+        dump(name, indice, n_ind);
+        sprintf(name, "isfq%d", f);
+        dump(name, isf_q, M);
+        sprintf(name, "past%d", f);
+        dump(name, past_isfq, M);
+
+        /* The decoder carries the result forward as the next frame's history,
+         * which is what makes concealment reach for a plausible spectrum. */
+        Copy(isf_q, isfold, M);
+    }
 }
 
 int main(void) {
@@ -123,5 +195,8 @@ int main(void) {
             dump(name, az_int + k * (M + 1), M + 1);
         }
     }
+
+    dump_isf_dequant(0);
+    dump_isf_dequant(1);
     return 0;
 }

@@ -162,6 +162,39 @@ pub mod tests_support {
     pub fn case_count() -> usize {
         LP_STAGES.lines().filter(|l| l.starts_with("case ")).count()
     }
+
+    /// The indented rows belonging to a named block.
+    ///
+    /// Block headers sit at the left margin and their rows are indented, so
+    /// this needs no knowledge of which blocks exist.
+    fn block_lines(block: &str) -> impl Iterator<Item = &'static str> + '_ {
+        LP_STAGES
+            .lines()
+            .skip_while(move |l| l.trim_end() != block)
+            .skip(1)
+            .take_while(|l| l.starts_with(' '))
+    }
+
+    /// Whether the dump holds a block with this name.
+    pub fn has_block(block: &str) -> bool {
+        LP_STAGES.lines().any(|l| l.trim_end() == block)
+    }
+
+    /// Whether a block holds a row with this label.
+    pub fn block_has(block: &str, label: &str) -> bool {
+        block_lines(block).any(|l| l.split_whitespace().next() == Some(label))
+    }
+
+    /// One labelled row of a named block, as integers.
+    pub fn block_row(block: &str, label: &str) -> Vec<i16> {
+        for line in block_lines(block) {
+            let mut parts = line.split_whitespace();
+            if parts.next() == Some(label) {
+                return parts.map(|v| v.parse().expect("integer")).collect();
+            }
+        }
+        panic!("block {block:?} has no row {label:?}");
+    }
 }
 
 #[cfg(test)]
