@@ -33,6 +33,7 @@
 
 pub mod analysis;
 pub mod codebook;
+pub mod encoder;
 pub mod gain_quant;
 pub mod lsp_quant;
 pub mod pitch;
