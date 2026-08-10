@@ -88,6 +88,40 @@ pub fn isp_to_isf(isp: &[Word16; LP_ORDER]) -> [Word16; LP_ORDER] {
 /// # Panics
 ///
 /// If any input is negative, which means it is not an ISF.
+/// Convert ISFs to ISPs in place, at any order.
+///
+/// The high band uses order 20, so this cannot be fixed at [`LP_ORDER`].
+/// Otherwise identical to [`isf_to_isp`].
+///
+/// # Panics
+///
+/// If any value is negative, which means it is not an ISF.
+pub fn isf_to_isp_in_place(ctx: &mut DspContext, isf: &mut [Word16]) {
+    let m = isf.len();
+    // Undo the halving applied to the last coefficient, which spans twice the
+    // range of the others.
+    isf[m - 1] = shl(ctx, isf[m - 1], 1);
+
+    for slot in isf.iter_mut() {
+        let ind = usize::try_from(shr(ctx, *slot, 7).0)
+            .expect("ISFs are non-negative by construction");
+        let offset = Word16(slot.0 & 0x007f);
+
+        let step = sub(ctx, Word16(COS_TABLE[ind + 1]), Word16(COS_TABLE[ind]));
+        let interp = l_mult(ctx, step, offset);
+        let shifted = l_shr(ctx, interp, 8);
+        *slot = add(ctx, Word16(COS_TABLE[ind]), extract_l(shifted));
+    }
+}
+
+/// Convert ISFs (Q15 normalised frequencies) back to ISPs (Q15 cosines).
+///
+/// The inverse of [`isp_to_isf`] up to table interpolation, which is not exact
+/// in either direction.
+///
+/// # Panics
+///
+/// If any input is negative, which means it is not an ISF.
 #[must_use]
 pub fn isf_to_isp(isf: &[Word16; LP_ORDER]) -> [Word16; LP_ORDER] {
     let mut ctx = DspContext::default();

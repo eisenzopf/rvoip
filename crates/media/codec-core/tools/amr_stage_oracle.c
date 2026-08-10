@@ -60,6 +60,7 @@ Word16 voice_factor(Word16 exc[], Word16 Q_exc, Word16 gain_pit, Word16 code[],
                     Word16 gain_code, Word16 L_subfr);
 void Phase_dispersion(Word16 gain_code, Word16 gain_pit, Word16 code[],
                       Word16 mode, Word16 disp_mem[]);
+void Isf_Extrapolation(Word16 HfIsf[]);
 void Init_HP400_12k8(Word16 mem[]);
 void HP400_12k8(Word16 signal[], Word16 lg, Word16 mem[]);
 void Weight_a(Word16 a[], Word16 ap[], Word16 gamma, Word16 m);
@@ -860,6 +861,49 @@ static void dump_enhancers(void) {
     }
 }
 
+/* ISF extrapolation: the 6.60 kbit/s high-band branch.
+ *
+ * Every other mode shapes the high band with a bandwidth-expanded copy of the
+ * low band's filter. At 6.60 there is not enough spectral detail to borrow, so
+ * an order-20 filter is extrapolated from the low band's ISF *spacing* --
+ * whichever of three lag hypotheses correlates best is continued outward.
+ */
+static void dump_isf_extrap(void) {
+    Word16 isf[M16k];
+    int c, i;
+    char name[24];
+
+    /* Real dequantised ISF sets, not synthesised ones. A hand-made ascending
+     * ramp is not a valid ISF vector: the sixteenth value is the halved
+     * trailing predictor coefficient, not another line frequency, and
+     * continuing the ramp into it drives Isf_isp's table index out of range.
+     * C reads past the table silently, so such vectors look plausible and mean
+     * nothing. These come from running the quantiser. */
+    {
+        Word16 past_isfq[M], isfold[M], isf_buf[L_MEANBUF * M];
+        Word16 indice[7];
+        Set_zero(past_isfq, M);
+        Copy(isf_init, isfold, M);
+        for (i = 0; i < L_MEANBUF; i++) Copy(isf_init, &isf_buf[i * M], M);
+
+        printf("isfextrp\n");
+        for (c = 0; c < 4; c++) {
+            int k;
+            for (k = 0; k < 7; k++)
+                indice[k] = (Word16)((c * 53 + k * 31 + 7) % sizes_46b[k]);
+            Dpisf_2s_46b(indice, isf, past_isfq, isfold, isf_buf, 0, 1);
+            Copy(isf, isfold, M);
+            for (i = M; i < M16k; i++) isf[i] = 0;
+
+            sprintf(name, "xin%d", c);
+            dump(name, isf, M);
+            Isf_Extrapolation(isf);
+            sprintf(name, "xout%d", c);
+            dump(name, isf, M16k);
+        }
+    }
+}
+
 int main(int argc, char **argv) {
     for (int seed = 0; seed < 4; seed++) {
         Word16 x[L_WIN];
@@ -929,6 +973,7 @@ int main(int argc, char **argv) {
     dump_excitation();
     dump_highband();
     dump_enhancers();
+    dump_isf_extrap();
 
     if (argc > 1) {
         for (int m = 0; m < 9; m++) dump_bitstream(argv[1], m);

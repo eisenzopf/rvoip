@@ -376,6 +376,139 @@ pub const fn transmitted_gain(index: u16) -> Word16 {
     Word16(HP_GAIN[index as usize])
 }
 
+/// Order of the extrapolated high-band filter.
+pub const M16K_ORDER: usize = M16K;
+
+/// 1/12 in Q15, for the mean of the difference vector.
+const INV_LENGTH: Word16 = Word16(2731);
+
+/// Extrapolate an order-20 high-band filter from the low band's ISFs.
+///
+/// **Only the 6.60 kbit/s mode uses this.** Every other mode shapes the high
+/// band with a bandwidth-expanded copy of the low band's own filter; at 6.60
+/// there is not enough spectral detail to borrow, so a filter is invented.
+///
+/// The invention is not arbitrary. The *spacing* between consecutive ISFs
+/// carries the formant structure, and that spacing tends to be quasi-periodic.
+/// Three lag hypotheses (2, 3 and 4) are correlated against the observed
+/// spacing and the best-fitting one is continued outward — so the synthesised
+/// high band inherits the talker's formant rhythm rather than a flat guess.
+///
+/// `isf` holds the 16 low-band ISFs on entry and receives 20 ISPs on exit.
+///
+/// # Panics
+///
+/// If `isf` is shorter than [`M16K_ORDER`].
+pub fn extrapolate_isf(ctx: &mut DspContext, isf: &mut [Word16]) {
+    use crate::fixed_point::arith32::{l_add, l_sub};
+    use crate::fixed_point::oper32::{l_extract, mpy_32};
+
+    isf[M16K - 1] = isf[M - 1];
+
+    // Spacing between consecutive line frequencies.
+    let mut diff = [Word16(0); M - 2];
+    for i in 1..M - 1 {
+        diff[i - 1] = sub(ctx, isf[i], isf[i - 1]);
+    }
+
+    // Mean spacing, over the upper part only: the lowest few lines sit where
+    // the spectrum is dominated by the first formant and are not typical.
+    let mut acc = Word32(0);
+    for i in 3..M - 1 {
+        acc = l_mac(ctx, acc, diff[i - 1], INV_LENGTH);
+    }
+    let mut mean = round(ctx, acc);
+
+    // Normalise on the widest spacing, so the correlations below use the full
+    // dynamic range whatever the talker's absolute formant spread.
+    let mut peak = Word16(0);
+    for d in &diff {
+        if d.0 > peak.0 {
+            peak = *d;
+        }
+    }
+    let exp = norm_s(peak);
+    for d in &mut diff {
+        *d = shl(ctx, *d, exp);
+    }
+    mean = shl(ctx, mean, exp);
+
+    // Correlate the spacing against itself at lags 2, 3 and 4.
+    let mut corr = [Word32(0); 3];
+    for (slot, lag) in corr.iter_mut().zip([2usize, 3, 4]) {
+        for i in 7..M - 2 {
+            let a = sub(ctx, diff[i], mean);
+            let b = sub(ctx, diff[i - lag], mean);
+            let product = l_mult(ctx, a, b);
+            let (hi, lo) = l_extract(product);
+            *slot = l_add(ctx, *slot, mpy_32(hi, lo, hi, lo));
+        }
+    }
+
+    let mut best = usize::from(l_sub(ctx, corr[0], corr[1]).0 <= 0);
+    if l_sub(ctx, corr[2], corr[best]).0 > 0 {
+        best = 2;
+    }
+    let lag = best + 1;
+
+    // Continue the pattern outward at the winning lag.
+    for i in M - 1..M16K - 1 {
+        let step = sub(ctx, isf[i - 1 - lag], isf[i - 2 - lag]);
+        isf[i] = add(ctx, isf[i - 1], step);
+    }
+
+    // Where the extrapolation should end: 7965 + (isf2 - isf3 - isf4)/6,
+    // capped so the top line never exceeds 7600 Hz.
+    let sum = add(ctx, isf[4], isf[3]);
+    let mut target = sub(ctx, isf[2], sum);
+    target = mult(ctx, target, Word16(5461));
+    target = add(ctx, target, Word16(20390));
+    if target.0 > 19456 {
+        target = Word16(19456);
+    }
+
+    // Stretch the extrapolated part to land exactly on that target.
+    let wanted = sub(ctx, target, isf[M - 2]);
+    let actual = sub(ctx, isf[M16K - 2], isf[M - 2]);
+    let exp2 = norm_s(actual);
+    let exp = norm_s(wanted) - 1;
+    let coeff = div_s(shl(ctx, wanted, exp), shl(ctx, actual, exp2));
+    let exp = exp2 - exp;
+
+    let mut stretched = [Word16(0); M16K - M];
+    for i in M - 1..M16K - 1 {
+        let step = sub(ctx, isf[i], isf[i - 1]);
+        let scaled = mult(ctx, step, coeff);
+        stretched[i - (M - 1)] = shl(ctx, scaled, exp);
+    }
+
+    // Two adjacent lines closer than 500 Hz would make the filter ring, so
+    // widen whichever gap is larger and keep the pair's total.
+    for i in M..M16K - 1 {
+        let (a, b) = (stretched[i - (M - 1)], stretched[i - M]);
+        if add(ctx, a, b).0 - 1280 < 0 {
+            if a.0 > b.0 {
+                stretched[i - M] = sub(ctx, Word16(1280), a);
+            } else {
+                stretched[i - (M - 1)] = sub(ctx, Word16(1280), b);
+            }
+        }
+    }
+
+    for i in M - 1..M16K - 1 {
+        isf[i] = add(ctx, isf[i - 1], stretched[i - (M - 1)]);
+    }
+
+    // The low band's ISFs are normalised to 12.8 kHz; 0.8 rescales them to the
+    // 16 kHz grid the high-band filter lives on.
+    for slot in isf.iter_mut().take(M16K - 1) {
+        *slot = mult(ctx, *slot, Word16(26214));
+    }
+
+    super::lp::isf::isf_to_isp_in_place(ctx, isf);
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::super::lp::isp_to_lp::tests_support::{block_row, has_block};
@@ -464,6 +597,35 @@ mod tests {
 
             low7k.filter(&mut ctx, &mut hf);
             expect("lp7k", &hf, blk);
+        }
+    }
+
+    #[test]
+    fn isf_extrapolation_is_bit_exact_against_ts26173() {
+        assert!(has_block("isfextrp"), "fixture block isfextrp missing");
+        let mut ctx = DspContext::default();
+
+        for c in 0..4 {
+            let want_in = block_row("isfextrp", &format!("xin{c}"));
+            let mut isf = vec![Word16(0); M16K];
+            for (i, &v) in want_in.iter().enumerate() {
+                isf[i] = Word16(v);
+            }
+
+            extrapolate_isf(&mut ctx, &mut isf);
+            expect_named("isfextrp", "xout", &isf, c);
+        }
+    }
+
+    fn expect_named(block: &str, label: &str, got: &[Word16], blk: usize) {
+        let want = block_row(block, &format!("{label}{blk}"));
+        assert_eq!(want.len(), got.len(), "{label}{blk}: length");
+        for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
+            assert_eq!(
+                g.0, w,
+                "{label}{blk}: value {i} = {} but the reference gives {w}",
+                g.0
+            );
         }
     }
 
