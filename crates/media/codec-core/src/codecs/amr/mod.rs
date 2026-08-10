@@ -613,13 +613,13 @@ mod tests {
             let mut codec = AmrCodec::new(&CodecConfig::amr_nb()).unwrap();
             let mut got = Vec::with_capacity(want.len());
             for frame in &frames {
-                let coded = CodedFrame {
+                let speech = CodedFrame {
                     kind: FrameKind::Speech,
                     mode: 4,
                     quality_ok: frame.quality_ok,
                     data: frame.data.clone(),
                 };
-                got.extend(codec.decode_frame(&coded).expect("frame decodes"));
+                got.extend(codec.decode_frame(&speech).expect("frame decodes"));
             }
             assert_eq!(got, want, "concealment through the trait is not bit-exact");
         }
