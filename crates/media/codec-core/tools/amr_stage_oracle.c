@@ -31,8 +31,15 @@ void Levinson(Word16 Rh[], Word16 Rl[], Word16 A[], Word16 rc[], Word16 *old_A,
               Word16 *old_rc);
 void Az_isp(Word16 a[], Word16 isp[], Word16 old_isp[]);
 void Isp_Az(Word16 isp[], Word16 a[], Word16 m, Word16 adaptive_scaling);
+void Isp_isf(Word16 isp[], Word16 isf[], Word16 m);
+void Isf_isp(Word16 isf[], Word16 isp[], Word16 m);
+void Int_isp(Word16 isp_old[], Word16 isp_new[], Word16 frac[], Word16 Az[]);
 
 #define L_WIN 384
+
+/* The interpolation weights the decoder uses, from dec_main.c. Not uniform
+ * quarters: {0.45, 0.8, 0.96, 1.0}, weighted hard toward the new frame. */
+static Word16 interpol_frac[4] = {14746, 26214, 31457, 32767};
 
 /* Deterministic speech-like input: two formants under a slow envelope. */
 static void make_speech(Word16 x[L_WIN], int seed) {
@@ -61,6 +68,7 @@ int main(void) {
         Word16 r_h[M + 1], r_l[M + 1];
         Word16 A[M + 1], rc[M];
         Word16 isp[M], old_isp[M], a_back[M + 1];
+        Word16 isf[M], isp_rt[M], az_int[4 * (M + 1)];
         Word16 old_A[M + 1], old_rc[2];
 
         make_speech(x, seed);
@@ -97,6 +105,23 @@ int main(void) {
 
         Isp_Az(isp, a_back, M, 0);
         dump("a_back", a_back, M + 1);
+
+        /* ISP to ISF and back. The round trip is not the identity -- both
+         * directions interpolate a 129-entry table -- so dump both, and let
+         * the Rust match each direction rather than only their composition. */
+        Isp_isf(isp, isf, M);
+        dump("isf", isf, M);
+        Isf_isp(isf, isp_rt, M);
+        dump("isp_rt", isp_rt, M);
+
+        /* Interpolation across the four subframes. old_isp is the reset-state
+         * ISP set, so this exercises a genuine frame-to-frame transition. */
+        Int_isp(old_isp, isp, interpol_frac, az_int);
+        for (int k = 0; k < 4; k++) {
+            char name[16];
+            sprintf(name, "az_int%d", k);
+            dump(name, az_int + k * (M + 1), M + 1);
+        }
     }
     return 0;
 }

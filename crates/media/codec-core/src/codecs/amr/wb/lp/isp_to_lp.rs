@@ -131,13 +131,18 @@ pub fn isp_to_lp(isp: &[Word16; LP_ORDER]) -> [Word16; LP_ORDER + 1] {
     a
 }
 
+/// Readers for the TS 26.173 per-stage dump, shared across the LP modules.
+///
+/// Panicking on a missing case or row is the intended behaviour: a fixture
+/// that no longer holds what a test asks for is a broken fixture, and a loud
+/// failure beats a test that silently checks nothing.
 #[cfg(test)]
-mod tests {
-    use super::*;
-
+#[allow(clippy::missing_panics_doc, clippy::must_use_candidate)]
+pub mod tests_support {
     const LP_STAGES: &str = include_str!("../../testdata/lp_stages_wb.txt");
 
-    fn row(case: usize, label: &str) -> Vec<i16> {
+    /// One labelled row of one case, as integers.
+    pub fn row(case: usize, label: &str) -> Vec<i16> {
         let marker = format!("case {case}\n");
         let block = LP_STAGES
             .split(&marker)
@@ -153,9 +158,16 @@ mod tests {
         panic!("case {case} has no row {label:?}");
     }
 
-    fn case_count() -> usize {
-        LP_STAGES.matches("case ").count()
+    /// How many cases the dump holds.
+    pub fn case_count() -> usize {
+        LP_STAGES.lines().filter(|l| l.starts_with("case ")).count()
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tests_support::{case_count, row};
+    use super::*;
 
     #[test]
     fn isp_to_lp_is_bit_exact_against_ts26173() {
