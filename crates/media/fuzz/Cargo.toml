@@ -70,3 +70,10 @@ bench = false
 # Detach from the parent workspace so cargo-fuzz builds this crate standalone
 # (mirrors crates/sip/fuzz).
 [workspace]
+
+[[bin]]
+name = "amr_decode"
+path = "fuzz_targets/amr_decode.rs"
+test = false
+doc = false
+bench = false
