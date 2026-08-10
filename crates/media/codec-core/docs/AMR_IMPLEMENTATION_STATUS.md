@@ -16,7 +16,7 @@ where we actually are.
 | 0 | Foundations: types, feature flags, ADR, oracle qualification | 🟡 **In progress** — code landed, external items outstanding |
 | 1 | RFC 4867 payload format + AMR file storage format | 🟢 **Complete** |
 | 2 | SDP negotiation + relay path | 🟡 **Negotiation done** — relay path outstanding |
-| 3 | `common/` DSP layer + oracle harness | 🟡 **In progress** — operators done, oracle running |
+| 3 | `common/` DSP layer + oracle harness | 🟡 **In progress** — operators, oracle and LP front end done |
 | 4 | AMR-WB decoder, fixed point | ⚪ Not started |
 | 5 | **AMR-WB encoder — the HD-voice milestone** | ⚪ Not started |
 | 6 | AMR-NB decoder, fixed point | ⚪ Not started |
@@ -118,11 +118,91 @@ the data is committed; the test suite reads only that. A normal `cargo test`
 needs neither the libraries nor a C toolchain — the property that lets the
 crate stay pure Rust while still being developed against a real reference.
 
-### Remaining for Phase 3
+### The spec was never actually blocked
 
-- [ ] The 3GPP reference (TS 26.073 / 26.173) as the tier-1 authority.
-      `3gpp.org` returns 403 from here; the Apache-2.0 tier-2 oracle is running
-      and is sufficient to make progress.
+An earlier revision of this section recorded Phase 3 as blocked on TS 26.190
+being unreachable. **That was wrong, and the mistake is worth keeping visible.**
+`3gpp.org` and `etsi.org` return 403 to `curl`'s default user agent and 200 to a
+browser one — bot filtering, not an egress block. They were lumped in with hosts
+that genuinely fail at the connection layer (`arib.or.jp`, `tech-invite.com`,
+which return `EADDRNOTAVAIL` exactly like `github.com`) and the whole set was
+called blocked.
+
+The distinction is diagnosable in one command: a 403 means the connection
+succeeded and the server refused; a connection-layer failure means it never got
+that far. Two different problems, two different fixes.
+
+TS 26.190 v19.0.0 is now available from ETSI. Extracting it also needed `pypdf`
+rather than raw stream decompression — it uses subset fonts with custom
+encodings, unlike TS 26.201, so naive extraction yields binary noise that looks
+like a failed download.
+
+### First DSP: the LP analysis front end
+
+`codecs/amr/wb/lp/window.rs` implements TS 26.190 §5.2.1 — the asymmetric
+analysis window (L1=256, L2=128, 384 samples), autocorrelation, 60 Hz lag
+windowing and the 1.0001 white-noise correction. Floating point for now; the
+fixed-point form will be checked against it.
+
+**The oracle earned its keep immediately.** The window formula came through a
+garbled PDF extraction and had to be reconstructed. Computing it from the
+reconstructed formula and comparing against `vo-amrwbenc`'s `ham_wind.tab`:
+all 384 values agree to within 1 LSB in Q15, none differing by more than 1. The
+reading was right, and now it is *known* to be right rather than assumed —
+without copying the table.
+
+It also surfaced a real discrepancy worth recording. The reference's lag window
+values differ from ours by a consistent 1e-4, because `lag_wind.tab` folds the
+white-noise correction into the lag window (its own comment says "noise floor =
+1.0001 = (0.9999 on r[1]..r[16])") while TS 26.190 places it on `r(0)`. The two
+differ only by an overall scale on the autocorrelation sequence, which
+Levinson-Durbin is invariant to, so the predictor is identical. We follow the
+spec's placement; a test pins ours against the reference's documented values
+with the factor restored, so the equivalence is asserted rather than assumed.
+
+### Previously recorded as blocked (resolved)
+
+The next piece of Phase 3 is the LP-analysis chain — order-16 autocorrelation
+with lag windowing, Levinson-Durbin, A(z)↔ISP conversion, interpolation. **This
+cannot be written bit-exactly without TS 26.190.** The algorithm *structure* is
+well known and available from secondary sources, but the parts that decide
+bit-exactness are normative data in the spec:
+
+- the LP analysis window (shape, length, exact coefficients),
+- the lag window / bandwidth-expansion values,
+- the Q-format of each intermediate,
+- the per-mode bit allocation.
+
+Writing the structure with plausible-looking tables would produce a codec that
+compiles, passes its own tests, sounds approximately right, and is not
+bit-exact — the exact failure mode the plan was built to avoid. It is worse
+than not writing it, because it looks finished.
+
+**Every spec source is unreachable from this environment.** Checked:
+
+| Host | |
+|---|---|
+| `arib.or.jp` (mirrored TS 26.201 successfully earlier today) | now unreachable |
+| `3gpp.org`, `etsi.org` | 403 |
+| `portal.3gpp.org`, `tech-invite.com`, `qtc.jp` | unreachable |
+
+Egress tightened during the session: the ARIB mirror that supplied the TS 26.201
+class A table earlier stopped responding.
+
+### To resume, one of these
+
+1. **Supply TS 26.190** (and ideally TS 26.201 for the bit ordering, TS 26.192/3/4
+   for CNG/DTX/VAD). Downloadable from `3gpp.org` in a normal browser. This is
+   the intended path and keeps the from-spec implementation the plan chose.
+2. **Authorise taking the tables and algorithms from `opencore-amr`**, which is
+   already built locally and is Apache-2.0. Lawful — plan §6.5 records this as
+   the preferred fallback — but it is a **licensing decision, not a technical
+   one**: parts of `codec-core` would become Apache-2.0-derived rather than MIT,
+   requiring `THIRD_PARTY_NOTICES.md` entries and attribution. Deliberately not
+   taken unilaterally.
+
+The tier-1 3GPP reference *code* (TS 26.073 / 26.173) is blocked by the same
+egress restriction, so tier-1 oracle qualification is also waiting on this.
 - [ ] `common/dsp/` — autocorrelation, Levinson-Durbin, A(z)↔LSP/ISP,
       interpolation, residual/synthesis filters. Order-16 and ISP-capable from
       the outset, since WB comes first.
@@ -571,6 +651,29 @@ now returns `usize` for both variants and WB CRC works. See the Phase 1 section.
 ---
 
 ## Changelog
+
+### 2026-08-09 — Spec obtained; first DSP written
+
+TS 26.190 was never unreachable. `3gpp.org` and `etsi.org` were rejecting
+curl's user agent with 403; the previous entry conflated that with hosts that
+fail at the connection layer and declared the whole set blocked.
+
+With the spec in hand, wrote the LP analysis front end (§5.2.1). The oracle
+confirmed the reconstructed window formula against `ham_wind.tab` — 384 values,
+all within 1 LSB — and surfaced that the reference folds the white-noise
+correction into its lag window where the spec puts it on r(0).
+
+### Superseded: 2026-08-09 — Phase 3 blocked on spec access
+
+The LP-analysis chain cannot be written bit-exactly without TS 26.190's
+normative windows, lag-window values and Q-formats. Every 3GPP spec mirror is
+unreachable or 403 from this environment, including the ARIB one that served
+TS 26.201 earlier the same day.
+
+Stopped rather than writing structurally-correct DSP with invented tables — that
+produces something that looks finished and is not bit-exact, which is worse than
+an obvious gap. Two ways forward are recorded above; one of them is a licensing
+decision that is not mine to make.
 
 ### 2026-08-09 — The oracle is running, and it confirmed the mode table
 
