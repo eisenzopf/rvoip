@@ -321,8 +321,27 @@ interpolation** (4 × 17 coefficients per case), and **§5.2.7 ISF
 dequantisation** at both rates across a six-frame sequence including an
 erasure, checking the residual state as well as the output.
 
-That completes the decoder's spectral path: **indices → ISFs → ISPs →
-interpolated → per-subframe LP coefficients, every stage bit-exact.**
+**TS 26.201 bitstream unpacking** closes the loop: real payload bytes → codec
+bits → parameter indices, checked against every mode's first three frames.
+
+That completes the decoder's spectral path: **payload → indices → ISFs → ISPs
+→ interpolated → per-subframe LP coefficients, every stage bit-exact.**
+
+The unpacking vectors deserve a note on method. A bit permutation that is
+self-consistent but wrong round-trips perfectly against itself, so a synthetic
+round trip would prove nothing. Instead the vectors come from feeding the
+committed `.amr` fixtures — produced by **opencore-amr and vo-amrwbenc** —
+through **TS 26.173's** own unsorter. Three independent implementations
+agreeing on real bitstreams is a much stronger claim than any self-check.
+
+Note the sorting tables ship inside TS 26.173 (`mime_io.tab`), so this needed
+no source outside the tier-1 authority.
+
+One test was written on a false assumption and removed: the first parameter
+field is *not* the leading octet of the payload. `SORT_660` opens `0, 5, 6, 7`,
+so the eight bits of the first ISF index arrive at payload positions 0, 31, 38,
+32, 10, 1, 2, 3. The bit-exact test caught it — the guessed property failed
+while the reference comparison passed.
 
 A bit-exact test can pass vacuously if the fixture reader silently returns
 nothing, so the reader is checked too: corrupting one value in the dump by a
