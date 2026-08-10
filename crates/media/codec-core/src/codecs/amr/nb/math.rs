@@ -200,9 +200,9 @@ mod tests {
     #[test]
     fn log2_recovers_the_exponent_of_a_power_of_two() {
         let mut c = ctx();
-        for shift in 1..=30 {
+        for shift in 1..=30i16 {
             let (exponent, fraction) = log2(&mut c, Word32(1 << shift));
-            assert_eq!(exponent.0, shift as i16, "log2(2^{shift})");
+            assert_eq!(exponent.0, shift, "log2(2^{shift})");
             // A power of two lands exactly on a table entry, so the fraction is
             // zero rather than merely small. An index base off by one would
             // show up here and nowhere else in this test.
