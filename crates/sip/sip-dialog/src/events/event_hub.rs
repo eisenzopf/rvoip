@@ -98,7 +98,16 @@ impl DialogEventHub {
         Ok(())
     }
 
-    /// Publish a session coordination event to the global bus
+    /// Publish a session coordination event to the global bus, requiring that
+    /// it reached a handler.
+    ///
+    /// An event class with no cross-crate mapping, and a termination whose
+    /// session binding is already gone, both have nowhere to go by design.
+    /// This wrapper reports that as an error, so a caller that only wants the
+    /// event delivered where one exists will treat an ordinary teardown as a
+    /// failure. Use `try_publish_session_coordination_event` and read the
+    /// returned bool instead, which separates having no route from failing to
+    /// deliver on one.
     pub async fn publish_session_coordination_event(
         &self,
         event: SessionCoordinationEvent,

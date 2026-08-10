@@ -2981,21 +2981,37 @@ impl DialogManager {
         let hub = self.event_hub.read().await.clone();
         if let Some(hub) = hub {
             trace!("Delivering session coordination event to authoritative handler");
-            if let Err(error) = hub.publish_session_coordination_event(event.clone()).await {
-                warn!(
+
+            // Not every class has somewhere to go. `AckSent` and everything
+            // still unmapped convert to no cross-crate event at all, and a
+            // termination whose session binding is already gone converts to
+            // nothing either. `try_publish_session_coordination_event` reports
+            // that as `Ok(false)`, which is a routing outcome and not a
+            // failure: the wrapper that turned it into an error made every
+            // ordinary teardown look like one.
+            match hub
+                .try_publish_session_coordination_event(event.clone())
+                .await
+            {
+                Ok(true) => {
+                    trace!("Delivered session coordination event");
+                    if let Some(started) = publish_started {
+                        crate::diagnostics::record_dialog_session_publish(
+                            publish_kind.expect("timed session coordination event kind"),
+                            started.elapsed(),
+                        );
+                    }
+                    return;
+                }
+                Ok(false) => debug!(
+                    class = session_coordination_event_kind(&event),
+                    "Session coordination event had no route to take"
+                ),
+                Err(error) => warn!(
                     class = session_coordination_event_kind(&event),
                     %error,
                     "Authoritative session coordination delivery failed"
-                );
-            } else {
-                trace!("Delivered session coordination event");
-                if let Some(started) = publish_started {
-                    crate::diagnostics::record_dialog_session_publish(
-                        publish_kind.expect("timed session coordination event kind"),
-                        started.elapsed(),
-                    );
-                }
-                return;
+                ),
             }
         } else {
             warn!("No authoritative route for session coordination event");
