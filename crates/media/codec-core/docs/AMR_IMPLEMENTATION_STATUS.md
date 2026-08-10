@@ -13,6 +13,11 @@
 | AMR-NB encoder | Not started |
 | Codec-trait integration | Not started |
 
+**Bit-exact does not yet mean usable.** `wb::decoder::Decoder` matches the
+reference on every sample, but `AmrCodec::encode`/`decode` still return
+`FeatureNotEnabled` — nothing outside this crate can decode AMR until the two
+are wired together.
+
 Both references are fetched by script and never committed
 (`tools/build-amr-reference.sh`, `tools/build-amrnb-reference.sh`); only
 generated vectors and PCM are checked in, because they are output rather than
@@ -35,6 +40,12 @@ Instrumenting the reference decoder and diffing per-stage intermediates found
 every remaining bug in a single pass. `tools/instrument-amr-decoder.py` and
 `tools/trace-amr-reference.sh` exist so that is the first move next time, not
 the last.
+
+The Rust side emits the same trace under `cfg(test)`. Run
+`cargo test --all-features where_does_it_diverge -- --ignored --nocapture`
+and diff it against the script's output; the two use identical stage names.
+It is the only `#[ignore]`d test in the crate, and deliberately so — it asserts
+nothing, it exists to be read.
 
 A third, smaller: **read the reference raw.** Both references interleave
 instrumentation counters (`test(); move16();`) on the same line as real
@@ -66,17 +77,33 @@ same input, so a later attempt to unify them fails loudly rather than silently.
 
 ## Remaining work, in order
 
-1. **AMR-NB decoder DSP.** The bitstream layer is done. Everything downstream is
-   new: LSF dequantisation (two quantisers, mode-selected), LSP↔LSF, LSP→LP,
-   eight per-mode algebraic codebooks, separate pitch and code gain quantisers
-   for some modes, and a **decoder post-filter that AMR-WB does not have**.
-2. **AMR-WB erasure, DTX and homing.** Today the decoder always passes
-   `FrameQuality::Good`, so `GainDecoder::conceal` is dead code and a lost
-   packet produces garbage. Required for conformance and for the first real
-   packet loss.
-3. **Encoders.** The algebraic codebook search is the large piece; LP analysis,
-   Levinson-Durbin and LP→ISP are the prerequisites.
-4. **Integration.** Codec traits, registration, transcoding, CMR.
+1. **AMR-NB decoder: excitation onward.** The bitstream and spectral paths are
+   bit-exact. Still to do: pitch lag decoding, the adaptive codebook at ⅙
+   resolution, **eight per-mode algebraic codebooks**, gain decoding (joint for
+   some rates, separate for others), synthesis, and a **decoder post-filter
+   AMR-WB does not have**. Also the 5-split LSF quantiser, which only 12.2
+   kbit/s uses.
+
+   Sequencing that matters: do **7.40 kbit/s first**. It takes the mainstream
+   3-split LSFs, joint gain decoding, and — decisively — skips phase dispersion,
+   so five enhancement modules stay unreachable and it is the shortest path to a
+   first end-to-end PCM comparison.
+
+2. **Wire the decoders to `AmrCodec`.** Until this happens the bit-exact DSP is
+   unreachable from outside the crate, which makes every other milestone
+   untestable in situ.
+
+3. **AMR-WB erasure, DTX and homing.** The decoder passes `FrameQuality::Good`
+   unconditionally (`wb/decoder.rs`), so `GainDecoder::conceal` is unreachable
+   and a lost packet produces garbage. Required for conformance and for the
+   first real packet loss. Narrowband's LSF concealment is implemented and
+   tested, but is likewise not reachable from the frame path yet.
+
+4. **Encoders.** The algebraic codebook search is the large piece; LP analysis,
+   Levinson-Durbin and LP→ISP are the prerequisites, and the first two of those
+   already exist from the decoder work.
+
+5. **Integration.** Registration, transcoding, CMR, resampling.
 
 ## Detailed history
 
@@ -86,7 +113,7 @@ Living tracker for the AMR-NB / AMR-WB work. The plan is in
 where we actually are.
 
 **Branch:** `feat/amr-codecs`
-**Last updated:** 2026-08-08
+**Last updated:** 2026-08-10
 
 ---
 
@@ -94,19 +121,21 @@ where we actually are.
 
 | Phase | Scope | Status |
 |---|---|---|
-| 0 | Foundations: types, feature flags, ADR, oracle qualification | 🟡 **In progress** — code landed, external items outstanding |
+| 0 | Foundations: types, feature flags, ADR, oracle qualification | 🟢 **Complete** |
 | 1 | RFC 4867 payload format + AMR file storage format | 🟢 **Complete** |
 | 2 | SDP negotiation + relay path | 🟡 **Negotiation done** — relay path outstanding |
-| 3 | `common/` DSP layer + oracle harness | 🟡 **In progress** — operators, oracle, fixed-point LP front end |
-| 4 | AMR-WB decoder, fixed point | ⚪ Not started |
+| 3 | DSP layer + oracle harness | 🟢 **Complete** for the wideband decoder |
+| 4 | AMR-WB decoder, fixed point | 🟢 **Bit-exact, all nine rates** — erasure/DTX/homing outstanding |
 | 5 | **AMR-WB encoder — the HD-voice milestone** | ⚪ Not started |
-| 6 | AMR-NB decoder, fixed point | ⚪ Not started |
+| 6 | AMR-NB decoder, fixed point | 🟡 **In progress** — bitstream and spectral path bit-exact |
 | 7 | AMR-NB encoder, fixed point | ⚪ Not started |
 | 8 | Transcoding, interop, performance, hardening | ⚪ Not started |
 
-**There is no working AMR encoder or decoder yet.** `AmrCodec` constructs and
-negotiates, but `encode`/`decode` return `FeatureNotEnabled` naming the phase
-that will supply them.
+**The wideband decoder DSP is bit-exact, but it is not yet reachable through the
+public API.** `wb::decoder::Decoder` decodes payloads to PCM identically to
+TS 26.173; `AmrCodec::encode` and `AmrCodec::decode` still return
+`FeatureNotEnabled`. Wiring the two together is part of phase 8 and has not been
+done, so nothing outside this crate can decode AMR yet.
 
 ---
 
@@ -589,7 +618,7 @@ that was recognisably speech and steadily wrong.
 to 16 kHz PCM (`amrwb_mode*.pcm`, 25 frames each). Per-stage vectors cannot
 reach the state coupling *between* stages; this can.
 
-## AMR-WB DECODER: BIT-EXACT AT ALL NINE RATES
+### Milestone: the wideband decoder reached bit-exactness
 
 Every sample of every frame of every fixture, 6.60 through 23.85 kbit/s, is
 identical to the TS 26.173 reference decoder. 8000/8000 per mode, worst error
@@ -638,9 +667,13 @@ uses the plain complement `32767 - frac`, **not** the `+1` complement
 `interpolate_isp` uses. Reusing that helper would have been off by one LSB per
 subframe.
 
-### Superseded record
+### Superseded: how the accuracy figure was corrected, in two steps
 
-### CORRECTION: the 1–3% figure was mostly a wrong yardstick
+The two entries below are kept because the *reasoning* in them is still useful,
+but both of their headline numbers are obsolete — the decoder is now bit-exact.
+Read them as a record of how a wrong measurement was diagnosed, not as status.
+
+#### Step 2 — the 1–3% figure was mostly a wrong yardstick
 
 **TS 26.173's `decoder.c` masks its output with `0xfffC` before writing** — AMR-WB's
 output is defined as 14-bit linear, so the low two bits are deleted. I was
@@ -689,11 +722,7 @@ gain path); 6.60 and 8.85 share a mode-specific bug (they take the
 post-processing step the Rust omits entirely); modes 12.65–23.05 have a small
 residual worth 8–24 LSB.
 
-### Superseded: the assembly at 1–3%
-
-#### Original entry
-
-### The assembly: fourteen exact stages, and a decoder that is 1–3% right
+#### Step 1 — the original measurement: fourteen exact stages, 1–3% right
 
 The decoder is wired and runs on every mode without panicking, producing
 speech-shaped output. Against the reference PCM:
@@ -722,6 +751,12 @@ The suite now carries a **ratchet** test (fails on regression, floors set below
 current values) and an exact-match test marked `#[ignore]` with the figure in
 its reason. "Runs without panicking" is far too weak to be the only assertion,
 and prose in this document is not a substitute for a failing test.
+
+> *No longer true.* Both the ratchet and the `#[ignore]` were removed once the
+> decoder became bit-exact: a floor on match percentage is meaningless at 100%,
+> and an exact-match assertion supersedes it. The reasoning above still holds
+> for any stage that is not yet exact — which is why the narrowband work uses
+> the same approach.
 
 One concrete bug the assembly did surface: the excitation buffer was one sample
 too short. The adaptive codebook writes `L_SUBFR + 1` samples because the LTP
@@ -882,12 +917,28 @@ class A table earlier stopped responding.
    requiring `THIRD_PARTY_NOTICES.md` entries and attribution. Deliberately not
    taken unilaterally.
 
-The tier-1 3GPP reference *code* (TS 26.073 / 26.173) is blocked by the same
-egress restriction, so tier-1 oracle qualification is also waiting on this.
-- [ ] `common/dsp/` — autocorrelation, Levinson-Durbin, A(z)↔LSP/ISP,
-      interpolation, residual/synthesis filters. Order-16 and ISP-capable from
-      the outset, since WB comes first.
-- [ ] `common/bits.rs` and `common/homing.rs` (EHF/DHF).
+> **RESOLVED.** Both tier-1 references are fetched and building —
+> TS 26.173 by `tools/build-amr-reference.sh` and TS 26.073 by
+> `tools/build-amrnb-reference.sh`. The blocker was never egress: ETSI serves
+> 403 to curl's default user agent and 200 to a browser one, which is bot
+> filtering rather than an access restriction. Nothing was taken from
+> `opencore-amr`, so no licensing decision was needed and `codec-core` stays
+> MIT; opencore is used only to *produce fixtures*, which is what makes the
+> three-way comparison meaningful.
+> **Superseded layout.** This planned a shared `common/dsp/`. That is not what
+> was built, and deliberately so: the two variants turned out to share far less
+> than the plan assumed (see *AMR-NB: what must not be shared with wideband*
+> above). What is genuinely common lives in `fixed_point/`; everything
+> spectral is per-variant. Actual state of the items listed here:
+>
+> - Autocorrelation and lag windowing — ✅ `wb/lp/autocorr.rs`
+> - ISP→LP — ✅ `wb/lp/isp_to_lp.rs`; LSP→LP — ✅ `nb/lsp.rs` (a *different*
+>   algorithm, not the same one at order 10)
+> - ISF↔ISP and subframe interpolation — ✅ `wb/lp/isf.rs`; LSF↔LSP — ✅ `nb/lsp.rs`
+> - Synthesis filter — ✅ `wb/synthesis.rs`
+> - Levinson-Durbin, LP→ISP, residual filter — ❌ encoder-side, not started
+> - Bit handling — ✅ `amr/bits.rs`, `wb/bitstream.rs`, `nb/bitstream.rs`
+> - Homing (EHF/DHF) — ❌ not started
 
 ---
 
@@ -1253,18 +1304,26 @@ cargo check -p rvoip --features amr
 | Item | Blocks | Owner |
 |---|---|---|
 | ~~**IP-1** — AMR-WB/G.722.2 essential patents~~ | ~~Phase 3+~~ | ✅ **CLEARED 2026-08-09** — no blockers |
-| **IP-2a** — may 3GPP test sequences (TS 26.074 / 26.174) be vendored? | Nothing hard; decides CI shape | ❗ unassigned |
-| **IP-2b** — may vectors *generated by running* the reference be committed? | Nothing hard; decides fixture provenance | ❗ unassigned |
-| **Oracle qualification** — build the five oracles, record which are bit-exact per path | Phase 3 | ❗ unassigned |
-| **Spec acquisition** — TS 26.090, 26.190, 26.101, 26.201, 26.091–094, 26.191–194 | Phase 3 | ❗ unassigned |
-| **Staffing** — is a second engineer available for Phase 2? | Pulls HD-voice milestone in ~2–3 weeks | ❗ unassigned |
+| ~~**Oracle qualification**~~ | ~~Phase 3~~ | ✅ **DONE** — both tier-1 references build; every stage is verified against them |
+| ~~**Spec acquisition**~~ | ~~Phase 3~~ | ✅ **DONE** — TS 26.173 and 26.073 fetched by script |
+| **IP-2a** — may 3GPP test sequences (TS 26.074 / 26.174) be vendored? | Conformance testing only | ❗ unassigned |
+| **IP-2b** — may vectors *generated by running* the reference be committed? | Nothing — already done | ⚠️ **assumed yes** |
+| **Staffing** — is a second engineer available? | Pulls the encoder milestone in | ❗ unassigned |
 
-**IP-1 is cleared, so Phase 3 — the codec kernel — is unblocked.** That was the
-gate on all DSP work; everything shipped so far is protocol and plumbing.
+**IP-1 is cleared and the oracles are qualified.** Everything that was gating
+DSP work is resolved.
 
-Oracle qualification is now the highest-value outstanding item and the last
-thing standing between here and starting Phase 3 properly. It is cheap, and it
-settles whether Phase 5 needs its 2–3 week fallback budget (risk R8).
+**IP-2b needs a decision after the fact, not before.** Generated vectors *are*
+committed — `lp_stages_wb.txt`, `stages_nb.txt` and the `.pcm` ground truth are
+all output from running the 3GPP references. That was judged to be output
+rather than redistribution of the source, which is never committed. If that
+reading is wrong, the fixtures must be regenerated on demand in CI instead;
+both build scripts already reproduce them bit-identically from a clean fetch,
+so the change would be mechanical.
+
+**IP-2a is only about conformance testing.** The TS 26.074/26.174 sequences are
+not currently used; the fixtures come from opencore-amr and vo-amrwbenc
+instead, which is independent enough to be the stronger check.
 
 Note the environment currently has a **selective egress allowlist**:
 `raw.githubusercontent.com` is reachable but `github.com` is not, and Docker
