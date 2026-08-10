@@ -1353,6 +1353,114 @@ mod tests {
         assert!(codec.unpack(&bytes).is_ok());
     }
 
+    // ---- captured from a real implementation ----
+
+    /// AMR-WB RTP payloads captured from `FreeSWITCH` 1.10.12 (`mod_amrwb`,
+    /// `vo-amrwbenc`) during a live call, length-prefixed with a 16-bit
+    /// big-endian length so they can be split without guessing.
+    ///
+    /// Genuine encoder output, not our own bytes echoed back: the call was
+    /// bridged into a conference so `FreeSWITCH` had to mix in linear PCM and
+    /// re-encode, and all 50 payloads differ from one another. An earlier
+    /// capture using `&echo` produced 50 byte-identical payloads because
+    /// `FreeSWITCH` passed them through untouched — which would have made this a
+    /// test of our own packetizer wearing a disguise.
+    const FREESWITCH_AMRWB_RTP: &[u8] =
+        include_bytes!("testdata/freeswitch_amrwb_be.rtp");
+
+    /// Split the length-prefixed capture into individual RTP payloads.
+    fn freeswitch_payloads() -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut rest = FREESWITCH_AMRWB_RTP;
+        while rest.len() >= 2 {
+            let len = usize::from(u16::from_be_bytes([rest[0], rest[1]]));
+            assert!(rest.len() >= 2 + len, "truncated capture fixture");
+            out.push(rest[2..2 + len].to_vec());
+            rest = &rest[2 + len..];
+        }
+        out
+    }
+
+    #[test]
+    fn unpacks_real_freeswitch_amr_wb_rtp() {
+        let codec =
+            AmrPayloadCodec::new(AmrPayloadConfig::bandwidth_efficient(AmrVariant::WideBand))
+                .unwrap();
+        let payloads = freeswitch_payloads();
+        assert_eq!(payloads.len(), 50, "fixture should carry 50 payloads");
+
+        for (index, payload) in payloads.iter().enumerate() {
+            // 4-bit CMR + 6-bit ToC + 477 speech bits = 487 bits = 61 octets.
+            // FreeSWITCH independently produces exactly the size our mode
+            // table predicts.
+            assert_eq!(payload.len(), 61, "payload {index}");
+
+            let packet = codec
+                .unpack(payload)
+                .unwrap_or_else(|e| panic!("payload {index} failed to parse: {e}"));
+
+            assert_eq!(packet.frames.len(), 1, "payload {index}");
+            let frame = &packet.frames[0];
+            let AmrFrameType::Speech(mode) = frame.frame_type else {
+                panic!("payload {index} was not a speech frame: {:?}", frame.frame_type);
+            };
+            assert_eq!(mode.index(), 8, "payload {index}: expected mode 8 (23.85)");
+            assert_eq!(mode.bits(), 477);
+            assert!(frame.quality_ok, "payload {index}: Q bit clear");
+            assert_eq!(frame.data.len(), 60, "payload {index}: speech octets");
+
+            // No mode request: CMR 15 means the peer wants nothing.
+            assert_eq!(packet.cmr, None, "payload {index}");
+        }
+    }
+
+    #[test]
+    fn real_payloads_repack_to_the_same_bytes() {
+        // Stronger than a parse: our packetizer must reproduce the peer's
+        // exact octets from the parsed form. Any disagreement about bit
+        // placement or padding shows up here.
+        let codec =
+            AmrPayloadCodec::new(AmrPayloadConfig::bandwidth_efficient(AmrVariant::WideBand))
+                .unwrap();
+        for (index, payload) in freeswitch_payloads().iter().enumerate() {
+            let packet = codec.unpack(payload).unwrap();
+            let repacked = codec.pack(&packet).unwrap();
+            assert_eq!(&repacked, payload, "payload {index} did not round-trip");
+        }
+    }
+
+    #[test]
+    fn real_payloads_carry_genuine_encoder_output() {
+        // Guards the fixture itself. If a future re-capture accidentally
+        // records pass-through instead of transcoded audio, every payload
+        // becomes identical and the two tests above would still pass while
+        // proving much less.
+        let payloads = freeswitch_payloads();
+        let distinct: std::collections::HashSet<&Vec<u8>> = payloads.iter().collect();
+        assert!(
+            distinct.len() > payloads.len() / 2,
+            "fixture looks like pass-through, not encoder output: only {} distinct of {}",
+            distinct.len(),
+            payloads.len()
+        );
+        // And the speech bits are not all zero.
+        assert!(payloads.iter().all(|p| p[2..].iter().any(|&b| b != 0)));
+    }
+
+    #[test]
+    fn real_payloads_are_rejected_as_octet_aligned() {
+        // The capture is bandwidth-efficient (the peer offered
+        // octet-align=0). Parsing it as octet-aligned must not quietly
+        // succeed — that is the interop failure mode this format has.
+        let oa = AmrPayloadCodec::new(AmrPayloadConfig::octet_aligned(AmrVariant::WideBand))
+            .unwrap();
+        let mismatched = freeswitch_payloads()
+            .iter()
+            .filter(|p| oa.unpack(p).is_ok())
+            .count();
+        assert_eq!(mismatched, 0, "octet-aligned parse accepted BE payloads");
+    }
+
     #[test]
     fn never_panics_on_arbitrary_input() {
         // Cheap structured sweep; the real fuzz target lives in crates/media/fuzz.

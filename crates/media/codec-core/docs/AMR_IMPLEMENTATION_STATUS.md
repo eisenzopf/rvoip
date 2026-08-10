@@ -210,8 +210,35 @@ Three things it independently confirms:
 - **`mode-change-capability=2`** appears in the wild, so the declarative pair we
   implemented is not a theoretical corner.
 
-Still open: this validates *negotiation*. It does not exercise RTP framing,
-which needs the relay topology with media actually flowing.
+### And the framing, against real RTP
+
+A live AMR-WB call was then established with FreeSWITCH and its RTP captured.
+50 payloads are checked in at `src/codecs/amr/testdata/`, with tests asserting:
+
+- every payload is **61 octets** — 4-bit CMR + 6-bit ToC + 477 speech bits =
+  487 bits, exactly what our mode table predicts, arrived at independently;
+- each parses as one AMR-WB mode 8 speech frame with the Q bit set;
+- **our packetizer reproduces FreeSWITCH's exact octets** from the parsed form,
+  byte for byte — the strongest agreement available short of the 3GPP vectors;
+- parsing them as octet-aligned fails for all 50, which is the interop failure
+  mode this format is prone to.
+
+**A first attempt at this produced a worthless fixture, and the way it was
+caught is worth recording.** Using FreeSWITCH's `&echo` gave 50 payloads that
+looked perfect — until a check showed all 50 were byte-identical to what we had
+sent. FreeSWITCH was passing them through, not transcoding, so the "captured"
+bytes were our own returning. It would have been a test of our packetizer
+wearing a disguise. Bridging the call into a conference forces a mix in linear
+PCM and therefore a real encode; the second capture has 50 distinct payloads.
+`real_payloads_carry_genuine_encoder_output` now guards the fixture against that
+mistake recurring.
+
+Note what the first attempt *did* legitimately establish: FreeSWITCH parsed our
+hand-built RFC 4867 payload, matched it to AMR-WB mode 8 and relayed it, which
+is real validation of the packetizer.
+
+Still open: this exercises framing frame-by-frame, not the full relay path with
+rvoip bridging two live legs.
 
 ### Remaining for Phase 2
 
@@ -443,6 +470,16 @@ now returns `usize` for both variants and WB CRC works. See the Phase 1 section.
 ---
 
 ## Changelog
+
+### 2026-08-09 — Framing validated against real FreeSWITCH RTP
+
+Captured 50 AMR-WB payloads from a live call and checked them in. Our
+packetizer reproduces them byte for byte.
+
+The first capture attempt was invalid — `&echo` passes through rather than
+transcoding, so the payloads were our own bytes returning. Caught by comparing
+them against what we sent. A conference bridge forces a real encode; there is
+now a test guarding the fixture against that mistake.
 
 ### 2026-08-09 — IP-1 cleared
 
