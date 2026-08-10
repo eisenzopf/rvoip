@@ -253,6 +253,24 @@ arithmetic that defines the codec, built on the ETSI operators in
   work**, which is why it lands before the encoder-only analysis stages: the
   decoder receives quantised ISFs and never analyses, so this is on the critical
   path to a working decoder while §5.2.2 and §5.2.3 are not.
+- `isf.rs` — §5.2.5–§5.2.6, ISP↔ISF conversion and the four-subframe
+  interpolation. The codec quantises in the ISF domain (ordered, bounded, local
+  error) and computes in the ISP domain (what the polynomial arithmetic wants),
+  converting once per frame each way. Interpolating ISPs rather than
+  coefficients is what keeps every intermediate filter stable — ISPs stay
+  ordered under a convex combination, and ordered ISPs *are* the minimum-phase
+  condition.
+- `isf_tables.rs` — the 129-entry cosine table and 128 `acos` slopes. **These
+  tables are the transform**, not an approximation of it: both directions
+  interpolate rather than evaluating a real trigonometric function, so a more
+  accurate cosine gives different bits and fails conformance. The round trip is
+  correspondingly not the identity, which is why each direction is checked
+  against the reference separately rather than only checking that they compose.
+
+The interpolation weights are worth naming: `{0.45, 0.8, 0.96, 1.0}`, not
+uniform quarters. The weighting is pushed hard toward the new frame because the
+analysis window that produced it is itself concentrated at the end of the frame
+— the "new" ISPs already describe the region the first subframe sits in.
 
 Two details worth naming, both invisible in a float model:
 
@@ -284,7 +302,14 @@ pre-lag values through `lag_window` in isolation so a failure there cannot be
 blamed on the accumulation.
 
 **§5.2.4 ISP→LP matches exactly too** — all 17 coefficients, every case, on the
-first run.
+first run. So do **§5.2.5 ISP→ISF, §5.2.6 ISF→ISP, and the subframe
+interpolation** (4 × 17 coefficients per case).
+
+A bit-exact test can pass vacuously if the fixture reader silently returns
+nothing, so the reader is checked too: corrupting one value in the dump by a
+single LSB makes the corresponding test fail. Worth redoing whenever the dump
+format changes, since a passing suite is otherwise indistinguishable from a
+suite that compares nothing.
 
 This is the only evidence that counts. Property tests can show output is
 *plausible*; conformance means matching these integers.
