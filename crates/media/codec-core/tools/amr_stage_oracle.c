@@ -273,7 +273,7 @@ static void dump_bitstream(const char *dir, int mode_no) {
          * one -- so a layout error shows up as a plausible but wrong lag
          * rather than an overrun. */
         for (int sf = 0; sf < 4; sf++) {
-            Word16 T0, T0_frac, T0_min = 0, T0_max = 0, select, gain_index;
+            Word16 T0, T0_frac, T0_min = 0, T0_max = 0, select, gain_index, hf_gain;
             Word16 pulses[8];
             int n_pulses = 0, pit_flag = sf * 64;
             int index;
@@ -358,7 +358,13 @@ static void dump_bitstream(const char *dir, int mode_no) {
             gain_index = (nb_bits <= NBBITS_9k) ? Serial_parm(6, &p)
                                                 : Serial_parm(7, &p);
 
-            printf("  sf%d_%d %d %d %d %d", f, sf, T0, T0_frac, select, gain_index);
+            /* The 23.85 high-band gain is read HERE, inside the subframe, not
+             * grouped at the end of the frame. dec_main.c reads it immediately
+             * before calling synthesis() for this subframe. */
+            hf_gain = (nb_bits >= NBBITS_24k) ? Serial_parm(4, &p) : -1;
+
+            printf("  sf%d_%d %d %d %d %d %d", f, sf, T0, T0_frac, select,
+                   gain_index, hf_gain);
             for (i = 0; i < n_pulses; i++) printf(" %d", pulses[i]);
             printf("\n");
 

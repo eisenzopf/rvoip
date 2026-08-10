@@ -99,6 +99,21 @@ pub fn log2(ctx: &mut DspContext, x: Word32) -> (i16, Word16) {
     (exponent, extract_h(y))
 }
 
+/// `1/sqrt(x)` for an unnormalised Q0 value, returning Q31.
+///
+/// Wraps [`isqrt_n`] with the normalise/denormalise either side.
+///
+/// # Panics
+///
+/// Never for positive input; non-positive returns the largest representable.
+#[must_use]
+pub fn isqrt(ctx: &mut DspContext, x: Word32) -> Word32 {
+    let shift = norm_l(x);
+    let normalised = l_shl(ctx, x, shift);
+    let (frac, exp) = isqrt_n(ctx, (normalised, 31 - shift));
+    l_shl(ctx, frac, exp)
+}
+
 /// Normalised dot product of two vectors, as `(Q31 value, exponent 0..30)`.
 ///
 /// The accumulator starts at 1 rather than 0 so an all-zero input still

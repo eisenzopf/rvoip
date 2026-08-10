@@ -58,6 +58,12 @@ pub struct SubframeParams {
     pub gain_index: u16,
     /// Algebraic codebook pulse indices; count and width vary by mode.
     pub pulses: Vec<u16>,
+    /// High-band correction gain index, 23.85 kbit/s only.
+    ///
+    /// Interleaved *per subframe*, immediately after the gain index — not
+    /// grouped at the end of the frame. The reference reads it inside the
+    /// subframe loop, right before calling synthesis.
+    pub hf_gain: Option<u16>,
 }
 
 /// Everything one frame carries.
@@ -69,7 +75,10 @@ pub struct FrameParams {
     pub isf_indices: Vec<u16>,
     /// Per-subframe excitation parameters.
     pub subframes: Vec<SubframeParams>,
-    /// High-band correction gains, one per subframe. Only at 23.85 kbit/s.
+    /// High-band correction gains, one per subframe, in subframe order.
+    ///
+    /// A convenience view over [`SubframeParams::hf_gain`]; the bits themselves
+    /// are interleaved through the frame, not grouped here.
     pub hf_gains: Vec<u16>,
 }
 
@@ -120,23 +129,28 @@ impl FrameParams {
             let gain_width = if nb_bits <= NBBITS_9K { 6 } else { 7 };
             let gain_index = bits.take(gain_width)?;
 
+            // Only 23.85 kbit/s spends bits correcting the high band, and it
+            // spends them here — inside the subframe, not at the end of the
+            // frame. Reading them as a group parses the same total number of
+            // bits while assigning every field after the first subframe's
+            // gain to the wrong parameter.
+            let hf_gain = if nb_bits >= NBBITS_24K {
+                Some(bits.take(4)?)
+            } else {
+                None
+            };
+
             subframes.push(SubframeParams {
                 pitch_lag,
                 pitch_frac,
                 ltp_filter,
                 gain_index,
                 pulses,
+                hf_gain,
             });
         }
 
-        // Only 23.85 kbit/s spends bits correcting the high band.
-        let hf_gains = if nb_bits >= NBBITS_24K {
-            (0..NB_SUBFR)
-                .map(|_| bits.take(4))
-                .collect::<Option<Vec<_>>>()?
-        } else {
-            Vec::new()
-        };
+        let hf_gains: Vec<u16> = subframes.iter().filter_map(|s| s.hf_gain).collect();
 
         // Conservation: a layout error shifts fields rather than overrunning,
         // so the only reliable signal is that nothing is left.
@@ -335,7 +349,12 @@ mod tests {
                         i64::from(want[3]),
                         "{block} frame {f} subframe {sf}: gain index"
                     );
-                    let want_pulses = &want[4..];
+                    assert_eq!(
+                        params.hf_gain.map_or(-1, |g| i16::try_from(g).expect("gain")),
+                        want[4],
+                        "{block} frame {f} subframe {sf}: high-band gain"
+                    );
+                    let want_pulses = &want[5..];
                     assert_eq!(
                         params.pulses.len(),
                         want_pulses.len(),

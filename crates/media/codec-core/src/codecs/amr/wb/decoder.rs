@@ -20,8 +20,8 @@
 
 use super::codebook::{self, L_SUBFR};
 use super::enhance::{
-    enhance_strength, pitch_enhance_with, stability_factor, voice_factor, DispersionLevel,
-    NoiseEnhancer, PhaseDispersion,
+    agc2, enhance_strength, pitch_enhance_with, stability_factor, voice_factor,
+    DispersionLevel, NoiseEnhancer, PhaseDispersion,
 };
 use super::excitation::{Excitation, Upsampler, L_SUBFR16K};
 use super::gain::{FrameQuality, GainDecoder};
@@ -35,7 +35,7 @@ use super::synthesis::{deemphasis, HighPass50, SynthesisFilter, PREEMPH_FAC};
 use crate::codecs::amr::mode::AmrMode;
 use crate::fixed_point::arith::{add, mult, round};
 use crate::fixed_point::oper32::l_extract;
-use crate::fixed_point::shift::{l_shl, shr};
+use crate::fixed_point::shift::{l_shl, shl, shr};
 use crate::fixed_point::types::{DspContext, Word16};
 
 /// Samples one frame produces, at 16 kHz.
@@ -69,6 +69,12 @@ pub struct Decoder {
     tilt_code: Word16,
     /// Whether any frame has been decoded yet.
     started: bool,
+    /// Consecutive frames the encoder marked as containing no voice activity.
+    ///
+    /// Selects a different high-band gain curve: during background noise the
+    /// band is attenuated less, so the noise floor sounds continuous rather
+    /// than gated.
+    vad_history: i16,
     /// Scalar trace of the last decode.
     ///
     /// Exists to be diffed against the instrumented reference decoder — see
@@ -110,6 +116,7 @@ impl Decoder {
             isf_old: [Word16(0); LP_ORDER],
             tilt_code: Word16(0),
             started: false,
+            vad_history: 0,
             #[cfg(test)]
             trace: Vec::new(),
             #[cfg(test)]
@@ -155,6 +162,14 @@ impl Decoder {
         } else {
             IsfQuantizer::Bits46
         };
+        // The VAD flag counts up while the encoder sees no speech and resets
+        // the moment it does.
+        if params.vad_flag {
+            self.vad_history = 0;
+        } else {
+            self.vad_history = self.vad_history.saturating_add(1);
+        }
+
         let isf = self.isf.decode(quantizer, &params.isf_indices, false);
         let stab_fac = stability_factor(&mut ctx, &isf, &self.isf_old);
         self.isf_old = isf;
@@ -216,7 +231,7 @@ impl Decoder {
                 &code,
                 FrameQuality::Good,
                 0,
-                0,
+                self.vad_history,
             );
 
             trace!("gain_pit", gains.pitch.0);
@@ -259,6 +274,24 @@ impl Decoder {
             let quartered = shr(&mut ctx, voice_fac, 2);
             self.tilt_code = add(&mut ctx, quartered, Word16(8192));
 
+            // At the low rates a strongly voiced subframe gets an extra
+            // sharpened copy blended in later. It is built from the
+            // adaptive-only excitation *before* the total is assembled over
+            // it, so it has to be computed here.
+            let pit_sharp = shl(&mut ctx, gains.pitch, 1);
+            let sharpened = if frame_bits <= 177 && pit_sharp.0 > 16384 {
+                let mut excp = [Word16(0); L_SUBFR];
+                for (i, slot) in excp.iter_mut().enumerate() {
+                    let t = mult(&mut ctx, scaled[i], pit_sharp);
+                    let acc = crate::fixed_point::arith32::l_mult(&mut ctx, t, gains.pitch);
+                    let acc = crate::fixed_point::shift::l_shr(&mut ctx, acc, 1);
+                    *slot = round(&mut ctx, acc);
+                }
+                Some(excp)
+            } else {
+                None
+            };
+
             trace!("voice_fac", voice_fac.0);
             // The enhanced path, for the listener only.
             // Phase dispersion takes the HIGH HALF of the Q16 code gain, not
@@ -273,14 +306,26 @@ impl Decoder {
             let strength = enhance_strength(&mut ctx, voice_fac);
             let code2 = pitch_enhance_with(&mut ctx, &code, strength);
 
-            let raised = l_shl(&mut ctx, enhanced_gain, q_new);
-            let gain_code = round(&mut ctx, raised);
+            let lifted = l_shl(&mut ctx, enhanced_gain, q_new);
+            let enhanced_gain_word = round(&mut ctx, lifted);
             for i in 0..L_SUBFR {
-                let mut acc = crate::fixed_point::arith32::l_mult(&mut ctx, code2[i], gain_code);
+                let mut acc =
+                    crate::fixed_point::arith32::l_mult(&mut ctx, code2[i], enhanced_gain_word);
                 acc = l_shl(&mut ctx, acc, 5);
                 acc = crate::fixed_point::arith32::l_mac(&mut ctx, acc, exc2[i], gains.pitch);
                 let acc = l_shl(&mut ctx, acc, 1);
                 exc2[i] = round(&mut ctx, acc);
+            }
+
+            // Blend the sharpened copy in, matching its loudness to the
+            // excitation it replaces so the sharpening is heard as periodicity
+            // rather than as a level jump.
+            if let Some(mut excp) = sharpened {
+                for (i, slot) in excp.iter_mut().enumerate() {
+                    *slot = add(&mut ctx, *slot, exc2[i]);
+                }
+                agc2(&mut ctx, &exc2, &mut excp);
+                exc2 = excp;
             }
 
             vtrace!("exc2_final", exc2);
@@ -300,13 +345,20 @@ impl Decoder {
             highband::match_energy(&mut ctx, &energy_source, &mut hf, q_new - 3);
 
             let tilt = highband::spectral_tilt(&mut ctx, &mut self.tilt_filter, &mut speech);
-            let hf_gain = if frame_bits >= 477 {
-                highband::transmitted_gain(params.hf_gains[sf])
+            if let Some(index) = sub.hf_gain {
+                // 23.85 transmits the gain, and applies it with an extra
+                // doubling the estimated path does not have: the reference is
+                // shl(mult(HF, gain), 1), not mult alone.
+                let gain = highband::transmitted_gain(index);
+                for s in &mut hf {
+                    let scaled = mult(&mut ctx, *s, gain);
+                    *s = shl(&mut ctx, scaled, 1);
+                }
             } else {
-                highband::gain_from_tilt(&mut ctx, tilt, 0)
-            };
-            for s in &mut hf {
-                *s = mult(&mut ctx, *s, hf_gain);
+                let gain = highband::gain_from_tilt(&mut ctx, tilt, self.vad_history);
+                for s in &mut hf {
+                    *s = mult(&mut ctx, *s, gain);
+                }
             }
             vtrace!("hfnoise_scaled", hf);
             self.shaper.shape(&mut ctx, a, &mut hf);
@@ -467,7 +519,7 @@ mod tests {
     fn the_assembly_does_not_regress_against_the_reference() {
         // Floors, well under the measured values, so ordinary noise does not
         // fail the build but a real regression does.
-        const FLOOR_PERMILLE: [u64; 9] = [10, 120, 790, 790, 750, 720, 770, 780, 10];
+        const FLOOR_PERMILLE: [u64; 9] = [530, 590, 790, 790, 750, 720, 770, 780, 700];
 
         for (mode_index, &floor) in FLOOR_PERMILLE.iter().enumerate() {
             let (matched, total, worst) = compare(mode_index);

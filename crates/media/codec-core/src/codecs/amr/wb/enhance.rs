@@ -266,6 +266,60 @@ pub fn enhance_strength(ctx: &mut DspContext, voice_fac: Word16) -> Word16 {
     add(ctx, scaled, Word16(4096))
 }
 
+/// Scale `output` so its energy matches `input`'s.
+///
+/// Used at the low rates, where an extra pitch-sharpened excitation is blended
+/// in: the blend changes the waveform's shape deliberately but must not change
+/// its loudness, or the sharpening would be heard as a level jump rather than
+/// as added periodicity.
+///
+/// Both signals are pre-shifted down two bits before the energy sums, which is
+/// what keeps a loud subframe from overflowing the accumulator.
+pub fn agc2(ctx: &mut DspContext, input: &[Word16], output: &mut [Word16]) {
+    let energy = |ctx: &mut DspContext, v: &[Word16]| -> Word32 {
+        let first = shr(ctx, v[0], 2);
+        let mut s = l_mult(ctx, first, first);
+        for &x in &v[1..] {
+            let t = shr(ctx, x, 2);
+            s = l_mac(ctx, s, t, t);
+        }
+        s
+    };
+
+    let out_energy = energy(ctx, output);
+    if out_energy.0 == 0 {
+        return;
+    }
+    let mut exp = norm_l(out_energy) - 1;
+    let normalised = l_shl(ctx, out_energy, exp);
+    let gain_out = round(ctx, normalised);
+
+    let in_energy = energy(ctx, input);
+    let g0 = if in_energy.0 == 0 {
+        Word16(0)
+    } else {
+        let i = norm_l(in_energy);
+        let normalised = l_shl(ctx, in_energy, i);
+        let gain_in = round(ctx, normalised);
+        exp -= i;
+
+        // g0 = sqrt(gain_in / gain_out), via the reciprocal square root of the
+        // ratio the other way up.
+        let ratio = Word32(i32::from(div_s(gain_out, gain_in).0));
+        let ratio = l_shl(ctx, ratio, 7);
+        let ratio = crate::fixed_point::shift::l_shr(ctx, ratio, exp);
+        let root = super::math::isqrt(ctx, ratio);
+        let lifted = l_shl(ctx, root, 9);
+        round(ctx, lifted)
+    };
+
+    for sample in output.iter_mut() {
+        let scaled = l_mult(ctx, *sample, g0);
+        let lifted = l_shl(ctx, scaled, 2);
+        *sample = extract_h(lifted);
+    }
+}
+
 /// How stable the LP filter is between frames: 1.0 stable, 0 unstable, Q15.
 ///
 /// Measured as the squared distance between this frame's ISFs and the last
