@@ -17,18 +17,34 @@ path = sys.argv[1]
 s = open(path).read()
 
 HELPER = '''
-/* --- trace instrumentation, not part of TS 26.173 --- */
+/* --- trace instrumentation, not part of the reference --- */
 #include <stdio.h>
+#include <stdlib.h>
 static long rvoip_frame = -1;
 static long rvoip_subfr = -1;
+/* The trace gets its own file rather than stderr. The reference writes its
+ * own progress to stderr *without* newlines, so it merges into whatever
+ * trace line follows and silently removes it from any line-prefix filter.
+ * Fifty rows vanished that way before it was noticed, and a missing row
+ * reads as "this stage agrees" when it was never compared at all. */
+static FILE *rvoip_trace_file(void) {
+    static FILE *f = NULL;
+    if (!f) {
+        const char *p = getenv("RVOIP_TRACE");
+        f = fopen(p ? p : "rvoip_trace.txt", "w");
+        if (!f) { perror("rvoip trace"); exit(1); }
+    }
+    return f;
+}
 static void TRC(const char *name, const Word16 *v, int n) {
+    FILE *f = rvoip_trace_file();
     int i;
-    fprintf(stderr, "T %ld %ld %s", rvoip_frame, rvoip_subfr, name);
-    for (i = 0; i < n; i++) fprintf(stderr, " %d", v[i]);
-    fprintf(stderr, "\\n");
+    fprintf(f, "T %ld %ld %s", rvoip_frame, rvoip_subfr, name);
+    for (i = 0; i < n; i++) fprintf(f, " %d", v[i]);
+    fprintf(f, "\\n");
 }
 static void TRC1(const char *name, long v) {
-    fprintf(stderr, "T %ld %ld %s %ld\\n", rvoip_frame, rvoip_subfr, name, v);
+    fprintf(rvoip_trace_file(), "T %ld %ld %s %ld\\n", rvoip_frame, rvoip_subfr, name, v);
 }
 /* --- end trace instrumentation --- */
 '''

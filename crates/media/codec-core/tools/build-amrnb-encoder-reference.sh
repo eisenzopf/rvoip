@@ -89,6 +89,17 @@ for m in 0 1 2 3 4 5 6 7; do
 done
 echo "    all eight modes decode back to $(( FRAMES * 160 )) samples"
 
+echo "==> capturing a per-stage trace as a committed fixture"
+# Three frames at 7.40 kbit/s: the mainstream path -- 3-split LSFs, joint gain
+# quantisation, one LP analysis per frame -- so it exercises the common code
+# with real state carried between frames without pulling in 12.2's second
+# analysis or 4.75's joint-subframe gain coding.
+"$HERE/trace-amrnb-encoder.sh" 4 >/dev/null
+TRACE="${TMPDIR:-/tmp}/rvoip-amrnb-enc-trace/trace.txt"
+awk '$2 < 3' "$TRACE" > "$TESTDATA/nb_enc_trace.txt"
+wc -l < "$TESTDATA/nb_enc_trace.txt" | xargs echo "    lines:"
+ls -l "$TESTDATA/nb_enc_trace.txt" | awk '{print "    " $5 " bytes"}'
+
 echo
-echo "==> per-stage ground truth comes from the instrumented encoder:"
+echo "==> the full trace, for any mode:"
 echo "    tools/trace-amrnb-encoder.sh <mode>"

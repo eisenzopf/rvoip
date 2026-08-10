@@ -35,11 +35,19 @@ python3 "$HERE/instrument-amrnb-encoder.py" "$WORK/cod_amr.c" "$WORK/sp_enc.c"
 ( cd "$WORK" && cc -O1 -w -DMMS_IO -o "$WORK/amrnb_enc_trace" \
     $(ls ./*.c | grep -v '/decoder\.c$') -lm )
 
-"$WORK/amrnb_enc_trace" "${MODES[$MODE]}" "$TESTDATA/amrnb_enc_input.pcm" \
-    "$WORK/out.amr" 2>"$WORK/raw.txt" >/dev/null
-grep '^T ' "$WORK/raw.txt" > "$WORK/trace.txt"
+# The trace goes to its own file, not stderr: the reference writes progress to
+# stderr without newlines, which merges into whatever trace line follows and
+# silently removes it from any line-prefix filter.
+RVOIP_TRACE="$WORK/trace.txt" "$WORK/amrnb_enc_trace" "${MODES[$MODE]}" \
+    "$TESTDATA/amrnb_enc_input.pcm" "$WORK/out.amr" >/dev/null 2>&1
 
 echo "wrote $WORK/trace.txt ($(wc -l < "$WORK/trace.txt") lines)"
+
+# Every distinct trace name must appear once per frame (or per subframe), so a
+# row silently lost to interleaving shows up as an uneven count rather than as
+# a stage that agrees.
+awk '{c[$4]++} END {for (k in c) print c[k], k}' "$WORK/trace.txt" | sort -n | head -3 \
+  | awk '{print "    least frequent: " $2 " x" $1}'
 
 # The instrumented build must still produce the committed bitstream, or the
 # trace points changed behaviour rather than only observing it.

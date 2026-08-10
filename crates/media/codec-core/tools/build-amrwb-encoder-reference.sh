@@ -95,9 +95,21 @@ for m in 0 1 2 3 4 5 6 7 8; do
 done
 echo "    all nine modes decode back to $(( FRAMES * 320 )) samples"
 
+echo "==> capturing a per-stage trace as a committed fixture"
+# Three frames at 12.65 kbit/s: enough to exercise every frame- and
+# subframe-level stage with real state carried between them, small enough to
+# commit. The full trace, for any mode, is a script away
+# (tools/trace-amrwb-encoder.sh) and is the instrument to reach for when the
+# assembled encoder is wrong.
+"$HERE/trace-amrwb-encoder.sh" 2 >/dev/null
+TRACE="${TMPDIR:-/tmp}/rvoip-amrwb-enc-trace/trace.txt"
+awk '$2 < 3' "$TRACE" > "$TESTDATA/wb_enc_trace.txt"
+wc -l < "$TESTDATA/wb_enc_trace.txt" | xargs echo "    lines:"
+ls -l "$TESTDATA/wb_enc_trace.txt" | awk '{print "    " $5 " bytes"}'
+
 echo
-echo "==> per-stage ground truth comes from the instrumented encoder:"
+echo "==> the full trace, for any mode:"
 echo "    tools/trace-amrwb-encoder.sh <mode>"
 echo
 echo "==> verify with:"
-echo "    cargo test -p rvoip-codec-core --all-features amr::wb::encoder"
+echo "    cargo test -p rvoip-codec-core --all-features amr::wb::enc"
