@@ -7,7 +7,8 @@
 | **AMR-WB decoder** | **Bit-exact against TS 26.173, all nine rates** |
 | AMR-WB erasure / DTX / homing | Not started — concealment code exists but is unreachable |
 | **AMR-NB bitstream layer** | **Bit-exact against TS 26.073, all eight rates** |
-| AMR-NB decoder DSP | Not started |
+| **AMR-NB spectral path** | **Bit-exact, 4.75–10.2 kbit/s** (12.2 needs the 5-split quantiser) |
+| AMR-NB excitation, synthesis, post-filter | Not started |
 | AMR-WB encoder | Not started |
 | AMR-NB encoder | Not started |
 | Codec-trait integration | Not started |
@@ -39,6 +40,29 @@ A third, smaller: **read the reference raw.** Both references interleave
 instrumentation counters (`test(); move16();`) on the same line as real
 assignments, so any filter that strips those lines silently strips real code.
 That removed four lines from one function before it was noticed.
+
+## AMR-NB: what must not be shared with wideband
+
+The two codecs look like relatives and are not interchangeable anywhere it
+matters. Each of these would compile, run, and produce speech-shaped output:
+
+| Thing | Narrowband | Wideband |
+|---|---|---|
+| Spectral representation | **LSP/LSF** | **ISP/ISF** |
+| `F2(z)` factor in the LP conversion | `(1 − z⁻¹)`, subtract `f2[i-1]` | `(1 − z⁻²)`, subtract `f2[i-2]` |
+| Final shift in that conversion | 13 | 12 |
+| Trailing-coefficient scaling | none | scales by the last ISP |
+| Cosine table | 65 entries, top 8 bits | 129 entries, top 9 bits |
+| Spacing enforcement | all `M` coefficients | stops one short |
+| MA prediction factor | per coefficient | one scalar |
+| Interpolation weights | uniform ¼, ½, ¾, 1 | `{0.45, 0.8, 0.96, 1.0}` |
+| Adaptive-codebook filter | ⅙ resolution | ¼ resolution |
+| Output convention | **13-bit** (`& 0xfff8`) | **14-bit** (`& 0xfffC`) |
+| Decoder post-filter | **yes** | none |
+| `packed_size` in the reference | includes the ToC byte | excludes it |
+
+`nb/lsp.rs` carries a test asserting the two LP conversions **disagree** on the
+same input, so a later attempt to unify them fails loudly rather than silently.
 
 ## Remaining work, in order
 
