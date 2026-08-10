@@ -26,6 +26,7 @@ pub mod bitstream;
 pub mod codebook;
 pub mod decoder;
 pub mod decoder_tables;
+pub mod enc;
 pub mod detect;
 pub mod gain;
 pub mod lag;

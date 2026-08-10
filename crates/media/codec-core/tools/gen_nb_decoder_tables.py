@@ -75,6 +75,16 @@ TABLES = [
      "/// Shorter than [`INTER_6_PRED`] because the search only needs the\\n"
      "/// filter's central lobe to rank candidate lags, while the decoder needs\\n"
      "/// the whole response to reconstruct the excitation."),
+    ("corrwght.tab", "corrweight", "CORR_WEIGHT", 251, 10,
+     "Lag-dependent weighting of the open-loop correlation, Q15. Encoder only,\\n"
+     "/// 10.2 kbit/s only.\\n"
+     "///\\n"
+     "/// `Pitch_ol_wgh` reads it through *two* cursors at once: a fixed one\\n"
+     "/// anchored at entry 250 that walks down once per candidate lag, and a\\n"
+     "/// second anchored at `123 + lag_max - old_lag` that only advances while\\n"
+     "/// the adaptive weighting is armed. The single table is therefore both a\\n"
+     "/// fixed lag prior and a proximity window around the previous lag,\\n"
+     "/// depending on where it is entered."),
     ("qua_gain.tab", "table_gain_highrates", "GAIN_HIGHRATES", None, 4,
      "Joint pitch/code gain codebook for the higher rates, four words per entry."),
     ("qua_gain.tab", "table_gain_lowrates", "GAIN_LOWRATES", None, 4,
@@ -112,6 +122,17 @@ TABLES = [
      "/// Indexed by subframe and by the two pulses; 4.75 and 5.15 kbit/s vary\\n"
      "/// their tracks across the four subframes, which is why this decoder\\n"
      "/// alone takes a subframe number."),
+    # Encoder-side and file-local to c2_9pf.c: the reference declares it
+    # `static` *inside* `build_code`, so it is normative but lives in no .tab.
+    ("c2_9pf.c", "trackTable", "TRACK_TABLE_2I40_9", 20, 5,
+     "Which of the two track pairs each position's track belongs to, for the\\n"
+     "/// 9-bit two-pulse codebook's index packing. Four subframes of five\\n"
+     "/// tracks.\\n"
+     "///\\n"
+     "/// A `-1` marks a track the search never visits in that subframe, so the\\n"
+     "/// entry is unreachable rather than meaningful; the encoder treats it the\\n"
+     "/// same as `1`, which is what the reference's `if (first == 0) ... else`\\n"
+     "/// does."),
     ("c2_11pf.tab", "startPos1", "START_POS1_2I40_11", 2, 2,
      "First-pulse track start positions for the 11-bit two-pulse codebook."),
     ("c2_11pf.tab", "startPos2", "START_POS2_2I40_11", 4, 4,
@@ -145,6 +166,73 @@ TABLES = [
      "/// [`GAMMA4_MR122`] is `0.75^n`. The generator asserts that coincidence\\n"
      "/// rather than relying on it, so a revision where they diverge fails\\n"
      "/// here instead of quietly detuning one rate's post-filter."),
+
+    # ---- encoder front end ------------------------------------------------
+    # Everything below is read by the encoder only. They live here because
+    # this generator is the one sanctioned path from the reference to Rust;
+    # the module name predates the encoder.
+    ("window.tab", "window_200_40", "LP_WINDOW_200_40", 240, 10,
+     "LP analysis window for every rate except 12.2 kbit/s, Q15.\\n"
+     "///\\n"
+     "/// A Hamming half over the 200 past-and-current samples, a quarter\\n"
+     "/// cosine over the 40 lookahead samples. Applied to\\n"
+     "/// `old_speech[80..320]`, so its peak sits at the end of the current\\n"
+     "/// frame rather than at its centre."),
+    ("window.tab", "window_160_80", "LP_WINDOW_160_80", 240, 10,
+     "First (mid-frame) LP analysis window at 12.2 kbit/s, Q15.\\n"
+     "///\\n"
+     "/// 12.2 is the only rate that runs two analyses per frame; this one is\\n"
+     "/// centred on the second subframe. Applied to `old_speech[40..280]`,\\n"
+     "/// which is 40 samples earlier than the other rates' window."),
+    ("window.tab", "window_232_8", "LP_WINDOW_232_8", 240, 10,
+     "Second (end-of-frame) LP analysis window at 12.2 kbit/s, Q15.\\n"
+     "///\\n"
+     "/// Applied to the same `old_speech[40..280]` span as\\n"
+     "/// [`LP_WINDOW_160_80`], not to the span the other rates use — the two\\n"
+     "/// 12.2 analyses differ only in the window, never in the samples."),
+    ("lag_wind.tab", "lag_h", "LAG_WINDOW_H", 10, 10,
+     "Lag-window multipliers, DPF high words.\\n"
+     "///\\n"
+     "/// 60 Hz of bandwidth expansion plus a white-noise floor, applied to\\n"
+     "/// `r[1..=10]`. Index `i` here multiplies `r[i + 1]`: the reference\\n"
+     "/// reads `lag_h[i - 1]` inside a loop over `i = 1..=10`, and `r[0]` is\\n"
+     "/// deliberately left alone."),
+    ("lag_wind.tab", "lag_l", "LAG_WINDOW_L", 10, 10,
+     "Lag-window multipliers, DPF low words. See [`LAG_WINDOW_H`]."),
+    ("grid.tab", "grid", "LSP_GRID", 61, 6,
+     "Cosine grid the `Az_lsp` root search walks, Q15, descending.\\n"
+     "///\\n"
+     "/// 61 points: `grid_points = 60` intervals. The endpoints are\\n"
+     "/// **±32760, not ±32767**, despite the reference's own comment saying\\n"
+     "/// `grid[0] = 1.0`. Regenerating this from `cos()` moves the first and\\n"
+     "/// last entries and changes which interval the outermost root falls in,\\n"
+     "/// so the table is copied rather than computed — and the generator\\n"
+     "/// asserts the endpoints below."),
+    ("cod_amr.c", "gamma1", "GAMMA1", 10, 5,
+     "Perceptual weighting numerator factors, `0.94^n`, Q15.\\n"
+     "///\\n"
+     "/// Used by 4.75 through 7.95 kbit/s. Note the two consumers do not\\n"
+     "/// select between this and [`GAMMA1_12K2`] with the same test:\\n"
+     "/// `pre_big` uses `mode <= MR795` while `subframePreProc` uses\\n"
+     "/// `mode == MR122 || mode == MR102`. The two agree on every speech rate\\n"
+     "/// and disagree on the DTX pseudo-mode."),
+    ("cod_amr.c", "gamma1_12k2", "GAMMA1_12K2", 10, 5,
+     "Perceptual weighting numerator factors, `0.9^n`, Q15, for 10.2 and\\n"
+     "/// 12.2 kbit/s. See [`GAMMA1`]."),
+    ("cod_amr.c", "gamma2", "GAMMA2", 10, 5,
+     "Perceptual weighting denominator factors, `0.6^n`, Q15, all rates."),
+    ("pre_proc.c", "b", "PRE_PROC_B", 3, 3,
+     "Numerator of the encoder's 80 Hz input high-pass, Q12.\\n"
+     "///\\n"
+     "/// **Already divided by two.** This is where the reference's promise to\\n"
+     "/// divide the input by two comes from: there is no separate halving\\n"
+     "/// step, the gain is folded into these three coefficients."),
+    ("pre_proc.c", "a", "PRE_PROC_A", 3, 3,
+     "Denominator of the encoder's 80 Hz input high-pass, Q12.\\n"
+     "///\\n"
+     "/// `a[0]` is never used — the recursion is written directly in terms of\\n"
+     "/// `a[1]` and `a[2]` — but it is kept so the indices match the\\n"
+     "/// reference's."),
 ]
 
 # Decoder homing frames: one parameter vector per mode, all in one file, so
@@ -264,6 +352,29 @@ assert len(extracted["INTER_6_PRED"]) != len(extracted["INTER_6_SEARCH"]), (
 assert extracted["INTER_6_PRED"][0] == 29443 and extracted["INTER_6_SEARCH"][0] == 29519, (
     "the two inter_6 tables no longer start where they did; the generator may "
     "have read one file twice"
+)
+# The three LP analysis windows are declared consecutively in one file and are
+# the same length, so reading the same declaration three times would go
+# unnoticed.
+assert (extracted["LP_WINDOW_200_40"] != extracted["LP_WINDOW_160_80"]
+        and extracted["LP_WINDOW_160_80"] != extracted["LP_WINDOW_232_8"]
+        and extracted["LP_WINDOW_200_40"] != extracted["LP_WINDOW_232_8"]), (
+    "two of the three LP analysis windows are identical — window.tab was read "
+    "off the wrong declaration"
+)
+assert extracted["GAMMA1"] != extracted["GAMMA1_12K2"], (
+    "the two weighting numerators are identical — `gamma1` matched the "
+    "`gamma1_12k2` declaration"
+)
+# The comment above grid.tab claims grid[0] = 1.0. The stored value is not
+# 32767, and the root search's outermost interval depends on which it is.
+assert extracted["LSP_GRID"][0] == 32760 and extracted["LSP_GRID"][-1] == -32760, (
+    "the Az_lsp grid endpoints are not ±32760; someone regenerated the table "
+    "from cos() instead of copying it"
+)
+assert extracted["LSP_GRID"][30] == 0, "the Az_lsp grid is no longer symmetric about 0"
+assert extracted["PRE_PROC_A"][0] == 4096, (
+    "the pre-processing high-pass denominator no longer leads with 4096"
 )
 
 HEADER = '''//! Decoder tables for AMR-NB, from the TS 26.073 reference.
