@@ -92,6 +92,20 @@ POINTS = [
     ("        st->old_T0_med = Med_olag(T_op, st->old_ol_lag);        move16();",
      '\n        TRC1("T_op_med", st->old_T0_med);', "after"),
 
+    # The weighted speech the open-loop pitch search runs on, and the
+    # decimated-by-two copy it actually scans. Without these the pitch search
+    # has an input nothing can check it against.
+    ("    Scale_sig(wsp, L_FRAME / OPL_DECIM, shift);",
+     '\n    TRC("wsp", wsp, L_FRAME / OPL_DECIM); TRC1("wsp_shift", shift);', "after"),
+
+    # The quantiser indices, at both budgets: an ISF vector that matches while
+    # the indices differ is a real possibility, since two codebook entries can
+    # dequantise to the same rounded vector.
+    ("        Parm_serial(indice[4], 6, &prms);",
+     '\n        TRC("isf_indice36", indice, 5);', "after"),
+    ("        Parm_serial(indice[6], 5, &prms);",
+     '\n        TRC("isf_indice46", indice, 7);', "after"),
+
     # Per-subframe. The subframe counter is set from the loop variable rather
     # than incremented, so a `continue` cannot desynchronise it.
     ("        Weight_a(p_A, Ap, GAMMA1, M);\n        Residu(Ap, M, error + M, xn, L_SUBFR);",
@@ -104,7 +118,7 @@ POINTS = [
      ' TRC1("T0_min", T0_min); TRC1("T0_max", T0_max);', "after"),
     ("        Updt_tar(xn, xn2, y2, gain2, L_SUBFR);",
      '\n        TRC1("gain1", gain1); TRC1("gain2", gain2);'
-     ' TRC("adapt", &exc[i_subfr], L_SUBFR);', "after"),
+     ' TRC("adapt", &exc[i_subfr], L_SUBFR); TRC("y1", y1, L_SUBFR);', "after"),
     ("        cor_h_x(h2, xn2, dn);",
      '\n        TRC("xn2", xn2, L_SUBFR); TRC("cn", cn, L_SUBFR);'
      ' TRC("h2", h2, L_SUBFR); TRC("dn", dn, L_SUBFR);', "after"),
