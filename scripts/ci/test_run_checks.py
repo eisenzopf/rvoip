@@ -127,6 +127,34 @@ class RunChecksTests(unittest.TestCase):
         self.assertIn("otel", commands[0][0])
         self.assertIn("--all-targets", commands[0][0])
 
+    def test_codec_gate_runs_what_the_default_feature_shards_compile_out(self) -> None:
+        commands = run_checks.specialty_commands("codec-features", Path("/workspace"))
+        argv = [item[0] for item in commands]
+        self.assertEqual(len(argv), 4)
+        # Every command asks for all features. A command here without it is a
+        # command that duplicates the shard and proves nothing.
+        for command in argv:
+            self.assertIn("--all-features", command)
+        for package in ("rvoip-codec-core", "rvoip-media-core"):
+            with self.subTest(package=package):
+                owned = [command for command in argv if package in command]
+                self.assertEqual(len(owned), 2)
+                self.assertEqual(
+                    sorted(command[1] for command in owned), ["clippy", "test"]
+                )
+
+    def test_shards_alone_never_reach_the_optional_codecs(self) -> None:
+        # The reason the gate above exists, asserted rather than assumed: the
+        # shard that owns rvoip-codec-core builds it with its default features,
+        # which is g711 only. Should the shards ever gain --all-features, this
+        # fails and the specialty gate becomes removable.
+        for commands in (
+            run_checks.shard_commands("rvoip-codec-core,rvoip-media-core"),
+            run_checks.shard_test_commands("rvoip-codec-core"),
+        ):
+            for command, _, _ in commands:
+                self.assertNotIn("--all-features", command)
+
     def test_release_tooling_gate_owns_proxy_harness_tests(self) -> None:
         commands = run_checks.specialty_commands("release-tooling", Path("/workspace"))
         argv = [item[0] for item in commands]

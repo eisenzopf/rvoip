@@ -54,9 +54,10 @@ opus = ["dep:opus"]          # Opus codec backed by libopus
 opus-sim = ["opus"]
 
 # AMR-NB / AMR-WB (3GPP TS 26.071 / TS 26.171, RFC 4867).
-# Phase 0: types, modes and mode-set negotiation only -- there is no encoder or
-# decoder yet, and encode/decode return FeatureNotEnabled. See
-# docs/AMR_IMPLEMENTATION_PLAN.md.
+# Both variants encode and decode, bit-exact against the 3GPP reference
+# implementations over the committed fixtures. DTX, comfort noise and homing
+# frames are not implemented; see docs/AMR_IMPLEMENTATION_STATUS.md for what is
+# and is not claimed.
 amr-nb = []                  # AMR narrowband, 8 kHz
 amr-wb = []                  # AMR wideband (G.722.2), 16 kHz -- the HD voice codec
 amr = ["amr-nb", "amr-wb"]

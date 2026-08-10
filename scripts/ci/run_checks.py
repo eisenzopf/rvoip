@@ -322,6 +322,56 @@ def specialty_commands(
                 None,
             ),
         ]
+    if gate == "codec-features":
+        # The shards run `cargo test -p <crate>` with default features only.
+        # `rvoip-codec-core` defaults to `["g711"]` and `rvoip-media-core` to
+        # `["pcmu", "pcma"]`, so every test behind `g729`, `opus`, `amr-nb` or
+        # `amr-wb` is compiled out on every pull request -- 104 tests run where
+        # `--all-features` runs 740. The skipped ones are the expensive ones to
+        # be wrong about: the AMR bit-exactness suites against TS 26.073 and
+        # TS 26.173. This gate is where they actually execute.
+        #
+        # Both crates and not just the codec, because media-core's own codec
+        # adapters sit behind the same feature names and inherit the identical
+        # hole: 290 tests run there by default and 316 with every feature on,
+        # and 14 of the 26 missing are the RFC 4867 AMR payload-format tests
+        # the relay's framing guard depends on.
+        commands = []
+        for package in ("rvoip-codec-core", "rvoip-media-core"):
+            commands.extend(
+                [
+                    (
+                        [
+                            "cargo",
+                            "test",
+                            "--locked",
+                            "--all-features",
+                            "--lib",
+                            "--tests",
+                            "--bins",
+                            "--examples",
+                            "-p",
+                            package,
+                        ],
+                        None,
+                        None,
+                    ),
+                    (
+                        [
+                            "cargo",
+                            "clippy",
+                            "--locked",
+                            "--all-features",
+                            "--all-targets",
+                            "-p",
+                            package,
+                        ],
+                        None,
+                        None,
+                    ),
+                ]
+            )
+        return commands
     if gate == "rtp-interop":
         return [(["bash", "scripts/test_libsrtp_interop.sh"], None, None)]
     if gate == "amazon-connect-aws-control":

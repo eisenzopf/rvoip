@@ -57,6 +57,23 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("infra-otel", rules)
         self.assertIn("Cargo.lock", rules["infra-otel"])
 
+    def test_optional_codecs_are_owned_by_a_gate_and_forced_on_main(self) -> None:
+        policy = json.loads((ROOT / "scripts/ci/policy.json").read_text())
+        rules = {
+            rule["gate"]: set(rule["patterns"])
+            for rule in policy["specialty_rules"]
+        }
+        self.assertIn("codec-features", rules)
+        self.assertIn("crates/media/codec-core/**", rules["codec-features"])
+        # The optional codec backends -- libopus today -- are only compiled
+        # under their feature, so a lockfile bump moves code no shard builds.
+        self.assertIn("Cargo.lock", rules["codec-features"])
+        # Path matching only fires when the codec crates themselves change. A
+        # change anywhere else that breaks a feature-gated path would go
+        # unnoticed until main, so main runs the gate unconditionally.
+        main = (ROOT / ".github/workflows/main-ci.yml").read_text()
+        self.assertIn("--specialty-gate codec-features", main)
+
     def test_every_sip_process_fixture_is_prebuilt_by_the_dedicated_lane(self) -> None:
         policy = json.loads((ROOT / "scripts/ci/policy.json").read_text())
         mapping = policy["pr_sip_fixture_examples"]

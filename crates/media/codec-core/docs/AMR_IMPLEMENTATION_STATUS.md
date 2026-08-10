@@ -174,6 +174,16 @@ survive the two parameters the lag and the codebook consume in between.
    closes that properly. Homing frames are the spec's own conformance
    mechanism and cost little once DTX exists.
 
+   Both reference tarballs already ship normative DTX vectors that nothing here
+   reads: the wideband one has `testv/tst_md.cod` and `.out` (80 speech, 1
+   SID_FIRST, 15 SID_UPDATE, 104 NO_DATA at 12.65 kbit/s), and the narrowband
+   one has `spch_dos.inp`, `spch_dos.cod` and `spch_dos.out` — 425 frames
+   encoded with `-dtx` across all eight rates, which is the reference's own
+   installation check (`amr_chk.csh`). They are ground truth for this work and
+   for the VAD1 port, which otherwise has *no* directly observable output: the
+   narrowband VAD decision appears nowhere in the bitstream, only in which
+   frames become SID or NO_DATA.
+
 2. **Transcoding.** AMR-NB ↔ PCMU/PCMA, AMR-WB ↔ Opus, AMR-NB ↔ AMR-WB with
    the 8/16 kHz resampling. Everything it needs now exists.
 
@@ -194,6 +204,23 @@ the same as conformance: TS 26.074 and TS 26.174 are the normative test
 sequences and are not in this tree (IP-2a). The distinction is worth keeping,
 because this repo's own G.711 tests already disclaim evidence from files that
 are not present, and the same discipline applies here.
+
+## Where these tests run
+
+Until 2026-08-10, nowhere. `codec-core` defaults to `["g711"]` and the PR
+shards build every crate with its default features, so
+`cargo test -p rvoip-codec-core` ran **104 tests where `--all-features` runs
+740** — every AMR test on this branch, plus G.729 and Opus, compiled out on
+every pull request. media-core had the same hole, 290 against 316, and 14 of
+its 26 missing tests are the RFC 4867 AMR payload-format ones.
+
+The `codec-features` specialty gate now runs both crates at `--all-features`,
+tests and Clippy, on any change under `crates/media/codec-core/**`,
+media-core's codec and payload trees, or `Cargo.lock` — and unconditionally on
+Main. It is defined in `scripts/ci/run_checks.py` and `scripts/ci/policy.json`,
+and `scripts/ci/test_run_checks.py` asserts both that the gate passes
+`--all-features` everywhere and that the shards do not, so the gate cannot
+quietly become a duplicate of work already done.
 
 ## Detailed history
 

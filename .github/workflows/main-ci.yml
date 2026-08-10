@@ -48,6 +48,7 @@ jobs:
             --job-mode combined
             --deferred-sip-mode separate
             --github-output "$GITHUB_OUTPUT"
+            --specialty-gate codec-features
             --specialty-gate release-tooling
             --specialty-gate rtp-interop
             --specialty-gate vcon-postgres

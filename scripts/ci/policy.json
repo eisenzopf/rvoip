@@ -130,6 +130,16 @@
       ]
     },
     {
+      "gate": "codec-features",
+      "patterns": [
+        "Cargo.lock",
+        "crates/media/codec-core/**",
+        "crates/media/media-core/src/codec/**",
+        "crates/media/media-core/src/rtp_processing/payload/**",
+        "crates/media/media-core/Cargo.toml"
+      ]
+    },
+    {
       "gate": "infra-otel",
       "patterns": [
         "Cargo.lock",
