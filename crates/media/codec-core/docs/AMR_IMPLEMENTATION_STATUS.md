@@ -476,6 +476,38 @@ The fixture also caught a real bug: the upsampling filter is centred on its
 sample, so the read window starts `NB_COEF_UP - 1` taps earlier. I had omitted
 the reference's `x = x - nb_coef + 1` back-step, which read past the buffer.
 
+### Correction: the decoder is not as close to done as the per-stage list suggests
+
+Assembling the decoder turned up **five stages I had not accounted for**, all
+sitting between gain decoding and synthesis. An earlier summary here claimed
+every decoder stage existed and only the wiring remained. That was wrong, and
+the way it was wrong is worth recording: I had been working outward from the
+data path in TS 26.190's section order, and these are *enhancement* stages that
+the prose treats as refinements but `dec_main.c` runs unconditionally. Reading
+per-stage left them invisible; only trying to wire the whole thing exposed them.
+
+Still to implement:
+
+| Stage | Where | Note |
+|---|---|---|
+| `voice_factor` | inline | Voicing measure driving the two enhancers and the next subframe's tilt |
+| Phase dispersion | `ph_disp.c` | Spreads pulse energy in time at low rates; three dispersion levels by rate |
+| Noise enhancer | inline | Moves the code gain toward a threshold on noisy, stable frames |
+| Pitch enhancer | inline | HP-filters the innovation on voiced frames |
+| Enhanced excitation | inline | **Synthesis consumes `exc2`, not the `exc` I assemble** — the two diverge |
+| `Isf_Extrapolation` | `isfextrp.c` | The 6.60 kbit/s high-band branch |
+
+The last row of that table is the one that would have bitten hardest: the
+excitation fed to the synthesis filter is a separately enhanced copy, while the
+one written back to the adaptive-codebook history is not. Wiring my current
+modules together naively would have used one buffer for both and produced audio
+that was recognisably speech and steadily wrong.
+
+**End-to-end ground truth is now in place**, which is what will catch the rest.
+`build-amr-reference.sh` builds the reference decoder and decodes every fixture
+to 16 kHz PCM (`amrwb_mode*.pcm`, 25 frames each). Per-stage vectors cannot
+reach the state coupling *between* stages; this can.
+
 ### High-band synthesis — the wideband half
 
 `wb/highband.rs` implements §6.10, bit-exact over three blocks covering both

@@ -83,6 +83,21 @@ mkdir -p "$TESTDATA"
 "$WORK/stage_oracle" "$TESTDATA" > "$TESTDATA/lp_stages_wb.txt"
 wc -l < "$TESTDATA/lp_stages_wb.txt" | xargs echo "    lines:"
 
+echo "==> building the full reference decoder"
+# Everything except coder.c, which carries the encoder's own main().
+# shellcheck disable=SC2046
+cc -O1 -w -I"$SRC" -o "$WORK/amrwb_dec" \
+   $(ls "$SRC"/*.c | grep -v '/coder\.c$') -lm
+
+echo "==> decoding the fixtures to reference PCM"
+# End-to-end ground truth: 16 kHz mono little-endian, 320 samples per frame.
+# Per-stage vectors cannot reach the state coupling between stages; this can.
+for m in 0 1 2 3 4 5 6 7 8; do
+  "$WORK/amrwb_dec" -mime "$TESTDATA/amrwb_mode$m.amr" \
+      "$TESTDATA/amrwb_mode$m.pcm" >/dev/null 2>&1
+done
+ls -l "$TESTDATA"/amrwb_mode0.pcm | awk '{print "    " $5 " bytes per mode"}'
+
 echo "==> generating the ISP/ISF tables"
 python3 "$HERE/gen_isf_tables.py" "$SRC/isp_isf.tab" \
     "$HERE/../src/codecs/amr/wb/lp/isf_tables.rs"
