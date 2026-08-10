@@ -6,22 +6,25 @@
 |---|---|
 | **AMR-WB decoder** | **Bit-exact against TS 26.173, all nine rates** |
 | **AMR-NB decoder** | **Bit-exact against TS 26.073, all eight rates** |
-| **Decoders reachable through `AmrCodec`** | **Done, and bit-exact through the public API** |
+| **AMR-WB encoder** | **Byte-identical bitstream, all nine rates, 50 frames** |
+| **AMR-NB encoder** | **Byte-identical bitstream, all eight rates, 50 frames** |
+| **Concealment** | **Bit-exact, both variants** — damaged frames, and lost frames for wideband |
+| **All four paths reachable through `AmrCodec`** | **Done, and byte-exact through the public API** |
 | **Oracle qualification** | **Measured** — see below |
-| **Encoder ground truth, both variants** | **Committed** — input PCM, reference bitstreams, per-stage traces |
-| AMR-WB encoder | In progress |
-| AMR-NB encoder | Not started |
-| Erasure / DTX / CNG / homing, both variants | Not started — concealment code exists but is unreachable from the frame path |
-| Transcoding, interop | Not started |
+| DTX / comfort noise / homing | Not started — refuses with a message naming what it needs |
+| Transcoding, interop, benchmarks | Not started |
 
-Both decoders decode the committed reference fixtures to PCM identical to what
-the 3GPP reference decoders produce, sample for sample, at every rate — through
-`AmrCodec::decode`, not only through the internal DSP. Encoding still returns
-`FeatureNotEnabled`.
+Every claim above is a test, not a note. Both decoders reproduce the reference
+decoders sample for sample; both encoders reproduce the reference *bitstream*
+byte for byte, magic and table of contents included. Each is asserted twice —
+once inside the module and once through `AmrCodec` — because per-stage
+exactness cannot see a wiring layer that resets state between frames, and each
+comparison is checked for vacuity.
 
-Neither reference is committed. `tools/build-amr-reference.sh` and
-`tools/build-amrnb-reference.sh` fetch and build them; only generated vectors,
-PCM and traces are checked in, because they are output rather than source.
+Neither reference is committed. `tools/build-amr-reference.sh`,
+`build-amrnb-reference.sh` and the two `*-encoder-reference.sh` scripts fetch
+and build them; only generated vectors, PCM, bitstreams and traces are checked
+in, because they are output rather than source.
 
 ## Oracle qualification, measured rather than assumed
 
@@ -161,26 +164,36 @@ survive the two parameters the lag and the codebook consume in between.
 
 ## Remaining work, in order
 
-1. **AMR-WB encoder.** In progress. Ground truth is committed: 50 frames of
-   deterministic input PCM, the reference bitstream at every rate, and a
-   three-frame per-stage trace at 12.65 kbit/s covering every frame- and
-   subframe-level intermediate. The algebraic codebook search is the large
-   piece and is almost entirely *search* — an encoder that picks a
-   different-but-equally-good candidate produces plausible speech and fails
-   conformance, so the tests check chosen indices and tie-breaks, not only the
-   resulting vectors.
+1. **DTX, comfort noise and homing, both variants.** The one part of the codec
+   proper still missing. The encoders were driven without DTX, so every
+   committed fixture frame is speech and `tx_dtx_handler` never runs — which
+   also means the wideband VAD, though fully implemented and on the
+   byte-exactness path (its output is codec bit 0 of every frame), is only
+   weakly *differentiated* by these fixtures: byte-exactness would still pass
+   with the detector wired to a constant. A fixture with real silence is what
+   closes that properly. Homing frames are the spec's own conformance
+   mechanism and cost little once DTX exists.
 
-2. **AMR-NB encoder.** Same ground truth in place. Eight per-rate codebook
-   searches are the bulk; 12.2 does two LP analyses per frame and 4.75 codes two
-   subframes' gains jointly, with a state save/restore and a re-run of the first
-   subframe's post-processing.
+2. **Transcoding.** AMR-NB ↔ PCMU/PCMA, AMR-WB ↔ Opus, AMR-NB ↔ AMR-WB with
+   the 8/16 kHz resampling. Everything it needs now exists.
 
-3. **Erasure, DTX, CNG and homing, both variants.** Both decoders pass a good
-   frame unconditionally, so the concealment paths — which exist and are tested
-   at the module level — are unreachable from the frame path, and a lost packet
-   produces garbage. Required for conformance and for the first real packet loss.
+3. **The relay path's exit criterion** — an AMR-WB call completed as a relaying
+   B2BUA against Asterisk and Kamailio+rtpengine, both framings, with a
+   mid-call mode switch observed.
 
-4. **Integration.** Registration, transcoding, CMR, resampling.
+4. **Interop and performance.** The cross-implementation matrix in both
+   directions, benchmarks per rate, and a soak test. The decoders have a fuzz
+   target; the encoders do not yet.
+
+## What is *not* claimed
+
+Bit-exactness here means agreement with the 3GPP reference implementations over
+the committed fixtures — 50 frames of one deterministic signal per rate, plus
+25 frames of a second for the decoders. That is strong evidence and it is not
+the same as conformance: TS 26.074 and TS 26.174 are the normative test
+sequences and are not in this tree (IP-2a). The distinction is worth keeping,
+because this repo's own G.711 tests already disclaim evidence from files that
+are not present, and the same discipline applies here.
 
 ## Detailed history
 
@@ -202,16 +215,14 @@ where we actually are.
 | 1 | RFC 4867 payload format + AMR file storage format | 🟢 **Complete** |
 | 2 | SDP negotiation + relay path | 🟡 **Negotiation done** — relay path outstanding |
 | 3 | DSP layer + oracle harness | 🟢 **Complete**, all four codec paths |
-| 4 | AMR-WB decoder, fixed point | 🟢 **Bit-exact, all nine rates** — erasure/DTX/homing outstanding |
-| 5 | **AMR-WB encoder — the HD-voice milestone** | 🟡 **In progress** — ground truth committed |
-| 6 | AMR-NB decoder, fixed point | 🟢 **Bit-exact, all eight rates** — erasure/DTX/homing outstanding |
-| 7 | AMR-NB encoder, fixed point | ⚪ Not started — ground truth committed |
-| 8 | Transcoding, interop, performance, hardening | 🟡 **Decoders wired to `AmrCodec`**; the rest not started |
+| 4 | AMR-WB decoder, fixed point | 🟢 **Bit-exact, all nine rates**, plus concealment |
+| 5 | **AMR-WB encoder — the HD-voice milestone** | 🟢 **Byte-identical, all nine rates** |
+| 6 | AMR-NB decoder, fixed point | 🟢 **Bit-exact, all eight rates**, plus concealment |
+| 7 | AMR-NB encoder, fixed point | 🟢 **Byte-identical, all eight rates** |
+| 8 | Transcoding, interop, performance, hardening | 🟡 **All four paths wired to `AmrCodec`**; the rest not started |
 
-Both decoders are reachable through `AmrCodec::decode` and
-`VariableRateCodec::decode_frame`, and bit-exact through that path. Encoding,
-comfort noise, gaps and lost frames each refuse with a message naming the piece
-they need.
+DTX is the one piece of the codec proper that is missing, in either direction.
+Comfort noise and deliberate gaps refuse with a message naming what they need.
 
 ---
 
@@ -1467,6 +1478,34 @@ now returns `usize` for both variants and WB CRC works. See the Phase 1 section.
 ---
 
 ## Changelog
+
+### 2026-08-10 — All four codec paths bit-exact
+
+Both encoders now produce a byte-identical bitstream at every rate — wideband
+nine, narrowband eight, 50 frames each — and both are reachable through
+`AmrCodec` alongside the decoders. With the decoders finished earlier the same
+day, every path this codec has is exact against its normative reference.
+
+The encoders were built the same way as the decoders and for the same reason:
+ground truth first, stages second, assembly last. Committed input PCM and
+reference bitstreams at every rate, an instrumented reference encoder emitting
+per-stage traces, then one module per stage group each verified against those
+traces, then the frame loop. Both assemblies matched on close to the first run,
+which is what the decoders' hazards bought — every composition trap the
+wideband decoder found the hard way was written into the assembly brief before
+a line of it existed.
+
+Also this session: oracle qualification finally measured, the wideband erasure
+path closed, a decoder fuzz target, and a latent `prev_bfi` frame-versus-
+subframe divergence found and fixed before it could fire.
+
+**Lesson 3 fired twice more and is now the one to expect.** A trace row that is
+absent, or that silently duplicates another, reads exactly like a passing
+comparison. Two rows were lost to output interleaving, one row was a
+byte-identical copy of its neighbour under a different name, and one vacuity
+check passed because a single sample moved by 8 is below what 4.75 kbit/s can
+resolve. Every one was caught by a count assertion or a mutation check rather
+than by reading the code.
 
 ### 2026-08-10 — Both decoders bit-exact, and reachable
 
