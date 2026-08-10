@@ -128,6 +128,24 @@ pub fn dot_product12(ctx: &mut DspContext, x: &[Word16], y: &[Word16]) -> Normal
     (l_shl(ctx, sum, shift), 30 - shift)
 }
 
+/// Rescale a signal by `exp` bits, rounding.
+///
+/// Not a plain shift. The reference widens each sample to 32 bits, shifts, and
+/// *rounds* back: `round(L_shl(L_deposit_h(x), exp))`. For a right shift that
+/// is `floor((x + 2^(-exp-1)) / 2^-exp)`, which differs from a truncating
+/// `shr` on half of all inputs — and the difference propagates, because the
+/// rescaled excitation feeds the voicing measure and both enhancers.
+///
+/// Not `shr_r` either: that rounds ties away from zero, `round` does not.
+pub fn scale_sig(ctx: &mut DspContext, x: &mut [Word16], exp: i16) {
+    for sample in x.iter_mut() {
+        let widened = l_deposit_h(*sample);
+        // Saturation is expected here on a left shift.
+        let shifted = l_shl(ctx, widened, exp);
+        *sample = crate::fixed_point::arith::round(ctx, shifted);
+    }
+}
+
 /// Median of five values.
 ///
 /// Used to pick a representative gain from recent history during concealment,

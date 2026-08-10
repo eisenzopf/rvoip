@@ -53,7 +53,10 @@ const ISF_GAP: Word16 = Word16(128);
 const L_MEANBUF: usize = 3;
 
 /// The decoder's reset-state ISFs: evenly spaced, which is a flat spectrum.
-const ISF_INIT: [i16; LP_ORDER] = [
+///
+/// Exported because the decoder seeds its own previous-frame ISF history from
+/// the same values — the stability measure compares against it on frame 0.
+pub const ISF_INIT: [i16; LP_ORDER] = [
     1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192, 9216, 10240, 11264, 12288, 13312, 14336,
     15360, 3840,
 ];

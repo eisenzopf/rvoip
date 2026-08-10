@@ -27,8 +27,9 @@ use super::excitation::{Excitation, Upsampler, L_SUBFR16K};
 use super::gain::{FrameQuality, GainDecoder};
 use super::highband::{self, BandFilter, NoiseGenerator, NoiseShaper, TiltFilter};
 use super::lp::autocorr::LP_ORDER;
+use super::math::scale_sig;
 use super::lp::isf::{interpolate_isp, isf_to_isp, NB_SUBFR};
-use super::lp::isf_dequant::{IsfDecoder, IsfQuantizer};
+use super::lp::isf_dequant::{IsfDecoder, IsfQuantizer, ISF_INIT};
 use super::ltp::{self, PIT_SHARP};
 use super::params::FrameParams;
 use super::synthesis::{deemphasis, HighPass50, SynthesisFilter, PREEMPH_FAC};
@@ -112,8 +113,16 @@ impl Decoder {
             shaper: NoiseShaper::new(),
             band_pass: BandFilter::band_pass(),
             low_pass_7k: BandFilter::low_pass_7k(),
+            // Never overwritten before use, unlike isp_old below: the
+            // stability measure reads it on frame 0, and a zeroed history
+            // would report a huge spectral jump on a perfectly ordinary first
+            // frame. The reference seeds it to the same flat spectrum the ISF
+            // decoder starts from.
+            isf_old: ISF_INIT.map(Word16),
+            // Seeded on the first frame via `started`, so the value here is
+            // never read. Kept explicit so the reset state is diffable against
+            // the reference's.
             isp_old: [Word16(0); LP_ORDER],
-            isf_old: [Word16(0); LP_ORDER],
             tilt_code: Word16(0),
             started: false,
             vad_history: 0,
@@ -258,10 +267,11 @@ impl Decoder {
                 self.vtrace.push(("exc_total", t));
             }
             // voice_factor works on the adaptive part scaled down by 3 bits.
+            // Scale_sig rounds; a truncating shift here is wrong for half of
+            // all samples and the error reaches the tilt, both enhancers, and
+            // the low-rate sharpening.
             let mut scaled = exc2;
-            for s in &mut scaled {
-                *s = shr(&mut ctx, *s, 3);
-            }
+            scale_sig(&mut ctx, &mut scaled, -3);
             let voice_fac = voice_factor(
                 &mut ctx,
                 &scaled,
@@ -343,9 +353,7 @@ impl Decoder {
             // --- high band ---
             let mut hf = self.noise.fill(&mut ctx);
             let mut energy_source = exc2;
-            for s in &mut energy_source {
-                *s = shr(&mut ctx, *s, 3);
-            }
+            scale_sig(&mut ctx, &mut energy_source, -3);
             highband::match_energy(&mut ctx, &energy_source, &mut hf, q_new - 3);
 
             let tilt = highband::spectral_tilt(&mut ctx, &mut self.tilt_filter, &mut speech);
@@ -544,7 +552,7 @@ mod tests {
     fn the_assembly_does_not_regress_against_the_reference() {
         // Floors, well under the measured values, so ordinary noise does not
         // fail the build but a real regression does.
-        const FLOOR_PERMILLE: [u64; 9] = [530, 590, 790, 790, 750, 720, 770, 780, 700];
+        const FLOOR_PERMILLE: [u64; 9] = [860, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000];
 
         for (mode_index, &floor) in FLOOR_PERMILLE.iter().enumerate() {
             let (matched, total, worst) = compare(mode_index);
@@ -559,21 +567,17 @@ mod tests {
         }
     }
 
-    /// Bounds the residual error once the filter memories have filled.
+    /// 6.60 kbit/s is the one mode not yet bit-exact.
     ///
-    /// The measured worst case across modes 8.85 to 23.85 is 24, which is six
-    /// LSBs of the codec's 14-bit output and about -62 dBFS. Small, but not
-    /// zero: this is a ratchet against regression, not a conformance claim.
-    /// Bit-exactness is asserted by the ignored test below and is not yet met.
-    ///
-    /// 6.60 kbit/s is excluded and sits at 36. It is the one mode that shapes
-    /// its high band with an extrapolated order-20 filter rather than the low
-    /// band's own; that path is implemented
-    /// ([`super::highband::extrapolate_isf`]) but not yet wired, because
-    /// `isp_to_lp` and the noise shaper are both fixed at order 16.
+    /// It shapes its high band with an extrapolated order-20 filter rather
+    /// than the low band's own. That path is implemented and tested
+    /// ([`super::highband::extrapolate_isf`]) but not wired, because
+    /// `isp_to_lp` and the noise shaper are both fixed at order 16. The
+    /// residual is one LSB of the 14-bit output, so this bounds it rather than
+    /// asserting exactness.
     #[test]
-    fn the_residual_error_stays_small_after_warmup() {
-        for mode_index in 1..9 {
+    fn the_low_rate_mode_is_close_but_not_yet_exact() {
+        for mode_index in 0..1 {
             let (bits, pcm) = fixture(mode_index);
             let want = reference(pcm);
             let (_, frames) = storage::read(bits).expect("fixture parses");
@@ -600,16 +604,21 @@ mod tests {
                 }
             }
             assert!(
-                worst <= 24,
-                "mode {mode_index}: worst error {worst}, above the measured bound"
+                worst <= 4,
+                "mode {mode_index}: worst error {worst}, above one 14-bit LSB"
             );
         }
     }
 
+    /// Bit-exact against TS 26.173 for every mode except 6.60 kbit/s.
+    ///
+    /// This is the conformance claim: every sample of every frame of every
+    /// fixture is identical to the reference decoder's output. 6.60 is
+    /// excluded pending its order-20 high-band filter — see
+    /// [`the_low_rate_mode_is_close_but_not_yet_exact`].
     #[test]
-    #[ignore = "residual is one 14-bit LSB; see AMR_IMPLEMENTATION_STATUS.md"]
     fn the_decoder_matches_the_reference_sample_for_sample() {
-        for mode_index in 0..9 {
+        for mode_index in 1..9 {
             let (matched, total, worst) = compare(mode_index);
             assert_eq!(
                 matched, total,
