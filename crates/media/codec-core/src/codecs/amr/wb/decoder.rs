@@ -176,6 +176,10 @@ impl Decoder {
                 0,
             );
 
+            // Scale the buffer first: the adaptive-only copy below must be at
+            // the new scale, which is what the reference captures.
+            let (q_new, gain_code_word) = self.excitation.rescale_to(gains.code);
+
             // The adaptive-only excitation, before the total is built over it.
             // This is what voice_factor and the enhanced path start from.
             let (buffer, offset) = self.excitation.buffer_mut();
@@ -183,16 +187,13 @@ impl Decoder {
             exc2.copy_from_slice(&buffer[offset..offset + L_SUBFR]);
 
             // The plain total, written back to the history.
-            let (assembled, q_new) = self.excitation.assemble(&code, gains.pitch, gains.code);
-            let _ = assembled;
+            self.excitation.build(&code, gains.pitch, gain_code_word, q_new);
 
             // voice_factor works on the adaptive part scaled down by 3 bits.
             let mut scaled = exc2;
             for s in &mut scaled {
                 *s = shr(&mut ctx, *s, 3);
             }
-            let raised = l_shl(&mut ctx, gains.code, q_new);
-            let gain_code_word = round(&mut ctx, raised);
             let voice_fac = voice_factor(
                 &mut ctx,
                 &scaled,
@@ -342,6 +343,37 @@ mod tests {
             }
         }
         (matched, total, worst)
+    }
+
+    /// Diagnostic for the assembly's remaining error, kept because it is how
+    /// the next step starts rather than because it asserts anything.
+    ///
+    /// Run with `--ignored --nocapture`. Current finding: the reference's early
+    /// samples are all multiples of 4 where ours are not, at similar
+    /// magnitudes — a two-bit scaling difference rather than a wrong
+    /// computation, which points at a prescale in the path that dominates
+    /// those samples.
+    #[test]
+    #[ignore = "diagnostic, not an assertion"]
+    fn where_does_it_diverge() {
+        let mode_index = 2;
+        let (bits, pcm) = fixture(mode_index);
+        let want = reference(pcm);
+        let (_, frames) = storage::read(bits).expect("fixture parses");
+        let mode = AmrMode::new(AmrVariant::WideBand, 2).expect("mode");
+        let mut dec = Decoder::new();
+        let got = dec.decode(mode, &frames[0].data).expect("decodes");
+
+        let first_bad = (0..FRAME_SIZE_16K).find(|&i| got[i] != want[i]);
+        let first_nz = (0..FRAME_SIZE_16K).find(|&i| want[i] != 0);
+        println!("first non-zero {first_nz:?}, first mismatch {first_bad:?}");
+        println!("got  {:?}", &got[20..30]);
+        println!("want {:?}", &want[20..30]);
+
+        for sf in 0..4 {
+            let n = (sf * 80..(sf + 1) * 80).filter(|&i| got[i] == want[i]).count();
+            println!("  subframe {sf}: {n}/80 exact");
+        }
     }
 
     #[test]

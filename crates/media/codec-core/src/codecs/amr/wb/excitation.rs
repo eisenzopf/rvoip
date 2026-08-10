@@ -126,6 +126,61 @@ impl Excitation {
         }
     }
 
+    /// Choose this subframe's scaling and rescale the buffer to it.
+    ///
+    /// Separate from [`Self::assemble`] because the reference copies the
+    /// adaptive-only excitation *after* the rescale and before the total is
+    /// built over it — capturing it either side of this call gives different
+    /// answers, and the enhanced path needs the post-rescale one.
+    ///
+    /// Returns the shift and the code gain rounded into it.
+    pub fn rescale_to(&mut self, gain_code: Word32) -> (i16, Word16) {
+        let mut ctx = DspContext::default();
+        let (q_new, gain_word) = self.choose_scaling(&mut ctx, gain_code);
+        let shift = q_new - self.q_old;
+        self.rescale(&mut ctx, shift);
+        self.q_old = q_new;
+        (q_new, gain_word)
+    }
+
+    /// Build the total excitation over an already-rescaled buffer.
+    ///
+    /// `gain_code` is the value [`Self::rescale_to`] returned.
+    pub fn build(
+        &mut self,
+        code: &[Word16; L_SUBFR],
+        gain_pitch: Word16,
+        gain_code: Word16,
+        q_new: i16,
+    ) -> [Word16; L_SUBFR] {
+        let mut ctx = DspContext::default();
+        let offset = HISTORY;
+        let mut out = [Word16(0); L_SUBFR];
+        for i in 0..L_SUBFR {
+            let mut acc = l_mult(&mut ctx, code[i], gain_code);
+            acc = l_shl(&mut ctx, acc, 5);
+            acc = l_mac(&mut ctx, acc, self.buffer[offset + i], gain_pitch);
+            let acc = l_shl(&mut ctx, acc, 1);
+            let sample = round(&mut ctx, acc);
+            self.buffer[offset + i] = sample;
+            out[i] = sample;
+        }
+
+        let mut max = Word16(1);
+        for sample in &out {
+            let magnitude = abs_s(&mut ctx, *sample);
+            if magnitude.0 > max.0 {
+                max = magnitude;
+            }
+        }
+        let raised = add(&mut ctx, Word16(norm_s(max)), Word16(q_new));
+        let headroom = sub(&mut ctx, raised, Word16(1));
+        self.q_subfr.rotate_right(1);
+        self.q_subfr[0] = headroom;
+
+        out
+    }
+
     /// Assemble one subframe's excitation.
     ///
     /// The adaptive contribution must already be in the current subframe — that
