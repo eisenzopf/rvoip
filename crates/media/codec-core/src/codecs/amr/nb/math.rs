@@ -63,6 +63,11 @@ fn index_and_fraction(ctx: &mut DspContext, l_x: Word32) -> (i16, Word16) {
 ///
 /// A non-positive input returns `(0, 0)` rather than an error: the callers feed
 /// this energies, and a silent frame legitimately has none.
+///
+/// # Panics
+///
+/// Panics if `l_x` is not normalised to `exp`, since the table index would then
+/// be out of range. That is a caller error rather than bad data.
 pub fn log2_norm(ctx: &mut DspContext, l_x: Word32, exp: i16) -> (Word16, Word16) {
     if l_x.0 <= 0 {
         return (Word16(0), Word16(0));
@@ -73,8 +78,9 @@ pub fn log2_norm(ctx: &mut DspContext, l_x: Word32, exp: i16) -> (Word16, Word16
     let positioned = l_shr(ctx, l_x, 9);
     let (i, a) = index_and_fraction(ctx, positioned);
     // Normalisation puts the leading one in bit 30, so the extracted index is
-    // always 32..=63; this brings it into the table's 0..=31.
-    let i = (i - 32) as usize;
+    // always 32..=63; this brings it into the table's 0..=31. The conversion
+    // asserts that invariant rather than wrapping if it is ever broken.
+    let i = usize::try_from(i - 32).expect("log2 index is normalised into range");
 
     let l_y = interpolate(ctx, &LOG2_TABLE, i, a);
     (exponent, extract_h(l_y))
@@ -92,6 +98,10 @@ pub fn log2(ctx: &mut DspContext, l_x: Word32) -> (Word16, Word16) {
 /// `exponent` is the integer part (0..=30) and `fraction` the Q15 fractional
 /// part. The result is a `Word32` scaled so that the integer part lands at bit
 /// `exponent`.
+///
+/// # Panics
+///
+/// Panics on a negative `fraction`, which is outside the function's domain.
 pub fn pow2(ctx: &mut DspContext, exponent: Word16, fraction: Word16) -> Word32 {
     // `L_mult` doubles as it multiplies, so this is `fraction << 6`: it puts the
     // fraction's top five bits where `extract_h` reads them as the index. No
@@ -99,7 +109,8 @@ pub fn pow2(ctx: &mut DspContext, exponent: Word16, fraction: Word16) -> Word32 
     // already a Q15 fraction rather than a normalised word.
     let l_x = l_mult(ctx, fraction, Word16(32));
     let (i, a) = index_and_fraction(ctx, l_x);
-    let l_x = interpolate(ctx, &POW2_TABLE, i as usize, a);
+    let i = usize::try_from(i).expect("pow2 index is non-negative");
+    let l_x = interpolate(ctx, &POW2_TABLE, i, a);
 
     let exp = sub(ctx, Word16(30), exponent);
     l_shr_r(ctx, l_x, exp.0)
@@ -112,6 +123,11 @@ pub fn pow2(ctx: &mut DspContext, exponent: Word16, fraction: Word16) -> Word32 
 /// Splitting it this way is not an optimisation: `Dec_gain`'s energy measure
 /// needs the exponent separately, and rounding the shift here would lose bits
 /// it depends on.
+///
+/// # Panics
+///
+/// Panics only if the even-normalisation invariant is broken, which cannot
+/// happen for a positive input.
 pub fn sqrt_l_exp(ctx: &mut DspContext, l_x: Word32) -> (Word32, i16) {
     if l_x.0 <= 0 {
         return (Word32(0), 0);
@@ -127,7 +143,8 @@ pub fn sqrt_l_exp(ctx: &mut DspContext, l_x: Word32) -> (Word32, i16) {
 
     let positioned = l_shr(ctx, l_x, 9);
     let (i, a) = index_and_fraction(ctx, positioned);
-    let i = (i - 16) as usize;
+    // The even normalisation leaves the index in 16..=63.
+    let i = usize::try_from(i - 16).expect("sqrt index is normalised into range");
 
     (interpolate(ctx, &SQRT_L_TABLE, i, a), e)
 }
@@ -137,6 +154,11 @@ pub fn sqrt_l_exp(ctx: &mut DspContext, l_x: Word32) -> (Word32, i16) {
 /// A non-positive input returns `0x3fff_ffff` — the reference's saturated
 /// stand-in for an infinite result, which keeps the gain predictor bounded on a
 /// silent frame instead of dividing by zero.
+///
+/// # Panics
+///
+/// Panics only if the normalisation invariant is broken, which cannot happen
+/// for a positive input.
 pub fn inv_sqrt(ctx: &mut DspContext, l_x: Word32) -> Word32 {
     if l_x.0 <= 0 {
         return Word32(0x3fff_ffff);
@@ -157,7 +179,7 @@ pub fn inv_sqrt(ctx: &mut DspContext, l_x: Word32) -> Word32 {
 
     let positioned = l_shr(ctx, l_x, 9);
     let (i, a) = index_and_fraction(ctx, positioned);
-    let i = (i - 16) as usize;
+    let i = usize::try_from(i - 16).expect("inv_sqrt index is normalised into range");
 
     let l_y = interpolate(ctx, &INV_SQRT_TABLE, i, a);
     l_shr(ctx, l_y, exp.0)
