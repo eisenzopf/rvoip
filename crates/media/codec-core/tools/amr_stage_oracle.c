@@ -24,6 +24,7 @@ extern double cos(double);
 #include "typedef.h"
 #include "basic_op.h"
 #include "cnst.h"
+#include "bits.h"   /* RX_State, Read_serial, Serial_parm */
 
 void Autocorr(Word16 x[], Word16 m, Word16 r_h[], Word16 r_l[]);
 void Lag_window(Word16 r_h[], Word16 r_l[]);
@@ -134,7 +135,98 @@ static void dump_isf_dequant(int variant) {
     }
 }
 
-int main(void) {
+/* Bitstream unpacking.
+ *
+ * The payload carries codec bits sorted by subjective importance (TS 26.201),
+ * not in the order the decoder reads them, so unpacking is a permutation
+ * followed by a field walk. The sorting tables live in mime_io.tab inside the
+ * reference itself, so this needs no secondary source.
+ *
+ * The input is the committed .amr fixtures, which were produced by the
+ * *other* oracles (opencore-amr and vo-amrwbenc). Running real third-party
+ * bitstreams through the reference's own unsorter is a much stronger check
+ * than round-tripping synthetic parameters through my own understanding of
+ * the format: it would catch a permutation that is self-consistent but wrong.
+ */
+#define MAX_PRM 477
+#define FRAMES_PER_MODE 3
+
+/* Speech bits per mode. In MIME mode Read_serial returns 1 for "parsed a
+ * frame", not a bit count, so the length has to come from here. Static inside
+ * mime_io.tab, hence reproduced. */
+static const int unpacked_size[9] = {132, 177, 253, 285, 317, 365, 397, 461, 477};
+
+/* Emit a bit array as hex, MSB of each nibble first, so a whole frame fits on
+ * one line and a Rust test can compare it as a string. */
+static void dump_bits_hex(const char *name, const Word16 *bits, int n) {
+    printf("  %s ", name);
+    for (int i = 0; i < n; i += 4) {
+        int nibble = 0;
+        for (int b = 0; b < 4; b++) {
+            nibble <<= 1;
+            if (i + b < n && bits[i + b] == BIT_1) nibble |= 1;
+        }
+        printf("%x", nibble);
+    }
+    printf("\n");
+}
+
+static void dump_bitstream(const char *dir, int mode_no) {
+    char path[512];
+    FILE *fp;
+    RX_State *rx = NULL;
+    Word16 prms[MAX_PRM], frame_type, mode;
+    char magic[16];
+
+    sprintf(path, "%s/amrwb_mode%d.amr", dir, mode_no);
+    fp = fopen(path, "rb");
+    if (!fp) { fprintf(stderr, "missing %s\n", path); return; }
+
+    /* Read_serial expects the caller to have consumed the magic. */
+    if (fread(magic, 1, 9, fp) != 9 || strncmp(magic, "#!AMR-WB\n", 9)) {
+        fprintf(stderr, "%s: not an AMR-WB storage file\n", path);
+        fclose(fp);
+        return;
+    }
+
+    Init_read_serial(&rx);
+    printf("bitstream%d\n", mode_no);
+    for (int f = 0; f < FRAMES_PER_MODE; f++) {
+        Word16 ok = Read_serial(fp, prms, &frame_type, &mode, rx, 2);
+        int nb_bits;
+        Word16 *p = prms;
+        Word16 ind[7];
+        int n_ind, i;
+        char name[24];
+
+        if (ok == 0) break;
+        nb_bits = unpacked_size[mode];
+
+        /* The 6.60 kbit/s mode spends 36 bits on the spectrum, the rest 46. */
+        n_ind = (mode == 0) ? 5 : 7;
+        if (n_ind == 5) {
+            ind[0] = Serial_parm(8, &p); ind[1] = Serial_parm(8, &p);
+            ind[2] = Serial_parm(7, &p); ind[3] = Serial_parm(7, &p);
+            ind[4] = Serial_parm(6, &p);
+        } else {
+            ind[0] = Serial_parm(8, &p); ind[1] = Serial_parm(8, &p);
+            ind[2] = Serial_parm(6, &p); ind[3] = Serial_parm(7, &p);
+            ind[4] = Serial_parm(7, &p); ind[5] = Serial_parm(5, &p);
+            ind[6] = Serial_parm(5, &p);
+        }
+
+        printf("  meta%d %d %d\n", f, mode, nb_bits);
+        sprintf(name, "bits%d", f);
+        dump_bits_hex(name, prms, nb_bits);
+        sprintf(name, "isfind%d", f);
+        dump(name, ind, n_ind);
+        (void)i;
+    }
+    Close_read_serial(rx);
+    fclose(fp);
+}
+
+int main(int argc, char **argv) {
     for (int seed = 0; seed < 4; seed++) {
         Word16 x[L_WIN];
         Word16 r_h[M + 1], r_l[M + 1];
@@ -198,5 +290,11 @@ int main(void) {
 
     dump_isf_dequant(0);
     dump_isf_dequant(1);
+
+    if (argc > 1) {
+        for (int m = 0; m < 9; m++) dump_bitstream(argv[1], m);
+    } else {
+        fprintf(stderr, "no testdata dir given; skipping bitstream vectors\n");
+    }
     return 0;
 }

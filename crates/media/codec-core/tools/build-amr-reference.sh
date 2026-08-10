@@ -69,12 +69,12 @@ echo "==> building the stage oracle"
 cc -O1 -w -I"$SRC" -o "$WORK/stage_oracle" "$HERE/amr_stage_oracle.c" \
    "$SRC/isp_az.c" "$SRC/az_isp.c" "$SRC/levinson.c" "$SRC/autocorr.c" \
    "$SRC/lag_wind.c" "$SRC/isp_isf.c" "$SRC/int_lpc.c" "$SRC/qpisf_2s.c" \
-   "$SRC/weight_a.c" "$SRC/basicop2.c" \
+   "$SRC/weight_a.c" "$SRC/bits.c" "$SRC/basicop2.c" \
    "$SRC/oper_32b.c" "$SRC/count.c" "$SRC/util.c" -lm
 
 echo "==> generating vectors"
 mkdir -p "$TESTDATA"
-"$WORK/stage_oracle" > "$TESTDATA/lp_stages_wb.txt"
+"$WORK/stage_oracle" "$TESTDATA" > "$TESTDATA/lp_stages_wb.txt"
 wc -l < "$TESTDATA/lp_stages_wb.txt" | xargs echo "    lines:"
 
 echo "==> generating the ISP/ISF tables"
@@ -82,6 +82,8 @@ python3 "$HERE/gen_isf_tables.py" "$SRC/isp_isf.tab" \
     "$HERE/../src/codecs/amr/wb/lp/isf_tables.rs"
 python3 "$HERE/gen_isf_codebooks.py" "$SRC/qpisf_2s.tab" \
     "$HERE/../src/codecs/amr/wb/lp/isf_codebooks.rs"
+python3 "$HERE/gen_sort_tables.py" "$SRC/mime_io.tab" \
+    "$HERE/../src/codecs/amr/wb/sort_tables.rs"
 
 echo
 echo "==> verify with:"

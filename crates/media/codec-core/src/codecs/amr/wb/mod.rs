@@ -12,4 +12,6 @@
 //! different codec, failing conformance and producing different bitstreams from
 //! identical audio.
 
+pub mod bitstream;
 pub mod lp;
+pub mod sort_tables;
