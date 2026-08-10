@@ -16,7 +16,7 @@ where we actually are.
 | 0 | Foundations: types, feature flags, ADR, oracle qualification | 🟡 **In progress** — code landed, external items outstanding |
 | 1 | RFC 4867 payload format + AMR file storage format | 🟢 **Complete** |
 | 2 | SDP negotiation + relay path | 🟡 **Negotiation done** — relay path outstanding |
-| 3 | `common/` DSP layer + oracle harness | 🟡 **Started** — basic operators already existed |
+| 3 | `common/` DSP layer + oracle harness | 🟡 **In progress** — operators done, oracle running |
 | 4 | AMR-WB decoder, fixed point | ⚪ Not started |
 | 5 | **AMR-WB encoder — the HD-voice milestone** | ⚪ Not started |
 | 6 | AMR-NB decoder, fixed point | ⚪ Not started |
@@ -69,12 +69,48 @@ Verified: G.729's 26 tests still pass, so the move did not disturb a bit-exact
 codec; the feature matrix builds in all five combinations, including AMR without
 G.729 and vice versa.
 
+### The oracle is running
+
+**It never needed Docker.** The blocker was assumed to be container egress, but
+the harness only ever needed source and a C compiler — and macOS has clang. The
+sources come from the **Debian archive**, which is reachable, rather than
+SourceForge (whose download mirrors are not) or GitHub (also not).
+
+`tools/build-amr-oracle.sh` fetches and statically builds all three
+Apache-2.0 libraries, then regenerates the vectors:
+
+| Library | Covers |
+|---|---|
+| `opencore-amr` 0.1.6 | AMR-NB encode/decode, AMR-WB decode |
+| `vo-amrwbenc` 0.1.3 | AMR-WB encode |
+
+**First result, and it validates the mode table outright.** The reference
+encoder was run at every AMR-WB mode; its frame sizes are 18, 24, 33, 37, 41,
+47, 51, 59, 61 octets including the 1-octet storage ToC — which is exactly
+`octet_aligned_bytes() + 1` for all nine modes. Independent confirmation of the
+entire table, which until now rested on RFC 4867 plus arithmetic.
+
+225 reference frames are checked in at `src/codecs/amr/testdata/` (40 KB), with
+tests asserting that we read every mode correctly, that our frame sizes predict
+the file lengths exactly, that re-writing reproduces the files byte for byte,
+and that every frame survives both RFC 4867 framings. The generator also decodes
+each file back through `opencore-amrwb` before accepting it, so the fixtures are
+self-consistent independently of anything here.
+
+The script reproduces the checked-in fixtures bit-identically from a clean
+workdir, so a future regeneration that changes them means something changed for
+a reason worth understanding.
+
+**Nothing from the oracle is linked into the shipped crate.** It emits data;
+the data is committed; the test suite reads only that. A normal `cargo test`
+needs neither the libraries nor a C toolchain — the property that lets the
+crate stay pure Rust while still being developed against a real reference.
+
 ### Remaining for Phase 3
 
-- [ ] Oracle qualification and the vector-generating harness. **Blocked on
-      network** — Docker containers have no egress and `github.com` is
-      unreachable from this machine, and the harness must fetch and build
-      `opencore-amr`, `vo-amrwbenc` and the 3GPP reference.
+- [ ] The 3GPP reference (TS 26.073 / 26.173) as the tier-1 authority.
+      `3gpp.org` returns 403 from here; the Apache-2.0 tier-2 oracle is running
+      and is sufficient to make progress.
 - [ ] `common/dsp/` — autocorrelation, Levinson-Durbin, A(z)↔LSP/ISP,
       interpolation, residual/synthesis filters. Order-16 and ISP-capable from
       the outset, since WB comes first.
@@ -523,6 +559,16 @@ now returns `usize` for both variants and WB CRC works. See the Phase 1 section.
 ---
 
 ## Changelog
+
+### 2026-08-09 — The oracle is running, and it confirmed the mode table
+
+Built `opencore-amr` and `vo-amrwbenc` natively with clang. The supposed
+blocker was container networking, but the harness only ever needed source and a
+compiler; sources come from the Debian archive, which is reachable.
+
+The reference encoder's frame sizes match our mode table at all nine AMR-WB
+modes. 225 reference frames checked in, with the build script reproducing them
+bit-identically.
 
 ### 2026-08-09 — Phase 3 opened; the basic operators were already written
 

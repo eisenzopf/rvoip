@@ -362,6 +362,109 @@ mod tests {
         }
     }
 
+    // ---- reference-generated vectors ----
+
+    /// AMR-WB files produced by the Apache-2.0 reference encoder
+    /// (`vo-amrwbenc` 0.1.3), one per mode, 25 frames each, from a
+    /// deterministic speech-like signal.
+    ///
+    /// The generator also decoded each file back through `opencore-amrwb`
+    /// 0.1.6 before it was accepted, so the fixtures are known to be
+    /// self-consistent independently of anything here.
+    const REFERENCE_FILES: [(&[u8], u8); 9] = [
+        (include_bytes!("testdata/amrwb_mode0.amr"), 0),
+        (include_bytes!("testdata/amrwb_mode1.amr"), 1),
+        (include_bytes!("testdata/amrwb_mode2.amr"), 2),
+        (include_bytes!("testdata/amrwb_mode3.amr"), 3),
+        (include_bytes!("testdata/amrwb_mode4.amr"), 4),
+        (include_bytes!("testdata/amrwb_mode5.amr"), 5),
+        (include_bytes!("testdata/amrwb_mode6.amr"), 6),
+        (include_bytes!("testdata/amrwb_mode7.amr"), 7),
+        (include_bytes!("testdata/amrwb_mode8.amr"), 8),
+    ];
+
+    #[test]
+    fn reads_reference_encoder_output_for_every_mode() {
+        for (bytes, expected_mode) in REFERENCE_FILES {
+            let (variant, frames) = read(bytes)
+                .unwrap_or_else(|e| panic!("mode {expected_mode} failed to parse: {e}"));
+
+            assert_eq!(variant, AmrVariant::WideBand, "mode {expected_mode}");
+            assert_eq!(frames.len(), 25, "mode {expected_mode}: frame count");
+
+            for (index, frame) in frames.iter().enumerate() {
+                let AmrFrameType::Speech(mode) = frame.frame_type else {
+                    panic!("mode {expected_mode} frame {index}: {:?}", frame.frame_type);
+                };
+                assert_eq!(mode.index(), expected_mode, "frame {index}");
+                assert!(frame.quality_ok, "mode {expected_mode} frame {index}");
+                assert_eq!(frame.data.len(), mode.octet_aligned_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn our_frame_sizes_match_the_reference_encoder() {
+        // The strongest check available on the mode table: a file of N frames
+        // in a known mode has an exactly predictable length, so any wrong entry
+        // shows up as a size mismatch rather than as subtly bad audio later.
+        for (bytes, expected_mode) in REFERENCE_FILES {
+            let mode = AmrMode::new(AmrVariant::WideBand, expected_mode).unwrap();
+            // magic + 25 * (1-octet storage ToC + payload)
+            let expected_len =
+                AmrVariant::WideBand.storage_magic().len() + 25 * (1 + mode.octet_aligned_bytes());
+            assert_eq!(
+                bytes.len(),
+                expected_len,
+                "mode {expected_mode}: {} bits => {} octets",
+                mode.bits(),
+                mode.octet_aligned_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn reference_frames_repack_to_the_original_file() {
+        // Byte-for-byte agreement with the reference on the storage format,
+        // in both directions.
+        for (bytes, expected_mode) in REFERENCE_FILES {
+            let (variant, frames) = read(bytes).unwrap();
+            let rewritten = write(variant, &frames).unwrap();
+            assert_eq!(rewritten, bytes, "mode {expected_mode} did not round-trip");
+        }
+    }
+
+    #[test]
+    fn reference_frames_survive_the_rtp_payload_format() {
+        // The path a relay actually takes: frames read from storage, packed
+        // into RFC 4867 payloads, parsed back. Exercised in both framings
+        // against real encoder output rather than synthetic data.
+        use crate::codecs::amr::payload::{AmrPacket, AmrPayloadCodec, AmrPayloadConfig};
+
+        for (bytes, expected_mode) in REFERENCE_FILES {
+            let (variant, frames) = read(bytes).unwrap();
+            for config in [
+                AmrPayloadConfig::bandwidth_efficient(variant),
+                AmrPayloadConfig::octet_aligned(variant),
+            ] {
+                let codec = AmrPayloadCodec::new(config).unwrap();
+                // One frame per packet, then all 25 in a single packet.
+                for frame in &frames {
+                    let packet = AmrPacket::single(frame.clone());
+                    let wire = codec.pack(&packet).unwrap();
+                    assert_eq!(codec.unpack(&wire).unwrap(), packet, "mode {expected_mode}");
+                }
+                let packet = AmrPacket {
+                    cmr: None,
+                    interleaving: None,
+                    frames: frames.clone(),
+                };
+                let wire = codec.pack(&packet).unwrap();
+                assert_eq!(codec.unpack(&wire).unwrap(), packet, "mode {expected_mode} bulk");
+            }
+        }
+    }
+
     #[test]
     fn never_panics_on_arbitrary_input() {
         for byte in 0u16..=u16::from(u8::MAX) {
