@@ -249,6 +249,10 @@ arithmetic that defines the codec, built on the ETSI operators in
   catching transcription errors without pretending the formula is authoritative.
 - `autocorr.rs` — windowing, the energy-estimate pre-shift, autocorrelation over
   17 lags in double-precision format, and lag windowing.
+- `isp_to_lp.rs` — §5.2.4, ISPs back to predictor coefficients. **Decoder-side
+  work**, which is why it lands before the encoder-only analysis stages: the
+  decoder receives quantised ISFs and never analyses, so this is on the critical
+  path to a working decoder while §5.2.2 and §5.2.3 are not.
 
 Two details worth naming, both invisible in a float model:
 
@@ -279,8 +283,20 @@ the whole windowing-and-accumulation path, and one feeding the reference's own
 pre-lag values through `lag_window` in isolation so a failure there cannot be
 blamed on the accumulation.
 
+**§5.2.4 ISP→LP matches exactly too** — all 17 coefficients, every case, on the
+first run.
+
 This is the only evidence that counts. Property tests can show output is
 *plausible*; conformance means matching these integers.
+
+The ISP→LP result also settled a question I could not settle by reading. The
+reference's `Get_isp_pol` walks pointers rather than indices, and traced by
+hand it appears to add the `f[i-2]` term twice — once from the pre-set
+`*f = f[-2]` and once from the loop body's `L_add(*f, f[-2])`. I stopped
+tracing, implemented it exactly as written, and let the vectors decide; they
+came out bit-exact, so the apparent duplication is the algorithm. **With an
+oracle in place, checking beats deriving.** The hour lost to hand-tracing this
+before the harness existed is the argument for building the harness first.
 
 Two things the harness needed, both worth recording for whoever runs it next:
 
