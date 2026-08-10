@@ -1,8 +1,8 @@
-use crate::codecs::g729::impls::dsp::arith::{extract_h, extract_l, mult};
-use crate::codecs::g729::impls::dsp::arith32::{l_deposit_h, l_mac, l_msu, l_mult, l_sub};
-use crate::codecs::g729::impls::dsp::div::div_s;
-use crate::codecs::g729::impls::dsp::shift::{l_shl, l_shr};
-use crate::codecs::g729::impls::dsp::types::{DspContext, Word16, Word32};
+use crate::fixed_point::arith::{extract_h, extract_l, mult};
+use crate::fixed_point::arith32::{l_deposit_h, l_mac, l_msu, l_mult, l_sub};
+use crate::fixed_point::div::div_s;
+use crate::fixed_point::shift::{l_shl, l_shr};
+use crate::fixed_point::types::{DspContext, Word16, Word32};
 
 /// Public function `l_extract`.
 #[inline(always)]

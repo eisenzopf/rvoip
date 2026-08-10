@@ -43,7 +43,7 @@ pub(super) fn synth_subframe(
         excs[i] = 0;
     }
 
-    l_acc = crate::codecs::g729::impls::dsp::div::Inv_sqrt(l_shr(&mut ctx, l_acc, 1));
+    l_acc = crate::codecs::g729::impls::math::Inv_sqrt(l_shr(&mut ctx, l_acc, 1));
     let (hi, lo) = l_extract(l_acc);
     let mut temp = mult_r(&mut ctx, w(cur_gain), w(FRAC1)).0;
     temp = add(&mut ctx, w(cur_gain), w(temp)).0;

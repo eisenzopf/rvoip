@@ -1,37 +1,19 @@
-use crate::codecs::g729::impls::dsp::arith::{extract_h, extract_l};
-use crate::codecs::g729::impls::dsp::arith32::{l_deposit_h, l_msu, l_mult};
-use crate::codecs::g729::impls::dsp::shift::{l_shl, l_shr, l_shr_r, norm_l, shl, shr};
-use crate::codecs::g729::impls::dsp::types::{DspContext, Word16, Word32, MAX_16};
+//! G.729 table-driven transcendentals: `pow2`, `log2` and `inv_sqrt`.
+//!
+//! These were previously alongside the ETSI basic operators, but they are not
+//! basic operators: each reads a G.729 Annex A lookup table, so they belong
+//! with G.729 rather than in the shared [`crate::fixed_point`] module.
+//!
+//! AMR specifies the same three functions (TS 26.073 `oper_32b.c`) over its own
+//! tables. Whether those tables are numerically identical to G.729's is an open
+//! question, and sharing the code before answering it would be an assumption
+//! dressed as reuse — so AMR will bring its own when it needs them.
+
 use crate::codecs::g729::impls::tables::annexa::{TABLOG, TABPOW, TABSQR};
-
-/// Public function `div_s`.
-#[inline(always)]
-pub fn div_s(var1: Word16, var2: Word16) -> Word16 {
-    if var1.0 < 0 || var2.0 <= 0 || var1.0 > var2.0 {
-        return Word16(0);
-    }
-    if var1.0 == 0 {
-        return Word16(0);
-    }
-    if var1.0 == var2.0 {
-        return Word16(MAX_16);
-    }
-
-    let mut result = Word16(0);
-    let mut l_num = Word32(i32::from(var1.0));
-    let l_denom = Word32(i32::from(var2.0));
-    let mut ctx = DspContext::default();
-
-    for _ in 0..15 {
-        result = shl(&mut ctx, result, 1);
-        l_num = l_shl(&mut ctx, l_num, 1);
-        if l_num.0 >= l_denom.0 {
-            l_num = Word32(l_num.0 - l_denom.0);
-            result = Word16(result.0.wrapping_add(1));
-        }
-    }
-    result
-}
+use crate::fixed_point::arith::{extract_h, extract_l};
+use crate::fixed_point::arith32::{l_deposit_h, l_msu, l_mult};
+use crate::fixed_point::shift::{l_shl, l_shr, l_shr_r, norm_l, shr};
+use crate::fixed_point::types::{DspContext, Word16, Word32};
 
 /// Public function `pow2`.
 #[inline(always)]
@@ -111,13 +93,6 @@ pub fn inv_sqrt(l_x: Word32) -> Word32 {
     l_shr(&mut ctx, l_y, exp)
 }
 
-/// Public function `Div_s`.
-#[allow(non_snake_case)]
-#[inline(always)]
-pub fn Div_s(var1: Word16, var2: Word16) -> Word16 {
-    div_s(var1, var2)
-}
-
 /// Public function `Pow2`.
 #[allow(non_snake_case)]
 #[inline(always)]
@@ -144,12 +119,6 @@ pub fn Inv_sqrt(l_x: Word32) -> Word32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn dsp_div_s_half() {
-        let r = div_s(Word16(16384), Word16(32767));
-        assert!((r.0 - 16384).abs() <= 1);
-    }
 
     #[test]
     fn dsp_pow2_log2_roundtrip_shape() {

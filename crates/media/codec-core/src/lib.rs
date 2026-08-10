@@ -161,6 +161,19 @@
 
 pub mod codecs;
 pub mod error;
+
+/// ITU-T / 3GPP fixed-point basic operators (the ETSI "basicop" library).
+///
+/// Shared by every fixed-point speech codec here: G.729 and AMR both specify
+/// their arithmetic in terms of these exact saturating operations, so a single
+/// implementation is the only way both can be bit-exact against the same
+/// definitions. Originally written for the G.729A port and promoted out of it
+/// when AMR needed the same foundation.
+///
+/// Crate-internal: an implementation detail shared between codecs, not a public
+/// API surface this crate wants to commit to.
+#[cfg(any(feature = "g729", feature = "amr-nb", feature = "amr-wb"))]
+pub(crate) mod fixed_point;
 pub mod types;
 pub mod utils;
 

@@ -1,5 +1,5 @@
-use crate::codecs::g729::impls::dsp::arith32::l_add;
-use crate::codecs::g729::impls::dsp::types::{DspContext, Word16, Word32, MAX_16, MIN_16};
+use crate::fixed_point::arith32::l_add;
+use crate::fixed_point::types::{DspContext, Word16, Word32, MAX_16, MIN_16};
 
 /// Public function `sature`.
 #[inline(always)]

@@ -1,5 +1,5 @@
-use crate::codecs::g729::impls::dsp::arith::extract_h;
-use crate::codecs::g729::impls::dsp::types::{DspContext, Word16, Word32, MAX_32, MIN_32};
+use crate::fixed_point::arith::extract_h;
+use crate::fixed_point::types::{DspContext, Word16, Word32, MAX_32, MIN_32};
 
 use super::{l_add, l_mac, l_msu, l_mult, l_sub};
 

@@ -1,7 +1,7 @@
 //! Provenance: ITU STL extended carry/borrow arithmetic (`L_add_c`/`L_sub_c`).
 //! Q-format: operations preserve 32-bit fixed-point accumulators with carry state.
 
-use crate::codecs::g729::impls::dsp::types::{DspContext, Word16, Word32, MAX_32, MIN_32};
+use crate::fixed_point::types::{DspContext, Word16, Word32, MAX_32, MIN_32};
 
 use super::l_mult;
 

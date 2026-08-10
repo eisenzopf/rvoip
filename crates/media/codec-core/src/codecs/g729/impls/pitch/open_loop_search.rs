@@ -5,7 +5,7 @@ use crate::codecs::g729::impls::codec::state::OLD_WSP_LEN;
 use crate::codecs::g729::impls::constants::{L_FRAME, PIT_MAX};
 use crate::codecs::g729::impls::dsp::arith::extract_l;
 use crate::codecs::g729::impls::dsp::arith32::{l_mac, l_sub};
-use crate::codecs::g729::impls::dsp::div::Inv_sqrt;
+use crate::codecs::g729::impls::math::Inv_sqrt;
 use crate::codecs::g729::impls::dsp::oper32::{l_extract, mpy_32};
 use crate::codecs::g729::impls::dsp::shift::{shl, shr};
 use crate::codecs::g729::impls::dsp::types::{DspContext, Word16, Word32, MIN_32};

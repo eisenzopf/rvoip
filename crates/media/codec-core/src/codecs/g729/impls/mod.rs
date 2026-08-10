@@ -47,7 +47,14 @@ pub mod error;
 pub mod codec;
 /// Internal DSP helpers.
 #[doc(hidden)]
-pub mod dsp;
+/// G.729 table-driven transcendentals, split out of the shared basic operators.
+pub mod math;
+
+/// The fixed-point basic operators, now shared with AMR.
+///
+/// Re-exported under the historical name so the ~318 `impls::dsp::…` paths
+/// throughout the G.729 implementation keep resolving unchanged.
+pub(crate) use crate::fixed_point as dsp;
 /// Internal filter helpers.
 #[doc(hidden)]
 pub mod filter;

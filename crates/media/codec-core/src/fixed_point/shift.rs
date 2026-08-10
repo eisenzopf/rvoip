@@ -1,5 +1,5 @@
-use crate::codecs::g729::impls::dsp::arith::{add, extract_l};
-use crate::codecs::g729::impls::dsp::types::{
+use crate::fixed_point::arith::{add, extract_l};
+use crate::fixed_point::types::{
     DspContext, Word16, Word32, MAX_16, MAX_32, MIN_16, MIN_32,
 };
 

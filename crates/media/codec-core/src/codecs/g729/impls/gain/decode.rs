@@ -19,7 +19,7 @@ fn gain_update_decode(past_qua_en: &mut [i16; 4], l_gbk12: Word32) {
 
     let mut exp = Word16(0);
     let mut frac = Word16(0);
-    crate::codecs::g729::impls::dsp::div::Log2(l_gbk12, &mut exp, &mut frac);
+    crate::codecs::g729::impls::math::Log2(l_gbk12, &mut exp, &mut frac);
     let l_acc = l_comp(sub(&mut ctx, exp, Word16(13)), frac);
     let tmp = extract_h(l_shl(&mut ctx, l_acc, 13));
     past_qua_en[0] = mult(&mut ctx, tmp, Word16(24660)).0;

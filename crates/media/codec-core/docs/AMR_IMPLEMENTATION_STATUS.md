@@ -16,7 +16,7 @@ where we actually are.
 | 0 | Foundations: types, feature flags, ADR, oracle qualification | 🟡 **In progress** — code landed, external items outstanding |
 | 1 | RFC 4867 payload format + AMR file storage format | 🟢 **Complete** |
 | 2 | SDP negotiation + relay path | 🟡 **Negotiation done** — relay path outstanding |
-| 3 | `common/` DSP layer + oracle harness | 🟢 **Unblocked** — IP-1 cleared |
+| 3 | `common/` DSP layer + oracle harness | 🟡 **Started** — basic operators already existed |
 | 4 | AMR-WB decoder, fixed point | ⚪ Not started |
 | 5 | **AMR-WB encoder — the HD-voice milestone** | ⚪ Not started |
 | 6 | AMR-NB decoder, fixed point | ⚪ Not started |
@@ -26,6 +26,59 @@ where we actually are.
 **There is no working AMR encoder or decoder yet.** `AmrCodec` constructs and
 negotiates, but `encode`/`decode` return `FeatureNotEnabled` naming the phase
 that will supply them.
+
+---
+
+## Phase 3 — the codec kernel
+
+### The basic operators already existed
+
+Phase 3 was planned to open with writing `common/basicop.rs`, the ETSI basic
+operators, exhaustively tested, with nothing else starting until it was green —
+budgeted as the foundation everything else is debugged against.
+
+**It was already there.** The G.729A port carries a complete ETSI basic-operator
+set, and AMR specifies its arithmetic against the same ITU-T/3GPP library: `add`,
+`sub`, `mult`, `mult_r`, `l_mult`, `l_mac`, `l_msu`, `l_add`, `l_sub`, `shl`,
+`shr`, `l_shl`, `l_shr`, `l_shr_r`, `round`, `norm_s`, `norm_l`, `div_s`,
+`abs_s`, `l_abs`, `negate`, `extract_h/l`, `l_deposit_h/l`, `mac_r`, `msu_r`,
+plus the extended-precision `_c` and `_ns` variants. Faithful to the reference,
+including the `MIN_16 → MAX_16` quirk in `abs_s`/`negate` and the overflow/carry
+flags — and validated by that codec reaching bit-exactness.
+
+So the work was not writing them but **promoting them**: they lived in
+`codecs::g729::impls::dsp`, gated behind the `g729` feature. They now live in
+`crate::fixed_point`, shared. G.729 reaches them under the old name through a
+re-export, so its ~318 call sites were untouched.
+
+Two things were deliberately *not* shared:
+
+- **`pow2`, `log2`, `inv_sqrt`** moved to `codecs::g729::impls::math` instead.
+  They are not basic operators — each reads a G.729 Annex A lookup table. AMR
+  specifies the same three functions over its own tables (TS 26.073
+  `oper_32b.c`), and whether those tables are numerically identical is an open
+  question. Sharing the code before answering it would be an assumption dressed
+  as reuse.
+- **The lint exemption** was carried across rather than widened. The G.729
+  subtree has a narrowly enumerated `allow` list with a written rationale —
+  deliberate wrapping casts, reference-style names. The same list now sits on
+  `fixed_point` with the same reasoning, and `fixed_point` is `pub(crate)`
+  because it is an implementation detail, not API this crate wants to commit to.
+
+Verified: G.729's 26 tests still pass, so the move did not disturb a bit-exact
+codec; the feature matrix builds in all five combinations, including AMR without
+G.729 and vice versa.
+
+### Remaining for Phase 3
+
+- [ ] Oracle qualification and the vector-generating harness. **Blocked on
+      network** — Docker containers have no egress and `github.com` is
+      unreachable from this machine, and the harness must fetch and build
+      `opencore-amr`, `vo-amrwbenc` and the 3GPP reference.
+- [ ] `common/dsp/` — autocorrelation, Levinson-Durbin, A(z)↔LSP/ISP,
+      interpolation, residual/synthesis filters. Order-16 and ISP-capable from
+      the outset, since WB comes first.
+- [ ] `common/bits.rs` and `common/homing.rs` (EHF/DHF).
 
 ---
 
@@ -470,6 +523,16 @@ now returns `usize` for both variants and WB CRC works. See the Phase 1 section.
 ---
 
 ## Changelog
+
+### 2026-08-09 — Phase 3 opened; the basic operators were already written
+
+The ETSI basic-operator set Phase 3 was going to start by writing already
+existed in the G.729A port, validated by that codec being bit-exact. Promoted
+from `codecs::g729::impls::dsp` to a shared `crate::fixed_point`; G.729 reaches
+it under the old name via a re-export so none of its ~318 call sites changed.
+
+Table-driven transcendentals were deliberately left behind with G.729 rather
+than shared, because AMR supplies its own tables and their equality is unproven.
 
 ### 2026-08-09 — Framing validated against real FreeSWITCH RTP
 

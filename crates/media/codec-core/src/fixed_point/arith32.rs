@@ -1,7 +1,7 @@
 #![allow(clippy::collapsible_if)]
 
-use crate::codecs::g729::impls::dsp::arith::sature;
-use crate::codecs::g729::impls::dsp::types::{DspContext, Word16, Word32, MAX_32, MIN_32};
+use crate::fixed_point::arith::sature;
+use crate::fixed_point::types::{DspContext, Word16, Word32, MAX_32, MIN_32};
 
 #[path = "arith32_ext.rs"]
 mod arith32_ext;
