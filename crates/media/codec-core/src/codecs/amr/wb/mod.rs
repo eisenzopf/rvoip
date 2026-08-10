@@ -17,6 +17,7 @@ pub mod codebook;
 pub mod highband;
 pub mod lp;
 pub mod decoder;
+pub mod enc;
 pub mod enhance;
 pub mod excitation;
 pub mod gain;
