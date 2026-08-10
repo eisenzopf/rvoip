@@ -15,6 +15,12 @@
 //! > correction factor 1.0001 which is equivalent to adding a noise floor at
 //! > -40 dB.
 //!
+//! **The last sentence is not what the normative reference does.** TS 26.173
+//! `lag_wind.c` applies the lag window to `r[1..=16]` only and leaves `r[0]`
+//! alone, folding the reciprocal `0.9999` into the table instead. See
+//! [`WHITE_NOISE_CORRECTION`]. The prose describes the intent; the fixed-point
+//! C defines the codec.
+//!
 //! # Numeric style
 //!
 //! Indices are small and exactly representable, so the `usize`-to-`f64`
@@ -52,16 +58,25 @@ pub const INTERNAL_RATE: f64 = 12_800.0;
 /// Lag-window bandwidth expansion, in hertz.
 pub const LAG_WINDOW_F0: f64 = 60.0;
 
-/// White noise correction applied to `r(0)`: a -40 dB noise floor, which keeps
-/// Levinson-Durbin stable on near-silent input.
+/// White noise correction: a -40 dB noise floor keeping Levinson-Durbin stable
+/// on near-silent input.
 ///
-/// TS 26.190 places this on `r(0)`. Some implementations instead fold the
-/// reciprocal into the lag window applied to `r(1..=16)` — vo-amrwbenc's
-/// `lag_wind.tab` documents exactly that, "noise floor = 1.0001 = (0.9999 on
-/// r[1]..r[16])". The two differ only by an overall scale on the
-/// autocorrelation sequence, and Levinson-Durbin is invariant to that, so the
-/// predictor is identical. This module follows the spec's placement.
-pub const WHITE_NOISE_CORRECTION: f64 = 1.0001;
+/// **Applied as `0.9999` on `r[1..=16]`, not as `1.0001` on `r(0)`.**
+///
+/// TS 26.190's prose says "r(0) is multiplied by the white noise correction
+/// factor 1.0001". The normative fixed-point reference, TS 26.173
+/// `lag_wind.c`, does something else: its loop runs `i = 1..M` and never
+/// touches `r[0]`, with the reciprocal folded into the lag-window table —
+/// whose own header states "noise floor = 1.0001 = (0.9999 on r[1]..r[16])".
+///
+/// The two are equivalent up to a uniform scale on the autocorrelation
+/// sequence, and Levinson-Durbin is scale-invariant, so in exact arithmetic
+/// the predictor is identical. **In fixed point they are not interchangeable**:
+/// the sequence is normalised and rounded at every step, so a different scale
+/// changes intermediate values. Bit-exactness is defined against the reference
+/// C, so the reference's placement is the correct one and this module follows
+/// it.
+pub const WHITE_NOISE_CORRECTION: f64 = 0.9999;
 
 /// The analysis window, computed from the TS 26.190 §5.2.1 definition.
 ///
@@ -129,11 +144,11 @@ pub fn autocorrelation(speech: &[f64; WINDOW_LEN]) -> [f64; LP_ORDER + 1] {
         *slot = acc;
     }
 
-    // r(0) first: the correction must not be scaled by the lag window.
-    r[0] *= WHITE_NOISE_CORRECTION;
+    // Matches TS 26.173 `lag_wind.c`: r[0] is left alone, and the noise-floor
+    // reciprocal rides along with the lag window on r[1..=16].
     let lag = lag_window();
-    for (slot, w) in r.iter_mut().zip(lag.iter()) {
-        *slot *= w;
+    for (slot, w) in r.iter_mut().zip(lag.iter()).skip(1) {
+        *slot *= w * WHITE_NOISE_CORRECTION;
     }
     r
 }
@@ -251,28 +266,45 @@ mod tests {
     }
 
     #[test]
-    fn white_noise_correction_keeps_silence_solvable() {
-        // Without the -40 dB floor, an all-zero frame gives r(0) = 0 and
-        // Levinson-Durbin divides by zero. The correction alone does not fix
-        // that, but it is why near-silent frames stay conditioned.
-        let quiet = [0.0f64; WINDOW_LEN];
-        let r = autocorrelation(&quiet);
-        assert!(r[0].abs() < f64::EPSILON, "exact silence really is zero");
+    fn the_noise_floor_rides_on_r1_upwards_not_on_r0() {
+        // Pins the divergence between the spec's prose and the normative
+        // reference. TS 26.190 says r(0) is multiplied by 1.0001; TS 26.173
+        // `lag_wind.c` instead leaves r[0] alone and folds 0.9999 into the lag
+        // window for r[1..=16]. Equivalent up to scale in exact arithmetic,
+        // *not* interchangeable once the sequence is normalised and rounded in
+        // fixed point — so the reference's placement is the one that counts.
+        let mut s = [0.0f64; WINDOW_LEN];
+        for (n, slot) in s.iter_mut().enumerate() {
+            *slot = ((n * 41 % 197) as f64) - 98.0;
+        }
+        let w = analysis_window();
+        let lag = lag_window();
+        let r = autocorrelation(&s);
 
-        let mut faint = [0.0f64; WINDOW_LEN];
-        faint[0] = 1.0;
-        let r = autocorrelation(&faint);
-        assert!(r[0] > 0.0);
-        // r(0) carries the correction; the ratio to an uncorrected computation
-        // is exactly the stated factor.
-        let uncorrected = {
-            let w = analysis_window();
-            (faint[0] * w[0]).powi(2)
-        };
+        // r(0) is the plain windowed energy, with no correction applied.
+        let raw_r0: f64 = (0..WINDOW_LEN).map(|n| (s[n] * w[n]).powi(2)).sum();
         assert!(
-            (r[0] / uncorrected - WHITE_NOISE_CORRECTION).abs() < 1e-9,
-            "r(0) should carry the 1.0001 correction"
+            (r[0] / raw_r0 - 1.0).abs() < 1e-12,
+            "r(0) must be unscaled, got ratio {}",
+            r[0] / raw_r0
         );
+
+        // r(1) carries both the lag window and the noise-floor reciprocal.
+        let raw_r1: f64 = (1..WINDOW_LEN).map(|n| s[n] * w[n] * s[n - 1] * w[n - 1]).sum();
+        let expected = raw_r1 * lag[1] * WHITE_NOISE_CORRECTION;
+        assert!(
+            (r[1] - expected).abs() <= expected.abs() * 1e-9,
+            "r(1): {} vs {expected}",
+            r[1]
+        );
+    }
+
+    #[test]
+    fn exact_silence_has_no_autocorrelation() {
+        // An all-zero frame gives r(0) = 0 and no predictor; the noise floor is
+        // a conditioning aid for near-silence, not a fix for true silence.
+        let r = autocorrelation(&[0.0f64; WINDOW_LEN]);
+        assert!(r[0].abs() < f64::EPSILON);
     }
 
     #[test]
@@ -291,10 +323,11 @@ mod tests {
             for n in k..WINDOW_LEN {
                 want += s[n] * w[n] * s[n - k] * w[n - k];
             }
-            if k == 0 {
-                want *= WHITE_NOISE_CORRECTION;
+            // r[0] is unscaled; r[1..] carry both the lag window and the
+            // noise-floor reciprocal, as TS 26.173 `lag_wind.c` does.
+            if k > 0 {
+                want *= lag[k] * WHITE_NOISE_CORRECTION;
             }
-            want *= lag[k];
             let tol = want.abs() * 1e-9 + 1e-6;
             assert!((got[k] - want).abs() <= tol, "r({k}): {} vs {want}", got[k]);
         }

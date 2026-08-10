@@ -85,19 +85,23 @@ itself provenance evidence (§2.4).
 | **1 — authority** | **TS 26.073** (NB fixed), **TS 26.173** (WB fixed) | NB enc+dec, WB enc+dec | **Instrument + per-stage dumps.** The normative definition of bit-exactness | **No — fetched, git-ignored** (§2.3) |
 | 2 — redistributable | `opencore-amr` (Apache-2.0) | NB enc+dec, WB dec | Instrument + per-stage dumps; **output is committable** | Yes |
 | 2 — redistributable | `vo-amrwbenc` (Apache-2.0) | WB enc | Instrument + per-stage dumps; output committable | Yes |
-| 3 — black-box only | TS 26.104 (NB float), TS 26.204 (WB float) | NB enc+dec, WB enc+dec | **Run only.** Independent codebases from the fixed-point references | No |
+| ~~3~~ | ~~TS 26.104 (NB float), TS 26.204 (WB float)~~ | — | **REMOVED.** Not bit-exact with the fixed-point specs, so they cannot confirm bit-exactness and a disagreement does not say which side is wrong | — |
 | 3 — black-box only | FFmpeg native `amrnbdec` / `amrwbdec` (LGPL) | NB dec, WB dec | **Run the binary only — never read the source.** LGPL restricts copying, not execution | No |
 
-Coverage per path: NB decode and WB decode get **4 independent oracles**; NB encode and WB
+Coverage per path: NB decode and WB decode get **3 independent oracles**; NB encode and WB
 encode get **3**.
 
-Three points on tier 3. Adding FFmpeg costs nothing legally — running a program is not a
-derivative work, and this is exactly the boundary that made it "off-limits" before, which
-was too broad. The floating-point references are *not* bit-exact with the fixed-point
-specs by design, so they are **behavioural** cross-checks that catch gross algorithmic
-misreadings, not bit-exactness oracles; do not compare them bit-for-bit. And tier 3
-compares whole frames only, since we cannot instrument stage boundaries without reading
-source.
+**The floating-point references are removed from the roster.** They are not
+bit-exact with the fixed-point specs by design, which makes them useless for the
+only question that matters: they cannot confirm bit-exactness, and a
+disagreement does not identify which side is wrong. Keeping them invites
+treating agreement as evidence when it is not.
+
+The same reasoning bounds FFmpeg. Running it costs nothing legally — execution
+is not a derivative work — but it is an independent implementation, not a
+bit-exact one, so it belongs to interop testing rather than bit-exactness
+verification. Tier 3 compares whole frames only, since stage boundaries cannot
+be instrumented without reading source.
 
 **Cross-validation is the point, not redundancy.** The interesting signal is disagreement:
 
@@ -360,7 +364,7 @@ starting Phase 4.
 | TS 26.094 | Voice Activity Detector (VAD) | VAD option 1 and option 2 |
 | TS 26.101 | AMR frame structure | Bit ordering, class A/B/C sorting, IF1/IF2 |
 | **TS 26.073** | **AMR ANSI-C source (fixed point)** | **Primary oracle** — fetch, build, instrument locally; never redistribute (§2.3) |
-| TS 26.104 | ANSI-C source (floating point) | Secondary reference; same terms |
+| TS 26.104 | ANSI-C source (floating point) | **Not used** — not bit-exact, see §1.2.1 |
 | TS 26.074 | Test sequences | Conformance vectors |
 
 ### AMR-WB
@@ -375,7 +379,7 @@ starting Phase 4.
 | TS 26.194 | Voice Activity Detector | VAD |
 | TS 26.201 | AMR-WB frame structure | Bit ordering |
 | **TS 26.173** | **AMR-WB ANSI-C source (fixed point)** | **Primary oracle** — normative for WB encode; same terms (§2.3) |
-| TS 26.204 | ANSI-C source (floating point) | Secondary reference; same terms |
+| TS 26.204 | ANSI-C source (floating point) | **Not used** — not bit-exact, see §1.2.1 |
 | TS 26.174 | Test sequences | Conformance vectors |
 
 ### Transport
@@ -783,7 +787,7 @@ not; DSP bit-exactness work is notoriously spiky.
 - [ ] Legal actions **IP-1** and **IP-2** opened; IP-2 answered in this phase.
 - [ ] **Oracle qualification.** Stand up the full roster (§1.2.1): fetch and build the
       3GPP fixed-point references (TS 26.073 / 26.173) and floating-point references
-      (TS 26.104 / 26.204); build `opencore-amr` and `vo-amrwbenc`; install FFmpeg. Run all
+      build `opencore-amr` and `vo-amrwbenc`; install FFmpeg. Run all
       of them over a shared corpus and record, per path (NB enc, NB dec, WB enc, WB dec),
       which are bit-exact with tier 1. Determines which fixtures can be committed directly
       and which need the external-fixture pattern.
@@ -1023,9 +1027,9 @@ Three outcomes, each actionable:
 - Consensus including us → strong signal, though only the tier-1 comparison and the 3GPP
   conformance sequences are *evidence* of conformance (§9.3).
 
-Note the floating-point references (TS 26.104 / 26.204) are non-bit-exact by design —
-compare them behaviourally (spectral distance, SNR, parameter trajectories), never
-bit-for-bit.
+The floating-point references (TS 26.104 / 26.204) are **not** part of this. Being
+non-bit-exact by design, they cannot confirm the only property under test, and a
+disagreement with them would not say which side is wrong.
 
 **(b) Cross-implementation round-trip matrix — how third-party decoders validate our
 encoder.**

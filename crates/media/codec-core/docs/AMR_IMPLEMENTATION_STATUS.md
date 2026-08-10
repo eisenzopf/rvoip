@@ -209,6 +209,47 @@ can be lost, and the interlacing is then *asserted* rather than assumed. The
 fixed-point version will need the reference's cheaper approach; having this one
 to check against is the point.
 
+### Course correction: fixed point, and the reference is the definition
+
+**AMR is defined in fixed-point arithmetic.** TS 26.190 §8.1: "The adaptive
+multi-rate wideband speech codec is described in a bit-exact arithmetic to allow
+easy type approval." The prose spec describes the algorithm; **TS 26.173, the
+ANSI-C fixed-point source, defines it.** A floating-point AMR is a different
+codec output — it will not pass conformance, and two endpoints running float and
+fixed versions produce different bitstreams from identical audio.
+
+The Phase 3 modules written so far are `f64` reference models, not the codec.
+The plan (§6.4) had already rejected float-model-first as redundant once a real
+oracle existed; building them anyway was a drift that should have been flagged
+at the time.
+
+**TS 26.173 is now obtained** (58 C files) and immediately overturned a decision:
+
+> `lag_wind.c` loops `i = 1..M` and never touches `r[0]`. The noise-floor
+> reciprocal is folded into the lag table, whose header reads "noise floor =
+> 1.0001 = (0.9999 on r[1]..r[16])".
+
+TS 26.190's prose says `r(0)` is multiplied by 1.0001. **The reference uses the
+opposite placement**, and `window.rs` had followed the prose. Corrected, with a
+test pinning it.
+
+The two are equivalent up to a uniform scale, and Levinson-Durbin is
+scale-invariant — but only in exact arithmetic. In fixed point the sequence is
+normalised and rounded at each step, so the scale changes intermediate values
+and therefore the bits.
+
+Generalising: several "improvements" over the reference are defects. The 60-step
+bisection in `isp.rs` converges further than the reference's 4, which for a
+bit-exact codec means producing the wrong ISPs. **The reference's imprecision is
+part of the specification.**
+
+### Floating-point references removed from the oracle roster
+
+TS 26.104 and TS 26.204 are out. Not being bit-exact, they cannot confirm
+bit-exactness, and a disagreement would not identify which side is wrong — a
+reference that can only mislead is a liability. FFmpeg stays, scoped to interop
+rather than bit-exactness, for the same reason.
+
 ### Previously recorded as blocked (resolved)
 
 The next piece of Phase 3 is the LP-analysis chain — order-16 autocorrelation
