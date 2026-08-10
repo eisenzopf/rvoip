@@ -62,15 +62,19 @@ impl Default for Excitation {
 }
 
 impl Excitation {
-    /// An empty excitation history.
+    /// An empty excitation history, at the reference's reset state.
     #[must_use]
     pub fn new() -> Self {
         Self {
             // One past the subframe: the adaptive codebook writes an extra
             // sample because the LTP low-pass filter reads one ahead.
             buffer: vec![Word16(0); HISTORY + L_SUBFR + 1],
-            q_subfr: [Word16(0); 4],
-            q_old: 0,
+            // Q_MAX, not zero. The reference seeds both to the maximum shift
+            // so the first subframes are free to use full headroom; starting
+            // at zero pins q_new to zero until four subframes have run, which
+            // silently mis-scales the entire start of a stream.
+            q_subfr: [Word16(Q_MAX); 4],
+            q_old: Q_MAX,
         }
     }
 

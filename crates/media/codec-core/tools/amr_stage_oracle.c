@@ -553,8 +553,12 @@ static void dump_synthesis(void) {
 static void dump_excitation(void) {
     Word16 buf[PIT_MAX_L + L_INTERP_L + 4 * 64];
     Word16 *exc = buf + PIT_MAX_L + L_INTERP_L;
-    Word16 Qsubfr[4] = {0, 0, 0, 0};
-    Word16 Q_old = 0;
+    /* The decoder's documented reset state is Q_MAX, not zero -- see
+     * Reset_decoder in dec_main.c. Seeding these to zero pins the shift to
+     * zero until four subframes have run and mis-scales the start of a
+     * stream, so the fixture must start where the decoder does. */
+    Word16 Qsubfr[4] = {Q_MAX_L, Q_MAX_L, Q_MAX_L, Q_MAX_L};
+    Word16 Q_old = Q_MAX_L;
     Word16 up_mem[24], sig16k[80];
     Word16 code[64];
     int sf, n, i;

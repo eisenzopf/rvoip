@@ -34,6 +34,7 @@ use super::params::FrameParams;
 use super::synthesis::{deemphasis, HighPass50, SynthesisFilter, PREEMPH_FAC};
 use crate::codecs::amr::mode::AmrMode;
 use crate::fixed_point::arith::{add, mult, round};
+use crate::fixed_point::oper32::l_extract;
 use crate::fixed_point::shift::{l_shl, shr};
 use crate::fixed_point::types::{DspContext, Word16};
 
@@ -68,6 +69,12 @@ pub struct Decoder {
     tilt_code: Word16,
     /// Whether any frame has been decoded yet.
     started: bool,
+    /// Scalar trace of the last decode, for comparison against the reference.
+    #[cfg(test)]
+    pub(crate) trace: Vec<(&'static str, i64)>,
+    /// Vector trace of the last decode.
+    #[cfg(test)]
+    pub(crate) vtrace: Vec<(&'static str, Vec<i16>)>,
 }
 
 impl Default for Decoder {
@@ -99,6 +106,10 @@ impl Decoder {
             isf_old: [Word16(0); LP_ORDER],
             tilt_code: Word16(0),
             started: false,
+            #[cfg(test)]
+            trace: Vec::new(),
+            #[cfg(test)]
+            vtrace: Vec::new(),
         }
     }
 
@@ -115,6 +126,24 @@ impl Decoder {
         let frame_bits = *FRAME_BITS.get(mode.index() as usize)?;
         let params = FrameParams::parse(mode, payload)?;
         let mut ctx = DspContext::default();
+        #[cfg(test)]
+        {
+            self.trace.clear();
+            self.vtrace.clear();
+        }
+        macro_rules! vtrace {
+            ($n:expr, $v:expr) => {
+                #[cfg(test)]
+                self.vtrace
+                    .push(($n, $v.iter().map(|w: &Word16| w.0).collect()));
+            };
+        }
+        macro_rules! trace {
+            ($n:expr, $v:expr) => {
+                #[cfg(test)]
+                self.trace.push(($n, i64::from($v)));
+            };
+        }
 
         // --- spectrum ---
         let quantizer = if frame_bits <= 132 {
@@ -126,6 +155,7 @@ impl Decoder {
         let stab_fac = stability_factor(&mut ctx, &isf, &self.isf_old);
         self.isf_old = isf;
 
+        trace!("stab_fac", stab_fac.0);
         let isp_new = isf_to_isp(&isf);
         if !self.started {
             // Nothing to interpolate from on the first frame.
@@ -150,12 +180,20 @@ impl Decoder {
                 sub.pitch_frac,
                 L_SUBFR + 1,
             );
+            #[cfg(test)]
+            let pred_snapshot: Vec<i16> =
+                buffer[offset..offset + L_SUBFR].iter().map(|w| w.0).collect();
+            #[cfg(test)]
+            self.vtrace.push(("pred", pred_snapshot));
             // Below 12.65 the filter is always on; above it the encoder picks.
             if !sub.ltp_filter {
                 let smoothed = ltp::low_pass(&buffer[offset - 1..]);
                 buffer[offset..offset + L_SUBFR].copy_from_slice(&smoothed);
             }
 
+            trace!("T0", sub.pitch_lag);
+            trace!("T0_frac", sub.pitch_frac);
+            trace!("tilt_code_used", self.tilt_code.0);
             // Algebraic codebook, shaped by the previous subframe's tilt and
             // sharpened at the pitch period.
             let mut code: [Word16; L_SUBFR] = codebook::decode(&sub.pulses, frame_bits)?.map(Word16);
@@ -167,6 +205,7 @@ impl Decoder {
                 PIT_SHARP,
             );
 
+            vtrace!("code", code);
             let gains = self.gains.decode(
                 sub.gain_index,
                 gain_bits,
@@ -176,10 +215,14 @@ impl Decoder {
                 0,
             );
 
+            trace!("gain_pit", gains.pitch.0);
+            trace!("L_gain_code", gains.code.0);
             // Scale the buffer first: the adaptive-only copy below must be at
             // the new scale, which is what the reference captures.
             let (q_new, gain_code_word) = self.excitation.rescale_to(gains.code);
 
+            trace!("Q_new", q_new);
+            trace!("gain_code_scaled", gain_code_word.0);
             // The adaptive-only excitation, before the total is built over it.
             // This is what voice_factor and the enhanced path start from.
             let (buffer, offset) = self.excitation.buffer_mut();
@@ -189,6 +232,12 @@ impl Decoder {
             // The plain total, written back to the history.
             self.excitation.build(&code, gains.pitch, gain_code_word, q_new);
 
+            #[cfg(test)]
+            {
+                let (b, o) = self.excitation.buffer_mut();
+                let t: Vec<i16> = b[o..o + L_SUBFR].iter().map(|w| w.0).collect();
+                self.vtrace.push(("exc_total", t));
+            }
             // voice_factor works on the adaptive part scaled down by 3 bits.
             let mut scaled = exc2;
             for s in &mut scaled {
@@ -206,14 +255,14 @@ impl Decoder {
             let quartered = shr(&mut ctx, voice_fac, 2);
             self.tilt_code = add(&mut ctx, quartered, Word16(8192));
 
+            trace!("voice_fac", voice_fac.0);
             // The enhanced path, for the listener only.
-            self.dispersion.apply(
-                &mut ctx,
-                &mut code,
-                gain_code_word,
-                gains.pitch,
-                dispersion,
-            );
+            // Phase dispersion takes the HIGH HALF of the Q16 code gain, not
+            // a rounded or rescaled version of it -- the reference splits
+            // L_gain_code with L_Extract and passes the high word.
+            let (gain_code_hi, _) = l_extract(gains.code);
+            self.dispersion
+                .apply(&mut ctx, &mut code, gain_code_hi, gains.pitch, dispersion);
             let enhanced_gain =
                 self.noise_enhancer
                     .apply(&mut ctx, gains.code, voice_fac, stab_fac);
@@ -230,6 +279,7 @@ impl Decoder {
                 exc2[i] = round(&mut ctx, acc);
             }
 
+            vtrace!("exc2_final", exc2);
             // --- synthesis ---
             let a = &coefficients[sf];
             let (high, low) = self.synthesis.filter(a, &exc2, q_new);
@@ -335,6 +385,11 @@ mod tests {
                     break;
                 }
                 total += 1;
+                // AMR-WB's output is defined as 14-bit linear: the reference
+                // harness masks the low two bits before writing (decoder.c
+                // line 211, `synth[i] & 0xfffC`). Comparing unmasked 16-bit
+                // output against it is comparing different things.
+                let g = g & !3i16;
                 let delta = i64::from(g) - i64::from(want[index]);
                 worst = worst.max(delta.abs());
                 if delta == 0 {
@@ -364,6 +419,9 @@ mod tests {
         let mut dec = Decoder::new();
         let got = dec.decode(mode, &frames[0].data).expect("decodes");
 
+        for (k, v) in dec.vtrace.iter().take(4) {
+            println!("V {k}: {:?}", &v[..8.min(v.len())]);
+        }
         let first_bad = (0..FRAME_SIZE_16K).find(|&i| got[i] != want[i]);
         let first_nz = (0..FRAME_SIZE_16K).find(|&i| want[i] != 0);
         println!("first non-zero {first_nz:?}, first mismatch {first_bad:?}");
@@ -396,12 +454,13 @@ mod tests {
     fn the_assembly_does_not_regress_against_the_reference() {
         // Floors, well under the measured values, so ordinary noise does not
         // fail the build but a real regression does.
-        const FLOOR_PERMILLE: [u64; 9] = [10, 12, 12, 12, 11, 18, 18, 24, 4];
+        const FLOOR_PERMILLE: [u64; 9] = [10, 120, 790, 790, 750, 720, 770, 780, 10];
 
         for (mode_index, &floor) in FLOOR_PERMILLE.iter().enumerate() {
             let (matched, total, worst) = compare(mode_index);
             assert!(total > 0, "mode {mode_index}: decoded nothing");
             let permille = matched as u64 * 1000 / total as u64;
+            println!("mode {mode_index}: {matched}/{total} = {permille} per mille, worst {worst}");
             assert!(
                 permille >= floor,
                 "mode {mode_index}: {matched}/{total} exact ({permille} per mille, \
