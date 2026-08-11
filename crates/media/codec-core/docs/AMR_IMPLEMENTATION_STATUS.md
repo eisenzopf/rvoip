@@ -20,7 +20,7 @@
 | **AMR-WB homing frames** | **Done** — the encoder emits each mode's pattern |
 | **AMR-WB conformance, speech** | **All nine TS 26.173 vectors, both directions** |
 | **AMR-WB conformance, DTX encode** | **`tst_md.cod`, every frame type and payload** |
-| AMR-WB conformance, DTX decode | One LSB out from frame 80, the first SID |
+| **AMR-WB conformance, DTX decode** | **`tst_md`, 200 frames, sample for sample** |
 | AMR-NB homing frames | Not started |
 | Transcoding, interop, benchmarks | Not started |
 
@@ -58,6 +58,24 @@ already exact. And `Reset_decoder(st, 0)` clears more than the excitation —
 the ISF predictor, the pitch-lag history, the innovation tilt, the phase
 dispersion memory and the noise enhancer's threshold — an omission invisible
 until the first speech frame *after* the silence.
+
+**And two more that only the normative stream could reach.** The committed
+fixture passed while both were present, which is the whole argument for
+fetching TS 26.174 rather than trusting a locally generated one.
+
+The energy history has to be captured from an excitation in *one* exponent.
+`rescale_to` rewrites the entire history when a subframe needs a different one,
+so by the end of a frame the reference's buffer is uniform and a single
+`Scale_sig` undoes it — but snapshotting each subframe as it is built leaves
+four exponents mixed together. It corrupts exactly the frames where the scaling
+moved, three of eight ring slots on this stream and none on the fixture.
+
+And `CN_dithering` draws its generator **twice** per perturbation and sums the
+halves — a triangular variate, not a uniform one — and enforces the 448-unit
+ISF spacing *inline* against the coefficient just written rather than in a pass
+afterwards. Written from a summary of the algorithm it was wrong in both
+respects, and only a stream whose encoder actually sets the dithering bit can
+tell. Ours does; the fixture's does not.
 
 Neither reference is committed. `tools/build-amr-reference.sh`,
 `build-amrnb-reference.sh` and the two `*-encoder-reference.sh` scripts fetch

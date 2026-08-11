@@ -339,22 +339,26 @@ mod tests {
 
     /// The decoder against `tst_md.out`: the normative comfort-noise output.
     ///
-    /// **Currently failing, and kept so the gap stays visible.** The eighty
-    /// speech frames before the first SID are sample-exact; frame 80, the
-    /// `SID_FIRST`, differs by one LSB from sample 16 onward.
+    /// Speech, comfort noise and gaps, 200 frames, sample for sample.
     ///
-    /// Everything around it passes: all nine normative *speech* vectors in
-    /// both directions, the normative DTX vector on the *encode* side frame
-    /// type for frame type and payload for payload, and a 150-frame DTX
-    /// stream decoded sample-exact against the reference implementation. So
-    /// what is left is narrow — an arithmetic detail in the backward analysis
-    /// or the level conversion that this stream's values expose and the
-    /// committed fixture's do not.
+    /// Two defects had to go before this passed, and the committed fixture
+    /// exposed neither.
     ///
-    /// Not deleted, and not quietly weakened to a tolerance: a one-LSB
-    /// disagreement with the specification is still a disagreement.
+    /// The background energy history has to be captured from an excitation in
+    /// *one* exponent. `rescale_to` rescales the whole history when a subframe
+    /// needs a different one, so the reference's buffer is uniform by the end
+    /// and a single `Scale_sig` undoes it; snapshotting each subframe as it is
+    /// built mixes four exponents and corrupts exactly the frames where the
+    /// scaling moved — three of eight ring slots here.
+    ///
+    /// And `CN_dithering` draws the generator *twice* per perturbation and
+    /// sums the halves, giving a triangular variate rather than a uniform one,
+    /// and enforces ISF spacing inline against the coefficient just written
+    /// rather than in a pass afterwards. Written from a summary it was wrong
+    /// in both respects, and only a stream whose encoder set the dithering bit
+    /// could show it.
     #[test]
-    #[ignore = "known gap: the normative DTX decode diverges at frame 80; see the doc comment"]
+    #[ignore = "needs the 3GPP sequences; see the module header"]
     fn wideband_dtx_decoding_matches_the_normative_vector() {
         use crate::codecs::amr::wb::decoder::Decoder;
         use crate::codecs::amr::wb::dtx::RxFrameType;

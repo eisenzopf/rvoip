@@ -382,12 +382,22 @@ impl Decoder {
 
             // The plain total, written back to the history.
             self.excitation.build(&code, gains.pitch, gain_code_word, q_new);
+            // Snapshot this subframe, keeping the whole frame in one
+            // exponent. `rescale_to` rescales the entire excitation history
+            // when a subframe needs a different one, so the reference's buffer
+            // is uniform by the end and a single `Scale_sig` undoes it.
+            // Copying each subframe as built and scaling once at the end
+            // instead mixes four exponents, and the energies a later SID
+            // averages come out wrong on exactly the frames where q moved.
+            if q_new != frame_q_new && sf > 0 {
+                scale_sig(&mut ctx, &mut frame_excitation[..sf * L_SUBFR], q_new - frame_q_new);
+            }
+            frame_q_new = q_new;
             {
                 let (buffer, offset) = self.excitation.buffer_mut();
                 frame_excitation[sf * L_SUBFR..(sf + 1) * L_SUBFR]
                     .copy_from_slice(&buffer[offset..offset + L_SUBFR]);
             }
-            frame_q_new = q_new;
 
             #[cfg(test)]
             {
@@ -500,10 +510,13 @@ impl Decoder {
         // path. It is the memory a `SID_FIRST` reconstructs the talker's
         // background from, so it must describe decoded speech and never the
         // comfort noise the decoder itself produced.
-        // Measured on the excitation brought back out of this frame's
-        // scaling: the reference does `Scale_sig(exc, L_FRAME, -Q_new)` first,
-        // and skipping it inflates every stored energy by 2^Q_new -- which
-        // reaches the far end as comfort noise hundreds of times too loud.
+        // The whole frame's excitation, read out *after* the loop rather than
+        // snapshotted per subframe. `rescale_to` rescales the entire history
+        // when a subframe needs a different exponent, so a snapshot taken as
+        // each subframe was built is in that subframe's own scaling and the
+        // four do not share one. The reference reads the finished buffer and
+        // applies a single `Scale_sig(exc, L_FRAME, -Q_new)`; anything else
+        // mixes exponents and corrupts the energies a later SID averages.
         scale_sig(&mut ctx, &mut frame_excitation, -frame_q_new);
         self.dtx.observe_speech(&mut ctx, &isf, &frame_excitation);
         self.dtx.observe_vad(&mut ctx, params.vad_flag);

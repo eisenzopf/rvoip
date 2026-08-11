@@ -35,7 +35,7 @@ use super::isf_noise;
 use super::lp::autocorr::LP_ORDER;
 use super::lp::isf_dequant::ISF_INIT;
 use super::math::{dot_product12, isqrt_n, pow2};
-use crate::fixed_point::arith::{add, extract_h, extract_l, mult, sub};
+use crate::fixed_point::arith::{add, extract_h, extract_l, mult, mult_r, sub};
 use crate::fixed_point::div::div_s;
 use crate::fixed_point::shift::shr;
 use crate::fixed_point::arith32::{l_add, l_deposit_h, l_mac, l_mult, l_sub};
@@ -518,6 +518,13 @@ impl DtxDecoder {
     /// Only when the encoder said the background was moving. Without it a
     /// non-stationary background is reproduced as a steady tone, which is
     /// more noticeable than the noise it replaced.
+    ///
+    /// Every perturbation is *two* draws of the generator summed, each halved
+    /// first — a triangular variate rather than a uniform one — and the ISF
+    /// perturbation grows with frequency. The spacing is enforced inline
+    /// against the coefficient just written, not in a separate pass
+    /// afterwards: the two give different vectors as soon as one coefficient
+    /// is clamped.
     fn apply_dithering(
         &mut self,
         ctx: &mut DspContext,
@@ -526,38 +533,54 @@ impl DtxDecoder {
     ) {
         /// Energy perturbation scale.
         const GAIN_FACTOR: Word16 = Word16(75);
-        /// Where the per-coefficient spectral perturbation starts.
+        /// Where the per-coefficient spectral perturbation starts, and how
+        /// much it grows per coefficient.
         const ISF_FACTOR_LOW: Word16 = Word16(256);
-        /// How much it grows per coefficient.
         const ISF_FACTOR_STEP: Word16 = Word16(2);
-        /// Minimum spacing dithering must not violate.
+        /// Minimum spacing dithering must not violate, and the floor on the
+        /// first coefficient.
         const ISF_DITH_GAP: Word16 = Word16(448);
+        const ISF_GAP: Word16 = Word16(128);
 
-        // A triangular variate, from two draws.
-        let a = self.next_dither(ctx);
-        let b = self.next_dither(ctx);
-        let half_a = shr(ctx, a, 1);
-        let half_b = shr(ctx, b, 1);
-        let triangular = add(ctx, half_a, half_b);
-        let perturbation = mult(ctx, triangular, GAIN_FACTOR);
-        let widened = l_mult(ctx, perturbation, Word16(1));
+        let mut triangular = |dtx: &mut Self, ctx: &mut DspContext| -> Word16 {
+            let first = dtx.next_dither(ctx);
+            let half_first = shr(ctx, first, 1);
+            let second = dtx.next_dither(ctx);
+            let half_second = shr(ctx, second, 1);
+            add(ctx, half_first, half_second)
+        };
+
+        let perturbation = triangular(self, ctx);
+        let widened = l_mult(ctx, perturbation, GAIN_FACTOR);
         *energy = l_add(ctx, *energy, widened);
+        if energy.0 < 0 {
+            *energy = Word32(0);
+        }
 
         let mut factor = ISF_FACTOR_LOW;
-        for slot in isf.iter_mut() {
-            let draw = self.next_dither(ctx);
-            let delta = mult(ctx, draw, factor);
-            *slot = add(ctx, *slot, delta);
+        let perturbation = triangular(self, ctx);
+        let step = mult_r(ctx, perturbation, factor);
+        let candidate = add(ctx, isf[0], step);
+        // The first coefficient must not go negative.
+        isf[0] = if sub(ctx, candidate, ISF_GAP).0 < 0 {
+            ISF_GAP
+        } else {
+            candidate
+        };
+
+        for i in 1..LP_ORDER - 1 {
             factor = add(ctx, factor, ISF_FACTOR_STEP);
+            let perturbation = triangular(self, ctx);
+            let step = mult_r(ctx, perturbation, factor);
+            let candidate = add(ctx, isf[i], step);
+            let spacing = sub(ctx, candidate, isf[i - 1]);
+            isf[i] = if sub(ctx, spacing, ISF_DITH_GAP).0 < 0 {
+                add(ctx, isf[i - 1], ISF_DITH_GAP)
+            } else {
+                candidate
+            };
         }
-        // The spacing the perturbation must not destroy.
-        let mut floor = ISF_DITH_GAP;
-        for slot in isf.iter_mut().take(LP_ORDER - 1) {
-            if slot.0 < floor.0 {
-                *slot = floor;
-            }
-            floor = add(ctx, *slot, ISF_DITH_GAP);
-        }
+
         if isf[LP_ORDER - 2].0 > 16384 {
             isf[LP_ORDER - 2] = Word16(16384);
         }
