@@ -307,9 +307,6 @@ mod tests {
     #[tokio::test]
     async fn pump_passes_through_4byte_payload_when_transcode_fails() {
         use rvoip_media_core::codec::transcoding::Transcoder;
-        use rvoip_media_core::processing::format::FormatConverter;
-        use std::sync::Arc;
-        use tokio::sync::RwLock;
 
         let (tx_from, rx_from) = mpsc::channel::<MediaFrame>(8);
         let (tx_to, mut rx_to) = mpsc::channel::<MediaFrame>(8);

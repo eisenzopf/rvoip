@@ -7,6 +7,8 @@
 //! against TS 26.173 at all nine rates, AMR-NB against TS 26.073 at all eight —
 //! and both encoders produce a byte-identical bitstream at every rate.
 //!
+//! Concealment covers both damaged frames and lost ones, on both variants.
+//!
 //! What is not implemented is DTX: comfort noise and deliberate gaps refuse
 //! with a message naming what they need, rather than returning silence.
 //!
@@ -444,10 +446,14 @@ impl VariableRateCodec for AmrCodec {
                             CodecError::decoding_failed("AMR-WB concealment produced no frame")
                         })
                 }
-                _ => Err(CodecError::feature_not_enabled(
-                    "AMR-NB concealment of a wholly lost frame needs the comfort-noise \
-                     path, which is not implemented yet \
-                     (see codec-core/docs/AMR_IMPLEMENTATION_PLAN.md)",
+                #[cfg(feature = "amr-nb")]
+                Decoder::NarrowBand(decoder) => {
+                    let mode = AmrMode::new(self.variant, frame.mode)
+                        .unwrap_or(self.current_mode);
+                    Ok(decoder.conceal_lost_frame(mode.index()).to_vec())
+                }
+                Decoder::Absent => Err(CodecError::feature_not_enabled(
+                    "no AMR decoder is compiled in",
                 )),
             },
             FrameKind::ComfortNoise | FrameKind::NoData => {
@@ -823,6 +829,71 @@ mod tests {
                 .flat_map(|f| codec.decode(&f.data).expect("decodes"))
                 .collect();
             assert_eq!(first, again, "reset did not clear the decoder state");
+        }
+
+        /// The narrowband twin, and the asymmetry it removes.
+        ///
+        /// Wideband has had lost-frame concealment since the decoder landed;
+        /// narrowband refused, because RFC 4867 gives it no `SPEECH_LOST`
+        /// frame type and the reference reaches concealment by a different
+        /// route — it manufactures a parameter vector first. Both streams are
+        /// the same 25 frames with the same six erasures, differing only in
+        /// whether each is marked damaged or absent.
+        #[test]
+        fn narrowband_conceals_both_bad_frame_kinds_bit_exactly() {
+            for (bits, pcm, lost) in [
+                (
+                    include_bytes!("testdata/amrnb_erased.amr").as_slice(),
+                    include_bytes!("testdata/amrnb_erased.pcm").as_slice(),
+                    false,
+                ),
+                (
+                    include_bytes!("testdata/amrnb_lost.amr").as_slice(),
+                    include_bytes!("testdata/amrnb_lost.pcm").as_slice(),
+                    true,
+                ),
+            ] {
+                let want: Vec<i16> = pcm
+                    .chunks_exact(2)
+                    .map(|b| i16::from_le_bytes([b[0], b[1]]))
+                    .collect();
+                let (_, frames) = storage::read(bits).expect("fixture parses");
+                let mut codec = AmrCodec::new(&CodecConfig::amr_nb()).unwrap();
+                let mut got = Vec::with_capacity(want.len());
+
+                let mut concealed = 0usize;
+                for frame in &frames {
+                    let input = match frame.frame_type {
+                        AmrFrameType::NoData => {
+                            concealed += 1;
+                            CodedFrame {
+                                kind: FrameKind::Lost,
+                                mode: 4,
+                                quality_ok: false,
+                                data: Vec::new(),
+                            }
+                        }
+                        _ => CodedFrame {
+                            kind: FrameKind::Speech,
+                            mode: 4,
+                            quality_ok: frame.quality_ok,
+                            data: frame.data.clone(),
+                        },
+                    };
+                    got.extend(codec.decode_frame(&input).expect("frame decodes"));
+                }
+
+                // The damaged stream has no NoData frames, so only the lost
+                // one takes the concealment path; asserting the count stops
+                // this from passing while decoding everything as speech.
+                assert_eq!(concealed, if lost { 6 } else { 0 });
+                let masked: Vec<i16> = got.iter().map(|s| s & !7).collect();
+                assert_eq!(
+                    masked, want,
+                    "{} stream is not bit-exact through the trait",
+                    if lost { "lost" } else { "damaged" }
+                );
+            }
         }
     }
 

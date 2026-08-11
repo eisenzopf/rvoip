@@ -106,9 +106,6 @@ async fn telephone_event_pt_passes_through_when_pts_match() {
 #[tokio::test]
 async fn telephone_event_pt_passes_through_when_transcoding() {
     use rvoip_media_core::codec::transcoding::Transcoder;
-    use rvoip_media_core::processing::format::FormatConverter;
-    use std::sync::Arc;
-    use tokio::sync::RwLock;
 
     let (tx_from, rx_from) = mpsc::channel::<MediaFrame>(16);
     let (tx_to, mut rx_to) = mpsc::channel::<MediaFrame>(16);

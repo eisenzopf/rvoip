@@ -24,6 +24,7 @@
 
 pub mod bitstream;
 pub mod codebook;
+pub mod conceal;
 pub mod decoder;
 pub mod decoder_tables;
 pub mod enc;

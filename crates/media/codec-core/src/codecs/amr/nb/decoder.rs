@@ -40,6 +40,7 @@
 //! found every remaining defect in a single pass.
 
 use super::codebook::{sharpen, sharpening_factor, sharpening_state, FixedCodebook};
+use super::conceal;
 use super::detect::{interpolate_lsf, LsfAverage, SourceDetector};
 use super::gain::{
     decode_code_gain, decode_joint, decode_pitch_gain, CodeGainConcealer, CodeGainPredictor,
@@ -82,11 +83,16 @@ const LTP_HISTORY: usize = 9;
 pub enum FrameState {
     /// Bits arrived and the transport believes them.
     Good,
-    /// Bits arrived damaged, or did not arrive at all.
+    /// Bits arrived damaged.
     ///
-    /// Both drive the same concealment path in the reference — a severely
-    /// damaged frame and a lost one are equally unusable — so they are one
-    /// variant rather than two that behave identically.
+    /// This is also the *tail* of the lost-frame path, but not its entirety:
+    /// AMR-NB has no distinct lost frame type, and the reference reaches this
+    /// same code after first manufacturing a parameter vector from
+    /// `nodataSeed`. A frame that never arrived must therefore enter through
+    /// [`Decoder::conceal_lost_frame`], which synthesises what this state then
+    /// consumes. Passing stale bits here instead decodes a different
+    /// excitation -- the fixed codebook reads the indices even when the frame
+    /// is bad.
     Bad,
     /// The transport says the frame is usable but degraded.
     ///
@@ -138,6 +144,12 @@ pub struct Decoder {
     energy_history: [Word16; EXC_ENERGY_HIST],
     /// Pitch gains of the last nine subframes, newest last.
     ltp_gains: [Word16; LTP_HISTORY],
+    /// `dec_amr.c`'s `st->nodataSeed`.
+    ///
+    /// Advances only on a lost frame -- a good or damaged one leaves it
+    /// untouched -- and is re-seeded only by a full reset. So the sequence a
+    /// stream sees depends on how many frames it has lost and on nothing else.
+    nodata_seed: Word16,
 
     /// Per-frame scalar trace, for diffing against the instrumented reference.
     #[cfg(test)]
@@ -187,6 +199,7 @@ impl Decoder {
             previous: PreviousFrame::default(),
             energy_history: [Word16(0); EXC_ENERGY_HIST],
             ltp_gains: [Word16(0); LTP_HISTORY],
+            nodata_seed: conceal::NODATA_SEED_INIT,
             #[cfg(test)]
             trace: Vec::new(),
             #[cfg(test)]
@@ -441,6 +454,41 @@ impl Decoder {
             *slot = sample.0 & !7;
         }
         out
+    }
+
+    /// Conceal a frame that never arrived -- RFC 4867 frame type 15, the
+    /// reference's `RX_NO_DATA`.
+    ///
+    /// Not the same as decoding a damaged frame, though it ends in the same
+    /// place. `dec_amr.c` manufactures the entire parameter vector from
+    /// `nodataSeed` first, and only then runs the bad-frame path; the LSF and
+    /// gain concealers ignore what it produced, but the fixed codebook does
+    /// not, so the synthesised pulses become the excitation. Feeding a lost
+    /// frame through [`Self::decode_parameters`] with [`FrameState::Bad`] and
+    /// whatever bits happened to be in the buffer produces plausible speech
+    /// that matches no reference.
+    ///
+    /// `mode_index` is the mode the stream was last using: a lost frame
+    /// carries none of its own, and the reference substitutes `prev_mode`. It
+    /// selects both how many parameters are synthesised and how wide each one
+    /// is.
+    ///
+    /// # A limit worth stating
+    ///
+    /// `Decoder_amr_reset(st, MRDTX)` re-seeds `nodataSeed` on every
+    /// comfort-noise frame, so on a stream that has passed through DTX the
+    /// sequence depends on that history. Nothing here implements DTX yet, so
+    /// this is exact for a stream that has never entered it -- and when DTX
+    /// lands, re-seeding from the comfort-noise path is required behaviour,
+    /// not an optimisation.
+    ///
+    /// # Panics
+    /// If `mode_index` is not a speech mode, 0..=7.
+    #[must_use]
+    pub fn conceal_lost_frame(&mut self, mode_index: u8) -> [i16; L_FRAME] {
+        let mut ctx = DspContext::default();
+        let params = conceal::build_cn_param(&mut ctx, &mut self.nodata_seed, mode_index);
+        self.decode_parameters(mode_index, &params, FrameState::Bad)
     }
 
     /// Return the decoder to its reset state, keeping nothing.
@@ -942,7 +990,7 @@ impl Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codecs::amr::storage;
+    use crate::codecs::amr::{storage, AmrFrameType};
 
     /// The `.amr` fixture and the reference PCM for one rate.
     ///
@@ -1140,6 +1188,78 @@ mod tests {
             }
         }
         assert_eq!(compared, want.len(), "compared fewer samples than the fixture holds");
+    }
+
+    /// The same erasure pattern, but the frames are *lost* rather than damaged.
+    ///
+    /// This is the test that decides whether `build_CN_param` was read
+    /// correctly: everything downstream of the parameter vector is already
+    /// bit-exact, so a divergence can only be in the seed recurrence or the
+    /// window walk, and it would appear at the first loss and nowhere earlier.
+    #[test]
+    fn lost_frames_match_the_reference_frame_for_frame() {
+        let bits: &[u8] = include_bytes!("../testdata/amrnb_lost.amr");
+        let want = reference(include_bytes!("../testdata/amrnb_lost.pcm"));
+        let (_, frames) = storage::read(bits).expect("fixture parses");
+
+        // Frame type 15 is NO_DATA: nothing arrived, so there is no payload to
+        // parse and the mode comes from the stream's history instead.
+        let lost: Vec<usize> = frames
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.frame_type == AmrFrameType::NoData)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            lost,
+            vec![5, 10, 11, 12, 20, 22],
+            "the fixture's loss pattern moved; the test below assumes it"
+        );
+
+        let mut decoder = Decoder::new();
+        let mut compared = 0usize;
+        let mut concealed = 0usize;
+        for (f, frame) in frames.iter().enumerate() {
+            let got = if frame.frame_type == AmrFrameType::NoData {
+                concealed += 1;
+                decoder.conceal_lost_frame(4)
+            } else {
+                let params = super::super::bitstream::parse(4, &frame.data).expect("parses");
+                decoder.decode_parameters(4, &params, FrameState::Good)
+            };
+            for (i, &sample) in got.iter().enumerate() {
+                let index = f * L_FRAME + i;
+                assert_eq!(sample, want[index], "frame {f} sample {i} differs");
+                compared += 1;
+            }
+        }
+        assert_eq!(concealed, 6, "the concealment path was not taken six times");
+        assert_eq!(compared, want.len(), "compared fewer samples than the fixture holds");
+    }
+
+    /// A lost frame and a damaged one must not decode alike.
+    ///
+    /// The two fixtures erase the same frames of the same stream and differ
+    /// only in how: one clears the quality bit, the other replaces the frame
+    /// with NO_DATA. If concealment ignored the manufactured parameters -- the
+    /// mistake this module exists to avoid -- both would produce identical
+    /// audio and every other assertion here would still pass.
+    #[test]
+    fn a_lost_frame_does_not_decode_like_a_damaged_one() {
+        let lost = reference(include_bytes!("../testdata/amrnb_lost.pcm"));
+        let damaged = reference(include_bytes!("../testdata/amrnb_erased.pcm"));
+        let clean = reference(include_bytes!("../testdata/amrnb_mode4.pcm"));
+        assert_eq!(lost.len(), damaged.len());
+        assert_ne!(lost, damaged, "lost and damaged decoded identically");
+        assert_ne!(lost, clean, "the losses had no effect at all");
+        // And the difference is confined to the frames that were lost and what
+        // follows them -- frames 0..5 arrived intact in both streams.
+        let head = 5 * L_FRAME;
+        assert_eq!(
+            lost[..head],
+            damaged[..head],
+            "the streams differ before the first erasure"
+        );
     }
 
     /// Prints the first stage at which the Rust decoder leaves the reference,

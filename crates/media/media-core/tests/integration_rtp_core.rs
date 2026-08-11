@@ -6,7 +6,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-#[cfg(feature = "g729")]
 use tokio::time::{timeout, Duration};
 
 // Import rtp-core types
@@ -16,7 +15,6 @@ use rvoip_rtp_core::{
 
 // Import media-core types
 use codec_core::codecs::g711::G711Variant;
-#[cfg(feature = "g729")]
 use rvoip_media_core::{
     codec::audio::g711::G711Codec,
     codec::{mapping::CodecMapper, AudioCodec},
