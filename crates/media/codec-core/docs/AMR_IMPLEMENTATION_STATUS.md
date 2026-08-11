@@ -16,6 +16,7 @@
 | **AMR-WB DTX through `AmrCodec`** | **Both directions, byte- and sample-exact** |
 | AMR-NB DTX | Not started, and gated on the VAD1 port |
 | **AMR-WB homing frames** | **Done** — the encoder emits each mode's pattern |
+| **AMR-WB encoder conformance** | **All nine TS 26.173 vectors, bit-exact** |
 | AMR-NB homing frames | Not started |
 | Transcoding, interop, benchmarks | Not started |
 
@@ -237,6 +238,23 @@ survive the two parameters the lag and the codebook consume in between.
 4. **Interop and performance.** The cross-implementation matrix in both
    directions, benchmarks per rate, and a soak test. The decoders have a fuzz
    target; the encoders do not yet.
+
+## Conformance against the normative sequences
+
+**All nine TS 26.173 wideband encoder vectors pass, bit for bit** — 200 frames
+each of the specification's own input compared against the specification's own
+output, including 23.85 kbit/s, which no amount of ACELP work would have
+reached without DTX and homing. `cargo test -- --ignored conformance` runs
+them; they panic rather than skip when the sequences are absent, because a
+conformance test that quietly passes having found nothing is worse than none.
+
+The sequences are 3GPP copyright and stay out of the tree, on the same rule as
+the reference implementations: only generated output is committed. The vectors
+are read in the ETSI serial form they ship in rather than converted first — a
+converter is one more thing that could be wrong in the same direction as the
+code under test.
+
+Mutation-checked: turning DTX off fails mode 8 at frame 0.
 
 ## What is *not* claimed
 

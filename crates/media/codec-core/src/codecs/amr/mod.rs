@@ -47,6 +47,9 @@ use crate::types::{
 };
 
 mod bits;
+/// The normative 3GPP sequences, when the environment names them.
+#[cfg(test)]
+mod conformance;
 pub mod mode;
 pub mod nb;
 pub mod payload;
