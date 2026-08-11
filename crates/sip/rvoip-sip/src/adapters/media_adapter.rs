@@ -288,6 +288,65 @@ pub(crate) fn fmtp_for_pt(pt: u8) -> Option<&'static str> {
     fmtp_for_pt_with_g729_annex_b(pt, true)
 }
 
+/// The `a=fmtp` to put in an answer for `pt`.
+///
+/// For every codec but AMR this is the fixed per-payload-type string
+/// [`fmtp_for_pt_with_g729_annex_b`] returns.
+///
+/// # Why AMR cannot use that table
+///
+/// RFC 4867 §8.3.1 makes the transport-format parameters — `octet-align`,
+/// `crc`, `robust-sorting`, `interleaving`, `channels` — a mutually
+/// incompatible set that an answerer must echo rather than renegotiate. The
+/// table keys on *our* payload-type constants, which says nothing about what
+/// the peer actually offered on that number:
+///
+/// - a peer offering `octet-align=1` on PT 104, our bandwidth-efficient
+///   number, was answered with no fmtp at all — so we advertised
+///   bandwidth-efficient and then transmitted octet-aligned, because the codec
+///   is configured from the offer. Unparseable audio, no error;
+/// - a peer using its own dynamic number gets nothing from a table keyed on
+///   ours.
+///
+/// So the answer echoes the offer's transport parameters for that payload
+/// type. `mode-set` and the rest are deliberately not echoed: they constrain
+/// which modes may be used rather than how a frame is laid out, and an
+/// answerer states its own.
+fn answer_fmtp_for_pt(offer: &SdpSession, pt: u8, g729_annex_b: bool) -> Option<String> {
+    if !sdp_payload_is_amr(offer, pt) {
+        return fmtp_for_pt_with_g729_annex_b(pt, g729_annex_b).map(ToString::to_string);
+    }
+
+    let offered = audio_fmtp_params(offer, pt).unwrap_or_default();
+    let mut echoed: Vec<&str> = Vec::new();
+    for part in offered.split(';') {
+        let trimmed = part.trim();
+        let Some((name, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let value = value.trim().trim_matches('"');
+        // Only the parameters that decide the bit layout, and only when set:
+        // an explicit `octet-align=0` means the default, which is stated by
+        // omission.
+        let carries = matches!(
+            name.trim().to_ascii_lowercase().as_str(),
+            "octet-align" | "crc" | "robust-sorting"
+        ) && value == "1";
+        if carries {
+            echoed.push(trimmed);
+        }
+    }
+    (!echoed.is_empty()).then(|| echoed.join("; "))
+}
+
+/// Whether `pt` in this offer is mapped to one of the AMR encodings.
+fn sdp_payload_is_amr(offer: &SdpSession, pt: u8) -> bool {
+    audio_rtpmap(offer, pt).is_some_and(|mapping| {
+        mapping.encoding_name.eq_ignore_ascii_case("AMR")
+            || mapping.encoding_name.eq_ignore_ascii_case("AMR-WB")
+    })
+}
+
 pub(crate) fn fmtp_for_pt_with_g729_annex_b(pt: u8, g729_annex_b: bool) -> Option<&'static str> {
     match pt {
         18 if g729_annex_b => Some("annexb=yes"),
@@ -2261,8 +2320,8 @@ impl MediaAdapter {
             } else if let Some(rtpmap) = rtpmap_for_pt(pt) {
                 media_builder = media_builder.rtpmap(fmt.as_str(), rtpmap);
             }
-            if let Some(fmtp) = fmtp_for_pt_with_g729_annex_b(pt, negotiated_annex_b) {
-                media_builder = media_builder.fmtp(fmt.as_str(), fmtp);
+            if let Some(fmtp) = answer_fmtp_for_pt(&parsed_offer, pt, negotiated_annex_b) {
+                media_builder = media_builder.fmtp(fmt.as_str(), fmtp.as_str());
             }
         }
         if let Some(attr) = answer_attr {
@@ -4602,9 +4661,48 @@ pub(crate) fn compute_answer_formats(
 ) -> Result<Vec<String>> {
     let mut supported: Vec<String> = offered_codecs.iter().map(|pt| pt.to_string()).collect();
 
-    // Dynamic payload numbers belong to the offer, not to a codec. PT 111 in
-    // the local capability list represents Opus support; when the peer maps
-    // Opus to another dynamic PT, match and answer using that exact number.
+    // Dynamic payload numbers belong to the offer, not to a codec. Our
+    // capability list uses fixed numbers to *represent* support; when the peer
+    // maps the same codec to a different dynamic PT, match and answer using
+    // that exact number.
+    //
+    // AMR needs this at least as much as Opus does: both its variants are
+    // dynamic, and Asterisk and most handsets pick their own numbers. Without
+    // it a peer offering AMR-WB on 96 got a 488 for a codec we support.
+    let amr_wb_offered = offered_codecs.contains(&AMR_WB_BE_PT)
+        || offered_codecs.contains(&AMR_WB_OA_PT);
+    let amr_nb_offered = offered_codecs.contains(&AMR_NB_BE_PT)
+        || offered_codecs.contains(&AMR_NB_OA_PT);
+    if (cfg!(feature = "amr-wb") && amr_wb_offered) || (cfg!(feature = "amr-nb") && amr_nb_offered)
+    {
+        if let Some(audio) = offer
+            .media_descriptions
+            .iter()
+            .find(|media| media.media.eq_ignore_ascii_case("audio"))
+        {
+            for format in &audio.formats {
+                let Ok(payload_type) = format.parse::<u8>() else {
+                    continue;
+                };
+                if !(96..=127).contains(&payload_type) || payload_type == 101 {
+                    continue;
+                }
+                let Some(mapping) = audio_rtpmap(offer, payload_type) else {
+                    continue;
+                };
+                let wanted = (mapping.encoding_name.eq_ignore_ascii_case("AMR-WB")
+                    && cfg!(feature = "amr-wb")
+                    && amr_wb_offered)
+                    || (mapping.encoding_name.eq_ignore_ascii_case("AMR")
+                        && cfg!(feature = "amr-nb")
+                        && amr_nb_offered);
+                if wanted && !supported.contains(format) {
+                    supported.push(format.clone());
+                }
+            }
+        }
+    }
+
     if cfg!(feature = "opus") && offered_codecs.contains(&111) {
         if let Some(audio) = offer
             .media_descriptions
@@ -6553,6 +6651,82 @@ a=fmtp:101 0-15\r\n";
 
     #[test]
     #[cfg(feature = "amr-wb")]
+    fn amr_matches_a_peers_own_dynamic_payload_type() {
+        // Asterisk and most handsets pick their own number for AMR. Opus
+        // already has this remap; AMR did not, so a peer offering AMR-WB on
+        // 96 got a 488 even though we support exactly that codec. Our own
+        // call test passed only because both ends used our private constants.
+        let offer = SdpBuilder::new("Session")
+            .origin("-", "1", "1", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16_000, "RTP/AVP")
+            .formats(&["96", "101"])
+            .rtpmap("96", "AMR-WB/16000")
+            .fmtp("96", "octet-align=1")
+            .rtpmap("101", "telephone-event/8000")
+            .done()
+            .build()
+            .unwrap();
+
+        let answer = compute_answer_formats(&offer, &[AMR_WB_OA_PT, 101], true, false, false)
+            .expect("a peer's own dynamic payload type for AMR must negotiate");
+        assert_eq!(
+            answer.first().map(String::as_str),
+            Some("96"),
+            "the answer must use the peer's number, not ours: {answer:?}"
+        );
+    }
+
+    /// What we advertise and what we transmit must be the same framing.
+    ///
+    /// The answer's fmtp came from a fixed per-PT table while the codec was
+    /// configured from the *offer's* fmtp. A peer offering `octet-align=1` on
+    /// PT 104 — our bandwidth-efficient number — was accepted, answered with
+    /// no fmtp at all, and then sent octet-aligned frames. Unparseable audio
+    /// with no error anywhere, which is the exact failure the bridge's framing
+    /// guard exists to catch one layer up.
+    #[test]
+    fn the_answers_framing_matches_what_the_codec_is_given() {
+        for (offer_pt, offered_fmtp) in [
+            (AMR_WB_BE_PT, Some("octet-align=1")),
+            (AMR_WB_OA_PT, Some("octet-align=1")),
+            (AMR_WB_BE_PT, None),
+            (AMR_NB_BE_PT, Some("octet-align=1")),
+        ] {
+            let pt = offer_pt.to_string();
+            let mut media = SdpBuilder::new("Session")
+                .origin("-", "1", "1", "IN", "IP4", "127.0.0.1")
+                .connection("IN", "IP4", "127.0.0.1")
+                .time("0", "0")
+                .media_audio(16_000, "RTP/AVP")
+                .formats(&[pt.as_str()])
+                .rtpmap(
+                    pt.as_str(),
+                    if offer_pt >= AMR_NB_BE_PT { "AMR/8000" } else { "AMR-WB/16000" },
+                );
+            if let Some(fmtp) = offered_fmtp {
+                media = media.fmtp(pt.as_str(), fmtp);
+            }
+            let offer = media.done().build().unwrap();
+
+            // What the codec will be configured with.
+            let to_codec = audio_fmtp_params(&offer, offer_pt).unwrap_or_default();
+            // What we would put in the answer.
+            let advertised = answer_fmtp_for_pt(&offer, offer_pt, false).unwrap_or_default();
+
+            let transmits_octet_aligned = to_codec.contains("octet-align=1");
+            let advertises_octet_aligned = advertised.contains("octet-align=1");
+            assert_eq!(
+                transmits_octet_aligned, advertises_octet_aligned,
+                "PT {offer_pt} offered {offered_fmtp:?}: we would transmit \
+                 octet-aligned={transmits_octet_aligned} while advertising \
+                 octet-aligned={advertises_octet_aligned} ({advertised:?})"
+            );
+        }
+    }
+
+    #[test]
     fn amr_offers_advertise_each_framing_as_its_own_payload_type() {
         // RFC 4867 §8.3.1: transport configurations are mutually incompatible
         // bit patterns, so they are separate payload types rather than
