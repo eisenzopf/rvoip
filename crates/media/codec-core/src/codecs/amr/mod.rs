@@ -51,6 +51,7 @@ pub mod payload;
 mod qualification;
 pub mod rate;
 pub mod sdp;
+pub mod sid_cadence;
 pub mod storage;
 
 #[cfg(feature = "amr-wb")]

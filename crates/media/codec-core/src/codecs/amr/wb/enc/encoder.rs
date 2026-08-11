@@ -52,7 +52,9 @@
     clippy::too_many_lines
 )]
 
+use super::super::isf_noise;
 use super::super::lp::isf::{interpolate_isp, isf_to_isp};
+use super::super::lp::isp_to_lp::isp_to_lp;
 use super::dtx::{DtxEncoder, TxDecision};
 use super::super::lp::isf_dequant::{IsfQuantizer, ISF_INIT};
 use super::super::math::{dot_product12, isqrt_n, scale_sig};
@@ -421,12 +423,38 @@ impl WbEncoder {
         }
     }
 
+    /// `Reset_encoder(st, 0)`: what a comfort-noise frame clears, and what it
+    /// deliberately does not.
+    ///
+    /// Cleared: the excitation history, the synthesis and weighting memories,
+    /// the ISF quantiser's predictor, the voicing tilt, the gain-clipping
+    /// state and the high band's slow gain threshold.
+    ///
+    /// Kept, and this is the half that matters: the *gain predictor* -- the
+    /// reference resets it only under `reset_all`, so a talk spurt resuming
+    /// after silence inherits its history -- along with `gain_alpha`, every
+    /// high-band filter memory, the noise seed, both ISP memories and the DTX
+    /// state itself. `first_frame` going back to true is how `isp_old_q`
+    /// recovers: the next speech frame copies rather than interpolating from a
+    /// stale value.
+    fn reset_after_comfort_noise(&mut self) {
+        self.old_exc = [Word16(0); EXC_HISTORY];
+        self.mem_syn = [Word16(0); M];
+        self.mem_w0 = Word16(0);
+        self.tilt_code = Word16(0);
+        self.first_frame = true;
+        self.isf_quantiser.reset();
+        self.clipping = GainClipping::new();
+        self.high_band.reset_gain_threshold();
+    }
+
     /// Enable discontinuous transmission.
     ///
     /// With it on, a frame the detector calls quiet may be coded as comfort
     /// noise instead of speech, and [`Self::encode_frame_typed`] reports that.
     /// [`Self::encode_frame`] always codes speech regardless, because it has
     /// nowhere to say otherwise.
+    #[allow(clippy::missing_const_for_fn)]
     pub fn set_allow_dtx(&mut self, allow: bool) {
         self.allow_dtx = allow;
     }
@@ -479,15 +507,30 @@ impl WbEncoder {
     /// [`Rate::packed_bytes`] of them — with no table-of-contents byte in
     /// front; [`Rate::toc_byte`] supplies that.
     pub fn encode_frame(&mut self, pcm: &[i16; L_FRAME16K], rate: Rate) -> Vec<u8> {
+        self.encode_frame_typed(pcm, rate).1
+    }
+
+    /// One frame, reporting whether it came out as speech or comfort noise.
+    ///
+    /// The payload for a comfort-noise frame is the 35-bit SID, five bytes.
+    /// Whether the *transmitter* sends it is a separate decision -- see
+    /// [`SidCadence`](crate::codecs::amr::sid_cadence::SidCadence) -- because
+    /// the encoder builds a SID on every comfort-noise frame and most are
+    /// discarded.
+    pub fn encode_frame_typed(
+        &mut self,
+        pcm: &[i16; L_FRAME16K],
+        rate: Rate,
+    ) -> (bool, Vec<u8>) {
         let mut prms = Parameters::new();
-        self.encode_into(pcm, rate, &mut prms);
-        let payload = prms.pack(rate);
+        let comfort_noise = self.encode_into(pcm, rate, &mut prms);
+        let payload = prms.pack(if comfort_noise { Rate::SID } else { rate });
         self.frame_index += 1;
-        payload
+        (comfort_noise, payload)
     }
 
     /// One frame of `coder()`, writing parameters in transmission order.
-    fn encode_into(&mut self, pcm: &[i16; L_FRAME16K], rate: Rate, prms: &mut Parameters) {
+    fn encode_into(&mut self, pcm: &[i16; L_FRAME16K], rate: Rate, prms: &mut Parameters) -> bool {
         let ser_size = rate.bits();
         let mut mode = PitchMode::from_frame_bits(ser_size as u16);
         let mut ctx = DspContext::default();
@@ -591,6 +634,79 @@ impl WbEncoder {
             self.vad.tone_detection(&mut ctx, tone_gain);
         }
 
+        // --- comfort noise, and nothing after it -----------------------------
+        // Everything above ran on both paths: the front end, the VAD, the
+        // clipping observation and both open-loop halves with their tone
+        // detection. What a SID frame skips is the ISF quantiser, the gain
+        // predictor and the whole subframe loop.
+        if comfort_noise {
+            // One `Residu` across all 256 samples, through the *unquantised*
+            // interpolated predictor of the fourth subframe. Not per-subframe
+            // and not the quantised one -- the other `dtx_buffer` call site
+            // downstream uses both of those, and confusing them yields a
+            // plausible SID several frames later.
+            let mut residual = [Word16(0); L_FRAME];
+            residu(
+                &frame.a_interp[NB_SUBFR - 1],
+                &frame.window[SPEECH - M..SPEECH + L_FRAME],
+                &mut residual,
+            );
+
+            let mut excitation = [Word16(0); L_FRAME];
+            let mut energy = Word32(0);
+            for (slot, &sample) in excitation.iter_mut().zip(residual.iter()) {
+                *slot = shr(&mut ctx, sample, q_new);
+            }
+            for &sample in &excitation {
+                energy = l_mac(&mut ctx, energy, sample, sample);
+            }
+            let energy = crate::fixed_point::shift::l_shr(&mut ctx, energy, 1);
+
+            self.dtx
+                .buffer(&mut ctx, &frame.isf, energy, rate.index() as usize);
+            let sid = self.dtx.build_sid(&mut ctx);
+            for (&index, &width) in sid.isf_indices.iter().zip(&isf_noise::SPLIT_BITS) {
+                prms.push(index, usize::from(width));
+            }
+            #[allow(clippy::cast_sign_loss)]
+            prms.push(sid.energy_index.0 as u16, 6);
+            prms.push(u16::from(sid.dither), 1);
+
+            // The encoder synthesises the comfort noise it just described, so
+            // the high band, de-emphasis and output filters carry the right
+            // memories into the next speech frame. One predictor for all four
+            // subframes -- the CN spectrum does not move within a frame -- and
+            // the gain indices it produces are computed and discarded.
+            let cn_excitation = self.dtx.excitation(&mut ctx, sid.energy_index);
+            let isp = isf_to_isp(&sid.spectrum);
+            let aq = isp_to_lp(&isp);
+            if rate.has_high_band() {
+                let hangover = self.dtx.hangover_count();
+                for k in 0..NB_SUBFR {
+                    let sub: [Word16; L_SUBFR] = cn_excitation
+                        [k * L_SUBFR..(k + 1) * L_SUBFR]
+                        .try_into()
+                        .expect("one subframe");
+                    let reference: [Word16; L_SUBFR16K] = input
+                        [k * L_SUBFR16K..(k + 1) * L_SUBFR16K]
+                        .try_into()
+                        .expect("one subframe at 16 kHz");
+                    let _ = self.high_band.analyse(
+                        &mut ctx,
+                        &aq,
+                        &sub,
+                        0,
+                        &reference,
+                        self.vad_hist,
+                        hangover,
+                    );
+                }
+            }
+            self.isf_old = sid.spectrum;
+            self.reset_after_comfort_noise();
+            return true;
+        }
+
         // --- ISF quantisation ------------------------------------------------
         let narrow = rate.bits() <= NBBITS_7K;
         self.trc(-1, if narrow { "isf_unq36" } else { "isf_unq46" }, &frame.isf);
@@ -652,6 +768,27 @@ impl WbEncoder {
             );
         }
 
+        // --- background history, on a speech frame the detector called quiet ---
+        // The second of the two `dtx_buffer` call sites, and it disagrees with
+        // the first on both inputs: this one measures the residual through the
+        // *quantised* per-subframe predictors, and buffers the *quantised*
+        // ISFs. The reference has no `allow_dtx` guard here -- the history
+        // fills whether or not DTX is enabled, which is harmless because
+        // nothing reads it until a SID is built.
+        if !vad_flag {
+            let mut scaled = [Word16(0); L_FRAME];
+            let mut energy = Word32(0);
+            for (slot, &sample) in scaled.iter_mut().zip(&exc[EXC_HISTORY..]) {
+                *slot = shr(&mut ctx, sample, q_new);
+            }
+            for &sample in &scaled {
+                energy = l_mac(&mut ctx, energy, sample, sample);
+            }
+            let energy = crate::fixed_point::shift::l_shr(&mut ctx, energy, 1);
+            self.dtx
+                .buffer(&mut ctx, &isf_q, energy, rate.index() as usize);
+        }
+
         // --- the subframe loop -------------------------------------------------
         let mut window = LagWindow::around(&mut ctx, lags.first_half);
         for (k, (a, a_quantised)) in frame.a_interp.iter().zip(aq.iter()).enumerate() {
@@ -682,6 +819,7 @@ impl WbEncoder {
 
         self.old_exc
             .copy_from_slice(&exc[L_FRAME..L_FRAME + EXC_HISTORY]);
+        false
     }
 
     /// `stab_fac`: how far this frame's quantised ISFs moved from the last,
@@ -2106,6 +2244,16 @@ mod highband {
             }
         }
 
+        /// Clear `L_gc_thres`, the slow gain threshold.
+        ///
+        /// The only high-band state a comfort-noise frame's partial reset
+        /// touches: every filter memory and the noise seed survive, because
+        /// the next speech frame has to continue the same noise.
+        #[allow(clippy::missing_const_for_fn)]
+        pub fn reset_gain_threshold(&mut self) {
+            self.gc_threshold = Word32(0);
+        }
+
         /// The excitation the high band is driven from, `cod_main.c`
         /// 1294–1377.
         ///
@@ -2384,6 +2532,58 @@ mod tests {
         }
         let trace = encoder.take_trace().expect("recording was enabled");
         (payloads, trace)
+    }
+
+    /// With DTX on, the encoder reproduces the reference's frame-type sequence.
+    ///
+    /// The committed fixture is what TS 26.173's own encoder made of
+    /// `amrwb_dtx_input.pcm` with `-dtx`, so its table-of-contents bytes are
+    /// the reference's own speech / SID / `NO_DATA` decisions over 150 frames.
+    /// Reproducing them exercises the VAD, `tx_dtx_handler`'s asymmetric
+    /// hangover and the transmit cadence together -- none of which any other
+    /// test reaches, because comfort noise is off by default.
+    #[test]
+    fn the_frame_type_sequence_matches_the_reference_with_dtx_on() {
+        use crate::codecs::amr::mode::{AmrFrameType, AmrMode, AmrVariant};
+        use crate::codecs::amr::sid_cadence::SidCadence;
+        use crate::codecs::amr::storage;
+
+        let bits: &[u8] = include_bytes!("../../testdata/amrwb_dtx_mode2.amr");
+        let pcm: &[u8] = include_bytes!("../../testdata/amrwb_dtx_input.pcm");
+        let (_, want) = storage::read(bits).expect("fixture parses");
+
+        let rate = Rate::from_index(2).expect("12.65 kbit/s");
+        let mode = AmrMode::new(AmrVariant::WideBand, 2).expect("12.65 kbit/s");
+        let mut encoder = WbEncoder::new();
+        encoder.set_allow_dtx(true);
+        let mut cadence = SidCadence::new(AmrVariant::WideBand);
+
+        let mut got = Vec::with_capacity(want.len());
+        for frame in 0..want.len() {
+            let mut samples = [0i16; L_FRAME16K];
+            for (slot, chunk) in samples
+                .iter_mut()
+                .zip(pcm[frame * 2 * L_FRAME16K..].chunks_exact(2))
+            {
+                *slot = i16::from_le_bytes([chunk[0], chunk[1]]);
+            }
+            let (comfort_noise, _) = encoder.encode_frame_typed(&samples, rate);
+            got.push(cadence.next(comfort_noise, mode));
+        }
+
+        assert_eq!(got.len(), want.len(), "the fixture and the run disagree on length");
+        let want_types: Vec<AmrFrameType> = want.iter().map(|f| f.frame_type).collect();
+        // Report the first divergence rather than a wall of frame types.
+        for (frame, (&mine, &theirs)) in got.iter().zip(&want_types).enumerate() {
+            assert_eq!(mine, theirs, "frame {frame} differs");
+        }
+
+        // And the sequence has to be worth comparing: all three kinds present,
+        // in both directions.
+        let speech = got.iter().filter(|t| matches!(t, AmrFrameType::Speech(_))).count();
+        let sid = got.iter().filter(|t| matches!(t, AmrFrameType::Sid(_))).count();
+        let quiet = got.iter().filter(|t| **t == AmrFrameType::NoData).count();
+        assert!(speech > 50 && sid >= 8 && quiet > 40, "{speech} / {sid} / {quiet}");
     }
 
     /// The DTX hangover counter reaches the wire, and only at 23.85 kbit/s.
