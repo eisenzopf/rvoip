@@ -15,7 +15,8 @@
 | **AMR-WB DTX, decoder side** | **Sample-exact over a 150-frame DTX stream** |
 | **AMR-WB DTX through `AmrCodec`** | **Both directions, byte- and sample-exact** |
 | **AMR-NB VAD1** | **Bit-exact** — whole state, 150 frames |
-| AMR-NB DTX | Not started; the VAD1 port that gated it is done |
+| **AMR-NB DTX, encoder state** | **Done** — classifier, history, averaging, predictor reset |
+| AMR-NB DTX, decoder + frame-loop wiring | Not started |
 | **AMR-WB homing frames** | **Done** — the encoder emits each mode's pattern |
 | **AMR-WB conformance** | **All nine TS 26.173 vectors, both directions** |
 | AMR-NB homing frames | Not started |
