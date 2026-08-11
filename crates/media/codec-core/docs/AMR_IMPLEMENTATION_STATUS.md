@@ -29,7 +29,8 @@
 | **Transcoding** | **Six AMR pairs, tested by property** |
 | **`mode-change-period` / `-neighbor`** | **Honoured** — they were parsed and obeyed by nothing |
 | **Performance** | **Measured, with a gate** — see below |
-| Interop | Not started |
+| **SDP to a working codec** | **An AMR-WB offer negotiates and codes** |
+| Live PBX interop | Blocked — see below |
 
 Every claim above is a test, not a note. Both decoders reproduce the reference
 decoders sample for sample; both encoders reproduce the reference *bitstream*
@@ -150,6 +151,21 @@ debug build under a loaded scheduler produces numbers that are meaningless as
 a pass/fail signal. It fails if it finds *no* AMR results, because a
 performance gate that silently checks nothing is the same failure this branch
 has hit four times elsewhere.
+
+## Interop, and what is blocked
+
+The SDP half is done and tested: an AMR-WB offer with
+`octet-align=1; mode-set=0,2,4` negotiates through the SIP layer, reaches
+media-core with its name, dynamic payload type, 16 kHz clock rate and fmtp
+intact, and a codec built from exactly that negotiation round-trips a frame.
+Each of those four was separately broken during this work, so the test asserts
+all four together.
+
+What is **not** done is the live call against FreeSWITCH or Asterisk. That
+needs the Docker daemon, which is not running and cannot be started from here.
+The `amr_call` scenario for `examples/pbx` is deliberately not written yet: an
+interop scenario that has never been run against a PBX is exactly the shape of
+untested code this branch has spent its time removing.
 
 Neither reference is committed. `tools/build-amr-reference.sh`,
 `build-amrnb-reference.sh` and the two `*-encoder-reference.sh` scripts fetch

@@ -6142,6 +6142,113 @@ a=fmtp:101 0-15\r\n";
             .expect("cleanup media session");
     }
 
+    /// A peer's AMR-WB offer negotiates into a session that actually codes.
+    ///
+    /// The locally-testable half of interop. A live FreeSWITCH or Asterisk
+    /// call exercises the same path plus the wire; this exercises everything
+    /// up to it — SDP in, negotiated payload type, clock rate and fmtp out,
+    /// then a codec built from exactly those and a frame put through it.
+    ///
+    /// Four things have to survive together and each was separately broken on
+    /// this branch: the codec name, the dynamic payload type, the 16 kHz clock
+    /// rate (the shape check refused it), and the `octet-align` that decides
+    /// the payload's bit layout.
+    #[tokio::test]
+    #[cfg(feature = "amr-wb")]
+    async fn an_amr_wideband_offer_negotiates_into_a_working_codec() {
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::{
+            MediaSessionController, NEGOTIATED_FMTP_PARAMETER,
+        };
+        use std::net::Ipv4Addr;
+
+        let controller = Arc::new(MediaSessionController::new());
+        let store = Arc::new(SessionStore::new());
+        let session_id = SessionId("amr-wb-offer".to_string());
+        store
+            .create_session(session_id.clone(), Role::UAS, false)
+            .await
+            .expect("create session");
+
+        let mut adapter = MediaAdapter::new(
+            controller.clone(),
+            store.clone(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16400,
+            16500,
+        );
+        adapter.set_offered_codecs(vec![AMR_WB_OA_PT, 101]);
+        adapter
+            .start_session(&session_id)
+            .await
+            .expect("start session");
+
+        let pt = AMR_WB_OA_PT.to_string();
+        let offer = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(35200, "RTP/AVP")
+            .formats(&[pt.as_str()])
+            .rtpmap(pt.as_str(), "AMR-WB/16000")
+            .fmtp(pt.as_str(), "octet-align=1; mode-set=0,2,4")
+            .attribute("sendrecv", None::<String>)
+            .done()
+            .build()
+            .expect("offer builds")
+            .to_string();
+
+        adapter
+            .negotiate_sdp_as_uas(&session_id, &offer)
+            .await
+            .expect("an AMR-WB offer negotiates");
+
+        let dialog_id = adapter
+            .current_media(&session_id)
+            .expect("media resource exists")
+            .dialog_id;
+        let config = controller
+            .get_session_info(&dialog_id)
+            .await
+            .expect("media session exists")
+            .config;
+
+        assert_eq!(
+            config.preferred_codec.as_deref(),
+            Some("AMR-WB"),
+            "the negotiated codec name did not reach media-core"
+        );
+        assert_eq!(
+            config.parameters.get(NEGOTIATED_FMTP_PARAMETER).map(String::as_str),
+            Some("octet-align=1; mode-set=0,2,4"),
+            "the framing did not reach media-core"
+        );
+
+        // And the thing that actually matters: a codec built from exactly this
+        // negotiation codes a frame. 320 samples, because AMR-WB is 16 kHz --
+        // a path that assumed 8 kHz would refuse this and pass a narrowband
+        // test.
+        use rvoip_media_core::codec::spec::AudioCodecSpec;
+        let spec = AudioCodecSpec::new("AMR-WB", AMR_WB_OA_PT, 16_000, 1)
+            .with_fmtp(config.parameters.get(NEGOTIATED_FMTP_PARAMETER).map(String::as_str));
+        let mut codec = spec.build().expect("the negotiated codec builds");
+        let pcm: Vec<i16> = (0..320)
+            .map(|i| ((f64::from(i) * 0.05).sin() * 6000.0) as i16)
+            .collect();
+        let frame = rvoip_media_core::types::AudioFrame::new(pcm, 16_000, 1, 0);
+        let payload = codec.encode(&frame).expect("encodes");
+        assert!(!payload.is_empty());
+        let decoded = codec.decode(&payload).expect("decodes");
+        assert_eq!(decoded.samples.len(), 320);
+        assert!(decoded.samples.iter().any(|&s| s != 0), "round trip was silent");
+
+        adapter
+            .cleanup_session(&session_id)
+            .await
+            .expect("cleanup media session");
+    }
+
     /// The negotiated `a=fmtp` string must survive from the peer's SDP into
     /// the media layer's own configuration.
     ///
@@ -6152,10 +6259,11 @@ a=fmtp:101 0-15\r\n";
     /// never fire. Every test that looked like coverage stopped one call short
     /// of the boundary.
     ///
-    /// G.729 rather than AMR because media-core's `resolve_codec` has no AMR
-    /// arm yet, so an AMR `MediaConfig` is refused before any of this is
-    /// reached. The parameter is codec-agnostic; what is under test is
-    /// carriage, not interpretation.
+    /// G.729 rather than AMR, still: the parameter is codec-agnostic and what
+    /// is under test here is carriage rather than interpretation. The AMR
+    /// case is `an_amr_wideband_offer_negotiates_into_a_working_codec` above,
+    /// which is a different claim -- that the value is not merely carried but
+    /// acted on.
     #[cfg(feature = "g729")]
     #[tokio::test]
     async fn negotiated_fmtp_reaches_the_media_layer() {
