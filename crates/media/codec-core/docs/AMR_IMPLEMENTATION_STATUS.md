@@ -12,7 +12,7 @@
 | **All four paths reachable through `AmrCodec`** | **Done, and byte-exact through the public API** |
 | **Oracle qualification** | **Measured** — see below |
 | **AMR-WB DTX, encoder side** | **Byte-identical SIDs on the reference's own schedule**, 150 frames |
-| AMR-WB DTX, decoder side | **Kernel bit-exact**; the synthesis wiring is not — 83 of 150 frames |
+| **AMR-WB DTX, decoder side** | **Sample-exact over a 150-frame DTX stream** |
 | AMR-NB DTX | Not started, and gated on the VAD1 port |
 | Homing frames | Not started, both variants |
 | Transcoding, interop, benchmarks | Not started |
@@ -35,18 +35,22 @@ included. A right kernel fed the wrong residual or the wrong history would
 produce a well-formed SID with wrong bits, which the frame-type sequence alone
 would not notice.
 
-**What "AMR-WB DTX, decoder side" claims, exactly.** The state machine, the
-backward analysis, the interpolation, the `DTX_MUTE` fade and the comfort-noise
-generator are bit-exact against `rx_dtx_handler`, `dtx_dec` and
+**What "AMR-WB DTX, decoder side" claims, exactly.** Two things. The kernel —
+state machine, backward analysis, interpolation, `DTX_MUTE` fade,
+comfort-noise generator — is bit-exact against `rx_dtx_handler`, `dtx_dec` and
 `dtx_dec_activity_update` over an 89-frame sequence visiting all three states.
-A real DTX stream decodes through every frame type and synthesises noise rather
-than silence. **Not claimed:** that the synthesised audio matches the reference
-decoder. It does not — 83 of the 150 frames differ, the first being the
-stream's first SID, with every speech frame before it still sample-exact. The
-kernel is exact, so what is wrong is the wiring around it: the partial decoder
-reset, the scaling handed to the synthesis filter, or the high-band branch.
-`the_comfort_noise_synthesis_is_not_yet_bit_exact` is ignored rather than
-deleted so the gap stays visible and names the frame to trace.
+And the assembled decoder reproduces the reference decoder **sample for
+sample** over the whole 150-frame DTX stream: speech, comfort noise and gaps,
+two transitions into silence and two back.
+
+Two defects stood between those, and neither was in the kernel. The background
+energy history is measured on the excitation *brought back out of the frame's
+scaling*; skipping that inflated every stored energy by `2^Q_new` and reached
+the output as comfort noise hundreds of times too loud while the spectrum was
+already exact. And `Reset_decoder(st, 0)` clears more than the excitation —
+the ISF predictor, the pitch-lag history, the innovation tilt, the phase
+dispersion memory and the noise enhancer's threshold — an omission invisible
+until the first speech frame *after* the silence.
 
 Neither reference is committed. `tools/build-amr-reference.sh`,
 `build-amrnb-reference.sh` and the two `*-encoder-reference.sh` scripts fetch

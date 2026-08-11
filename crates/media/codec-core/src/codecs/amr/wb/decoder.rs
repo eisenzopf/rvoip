@@ -286,6 +286,7 @@ impl Decoder {
         let mut out = [0i16; FRAME_SIZE_16K];
         // The frame's excitation, kept for the DTX background history below.
         let mut frame_excitation = [Word16(0); NB_SUBFR * L_SUBFR];
+        let mut frame_q_new = 0i16;
         let gain_bits = if frame_bits <= 177 { 6 } else { 7 };
         let dispersion = DispersionLevel::for_frame_bits(frame_bits);
 
@@ -386,6 +387,7 @@ impl Decoder {
                 frame_excitation[sf * L_SUBFR..(sf + 1) * L_SUBFR]
                     .copy_from_slice(&buffer[offset..offset + L_SUBFR]);
             }
+            frame_q_new = q_new;
 
             #[cfg(test)]
             {
@@ -498,6 +500,11 @@ impl Decoder {
         // path. It is the memory a `SID_FIRST` reconstructs the talker's
         // background from, so it must describe decoded speech and never the
         // comfort noise the decoder itself produced.
+        // Measured on the excitation brought back out of this frame's
+        // scaling: the reference does `Scale_sig(exc, L_FRAME, -Q_new)` first,
+        // and skipping it inflates every stored energy by 2^Q_new -- which
+        // reaches the far end as comfort noise hundreds of times too loud.
+        scale_sig(&mut ctx, &mut frame_excitation, -frame_q_new);
         self.dtx.observe_speech(&mut ctx, &isf, &frame_excitation);
         self.dtx.observe_vad(&mut ctx, params.vad_flag);
         self.dtx.commit(dtx_state);
@@ -570,7 +577,9 @@ impl Decoder {
         // One predictor, used for all four subframes. There is no
         // interpolation here and no `isp_old` update: the partial reset below
         // makes the next speech frame re-seed instead.
-        let a = super::lp::isp_to_lp::isp_to_lp(&isp);
+        // `Isp_Az(ispnew, Aq, M, 1)`: adaptive scaling *enabled*, which is
+        // unique to this call. Every speech path passes 0.
+        let a = super::lp::isp_to_lp::isp_to_lp_adaptive(&isp);
 
         let mut out = [0i16; FRAME_SIZE_16K];
         for sf in 0..NB_SUBFR {
@@ -620,8 +629,19 @@ impl Decoder {
     /// going back to false is how the ISP memory recovers: the frame after
     /// comfort noise re-seeds rather than interpolating from a stale value.
     fn reset_after_comfort_noise(&mut self) {
+        // `Reset_decoder(st, 0)`. The excitation history and its scaling, the
+        // ISF predictor, the pitch-lag history, the innovation tilt, the phase
+        // dispersion memory and the noise enhancer's slow threshold.
         self.excitation = super::excitation::Excitation::new();
         self.isf = IsfDecoder::new();
+        self.erasure = Erasure::new();
+        self.dispersion = PhaseDispersion::new();
+        self.noise_enhancer = NoiseEnhancer::new();
+        self.tilt_code = Word16(0);
+        // Not the seeds, not a single high-band filter memory, not the
+        // synthesis or de-emphasis state, and not `isf_old` -- the caller
+        // writes the comfort-noise spectrum there afterwards. The next speech
+        // frame has to continue the same background, not restart it.
         self.started = false;
     }
 }
@@ -691,7 +711,9 @@ mod comfort_noise_tests {
                         )
                         .unwrap_or_else(|| panic!("gap frame {n} refused"))
                 }
-                other => panic!("unexpected frame type {other:?} at {n}"),
+                other @ AmrFrameType::SpeechLost => {
+                    panic!("unexpected frame type {other:?} at {n}")
+                }
             };
             assert_eq!(out.len(), FRAME_SIZE_16K);
             got.extend_from_slice(&out);
@@ -719,20 +741,24 @@ mod comfort_noise_tests {
         );
     }
 
-    /// How far the comfort-noise synthesis is from the reference, measured.
+    /// The whole DTX stream, sample for sample against the reference decoder.
     ///
-    /// The DTX *kernel* is bit-exact against `dtx_dec` — see `wb::dtx` — so
-    /// what is wrong is the wiring between it and synthesis: the partial
-    /// decoder reset, the scaling passed to the filter, or the high-band
-    /// branch. As of this commit 83 of the 150 frames differ, the first being
-    /// frame 7, the stream's first SID, and every speech frame before it is
-    /// exact.
+    /// Speech, comfort noise and gaps, 150 frames, including two speech-to-DTX
+    /// transitions and two back. Two defects had to go before this passed, and
+    /// neither was in the DTX kernel:
     ///
-    /// Ignored rather than deleted: a deleted test is a gap nobody sees, and
-    /// this one names the frame to put a trace point on.
+    /// The background energy history is measured on the excitation *brought
+    /// back out of the frame's scaling* — the reference does
+    /// `Scale_sig(exc, L_FRAME, -Q_new)` first. Skipping it inflated every
+    /// stored energy by `2^Q_new`, which reached the output as comfort noise
+    /// hundreds of times too loud while the spectrum was already exact.
+    ///
+    /// And `Reset_decoder(st, 0)` clears more than the excitation: the ISF
+    /// predictor, the pitch-lag history, the innovation tilt, the phase
+    /// dispersion memory and the noise enhancer's threshold. An incomplete
+    /// reset is invisible until the first speech frame *after* the silence.
     #[test]
-    #[ignore = "the comfort-noise synthesis wiring is not yet bit-exact; see the doc comment"]
-    fn the_comfort_noise_synthesis_is_not_yet_bit_exact() {
+    fn the_whole_dtx_stream_matches_the_reference_decoder() {
         let bits: &[u8] = include_bytes!("../testdata/amrwb_dtx_mode2.amr");
         let want: Vec<i16> = include_bytes!("../testdata/amrwb_dtx_mode2.pcm")
             .chunks_exact(2)

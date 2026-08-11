@@ -33,7 +33,7 @@ use super::autocorr::LP_ORDER;
 use crate::fixed_point::arith::extract_l;
 use crate::fixed_point::arith32::{l_add, l_msu, l_mult, l_sub};
 use crate::fixed_point::oper32::{l_extract, mpy_32_16};
-use crate::fixed_point::shift::{l_shl, l_shr_r, shr_r};
+use crate::fixed_point::shift::{l_shl, l_shr_r, norm_l, shr, shr_r};
 use crate::fixed_point::types::{DspContext, Word16, Word32};
 
 /// Expand one interlaced root set into its polynomial, in Q23.
@@ -96,6 +96,21 @@ pub fn isp_to_lp(isp: &[Word16; LP_ORDER]) -> [Word16; LP_ORDER + 1] {
     a
 }
 
+/// The same conversion with adaptive scaling, `Isp_Az(..., 1)`.
+///
+/// The speech paths all pass 0 and this is the only caller that passes 1: the
+/// decoder's comfort-noise branch. When the expanded polynomial has grown
+/// large enough that the Q12 result would clip, every coefficient is shifted
+/// down together and the filter is rescaled rather than saturated. On a
+/// comfort-noise spectrum that is not a rare corner — it fires routinely,
+/// which is why the branch exists at all.
+#[must_use]
+pub fn isp_to_lp_adaptive(isp: &[Word16; LP_ORDER]) -> [Word16; LP_ORDER + 1] {
+    let mut a = [Word16(0); LP_ORDER + 1];
+    isp_to_lp_scaled(isp, &mut a, true);
+    a
+}
+
 /// Convert ISPs to predictor coefficients at any even order.
 ///
 /// The high band uses order 20, so this cannot be fixed at [`LP_ORDER`].
@@ -106,6 +121,15 @@ pub fn isp_to_lp(isp: &[Word16; LP_ORDER]) -> [Word16; LP_ORDER + 1] {
 ///
 /// If `a` is not exactly one longer than `isp`, or the order is odd.
 pub fn isp_to_lp_order(isp: &[Word16], a: &mut [Word16]) {
+    isp_to_lp_scaled(isp, a, false);
+}
+
+/// The conversion, with adaptive scaling optional.
+///
+/// # Panics
+///
+/// If `a` is not exactly one longer than `isp`, or the order is odd.
+fn isp_to_lp_scaled(isp: &[Word16], a: &mut [Word16], adaptive: bool) {
     let order = isp.len();
     assert_eq!(a.len(), order + 1, "a must be one longer than isp");
     assert_eq!(order % 2, 0, "the predictor order must be even");
@@ -147,19 +171,42 @@ pub fn isp_to_lp_order(isp: &[Word16], a: &mut [Word16]) {
     }
 
     a[0] = Word16(4096);
+    // The largest magnitude seen while forming the coefficients, which is what
+    // the adaptive branch below sizes its shift from.
+    let mut tmax = Word32(0);
     for i in 1..nc {
         let j = order - i;
         let sum = l_add(&mut ctx, f1[i], f2[i]);
+        tmax = Word32(tmax.0 | sum.0.saturating_abs());
         a[i] = extract_l(l_shr_r(&mut ctx, sum, 12));
         let diff = l_sub(&mut ctx, f1[i], f2[i]);
+        tmax = Word32(tmax.0 | diff.0.saturating_abs());
         a[j] = extract_l(l_shr_r(&mut ctx, diff, 12));
     }
+
+    // Rescale and redo the loop when the result would not fit Q12.
+    let q = if adaptive { 4 - norm_l(tmax) } else { 0 };
+    let q_sug = if q > 0 {
+        let q_sug = 12 + q;
+        for i in 1..nc {
+            let j = order - i;
+            let sum = l_add(&mut ctx, f1[i], f2[i]);
+            a[i] = extract_l(l_shr_r(&mut ctx, sum, q_sug));
+            let diff = l_sub(&mut ctx, f1[i], f2[i]);
+            a[j] = extract_l(l_shr_r(&mut ctx, diff, q_sug));
+        }
+        a[0] = shr(&mut ctx, a[0], q);
+        q_sug
+    } else {
+        12
+    };
+    let q = q.max(0);
 
     let (hi, lo) = l_extract(f1[nc]);
     let scaled = mpy_32_16(hi, lo, last);
     let centre = l_add(&mut ctx, f1[nc], scaled);
-    a[nc] = extract_l(l_shr_r(&mut ctx, centre, 12));
-    a[order] = shr_r(&mut ctx, last, 3);
+    a[nc] = extract_l(l_shr_r(&mut ctx, centre, q_sug));
+    a[order] = shr_r(&mut ctx, last, 3 + q);
 }
 
 /// Readers for the TS 26.173 per-stage dump, shared across the LP modules.
