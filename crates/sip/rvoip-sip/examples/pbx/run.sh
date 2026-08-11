@@ -32,7 +32,10 @@ TRANSPORT_ARG=${PBX_TRANSPORT_FILTER:-all}
 REPEAT_COUNT=${PBX_REPEAT:-1}
 PBX_REUSE_TLS_CERT=${PBX_REUSE_TLS_CERT:-1}
 PBX_RUN_WITH_CARGO=${PBX_RUN_WITH_CARGO:-0}
-PBX_CARGO_FEATURES=${PBX_CARGO_FEATURES:-dev-insecure-tls,g729}
+# `amr` is in the default set so the harness can actually run every
+# scenario it advertises: without it an amr_call build compiles the AMR arms
+# out and the scenario fails for a reason that has nothing to do with interop.
+PBX_CARGO_FEATURES=${PBX_CARGO_FEATURES:-dev-insecure-tls,g729,amr}
 PBX_G729_PROFILES="${PBX_G729_PROFILES:-g729a g729ab}"
 PBX_TLS_PREWARM=${PBX_TLS_PREWARM:-1}
 if [ "${PBX_DIAG:-0}" = "1" ]; then
@@ -1147,6 +1150,21 @@ run_matrix_cell() {
       fi
       if transport_selected TLS; then
         run_two_party "$provider" "$example" basic_call TLS || {
+          tls_rc=$?
+          if [ "$rc" -eq 0 ]; then rc=$tls_rc; fi
+        }
+      fi
+      ;;
+    amr_call)
+      # PBX_CODEC_PROFILE picks amrnb (the default) or amrwb; unlike
+      # g729_call there is no profile sweep, because the two variants are
+      # different codecs rather than two annexes of one.
+      if transport_selected UDP; then
+        run_two_party "$provider" "$example" amr_call UDP || rc=$?
+        if [ "$rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then return "$rc"; fi
+      fi
+      if transport_selected TLS; then
+        run_two_party "$provider" "$example" amr_call TLS || {
           tls_rc=$?
           if [ "$rc" -eq 0 ]; then rc=$tls_rc; fi
         }

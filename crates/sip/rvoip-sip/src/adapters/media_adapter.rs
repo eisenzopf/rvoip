@@ -288,6 +288,37 @@ pub(crate) fn fmtp_for_pt(pt: u8) -> Option<&'static str> {
     fmtp_for_pt_with_g729_annex_b(pt, true)
 }
 
+/// The `a=rtpmap` to put in an answer for `pt`.
+///
+/// For a *dynamic* payload type the answer must carry an rtpmap: the number
+/// alone means nothing, and RFC 3264 requires the answerer to describe what it
+/// accepted. [`rtpmap_for_pt`] is keyed on the payload types this stack
+/// assigns, so the moment we answer on a number the *peer* chose it returns
+/// `None` and the line is silently omitted.
+///
+/// Asterisk exposed this immediately: it offers AMR on payload type 98, we
+/// answered `m=audio ... 98` with an `a=fmtp:98` and no `a=rtpmap:98`, and it
+/// tore the call down with 488 Not Acceptable Here. Two rvoip endpoints never
+/// hit it, because they both use the same constants and the table always has
+/// an answer.
+///
+/// So the offer's own rtpmap is echoed when there is one, and the local table
+/// is the fallback for static types.
+fn answer_rtpmap_for_pt(offer: &SdpSession, pt: u8) -> Option<String> {
+    if let Some(mapping) = audio_rtpmap(offer, pt) {
+        let mut rtpmap = format!("{}/{}", mapping.encoding_name, mapping.clock_rate);
+        // Channels are written only when the peer wrote them: `AMR/8000/1` and
+        // `AMR/8000` are equivalent, but echoing the offer's exact spelling
+        // keeps the answer a mirror rather than a paraphrase.
+        if let Some(params) = mapping.encoding_params.as_ref() {
+            rtpmap.push('/');
+            rtpmap.push_str(params);
+        }
+        return Some(rtpmap);
+    }
+    rtpmap_for_pt(pt).map(ToString::to_string)
+}
+
 /// The `a=fmtp` to put in an answer for `pt`.
 ///
 /// For every codec but AMR this is the fixed per-payload-type string
@@ -2330,8 +2361,8 @@ impl MediaAdapter {
             if pt == negotiated_payload_type && negotiated_codec.eq_ignore_ascii_case("opus") {
                 let rtpmap = format!("opus/{clock_rate}/{channels}");
                 media_builder = media_builder.rtpmap(fmt.as_str(), rtpmap.as_str());
-            } else if let Some(rtpmap) = rtpmap_for_pt(pt) {
-                media_builder = media_builder.rtpmap(fmt.as_str(), rtpmap);
+            } else if let Some(rtpmap) = answer_rtpmap_for_pt(&parsed_offer, pt) {
+                media_builder = media_builder.rtpmap(fmt.as_str(), rtpmap.as_str());
             }
             if let Some(fmtp) = answer_fmtp_for_pt(&parsed_offer, pt, negotiated_annex_b) {
                 media_builder = media_builder.fmtp(fmt.as_str(), fmtp.as_str());
@@ -6664,6 +6695,38 @@ a=fmtp:101 0-15\r\n";
 
     #[test]
     #[cfg(feature = "amr-wb")]
+    fn an_answer_on_a_peers_payload_type_carries_its_rtpmap() {
+        // Found by Asterisk, not by a test: it offers AMR on PT 98, we
+        // answered `m=audio ... 98` with an `a=fmtp:98` and no `a=rtpmap:98`,
+        // and it replied 488 Not Acceptable Here. For a dynamic payload type
+        // the number alone means nothing, so the answer must describe it.
+        //
+        // Two rvoip endpoints never hit this: they use the same constants, so
+        // the local table always had an answer.
+        let offer = SdpBuilder::new("Session")
+            .origin("-", "1", "1", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16_000, "RTP/AVP")
+            .formats(&["98"])
+            .rtpmap("98", "AMR/8000")
+            .fmtp("98", "octet-align=1")
+            .done()
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            answer_rtpmap_for_pt(&offer, 98).as_deref(),
+            Some("AMR/8000"),
+            "an answer on the peer's number must echo its rtpmap"
+        );
+        // A static type still comes from the local table.
+        assert_eq!(answer_rtpmap_for_pt(&offer, 0).as_deref(), Some("PCMU/8000"));
+        // And an unmapped dynamic type yields nothing rather than a guess.
+        assert_eq!(answer_rtpmap_for_pt(&offer, 99), None);
+    }
+
+    #[test]
     fn amr_matches_a_peers_own_dynamic_payload_type() {
         // Asterisk and most handsets pick their own number for AMR. Opus
         // already has this remap; AMR did not, so a peer offering AMR-WB on

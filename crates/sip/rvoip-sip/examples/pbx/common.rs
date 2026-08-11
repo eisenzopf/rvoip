@@ -1632,6 +1632,22 @@ async fn run_endpoint_two_party(
             let handle = incoming.accept().await?;
             run_g729_callee(provider, cfg, handle.as_session_handle(), transport).await?;
         }
+        (Scenario::AmrCall, Role::Caller) => {
+            settle_after_register(provider).await;
+            let handle = endpoint
+                .call_and_wait(
+                    target_user_for(transport),
+                    Some(remote_test_timeout(provider)?),
+                )
+                .await?;
+            run_amr_caller(cfg, handle.as_session_handle(), transport).await?;
+        }
+        (Scenario::AmrCall, Role::Callee) => {
+            let incoming =
+                timeout(remote_test_timeout(provider)?, endpoint.wait_for_incoming()).await??;
+            let handle = incoming.accept().await?;
+            run_amr_callee(provider, cfg, handle.as_session_handle(), transport).await?;
+        }
         (Scenario::HoldResume, Role::Caller) => {
             settle_after_register(provider).await;
             let target = cfg.outbound_call_uri(target_user_for(transport));
@@ -1766,6 +1782,20 @@ async fn run_callback_two_party(
                 wait_for_next_established(&mut runtime.events, remote_test_timeout(provider)?)
                     .await?;
             run_g729_callee(runtime.cfg.provider, &runtime.cfg, &handle, transport).await?;
+        }
+        (Scenario::AmrCall, Role::Caller) => {
+            settle_after_register(provider).await;
+            let target = runtime.cfg.outbound_call_uri(target_user_for(transport));
+            let handle =
+                callback_call_with_answer_retry(runtime, &target, remote_test_timeout(provider)?)
+                    .await?;
+            run_amr_caller(&runtime.cfg, &handle, transport).await?;
+        }
+        (Scenario::AmrCall, Role::Callee) => {
+            let handle =
+                wait_for_next_established(&mut runtime.events, remote_test_timeout(provider)?)
+                    .await?;
+            run_amr_callee(runtime.cfg.provider, &runtime.cfg, &handle, transport).await?;
         }
         (Scenario::HoldResume, Role::Caller) => {
             settle_after_register(provider).await;
@@ -2133,8 +2163,12 @@ async fn run_amr_caller(
     let recorder =
         start_tone_recorder_with_frame_size(handle, tone_for_caller(transport), AMR_FRAME_SIZE)
             .await?;
+    // The same evidence floor both directions, unlike the G.729 pair where the
+    // caller captures half a second extra before driving teardown. Here the
+    // callee reaches its floor first and hangs up, which caps the caller at
+    // the same count -- so asking the caller for more only ever times out.
     let outcome = recorder
-        .wait_for_received_samples(G729_CALLER_CAPTURE_TARGET_SAMPLES, Duration::from_secs(15))
+        .wait_for_received_samples(MIN_RECEIVED_SAMPLES, Duration::from_secs(20))
         .await;
     handle
         .hangup_and_wait(Some(Duration::from_secs(8)))
