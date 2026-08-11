@@ -11,7 +11,10 @@
 | **Concealment** | **Bit-exact, both variants** — damaged frames and lost frames |
 | **All four paths reachable through `AmrCodec`** | **Done, and byte-exact through the public API** |
 | **Oracle qualification** | **Measured** — see below |
-| DTX / comfort noise / homing | Not started — refuses with a message naming what it needs |
+| **AMR-WB DTX, encoder side** | **Bit-exact**, and the frame-type sequence matches over 150 frames |
+| AMR-WB DTX, decoder side | Not started — comfort-noise frames still refuse |
+| AMR-NB DTX | Not started, and gated on the VAD1 port |
+| Homing frames | Not started, both variants |
 | Transcoding, interop, benchmarks | Not started |
 
 Every claim above is a test, not a note. Both decoders reproduce the reference
@@ -20,6 +23,16 @@ byte for byte, magic and table of contents included. Each is asserted twice —
 once inside the module and once through `AmrCodec` — because per-stage
 exactness cannot see a wiring layer that resets state between frames, and each
 comparison is checked for vacuity.
+
+**What "AMR-WB DTX, encoder side" claims, exactly.** The comfort-noise ISF
+quantiser matches `Qisf_ns` over 64 vectors; the DTX kernel matches
+`dtx_buffer` and `dtx_enc` over 40 frames on all five ISF indices, the energy
+index, the dithering flag and the excitation; and with DTX enabled the encoder
+reproduces the reference's own speech / SID / `NO_DATA` sequence over all 150
+frames of the committed fixture. **Not yet claimed:** the SID *payload bits*
+compared end to end against that fixture. The kernel that produces them is
+exact against `dtx_enc` directly, so what is unverified is the wiring between
+the two, not the arithmetic.
 
 Neither reference is committed. `tools/build-amr-reference.sh`,
 `build-amrnb-reference.sh` and the two `*-encoder-reference.sh` scripts fetch
@@ -164,18 +177,28 @@ survive the two parameters the lag and the codebook consume in between.
 
 ## Remaining work, in order
 
-1. **DTX, comfort noise and homing, both variants.** The one part of the codec
-   proper still missing. The encoders were driven without DTX, so every
-   committed fixture frame is speech and `tx_dtx_handler` never runs — which
-   also means the wideband VAD, though fully implemented and on the
-   byte-exactness path (its output is codec bit 0 of every frame), is only
-   weakly *differentiated* by these fixtures: byte-exactness would still pass
-   with the detector wired to a constant. A fixture with real silence is what
-   closes that properly. Homing frames are the spec's own conformance
-   mechanism and cost little once DTX exists.
+1. **DTX, comfort noise and homing.** Partly done; see the table above for what
+   is claimed.
 
-   Both reference tarballs already ship normative DTX vectors that nothing here
-   reads: the wideband one has `testv/tst_md.cod` and `.out` (80 speech, 1
+   The ground truth landed first, as it did for the encoders:
+   `tools/build-amr-dtx-fixtures.sh` produces a 150-frame signal with real
+   silence in it, encoded with `-dtx` at all seventeen rates across both
+   variants, plus `_mute` variants whose SID updates are dropped so the
+   `DTX_MUTE` fade is reachable at all. Five assertions keep it from being
+   vacuous, the sharpest being that VAD1 and VAD2 choose different frame types
+   on 21 of the 150 frames — established *before* the VAD1 port is written,
+   because otherwise nothing would tell the two detectors apart.
+
+   That also closes the caveat this entry used to carry: the wideband VAD is
+   no longer only weakly differentiated, since the frame-type sequence test
+   depends on its per-frame decisions directly.
+
+   What remains: the wideband decoder side (`rx_dtx_handler`, `dtx_dec`, the
+   `DTX_MUTE` fade), homing for both variants, and then narrowband — whose
+   long pole is VAD1, roughly 2000 lines with no directly observable output.
+
+   Both reference tarballs also ship normative DTX vectors that nothing here
+   reads yet: the wideband one has `testv/tst_md.cod` and `.out` (80 speech, 1
    SID_FIRST, 15 SID_UPDATE, 104 NO_DATA at 12.65 kbit/s), and the narrowband
    one has `spch_dos.inp`, `spch_dos.cod` and `spch_dos.out` — 425 frames
    encoded with `-dtx` across all eight rates, which is the reference's own

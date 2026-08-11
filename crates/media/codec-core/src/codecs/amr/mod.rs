@@ -9,8 +9,12 @@
 //!
 //! Concealment covers both damaged frames and lost ones, on both variants.
 //!
-//! What is not implemented is DTX: comfort noise and deliberate gaps refuse
-//! with a message naming what they need, rather than returning silence.
+//! DTX is partly implemented: the wideband *encoder* produces comfort noise
+//! bit-exactly and on the reference's own schedule, behind
+//! `WbEncoder::set_allow_dtx`. Nothing decodes it yet — a comfort-noise or
+//! no-data frame arriving here still refuses with a message naming what it
+//! needs, rather than returning silence — and narrowband DTX is gated on a
+//! VAD1 port that does not exist.
 //!
 //! See `docs/AMR_IMPLEMENTATION_PLAN.md` for the phased plan and
 //! `docs/AMR_IMPLEMENTATION_STATUS.md` for current progress.
