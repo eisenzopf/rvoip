@@ -12,8 +12,6 @@ use crate::error::{CodecError, Result};
 use crate::processing::format::{ConversionParams, FormatConverter};
 use crate::types::{PayloadType, SampleRate};
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use tracing::{debug, trace};
 
 /// Transcoding path between two codecs
@@ -31,8 +29,14 @@ pub struct TranscodingSession {
     source_codec: Box<dyn AudioCodec>,
     /// Target codec for encoding
     target_codec: Box<dyn AudioCodec>,
-    /// Format converter for sample rate/channel conversion
-    format_converter: Arc<RwLock<FormatConverter>>,
+    /// Format converter for sample rate/channel conversion.
+    ///
+    /// One per session, owned rather than shared. A resampler is filter state
+    /// as well as a ratio, so two sessions sharing one would interleave their
+    /// histories even when their rates agree -- and when their rates differ,
+    /// as they do for the two directions of an 8 kHz <-> 48 kHz call, they
+    /// would fight over which ratio the single cached resampler holds.
+    format_converter: FormatConverter,
     /// Transcoding statistics
     stats: TranscodingStats,
 }
@@ -54,20 +58,28 @@ pub struct TranscodingStats {
 pub struct Transcoder {
     /// Active transcoding sessions
     sessions: HashMap<TranscodingPath, TranscodingSession>,
-    /// Format converter for intermediate processing
-    format_converter: Arc<RwLock<FormatConverter>>,
     /// Enable performance statistics
     enable_stats: bool,
 }
 
+impl Default for Transcoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Transcoder {
-    /// Create a new transcoder
-    pub fn new(format_converter: Arc<RwLock<FormatConverter>>) -> Self {
+    /// Create a new transcoder.
+    ///
+    /// This used to take an `Arc<RwLock<FormatConverter>>`. Every caller built
+    /// a fresh one to hand in, and sharing one across sessions was wrong
+    /// anyway -- see [`TranscodingSession::format_converter`]. Each session now
+    /// builds its own.
+    pub fn new() -> Self {
         debug!("Creating Transcoder");
 
         Self {
             sessions: HashMap::new(),
-            format_converter,
             enable_stats: true,
         }
     }
@@ -151,7 +163,7 @@ impl Transcoder {
         Ok(TranscodingSession {
             source_codec,
             target_codec,
-            format_converter: self.format_converter.clone(),
+            format_converter: FormatConverter::new(),
             stats: TranscodingStats::default(),
         })
     }
@@ -263,8 +275,6 @@ impl TranscodingSession {
 
             let conversion_result = self
                 .format_converter
-                .write()
-                .await
                 .convert_frame(&source_frame, &conversion_params)?;
             conversion_result.frame
         } else {
@@ -351,8 +361,7 @@ mod tests {
     use super::*;
 
     fn create_test_transcoder() -> Transcoder {
-        let format_converter = Arc::new(RwLock::new(FormatConverter::new()));
-        Transcoder::new(format_converter)
+        Transcoder::new()
     }
 
     #[test]

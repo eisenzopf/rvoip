@@ -313,8 +313,7 @@ mod tests {
 
         let (tx_from, rx_from) = mpsc::channel::<MediaFrame>(8);
         let (tx_to, mut rx_to) = mpsc::channel::<MediaFrame>(8);
-        let fc = Arc::new(RwLock::new(FormatConverter::new()));
-        let transcoder = Transcoder::new(fc);
+        let transcoder = Transcoder::new();
 
         // from=Opus (111), to=PCMU (0) — different PTs, so the pump
         // tries to transcode. Random 4-byte payload isn't a valid

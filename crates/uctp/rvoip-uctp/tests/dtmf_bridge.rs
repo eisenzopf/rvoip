@@ -112,8 +112,7 @@ async fn telephone_event_pt_passes_through_when_transcoding() {
 
     let (tx_from, rx_from) = mpsc::channel::<MediaFrame>(16);
     let (tx_to, mut rx_to) = mpsc::channel::<MediaFrame>(16);
-    let fc = Arc::new(RwLock::new(FormatConverter::new()));
-    let transcoder = Transcoder::new(fc);
+    let transcoder = Transcoder::new();
 
     // PT mismatch + transcoder present → audio is transcoded. The
     // DTMF frame's PT==101 label triggers the §4.3 passthrough
