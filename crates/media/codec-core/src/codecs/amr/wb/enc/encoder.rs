@@ -53,7 +53,7 @@
 )]
 
 use super::super::lp::isf::{interpolate_isp, isf_to_isp};
-use super::dtx::DtxEncoder;
+use super::dtx::{DtxEncoder, TxDecision};
 use super::super::lp::isf_dequant::{IsfQuantizer, ISF_INIT};
 use super::super::math::{dot_product12, isqrt_n, scale_sig};
 use super::super::sort_tables::{
@@ -353,6 +353,12 @@ pub struct WbEncoder {
     /// Present whether or not DTX is enabled for a session, because
     /// 23.85 kbit/s reads its hangover counter on ordinary speech frames.
     dtx: DtxEncoder,
+    /// Whether the DTX handler may turn a quiet frame into comfort noise.
+    ///
+    /// Off by default: DTX changes the *frame types* on the wire, so a caller
+    /// that has not negotiated it must never see one. The hangover counter
+    /// runs either way, because 23.85 kbit/s reads it.
+    allow_dtx: bool,
     high_band: HighBand,
 
     /// `st->old_exc`: excitation history, in the previous frame's `Q_new`.
@@ -400,6 +406,7 @@ impl WbEncoder {
             gains: GainPredictor::new(),
             vad: VoiceActivityDetector::new(),
             dtx: DtxEncoder::new(),
+            allow_dtx: false,
             high_band: HighBand::new(),
             old_exc: [Word16(0); EXC_HISTORY],
             mem_syn: [Word16(0); M],
@@ -412,6 +419,16 @@ impl WbEncoder {
             trace: None,
             frame_index: 0,
         }
+    }
+
+    /// Enable discontinuous transmission.
+    ///
+    /// With it on, a frame the detector calls quiet may be coded as comfort
+    /// noise instead of speech, and [`Self::encode_frame_typed`] reports that.
+    /// [`Self::encode_frame`] always codes speech regardless, because it has
+    /// nowhere to say otherwise.
+    pub fn set_allow_dtx(&mut self, allow: bool) {
+        self.allow_dtx = allow;
     }
 
     /// Walk the DTX hangover counter down, without running the detector.
@@ -472,7 +489,7 @@ impl WbEncoder {
     /// One frame of `coder()`, writing parameters in transmission order.
     fn encode_into(&mut self, pcm: &[i16; L_FRAME16K], rate: Rate, prms: &mut Parameters) {
         let ser_size = rate.bits();
-        let mode = PitchMode::from_frame_bits(ser_size as u16);
+        let mut mode = PitchMode::from_frame_bits(ser_size as u16);
         let mut ctx = DspContext::default();
 
         // --- input conditioning, LP analysis, weighted speech ---------------
@@ -523,9 +540,30 @@ impl WbEncoder {
         } else {
             add(&mut ctx, Word16(self.vad_hist), Word16(1)).0
         };
-        prms.push(u16::from(vad_flag), 1);
+        // --- discontinuous transmission -------------------------------------
+        // Runs before the VAD bit and may replace the whole frame with comfort
+        // noise. Guarded, because the reference guards it: with DTX off
+        // `tx_dtx_handler` is not called at all, so the hangover counter never
+        // leaves its reset value and 23.85 kbit/s's `gain_alpha` stays pinned
+        // at unity. Calling it anyway and discarding the decision would move
+        // mode 8's bitstream on quiet input.
+        let comfort_noise = self.allow_dtx
+            && self.dtx.classify(&mut ctx, vad_flag) == TxDecision::ComfortNoise;
+
+        // A SID frame carries no VAD bit: the frame type says what it is.
+        if comfort_noise {
+            // Every predicate downstream is on the bit budget, and a SID frame
+            // has 35 of them. `PitchMode` already documents and tests that
+            // case -- it takes the two-half open-loop path, like 8.85 upward.
+            mode = PitchMode::from_frame_bits(Rate::SID.bits() as u16);
+        } else {
+            prms.push(u16::from(vad_flag), 1);
+        }
 
         // --- pitch-clipping resonance measure, on the *unquantised* ISFs -----
+        // With the SID budget in hand, deliberately: the reference re-reads
+        // `ser_size` before this call, so a comfort-noise frame observes
+        // clipping against a different threshold than a speech frame would.
         self.clipping.observe_isf(&mut ctx, mode, &frame.isf);
 
         // --- open loop pitch --------------------------------------------------
