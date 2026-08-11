@@ -14,7 +14,8 @@
 | **AMR-WB DTX, encoder side** | **Byte-identical SIDs on the reference's own schedule**, 150 frames |
 | **AMR-WB DTX, decoder side** | **Sample-exact over a 150-frame DTX stream** |
 | **AMR-WB DTX through `AmrCodec`** | **Both directions, byte- and sample-exact** |
-| AMR-NB DTX | Not started, and gated on the VAD1 port |
+| **AMR-NB VAD1** | **Bit-exact** — whole state, 150 frames |
+| AMR-NB DTX | Not started; the VAD1 port that gated it is done |
 | **AMR-WB homing frames** | **Done** — the encoder emits each mode's pattern |
 | **AMR-WB conformance** | **All nine TS 26.173 vectors, both directions** |
 | AMR-NB homing frames | Not started |
