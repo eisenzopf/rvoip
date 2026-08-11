@@ -216,11 +216,30 @@ recover the far end's tone:
 | FreeSWITCH 1.10.12 | AMR-NB | bandwidth-efficient | 1.50 s at 8 kHz, 880 Hz dominant by 889× |
 | FreeSWITCH 1.10.12 | AMR-WB | bandwidth-efficient | 0.76 s at 16 kHz, 880 Hz dominant by 647× |
 
+**What these four runs do not prove, and were briefly claimed to.** Neither PBX
+decoded a single frame our encoder produced. Asterisk's own log says
+`bridge_native_rtp.c: Locally RTP bridged`, with `ReadTranscode: No` /
+`WriteTranscode: No` and `codec_amr.so` use count 0 for the whole call;
+FreeSWITCH emitted egress payloads byte-identical to its ingress payloads
+(75/75 narrowband, 38/38 wideband) having rewritten only the RTP header. Both
+PBXes matched the same codec on both legs and forwarded the octets.
+
+So the media path was rvoip's encoder to rvoip's own decoder, with a relay in
+the middle. These runs prove SDP/fmtp negotiation against a real PBX, per-leg
+dynamic-payload-type mapping, and that our framing survives a third-party relay.
+They prove nothing about a foreign AMR implementation being able to read our
+bitstream — which is the same symmetric-mistake blindness
+`tools/verify-amr-rtp-framing.sh` was written to cover, reappearing one layer up.
+Closing it needs the two legs on *different* codecs so the PBX is forced to
+transcode; see "Remaining work".
+
 The framing column is not a preference, it is what each PBX can actually carry
 end to end:
 
-- **Asterisk** transcodes, so each leg is negotiated on its own terms and our
-  octet-aligned offer is honoured in both directions.
+- **Asterisk** answers whichever framing we offer, on both legs, so the
+  octet-aligned offer is honoured in both directions. (Verified separately:
+  offering bandwidth-efficient instead yields byte-identical decoded audio, so
+  the framing is not what distinguishes these rows — the PBX is.)
 - **FreeSWITCH** *relays* AMR between the two legs of a bridged call without
   re-framing the payloads, and its outbound leg always offers `octet-align=0`.
   An octet-aligned inbound leg therefore leaves both endpoints reading the
