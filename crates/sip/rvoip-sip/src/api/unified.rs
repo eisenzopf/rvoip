@@ -4560,11 +4560,17 @@ fn validate_beta_media_codecs(offered_codecs: &[u8], comfort_noise_enabled: bool
         ));
     }
 
-    let supported_payloads = match (cfg!(feature = "g729"), cfg!(feature = "opus")) {
+    let base_payloads = match (cfg!(feature = "g729"), cfg!(feature = "opus")) {
         (true, true) => "0, 8, 18, 111, 101, and 13 when comfort_noise_enabled=true",
         (true, false) => "0, 8, 18, 101, and 13 when comfort_noise_enabled=true",
         (false, true) => "0, 8, 111, 101, and 13 when comfort_noise_enabled=true",
         (false, false) => "0, 8, 101, and 13 when comfort_noise_enabled=true",
+    };
+    let supported_payloads = match (cfg!(feature = "amr-wb"), cfg!(feature = "amr-nb")) {
+        (true, true) => format!("{base_payloads}, plus 104/105 (AMR-WB) and 106/107 (AMR-NB)"),
+        (true, false) => format!("{base_payloads}, plus 104/105 (AMR-WB)"),
+        (false, true) => format!("{base_payloads}, plus 106/107 (AMR-NB)"),
+        (false, false) => base_payloads.to_string(),
     };
     let mut has_audio = false;
     let mut seen = std::collections::BTreeSet::new();
@@ -4599,6 +4605,40 @@ fn validate_beta_media_codecs(offered_codecs: &[u8], comfort_noise_enabled: bool
                 {
                     return Err(SessionError::ConfigError(
                         "payload type 111 requires the rvoip-sip `opus` feature".to_string(),
+                    ));
+                }
+            }
+            // AMR, on the payload types this stack assigns in
+            // `adapters/media_adapter.rs`: 104/105 are AMR-WB
+            // (bandwidth-efficient / octet-aligned) and 106/107 are AMR-NB.
+            //
+            // Everything below this validation already handled them — the
+            // offer builder emits their rtpmap and fmtp, the answerer
+            // resolves them from `a=rtpmap`, and media-core builds an
+            // `AmrAdapter` for each — but the gate here had no arm for
+            // them, so the whole path was unreachable from `Config` and
+            // every AMR offer was rejected before a socket was opened.
+            104 | 105 => {
+                #[cfg(feature = "amr-wb")]
+                {
+                    has_audio = true;
+                }
+                #[cfg(not(feature = "amr-wb"))]
+                {
+                    return Err(SessionError::ConfigError(
+                        "payload types 104/105 require the rvoip-sip `amr-wb` feature".to_string(),
+                    ));
+                }
+            }
+            106 | 107 => {
+                #[cfg(feature = "amr-nb")]
+                {
+                    has_audio = true;
+                }
+                #[cfg(not(feature = "amr-nb"))]
+                {
+                    return Err(SessionError::ConfigError(
+                        "payload types 106/107 require the rvoip-sip `amr-nb` feature".to_string(),
                     ));
                 }
             }
