@@ -336,8 +336,12 @@ def specialty_commands(
         # hole: 290 tests run there by default and 316 with every feature on,
         # and 14 of the 26 missing are the RFC 4867 AMR payload-format tests
         # the relay's framing guard depends on.
+        # `rvoip-sip` too, and for the same reason one step further out: its
+        # defaults are empty, so its AMR SDP-negotiation test -- the one that
+        # checks a peer's offer reaches media-core with its framing intact and
+        # builds a codec that works -- is compiled out on every pull request.
         commands = []
-        for package in ("rvoip-codec-core", "rvoip-media-core"):
+        for package in ("rvoip-codec-core", "rvoip-media-core", "rvoip-sip"):
             commands.extend(
                 [
                     (

@@ -136,7 +136,13 @@
         "crates/media/codec-core/**",
         "crates/media/media-core/src/codec/**",
         "crates/media/media-core/src/rtp_processing/payload/**",
-        "crates/media/media-core/Cargo.toml"
+        "crates/media/media-core/src/relay/controller/bridge.rs",
+        "crates/media/media-core/src/relay/controller/codec_runtime.rs",
+        "crates/media/media-core/src/relay/controller/dtmf_transmitter.rs",
+        "crates/media/media-core/Cargo.toml",
+        "crates/sip/rvoip-sip/src/adapters/media_adapter.rs",
+        "crates/sip/rvoip-sip/src/media_stream.rs",
+        "crates/sip/rvoip-sip/Cargo.toml"
       ]
     },
     {
