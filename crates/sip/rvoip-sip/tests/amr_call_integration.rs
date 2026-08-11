@@ -263,19 +263,31 @@ async fn run_amr_call(variant: AmrVariant, ports: Ports) {
         !offer.contains("PCMU") && !offer.contains("PCMA"),
         "the INVITE offered G.711, so a passing audio assertion would not prove AMR:\n{offer}"
     );
+    // The framing, asserted by meaning rather than by an exact string.
+    // Bandwidth-efficient is the RFC 4867 default and is stated by *not*
+    // saying `octet-align=1`; octet-aligned has to say so. Either way the
+    // offer declines redundancy, because an absent `max-red` means no limit.
     let amr_fmtp = format!("a=fmtp:{} ", variant.payload_type);
+    let fmtp_line = offer
+        .lines()
+        .find(|line| line.starts_with(amr_fmtp.trim_end()))
+        .unwrap_or_else(|| panic!("PT {} carried no fmtp:\n{offer}", variant.payload_type));
     match variant.fmtp {
         Some(expected) => assert!(
-            offer.contains(&format!("{amr_fmtp}{expected}")),
+            fmtp_line.contains(expected),
             "the INVITE did not carry `{expected}` for PT {}:\n{offer}",
             variant.payload_type
         ),
         None => assert!(
-            !offer.contains(&amr_fmtp),
-            "bandwidth-efficient is the RFC 4867 default, so PT {} must carry no fmtp:\n{offer}",
+            !fmtp_line.contains("octet-align=1"),
+            "PT {} is the bandwidth-efficient number and must not claim octet alignment:\n{offer}",
             variant.payload_type
         ),
     }
+    assert!(
+        fmtp_line.contains("max-red=0"),
+        "the offer must decline redundancy, which this stack does not handle:\n{offer}"
+    );
 
     let min_samples = MIN_RECEIVED_FRAMES * variant.frame_size;
     eprintln!(

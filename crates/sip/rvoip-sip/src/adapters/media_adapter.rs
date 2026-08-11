@@ -336,7 +336,11 @@ fn answer_fmtp_for_pt(offer: &SdpSession, pt: u8, g729_annex_b: bool) -> Option<
             echoed.push(trimmed);
         }
     }
-    (!echoed.is_empty()).then(|| echoed.join("; "))
+    // `max-red` is not a transport parameter and is not echoed: each side
+    // declares its own. Ours is always 0 — see
+    // [`fmtp_for_pt_with_g729_annex_b`].
+    echoed.push("max-red=0");
+    Some(echoed.join("; "))
 }
 
 /// Whether `pt` in this offer is mapped to one of the AMR encodings.
@@ -352,10 +356,19 @@ pub(crate) fn fmtp_for_pt_with_g729_annex_b(pt: u8, g729_annex_b: bool) -> Optio
         18 if g729_annex_b => Some("annexb=yes"),
         18 => Some("annexb=no"),
         101 => Some("0-15"),
-        // Bandwidth-efficient is the RFC 4867 default, so those payload types
-        // need no fmtp at all. Omitting it also leaves mode-set absent, which
-        // is what an endpoint supporting every mode should do.
-        AMR_WB_OA_PT | AMR_NB_OA_PT => Some("octet-align=1"),
+        // `max-red=0` says this endpoint wants no redundant transmissions.
+        // RFC 4867 §8.1 makes an *absent* max-red mean no limit, so a peer in
+        // poor coverage may start repeating frames without asking — and this
+        // stack concatenates every frame-block in a payload as if it were new
+        // audio, which would turn redundancy into a stutter. Declining it is
+        // honest; handling it needs the timestamp arithmetic of §4.3, which is
+        // not implemented.
+        //
+        // `mode-set` stays absent, which is what an endpoint supporting every
+        // mode should say. Bandwidth-efficient is the RFC 4867 default and is
+        // stated by omitting `octet-align` rather than by setting it to 0.
+        AMR_WB_OA_PT | AMR_NB_OA_PT => Some("octet-align=1; max-red=0"),
+        AMR_WB_BE_PT | AMR_NB_BE_PT => Some("max-red=0"),
         // Opus (PT 111) defaults are fine for VoIP without fmtp; a
         // production deployment may want `useinbandfec=1; minptime=10`.
         _ => None,
@@ -6734,10 +6747,16 @@ a=fmtp:101 0-15\r\n";
         // fmtp; octet-aligned must say so.
         assert_eq!(rtpmap_for_pt(AMR_WB_BE_PT), Some("AMR-WB/16000"));
         assert_eq!(rtpmap_for_pt(AMR_WB_OA_PT), Some("AMR-WB/16000"));
-        assert_eq!(fmtp_for_pt_with_g729_annex_b(AMR_WB_BE_PT, false), None);
+        // Bandwidth-efficient states itself by omitting `octet-align`; both
+        // framings decline redundancy explicitly, because an absent `max-red`
+        // means *no limit* rather than none.
+        assert_eq!(
+            fmtp_for_pt_with_g729_annex_b(AMR_WB_BE_PT, false),
+            Some("max-red=0")
+        );
         assert_eq!(
             fmtp_for_pt_with_g729_annex_b(AMR_WB_OA_PT, false),
-            Some("octet-align=1")
+            Some("octet-align=1; max-red=0")
         );
         assert!(payload_codec_available(AMR_WB_BE_PT));
         assert!(payload_codec_available(AMR_WB_OA_PT));
