@@ -53,6 +53,7 @@
 )]
 
 use super::super::lp::isf::{interpolate_isp, isf_to_isp};
+use super::dtx::DtxEncoder;
 use super::super::lp::isf_dequant::{IsfQuantizer, ISF_INIT};
 use super::super::math::{dot_product12, isqrt_n, scale_sig};
 use super::super::sort_tables::{
@@ -326,6 +327,12 @@ pub struct WbEncoder {
     clipping: GainClipping,
     gains: GainPredictor,
     vad: VoiceActivityDetector,
+    /// Discontinuous transmission: the frame classifier, the eight-frame
+    /// background history and the comfort-noise generator.
+    ///
+    /// Present whether or not DTX is enabled for a session, because
+    /// 23.85 kbit/s reads its hangover counter on ordinary speech frames.
+    dtx: DtxEncoder,
     high_band: HighBand,
 
     /// `st->old_exc`: excitation history, in the previous frame's `Q_new`.
@@ -372,6 +379,7 @@ impl WbEncoder {
             clipping: GainClipping::new(),
             gains: GainPredictor::new(),
             vad: VoiceActivityDetector::new(),
+            dtx: DtxEncoder::new(),
             high_band: HighBand::new(),
             old_exc: [Word16(0); EXC_HISTORY],
             mem_syn: [Word16(0); M],
@@ -383,6 +391,19 @@ impl WbEncoder {
             vad_hist: 0,
             trace: None,
             frame_index: 0,
+        }
+    }
+
+    /// Walk the DTX hangover counter down, without running the detector.
+    ///
+    /// Test-only. 23.85 kbit/s reads this counter on ordinary speech frames,
+    /// and with DTX off it never moves -- so nothing else can demonstrate that
+    /// the value actually reaches the transmitted gain index.
+    #[cfg(test)]
+    pub(crate) fn force_dtx_hangover(&mut self, quiet_frames: usize) {
+        let mut ctx = DspContext::default();
+        for _ in 0..quiet_frames {
+            self.dtx.classify(&mut ctx, false);
         }
     }
 
@@ -924,6 +945,8 @@ impl WbEncoder {
         self.trc(sf, "synth", &synth);
 
         if rate.has_high_band() {
+            // Read before the borrow of `self.high_band` below.
+            let hangover = self.dtx.hangover_count();
             let enhanced = self.high_band.enhanced_excitation(
                 ctx,
                 &EnhancementInputs {
@@ -940,9 +963,15 @@ impl WbEncoder {
                 [index * L_SUBFR16K..(index + 1) * L_SUBFR16K]
                 .try_into()
                 .expect("one subframe at 16 kHz");
-            let gain_index =
-                self.high_band
-                    .analyse(ctx, aq, &enhanced, q_new, &reference, self.vad_hist);
+            let gain_index = self.high_band.analyse(
+                ctx,
+                aq,
+                &enhanced,
+                q_new,
+                &reference,
+                self.vad_hist,
+                hangover,
+            );
             prms.push(gain_index, 4);
         }
 
@@ -1974,14 +2003,6 @@ mod highband {
     use crate::fixed_point::arith32::{l_add, l_deposit_h, l_msu, l_sub};
     use crate::fixed_point::oper32::{l_extract, mpy_32_16};
 
-    /// `DTX_HANG_CONST`, the value `dtxHangoverCount` is reset to.
-    ///
-    /// With discontinuous transmission off the reference never decrements it,
-    /// so the smoothing it drives is permanently disabled and `gain_alpha`
-    /// stays at unity. Kept as the constant it is rather than folded away: the
-    /// day DTX arrives, this is the one line that has to change.
-    const DTX_HANG_CONST: i16 = 7;
-
     /// The high band's own filter memories.
     #[derive(Clone, Debug)]
     pub struct HighBand {
@@ -2129,6 +2150,7 @@ mod highband {
         /// `reference` is the *unprocessed* 16 kHz input for this subframe:
         /// what the far end should end up hearing, which is what the correction
         /// is measured against.
+        #[allow(clippy::too_many_arguments)]
         pub fn analyse(
             &mut self,
             ctx: &mut DspContext,
@@ -2137,6 +2159,7 @@ mod highband {
             q_new: i16,
             reference: &[Word16; L_SUBFR16K],
             vad_hist: i16,
+            dtx_hangover: Word16,
         ) -> u16 {
             // --- the low band, synthesised exactly as the decoder will -----
             let (high, low) = self.synthesis.filter(aq, excitation, q_new);
@@ -2164,14 +2187,18 @@ mod highband {
             // --- the gain that would actually be right ----------------------
             let measured = energy_ratio(ctx, &original, &noise);
 
-            // With DTX off the hangover counter never leaves its reset value,
-            // so this collapses to unity — but it is the reference's own
-            // expression and the branch below is what makes it so.
-            let fraction = l_mult(ctx, Word16(DTX_HANG_CONST), Word16(4681));
+            // The one place the DTX hangover reaches the transmitted
+            // bitstream. With DTX off the counter never leaves its reset value
+            // of 7, `7 > 6` holds, and this collapses to unity — which is why
+            // eight of the nine normative encoder vectors reproduce without
+            // DTX and 23.85 kbit/s does not. With DTX on the counter walks
+            // down through a talk spurt's hangover and the transmitted gain
+            // index moves with it.
+            let fraction = l_mult(ctx, dtx_hangover, Word16(4681));
             let hangover = l_shl(ctx, fraction, 15);
             let decayed = extract_h(hangover);
             self.gain_alpha = mult(ctx, self.gain_alpha, decayed);
-            if DTX_HANG_CONST > 6 {
+            if dtx_hangover.0 > 6 {
                 self.gain_alpha = Word16(32767);
             }
 
@@ -2299,6 +2326,47 @@ mod tests {
         }
         let trace = encoder.take_trace().expect("recording was enabled");
         (payloads, trace)
+    }
+
+    /// The DTX hangover counter reaches the wire, and only at 23.85 kbit/s.
+    ///
+    /// Eight of the nine normative encoder vectors reproduce with DTX off and
+    /// mode 8 does not, because mode 8 is the only rate whose high-band
+    /// correction gain is scaled by `gain_alpha`, which is scaled by this
+    /// counter. With the counter pinned at its reset value the expression
+    /// collapses to unity -- so a port that hardcoded it would pass every
+    /// existing test here and fail the one vector that matters.
+    #[test]
+    fn the_dtx_hangover_moves_mode_8_and_leaves_the_other_rates_alone() {
+        let frames = 6;
+        for mode in 0..9u8 {
+            let rate = Rate::from_index(mode).expect("a speech mode");
+
+            let mut plain = WbEncoder::new();
+            let baseline: Vec<Vec<u8>> = (0..frames)
+                .map(|f| plain.encode_frame(&input_frame(f), rate))
+                .collect();
+
+            let mut hungover = WbEncoder::new();
+            // Four quiet classifications leave the counter at 3, inside the
+            // range where `gain_alpha` decays rather than saturating.
+            hungover.force_dtx_hangover(4);
+            let moved: Vec<Vec<u8>> = (0..frames)
+                .map(|f| hungover.encode_frame(&input_frame(f), rate))
+                .collect();
+
+            if mode == 8 {
+                assert_ne!(
+                    baseline, moved,
+                    "23.85 kbit/s ignored the hangover counter; gain_alpha is not wired"
+                );
+            } else {
+                assert_eq!(
+                    baseline, moved,
+                    "mode {mode} changed with the hangover counter, and only mode 8 should"
+                );
+            }
+        }
     }
 
     #[test]
