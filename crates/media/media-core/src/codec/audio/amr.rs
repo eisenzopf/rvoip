@@ -303,10 +303,22 @@ mod tests {
         AudioFrame::new(data, rate, 1, 0)
     }
 
-    /// Both variants round-trip through the adapter, and the framing survives.
+    /// Every compiled-in variant round-trips, and the framing survives.
+    ///
+    /// Gated per variant rather than assuming both: a build with only
+    /// `amr-nb` refuses to construct a wideband codec, and a test that
+    /// hard-codes both fails there for a reason that has nothing to do with
+    /// the adapter.
     #[test]
-    fn a_frame_round_trips_at_both_variants() {
-        for (name, samples, rate) in [("AMR", 160usize, 8_000u32), ("AMR-WB", 320, 16_000)] {
+    fn a_frame_round_trips_at_every_compiled_variant() {
+        let mut variants: Vec<(&str, usize, u32)> = Vec::new();
+        #[cfg(feature = "amr-nb")]
+        variants.push(("AMR", 160, 8_000));
+        #[cfg(feature = "amr-wb")]
+        variants.push(("AMR-WB", 320, 16_000));
+        assert!(!variants.is_empty(), "this module needs at least one variant");
+
+        for (name, samples, rate) in variants {
             let mut codec = AmrAdapter::new(96, name, None).expect("constructs");
             assert_eq!(codec.frame_samples(), samples, "{name} frame size");
             assert_eq!(codec.clock_rate(), rate, "{name} clock rate");
@@ -331,6 +343,7 @@ mod tests {
     /// as fatal for the session, so a codec that silently accepted a short
     /// frame would drift against the far end instead of failing loudly here.
     #[test]
+    #[cfg(feature = "amr-nb")]
     fn a_misframed_buffer_is_refused() {
         let mut codec = AmrAdapter::new(96, "AMR", None).expect("constructs");
         for length in [0usize, 80, 159, 161, 320] {
@@ -350,6 +363,7 @@ mod tests {
     /// this would pass having proved nothing, so the difference is asserted
     /// before the length is.
     #[test]
+    #[cfg(feature = "amr-nb")]
     fn octet_alignment_changes_the_payload() {
         let frame = pcm(160, 8_000);
         let mut aligned = AmrAdapter::new(96, "AMR", Some("octet-align=1")).expect("constructs");
@@ -368,6 +382,7 @@ mod tests {
 
     /// Interleaving is refused at construction rather than silently dropped.
     #[test]
+    #[cfg(feature = "amr-nb")]
     fn negotiated_interleaving_is_refused() {
         let Err(err) = AmrAdapter::new(96, "AMR", Some("octet-align=1;interleaving=2")) else {
             panic!("interleaving must be refused");
@@ -389,6 +404,7 @@ mod tests {
     /// A peer's mode request moves the encoder, and an impossible one does not
     /// drop the packet.
     #[test]
+    #[cfg(feature = "amr-nb")]
     fn a_mode_request_is_honoured_or_ignored_but_never_fatal() {
         let mut codec = AmrAdapter::new(96, "AMR", Some("mode-set=0,7")).expect("constructs");
         let started = codec.mode.index();
@@ -409,6 +425,7 @@ mod tests {
 
     /// The reported info matches what the pipeline needs to size packets.
     #[test]
+    #[cfg(all(feature = "amr-nb", feature = "amr-wb"))]
     fn the_reported_info_matches_the_variant() {
         let nb = AmrAdapter::new(96, "AMR", None).expect("constructs");
         let wb = AmrAdapter::new(97, "AMR-WB", None).expect("constructs");
