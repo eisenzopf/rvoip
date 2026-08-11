@@ -8,6 +8,8 @@ use tokio::sync::Mutex;
 
 use crate::codec::audio::common::AudioCodec;
 use crate::codec::audio::G711Codec;
+#[cfg(any(feature = "amr-nb", feature = "amr-wb"))]
+use crate::codec::audio::amr::AmrAdapter;
 #[cfg(feature = "g729")]
 use crate::codec::audio::{G729Annexes, G729Codec, G729Config};
 #[cfg(feature = "opus")]
@@ -18,8 +20,8 @@ use crate::types::AudioFrame;
 use crate::types::SampleRate;
 
 use super::types::{
-    MediaConfig, NegotiatedAudioCodec, AUDIO_CHANNELS_PARAMETER, RTP_CLOCK_RATE_PARAMETER,
-    RTP_PAYLOAD_TYPE_PARAMETER,
+    MediaConfig, NegotiatedAudioCodec, AUDIO_CHANNELS_PARAMETER, NEGOTIATED_FMTP_PARAMETER,
+    RTP_CLOCK_RATE_PARAMETER, RTP_PAYLOAD_TYPE_PARAMETER,
 };
 
 fn parse_parameter<T>(config: &MediaConfig, key: &str) -> Result<Option<T>>
@@ -78,6 +80,23 @@ pub(super) fn resolve_codec(config: &MediaConfig) -> Result<NegotiatedAudioCodec
                 #[cfg(feature = "opus")]
                 ("opus", 111, 48_000, 2)
             }
+            // The canonical SDP names, which are what every layer below this
+            // compares against -- not the normalised forms this match arm
+            // reads. AMR has no static payload type, so the defaults here are
+            // only a fallback for a caller that supplied none; a real session
+            // always carries the negotiated one.
+            "AMR" => {
+                #[cfg(not(feature = "amr-nb"))]
+                return Err(Error::unsupported_codec("AMR (enable the `amr-nb` feature)"));
+                #[cfg(feature = "amr-nb")]
+                ("AMR", 96, 8_000, 1)
+            }
+            "AMRWB" => {
+                #[cfg(not(feature = "amr-wb"))]
+                return Err(Error::unsupported_codec("AMR-WB (enable the `amr-wb` feature)"));
+                #[cfg(feature = "amr-wb")]
+                ("AMR-WB", 97, 16_000, 1)
+            }
             _ => return Err(Error::unsupported_codec(requested)),
         };
 
@@ -86,9 +105,15 @@ pub(super) fn resolve_codec(config: &MediaConfig) -> Result<NegotiatedAudioCodec
         payload_type: supplied_payload_type.unwrap_or(default_payload_type),
         clock_rate: supplied_clock_rate.unwrap_or(default_clock_rate),
         channels: supplied_channels.unwrap_or(default_channels),
+        fmtp: config.parameters.get(NEGOTIATED_FMTP_PARAMETER).cloned(),
     };
     validate_codec_shape(&codec)?;
     Ok(codec)
+}
+
+/// Whether a canonical codec name is one of the two AMR encodings.
+fn is_amr(name: &str) -> bool {
+    name.eq_ignore_ascii_case("AMR") || name.eq_ignore_ascii_case("AMR-WB")
 }
 
 fn validate_codec_shape(codec: &NegotiatedAudioCodec) -> Result<()> {
@@ -148,6 +173,33 @@ fn validate_codec_shape(codec: &NegotiatedAudioCodec) -> Result<()> {
             ),
         }
         .into());
+    } else if is_amr(&codec.name) {
+        // **This arm must stay immediately before the catch-all below.** That
+        // catch-all demands 8000 Hz, and AMR-WB is 16000; reaching it refuses
+        // every wideband session with a message about narrowband's rate.
+        if codec.payload_type < 96 || codec.payload_type == 101 {
+            return Err(CodecError::InvalidParameters {
+                details: format!(
+                    "{} requires a negotiated dynamic RTP payload type, got {}",
+                    codec.name, codec.payload_type
+                ),
+            }
+            .into());
+        }
+        let wanted = if codec.name.eq_ignore_ascii_case("AMR-WB") {
+            16_000
+        } else {
+            8_000
+        };
+        if codec.clock_rate != wanted || codec.channels != 1 {
+            return Err(CodecError::InvalidParameters {
+                details: format!(
+                    "{} RTP requires {wanted}Hz mono, got {}Hz/{}ch",
+                    codec.name, codec.clock_rate, codec.channels
+                ),
+            }
+            .into());
+        }
     } else if codec.clock_rate != 8_000 || codec.channels != 1 {
         return Err(CodecError::InvalidParameters {
             details: format!(
@@ -167,6 +219,8 @@ enum StatefulCodec {
     G729(G729Codec),
     #[cfg(feature = "opus")]
     Opus(OpusCodec),
+    #[cfg(any(feature = "amr-nb", feature = "amr-wb"))]
+    Amr(Box<AmrAdapter>),
 }
 
 impl StatefulCodec {
@@ -216,6 +270,17 @@ impl StatefulCodec {
             )?));
         }
 
+        #[cfg(any(feature = "amr-nb", feature = "amr-wb"))]
+        if is_amr(&codec.name) {
+            // The fmtp is the framing, so it is passed through rather than
+            // defaulted: `octet-align` decides the payload's bit layout.
+            return Ok(Self::Amr(Box::new(AmrAdapter::new(
+                codec.payload_type,
+                &codec.name,
+                codec.fmtp.as_deref(),
+            )?)));
+        }
+
         Err(Error::unsupported_codec(&codec.name))
     }
 
@@ -226,6 +291,8 @@ impl StatefulCodec {
             Self::G729(codec) => encode_g729(codec, frame),
             #[cfg(feature = "opus")]
             Self::Opus(codec) => codec.encode(frame),
+            #[cfg(any(feature = "amr-nb", feature = "amr-wb"))]
+            Self::Amr(codec) => codec.encode(frame),
         }
     }
 
@@ -236,6 +303,8 @@ impl StatefulCodec {
             Self::G729(codec) => decode_g729(codec, payload),
             #[cfg(feature = "opus")]
             Self::Opus(codec) => codec.decode(payload),
+            #[cfg(any(feature = "amr-nb", feature = "amr-wb"))]
+            Self::Amr(codec) => codec.decode(payload),
         }
     }
 }
@@ -329,6 +398,135 @@ mod tests {
             remote_addr: None,
             preferred_codec: Some(codec.to_string()),
             parameters: HashMap::new(),
+        }
+    }
+
+    /// A config with an AMR codec, its dynamic payload type and its fmtp.
+    #[cfg(any(feature = "amr-nb", feature = "amr-wb"))]
+    fn amr_config(codec: &str, payload_type: u8, clock_rate: u32, fmtp: &str) -> MediaConfig {
+        let mut config = config(codec);
+        config.parameters.insert(
+            RTP_PAYLOAD_TYPE_PARAMETER.to_string(),
+            payload_type.to_string(),
+        );
+        config.parameters.insert(
+            RTP_CLOCK_RATE_PARAMETER.to_string(),
+            clock_rate.to_string(),
+        );
+        config
+            .parameters
+            .insert(NEGOTIATED_FMTP_PARAMETER.to_string(), fmtp.to_string());
+        config
+    }
+
+    /// Both variants resolve, and the fmtp reaches the resolved codec.
+    ///
+    /// The fmtp is the part that matters: `octet-align` selects the payload's
+    /// bit layout, so a session that resolved without it would build a framing
+    /// the peer cannot parse — audible as nothing at all, and indistinguishable
+    /// from a network fault.
+    #[test]
+    #[cfg(all(feature = "amr-nb", feature = "amr-wb"))]
+    fn both_amr_variants_resolve_with_their_framing() {
+        let nb = resolve_codec(&amr_config("AMR", 96, 8_000, "octet-align=1")).expect("AMR");
+        assert_eq!(nb.name, "AMR");
+        assert_eq!(nb.clock_rate, 8_000);
+        assert_eq!(nb.fmtp.as_deref(), Some("octet-align=1"));
+
+        let wb = resolve_codec(&amr_config("AMR-WB", 97, 16_000, "octet-align=1;mode-set=0,2"))
+            .expect("AMR-WB");
+        assert_eq!(wb.name, "AMR-WB");
+        assert_eq!(wb.clock_rate, 16_000, "AMR-WB is a 16 kHz codec");
+        assert_eq!(wb.fmtp.as_deref(), Some("octet-align=1;mode-set=0,2"));
+
+        // The SDP spellings a peer may actually send.
+        for spelling in ["amr", "AMR-wb", "amrwb", "AMR_WB"] {
+            let resolved = resolve_codec(&amr_config(spelling, 96, 0, ""));
+            // Wrong clock rates are refused; what matters here is that the
+            // name was *recognised* rather than falling through to
+            // `unsupported_codec`.
+            assert!(
+                !matches!(resolved, Err(Error::Codec(CodecError::UnsupportedCodec { .. }))),
+                "`{spelling}` was not recognised as AMR"
+            );
+        }
+    }
+
+    /// AMR-WB's 16 kHz survives the shape check.
+    ///
+    /// The catch-all in `validate_codec_shape` demands 8000 Hz, so an AMR arm
+    /// placed after it refuses every wideband session — with a message about
+    /// narrowband's rate, which is the kind of error that gets diagnosed as a
+    /// negotiation bug somewhere else entirely.
+    #[test]
+    #[cfg(feature = "amr-wb")]
+    fn wideband_is_not_refused_by_the_narrowband_catch_all() {
+        assert!(resolve_codec(&amr_config("AMR-WB", 97, 16_000, "")).is_ok());
+        // And the rate is still checked: 8000 is wrong for wideband.
+        let err = resolve_codec(&amr_config("AMR-WB", 97, 8_000, "")).unwrap_err();
+        assert!(err.to_string().contains("16000Hz"), "{err}");
+    }
+
+    /// AMR has no static payload type, and a static one is refused.
+    #[test]
+    #[cfg(feature = "amr-nb")]
+    fn amr_requires_a_dynamic_payload_type() {
+        for payload_type in [0u8, 8, 18, 95, 101] {
+            let err = resolve_codec(&amr_config("AMR", payload_type, 8_000, ""))
+                .expect_err("a non-dynamic payload type must be refused");
+            assert!(err.to_string().contains("dynamic"), "{payload_type}: {err}");
+        }
+        assert!(resolve_codec(&amr_config("AMR", 96, 8_000, "")).is_ok());
+        assert!(resolve_codec(&amr_config("AMR", 127, 8_000, "")).is_ok());
+    }
+
+    /// A resolved AMR codec encodes and decodes through the runtime.
+    ///
+    /// The whole point of the wiring: `resolve_codec` to `StatefulCodec` to a
+    /// payload and back. Asserted for both variants because they differ in
+    /// frame size, clock rate and payload length, and a wiring that hard-coded
+    /// narrowband's would pass a narrowband-only test.
+    #[test]
+    #[cfg(all(feature = "amr-nb", feature = "amr-wb"))]
+    fn a_resolved_amr_codec_round_trips_through_the_runtime() {
+        for (name, payload_type, clock_rate, samples) in
+            [("AMR", 96u8, 8_000u32, 160usize), ("AMR-WB", 97, 16_000, 320)]
+        {
+            let resolved = resolve_codec(&amr_config(name, payload_type, clock_rate, "octet-align=1"))
+                .expect("resolves");
+            let mut codec = StatefulCodec::new(&resolved).expect("constructs");
+
+            let pcm: Vec<i16> = (0..samples)
+                .map(|i| (((i as f32) * 0.05).sin() * 5000.0) as i16)
+                .collect();
+            let frame = AudioFrame::new(pcm, clock_rate, 1, 0);
+
+            let payload = codec.encode(&frame).expect("encodes");
+            assert!(!payload.is_empty(), "{name}: empty payload");
+
+            let decoded = codec.decode(&payload).expect("decodes");
+            assert_eq!(decoded.samples.len(), samples, "{name}: decoded frame length");
+            assert!(
+                decoded.samples.iter().any(|&s| s != 0),
+                "{name}: the round trip produced silence"
+            );
+        }
+    }
+
+    /// A mis-framed buffer is refused rather than silently mis-encoded.
+    ///
+    /// It has to be an error the caller sees at the boundary: `audio_generation`
+    /// treats an encode failure as fatal and stops sending for the rest of the
+    /// call, so a codec that quietly accepted 80 samples would be worse than
+    /// one that refuses them.
+    #[test]
+    #[cfg(feature = "amr-nb")]
+    fn a_misframed_amr_buffer_is_refused() {
+        let resolved = resolve_codec(&amr_config("AMR", 96, 8_000, "")).expect("resolves");
+        let mut codec = StatefulCodec::new(&resolved).expect("constructs");
+        for length in [80usize, 159, 161, 320] {
+            let frame = AudioFrame::new(vec![0i16; length], 8_000, 1, 0);
+            assert!(codec.encode(&frame).is_err(), "{length} samples should be refused");
         }
     }
 

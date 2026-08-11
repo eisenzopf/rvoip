@@ -1239,6 +1239,13 @@ impl MediaSessionController {
             .map(|entry| entry.value().clone())
             .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
 
+        // A live bridge's framing guard ran once, when the bridge was made.
+        // Re-check it here, before anything is mutated, so a re-INVITE that
+        // would leave the bridge relaying a framing the far end cannot parse
+        // is refused with the previous generation intact.
+        self.revalidate_bridge_format(&dialog_id, &config)
+            .map_err(|error| Error::config(error.to_string()))?;
+
         // Build replacement codec state before changing the RTP session or
         // published configuration. Any unsupported codec or invalid shape
         // leaves the preceding stable generation untouched.

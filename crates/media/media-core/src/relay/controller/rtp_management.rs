@@ -249,7 +249,8 @@ impl MediaSessionController {
             .await
             .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
 
-        let transmitter = DtmfTransmitter::new(rtp_session);
+        let transmitter =
+            DtmfTransmitter::with_clock_rate(rtp_session, self.negotiated_clock_rate(dialog_id));
         let _handle = transmitter.send_digit(digit, duration_ms);
         // Drop the handle — fire-and-forget. The schedule runs to
         // completion in the background and logs any wire-level send
@@ -259,6 +260,18 @@ impl MediaSessionController {
             digit, duration_ms, dialog_id
         );
         Ok(())
+    }
+
+    /// The RTP clock rate this dialog negotiated, or 8000 if it has none.
+    ///
+    /// RFC 4733 events share the audio stream's SSRC and therefore its
+    /// timestamp clock, so a wideband session's tone durations are counted at
+    /// 16 kHz. Reading it from the codec runtime rather than assuming keeps
+    /// AMR-WB's tones the length they claim to be.
+    fn negotiated_clock_rate(&self, dialog_id: &DialogId) -> u32 {
+        self.codec_runtimes
+            .get(dialog_id)
+            .map_or(8_000, |entry| entry.value().format.clock_rate)
     }
 
     /// Send a bounded RFC 4733 sequence with non-overlapping tones.
@@ -281,7 +294,7 @@ impl MediaSessionController {
             .get_rtp_session(dialog_id)
             .await
             .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
-        DtmfTransmitter::new(rtp_session)
+        DtmfTransmitter::with_clock_rate(rtp_session, self.negotiated_clock_rate(dialog_id))
             .send_sequence(digits, duration_ms, inter_digit_ms)
             .await
     }

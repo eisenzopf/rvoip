@@ -43,7 +43,7 @@ use crate::types::DialogId;
 use rvoip_rtp_core::session::RtpSessionEvent;
 use rvoip_rtp_core::RtpSession;
 
-use super::types::NEGOTIATED_FMTP_PARAMETER;
+use super::types::{MediaConfig, NEGOTIATED_FMTP_PARAMETER};
 use super::MediaSessionController;
 
 /// Errors specific to bridge creation and teardown.
@@ -323,7 +323,80 @@ impl MediaSessionController {
     }
 }
 
-/// Whether two negotiated `a=fmtp` strings describe the same wire format.
+impl MediaSessionController {
+    /// Re-check a bridged pair's wire formats against a *proposed* config.
+    ///
+    /// The bridge's framing guard runs once, when the bridge is created. A
+    /// re-INVITE that flips `octet-align` on one leg of a live bridge would
+    /// otherwise be accepted, and the bridge would go on relaying frames the
+    /// far end cannot parse — the same silent-wrong-audio failure the guard
+    /// exists to prevent, arriving through the one door it did not watch.
+    ///
+    /// Returns `Ok(())` when this dialog is not bridged, which is the common
+    /// case and costs one `DashMap` lookup.
+    ///
+    /// # Errors
+    ///
+    /// When the proposed config's payload type or transport-format parameters
+    /// would no longer match the partner's. The caller must reject the update
+    /// rather than apply it: a bridge relaying the wrong framing is worse than
+    /// a re-INVITE that fails, because it is not diagnosable from either end.
+    pub(super) fn revalidate_bridge_format(
+        &self,
+        dialog_id: &DialogId,
+        proposed: &MediaConfig,
+    ) -> std::result::Result<(), BridgeError> {
+        let Some(partner) = self.bridge_partners.get(dialog_id).map(|e| e.value().clone()) else {
+            return Ok(());
+        };
+
+        let shape = |config: &MediaConfig| {
+            let pt = config
+                .preferred_codec
+                .as_ref()
+                .and_then(|codec| self.codec_mapper.codec_to_payload(codec))
+                .unwrap_or(0);
+            let fmtp = config
+                .parameters
+                .get(NEGOTIATED_FMTP_PARAMETER)
+                .cloned()
+                .unwrap_or_default();
+            (pt, fmtp)
+        };
+
+        let (proposed_pt, proposed_fmtp) = shape(proposed);
+        let Some((partner_pt, partner_fmtp)) = self
+            .sessions
+            .get(&partner)
+            .map(|entry| shape(&entry.value().config))
+        else {
+            // The partner vanished between the lookup and here. Nothing to
+            // relay to, so nothing to protect.
+            return Ok(());
+        };
+
+        if proposed_pt != partner_pt {
+            return Err(BridgeError::CodecMismatch {
+                a: dialog_id.to_string(),
+                b: partner.to_string(),
+                a_pt: proposed_pt,
+                b_pt: partner_pt,
+            });
+        }
+        if !wire_formats_are_interchangeable(&proposed_fmtp, &partner_fmtp) {
+            return Err(BridgeError::FormatMismatch {
+                a: dialog_id.to_string(),
+                b: partner.to_string(),
+                payload_type: proposed_pt,
+                a_fmtp: proposed_fmtp,
+                b_fmtp: partner_fmtp,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Whether two negotiated `a=fmtp` strings describe the same wire format./// Whether two negotiated `a=fmtp` strings describe the same wire format.
 ///
 /// Only parameters that change the bytes on the wire matter here. For AMR,
 /// RFC 4867 §8.3.1 names exactly those: "Each combination of the RTP payload
@@ -536,6 +609,74 @@ mod tests {
         // immediately, not on task completion.
         assert!(!controller.is_bridged(&a));
         assert!(!controller.is_bridged(&b));
+    }
+
+    /// A re-INVITE that flips the framing on one leg of a live bridge is
+    /// refused, and the previous configuration survives.
+    ///
+    /// The guard ran once, at bridge setup. `update_media` touches the codec
+    /// runtimes, the RTP sessions and the published configs but never looked
+    /// at `bridge_partners` — so this door was open even while the front one
+    /// was watched. Both halves matter: that the update fails, and that the
+    /// session it failed on is unchanged rather than half-applied.
+    #[tokio::test]
+    async fn a_reinvite_may_not_break_a_live_bridges_framing() {
+        let controller = MediaSessionController::new();
+        let a = DialogId::new("reinvite-a");
+        let b = DialogId::new("reinvite-b");
+
+        controller
+            .start_media(a.clone(), test_config_with_fmtp("PCMU", "octet-align=1"))
+            .await
+            .unwrap();
+        controller
+            .start_media(b.clone(), test_config_with_fmtp("PCMU", "octet-align=1"))
+            .await
+            .unwrap();
+        let _handle = expect_ok(controller.bridge_sessions(a.clone(), b.clone()).await);
+
+        // The same framing is still fine -- otherwise this test would pass
+        // for a hook that refused every re-INVITE.
+        controller
+            .update_media(a.clone(), test_config_with_fmtp("PCMU", "octet-align=1"))
+            .await
+            .expect("an unchanged framing must still be accepted");
+
+        let err = controller
+            .update_media(a.clone(), test_config_with_fmtp("PCMU", "octet-align=0"))
+            .await
+            .expect_err("flipping the framing under a live bridge must be refused");
+        assert!(err.to_string().contains("format mismatch"), "{err}");
+
+        // And the leg still carries what it had.
+        let carried = controller
+            .sessions
+            .get(&a)
+            .map(|entry| {
+                entry
+                    .value()
+                    .config
+                    .parameters
+                    .get(NEGOTIATED_FMTP_PARAMETER)
+                    .cloned()
+            })
+            .expect("the session survived");
+        assert_eq!(carried.as_deref(), Some("octet-align=1"));
+    }
+
+    /// An unbridged session is not subject to the partner check.
+    #[tokio::test]
+    async fn an_unbridged_session_may_change_its_framing_freely() {
+        let controller = MediaSessionController::new();
+        let solo = DialogId::new("solo");
+        controller
+            .start_media(solo.clone(), test_config_with_fmtp("PCMU", "octet-align=1"))
+            .await
+            .unwrap();
+        controller
+            .update_media(solo.clone(), test_config_with_fmtp("PCMU", "octet-align=0"))
+            .await
+            .expect("nothing is relaying, so nothing to protect");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Audio codec types and utilities
 
 // Common types and utilities for audio codecs
+pub mod amr;
 pub mod common;
 pub mod dtmf;
 pub mod g711; // G.711 codec implementation

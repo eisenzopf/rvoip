@@ -104,6 +104,12 @@ pub struct NegotiatedAudioCodec {
     pub clock_rate: u32,
     /// Number of interleaved PCM channels.
     pub channels: u8,
+    /// The negotiated `a=fmtp` line for this codec, when there was one.
+    ///
+    /// Carried because for AMR it is not decoration: `octet-align` selects the
+    /// payload's bit layout, so a session that lost it would build a framing
+    /// the peer cannot parse. Every other codec here ignores it.
+    pub fmtp: Option<String>,
 }
 
 /// Media session status
