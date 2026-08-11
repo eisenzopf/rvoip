@@ -8,7 +8,7 @@
 | **AMR-NB decoder** | **Bit-exact against TS 26.073, all eight rates** |
 | **AMR-WB encoder** | **Byte-identical bitstream, all nine rates, 50 frames** |
 | **AMR-NB encoder** | **Byte-identical bitstream, all eight rates, 50 frames** |
-| **Concealment** | **Bit-exact, both variants** — damaged frames, and lost frames for wideband |
+| **Concealment** | **Bit-exact, both variants** — damaged frames and lost frames |
 | **All four paths reachable through `AmrCodec`** | **Done, and byte-exact through the public API** |
 | **Oracle qualification** | **Measured** — see below |
 | DTX / comfort noise / homing | Not started — refuses with a message naming what it needs |

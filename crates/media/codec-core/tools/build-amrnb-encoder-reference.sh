@@ -62,9 +62,24 @@ ls -l "$TESTDATA/amrnb_enc_input.pcm" | awk '{print "    " $5 " bytes"}'
 echo "==> building the reference encoder"
 # Everything except decoder.c, which carries the decoder's own main().
 # -DMMS_IO selects the MIME/storage bitstream format the .amr fixtures use.
+# -DVAD1 selects voice activity detector option 1, the makefile's own default
+# and the one TS 26.073's conformance vectors were produced with. It is stated
+# rather than left implicit: the reference selects on `#ifndef VAD2`, so
+# omitting both macros compiles VAD1 anyway but makes the binary report its VAD
+# as "unknown" -- and the two detectors are not interchangeable, since VAD2
+# rewires the open-loop pitch stage as well.
 # shellcheck disable=SC2046
-cc -O1 -w -DMMS_IO -I"$SRC" -o "$WORK/amrnb_enc" \
+cc -O1 -w -DMMS_IO -DVAD1 -I"$SRC" -o "$WORK/amrnb_enc" \
    $(ls "$SRC"/*.c | grep -v '/decoder\.c$') -lm
+# Run with no arguments to make it print its banner. It exits non-zero doing
+# so, which under `pipefail` would fail the pipeline regardless of the grep --
+# hence capturing first.
+vad_report="$("$WORK/amrnb_enc" 2>&1 || true)"
+case "$vad_report" in
+  *"VAD option: VAD1"*) echo "    encoder reports VAD1, as the conformance vectors require" ;;
+  *) echo "    the encoder does not report VAD1; fixtures would be from the wrong detector" >&2
+     exit 1 ;;
+esac
 
 echo "==> encoding at every rate, DTX off"
 MODES=(MR475 MR515 MR59 MR67 MR74 MR795 MR102 MR122)
