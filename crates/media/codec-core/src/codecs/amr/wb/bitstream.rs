@@ -74,7 +74,7 @@ pub fn finish_sid_payload(payload: &mut [u8], is_update: bool, mode: u8) {
 /// Clear the 35 codec bits of a `SID_FIRST`, leaving STI and the mode.
 ///
 /// The encoder still built a full payload and still advanced every piece of
-/// its state; the bits are simply not sent. A receiver hearing a SID_FIRST is
+/// its state; the bits are simply not sent. A receiver hearing a `SID_FIRST` is
 /// meant to keep synthesising from whatever it already had, which is why there
 /// is nothing to carry.
 ///

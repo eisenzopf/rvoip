@@ -19,6 +19,7 @@ pub mod isf_noise;
 pub mod isf_noise_tables;
 pub mod lp;
 pub mod decoder;
+pub mod dtx;
 pub mod conceal;
 pub mod enc;
 pub mod enhance;
