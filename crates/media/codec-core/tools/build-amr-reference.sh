@@ -103,6 +103,8 @@ python3 "$HERE/gen_isf_tables.py" "$SRC/isp_isf.tab" \
     "$HERE/../src/codecs/amr/wb/lp/isf_tables.rs"
 python3 "$HERE/gen_isf_codebooks.py" "$SRC/qpisf_2s.tab" \
     "$HERE/../src/codecs/amr/wb/lp/isf_codebooks.rs"
+python3 "$HERE/gen_isf_noise_tables.py" "$SRC/qisf_ns.tab" \
+    "$HERE/../src/codecs/amr/wb/isf_noise_tables.rs"
 python3 "$HERE/gen_sort_tables.py" "$SRC/mime_io.tab" \
     "$HERE/../src/codecs/amr/wb/sort_tables.rs"
 python3 "$HERE/gen_gain_tables.py" "$SRC" \

@@ -71,7 +71,7 @@ use crate::fixed_point::types::{DspContext, Word16, Word32, MAX_32};
 const MU: Word16 = Word16(10923);
 
 /// Minimum spacing between adjacent quantised ISFs, Q15 — 50 Hz.
-const ISF_GAP: Word16 = Word16(128);
+pub(crate) const ISF_GAP: Word16 = Word16(128);
 
 /// How many first-stage candidates are refined by the second stage.
 ///
@@ -343,7 +343,7 @@ fn place_codevectors(
 /// despite the reference calling this a reorder. The floor starts at the gap
 /// itself, so ISF 0 is clamped too, and the last ISF is deliberately never
 /// examined — it carries half the usual scale and is not part of the ladder.
-fn enforce_min_spacing(ctx: &mut DspContext, isf: &mut [Word16; LP_ORDER]) {
+pub(crate) fn enforce_min_spacing(ctx: &mut DspContext, isf: &mut [Word16; LP_ORDER]) {
     let mut floor = ISF_GAP;
     for slot in isf.iter_mut().take(LP_ORDER - 1) {
         if slot.0 < floor.0 {
@@ -469,7 +469,7 @@ fn n_best_entries(
 /// write is dead at every call site here (each survivor recomputes the
 /// refinement target from scratch, and the splits within a survivor are
 /// disjoint), so this returns the index instead of mutating.
-fn nearest_entry(ctx: &mut DspContext, target: &[Word16], book: &[i16]) -> (u16, Word32) {
+pub(crate) fn nearest_entry(ctx: &mut DspContext, target: &[Word16], book: &[i16]) -> (u16, Word32) {
     let mut best = Word32(MAX_32);
     let mut index = 0usize;
 
@@ -493,7 +493,7 @@ fn nearest_entry(ctx: &mut DspContext, target: &[Word16], book: &[i16]) -> (u16,
 /// anywhere, unlike AMR-NB's, which weights every error term before squaring.
 /// The factor of two comes from `L_mult` and is uniform, so it cannot change an
 /// ordering; the saturation around it can, which is why it stays.
-fn squared_distance(ctx: &mut DspContext, target: &[Word16], entry: &[i16]) -> Word32 {
+pub(crate) fn squared_distance(ctx: &mut DspContext, target: &[Word16], entry: &[i16]) -> Word32 {
     let mut acc = Word32(0);
     for (&x, &c) in target.iter().zip(entry) {
         let error = sub(ctx, x, Word16(c));
