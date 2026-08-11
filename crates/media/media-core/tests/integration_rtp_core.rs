@@ -7,7 +7,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 #[cfg(feature = "g729")]
-use tokio::sync::RwLock;
 use tokio::time::{timeout, Duration};
 
 // Import rtp-core types
