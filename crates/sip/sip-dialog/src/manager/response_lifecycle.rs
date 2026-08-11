@@ -41,7 +41,7 @@ use rvoip_sip_core::{HeaderName, Method, Request, Response, StatusCode, TypedHea
 use tracing::{debug, info};
 
 use crate::diagnostics::safe_log::method_class;
-use crate::dialog::{DialogId, DialogState};
+use crate::dialog::{dialog_utils::extract_uri_from_contact, DialogId, DialogState};
 use crate::errors::{DialogError, DialogResult};
 use crate::manager::core::DialogManager;
 use crate::manager::utils::DialogUtils;
@@ -335,9 +335,18 @@ impl DialogManager {
             }
             add_contact_header(&mut response, contact_uri)?;
         } else if is_initial_invite && (200..300).contains(&status_code) {
+            let secure_contact_required = self.get_dialog(dialog_id)?.secure_transport_required
+                || initial_invite_response_requires_sips(&original_request);
             let contact_uri = self.local_contact_uri().unwrap_or_else(|| {
-                let local = self.local_address_for_uri(original_request.uri());
-                format!("sip:server@{local}")
+                if secure_contact_required {
+                    let local = self.local_address_for_transport(
+                        rvoip_sip_transport::transport::TransportType::Tls,
+                    );
+                    format!("sips:server@{local}")
+                } else {
+                    let local = self.local_address_for_uri(original_request.uri());
+                    format!("sip:server@{local}")
+                }
             });
             add_contact_header(&mut response, &contact_uri)?;
         }
@@ -599,6 +608,39 @@ impl DialogManager {
     }
 }
 
+/// RFC 3261 section 12.1.1 requires a SIPS Contact in a UAS response when the
+/// dialog-forming request used SIPS in its Request-URI, its top Record-Route,
+/// or (when Record-Route is absent) its Contact.
+fn initial_invite_response_requires_sips(request: &Request) -> bool {
+    use rvoip_sip_core::types::uri::Scheme;
+
+    if matches!(request.uri().scheme(), Scheme::Sips) {
+        return true;
+    }
+
+    let mut has_record_route = false;
+    for header in &request.headers {
+        if let TypedHeader::RecordRoute(record_route) = header {
+            has_record_route = true;
+            if let Some(topmost) = record_route.iter().next() {
+                return matches!(topmost.uri().scheme(), Scheme::Sips);
+            }
+        }
+    }
+    if has_record_route {
+        return false;
+    }
+
+    request
+        .header(&HeaderName::Contact)
+        .and_then(|header| match header {
+            TypedHeader::Contact(contacts) => contacts.0.first(),
+            _ => None,
+        })
+        .and_then(|contact| extract_uri_from_contact(contact).ok())
+        .is_some_and(|uri| matches!(uri.scheme(), Scheme::Sips))
+}
+
 fn set_response_to_tag(response: &mut Response, tag: &str) -> DialogResult<()> {
     let to_index = response
         .headers
@@ -650,18 +692,20 @@ fn is_response_stack_managed(name: &HeaderName) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DialogManagerConfig;
     use crate::manager::DialogLookup;
     use crate::transaction::TransactionManager;
     use async_trait::async_trait;
     use rvoip_sip_core::builder::SimpleRequestBuilder;
-    use rvoip_sip_core::StatusCode;
+    use rvoip_sip_core::types::{record_route::RecordRoute, uri::Scheme};
+    use rvoip_sip_core::{Message, StatusCode};
     use rvoip_sip_transport::error::{Error as TransportError, Result as TransportResult};
     use rvoip_sip_transport::{Transport, TransportEvent};
     use std::net::SocketAddr;
     use std::str::FromStr;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, Mutex};
 
     #[test]
     fn classified_final_response_uses_only_transaction_completion_state() {
@@ -697,11 +741,26 @@ mod tests {
         addr: SocketAddr,
     }
 
+    #[derive(Debug)]
+    struct CapturingTransport {
+        addr: SocketAddr,
+        sent: Mutex<Vec<Message>>,
+    }
+
     impl NoopTransport {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 addr: SocketAddr::from_str("127.0.0.1:5060").unwrap(),
                 closed: AtomicBool::new(false),
+            })
+        }
+    }
+
+    impl CapturingTransport {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                addr: SocketAddr::from_str("127.0.0.1:5060").unwrap(),
+                sent: Mutex::new(Vec::new()),
             })
         }
     }
@@ -753,6 +812,30 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl Transport for CapturingTransport {
+        fn local_addr(&self) -> TransportResult<SocketAddr> {
+            Ok(self.addr)
+        }
+
+        async fn send_message(
+            &self,
+            message: rvoip_sip_core::Message,
+            _destination: SocketAddr,
+        ) -> TransportResult<()> {
+            self.sent.lock().await.push(message);
+            Ok(())
+        }
+
+        async fn close(&self) -> TransportResult<()> {
+            Ok(())
+        }
+
+        fn is_closed(&self) -> bool {
+            false
+        }
+    }
+
     async fn make_manager() -> DialogManager {
         make_manager_with_transport(NoopTransport::new()).await
     }
@@ -778,6 +861,23 @@ mod tests {
         .await
     }
 
+    async fn make_capturing_manager() -> (DialogManager, Arc<CapturingTransport>) {
+        let transport = CapturingTransport::new();
+        let mut manager = make_manager_with_transport(transport.clone()).await;
+        manager.set_config(
+            DialogManagerConfig::server(SocketAddr::from_str("127.0.0.1:5060").unwrap())
+                .with_dialog_config(|mut config| {
+                    config.advertised_local_address =
+                        Some(SocketAddr::from_str("192.0.2.10:5070").unwrap());
+                    config.tls_advertised_local_address =
+                        Some(SocketAddr::from_str("192.0.2.20:5061").unwrap());
+                    config
+                })
+                .build(),
+        );
+        (manager, transport)
+    }
+
     fn initial_invite() -> Request {
         SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
             .unwrap()
@@ -789,6 +889,135 @@ mod tests {
             .via("127.0.0.1:5061", "UDP", Some("z9hG4bK-auth-retry"))
             .max_forwards(70)
             .build()
+    }
+
+    fn secure_initial_invite() -> Request {
+        SimpleRequestBuilder::new(Method::Invite, "sips:bob@example.com")
+            .unwrap()
+            .from("Alice", "sips:alice@example.com", Some("alice-secure-tag"))
+            .to("Bob", "sips:bob@example.com", None)
+            .contact("sips:alice@127.0.0.1:5061;transport=tls", None)
+            .call_id("secure-contact-fallback-test")
+            .cseq(1)
+            .via("127.0.0.1:5061", "TLS", Some("z9hG4bK-secure-contact"))
+            .max_forwards(70)
+            .build()
+    }
+
+    fn top_record_route_secure_initial_invite() -> Request {
+        let mut request = initial_invite();
+        request.headers.push(TypedHeader::RecordRoute(
+            RecordRoute::from_str("<sips:edge.example.com;lr>").unwrap(),
+        ));
+        request
+    }
+
+    fn contact_secure_initial_invite() -> Request {
+        SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("alice-contact-tag"))
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sips:alice@secure.example.com", None)
+            .call_id("secure-request-contact-fallback-test")
+            .cseq(1)
+            .via(
+                "127.0.0.1:5061",
+                "UDP",
+                Some("z9hG4bK-secure-request-contact"),
+            )
+            .max_forwards(70)
+            .build()
+    }
+
+    async fn send_initial_invite_ok_and_capture_contact(request: Request) -> Uri {
+        let (manager, transport) = make_capturing_manager().await;
+        let dialog_id = manager
+            .create_early_dialog_from_invite(&request)
+            .await
+            .expect("create early dialog");
+        let transaction = manager
+            .transaction_manager()
+            .create_server_transaction(request, SocketAddr::from_str("127.0.0.1:5061").unwrap())
+            .await
+            .expect("create server transaction");
+        let transaction_id = transaction.id().clone();
+        manager.associate_transaction_with_dialog(&transaction_id, &dialog_id);
+        manager
+            .pending_response_transaction_by_dialog
+            .insert(dialog_id.clone(), transaction_id.clone());
+
+        manager
+            .send_known_transaction_response(
+                &dialog_id,
+                &transaction_id,
+                StatusCode::Ok.as_u16(),
+                None,
+                None,
+                &[],
+                None,
+            )
+            .await
+            .expect("send initial INVITE 200 response");
+
+        let response = transport
+            .sent
+            .lock()
+            .await
+            .iter()
+            .find_map(|message| match message {
+                Message::Response(response) if response.status_code() == 200 => {
+                    Some(response.clone())
+                }
+                _ => None,
+            })
+            .expect("captured 200 response");
+        let TypedHeader::Contact(contacts) = response
+            .header(&HeaderName::Contact)
+            .expect("200 response Contact")
+        else {
+            panic!("200 response Contact was not typed");
+        };
+        extract_uri_from_contact(contacts.0.first().expect("one Contact"))
+            .expect("valid Contact URI")
+    }
+
+    #[tokio::test]
+    async fn sips_initial_invite_2xx_fallback_contact_remains_sips_over_tls() {
+        let contact = send_initial_invite_ok_and_capture_contact(secure_initial_invite()).await;
+
+        assert!(matches!(contact.scheme(), Scheme::Sips));
+        assert_eq!(contact.transport(), None);
+        assert_eq!(contact.to_string(), "sips:server@192.0.2.20:5061");
+    }
+
+    #[tokio::test]
+    async fn sips_top_record_route_uses_sips_contact_and_tls_advertised_address() {
+        let contact =
+            send_initial_invite_ok_and_capture_contact(top_record_route_secure_initial_invite())
+                .await;
+
+        assert!(matches!(contact.scheme(), Scheme::Sips));
+        assert_eq!(contact.transport(), None);
+        assert_eq!(contact.to_string(), "sips:server@192.0.2.20:5061");
+    }
+
+    #[tokio::test]
+    async fn sips_request_contact_without_record_route_requires_sips_response_contact() {
+        let contact =
+            send_initial_invite_ok_and_capture_contact(contact_secure_initial_invite()).await;
+
+        assert!(matches!(contact.scheme(), Scheme::Sips));
+        assert_eq!(contact.transport(), None);
+        assert_eq!(contact.to_string(), "sips:server@192.0.2.20:5061");
+    }
+
+    #[tokio::test]
+    async fn sip_initial_invite_2xx_fallback_contact_remains_plain_sip() {
+        let contact = send_initial_invite_ok_and_capture_contact(initial_invite()).await;
+
+        assert!(matches!(contact.scheme(), Scheme::Sip));
+        assert_eq!(contact.transport(), None);
+        assert_eq!(contact.to_string(), "sip:server@192.0.2.10:5070");
     }
 
     #[tokio::test]
