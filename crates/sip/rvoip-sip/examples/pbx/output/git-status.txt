@@ -1,7 +1,12 @@
 + git -C /Users/jonathan/Developer/rvoip status --short
  M crates/sip/rvoip-sip/examples/pbx/common.rs
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrnb/UDP/callee_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrnb/UDP/caller_metadata.md
  M crates/sip/rvoip-sip/examples/pbx/output/environment-asterisk.md
  M crates/sip/rvoip-sip/examples/pbx/output/git-status.txt
  M crates/sip/rvoip-sip/examples/pbx/output/matrix.tsv
  M crates/sip/rvoip-sip/examples/pbx/output/summary.md
-?? crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrwb/
+ M crates/sip/rvoip-sip/examples/pbx/run.sh
+?? crates/sip/rvoip-sip/examples/pbx/env/freeswitch.env
+?? crates/sip/rvoip-sip/examples/pbx/output/environment-freeswitch.md
+?? crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_call/

@@ -1156,9 +1156,10 @@ run_matrix_cell() {
       fi
       ;;
     amr_call)
-      # PBX_CODEC_PROFILE picks amrnb (the default) or amrwb; unlike
-      # g729_call there is no profile sweep, because the two variants are
-      # different codecs rather than two annexes of one.
+      # PBX_CODEC_PROFILE picks amrnb (the default), amrwb, or the
+      # bandwidth-efficient amrnb_be / amrwb_be. Unlike g729_call there is no
+      # profile sweep: the two variants are different codecs rather than two
+      # annexes of one, and the two framings need a PBX configured for each.
       if transport_selected UDP; then
         run_two_party "$provider" "$example" amr_call UDP || rc=$?
         if [ "$rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then return "$rc"; fi

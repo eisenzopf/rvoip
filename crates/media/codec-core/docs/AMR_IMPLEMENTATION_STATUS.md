@@ -32,7 +32,7 @@
 | **SDP to a working codec** | **An AMR-WB offer negotiates and codes** |
 | **A real AMR call** | **Three, over loopback, with verified audio** |
 | **RFC 4867 wire format** | **68 payloads agree with Wireshark's dissector** |
-| Live PBX interop | Blocked — see below |
+| **Live PBX interop** | **Asterisk and FreeSWITCH, both variants, tone verified** |
 
 Every claim above is a test, not a note. Both decoders reproduce the reference
 decoders sample for sample; both encoders reproduce the reference *bitstream*
@@ -196,7 +196,7 @@ calling each other cannot find that either, for exactly the same reason.
 Verified by mutation: rotating the first octet's nibbles makes 47 of the 68
 disagree.
 
-## Interop, and what is blocked
+## Interop, against both PBXes
 
 The SDP half is done and tested: an AMR-WB offer with
 `octet-align=1; mode-set=0,2,4` negotiates through the SIP layer, reaches
@@ -205,11 +205,55 @@ intact, and a codec built from exactly that negotiation round-trips a frame.
 Each of those four was separately broken during this work, so the test asserts
 all four together.
 
-What is **not** done is the live call against FreeSWITCH or Asterisk. That
-needs the Docker daemon, which is not running and cannot be started from here.
-The `amr_call` scenario for `examples/pbx` is deliberately not written yet: an
-interop scenario that has never been run against a PBX is exactly the shape of
-untested code this branch has spent its time removing.
+The live calls are done too. `examples/pbx` has an `amr_call` scenario, and all
+four variant/framing combinations place a real call through a real PBX and
+recover the far end's tone:
+
+| PBX | Variant | Framing | Result |
+|---|---|---|---|
+| Asterisk 20.20.1 | AMR-NB | octet-aligned | 1.50 s at 8 kHz, 880 Hz dominant by 9394× |
+| Asterisk 20.20.1 | AMR-WB | octet-aligned | 0.76 s at 16 kHz, 880 Hz dominant by 877× |
+| FreeSWITCH 1.10.12 | AMR-NB | bandwidth-efficient | 1.50 s at 8 kHz, 880 Hz dominant by 889× |
+| FreeSWITCH 1.10.12 | AMR-WB | bandwidth-efficient | 0.76 s at 16 kHz, 880 Hz dominant by 647× |
+
+The framing column is not a preference, it is what each PBX can actually carry
+end to end:
+
+- **Asterisk** transcodes, so each leg is negotiated on its own terms and our
+  octet-aligned offer is honoured in both directions.
+- **FreeSWITCH** *relays* AMR between the two legs of a bridged call without
+  re-framing the payloads, and its outbound leg always offers `octet-align=0`.
+  An octet-aligned inbound leg therefore leaves both endpoints reading the
+  framing they did not agree to. The two legs only agree if ours is
+  bandwidth-efficient as well, which is what the `amrnb_be` / `amrwb_be`
+  profiles offer (PT 106 and 104 rather than 107 and 105).
+
+  `mod_amr`'s `force-oa` does not fix this and is deliberately left at 0:
+  setting it to 1 makes FreeSWITCH answer `octet-align=1` to an offer that
+  asked for bandwidth-efficient, which RFC 4867 §8.3.1 does not permit, and
+  breaks the inbound leg instead of aligning the outbound one.
+
+That split is better coverage than either alone: Asterisk exercises the
+octet-aligned path and FreeSWITCH the bandwidth-efficient one, whose payload
+boundaries do not fall on octets.
+
+**Why the tone is asserted and not just the sample count.** A framing mismatch
+does not drop packets. Every payload decodes into *something*, the recorder's
+buffer fills at the expected rate, and a run gated on sample count alone
+passes while both endpoints hear noise — which is how the first four
+FreeSWITCH attempts looked before the decode errors were read. The scenario now
+asserts the received recording is dominated by the far end's tone, at the rate
+that endpoint actually captured. The check is tested in both directions,
+including against a wideband capture read as narrowband: 16 kHz samples read at
+8 kHz are a clean tone an octave low, which nothing else in the harness
+notices.
+
+Two environment defects were found and fixed along the way, neither of them
+AMR's: the `rvoip_*` FreeSWITCH profiles pinned `inbound-codec-prefs` to
+`G729,PCMU,PCMA`, so an accepted AMR call was bridged out as G.729 and refused;
+and the container advertised its docker-internal address in SDP unless started
+through `scripts/up.sh`, so RTP went to an unroutable host. Both fixes live in
+`~/Developer/freeswitch/docker-entrypoint.sh`.
 
 Neither reference is committed. `tools/build-amr-reference.sh`,
 `build-amrnb-reference.sh` and the two `*-encoder-reference.sh` scripts fetch
@@ -384,16 +428,20 @@ survive the two parameters the lag and the codebook consume in between.
    narrowband VAD decision appears nowhere in the bitstream, only in which
    frames become SID or NO_DATA.
 
-2. **Transcoding.** AMR-NB ↔ PCMU/PCMA, AMR-WB ↔ Opus, AMR-NB ↔ AMR-WB with
-   the 8/16 kHz resampling. Everything it needs now exists.
+2. ~~**Transcoding.**~~ Done — six pairs, tested by property.
 
-3. **The relay path's exit criterion** — an AMR-WB call completed as a relaying
-   B2BUA against Asterisk and Kamailio+rtpengine, both framings, with a
-   mid-call mode switch observed.
+3. ~~**Interop and performance.**~~ Done — see the table at the top and the
+   interop section. Both PBXes, both variants, tone verified; benchmarks per
+   rate with a real-time-factor gate.
 
-4. **Interop and performance.** The cross-implementation matrix in both
-   directions, benchmarks per rate, and a soak test. The decoders have a fuzz
-   target; the encoders do not yet.
+4. **The relay path's exit criterion** is still only half met. The calls that
+   pass go through a PBX that either transcodes (Asterisk) or relays
+   (FreeSWITCH), but **rvoip has not been the relaying B2BUA in the middle**,
+   and no run has yet observed a mid-call mode switch. Kamailio+rtpengine is
+   untried.
+
+5. **A soak test**, and a fuzz target for the encoders. The decoders have one;
+   the encoders do not.
 
 ## Conformance against the normative sequences
 
@@ -518,10 +566,12 @@ where we actually are.
 | 5 | **AMR-WB encoder — the HD-voice milestone** | 🟢 **Byte-identical, all nine rates** |
 | 6 | AMR-NB decoder, fixed point | 🟢 **Bit-exact, all eight rates**, plus concealment |
 | 7 | AMR-NB encoder, fixed point | 🟢 **Byte-identical, all eight rates** |
-| 8 | Transcoding, interop, performance, hardening | 🟡 **All four paths wired to `AmrCodec`**; the rest not started |
+| 8 | Transcoding, interop, performance, hardening | 🟢 **Transcoding, both PBXes, and a real-time-factor gate**; soak and encoder fuzzing not started |
 
-DTX is the one piece of the codec proper that is missing, in either direction.
-Comfort noise and deliberate gaps refuse with a message naming what they need.
+Of the codec proper, nothing is missing: DTX, comfort noise, concealment and
+homing are all in and checked against the normative sequences. What is left is
+around it — rvoip as the relaying B2BUA, a mid-call mode switch observed on the
+wire, a soak test, and a fuzz target for the encoders.
 
 ---
 
@@ -1446,11 +1496,19 @@ directory is version-controlled.
 
 **FreeSWITCH — done and verified.** Its image already built FS 1.10.12 from
 source, so this was three `-dev` packages in the build stage, three runtime
-libraries, and two lines in `freeswitch-modules.conf`. Built as
-`rvoip-freeswitch:amr`, a **separate tag** so the working `:local` image is
-untouched. Verified: `mod_amr.so` and `mod_amrwb.so` present, linking
-`libopencore-amrnb`, `libopencore-amrwb` and `libvo-amrwbenc`, zero unresolved
-symbols.
+libraries, and two lines in `freeswitch-modules.conf`. First built as
+`rvoip-freeswitch:amr`, a separate tag so the working `:local` image stayed
+untouched; the AMR changes are now in `:local` as well, which is the tag
+`docker-compose.yml` and `scripts/up.sh` actually run. Verified: `mod_amr.so`
+and `mod_amrwb.so` present, linking `libopencore-amrnb`, `libopencore-amrwb` and
+`libvo-amrwbenc`, zero unresolved symbols.
+
+**Start it with `scripts/up.sh`, not `docker compose up`.** Only `up.sh` passes
+`FS_EXTERNAL_SIP_IP`/`FS_EXTERNAL_RTP_IP` from the colima VM address; without
+them the entrypoint falls back to the container's own address, FreeSWITCH
+advertises `172.21.0.2` in SDP, and every RTP packet from a macOS-hosted client
+fails with `No route to host`. SIP still registers and the call still connects,
+so it presents as a codec problem rather than a routing one.
 
 **One trap worth recording:** FreeSWITCH has *two* module lists. `modules.conf`
 decides what gets **compiled**; `autoload_configs/modules.conf.xml` decides what
@@ -1472,16 +1530,27 @@ That is a real implementation independently arriving at the same shape as our
 four offered payload types (104–107): one per transport configuration, because
 the framings are not interchangeable.
 
-Two of its config knobs are directly useful for testing:
-`force-oa` originates octet-aligned (so both framings can be exercised against
-a real peer), and `mode-set-overwrite=0` mirrors the offered mode-set — which is
-the RFC 4867 §8.3.1-compliant behaviour our negotiation implements.
+`mode-set-overwrite=0` mirrors the offered mode-set, which is the RFC 4867
+§8.3.1-compliant behaviour our negotiation implements.
 
-**Asterisk — prepared, build blocked.** AMR is not a loadable module for
-Asterisk; it is a source patch, and the packaged Alpine Asterisk cannot take it.
-`Dockerfile.amr` (separate file and tag) builds Asterisk 20 from source and
+`force-oa` reads as the knob that would let both framings be exercised against a
+real peer. It is not, and it was measured rather than assumed: with `force-oa=1`
+FreeSWITCH answered `octet-align=1` to our PT 106 offer, which asked for
+bandwidth-efficient. That is not a legal answer, and it breaks the leg it
+touches. It is left at 0 — see the interop section for what does work.
+
+**Asterisk — built, and calls placed through it.** AMR is not a loadable module
+for Asterisk; it is a source patch, and the packaged Alpine Asterisk cannot take
+it. `Dockerfile.amr` (separate file and tag) builds Asterisk 20 from source and
 applies the patches from `traud/asterisk-amr`, with `config-amr/` carrying
 `allow = amrwb` / `allow = amr`.
+
+Three things had to be fixed before it built and ran, none of them in the
+patches: `make third-party` fails under `-j` with no diagnostic and has to be
+serialised to `-j1`; the patch set omits `codecs/ex_amr.h`, which is fetched
+from upstream; and `astdatadir` pointed at Alpine's `/usr/share/asterisk`, which
+produced only `Stasis initialization failed. ASTERISK EXITING!` until it was
+pointed at `/var/lib/asterisk`.
 
 The patches document Asterisk 13/16 support, which looked like a serious
 forward-port risk across four major versions. **It is not.** Dry-run against
@@ -1492,15 +1561,14 @@ touch (`ast_codec`, `CODEC_REGISTER_AND_CACHE`, `set_next_mime_type`,
 and converted an open-ended risk into a known quantity; worth doing before a
 long build rather than after.
 
-The build is blocked only by the environment: **Docker containers currently have
-no outbound network** (HTTP, HTTPS and even Alpine's own repositories all
-refused) while the host does. The FreeSWITCH image built successfully earlier
-under the same Dockerfile pattern, so this is a recent change rather than
-anything wrong with the setup. Re-run when container networking returns:
+To rebuild:
 
 ```sh
 cd ~/Developer/asterisk && docker build -f Dockerfile.amr -t rvoip-asterisk:amr .
 ```
+
+Note the two PBXes both bind 5060 and cannot run at once; `docker compose stop`
+one before starting the other.
 
 The Dockerfile fails loudly rather than silently producing an AMR-less image: it
 asserts `configure` detected all three libraries, and that `codec_amr.so` and

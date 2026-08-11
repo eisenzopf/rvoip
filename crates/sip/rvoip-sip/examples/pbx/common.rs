@@ -62,17 +62,28 @@ pub const G729_FRAME_SIZE: usize = 80;
 /// the encoder refuses them outright, because a short frame silently
 /// mis-framed would drift against the far end. So the recorder has to be told
 /// which variant it is driving.
+/// Matched exhaustively rather than with a catch-all: a wildcard here would
+/// give any newly added wideband profile the narrowband rate silently, which is
+/// the failure this function exists to prevent.
 pub const fn amr_sample_rate(profile: CodecProfile) -> u32 {
     match profile {
-        CodecProfile::AmrWb => 16_000,
-        _ => 8_000,
+        CodecProfile::AmrWb | CodecProfile::AmrWbBe => 16_000,
+        CodecProfile::Default
+        | CodecProfile::G729A
+        | CodecProfile::G729AB
+        | CodecProfile::AmrNb
+        | CodecProfile::AmrNbBe => 8_000,
     }
 }
 
 pub const fn amr_frame_size(profile: CodecProfile) -> usize {
     match profile {
-        CodecProfile::AmrWb => 320,
-        _ => 160,
+        CodecProfile::AmrWb | CodecProfile::AmrWbBe => 320,
+        CodecProfile::Default
+        | CodecProfile::G729A
+        | CodecProfile::G729AB
+        | CodecProfile::AmrNb
+        | CodecProfile::AmrNbBe => 160,
     }
 }
 pub const TONE_FRAMES: usize = 150;
@@ -262,6 +273,18 @@ pub enum CodecProfile {
     /// AMR-WB, octet-aligned. Separate because it is 16 kHz with 320-sample
     /// frames, which is where a narrowband assumption shows up.
     AmrWb,
+    /// AMR-NB, bandwidth-efficient. The framing whose payload boundaries do not
+    /// fall on octets, so a peer that packs it wrongly still produces a payload
+    /// of a plausible length — the error surfaces as noise, not as a refusal.
+    ///
+    /// It is also the only framing a bridged FreeSWITCH call can use end to
+    /// end: FreeSWITCH offers `octet-align=0` on the outbound leg and relays
+    /// payloads between the legs without re-framing them, so an octet-aligned
+    /// inbound leg leaves both endpoints reading the framing they did not
+    /// agree to.
+    AmrNbBe,
+    /// AMR-WB, bandwidth-efficient.
+    AmrWbBe,
 }
 
 impl CodecProfile {
@@ -286,6 +309,8 @@ impl CodecProfile {
             "g729" | "g729ab" | "g729ba" | "annexb_yes" => Ok(Self::G729AB),
             "amr" | "amrnb" | "amr_nb" => Ok(Self::AmrNb),
             "amrwb" | "amr_wb" => Ok(Self::AmrWb),
+            "amrnb_be" | "amr_nb_be" | "amrnbbe" => Ok(Self::AmrNbBe),
+            "amrwb_be" | "amr_wb_be" | "amrwbbe" => Ok(Self::AmrWbBe),
             other => Err(format!("unknown PBX codec profile '{}'", other).into()),
         }
     }
@@ -307,6 +332,11 @@ impl CodecProfile {
             // octet-aligned and 105 is AMR-WB octet-aligned.
             Self::AmrNb => config.offered_codecs = vec![107, 101],
             Self::AmrWb => config.offered_codecs = vec![105, 101],
+            // 106 and 104 are the same two codecs bandwidth-efficient, and are
+            // offered alone for the same reason: a call that passes must have
+            // used the framing named here.
+            Self::AmrNbBe => config.offered_codecs = vec![106, 101],
+            Self::AmrWbBe => config.offered_codecs = vec![104, 101],
         }
     }
 
@@ -317,6 +347,8 @@ impl CodecProfile {
             Self::G729AB => "g729ab",
             Self::AmrNb => "amrnb",
             Self::AmrWb => "amrwb",
+            Self::AmrNbBe => "amrnb_be",
+            Self::AmrWbBe => "amrwb_be",
         }
     }
 }
@@ -749,6 +781,10 @@ pub struct ToneRecorder {
     counters: Arc<RecorderCounters>,
     diag_output_dir: Option<PathBuf>,
     diag_name: String,
+    /// The rate the far end's audio arrives at, carried so the saved file says
+    /// so. Wideband recordings written with the narrowband default play an
+    /// octave low at twice the duration, and nothing about them looks wrong.
+    sample_rate: u32,
 }
 
 pub struct RecorderCounters {
@@ -2199,7 +2235,13 @@ async fn run_amr_caller(
         .stop_and_save(&cfg.output_dir, amr_caller_wav(transport))
         .await;
     outcome?;
-    saved?;
+    let path = saved?;
+    assert_amr_tone(
+        &path,
+        amr_sample_rate(cfg.codec_profile),
+        tone_for_callee(transport),
+        tone_for_caller(transport),
+    )?;
     Ok(())
 }
 
@@ -2231,7 +2273,13 @@ async fn run_amr_callee(
         .stop_and_save(&cfg.output_dir, amr_callee_wav(transport))
         .await;
     outcome?;
-    saved?;
+    let path = saved?;
+    assert_amr_tone(
+        &path,
+        amr_sample_rate(cfg.codec_profile),
+        tone_for_caller(transport),
+        tone_for_callee(transport),
+    )?;
     Ok(())
 }
 
@@ -3357,6 +3405,7 @@ pub async fn start_tone_recorder_at_rate(
         counters,
         diag_output_dir,
         diag_name,
+        sample_rate,
     })
 }
 
@@ -3401,12 +3450,13 @@ impl ToneRecorder {
             counters,
             diag_output_dir,
             diag_name,
+            sample_rate,
         } = self;
         running.store(false, Ordering::Relaxed);
         let _ = timeout(Duration::from_secs(2), send_task).await;
         stop_recv_task(recv_task).await;
         let received = received_buf.lock().map(|g| g.clone()).unwrap_or_default();
-        let path = save_wav(output_dir, output_name, &received)?;
+        let path = save_wav_at_rate(output_dir, output_name, &received, sample_rate)?;
         if let Some(diag_dir) = diag_output_dir.as_deref() {
             diag_event(
                 diag_dir,
@@ -4042,11 +4092,29 @@ async fn wait_for_incoming_notice(
 }
 
 pub fn save_wav(out_dir: &Path, name: &str, samples: &[i16]) -> ExampleResult<PathBuf> {
+    save_wav_at_rate(out_dir, name, samples, SAMPLE_RATE)
+}
+
+/// Write a recording whose header states the rate the samples were actually
+/// captured at.
+///
+/// The narrowband default is wrong for AMR-WB, and wrong in the way that is
+/// hardest to notice: 16 kHz samples in an 8 kHz header still play, still have
+/// a plausible RMS, and still pass a length check — they are simply an octave
+/// low and twice as long. Every wideband recording this harness wrote before
+/// this took the rate from `SAMPLE_RATE`, so their durations were double the
+/// truth and their tones half the frequency.
+pub fn save_wav_at_rate(
+    out_dir: &Path,
+    name: &str,
+    samples: &[i16],
+    sample_rate: u32,
+) -> ExampleResult<PathBuf> {
     std::fs::create_dir_all(out_dir)?;
     let path = out_dir.join(name);
     let spec = hound::WavSpec {
         channels: 1,
-        sample_rate: SAMPLE_RATE,
+        sample_rate,
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     };
@@ -4107,6 +4175,65 @@ pub fn assert_audio_path(
         expected_hz,
         rejected_hz,
     )
+}
+
+/// Assert a recording holds the far end's tone rather than our own.
+///
+/// The recorder's sample floor cannot tell audio from noise. When the two legs
+/// of a bridged call disagree about AMR framing — one octet-aligned, the other
+/// bandwidth-efficient — every payload still decodes into *something*, the
+/// buffer still fills at the expected rate, and a run gated only on sample
+/// count passes while both endpoints hear garbage. This is the check that
+/// separates "packets arrived" from "the call worked".
+///
+/// It takes the rate as an argument rather than reusing
+/// [`assert_best_window_tone`], whose scan is hard-wired to [`SAMPLE_RATE`] and
+/// would read every wideband tone an octave low.
+fn assert_amr_tone(
+    path: &Path,
+    sample_rate: u32,
+    expected_hz: f32,
+    rejected_hz: f32,
+) -> ExampleResult<()> {
+    let samples = read_wav(path)?;
+    // Skip the first quarter second: those frames arrive while the far end's
+    // encoder is still converging and the jitter buffer is filling.
+    let start = (sample_rate as usize / 4).min(samples.len());
+    let window = &samples[start..];
+    if window.len() < sample_rate as usize / 8 {
+        return Err(format!(
+            "{}: {} samples after the leading quarter second, too few to analyse",
+            path.display(),
+            window.len()
+        )
+        .into());
+    }
+    let expected_magnitude = goertzel_magnitude(window, sample_rate as f32, expected_hz);
+    let rejected_magnitude = goertzel_magnitude(window, sample_rate as f32, rejected_hz);
+    let ratio = dominance_ratio(expected_magnitude, rejected_magnitude);
+    if ratio < DOMINANCE_RATIO {
+        return Err(format!(
+            "{}: {:.0}Hz magnitude {:.1} vs {:.0}Hz magnitude {:.1}, ratio {:.2} \
+             (expected at least {:.2}) — the far end's tone is not what arrived",
+            path.display(),
+            expected_hz,
+            expected_magnitude,
+            rejected_hz,
+            rejected_magnitude,
+            ratio,
+            DOMINANCE_RATIO
+        )
+        .into());
+    }
+    println!(
+        "{}: {:.0}Hz dominant over {:.0}Hz by {:.1}x at {} Hz",
+        path.display(),
+        expected_hz,
+        rejected_hz,
+        ratio,
+        sample_rate
+    );
+    Ok(())
 }
 
 pub fn assert_samples_tone(
@@ -4887,5 +5014,53 @@ mod tests {
         let path = save_wav(temp.path(), "full-capture.wav", &samples).unwrap();
         assert_audio_path(&path, 880.0, 440.0)
             .expect("the full capture contains one continuous valid second");
+    }
+
+    /// One second of `hz` at `rate`, as the AMR recorder would capture it.
+    fn tone_at_rate(rate: u32, hz: f64) -> Vec<i16> {
+        (0..rate as usize)
+            .map(|index| {
+                let phase = 2.0 * std::f64::consts::PI * hz * index as f64 / f64::from(rate);
+                (12_000.0 * phase.sin()).round() as i16
+            })
+            .collect()
+    }
+
+    #[test]
+    fn amr_tone_check_accepts_the_far_end_tone_at_either_rate() {
+        let temp = tempfile::tempdir().unwrap();
+        for rate in [8_000u32, 16_000] {
+            let path =
+                save_wav_at_rate(temp.path(), &format!("{rate}.wav"), &tone_at_rate(rate, 880.0), rate)
+                    .unwrap();
+            assert_amr_tone(&path, rate, 880.0, 440.0)
+                .unwrap_or_else(|error| panic!("{rate} Hz capture should pass: {error}"));
+        }
+    }
+
+    #[test]
+    fn amr_tone_check_rejects_our_own_tone_coming_back() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = save_wav_at_rate(temp.path(), "echo.wav", &tone_at_rate(16_000, 440.0), 16_000)
+            .unwrap();
+        assert!(
+            assert_amr_tone(&path, 16_000, 880.0, 440.0).is_err(),
+            "a recording of the tone we sent must not pass as the far end's"
+        );
+    }
+
+    /// The wrong-rate case is the one this check exists for, because nothing
+    /// else catches it: 16 kHz samples read at 8 kHz are a real, clean tone —
+    /// just an octave below the one that was sent.
+    #[test]
+    fn amr_tone_check_rejects_a_wideband_capture_read_as_narrowband() {
+        let temp = tempfile::tempdir().unwrap();
+        let path =
+            save_wav_at_rate(temp.path(), "wb.wav", &tone_at_rate(16_000, 880.0), 16_000).unwrap();
+        assert_amr_tone(&path, 16_000, 880.0, 440.0).expect("passes at the rate it was captured at");
+        assert!(
+            assert_amr_tone(&path, 8_000, 880.0, 440.0).is_err(),
+            "read at half the rate the 880Hz tone lands on 440Hz, which must not pass as 880Hz"
+        );
     }
 }

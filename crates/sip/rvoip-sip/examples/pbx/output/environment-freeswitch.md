@@ -1,9 +1,9 @@
 # PBX Interop Environment
 
-- started_at_utc: 2026-08-11T20:08:36Z
+- started_at_utc: 2026-08-11T20:07:20Z
 - workspace: /Users/jonathan/Developer/rvoip
 - output_root: /Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output
-- pbx_arg: asterisk
+- pbx_arg: freeswitch
 - api_arg: endpoint
 - scenario_arg: amr_call
 - transport_arg: UDP
@@ -26,5 +26,5 @@
 ## Redacted Runtime Environment
 
 ```text
-PBX_CODEC_PROFILE=amrwb
+PBX_CODEC_PROFILE=amrnb_be
 ```
