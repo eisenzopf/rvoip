@@ -55,9 +55,26 @@ pub const SAMPLE_RATE: u32 = 8000;
 pub const FRAME_SIZE: usize = 160;
 pub const G729_FRAME_SIZE: usize = 80;
 
-/// One 20 ms AMR-NB frame. AMR-WB is 320, but the recorder's frame size only
-/// has to divide the stream evenly, and 160 does for both.
-pub const AMR_FRAME_SIZE: usize = 160;
+/// One 20 ms AMR frame, which is *not* the same for both variants: AMR-NB is
+/// 160 samples at 8 kHz and AMR-WB is 320 at 16 kHz.
+///
+/// Feeding a wideband session 160-sample frames does not degrade gracefully —
+/// the encoder refuses them outright, because a short frame silently
+/// mis-framed would drift against the far end. So the recorder has to be told
+/// which variant it is driving.
+pub const fn amr_sample_rate(profile: CodecProfile) -> u32 {
+    match profile {
+        CodecProfile::AmrWb => 16_000,
+        _ => 8_000,
+    }
+}
+
+pub const fn amr_frame_size(profile: CodecProfile) -> usize {
+    match profile {
+        CodecProfile::AmrWb => 320,
+        _ => 160,
+    }
+}
 pub const TONE_FRAMES: usize = 150;
 pub const ENDPOINT_2001_TONE_HZ: f32 = 440.0;
 pub const ENDPOINT_2002_TONE_HZ: f32 = 880.0;
@@ -2160,9 +2177,13 @@ async fn run_amr_caller(
     if transport.is_tls() {
         assert_srtp_media_security(handle, Duration::from_secs(5)).await?;
     }
-    let recorder =
-        start_tone_recorder_with_frame_size(handle, tone_for_caller(transport), AMR_FRAME_SIZE)
-            .await?;
+    let recorder = start_tone_recorder_at_rate(
+        handle,
+        tone_for_caller(transport),
+        amr_frame_size(cfg.codec_profile),
+        amr_sample_rate(cfg.codec_profile),
+    )
+    .await?;
     // The same evidence floor both directions, unlike the G.729 pair where the
     // caller captures half a second extra before driving teardown. Here the
     // callee reaches its floor first and hangs up, which caps the caller at
@@ -2192,9 +2213,13 @@ async fn run_amr_callee(
     if transport.is_tls() {
         assert_srtp_media_security(handle, Duration::from_secs(5)).await?;
     }
-    let recorder =
-        start_tone_recorder_with_frame_size(handle, tone_for_callee(transport), AMR_FRAME_SIZE)
-            .await?;
+    let recorder = start_tone_recorder_at_rate(
+        handle,
+        tone_for_callee(transport),
+        amr_frame_size(cfg.codec_profile),
+        amr_sample_rate(cfg.codec_profile),
+    )
+    .await?;
     let outcome = recorder
         .wait_for_received_samples(MIN_RECEIVED_SAMPLES, remote_test_timeout(provider)?)
         .await;
@@ -3178,9 +3203,24 @@ pub fn generate_tone(freq: f32, frame_num: usize) -> Vec<i16> {
 }
 
 pub fn generate_tone_with_frame_size(freq: f32, frame_num: usize, frame_size: usize) -> Vec<i16> {
+    generate_tone_at_rate(freq, frame_num, frame_size, SAMPLE_RATE)
+}
+
+/// The same tone at an explicit sample rate.
+///
+/// Everything else in this harness is 8 kHz, so the rate was a constant.
+/// AMR-WB is 16 kHz, and a frame carrying the wrong rate is refused by the
+/// codec runtime rather than resampled — correctly, since a mis-declared rate
+/// would otherwise play back at the wrong pitch.
+pub fn generate_tone_at_rate(
+    freq: f32,
+    frame_num: usize,
+    frame_size: usize,
+    sample_rate: u32,
+) -> Vec<i16> {
     (0..frame_size)
         .map(|j| {
-            let t = (frame_num * frame_size + j) as f32 / SAMPLE_RATE as f32;
+            let t = (frame_num * frame_size + j) as f32 / sample_rate as f32;
             (0.3 * (2.0 * std::f32::consts::PI * freq * t).sin() * 32767.0) as i16
         })
         .collect()
@@ -3217,6 +3257,16 @@ pub async fn start_tone_recorder_with_frame_size(
     handle: &SessionHandle,
     tone_hz: f32,
     frame_size: usize,
+) -> ExampleResult<ToneRecorder> {
+    start_tone_recorder_at_rate(handle, tone_hz, frame_size, SAMPLE_RATE).await
+}
+
+/// [`start_tone_recorder_with_frame_size`] at an explicit sample rate.
+pub async fn start_tone_recorder_at_rate(
+    handle: &SessionHandle,
+    tone_hz: f32,
+    frame_size: usize,
+    sample_rate: u32,
 ) -> ExampleResult<ToneRecorder> {
     let audio = handle.audio().await?;
     let (sender, mut receiver) = audio.split();
@@ -3284,11 +3334,11 @@ pub async fn start_tone_recorder_with_frame_size(
     let send_running = running.clone();
     let send_task = tokio::spawn(async move {
         let mut frame_index = 0usize;
-        let frame_duration_ms = ((frame_size as u64) * 1000 / u64::from(SAMPLE_RATE)).max(1);
+        let frame_duration_ms = ((frame_size as u64) * 1000 / u64::from(sample_rate)).max(1);
         while send_running.load(Ordering::Relaxed) && sender.is_open() {
             let frame = AudioFrame::new(
-                generate_tone_with_frame_size(tone_hz, frame_index, frame_size),
-                SAMPLE_RATE,
+                generate_tone_at_rate(tone_hz, frame_index, frame_size, sample_rate),
+                sample_rate,
                 1,
                 (frame_index * frame_size) as u32,
             );

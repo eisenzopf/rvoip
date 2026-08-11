@@ -1,10 +1,7 @@
 + git -C /Users/jonathan/Developer/rvoip status --short
  M crates/sip/rvoip-sip/examples/pbx/common.rs
- M crates/sip/rvoip-sip/examples/pbx/run.sh
- M crates/sip/rvoip-sip/src/adapters/media_adapter.rs
-?? crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/
-?? crates/sip/rvoip-sip/examples/pbx/output/environment-asterisk.md
-?? crates/sip/rvoip-sip/examples/pbx/output/git-status.txt
-?? crates/sip/rvoip-sip/examples/pbx/output/matrix.tsv
-?? crates/sip/rvoip-sip/examples/pbx/output/summary.md
-?? crates/sip/rvoip-sip/examples/pbx/output/tls-prewarm.tsv
+ M crates/sip/rvoip-sip/examples/pbx/output/environment-asterisk.md
+ M crates/sip/rvoip-sip/examples/pbx/output/git-status.txt
+ M crates/sip/rvoip-sip/examples/pbx/output/matrix.tsv
+ M crates/sip/rvoip-sip/examples/pbx/output/summary.md
+?? crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrwb/
