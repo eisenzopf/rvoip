@@ -43,6 +43,52 @@ const fn sort_table(mode: AmrMode) -> &'static [u16] {
     }
 }
 
+/// Bits a wideband SID payload carries beyond the 35 codec bits.
+///
+/// `Rate::SID`'s five bytes hold 35 sorted codec bits and then five more that
+/// are not codec bits at all, laid out MSB-first in the last byte:
+///
+/// ```text
+///   bit 32 | bit 33 | bit 34 | STI | mode3 | mode2 | mode1 | mode0
+/// ```
+///
+/// `STI` distinguishes a SID_UPDATE (set) from a SID_FIRST (clear) — they are
+/// the same frame type on the wire and nothing else tells them apart. `mode`
+/// is the *speech* mode the encoder was asked for, not the comfort-noise
+/// pseudo-mode, so the receiver knows what to expect when speech resumes.
+///
+/// Narrowband packs the same two fields differently — three bits, LSB-first,
+/// plus a padding bit — which is why this is wideband-specific rather than
+/// shared.
+///
+/// # Panics
+/// If `payload` is not the five bytes of a SID frame, or `mode` exceeds 8.
+pub fn finish_sid_payload(payload: &mut [u8], is_update: bool, mode: u8) {
+    assert_eq!(payload.len(), 5, "a wideband SID payload is five bytes");
+    assert!(mode <= 8, "the SID's mode indication names a speech mode");
+    payload[4] &= 0b1110_0000;
+    payload[4] |= u8::from(is_update) << 4;
+    payload[4] |= mode & 0x0F;
+}
+
+/// Clear the 35 codec bits of a `SID_FIRST`, leaving STI and the mode.
+///
+/// The encoder still built a full payload and still advanced every piece of
+/// its state; the bits are simply not sent. A receiver hearing a SID_FIRST is
+/// meant to keep synthesising from whatever it already had, which is why there
+/// is nothing to carry.
+///
+/// # Panics
+/// If `payload` is not the five bytes of a SID frame.
+pub fn blank_sid_first(payload: &mut [u8]) {
+    assert_eq!(payload.len(), 5, "a wideband SID payload is five bytes");
+    payload[0] = 0;
+    payload[1] = 0;
+    payload[2] = 0;
+    payload[3] = 0;
+    payload[4] &= 0b0001_1111;
+}
+
 /// A frame's codec bits, in the order the decoder reads them.
 ///
 /// Deliberately not a bitfield: the reference works one bit per slot, the

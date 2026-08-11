@@ -11,7 +11,7 @@
 | **Concealment** | **Bit-exact, both variants** — damaged frames and lost frames |
 | **All four paths reachable through `AmrCodec`** | **Done, and byte-exact through the public API** |
 | **Oracle qualification** | **Measured** — see below |
-| **AMR-WB DTX, encoder side** | **Bit-exact**, and the frame-type sequence matches over 150 frames |
+| **AMR-WB DTX, encoder side** | **Byte-identical SIDs on the reference's own schedule**, 150 frames |
 | AMR-WB DTX, decoder side | Not started — comfort-noise frames still refuse |
 | AMR-NB DTX | Not started, and gated on the VAD1 port |
 | Homing frames | Not started, both variants |
@@ -29,10 +29,11 @@ quantiser matches `Qisf_ns` over 64 vectors; the DTX kernel matches
 `dtx_buffer` and `dtx_enc` over 40 frames on all five ISF indices, the energy
 index, the dithering flag and the excitation; and with DTX enabled the encoder
 reproduces the reference's own speech / SID / `NO_DATA` sequence over all 150
-frames of the committed fixture. **Not yet claimed:** the SID *payload bits*
-compared end to end against that fixture. The kernel that produces them is
-exact against `dtx_enc` directly, so what is unverified is the wiring between
-the two, not the arithmetic.
+frames of the committed fixture — and every one of the twelve transmitted SID
+payloads is byte-identical, STI bit, mode indication and `SID_FIRST` blanking
+included. A right kernel fed the wrong residual or the wrong history would
+produce a well-formed SID with wrong bits, which the frame-type sequence alone
+would not notice.
 
 Neither reference is committed. `tools/build-amr-reference.sh`,
 `build-amrnb-reference.sh` and the two `*-encoder-reference.sh` scripts fetch

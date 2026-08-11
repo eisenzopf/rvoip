@@ -2559,6 +2559,7 @@ mod tests {
         let mut cadence = SidCadence::new(AmrVariant::WideBand);
 
         let mut got = Vec::with_capacity(want.len());
+        let mut sid_payloads = Vec::new();
         for frame in 0..want.len() {
             let mut samples = [0i16; L_FRAME16K];
             for (slot, chunk) in samples
@@ -2567,8 +2568,17 @@ mod tests {
             {
                 *slot = i16::from_le_bytes([chunk[0], chunk[1]]);
             }
-            let (comfort_noise, _) = encoder.encode_frame_typed(&samples, rate);
-            got.push(cadence.next(comfort_noise, mode));
+            let (comfort_noise, mut payload) = encoder.encode_frame_typed(&samples, rate);
+            let frame_type = cadence.next(comfort_noise, mode);
+            if frame_type == AmrFrameType::Sid(AmrVariant::WideBand) {
+                let update = cadence.last_sid_was_an_update();
+                crate::codecs::amr::wb::bitstream::finish_sid_payload(&mut payload, update, 2);
+                if !update {
+                    crate::codecs::amr::wb::bitstream::blank_sid_first(&mut payload);
+                }
+                sid_payloads.push(payload);
+            }
+            got.push(frame_type);
         }
 
         assert_eq!(got.len(), want.len(), "the fixture and the run disagree on length");
@@ -2576,6 +2586,22 @@ mod tests {
         // Report the first divergence rather than a wall of frame types.
         for (frame, (&mine, &theirs)) in got.iter().zip(&want_types).enumerate() {
             assert_eq!(mine, theirs, "frame {frame} differs");
+        }
+
+        // The SID payloads themselves, not just where they fall. This is what
+        // ties the DTX kernel -- already exact against `dtx_enc` in isolation
+        // -- to the wiring that feeds it: a right kernel fed the wrong
+        // residual or the wrong history produces a well-formed SID with wrong
+        // bits, and the frame-type sequence above would not notice.
+        let want_sids: Vec<Vec<u8>> = want
+            .iter()
+            .filter(|f| f.frame_type == AmrFrameType::Sid(AmrVariant::WideBand))
+            .map(|f| f.data.clone())
+            .collect();
+        assert_eq!(sid_payloads.len(), want_sids.len(), "SID count differs");
+        assert!(sid_payloads.len() >= 8, "too few SIDs to be worth comparing");
+        for (n, (mine, theirs)) in sid_payloads.iter().zip(&want_sids).enumerate() {
+            assert_eq!(mine, theirs, "SID {n} payload differs");
         }
 
         // And the sequence has to be worth comparing: all three kinds present,
