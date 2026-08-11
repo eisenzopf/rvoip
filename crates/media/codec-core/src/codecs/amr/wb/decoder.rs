@@ -69,6 +69,13 @@ pub struct Decoder {
     isp_old: [Word16; LP_ORDER],
     /// Previous frame's ISFs, for the stability measure.
     isf_old: [Word16; LP_ORDER],
+    /// Discontinuous transmission: the receive-side state machine and the
+    /// background history a `SID_FIRST` is synthesised from.
+    ///
+    /// Its bookkeeping runs on every frame, speech included. Deferring it to
+    /// the frames that actually carry comfort noise leaves the staleness
+    /// counter wrong, and the symptom appears several frames later.
+    dtx: super::dtx::DtxDecoder,
     /// Spectral tilt of the innovation, carried to the next subframe.
     tilt_code: Word16,
     /// Whether any frame has been decoded yet.
@@ -124,6 +131,7 @@ impl Decoder {
             // frame. The reference seeds it to the same flat spectrum the ISF
             // decoder starts from.
             isf_old: ISF_INIT.map(Word16),
+            dtx: super::dtx::DtxDecoder::new(),
             // Seeded on the first frame via `started`, so the value here is
             // never read. Kept explicit so the reset state is diffable against
             // the reference's.
@@ -201,6 +209,16 @@ impl Decoder {
         };
         self.erasure.begin_frame(quality);
         let mut ctx = DspContext::default();
+
+        // `rx_dtx_handler`, which the reference runs before anything else and
+        // on every frame. A speech frame only updates counters here, but those
+        // counters are what a later `SID_FIRST` reads.
+        let rx_type = match quality {
+            FrameQuality::Good => super::dtx::RxFrameType::SpeechGood,
+            FrameQuality::Unusable => super::dtx::RxFrameType::SpeechLost,
+            FrameQuality::Bad => super::dtx::RxFrameType::SpeechBad,
+        };
+        let dtx_state = self.dtx.receive(&mut ctx, rx_type);
         #[cfg(test)]
         {
             self.trace.clear();
@@ -263,6 +281,8 @@ impl Decoder {
 
         // --- excitation and synthesis, subframe by subframe ---
         let mut out = [0i16; FRAME_SIZE_16K];
+        // The frame's excitation, kept for the DTX background history below.
+        let mut frame_excitation = [Word16(0); NB_SUBFR * L_SUBFR];
         let gain_bits = if frame_bits <= 177 { 6 } else { 7 };
         let dispersion = DispersionLevel::for_frame_bits(frame_bits);
 
@@ -358,6 +378,11 @@ impl Decoder {
 
             // The plain total, written back to the history.
             self.excitation.build(&code, gains.pitch, gain_code_word, q_new);
+            {
+                let (buffer, offset) = self.excitation.buffer_mut();
+                frame_excitation[sf * L_SUBFR..(sf + 1) * L_SUBFR]
+                    .copy_from_slice(&buffer[offset..offset + L_SUBFR]);
+            }
 
             #[cfg(test)]
             {
@@ -512,6 +537,15 @@ impl Decoder {
 
             self.excitation.advance();
         }
+
+        // `dtx_dec_activity_update`, which sits below the comfort-noise return
+        // in the reference and therefore runs only on frames that took this
+        // path. It is the memory a `SID_FIRST` reconstructs the talker's
+        // background from, so it must describe decoded speech and never the
+        // comfort noise the decoder itself produced.
+        self.dtx.observe_speech(&mut ctx, &isf, &frame_excitation);
+        self.dtx.observe_vad(&mut ctx, params.vad_flag);
+        self.dtx.commit(dtx_state);
 
         Some(out)
     }
