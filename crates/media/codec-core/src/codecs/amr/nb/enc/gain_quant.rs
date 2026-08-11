@@ -247,6 +247,21 @@ pub struct GainQuantiser {
     adaptor: GainAdaptor,
 }
 
+impl GainQuantiser {
+    /// Install a comfort-noise frame's energy in both MA predictors.
+    ///
+    /// `dtx_enc` writes `past_qua_en` and `past_qua_en_MR122` directly, so a
+    /// talk spurt resuming at any rate starts from the background level rather
+    /// than from the last speech frame's.
+    ///
+    /// Only the *quantised* predictor is touched. The unquantised one tracks
+    /// the analysis rather than the transmitted gains, and the reference leaves
+    /// it alone here.
+    pub const fn reseed_predictors(&mut self, db: Word16, log2: Word16) {
+        self.predictor.seed_directly(db, log2);
+    }
+}
+
 impl Default for GainQuantiser {
     fn default() -> Self {
         Self::new()

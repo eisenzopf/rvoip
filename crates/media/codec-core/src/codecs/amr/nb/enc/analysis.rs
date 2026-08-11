@@ -215,6 +215,35 @@ impl SpeechBuffer {
             .expect("the 12.2 window is one lookahead earlier")
     }
 
+    /// `st->new_speech`: the newest frame, which is *not* the coded one.
+    ///
+    /// The coded frame sits one lookahead earlier — see
+    /// [`coded`](Self::coded). Both the VAD and the DTX energy ring measure
+    /// this window instead, so a stream's comfort noise describes the audio
+    /// forty samples ahead of the frame it is transmitted with. Passing
+    /// `coded()` to either is a plausible-looking substitution that shifts
+    /// every energy and every detector decision by half a subframe.
+    ///
+    /// # Panics
+    /// Never: the slice is a fixed tail of a fixed-size array.
+    #[must_use]
+    pub fn newest(&self) -> &[Word16; L_FRAME] {
+        self.samples[L_TOTAL - L_FRAME..]
+            .try_into()
+            .expect("the newest frame is the tail of the buffer")
+    }
+
+    /// The 200 samples `vad1` reads: forty of history, then [`newest`](Self::newest).
+    ///
+    /// # Panics
+    /// Never, as above.
+    #[must_use]
+    pub fn vad_window(&self) -> &[Word16; L_NEXT + L_FRAME] {
+        self.samples[L_TOTAL - L_FRAME - L_NEXT..]
+            .try_into()
+            .expect("the detector window is the tail of the buffer")
+    }
+
     /// The coded frame: `old_speech[120..280]`, what the subframe loop indexes
     /// from zero.
     ///

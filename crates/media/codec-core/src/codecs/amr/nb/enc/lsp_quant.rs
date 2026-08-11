@@ -47,7 +47,7 @@
 
 use super::super::decoder_tables::{
     COS_TABLE, DICO1_LSF_3, DICO1_LSF_5, DICO2_LSF_3, DICO2_LSF_5, DICO3_LSF_3, DICO3_LSF_5,
-    DICO4_LSF_5, DICO5_LSF_5, MEAN_LSF_3, MEAN_LSF_5, MR515_3_LSF, MR795_1_LSF, PRED_FAC_3,
+    DICO4_LSF_5, DICO5_LSF_5, MEAN_LSF_3, MEAN_LSF_5, MR515_3_LSF, MR795_1_LSF, PAST_RQ_INIT, PRED_FAC_3,
 };
 use super::super::lsp::{lsf_to_lsp, reorder_lsf, M};
 use crate::fixed_point::arith::{add, mult, negate, round, sub};
@@ -120,6 +120,18 @@ pub struct Quantised {
     pub lsp: [Word16; M],
 }
 
+/// A SID frame's spectrum: the seed the encoder chose, and the split indices
+/// that are meaningless without it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SidQuantised {
+    /// Which of the eight `past_rq_init` vectors the residual is against, 0..=7.
+    pub seed_index: u16,
+    /// The three transmitted split indices, Q0.
+    pub indices: [u16; 3],
+    /// The quantised LSPs, Q15.
+    pub lsp: [Word16; M],
+}
+
 /// One 12.2 kbit/s frame's five-split quantisation of both LSF sets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QuantisedPair {
@@ -169,11 +181,9 @@ impl LsfQuantiser {
     /// triple, and only three groupings exist: 4.75/5.15 share one, 7.95 has its
     /// own, and 5.90/6.70/7.40/10.2 share the third.
     ///
-    /// The reference's `MRDTX` branch — which searches eight predictor seed
-    /// vectors instead of using the carried memory — is deliberately absent. It
-    /// is unreachable from `lsp()`, whose call is guarded by
-    /// `used_mode != MRDTX`; only `dtx_enc()` enters it, and comfort noise is
-    /// not implemented here.
+    /// The reference's `MRDTX` branch is [`quantise_sid`](Self::quantise_sid),
+    /// which is reached only from the DTX encoder — `lsp()`'s call here is
+    /// guarded by `used_mode != MRDTX`.
     ///
     /// # Panics
     ///
@@ -258,6 +268,105 @@ impl LsfQuantiser {
 
         reorder_lsf(ctx, &mut quantised, LSF_GAP);
         Quantised {
+            indices,
+            lsp: lsf_to_lsp(ctx, &quantised),
+        }
+    }
+
+    /// Quantise a SID frame's spectrum — the `MRDTX` branch of `Q_plsf_3`.
+    ///
+    /// Returns the three split indices and the seed index that goes with them.
+    ///
+    /// Where a speech frame predicts from the memory it carries, a SID cannot:
+    /// the decoder may have missed every frame since the last one, so there is
+    /// no shared memory to predict from. Instead this searches all eight of
+    /// [`PAST_RQ_INIT`]'s vectors for whichever leaves the smallest residual
+    /// energy, transmits its index in the SID's first three bits, and *writes
+    /// that vector into the prediction memory* — so the encoder and the decoder
+    /// resynchronise on a frame either of them could have arrived at alone.
+    ///
+    /// Two details that a summary of the algorithm would lose. The search
+    /// error is unweighted, plain `L_mac` over the ten residuals, where the
+    /// codebook search below is weighted by [`lsf_weights`]. And the seed's
+    /// contribution is added to the mean *unscaled* — there is no `pred_fac`
+    /// here, matching the decoder's own SID branch.
+    ///
+    /// # Panics
+    /// Never: the seed table holds exactly eight vectors and the loop indexes
+    /// it by construction.
+    pub fn quantise_sid(&mut self, ctx: &mut DspContext, lsp: &[Word16; M]) -> SidQuantised {
+        let lsf = lsp_to_lsf(ctx, lsp);
+        let weights = lsf_weights(ctx, &lsf);
+
+        let mut seed_index = 0u16;
+        let mut best_error = Word32(i32::MAX);
+        let mut predicted = [Word16(0); M];
+        let mut residual = [Word16(0); M];
+
+        for j in 0..PAST_RQ_INIT.len() / M {
+            let mut error = Word32(0);
+            let mut candidate_p = [Word16(0); M];
+            let mut candidate_r = [Word16(0); M];
+            for i in 0..M {
+                candidate_p[i] = add(ctx, Word16(MEAN_LSF_3[i]), Word16(PAST_RQ_INIT[j * M + i]));
+                candidate_r[i] = sub(ctx, lsf[i], candidate_p[i]);
+                error = l_mac(ctx, error, candidate_r[i], candidate_r[i]);
+            }
+            if l_sub(ctx, error, best_error).0 < 0 {
+                best_error = error;
+                residual = candidate_r;
+                predicted = candidate_p;
+                for i in 0..M {
+                    self.past_rq[i] = Word16(PAST_RQ_INIT[j * M + i]);
+                }
+                seed_index = u16::try_from(j).expect("eight seeds");
+            }
+        }
+
+        // The standard codebook triple, the same one 5.90 through 10.2 use.
+        let mut split0 = [residual[0], residual[1], residual[2]];
+        let mut split1 = [residual[3], residual[4], residual[5]];
+        let mut split2 = [residual[6], residual[7], residual[8], residual[9]];
+
+        let indices = [
+            search_split3(
+                ctx,
+                &mut split0,
+                &DICO1_LSF_3,
+                &[weights[0], weights[1], weights[2]],
+                256,
+                Stride::Every,
+            ),
+            search_split3(
+                ctx,
+                &mut split1,
+                &DICO2_LSF_3,
+                &[weights[3], weights[4], weights[5]],
+                512,
+                Stride::Every,
+            ),
+            search_split4(
+                ctx,
+                &mut split2,
+                &DICO3_LSF_3,
+                &[weights[6], weights[7], weights[8], weights[9]],
+                512,
+            ),
+        ];
+
+        residual[0..3].copy_from_slice(&split0);
+        residual[3..6].copy_from_slice(&split1);
+        residual[6..10].copy_from_slice(&split2);
+
+        let mut quantised = [Word16(0); M];
+        for i in 0..M {
+            quantised[i] = add(ctx, residual[i], predicted[i]);
+            self.past_rq[i] = residual[i];
+        }
+        reorder_lsf(ctx, &mut quantised, LSF_GAP);
+
+        SidQuantised {
+            seed_index,
             indices,
             lsp: lsf_to_lsp(ctx, &quantised),
         }

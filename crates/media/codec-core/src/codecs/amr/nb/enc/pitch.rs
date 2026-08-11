@@ -70,9 +70,11 @@ use super::super::decoder_tables::{CORR_WEIGHT, INTER_6_SEARCH, QUA_GAIN_PITCH};
 use super::super::lag::{Excitation, LagResolution, LagWindow, PitchLag};
 use super::super::lsp::M;
 use super::super::math::inv_sqrt;
+use super::vad::VoiceActivityDetector;
 use super::super::{L_FRAME, L_INTERPOL, L_SUBFR, PIT_MAX, PIT_MIN, PIT_MIN_MR122};
 use crate::fixed_point::arith::{abs_s, add, extract_h, extract_l, mult, round, sub};
-use crate::fixed_point::arith32::{l_mac, l_msu, l_mult, l_sub};
+use crate::fixed_point::arith32::{l_abs, l_mac, l_msu, l_mult, l_sub};
+use crate::fixed_point::div::div_s;
 use crate::fixed_point::oper32::{l_extract, mpy_32, mpy_32_16};
 use crate::fixed_point::shift::{l_shl, l_shr, norm_l, shl, shr};
 use crate::fixed_point::types::{DspContext, Word16, Word32, MAX_16, MAX_32, MIN_32};
@@ -258,6 +260,7 @@ pub fn peak_lag(
 ///
 /// Reproducing the second is the single easiest line in the open-loop path to
 /// get wrong, and it silently reorders the sections.
+#[allow(clippy::too_many_arguments)]
 fn section_peak(
     ctx: &mut DspContext,
     corr: &[Word32; PIT_MAX as usize + 1],
@@ -266,6 +269,7 @@ fn section_peak(
     l_frame: usize,
     lag_max: i16,
     lag_min: i16,
+    vad: Option<&mut VoiceActivityDetector>,
 ) -> (i16, Word16) {
     let chosen = peak_lag(ctx, corr, lag_max, lag_min);
     let best = corr[usize::try_from(chosen).expect("lag is positive")];
@@ -274,6 +278,14 @@ fn section_peak(
     for i in 0..l_frame {
         let s = scaled.at(i16::try_from(i).expect("frame length fits in i16") - chosen);
         energy = l_mac(ctx, energy, s, s);
+    }
+
+    // `vad_tone_detection`, from inside `Lag_max` -- so it runs three times per
+    // `Pitch_ol`, once per section, and on the *raw* peak and energy. Placing
+    // it after the normalisation below would compare two Q15 values against a
+    // threshold meant for the unnormalised pair.
+    if let Some(vad) = vad {
+        vad.observe_tone(ctx, best, energy);
     }
 
     let mut inverse = inv_sqrt(ctx, energy);
@@ -342,23 +354,38 @@ pub fn arbitrate_sections(
 /// then arbitrated by [`arbitrate_sections`] on the energy-normalised value.
 /// `pit_min` is 18 at 12.2 kbit/s and 20 everywhere else.
 ///
-/// The VAD hooks the reference threads through here (`vad_tone_detection`,
-/// `hp_max`, `vad_complex_detection_update`) are omitted: they feed comfort
-/// noise, which this encoder does not produce, and none of them influences the
-/// returned lag.
+/// `vad` is `Some` only when DTX is enabled, and none of what it does here
+/// influences the returned lag — the detector reads this stage, it does not
+/// steer it. Three hooks fire, in this order and nowhere else: the tone
+/// register shifts once on entry, each of the three sections reports its raw
+/// peak, and the *second* half-frame of the frame additionally computes
+/// [`high_pass_correlation`] for the complex-background detector.
+///
+/// `second_half` is the reference's `idx`, and at 4.75 and 5.15 kbit/s — where
+/// one search covers the whole frame — it is true for that single call.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn open_loop_lag(
     ctx: &mut DspContext,
     mode_index: u8,
     signal: &[Word16],
     origin: usize,
     l_frame: usize,
+    mut vad: Option<&mut VoiceActivityDetector>,
+    second_half: bool,
 ) -> i16 {
     let pit_min = if mode_index == MR122 {
         PIT_MIN_MR122
     } else {
         PIT_MIN
     };
+    // `vad_tone_detection_update`, before anything else in `Pitch_ol`. The
+    // flag says "only one lag this frame", which is true exactly of the two
+    // rates that search all 160 samples at once.
+    if let Some(vad) = vad.as_deref_mut() {
+        vad.shift_tone_register(ctx, matches!(mode_index, MR475 | MR515));
+    }
+
     let scaled = scale_for_correlation(ctx, signal, origin, l_frame);
     let corr = correlations(ctx, &scaled, l_frame, pit_min);
     let efr_scaling = mode_index == MR122;
@@ -366,11 +393,96 @@ pub fn open_loop_lag(
     let quarter = shl(ctx, Word16(pit_min), 2).0;
     let half = shl(ctx, Word16(pit_min), 1).0;
 
-    let long = section_peak(ctx, &corr, &scaled, efr_scaling, l_frame, PIT_MAX, quarter);
-    let middle = section_peak(ctx, &corr, &scaled, efr_scaling, l_frame, quarter - 1, half);
-    let short = section_peak(ctx, &corr, &scaled, efr_scaling, l_frame, half - 1, pit_min);
+    let long = section_peak(
+        ctx, &corr, &scaled, efr_scaling, l_frame, PIT_MAX, quarter,
+        vad.as_deref_mut(),
+    );
+    let middle = section_peak(
+        ctx, &corr, &scaled, efr_scaling, l_frame, quarter - 1, half,
+        vad.as_deref_mut(),
+    );
+    let short = section_peak(
+        ctx, &corr, &scaled, efr_scaling, l_frame, half - 1, pit_min,
+        vad.as_deref_mut(),
+    );
+
+    if let Some(vad) = vad {
+        if second_half {
+            let correlation =
+                high_pass_correlation(ctx, &corr, &scaled, l_frame, PIT_MAX, pit_min);
+            vad.observe_correlation(correlation);
+        }
+    }
 
     arbitrate_sections(ctx, long, middle, short)
+}
+
+/// `hp_max`: the largest high-pass filtered correlation, normalised — Q15.
+///
+/// A second-difference across the correlation vector, which suppresses the
+/// smooth part and leaves whatever varies lag to lag. A background that is
+/// *complex* rather than merely noisy — music, babble — produces a large value
+/// here while looking unvoiced to every other measure, and this is the only
+/// thing that distinguishes it.
+///
+/// The denominator is the same second difference applied to the two
+/// zero-lag-adjacent energies, so it is a ratio of like quantities. Both are
+/// normalised before the division, and the shift difference is applied
+/// afterwards — `div_s` needs its arguments comparable, and the exponent
+/// bookkeeping is what makes the Q15 result meaningful.
+fn high_pass_correlation(
+    ctx: &mut DspContext,
+    corr: &[Word32; PIT_MAX as usize + 1],
+    scaled: &Scaled,
+    l_frame: usize,
+    lag_max: i16,
+    lag_min: i16,
+) -> Word16 {
+    let mut max = Word32(MIN_32);
+    // Strictly inside the range on both ends: the filter reads its neighbours.
+    for lag in (lag_min + 1..lag_max).rev() {
+        let at = |l: i16| corr[usize::try_from(l).expect("lag is positive")];
+        let doubled = l_shl(ctx, at(lag), 1);
+        let above = l_sub(ctx, doubled, at(lag + 1));
+        let t = l_sub(ctx, above, at(lag - 1));
+        let t = l_abs(ctx, t);
+        if l_sub(ctx, t, max).0 >= 0 {
+            max = t;
+        }
+    }
+
+    let mut energy = Word32(0);
+    let mut lagged = Word32(0);
+    for i in 0..l_frame {
+        let i = i16::try_from(i).expect("frame length fits in i16");
+        let here = scaled.at(i);
+        energy = l_mac(ctx, energy, here, here);
+        lagged = l_mac(ctx, lagged, here, scaled.at(i - 1));
+    }
+    let doubled_energy = l_shl(ctx, energy, 1);
+    let doubled_lagged = l_shl(ctx, lagged, 1);
+    let difference = l_sub(ctx, doubled_energy, doubled_lagged);
+    let denominator = l_abs(ctx, difference);
+
+    // One less than the full normalisation on the numerator, so the quotient
+    // cannot reach 1.0 and overflow `div_s`.
+    let shift_num = sub(ctx, Word16(norm_l(max)), Word16(1));
+    let numerator = extract_h(l_shl(ctx, max, shift_num.0));
+    let shift_den = norm_l(denominator);
+    let scaled_den = extract_h(l_shl(ctx, denominator, shift_den));
+
+    let quotient = if scaled_den.0 == 0 {
+        Word16(0)
+    } else {
+        div_s(numerator, scaled_den)
+    };
+
+    let shift = sub(ctx, shift_num, Word16(shift_den));
+    if shift.0 >= 0 {
+        shr(ctx, quotient, shift.0)
+    } else {
+        shl(ctx, quotient, -shift.0)
+    }
 }
 
 /// State of the weighted open-loop search, 10.2 kbit/s only — TS 26.073
@@ -418,6 +530,7 @@ impl WeightedOpenLoop {
     /// own comment says otherwise and the code is what counts — and its quiet
     /// threshold is 2²⁰, identical to [`open_loop_lag`]'s despite a comment
     /// claiming 2²².
+    #[allow(clippy::too_many_arguments)]
     pub fn search(
         &mut self,
         ctx: &mut DspContext,
@@ -426,10 +539,21 @@ impl WeightedOpenLoop {
         l_frame: usize,
         old_lags: &mut [Word16; 5],
         voiced: &mut bool,
+        mut vad: Option<&mut VoiceActivityDetector>,
+        second_half: bool,
     ) -> i16 {
         let scaled = scale_for_correlation(ctx, signal, origin, l_frame);
         let corr = correlations(ctx, &scaled, l_frame, PIT_MIN);
-        let chosen = self.weighted_peak(ctx, &corr, &scaled, l_frame, voiced);
+        let chosen =
+            self.weighted_peak(ctx, &corr, &scaled, l_frame, voiced, vad.as_deref_mut());
+
+        if let Some(vad) = vad {
+            if second_half {
+                let correlation =
+                    high_pass_correlation(ctx, &corr, &scaled, l_frame, PIT_MAX, PIT_MIN);
+                vad.observe_correlation(correlation);
+            }
+        }
 
         if *voiced {
             old_lags.copy_within(0..4, 1);
@@ -463,6 +587,7 @@ impl WeightedOpenLoop {
         scaled: &Scaled,
         l_frame: usize,
         voiced: &mut bool,
+        vad: Option<&mut VoiceActivityDetector>,
     ) -> i16 {
         let mut fixed = CORR_WEIGHT.len() - 1;
         // The state invariant `old_t0_med ∈ [PIT_MIN, PIT_MAX]` keeps this
@@ -480,12 +605,21 @@ impl WeightedOpenLoop {
             let raw = corr[usize::try_from(lag).expect("lag is positive")];
             let (hi, lo) = l_extract(raw);
             let mut weighted = mpy_32_16(hi, lo, Word16(CORR_WEIGHT[fixed]));
-            fixed -= 1;
+            // Both cursors step back *after* being read, and the last step of
+            // the near one can leave it at -1: its start is `123 + PIT_MAX -
+            // old_T0_med`, which is 123 when the median sits at PIT_MAX, and
+            // the loop runs 124 times. The reference walks its pointer one
+            // past the front and never dereferences it. Saturating here is
+            // therefore exact, not a papering-over -- and an ordinary
+            // subtraction panics, which is how this was found: only a stream
+            // whose median reaches PIT_MAX gets there, and no speech fixture
+            // does.
+            fixed = fixed.saturating_sub(1);
 
             if self.weighting_armed {
                 let (hi, lo) = l_extract(weighted);
                 weighted = mpy_32_16(hi, lo, Word16(CORR_WEIGHT[near]));
-                near -= 1;
+                near = near.saturating_sub(1);
             }
 
             if l_sub(ctx, weighted, best).0 >= 0 {
@@ -507,6 +641,14 @@ impl WeightedOpenLoop {
             cross = l_mac(ctx, cross, here, there);
             delayed = l_mac(ctx, delayed, there, there);
         }
+        // 10.2's own tone hooks, and note the ordering: the register shifts
+        // *here*, after the search, where every other rate shifts on entry.
+        // The flag is always 0 -- this rate computes two lags a frame.
+        if let Some(vad) = vad {
+            vad.shift_tone_register(ctx, false);
+            vad.observe_tone(ctx, cross, delayed);
+        }
+
         let rounded = round(ctx, delayed);
         // 0.4 in Q15.
         let excess = l_msu(ctx, cross, rounded, Word16(13107));
@@ -567,6 +709,7 @@ const MIN_16_VALUE: i16 = -32768;
 ///   `voiced` and does **not** clear the latter on entry; every other rate
 ///   clears both entries first.
 /// - **12.2 kbit/s** searches down to lag 18 rather than 20.
+#[allow(clippy::too_many_arguments)]
 pub fn open_loop_lags(
     ctx: &mut DspContext,
     mode_index: u8,
@@ -575,6 +718,7 @@ pub fn open_loop_lags(
     origin: usize,
     old_lags: &mut [Word16; 5],
     voiced: &mut [bool; 2],
+    mut vad: Option<&mut VoiceActivityDetector>,
 ) -> [i16; 2] {
     if mode_index != MR102 {
         voiced[0] = false;
@@ -582,7 +726,9 @@ pub fn open_loop_lags(
     }
 
     if mode_index == MR475 || mode_index == MR515 {
-        let lag = open_loop_lag(ctx, mode_index, wsp, origin, L_FRAME);
+        // One search over the whole frame, and the reference passes idx = 1 --
+        // so the complex-background hook fires on it.
+        let lag = open_loop_lag(ctx, mode_index, wsp, origin, L_FRAME, vad, true);
         return [lag, lag];
     }
 
@@ -591,11 +737,28 @@ pub fn open_loop_lags(
         let at = origin + half * L_FRAME_BY2;
         *slot = if mode_index == MR102 {
             let mut flag = voiced[half];
-            let lag = weighted.search(ctx, wsp, at, L_FRAME_BY2, old_lags, &mut flag);
+            let lag = weighted.search(
+                ctx,
+                wsp,
+                at,
+                L_FRAME_BY2,
+                old_lags,
+                &mut flag,
+                vad.as_deref_mut(),
+                half == 1,
+            );
             voiced[half] = flag;
             lag
         } else {
-            open_loop_lag(ctx, mode_index, wsp, at, L_FRAME_BY2)
+            open_loop_lag(
+                ctx,
+                mode_index,
+                wsp,
+                at,
+                L_FRAME_BY2,
+                vad.as_deref_mut(),
+                half == 1,
+            )
         };
     }
     lags
@@ -1016,6 +1179,7 @@ impl ClosedLoopPitch {
     /// If `exc` does not cover the window the search reaches.
     // Nine parameters, because `Pitch_fr` genuinely depends on nine things and
     // bundling them into a struct would only move the list somewhere else.
+    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     pub fn search(
         &mut self,
@@ -2232,7 +2396,7 @@ mod tests {
             });
         }
         assert_eq!(
-            open_loop_lag(&mut ctx, MR74, &signal, origin, L_FRAME_BY2),
+            open_loop_lag(&mut ctx, MR74, &signal, origin, L_FRAME_BY2, None, false),
             i16::try_from(PERIOD).expect("period fits"),
         );
     }
@@ -2269,6 +2433,7 @@ mod tests {
             origin,
             &mut old_lags,
             &mut voiced,
+            None,
         );
         assert_ne!(split[0], split[1], "each half is searched on its own");
 
@@ -2280,6 +2445,7 @@ mod tests {
             origin,
             &mut old_lags,
             &mut voiced,
+            None,
         );
         assert_eq!(single[0], single[1], "one search, copied into both halves");
     }
@@ -2299,7 +2465,7 @@ mod tests {
                 _ => 0,
             });
         }
-        assert_eq!(open_loop_lag(&mut ctx, MR122, &signal, origin, L_FRAME_BY2), 19);
+        assert_eq!(open_loop_lag(&mut ctx, MR122, &signal, origin, L_FRAME_BY2, None, false), 19);
         assert_eq!(mode_params(MR122).pit_min, 18);
         assert_eq!(mode_params(MR74).pit_min, 20);
     }
@@ -2566,6 +2732,7 @@ mod tests {
             origin,
             &mut old_lags,
             &mut voiced,
+            None,
         );
         assert_eq!(first[0], 45, "the planted period survives the weighting");
         assert!(voiced[0] && voiced[1], "a periodic signal is voiced");
@@ -2581,6 +2748,7 @@ mod tests {
             origin,
             &mut old_lags,
             &mut voiced,
+            None,
         );
         assert_eq!(second[0], 45);
 
@@ -2595,6 +2763,7 @@ mod tests {
             origin,
             &mut old_lags,
             &mut voiced,
+            None,
         );
         assert!(!voiced[0], "silence is not voiced");
 
@@ -2608,6 +2777,7 @@ mod tests {
             origin,
             &mut old_lags,
             &mut other,
+            None,
         );
         assert_eq!(other, [false; 2]);
     }

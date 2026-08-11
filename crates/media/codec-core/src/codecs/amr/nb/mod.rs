@@ -32,6 +32,7 @@ pub mod dtx;
 pub mod enc;
 pub mod detect;
 pub mod gain;
+pub mod homing;
 pub mod lag;
 pub mod lsp;
 pub mod math;

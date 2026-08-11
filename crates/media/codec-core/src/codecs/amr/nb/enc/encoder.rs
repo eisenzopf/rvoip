@@ -83,7 +83,9 @@ use super::analysis::{
 };
 use super::codebook::{search as codebook_search, CodebookInputs};
 use super::gain_quant::{GainParams, GainQuantiser, SubframeSignals};
+use super::dtx::{DtxEncoder, TxDecision};
 use super::lsp_quant::LsfQuantiser;
+use super::vad::VoiceActivityDetector;
 use super::pitch::{
     closed_loop_ltp, convolve, open_loop_lags, ClosedLoopPitch, ToneStability, WeightedOpenLoop,
     EXC_ORIGIN,
@@ -269,6 +271,38 @@ impl Parameters {
         }
         out
     }
+
+    /// The same, for a SID frame's own five-parameter layout.
+    ///
+    /// Five octets, of which the first 35 bits are the description and the
+    /// remaining five are left clear for the caller to finish — the STI bit,
+    /// the three-bit mode indication, and one spare.
+    ///
+    /// # Panics
+    /// If five parameters were not written.
+    fn pack_sid(&self) -> Vec<u8> {
+        let widths = parameter_widths(8);
+        assert_eq!(self.words.len(), widths.len(), "a SID is five parameters");
+
+        let mut bits = Vec::with_capacity(35);
+        for (&value, &width) in self.words.iter().zip(widths.iter()) {
+            debug_assert!(
+                u32::from(value) < (1u32 << width),
+                "SID parameter {value} does not fit in {width} bits"
+            );
+            for i in (0..width).rev() {
+                bits.push(u8::try_from((value >> i) & 1).expect("one bit"));
+            }
+        }
+        assert_eq!(bits.len(), 35, "the SID layout must fill 35 bits");
+
+        let sort = super::super::tables::SORT_SID;
+        let mut out = vec![0u8; 5];
+        for (i, &source) in sort.iter().enumerate() {
+            out[i / 8] |= bits[source as usize] << (7 - (i % 8));
+        }
+        out
+    }
 }
 
 /// The transmitted words for one subframe's algebraic codebook, in `ana` order.
@@ -396,6 +430,16 @@ pub struct NbEncoder {
     /// `st->sharp`: the previous subframe's clamped pitch gain, Q14.
     sharp: Word16,
 
+    // --- discontinuous transmission -----------------------------------------
+    /// `vadState`: the VAD1 detector. Driven only when DTX is enabled, because
+    /// its pitch, tone and complex registers are fed from the open-loop stage
+    /// and the reference guards every one of those hooks on `st->dtx`.
+    vad: VoiceActivityDetector,
+    /// `dtx_encState`: the transmit-side hangover machine and history rings.
+    dtx: DtxEncoder,
+    /// `st->dtx`: whether this encoder may emit comfort noise at all.
+    dtx_enabled: bool,
+
     trace: Option<EncoderTrace>,
     frame_index: usize,
 }
@@ -416,6 +460,9 @@ impl NbEncoder {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            vad: VoiceActivityDetector::new(),
+            dtx: DtxEncoder::new(),
+            dtx_enabled: false,
             preprocessor: Preprocessor::new(),
             speech: SpeechBuffer::new(),
             lp: LpAnalysis::new(),
@@ -476,15 +523,42 @@ impl NbEncoder {
     /// [`Rate::packed_bytes`] of them — with no table-of-contents byte in
     /// front; [`Rate::toc_byte`] supplies that.
     pub fn encode_frame(&mut self, pcm: &[i16; L_FRAME], rate: Rate) -> Vec<u8> {
+        self.encode_frame_typed(pcm, rate).1
+    }
+
+    /// Whether this encoder may replace speech frames with comfort noise.
+    ///
+    /// Off by default, and off is not merely "never emit a SID": with DTX
+    /// disabled the reference does not run the detector at all, and the
+    /// open-loop stage's four VAD hooks are skipped with it. So this is a
+    /// switch over the analysis, not a filter on the output.
+    pub const fn set_allow_dtx(&mut self, allow: bool) {
+        self.dtx_enabled = allow;
+    }
+
+    /// Encode one frame, reporting whether it came out as comfort noise.
+    ///
+    /// The payload of a comfort-noise frame is the SID's 35 bits packed into
+    /// five octets, with the STI bit and the mode indication left clear —
+    /// those depend on the *cadence*, which is the caller's to decide, since
+    /// only it knows whether this SID is the first of a silence or a periodic
+    /// update. [`super::super::bitstream`] finishes it.
+    pub fn encode_frame_typed(&mut self, pcm: &[i16; L_FRAME], rate: Rate) -> (bool, Vec<u8>) {
         let mut prms = Parameters::new();
-        self.encode_into(pcm, rate, &mut prms);
-        let payload = prms.pack(rate);
+        let comfort_noise = self.encode_into(pcm, rate, &mut prms);
+        let payload = if comfort_noise {
+            prms.pack_sid()
+        } else {
+            prms.pack(rate)
+        };
         self.frame_index += 1;
-        payload
+        (comfort_noise, payload)
     }
 
     /// One frame of `Speech_Encode_Frame`, writing parameters in codec order.
-    fn encode_into(&mut self, pcm: &[i16; L_FRAME], rate: Rate, prms: &mut Parameters) {
+    ///
+    /// Returns whether the frame came out as comfort noise.
+    fn encode_into(&mut self, pcm: &[i16; L_FRAME], rate: Rate, prms: &mut Parameters) -> bool {
         let mode = rate.index();
         let mut ctx = DspContext::default();
 
@@ -500,6 +574,18 @@ impl NbEncoder {
         self.speech.push(&frame);
         self.trc(-1, "speech", &frame);
 
+        // --- the DTX decision, before any analysis -----------------------------
+        // `used_mode` may change here, and everything downstream reads it
+        // rather than the requested rate.
+        let (comfort_noise, compute_sid) = if self.dtx_enabled {
+            let window = *self.speech.vad_window();
+            let voice_active = self.vad.process(&mut ctx, &window);
+            let (decision, compute) = self.dtx.classify(&mut ctx, voice_active);
+            (decision == TxDecision::ComfortNoise, compute)
+        } else {
+            (false, false)
+        };
+
         // --- LP analysis ------------------------------------------------------
         // Fills slot 3 — and slot 1 at 12.2 kbit/s, from a second window. The
         // interpolation in `spectrum` fills exactly the complement.
@@ -507,15 +593,38 @@ impl NbEncoder {
         self.lp.analyse(&mut ctx, mode, &self.speech, &mut az);
 
         // --- A(z) to LSP, quantisation, interpolation — `lsp()` ---------------
-        let azq = self.spectrum(&mut ctx, mode, &mut az, prms);
+        // A comfort-noise frame still runs the analysis and the interpolation;
+        // only the *quantisation* is skipped, because the SID carries its own
+        // spectrum from the averaged history instead.
+        let azq = self.spectrum(&mut ctx, mode, &mut az, prms, comfort_noise);
         self.trc(-1, "A_t", &az);
+
+        // `dtx_buffer`, on every frame including speech ones -- the history it
+        // fills is what the *next* silence averages.
+        if self.dtx_enabled {
+            let lsp_new = self.lsp_old;
+            let newest = *self.speech.newest();
+            self.dtx.buffer(&mut ctx, &lsp_new, &newest);
+        }
+
+        if comfort_noise {
+            self.build_sid(&mut ctx, compute_sid, prms);
+        }
 
         // `check_lsp` reads `lsp_old` *after* `lsp()` overwrote it with this
         // frame's vector, so the resonance test is on the current frame. Once
         // per frame: reading it per subframe agrees on any fixture where the
         // twelve-frame counter never fires, and diverges on one where it does.
+        //
+        // Not on a comfort-noise frame: the reference's `else` branch. The
+        // resonance counter must not advance on a frame whose spectrum came
+        // from the noise history.
         let lsp_new = self.lsp_old;
-        let lsp_flag = self.tone.check_lsp(&mut ctx, &lsp_new);
+        let lsp_flag = if comfort_noise {
+            false
+        } else {
+            self.tone.check_lsp(&mut ctx, &lsp_new)
+        };
 
         // --- weighted speech and open-loop pitch ------------------------------
         // The reference interleaves `pre_big` and `ol_ltp` half-frame by
@@ -543,7 +652,25 @@ impl NbEncoder {
             PIT_MAX as usize,
             &mut self.old_lags,
             &mut self.ol_gain_flg,
+            self.dtx_enabled.then_some(&mut self.vad),
         );
+
+        // `vad_pitch_detection`, after both open-loop lags exist and before
+        // anything else uses them.
+        if self.dtx_enabled {
+            self.vad.observe_pitch(&mut ctx, [Word16(t_op[0]), Word16(t_op[1])]);
+        }
+
+        // `goto the_end`: a comfort-noise frame runs the analysis and the
+        // open-loop search -- both feed state the next speech frame needs --
+        // and stops before the subframe loop. Note where the label sits: the
+        // excitation slide is *inside* the loop's scope and is skipped, while
+        // the weighted-speech and speech slides below are not.
+        if comfort_noise {
+            self.old_wsp.copy_within(L_FRAME.., 0);
+            self.speech.shift();
+            return true;
+        }
         if mode <= 1 {
             // Only the two rates that search the whole frame at once reach the
             // `T_op[1] = T_op[0]` line the fixture records.
@@ -574,6 +701,58 @@ impl NbEncoder {
         // buffer's own slide. Both run on every frame.
         self.old_wsp.copy_within(L_FRAME.., 0);
         self.speech.shift();
+        false
+    }
+
+    /// `dtx_enc`, and the state reset that follows it.
+    ///
+    /// `compute_sid` says whether a *new* description may be derived. When it
+    /// is false the previously computed indices are retransmitted unchanged —
+    /// which is the point of holding them in the DTX state rather than
+    /// recomputing per frame: a SID sent immediately after a talk spurt would
+    /// describe the talker.
+    ///
+    /// The reset afterwards is the encoder's half of the same agreement the
+    /// decoder makes: excitation, weighting memory, error memory, sharpening
+    /// and the closed-loop pitch history all go, and the LSP state is reset and
+    /// then *overwritten with this frame's unquantised LSPs* — not with the
+    /// initial vector `lsp_reset` just wrote. Leaving it at the initial vector
+    /// makes the first speech frame after the silence interpolate from a
+    /// spectrum neither end ever saw.
+    fn build_sid(&mut self, ctx: &mut DspContext, compute_sid: bool, prms: &mut Parameters) {
+        if compute_sid {
+            let (lsp, _) = self.dtx.average_history(ctx);
+
+            // Order and reorder before quantising: the averaged LSPs can come
+            // out too close together or crossed, and the quantiser's weighting
+            // divides by their spacing.
+            let mut lsf = super::lsp_quant::lsp_to_lsf(ctx, &lsp);
+            super::super::lsp::reorder_lsf(ctx, &mut lsf, Word16(205));
+            let lsp = super::super::lsp::lsf_to_lsp(ctx, &lsf);
+
+            let quantised = self.lsf.quantise_sid(ctx, &lsp);
+            self.dtx.set_indices(
+                Word16(i16::try_from(quantised.seed_index).expect("three bits")),
+                quantised.indices.map(|i| Word16(i16::try_from(i).expect("nine bits"))),
+            );
+
+            let (ordinary, mr122) = self.dtx.predictor_reset(ctx);
+            self.gains.reseed_predictors(ordinary, mr122);
+        }
+
+        for word in self.dtx.sid_parameters() {
+            prms.push(u16::try_from(word.0).expect("a SID parameter is non-negative"));
+        }
+
+        let lsp_new = self.lsp_old;
+        self.old_exc = [Word16(0); EXC_TOTAL];
+        self.mem_w0 = [Word16(0); M];
+        self.mem_err = [Word16(0); M];
+        self.lsf = LsfQuantiser::new();
+        self.lsp_old = lsp_new;
+        self.lsp_old_q = lsp_new;
+        self.pitch = ClosedLoopPitch::new();
+        self.sharp = Word16(0);
     }
 
     /// `lsp()`: roots, interpolation of the unquantised spectrum, quantisation,
@@ -587,6 +766,7 @@ impl NbEncoder {
         mode: u8,
         az: &mut [Word16; AZ_SIZE],
         prms: &mut Parameters,
+        comfort_noise: bool,
     ) -> [Word16; AZ_SIZE] {
         if mode == MR122 {
             // Two analyses, and the second falls back on the first's roots
@@ -600,6 +780,15 @@ impl NbEncoder {
             let interpolated = interpolate_lsp_mid(ctx, &self.lsp_old, &mid, &new);
             copy_slot(az, 0, &interpolated);
             copy_slot(az, 2, &interpolated);
+
+            // `if (used_mode != MRDTX)`: a comfort-noise frame transmits no
+            // LSF indices and rebuilds no quantised filter -- the SID's own
+            // spectrum replaces both, and `build_sid` overwrites `lsp_old_q`
+            // moments later. The returned `azq` is never read on that path.
+            if comfort_noise {
+                self.lsp_old = new;
+                return [Word16(0); AZ_SIZE];
+            }
 
             let quantised = self.lsf.quantise_pair(ctx, &mid, &new);
             for index in quantised.indices {
@@ -618,6 +807,11 @@ impl NbEncoder {
             copy_slot(az, 0, &interpolated);
             copy_slot(az, 1, &interpolated);
             copy_slot(az, 2, &interpolated);
+
+            if comfort_noise {
+                self.lsp_old = new;
+                return [Word16(0); AZ_SIZE];
+            }
 
             let quantised = self.lsf.quantise(ctx, mode, &new);
             for index in quantised.indices {

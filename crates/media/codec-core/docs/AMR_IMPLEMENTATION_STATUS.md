@@ -15,13 +15,14 @@
 | **AMR-WB DTX, decoder side** | **Sample-exact over a 150-frame DTX stream** |
 | **AMR-WB DTX through `AmrCodec`** | **Both directions, byte- and sample-exact** |
 | **AMR-NB VAD1** | **Bit-exact** — whole state, 150 frames |
-| **AMR-NB DTX, encoder state** | **Done** — classifier, history, averaging, predictor reset |
-| AMR-NB DTX, decoder + frame-loop wiring | Not started |
+| **AMR-NB DTX, encoder side** | **Byte-identical bitstream, all eight rates, 150 frames** |
+| **AMR-NB DTX, decoder side** | **Sample-exact, all eight rates, plus the muting stream** |
+| **AMR-NB DTX through `AmrCodec`** | **Both directions, byte- and sample-exact** |
 | **AMR-WB homing frames** | **Done** — the encoder emits each mode's pattern |
+| **AMR-NB homing frames** | **Done** — the encoder emits each mode's pattern |
 | **AMR-WB conformance, speech** | **All nine TS 26.173 vectors, both directions** |
 | **AMR-WB conformance, DTX encode** | **`tst_md.cod`, every frame type and payload** |
 | **AMR-WB conformance, DTX decode** | **`tst_md`, 200 frames, sample for sample** |
-| AMR-NB homing frames | Not started |
 | Transcoding, interop, benchmarks | Not started |
 
 Every claim above is a test, not a note. Both decoders reproduce the reference
@@ -76,6 +77,37 @@ ISF spacing *inline* against the coefficient just written rather than in a pass
 afterwards. Written from a summary of the algorithm it was wrong in both
 respects, and only a stream whose encoder actually sets the dithering bit can
 tell. Ours does; the fixture's does not.
+
+**What the narrowband DTX claims, exactly.** With DTX enabled the encoder
+reproduces the reference's own speech / SID / `NO_DATA` sequence over all 150
+frames at **every one of the eight rates**, and each of the twelve transmitted
+SIDs is byte-identical — description, STI bit and mode indication. The decoder
+reproduces the reference decoder sample for sample over the same eight streams,
+and over the muting stream as well.
+
+Four things cost more than the port itself.
+
+The `_mute` fixture never muted. It dropped every SID from frame 50 on,
+including the one that opens the silence, so the decoder never learned DTX had
+begun and read all 61 empty frames as lost speech. Its build-time guard passed
+because the output does differ from the intact stream — just not for the reason
+claimed. With the opening SID kept, `DTX_MUTE` is reached for eleven frames and
+the fade is finally covered: deleting the 0.75 dB step moves 374 samples.
+
+The first speech frame out of `DTX_MUTE` must be muted, so `prev_bf` is written
+*before* the concealers read it. Snapshotting the frame quality first left them
+looking at the value from before the silence.
+
+Narrowband transmits a description on a `SID_FIRST`; wideband blanks one.
+Carrying the wideband habit across gives five octets of `00 00 00 00 02` where
+the reference has a full description — and since both decoders derive a
+`SID_FIRST`'s spectrum by backward analysis and ignore the payload, nothing
+sounds wrong. Only a bitstream comparison catches it.
+
+And the speech path has to run the receiver too. Decoding a speech frame
+without `rx_dtx_handler` and `dtx_dec_activity_update` enters the next silence
+with an empty history and a stale hangover count: 1928 of 24000 samples wrong
+at 4.75 kbit/s, every one of them inside the comfort noise.
 
 Neither reference is committed. `tools/build-amr-reference.sh`,
 `build-amrnb-reference.sh` and the two `*-encoder-reference.sh` scripts fetch

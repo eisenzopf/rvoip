@@ -215,6 +215,13 @@ impl AmrCodec {
                 if let Encoder::WideBand(wide) = &mut encoder {
                     wide.set_allow_dtx(params.dtx);
                 }
+                // Narrowband's switch does more: with DTX off the reference
+                // does not run VAD1 at all, and the open-loop stage's four
+                // detector hooks are skipped with it.
+                #[cfg(feature = "amr-nb")]
+                if let Encoder::NarrowBand(narrow) = &mut encoder {
+                    narrow.set_allow_dtx(params.dtx);
+                }
                 encoder
             },
         })
@@ -267,15 +274,20 @@ impl AmrCodec {
         match &mut self.decoder {
             #[cfg(feature = "amr-nb")]
             Decoder::NarrowBand(decoder) => {
-                let state = if quality_ok {
-                    nb::decoder::FrameState::Good
+                // Through `decode_typed`, not `decode_parameters`, even though
+                // this frame is certainly speech. `rx_dtx_handler` runs on
+                // *every* frame and the backward analysis is fed from every
+                // decoded speech frame, so a speech path that skipped it would
+                // enter the next silence with an empty history and a stale
+                // hangover count. Measured: 1928 of 24000 samples wrong at
+                // 4.75 kbit/s, all of them inside the comfort noise.
+                let rx = if quality_ok {
+                    nb::dtx::RxFrameType::SpeechGood
                 } else {
-                    nb::decoder::FrameState::Bad
+                    nb::dtx::RxFrameType::SpeechBad
                 };
                 let params = nb::bitstream::parse(mode.index(), data).ok_or_else(short)?;
-                Ok(decoder
-                    .decode_parameters(mode.index(), &params, state)
-                    .to_vec())
+                Ok(decoder.decode_typed(rx, mode.index(), &params).to_vec())
             }
             #[cfg(feature = "amr-wb")]
             Decoder::WideBand(decoder) => {
@@ -484,10 +496,28 @@ impl VariableRateCodec for AmrCodec {
                 }
             }
             #[cfg(feature = "amr-nb")]
-            Encoder::NarrowBand(_) => Err(CodecError::feature_not_enabled(
-                "AMR-NB DTX needs the narrowband VAD and DTX encoder, which are not \
-                 implemented yet (see codec-core/docs/AMR_IMPLEMENTATION_PLAN.md)",
-            )),
+            Encoder::NarrowBand(encoder) => {
+                let mut frame = [0i16; 160];
+                frame.copy_from_slice(samples);
+                let rate = nb::enc::encoder::Rate::from_index(mode.index())
+                    .ok_or_else(|| CodecError::encoding_failed("not an AMR-NB speech mode"))?;
+                let (comfort_noise, mut data) = encoder.encode_frame_typed(&frame, rate);
+                if !comfort_noise {
+                    self.cadence.next(false, mode);
+                    return Ok(CodedFrame::speech(mode.index(), data));
+                }
+                match self.cadence.next(true, mode) {
+                    AmrFrameType::Sid(_) => {
+                        // No blanking on a SID_FIRST: narrowband transmits
+                        // the description on both SID types. See
+                        // `nb::bitstream::finish_sid_payload`.
+                        let update = self.cadence.last_sid_was_an_update();
+                        nb::bitstream::finish_sid_payload(&mut data, update, mode.index());
+                        Ok(CodedFrame::comfort_noise(data))
+                    }
+                    _ => Ok(CodedFrame::no_data()),
+                }
+            }
             Encoder::Absent => Err(CodecError::feature_not_enabled(
                 "no AMR encoder is compiled in",
             )),
@@ -523,9 +553,18 @@ impl VariableRateCodec for AmrCodec {
                 }
                 #[cfg(feature = "amr-nb")]
                 Decoder::NarrowBand(decoder) => {
+                    // Narrowband has no `SPEECH_LOST`: the reference maps a
+                    // missing frame to `RX_NO_DATA`, and what that *means*
+                    // depends on the DTX state. Mid-talk-spurt it is a hole to
+                    // conceal; mid-silence it is the encoder saying nothing,
+                    // and comfort noise is the right answer rather than
+                    // extrapolated speech. `decode_typed` makes that
+                    // distinction, which `conceal_lost_frame` cannot.
                     let mode = AmrMode::new(self.variant, frame.mode)
                         .unwrap_or(self.current_mode);
-                    Ok(decoder.conceal_lost_frame(mode.index())?.to_vec())
+                    Ok(decoder
+                        .decode_typed(nb::dtx::RxFrameType::NoData, mode.index(), &[])
+                        .to_vec())
                 }
                 Decoder::Absent => Err(CodecError::feature_not_enabled(
                     "no AMR decoder is compiled in",
@@ -567,10 +606,42 @@ impl VariableRateCodec for AmrCodec {
                         })
                 }
                 #[cfg(feature = "amr-nb")]
-                Decoder::NarrowBand(_) => Err(CodecError::feature_not_enabled(
-                    "AMR-NB comfort noise needs the narrowband DTX decoder, which is \
-                     not implemented yet (see codec-core/docs/AMR_IMPLEMENTATION_PLAN.md)",
-                )),
+                Decoder::NarrowBand(decoder) => {
+                    // A SID's own payload says which of the three it is, and
+                    // which speech mode the encoder had been using; a gap says
+                    // nothing and takes the mode from the caller.
+                    let (rx, mode_index, params) = if frame.kind == FrameKind::NoData {
+                        let mode = AmrMode::new(self.variant, frame.mode)
+                            .unwrap_or(self.current_mode);
+                        (nb::dtx::RxFrameType::NoData, mode.index(), Vec::new())
+                    } else {
+                        let header = nb::bitstream::parse_sid_header(&frame.data)
+                            .ok_or_else(|| {
+                                CodecError::decoding_failed(
+                                    "an AMR-NB SID frame is five octets",
+                                )
+                            })?;
+                        let kind = if !frame.quality_ok {
+                            nb::dtx::RxFrameType::SidBad
+                        } else if header.update {
+                            nb::dtx::RxFrameType::SidUpdate
+                        } else {
+                            nb::dtx::RxFrameType::SidFirst
+                        };
+                        // The description is read with the SID's own 35-bit
+                        // layout, never the speech mode's. A SID_FIRST carries
+                        // no description at all.
+                        let params = if header.update || !frame.quality_ok {
+                            nb::bitstream::parse(8, &frame.data).ok_or_else(|| {
+                                CodecError::decoding_failed("malformed AMR-NB SID payload")
+                            })?
+                        } else {
+                            Vec::new()
+                        };
+                        (kind, header.mode_index, params)
+                    };
+                    Ok(decoder.decode_typed(rx, mode_index, &params).to_vec())
+                }
                 Decoder::Absent => Err(CodecError::feature_not_enabled(
                     "no AMR decoder is compiled in",
                 )),
@@ -681,15 +752,21 @@ mod tests {
         let err = wb.decode_frame(&CodedFrame::no_data()).unwrap_err();
         assert!(err.to_string().contains("gap to conceal"), "{err}");
 
-        // Narrowband still refuses both, and names what it needs.
+        // Narrowband draws that line differently, and deliberately: it has no
+        // `SPEECH_LOST` frame type, so its receiver reads a gap through the
+        // same state machine either way and always has an answer. What it
+        // refuses instead is a malformed SID -- a comfort-noise frame that is
+        // not five octets describes nothing, and decoding it would synthesise
+        // noise from whatever the short buffer happened to parse as.
         #[cfg(feature = "amr-nb")]
         {
             let mut nb = AmrCodec::new(&CodecConfig::amr_nb()).unwrap();
-            for frame in [CodedFrame::no_data(), CodedFrame::comfort_noise(vec![0; 5])] {
-                let err = nb.decode_frame(&frame).unwrap_err();
-                assert!(matches!(err, CodecError::FeatureNotEnabled { .. }), "{err}");
-                assert!(err.to_string().contains("not implemented"), "{err}");
-            }
+            assert_eq!(nb.decode_frame(&CodedFrame::no_data()).unwrap().len(), 160);
+
+            let err = nb
+                .decode_frame(&CodedFrame::comfort_noise(vec![0; 3]))
+                .unwrap_err();
+            assert!(err.to_string().contains("five octets"), "{err}");
         }
         // A lost frame is the one gap wideband can fill.
         assert_eq!(wb.decode_frame(&CodedFrame::lost()).unwrap().len(), 320);
@@ -1242,6 +1319,170 @@ mod tests {
                 }
             }
             assert_eq!((speech, sids, gaps), (77, 12, 61));
+        }
+
+        /// The narrowband encoder with DTX on, against the reference stream.
+        ///
+        /// Frame type for frame type *and* payload for payload. The frame-type
+        /// sequence alone would pass with a right cadence over a wrong SID —
+        /// which is exactly the failure a VAD wired to a constant produces —
+        /// so every transmitted SID's 35 bits are compared too, STI bit and
+        /// mode indication included.
+        #[test]
+        fn narrowband_encoding_with_dtx_reproduces_the_reference_stream() {
+            for mode in 0..8u8 {
+                narrowband_dtx_rate(mode);
+            }
+        }
+
+        /// One rate's DTX stream, encoder side.
+        fn narrowband_dtx_rate(mode: u8) {
+            let want_bits: &[u8] = match mode {
+                0 => include_bytes!("testdata/amrnb_dtx_mode0.amr"),
+                1 => include_bytes!("testdata/amrnb_dtx_mode1.amr"),
+                2 => include_bytes!("testdata/amrnb_dtx_mode2.amr"),
+                3 => include_bytes!("testdata/amrnb_dtx_mode3.amr"),
+                4 => include_bytes!("testdata/amrnb_dtx_mode4.amr"),
+                5 => include_bytes!("testdata/amrnb_dtx_mode5.amr"),
+                6 => include_bytes!("testdata/amrnb_dtx_mode6.amr"),
+                _ => include_bytes!("testdata/amrnb_dtx_mode7.amr"),
+            };
+            let pcm: &[u8] = include_bytes!("testdata/amrnb_dtx_input.pcm");
+            let (_, want) = storage::read(want_bits).expect("fixture parses");
+
+            let mut config = CodecConfig::amr_nb();
+            config.parameters.amr.dtx = true;
+            config.parameters.amr.mode_set = 1 << mode;
+            let mut codec = AmrCodec::new(&config).unwrap();
+
+            let (mut speech, mut sids, mut gaps) = (0usize, 0usize, 0usize);
+            for (n, frame) in want.iter().enumerate() {
+                let samples: Vec<i16> = pcm[n * 320..(n + 1) * 320]
+                    .chunks_exact(2)
+                    .map(|b| i16::from_le_bytes([b[0], b[1]]))
+                    .collect();
+                let got = codec.encode_frame(&samples).expect("frame encodes");
+                match frame.frame_type {
+                    AmrFrameType::Speech(_) => {
+                        speech += 1;
+                        assert_eq!(got.kind, FrameKind::Speech, "mode {mode} frame {n} kind");
+                        assert_eq!(got.data, frame.data, "mode {mode} frame {n} payload");
+                    }
+                    AmrFrameType::Sid(_) => {
+                        sids += 1;
+                        assert_eq!(got.kind, FrameKind::ComfortNoise, "mode {mode} frame {n} kind");
+                        assert_eq!(got.data, frame.data, "mode {mode} frame {n} SID payload");
+                    }
+                    AmrFrameType::NoData => {
+                        gaps += 1;
+                        assert_eq!(got.kind, FrameKind::NoData, "mode {mode} frame {n} kind");
+                        assert!(got.data.is_empty());
+                    }
+                    other @ AmrFrameType::SpeechLost => panic!("unexpected {other:?} at {n}"),
+                }
+            }
+            assert_eq!((speech, sids, gaps), (75, 12, 63), "mode {mode} frame-type mix");
+        }
+
+        /// The narrowband DTX stream decoded through the public API,
+        /// sample-exact, on all eight rates.
+        ///
+        /// The decoder module's own test proves the decoder; this proves the
+        /// wiring above it — that a caller with nothing but `CodedFrame` can
+        /// distinguish a SID, an update and a gap, and reaches the reference's
+        /// own samples doing so.
+        #[test]
+        #[allow(clippy::similar_names)]
+        fn a_narrowband_dtx_stream_is_sample_exact_through_the_trait() {
+            for mode in 0..8u8 {
+                let (bits, pcm): (&[u8], &[u8]) = match mode {
+                    0 => (
+                        include_bytes!("testdata/amrnb_dtx_mode0.amr"),
+                        include_bytes!("testdata/amrnb_dtx_mode0.pcm"),
+                    ),
+                    1 => (
+                        include_bytes!("testdata/amrnb_dtx_mode1.amr"),
+                        include_bytes!("testdata/amrnb_dtx_mode1.pcm"),
+                    ),
+                    2 => (
+                        include_bytes!("testdata/amrnb_dtx_mode2.amr"),
+                        include_bytes!("testdata/amrnb_dtx_mode2.pcm"),
+                    ),
+                    3 => (
+                        include_bytes!("testdata/amrnb_dtx_mode3.amr"),
+                        include_bytes!("testdata/amrnb_dtx_mode3.pcm"),
+                    ),
+                    4 => (
+                        include_bytes!("testdata/amrnb_dtx_mode4.amr"),
+                        include_bytes!("testdata/amrnb_dtx_mode4.pcm"),
+                    ),
+                    5 => (
+                        include_bytes!("testdata/amrnb_dtx_mode5.amr"),
+                        include_bytes!("testdata/amrnb_dtx_mode5.pcm"),
+                    ),
+                    6 => (
+                        include_bytes!("testdata/amrnb_dtx_mode6.amr"),
+                        include_bytes!("testdata/amrnb_dtx_mode6.pcm"),
+                    ),
+                    _ => (
+                        include_bytes!("testdata/amrnb_dtx_mode7.amr"),
+                        include_bytes!("testdata/amrnb_dtx_mode7.pcm"),
+                    ),
+                };
+                let want: Vec<i16> = pcm
+                    .chunks_exact(2)
+                    .map(|b| i16::from_le_bytes([b[0], b[1]]))
+                    .collect();
+                let (_, frames) = storage::read(bits).expect("fixture parses");
+
+                let config = CodecConfig::amr_nb();
+                let mut codec = AmrCodec::new(&config).unwrap();
+                let (mut exact, mut total, mut kinds) = (0usize, 0usize, [0usize; 3]);
+
+                for (n, frame) in frames.iter().enumerate() {
+                    let coded = match frame.frame_type {
+                        AmrFrameType::Sid(_) => {
+                            kinds[1] += 1;
+                            CodedFrame {
+                                kind: FrameKind::ComfortNoise,
+                                mode,
+                                data: frame.data.clone(),
+                                quality_ok: frame.quality_ok,
+                            }
+                        }
+                        AmrFrameType::NoData => {
+                            kinds[2] += 1;
+                            CodedFrame {
+                                kind: FrameKind::NoData,
+                                mode,
+                                data: Vec::new(),
+                                quality_ok: true,
+                            }
+                        }
+                        _ => {
+                            kinds[0] += 1;
+                            CodedFrame {
+                                kind: FrameKind::Speech,
+                                mode,
+                                data: frame.data.clone(),
+                                quality_ok: frame.quality_ok,
+                            }
+                        }
+                    };
+                    let got = codec.decode_frame(&coded).expect("frame decodes");
+                    for (i, &sample) in got.iter().enumerate() {
+                        let at = n * 160 + i;
+                        if at >= want.len() {
+                            break;
+                        }
+                        total += 1;
+                        exact += usize::from(sample == want[at]);
+                    }
+                }
+
+                assert_eq!(kinds, [75, 12, 63], "mode {mode} frame-type mix");
+                assert_eq!(exact, total, "mode {mode}: {} of {total} differ", total - exact);
+            }
         }
 
         /// A real DTX stream, decoded entirely through the public API.

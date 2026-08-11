@@ -402,6 +402,18 @@ impl CodeGainPredictor {
         (log2_avg, db_avg)
     }
 
+    /// Overwrite both histories with one value each — the encoder's
+    /// `dtx_enc` half of [`reseed_from_sid`](Self::reseed_from_sid).
+    ///
+    /// The decoder derives the two values from the SID's energy field; the
+    /// encoder already holds them, having just computed the index. Same effect,
+    /// different starting point, so they are separate entry points rather than
+    /// one with a flag.
+    pub const fn seed_directly(&mut self, db: Word16, log2: Word16) {
+        self.past_db = [db; NPRED];
+        self.past_log2 = [log2; NPRED];
+    }
+
     /// Re-seed the history from a SID frame's logarithmic energy,
     /// TS 26.073 `dtx_dec.c`.
     ///

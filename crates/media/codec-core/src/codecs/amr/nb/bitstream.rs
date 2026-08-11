@@ -117,6 +117,40 @@ pub fn parse(mode_index: u8, payload: &[u8]) -> Option<Vec<u16>> {
     read_parameters(mode_index, &bits)
 }
 
+/// Write a SID payload's STI bit and mode indication — `Write_serial`'s tail.
+///
+/// `update` is true for a `SID_UPDATE` and false for a `SID_FIRST`. `mode` is
+/// the speech mode the encoder had been using, 0..=7.
+///
+/// The mode goes out **least significant bit first**, which nothing else in
+/// this codec does; [`parse_sid_header`] undoes it, and the reason to write the
+/// permutation out in both places rather than share a helper is that the two
+/// are the only places it appears and each is checkable against its own line of
+/// the reference.
+///
+/// # A `SID_FIRST` keeps its description here, unlike wideband
+///
+/// `Write_serial` writes the 35 description bits for both SID types and only
+/// the STI bit distinguishes them. Wideband is the opposite — TS 26.173 blanks
+/// a `SID_FIRST`'s payload — and carrying that habit across produces five
+/// octets of `00 00 00 00 02` where the reference has a full description. The
+/// decoders agree on ignoring it either way, since a `SID_FIRST` is decoded by
+/// backward analysis, so nothing sounds wrong; only a bitstream comparison
+/// catches it.
+///
+/// # Panics
+/// If `payload` is not exactly five octets, or `mode` is not a speech mode.
+pub fn finish_sid_payload(payload: &mut [u8], update: bool, mode: u8) {
+    assert_eq!(payload.len(), 5, "a narrowband SID is five octets");
+    assert!(mode < 8, "mode {mode} is not a speech mode");
+
+    let reversed = ((mode & 4) >> 2) | (mode & 2) | ((mode & 1) << 2);
+    // Bits 35..=38 of a 40-bit payload: the low five bits of the last octet,
+    // of which the lowest is unused and stays clear.
+    let tail = (u8::from(update) << 4) | (reversed << 1);
+    payload[4] = (payload[4] & 0xE0) | tail;
+}
+
 /// A SID frame's two header fields — the bits after the 35 quantised ones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SidHeader {
