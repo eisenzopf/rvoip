@@ -148,7 +148,10 @@ fn codec_descriptor(
             name: name.to_string(),
             clock_rate_hz: config.sample_rate,
             channels: config.channels,
-            fmtp: None,
+            // Carried, not dropped. `rvoip-core` keys its transcoding codec
+            // groups on this, so a hard-coded `None` puts every SIP leg in one
+            // group and silently discards whatever the peer negotiated.
+            fmtp: config.fmtp.clone(),
         },
         payload_type,
     ))
@@ -1200,7 +1203,33 @@ mod negotiated_codec_tests {
             codec: codec.to_string(),
             sample_rate,
             channels,
+            fmtp: None,
         }
+    }
+
+    /// The negotiated fmtp reaches `CodecInfo` rather than being dropped.
+    ///
+    /// It was hard-coded to `None` here, which is the second of two
+    /// independent drop points on the same parameter. `rvoip-core` keys its
+    /// transcoding codec groups on this field, so every SIP leg landed in the
+    /// one `fmtp: None` group and whatever the peer negotiated — Opus's
+    /// `maxaveragebitrate`, and AMR's framing the moment AMR reaches here —
+    /// was silently discarded.
+    #[test]
+    fn the_negotiated_fmtp_reaches_the_codec_descriptor() {
+        let mut config = negotiated("PCMU", 8_000, 1);
+        config.fmtp = Some("annexb=no".to_string());
+        let (codec, _) = codec_descriptor(&config, 0).unwrap();
+        assert_eq!(codec.fmtp.as_deref(), Some("annexb=no"));
+
+        // Absent stays absent rather than becoming an empty string, because
+        // the two are different keys downstream.
+        let (plain, _) = codec_descriptor(&negotiated("PCMU", 8_000, 1), 0).unwrap();
+        assert_eq!(plain.fmtp, None);
+
+        // And two legs differing only in fmtp are different descriptors --
+        // the property the transcoding grouping depends on.
+        assert_ne!(codec, plain);
     }
 
     #[test]

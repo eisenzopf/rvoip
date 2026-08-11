@@ -6263,6 +6263,7 @@ a=recvonly\r\n";
                         codec: "PCMU".to_string(),
                         sample_rate: 8_000,
                         channels: 1,
+                        fmtp: None,
                     },
                     0,
                 );
@@ -6394,6 +6395,7 @@ a=recvonly\r\n";
                         codec: "PCMU".to_string(),
                         sample_rate: 8_000,
                         channels: 1,
+                        fmtp: None,
                     },
                     0,
                 );

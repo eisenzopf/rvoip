@@ -2719,6 +2719,7 @@ pub(crate) async fn execute_action(
                 codec: config.codec,
                 sample_rate: config.clock_rate,
                 channels: config.channels,
+                fmtp: config.negotiated_fmtp.clone(),
             };
             session.set_negotiated_config(session_config, config.payload_type);
             session.local_media_direction = config.local_direction;
@@ -2762,6 +2763,7 @@ pub(crate) async fn execute_action(
                     codec: config.codec,
                     sample_rate: config.clock_rate,
                     channels: config.channels,
+                    fmtp: config.negotiated_fmtp.clone(),
                 };
                 session.local_sdp = Some(local_sdp);
                 session.set_negotiated_config(session_config, config.payload_type);
@@ -2790,6 +2792,7 @@ pub(crate) async fn execute_action(
                     codec: config.codec,
                     sample_rate: config.clock_rate,
                     channels: config.channels,
+                    fmtp: config.negotiated_fmtp.clone(),
                 };
                 session.local_sdp = Some(local_sdp);
                 session.set_negotiated_config(session_config, config.payload_type);
@@ -5714,6 +5717,7 @@ mod lane_owned_action_state_tests {
             codec: "PCMU".to_string(),
             sample_rate: 8_000,
             channels: 1,
+            fmtp: None,
         });
 
         retire_lane_owned_media_identity(&mut session);

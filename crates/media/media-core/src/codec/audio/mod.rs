@@ -1,6 +1,12 @@
 //! Audio codec types and utilities
 
 // Common types and utilities for audio codecs
+/// AMR-NB and AMR-WB, gated on the codec being compiled in at all — the
+/// module's every type comes from `codec-core`'s `amr` module, which does not
+/// exist without one of these features. An ungated `pub mod` here compiles
+/// under `--all-features` and breaks every narrower build, which is how this
+/// was found.
+#[cfg(any(feature = "amr-nb", feature = "amr-wb"))]
 pub mod amr;
 pub mod common;
 pub mod dtmf;
