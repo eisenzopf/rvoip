@@ -31,6 +31,7 @@
 | **Performance** | **Measured, with a gate** — see below |
 | **SDP to a working codec** | **An AMR-WB offer negotiates and codes** |
 | **A real AMR call** | **Three, over loopback, with verified audio** |
+| **RFC 4867 wire format** | **68 payloads agree with Wireshark's dissector** |
 | Live PBX interop | Blocked — see below |
 
 Every claim above is a test, not a note. Both decoders reproduce the reference
@@ -170,6 +171,30 @@ table above are the ones continuous integration protects least, and they are
 distinguishable from the fixture-backed rows on exactly that basis. Everything
 else — including all four bit-exactness paths against the committed fixtures —
 runs on every pull request through the `codec-features` gate.
+
+## The wire format, checked against someone else's dissector
+
+```bash
+crates/media/codec-core/tools/verify-amr-rtp-framing.sh
+```
+
+68 payloads — both variants, both framings, every speech mode, with and
+without a mode request — packed by this crate and read back by **Wireshark's**
+AMR dissector, which is an independent implementation of RFC 4867. Frame type
+and CMR agree on all of them.
+
+This closes a gap that neither the 3GPP vectors nor an rvoip-to-rvoip call can
+reach. The codec *bits* are bit-exact against the reference implementations and
+their sorting is checked against reference-produced `.amr` files, but
+everything RFC 4867 adds for RTP — the CMR nibble, the table-of-contents chain,
+octet-aligned padding — was otherwise verified only by packing and unpacking
+with our own code. A round trip cannot catch a symmetric mistake: put the CMR
+in the wrong four bits and our depacker reads it out of the wrong four bits,
+the audio is perfect, and no peer can read the stream. Two rvoip endpoints
+calling each other cannot find that either, for exactly the same reason.
+
+Verified by mutation: rotating the first octet's nibbles makes 47 of the 68
+disagree.
 
 ## Interop, and what is blocked
 
