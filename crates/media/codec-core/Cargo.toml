@@ -42,6 +42,11 @@ name = "g711_codec"
 harness = false
 required-features = ["g711"]
 
+[[bench]]
+name = "amr_codec"
+harness = false
+required-features = ["amr-nb", "amr-wb"]
+
 [features]
 default = ["g711"]
 

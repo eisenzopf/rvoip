@@ -28,7 +28,8 @@
 | **AMR reachable through media-core** | **Both variants resolve, encode and decode end to end** |
 | **Transcoding** | **Six AMR pairs, tested by property** |
 | **`mode-change-period` / `-neighbor`** | **Honoured** — they were parsed and obeyed by nothing |
-| Benchmarks, interop | Not started |
+| **Performance** | **Measured, with a gate** — see below |
+| Interop | Not started |
 
 Every claim above is a test, not a note. Both decoders reproduce the reference
 decoders sample for sample; both encoders reproduce the reference *bitstream*
@@ -123,6 +124,32 @@ constant rate; a rate switch carries the LSF predictor, both gain predictors,
 the pitch history and the DTX rings across a change in what those numbers mean,
 and no fixture reaches that state at all. It contains no homing frame, and the
 tests assert that rather than implying otherwise.
+
+## Performance, measured
+
+`cargo bench -p rvoip-codec-core --all-features --bench amr_codec`, then
+`python3 tools/check-amr-rtf.py`. A 20 ms frame has a 20 ms budget, so the
+real-time factor is `time / 20 ms`.
+
+| Path | Worst rate | RTF |
+|---|---|---|
+| AMR-NB encode | 12.2 | 0.0095 |
+| AMR-NB decode | 7.95 | 0.0010 |
+| AMR-WB encode | 23.85 | 0.0229 |
+| AMR-WB decode | 23.85 | 0.0056 |
+| AMR-NB conceal | — | 0.0007 |
+| AMR-WB conceal | — | 0.0031 |
+
+A duplex leg — encode plus decode, since a call does both — costs 0.0105 at
+narrowband and 0.0285 at wideband: about 95 and 35 legs per core. The plan's
+goal was 20 concurrent legs.
+
+The gate is a script over Criterion's own output rather than an assertion in
+`cargo test`, following the policy the G.711 benchmark's header sets out: a
+debug build under a loaded scheduler produces numbers that are meaningless as
+a pass/fail signal. It fails if it finds *no* AMR results, because a
+performance gate that silently checks nothing is the same failure this branch
+has hit four times elsewhere.
 
 Neither reference is committed. `tools/build-amr-reference.sh`,
 `build-amrnb-reference.sh` and the two `*-encoder-reference.sh` scripts fetch
