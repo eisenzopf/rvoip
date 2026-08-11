@@ -17,6 +17,9 @@ pub use audio::common::*;
 pub use transcoding::{Transcoder, TranscodingPath, TranscodingStats};
 
 // Re-export codec mapping types
+pub mod spec;
+pub use spec::AudioCodecSpec;
+
 pub use mapping::{CodecCapability, CodecMapper};
 
 // Re-export codec factory
