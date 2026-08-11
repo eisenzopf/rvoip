@@ -34,6 +34,7 @@
 
 pub mod analysis;
 pub mod codebook;
+pub mod dtx;
 pub mod encoder;
 pub mod gain_quant;
 pub mod isf_quant;
