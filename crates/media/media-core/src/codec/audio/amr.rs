@@ -147,6 +147,17 @@ impl AmrAdapter {
         })
     }
 
+    /// Allow this session's encoder to replace silence with comfort noise.
+    ///
+    /// Off unless a deployment asks for it — see
+    /// [`AMR_DTX_PARAMETER`](crate::relay::controller::AMR_DTX_PARAMETER). It
+    /// changes what goes on the wire, and the receive side handles a peer's
+    /// SID and `NO_DATA` frames whether or not this is set, so nothing about
+    /// interoperating depends on turning it on.
+    pub fn set_allow_dtx(&mut self, allow: bool) {
+        self.codec.set_allow_dtx(allow);
+    }
+
     /// Samples in one 20 ms frame at this variant's rate: 160 or 320.
     #[must_use]
     pub const fn frame_samples(&self) -> usize {

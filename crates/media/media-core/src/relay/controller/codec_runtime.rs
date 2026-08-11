@@ -20,8 +20,8 @@ use crate::types::AudioFrame;
 use crate::types::SampleRate;
 
 use super::types::{
-    MediaConfig, NegotiatedAudioCodec, AUDIO_CHANNELS_PARAMETER, NEGOTIATED_FMTP_PARAMETER,
-    RTP_CLOCK_RATE_PARAMETER, RTP_PAYLOAD_TYPE_PARAMETER,
+    MediaConfig, NegotiatedAudioCodec, AMR_DTX_PARAMETER, AUDIO_CHANNELS_PARAMETER,
+    NEGOTIATED_FMTP_PARAMETER, RTP_CLOCK_RATE_PARAMETER, RTP_PAYLOAD_TYPE_PARAMETER,
 };
 
 fn parse_parameter<T>(config: &MediaConfig, key: &str) -> Result<Option<T>>
@@ -106,6 +106,10 @@ pub(super) fn resolve_codec(config: &MediaConfig) -> Result<NegotiatedAudioCodec
         clock_rate: supplied_clock_rate.unwrap_or(default_clock_rate),
         channels: supplied_channels.unwrap_or(default_channels),
         fmtp: config.parameters.get(NEGOTIATED_FMTP_PARAMETER).cloned(),
+        dtx: config
+            .parameters
+            .get(AMR_DTX_PARAMETER)
+            .is_some_and(|value| value.eq_ignore_ascii_case("true")),
     };
     validate_codec_shape(&codec)?;
     Ok(codec)
@@ -274,11 +278,10 @@ impl StatefulCodec {
         if is_amr(&codec.name) {
             // The fmtp is the framing, so it is passed through rather than
             // defaulted: `octet-align` decides the payload's bit layout.
-            return Ok(Self::Amr(Box::new(AmrAdapter::new(
-                codec.payload_type,
-                &codec.name,
-                codec.fmtp.as_deref(),
-            )?)));
+            let mut adapter =
+                AmrAdapter::new(codec.payload_type, &codec.name, codec.fmtp.as_deref())?;
+            adapter.set_allow_dtx(codec.dtx);
+            return Ok(Self::Amr(Box::new(adapter)));
         }
 
         Err(Error::unsupported_codec(&codec.name))
@@ -622,6 +625,64 @@ mod tests {
         assert!(
             after < before,
             "the request was for a lower rate, so frames should have shrunk: {before} -> {after}"
+        );
+    }
+
+    /// A session can actually turn DTX on, and does not by default.
+    ///
+    /// All the DTX bit-exactness work lives in codec-core and every test there
+    /// sets `parameters.amr.dtx` by hand. Nothing in the production path ever
+    /// did, and there was no config surface that could — so the encoder ran
+    /// 200 frames of digital silence and emitted 200 identical full-rate
+    /// frames.
+    ///
+    /// Both halves are asserted. Off by default matters because DTX changes
+    /// what goes on the wire and a deployment should opt in; on-when-asked
+    /// matters because otherwise the switch is decorative.
+    #[tokio::test]
+    #[cfg(feature = "amr-nb")]
+    async fn a_session_can_enable_dtx_and_does_not_by_default() {
+        // Digital silence is what DTX exists for. Not a homing frame: an
+        // all-0x0008 frame would trip the encoder's own homing test.
+        let silence = AudioFrame::new(vec![0i16; 160], 8_000, 1, 0);
+
+        async fn run(dtx: bool, silence: &AudioFrame) -> std::collections::BTreeSet<usize> {
+            let mut config = amr_config("AMR", 96, 8_000, "octet-align=1");
+            if dtx {
+                config
+                    .parameters
+                    .insert(AMR_DTX_PARAMETER.to_string(), "true".to_string());
+            }
+            let resolved = resolve_codec(&config).expect("resolves");
+            assert_eq!(resolved.dtx, dtx, "the parameter did not reach the format");
+            let runtime = DialogCodecRuntime::new(resolved).expect("constructs");
+
+            let mut sizes = std::collections::BTreeSet::new();
+            for _ in 0..200 {
+                sizes.insert(runtime.encode(silence).await.expect("encodes").len());
+            }
+            sizes
+        }
+
+        let without = run(false, &silence).await;
+        assert_eq!(
+            without.len(),
+            1,
+            "DTX is off by default, so every frame should be full-rate: {without:?}"
+        );
+
+        let with = run(true, &silence).await;
+        assert!(
+            with.len() > 1,
+            "200 frames of silence with DTX on produced one payload size: {with:?}"
+        );
+        // A SID is 5 octets of payload plus framing, and a NO_DATA carries
+        // none — both are far shorter than a speech frame, so the smallest
+        // size seen must have dropped well below the no-DTX one.
+        let speech = *without.iter().next().expect("one size");
+        assert!(
+            *with.iter().next().expect("at least one") < speech,
+            "nothing shorter than a speech frame was emitted: {with:?} vs {speech}"
         );
     }
 

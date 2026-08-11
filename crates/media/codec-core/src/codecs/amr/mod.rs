@@ -457,6 +457,29 @@ impl AmrCodec {
         self.octet_align
     }
 
+    /// Turn discontinuous transmission on or off.
+    ///
+    /// Local policy, not a negotiated parameter: RFC 4867 defines no fmtp for
+    /// DTX and a sender may use it or not without telling the peer, because
+    /// every conforming receiver has to handle SID and `NO_DATA` frames
+    /// regardless. So this is a runtime switch rather than something read out
+    /// of an answer.
+    ///
+    /// It reaches the *encoder's* own switch too, which is a different thing:
+    /// wideband's hangover counter runs either way because 23.85 kbit/s reads
+    /// it, and narrowband skips VAD1 entirely when this is off.
+    pub fn set_allow_dtx(&mut self, allow: bool) {
+        self.dtx = allow;
+        #[cfg(feature = "amr-wb")]
+        if let Encoder::WideBand(wide) = &mut self.encoder {
+            wide.set_allow_dtx(allow);
+        }
+        #[cfg(feature = "amr-nb")]
+        if let Encoder::NarrowBand(narrow) = &mut self.encoder {
+            narrow.set_allow_dtx(allow);
+        }
+    }
+
     /// Whether discontinuous transmission is enabled.
     #[must_use]
     pub const fn dtx_enabled(&self) -> bool {

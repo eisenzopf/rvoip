@@ -29,6 +29,17 @@ pub const AUDIO_CHANNELS_PARAMETER: &str = "audio_channels";
 /// than a tuning detail — see [`super::bridge`].
 pub const NEGOTIATED_FMTP_PARAMETER: &str = "negotiated_fmtp";
 
+/// Whether an AMR session may replace silence with comfort noise.
+///
+/// `"true"` enables it; anything else, or absence, leaves it off.
+///
+/// Local policy rather than a negotiated parameter: RFC 4867 has no fmtp for
+/// DTX, and a sender may use it or not without telling the peer — every
+/// conforming AMR receiver must handle SID and NO_DATA frames regardless.
+/// Off by default because it changes what goes on the wire, and a deployment
+/// should opt into that rather than discover it.
+pub const AMR_DTX_PARAMETER: &str = "amr_dtx";
+
 /// Media configuration for a session
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaConfig {
@@ -110,6 +121,9 @@ pub struct NegotiatedAudioCodec {
     /// payload's bit layout, so a session that lost it would build a framing
     /// the peer cannot parse. Every other codec here ignores it.
     pub fmtp: Option<String>,
+    /// Whether this session's encoder may emit comfort noise — see
+    /// [`AMR_DTX_PARAMETER`]. Meaningless for every codec but AMR.
+    pub dtx: bool,
 }
 
 /// Media session status

@@ -821,6 +821,7 @@ fn default_pcmu_runtime() -> Arc<DialogCodecRuntime> {
             clock_rate: 8_000,
             channels: 1,
             fmtp: None,
+            dtx: false,
         })
         .expect("the built-in PCMU transmitter format is valid"),
     )
@@ -1040,6 +1041,7 @@ mod tests {
             clock_rate: 8_000,
             channels: 1,
             fmtp: None,
+            dtx: false,
         };
         let (tone_payload, tone) = encode_generated(
             format.clone(),
@@ -1074,6 +1076,7 @@ mod tests {
             clock_rate: 48_000,
             channels: 2,
             fmtp: None,
+            dtx: false,
         };
         for source in [
             AudioSource::Tone {
