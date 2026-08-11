@@ -78,7 +78,7 @@ impl Default for DtxEncoder {
 impl DtxEncoder {
     /// A DTX encoder in its reset state, as `dtx_enc_reset` leaves it.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             lsp_hist: [Word16(0); M * DTX_HIST_SIZE],
             // The reference clears eight words here with a loop bound of `M`,
@@ -211,7 +211,7 @@ impl DtxEncoder {
     }
 
     /// Record the quantiser indices a new SID produced.
-    pub fn set_indices(&mut self, init_index: Word16, lsp_index: [Word16; 3]) {
+    pub const fn set_indices(&mut self, init_index: Word16, lsp_index: [Word16; 3]) {
         self.init_lsf_vq_index = init_index;
         self.lsp_index = lsp_index;
     }
