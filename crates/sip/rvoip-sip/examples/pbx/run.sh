@@ -72,7 +72,7 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --help|-h)
-      echo "Usage: $0 [--pbx asterisk|freeswitch|both] [--api endpoint|stream_peer|callback|all] [--scenario registration|basic_call|g729_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all] [--transport UDP|TLS|all] [--repeat N] [--stop-on-fail 0|1]"
+      echo "Usage: $0 [--pbx asterisk|freeswitch|both] [--api endpoint|stream_peer|callback|all] [--scenario registration|basic_call|g729_call|amr_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all] [--transport UDP|TLS|all] [--repeat N] [--stop-on-fail 0|1]"
       exit 0
       ;;
     *)
@@ -294,6 +294,7 @@ api_examples() {
 scenario_list() {
   case "$SCENARIO_ARG" in
     all) printf '%s\n' registration basic_call g729_call hold_resume ring_cancel dtmf reject blind_transfer ;;
+    amr|amr_call) printf '%s\n' amr_call ;;
     basic|basic_call|call) printf '%s\n' basic_call ;;
     g729|g729_call|g729ab|g729ab_call) printf '%s\n' g729_call ;;
     hold|hold_resume) printf '%s\n' hold_resume ;;
@@ -372,6 +373,7 @@ codec_profile_for_scenario() {
   fi
   case "$scenario" in
     g729_call) printf '%s\n' g729ab ;;
+    amr_call) printf '%s\n' amrnb ;;
     *) printf '%s\n' default ;;
   esac
 }
@@ -1031,7 +1033,7 @@ run_two_party() {
   transport=$4
   api_label=$(example_label "$example")
   codec_profile=$(codec_profile_for_scenario "$scenario")
-  if [ "$scenario" = "g729_call" ]; then
+  if [ "$scenario" = "g729_call" ] || [ "$scenario" = "amr_call" ]; then
     out_dir="$OUT_ROOT/$provider/$api_label/$scenario/$codec_profile/$transport"
   else
     out_dir="$OUT_ROOT/$provider/$api_label/$scenario/$transport"
@@ -1046,7 +1048,7 @@ run_two_party() {
 
   rc=0
   case "$scenario" in
-    basic_call|g729_call|hold_resume|dtmf|reject)
+    basic_call|g729_call|amr_call|hold_resume|dtmf|reject)
       start_one "$provider" "$example" "$scenario" "$transport" callee "$out_dir" "$out_dir/callee.log"
       pid_a=$LAST_PID
       wait_for_log "$out_dir/callee.log" "Registered." "$pid_a" "$scenario-callee" || rc=$?

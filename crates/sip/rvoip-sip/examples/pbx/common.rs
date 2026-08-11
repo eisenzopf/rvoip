@@ -54,6 +54,10 @@ pub type ExampleResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub const SAMPLE_RATE: u32 = 8000;
 pub const FRAME_SIZE: usize = 160;
 pub const G729_FRAME_SIZE: usize = 80;
+
+/// One 20 ms AMR-NB frame. AMR-WB is 320, but the recorder's frame size only
+/// has to divide the stream evenly, and 160 does for both.
+pub const AMR_FRAME_SIZE: usize = 160;
 pub const TONE_FRAMES: usize = 150;
 pub const ENDPOINT_2001_TONE_HZ: f32 = 440.0;
 pub const ENDPOINT_2002_TONE_HZ: f32 = 880.0;
@@ -188,6 +192,7 @@ pub enum Scenario {
     Registration,
     BasicCall,
     G729Call,
+    AmrCall,
     HoldResume,
     RingCancel,
     Dtmf,
@@ -218,6 +223,7 @@ impl Scenario {
             "registration" | "registration_tls" | "registration_udp" => Ok(Self::Registration),
             "basic" | "basic_call" | "call" | "udp_call" => Ok(Self::BasicCall),
             "g729" | "g729_call" | "g729ab" | "g729ab_call" => Ok(Self::G729Call),
+            "amr" | "amr_call" | "amrwb" | "amrwb_call" | "amr_wb_call" => Ok(Self::AmrCall),
             "hold" | "hold_resume" => Ok(Self::HoldResume),
             "ring" | "ring_cancel" | "ring_remote" => Ok(Self::RingCancel),
             "dtmf" => Ok(Self::Dtmf),
@@ -233,6 +239,12 @@ pub enum CodecProfile {
     Default,
     G729A,
     G729AB,
+    /// AMR-NB, octet-aligned. The framing most PBXes default to, and the one
+    /// whose fmtp has to survive the round trip for anything to be audible.
+    AmrNb,
+    /// AMR-WB, octet-aligned. Separate because it is 16 kHz with 320-sample
+    /// frames, which is where a narrowband assumption shows up.
+    AmrWb,
 }
 
 impl CodecProfile {
@@ -243,6 +255,9 @@ impl CodecProfile {
 
         match Scenario::from_env_or_args()? {
             Scenario::G729Call => Ok(Self::G729AB),
+            // Narrowband by default: it is the variant every AMR-capable PBX
+            // has, and PBX_CODEC_PROFILE=amrwb selects the other.
+            Scenario::AmrCall => Ok(Self::AmrNb),
             _ => Ok(Self::Default),
         }
     }
@@ -252,6 +267,8 @@ impl CodecProfile {
             "" | "default" | "pcmu_pcma" | "g711" => Ok(Self::Default),
             "g729a" | "g729_annex_a" | "annexb_no" => Ok(Self::G729A),
             "g729" | "g729ab" | "g729ba" | "annexb_yes" => Ok(Self::G729AB),
+            "amr" | "amrnb" | "amr_nb" => Ok(Self::AmrNb),
+            "amrwb" | "amr_wb" => Ok(Self::AmrWb),
             other => Err(format!("unknown PBX codec profile '{}'", other).into()),
         }
     }
@@ -267,6 +284,12 @@ impl CodecProfile {
                 config.offered_codecs = vec![18, 101];
                 config.g729_annex_b = true;
             }
+            // Octet-aligned only: offering both framings for one codec lets a
+            // PBX pick the other one, and then a passing call would say
+            // nothing about the framing under test. 107 is AMR-NB
+            // octet-aligned and 105 is AMR-WB octet-aligned.
+            Self::AmrNb => config.offered_codecs = vec![107, 101],
+            Self::AmrWb => config.offered_codecs = vec![105, 101],
         }
     }
 
@@ -275,6 +298,8 @@ impl CodecProfile {
             Self::Default => "default",
             Self::G729A => "g729a",
             Self::G729AB => "g729ab",
+            Self::AmrNb => "amrnb",
+            Self::AmrWb => "amrwb",
         }
     }
 }
@@ -1352,6 +1377,7 @@ async fn run_stream_peer(
         }
         Scenario::BasicCall
         | Scenario::G729Call
+        | Scenario::AmrCall
         | Scenario::HoldResume
         | Scenario::RingCancel
         | Scenario::Dtmf
@@ -1382,6 +1408,7 @@ async fn run_endpoint(
         }
         Scenario::BasicCall
         | Scenario::G729Call
+        | Scenario::AmrCall
         | Scenario::HoldResume
         | Scenario::RingCancel
         | Scenario::Dtmf
@@ -1418,6 +1445,7 @@ async fn run_callback(
         }
         Scenario::BasicCall
         | Scenario::G729Call
+        | Scenario::AmrCall
         | Scenario::HoldResume
         | Scenario::RingCancel
         | Scenario::Dtmf
@@ -1468,6 +1496,19 @@ async fn run_stream_peer_two_party(
                 timeout(remote_test_timeout(provider)?, peer.wait_for_incoming()).await??;
             let handle = incoming.accept().await?;
             run_g729_callee(provider, cfg, &handle, transport).await?;
+        }
+        (Scenario::AmrCall, Role::Caller) => {
+            settle_after_register(provider).await;
+            let target = cfg.outbound_call_uri(target_user_for(transport));
+            let handle =
+                call_with_answer_retry(peer, &target, remote_test_timeout(provider)?).await?;
+            run_amr_caller(cfg, &handle, transport).await?;
+        }
+        (Scenario::AmrCall, Role::Callee) => {
+            let incoming =
+                timeout(remote_test_timeout(provider)?, peer.wait_for_incoming()).await??;
+            let handle = incoming.accept().await?;
+            run_amr_callee(provider, cfg, &handle, transport).await?;
         }
         (Scenario::HoldResume, Role::Caller) => {
             settle_after_register(provider).await;
@@ -2073,6 +2114,65 @@ async fn run_basic_callee(
     recorder
         .stop_and_save(&cfg.output_dir, g711_callee_wav(transport))
         .await?;
+    Ok(())
+}
+
+/// Stream a tone over a negotiated AMR call and keep what comes back.
+///
+/// The PBX is the peer here, not another rvoip endpoint — which is the whole
+/// point. Asterisk parses our SDP, negotiates its own AMR framing, and either
+/// relays or transcodes; none of that shares an assumption with our code.
+async fn run_amr_caller(
+    cfg: &EndpointConfig,
+    handle: &SessionHandle,
+    transport: TransportMode,
+) -> ExampleResult<()> {
+    if transport.is_tls() {
+        assert_srtp_media_security(handle, Duration::from_secs(5)).await?;
+    }
+    let recorder =
+        start_tone_recorder_with_frame_size(handle, tone_for_caller(transport), AMR_FRAME_SIZE)
+            .await?;
+    let outcome = recorder
+        .wait_for_received_samples(G729_CALLER_CAPTURE_TARGET_SAMPLES, Duration::from_secs(15))
+        .await;
+    handle
+        .hangup_and_wait(Some(Duration::from_secs(8)))
+        .await
+        .ok();
+    let saved = recorder
+        .stop_and_save(&cfg.output_dir, amr_caller_wav(transport))
+        .await;
+    outcome?;
+    saved?;
+    Ok(())
+}
+
+/// The answering half of [`run_amr_caller`].
+async fn run_amr_callee(
+    provider: PbxProvider,
+    cfg: &EndpointConfig,
+    handle: &SessionHandle,
+    transport: TransportMode,
+) -> ExampleResult<()> {
+    if transport.is_tls() {
+        assert_srtp_media_security(handle, Duration::from_secs(5)).await?;
+    }
+    let recorder =
+        start_tone_recorder_with_frame_size(handle, tone_for_callee(transport), AMR_FRAME_SIZE)
+            .await?;
+    let outcome = recorder
+        .wait_for_received_samples(MIN_RECEIVED_SAMPLES, remote_test_timeout(provider)?)
+        .await;
+    handle
+        .hangup_and_wait(Some(Duration::from_secs(8)))
+        .await
+        .ok();
+    let saved = recorder
+        .stop_and_save(&cfg.output_dir, amr_callee_wav(transport))
+        .await;
+    outcome?;
+    saved?;
     Ok(())
 }
 
@@ -4241,6 +4341,22 @@ fn g711_callee_wav(transport: TransportMode) -> &'static str {
         "tls_srtp_g711_1002_received.wav"
     } else {
         "g711_2002_received.wav"
+    }
+}
+
+fn amr_caller_wav(transport: TransportMode) -> &'static str {
+    if transport.is_tls() {
+        "tls_srtp_amr_1001_received.wav"
+    } else {
+        "amr_2001_received.wav"
+    }
+}
+
+fn amr_callee_wav(transport: TransportMode) -> &'static str {
+    if transport.is_tls() {
+        "tls_srtp_amr_1002_received.wav"
+    } else {
+        "amr_2002_received.wav"
     }
 }
 
