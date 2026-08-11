@@ -23,6 +23,8 @@
 | **AMR-WB conformance, speech** | **All nine TS 26.173 vectors, both directions** |
 | **AMR-WB conformance, DTX encode** | **`tst_md.cod`, every frame type and payload** |
 | **AMR-WB conformance, DTX decode** | **`tst_md`, 200 frames, sample for sample** |
+| **AMR-NB conformance, encode** | **`spch_dos`, 425 frames, every bit** |
+| **AMR-NB conformance, decode** | **`spch_dos`, 425 frames, sample for sample** |
 | Transcoding, interop, benchmarks | Not started |
 
 Every claim above is a test, not a note. Both decoders reproduce the reference
@@ -108,6 +110,16 @@ And the speech path has to run the receiver too. Decoding a speech frame
 without `rx_dtx_handler` and `dtx_dec_activity_update` enters the next silence
 with an empty history and a stale hangover count: 1928 of 24000 samples wrong
 at 4.75 kbit/s, every one of them inside the comfort noise.
+
+**And the narrowband verification stream, which the fixtures cannot imitate.**
+`spch_dos` is 425 frames driven through `allmodes.txt`, so the rate changes on
+424 of them, with DTX on throughout. The encoder reproduces all 36575
+transmitted bits — every frame's type, rate word and payload — and the decoder
+reproduces all 68000 output samples. Each committed fixture is a single
+constant rate; a rate switch carries the LSF predictor, both gain predictors,
+the pitch history and the DTX rings across a change in what those numbers mean,
+and no fixture reaches that state at all. It contains no homing frame, and the
+tests assert that rather than implying otherwise.
 
 Neither reference is committed. `tools/build-amr-reference.sh`,
 `build-amrnb-reference.sh` and the two `*-encoder-reference.sh` scripts fetch

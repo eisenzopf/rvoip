@@ -24,6 +24,17 @@ use super::tables::{
 /// The largest AMR-NB frame, in bits — 12.2 kbit/s.
 pub const MAX_FRAME_BITS: usize = 244;
 
+/// Payload bit order for a mode: `sort_table_for(m)[i]` is the codec-bit index
+/// that payload position `i` carries.
+///
+/// Public because the conformance vectors ship in the ETSI *serial* format,
+/// which is codec order, and converting between the two is the reader's job
+/// rather than something to reimplement beside it.
+#[must_use]
+pub const fn sort_table_for(mode_index: u8) -> &'static [u16] {
+    sort_table(mode_index)
+}
+
 /// Payload bit order for a mode.
 const fn sort_table(mode_index: u8) -> &'static [u16] {
     match mode_index {

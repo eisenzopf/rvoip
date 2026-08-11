@@ -16,11 +16,34 @@
 //!
 //! ```text
 //! RVOIP_AMRWB_REFERENCE=$TMPDIR/rvoip-amr-reference \
+//! RVOIP_AMRNB_REFERENCE=$TMPDIR/rvoip-amrnb-reference \
 //!   cargo test -p rvoip-codec-core --all-features -- --ignored conformance
 //! ```
 //!
-//! The directory is the one `build-amr-reference.sh` populates; the sequences
-//! live in its `testv/` subdirectory.
+//! The directories are the ones `build-amr-reference.sh` and
+//! `build-amrnb-encoder-reference.sh` populate. The wideband sequences live in
+//! a `testv/` subdirectory; the narrowband ones sit beside the sources in
+//! `c-code/`.
+//!
+//! # The narrowband sequence is one stream, and it changes rate every frame
+//!
+//! `spch_dos.inp` is 425 frames driven through `allmodes.txt`, which cycles
+//! all eight rates continuously — so the rate changes on 424 of the 425
+//! frames, with DTX on throughout. Nothing in the committed fixtures does
+//! that: they are eight separate constant-rate streams. A rate switch carries
+//! the LSF predictor, the gain predictors, the pitch history and the DTX rings
+//! across a change in what those numbers *mean*, and that is exactly the state
+//! the fixtures cannot exercise.
+//!
+//! It contains **no homing frame**. Both tests below drive the homing protocol
+//! the reference drivers implement, because getting it wrong would be a silent
+//! divergence if a stream ever did contain one — but neither is evidence that
+//! the protocol works. That evidence is in `nb::homing`'s own tests, which
+//! build each mode's pattern and check the encoder emits it.
+//!
+//! (`spch_un2` is the same stream through VAD2, which is not implemented — the
+//! makefiles' default and this port's is VAD1. `spch_unx` is the big-endian
+//! copy of `spch_dos`.)
 //!
 //! # What they establish that the committed fixtures do not
 //!
@@ -60,7 +83,313 @@ mod tests {
         root
     }
 
-    /// One frame of the input sequence.
+    /// Where the narrowband reference lives, or a panic naming the variable.
+    fn narrowband_root() -> PathBuf {
+        let named = std::env::var("RVOIP_AMRNB_REFERENCE").unwrap_or_else(|_| {
+            let tmp = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
+            format!("{}/rvoip-amrnb-reference", tmp.trim_end_matches('/'))
+        });
+        let root = PathBuf::from(named);
+        assert!(
+            root.join("c-code/spch_dos.inp").is_file(),
+            "the TS 26.073 verification sequences are not at {}. They are 3GPP \
+             copyright and are deliberately not committed; run \
+             tools/build-amrnb-encoder-reference.sh and set RVOIP_AMRNB_REFERENCE. \
+             This test panics rather than skipping so a green run cannot be \
+             mistaken for conformance evidence.",
+            root.display()
+        );
+        root
+    }
+
+    /// Little-endian 16-bit samples, in frames of 160.
+    fn narrowband_frames(path: &Path) -> Vec<[i16; 160]> {
+        let bytes = std::fs::read(path).expect("the input sequence is readable");
+        bytes
+            .chunks_exact(320)
+            .map(|frame| {
+                let mut out = [0i16; 160];
+                for (slot, pair) in out.iter_mut().zip(frame.chunks_exact(2)) {
+                    *slot = i16::from_le_bytes([pair[0], pair[1]]);
+                }
+                out
+            })
+            .collect()
+    }
+
+    /// The rate sequence `allmodes.txt` drives the encoder through.
+    fn mode_sequence(path: &Path) -> Vec<u8> {
+        let text = std::fs::read_to_string(path).expect("the mode file is readable");
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| match line {
+                "MR475" => 0u8,
+                "MR515" => 1,
+                "MR59" => 2,
+                "MR67" => 3,
+                "MR74" => 4,
+                "MR795" => 5,
+                "MR102" => 6,
+                "MR122" => 7,
+                other => panic!("unknown mode `{other}` in the mode file"),
+            })
+            .collect()
+    }
+
+    /// One frame of the narrowband ETSI serial format.
+    struct SerialFrame {
+        /// `TXFrameType`: 0 speech, 1 `SID_FIRST`, 2 `SID_UPDATE`, 3 `NO_DATA`.
+        tx_type: i16,
+        /// The 244 bit slots, of which each rate uses a prefix.
+        bits: Vec<i16>,
+        /// The rate the encoder was asked for, or -1 on a `NO_DATA` frame.
+        mode: i16,
+    }
+
+    /// Read `spch_dos.cod`: 250 little-endian words per frame.
+    ///
+    /// `[tx_type][244 bits][mode][4 unused]`. Note the bit values are plain 0
+    /// and 1 here — narrowband's `BIT_0`/`BIT_1` — where wideband's serial
+    /// format uses ±127. Decoding this one with `& 1` happens to work and
+    /// decoding wideband's that way yields all ones, which is why neither
+    /// reader is shared.
+    fn read_narrowband_serial(path: &Path) -> Vec<SerialFrame> {
+        const WORDS: usize = 1 + 244 + 5;
+        let bytes = std::fs::read(path).expect("the bitstream is readable");
+        assert_eq!(bytes.len() % (WORDS * 2), 0, "not a whole number of serial frames");
+
+        bytes
+            .chunks_exact(WORDS * 2)
+            .map(|frame| {
+                let word = |i: usize| i16::from_le_bytes([frame[i * 2], frame[i * 2 + 1]]);
+                SerialFrame {
+                    tx_type: word(0),
+                    bits: (1..=244).map(word).collect(),
+                    mode: word(245),
+                }
+            })
+            .collect()
+    }
+
+    /// The narrowband encoder against the reference's own verification stream.
+    ///
+    /// 425 frames, DTX on, and the rate changing on 424 of them. Compared
+    /// three ways per frame: the transmitted frame type, the rate word, and
+    /// every one of the rate's bits — 36575 bits in all, the rest of the
+    /// stream being the 157 gaps DTX leaves and carrying no bits to compare.
+    ///
+    /// The homing reset is driven the way the reference driver drives it, but
+    /// this stream contains no homing frame; see the module header.
+    #[test]
+    #[ignore = "needs the 3GPP sequences; see the module header"]
+    fn narrowband_encoder_matches_the_reference_vectors() {
+        use crate::codecs::amr::nb::enc::encoder::{NbEncoder, Rate as NbRate};
+        use crate::codecs::amr::nb::homing as nb_homing;
+        use crate::codecs::amr::sid_cadence::SidCadence;
+        use crate::codecs::amr::{AmrFrameType, AmrMode, AmrVariant};
+
+        let root = narrowband_root();
+        let frames = narrowband_frames(&root.join("c-code/spch_dos.inp"));
+        let modes = mode_sequence(&root.join("c-code/allmodes.txt"));
+        let want = read_narrowband_serial(&root.join("c-code/spch_dos.cod"));
+
+        assert!(frames.len() >= 400, "only {} input frames", frames.len());
+        assert!(want.len() >= frames.len(), "the bitstream is shorter than the input");
+        assert!(modes.len() >= frames.len(), "the mode file is shorter than the input");
+
+        let mut encoder = NbEncoder::new();
+        encoder.set_allow_dtx(true);
+        let mut cadence = SidCadence::new(AmrVariant::NarrowBand);
+
+        let (mut compared, mut sids, mut gaps, mut homings, mut switches) =
+            (0usize, 0usize, 0usize, 0usize, 0usize);
+
+        for (n, frame) in frames.iter().enumerate() {
+            let mode = modes[n];
+            if n > 0 && modes[n - 1] != mode {
+                switches += 1;
+            }
+            let rate = NbRate::from_index(mode).expect("a speech mode");
+            let amr_mode = AmrMode::new(AmrVariant::NarrowBand, mode).expect("a speech mode");
+
+            // The driver tests the input *before* encoding it.
+            let homing_frame = nb_homing::is_encoder_homing_frame(frame);
+
+            let (comfort_noise, mut data) = encoder.encode_frame_typed(frame, rate);
+            let tx = cadence.next(comfort_noise, amr_mode);
+            if let AmrFrameType::Sid(_) = tx {
+                let update = cadence.last_sid_was_an_update();
+                crate::codecs::amr::nb::bitstream::finish_sid_payload(&mut data, update, mode);
+            }
+
+            let (want_tx, want_mode) = match tx {
+                AmrFrameType::Speech(_) => (0i16, i16::from(mode)),
+                AmrFrameType::Sid(_) => {
+                    sids += 1;
+                    (if cadence.last_sid_was_an_update() { 2 } else { 1 }, i16::from(mode))
+                }
+                AmrFrameType::NoData => {
+                    gaps += 1;
+                    (3, -1)
+                }
+                AmrFrameType::SpeechLost => panic!("narrowband has no SPEECH_LOST"),
+            };
+            assert_eq!(want[n].tx_type, want_tx, "frame {n} type");
+            assert_eq!(want[n].mode, want_mode, "frame {n} mode word");
+
+            // `Prm2bits` writes one word per bit in **parameter** order,
+            // most significant bit of each parameter first -- *not* in the
+            // sorted payload order the MIME format uses. `PackBits` is what
+            // applies the sort, and it is a different function on a different
+            // path. Comparing the packed payload against these words directly
+            // diverges at bit 16 of the very first frame.
+            //
+            // So this unpacks back to codec order, which also exercises the
+            // sort table in both directions.
+            if want_tx != 3 {
+                let (unpack_mode, bits) = if want_tx == 0 { (mode, rate.bits()) } else { (8, 35) };
+                let codec = crate::codecs::amr::nb::bitstream::unpack(unpack_mode, &data)
+                    .expect("the payload unpacks");
+                for (i, &want_bit) in want[n].bits[..bits].iter().enumerate() {
+                    assert_eq!(
+                        i16::from(codec[i]),
+                        want_bit,
+                        "frame {n} (mode {mode}, type {want_tx}) bit {i}"
+                    );
+                    compared += 1;
+                }
+            }
+
+            if homing_frame {
+                homings += 1;
+                encoder = NbEncoder::new();
+                encoder.set_allow_dtx(true);
+                cadence = SidCadence::new(AmrVariant::NarrowBand);
+            }
+        }
+
+        // Exact, not a floor: these are properties of a fixed stream, and a
+        // floor would let a future change quietly compare fewer frames.
+        assert_eq!(compared, 36_575, "the bit count changed; the stream is fixed");
+        assert_eq!((sids, gaps), (26, 157), "the DTX frame mix changed");
+        assert_eq!(switches, 424, "the mode file did not cycle every frame");
+        assert_eq!(homings, 0, "this stream has no homing frame; see the module header");
+    }
+
+    /// The narrowband decoder against the reference's own output.
+    ///
+    /// `spch_dos.out` is what TS 26.073's decoder makes of `spch_dos.cod`.
+    /// All 68000 samples of all 425 frames, masked to the thirteen bits AMR-NB
+    /// defines — 242 speech frames at eight different rates, 26 SIDs and 157
+    /// gaps, with the rate changing almost every frame.
+    #[test]
+    #[ignore = "needs the 3GPP sequences; see the module header"]
+    fn narrowband_decoder_matches_the_reference_vectors() {
+        use crate::codecs::amr::nb::decoder::Decoder;
+        use crate::codecs::amr::nb::dtx::RxFrameType;
+        use crate::codecs::amr::nb::homing as nb_homing;
+
+        let root = narrowband_root();
+        let coded = read_narrowband_serial(&root.join("c-code/spch_dos.cod"));
+        let want = narrowband_frames(&root.join("c-code/spch_dos.out"));
+        assert!(want.len() >= 400, "only {} output frames", want.len());
+
+        let mut decoder = Decoder::new();
+        // `reset_flag_old` starts at 1: the decoder begins homed.
+        let mut homed = true;
+        let (mut compared, mut kinds, mut homings) = (0usize, [0usize; 3], 0usize);
+        let mut prev_mode = 0u8;
+
+        for (n, frame) in coded.iter().enumerate().take(want.len()) {
+            let mode = if frame.tx_type == 3 {
+                prev_mode
+            } else {
+                let m = u8::try_from(frame.mode).expect("a speech mode");
+                prev_mode = m;
+                m
+            };
+
+            // The serial words are codec bits in parameter order; the codec
+            // speaks the sorted payload. Apply the permutation -- and note
+            // which table: a SID uses its own 35-entry one, never the speech
+            // mode's.
+            let sid = matches!(frame.tx_type, 1 | 2 | 6);
+            let sort: &[u16] = if sid {
+                &crate::codecs::amr::nb::tables::SORT_SID
+            } else {
+                crate::codecs::amr::nb::bitstream::sort_table_for(mode)
+            };
+            let mut payload = vec![0u8; sort.len().div_ceil(8)];
+            for (i, &source) in sort.iter().enumerate() {
+                let bit = frame.bits[source as usize] & 1;
+                payload[i / 8] |= u8::try_from(bit).expect("one bit") << (7 - (i % 8));
+            }
+
+            let rx = match frame.tx_type {
+                0 => RxFrameType::SpeechGood,
+                1 => RxFrameType::SidFirst,
+                2 => RxFrameType::SidUpdate,
+                3 => RxFrameType::NoData,
+                4 => RxFrameType::SpeechDegraded,
+                5 => RxFrameType::SpeechBad,
+                6 => RxFrameType::SidBad,
+                other => panic!("frame {n}: unexpected TX type {other}"),
+            };
+            kinds[match rx {
+                RxFrameType::SidFirst | RxFrameType::SidUpdate | RxFrameType::SidBad => 1,
+                RxFrameType::NoData | RxFrameType::Onset => 2,
+                _ => 0,
+            }] += 1;
+
+            // A decoder already homed compares only the first subframe; one
+            // that is not compares the whole frame. Checked before decoding,
+            // exactly where the driver checks it.
+            let homing_now = if homed {
+                nb_homing::is_decoder_homing_frame_first(&payload, mode)
+            } else {
+                false
+            };
+
+            let got = if homing_now && homed {
+                [nb_homing::HOMING_SAMPLE; 160]
+            } else {
+                let params = match rx {
+                    RxFrameType::SidUpdate | RxFrameType::SidBad => {
+                        crate::codecs::amr::nb::bitstream::parse(8, &payload)
+                            .expect("a SID parses")
+                    }
+                    RxFrameType::NoData | RxFrameType::SidFirst | RxFrameType::Onset => Vec::new(),
+                    _ => crate::codecs::amr::nb::bitstream::parse(mode, &payload)
+                        .expect("speech parses"),
+                };
+                decoder.decode_typed(rx, mode, &params)
+            };
+
+            for (i, &sample) in got.iter().enumerate() {
+                assert_eq!(sample, want[n][i] & !7, "frame {n} sample {i}");
+                compared += 1;
+            }
+
+            // And after: an unhomed decoder tests the whole frame.
+            let reset = if homed {
+                homing_now
+            } else {
+                nb_homing::is_decoder_homing_frame(&payload, mode)
+            };
+            if reset {
+                decoder.reset();
+                homings += 1;
+            }
+            homed = reset;
+        }
+
+        assert_eq!(compared, 425 * 160, "the sample count changed; the stream is fixed");
+        assert_eq!(kinds, [242, 26, 157], "the frame-type mix changed");
+        assert_eq!(homings, 0, "this stream has no homing frame; see the module header");
+    }
+
+    /// One frame of the input sequence.    /// One frame of the input sequence.
     fn frames(root: &Path) -> Vec<[i16; 320]> {
         let raw = std::fs::read(root.join("testv/tst.inp")).expect("tst.inp reads");
         assert_eq!(raw.len() % 640, 0, "tst.inp is not a whole number of frames");
