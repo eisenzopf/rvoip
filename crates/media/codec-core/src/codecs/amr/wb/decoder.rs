@@ -821,31 +821,49 @@ mod comfort_noise_tests {
 
         let mut decoder = Decoder::new();
         let mut got: Vec<i16> = Vec::new();
+        // Speech, SID, gap. Pinned below, because a stream that turned out to
+        // be all speech would exercise none of the comfort-noise path this
+        // test exists for.
+        let mut kinds = [0usize; 3];
         for frame in &frames {
             let out = match frame.frame_type {
-                AmrFrameType::Speech(_) => decoder
-                    .decode_frame(mode, &frame.data, FrameQuality::Good)
-                    .expect("speech decodes"),
+                AmrFrameType::Speech(_) => {
+                    kinds[0] += 1;
+                    decoder
+                        .decode_frame(mode, &frame.data, FrameQuality::Good)
+                        .expect("speech decodes")
+                }
                 AmrFrameType::Sid(_) => {
                     let kind = if crate::codecs::amr::wb::bitstream::sid_is_update(&frame.data) {
                         crate::codecs::amr::wb::dtx::RxFrameType::SidUpdate
                     } else {
                         crate::codecs::amr::wb::dtx::RxFrameType::SidFirst
                     };
+                    kinds[1] += 1;
                     decoder
                         .decode_comfort_noise(kind, &frame.data, cn_mode)
                         .expect("SID decodes")
                 }
-                _ => decoder
-                    .decode_comfort_noise(
-                        crate::codecs::amr::wb::dtx::RxFrameType::NoData,
-                        &[],
-                        mode.index(),
-                    )
-                    .expect("gap decodes"),
+                _ => {
+                    kinds[2] += 1;
+                    decoder
+                        .decode_comfort_noise(
+                            crate::codecs::amr::wb::dtx::RxFrameType::NoData,
+                            &[],
+                            mode.index(),
+                        )
+                        .expect("gap decodes")
+                }
             };
             got.extend_from_slice(&out);
         }
+
+        // `zip` below stops at the shorter side, so without these a truncated
+        // decode compares its own prefix and passes. Measured: a mutation
+        // cutting the fixture to three frames left this test green.
+        assert_eq!(kinds, [77, 12, 61], "the fixture's frame-type mix changed");
+        assert_eq!(got.len(), want.len(), "decoded {} samples, want {}", got.len(), want.len());
+        assert_eq!(got.len(), 150 * FRAME_SIZE_16K, "the fixture is 150 frames");
 
         for (i, (&mine, &theirs)) in got.iter().zip(&want).enumerate() {
             assert_eq!(
@@ -1495,10 +1513,21 @@ mod tests {
     ///
     /// The conformance claim: every sample of every frame of every fixture is
     /// identical to the reference decoder's output, at all nine rates.
+    ///
+    /// The sample count is pinned, not floored. Its narrowband counterpart
+    /// asserts `total > 0`; this had neither, and a mutation that truncated
+    /// the fixture to three frames left it green while its siblings failed.
+    /// An equality is stronger than a floor and costs nothing: the fixture is
+    /// 25 frames of 320 samples and is not going to change silently.
     #[test]
     fn the_decoder_matches_the_reference_sample_for_sample() {
         for mode_index in 0..9 {
             let (matched, total, worst) = compare(mode_index);
+            assert_eq!(
+                total,
+                25 * FRAME_SIZE_16K,
+                "mode {mode_index} compared {total} samples; the fixture is 25 frames"
+            );
             assert_eq!(
                 matched, total,
                 "mode {mode_index}: {matched} of {total} samples match, worst error {worst}"

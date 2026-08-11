@@ -30,6 +30,7 @@
 | **`mode-change-period` / `-neighbor`** | **Honoured** — they were parsed and obeyed by nothing |
 | **Performance** | **Measured, with a gate** — see below |
 | **SDP to a working codec** | **An AMR-WB offer negotiates and codes** |
+| **A real AMR call** | **Three, over loopback, with verified audio** |
 | Live PBX interop | Blocked — see below |
 
 Every claim above is a test, not a note. Both decoders reproduce the reference
@@ -151,6 +152,24 @@ debug build under a loaded scheduler produces numbers that are meaningless as
 a pass/fail signal. It fails if it finds *no* AMR results, because a
 performance gate that silently checks nothing is the same failure this branch
 has hit four times elsewhere.
+
+## Running the conformance sequences
+
+```bash
+crates/media/codec-core/tools/run-amr-conformance.sh
+```
+
+It fetches and builds both reference trees if they are absent, sets the two
+environment variables, and runs the six `#[ignore]`d tests. It fails unless all
+six pass — a conformance run that checks five of six is not a pass, and the
+count cargo happens to report is not the claim.
+
+**These six cannot run in CI, and that is structural.** The sequences are 3GPP
+copyright; only generated output is committed. So the six strongest rows in the
+table above are the ones continuous integration protects least, and they are
+distinguishable from the fixture-backed rows on exactly that basis. Everything
+else — including all four bit-exactness paths against the committed fixtures —
+runs on every pull request through the `codec-features` gate.
 
 ## Interop, and what is blocked
 
@@ -378,15 +397,12 @@ every transmit type and every payload matching. `tst.inp` never goes quiet
 enough to emit a SID, so without this the DTX path would only ever have been
 exercised through its effect on mode 8's gain.
 
-**One thing does not yet pass.** Decoding `tst_md.cod` against `tst_md.out`
-diverges by one LSB from sample 16 of frame 80 — the first `SID_FIRST` — with
-all eighty speech frames before it sample-exact. Everything around it passes:
-both directions of all nine speech vectors, the DTX encode vector, and a
-150-frame DTX stream decoded sample-exact against the reference
-implementation. So the remaining fault is narrow, somewhere in the backward
-analysis or the level conversion, on values this stream produces and the
-committed fixture does not. The test is committed and ignored rather than
-deleted or weakened to a tolerance.
+**Everything passes now.** `tst_md.cod` against `tst_md.out` was the last
+holdout — one LSB out from sample 16 of frame 80, the first `SID_FIRST` — and
+it was two defects rather than one: an excitation snapshot taken per subframe
+in four different exponents, and a `CN_dithering` written from a summary
+instead of from the C. Both are described above. All six sequences now compare
+with zero tolerance.
 
 Mutation-checked: turning DTX off fails mode 8 at frame 0.
 

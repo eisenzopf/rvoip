@@ -319,7 +319,23 @@ impl AudioCodec for AmrAdapter {
                     details: format!("AMR decode: {error}"),
                 })
             })?;
-            samples.extend_from_slice(&pcm);
+            // 3GPP defines AMR-NB's output as 13-bit and AMR-WB's as 14-bit,
+            // and both references mask before handing samples to the
+            // application -- but in different places: narrowband inside
+            // `Speech_Decode_Frame` (the library), wideband in `decoder.c`
+            // (the driver). codec-core mirrors each faithfully, so its
+            // narrowband output arrives masked and its wideband output does
+            // not.
+            //
+            // This adapter is the application boundary, so it is where the
+            // driver's mask belongs. Without it the two variants of one trait
+            // hand callers different precision: measured, ~6000 of 8000
+            // wideband samples per rate carried nonzero low bits.
+            let mask = match self.variant {
+                AmrVariant::NarrowBand => !7i16,
+                AmrVariant::WideBand => !3i16,
+            };
+            samples.extend(pcm.iter().map(|&s| s & mask));
         }
 
         Ok(AudioFrame::new(samples, self.clock_rate(), 1, 0))
@@ -353,6 +369,43 @@ mod tests {
             })
             .collect();
         AudioFrame::new(data, rate, 1, 0)
+    }
+
+    /// Both variants hand the caller the precision 3GPP defines.
+    ///
+    /// AMR-NB is 13-bit and AMR-WB is 14-bit. The two references mask in
+    /// different places — narrowband in the library, wideband in the driver —
+    /// and codec-core mirrors each, so the masking has to happen here, at the
+    /// application boundary, or the same trait yields different precision
+    /// depending on the variant.
+    #[test]
+    fn decoded_samples_carry_the_precision_the_spec_defines() {
+        let mut checked = 0;
+        #[cfg(feature = "amr-nb")]
+        {
+            let mut codec = AmrAdapter::new(96, "AMR", None).expect("constructs");
+            let payload = codec.encode(&pcm(160, 8_000)).expect("encodes");
+            let out = codec.decode(&payload).expect("decodes");
+            assert!(
+                out.samples.iter().all(|s| s & 7 == 0),
+                "AMR-NB output must be 13-bit"
+            );
+            assert!(out.samples.iter().any(|&s| s != 0), "vacuous on silence");
+            checked += 1;
+        }
+        #[cfg(feature = "amr-wb")]
+        {
+            let mut codec = AmrAdapter::new(97, "AMR-WB", None).expect("constructs");
+            let payload = codec.encode(&pcm(320, 16_000)).expect("encodes");
+            let out = codec.decode(&payload).expect("decodes");
+            assert!(
+                out.samples.iter().all(|s| s & 3 == 0),
+                "AMR-WB output must be 14-bit"
+            );
+            assert!(out.samples.iter().any(|&s| s != 0), "vacuous on silence");
+            checked += 1;
+        }
+        assert!(checked > 0, "no variant was compiled in");
     }
 
     /// Every compiled-in variant round-trips, and the framing survives.
