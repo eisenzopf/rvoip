@@ -707,7 +707,8 @@ mod tests {
             .collect();
 
         let mode = AmrMode::new(AmrVariant::WideBand, 2).expect("12.65 kbit/s");
-        let bits = Rate::from_index(2).expect("12.65 kbit/s").bits();
+        let cn_mode = 2u8;
+        let bits = Rate::from_index(cn_mode).expect("12.65 kbit/s").bits();
         let sort = crate::codecs::amr::wb::bitstream::sort_table_for(mode);
         let comfort_order = &crate::codecs::amr::wb::sort_tables::SORT_SID;
 
@@ -760,7 +761,7 @@ mod tests {
                 };
                 let data: &[u8] = if tx_type == 3 { &[] } else { &payload };
                 decoder
-                    .decode_comfort_noise(rx, data, bits)
+                    .decode_comfort_noise(rx, data, cn_mode)
                     .unwrap_or_else(|| panic!("frame {frame} comfort noise refused"))
             };
 

@@ -137,6 +137,25 @@ pub fn sid_is_update(payload: &[u8]) -> bool {
     payload[4] & 0b0001_0000 != 0
 }
 
+/// The speech mode a SID frame names, 0..=8.
+///
+/// Written by [`finish_sid_payload`] into the low nibble of the last octet.
+/// It says what the *sender* was coding at, and it is what selects the
+/// high-band branch when the comfort noise is synthesised — so a receiver must
+/// read it here rather than substitute its own transmit rate, which is an
+/// unrelated number.
+///
+/// Returns `None` if the nibble names no speech mode.
+///
+/// # Panics
+/// If `payload` is not the five bytes of a SID frame.
+#[must_use]
+pub fn sid_mode_indication(payload: &[u8]) -> Option<u8> {
+    assert_eq!(payload.len(), 5, "a wideband SID payload is five bytes");
+    let mode = payload[4] & 0x0F;
+    (mode <= 8).then_some(mode)
+}
+
 /// A frame's codec bits, in the order the decoder reads them.
 ///
 /// Deliberately not a bitfield: the reference works one bit per slot, the

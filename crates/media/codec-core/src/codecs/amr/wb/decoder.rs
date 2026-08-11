@@ -194,6 +194,24 @@ impl Decoder {
         payload: &[u8],
         quality: FrameQuality,
     ) -> Option<[i16; FRAME_SIZE_16K]> {
+        self.decode_frame_with_state(mode, payload, quality, None)
+    }
+
+    /// [`decode_frame`](Self::decode_frame), optionally with the DTX state
+    /// already decided.
+    ///
+    /// `rx_dtx_handler` runs **once per frame** in the reference, and its side
+    /// effects — the staleness counter, the hangover bookkeeping — are not
+    /// idempotent. A caller that has already classified this frame passes the
+    /// result in rather than letting it run again.
+    #[allow(clippy::too_many_lines)]
+    fn decode_frame_with_state(
+        &mut self,
+        mode: AmrMode,
+        payload: &[u8],
+        quality: FrameQuality,
+        decided: Option<super::dtx::DtxState>,
+    ) -> Option<[i16; FRAME_SIZE_16K]> {
         let frame_bits = *FRAME_BITS.get(mode.index() as usize)?;
         let bad = quality != FrameQuality::Good;
         let unusable = quality == FrameQuality::Unusable;
@@ -213,12 +231,16 @@ impl Decoder {
         // `rx_dtx_handler`, which the reference runs before anything else and
         // on every frame. A speech frame only updates counters here, but those
         // counters are what a later `SID_FIRST` reads.
-        let rx_type = match quality {
-            FrameQuality::Good => super::dtx::RxFrameType::SpeechGood,
-            FrameQuality::Unusable => super::dtx::RxFrameType::SpeechLost,
-            FrameQuality::Bad => super::dtx::RxFrameType::SpeechBad,
+        let dtx_state = if let Some(state) = decided {
+            state
+        } else {
+            let rx_type = match quality {
+                FrameQuality::Good => super::dtx::RxFrameType::SpeechGood,
+                FrameQuality::Unusable => super::dtx::RxFrameType::SpeechLost,
+                FrameQuality::Bad => super::dtx::RxFrameType::SpeechBad,
+            };
+            self.dtx.receive(&mut ctx, rx_type)
         };
-        let dtx_state = self.dtx.receive(&mut ctx, rx_type);
         if dtx_state != super::dtx::DtxState::Speech {
             return Some(self.synthesise_comfort_noise(&mut ctx, dtx_state, frame_bits, None));
         }
@@ -543,12 +565,28 @@ impl Decoder {
         &mut self,
         frame_type: super::dtx::RxFrameType,
         payload: &[u8],
-        frame_bits: usize,
+        mode_index: u8,
     ) -> Option<[i16; FRAME_SIZE_16K]> {
+        let frame_bits = *FRAME_BITS.get(mode_index as usize)?;
         let mut ctx = DspContext::default();
         let state = self.dtx.receive(&mut ctx, frame_type);
         if state == super::dtx::DtxState::Speech {
-            return None;
+            // The reference's own table: `RX_NO_DATA | SPEECH -> SPEECH`, and
+            // the SPEECH branch conceals. A gap arriving mid-talk-spurt is a
+            // lost frame, which happens whenever the `SID_FIRST` that opened a
+            // silence was itself lost. Refusing it here dropped every
+            // following `NO_DATA` until speech resumed.
+            //
+            // The state machine has already been advanced by the `receive`
+            // above and must not run again, hence the pre-decided state.
+            let mode =
+                AmrMode::new(crate::codecs::amr::mode::AmrVariant::WideBand, mode_index).ok()?;
+            return self.decode_frame_with_state(
+                mode,
+                &[],
+                FrameQuality::Unusable,
+                Some(state),
+            );
         }
         // Only a SID_UPDATE's bits are worth reading. A SID_FIRST's are blank
         // and a SID_BAD's are not trusted; both fall back to what the decoder
@@ -681,7 +719,7 @@ mod comfort_noise_tests {
         let bits: &[u8] = include_bytes!("../testdata/amrwb_dtx_mode2.amr");
         let (_, frames) = storage::read(bits).expect("fixture parses");
         let mode = AmrMode::new(AmrVariant::WideBand, 2).expect("12.65 kbit/s");
-        let frame_bits = FRAME_BITS[2];
+        let cn_mode = 2u8;
 
         let mut decoder = Decoder::new();
         let mut speech = 0usize;
@@ -707,7 +745,7 @@ mod comfort_noise_tests {
                         crate::codecs::amr::wb::dtx::RxFrameType::SidFirst
                     };
                     let out = decoder
-                        .decode_comfort_noise(kind, &frame.data, frame_bits)
+                        .decode_comfort_noise(kind, &frame.data, cn_mode)
                         .unwrap_or_else(|| panic!("SID frame {n} refused"));
                     if out.iter().all(|&s| s == 0) {
                         silent_comfort += 1;
@@ -720,7 +758,7 @@ mod comfort_noise_tests {
                         .decode_comfort_noise(
                             crate::codecs::amr::wb::dtx::RxFrameType::NoData,
                             &[],
-                            frame_bits,
+                            cn_mode,
                         )
                         .unwrap_or_else(|| panic!("gap frame {n} refused"))
                 }
@@ -779,7 +817,7 @@ mod comfort_noise_tests {
             .collect();
         let (_, frames) = storage::read(bits).expect("fixture parses");
         let mode = AmrMode::new(AmrVariant::WideBand, 2).expect("12.65 kbit/s");
-        let frame_bits = FRAME_BITS[2];
+        let cn_mode = 2u8;
 
         let mut decoder = Decoder::new();
         let mut got: Vec<i16> = Vec::new();
@@ -795,14 +833,14 @@ mod comfort_noise_tests {
                         crate::codecs::amr::wb::dtx::RxFrameType::SidFirst
                     };
                     decoder
-                        .decode_comfort_noise(kind, &frame.data, frame_bits)
+                        .decode_comfort_noise(kind, &frame.data, cn_mode)
                         .expect("SID decodes")
                 }
                 _ => decoder
                     .decode_comfort_noise(
                         crate::codecs::amr::wb::dtx::RxFrameType::NoData,
                         &[],
-                        frame_bits,
+                        mode.index(),
                     )
                     .expect("gap decodes"),
             };
@@ -819,21 +857,25 @@ mod comfort_noise_tests {
         }
     }
 
-    /// A gap while the stream is in speech is not comfort noise.
+    /// A gap while the stream is in speech is concealed, not synthesised as
+    /// comfort noise and not refused.
     ///
     /// `NO_DATA` means the sender chose to send nothing, which during a talk
-    /// spurt is a transport anomaly rather than a DTX statement. The reference
-    /// keeps such a frame on the speech path, and returning synthesised noise
-    /// for it would replace a concealable gap with invented background.
+    /// spurt is a transport anomaly rather than a DTX statement — so the
+    /// reference keeps it on the speech path, where it is concealed. This
+    /// previously returned `None`, which the caller turned into an error and
+    /// therefore a dropped packet.
+    ///
+    /// It is not a rare corner: lose the `SID_FIRST` that opens a silence and
+    /// every `NO_DATA` for the rest of that gap arrives while the state
+    /// machine still believes the stream is speaking.
     #[test]
-    fn a_gap_during_speech_is_refused_rather_than_synthesised() {
+    fn a_gap_during_speech_is_concealed_rather_than_refused() {
         let mut decoder = Decoder::new();
-        assert!(
-            decoder
-                .decode_comfort_noise(crate::codecs::amr::wb::dtx::RxFrameType::NoData, &[], FRAME_BITS[2])
-                .is_none(),
-            "a gap before any SID should not enter comfort noise"
-        );
+        let out = decoder
+            .decode_comfort_noise(crate::codecs::amr::wb::dtx::RxFrameType::NoData, &[], 2)
+            .expect("a gap during speech is concealed");
+        assert_eq!(out.len(), FRAME_SIZE_16K);
     }
 }
 

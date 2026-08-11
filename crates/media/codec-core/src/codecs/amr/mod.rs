@@ -628,21 +628,32 @@ impl VariableRateCodec for AmrCodec {
                     } else {
                         wb::dtx::RxFrameType::SidFirst
                     };
-                    // The speech mode the stream is using, which a SID
-                    // carries in its own mode-indication field and a caller
-                    // supplies for a gap. It selects the high-band branch, so
-                    // defaulting it to the codec's configured mode decodes
-                    // comfort noise against the wrong rate.
-                    let bits = AmrMode::new(self.variant, frame.mode)
-                        .unwrap_or(self.current_mode)
-                        .bits();
+                    // The mode selects the high-band branch, so it has to be
+                    // the mode the *SID itself* names -- read out of its own
+                    // mode-indication field. A receiver's transmit rate is an
+                    // unrelated number, and using it made the same SID bytes
+                    // decode to different comfort noise depending on what this
+                    // end happened to be sending.
+                    //
+                    // A gap carries no SID and no indication, so there the
+                    // caller's mode stands.
+                    let mode_index = if frame.kind == FrameKind::NoData {
+                        AmrMode::new(self.variant, frame.mode)
+                            .unwrap_or(self.current_mode)
+                            .index()
+                    } else {
+                        wb::bitstream::sid_mode_indication(&frame.data).unwrap_or_else(|| {
+                            AmrMode::new(self.variant, frame.mode)
+                                .unwrap_or(self.current_mode)
+                                .index()
+                        })
+                    };
                     decoder
-                        .decode_comfort_noise(rx, &frame.data, bits)
+                        .decode_comfort_noise(rx, &frame.data, mode_index)
                         .map(Vec::from)
                         .ok_or_else(|| {
                             CodecError::decoding_failed(
-                                "an empty frame arrived while the stream was in speech, \
-                                 which is a gap to conceal rather than comfort noise",
+                                "AMR-WB comfort-noise decode produced no frame",
                             )
                         })
                 }
@@ -787,11 +798,12 @@ mod tests {
     fn unsupported_operations_fail_loudly_rather_than_returning_silence() {
         let mut wb = AmrCodec::new(&CodecConfig::amr_wb()).unwrap();
 
-        // Wideband comfort noise works now; a gap arriving *during speech*
-        // does not, and the error says why rather than returning silence. It
-        // is a hole for the concealer, not a statement about background noise.
-        let err = wb.decode_frame(&CodedFrame::no_data()).unwrap_err();
-        assert!(err.to_string().contains("gap to conceal"), "{err}");
+        // A gap arriving *during speech* is a hole to conceal, not a
+        // statement about background noise -- and both variants conceal it
+        // rather than refusing. This used to be an error on the wideband side,
+        // which turned every `NO_DATA` following a lost `SID_FIRST` into a
+        // dropped packet.
+        assert_eq!(wb.decode_frame(&CodedFrame::no_data()).unwrap().len(), 320);
 
         // Narrowband draws that line differently, and deliberately: it has no
         // `SPEECH_LOST` frame type, so its receiver reads a gap through the
@@ -1612,7 +1624,92 @@ mod tests {
             assert!(codec.set_mode(0).is_ok());
         }
 
-        /// A real DTX stream, decoded entirely through the public API.        /// A real DTX stream, decoded entirely through the public API.
+        /// A `NO_DATA` arriving mid-talk-spurt is a lost frame, not an error.
+        ///
+        /// The reference's own state table (`dtx.c`, above `rx_dtx_handler`)
+        /// gives `RX_NO_DATA | SPEECH -> SPEECH`, and the SPEECH branch
+        /// conceals. Returning an error instead drops the packet — reachable
+        /// on any real network the moment the `SID_FIRST` that opens a silence
+        /// is lost, after which *every* `NO_DATA` for the rest of that gap is
+        /// discarded.
+        ///
+        /// The DTX tests never caught it because they feed complete, in-order
+        /// reference streams, so the state machine is always already in DTX by
+        /// the time a `NO_DATA` arrives.
+        #[test]
+        #[cfg(feature = "amr-wb")]
+        fn a_gap_arriving_during_speech_is_concealed_rather_than_refused() {
+            let bits: &[u8] = include_bytes!("testdata/amrwb_dtx_mode2.amr");
+            let (_, frames) = storage::read(bits).expect("fixture parses");
+            let mut codec = AmrCodec::new(&CodecConfig::amr_wb()).unwrap();
+
+            let mut decoded = 0;
+            for frame in frames.iter().take(20) {
+                if let AmrFrameType::Speech(mode) = frame.frame_type {
+                    codec
+                        .decode_frame(&CodedFrame {
+                            kind: FrameKind::Speech,
+                            mode: mode.index(),
+                            data: frame.data.clone(),
+                            quality_ok: true,
+                        })
+                        .expect("speech decodes");
+                    decoded += 1;
+                    if decoded == 5 {
+                        break;
+                    }
+                }
+            }
+            assert_eq!(decoded, 5, "the fixture did not supply five speech frames");
+
+            let out = codec
+                .decode_frame(&CodedFrame {
+                    kind: FrameKind::NoData,
+                    mode: 2,
+                    data: Vec::new(),
+                    quality_ok: true,
+                })
+                .expect("a gap during speech must be concealed, not refused");
+            assert_eq!(out.len(), 320, "concealment produces a whole frame");
+        }
+
+        /// A SID is decoded against the mode *it* names, not against whatever
+        /// this end happens to be transmitting.
+        ///
+        /// The mode selects the high-band branch, so the same SID bytes
+        /// decoded by two receivers transmitting at different rates would
+        /// otherwise produce different comfort noise. The code comment at the
+        /// call site names this exact failure; the caller committed it.
+        #[test]
+        #[cfg(feature = "amr-wb")]
+        fn comfort_noise_is_decoded_against_the_sids_own_mode() {
+            let bits: &[u8] = include_bytes!("testdata/amrwb_dtx_mode2.amr");
+            let (_, frames) = storage::read(bits).expect("fixture parses");
+            let sid = frames
+                .iter()
+                .find(|f| matches!(f.frame_type, AmrFrameType::Sid(_)))
+                .expect("the fixture carries a SID");
+
+            let decode_with = |claimed_mode: u8| {
+                let mut codec = AmrCodec::new(&CodecConfig::amr_wb()).unwrap();
+                codec
+                    .decode_frame(&CodedFrame {
+                        kind: FrameKind::ComfortNoise,
+                        mode: claimed_mode,
+                        data: sid.data.clone(),
+                        quality_ok: true,
+                    })
+                    .expect("comfort noise decodes")
+            };
+
+            assert_eq!(
+                decode_with(0),
+                decode_with(8),
+                "the same SID decoded differently depending on the receiver's own rate"
+            );
+        }
+
+        /// A real DTX stream, decoded entirely through the public API.
         ///
         /// The module's own test proves the decoder; this proves the wiring
         /// above it — that `FrameKind` carries enough for a caller to say
