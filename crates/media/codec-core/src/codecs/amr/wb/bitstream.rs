@@ -26,6 +26,12 @@ pub const MAX_FRAME_BITS: usize = 477;
 
 /// Payload bit order for a mode, and how many bits it has.
 #[must_use]
+#[cfg(test)]
+pub(crate) const fn sort_table_for(mode: AmrMode) -> &'static [u16] {
+    sort_table(mode)
+}
+
+#[must_use]
 const fn sort_table(mode: AmrMode) -> &'static [u16] {
     match mode.index() {
         0 => &SORT_660,

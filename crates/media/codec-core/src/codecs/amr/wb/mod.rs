@@ -15,6 +15,8 @@
 pub mod bitstream;
 pub mod codebook;
 pub mod highband;
+pub mod homing;
+pub mod homing_tables;
 pub mod isf_noise;
 pub mod isf_noise_tables;
 pub mod lp;

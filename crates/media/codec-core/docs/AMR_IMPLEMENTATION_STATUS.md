@@ -15,7 +15,8 @@
 | **AMR-WB DTX, decoder side** | **Sample-exact over a 150-frame DTX stream** |
 | **AMR-WB DTX through `AmrCodec`** | **Both directions, byte- and sample-exact** |
 | AMR-NB DTX | Not started, and gated on the VAD1 port |
-| Homing frames | Not started, both variants |
+| **AMR-WB homing frames** | **Done** — the encoder emits each mode's pattern |
+| AMR-NB homing frames | Not started |
 | Transcoding, interop, benchmarks | Not started |
 
 Every claim above is a test, not a note. Both decoders reproduce the reference
