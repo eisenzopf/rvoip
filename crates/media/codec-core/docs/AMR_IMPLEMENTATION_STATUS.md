@@ -25,7 +25,10 @@
 | **AMR-WB conformance, DTX decode** | **`tst_md`, 200 frames, sample for sample** |
 | **AMR-NB conformance, encode** | **`spch_dos`, 425 frames, every bit** |
 | **AMR-NB conformance, decode** | **`spch_dos`, 425 frames, sample for sample** |
-| Transcoding, interop, benchmarks | Not started |
+| **AMR reachable through media-core** | **Both variants resolve, encode and decode end to end** |
+| **Transcoding** | **Six AMR pairs, tested by property** |
+| **`mode-change-period` / `-neighbor`** | **Honoured** — they were parsed and obeyed by nothing |
+| Benchmarks, interop | Not started |
 
 Every claim above is a test, not a note. Both decoders reproduce the reference
 decoders sample for sample; both encoders reproduce the reference *bitstream*

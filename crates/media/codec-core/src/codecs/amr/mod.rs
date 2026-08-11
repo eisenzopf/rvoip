@@ -85,6 +85,15 @@ pub struct AmrCodec {
     variant: AmrVariant,
     mode_set: AmrModeSet,
     current_mode: AmrMode,
+    /// The negotiated `mode-change-period` and `mode-change-neighbor`, as a
+    /// state machine rather than two remembered numbers.
+    ///
+    /// Both parameters were parsed and modelled and honoured by nothing: a
+    /// peer that negotiated `mode-change-period=2` got mode changes on every
+    /// frame, and one that negotiated `mode-change-neighbor=1` got arbitrary
+    /// jumps. Neither is audible on its own — the frames still decode — which
+    /// is why it went unnoticed.
+    rate_policy: rate::ModeChangePolicy,
     octet_align: bool,
     dtx: bool,
     /// Which comfort-noise frames are actually transmitted. Shared shape
@@ -197,10 +206,18 @@ impl AmrCodec {
             .highest()
             .ok_or_else(|| CodecError::invalid_config("AMR mode-set resolved to no modes"))?;
 
+        let rate_policy = rate::ModeChangePolicy::new(
+            mode_set.clone(),
+            params.mode_change_period,
+            params.mode_change_neighbor,
+            current_mode,
+        )?;
+
         Ok(Self {
             variant,
             mode_set,
             current_mode,
+            rate_policy,
             octet_align: params.requires_octet_align(),
             dtx: params.dtx,
             cadence: sid_cadence::SidCadence::new(variant),
@@ -355,6 +372,79 @@ impl AmrCodec {
         self.variant
     }
 
+    /// One frame, without the policy bookkeeping — see
+    /// [`VariableRateCodec::encode_frame`].
+    fn encode_one_frame(&mut self, samples: &[i16]) -> Result<CodedFrame> {
+        let mode = self.current_mode;
+        if !self.dtx {
+            let data = self.encode_speech(mode, samples)?;
+            return Ok(CodedFrame::speech(mode.index(), data));
+        }
+
+        let wanted = self.variant.frame_samples();
+        if samples.len() != wanted {
+            return Err(CodecError::encoding_failed(format!(
+                "{} takes exactly {wanted} samples per frame, got {}",
+                self.variant,
+                samples.len()
+            )));
+        }
+
+        match &mut self.encoder {
+            #[cfg(feature = "amr-wb")]
+            Encoder::WideBand(encoder) => {
+                let mut frame = [0i16; 320];
+                frame.copy_from_slice(samples);
+                let rate = wb::enc::encoder::Rate::from_index(mode.index())
+                    .ok_or_else(|| CodecError::encoding_failed("not an AMR-WB speech mode"))?;
+                let (comfort_noise, mut data) = encoder.encode_frame_typed(&frame, rate);
+                if !comfort_noise {
+                    self.cadence.next(false, mode);
+                    return Ok(CodedFrame::speech(mode.index(), data));
+                }
+                // The encoder builds a SID on every comfort-noise frame; the
+                // cadence decides which are actually sent. Most become gaps.
+                match self.cadence.next(true, mode) {
+                    AmrFrameType::Sid(_) => {
+                        let update = self.cadence.last_sid_was_an_update();
+                        wb::bitstream::finish_sid_payload(&mut data, update, mode.index());
+                        if !update {
+                            wb::bitstream::blank_sid_first(&mut data);
+                        }
+                        Ok(CodedFrame::comfort_noise(data))
+                    }
+                    _ => Ok(CodedFrame::no_data()),
+                }
+            }
+            #[cfg(feature = "amr-nb")]
+            Encoder::NarrowBand(encoder) => {
+                let mut frame = [0i16; 160];
+                frame.copy_from_slice(samples);
+                let rate = nb::enc::encoder::Rate::from_index(mode.index())
+                    .ok_or_else(|| CodecError::encoding_failed("not an AMR-NB speech mode"))?;
+                let (comfort_noise, mut data) = encoder.encode_frame_typed(&frame, rate);
+                if !comfort_noise {
+                    self.cadence.next(false, mode);
+                    return Ok(CodedFrame::speech(mode.index(), data));
+                }
+                match self.cadence.next(true, mode) {
+                    AmrFrameType::Sid(_) => {
+                        // No blanking on a SID_FIRST: narrowband transmits
+                        // the description on both SID types. See
+                        // `nb::bitstream::finish_sid_payload`.
+                        let update = self.cadence.last_sid_was_an_update();
+                        nb::bitstream::finish_sid_payload(&mut data, update, mode.index());
+                        Ok(CodedFrame::comfort_noise(data))
+                    }
+                    _ => Ok(CodedFrame::no_data()),
+                }
+            }
+            Encoder::Absent => Err(CodecError::feature_not_enabled(
+                "no AMR encoder is compiled in",
+            )),
+        }
+    }
+
     /// The negotiated mode set.
     #[must_use]
     pub const fn mode_set(&self) -> &AmrModeSet {
@@ -440,6 +530,19 @@ impl VariableRateCodec for AmrCodec {
         self.current_mode.index()
     }
 
+    /// Request a rate change, honouring the negotiated change policy.
+    ///
+    /// A mode outside the negotiated set is an error, because RFC 4867 says
+    /// such frames "MUST NOT be sent in any RTP payload" — that is a
+    /// configuration mistake, not a request to decline.
+    ///
+    /// A mode inside the set may still not take effect this frame: with
+    /// `mode-change-period=2` a change is only permitted on every second
+    /// frame-block, and with `mode-change-neighbor=1` a distant target is
+    /// approached one step at a time. Both return `Ok`, and the mode actually
+    /// in effect is [`current_mode`](Self::current_mode) — a caller that needs
+    /// to know whether the request landed should read it back rather than
+    /// assume.
     fn set_mode(&mut self, mode: u8) -> Result<()> {
         let requested = AmrMode::new(self.variant, mode)?;
         if !self.mode_set.contains(requested) {
@@ -449,79 +552,17 @@ impl VariableRateCodec for AmrCodec {
                 self.mode_set.to_sdp_value()
             )));
         }
-        self.current_mode = requested;
+        self.current_mode = self.rate_policy.request(requested);
         Ok(())
     }
 
     fn encode_frame(&mut self, samples: &[i16]) -> Result<CodedFrame> {
-        let mode = self.current_mode;
-        if !self.dtx {
-            let data = self.encode_speech(mode, samples)?;
-            return Ok(CodedFrame::speech(mode.index(), data));
-        }
-
-        let wanted = self.variant.frame_samples();
-        if samples.len() != wanted {
-            return Err(CodecError::encoding_failed(format!(
-                "{} takes exactly {wanted} samples per frame, got {}",
-                self.variant,
-                samples.len()
-            )));
-        }
-
-        match &mut self.encoder {
-            #[cfg(feature = "amr-wb")]
-            Encoder::WideBand(encoder) => {
-                let mut frame = [0i16; 320];
-                frame.copy_from_slice(samples);
-                let rate = wb::enc::encoder::Rate::from_index(mode.index())
-                    .ok_or_else(|| CodecError::encoding_failed("not an AMR-WB speech mode"))?;
-                let (comfort_noise, mut data) = encoder.encode_frame_typed(&frame, rate);
-                if !comfort_noise {
-                    self.cadence.next(false, mode);
-                    return Ok(CodedFrame::speech(mode.index(), data));
-                }
-                // The encoder builds a SID on every comfort-noise frame; the
-                // cadence decides which are actually sent. Most become gaps.
-                match self.cadence.next(true, mode) {
-                    AmrFrameType::Sid(_) => {
-                        let update = self.cadence.last_sid_was_an_update();
-                        wb::bitstream::finish_sid_payload(&mut data, update, mode.index());
-                        if !update {
-                            wb::bitstream::blank_sid_first(&mut data);
-                        }
-                        Ok(CodedFrame::comfort_noise(data))
-                    }
-                    _ => Ok(CodedFrame::no_data()),
-                }
-            }
-            #[cfg(feature = "amr-nb")]
-            Encoder::NarrowBand(encoder) => {
-                let mut frame = [0i16; 160];
-                frame.copy_from_slice(samples);
-                let rate = nb::enc::encoder::Rate::from_index(mode.index())
-                    .ok_or_else(|| CodecError::encoding_failed("not an AMR-NB speech mode"))?;
-                let (comfort_noise, mut data) = encoder.encode_frame_typed(&frame, rate);
-                if !comfort_noise {
-                    self.cadence.next(false, mode);
-                    return Ok(CodedFrame::speech(mode.index(), data));
-                }
-                match self.cadence.next(true, mode) {
-                    AmrFrameType::Sid(_) => {
-                        // No blanking on a SID_FIRST: narrowband transmits
-                        // the description on both SID types. See
-                        // `nb::bitstream::finish_sid_payload`.
-                        let update = self.cadence.last_sid_was_an_update();
-                        nb::bitstream::finish_sid_payload(&mut data, update, mode.index());
-                        Ok(CodedFrame::comfort_noise(data))
-                    }
-                    _ => Ok(CodedFrame::no_data()),
-                }
-            }
-            Encoder::Absent => Err(CodecError::feature_not_enabled(
-                "no AMR encoder is compiled in",
-            )),
-        }
+        let coded = self.encode_one_frame(samples);
+        // One frame-block encoded, whatever it turned into. The change-period
+        // counter measures frames, not successful ones -- a DTX gap still
+        // occupies its slot on the wire.
+        self.rate_policy.advance();
+        coded
     }
 
     fn decode_frame(&mut self, frame: &CodedFrame) -> Result<Vec<i16>> {
@@ -1485,7 +1526,93 @@ mod tests {
             }
         }
 
-        /// A real DTX stream, decoded entirely through the public API.
+        /// `mode-change-period=2` is honoured through the public API.
+        ///
+        /// Both this and `mode-change-neighbor` were parsed, modelled in
+        /// `rate.rs`, tested there, and called by nothing: `set_mode` assigned
+        /// straight to `current_mode`. Neither is audible on its own — the
+        /// frames decode either way — so only a test that drives the codec and
+        /// reads the mode back catches it.
+        #[test]
+        #[cfg(feature = "amr-nb")]
+        fn a_negotiated_change_period_delays_a_rate_change() {
+            let mut config = CodecConfig::amr_nb();
+            config.parameters.amr.mode_change_period = 2;
+            let mut codec = AmrCodec::new(&config).unwrap();
+
+            let start = codec.current_mode();
+            assert_eq!(start, 7, "the mode set is all modes, so it opens at 12.2");
+
+            // The first request lands: the policy starts with its interval
+            // already elapsed, per RFC 4867's "the initial phase of the
+            // interval is arbitrary".
+            codec.set_mode(4).unwrap();
+            assert_eq!(codec.current_mode(), 4);
+
+            // The next one does not, because only one frame-block has passed.
+            let frame = vec![0i16; 160];
+            codec.encode_frame(&frame).unwrap();
+            codec.set_mode(0).unwrap();
+            assert_eq!(codec.current_mode(), 4, "a change came too soon");
+
+            // After a second frame-block it does.
+            codec.encode_frame(&frame).unwrap();
+            codec.set_mode(0).unwrap();
+            assert_eq!(codec.current_mode(), 0);
+
+            // And with period 1 the same sequence changes every time, so the
+            // assertion above is about the period rather than about anything
+            // else in the path.
+            let mut config = CodecConfig::amr_nb();
+            config.parameters.amr.mode_change_period = 1;
+            let mut every = AmrCodec::new(&config).unwrap();
+            every.set_mode(4).unwrap();
+            every.encode_frame(&frame).unwrap();
+            every.set_mode(0).unwrap();
+            assert_eq!(every.current_mode(), 0, "period 1 should not delay");
+        }
+
+        /// `mode-change-neighbor=1` walks rather than jumps.
+        #[test]
+        #[cfg(feature = "amr-nb")]
+        fn a_negotiated_neighbor_restriction_steps_one_mode_at_a_time() {
+            let mut config = CodecConfig::amr_nb();
+            config.parameters.amr.mode_change_neighbor = true;
+            let mut codec = AmrCodec::new(&config).unwrap();
+            let frame = vec![0i16; 160];
+
+            assert_eq!(codec.current_mode(), 7);
+            // Asking for 0 from 7 moves one step, not seven.
+            codec.set_mode(0).unwrap();
+            assert_eq!(codec.current_mode(), 6);
+
+            let mut steps = 1;
+            while codec.current_mode() != 0 {
+                codec.encode_frame(&frame).unwrap();
+                codec.set_mode(0).unwrap();
+                steps += 1;
+                assert!(steps <= 8, "the walk did not converge");
+            }
+            assert_eq!(steps, 7, "seven single steps from mode 7 to mode 0");
+
+            // Unrestricted, the same request arrives in one.
+            let mut direct = AmrCodec::new(&CodecConfig::amr_nb()).unwrap();
+            direct.set_mode(0).unwrap();
+            assert_eq!(direct.current_mode(), 0);
+        }
+
+        /// A mode outside the negotiated set is still an error, not a
+        /// declined request.
+        #[test]
+        #[cfg(feature = "amr-nb")]
+        fn a_mode_outside_the_set_is_refused_rather_than_deferred() {
+            let config = CodecConfig::amr_nb().with_amr_mode_set(&[0, 4]);
+            let mut codec = AmrCodec::new(&config).unwrap();
+            assert!(codec.set_mode(7).is_err(), "mode 7 is outside the set");
+            assert!(codec.set_mode(0).is_ok());
+        }
+
+        /// A real DTX stream, decoded entirely through the public API.        /// A real DTX stream, decoded entirely through the public API.
         ///
         /// The module's own test proves the decoder; this proves the wiring
         /// above it — that `FrameKind` carries enough for a caller to say
