@@ -430,10 +430,15 @@ impl VariableRateCodec for AmrCodec {
                 let mode = AmrMode::new(self.variant, frame.mode)?;
                 self.decode_frame_bits(mode, &frame.data, frame.quality_ok)
             }
-            // A frame that carried nothing usable. Wideband conceals it; the
-            // caller supplies the mode the stream was last using, because a
-            // lost frame has none of its own and only the receiver knows what
-            // the sequence numbers imply.
+            // A frame the *transport* reports as missing -- a sequence-number
+            // gap, or wideband's SPEECH_LOST. The caller supplies the mode the
+            // stream was last using, because a lost frame has none of its own
+            // and only the receiver knows what the sequence numbers imply.
+            //
+            // Distinct from an in-band NO_DATA frame, which arrives intact and
+            // says the sender deliberately transmitted nothing. That is a DTX
+            // statement about comfort noise, not a loss, and it is refused
+            // below rather than concealed.
             FrameKind::Lost => match &mut self.decoder {
                 #[cfg(feature = "amr-wb")]
                 Decoder::WideBand(decoder) => {
@@ -450,7 +455,7 @@ impl VariableRateCodec for AmrCodec {
                 Decoder::NarrowBand(decoder) => {
                     let mode = AmrMode::new(self.variant, frame.mode)
                         .unwrap_or(self.current_mode);
-                    Ok(decoder.conceal_lost_frame(mode.index()).to_vec())
+                    Ok(decoder.conceal_lost_frame(mode.index())?.to_vec())
                 }
                 Decoder::Absent => Err(CodecError::feature_not_enabled(
                     "no AMR decoder is compiled in",

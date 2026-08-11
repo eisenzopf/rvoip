@@ -58,6 +58,7 @@ use super::synthesis::{
     EXC_ENERGY_HIST,
 };
 use super::{L_FRAME, L_SUBFR, PIT_MAX, SHARPMAX};
+use crate::error::{CodecError, Result};
 use crate::fixed_point::arith::{add, extract_l, mult, round, sub};
 use crate::fixed_point::arith32::{l_mac, l_mult};
 use crate::fixed_point::shift::{l_shr, shl, shr};
@@ -144,6 +145,15 @@ pub struct Decoder {
     energy_history: [Word16; EXC_ENERGY_HIST],
     /// Pitch gains of the last nine subframes, newest last.
     ltp_gains: [Word16; LTP_HISTORY],
+    /// Whether any frame has been decoded since the last reset.
+    ///
+    /// The reference's `dtxGlobalState` starts at `DTX`, not `SPEECH`
+    /// (`dtx_dec_reset`), and only becomes `SPEECH` once a frame has been
+    /// received. A frame lost before that takes the comfort-noise path rather
+    /// than the concealment one, so concealing it here would silently diverge
+    /// -- verified against the reference, which emits a non-zero frame where
+    /// this decoder emits silence.
+    started: bool,
     /// `dec_amr.c`'s `st->nodataSeed`.
     ///
     /// Advances only on a lost frame -- a good or damaged one leaves it
@@ -199,6 +209,7 @@ impl Decoder {
             previous: PreviousFrame::default(),
             energy_history: [Word16(0); EXC_ENERGY_HIST],
             ltp_gains: [Word16(0); LTP_HISTORY],
+            started: false,
             nodata_seed: conceal::NODATA_SEED_INIT,
             #[cfg(test)]
             trace: Vec::new(),
@@ -439,6 +450,7 @@ impl Decoder {
 
         self.detector.update(&mut ctx, &self.ltp_gains, &synthesis);
         self.previous = PreviousFrame { bad, degraded };
+        self.started = true;
         self.lsf_average.update(&mut ctx, self.lsf.last_lsf());
 
         self.post_filter
@@ -473,22 +485,36 @@ impl Decoder {
     /// selects both how many parameters are synthesised and how wide each one
     /// is.
     ///
-    /// # A limit worth stating
+    /// # Two limits, both from DTX
     ///
-    /// `Decoder_amr_reset(st, MRDTX)` re-seeds `nodataSeed` on every
+    /// `dtx_dec_reset` leaves `dtxGlobalState` at `DTX`, not `SPEECH`, so the
+    /// reference sends a frame lost *before any frame has been received* to
+    /// comfort noise rather than here. Measured: it emits a non-zero frame
+    /// where this path emits silence. That case is refused rather than
+    /// approximated.
+    ///
+    /// `Decoder_amr_reset(st, MRDTX)` also re-seeds `nodataSeed` on every
     /// comfort-noise frame, so on a stream that has passed through DTX the
-    /// sequence depends on that history. Nothing here implements DTX yet, so
-    /// this is exact for a stream that has never entered it -- and when DTX
-    /// lands, re-seeding from the comfort-noise path is required behaviour,
-    /// not an optimisation.
+    /// sequence depends on that history. This is therefore exact for a stream
+    /// that has never entered DTX -- and when DTX lands, re-seeding from the
+    /// comfort-noise path is required behaviour, not an optimisation.
+    ///
+    /// # Errors
+    /// When no frame has been decoded since the last reset, per above.
     ///
     /// # Panics
     /// If `mode_index` is not a speech mode, 0..=7.
-    #[must_use]
-    pub fn conceal_lost_frame(&mut self, mode_index: u8) -> [i16; L_FRAME] {
+    pub fn conceal_lost_frame(&mut self, mode_index: u8) -> Result<[i16; L_FRAME]> {
+        if !self.started {
+            return Err(CodecError::feature_not_enabled(
+                "AMR-NB cannot conceal the first frame of a stream: the reference starts in \
+                 the DTX state and routes that frame to comfort noise, which is not \
+                 implemented (see codec-core/docs/AMR_IMPLEMENTATION_PLAN.md)",
+            ));
+        }
         let mut ctx = DspContext::default();
         let params = conceal::build_cn_param(&mut ctx, &mut self.nodata_seed, mode_index);
-        self.decode_parameters(mode_index, &params, FrameState::Bad)
+        Ok(self.decode_parameters(mode_index, &params, FrameState::Bad))
     }
 
     /// Return the decoder to its reset state, keeping nothing.
@@ -1222,7 +1248,7 @@ mod tests {
         for (f, frame) in frames.iter().enumerate() {
             let got = if frame.frame_type == AmrFrameType::NoData {
                 concealed += 1;
-                decoder.conceal_lost_frame(4)
+                decoder.conceal_lost_frame(4).expect("not the first frame")
             } else {
                 let params = super::super::bitstream::parse(4, &frame.data).expect("parses");
                 decoder.decode_parameters(4, &params, FrameState::Good)
@@ -1237,12 +1263,41 @@ mod tests {
         assert_eq!(compared, want.len(), "compared fewer samples than the fixture holds");
     }
 
+    /// The first frame of a stream cannot be concealed, and says so.
+    ///
+    /// The reference's `dtxGlobalState` starts at `DTX`, so a frame lost
+    /// before any has been received goes to comfort noise rather than to
+    /// `build_CN_param`. Measured against the reference decoder: feeding it a
+    /// stream whose frame 0 is frame type 15 yields
+    /// `[0, 0, 0, 0, -8, -16, 0, 0]`, where this path yields silence. The
+    /// committed fixture cannot catch that -- its first loss is frame 5 --
+    /// which is exactly why the boundary is asserted here instead.
+    #[test]
+    fn the_first_frame_of_a_stream_is_refused_rather_than_approximated() {
+        let mut decoder = Decoder::new();
+        assert!(decoder.conceal_lost_frame(4).is_err());
+
+        // One good frame is enough to leave the DTX state behind.
+        let (bits, _) = fixture(4);
+        let (_, frames) = storage::read(bits).expect("fixture parses");
+        let params = super::super::bitstream::parse(4, &frames[0].data).expect("parses");
+        let _ = decoder.decode_parameters(4, &params, FrameState::Good);
+        assert!(
+            decoder.conceal_lost_frame(4).is_ok(),
+            "the refusal outlived the first frame"
+        );
+
+        // And it comes back after a reset, because the reference's state does.
+        decoder.reset();
+        assert!(decoder.conceal_lost_frame(4).is_err());
+    }
+
     /// A lost frame and a damaged one must not decode alike.
     ///
     /// The two fixtures erase the same frames of the same stream and differ
     /// only in how: one clears the quality bit, the other replaces the frame
-    /// with NO_DATA. If concealment ignored the manufactured parameters -- the
-    /// mistake this module exists to avoid -- both would produce identical
+    /// with `NO_DATA`. If concealment ignored the manufactured parameters --
+    /// the mistake this module exists to avoid -- both would produce identical
     /// audio and every other assertion here would still pass.
     #[test]
     fn a_lost_frame_does_not_decode_like_a_damaged_one() {
