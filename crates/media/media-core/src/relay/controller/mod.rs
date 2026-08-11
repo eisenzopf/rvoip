@@ -157,7 +157,7 @@ pub use audio_generation::{AudioSource, AudioTransmitterConfig};
 pub use bridge::{BridgeError, BridgeHandle};
 pub use types::{
     AdvancedProcessorConfig, AdvancedProcessorSet, MediaConfig, MediaSessionEvent,
-    MediaSessionInfo, MediaSessionStatus,
+    MediaSessionInfo, MediaSessionStatus, NEGOTIATED_FMTP_PARAMETER,
 };
 
 use types::RtpSessionWrapper;

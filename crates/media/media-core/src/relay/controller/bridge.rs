@@ -619,12 +619,26 @@ mod tests {
     }
 
     /// A config carrying an explicit negotiated fmtp string.
+    ///
+    /// Through the same builder the SIP layer uses, not a raw map insert: a
+    /// helper that writes the key itself would keep passing if the builder
+    /// stopped writing it, which is most of how this parameter came to be
+    /// unwired in the first place.
     fn test_config_with_fmtp(codec: &str, fmtp: &str) -> MediaConfig {
-        let mut config = test_config(codec);
-        config
-            .parameters
-            .insert(NEGOTIATED_FMTP_PARAMETER.to_string(), fmtp.to_string());
-        config
+        test_config(codec).with_negotiated_fmtp(Some(fmtp))
+    }
+
+    #[test]
+    fn clearing_the_fmtp_removes_the_key_rather_than_emptying_it() {
+        // Absent and empty are different states of the map, and the guard
+        // reads the map. A re-negotiation that carries no fmtp arrives here.
+        let carried = test_config_with_fmtp("PCMU", "octet-align=1");
+        assert_eq!(
+            carried.parameters.get(NEGOTIATED_FMTP_PARAMETER).cloned(),
+            Some("octet-align=1".to_string())
+        );
+        let cleared = carried.with_negotiated_fmtp(None);
+        assert!(!cleared.parameters.contains_key(NEGOTIATED_FMTP_PARAMETER));
     }
 
     #[tokio::test]

@@ -1476,6 +1476,17 @@ impl MediaAdapter {
         out
     }
 
+    /// Commit one negotiated media generation to the media layer.
+    ///
+    /// `negotiated_fmtp` is the peer's `a=fmtp` parameter string for the
+    /// primary audio payload type, carried verbatim and uninterpreted — the
+    /// signalling layer has no business parsing it, but losing it is not
+    /// neutral either. For AMR those parameters select the wire framing
+    /// itself (RFC 4867 §8.3.1), so a relay that never sees them will forward
+    /// bytes the far end cannot parse. `None` means the peer sent no usable
+    /// `a=fmtp` line, and is passed through as such rather than flattened to
+    /// an empty string: the configuration below is seeded from the previous
+    /// generation, so `None` has to clear what a previous negotiation left.
     async fn apply_negotiated_media_config(
         &self,
         dialog_id: &DialogId,
@@ -1484,6 +1495,7 @@ impl MediaAdapter {
         payload_type: u8,
         clock_rate: u32,
         channels: u8,
+        negotiated_fmtp: Option<&str>,
     ) -> Result<()> {
         let mut config = self
             .controller
@@ -1494,12 +1506,9 @@ impl MediaAdapter {
             })?
             .config;
         config.remote_addr = Some(remote_addr);
-        config = config.with_negotiated_audio_codec(
-            codec.to_string(),
-            payload_type,
-            clock_rate,
-            channels,
-        );
+        config = config
+            .with_negotiated_audio_codec(codec.to_string(), payload_type, clock_rate, channels)
+            .with_negotiated_fmtp(negotiated_fmtp);
 
         self.controller
             .update_media(dialog_id.clone(), config)
@@ -2396,6 +2405,7 @@ impl MediaAdapter {
                 staged.config.payload_type,
                 staged.config.clock_rate,
                 staged.config.channels,
+                staged.config.negotiated_fmtp.as_deref(),
             )
             .await?;
 
@@ -6132,6 +6142,123 @@ a=fmtp:101 0-15\r\n";
             .expect("cleanup media session");
     }
 
+    /// The negotiated `a=fmtp` string must survive from the peer's SDP into
+    /// the media layer's own configuration.
+    ///
+    /// It did not, for the whole life of the parameter: `NegotiatedConfig`
+    /// carried it, `apply_negotiated_media_config` did not take it, and
+    /// `MediaConfig::with_negotiated_fmtp` had zero callers -- so the bridge's
+    /// AMR framing guard read `None`, compared `""` against `""`, and could
+    /// never fire. Every test that looked like coverage stopped one call short
+    /// of the boundary.
+    ///
+    /// G.729 rather than AMR because media-core's `resolve_codec` has no AMR
+    /// arm yet, so an AMR `MediaConfig` is refused before any of this is
+    /// reached. The parameter is codec-agnostic; what is under test is
+    /// carriage, not interpretation.
+    #[cfg(feature = "g729")]
+    #[tokio::test]
+    async fn negotiated_fmtp_reaches_the_media_layer() {
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::{
+            MediaSessionController, NEGOTIATED_FMTP_PARAMETER,
+        };
+        use std::net::Ipv4Addr;
+
+        let controller = Arc::new(MediaSessionController::new());
+        let store = Arc::new(SessionStore::new());
+        let session_id = SessionId("fmtp-reaches-media-layer".to_string());
+        store
+            .create_session(session_id.clone(), Role::UAS, false)
+            .await
+            .expect("create session");
+
+        let mut adapter = MediaAdapter::new(
+            controller.clone(),
+            store.clone(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16200,
+            16300,
+        );
+        adapter.set_offered_codecs(vec![18, 101]);
+        adapter.set_g729_annex_b(false);
+        adapter
+            .start_session(&session_id)
+            .await
+            .expect("start session");
+
+        let offer = |fmtp: Option<&str>| {
+            let mut media = SdpBuilder::new("Session")
+                .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+                .connection("IN", "IP4", "127.0.0.1")
+                .time("0", "0")
+                .media_audio(35100, "RTP/AVP")
+                .formats(&["18"])
+                .rtpmap("18", "G729/8000");
+            if let Some(fmtp) = fmtp {
+                media = media.fmtp("18", fmtp);
+            }
+            media
+                .attribute("sendrecv", None::<String>)
+                .done()
+                .build()
+                .expect("offer builds")
+                .to_string()
+        };
+
+        adapter
+            .negotiate_sdp_as_uas(&session_id, &offer(Some("annexb=no")))
+            .await
+            .expect("G.729 offer negotiates");
+
+        let dialog_id = adapter
+            .current_media(&session_id)
+            .expect("exact media resource exists")
+            .dialog_id;
+        let carried = controller
+            .get_session_info(&dialog_id)
+            .await
+            .expect("media session exists")
+            .config
+            .parameters
+            .get(NEGOTIATED_FMTP_PARAMETER)
+            .cloned();
+        assert_eq!(
+            carried.as_deref(),
+            Some("annexb=no"),
+            "the peer's fmtp did not reach media-core"
+        );
+
+        // And a renegotiation carrying no fmtp must CLEAR it rather than leave
+        // the previous generation's string behind. This is the half an
+        // insert-only builder gets wrong: the next configuration is seeded
+        // from this one, so a stale `octet-align=1` would outlive the
+        // negotiation that agreed it and make the bridge refuse a compatible
+        // pair.
+        adapter
+            .negotiate_sdp_as_uas(&session_id, &offer(None))
+            .await
+            .expect("fmtp-less offer negotiates");
+        let after = controller
+            .get_session_info(&dialog_id)
+            .await
+            .expect("media session exists")
+            .config
+            .parameters
+            .get(NEGOTIATED_FMTP_PARAMETER)
+            .cloned();
+        assert_eq!(
+            after, None,
+            "a negotiation without fmtp left the previous value in place"
+        );
+
+        adapter
+            .cleanup_session(&session_id)
+            .await
+            .expect("cleanup media session");
+    }
+
     #[tokio::test]
     async fn default_offered_codecs_omit_opus() {
         // Regression guard: the C2 default (PCMU + PCMA + DTMF) must
@@ -6282,10 +6409,13 @@ a=fmtp:101 0-15\r\n";
 
     #[test]
     #[cfg(feature = "amr-wb")]
-    fn negotiated_fmtp_is_carried_verbatim_to_the_media_layer() {
-        // The signalling layer must not interpret format parameters, but it
-        // must not lose them either: for AMR they select the wire framing, so
-        // a relay that never sees them frames packets the peer cannot parse.
+    fn amr_fmtp_is_read_out_of_the_offer_verbatim() {
+        // Scope: this asserts the SDP parser hands back the parameter string
+        // unchanged. It says nothing about whether the value survives into
+        // media-core -- for a long time it did not, and this test's previous
+        // name claimed otherwise while the body never crossed the boundary.
+        // `negotiated_fmtp_reaches_the_media_layer` below is the one that
+        // crosses it.
         let offer = SdpBuilder::new("Session")
             .origin("-", "1", "1", "IN", "IP4", "127.0.0.1")
             .connection("IN", "IP4", "127.0.0.1")

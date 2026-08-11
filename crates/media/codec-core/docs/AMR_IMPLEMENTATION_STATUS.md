@@ -1068,8 +1068,8 @@ class A table earlier stopped responding.
 | `CmrDamper` — CMR-interval damping | `src/codecs/amr/rate.rs` |
 | Dynamic PT resolution from `a=rtpmap` instead of assumed Opus | `rvoip-sip/src/adapters/media_adapter.rs` |
 | AMR payload types, rtpmap and fmtp in offers | `rvoip-sip/src/adapters/media_adapter.rs` |
-| Negotiated `a=fmtp` carried to the media layer | `NegotiatedConfig::negotiated_fmtp` |
-| `AmrPayloadFormat::from_negotiated` — signalling to wire | `media-core/src/rtp_processing/payload/amr.rs` |
+| Negotiated `a=fmtp` carried to the media layer | `NegotiatedConfig::negotiated_fmtp`, and into `MediaConfig` as of 2026-08-10 |
+| `AmrPayloadFormat::from_negotiated` — written, **not yet called** | `media-core/src/rtp_processing/payload/amr.rs` |
 
 ### A phase 0 mistake, corrected
 
@@ -1117,7 +1117,30 @@ RFC's "separate payload types" guidance:
 avoid collisions. A *peer's* AMR payload type is identified from its rtpmap, not
 from these numbers — they are only our own assignments.
 
-### Signalling now reaches the wire
+### Signalling reaches the media layer — corrected 2026-08-10
+
+**This section was written as "Signalling now reaches the wire" and overclaimed.**
+What it describes was built and tested; what it did not check is whether anything
+called it. Two separate consumers of the negotiated fmtp were left unwired:
+
+- `MediaConfig::with_negotiated_fmtp` had **zero callers**.
+  `apply_negotiated_media_config` took six arguments, none of them the fmtp, so
+  the string died at the SIP/media boundary and the relay's framing guard
+  compared `""` against `""` on every call. Fixed, with an end-to-end test that
+  negotiates real SDP and asserts the value in media-core's own config — plus
+  the half an insert-only builder gets wrong, that a renegotiation carrying no
+  fmtp must *clear* the previous one rather than leave it behind.
+- `AmrPayloadFormat::from_negotiated` still has **zero production callers**; all
+  of them are in its own test module. The payload layer therefore still assumes
+  RFC 4867 defaults. Harmless for a transparent relay, which never unpacks a
+  frame, and a real gap the moment media-core terminates AMR.
+
+The lesson is the branch's own recurring one, in a new place: a test named
+`negotiated_fmtp_is_carried_verbatim_to_the_media_layer` asserted only that the
+SDP parser could read an fmtp line. It stopped one call short of the boundary it
+named, and reading the test list was enough to believe the path was covered.
+
+What follows is accurate about the mechanism.
 
 `NegotiatedConfig` gained `negotiated_fmtp: Option<String>` — the raw `a=fmtp`
 parameters agreed for the negotiated payload type. It is deliberately
@@ -1647,8 +1670,13 @@ compatibility check, where matching payload types were treated as sufficient.
 
 `NegotiatedConfig::negotiated_fmtp` plus `AmrPayloadFormat::from_negotiated`.
 The signalling layer carries the fmtp string without interpreting it; the codec
-layer parses it. Closes the gap flagged in the previous entry, where a relay
-would have framed packets with defaults rather than what was negotiated.
+layer parses it.
+
+**Corrected 2026-08-10:** this claimed to close the gap and did not. Neither
+consumer was called — `MediaConfig::with_negotiated_fmtp` had zero callers, and
+`AmrPayloadFormat::from_negotiated` still has none outside its own tests. The
+first is now wired end to end; the second is not. See "Signalling reaches the
+media layer" above.
 
 ### 2026-08-08 — Phase 2 negotiation layer
 

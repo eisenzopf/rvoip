@@ -68,11 +68,27 @@ impl MediaConfig {
         self
     }
 
-    /// Record the negotiated `a=fmtp` parameter string.
+    /// Record the negotiated `a=fmtp` parameter string, or clear it.
+    ///
+    /// `None` means the peer sent no usable `a=fmtp` line, which is a
+    /// statement rather than an absence of one: for AMR it selects every RFC
+    /// 4867 default. It therefore has to *remove* any value a previous
+    /// negotiation left behind. A re-INVITE from octet-aligned AMR to
+    /// bandwidth-efficient AMR — or to any codec at all — reaches this with
+    /// `None`, and callers seed the new configuration from the old one, so
+    /// skipping the write would leave the stale string in place and make the
+    /// bridge's framing guard refuse a pair that is in fact compatible.
     #[must_use]
-    pub fn with_negotiated_fmtp(mut self, fmtp: impl Into<String>) -> Self {
-        self.parameters
-            .insert(NEGOTIATED_FMTP_PARAMETER.to_string(), fmtp.into());
+    pub fn with_negotiated_fmtp(mut self, fmtp: Option<&str>) -> Self {
+        match fmtp {
+            Some(fmtp) => {
+                self.parameters
+                    .insert(NEGOTIATED_FMTP_PARAMETER.to_string(), fmtp.to_string());
+            }
+            None => {
+                self.parameters.remove(NEGOTIATED_FMTP_PARAMETER);
+            }
+        }
         self
     }
 }

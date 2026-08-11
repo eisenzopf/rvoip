@@ -68,6 +68,49 @@ erase "$TESTDATA/amrnb_mode4.amr" "$TESTDATA/amrnb_erased.amr" 6
 "$NB_WORK/amrnb_dec" "$TESTDATA/amrnb_erased.amr" "$TESTDATA/amrnb_erased.pcm" >/dev/null 2>&1
 ls -l "$TESTDATA/amrnb_erased.pcm" | awk '{print "    reference PCM: " $5 " bytes"}'
 
+echo "==> AMR-NB: the same frames LOST rather than damaged"
+# Narrowband has no SPEECH_LOST frame type. RFC 4867 §4.3.1 gives AMR-NB frame
+# type 15 for NO_DATA, and that is what a receiver marks a frame it never got:
+# the reference's `RX_NO_DATA` path fills the parameter vector with pseudo-random
+# values sized by the mode and decodes them as if they were real, with the bad-
+# frame flag set. So the same distinction wideband draws with FT 14 is drawn
+# here with FT 15, and the two decode differently for the same reason: a damaged
+# frame still carries usable pulses.
+python3 - "$TESTDATA/amrnb_mode4.amr" "$TESTDATA/amrnb_lost.amr" "$ERASED" <<'NBLOSTEOF'
+import sys
+src, dst, erased = sys.argv[1], sys.argv[2], set(map(int, sys.argv[3].split()))
+NB = [12, 13, 15, 17, 19, 20, 26, 31, 5] + [0] * 7
+data = open(src, "rb").read()
+out = bytearray(data[:6])
+pos, frame = 6, 0
+while pos < len(data):
+    toc = data[pos]
+    body = NB[(toc >> 3) & 0x0F]
+    if frame in erased:
+        # FT 15 with the quality bit set: the transport knows the frame is
+        # gone, which is a different statement from "these bits may be wrong".
+        out.append((15 << 3) | 0x04)
+    else:
+        out.append(toc)
+        out += data[pos + 1 : pos + 1 + body]
+    pos += 1 + body
+    frame += 1
+open(dst, "wb").write(bytes(out))
+print(f"    {frame} frames, {len(erased)} lost")
+NBLOSTEOF
+"$NB_WORK/amrnb_dec" "$TESTDATA/amrnb_lost.amr" "$TESTDATA/amrnb_lost.pcm" >/dev/null 2>&1
+ls -l "$TESTDATA/amrnb_lost.pcm" | awk '{print "    reference PCM: " $5 " bytes"}'
+# A lost frame still produces 160 samples: the decoder conceals rather than
+# skipping. Anything else means the reference dropped the frame instead of
+# concealing it, and the fixture would be measuring the wrong thing.
+python3 - "$TESTDATA/amrnb_lost.pcm" "$TESTDATA/amrnb_mode4.pcm" <<'LENEOF'
+import sys
+lost, clean = (open(p, "rb").read() for p in sys.argv[1:3])
+if len(lost) != len(clean):
+    sys.exit(f"    lost stream is {len(lost)} bytes, clean is {len(clean)}: frames were dropped, not concealed")
+print(f"    {len(lost) // 320} frames concealed in place")
+LENEOF
+
 echo "==> AMR-WB: erasing the same frames from 12.65 kbit/s"
 erase "$TESTDATA/amrwb_mode2.amr" "$TESTDATA/amrwb_erased.amr" 9
 "$WB_WORK/amrwb_dec" -mime "$TESTDATA/amrwb_erased.amr" "$TESTDATA/amrwb_erased.pcm" >/dev/null 2>&1
@@ -109,14 +152,15 @@ echo "==> sanity check: the erased streams must NOT decode to the clean ones"
 # Otherwise the fixture proves nothing — the erasures would have had no effect,
 # which is what a mis-set quality bit looks like.
 for pair in "amrnb_erased.pcm amrnb_mode4.pcm" "amrwb_erased.pcm amrwb_mode2.pcm" \
-            "amrwb_lost.pcm amrwb_mode2.pcm" "amrwb_lost.pcm amrwb_erased.pcm"; do
+            "amrwb_lost.pcm amrwb_mode2.pcm" "amrwb_lost.pcm amrwb_erased.pcm" \
+            "amrnb_lost.pcm amrnb_mode4.pcm" "amrnb_lost.pcm amrnb_erased.pcm"; do
   set -- $pair
   if cmp -s "$TESTDATA/$1" "$TESTDATA/$2"; then
     echo "    $1 is identical to the clean stream — the quality bit did not take" >&2
     exit 1
   fi
 done
-echo "    all four comparisons differ, as they must"
-# The last pair is the one that matters most: lost and damaged decode
-# differently, so a test that conflated the two would fail visibly rather
-# than merely be wrong.
+echo "    all six comparisons differ, as they must"
+# The lost-vs-damaged pairs are the ones that matter most, one per variant:
+# lost and damaged decode differently, so a test that conflated the two would
+# fail visibly rather than merely be wrong.
