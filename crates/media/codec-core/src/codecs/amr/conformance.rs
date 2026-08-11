@@ -148,4 +148,80 @@ mod tests {
         }
         assert!(compared > 500_000, "only {compared} bits compared");
     }
+
+    /// The decoder, against the specification's own output for each vector.
+    ///
+    /// `tst_m*.out` is what TS 26.173's decoder makes of `tst_m*.cod`. All
+    /// nine, sample for sample, masked to the fourteen bits AMR-WB defines.
+    #[test]
+    #[ignore = "needs the 3GPP sequences; see the module header"]
+    fn wideband_decoder_matches_the_normative_vectors() {
+        use crate::codecs::amr::wb::decoder::Decoder;
+        use crate::codecs::amr::wb::gain::FrameQuality;
+
+        let root = reference_root();
+        let mut compared = 0usize;
+        for mode in 0..9u8 {
+            let amr =
+                crate::codecs::amr::AmrMode::new(crate::codecs::amr::AmrVariant::WideBand, mode)
+                    .expect("a speech mode");
+            let bits = Rate::from_index(mode).expect("a speech mode").bits();
+            let coded = read_serial(&root.join(format!("testv/tst_m{mode}.cod")), bits);
+            let raw = std::fs::read(root.join(format!("testv/tst_m{mode}.out")))
+                .unwrap_or_else(|e| panic!("tst_m{mode}.out: {e}"));
+            let want: Vec<i16> = raw
+                .chunks_exact(2)
+                .map(|b| i16::from_le_bytes([b[0], b[1]]))
+                .collect();
+            assert_eq!(want.len(), coded.len() * 320, "mode {mode} output length");
+
+            let mut decoder = Decoder::new();
+            // The driver's two-state homing protocol, transcribed from
+            // `decoder.c`. Once homed, a following homing frame is recognised
+            // from its *first subframe only* and is answered with the encoder
+            // homing frame directly, without decoding -- the rest of that
+            // frame already carries the next one's content.
+            //
+            // It starts *homed*: `reset_flag_old` is initialised to 1, so a
+            // sequence opening with a homing frame is answered rather than
+            // decoded. Starting from false decodes frame 0 and emits silence
+            // where the vector has 0x0008.
+            let mut homed = true;
+            for (n, frame) in coded.iter().enumerate() {
+                // Re-sort the codec bits into a payload, which is what the
+                // decoder's public entry point takes.
+                let sort = crate::codecs::amr::wb::bitstream::sort_table_for(amr);
+                let mut payload = vec![0u8; bits.div_ceil(8)];
+                for (i, &source) in sort.iter().enumerate() {
+                    payload[i / 8] |= frame[source as usize] << (7 - (i % 8));
+                }
+
+                let mut is_homing = homed
+                    && homing::is_decoder_homing_frame_first(&payload, mode as usize);
+                let out = if is_homing {
+                    [homing::HOMING_SAMPLE; 320]
+                } else {
+                    decoder
+                        .decode_frame(amr, &payload, FrameQuality::Good)
+                        .unwrap_or_else(|| panic!("mode {mode} frame {n} refused"))
+                };
+                for (i, (&got, &theirs)) in out.iter().zip(&want[n * 320..]).enumerate() {
+                    assert_eq!(
+                        got & !3,
+                        theirs,
+                        "mode {mode} frame {n} sample {i} differs from the vector"
+                    );
+                    compared += 1;
+                }
+                if !homed {
+                    is_homing = homing::is_decoder_homing_frame(&payload, mode as usize);
+                }
+                if is_homing {
+                    decoder = Decoder::new();
+                }
+                homed = is_homing;
+            }
+        }
+        assert!(compared > 500_000, "only {compared} samples compared");
+    }
 }

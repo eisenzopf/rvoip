@@ -16,7 +16,7 @@
 | **AMR-WB DTX through `AmrCodec`** | **Both directions, byte- and sample-exact** |
 | AMR-NB DTX | Not started, and gated on the VAD1 port |
 | **AMR-WB homing frames** | **Done** — the encoder emits each mode's pattern |
-| **AMR-WB encoder conformance** | **All nine TS 26.173 vectors, bit-exact** |
+| **AMR-WB conformance** | **All nine TS 26.173 vectors, both directions** |
 | AMR-NB homing frames | Not started |
 | Transcoding, interop, benchmarks | Not started |
 
@@ -241,10 +241,16 @@ survive the two parameters the lag and the codebook consume in between.
 
 ## Conformance against the normative sequences
 
-**All nine TS 26.173 wideband encoder vectors pass, bit for bit** — 200 frames
-each of the specification's own input compared against the specification's own
-output, including 23.85 kbit/s, which no amount of ACELP work would have
-reached without DTX and homing. `cargo test -- --ignored conformance` runs
+**All nine TS 26.173 wideband vectors pass in both directions.** The encoder
+reproduces `tst_m0.cod` .. `tst_m8.cod` bit for bit from `tst.inp`, and the
+decoder reproduces `tst_m0.out` .. `tst_m8.out` sample for sample from those —
+200 frames each, including 23.85 kbit/s, which no amount of ACELP work would
+have reached without DTX and homing.
+
+The decoder side needed the driver's own two-state homing protocol, and it
+starts *homed*: `reset_flag_old` is initialised to 1, so a sequence opening
+with a homing frame is answered with `0x0008` directly rather than decoded.
+Starting from the other state emits silence where the vector has 8. `cargo test -- --ignored conformance` runs
 them; they panic rather than skip when the sequences are absent, because a
 conformance test that quietly passes having found nothing is worse than none.
 
