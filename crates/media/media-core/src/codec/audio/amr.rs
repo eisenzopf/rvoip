@@ -59,6 +59,16 @@ pub struct AmrAdapter {
     variant: AmrVariant,
     /// The mode being encoded at, which a peer's CMR can move.
     mode: AmrMode,
+    /// A codec mode request seen on a decoded packet, waiting to be handed to
+    /// whichever object does the encoding.
+    ///
+    /// Not applied here. A CMR tells the *sender* what to send, and in this
+    /// stack the object that decodes is a different allocation from the one
+    /// that encodes ([`DialogCodecRuntime`] holds a `Mutex<StatefulCodec>`
+    /// each). Applying it to the decoding object changed only that object's
+    /// idea of its own transmit rate, which nothing reads — so every peer
+    /// request was silently discarded.
+    pending_mode_request: Option<u8>,
 }
 
 impl AmrAdapter {
@@ -113,6 +123,14 @@ impl AmrAdapter {
             AmrVariant::WideBand => CoreCodecConfig::amr_wb(),
         };
         config.parameters.amr.mode_set = mode_set;
+        // The rate-change constraints, which only bite once codec mode
+        // requests actually move the encoder. Setting only `mode_set` left
+        // codec-core on its defaults (period 1, neighbour off), so a peer that
+        // negotiated `mode-change-period=2` would get a change on every frame
+        // and one that negotiated `mode-change-neighbor=1` would get arbitrary
+        // jumps -- both of which it explicitly asked us not to do.
+        config.parameters.amr.mode_change_period = parsed.mode_change_period;
+        config.parameters.amr.mode_change_neighbor = parsed.mode_change_neighbor;
 
         let codec = CoreAmrCodec::new(&config).map_err(|error| {
             Error::Codec(CodecError::InvalidParameters {
@@ -125,6 +143,7 @@ impl AmrAdapter {
             codec,
             variant,
             mode,
+            pending_mode_request: None,
         })
     }
 
@@ -147,20 +166,39 @@ impl AmrAdapter {
         }
     }
 
+    /// Take any codec mode request this adapter has decoded since the last
+    /// call, so the caller can hand it to the encoding side.
+    ///
+    /// Returns `None` on the common path — a packet whose CMR is 15, "no
+    /// request", or no packet at all.
+    pub const fn take_mode_request(&mut self) -> Option<u8> {
+        self.pending_mode_request.take()
+    }
+
     /// Honour a peer's codec mode request.
     ///
     /// Silently ignored when the requested mode is outside the negotiated
     /// mode set: a CMR is a *request*, and RFC 4867 §3.4.1 leaves an
     /// unsatisfiable one to the encoder's discretion. Refusing the packet
     /// instead would drop audio over a field the sender may set freely.
+    ///
+    /// Also ignored when the negotiated `mode-change-period` says this frame
+    /// is not a permitted change point, or when `mode-change-neighbor` allows
+    /// only a single step — [`codec_core`]'s `ModeChangePolicy` decides, and
+    /// the mode actually in effect is read back rather than assumed.
     pub fn apply_mode_request(&mut self, cmr: Option<u8>) {
         let Some(index) = cmr else { return };
         let Ok(requested) = AmrMode::new(self.variant, index) else {
             return;
         };
         if self.codec.set_mode(requested.index()).is_ok() {
-            self.mode = requested;
-            let _ = self.payload.set_mode(requested);
+            // Read back rather than assume: the change policy may have
+            // deferred this request to a later frame-block, or moved one step
+            // toward it instead of all the way.
+            if let Ok(effective) = AmrMode::new(self.variant, self.codec.current_mode()) {
+                self.mode = effective;
+                let _ = self.payload.set_mode(effective);
+            }
         }
     }
 }
@@ -230,9 +268,12 @@ impl AudioCodec for AmrAdapter {
             })
         })?;
 
-        // The peer's mode request rides on the packet it arrived with, and
-        // applies to what *this* end sends next.
-        self.apply_mode_request(packet.cmr);
+        // The peer's mode request rides on the packet it arrived with and
+        // applies to what *this* end sends next — which is a different object
+        // from this one. Record it; the caller routes it.
+        if packet.cmr.is_some() {
+            self.pending_mode_request = packet.cmr;
+        }
 
         let mut samples = Vec::with_capacity(packet.frames.len() * self.frame_samples());
         for frame in &packet.frames {
@@ -401,7 +442,55 @@ mod tests {
         }
     }
 
+    /// The negotiated rate-change constraints reach the codec.
+    ///
+    /// Only `mode_set` was passed through, so `mode-change-period=2` and
+    /// `mode-change-neighbor=1` were parsed out of the peer's fmtp and then
+    /// dropped on the floor. Latent while codec mode requests went nowhere;
+    /// live the moment they started working.
+    ///
+    /// The period counts *frame-blocks*, so each request below is separated by
+    /// an encoded frame. Two requests inside one frame-block only ever take
+    /// the first, at any period — which is correct, and would make a test
+    /// without the intervening frame pass for the wrong reason.
+    #[test]
+    #[cfg(feature = "amr-nb")]
+    fn the_negotiated_rate_change_constraints_reach_the_codec() {
+        let frame = pcm(160, 8_000);
+
+        let mut deferred =
+            AmrAdapter::new(96, "AMR", Some("mode-set=0,4,7; mode-change-period=2"))
+                .expect("constructs");
+        let mut prompt = AmrAdapter::new(96, "AMR", Some("mode-set=0,4,7")).expect("constructs");
+
+        for codec in [&mut deferred, &mut prompt] {
+            assert_ne!(codec.mode.index(), 4, "vacuous if it starts at the first target");
+            codec.apply_mode_request(Some(4));
+            assert_eq!(codec.mode.index(), 4, "the first request should land");
+            codec.encode(&frame).expect("encodes");
+            codec.apply_mode_request(Some(0));
+        }
+
+        assert_eq!(
+            prompt.mode.index(),
+            0,
+            "period defaults to 1, so a request one frame-block later lands"
+        );
+        assert_eq!(
+            deferred.mode.index(),
+            4,
+            "mode-change-period=2 should still be deferring after one frame-block"
+        );
+
+        // And it is a deferral rather than a refusal: one more frame-block and
+        // the same request takes.
+        deferred.encode(&frame).expect("encodes");
+        deferred.apply_mode_request(Some(0));
+        assert_eq!(deferred.mode.index(), 0, "the second frame-block should allow it");
+    }
+
     /// A peer's mode request moves the encoder, and an impossible one does not
+    /// drop the packet.    /// A peer's mode request moves the encoder, and an impossible one does not
     /// drop the packet.
     #[test]
     #[cfg(feature = "amr-nb")]

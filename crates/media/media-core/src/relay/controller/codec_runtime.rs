@@ -296,6 +296,26 @@ impl StatefulCodec {
         }
     }
 
+    /// Any codec mode request the last decode observed.
+    ///
+    /// Only AMR has one; every other codec here returns `None`.
+    fn take_mode_request(&mut self) -> Option<u8> {
+        match self {
+            #[cfg(any(feature = "amr-nb", feature = "amr-wb"))]
+            Self::Amr(codec) => codec.take_mode_request(),
+            _ => None,
+        }
+    }
+
+    /// Apply a peer's codec mode request to this (encoding) side.
+    fn apply_mode_request(&mut self, cmr: u8) {
+        match self {
+            #[cfg(any(feature = "amr-nb", feature = "amr-wb"))]
+            Self::Amr(codec) => codec.apply_mode_request(Some(cmr)),
+            _ => {}
+        }
+    }
+
     fn decode(&mut self, payload: &[u8]) -> Result<AudioFrame> {
         match self {
             Self::Pcmu(codec) | Self::Pcma(codec) => codec.decode(payload),
@@ -380,8 +400,21 @@ impl DialogCodecRuntime {
     }
 
     pub(super) async fn decode(&self, payload: &[u8], timestamp: u32) -> Result<AudioFrame> {
-        let mut frame = self.decoder.lock().await.decode(payload)?;
+        let (mut frame, mode_request) = {
+            let mut decoder = self.decoder.lock().await;
+            let frame = decoder.decode(payload)?;
+            (frame, decoder.take_mode_request())
+        };
         frame.timestamp = timestamp;
+
+        // A codec mode request arrives on the *receive* path and constrains
+        // the *transmit* one, and those are separate objects behind separate
+        // locks. Hand it across here, after the decoder's lock is released so
+        // the two are never held at once.
+        if let Some(cmr) = mode_request {
+            self.encoder.lock().await.apply_mode_request(cmr);
+        }
+
         Ok(frame)
     }
 }
@@ -528,6 +561,68 @@ mod tests {
             let frame = AudioFrame::new(vec![0i16; length], 8_000, 1, 0);
             assert!(codec.encode(&frame).is_err(), "{length} samples should be refused");
         }
+    }
+
+    /// A peer's codec mode request has to reach the *encoder*.
+    ///
+    /// `DialogCodecRuntime` holds the encoder and the decoder as two separate
+    /// `StatefulCodec` allocations, so a CMR applied inside the decoding
+    /// object changes nothing about what this end transmits. The unit test in
+    /// the adapter passed because it called `apply_mode_request` on the same
+    /// object it then encoded with; production never does.
+    ///
+    /// A CMR is the one flow-control lever a peer has over our bitrate. On a
+    /// congested link a handset asks us to drop rate and, before this, we
+    /// carried on at the negotiated maximum indefinitely.
+    #[tokio::test]
+    #[cfg(feature = "amr-nb")]
+    async fn a_peers_mode_request_reaches_the_encoder() {
+        use codec_core::codecs::amr::mode::AmrVariant;
+        use codec_core::codecs::amr::payload::{AmrPayloadCodec, AmrPayloadConfig};
+
+        // mode-set 0 and 7 only, so the request below is satisfiable and the
+        // two modes have plainly different frame sizes.
+        let resolved = resolve_codec(&amr_config("AMR", 96, 8_000, "octet-align=1; mode-set=0,7"))
+            .expect("resolves");
+        let runtime = DialogCodecRuntime::new(resolved).expect("constructs");
+
+        let pcm: Vec<i16> = (0..160)
+            .map(|i| ((f64::from(i) * 0.05).sin() * 5000.0) as i16)
+            .collect();
+        let frame = AudioFrame::new(pcm, 8_000, 1, 0);
+
+        let before = runtime.encode(&frame).await.expect("encodes").len();
+
+        // A payload from the peer carrying CMR = 0 (request 4.75 kbit/s).
+        // Its speech frame is whatever we just produced, so the packet is
+        // well-formed and the only thing under test is the request.
+        let packer = AmrPayloadCodec::new(AmrPayloadConfig {
+            variant: AmrVariant::NarrowBand,
+            octet_aligned: true,
+            crc: false,
+            robust_sorting: false,
+            interleaving: false,
+        })
+        .expect("packer");
+        // Unpack one of our own payloads and re-pack it with the request
+        // set, so the speech frame is genuinely well-formed and the only
+        // difference from an ordinary packet is the CMR nibble.
+        let speech = runtime.encode(&frame).await.expect("encodes");
+        let mut packet = packer.unpack(&speech).expect("our own payload unpacks");
+        packet.cmr = Some(0);
+        let inbound = packer.pack(&packet).expect("packs");
+
+        runtime.decode(&inbound, 0).await.expect("decodes");
+
+        let after = runtime.encode(&frame).await.expect("encodes").len();
+        assert_ne!(
+            before, after,
+            "the peer asked for 4.75 kbit/s and the encoder kept sending {before}-byte frames"
+        );
+        assert!(
+            after < before,
+            "the request was for a lower rate, so frames should have shrunk: {before} -> {after}"
+        );
     }
 
     #[test]
