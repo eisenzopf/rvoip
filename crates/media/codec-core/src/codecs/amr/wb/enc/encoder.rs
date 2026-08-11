@@ -58,6 +58,7 @@ use super::super::lp::isf_dequant::{IsfQuantizer, ISF_INIT};
 use super::super::math::{dot_product12, isqrt_n, scale_sig};
 use super::super::sort_tables::{
     SORT_1265, SORT_1425, SORT_1585, SORT_1825, SORT_1985, SORT_2305, SORT_2385, SORT_660,
+    SORT_SID,
     SORT_885,
 };
 use super::analysis::{deemph2, residu, weight_a, FrontEnd, GAMMA1, L_SUBFR, TILT_FAC};
@@ -106,7 +107,7 @@ const L_SUBFR16K: usize = 80;
 
 /// Frame sizes in bits, indexed by mode. Every mode test in `coder()` keys on
 /// the budget rather than on the mode number.
-const NB_OF_BITS: [usize; 9] = [132, 177, 253, 285, 317, 365, 397, 461, 477];
+const NB_OF_BITS: [usize; 10] = [132, 177, 253, 285, 317, 365, 397, 461, 477, 35];
 
 /// Shortest pitch lag, in 12.8 kHz samples.
 const PIT_MIN: i16 = 34;
@@ -131,6 +132,13 @@ const NBBITS_24K: usize = 477;
 pub struct Rate(u8);
 
 impl Rate {
+    /// The comfort-noise pseudo-rate, frame type 9.
+    ///
+    /// Not reachable through [`Self::from_index`]: it is a decision the DTX
+    /// handler makes about a frame, not a rate a caller can ask for, and the
+    /// ISF quantiser and index widths below are meaningless for it.
+    pub const SID: Self = Self(9);
+
     /// The rate for mode index 0..=8, or `None` for anything else.
     #[must_use]
     pub const fn from_index(index: u8) -> Option<Self> {
@@ -139,6 +147,12 @@ impl Rate {
         } else {
             None
         }
+    }
+
+    /// Whether this is the comfort-noise pseudo-rate.
+    #[must_use]
+    pub const fn is_sid(self) -> bool {
+        self.0 == 9
     }
 
     /// The mode index, 0..=8.
@@ -178,12 +192,18 @@ impl Rate {
             5 => &SORT_1825,
             6 => &SORT_1985,
             7 => &SORT_2305,
+            9 => &SORT_SID,
             _ => &SORT_2385,
         }
     }
 
     /// The ISF quantiser this rate can afford.
+    ///
+    /// # Panics
+    /// On [`Self::SID`], which quantises its spectrum with the comfort-noise
+    /// codebooks instead and never reaches here.
     const fn isf_quantiser(self) -> IsfQuantizer {
+        assert!(!self.is_sid(), "a SID frame has no speech ISF quantiser");
         if self.bits() <= NBBITS_7K {
             IsfQuantizer::Bits36
         } else {
