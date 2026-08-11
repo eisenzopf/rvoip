@@ -52,7 +52,7 @@ const fn sort_table(mode: AmrMode) -> &'static [u16] {
 ///   bit 32 | bit 33 | bit 34 | STI | mode3 | mode2 | mode1 | mode0
 /// ```
 ///
-/// `STI` distinguishes a SID_UPDATE (set) from a SID_FIRST (clear) — they are
+/// `STI` distinguishes a `SID_UPDATE` (set) from a `SID_FIRST` (clear) — they are
 /// the same frame type on the wire and nothing else tells them apart. `mode`
 /// is the *speech* mode the encoder was asked for, not the comfort-noise
 /// pseudo-mode, so the receiver knows what to expect when speech resumes.
@@ -87,6 +87,48 @@ pub fn blank_sid_first(payload: &mut [u8]) {
     payload[2] = 0;
     payload[3] = 0;
     payload[4] &= 0b0001_1111;
+}
+
+/// The five fields a wideband SID payload carries, unsorted and read out.
+///
+/// Returns `None` for a payload that is not the five bytes of a SID frame.
+/// A `SID_FIRST`'s bits are all zero by construction — the caller decides
+/// whether to believe them, using the STI bit, not this function.
+#[must_use]
+pub fn parse_sid(payload: &[u8]) -> Option<([u16; 5], u16, bool)> {
+    if payload.len() != 5 {
+        return None;
+    }
+    let mut bits = [0u8; 35];
+    for (i, &target) in SORT_SID.iter().enumerate() {
+        bits[target as usize] = (payload[i / 8] >> (7 - (i % 8))) & 1;
+    }
+    let mut at = 0usize;
+    let mut take = |width: usize| -> u16 {
+        let mut value = 0u16;
+        for _ in 0..width {
+            value = (value << 1) | u16::from(bits[at]);
+            at += 1;
+        }
+        value
+    };
+    let indices = [take(6), take(6), take(6), take(5), take(5)];
+    let energy = take(6);
+    let dither = take(1) == 1;
+    Some((indices, energy, dither))
+}
+
+/// Whether a SID payload's set-transmission-indicator marks it an update.
+///
+/// Clear means `SID_FIRST`, whose thirty-five codec bits are blank. The two
+/// carry the same frame type on the wire and nothing else distinguishes them.
+///
+/// # Panics
+/// If `payload` is not the five bytes of a SID frame.
+#[must_use]
+pub fn sid_is_update(payload: &[u8]) -> bool {
+    assert_eq!(payload.len(), 5, "a wideband SID payload is five bytes");
+    payload[4] & 0b0001_0000 != 0
 }
 
 /// A frame's codec bits, in the order the decoder reads them.

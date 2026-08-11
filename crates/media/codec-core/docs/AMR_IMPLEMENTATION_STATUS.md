@@ -12,7 +12,7 @@
 | **All four paths reachable through `AmrCodec`** | **Done, and byte-exact through the public API** |
 | **Oracle qualification** | **Measured** — see below |
 | **AMR-WB DTX, encoder side** | **Byte-identical SIDs on the reference's own schedule**, 150 frames |
-| AMR-WB DTX, decoder side | Not started — comfort-noise frames still refuse |
+| AMR-WB DTX, decoder side | **Kernel bit-exact**; the synthesis wiring is not — 83 of 150 frames |
 | AMR-NB DTX | Not started, and gated on the VAD1 port |
 | Homing frames | Not started, both variants |
 | Transcoding, interop, benchmarks | Not started |
@@ -34,6 +34,19 @@ payloads is byte-identical, STI bit, mode indication and `SID_FIRST` blanking
 included. A right kernel fed the wrong residual or the wrong history would
 produce a well-formed SID with wrong bits, which the frame-type sequence alone
 would not notice.
+
+**What "AMR-WB DTX, decoder side" claims, exactly.** The state machine, the
+backward analysis, the interpolation, the `DTX_MUTE` fade and the comfort-noise
+generator are bit-exact against `rx_dtx_handler`, `dtx_dec` and
+`dtx_dec_activity_update` over an 89-frame sequence visiting all three states.
+A real DTX stream decodes through every frame type and synthesises noise rather
+than silence. **Not claimed:** that the synthesised audio matches the reference
+decoder. It does not — 83 of the 150 frames differ, the first being the
+stream's first SID, with every speech frame before it still sample-exact. The
+kernel is exact, so what is wrong is the wiring around it: the partial decoder
+reset, the scaling handed to the synthesis filter, or the high-band branch.
+`the_comfort_noise_synthesis_is_not_yet_bit_exact` is ignored rather than
+deleted so the gap stays visible and names the frame to trace.
 
 Neither reference is committed. `tools/build-amr-reference.sh`,
 `build-amrnb-reference.sh` and the two `*-encoder-reference.sh` scripts fetch
