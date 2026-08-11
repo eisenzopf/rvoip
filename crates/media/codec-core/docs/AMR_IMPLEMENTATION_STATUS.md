@@ -205,6 +205,42 @@ sequences and are not in this tree (IP-2a). The distinction is worth keeping,
 because this repo's own G.711 tests already disclaim evidence from files that
 are not present, and the same discipline applies here.
 
+## The normative encoder vectors are DTX-on, and mode 8 needs it
+
+Found while specifying DTX, and it changes what conformance will cost.
+
+TS 26.173 ships nine encoder conformance vectors, and `testv/test_enc.bat`
+produces every one of them with `-dtx`. Measured against our own build of the
+reference:
+
+| | Reproducible without `-dtx`? |
+|---|---|
+| `tst_m0.cod` .. `tst_m7.cod` | **Yes**, byte for byte |
+| `tst_m8.cod` (23.85 kbit/s) | **No** — 266 of 192 000 bytes differ |
+
+`tst.inp` never goes quiet enough to emit a SID at any rate, so for eight of
+the nine the DTX flag changes nothing. Mode 8 is different because it is the
+only rate whose high-band correction gain depends on `dtxHangoverCount`: with
+DTX off the counter never leaves `DTX_HANG_CONST`, `gain_alpha` is pinned at
+32767, and that is exactly what `wb/enc/encoder.rs` hardcodes today. The
+differing frames are precisely those where the counter is below 7, and every
+differing bit is inside the four 4-bit gain fields.
+
+Two consequences:
+
+1. **Eight of the nine normative vectors are within reach now**, without DTX.
+   That is a stronger claim than agreement with our own fixtures and it costs
+   only a fetch — the vectors are 3GPP-copyrighted and stay out of the tree, so
+   the test is opt-in, `#[ignore]`d, and panics rather than skips when the
+   environment variable naming them is unset.
+2. **The ninth is the acceptance test for the DTX hangover counter.** Not a
+   proxy for it: the same counter, read by the same expression, over 200 frames
+   of the spec's own input.
+
+`tst.inp` also opens with two encoder homing frames (all `0x0008`), each of
+which drives `Reset_encoder` and re-arms the hangover — so reproducing
+`tst_m8.cod` needs homing as well as DTX.
+
 ## Where these tests run
 
 Until 2026-08-10, nowhere. `codec-core` defaults to `["g711"]` and the PR
