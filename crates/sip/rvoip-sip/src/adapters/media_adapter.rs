@@ -6740,6 +6740,7 @@ a=fmtp:101 0-15\r\n";
     }
 
     #[test]
+    #[cfg(feature = "amr-wb")]
     fn amr_offers_advertise_each_framing_as_its_own_payload_type() {
         // RFC 4867 §8.3.1: transport configurations are mutually incompatible
         // bit patterns, so they are separate payload types rather than
