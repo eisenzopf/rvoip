@@ -281,6 +281,7 @@ sid_ft = 8 if variant == "nb" else 9
 data = open(src, "rb").read()
 out = bytearray(data[:magic])
 pos, frame, dropped, run, longest = magic, 0, 0, 0, 0
+kept_opening_sid = False
 while pos < len(data):
     toc = data[pos]
     ft = (toc >> 3) & 0x0F
@@ -288,11 +289,21 @@ while pos < len(data):
     # Only inside the long quiet run: a SID dropped during the short opening
     # silence would not accumulate enough empty frames to matter, and dropping
     # them everywhere would make the fixture about something else.
-    if ft == sid_ft and frame >= 50:
+    #
+    # And the run's *first* SID is kept. Dropping it too was the original
+    # mistake here: without it the decoder never learns that DTX has begun, so
+    # every following empty frame reads as a lost speech frame rather than as
+    # silence, the state machine stays in SPEECH, and DTX_MUTE -- the whole
+    # point of this fixture -- is never reached. The stream still decoded
+    # differently from the intact one, so the guard at the bottom of this
+    # script passed while the fixture tested nothing it was built for.
+    if ft == sid_ft and frame >= 50 and kept_opening_sid:
         out.append((15 << 3) | 0x04)
         dropped += 1
         run += 1
     else:
+        if ft == sid_ft and frame >= 50:
+            kept_opening_sid = True
         out.append(toc)
         out += data[pos + 1 : pos + 1 + body]
         run = run + 1 if ft == 15 else 0

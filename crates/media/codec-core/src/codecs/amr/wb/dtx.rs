@@ -542,7 +542,7 @@ impl DtxDecoder {
         const ISF_DITH_GAP: Word16 = Word16(448);
         const ISF_GAP: Word16 = Word16(128);
 
-        let mut triangular = |dtx: &mut Self, ctx: &mut DspContext| -> Word16 {
+        let triangular = |dtx: &mut Self, ctx: &mut DspContext| -> Word16 {
             let first = dtx.next_dither(ctx);
             let half_first = shr(ctx, first, 1);
             let second = dtx.next_dither(ctx);

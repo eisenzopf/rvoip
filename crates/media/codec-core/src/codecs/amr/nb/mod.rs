@@ -23,10 +23,12 @@
 //! [`super::storage`], [`super::mode`]).
 
 pub mod bitstream;
+pub mod cn;
 pub mod codebook;
 pub mod conceal;
 pub mod decoder;
 pub mod decoder_tables;
+pub mod dtx;
 pub mod enc;
 pub mod detect;
 pub mod gain;

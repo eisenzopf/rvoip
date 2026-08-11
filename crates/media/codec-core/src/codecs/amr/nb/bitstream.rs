@@ -117,6 +117,42 @@ pub fn parse(mode_index: u8, payload: &[u8]) -> Option<Vec<u16>> {
     read_parameters(mode_index, &bits)
 }
 
+/// A SID frame's two header fields — the bits after the 35 quantised ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SidHeader {
+    /// The SID type indicator. `false` is `SID_FIRST`, which carries no
+    /// description; `true` is `SID_UPDATE`, which does.
+    pub update: bool,
+    /// Which speech mode the encoder had been using, 0..=7.
+    pub mode_index: u8,
+}
+
+/// Read a SID frame's header, `UnpackBits`'s tail.
+///
+/// A narrowband SID payload is 39 bits: 35 quantised ones, then the STI bit,
+/// then a three-bit mode indication. Returns `None` if the payload is shorter
+/// than five octets.
+///
+/// **The mode indication is least-significant bit first**, and nothing else in
+/// this codec is. The reference spells the reversal out as
+/// `((m & 4) >> 2) | (m & 2) | ((m & 1) << 2)` after reading the three bits in
+/// the usual order; reading them the usual way and stopping gives mode 1 for
+/// mode 4 and mode 3 for mode 6, which are legal modes, so the error surfaces
+/// only as a slightly wrong comfort-noise level.
+#[must_use]
+pub fn parse_sid_header(payload: &[u8]) -> Option<SidHeader> {
+    if payload.len() < 5 {
+        return None;
+    }
+    let bit = |i: usize| (payload[i / 8] >> (7 - (i % 8))) & 1;
+
+    let update = bit(35) != 0;
+    let reversed = (bit(36) << 2) | (bit(37) << 1) | bit(38);
+    let mode_index = ((reversed & 4) >> 2) | (reversed & 2) | ((reversed & 1) << 2);
+
+    Some(SidHeader { update, mode_index })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

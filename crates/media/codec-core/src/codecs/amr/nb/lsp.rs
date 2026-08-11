@@ -229,6 +229,92 @@ impl LsfDecoder {
         }
     }
 
+    /// `Init_D_plsf_3`: seed the prediction memory from one of eight vectors.
+    ///
+    /// Only the comfort-noise path calls this, and it calls it on *every*
+    /// `SID_UPDATE` carrying valid data. The three-bit first parameter of a SID
+    /// chooses the vector, so the encoder tells the decoder which starting
+    /// point makes its residual decode correctly — the SID's own LSF indices
+    /// are meaningless without it.
+    ///
+    /// # Panics
+    /// If `index` is not in 0..=7.
+    pub fn seed_predictor(&mut self, index: u16) {
+        assert!(index < 8, "past_rq_init holds eight vectors, not {index}");
+        let base = usize::from(index) * M;
+        for (slot, &v) in self.past_residual.iter_mut().zip(&PAST_RQ_INIT[base..base + M]) {
+            *slot = Word16(v);
+        }
+    }
+
+    /// `Set_zero(lsfState->past_r_q, M)`: forget the prediction memory.
+    ///
+    /// `dtx_dec` does this immediately after decoding a SID's spectrum, so the
+    /// next *speech* frame predicts from zero rather than from comfort noise.
+    /// Leaving the SID's residual in place would have the first frame out of
+    /// silence decode its spectrum against a background estimate.
+    pub const fn clear_predictor(&mut self) {
+        self.past_residual = [Word16(0); M];
+    }
+
+    /// Overwrite the previous frame's LSFs without touching the predictor.
+    ///
+    /// The reference writes `lsfState->past_lsf_q` directly at the end of
+    /// `dtx_dec`, with the *interpolated* comfort-noise LSFs rather than
+    /// anything a quantiser produced. Everything downstream that reads "the
+    /// previous frame's LSFs" — the running average, the codebook-gain
+    /// smoother, the next erasure's concealment — then sees the noise
+    /// spectrum, which is the point.
+    pub const fn set_last_lsf(&mut self, lsf: [Word16; M]) {
+        self.past_lsf = lsf;
+    }
+
+    /// Decode a SID frame's spectrum: the three-split books, prediction
+    /// factor 1.
+    ///
+    /// The `MRDTX` branch of `D_plsf_3`. It differs from every speech rate in
+    /// exactly one place — where speech scales the previous residual by the
+    /// per-coefficient [`PRED_FAC_3`], the SID adds it unscaled. That is a
+    /// stronger predictor, which is what lets a 35-bit frame carry a usable
+    /// spectrum, and it is the whole difference: the codebooks, the mean and
+    /// the reordering are the standard ones.
+    ///
+    /// Returns the LSPs, Q15. The LSFs are kept as [`last_lsf`](Self::last_lsf).
+    ///
+    /// # Panics
+    /// If `indices` holds fewer than three entries.
+    pub fn decode_sid(&mut self, indices: &[u16]) -> [Word16; M] {
+        assert!(indices.len() >= 3, "a SID spectrum is three indices");
+        let mut ctx = DspContext::default();
+        let books = Books::Standard;
+
+        let mut residual = [Word16(0); M];
+        let base = usize::from(indices[0]) * 3;
+        for (i, slot) in residual[0..3].iter_mut().enumerate() {
+            *slot = Word16(books.first()[base + i]);
+        }
+        let base = usize::from(indices[1]) * 3;
+        for (i, slot) in residual[3..6].iter_mut().enumerate() {
+            *slot = Word16(DICO2_LSF_3[base + i]);
+        }
+        let base = usize::from(indices[2]) * 4;
+        for (i, slot) in residual[6..10].iter_mut().enumerate() {
+            *slot = Word16(books.third()[base + i]);
+        }
+
+        let mut lsf = [Word16(0); M];
+        for i in 0..M {
+            // `temp = mean_lsf[i] + past_r_q[i]` -- no `mult` by pred_fac.
+            let anchor = add(&mut ctx, Word16(MEAN_LSF_3[i]), self.past_residual[i]);
+            lsf[i] = add(&mut ctx, residual[i], anchor);
+            self.past_residual[i] = residual[i];
+        }
+
+        reorder_lsf(&mut ctx, &mut lsf, LSF_GAP);
+        self.past_lsf = lsf;
+        lsf_to_lsp(&mut ctx, &lsf)
+    }
+
     /// Decode one frame's LSFs into the cosine domain, three-split quantiser.
     ///
     /// `indices` holds the three split indices, Q0. On an erasure the indices

@@ -41,6 +41,7 @@
 
 use super::codebook::{sharpen, sharpening_factor, sharpening_state, FixedCodebook};
 use super::conceal;
+use super::dtx::{DtxDecoder, DtxState, RxFrameType};
 use super::detect::{interpolate_lsf, LsfAverage, SourceDetector};
 use super::gain::{
     decode_code_gain, decode_joint, decode_pitch_gain, CodeGainConcealer, CodeGainPredictor,
@@ -157,9 +158,11 @@ pub struct Decoder {
     /// `dec_amr.c`'s `st->nodataSeed`.
     ///
     /// Advances only on a lost frame -- a good or damaged one leaves it
-    /// untouched -- and is re-seeded only by a full reset. So the sequence a
-    /// stream sees depends on how many frames it has lost and on nothing else.
+    /// untouched -- and is re-seeded by a full reset *and* by every
+    /// comfort-noise frame, because `Decoder_amr_reset(st, MRDTX)` sets it.
     nodata_seed: Word16,
+    /// The comfort-noise state, `st->dtxDecoderState`.
+    dtx: DtxDecoder,
 
     /// Per-frame scalar trace, for diffing against the instrumented reference.
     #[cfg(test)]
@@ -211,6 +214,7 @@ impl Decoder {
             ltp_gains: [Word16(0); LTP_HISTORY],
             started: false,
             nodata_seed: conceal::NODATA_SEED_INIT,
+            dtx: DtxDecoder::new(),
             #[cfg(test)]
             trace: Vec::new(),
             #[cfg(test)]
@@ -231,7 +235,7 @@ impl Decoder {
     /// 14-bit equivalent.
     #[must_use]
     pub fn decode(&mut self, mode_index: u8, payload: &[u8]) -> Option<[i16; L_FRAME]> {
-        let params = super::bitstream::parse(mode_index, payload)?;
+        let params = crate::codecs::amr::nb::bitstream::parse(mode_index, payload)?;
         Some(self.decode_parameters(mode_index, &params, FrameState::Good))
     }
 
@@ -260,6 +264,33 @@ impl Decoder {
 
         let bad = state == FrameState::Bad;
         let degraded = state == FrameState::Degraded;
+
+        self.advance_erasure_state(bad);
+
+        // The first speech frame out of a silence starts from state 5 rather
+        // than from wherever the erasure counter had got to, and whether it is
+        // muted depends on how the silence ended. Coming out of `DTX_MUTE` the
+        // frame is muted; out of plain `DTX` it is not. State 5 either way, so
+        // that a SID misread as speech is attenuated quickly.
+        //
+        // This runs *before* the frame quality below is taken, because
+        // `prev_bf` is what it writes and the concealers are what read it.
+        // Taking the snapshot first leaves them looking at the value from
+        // before the silence, and the first frame out of `DTX_MUTE` comes back
+        // at full level instead of muted -- 160 samples wrong on that frame
+        // and a tail of a dozen more while the gain smoother recovers.
+        match self.dtx.global_state() {
+            DtxState::Dtx => {
+                self.erasure_state = 5;
+                self.previous.bad = false;
+            }
+            DtxState::DtxMute => {
+                self.erasure_state = 5;
+                self.previous.bad = true;
+            }
+            DtxState::Speech => {}
+        }
+
         let quality = FrameQuality {
             bad: WithPrevious {
                 current: bad,
@@ -272,8 +303,6 @@ impl Decoder {
             background_noise: self.detector.background_noise(),
             voiced_hangover: self.detector.voiced_hangover().0,
         };
-
-        self.advance_erasure_state(bad);
 
         // The gain smoother compares this frame's interpolated LSFs against the
         // *previous* frame's, so they have to be taken before the spectral path
@@ -449,9 +478,22 @@ impl Decoder {
         }
 
         self.detector.update(&mut ctx, &self.ltp_gains, &synthesis);
+
+        // Before the post-filter: the noise description is derived from the
+        // synthesis, not from what a listener eventually hears.
+        let last_lsf = *self.lsf.last_lsf();
+        self.dtx.observe_speech(&mut ctx, &last_lsf, &synthesis);
+
         self.previous = PreviousFrame { bad, degraded };
         self.started = true;
         self.lsf_average.update(&mut ctx, self.lsf.last_lsf());
+
+        // `the_end: st->dtxDecoderState->dtxGlobalState = newDTXState`, which
+        // the reference runs on every frame including this path's. Without it
+        // the override above fires on every frame of a speech-only stream
+        // rather than only on the first, because `dtx_dec_reset` leaves the
+        // state at DTX and nothing else would ever move it.
+        self.dtx.commit(DtxState::Speech);
 
         self.post_filter
             .process(&mut ctx, mode_index, &mut synthesis, &az);
@@ -466,6 +508,145 @@ impl Decoder {
             *slot = sample.0 & !7;
         }
         out
+    }
+
+    /// Decode one frame of a stream that may use DTX — `Speech_Decode_Frame`.
+    ///
+    /// This is the whole receiver: it decides between speech and comfort noise,
+    /// and every path through it leaves the state the next frame needs.
+    /// [`decode`](Self::decode) and [`conceal_lost_frame`](Self::conceal_lost_frame)
+    /// remain for streams where the caller has already made that decision.
+    ///
+    /// `params` is the frame's unpacked parameters. For a `SID_UPDATE` or
+    /// `SID_BAD` those are the five *MRDTX* parameters, not the speech mode's —
+    /// the reference overrides the bit allocation for exactly these two types
+    /// in `Speech_Decode_Frame`, and unpacking a SID with the speech mode's
+    /// widths yields five numbers that decode into a spectrum. For `SID_FIRST`,
+    /// `NO_DATA` and `ONSET` the slice is unread and may be empty.
+    ///
+    /// `mode_index` is always a *speech* mode: on a SID it is the mode
+    /// indication carried in the SID's own payload, which tells the decoder
+    /// which level adjustment the encoder had been using.
+    ///
+    /// # Panics
+    /// If `mode_index` is not 0..=7.
+    pub fn decode_typed(
+        &mut self,
+        frame_type: RxFrameType,
+        mode_index: u8,
+        params: &[u16],
+    ) -> [i16; L_FRAME] {
+        assert!(mode_index < 8, "mode {mode_index} is not a speech mode");
+        let mut ctx = DspContext::default();
+
+        let new_state = self.dtx.receive(&mut ctx, frame_type);
+        let out = if new_state == DtxState::Speech {
+            let (state, params) = self.speech_frame_inputs(&mut ctx, frame_type, mode_index, params);
+            self.decode_parameters(mode_index, &params, state)
+        } else {
+            self.comfort_noise_frame(&mut ctx, new_state, mode_index, params)
+        };
+
+        self.dtx.commit(new_state);
+        out
+    }
+
+    /// What the speech path should be told about a frame, and what to decode.
+    ///
+    /// Three of the eight frame types reach the speech decoder without usable
+    /// bits, and the reference does not treat them alike: `SPEECH_BAD` keeps
+    /// the parameters it received and marks them untrusted, while `NO_DATA` and
+    /// `ONSET` have none and manufacture a vector from `nodataSeed` first. The
+    /// concealers ignore what that produces, but the fixed codebook does not.
+    fn speech_frame_inputs(
+        &mut self,
+        ctx: &mut DspContext,
+        frame_type: RxFrameType,
+        mode_index: u8,
+        params: &[u16],
+    ) -> (FrameState, Vec<u16>) {
+        match frame_type {
+            RxFrameType::SpeechGood => (FrameState::Good, params.to_vec()),
+            RxFrameType::SpeechDegraded => (FrameState::Degraded, params.to_vec()),
+            RxFrameType::SpeechBad => (FrameState::Bad, params.to_vec()),
+            RxFrameType::NoData | RxFrameType::Onset => (
+                FrameState::Bad,
+                conceal::build_cn_param(ctx, &mut self.nodata_seed, mode_index),
+            ),
+            // The SID types cannot reach the speech path: `receive` returns
+            // DTX for all three unconditionally.
+            other => unreachable!("{other:?} cannot be synthesised as speech"),
+        }
+    }
+
+    /// Synthesise, post-filter and post-process one comfort-noise frame.
+    fn comfort_noise_frame(
+        &mut self,
+        ctx: &mut DspContext,
+        new_state: DtxState,
+        mode_index: u8,
+        params: &[u16],
+    ) -> [i16; L_FRAME] {
+        self.reset_for_comfort_noise();
+
+        let cn = self.dtx.comfort_noise(
+            ctx,
+            new_state,
+            usize::from(mode_index),
+            params,
+            &mut self.mem_syn,
+            &mut self.lsf,
+            &mut self.predictor,
+        );
+
+        // The rest of the decoder is told the spectrum was the comfort noise's,
+        // so the first speech frame afterwards interpolates from it rather than
+        // from whatever preceded the silence.
+        self.lsp_old = super::lsp::lsf_to_lsp(ctx, self.lsf.last_lsf());
+        self.lsf_average.update(ctx, self.lsf.last_lsf());
+
+        let mut synthesis = cn.synth;
+        self.post_filter
+            .process(ctx, mode_index, &mut synthesis, &cn.a_t);
+        self.post_processor.process(ctx, &mut synthesis);
+
+        let mut out = [0i16; L_FRAME];
+        for (slot, sample) in out.iter_mut().zip(synthesis.iter()) {
+            *slot = sample.0 & !7;
+        }
+        out
+    }
+
+    /// `Decoder_amr_reset(st, MRDTX)`: clear the speech state, keep the rest.
+    ///
+    /// The five exemptions are what make comfort noise continuous with the
+    /// speech around it, and each is load-bearing. `mem_syn` carries the
+    /// synthesis filter across the boundary, so the noise does not start from
+    /// an impulse. `lsp_old` and the LSP average keep the spectral history the
+    /// backward analysis has just been computed from. The excitation energy
+    /// history is what a later erasure's gain control reads. And the gain
+    /// predictor is re-seeded from the SID's own level a moment later, which
+    /// clearing it here would then undo.
+    ///
+    /// Everything else goes, `nodataSeed` included — so a lost frame after a
+    /// silence draws from a re-seeded generator, not from wherever the stream
+    /// had got to.
+    fn reset_for_comfort_noise(&mut self) {
+        self.excitation = Excitation::new();
+        // `SHARPMIN` -- zero, not the mid-scale value the encoder starts from.
+        self.sharp = Word16(0);
+        self.old_lag = Word16(40);
+        self.lag_buffer = Word16(40);
+        self.erasure_state = 0;
+        self.previous = PreviousFrame::default();
+        self.ltp_gains = [Word16(0); LTP_HISTORY];
+        self.smoother.reset_for_comfort_noise();
+        self.lsf = LsfDecoder::at_reset();
+        self.pitch_concealer = PitchGainConcealer::new();
+        self.code_concealer = CodeGainConcealer::new();
+        self.detector = SourceDetector::new();
+        self.nodata_seed = conceal::NODATA_SEED_INIT;
+        self.dispersion = PhaseDispersion::new();
     }
 
     /// Conceal a frame that never arrived -- RFC 4867 frame type 15, the
@@ -1065,6 +1246,203 @@ mod tests {
         pcm.chunks_exact(2)
             .map(|b| i16::from_le_bytes([b[0], b[1]]))
             .collect()
+    }
+
+    /// The DTX fixture and the reference decoder's PCM for one rate.
+    ///
+    /// Built by `tools/build-amr-dtx-fixtures.sh` from a signal that actually
+    /// goes quiet, with the reference encoder driven `-dtx`. The all-speech
+    /// fixtures above contain no SID frame at all, so nothing in this file
+    /// before this point exercises a single line of the comfort-noise path.
+    fn dtx_fixture(mode: u8) -> (&'static [u8], &'static [u8]) {
+        match mode {
+            0 => (
+                include_bytes!("../testdata/amrnb_dtx_mode0.amr"),
+                include_bytes!("../testdata/amrnb_dtx_mode0.pcm"),
+            ),
+            1 => (
+                include_bytes!("../testdata/amrnb_dtx_mode1.amr"),
+                include_bytes!("../testdata/amrnb_dtx_mode1.pcm"),
+            ),
+            2 => (
+                include_bytes!("../testdata/amrnb_dtx_mode2.amr"),
+                include_bytes!("../testdata/amrnb_dtx_mode2.pcm"),
+            ),
+            3 => (
+                include_bytes!("../testdata/amrnb_dtx_mode3.amr"),
+                include_bytes!("../testdata/amrnb_dtx_mode3.pcm"),
+            ),
+            4 => (
+                include_bytes!("../testdata/amrnb_dtx_mode4.amr"),
+                include_bytes!("../testdata/amrnb_dtx_mode4.pcm"),
+            ),
+            5 => (
+                include_bytes!("../testdata/amrnb_dtx_mode5.amr"),
+                include_bytes!("../testdata/amrnb_dtx_mode5.pcm"),
+            ),
+            6 => (
+                include_bytes!("../testdata/amrnb_dtx_mode6.amr"),
+                include_bytes!("../testdata/amrnb_dtx_mode6.pcm"),
+            ),
+            7 => (
+                include_bytes!("../testdata/amrnb_dtx_mode7.amr"),
+                include_bytes!("../testdata/amrnb_dtx_mode7.pcm"),
+            ),
+            other => panic!("no DTX fixture for mode {other}"),
+        }
+    }
+
+    /// What the receiver makes of one stored frame.
+    ///
+    /// The `.amr` storage format carries the frame type and the quality bit,
+    /// which between them determine everything except `SID_FIRST` versus
+    /// `SID_UPDATE` -- that distinction lives in the SID payload's own STI bit,
+    /// and so does the speech mode the encoder had been using.
+    fn classify(frame: &crate::codecs::amr::AmrPayloadFrame, last_mode: u8) -> (RxFrameType, u8) {
+        match frame.frame_type {
+            AmrFrameType::Speech(mode) => (
+                if frame.quality_ok { RxFrameType::SpeechGood } else { RxFrameType::SpeechBad },
+                mode.index(),
+            ),
+            AmrFrameType::Sid(_) => {
+                let header = crate::codecs::amr::nb::bitstream::parse_sid_header(&frame.data)
+                    .expect("a SID payload is five octets");
+                let kind = if !frame.quality_ok {
+                    RxFrameType::SidBad
+                } else if header.update {
+                    RxFrameType::SidUpdate
+                } else {
+                    RxFrameType::SidFirst
+                };
+                (kind, header.mode_index)
+            }
+            AmrFrameType::NoData => (RxFrameType::NoData, last_mode),
+            AmrFrameType::SpeechLost => panic!("narrowband has no SPEECH_LOST"),
+        }
+    }
+
+    /// Decode a DTX stream and report how many samples matched, and how the
+    /// frame types were distributed.
+    fn run_dtx(mode: u8) -> (usize, usize, [usize; 3]) {
+        let (bits, pcm) = dtx_fixture(mode);
+        let want = reference(pcm);
+        let (_, frames) = storage::read(bits).expect("fixture parses");
+
+        let mut decoder = Decoder::new();
+        let (mut exact, mut total) = (0usize, 0usize);
+        // speech, SID, NO_DATA
+        let mut kinds = [0usize; 3];
+        let mut last_mode = mode;
+
+        for (f, frame) in frames.iter().enumerate() {
+            let (kind, frame_mode) = classify(frame, last_mode);
+            last_mode = frame_mode;
+            kinds[match kind {
+                RxFrameType::SpeechGood | RxFrameType::SpeechDegraded | RxFrameType::SpeechBad => 0,
+                RxFrameType::SidFirst | RxFrameType::SidUpdate | RxFrameType::SidBad => 1,
+                RxFrameType::NoData | RxFrameType::Onset => 2,
+            }] += 1;
+
+            // A SID's parameters are read with the *MRDTX* layout, not the
+            // speech mode's -- `Speech_Decode_Frame` overrides it for exactly
+            // SID_UPDATE and SID_BAD.
+            let params = match kind {
+                RxFrameType::SidUpdate | RxFrameType::SidBad => {
+                    crate::codecs::amr::nb::bitstream::parse(8, &frame.data).expect("a SID parses")
+                }
+                RxFrameType::NoData | RxFrameType::Onset | RxFrameType::SidFirst => Vec::new(),
+                _ => crate::codecs::amr::nb::bitstream::parse(frame_mode, &frame.data).expect("speech parses"),
+            };
+
+            let got = decoder.decode_typed(kind, frame_mode, &params);
+            for (i, &sample) in got.iter().enumerate() {
+                let index = f * L_FRAME + i;
+                if index >= want.len() {
+                    break;
+                }
+                total += 1;
+                exact += usize::from(sample == want[index]);
+            }
+        }
+        (exact, total, kinds)
+    }
+
+    /// The comfort-noise path, sample for sample against the reference
+    /// decoder, on all eight rates.
+    ///
+    /// The fixture's own shape is asserted first, and that is not decoration:
+    /// a stream that turned out to be all speech would pass a sample
+    /// comparison having exercised nothing this test exists for.
+    #[test]
+    fn comfort_noise_matches_the_reference_sample_for_sample() {
+        for mode in 0..8u8 {
+            let (exact, total, kinds) = run_dtx(mode);
+            assert!(total >= 150 * L_FRAME, "mode {mode}: only {total} samples compared");
+            assert!(kinds[0] >= 40, "mode {mode}: only {} speech frames", kinds[0]);
+            assert!(kinds[1] >= 8, "mode {mode}: only {} SID frames", kinds[1]);
+            assert!(kinds[2] >= 40, "mode {mode}: only {} NO_DATA frames", kinds[2]);
+            assert_eq!(
+                exact, total,
+                "mode {mode}: {} of {total} samples differ",
+                total - exact
+            );
+        }
+    }
+
+    /// The `DTX_MUTE` fade, which no other fixture reaches.
+    ///
+    /// `DTX_MUTE` needs a stream that stays quiet for more than fifty frames
+    /// *and* loses its SID updates -- a clean encoder sends one every eight, so
+    /// the state is unreachable on any well-formed stream. The fixture builder
+    /// makes one by dropping SIDs out of mode 4's DTX stream and re-decoding
+    /// with the reference, and it fails the build if the result is identical
+    /// to the intact original.
+    ///
+    /// Without this the fade is dead code that passes: removing the 0.75 dB
+    /// step entirely leaves every other assertion in this file green.
+    #[test]
+    fn the_mute_fade_matches_the_reference() {
+        let bits: &[u8] = include_bytes!("../testdata/amrnb_dtx_mute.amr");
+        let pcm: &[u8] = include_bytes!("../testdata/amrnb_dtx_mute.pcm");
+        let want = reference(pcm);
+        let (_, frames) = storage::read(bits).expect("fixture parses");
+
+        let mut decoder = Decoder::new();
+        let (mut exact, mut total) = (0usize, 0usize);
+        let mut muted = 0usize;
+        let mut last_mode = 4u8;
+
+        for (f, frame) in frames.iter().enumerate() {
+            let (kind, frame_mode) = classify(frame, last_mode);
+            last_mode = frame_mode;
+            let params = match kind {
+                RxFrameType::SidUpdate | RxFrameType::SidBad => {
+                    super::super::bitstream::parse(8, &frame.data).expect("a SID parses")
+                }
+                RxFrameType::NoData | RxFrameType::Onset | RxFrameType::SidFirst => Vec::new(),
+                _ => super::super::bitstream::parse(frame_mode, &frame.data).expect("speech parses"),
+            };
+
+            let got = decoder.decode_typed(kind, frame_mode, &params);
+            muted += usize::from(decoder.dtx.global_state() == DtxState::DtxMute);
+            for (i, &sample) in got.iter().enumerate() {
+                let index = f * L_FRAME + i;
+                if index >= want.len() {
+                    break;
+                }
+                total += 1;
+                exact += usize::from(sample == want[index]);
+            }
+        }
+
+        // The state has to be *entered*, not merely made plausible by a long
+        // gap. Asserting the gap length instead is what let the first version
+        // of this fixture pass having never muted at all: it dropped the
+        // silence's opening SID along with the updates, so the decoder read
+        // every empty frame as a lost speech frame and stayed in SPEECH.
+        assert!(muted >= 8, "only {muted} frames were synthesised muting");
+        assert!(total >= 150 * L_FRAME, "only {total} samples compared");
+        assert_eq!(exact, total, "{} of {total} samples differ", total - exact);
     }
 
     /// Decode a whole fixture and report, per mode, how many samples matched.
