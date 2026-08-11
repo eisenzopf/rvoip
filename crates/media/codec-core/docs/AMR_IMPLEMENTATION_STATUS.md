@@ -18,7 +18,9 @@
 | **AMR-NB DTX, encoder state** | **Done** — classifier, history, averaging, predictor reset |
 | AMR-NB DTX, decoder + frame-loop wiring | Not started |
 | **AMR-WB homing frames** | **Done** — the encoder emits each mode's pattern |
-| **AMR-WB conformance** | **All nine TS 26.173 vectors, both directions** |
+| **AMR-WB conformance, speech** | **All nine TS 26.173 vectors, both directions** |
+| **AMR-WB conformance, DTX encode** | **`tst_md.cod`, every frame type and payload** |
+| AMR-WB conformance, DTX decode | One LSB out from frame 80, the first SID |
 | AMR-NB homing frames | Not started |
 | Transcoding, interop, benchmarks | Not started |
 
@@ -261,6 +263,22 @@ the reference implementations: only generated output is committed. The vectors
 are read in the ETSI serial form they ship in rather than converted first — a
 converter is one more thing that could be wrong in the same direction as the
 code under test.
+
+The normative *DTX* vector, `tst_md.cod` from `dtx.inp`, is covered on the
+encode side too: 80 speech frames, a SID_FIRST, 15 SID_UPDATEs and 104 NO_DATA,
+every transmit type and every payload matching. `tst.inp` never goes quiet
+enough to emit a SID, so without this the DTX path would only ever have been
+exercised through its effect on mode 8's gain.
+
+**One thing does not yet pass.** Decoding `tst_md.cod` against `tst_md.out`
+diverges by one LSB from sample 16 of frame 80 — the first `SID_FIRST` — with
+all eighty speech frames before it sample-exact. Everything around it passes:
+both directions of all nine speech vectors, the DTX encode vector, and a
+150-frame DTX stream decoded sample-exact against the reference
+implementation. So the remaining fault is narrow, somewhere in the backward
+analysis or the level conversion, on values this stream produces and the
+committed fixture does not. The test is committed and ignored rather than
+deleted or weakened to a tolerance.
 
 Mutation-checked: turning DTX off fails mode 8 at frame 0.
 

@@ -224,4 +224,225 @@ mod tests {
         }
         assert!(compared > 500_000, "only {compared} samples compared");
     }
+
+    /// The normative *DTX* vector: real SID frames on the wire.
+    ///
+    /// `tst.inp` never goes quiet enough to emit one, so the two tests above
+    /// exercise DTX only through its effect on 23.85 kbit/s's gain. This one
+    /// is `test_enc.bat`'s tenth line — `coder -dtx 2 dtx.inp` — and it is 80
+    /// speech frames, a `SID_FIRST`, then a long comfort-noise tail. It is the
+    /// only normative check that a SID this codec *transmits* is the SID the
+    /// specification says to transmit.
+    #[test]
+    #[ignore = "needs the 3GPP sequences; see the module header"]
+    fn wideband_dtx_matches_the_normative_vector() {
+        use crate::codecs::amr::sid_cadence::SidCadence;
+        use crate::codecs::amr::{AmrMode, AmrVariant};
+
+        let root = reference_root();
+        let raw = std::fs::read(root.join("testv/dtx.inp")).expect("dtx.inp reads");
+        let input: Vec<[i16; 320]> = raw
+            .chunks_exact(640)
+            .map(|chunk| {
+                let mut frame = [0i16; 320];
+                for (slot, pair) in frame.iter_mut().zip(chunk.chunks_exact(2)) {
+                    *slot = i16::from_le_bytes([pair[0], pair[1]]);
+                }
+                frame
+            })
+            .collect();
+
+        // The serial length follows the frame *type*, not the mode word: a
+        // comfort-noise frame keeps the speech mode in its header and carries
+        // 35 bits.
+        let vector = std::fs::read(root.join("testv/tst_md.cod")).expect("tst_md.cod reads");
+        let words: Vec<i16> = vector
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        let rate = Rate::from_index(2).expect("12.65 kbit/s");
+        let mode = AmrMode::new(AmrVariant::WideBand, 2).expect("12.65 kbit/s");
+
+        let mut encoder = WbEncoder::new();
+        encoder.set_allow_dtx(true);
+        let mut cadence = SidCadence::new(AmrVariant::WideBand);
+
+        let mut at = 0usize;
+        let mut frame = 0usize;
+        let mut seen = (0usize, 0usize, 0usize, 0usize);
+        while at < words.len() {
+            assert_eq!(words[at], 0x6b21, "frame {frame} lost the serial sync");
+            let tx_type = words[at + 1];
+            let bits = if tx_type == 0 { rate.bits() } else { 35 };
+            let want: Vec<u8> = words[at + 3..at + 3 + bits]
+                .iter()
+                .map(|&w| u8::from(w == 127))
+                .collect();
+
+            let source = input.get(frame).unwrap_or_else(|| {
+                panic!("dtx.inp is shorter than tst_md.cod at frame {frame}")
+            });
+            let homing = homing::is_encoder_homing_frame(source);
+            let (comfort_noise, payload) = encoder.encode_frame_typed(source, rate);
+            let scheduled = cadence.next(comfort_noise, mode);
+
+            // 0 speech, 1 SID_FIRST, 2 SID_UPDATE, 3 NO_DATA.
+            let want_type = match scheduled {
+                crate::codecs::amr::AmrFrameType::Speech(_) => 0,
+                crate::codecs::amr::AmrFrameType::Sid(_) => {
+                    if cadence.last_sid_was_an_update() {
+                        2
+                    } else {
+                        1
+                    }
+                }
+                _ => 3,
+            };
+            assert_eq!(want_type, tx_type, "frame {frame} transmit type");
+            match tx_type {
+                0 => seen.0 += 1,
+                1 => seen.1 += 1,
+                2 => seen.2 += 1,
+                _ => seen.3 += 1,
+            }
+
+            // The reference writes the built SID bits even on a NO_DATA
+            // frame, so every frame's payload is comparable. A SID sorts
+            // through its own table and `AmrMode` cannot name the pseudo-mode,
+            // so unsort it directly.
+            let got: Vec<u8> = if tx_type == 0 {
+                super::super::wb::bitstream::CodecBits::unpack(mode, &payload)
+                    .expect("speech payload unpacks")
+                    .bits()
+                    .to_vec()
+            } else {
+                let sort = &crate::codecs::amr::wb::sort_tables::SORT_SID;
+                let mut codec = vec![0u8; sort.len()];
+                for (i, &target) in sort.iter().enumerate() {
+                    codec[target as usize] = (payload[i / 8] >> (7 - (i % 8))) & 1;
+                }
+                codec
+            };
+            assert_eq!(got, want, "frame {frame} payload");
+
+            if homing {
+                encoder = WbEncoder::new();
+                encoder.set_allow_dtx(true);
+                cadence.reset();
+            }
+            at += 3 + bits;
+            frame += 1;
+        }
+
+        assert_eq!(seen, (80, 1, 15, 104), "the vector's frame mix moved");
+    }
+
+    /// The decoder against `tst_md.out`: the normative comfort-noise output.
+    ///
+    /// **Currently failing, and kept so the gap stays visible.** The eighty
+    /// speech frames before the first SID are sample-exact; frame 80, the
+    /// `SID_FIRST`, differs by one LSB from sample 16 onward.
+    ///
+    /// Everything around it passes: all nine normative *speech* vectors in
+    /// both directions, the normative DTX vector on the *encode* side frame
+    /// type for frame type and payload for payload, and a 150-frame DTX
+    /// stream decoded sample-exact against the reference implementation. So
+    /// what is left is narrow — an arithmetic detail in the backward analysis
+    /// or the level conversion that this stream's values expose and the
+    /// committed fixture's do not.
+    ///
+    /// Not deleted, and not quietly weakened to a tolerance: a one-LSB
+    /// disagreement with the specification is still a disagreement.
+    #[test]
+    #[ignore = "known gap: the normative DTX decode diverges at frame 80; see the doc comment"]
+    fn wideband_dtx_decoding_matches_the_normative_vector() {
+        use crate::codecs::amr::wb::decoder::Decoder;
+        use crate::codecs::amr::wb::dtx::RxFrameType;
+        use crate::codecs::amr::wb::gain::FrameQuality;
+        use crate::codecs::amr::{AmrMode, AmrVariant};
+
+        let root = reference_root();
+        let vector = std::fs::read(root.join("testv/tst_md.cod")).expect("tst_md.cod reads");
+        let words: Vec<i16> = vector
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        let raw = std::fs::read(root.join("testv/tst_md.out")).expect("tst_md.out reads");
+        let want: Vec<i16> = raw
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect();
+
+        let mode = AmrMode::new(AmrVariant::WideBand, 2).expect("12.65 kbit/s");
+        let bits = Rate::from_index(2).expect("12.65 kbit/s").bits();
+        let sort = crate::codecs::amr::wb::bitstream::sort_table_for(mode);
+        let comfort_order = &crate::codecs::amr::wb::sort_tables::SORT_SID;
+
+        let mut decoder = Decoder::new();
+        let mut homed = true;
+        let mut at = 0usize;
+        let mut frame = 0usize;
+        let mut compared = 0usize;
+        while at < words.len() {
+            let tx_type = words[at + 1];
+            let width = if tx_type == 0 { bits } else { 35 };
+            let codec: Vec<u8> = words[at + 3..at + 3 + width]
+                .iter()
+                .map(|&w| u8::from(w == 127))
+                .collect();
+
+            let out = if tx_type == 0 {
+                let mut payload = vec![0u8; bits.div_ceil(8)];
+                for (i, &source) in sort.iter().enumerate() {
+                    payload[i / 8] |= codec[source as usize] << (7 - (i % 8));
+                }
+                let is_homing = homed
+                    && homing::is_decoder_homing_frame_first(&payload, 2);
+                let out = if is_homing {
+                    [homing::HOMING_SAMPLE; 320]
+                } else {
+                    decoder
+                        .decode_frame(mode, &payload, FrameQuality::Good)
+                        .unwrap_or_else(|| panic!("frame {frame} refused"))
+                };
+                homed = if homed {
+                    is_homing
+                } else {
+                    homing::is_decoder_homing_frame(&payload, 2)
+                };
+                if homed {
+                    decoder = Decoder::new();
+                }
+                out
+            } else {
+                homed = false;
+                let mut payload = vec![0u8; 5];
+                for (i, &source) in comfort_order.iter().enumerate() {
+                    payload[i / 8] |= codec[source as usize] << (7 - (i % 8));
+                }
+                let rx = match tx_type {
+                    1 => RxFrameType::SidFirst,
+                    2 => RxFrameType::SidUpdate,
+                    _ => RxFrameType::NoData,
+                };
+                let data: &[u8] = if tx_type == 3 { &[] } else { &payload };
+                decoder
+                    .decode_comfort_noise(rx, data, bits)
+                    .unwrap_or_else(|| panic!("frame {frame} comfort noise refused"))
+            };
+
+            for (i, (&got, &theirs)) in out.iter().zip(&want[frame * 320..]).enumerate() {
+                assert_eq!(
+                    got & !3,
+                    theirs,
+                    "frame {frame} (tx type {tx_type}) sample {i}"
+                );
+                compared += 1;
+            }
+            at += 3 + width;
+            frame += 1;
+        }
+        assert_eq!(frame, 200, "the vector is 200 frames");
+        assert_eq!(compared, 200 * 320);
+    }
 }
