@@ -13,6 +13,7 @@
 | **Oracle qualification** | **Measured** — see below |
 | **AMR-WB DTX, encoder side** | **Byte-identical SIDs on the reference's own schedule**, 150 frames |
 | **AMR-WB DTX, decoder side** | **Sample-exact over a 150-frame DTX stream** |
+| **AMR-WB DTX through `AmrCodec`** | **Both directions, byte- and sample-exact** |
 | AMR-NB DTX | Not started, and gated on the VAD1 port |
 | Homing frames | Not started, both variants |
 | Transcoding, interop, benchmarks | Not started |
