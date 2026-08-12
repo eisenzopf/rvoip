@@ -1853,6 +1853,27 @@ and **20 million fuzz iterations with zero crashes**. Notable coverage:
 | Frame CRC (§4.4.2.1) | Implemented for **both** variants |
 | Robust sorting (§4.4.3) | Implemented |
 | Interleaving (§4.4.1) | ILL/ILP **carried**, reordering deliberately not performed |
+| `max-red` redundancy (§3.5, §4.3) | Implemented — `codecs/amr/redundancy.rs` |
+
+**`max-red` redundancy** (2026-08-12) is a scheduler and a dedup filter, both
+in `redundancy.rs`. Redundancy in RFC 4867 is not a separate mechanism: it is
+the multi-frame payload used deliberately, re-sending recent frames beside the
+new one, so the scheduler's whole job is choosing the frame list and the
+timestamp. The rule that is easy to invert and expensive to debug — §4.3
+orders frames **oldest first** and stamps the payload with the *oldest*
+frame's timestamp — is stated in the module header and pinned by a test,
+because getting it backwards shifts audio by the redundancy depth rather than
+failing to parse.
+
+Depth is bounded by what the peer's `max-red` permits and a too-deep request
+is **refused rather than clamped**: a caller that thinks it has three-deep
+protection and silently got one is worse off than one told no. The dedup side
+is wrapping-aware — a 32-bit timestamp at 8 kHz wraps every six days, and a
+naive `>` comparison would drop every frame for an epoch after the wrap.
+
+We advertise `max-red=0`, so nothing turns this on by itself; the receive path
+handles a peer's multi-frame payloads either way, since a peer may bundle for
+its own reasons.
 
 **The WB CRC blocker is gone.** An earlier revision recorded that RFC 4867
 defers the AMR-WB class A counts to TS 26.201 and that we did not have them.

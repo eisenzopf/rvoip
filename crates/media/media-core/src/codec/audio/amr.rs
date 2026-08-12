@@ -41,6 +41,7 @@ use crate::error::{CodecError, Error, Result};
 use crate::rtp_processing::payload::amr::AmrPayloadFormat;
 use crate::types::AudioFrame;
 use codec_core::codecs::amr::rate::CmrDamper;
+use codec_core::codecs::amr::redundancy::RedundancyScheduler;
 use codec_core::codecs::amr::sdp::AmrFmtp;
 use codec_core::codecs::amr::mode::{AmrFrameType, AmrMode, AmrVariant};
 use codec_core::codecs::amr::payload::{AmrPacket, AmrPayloadFrame};
@@ -104,6 +105,16 @@ pub struct AmrAdapter {
     /// encoding object. Same seam, and same reason, as
     /// [`Self::pending_mode_request`].
     automatic_cmr: Option<u8>,
+    /// The peer's declared `max-red` ceiling, kept so a caller can ask for a
+    /// depth and be refused if the peer never permitted it.
+    negotiated_max_red: Option<u16>,
+    /// Outgoing redundancy, when a caller asked for it and the peer allows it.
+    ///
+    /// `None` is the ordinary case and means one frame per payload. We
+    /// advertise `max-red=0`, so a peer has no reason to send us repeats
+    /// either; the receive side handles multi-frame payloads regardless,
+    /// because a peer may bundle for its own reasons.
+    redundancy: Option<RedundancyScheduler>,
 }
 
 impl AmrAdapter {
@@ -183,6 +194,8 @@ impl AmrAdapter {
             outgoing_cmr: None,
             auto_cmr: None,
             automatic_cmr: None,
+            negotiated_max_red: parsed.max_red,
+            redundancy: None,
         })
     }
 
@@ -214,6 +227,40 @@ impl AmrAdapter {
         })?;
         self.auto_cmr = Some(damper);
         Ok(())
+    }
+
+    /// Repeat recent frames in each outgoing payload, up to `depth` frames
+    /// per payload (1 disables it).
+    ///
+    /// Bounded by the peer's negotiated `max-red`: it declares how long a
+    /// frame may keep being retransmitted, and asking for more than it allows
+    /// is refused rather than quietly clamped — a caller that believes it has
+    /// three-deep protection and silently gets one is worse off than one told
+    /// no.
+    ///
+    /// # Errors
+    ///
+    /// When `depth` exceeds what the peer's `max-red` permits, or exceeds the
+    /// 32 frame-blocks a payload can address.
+    pub fn set_redundancy_depth(&mut self, depth: usize) -> Result<()> {
+        if depth <= 1 {
+            self.redundancy = None;
+            return Ok(());
+        }
+        let scheduler =
+            RedundancyScheduler::new(self.negotiated_max_red, depth).map_err(|error| {
+                Error::Codec(CodecError::InvalidParameters {
+                    details: format!("AMR redundancy: {error}"),
+                })
+            })?;
+        self.redundancy = Some(scheduler);
+        Ok(())
+    }
+
+    /// Frames per outgoing payload: 1 unless redundancy is on.
+    #[must_use]
+    pub fn redundancy_depth(&self) -> usize {
+        self.redundancy.as_ref().map_or(1, RedundancyScheduler::depth)
     }
 
     /// Stage a CMR unless one is already waiting, so an automatic request
@@ -358,7 +405,19 @@ impl AudioCodec for AmrAdapter {
             })
         })?;
 
-        let packet = AmrPacket::single(frame).with_cmr(self.outgoing_cmr.take());
+        // With redundancy on, the payload carries recent frames as well as
+        // this one, oldest first. The caller stamps the RTP timestamp, and
+        // RFC 4867 §4.3 requires it to name the *oldest* frame —
+        // `RedundancyScheduler::payload_timestamp` computes that.
+        let packet = match self.redundancy.as_mut() {
+            Some(scheduler) => AmrPacket {
+                cmr: None,
+                interleaving: None,
+                frames: scheduler.next_payload(frame),
+            },
+            None => AmrPacket::single(frame),
+        }
+        .with_cmr(self.outgoing_cmr.take());
         self.payload.codec().pack(&packet).map_err(|error| {
             Error::Codec(CodecError::InvalidParameters {
                 details: format!("AMR pack: {error}"),
@@ -882,4 +941,69 @@ mod tests {
         assert!(nb.get_info().bitrate >= 4_750 && nb.get_info().bitrate <= 12_200);
         assert!(wb.get_info().bitrate >= 6_600 && wb.get_info().bitrate <= 23_850);
     }
+    /// Redundancy is refused unless the peer's `max-red` permits it, and does
+    /// what it says when it is allowed.
+    ///
+    /// The refusal half matters most: `max-red` is the peer telling us how
+    /// long we may keep retransmitting a frame, and quietly clamping a
+    /// too-deep request would leave a caller believing it had protection it
+    /// does not have.
+    #[test]
+    fn redundancy_depth_is_bounded_by_the_peers_max_red() {
+        // No max-red declared: no redundancy permitted beyond a single copy.
+        let mut plain = AmrAdapter::new(96, "AMR", Some("octet-align=1")).expect("constructs");
+        assert_eq!(plain.redundancy_depth(), 1);
+        assert!(
+            plain.set_redundancy_depth(2).is_err(),
+            "a peer that declared no max-red has not permitted redundancy"
+        );
+        assert_eq!(plain.redundancy_depth(), 1, "a refused request must change nothing");
+
+        // max-red=40 permits three transmissions of a frame (0, 20, 40 ms).
+        let mut permitted =
+            AmrAdapter::new(96, "AMR", Some("octet-align=1; max-red=40")).expect("constructs");
+        permitted.set_redundancy_depth(3).expect("40ms allows depth 3");
+        assert_eq!(permitted.redundancy_depth(), 3);
+        assert!(
+            permitted.set_redundancy_depth(4).is_err(),
+            "40ms does not allow a fourth transmission"
+        );
+        assert_eq!(permitted.redundancy_depth(), 3);
+
+        // Depth 1 turns it off again.
+        permitted.set_redundancy_depth(1).expect("disables");
+        assert_eq!(permitted.redundancy_depth(), 1);
+    }
+
+    /// With redundancy on, payloads grow to carry the repeats — and the
+    /// stream still decodes.
+    #[test]
+    fn redundant_payloads_carry_previous_frames_and_still_decode() {
+        let mut sender =
+            AmrAdapter::new(96, "AMR", Some("octet-align=1; max-red=20")).expect("constructs");
+        sender.set_redundancy_depth(2).expect("20ms allows depth 2");
+        let mut receiver =
+            AmrAdapter::new(96, "AMR", Some("octet-align=1; max-red=20")).expect("constructs");
+
+        let pcm: Vec<i16> = (0..160)
+            .map(|i| ((f64::from(i) * 0.09).sin() * 6_000.0) as i16)
+            .collect();
+        let frame = AudioFrame::new(pcm, 8_000, 1, 0);
+
+        let first = sender.encode(&frame).expect("first payload");
+        let second = sender.encode(&frame).expect("second payload");
+        assert!(
+            second.len() > first.len(),
+            "depth 2 must bundle the previous frame: {} then {}",
+            first.len(),
+            second.len()
+        );
+
+        // The receive side takes a multi-frame payload as a whole: two frames
+        // in, two frames' worth of samples out. Dropping the repeat is the
+        // caller's job (RedundancyDedup), not the codec's.
+        let decoded = receiver.decode(&second).expect("a bundled payload decodes");
+        assert_eq!(decoded.samples.len(), 320, "two frame-blocks of audio");
+    }
+
 }

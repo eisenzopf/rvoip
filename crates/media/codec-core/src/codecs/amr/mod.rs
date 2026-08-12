@@ -59,6 +59,8 @@ mod qualification;
 #[cfg(test)]
 mod soak;
 pub mod rate;
+/// RFC 4867 `max-red` redundancy: scheduling repeats and dropping them again.
+pub mod redundancy;
 pub mod sdp;
 pub mod sid_cadence;
 pub mod storage;
