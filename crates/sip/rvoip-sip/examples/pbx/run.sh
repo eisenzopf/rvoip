@@ -75,7 +75,7 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --help|-h)
-      echo "Usage: $0 [--pbx asterisk|freeswitch|both] [--api endpoint|stream_peer|callback|all] [--scenario registration|basic_call|g729_call|amr_call|amr_transcode_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all] [--transport UDP|TLS|all] [--repeat N] [--stop-on-fail 0|1]"
+      echo "Usage: $0 [--pbx asterisk|freeswitch|both] [--api endpoint|stream_peer|callback|all] [--scenario registration|basic_call|g729_call|amr_call|amr_transcode_call|b2bua_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all] [--transport UDP|TLS|all] [--repeat N] [--stop-on-fail 0|1]"
       exit 0
       ;;
     *)
@@ -324,9 +324,10 @@ api_examples() {
 
 scenario_list() {
   case "$SCENARIO_ARG" in
-    all) printf '%s\n' registration basic_call g729_call amr_call amr_transcode_call hold_resume ring_cancel dtmf reject blind_transfer ;;
+    all) printf '%s\n' registration basic_call g729_call amr_call amr_transcode_call b2bua_call hold_resume ring_cancel dtmf reject blind_transfer ;;
     amr|amr_call) printf '%s\n' amr_call ;;
     amr_transcode|amr_transcode_call|transcode) printf '%s\n' amr_transcode_call ;;
+    b2bua|b2bua_call) printf '%s\n' b2bua_call ;;
     basic|basic_call|call) printf '%s\n' basic_call ;;
     g729|g729_call|g729ab|g729ab_call) printf '%s\n' g729_call ;;
     hold|hold_resume) printf '%s\n' hold_resume ;;
@@ -420,6 +421,14 @@ codec_profile_for_scenario() {
         printf '%s\n' amrnb_be
       else
         printf '%s\n' amrnb
+      fi
+      ;;
+    b2bua_call)
+      # The exit criterion's AMR-WB, framed per what the PBX can relay.
+      if [ "$cpfs_provider" = "freeswitch" ]; then
+        printf '%s\n' amrwb_be
+      else
+        printf '%s\n' amrwb
       fi
       ;;
     *) printf '%s\n' default ;;
@@ -524,6 +533,27 @@ amr_cell_supported() {
 # The split also mirrors amr_call's, and is better coverage than either
 # framing alone: Asterisk transcodes octet-aligned, FreeSWITCH transcodes
 # bandwidth-efficient.
+# The b2bua profile sweep: a PCMU control cell (proving the scenario shape
+# itself) plus AMR-WB in the framing the PBX can relay end to end. Override
+# with PBX_B2BUA_PROFILES.
+b2bua_profile_list() {
+  bpl_provider=$1
+  if [ -n "${PBX_CODEC_PROFILE:-}" ]; then
+    printf '%s\n' "$PBX_CODEC_PROFILE"
+    return
+  fi
+  if [ -n "${PBX_B2BUA_PROFILES:-}" ]; then
+    for profile in $PBX_B2BUA_PROFILES; do
+      printf '%s\n' "$profile"
+    done
+    return
+  fi
+  case "$bpl_provider" in
+    freeswitch) printf '%s\n' pcmu amrwb_be ;;
+    *) printf '%s\n' pcmu amrwb ;;
+  esac
+}
+
 amr_transcode_pairing_list() {
   atpl_provider=$1
   if [ -n "${PBX_CODEC_PAIRING:-}" ]; then
@@ -1330,6 +1360,57 @@ run_two_party() {
   return "$rc"
 }
 
+# rvoip as the B2BUA in the middle: caller(2001) -> PBX -> b2bua(2002) -> PBX
+# -> target(2003). Three role processes, target and b2bua backgrounded, the
+# caller in the foreground driving teardown. codec-labeled output like the
+# amr/g729 cells. Endpoint API only.
+run_b2bua() {
+  provider=$1
+  example=$2
+  transport=$3
+  api_label=$(example_label "$example")
+  scenario=b2bua_call
+  codec_label=$(codec_label_for_scenario "$provider" b2bua_call)
+  out_dir="$OUT_ROOT/$provider/$api_label/$scenario/$codec_label/$transport"
+  out_dir=$(iteration_out_dir "$out_dir")
+  rm -rf "$out_dir"
+  mkdir -p "$out_dir"
+  if [ "$transport" = "TLS" ]; then
+    prepare_tls "$provider" "$out_dir"
+  fi
+  diag_begin_cell "$provider" "$transport" "$out_dir"
+
+  rc=0
+  start_one "$provider" "$example" "$scenario" "$transport" target "$out_dir" "$out_dir/target.log"
+  pid_a=$LAST_PID
+  wait_for_log "$out_dir/target.log" "Registered." "$pid_a" b2bua-target || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    start_one "$provider" "$example" "$scenario" "$transport" b2bua "$out_dir" "$out_dir/b2bua.log"
+    pid_b=$LAST_PID
+    wait_for_log "$out_dir/b2bua.log" "Registered." "$pid_b" b2bua-bridge || rc=$?
+  else
+    pid_b=""
+  fi
+  if [ "$rc" -eq 0 ]; then
+    run_one "$provider" "$example" "$scenario" "$transport" caller "$out_dir" "$out_dir/caller.log" || rc=$?
+  fi
+  wait_child "$pid_a" b2bua-target "$out_dir/target.log" || {
+    child_rc=$?
+    if [ "$rc" -eq 0 ]; then rc=$child_rc; fi
+  }
+  if [ -n "$pid_b" ]; then
+    wait_child "$pid_b" b2bua-bridge "$out_dir/b2bua.log" || {
+      child_rc=$?
+      if [ "$rc" -eq 0 ]; then rc=$child_rc; fi
+    }
+  fi
+  if [ "$rc" -eq 0 ]; then
+    run_analyze "$provider" "$scenario" "$transport" "$out_dir" || rc=$?
+  fi
+  diag_end_cell "$provider" "$transport" "$out_dir"
+  return "$rc"
+}
+
 run_transfer() {
   provider=$1
   example=$2
@@ -1515,6 +1596,66 @@ run_matrix_cell() {
           tls_rc=$?
           if [ "$rc" -eq 0 ]; then rc=$tls_rc; fi
         }
+      fi
+      ;;
+    b2bua_call)
+      # rvoip is the B2BUA here, and that role is composed on the unified
+      # coordinator the endpoint API wraps; the other two APIs would need
+      # their own bridge plumbing, so they skip rather than fail.
+      if [ "$example" != "pbx_endpoint" ]; then
+        echo "[$provider] skipping b2bua_call for $(example_label "$example"): endpoint API only"
+        return 0
+      fi
+      # A PCMU control cell plus AMR-WB; the AMR cells go through the same
+      # capability probe as amr_call.
+      old_b2bua_profile_set=0
+      old_b2bua_profile=""
+      if [ "${PBX_CODEC_PROFILE+x}" = "x" ]; then
+        old_b2bua_profile_set=1
+        old_b2bua_profile=$PBX_CODEC_PROFILE
+      fi
+      for profile in $(b2bua_profile_list "$provider"); do
+        export PBX_CODEC_PROFILE="$profile"
+        profile_rc=0
+        case "$profile" in
+          amr*)
+            probe_ok=1
+            if transport_selected UDP; then
+              if amr_cell_supported "$provider" b2bua_call UDP "$profile"; then :; else
+                [ "$?" -eq 2 ] && { rc=1; profile_rc=1; }
+                probe_ok=0
+              fi
+            fi
+            ;;
+          *) probe_ok=1 ;;
+        esac
+        if [ "$probe_ok" = "1" ]; then
+          if transport_selected UDP; then
+            run_b2bua "$provider" "$example" UDP || {
+              profile_rc=$?
+              if [ "$rc" -eq 0 ]; then rc=$profile_rc; fi
+            }
+            if [ "$profile_rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then break; fi
+          fi
+          if transport_selected TLS; then
+            case "$profile" in
+              amr*) amr_cell_supported "$provider" b2bua_call TLS "$profile" || {
+                      [ "$?" -eq 2 ] && { if [ "$rc" -eq 0 ]; then rc=1; fi; }
+                      continue
+                    } ;;
+            esac
+            run_b2bua "$provider" "$example" TLS || {
+              profile_rc=$?
+              if [ "$rc" -eq 0 ]; then rc=$profile_rc; fi
+            }
+          fi
+        fi
+        if [ "$profile_rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then break; fi
+      done
+      if [ "$old_b2bua_profile_set" = "1" ]; then
+        export PBX_CODEC_PROFILE="$old_b2bua_profile"
+      else
+        unset PBX_CODEC_PROFILE
       fi
       ;;
     blind_transfer)

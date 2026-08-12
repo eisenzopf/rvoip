@@ -32,7 +32,7 @@ Options:
 
 - `--pbx asterisk|freeswitch|both`
 - `--api endpoint|stream_peer|callback|all`
-- `--scenario registration|basic_call|g729_call|amr_call|amr_transcode_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all`
+- `--scenario registration|basic_call|g729_call|amr_call|amr_transcode_call|b2bua_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all`
 
 The runner builds the PBX Cargo examples and stores logs/WAV evidence under
 `examples/pbx/output/<provider>/<api>/<scenario>/<transport>/` by default. Set
@@ -67,6 +67,18 @@ transcript as the row's log. Three knobs, all recorded in `environment-*.md`:
   into a loud FAIL, so a lab losing its codec cannot hide as a skip.
 - Both knobs given on the command line override values from the sourced env
   files; for everything else the files win.
+
+`b2bua_call` puts **rvoip in the middle**: caller(2001) → PBX → rvoip b2bua(2002)
+→ PBX → target(2003), three role processes, with rvoip terminating both legs and
+bridging their payloads through `UnifiedCoordinator::bridge`. Two independent PBX
+calls exist, so nothing joins the two ends except rvoip; if the PBX transcoded or
+re-framed a leg, the bridge would refuse (`CodecMismatch`/`FormatMismatch`) and
+the cell would fail. It sweeps a PCMU control cell plus AMR-WB in the framing the
+PBX can relay (Asterisk octet-aligned, FreeSWITCH bandwidth-efficient),
+overridable with `PBX_B2BUA_PROFILES`. Endpoint API only — the other two APIs
+record no rows for it. Evidence under `.../b2bua_call/<profile>/<transport>/`; the
+b2bua middle node records nothing, so 880 Hz appearing anywhere would itself be a
+fault.
 
 Each run also writes release-audit artifacts at the output root:
 

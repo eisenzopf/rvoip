@@ -1717,9 +1717,19 @@ rvoip bridging two live legs.
       relay topology is what makes audio verification possible without one:
       peer → rvoip (frames only) → peer, with the PBXes doing the codec work.
 - [ ] Mode-change policy and CMR damper driven from the live stream.
-- [ ] **Exit criterion not yet met:** an AMR-WB call completed as a relaying
-      B2BUA against Asterisk and Kamailio+rtpengine, in both framings, with a
-      mid-call mode switch observed.
+- **Exit criterion, in progress:**
+  - [x] AMR-WB call completed with **rvoip as the relaying B2BUA** against
+        Asterisk (octet-aligned) and FreeSWITCH (bandwidth-efficient), UDP and
+        TLS+SRTP, via the `b2bua_call` harness scenario. rvoip terminates both
+        legs and bridges their payloads; the quality gate confirms the caller
+        recovers the target's tone and vice versa, and a forced codec mismatch
+        on one leg fails the bridge (the cell is not vacuous). This is rvoip in
+        the middle, not an endpoint through the PBX's own bridge.
+  - [ ] Kamailio+rtpengine (no such lab yet; separate track).
+  - [ ] Mid-call mode switch observed on the wire — blocked on CMR emission,
+        which does not exist (`CmrDamper` uncalled, every payload CMR=15).
+        Once emission lands, `b2bua_call` is the vehicle: CMR crosses both
+        relay legs verbatim.
 
 ---
 

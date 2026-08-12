@@ -40,10 +40,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rvoip_media_core::types::AudioFrame;
 use rvoip_sip::{
-    AudioSender, CallHandlerDecision, CallId, CallbackPeer, CallbackPeerControl, Config, Endpoint,
-    EndpointAccount, EndpointProfile, Event, EventReceiver, MediaSecurityKeying,
+    AudioSender, CallHandlerDecision, CallId, CallState, CallbackPeer, CallbackPeerControl, Config,
+    Endpoint, EndpointAccount, EndpointProfile, Event, EventReceiver, MediaSecurityKeying,
     MediaSecurityProfile, MediaSecurityState, Registration, RegistrationHandle, SessionHandle,
-    SipAccount, SipContactMode, SrtpSuitePolicy, StreamPeer, TransferOutcome, TransferWaitMode,
+    SessionId, SipAccount, SipContactMode, SrtpSuitePolicy, StreamPeer, TransferOutcome,
+    TransferWaitMode, UnifiedCoordinator,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -280,6 +281,11 @@ pub enum Scenario {
     /// — the scenario where a foreign AMR implementation must actually read
     /// our bitstream. See [`CodecPairing`].
     AmrTranscodeCall,
+    /// rvoip is the B2BUA in the middle: caller → PBX → rvoip → PBX → target,
+    /// with rvoip terminating both legs and bridging their payloads. Closes
+    /// half the exit criterion in `AMR_IMPLEMENTATION_PLAN.md` — rvoip as the
+    /// relaying B2BUA rather than an endpoint through someone else's bridge.
+    B2buaCall,
     HoldResume,
     RingCancel,
     Dtmf,
@@ -300,6 +306,11 @@ impl Scenario {
                     .ok_or_else(|| "--scenario requires a value".to_string())?;
             }
         }
+        Self::parse(&value)
+    }
+
+    /// The pure name parser, so tests need not touch the environment.
+    pub fn parse(value: &str) -> ExampleResult<Self> {
         let normalized = value
             .trim()
             .to_ascii_lowercase()
@@ -312,6 +323,7 @@ impl Scenario {
             "g729" | "g729_call" | "g729ab" | "g729ab_call" => Ok(Self::G729Call),
             "amr" | "amr_call" | "amrwb" | "amrwb_call" | "amr_wb_call" => Ok(Self::AmrCall),
             "amr_transcode" | "amr_transcode_call" | "transcode" => Ok(Self::AmrTranscodeCall),
+            "b2bua" | "b2bua_call" => Ok(Self::B2buaCall),
             "hold" | "hold_resume" => Ok(Self::HoldResume),
             "ring" | "ring_cancel" | "ring_remote" => Ok(Self::RingCancel),
             "dtmf" => Ok(Self::Dtmf),
@@ -564,6 +576,9 @@ fn select_codec_profile(
         // Narrowband by default: it is the variant every AMR-capable PBX
         // has, and PBX_CODEC_PROFILE=amrwb selects the other.
         Scenario::AmrCall => Ok(CodecProfile::AmrNb),
+        // The exit criterion names AMR-WB; the run.sh sweep pins the framing
+        // per provider and adds a PCMU control cell.
+        Scenario::B2buaCall => Ok(CodecProfile::AmrWb),
         _ => Ok(CodecProfile::Default),
     }
 }
@@ -576,6 +591,9 @@ pub enum Role {
     Target,
     Transferor,
     Transferee,
+    /// The B2BUA in the middle: registers, accepts an inbound leg, originates
+    /// an outbound leg, and bridges the two.
+    B2bua,
 }
 
 impl Role {
@@ -596,6 +614,7 @@ impl Role {
             "target" | "transfer_target" | "ring_target" => Ok(Self::Target),
             "transferor" => Ok(Self::Transferor),
             "transferee" => Ok(Self::Transferee),
+            "b2bua" => Ok(Self::B2bua),
             other => Err(format!("unknown PBX role '{}'", other).into()),
         }
     }
@@ -1321,10 +1340,10 @@ pub fn context() -> ExampleResult<(PbxProvider, Scenario, TransportMode, Role)> 
 pub fn username_for(transport: TransportMode, role: Role) -> &'static str {
     match (transport, role) {
         (TransportMode::TlsSrtp, Role::Caller | Role::Transferor | Role::Registration) => "1001",
-        (TransportMode::TlsSrtp, Role::Callee | Role::Transferee) => "1002",
+        (TransportMode::TlsSrtp, Role::Callee | Role::Transferee | Role::B2bua) => "1002",
         (TransportMode::TlsSrtp, Role::Target) => "1003",
         (TransportMode::Udp, Role::Caller | Role::Transferor | Role::Registration) => "2001",
-        (TransportMode::Udp, Role::Callee | Role::Transferee) => "2002",
+        (TransportMode::Udp, Role::Callee | Role::Transferee | Role::B2bua) => "2002",
         (TransportMode::Udp, Role::Target) => "2003",
     }
 }
@@ -1717,6 +1736,11 @@ async fn run_stream_peer(
         | Scenario::Reject => {
             run_stream_peer_two_party(provider, scenario, transport, role, &cfg, &mut peer).await?;
         }
+        Scenario::B2buaCall => {
+            return Err(
+                "b2bua_call runs through the endpoint API only; use --api endpoint".into(),
+            );
+        }
         Scenario::BlindTransfer => {
             run_stream_peer_transfer(provider, transport, role, &cfg, &mut peer).await?;
         }
@@ -1749,6 +1773,9 @@ async fn run_endpoint(
         | Scenario::Reject => {
             run_endpoint_two_party(provider, scenario, transport, role, &cfg, &mut endpoint)
                 .await?;
+        }
+        Scenario::B2buaCall => {
+            run_endpoint_b2bua(provider, transport, role, &cfg, &mut endpoint).await?;
         }
         Scenario::BlindTransfer => {
             run_endpoint_transfer(provider, transport, role, &cfg, &mut endpoint).await?;
@@ -1786,6 +1813,11 @@ async fn run_callback(
         | Scenario::Dtmf
         | Scenario::Reject => {
             run_callback_two_party(provider, scenario, transport, role, &mut runtime).await?;
+        }
+        Scenario::B2buaCall => {
+            return Err(
+                "b2bua_call runs through the endpoint API only; use --api endpoint".into(),
+            );
         }
         Scenario::BlindTransfer => {
             run_callback_transfer(transport, role, &mut runtime).await?;
@@ -2562,13 +2594,38 @@ async fn run_amr_caller(
     transport: TransportMode,
     wav_name: &str,
 ) -> ExampleResult<()> {
+    run_amr_caller_toned(
+        cfg,
+        handle,
+        transport,
+        tone_for_caller(transport),
+        tone_for_callee(transport),
+        wav_name,
+    )
+    .await
+}
+
+/// The teardown-driving half of an AMR call, with the tones spelled out.
+///
+/// `send_hz` is what this side transmits, `expect_hz` what the far end sends
+/// and this side must recover. The two-party `amr_call` uses the caller/callee
+/// tones; `b2bua_call` reuses this with the far leg's tone, since its middle
+/// node sends nothing of its own.
+async fn run_amr_caller_toned(
+    cfg: &EndpointConfig,
+    handle: &SessionHandle,
+    transport: TransportMode,
+    send_hz: f32,
+    expect_hz: f32,
+    wav_name: &str,
+) -> ExampleResult<()> {
     if transport.is_tls() {
         assert_srtp_media_security(handle, Duration::from_secs(5)).await?;
     }
     let sample_rate = amr_sample_rate(cfg.codec_profile);
     let recorder = start_tone_recorder_at_rate(
         handle,
-        tone_for_caller(transport),
+        send_hz,
         amr_frame_size(cfg.codec_profile),
         sample_rate,
     )
@@ -2591,12 +2648,7 @@ async fn run_amr_caller(
     let saved = recorder.stop_and_save(&cfg.output_dir, wav_name).await;
     outcome?;
     let path = saved?;
-    assert_amr_tone_quality(
-        &path,
-        sample_rate,
-        tone_for_callee(transport),
-        tone_for_caller(transport),
-    )?;
+    assert_amr_tone_quality(&path, sample_rate, expect_hz, send_hz)?;
     Ok(())
 }
 
@@ -2608,13 +2660,34 @@ async fn run_amr_callee(
     transport: TransportMode,
     wav_name: &str,
 ) -> ExampleResult<()> {
+    run_amr_callee_toned(
+        provider,
+        cfg,
+        handle,
+        transport,
+        tone_for_callee(transport),
+        tone_for_caller(transport),
+        wav_name,
+    )
+    .await
+}
+
+async fn run_amr_callee_toned(
+    provider: PbxProvider,
+    cfg: &EndpointConfig,
+    handle: &SessionHandle,
+    transport: TransportMode,
+    send_hz: f32,
+    expect_hz: f32,
+    wav_name: &str,
+) -> ExampleResult<()> {
     if transport.is_tls() {
         assert_srtp_media_security(handle, Duration::from_secs(5)).await?;
     }
     let sample_rate = amr_sample_rate(cfg.codec_profile);
     let recorder = start_tone_recorder_at_rate(
         handle,
-        tone_for_callee(transport),
+        send_hz,
         amr_frame_size(cfg.codec_profile),
         sample_rate,
     )
@@ -2641,12 +2714,202 @@ async fn run_amr_callee(
         )
         .into());
     }
-    assert_amr_tone_quality(
-        &path,
-        sample_rate,
-        tone_for_caller(transport),
-        tone_for_callee(transport),
-    )?;
+    assert_amr_tone_quality(&path, sample_rate, expect_hz, send_hz)?;
+    Ok(())
+}
+
+/// Poll a session to a target state, bounded, exactly as
+/// `examples/unified/04_b2bua_bridge/bridge_peer.rs` does.
+async fn wait_for_call_state(
+    coordinator: &UnifiedCoordinator,
+    session: &SessionId,
+    target: CallState,
+    deadline: Duration,
+) -> ExampleResult<()> {
+    let end = tokio::time::Instant::now() + deadline;
+    loop {
+        let state = coordinator.get_state(session).await?;
+        if state == target {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= end {
+            return Err(format!(
+                "session {} never reached {:?} (stuck at {:?})",
+                session.0, target, state
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// rvoip as the B2BUA: accept the caller's inbound leg, originate an outbound
+/// leg to the target through the PBX, and bridge the two.
+///
+/// This composes the same coordinator primitives the CI-proven
+/// `04_b2bua_bridge` example does, in outbound-first order: the target leg is
+/// answered before the caller's INVITE is accepted, so by the time the caller
+/// sees the call established both legs already have media, which keeps the
+/// caller's received-sample clock honest. It reaches the coordinator through
+/// the endpoint's own control handle rather than `SipB2bua`, because the
+/// harness needs both leg session ids to tear down and (under TLS) to assert
+/// SRTP on each — `SipB2bua::handle_inbound` returns only a media-core bridge
+/// handle.
+///
+/// The two legs share the caller's negotiated codec because the b2bua's own
+/// `EndpointConfig` offers the same profile: `bridge` forwards payloads
+/// without transcoding and refuses (`CodecMismatch` / a framing
+/// `FormatMismatch`) if the two legs disagree, so a cell that passes is proof
+/// the same codec crossed both legs and rvoip relayed it.
+async fn run_b2bua_bridge_role(
+    provider: PbxProvider,
+    transport: TransportMode,
+    cfg: &EndpointConfig,
+    endpoint: &Endpoint,
+) -> ExampleResult<()> {
+    let coordinator = endpoint.control().coordinator().clone();
+    let mut events = coordinator.events().await?;
+
+    // Wait for the caller's INVITE. The unfiltered stream is only used to
+    // learn the inbound session id; per-leg streams take over after.
+    let inbound_id = timeout(remote_test_timeout(provider)?, async {
+        loop {
+            match events.next().await {
+                Some(Event::IncomingCall { call_id, from, .. }) => {
+                    diag_event(
+                        &cfg.output_dir,
+                        "b2bua_inbound",
+                        serde_json::json!({ "from": from, "leg_a": call_id.0 }),
+                    );
+                    println!("[b2bua] inbound leg A = {} from {}", call_id.0, from);
+                    return call_id;
+                }
+                Some(_) => continue,
+                None => unreachable!("event stream closed before an inbound call"),
+            }
+        }
+    })
+    .await
+    .map_err(|_| "b2bua never received the caller's INVITE")?;
+
+    // Originate the outbound leg to the target (2003/1003) through the PBX.
+    let outbound_id = coordinator
+        .invite(Some(cfg.aor_uri()), cfg.remote_call_uri())
+        .send()
+        .await?;
+    println!("[b2bua] outbound leg B = {} to {}", outbound_id.0, cfg.remote_call_uri());
+    let mut outbound_events = coordinator.events_for_session(&outbound_id).await?;
+
+    let answered = timeout(remote_test_timeout(provider)?, async {
+        loop {
+            match outbound_events.next().await? {
+                Event::CallAnswered { .. } => return Some(()),
+                Event::CallEnded { .. } | Event::CallFailed { .. } => return None,
+                _ => continue,
+            }
+        }
+    })
+    .await;
+    match answered {
+        Ok(Some(())) => {}
+        Ok(None) => return Err("b2bua outbound leg terminated before answering".into()),
+        Err(_) => return Err("b2bua outbound leg answer timeout".into()),
+    }
+
+    coordinator.accept_call(&inbound_id).await?;
+    wait_for_call_state(&coordinator, &inbound_id, CallState::Active, Duration::from_secs(10))
+        .await?;
+    wait_for_call_state(&coordinator, &outbound_id, CallState::Active, Duration::from_secs(10))
+        .await?;
+
+    if transport.is_tls() {
+        // Each leg negotiates its own SRTP; both must be secured before we
+        // relay decrypted payloads between them.
+        assert_srtp_media_security(
+            &coordinator.session(&inbound_id),
+            Duration::from_secs(5),
+        )
+        .await?;
+        assert_srtp_media_security(
+            &coordinator.session(&outbound_id),
+            Duration::from_secs(5),
+        )
+        .await?;
+    }
+
+    let bridge = coordinator.bridge(&inbound_id, &outbound_id).await?;
+    diag_event(
+        &cfg.output_dir,
+        "b2bua_bridged",
+        serde_json::json!({ "inbound": inbound_id.0, "outbound": outbound_id.0 }),
+    );
+    println!("[b2bua] bridged {} <-> {}", inbound_id.0, outbound_id.0);
+
+    // The caller drives teardown once it has its evidence; the b2bua just
+    // holds the bridge until the inbound leg ends, then closes the relay
+    // before hanging up the outbound leg.
+    coordinator
+        .session(&inbound_id)
+        .wait_for_end(Some(remote_test_timeout(provider)?))
+        .await
+        .ok();
+    drop(bridge);
+    let _ = coordinator.hangup(&outbound_id).await;
+    let _ = timeout(Duration::from_secs(3), outbound_events.next()).await;
+    Ok(())
+}
+
+async fn run_endpoint_b2bua(
+    provider: PbxProvider,
+    transport: TransportMode,
+    role: Role,
+    cfg: &EndpointConfig,
+    endpoint: &mut Endpoint,
+) -> ExampleResult<()> {
+    match role {
+        Role::Caller => {
+            settle_after_register(provider).await;
+            let handle = endpoint
+                .call_and_wait(
+                    target_user_for(transport),
+                    Some(remote_test_timeout(provider)?),
+                )
+                .await?;
+            run_amr_caller_toned(
+                cfg,
+                handle.as_session_handle(),
+                transport,
+                tone_for_caller(transport),
+                tone_for_b2bua_far(transport),
+                b2bua_caller_wav(transport),
+            )
+            .await?;
+        }
+        Role::B2bua => {
+            run_b2bua_bridge_role(provider, transport, cfg, endpoint).await?;
+        }
+        Role::Target => {
+            // The target answers, sends 660 Hz, and waits for the call to
+            // end. It is `run_amr_callee_toned` with the far tone being the
+            // caller's, two PBX hops away through the bridge.
+            let incoming =
+                timeout(remote_test_timeout(provider)?, endpoint.wait_for_incoming()).await??;
+            let handle = incoming.accept().await?;
+            run_amr_callee_toned(
+                provider,
+                cfg,
+                handle.as_session_handle(),
+                transport,
+                tone_for_b2bua_far(transport),
+                tone_for_caller(transport),
+                b2bua_target_wav(transport),
+            )
+            .await?;
+        }
+        other => {
+            return Err(format!("unsupported endpoint role {:?} for b2bua_call", other).into());
+        }
+    }
     Ok(())
 }
 
@@ -3029,6 +3292,7 @@ pub async fn run_analyze() -> ExampleResult<()> {
         Scenario::BasicCall => analyze_basic(&cfg, transport),
         Scenario::G729Call => analyze_g729(&cfg, transport),
         Scenario::AmrCall => analyze_amr(&cfg, transport),
+        Scenario::B2buaCall => analyze_b2bua(&cfg, transport),
         Scenario::HoldResume => analyze_hold(&cfg, transport),
         Scenario::Dtmf if transport.is_tls() => analyze_dtmf(&cfg, transport),
         Scenario::BlindTransfer if transport.is_tls() => analyze_transfer(&cfg, transport),
@@ -3102,6 +3366,29 @@ fn analyze_amr(cfg: &EndpointConfig, transport: TransportMode) -> ExampleResult<
         rate,
         tone_for_caller(transport),
         tone_for_callee(transport),
+    )?;
+    Ok(())
+}
+
+/// The caller recovers the target's 660 Hz and the target recovers the
+/// caller's tone, each two PBX hops away through rvoip's bridge; the b2bua
+/// middle node records nothing. Same quality gate as `analyze_amr`.
+fn analyze_b2bua(cfg: &EndpointConfig, transport: TransportMode) -> ExampleResult<()> {
+    write_audio_diagnostics(cfg, Scenario::B2buaCall, transport);
+    let rate = amr_sample_rate(cfg.codec_profile);
+    let caller_wav = cfg.output_dir.join(b2bua_caller_wav(transport));
+    let target_wav = cfg.output_dir.join(b2bua_target_wav(transport));
+    assert_amr_tone_quality(
+        &caller_wav,
+        rate,
+        tone_for_b2bua_far(transport),
+        tone_for_caller(transport),
+    )?;
+    assert_amr_tone_quality(
+        &target_wav,
+        rate,
+        tone_for_caller(transport),
+        tone_for_b2bua_far(transport),
     )?;
     Ok(())
 }
@@ -3445,11 +3732,40 @@ fn write_audio_diagnostics_inner(
                 )],
             );
         }
+        Scenario::B2buaCall => {
+            let rate = amr_sample_rate(cfg.codec_profile);
+            add_audio_file_diagnostics(
+                &mut files,
+                &mut markdown,
+                rate,
+                "b2bua caller",
+                &cfg.output_dir.join(b2bua_caller_wav(transport)),
+                &[(
+                    "caller received target tone through the bridge",
+                    WindowSelector::Stable,
+                    tone_for_b2bua_far(transport),
+                    tone_for_caller(transport),
+                )],
+            );
+            add_audio_file_diagnostics(
+                &mut files,
+                &mut markdown,
+                rate,
+                "b2bua target",
+                &cfg.output_dir.join(b2bua_target_wav(transport)),
+                &[(
+                    "target received caller tone through the bridge",
+                    WindowSelector::Stable,
+                    tone_for_caller(transport),
+                    tone_for_b2bua_far(transport),
+                )],
+            );
+        }
         _ => {}
     }
 
     let report_sample_rate = match scenario {
-        Scenario::AmrCall => amr_sample_rate(cfg.codec_profile),
+        Scenario::AmrCall | Scenario::B2buaCall => amr_sample_rate(cfg.codec_profile),
         _ => SAMPLE_RATE,
     };
     let report = serde_json::json!({
@@ -5258,6 +5574,29 @@ fn amr_transcode_wav(cfg: &EndpointConfig) -> String {
     )
 }
 
+/// The far end of a b2bua call — the target (2003/1003) — sends 660 Hz. The
+/// caller sends its usual tone; the b2bua in the middle sends nothing, so
+/// 880 Hz appearing anywhere in a b2bua recording would itself be a fault.
+fn tone_for_b2bua_far(_transport: TransportMode) -> f32 {
+    ENDPOINT_1003_TONE_HZ
+}
+
+fn b2bua_caller_wav(transport: TransportMode) -> &'static str {
+    if transport.is_tls() {
+        "tls_srtp_b2bua_1001_received.wav"
+    } else {
+        "b2bua_2001_received.wav"
+    }
+}
+
+fn b2bua_target_wav(transport: TransportMode) -> &'static str {
+    if transport.is_tls() {
+        "tls_srtp_b2bua_1003_received.wav"
+    } else {
+        "b2bua_2003_received.wav"
+    }
+}
+
 fn g729_caller_wav(transport: TransportMode) -> &'static str {
     if transport.is_tls() {
         "tls_srtp_g729_1001_received.wav"
@@ -6163,6 +6502,62 @@ mod tests {
                 .unwrap(),
             CodecProfile::AmrNb
         );
+    }
+
+    /// The b2bua scenario defaults to AMR-WB — the exit criterion's codec.
+    /// A `_` catch-all in `select_codec_profile` would silently default it to
+    /// PCMU, so this pins the explicit arm.
+    #[test]
+    fn b2bua_scenario_defaults_to_wideband_and_honours_overrides() {
+        assert_eq!(
+            Scenario::parse("b2bua_call").unwrap(),
+            Scenario::B2buaCall
+        );
+        assert_eq!(
+            select_codec_profile(Scenario::B2buaCall, Some(Role::Caller), None, None, None).unwrap(),
+            CodecProfile::AmrWb
+        );
+        // A global override still wins outside the transcode scenario.
+        assert_eq!(
+            select_codec_profile(Scenario::B2buaCall, Some(Role::B2bua), None, Some("pcmu"), None)
+                .unwrap(),
+            CodecProfile::Pcmu
+        );
+    }
+
+    /// The three b2bua roles map to three distinct users, and the b2bua is the
+    /// user the caller dials — otherwise the inbound leg would never reach it.
+    #[test]
+    fn b2bua_roles_use_three_distinct_users() {
+        for transport in [TransportMode::Udp, TransportMode::TlsSrtp] {
+            let caller = username_for(transport, Role::Caller);
+            let b2bua = username_for(transport, Role::B2bua);
+            let target = username_for(transport, Role::Target);
+            assert_ne!(caller, b2bua);
+            assert_ne!(b2bua, target);
+            assert_ne!(caller, target);
+            assert_eq!(
+                b2bua,
+                target_user_for(transport),
+                "the caller dials the b2bua, so they must share a user"
+            );
+        }
+    }
+
+    /// The tone the caller expects is the target's, and vice versa; the b2bua
+    /// itself sends nothing, so neither side should ever expect its tone.
+    #[test]
+    fn b2bua_tone_mapping_is_asymmetric() {
+        for transport in [TransportMode::Udp, TransportMode::TlsSrtp] {
+            let caller_sends = tone_for_caller(transport);
+            let far = tone_for_b2bua_far(transport);
+            assert_ne!(caller_sends, far);
+            assert_eq!(far, ENDPOINT_1003_TONE_HZ);
+            // The b2bua's own (callee-slot) tone must not be what either end
+            // listens for.
+            assert_ne!(far, tone_for_callee(transport));
+            assert_ne!(caller_sends, tone_for_callee(transport));
+        }
     }
 
     #[test]
