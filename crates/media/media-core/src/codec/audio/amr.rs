@@ -59,6 +59,15 @@ pub struct AmrAdapter {
     variant: AmrVariant,
     /// The mode being encoded at, which a peer's CMR can move.
     mode: AmrMode,
+    /// The mode of the last *decoded* speech frame — what the peer is
+    /// actually sending, which is not what we are encoding at.
+    ///
+    /// SID, NO_DATA and lost frames carry no mode of their own; the reference
+    /// decoders fall back to the rate of the last frame they received. Using
+    /// the *encode* mode here decoded those frames at the wrong rate whenever
+    /// the two directions ran at different ones — silently, because the two
+    /// modes agree in every symmetric test.
+    last_decoded_mode: AmrMode,
     /// A codec mode request seen on a decoded packet, waiting to be handed to
     /// whichever object does the encoding.
     ///
@@ -143,6 +152,7 @@ impl AmrAdapter {
             codec,
             variant,
             mode,
+            last_decoded_mode: mode,
             pending_mode_request: None,
         })
     }
@@ -289,27 +299,34 @@ impl AudioCodec for AmrAdapter {
         let mut samples = Vec::with_capacity(packet.frames.len() * self.frame_samples());
         for frame in &packet.frames {
             let coded = match frame.frame_type {
-                AmrFrameType::Speech(mode) => CodedFrame {
-                    kind: FrameKind::Speech,
-                    mode: mode.index(),
-                    data: frame.data.clone(),
-                    quality_ok: frame.quality_ok,
-                },
+                AmrFrameType::Speech(mode) => {
+                    self.last_decoded_mode = mode;
+                    CodedFrame {
+                        kind: FrameKind::Speech,
+                        mode: mode.index(),
+                        data: frame.data.clone(),
+                        quality_ok: frame.quality_ok,
+                    }
+                }
+                // SID, NO_DATA and lost frames have no mode of their own.
+                // The reference decoders continue at the rate of the last
+                // frame the *peer* sent — not at whatever rate we happen to
+                // be encoding, which is a different direction entirely.
                 AmrFrameType::Sid(_) => CodedFrame {
                     kind: FrameKind::ComfortNoise,
-                    mode: self.mode.index(),
+                    mode: self.last_decoded_mode.index(),
                     data: frame.data.clone(),
                     quality_ok: frame.quality_ok,
                 },
                 AmrFrameType::NoData => CodedFrame {
                     kind: FrameKind::NoData,
-                    mode: self.mode.index(),
+                    mode: self.last_decoded_mode.index(),
                     data: Vec::new(),
                     quality_ok: true,
                 },
                 AmrFrameType::SpeechLost => CodedFrame {
                     kind: FrameKind::Lost,
-                    mode: self.mode.index(),
+                    mode: self.last_decoded_mode.index(),
                     data: Vec::new(),
                     quality_ok: false,
                 },
@@ -439,6 +456,82 @@ mod tests {
                 "{name}: the round trip produced silence"
             );
         }
+    }
+
+    /// Frames that carry no mode of their own decode at the rate of the last
+    /// frame the *peer* sent, never at the rate we happen to encode at.
+    ///
+    /// SID, NO_DATA and lost frames used to borrow `self.mode` — the encode
+    /// mode. The two agree in every symmetric test, so the defect only shows
+    /// when the directions run at different rates: here the peer speaks at
+    /// 6.60 kbit/s while a CMR moves *our* encoder, and concealment of a lost
+    /// frame must not move with it.
+    #[test]
+    #[cfg(feature = "amr-wb")]
+    fn no_mode_frames_decode_at_the_peers_last_speech_mode_not_ours() {
+        use codec_core::codecs::amr::payload::{AmrPayloadCodec, AmrPayloadConfig};
+
+        // A payload whose only frame is FT 14 — "speech lost", wideband's
+        // in-band loss marker — in the same bandwidth-efficient framing the
+        // fmtp-less adapters below negotiate.
+        let lost_payload = {
+            let packer = AmrPayloadCodec::new(AmrPayloadConfig {
+                variant: AmrVariant::WideBand,
+                octet_aligned: false,
+                crc: false,
+                robust_sorting: false,
+                interleaving: false,
+            })
+            .expect("packer");
+            let frame = AmrPayloadFrame::new(AmrFrameType::SpeechLost, true, Vec::new())
+                .expect("a lost frame carries no data");
+            packer.pack(&AmrPacket::single(frame)).expect("packs")
+        };
+
+        // The peer: an encoder pinned to the lowest rate by its mode-set.
+        let low_payloads: Vec<Vec<u8>> = {
+            let mut encoder =
+                AmrAdapter::new(97, "AMR-WB", Some("mode-set=0")).expect("constructs");
+            (0..3)
+                .map(|_| encoder.encode(&pcm(320, 16_000)).expect("encodes"))
+                .collect()
+        };
+        // A different peer speaking at the highest rate, for the
+        // non-vacuity half below.
+        let high_payloads: Vec<Vec<u8>> = {
+            let mut encoder = AmrAdapter::new(97, "AMR-WB", None).expect("constructs");
+            (0..3)
+                .map(|_| encoder.encode(&pcm(320, 16_000)).expect("encodes"))
+                .collect()
+        };
+
+        let conceal_after = |speech: &[Vec<u8>], cmr: Option<u8>| -> Vec<i16> {
+            let mut decoder = AmrAdapter::new(97, "AMR-WB", None).expect("constructs");
+            for payload in speech {
+                decoder.decode(payload).expect("decodes");
+            }
+            // Moving the *encode* mode between the speech and the loss is the
+            // mutation this test exists to catch.
+            decoder.apply_mode_request(cmr);
+            decoder.decode(&lost_payload).expect("conceals").samples
+        };
+
+        let concealed = conceal_after(&low_payloads, None);
+        let concealed_with_encoder_moved = conceal_after(&low_payloads, Some(0));
+        assert_eq!(
+            concealed, concealed_with_encoder_moved,
+            "concealment followed the encode mode: a CMR that moves what we \
+             send must not change how we conceal what the peer lost"
+        );
+
+        // Non-vacuity: concealment genuinely depends on the peer's rate, so
+        // the equality above cannot hold by concealment ignoring mode.
+        let concealed_after_high = conceal_after(&high_payloads, None);
+        assert_ne!(
+            concealed, concealed_after_high,
+            "concealment after 6.60 kbit/s speech and after 23.85 kbit/s \
+             speech produced identical samples — the comparison proves nothing"
+        );
     }
 
     /// A frame of the wrong length is refused rather than padded or split.
