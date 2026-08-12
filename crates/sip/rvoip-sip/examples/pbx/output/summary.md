@@ -1,8 +1,8 @@
 # PBX Interop Run Summary
 
-- started_at_utc: 2026-08-11T20:08:36Z
-- ended_at_utc: 2026-08-11T20:08:45Z
-- duration_seconds: 9
+- started_at_utc: 2026-08-12T01:58:05Z
+- ended_at_utc: 2026-08-12T01:58:18Z
+- duration_seconds: 13
 - exit_status: 0
 - output_root: /Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output
 - environments: `environment-*.md`
@@ -10,13 +10,15 @@
 
 ## Result
 
-- total_cells: 2
-- passed_cells: 2
+- total_cells: 4
+- passed_cells: 4
 - failed_cells: 0
 
 ## Matrix
 
-| Status | Provider | API | Scenario | Transport | Role | Duration | Exit | Log |
-|--------|----------|-----|----------|-----------|------|----------|------|-----|
-| PASS | asterisk | endpoint | amr_call | UDP | callee | 8s | 0 | `/Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrwb/UDP/callee.log` |
-| PASS | asterisk | endpoint | amr_call | UDP | caller | 6s | 0 | `/Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrwb/UDP/caller.log` |
+| Status | Provider | API | Scenario | Codec | Transport | Role | Duration | Exit | Log |
+|--------|----------|-----|----------|-------|-----------|------|----------|------|-----|
+| PASS | freeswitch | endpoint | amr_transcode_call | amrnb_be_pcmu | UDP | caller | 4s | 0 | `/Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrnb_be_pcmu/UDP/caller.log` |
+| PASS | freeswitch | endpoint | amr_transcode_call | amrnb_be_pcmu | UDP | callee | 6s | 0 | `/Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrnb_be_pcmu/UDP/callee.log` |
+| PASS | freeswitch | endpoint | amr_transcode_call | amrwb_be_pcmu | UDP | callee | 6s | 0 | `/Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrwb_be_pcmu/UDP/callee.log` |
+| PASS | freeswitch | endpoint | amr_transcode_call | amrwb_be_pcmu | UDP | caller | 5s | 0 | `/Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrwb_be_pcmu/UDP/caller.log` |

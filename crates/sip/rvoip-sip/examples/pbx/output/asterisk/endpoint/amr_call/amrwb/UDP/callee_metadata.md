@@ -6,7 +6,7 @@
 - transport: UDP
 - role: callee
 - codec_profile: amrwb
-- started_at_utc: 2026-08-11T20:08:37Z
+- started_at_utc: 2026-08-12T01:08:10Z
 - output_dir: /Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrwb/UDP
 - log: /Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrwb/UDP/callee.log
 

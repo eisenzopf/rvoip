@@ -75,7 +75,7 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --help|-h)
-      echo "Usage: $0 [--pbx asterisk|freeswitch|both] [--api endpoint|stream_peer|callback|all] [--scenario registration|basic_call|g729_call|amr_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all] [--transport UDP|TLS|all] [--repeat N] [--stop-on-fail 0|1]"
+      echo "Usage: $0 [--pbx asterisk|freeswitch|both] [--api endpoint|stream_peer|callback|all] [--scenario registration|basic_call|g729_call|amr_call|amr_transcode_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all] [--transport UDP|TLS|all] [--repeat N] [--stop-on-fail 0|1]"
       exit 0
       ;;
     *)
@@ -193,7 +193,7 @@ write_run_environment() {
 init_report() {
   mkdir -p "$OUT_ROOT"
   if [ "${PBX_REPORT_APPEND:-0}" != "1" ] || [ ! -f "$RUN_MATRIX" ]; then
-    printf 'status\tprovider\tapi\tscenario\ttransport\trole\tduration_s\texit_code\tstarted_at_utc\tended_at_utc\tlog\tout_dir\n' >"$RUN_MATRIX"
+    printf 'status\tprovider\tapi\tscenario\ttransport\trole\tduration_s\texit_code\tstarted_at_utc\tended_at_utc\tlog\tout_dir\tcodec\n' >"$RUN_MATRIX"
     printf 'provider\tapi\tscenario\ttransport\trole\tduration_s\texit_code\tstarted_at_utc\tended_at_utc\tlog\n' >"$OUT_ROOT/tls-prewarm.tsv"
   fi
   RUN_INITIAL_FAILURES=$(awk -F '\t' 'NR > 1 && $1 == "FAIL" { n++ } END { print n + 0 }' "$RUN_MATRIX" 2>/dev/null || echo 0)
@@ -214,9 +214,12 @@ record_matrix() {
   ended_at=${10}
   log=${11}
   out_dir=${12}
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  # Appended last on purpose: the summary awk reads $11/$12 positionally and
+  # archived matrices are parsed by column index.
+  codec=${13:-}
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$status" "$provider" "$api" "$scenario" "$transport" "$role" \
-    "$duration" "$exit_code" "$started_at" "$ended_at" "$log" "$out_dir" >>"$RUN_MATRIX"
+    "$duration" "$exit_code" "$started_at" "$ended_at" "$log" "$out_dir" "$codec" >>"$RUN_MATRIX"
 }
 
 write_run_summary() {
@@ -249,10 +252,10 @@ write_run_summary() {
     echo
     echo "## Matrix"
     echo
-    echo "| Status | Provider | API | Scenario | Transport | Role | Duration | Exit | Log |"
-    echo "|--------|----------|-----|----------|-----------|------|----------|------|-----|"
+    echo "| Status | Provider | API | Scenario | Codec | Transport | Role | Duration | Exit | Log |"
+    echo "|--------|----------|-----|----------|-------|-----------|------|----------|------|-----|"
     awk -F '\t' 'NR > 1 {
-      printf "| %s | %s | %s | %s | %s | %s | %ss | %s | `%s` |\n", $1, $2, $3, $4, $5, $6, $7, $8, $11
+      printf "| %s | %s | %s | %s | %s | %s | %s | %ss | %s | `%s` |\n", $1, $2, $3, $4, $13, $5, $6, $7, $8, $11
     }' "$RUN_MATRIX"
   } >"$RUN_SUMMARY"
 }
@@ -298,6 +301,7 @@ scenario_list() {
   case "$SCENARIO_ARG" in
     all) printf '%s\n' registration basic_call g729_call hold_resume ring_cancel dtmf reject blind_transfer ;;
     amr|amr_call) printf '%s\n' amr_call ;;
+    amr_transcode|amr_transcode_call|transcode) printf '%s\n' amr_transcode_call ;;
     basic|basic_call|call) printf '%s\n' basic_call ;;
     g729|g729_call|g729ab|g729ab_call) printf '%s\n' g729_call ;;
     hold|hold_resume) printf '%s\n' hold_resume ;;
@@ -378,6 +382,46 @@ codec_profile_for_scenario() {
     g729_call) printf '%s\n' g729ab ;;
     amr_call) printf '%s\n' amrnb ;;
     *) printf '%s\n' default ;;
+  esac
+}
+
+# The transcode scenario is labeled by its *pairing*, not by one profile --
+# its whole point is that the two legs run different codecs, so a single
+# profile name cannot describe a cell. The label feeds the output path and
+# the matrix codec column.
+codec_label_for_scenario() {
+  scenario=$1
+  if [ "$scenario" = "amr_transcode_call" ]; then
+    printf '%s\n' "${PBX_CODEC_PAIRING:-amrnb_pcmu}"
+    return
+  fi
+  codec_profile_for_scenario "$scenario"
+}
+
+# The pairing sweep, mirroring g729_profile_list: PBX_CODEC_PAIRING pins one,
+# PBX_AMR_TRANSCODE_PAIRINGS overrides the list. The default differs per
+# provider for a measured reason: FreeSWITCH's mod_amr instantiates its
+# bandwidth-efficient decoder even for a leg negotiated octet-aligned
+# ("Codec AMR / Bandwidth Efficient decoder error!" on PT 107 input), so on
+# FreeSWITCH the bandwidth-efficient pairings are the ones that can work.
+# The split also mirrors amr_call's, and is better coverage than either
+# framing alone: Asterisk transcodes octet-aligned, FreeSWITCH transcodes
+# bandwidth-efficient.
+amr_transcode_pairing_list() {
+  atpl_provider=$1
+  if [ -n "${PBX_CODEC_PAIRING:-}" ]; then
+    printf '%s\n' "$PBX_CODEC_PAIRING"
+    return
+  fi
+  if [ -n "${PBX_AMR_TRANSCODE_PAIRINGS:-}" ]; then
+    for pairing in $PBX_AMR_TRANSCODE_PAIRINGS; do
+      printf '%s\n' "$pairing"
+    done
+    return
+  fi
+  case "$atpl_provider" in
+    freeswitch) printf '%s\n' amrnb_be_pcmu amrwb_be_pcmu ;;
+    *) printf '%s\n' amrnb_pcmu amrwb_pcmu ;;
   esac
 }
 
@@ -516,6 +560,53 @@ diag_fs_snapshot() {
   } >"$dfs_snapshot" 2>&1 || true
 }
 
+diag_ast_snapshot() {
+  das_provider=$1
+  das_out_dir=$2
+  das_label=$3
+  if ! diag_enabled || [ "$das_provider" != "asterisk" ]; then
+    return
+  fi
+  das_snapshot="$das_out_dir/asterisk-cli-$das_label.txt"
+  {
+    echo "# Asterisk CLI snapshot: $das_label"
+    echo
+    # `core show channels verbose` names each channel's format;
+    # `core show translation paths` and the codec module's use count are what
+    # distinguish a transcoded call (simple_bridge, use count > 0) from a
+    # relayed one (native_rtp, use count 0) -- the distinction the transcode
+    # scenario exists to force.
+    for command in \
+      "core show channels verbose" \
+      "core show channels concise" \
+      "module show like codec_amr" \
+      "bridge show all"
+    do
+      echo
+      echo "## $command"
+      echo
+      docker exec rvoip-asterisk asterisk -rx "$command" 2>&1 || true
+    done
+  } >"$das_snapshot" 2>&1 || true
+}
+
+diag_ast_sample_loop() {
+  dasl_provider=$1
+  dasl_out_dir=$2
+  if ! diag_enabled || [ "$dasl_provider" != "asterisk" ]; then
+    return
+  fi
+  dasl_sample_dir="$dasl_out_dir/asterisk-cli-samples"
+  mkdir -p "$dasl_sample_dir"
+  dasl_count=0
+  while [ "$dasl_count" -lt 60 ]; do
+    dasl_stamp=$(date -u +%H%M%S)
+    diag_ast_snapshot "$dasl_provider" "$dasl_sample_dir" "$dasl_stamp"
+    dasl_count=$((dasl_count + 1))
+    sleep 2
+  done
+}
+
 diag_fs_sample_loop() {
   dfsl_provider=$1
   dfsl_out_dir=$2
@@ -607,7 +698,12 @@ diag_begin_cell() {
     echo "- rust_log: $RUST_LOG"
   } >"$out_dir/diag-metadata.md"
   diag_fs_snapshot "$provider" "$out_dir" before
-  diag_fs_sample_loop "$provider" "$out_dir" &
+  diag_ast_snapshot "$provider" "$out_dir" before
+  if [ "$provider" = "asterisk" ]; then
+    diag_ast_sample_loop "$provider" "$out_dir" &
+  else
+    diag_fs_sample_loop "$provider" "$out_dir" &
+  fi
   DIAG_SAMPLE_PID=$!
   diag_start_pcap "$provider" "$transport" "$out_dir"
 }
@@ -626,6 +722,7 @@ diag_end_cell() {
   fi
   diag_stop_pcap "$out_dir"
   diag_fs_snapshot "$provider" "$out_dir" after
+  diag_ast_snapshot "$provider" "$out_dir" after
   if [ "$provider" = "freeswitch" ] && command -v docker >/dev/null 2>&1; then
     docker logs --since "${DIAG_CELL_STARTED_AT:-0}" rvoip-freeswitch >"$out_dir/freeswitch-since-cell.log" 2>&1 || true
   fi
@@ -644,7 +741,12 @@ run_one() {
   out_dir=$6
   log=$7
   api_label=$(example_label "$example")
-  codec_profile=$(codec_profile_for_scenario "$scenario")
+  codec_label=$(codec_label_for_scenario "$scenario")
+  if [ "$scenario" = "amr_transcode_call" ]; then
+    codec_env="PBX_CODEC_PAIRING=$codec_label"
+  else
+    codec_env="PBX_CODEC_PROFILE=$codec_label"
+  fi
   started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   start_epoch=$(date +%s)
   status_label=PASS
@@ -658,7 +760,7 @@ run_one() {
     echo "- scenario: $scenario"
     echo "- transport: $transport"
     echo "- role: $role"
-    echo "- codec_profile: $codec_profile"
+    echo "- codec: $codec_label"
     echo "- started_at_utc: $started_at"
     echo "- output_dir: $out_dir"
     echo "- log: $log"
@@ -666,7 +768,7 @@ run_one() {
     echo "## Command"
     echo
     echo '```sh'
-    echo "PBX_PROVIDER=$provider PBX_SCENARIO=$scenario PBX_TRANSPORT=$transport SIP_TRANSPORT=$transport PBX_ROLE=$role PBX_CODEC_PROFILE=$codec_profile AUDIO_OUTPUT_DIR=$out_dir $(example_command_label "$example")"
+    echo "PBX_PROVIDER=$provider PBX_SCENARIO=$scenario PBX_TRANSPORT=$transport SIP_TRANSPORT=$transport PBX_ROLE=$role $codec_env AUDIO_OUTPUT_DIR=$out_dir $(example_command_label "$example")"
     echo '```'
     echo
     echo "## Redacted Environment"
@@ -682,10 +784,10 @@ run_one() {
     echo "scenario: $scenario"
     echo "transport: $transport"
     echo "role: $role"
-    echo "codec_profile: $codec_profile"
+    echo "codec: $codec_label"
     echo "started_at_utc: $started_at"
     echo
-    echo "+ PBX_PROVIDER=$provider PBX_SCENARIO=$scenario PBX_TRANSPORT=$transport SIP_TRANSPORT=$transport PBX_ROLE=$role PBX_CODEC_PROFILE=$codec_profile AUDIO_OUTPUT_DIR=$out_dir $(example_command_label "$example")"
+    echo "+ PBX_PROVIDER=$provider PBX_SCENARIO=$scenario PBX_TRANSPORT=$transport SIP_TRANSPORT=$transport PBX_ROLE=$role $codec_env AUDIO_OUTPUT_DIR=$out_dir $(example_command_label "$example")"
   } >"$log"
 
   set +e
@@ -696,7 +798,30 @@ run_one() {
     export PBX_TRANSPORT="$transport"
     export SIP_TRANSPORT="$transport"
     export PBX_ROLE="$role"
-    export PBX_CODEC_PROFILE="$codec_profile"
+    if [ "$scenario" = "amr_transcode_call" ] && [ "$provider" = "freeswitch" ]; then
+      # FreeSWITCH's rvoip profiles pin disable-transcoding, which REFUSES a
+      # call whose legs cannot share a codec -- the exact shape of this
+      # scenario. The container also writes *_xcode twins of both profiles
+      # with transcoding enabled; register against those instead. The
+      # exported value wins over both env files (dotenvy does not override
+      # process env).
+      if [ -n "${FREESWITCH_XCODE_UDP_ADDR:-}" ]; then
+        export FREESWITCH_UDP_ADDR="$FREESWITCH_XCODE_UDP_ADDR"
+      fi
+      if [ -n "${FREESWITCH_XCODE_TLS_ADDR:-}" ]; then
+        export FREESWITCH_TLS_ADDR="$FREESWITCH_XCODE_TLS_ADDR"
+      fi
+    fi
+    if [ "$scenario" = "amr_transcode_call" ]; then
+      # One env var cannot name two codecs; the binary resolves its leg's
+      # profile from the pairing and its role, and a stray PBX_CODEC_PROFILE
+      # is refused by select_codec_profile rather than silently collapsing
+      # both legs onto one codec.
+      unset PBX_CODEC_PROFILE
+      export PBX_CODEC_PAIRING="$codec_label"
+    else
+      export PBX_CODEC_PROFILE="$codec_label"
+    fi
     export AUDIO_OUTPUT_DIR="$out_dir"
     run_example_command "$example"
   ) >>"$log" 2>&1
@@ -714,7 +839,7 @@ run_one() {
     echo "duration_seconds: $duration"
     echo "exit_status: $rc"
   } >>"$log"
-  record_matrix "$status_label" "$provider" "$api_label" "$scenario" "$transport" "$role" "$duration" "$rc" "$started_at" "$ended_at" "$log" "$out_dir"
+  record_matrix "$status_label" "$provider" "$api_label" "$scenario" "$transport" "$role" "$duration" "$rc" "$started_at" "$ended_at" "$log" "$out_dir" "$codec_label"
   return "$rc"
 }
 
@@ -993,7 +1118,7 @@ run_analyze() {
     echo "duration_seconds: $duration"
     echo "exit_status: $rc"
   } >>"$log"
-  record_matrix "$status_label" "$provider" analyzer "$scenario" "$transport" analyze "$duration" "$rc" "$started_at" "$ended_at" "$log" "$out_dir"
+  record_matrix "$status_label" "$provider" analyzer "$scenario" "$transport" analyze "$duration" "$rc" "$started_at" "$ended_at" "$log" "$out_dir" "$codec_profile"
   return "$rc"
 }
 
@@ -1035,9 +1160,9 @@ run_two_party() {
   scenario=$3
   transport=$4
   api_label=$(example_label "$example")
-  codec_profile=$(codec_profile_for_scenario "$scenario")
-  if [ "$scenario" = "g729_call" ] || [ "$scenario" = "amr_call" ]; then
-    out_dir="$OUT_ROOT/$provider/$api_label/$scenario/$codec_profile/$transport"
+  codec_label=$(codec_label_for_scenario "$scenario")
+  if [ "$scenario" = "g729_call" ] || [ "$scenario" = "amr_call" ] || [ "$scenario" = "amr_transcode_call" ]; then
+    out_dir="$OUT_ROOT/$provider/$api_label/$scenario/$codec_label/$transport"
   else
     out_dir="$OUT_ROOT/$provider/$api_label/$scenario/$transport"
   fi
@@ -1051,7 +1176,7 @@ run_two_party() {
 
   rc=0
   case "$scenario" in
-    basic_call|g729_call|amr_call|hold_resume|dtmf|reject)
+    basic_call|g729_call|amr_call|amr_transcode_call|hold_resume|dtmf|reject)
       start_one "$provider" "$example" "$scenario" "$transport" callee "$out_dir" "$out_dir/callee.log"
       pid_a=$LAST_PID
       wait_for_log "$out_dir/callee.log" "Registered." "$pid_a" "$scenario-callee" || rc=$?
@@ -1169,6 +1294,43 @@ run_matrix_cell() {
           tls_rc=$?
           if [ "$rc" -eq 0 ]; then rc=$tls_rc; fi
         }
+      fi
+      ;;
+    amr_transcode_call)
+      # Sweeps the pairings the way g729_call sweeps its profiles.
+      # PBX_CODEC_PAIRING pins one; PBX_AMR_TRANSCODE_PAIRINGS is the list.
+      old_pairing_set=0
+      old_pairing=""
+      if [ "${PBX_CODEC_PAIRING+x}" = "x" ]; then
+        old_pairing_set=1
+        old_pairing=$PBX_CODEC_PAIRING
+      fi
+      for pairing in $(amr_transcode_pairing_list "$provider"); do
+        export PBX_CODEC_PAIRING="$pairing"
+        pairing_rc=0
+        if transport_selected UDP; then
+          run_two_party "$provider" "$example" amr_transcode_call UDP || {
+            pairing_rc=$?
+            if [ "$rc" -eq 0 ]; then rc=$pairing_rc; fi
+          }
+          if [ "$pairing_rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then
+            break
+          fi
+        fi
+        if transport_selected TLS; then
+          run_two_party "$provider" "$example" amr_transcode_call TLS || {
+            pairing_rc=$?
+            if [ "$rc" -eq 0 ]; then rc=$pairing_rc; fi
+          }
+        fi
+        if [ "$pairing_rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then
+          break
+        fi
+      done
+      if [ "$old_pairing_set" = "1" ]; then
+        export PBX_CODEC_PAIRING="$old_pairing"
+      else
+        unset PBX_CODEC_PAIRING
       fi
       ;;
     g729_call)

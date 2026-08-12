@@ -72,7 +72,8 @@ pub const fn amr_sample_rate(profile: CodecProfile) -> u32 {
         | CodecProfile::G729A
         | CodecProfile::G729AB
         | CodecProfile::AmrNb
-        | CodecProfile::AmrNbBe => 8_000,
+        | CodecProfile::AmrNbBe
+        | CodecProfile::Pcmu => 8_000,
     }
 }
 
@@ -83,7 +84,8 @@ pub const fn amr_frame_size(profile: CodecProfile) -> usize {
         | CodecProfile::G729A
         | CodecProfile::G729AB
         | CodecProfile::AmrNb
-        | CodecProfile::AmrNbBe => 160,
+        | CodecProfile::AmrNbBe
+        | CodecProfile::Pcmu => 160,
     }
 }
 pub const TONE_FRAMES: usize = 150;
@@ -274,6 +276,10 @@ pub enum Scenario {
     BasicCall,
     G729Call,
     AmrCall,
+    /// Caller and callee offer disjoint codecs, forcing the PBX to transcode
+    /// — the scenario where a foreign AMR implementation must actually read
+    /// our bitstream. See [`CodecPairing`].
+    AmrTranscodeCall,
     HoldResume,
     RingCancel,
     Dtmf,
@@ -305,6 +311,7 @@ impl Scenario {
             "basic" | "basic_call" | "call" | "udp_call" => Ok(Self::BasicCall),
             "g729" | "g729_call" | "g729ab" | "g729ab_call" => Ok(Self::G729Call),
             "amr" | "amr_call" | "amrwb" | "amrwb_call" | "amr_wb_call" => Ok(Self::AmrCall),
+            "amr_transcode" | "amr_transcode_call" | "transcode" => Ok(Self::AmrTranscodeCall),
             "hold" | "hold_resume" => Ok(Self::HoldResume),
             "ring" | "ring_cancel" | "ring_remote" => Ok(Self::RingCancel),
             "dtmf" => Ok(Self::Dtmf),
@@ -338,21 +345,35 @@ pub enum CodecProfile {
     AmrNbBe,
     /// AMR-WB, bandwidth-efficient.
     AmrWbBe,
+    /// PCMU alone — the far leg of a transcode pairing. PCMU only, no PCMA,
+    /// for the same reason the AMR profiles offer one framing each: the
+    /// negotiated codec must be provable from the profile name.
+    Pcmu,
 }
 
 impl CodecProfile {
     pub fn from_env_or_scenario() -> ExampleResult<Self> {
-        if let Ok(value) = std::env::var("PBX_CODEC_PROFILE") {
-            return Self::parse(&value);
-        }
+        Self::for_endpoint(None, None)
+    }
 
-        match Scenario::from_env_or_args()? {
-            Scenario::G729Call => Ok(Self::G729AB),
-            // Narrowband by default: it is the variant every AMR-capable PBX
-            // has, and PBX_CODEC_PROFILE=amrwb selects the other.
-            Scenario::AmrCall => Ok(Self::AmrNb),
-            _ => Ok(Self::Default),
-        }
+    /// The codec profile for one participant.
+    ///
+    /// Delegates to [`select_codec_profile`] with the process environment
+    /// filled in; the precedence and every refusal live in that pure function
+    /// where they are testable without env mutation.
+    pub fn for_endpoint(username: Option<&str>, role: Option<Role>) -> ExampleResult<Self> {
+        let endpoint_override = username.and_then(|user| {
+            std::env::var(format!("ENDPOINT_{}_CODEC_PROFILE", user)).ok()
+        });
+        let global = std::env::var("PBX_CODEC_PROFILE").ok();
+        let pairing = std::env::var("PBX_CODEC_PAIRING").ok();
+        select_codec_profile(
+            Scenario::from_env_or_args()?,
+            role,
+            endpoint_override.as_deref(),
+            global.as_deref(),
+            pairing.as_deref(),
+        )
     }
 
     fn parse(value: &str) -> ExampleResult<Self> {
@@ -364,32 +385,42 @@ impl CodecProfile {
             "amrwb" | "amr_wb" => Ok(Self::AmrWb),
             "amrnb_be" | "amr_nb_be" | "amrnbbe" => Ok(Self::AmrNbBe),
             "amrwb_be" | "amr_wb_be" | "amrwbbe" => Ok(Self::AmrWbBe),
+            "pcmu" | "ulaw" => Ok(Self::Pcmu),
             other => Err(format!("unknown PBX codec profile '{}'", other).into()),
         }
     }
 
-    fn apply(self, config: &mut Config) {
+    /// The payload types this profile puts in the offer, `None` meaning the
+    /// stack's defaults. Split from [`Self::apply`] so the disjointness of a
+    /// [`CodecPairing`]'s two legs is a unit-testable property of the lists
+    /// themselves, not of a fully-constructed `Config`.
+    pub fn offered_codecs(self) -> Option<Vec<u8>> {
         match self {
-            Self::Default => {}
-            Self::G729A => {
-                config.offered_codecs = vec![18, 101];
-                config.g729_annex_b = false;
-            }
-            Self::G729AB => {
-                config.offered_codecs = vec![18, 101];
-                config.g729_annex_b = true;
-            }
+            Self::Default => None,
+            Self::G729A | Self::G729AB => Some(vec![18, 101]),
             // Octet-aligned only: offering both framings for one codec lets a
             // PBX pick the other one, and then a passing call would say
             // nothing about the framing under test. 107 is AMR-NB
             // octet-aligned and 105 is AMR-WB octet-aligned.
-            Self::AmrNb => config.offered_codecs = vec![107, 101],
-            Self::AmrWb => config.offered_codecs = vec![105, 101],
+            Self::AmrNb => Some(vec![107, 101]),
+            Self::AmrWb => Some(vec![105, 101]),
             // 106 and 104 are the same two codecs bandwidth-efficient, and are
             // offered alone for the same reason: a call that passes must have
             // used the framing named here.
-            Self::AmrNbBe => config.offered_codecs = vec![106, 101],
-            Self::AmrWbBe => config.offered_codecs = vec![104, 101],
+            Self::AmrNbBe => Some(vec![106, 101]),
+            Self::AmrWbBe => Some(vec![104, 101]),
+            Self::Pcmu => Some(vec![0, 101]),
+        }
+    }
+
+    fn apply(self, config: &mut Config) {
+        if let Some(codecs) = self.offered_codecs() {
+            config.offered_codecs = codecs;
+        }
+        match self {
+            Self::G729A => config.g729_annex_b = false,
+            Self::G729AB => config.g729_annex_b = true,
+            _ => {}
         }
     }
 
@@ -402,7 +433,135 @@ impl CodecProfile {
             Self::AmrWb => "amrwb",
             Self::AmrNbBe => "amrnb_be",
             Self::AmrWbBe => "amrwb_be",
+            Self::Pcmu => "pcmu",
         }
+    }
+}
+
+/// A codec per leg, for the scenario whose whole point is that the two legs
+/// cannot agree.
+///
+/// When both legs of a bridged call offer the same codec, both PBXes in this
+/// lab relay the RTP payloads untouched — Asterisk switches to its native_rtp
+/// bridge, FreeSWITCH forwards ingress bytes verbatim — and no foreign codec
+/// ever touches our bitstream. A pairing offers *disjoint* codecs, so the PBX
+/// physically cannot native-bridge: its own AMR implementation must decode
+/// what we encoded and encode what we decode.
+///
+/// Named pairings rather than a `caller_callee` grammar because profile names
+/// already contain underscores (`amrnb_be`), so a grammar would have to guess
+/// the split.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodecPairing {
+    /// AMR-NB caller, PCMU callee — the default. One foreign AMR codec in
+    /// each direction, and a lossless-ish reference on the far side, so a
+    /// tone failure names a suspect.
+    AmrNbPcmu,
+    /// AMR-WB caller, PCMU callee: the wideband decoder/encoder pair, plus
+    /// the PBX's 16 kHz ↔ 8 kHz resampler.
+    AmrWbPcmu,
+    /// Bandwidth-efficient variants, the fallback if a PBX mishandles
+    /// octet-aligned input on its transcoding path.
+    AmrNbBePcmu,
+    AmrWbBePcmu,
+    /// Both our variants through the PBX's transcoder at once. The stretch
+    /// case: four codecs in the path, so run it after a PCMU pairing is
+    /// green, not instead of one.
+    AmrNbAmrWb,
+}
+
+impl CodecPairing {
+    pub fn parse(value: &str) -> ExampleResult<Self> {
+        match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "amrnb_pcmu" => Ok(Self::AmrNbPcmu),
+            "amrwb_pcmu" => Ok(Self::AmrWbPcmu),
+            "amrnb_be_pcmu" => Ok(Self::AmrNbBePcmu),
+            "amrwb_be_pcmu" => Ok(Self::AmrWbBePcmu),
+            "amrnb_amrwb" => Ok(Self::AmrNbAmrWb),
+            other => Err(format!("unknown PBX codec pairing '{}'", other).into()),
+        }
+    }
+
+    pub fn env_value(self) -> &'static str {
+        match self {
+            Self::AmrNbPcmu => "amrnb_pcmu",
+            Self::AmrWbPcmu => "amrwb_pcmu",
+            Self::AmrNbBePcmu => "amrnb_be_pcmu",
+            Self::AmrWbBePcmu => "amrwb_be_pcmu",
+            Self::AmrNbAmrWb => "amrnb_amrwb",
+        }
+    }
+
+    /// Which profile each leg offers. Only the two media roles have one:
+    /// asking for a target/transferor profile is a wiring error, not a
+    /// default.
+    pub fn profile_for(self, role: Role) -> ExampleResult<CodecProfile> {
+        let (caller, callee) = match self {
+            Self::AmrNbPcmu => (CodecProfile::AmrNb, CodecProfile::Pcmu),
+            Self::AmrWbPcmu => (CodecProfile::AmrWb, CodecProfile::Pcmu),
+            Self::AmrNbBePcmu => (CodecProfile::AmrNbBe, CodecProfile::Pcmu),
+            Self::AmrWbBePcmu => (CodecProfile::AmrWbBe, CodecProfile::Pcmu),
+            Self::AmrNbAmrWb => (CodecProfile::AmrNb, CodecProfile::AmrWb),
+        };
+        match role {
+            Role::Caller => Ok(caller),
+            Role::Callee => Ok(callee),
+            other => Err(format!(
+                "codec pairing {} has no profile for role {:?}: only the caller and callee \
+                 carry media in a transcode call",
+                self.env_value(),
+                other
+            )
+            .into()),
+        }
+    }
+}
+
+/// The one place codec-profile precedence is decided, pure so it is testable
+/// without mutating the process environment:
+///
+/// 1. `ENDPOINT_{username}_CODEC_PROFILE` — the per-participant override
+///    channel every other per-endpoint knob already uses;
+/// 2. the pairing, for the transcode scenario;
+/// 3. `PBX_CODEC_PROFILE` — **refused** for the transcode scenario, because
+///    one profile cannot describe two legs, and accepting it would silently
+///    collapse both legs onto one codec: the PBX would native-bridge again
+///    and the scenario would pass while proving nothing;
+/// 4. the per-scenario default.
+fn select_codec_profile(
+    scenario: Scenario,
+    role: Option<Role>,
+    endpoint_override: Option<&str>,
+    global: Option<&str>,
+    pairing: Option<&str>,
+) -> ExampleResult<CodecProfile> {
+    if let Some(value) = endpoint_override {
+        return CodecProfile::parse(value);
+    }
+    if scenario == Scenario::AmrTranscodeCall {
+        if global.is_some() {
+            return Err(
+                "PBX_CODEC_PROFILE is one profile and a transcode call needs one per leg; \
+                 set PBX_CODEC_PAIRING (or ENDPOINT_{user}_CODEC_PROFILE) instead"
+                    .into(),
+            );
+        }
+        let pairing = match pairing {
+            Some(value) => CodecPairing::parse(value)?,
+            None => CodecPairing::AmrNbPcmu,
+        };
+        let role = role.ok_or("a transcode call resolves its codec per role, and no role was given")?;
+        return pairing.profile_for(role);
+    }
+    if let Some(value) = global {
+        return CodecProfile::parse(value);
+    }
+    match scenario {
+        Scenario::G729Call => Ok(CodecProfile::G729AB),
+        // Narrowband by default: it is the variant every AMR-capable PBX
+        // has, and PBX_CODEC_PROFILE=amrwb selects the other.
+        Scenario::AmrCall => Ok(CodecProfile::AmrNb),
+        _ => Ok(CodecProfile::Default),
     }
 }
 
@@ -514,6 +673,18 @@ impl EndpointConfig {
         username: &str,
         transport: TransportMode,
     ) -> ExampleResult<Self> {
+        Self::new_for_role(provider, username, transport, None)
+    }
+
+    /// The role-aware constructor. The role only matters for scenarios whose
+    /// two legs run different codecs; passing `None` keeps the historical
+    /// behaviour everywhere else.
+    pub fn new_for_role(
+        provider: PbxProvider,
+        username: &str,
+        transport: TransportMode,
+        role: Option<Role>,
+    ) -> ExampleResult<Self> {
         let defaults = endpoint_defaults(provider, username, transport);
         let prefix = format!("ENDPOINT_{}", username);
         let (sip_server, sip_port) = match provider {
@@ -579,7 +750,7 @@ impl EndpointConfig {
             &format!("{}_MEDIA_PORT_END", prefix),
             defaults.media_port_end,
         )?;
-        let codec_profile = CodecProfile::from_env_or_scenario()?;
+        let codec_profile = CodecProfile::for_endpoint(Some(username), role)?;
         let output_dir = std::env::var("AUDIO_OUTPUT_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| {
@@ -1160,7 +1331,7 @@ pub fn endpoint_config_for(
     transport: TransportMode,
     role: Role,
 ) -> ExampleResult<EndpointConfig> {
-    EndpointConfig::new(provider, username_for(transport, role), transport)
+    EndpointConfig::new_for_role(provider, username_for(transport, role), transport, Some(role))
 }
 
 pub async fn new_stream_peer(cfg: &EndpointConfig) -> ExampleResult<StreamPeer> {
@@ -1536,6 +1707,7 @@ async fn run_stream_peer(
         Scenario::BasicCall
         | Scenario::G729Call
         | Scenario::AmrCall
+        | Scenario::AmrTranscodeCall
         | Scenario::HoldResume
         | Scenario::RingCancel
         | Scenario::Dtmf
@@ -1567,6 +1739,7 @@ async fn run_endpoint(
         Scenario::BasicCall
         | Scenario::G729Call
         | Scenario::AmrCall
+        | Scenario::AmrTranscodeCall
         | Scenario::HoldResume
         | Scenario::RingCancel
         | Scenario::Dtmf
@@ -1604,6 +1777,7 @@ async fn run_callback(
         Scenario::BasicCall
         | Scenario::G729Call
         | Scenario::AmrCall
+        | Scenario::AmrTranscodeCall
         | Scenario::HoldResume
         | Scenario::RingCancel
         | Scenario::Dtmf
@@ -1660,13 +1834,28 @@ async fn run_stream_peer_two_party(
             let target = cfg.outbound_call_uri(target_user_for(transport));
             let handle =
                 call_with_answer_retry(peer, &target, remote_test_timeout(provider)?).await?;
-            run_amr_caller(cfg, &handle, transport).await?;
+            run_amr_caller(cfg, &handle, transport, &amr_caller_wav(transport)).await?;
         }
         (Scenario::AmrCall, Role::Callee) => {
             let incoming =
                 timeout(remote_test_timeout(provider)?, peer.wait_for_incoming()).await??;
             let handle = incoming.accept().await?;
-            run_amr_callee(provider, cfg, &handle, transport).await?;
+            run_amr_callee(provider, cfg, &handle, transport, &amr_callee_wav(transport)).await?;
+        }
+        (Scenario::AmrTranscodeCall, Role::Caller) => {
+            settle_after_register(provider).await;
+            let target = cfg.outbound_call_uri(target_user_for(transport));
+            let handle =
+                call_with_answer_retry(peer, &target, remote_test_timeout(provider)?).await?;
+            let wav = amr_transcode_wav(cfg);
+            run_amr_caller(cfg, &handle, transport, &wav).await?;
+        }
+        (Scenario::AmrTranscodeCall, Role::Callee) => {
+            let incoming =
+                timeout(remote_test_timeout(provider)?, peer.wait_for_incoming()).await??;
+            let handle = incoming.accept().await?;
+            let wav = amr_transcode_wav(cfg);
+            run_amr_callee(provider, cfg, &handle, transport, &wav).await?;
         }
         (Scenario::HoldResume, Role::Caller) => {
             settle_after_register(provider).await;
@@ -1798,13 +1987,44 @@ async fn run_endpoint_two_party(
                     Some(remote_test_timeout(provider)?),
                 )
                 .await?;
-            run_amr_caller(cfg, handle.as_session_handle(), transport).await?;
+            run_amr_caller(
+                cfg,
+                handle.as_session_handle(),
+                transport,
+                &amr_caller_wav(transport),
+            )
+            .await?;
         }
         (Scenario::AmrCall, Role::Callee) => {
             let incoming =
                 timeout(remote_test_timeout(provider)?, endpoint.wait_for_incoming()).await??;
             let handle = incoming.accept().await?;
-            run_amr_callee(provider, cfg, handle.as_session_handle(), transport).await?;
+            run_amr_callee(
+                provider,
+                cfg,
+                handle.as_session_handle(),
+                transport,
+                &amr_callee_wav(transport),
+            )
+            .await?;
+        }
+        (Scenario::AmrTranscodeCall, Role::Caller) => {
+            settle_after_register(provider).await;
+            let handle = endpoint
+                .call_and_wait(
+                    target_user_for(transport),
+                    Some(remote_test_timeout(provider)?),
+                )
+                .await?;
+            let wav = amr_transcode_wav(cfg);
+            run_amr_caller(cfg, handle.as_session_handle(), transport, &wav).await?;
+        }
+        (Scenario::AmrTranscodeCall, Role::Callee) => {
+            let incoming =
+                timeout(remote_test_timeout(provider)?, endpoint.wait_for_incoming()).await??;
+            let handle = incoming.accept().await?;
+            let wav = amr_transcode_wav(cfg);
+            run_amr_callee(provider, cfg, handle.as_session_handle(), transport, &wav).await?;
         }
         (Scenario::HoldResume, Role::Caller) => {
             settle_after_register(provider).await;
@@ -1947,13 +2167,36 @@ async fn run_callback_two_party(
             let handle =
                 callback_call_with_answer_retry(runtime, &target, remote_test_timeout(provider)?)
                     .await?;
-            run_amr_caller(&runtime.cfg, &handle, transport).await?;
+            run_amr_caller(&runtime.cfg, &handle, transport, &amr_caller_wav(transport)).await?;
         }
         (Scenario::AmrCall, Role::Callee) => {
             let handle =
                 wait_for_next_established(&mut runtime.events, remote_test_timeout(provider)?)
                     .await?;
-            run_amr_callee(runtime.cfg.provider, &runtime.cfg, &handle, transport).await?;
+            run_amr_callee(
+                runtime.cfg.provider,
+                &runtime.cfg,
+                &handle,
+                transport,
+                &amr_callee_wav(transport),
+            )
+            .await?;
+        }
+        (Scenario::AmrTranscodeCall, Role::Caller) => {
+            settle_after_register(provider).await;
+            let target = runtime.cfg.outbound_call_uri(target_user_for(transport));
+            let handle =
+                callback_call_with_answer_retry(runtime, &target, remote_test_timeout(provider)?)
+                    .await?;
+            let wav = amr_transcode_wav(&runtime.cfg);
+            run_amr_caller(&runtime.cfg, &handle, transport, &wav).await?;
+        }
+        (Scenario::AmrTranscodeCall, Role::Callee) => {
+            let handle =
+                wait_for_next_established(&mut runtime.events, remote_test_timeout(provider)?)
+                    .await?;
+            let wav = amr_transcode_wav(&runtime.cfg);
+            run_amr_callee(runtime.cfg.provider, &runtime.cfg, &handle, transport, &wav).await?;
         }
         (Scenario::HoldResume, Role::Caller) => {
             settle_after_register(provider).await;
@@ -2314,6 +2557,7 @@ async fn run_amr_caller(
     cfg: &EndpointConfig,
     handle: &SessionHandle,
     transport: TransportMode,
+    wav_name: &str,
 ) -> ExampleResult<()> {
     if transport.is_tls() {
         assert_srtp_media_security(handle, Duration::from_secs(5)).await?;
@@ -2341,9 +2585,7 @@ async fn run_amr_caller(
         .hangup_and_wait(Some(Duration::from_secs(8)))
         .await
         .ok();
-    let saved = recorder
-        .stop_and_save(&cfg.output_dir, amr_caller_wav(transport))
-        .await;
+    let saved = recorder.stop_and_save(&cfg.output_dir, wav_name).await;
     outcome?;
     let path = saved?;
     assert_amr_tone_quality(
@@ -2361,6 +2603,7 @@ async fn run_amr_callee(
     cfg: &EndpointConfig,
     handle: &SessionHandle,
     transport: TransportMode,
+    wav_name: &str,
 ) -> ExampleResult<()> {
     if transport.is_tls() {
         assert_srtp_media_security(handle, Duration::from_secs(5)).await?;
@@ -2381,9 +2624,7 @@ async fn run_amr_callee(
         .wait_for_end(Some(remote_test_timeout(provider)?))
         .await
         .ok();
-    let path = recorder
-        .stop_and_save(&cfg.output_dir, amr_callee_wav(transport))
-        .await?;
+    let path = recorder.stop_and_save(&cfg.output_dir, wav_name).await?;
     let received = read_wav(&path)?;
     let floor = min_received_samples(sample_rate);
     if received.len() < floor {
@@ -5000,6 +5241,20 @@ fn amr_callee_wav(transport: TransportMode) -> &'static str {
     }
 }
 
+/// The recording name for one leg of a transcode call.
+///
+/// Unlike [`amr_caller_wav`], the name carries the leg's own codec profile:
+/// the two legs of a transcode call write different codecs' audio into one
+/// directory, and `amr_2002_received.wav` holding PCMU audio would be
+/// actively misleading in an evidence bundle.
+fn amr_transcode_wav(cfg: &EndpointConfig) -> String {
+    format!(
+        "amr_transcode_{}_{}_received.wav",
+        cfg.username,
+        cfg.codec_profile.env_value()
+    )
+}
+
 fn g729_caller_wav(transport: TransportMode) -> &'static str {
     if transport.is_tls() {
         "tls_srtp_g729_1001_received.wav"
@@ -5814,6 +6069,151 @@ mod tests {
         assert!(
             assert_amr_tone_quality_samples("octave-up", &samples, 16_000, 1760.0, 880.0).is_err(),
             "the same capture must not read as 1760 Hz"
+        );
+    }
+
+    const ALL_PAIRINGS: [CodecPairing; 5] = [
+        CodecPairing::AmrNbPcmu,
+        CodecPairing::AmrWbPcmu,
+        CodecPairing::AmrNbBePcmu,
+        CodecPairing::AmrWbBePcmu,
+        CodecPairing::AmrNbAmrWb,
+    ];
+
+    /// The load-bearing property of the whole transcode scenario: the two
+    /// legs' offers share nothing but telephone-event, so the PBX physically
+    /// cannot native-bridge them — its own codecs must be in the path. This
+    /// test, not the call passing, is what guards against a future edit
+    /// quietly returning the scenario to a relayed call that still passes.
+    #[test]
+    fn transcode_pairings_put_disjoint_codecs_on_the_two_legs() {
+        for pairing in ALL_PAIRINGS {
+            let caller = pairing
+                .profile_for(Role::Caller)
+                .unwrap()
+                .offered_codecs()
+                .expect("a pairing leg always names its codecs");
+            let callee = pairing
+                .profile_for(Role::Callee)
+                .unwrap()
+                .offered_codecs()
+                .expect("a pairing leg always names its codecs");
+            let shared: Vec<u8> = caller
+                .iter()
+                .copied()
+                .filter(|pt| callee.contains(pt))
+                .collect();
+            assert_eq!(
+                shared,
+                vec![101],
+                "{}: the legs share {:?} beyond telephone-event, so a PBX could \
+                 native-bridge and the scenario would prove nothing",
+                pairing.env_value(),
+                shared
+            );
+        }
+    }
+
+    #[test]
+    fn pcmu_profile_offers_pcmu_alone() {
+        assert_eq!(CodecProfile::Pcmu.offered_codecs(), Some(vec![0, 101]));
+    }
+
+    #[test]
+    fn transcode_pairings_round_trip_their_names() {
+        for pairing in ALL_PAIRINGS {
+            assert_eq!(CodecPairing::parse(pairing.env_value()).unwrap(), pairing);
+        }
+        assert!(CodecPairing::parse("amrnb").is_err(), "a profile is not a pairing");
+    }
+
+    #[test]
+    fn transcode_pairings_have_no_profile_for_non_media_roles() {
+        assert!(CodecPairing::AmrNbPcmu.profile_for(Role::Target).is_err());
+    }
+
+    /// The precedence ladder, pinned as a pure function so no test mutates
+    /// the process environment.
+    #[test]
+    fn select_codec_profile_resolves_the_transcode_legs_per_role() {
+        let caller = select_codec_profile(
+            Scenario::AmrTranscodeCall,
+            Some(Role::Caller),
+            None,
+            None,
+            Some("amrwb_pcmu"),
+        )
+        .unwrap();
+        let callee = select_codec_profile(
+            Scenario::AmrTranscodeCall,
+            Some(Role::Callee),
+            None,
+            None,
+            Some("amrwb_pcmu"),
+        )
+        .unwrap();
+        assert_eq!(caller, CodecProfile::AmrWb);
+        assert_eq!(callee, CodecProfile::Pcmu);
+        // No pairing set: the default pairing, not the default profile.
+        assert_eq!(
+            select_codec_profile(Scenario::AmrTranscodeCall, Some(Role::Caller), None, None, None)
+                .unwrap(),
+            CodecProfile::AmrNb
+        );
+    }
+
+    #[test]
+    fn select_codec_profile_rejects_a_single_profile_for_the_transcode_scenario() {
+        let error = select_codec_profile(
+            Scenario::AmrTranscodeCall,
+            Some(Role::Caller),
+            None,
+            Some("amrnb"),
+            None,
+        )
+        .expect_err("one profile cannot describe two legs");
+        assert!(
+            error.to_string().contains("PBX_CODEC_PAIRING"),
+            "the refusal should say what to use instead: {error}"
+        );
+    }
+
+    #[test]
+    fn select_codec_profile_lets_an_endpoint_override_win() {
+        // The per-endpoint channel outranks the pairing — it is the designed
+        // escape hatch, including the deliberate same-codec vacuity check.
+        let forced = select_codec_profile(
+            Scenario::AmrTranscodeCall,
+            Some(Role::Callee),
+            Some("amrnb"),
+            None,
+            Some("amrnb_pcmu"),
+        )
+        .unwrap();
+        assert_eq!(forced, CodecProfile::AmrNb);
+        // And outside the transcode scenario nothing changed.
+        assert_eq!(
+            select_codec_profile(Scenario::AmrCall, Some(Role::Caller), None, Some("amrwb"), None)
+                .unwrap(),
+            CodecProfile::AmrWb
+        );
+        assert_eq!(
+            select_codec_profile(Scenario::G729Call, None, None, None, None).unwrap(),
+            CodecProfile::G729AB
+        );
+    }
+
+    /// The pairing whose legs run at different rates exercises the floor as
+    /// a duration: same milliseconds, different sample counts.
+    #[test]
+    fn transcode_legs_run_at_their_own_rate() {
+        let caller = CodecPairing::AmrWbPcmu.profile_for(Role::Caller).unwrap();
+        let callee = CodecPairing::AmrWbPcmu.profile_for(Role::Callee).unwrap();
+        assert_eq!(amr_sample_rate(caller), 16_000);
+        assert_eq!(amr_sample_rate(callee), 8_000);
+        assert_eq!(
+            min_received_samples(amr_sample_rate(caller)) * 1000 / 16_000,
+            min_received_samples(amr_sample_rate(callee)) * 1000 / 8_000,
         );
     }
 }

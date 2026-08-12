@@ -6,7 +6,7 @@
 - transport: UDP
 - role: caller
 - codec_profile: amrnb
-- started_at_utc: 2026-08-11T20:08:23Z
+- started_at_utc: 2026-08-12T01:08:02Z
 - output_dir: /Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrnb/UDP
 - log: /Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrnb/UDP/caller.log
 
