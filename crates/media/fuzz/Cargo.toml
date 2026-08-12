@@ -77,3 +77,10 @@ path = "fuzz_targets/amr_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "amr_encode"
+path = "fuzz_targets/amr_encode.rs"
+test = false
+doc = false
+bench = false

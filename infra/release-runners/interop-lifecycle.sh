@@ -101,7 +101,7 @@ PY
     -subj '/CN=localhost' -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' \
     >/dev/null 2>&1
   cp "$build/keys/asterisk.pem" "$build/keys/ca.pem"
-  docker build -t rvoip-release-asterisk "$build"
+  docker build --build-arg MAKE_JOBS="$(nproc)" -t rvoip-release-asterisk "$build"
   docker run -d --name rvoip-release-asterisk --network host \
     -v "$build/config/pjsip.conf:/etc/asterisk/pjsip.conf:ro" \
     -v "$build/config/extensions.conf:/etc/asterisk/extensions.conf:ro" \
@@ -127,7 +127,7 @@ MEDIA_ADVERTISED_IP=127.0.0.1
 LOCAL_PORT=5070
 POST_REGISTER_SETTLE_SECS=2
 REGISTRATION_IDLE_SECS=1
-PBX_ASSUME_AMR=0
+PBX_REQUIRE_AMR=1
 EOF
 }
 
@@ -188,7 +188,7 @@ FREESWITCH_TLS_USERS=1001,1002,1003
 RVOIP_LOCAL_IP=127.0.0.1
 RVOIP_ADVERTISED_IP=127.0.0.1
 RVOIP_MEDIA_ADVERTISED_IP=127.0.0.1
-PBX_ASSUME_AMR=0
+PBX_REQUIRE_AMR=1
 EOF
 }
 

@@ -19,7 +19,11 @@
 //! from the answer rather than reconstructed from one field of it.
 
 use crate::codec::audio::common::AudioCodec;
-use crate::error::{CodecError, Error, Result};
+use crate::error::{Error, Result};
+// Only the opus arm constructs a typed CodecError today; the import must not
+// dangle in builds without that feature.
+#[cfg(feature = "opus")]
+use crate::error::CodecError;
 
 /// A negotiated audio codec, complete enough to construct.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

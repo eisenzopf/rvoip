@@ -311,6 +311,10 @@ impl StatefulCodec {
     }
 
     /// Apply a peer's codec mode request to this (encoding) side.
+    #[cfg_attr(
+        not(any(feature = "amr-nb", feature = "amr-wb")),
+        allow(unused_variables)
+    )]
     fn apply_mode_request(&mut self, cmr: u8) {
         match self {
             #[cfg(any(feature = "amr-nb", feature = "amr-wb"))]
@@ -321,6 +325,10 @@ impl StatefulCodec {
 
     /// Emit a CMR to the peer on the next packed payload. AMR only; other
     /// codecs have no such field, so this is a no-op for them.
+    #[cfg_attr(
+        not(any(feature = "amr-nb", feature = "amr-wb")),
+        allow(unused_variables)
+    )]
     fn request_peer_mode(&mut self, mode_index: u8) {
         match self {
             #[cfg(any(feature = "amr-nb", feature = "amr-wb"))]

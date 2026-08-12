@@ -103,8 +103,8 @@ write_rvoip_profile() {
     <param name="rtp-ip" value="$local_rtp_ip"/>
     <param name="ext-sip-ip" value="$external_sip_ip"/>
     <param name="ext-rtp-ip" value="$external_rtp_ip"/>
-    <param name="inbound-codec-prefs" value="G729,PCMU,PCMA"/>
-    <param name="outbound-codec-prefs" value="G729,PCMU,PCMA"/>
+    <param name="inbound-codec-prefs" value="AMR-WB,AMR,G729,PCMU,PCMA"/>
+    <param name="outbound-codec-prefs" value="AMR-WB,AMR,G729,PCMU,PCMA"/>
     <param name="inbound-late-negotiation" value="true"/>
     <param name="disable-transcoding" value="true"/>
     <param name="rtp-timer-name" value="soft"/>

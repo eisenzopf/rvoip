@@ -38,6 +38,7 @@ Tracked for visibility only. When one is taken up, add a phase to this doc.
 | `conversation.update` for policy change | `[V1.x]` | CONVERSATION_PROTOCOL §7.1 |
 | Multi-party UCTP beyond N=2 via SFU adapter | `[V2]` | PRD §5; INTERFACE_DESIGN §2.4 |
 | SIP-over-QUIC / RoQ / MoQ adapters | `[V2]` | INTERFACE_DESIGN §2.5 |
+| Lyra V2 over UCTP and SIP/RTP, with a Lyra-over-RoQ end-to-end proof | `[V2]` | [`../ROADMAP.md`](../ROADMAP.md#lyra-v2--rtp-over-quic-workstream); INTERFACE_DESIGN §2.5 |
 
 > The earlier `rvoip-websocket` `[V1.x]` deferral is **closed** — the substrate
 > shipped at `crates/uctp/rvoip-websocket`.

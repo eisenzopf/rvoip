@@ -251,6 +251,15 @@ impl Transcoder {
 
     /// Get all supported transcoding paths
     pub fn get_supported_paths(&self) -> Vec<TranscodingPath> {
+        #[cfg_attr(
+            not(any(
+                feature = "g729",
+                feature = "opus",
+                feature = "amr-nb",
+                feature = "amr-wb"
+            )),
+            allow(unused_mut)
+        )]
         let mut supported: Vec<AudioCodecSpec> = vec![
             AudioCodecSpec::new("PCMU", 0, 8_000, 1),
             AudioCodecSpec::new("PCMA", 8, 8_000, 1),
