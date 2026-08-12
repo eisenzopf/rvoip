@@ -2982,6 +2982,29 @@ impl MediaAdapter {
         Ok(handle)
     }
 
+    /// Ask the peer of `session` to change the codec mode it sends (AMR CMR).
+    /// `Ok(false)` when the session has no active media.
+    pub async fn request_peer_codec_mode(
+        &self,
+        session: &SessionId,
+        mode_index: u8,
+    ) -> std::result::Result<bool, SessionError> {
+        let Some(exact) = self.current_media(session) else {
+            return Ok(false);
+        };
+        Ok(self
+            .controller
+            .request_peer_codec_mode(&exact.dialog_id, mode_index)
+            .await)
+    }
+
+    /// The codec mode of the last speech frame decoded from `session`'s peer.
+    /// `None` when there is no media or the codec tracks no mode.
+    pub async fn peer_codec_mode(&self, session: &SessionId) -> Option<u8> {
+        let exact = self.current_media(session)?;
+        self.controller.peer_codec_mode(&exact.dialog_id).await
+    }
+
     /// Compatibility facade retained for source stability. RTP bridge
     /// lifetime belongs to the [`BridgeHandle`] returned by
     /// [`Self::bridge_rtp_sessions`]; dropping that handle is the only exact

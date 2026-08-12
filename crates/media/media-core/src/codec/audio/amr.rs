@@ -78,6 +78,15 @@ pub struct AmrAdapter {
     /// idea of its own transmit rate, which nothing reads — so every peer
     /// request was silently discarded.
     pending_mode_request: Option<u8>,
+    /// A CMR this side wants to *emit* to the peer, asking it to change the
+    /// rate it sends us. Stamped on the next outgoing payload and then
+    /// cleared — one payload carries it, which is enough for the peer to see
+    /// it, and repeating it every frame is what the `CmrDamper` is for.
+    ///
+    /// This is the emission direction, distinct from `pending_mode_request`
+    /// (the peer's request to *us*). Without it every payload went out CMR=15
+    /// and nothing in the stack could ever ask a peer to slow down.
+    outgoing_cmr: Option<u8>,
 }
 
 impl AmrAdapter {
@@ -154,6 +163,7 @@ impl AmrAdapter {
             mode,
             last_decoded_mode: mode,
             pending_mode_request: None,
+            outgoing_cmr: None,
         })
     }
 
@@ -194,6 +204,27 @@ impl AmrAdapter {
     /// request", or no packet at all.
     pub const fn take_mode_request(&mut self) -> Option<u8> {
         self.pending_mode_request.take()
+    }
+
+    /// Ask the peer to send us a different mode: the next payload this adapter
+    /// packs carries the CMR, once.
+    ///
+    /// Silently ignored when the mode is outside the negotiated set — a CMR is
+    /// a request the peer may decline, so asking for an impossible one is a
+    /// no-op rather than an error. This is the emission counterpart of
+    /// [`apply_mode_request`](Self::apply_mode_request), which handles a CMR
+    /// coming the other way.
+    pub fn request_peer_mode(&mut self, mode_index: u8) {
+        if AmrMode::new(self.variant, mode_index).is_ok() {
+            self.outgoing_cmr = Some(mode_index);
+        }
+    }
+
+    /// The mode of the last speech frame decoded from the peer — what the peer
+    /// is actually sending right now. Lets a live test confirm a requested
+    /// mode change was honoured on the wire rather than only sent.
+    pub const fn last_decoded_mode(&self) -> u8 {
+        self.last_decoded_mode.index()
     }
 
     /// Honour a peer's codec mode request.
@@ -262,14 +293,12 @@ impl AudioCodec for AmrAdapter {
             })
         })?;
 
-        self.payload
-            .codec()
-            .pack(&AmrPacket::single(frame))
-            .map_err(|error| {
-                Error::Codec(CodecError::InvalidParameters {
-                    details: format!("AMR pack: {error}"),
-                })
+        let packet = AmrPacket::single(frame).with_cmr(self.outgoing_cmr.take());
+        self.payload.codec().pack(&packet).map_err(|error| {
+            Error::Codec(CodecError::InvalidParameters {
+                details: format!("AMR pack: {error}"),
             })
+        })
     }
 
     /// Decode one RFC 4867 payload.
@@ -531,6 +560,94 @@ mod tests {
             concealed, concealed_after_high,
             "concealment after 6.60 kbit/s speech and after 23.85 kbit/s \
              speech produced identical samples — the comparison proves nothing"
+        );
+    }
+
+    /// The full CMR round trip: a request emitted on one side is packed onto
+    /// the wire, read back by the peer's decoder, and moves that peer's
+    /// encode mode — which the requester then sees on the frames coming back.
+    ///
+    /// This is the emission direction that did not exist: every payload used
+    /// to go out CMR=15. Mutation-guarded — asserting the request was *not*
+    /// visible before it was made, and that a request for the current mode is
+    /// a no-op, so a stubbed emitter fails.
+    #[test]
+    #[cfg(feature = "amr-wb")]
+    fn a_requested_mode_change_crosses_the_wire_and_moves_the_peer() {
+        use codec_core::codecs::amr::mode::AmrFrameType;
+
+        // A is the requester; B is the peer whose rate A wants to change.
+        // Both negotiate the full mode set so any request is satisfiable.
+        let mut side_a = AmrAdapter::new(97, "AMR-WB", None).expect("constructs A");
+        let mut side_b = AmrAdapter::new(97, "AMR-WB", None).expect("constructs B");
+
+        // A's payload before any request carries no CMR (15 = none).
+        let quiet = side_a.encode(&pcm(320, 16_000)).expect("A encodes");
+        let quiet_cmr = side_a.payload.codec().unpack(&quiet).expect("unpack").cmr;
+        assert_eq!(quiet_cmr, None, "no request yet, so CMR must be none (15 unpacks to None)");
+
+        // A asks B to drop to mode 0 (6.60 kbit/s), the lowest.
+        side_a.request_peer_mode(0);
+        let request_payload = side_a.encode(&pcm(320, 16_000)).expect("A encodes with CMR");
+        let request_cmr = side_a
+            .payload
+            .codec()
+            .unpack(&request_payload)
+            .expect("unpack")
+            .cmr;
+        assert_eq!(request_cmr, Some(0), "the emitted payload must carry CMR 0");
+
+        // And only one payload carries it — the field clears after emission.
+        let next = side_a.encode(&pcm(320, 16_000)).expect("A encodes again");
+        assert_eq!(
+            side_a.payload.codec().unpack(&next).expect("unpack").cmr,
+            None,
+            "the CMR must not repeat every frame"
+        );
+
+        // B decodes A's request-bearing payload and hands the CMR to its own
+        // encoder, exactly as DialogCodecRuntime does across the two locks.
+        side_b.decode(&request_payload).expect("B decodes");
+        if let Some(cmr) = side_b.take_mode_request() {
+            side_b.apply_mode_request(Some(cmr));
+        } else {
+            panic!("B did not see A's CMR");
+        }
+
+        // B now encodes at the requested mode; A decodes it and sees the move.
+        let b_payload = side_b.encode(&pcm(320, 16_000)).expect("B encodes at new rate");
+        let b_frame = side_b
+            .payload
+            .codec()
+            .unpack(&b_payload)
+            .expect("unpack")
+            .frames
+            .remove(0);
+        assert_eq!(
+            b_frame.frame_type,
+            AmrFrameType::Speech(AmrMode::new(AmrVariant::WideBand, 0).unwrap()),
+            "B's encoder should have moved to mode 0"
+        );
+        side_a.decode(&b_payload).expect("A decodes B");
+        assert_eq!(
+            side_a.last_decoded_mode(),
+            0,
+            "A must observe the peer now sending mode 0"
+        );
+    }
+
+    /// A request for a mode outside the negotiated set is declined, not
+    /// packed as a malformed nibble.
+    #[test]
+    #[cfg(feature = "amr-nb")]
+    fn an_out_of_range_mode_request_is_ignored() {
+        let mut codec = AmrAdapter::new(96, "AMR", None).expect("constructs");
+        codec.request_peer_mode(9); // AMR-NB has modes 0..=7
+        let payload = codec.encode(&pcm(160, 8_000)).expect("encodes");
+        assert_eq!(
+            codec.payload.codec().unpack(&payload).expect("unpack").cmr,
+            None,
+            "an unsatisfiable request must not reach the wire"
         );
     }
 

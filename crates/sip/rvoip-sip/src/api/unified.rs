@@ -10485,6 +10485,32 @@ impl UnifiedCoordinator {
             .await
     }
 
+    /// Ask the peer of `session` to change the codec mode it transmits.
+    ///
+    /// AMR only for now: this emits a Codec Mode Request (RFC 4867 §3.4.1) on
+    /// the next outgoing payload, asking the peer to switch to `mode_index`.
+    /// The peer may decline. Returns `Ok(false)` when the session has no
+    /// active media; other codecs accept the call and no-op.
+    ///
+    /// Confirm the peer honoured it with [`peer_codec_mode`](Self::peer_codec_mode).
+    pub async fn request_peer_codec_mode(
+        &self,
+        session: &SessionId,
+        mode_index: u8,
+    ) -> std::result::Result<bool, SessionError> {
+        self.media_adapter
+            .request_peer_codec_mode(session, mode_index)
+            .await
+    }
+
+    /// The codec mode of the last speech frame decoded from `session`'s peer,
+    /// or `None` when there is no media or the codec tracks no mode. For AMR
+    /// this is how a caller sees whether a
+    /// [`request_peer_codec_mode`](Self::request_peer_codec_mode) took effect.
+    pub async fn peer_codec_mode(&self, session: &SessionId) -> Option<u8> {
+        self.media_adapter.peer_codec_mode(session).await
+    }
+
     /// Send a reliable 183 Session Progress with early-media SDP (RFC 3262).
     ///
     /// - `sdp: Some(body)` sends the supplied SDP verbatim.

@@ -1716,8 +1716,13 @@ rvoip bridging two live legs.
       pushes tones through rvoip's own codec, which for AMR does not exist. The
       relay topology is what makes audio verification possible without one:
       peer → rvoip (frames only) → peer, with the PBXes doing the codec work.
-- [ ] Mode-change policy and CMR damper driven from the live stream.
-- **Exit criterion, in progress:**
+- [x] CMR **emission** exists: `request_peer_codec_mode` on the coordinator
+      stamps a CMR on the next outgoing payload (once — repeating it is what
+      `CmrDamper` will be for), `peer_codec_mode` reads back the mode the
+      peer is actually sending, and the adapter-level round trip is pinned by
+      `a_requested_mode_change_crosses_the_wire_and_moves_the_peer`.
+      `CmrDamper` (automatic congestion-driven requests) remains uncalled.
+- **Exit criterion:**
   - [x] AMR-WB call completed with **rvoip as the relaying B2BUA** against
         Asterisk (octet-aligned) and FreeSWITCH (bandwidth-efficient), UDP and
         TLS+SRTP, via the `b2bua_call` harness scenario. rvoip terminates both
@@ -1725,11 +1730,17 @@ rvoip bridging two live legs.
         recovers the target's tone and vice versa, and a forced codec mismatch
         on one leg fails the bridge (the cell is not vacuous). This is rvoip in
         the middle, not an endpoint through the PBX's own bridge.
+  - [x] **Mid-call mode switch observed on the wire** (`PBX_AMR_MODE_SWITCH=1`):
+        after the quality floor is secured, the caller emits CMR 0 and the far
+        endpoint's encoder drops from mode 8 (23.85) to mode 0 (6.60),
+        observed by the caller's own decoder — through Asterisk's relay, and
+        through the full chain Asterisk → rvoip bridge → Asterisk in
+        `b2bua_call`. Non-vacuous both ways: the peer must be *at* the top
+        mode before the request and at mode 0 after. On FreeSWITCH the same
+        run fails deterministically and correctly: FS answers `mode-set=8`,
+        making any CMR unsatisfiable on that leg, and our endpoint declines
+        it per RFC 4867 §3.4.1 — the negative path, exercised live.
   - [ ] Kamailio+rtpengine (no such lab yet; separate track).
-  - [ ] Mid-call mode switch observed on the wire — blocked on CMR emission,
-        which does not exist (`CmrDamper` uncalled, every payload CMR=15).
-        Once emission lands, `b2bua_call` is the vehicle: CMR crosses both
-        relay legs verbatim.
 
 ---
 

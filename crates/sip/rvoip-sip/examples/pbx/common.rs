@@ -78,6 +78,30 @@ pub const fn amr_sample_rate(profile: CodecProfile) -> u32 {
     }
 }
 
+/// The highest mode index of an AMR profile — where our encoder opens, and
+/// therefore what the peer sends until someone asks otherwise. Used by the
+/// mode-switch step to prove the peer actually *moved*.
+pub const fn amr_top_mode_index(profile: CodecProfile) -> u8 {
+    match profile {
+        CodecProfile::AmrWb | CodecProfile::AmrWbBe => 8,
+        CodecProfile::Default
+        | CodecProfile::G729A
+        | CodecProfile::G729AB
+        | CodecProfile::AmrNb
+        | CodecProfile::AmrNbBe
+        | CodecProfile::Pcmu => 7,
+    }
+}
+
+/// Whether the operator asked the caller to exercise a mid-call codec mode
+/// request (`PBX_AMR_MODE_SWITCH=1`).
+fn amr_mode_switch_requested() -> bool {
+    matches!(
+        std::env::var("PBX_AMR_MODE_SWITCH").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes") | Ok("on")
+    )
+}
+
 pub const fn amr_frame_size(profile: CodecProfile) -> usize {
     match profile {
         CodecProfile::AmrWb | CodecProfile::AmrWbBe => 320,
@@ -2022,11 +2046,14 @@ async fn run_endpoint_two_party(
                     Some(remote_test_timeout(provider)?),
                 )
                 .await?;
-            run_amr_caller(
+            run_amr_caller_toned(
                 cfg,
                 handle.as_session_handle(),
                 transport,
+                tone_for_caller(transport),
+                tone_for_callee(transport),
                 amr_caller_wav(transport),
+                Some(endpoint.control().coordinator()),
             )
             .await?;
         }
@@ -2594,14 +2621,8 @@ async fn run_amr_caller(
     transport: TransportMode,
     wav_name: &str,
 ) -> ExampleResult<()> {
-    run_amr_caller_toned(
-        cfg,
-        handle,
-        transport,
-        tone_for_caller(transport),
-        tone_for_callee(transport),
-        wav_name,
-    )
+    run_amr_caller_toned(cfg, handle, transport, tone_for_caller(transport),
+        tone_for_callee(transport), wav_name, None)
     .await
 }
 
@@ -2618,6 +2639,7 @@ async fn run_amr_caller_toned(
     send_hz: f32,
     expect_hz: f32,
     wav_name: &str,
+    mode_switch: Option<&UnifiedCoordinator>,
 ) -> ExampleResult<()> {
     if transport.is_tls() {
         assert_srtp_media_security(handle, Duration::from_secs(5)).await?;
@@ -2641,14 +2663,83 @@ async fn run_amr_caller_toned(
     let outcome = recorder
         .wait_for_received_samples(target, Duration::from_secs(20))
         .await;
+    // The mode switch runs only after the quality floor is secured, so the
+    // gate's one continuous clean second exists regardless of how the lower
+    // rate codes the tone. Sequenced, not concurrent: evidence first, then
+    // the experiment on top of it.
+    let mut switch_outcome: ExampleResult<()> = Ok(());
+    if let (Some(coordinator), true) = (mode_switch, amr_mode_switch_requested()) {
+        if outcome.is_ok() {
+            switch_outcome =
+                exercise_amr_mode_switch(coordinator, handle, cfg.codec_profile).await;
+        }
+    }
     handle
         .hangup_and_wait(Some(Duration::from_secs(8)))
         .await
         .ok();
     let saved = recorder.stop_and_save(&cfg.output_dir, wav_name).await;
     outcome?;
+    switch_outcome?;
     let path = saved?;
     assert_amr_tone_quality(&path, sample_rate, expect_hz, send_hz)?;
+    Ok(())
+}
+
+/// Ask the peer to drop to the lowest mode mid-call and prove it did.
+///
+/// Non-vacuous by construction: the peer must be observed at the profile's
+/// *top* mode first (that is where every encoder opens), and at mode 0 after
+/// — a stack that never emitted the CMR, or a peer that ignored it, fails
+/// the second assertion; a test pointed at a stream that was already slow
+/// fails the first.
+async fn exercise_amr_mode_switch(
+    coordinator: &UnifiedCoordinator,
+    handle: &SessionHandle,
+    profile: CodecProfile,
+) -> ExampleResult<()> {
+    let session = handle.id();
+    let top = amr_top_mode_index(profile);
+    let before = coordinator.peer_codec_mode(session).await;
+    if before != Some(top) {
+        return Err(format!(
+            "mode switch: peer was sending mode {:?} before the request, expected the top mode {}",
+            before, top
+        )
+        .into());
+    }
+    if !coordinator.request_peer_codec_mode(session, 0).await? {
+        return Err("mode switch: session has no active media".into());
+    }
+    // The CMR rides the next outgoing payload (20 ms away); the peer's next
+    // frame at the new rate needs one more round trip plus its encoder's
+    // change policy. A second is generous; five covers a congested lab.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if coordinator.peer_codec_mode(session).await == Some(0) {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "mode switch: peer still sending mode {:?} five seconds after CMR 0",
+                coordinator.peer_codec_mode(session).await
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(40)).await;
+    }
+    // Half a second of audio at the new rate, so the switch is on the wire
+    // long enough to appear in the capture and the PBX snapshots.
+    sleep(Duration::from_millis(500)).await;
+    println!(
+        "[mode-switch] peer moved from mode {} to mode 0 on request",
+        top
+    );
+    diag_event(
+        &std::env::var("AUDIO_OUTPUT_DIR").map(PathBuf::from).unwrap_or_default(),
+        "amr_mode_switch",
+        serde_json::json!({ "from": top, "to": 0 }),
+    );
     Ok(())
 }
 
@@ -2882,6 +2973,7 @@ async fn run_endpoint_b2bua(
                 tone_for_caller(transport),
                 tone_for_b2bua_far(transport),
                 b2bua_caller_wav(transport),
+                Some(endpoint.control().coordinator()),
             )
             .await?;
         }

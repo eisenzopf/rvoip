@@ -319,6 +319,27 @@ impl StatefulCodec {
         }
     }
 
+    /// Emit a CMR to the peer on the next packed payload. AMR only; other
+    /// codecs have no such field, so this is a no-op for them.
+    fn request_peer_mode(&mut self, mode_index: u8) {
+        match self {
+            #[cfg(any(feature = "amr-nb", feature = "amr-wb"))]
+            Self::Amr(codec) => codec.request_peer_mode(mode_index),
+            _ => {}
+        }
+    }
+
+    /// The mode of the last speech frame decoded from the peer, if this codec
+    /// tracks one. AMR only.
+    fn last_decoded_mode(&self) -> Option<u8> {
+        match self {
+            #[cfg(any(feature = "amr-nb", feature = "amr-wb"))]
+            Self::Amr(codec) => Some(codec.last_decoded_mode()),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
     fn decode(&mut self, payload: &[u8]) -> Result<AudioFrame> {
         match self {
             Self::Pcmu(codec) | Self::Pcma(codec) => codec.decode(payload),
@@ -419,6 +440,19 @@ impl DialogCodecRuntime {
         }
 
         Ok(frame)
+    }
+
+    /// Ask the peer to change the mode it sends us: the encoder stamps the CMR
+    /// on its next payload. The request rides the *transmit* side, which is
+    /// why it goes to the encoder lock.
+    pub(super) async fn request_peer_mode(&self, mode_index: u8) {
+        self.encoder.lock().await.request_peer_mode(mode_index);
+    }
+
+    /// The mode of the last speech frame we decoded from the peer — how a
+    /// caller confirms a requested change actually took effect on the wire.
+    pub(super) async fn last_decoded_mode(&self) -> Option<u8> {
+        self.decoder.lock().await.last_decoded_mode()
     }
 }
 

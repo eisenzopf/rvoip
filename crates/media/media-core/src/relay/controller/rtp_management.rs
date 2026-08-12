@@ -547,6 +547,35 @@ impl MediaSessionController {
             .unwrap_or(false)
     }
 
+    /// Ask the peer of this dialog to change the codec mode it sends.
+    ///
+    /// For AMR this stamps a CMR on the next outgoing payload; for codecs with
+    /// no such mechanism it is a no-op. Returns `false` when the dialog has no
+    /// codec runtime (no media negotiated yet).
+    pub async fn request_peer_codec_mode(&self, dialog_id: &DialogId, mode_index: u8) -> bool {
+        let Some(runtime) = self
+            .codec_runtimes
+            .get(dialog_id)
+            .map(|entry| Arc::clone(entry.value()))
+        else {
+            return false;
+        };
+        runtime.request_peer_mode(mode_index).await;
+        true
+    }
+
+    /// The codec mode of the last speech frame decoded from this dialog's
+    /// peer — how a caller confirms a requested change took effect on the
+    /// wire. `None` when the dialog has no codec runtime or the codec does not
+    /// track a mode (everything but AMR).
+    pub async fn peer_codec_mode(&self, dialog_id: &DialogId) -> Option<u8> {
+        let runtime = self
+            .codec_runtimes
+            .get(dialog_id)
+            .map(|entry| Arc::clone(entry.value()))?;
+        runtime.last_decoded_mode().await
+    }
+
     /// Set custom audio samples for transmission. The transmitter is
     /// not Clone; we take it out of the wrapper, drop the shard
     /// guard, run the async setter, then put it back.
