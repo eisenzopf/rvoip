@@ -407,6 +407,20 @@ impl DialogCodecRuntime {
     pub(super) fn new(format: NegotiatedAudioCodec) -> Result<Self> {
         let encoder = StatefulCodec::new(&format)?;
         let decoder = StatefulCodec::new(&format)?;
+        // One line per codec generation, naming what it was actually built
+        // with. Every AMR field here has been silently wrong at some point on
+        // this branch -- the framing from a dropped fmtp, DTX from a switch
+        // that reached the configuration but not the codec -- and each cost
+        // more to find than this log costs to carry.
+        tracing::info!(
+            codec = %format.name,
+            payload_type = format.payload_type,
+            clock_rate = format.clock_rate,
+            channels = format.channels,
+            fmtp_present = format.fmtp.is_some(),
+            dtx = format.dtx,
+            "codec generation built"
+        );
         Ok(Self {
             format,
             encoder: Mutex::new(encoder),

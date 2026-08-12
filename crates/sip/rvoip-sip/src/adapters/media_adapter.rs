@@ -1173,6 +1173,12 @@ pub struct MediaAdapter {
     /// machine surfaces as `488 Not Acceptable Here`.
     srtp_required: bool,
 
+    /// AMR discontinuous transmission, from `Config::amr_dtx`. Sender-side
+    /// local policy: it is stamped into the media configuration when the
+    /// negotiated codec is applied, and media-core turns it into the codec's
+    /// own DTX switch. Nothing negotiates it (RFC 4867 has no fmtp for DTX).
+    amr_dtx: bool,
+
     /// Crypto suites to offer in preference order when `offer_srtp`
     /// is set. Default: AES-CM-128 + HMAC-SHA1-80 then -32 per
     /// RFC 4568 §6.2.1 MTI plus low-bandwidth fallback.
@@ -1323,6 +1329,7 @@ impl MediaAdapter {
             media_mode: MediaMode::Enabled,
             offer_srtp: false,
             srtp_required: false,
+            amr_dtx: false,
             srtp_offered_suites: vec![
                 CryptoSuite::AesCm128HmacSha1_80,
                 CryptoSuite::AesCm128HmacSha1_32,
@@ -1367,6 +1374,17 @@ impl MediaAdapter {
     pub fn set_comfort_noise(&mut self, enabled: bool) {
         self.comfort_noise_enabled = enabled;
         self.controller.set_comfort_noise_enabled(enabled);
+    }
+
+    /// Enable AMR discontinuous transmission for sessions this adapter
+    /// creates. Wired from `Config::amr_dtx` at coordinator boot, mirroring
+    /// `set_comfort_noise`.
+    ///
+    /// Unlike comfort noise there is nothing to advertise: DTX is invisible
+    /// to offer/answer, so this only affects what the encoder emits once a
+    /// session negotiates AMR. It is inert for every other codec.
+    pub fn set_amr_dtx(&mut self, enabled: bool) {
+        self.amr_dtx = enabled;
     }
 
     /// Set media allocation behavior.
@@ -1611,7 +1629,12 @@ impl MediaAdapter {
                 negotiated.clock_rate,
                 negotiated.channels,
             )
-            .with_negotiated_fmtp(negotiated.negotiated_fmtp.as_deref());
+            .with_negotiated_fmtp(negotiated.negotiated_fmtp.as_deref())
+            // Sender policy rather than a negotiated value, but it belongs on
+            // the same commit as the codec identity: this is the moment the
+            // session learns it is AMR, and media-core reads both out of the
+            // one configuration when it builds the codec.
+            .with_amr_dtx(self.amr_dtx);
 
         self.controller
             .update_media(dialog_id.clone(), config)
@@ -4669,6 +4692,7 @@ impl Clone for MediaAdapter {
             media_mode: self.media_mode,
             offer_srtp: self.offer_srtp,
             srtp_required: self.srtp_required,
+            amr_dtx: self.amr_dtx,
             srtp_offered_suites: self.srtp_offered_suites.clone(),
             sdes_base64_mode: self.sdes_base64_mode,
             pending_srtp_offerers: self.pending_srtp_offerers.clone(),
@@ -6416,6 +6440,103 @@ a=fmtp:101 0-15\r\n";
     /// never fire. Every test that looked like coverage stopped one call short
     /// of the boundary.
     ///
+    /// The `Config::amr_dtx` switch reaches the media layer, in both
+    /// positions.
+    ///
+    /// DTX was implemented and unit-tested inside media-core for a long time
+    /// while being unreachable from any public API: `amr_dtx` was set by
+    /// nothing outside one media-core test, so every live call ran with it
+    /// off and no configuration could change that. This pins the whole path —
+    /// `Config` -> adapter -> the media configuration media-core resolves the
+    /// codec from.
+    ///
+    /// Both positions are asserted, and that is the point rather than
+    /// symmetry: on-when-asked proves the switch is not decorative, and
+    /// off-by-default proves it is genuinely opt-in for something that
+    /// changes what goes on the wire.
+    #[cfg(feature = "amr")]
+    #[tokio::test]
+    async fn the_amr_dtx_switch_reaches_the_media_layer_in_both_positions() {
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::{MediaSessionController, AMR_DTX_PARAMETER};
+        use std::net::Ipv4Addr;
+
+        async fn negotiated_parameters(
+            dtx: bool,
+            port_base: u16,
+            label: &str,
+        ) -> std::collections::HashMap<String, String> {
+            let controller = Arc::new(MediaSessionController::new());
+            let store = Arc::new(SessionStore::new());
+            let session_id = SessionId(format!("amr-dtx-{label}"));
+            store
+                .create_session(session_id.clone(), Role::UAS, false)
+                .await
+                .expect("create session");
+
+            let mut adapter = MediaAdapter::new(
+                controller.clone(),
+                store.clone(),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                port_base,
+                port_base + 100,
+            );
+            adapter.set_offered_codecs(vec![AMR_WB_OA_PT, 101]);
+            // The one line under test: what a coordinator does with
+            // `Config::amr_dtx` at boot.
+            adapter.set_amr_dtx(dtx);
+            adapter
+                .start_session(&session_id)
+                .await
+                .expect("start session");
+
+            let pt = AMR_WB_OA_PT.to_string();
+            let offer = SdpBuilder::new("Session")
+                .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+                .connection("IN", "IP4", "127.0.0.1")
+                .time("0", "0")
+                .media_audio(port_base + 200, "RTP/AVP")
+                .formats(&[pt.as_str()])
+                .rtpmap(pt.as_str(), "AMR-WB/16000")
+                .fmtp(pt.as_str(), "octet-align=1")
+                .attribute("sendrecv", None::<String>)
+                .done()
+                .build()
+                .expect("offer builds")
+                .to_string();
+
+            adapter
+                .negotiate_sdp_as_uas(&session_id, &offer)
+                .await
+                .expect("an AMR-WB offer negotiates");
+
+            let dialog_id = adapter
+                .current_media(&session_id)
+                .expect("media resource exists")
+                .dialog_id;
+            controller
+                .get_session_info(&dialog_id)
+                .await
+                .expect("media session exists")
+                .config
+                .parameters
+        }
+
+        let enabled = negotiated_parameters(true, 16600, "on").await;
+        assert_eq!(
+            enabled.get(AMR_DTX_PARAMETER).map(String::as_str),
+            Some("true"),
+            "Config::amr_dtx=true did not reach the media configuration"
+        );
+
+        let disabled = negotiated_parameters(false, 16800, "off").await;
+        assert!(
+            !disabled.contains_key(AMR_DTX_PARAMETER),
+            "DTX must stay off unless asked for: it changes what goes on the wire"
+        );
+    }
+
     /// G.729 rather than AMR, still: the parameter is codec-agnostic and what
     /// is under test here is carriage rather than interpretation. The AMR
     /// case is `an_amr_wideband_offer_negotiates_into_a_working_codec` above,

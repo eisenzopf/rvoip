@@ -2237,6 +2237,19 @@ pub struct Config {
     /// behaviour).
     pub media_public_addr: Option<SocketAddr>,
 
+    /// Enable AMR discontinuous transmission: replace silence with SID
+    /// (comfort-noise) frames and gaps rather than coding it as speech.
+    ///
+    /// Local sender policy, not a negotiated parameter. RFC 4867 defines no
+    /// fmtp for DTX and a sender may use it without telling the peer, because
+    /// every conforming AMR receiver must handle SID and NO_DATA frames
+    /// regardless. It therefore needs no offer/answer support and cannot be
+    /// refused by the far end — but it does change what goes on the wire, so
+    /// it is off unless a deployment asks for it.
+    ///
+    /// Ignored by every codec but AMR. Default: `false`.
+    pub amr_dtx: bool,
+
     /// Media allocation behavior.
     ///
     /// Default: [`MediaMode::Enabled`], which allocates real media-core RTP
@@ -2710,6 +2723,7 @@ impl std::fmt::Debug for Config {
             )
             .field("offer_srtp", &self.offer_srtp)
             .field("srtp_required", &self.srtp_required)
+            .field("amr_dtx", &self.amr_dtx)
             .field("srtp_suite_count", &self.srtp_offered_suites.len())
             .field(
                 "media_public_address_configured",
@@ -2864,6 +2878,7 @@ impl Config {
             tls_insecure_skip_verify: false,
             offer_srtp: false,
             srtp_required: false,
+            amr_dtx: false,
             srtp_offered_suites: SrtpSuitePolicy::Default.suites(),
             media_public_addr: None,
             media_mode: MediaMode::Enabled,
@@ -2975,6 +2990,7 @@ impl Config {
             tls_insecure_skip_verify: false,
             offer_srtp: false,
             srtp_required: false,
+            amr_dtx: false,
             srtp_offered_suites: SrtpSuitePolicy::Default.suites(),
             media_public_addr: None,
             media_mode: MediaMode::Enabled,
@@ -8679,6 +8695,9 @@ impl UnifiedCoordinator {
         media_adapter_inner.set_sdes_base64_mode(sdes_base64_mode);
         // Sprint 3 C1 — propagate Comfort Noise opt-in.
         media_adapter_inner.set_comfort_noise(config.comfort_noise_enabled);
+        // AMR discontinuous transmission — sender-side policy, nothing to
+        // negotiate (RFC 4867 defines no fmtp for DTX).
+        media_adapter_inner.set_amr_dtx(config.amr_dtx);
         // Sprint 3.5 — propagate strict codec matching policy.
         media_adapter_inner.set_strict_codec_matching(config.strict_codec_matching);
         // NEXT_STEPS C2 — propagate the configured offered codec list.

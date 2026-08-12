@@ -102,6 +102,24 @@ impl MediaConfig {
         }
         self
     }
+
+    /// Set or clear the AMR discontinuous-transmission opt-in
+    /// ([`AMR_DTX_PARAMETER`]).
+    ///
+    /// Clears rather than writing `"false"` so an absent key and a disabled
+    /// one are the same state — `resolve_codec` treats anything that is not
+    /// `"true"` as off, and a stale `"true"` from a previous generation must
+    /// not survive a configuration that disables it.
+    #[must_use]
+    pub fn with_amr_dtx(mut self, dtx: bool) -> Self {
+        if dtx {
+            self.parameters
+                .insert(AMR_DTX_PARAMETER.to_string(), "true".to_string());
+        } else {
+            self.parameters.remove(AMR_DTX_PARAMETER);
+        }
+        self
+    }
 }
 
 /// Exact audio codec parameters used by one media dialog.
@@ -322,4 +340,54 @@ pub struct RtpSessionWrapper {
 
     #[cfg(feature = "memory-diagnostics")]
     pub memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn config() -> MediaConfig {
+        MediaConfig {
+            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 10_000),
+            remote_addr: None,
+            preferred_codec: None,
+            parameters: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn amr_dtx_opt_in_is_written_and_cleared_rather_than_falsified() {
+        let enabled = config().with_amr_dtx(true);
+        assert_eq!(
+            enabled.parameters.get(AMR_DTX_PARAMETER).map(String::as_str),
+            Some("true")
+        );
+
+        // Disabling must remove the key, not write "false": resolve_codec
+        // reads anything-but-"true" as off, so a leftover value would be
+        // indistinguishable from absence to a reader but would still show up
+        // in diagnostics as though DTX had been configured.
+        let disabled = enabled.with_amr_dtx(false);
+        assert!(!disabled.parameters.contains_key(AMR_DTX_PARAMETER));
+    }
+
+    #[test]
+    fn amr_dtx_does_not_disturb_the_negotiated_fmtp() {
+        // Both live in the same parameter map and are set on the same commit
+        // when a codec is applied; neither may clobber the other.
+        let both = config()
+            .with_negotiated_fmtp(Some("octet-align=1"))
+            .with_amr_dtx(true);
+        assert_eq!(
+            both.parameters
+                .get(NEGOTIATED_FMTP_PARAMETER)
+                .map(String::as_str),
+            Some("octet-align=1")
+        );
+        assert_eq!(
+            both.parameters.get(AMR_DTX_PARAMETER).map(String::as_str),
+            Some("true")
+        );
+    }
 }

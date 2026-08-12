@@ -102,6 +102,19 @@ fn amr_mode_switch_requested() -> bool {
     )
 }
 
+/// Whether the operator asked for AMR discontinuous transmission
+/// (`PBX_AMR_DTX=1`).
+///
+/// Sender-side policy with nothing in the SDP, so a cell that enables it
+/// looks identical on the signalling side and differs only in what the
+/// encoder emits during silence.
+fn amr_dtx_requested() -> bool {
+    matches!(
+        std::env::var("PBX_AMR_DTX").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes") | Ok("on")
+    )
+}
+
 pub const fn amr_frame_size(profile: CodecProfile) -> usize {
     match profile {
         CodecProfile::AmrWb | CodecProfile::AmrWbBe => 320,
@@ -988,6 +1001,15 @@ impl EndpointConfig {
         config.media_port_start = self.media_port_start;
         config.media_port_end = self.media_port_end;
         config.media_public_addr = Some(SocketAddr::new(self.media_advertised_ip, 0));
+        // AMR DTX is sender-side policy with no SDP surface, so it is set on
+        // whichever side the operator runs with PBX_AMR_DTX=1 and the other
+        // side needs no matching setting to receive it.
+        //
+        // Set here rather than in `session_config`: that method returns this
+        // one's result early for every non-TLS transport, so a knob applied to
+        // its tail reaches TLS cells only — which is exactly how the first
+        // version of this silently did nothing on UDP.
+        config.amr_dtx = amr_dtx_requested();
         self.codec_profile.apply(&mut config);
         config
     }
@@ -1162,6 +1184,9 @@ impl WindowGate {
 
 pub struct ToneRecorder {
     running: Arc<AtomicBool>,
+    /// Makes the send loop emit digital silence instead of the tone, so a DTX
+    /// cell has something for the encoder's VAD to detect.
+    sending_silence: Arc<AtomicBool>,
     send_task: JoinHandle<()>,
     recv_task: JoinHandle<()>,
     received_buf: Arc<Mutex<Vec<i16>>>,
@@ -2751,6 +2776,35 @@ async fn run_amr_caller_toned(
                 exercise_amr_mode_switch(coordinator, handle, cfg.codec_profile).await;
         }
     }
+    // DTX, on the same sequencing principle as the mode switch: the quality
+    // floor is already banked, so the silent window can only add evidence.
+    let mut dtx_outcome: ExampleResult<()> = Ok(());
+    if amr_dtx_requested() && outcome.is_ok() {
+        let silence = Duration::from_secs(2);
+        let received = recorder.hold_silence(silence).await;
+        // The far end must keep delivering audio through our silence. DTX
+        // replaces speech frames with SID updates and gaps on the wire, but
+        // the *decoder* turns those into comfort noise, so the receive stream
+        // stays continuous. A drop to nothing would mean the peer stopped
+        // rather than went quiet -- the failure this scenario exists to catch.
+        let expected = sample_rate as usize * silence.as_secs() as usize / 2;
+        if received < expected {
+            dtx_outcome = Err(format!(
+                "dtx: only {received} samples arrived during a {}s silent window,                  expected at least {expected} (comfort noise should keep the                  stream continuous)",
+                silence.as_secs()
+            )
+            .into());
+        }
+        diag_event(
+            &cfg.output_dir,
+            "amr_dtx_silence_window",
+            serde_json::json!({
+                "silence_secs": silence.as_secs(),
+                "received_samples": received,
+                "expected_at_least": expected,
+            }),
+        );
+    }
     handle
         .hangup_and_wait(Some(Duration::from_secs(8)))
         .await
@@ -2758,6 +2812,7 @@ async fn run_amr_caller_toned(
     let saved = recorder.stop_and_save(&cfg.output_dir, wav_name).await;
     outcome?;
     switch_outcome?;
+    dtx_outcome?;
     let path = saved?;
     assert_amr_tone_quality(&path, sample_rate, expect_hz, send_hz)?;
     Ok(())
@@ -4330,6 +4385,11 @@ pub async fn start_tone_recorder_at_rate(
     });
     let running = Arc::new(AtomicBool::new(true));
     let send_running = running.clone();
+    // Digital silence on demand. DTX only does anything when the encoder is
+    // given silence to detect, and the tone source never is — so a DTX cell
+    // without this proves only that the call still works.
+    let sending_silence = Arc::new(AtomicBool::new(false));
+    let send_silence = sending_silence.clone();
     let send_task = tokio::spawn(async move {
         let mut frame_index = 0usize;
         let frame_duration_ms = ((frame_size as u64) * 1000 / u64::from(sample_rate)).max(1);
@@ -4343,8 +4403,13 @@ pub async fn start_tone_recorder_at_rate(
         let mut ticker = tokio::time::interval(Duration::from_millis(frame_duration_ms));
         while send_running.load(Ordering::Relaxed) && sender.is_open() {
             ticker.tick().await;
+            let samples = if send_silence.load(Ordering::Relaxed) {
+                vec![0i16; frame_size]
+            } else {
+                generate_tone_at_rate(tone_hz, frame_index, frame_size, sample_rate)
+            };
             let frame = AudioFrame::new(
-                generate_tone_at_rate(tone_hz, frame_index, frame_size, sample_rate),
+                samples,
                 sample_rate,
                 1,
                 (frame_index * frame_size) as u32,
@@ -4357,6 +4422,7 @@ pub async fn start_tone_recorder_at_rate(
     });
     Ok(ToneRecorder {
         running,
+        sending_silence,
         send_task,
         recv_task,
         received_buf,
@@ -4368,6 +4434,24 @@ pub async fn start_tone_recorder_at_rate(
 }
 
 impl ToneRecorder {
+    /// Send digital silence for `duration`, then resume the tone.
+    ///
+    /// Returns the number of samples received during the silent window, which
+    /// is what makes the DTX assertion possible: with DTX on the far end
+    /// still has to deliver a continuous stream (SID-driven comfort noise
+    /// rather than a gap), so a receiver that goes silent is a bug, not the
+    /// feature working.
+    async fn hold_silence(&self, duration: Duration) -> usize {
+        let before = self.counters.rx_samples.load(Ordering::Relaxed);
+        self.sending_silence.store(true, Ordering::Relaxed);
+        sleep(duration).await;
+        self.sending_silence.store(false, Ordering::Relaxed);
+        self.counters
+            .rx_samples
+            .load(Ordering::Relaxed)
+            .saturating_sub(before)
+    }
+
     async fn wait_for_received_samples(
         &self,
         minimum_samples: usize,
@@ -4402,6 +4486,7 @@ impl ToneRecorder {
     ) -> ExampleResult<PathBuf> {
         let ToneRecorder {
             running,
+            sending_silence: _,
             send_task,
             recv_task,
             received_buf,

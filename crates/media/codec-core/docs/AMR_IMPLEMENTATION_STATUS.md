@@ -497,12 +497,35 @@ survive the two parameters the lag and the codebook consume in between.
    mid-call mode switch observed on the wire, and the proxy tier — Kamailio
    and OpenSIPS with rtpengine relaying all four AMR framings verbatim.
 
-5. **Live DTX and CMR.** Both are implemented and unit-tested, and both are
-   structurally off on every live call: the `amr_dtx` MediaConfig key is set
-   by nothing outside one unit test, we never emit a CMR (every payload goes
-   out CMR=15), and neither lab PBX would send us one as configured. Enabling
-   them live is a feature decision, not a bug fix — but until then the live
-   evidence covers speech frames only.
+5. ~~**Live DTX and CMR.**~~ Both now reach the wire. CMR emission closed with
+   `request_peer_codec_mode` (see the exit criterion above). **DTX closed
+   2026-08-12**: `Config::amr_dtx` -> `MediaAdapter::set_amr_dtx` ->
+   `MediaConfig::with_amr_dtx` on the same commit as the negotiated codec ->
+   `resolve_codec` -> the codec's own DTX switch. Sender-side policy only:
+   RFC 4867 defines no fmtp for DTX, so nothing is negotiated and the peer
+   needs no matching setting.
+
+   Verified on the wire against Asterisk with `PBX_AMR_DTX=1` and a two-second
+   silent window in the middle of the call (`amr_call`, octet-aligned, mode 7).
+   Speech frames are 33-octet payloads throughout; during the silence the
+   stream becomes:
+
+   - `f0 44 2b 07 83 68 0e` — CMR 15, **FT 8 (SID_UPDATE)**, Q=1, five octets
+     of comfort-noise parameters. 12 of them.
+   - `f0 7c` — CMR 15, **FT 15 (NO_DATA)**, Q=1. 74 of them.
+
+   One SID every eighth frame with NO_DATA between, which is the TS 26.093
+   update cadence, and Asterisk relayed them to the far end unchanged. The
+   same cell without `PBX_AMR_DTX=1` emits 87-byte frames and nothing else,
+   so the switch is non-vacuous in both positions.
+
+   Finding worth keeping: the first wiring set the flag in the harness's
+   `session_config`, which returns early for every non-TLS transport — so it
+   reached TLS cells only and every UDP run silently behaved as though DTX
+   were off, while the diagnostics said it had been requested. What caught it
+   was a new `codec generation built` log line naming the flags each codec was
+   actually constructed with; that line is now permanent, because every AMR
+   field in it has been silently wrong at some point on this branch.
 
 6. **Rates beyond the top of each variant.** Every live cell ran AMR-NB
    mode 7 (12.2) or AMR-WB mode 8 (23.85) — our encoder opens at the highest
