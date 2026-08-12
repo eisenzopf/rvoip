@@ -223,11 +223,25 @@ sipp_stop() {
   fi
 }
 
+proxy_up() {
+  # The compose-based proxy labs own their rendering, readiness gates
+  # (registrar answering AND rtpengine enabled), and env-file writing.
+  RVOIP_PBX_LOCAL_ENV_ROOT="$LOCAL_ENV_ROOT" sh "$PBX_SNAPSHOT/$1/up.sh"
+}
+
+proxy_down() {
+  sh "$PBX_SNAPSHOT/$1/down.sh"
+}
+
 case "$ACTION" in
   asterisk-up) asterisk_up ;;
   asterisk-down|restore-asterisk-down) down rvoip-release-asterisk ;;
   freeswitch-up) freeswitch_up ;;
   freeswitch-down|restore-freeswitch-down) down rvoip-freeswitch ;;
+  kamailio-up) proxy_up kamailio ;;
+  kamailio-down|restore-kamailio-down) proxy_down kamailio ;;
+  opensips-up) proxy_up opensips ;;
+  opensips-down|restore-opensips-down) proxy_down opensips ;;
   sipp-start) sipp_start ;;
   sipp-stop) sipp_stop ;;
   *) echo "unknown interop lifecycle action: $ACTION" >&2; exit 2 ;;

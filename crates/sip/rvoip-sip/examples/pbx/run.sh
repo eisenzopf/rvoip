@@ -75,7 +75,7 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --help|-h)
-      echo "Usage: $0 [--pbx asterisk|freeswitch|both] [--api endpoint|stream_peer|callback|all] [--scenario registration|basic_call|g729_call|amr_call|amr_transcode_call|b2bua_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all] [--transport UDP|TLS|all] [--repeat N] [--stop-on-fail 0|1]"
+      echo "Usage: $0 [--pbx asterisk|freeswitch|kamailio|opensips|proxies|both] [--api endpoint|stream_peer|callback|all] [--scenario registration|basic_call|g729_call|amr_call|amr_transcode_call|b2bua_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all] [--transport UDP|TLS|all] [--repeat N] [--stop-on-fail 0|1]"
       exit 0
       ;;
     *)
@@ -143,7 +143,7 @@ cleanup() {
 
 redacted_env() {
   env | LC_ALL=C sort | awk -F= '
-    /^(PBX_|SIP_|TLS_|ASTERISK_|FREESWITCH_|RVOIP_|AUDIO_|IDLE_)/ {
+    /^(PBX_|SIP_|TLS_|ASTERISK_|FREESWITCH_|KAMAILIO_|OPENSIPS_|RVOIP_|AUDIO_|IDLE_)/ {
       key=$1
       value=substr($0, length($1) + 2)
       upper=toupper(key)
@@ -305,11 +305,63 @@ trap 'exit 143' TERM
 
 pbx_list() {
   case "$PBX_ARG" in
+    # `both`/`all` deliberately stay asterisk+freeswitch: the release gates
+    # and the beta gate's BETA_PBX_PROVIDER default pass them, and growing
+    # their matrix silently would change what a release run means. The proxy
+    # providers are opt-in by name.
     both|all) printf '%s\n' asterisk freeswitch ;;
     asterisk|ast) printf '%s\n' asterisk ;;
     freeswitch|free-switch|fs) printf '%s\n' freeswitch ;;
+    kamailio|kam) printf '%s\n' kamailio ;;
+    opensips|open-sips|osips) printf '%s\n' opensips ;;
+    proxies) printf '%s\n' kamailio opensips ;;
     *) echo "Unknown PBX: $PBX_ARG" >&2; exit 2 ;;
   esac
+}
+
+# What each provider can actually run.
+#
+# The proxy labs have no TLS listener yet, and a proxy cannot transcode --
+# amr_transcode_call's disjoint-codec legs can never negotiate through one.
+# The rest of the scenarios are plausible but unproven through a
+# Record-Route proxy (re-INVITE hold, REFER transfer), so they stay gated
+# until proven; PBX_PROXY_ALL_SCENARIOS=1 lifts the gate for exploration.
+provider_supports_tls() {
+  case "$1" in
+    kamailio|opensips) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+provider_scenario_supported() {
+  pss_provider=$1
+  pss_scenario=$2
+  case "$pss_provider" in
+    kamailio|opensips)
+      case "$pss_scenario" in
+        registration|basic_call|amr_call) return 0 ;;
+        amr_transcode_call) return 1 ;;
+        *)
+          case "${PBX_PROXY_ALL_SCENARIOS:-0}" in
+            1|true|yes|on) return 0 ;;
+            *) return 1 ;;
+          esac
+          ;;
+      esac
+      ;;
+    *) return 0 ;;
+  esac
+}
+
+# UDP/TLS cell gate combining the user's --transport with provider ability.
+cell_transport_enabled() {
+  cte_provider=$1
+  cte_transport=$2
+  transport_selected "$cte_transport" || return 1
+  if [ "$cte_transport" = "TLS" ]; then
+    provider_supports_tls "$cte_provider" || return 1
+  fi
+  return 0
 }
 
 api_examples() {
@@ -345,10 +397,26 @@ load_provider_env() {
     freeswitch)
       unset SIP_SERVER SIP_PORT SIP_TLS_PORT SIP_PASSWORD TLS_CA_PATH
       unset ASTERISK_TLS_CONTACT_MODE ASTERISK_TLS_FLOW_REUSE ASTERISK_TLS_SRTP_REQUIRED
+      unset KAMAILIO_UDP_ADDR KAMAILIO_PASSWORD OPENSIPS_UDP_ADDR OPENSIPS_PASSWORD
+      ;;
+    kamailio)
+      unset SIP_SERVER SIP_PORT SIP_TLS_PORT SIP_PASSWORD TLS_CA_PATH
+      unset ASTERISK_TLS_CONTACT_MODE ASTERISK_TLS_FLOW_REUSE ASTERISK_TLS_SRTP_REQUIRED
+      unset FREESWITCH_UDP_ADDR FREESWITCH_TLS_ADDR FREESWITCH_PASSWORD FREESWITCH_TRANSPORT
+      unset FREESWITCH_TLS_CONTACT_MODE FREESWITCH_TLS_FLOW_REUSE FREESWITCH_TLS_SRTP_REQUIRED
+      unset OPENSIPS_UDP_ADDR OPENSIPS_PASSWORD
+      ;;
+    opensips)
+      unset SIP_SERVER SIP_PORT SIP_TLS_PORT SIP_PASSWORD TLS_CA_PATH
+      unset ASTERISK_TLS_CONTACT_MODE ASTERISK_TLS_FLOW_REUSE ASTERISK_TLS_SRTP_REQUIRED
+      unset FREESWITCH_UDP_ADDR FREESWITCH_TLS_ADDR FREESWITCH_PASSWORD FREESWITCH_TRANSPORT
+      unset FREESWITCH_TLS_CONTACT_MODE FREESWITCH_TLS_FLOW_REUSE FREESWITCH_TLS_SRTP_REQUIRED
+      unset KAMAILIO_UDP_ADDR KAMAILIO_PASSWORD
       ;;
     *)
       unset FREESWITCH_UDP_ADDR FREESWITCH_TLS_ADDR FREESWITCH_PASSWORD FREESWITCH_TRANSPORT
       unset FREESWITCH_TLS_CONTACT_MODE FREESWITCH_TLS_FLOW_REUSE FREESWITCH_TLS_SRTP_REQUIRED
+      unset KAMAILIO_UDP_ADDR KAMAILIO_PASSWORD OPENSIPS_UDP_ADDR OPENSIPS_PASSWORD
       ;;
   esac
   if [ "$provider" = "asterisk" ] && [ -f "$LOCAL_ENV_ROOT/asterisk/rvoip-local.env" ]; then
@@ -361,6 +429,18 @@ load_provider_env() {
     set -a
     # shellcheck disable=SC1091
     . "$LOCAL_ENV_ROOT/freeswitch/freeswitch-local.env"
+    set +a
+  fi
+  if [ "$provider" = "kamailio" ] && [ -f "$LOCAL_ENV_ROOT/kamailio/kamailio-local.env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . "$LOCAL_ENV_ROOT/kamailio/kamailio-local.env"
+    set +a
+  fi
+  if [ "$provider" = "opensips" ] && [ -f "$LOCAL_ENV_ROOT/opensips/opensips-local.env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . "$LOCAL_ENV_ROOT/opensips/opensips-local.env"
     set +a
   fi
   if [ -f "$SCRIPT_DIR/env/${provider}.env" ]; then
@@ -499,6 +579,13 @@ amr_cell_supported() {
   acs_scenario=$2
   acs_transport=$3
   acs_label=$4
+  case "$acs_provider" in
+    kamailio|opensips)
+      # rtpengine relays payloads without touching them; there is no codec
+      # module whose absence could make an AMR cell unrunnable.
+      return 0
+      ;;
+  esac
   pbx_amr_probe "$acs_provider"
   acs_missing=""
   for variant in $(amr_variants_for_label "$acs_label"); do
@@ -533,6 +620,28 @@ amr_cell_supported() {
 # The split also mirrors amr_call's, and is better coverage than either
 # framing alone: Asterisk transcodes octet-aligned, FreeSWITCH transcodes
 # bandwidth-efficient.
+# The amr_call profile sweep. Asterisk and FreeSWITCH run their single
+# provider default (one framing each -- see codec_profile_for_scenario); the
+# proxy labs sweep all four, because rtpengine relays every framing with one
+# config and "both framings" is exactly the evidence the AMR plan asks for.
+amr_profile_list() {
+  apl_provider=$1
+  if [ -n "${PBX_CODEC_PROFILE:-}" ]; then
+    printf '%s\n' "$PBX_CODEC_PROFILE"
+    return
+  fi
+  if [ -n "${PBX_AMR_PROFILES:-}" ]; then
+    for profile in $PBX_AMR_PROFILES; do
+      printf '%s\n' "$profile"
+    done
+    return
+  fi
+  case "$apl_provider" in
+    kamailio|opensips) printf '%s\n' amrnb amrwb amrnb_be amrwb_be ;;
+    *) codec_profile_for_scenario "$apl_provider" amr_call ;;
+  esac
+}
+
 # The b2bua profile sweep: a PCMU control cell (proving the scenario shape
 # itself) plus AMR-WB in the framing the PBX can relay end to end. Override
 # with PBX_B2BUA_PROFILES.
@@ -648,6 +757,8 @@ pbx_host_for_diag() {
   case "$provider:$transport" in
     freeswitch:TLS) printf '%s\n' "${FREESWITCH_TLS_ADDR%%:*}" ;;
     freeswitch:UDP) printf '%s\n' "${FREESWITCH_UDP_ADDR%%:*}" ;;
+    kamailio:*) printf '%s\n' "${KAMAILIO_UDP_ADDR%%:*}" ;;
+    opensips:*) printf '%s\n' "${OPENSIPS_UDP_ADDR%%:*}" ;;
     *) printf '%s\n' "${SIP_SERVER:-127.0.0.1}" ;;
   esac
 }
@@ -658,6 +769,8 @@ pbx_port_for_diag() {
   case "$provider:$transport" in
     freeswitch:TLS) printf '%s\n' "${FREESWITCH_TLS_ADDR##*:}" ;;
     freeswitch:UDP) printf '%s\n' "${FREESWITCH_UDP_ADDR##*:}" ;;
+    kamailio:*) printf '%s\n' "${KAMAILIO_UDP_ADDR##*:}" ;;
+    opensips:*) printf '%s\n' "${OPENSIPS_UDP_ADDR##*:}" ;;
     *:TLS) printf '%s\n' "${SIP_TLS_PORT:-5061}" ;;
     *) printf '%s\n' "${SIP_PORT:-5060}" ;;
   esac
@@ -737,6 +850,56 @@ diag_ast_snapshot() {
   } >"$das_snapshot" 2>&1 || true
 }
 
+diag_proxy_snapshot() {
+  dps_provider=$1
+  dps_out_dir=$2
+  dps_label=$3
+  if ! diag_enabled; then
+    return
+  fi
+  case "$dps_provider" in
+    kamailio)
+      dps_snapshot="$dps_out_dir/kamailio-$dps_label.txt"
+      {
+        echo "# Kamailio snapshot: $dps_label"
+        echo
+        # ul.dump proves the registrar bindings; rtpengine.show proves the
+        # relay node is enabled (a disabled node 503s every call by design).
+        for command in "ul.dump" "rtpengine.show all"; do
+          echo
+          echo "## kamcmd $command"
+          echo
+          docker exec rvoip-kamailio kamcmd $command 2>&1 || true
+        done
+        echo
+        echo "## rtpengine log tail"
+        echo
+        docker logs rvoip-rtpengine-kamailio 2>&1 | tail -40 || true
+      } >"$dps_snapshot" 2>&1 || true
+      ;;
+    opensips)
+      dps_snapshot="$dps_out_dir/opensips-$dps_label.txt"
+      {
+        echo "# OpenSIPS snapshot: $dps_label"
+        echo
+        for command in "ul_dump" "rtpengine_show"; do
+          echo
+          echo "## opensips-cli -x mi $command"
+          echo
+          docker exec rvoip-opensips opensips-cli -x mi $command 2>&1 || true
+        done
+        echo
+        echo "## rtpengine log tail"
+        echo
+        docker logs rvoip-rtpengine-opensips 2>&1 | tail -40 || true
+      } >"$dps_snapshot" 2>&1 || true
+      ;;
+    *)
+      return
+      ;;
+  esac
+}
+
 diag_ast_sample_loop() {
   dasl_provider=$1
   dasl_out_dir=$2
@@ -779,8 +942,20 @@ diag_start_pcap() {
   if [ -z "$iface" ]; then
     iface=${PBX_DIAG_TCPDUMP_IFACE:-any}
   fi
-  rtp_start=${FREESWITCH_RTP_START:-${ASTERISK_RTP_START:-16000}}
-  rtp_end=${FREESWITCH_RTP_END:-${ASTERISK_RTP_END:-18100}}
+  case "$provider" in
+    kamailio)
+      rtp_start=${KAMAILIO_RTP_START:-23000}
+      rtp_end=${KAMAILIO_RTP_END:-23200}
+      ;;
+    opensips)
+      rtp_start=${OPENSIPS_RTP_START:-23300}
+      rtp_end=${OPENSIPS_RTP_END:-23500}
+      ;;
+    *)
+      rtp_start=${FREESWITCH_RTP_START:-${ASTERISK_RTP_START:-16000}}
+      rtp_end=${FREESWITCH_RTP_END:-${ASTERISK_RTP_END:-18100}}
+      ;;
+  esac
   local_rtp_start=${PBX_DIAG_LOCAL_RTP_START:-16000}
   local_rtp_end=${PBX_DIAG_LOCAL_RTP_END:-18100}
   filter="host $host and (tcp port $port or udp port $port or udp portrange $rtp_start-$rtp_end or udp portrange $local_rtp_start-$local_rtp_end)"
@@ -846,6 +1021,7 @@ diag_begin_cell() {
   } >"$out_dir/diag-metadata.md"
   diag_fs_snapshot "$provider" "$out_dir" before
   diag_ast_snapshot "$provider" "$out_dir" before
+  diag_proxy_snapshot "$provider" "$out_dir" before
   if [ "$provider" = "asterisk" ]; then
     diag_ast_sample_loop "$provider" "$out_dir" &
   else
@@ -870,6 +1046,7 @@ diag_end_cell() {
   diag_stop_pcap "$out_dir"
   diag_fs_snapshot "$provider" "$out_dir" after
   diag_ast_snapshot "$provider" "$out_dir" after
+  diag_proxy_snapshot "$provider" "$out_dir" after
   if [ "$provider" = "freeswitch" ] && command -v docker >/dev/null 2>&1; then
     docker logs --since "${DIAG_CELL_STARTED_AT:-0}" rvoip-freeswitch >"$out_dir/freeswitch-since-cell.log" 2>&1 || true
   fi
@@ -1206,7 +1383,7 @@ run_prewarm_one() {
 prewarm_tls() {
   provider=$1
   example=$2
-  if ! transport_selected TLS || ! truthy "$PBX_TLS_PREWARM"; then
+  if ! cell_transport_enabled "$provider" TLS || ! truthy "$PBX_TLS_PREWARM"; then
     return 0
   fi
   api_label=$(example_label "$example")
@@ -1277,7 +1454,7 @@ run_registration() {
   export IDLE_SECS="${REGISTRATION_IDLE_SECS:-2}"
   rc=0
   for transport in TLS UDP; do
-    if ! transport_selected "$transport"; then
+    if ! cell_transport_enabled "$provider" "$transport"; then
       continue
     fi
     out_dir="$OUT_ROOT/$provider/$api_label/registration/$transport"
@@ -1462,6 +1639,10 @@ run_matrix_cell() {
   example=$2
   scenario=$3
   rc=0
+  if ! provider_scenario_supported "$provider" "$scenario"; then
+    echo "[$provider] skipping $scenario: unsupported for this provider (PBX_PROXY_ALL_SCENARIOS=1 to force)"
+    return 0
+  fi
   case "$scenario" in
     registration)
       run_registration "$provider" "$example" || rc=$?
@@ -1471,7 +1652,7 @@ run_matrix_cell() {
         run_two_party "$provider" "$example" basic_call UDP || rc=$?
         if [ "$rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then return "$rc"; fi
       fi
-      if transport_selected TLS; then
+      if cell_transport_enabled "$provider" TLS; then
         run_two_party "$provider" "$example" basic_call TLS || {
           tls_rc=$?
           if [ "$rc" -eq 0 ]; then rc=$tls_rc; fi
@@ -1479,29 +1660,48 @@ run_matrix_cell() {
       fi
       ;;
     amr_call)
-      # PBX_CODEC_PROFILE picks amrnb (the default), amrwb, or the
-      # bandwidth-efficient amrnb_be / amrwb_be. Unlike g729_call there is no
-      # profile sweep: the two variants are different codecs rather than two
-      # annexes of one, and the two framings need a PBX configured for each.
-      amr_label=$(codec_label_for_scenario "$provider" amr_call)
-      if transport_selected UDP; then
-        if amr_cell_supported "$provider" amr_call UDP "$amr_label"; then
-          run_two_party "$provider" "$example" amr_call UDP || rc=$?
-          if [ "$rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then return "$rc"; fi
-        elif [ "$?" -eq 2 ]; then
-          rc=1
-          if [ "$STOP_ON_FAIL" = "1" ]; then return "$rc"; fi
-        fi
+      # Asterisk/FreeSWITCH run their provider default (one framing each);
+      # the proxy labs sweep all four framings through one rtpengine config.
+      # PBX_CODEC_PROFILE pins one profile, PBX_AMR_PROFILES overrides the
+      # sweep list.
+      old_amr_profile_set=0
+      old_amr_profile=""
+      if [ "${PBX_CODEC_PROFILE+x}" = "x" ]; then
+        old_amr_profile_set=1
+        old_amr_profile=$PBX_CODEC_PROFILE
       fi
-      if transport_selected TLS; then
-        if amr_cell_supported "$provider" amr_call TLS "$amr_label"; then
-          run_two_party "$provider" "$example" amr_call TLS || {
-            tls_rc=$?
-            if [ "$rc" -eq 0 ]; then rc=$tls_rc; fi
-          }
-        elif [ "$?" -eq 2 ] && [ "$rc" -eq 0 ]; then
-          rc=1
+      for profile in $(amr_profile_list "$provider"); do
+        export PBX_CODEC_PROFILE="$profile"
+        profile_rc=0
+        if transport_selected UDP; then
+          if amr_cell_supported "$provider" amr_call UDP "$profile"; then
+            run_two_party "$provider" "$example" amr_call UDP || {
+              profile_rc=$?
+              if [ "$rc" -eq 0 ]; then rc=$profile_rc; fi
+            }
+          elif [ "$?" -eq 2 ]; then
+            profile_rc=1
+            if [ "$rc" -eq 0 ]; then rc=1; fi
+          fi
+          if [ "$profile_rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then break; fi
         fi
+        if cell_transport_enabled "$provider" TLS; then
+          if amr_cell_supported "$provider" amr_call TLS "$profile"; then
+            run_two_party "$provider" "$example" amr_call TLS || {
+              profile_rc=$?
+              if [ "$rc" -eq 0 ]; then rc=$profile_rc; fi
+            }
+          elif [ "$?" -eq 2 ] && [ "$rc" -eq 0 ]; then
+            profile_rc=1
+            rc=1
+          fi
+        fi
+        if [ "$profile_rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then break; fi
+      done
+      if [ "$old_amr_profile_set" = "1" ]; then
+        export PBX_CODEC_PROFILE="$old_amr_profile"
+      else
+        unset PBX_CODEC_PROFILE
       fi
       ;;
     amr_transcode_call)
@@ -1530,7 +1730,7 @@ run_matrix_cell() {
             break
           fi
         fi
-        if transport_selected TLS; then
+        if cell_transport_enabled "$provider" TLS; then
           if amr_cell_supported "$provider" amr_transcode_call TLS "$pairing"; then
             run_two_party "$provider" "$example" amr_transcode_call TLS || {
               pairing_rc=$?
@@ -1570,7 +1770,7 @@ run_matrix_cell() {
             break
           fi
         fi
-        if transport_selected TLS; then
+        if cell_transport_enabled "$provider" TLS; then
           run_two_party "$provider" "$example" g729_call TLS || {
             profile_rc=$?
             if [ "$rc" -eq 0 ]; then rc=$profile_rc; fi
@@ -1591,7 +1791,7 @@ run_matrix_cell() {
         run_two_party "$provider" "$example" "$scenario" UDP || rc=$?
         if [ "$rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then return "$rc"; fi
       fi
-      if transport_selected TLS; then
+      if cell_transport_enabled "$provider" TLS; then
         run_two_party "$provider" "$example" "$scenario" TLS || {
           tls_rc=$?
           if [ "$rc" -eq 0 ]; then rc=$tls_rc; fi
@@ -1637,7 +1837,7 @@ run_matrix_cell() {
             }
             if [ "$profile_rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then break; fi
           fi
-          if transport_selected TLS; then
+          if cell_transport_enabled "$provider" TLS; then
             case "$profile" in
               amr*) amr_cell_supported "$provider" b2bua_call TLS "$profile" || {
                       [ "$?" -eq 2 ] && { if [ "$rc" -eq 0 ]; then rc=1; fi; }
@@ -1663,7 +1863,7 @@ run_matrix_cell() {
         run_transfer "$provider" "$example" UDP || rc=$?
         if [ "$rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then return "$rc"; fi
       fi
-      if transport_selected TLS; then
+      if cell_transport_enabled "$provider" TLS; then
         run_transfer "$provider" "$example" TLS || {
           tls_rc=$?
           if [ "$rc" -eq 0 ]; then rc=$tls_rc; fi

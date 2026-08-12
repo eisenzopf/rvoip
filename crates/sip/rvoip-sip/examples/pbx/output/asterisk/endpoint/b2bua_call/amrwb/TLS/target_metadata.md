@@ -6,7 +6,7 @@
 - transport: TLS
 - role: target
 - codec: amrwb
-- started_at_utc: 2026-08-12T04:39:18Z
+- started_at_utc: 2026-08-12T06:15:15Z
 - output_dir: /Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/b2bua_call/amrwb/TLS
 - log: /Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/b2bua_call/amrwb/TLS/target.log
 

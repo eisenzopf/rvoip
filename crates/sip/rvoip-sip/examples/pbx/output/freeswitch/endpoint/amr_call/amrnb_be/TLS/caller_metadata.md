@@ -6,7 +6,7 @@
 - transport: TLS
 - role: caller
 - codec: amrnb_be
-- started_at_utc: 2026-08-12T02:05:46Z
+- started_at_utc: 2026-08-12T06:30:08Z
 - output_dir: /Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_call/amrnb_be/TLS
 - log: /Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_call/amrnb_be/TLS/caller.log
 
@@ -35,8 +35,10 @@ FREESWITCH_UDP_SIP_PORT=5062
 FREESWITCH_UDP_USERS=2001,2002,2003
 FREESWITCH_XCODE_TLS_ADDR=192.168.64.2:5065
 FREESWITCH_XCODE_UDP_ADDR=192.168.64.2:5064
+PBX_CODEC_PROFILE=amrnb_be
 PBX_PROVIDER=freeswitch
 PBX_REPEAT_INDEX=1
+PBX_REQUIRE_AMR=1
 PBX_TRANSPORT=TLS
 RVOIP_ADVERTISED_IP=192.168.64.1
 RVOIP_LOCAL_IP=192.168.64.1

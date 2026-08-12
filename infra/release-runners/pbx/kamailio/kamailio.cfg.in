@@ -1,0 +1,158 @@
+# Kamailio registrar-proxy for the rvoip PBX interop harness.
+# Rendered by up.sh: __PUBLIC_HOST__, __SIP_PORT__, __RTPENGINE_SOCK__.
+#
+# Shape: accept-all REGISTER into in-memory usrloc, route INVITE by location
+# lookup, and hand every SDP to rtpengine for media relay. The
+# rtpengine_manage flags deliberately contain NO transcode/codec options —
+# rtpengine then forwards payloads verbatim, which is what lets AMR (any
+# framing, PTs 104-107) cross untouched. That passthrough is the point of
+# this peer; "transcoded media: 0" in rtpengine-ctl's totals is the proof.
+#
+# Accept-all registration (no digest challenge) is a lab decision: both call
+# parties are rvoip's own endpoints, the client REGISTER path handles a
+# direct 200 fine, and DB-less digest auth would add failure modes without
+# adding interop signal.
+
+#!define WITH_DEBUG 0
+
+debug=2
+log_stderror=yes
+memdbg=5
+memlog=5
+fork=yes
+children=2
+auto_aliases=no
+alias="__PUBLIC_HOST__:__SIP_PORT__"
+
+listen=udp:0.0.0.0:__SIP_PORT__ advertise __PUBLIC_HOST__:__SIP_PORT__
+
+loadmodule "tm.so"
+loadmodule "sl.so"
+loadmodule "rr.so"
+loadmodule "pv.so"
+loadmodule "maxfwd.so"
+loadmodule "textops.so"
+loadmodule "siputils.so"
+loadmodule "xlog.so"
+loadmodule "sanity.so"
+loadmodule "ctl.so"
+loadmodule "kex.so"
+loadmodule "corex.so"
+loadmodule "usrloc.so"
+loadmodule "registrar.so"
+loadmodule "rtpengine.so"
+
+# In-memory location only: the lab has no DB and needs none.
+modparam("usrloc", "db_mode", 0)
+# AOR is the username alone, so sip:2001@HOST and sip:2001@HOST:PORT agree.
+modparam("usrloc", "use_domain", 0)
+modparam("registrar", "method_filtering", 1)
+modparam("rtpengine", "rtpengine_sock", "__RTPENGINE_SOCK__")
+# Retry a briefly-unreachable rtpengine after 5s, not the 60s default:
+# at lab startup the proxy can ping before rtpengine binds its ng socket,
+# and a disabled relay makes the SDP guard 503 every call for a minute.
+modparam("rtpengine", "rtpengine_disable_tout", 5)
+
+request_route {
+    if (!mf_process_maxfwd_header("10")) {
+        sl_send_reply("483", "Too Many Hops");
+        exit;
+    }
+    if (!sanity_check()) {
+        exit;
+    }
+
+    # CANCEL matches its INVITE transaction or is statelessly replied.
+    if (is_method("CANCEL")) {
+        if (t_check_trans()) {
+            t_relay();
+        }
+        exit;
+    }
+
+    # In-dialog requests: loose-route per Record-Route, keep rtpengine in
+    # the path for re-INVITEs, release it on BYE.
+    if (has_totag()) {
+        if (loose_route()) {
+            if (is_method("INVITE|UPDATE") && has_body("application/sdp")) {
+                # A failed rtpengine_manage MUST fail the request: continuing
+                # would relay the SDP untouched and the endpoints would talk
+                # directly, making every media assertion vacuously green.
+                if (!rtpengine_manage("replace-origin replace-session-connection")) {
+                    sl_send_reply("503", "Media Relay Unavailable");
+                    exit;
+                }
+            }
+            if (is_method("BYE")) {
+                rtpengine_delete();
+            }
+            t_on_reply("MANAGE_REPLY");
+            t_relay();
+            exit;
+        }
+        if (is_method("ACK")) {
+            if (t_check_trans()) {
+                t_relay();
+            }
+            exit;
+        }
+        sl_send_reply("404", "Not Here");
+        exit;
+    }
+
+    # Retransmission guard for initial requests.
+    if (t_check_trans()) {
+        exit;
+    }
+
+    # Accept-all registrar (see header).
+    if (is_method("REGISTER")) {
+        if (!save("location")) {
+            sl_reply_error();
+        }
+        exit;
+    }
+
+    if (is_method("INVITE")) {
+        record_route();
+        if (!lookup("location")) {
+            sl_send_reply("404", "Not Found");
+            exit;
+        }
+        if (has_body("application/sdp")) {
+            # Fail loudly if rtpengine is down (see the loose_route branch).
+            if (!rtpengine_manage("replace-origin replace-session-connection")) {
+                sl_send_reply("503", "Media Relay Unavailable");
+                exit;
+            }
+        }
+        t_on_reply("MANAGE_REPLY");
+        t_on_failure("MANAGE_FAILURE");
+        t_relay();
+        exit;
+    }
+
+    # Anything else initial (OPTIONS, MESSAGE, ...) routes by location too.
+    if (!lookup("location")) {
+        sl_send_reply("404", "Not Found");
+        exit;
+    }
+    record_route();
+    t_relay();
+}
+
+onreply_route[MANAGE_REPLY] {
+    # The answer side of the offer/answer: 180/183 with SDP and the 200.
+    if (status =~ "18[03]|2[0-9][0-9]") {
+        if (has_body("application/sdp")) {
+            rtpengine_manage("replace-origin replace-session-connection");
+        }
+    }
+}
+
+failure_route[MANAGE_FAILURE] {
+    if (t_is_canceled()) {
+        exit;
+    }
+    rtpengine_delete();
+}

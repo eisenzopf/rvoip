@@ -6,7 +6,7 @@
 - transport: TLS
 - role: caller
 - codec: amrnb
-- started_at_utc: 2026-08-12T02:04:27Z
+- started_at_utc: 2026-08-12T06:14:06Z
 - output_dir: /Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrnb/TLS
 - log: /Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrnb/TLS/caller.log
 
@@ -23,8 +23,10 @@ ASTERISK_TLS_CONTACT_MODE=reachable-contact
 ASTERISK_TLS_SRTP_REQUIRED=1
 AUDIO_OUTPUT_DIR=examples/asterisk/udp_hold_resume/output
 IDLE_SECS=30
+PBX_CODEC_PROFILE=amrnb
 PBX_PROVIDER=asterisk
 PBX_REPEAT_INDEX=1
+PBX_REQUIRE_AMR=1
 PBX_TRANSPORT=TLS
 SIP_AUTH_USERNAME=1001
 SIP_PASSWORD=<redacted>

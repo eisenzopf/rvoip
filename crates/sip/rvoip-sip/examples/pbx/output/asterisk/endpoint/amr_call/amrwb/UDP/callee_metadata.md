@@ -5,8 +5,8 @@
 - scenario: amr_call
 - transport: UDP
 - role: callee
-- codec_profile: amrwb
-- started_at_utc: 2026-08-12T01:08:10Z
+- codec: amrwb
+- started_at_utc: 2026-08-12T05:01:20Z
 - output_dir: /Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrwb/UDP
 - log: /Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrwb/UDP/callee.log
 
@@ -23,8 +23,10 @@ ASTERISK_TLS_CONTACT_MODE=reachable-contact
 ASTERISK_TLS_SRTP_REQUIRED=1
 AUDIO_OUTPUT_DIR=examples/asterisk/udp_hold_resume/output
 IDLE_SECS=30
+PBX_AMR_MODE_SWITCH=1
 PBX_CODEC_PROFILE=amrwb
 PBX_REPEAT_INDEX=1
+PBX_REQUIRE_AMR=1
 SIP_AUTH_USERNAME=1001
 SIP_PASSWORD=<redacted>
 SIP_PORT=5060

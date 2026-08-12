@@ -6,7 +6,7 @@
 - transport: TLS
 - role: b2bua
 - codec: pcmu
-- started_at_utc: 2026-08-12T04:39:08Z
+- started_at_utc: 2026-08-12T06:14:57Z
 - output_dir: /Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/b2bua_call/pcmu/TLS
 - log: /Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/b2bua_call/pcmu/TLS/b2bua.log
 

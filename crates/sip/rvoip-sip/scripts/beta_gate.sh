@@ -144,6 +144,7 @@ Environment:
                                   YAML file are supplied for attestation.
   BETA_RUN_PBX=1                 Run examples/pbx/run.sh when PBX configs are present.
   BETA_RUN_LOCAL_PBX=1           Manage ~/Developer/asterisk and ~/Developer/freeswitch sequentially.
+  BETA_RUN_PROXY_PBX=1           Run the Kamailio/OpenSIPS+rtpengine labs (infra/release-runners/pbx). Default: skip.
   BETA_RESTORE_LOCAL_PBX=0       Do not restore the PBX container that was running before the gate.
   BETA_PBX_API                   PBX API subset: endpoint|stream_peer|callback|all. Defaults to all.
   BETA_PBX_SCENARIO              PBX scenario subset. Defaults to all.
@@ -1453,6 +1454,39 @@ run_local_pbx_gate() {
   PBX_RESTORE_ARMED=0
 }
 
+run_local_proxy_pbx_gate() {
+  # Kamailio and OpenSIPS registrar-proxy labs with rtpengine media relay
+  # (infra/release-runners/pbx/{kamailio,opensips}). Opt-in: the labs pull
+  # proxy + rtpengine images and bind host-network SIP/RTP ports, which not
+  # every beta environment can do. The lab up.sh scripts gate readiness on
+  # the registrar answering AND rtpengine being enabled, and write the env
+  # files the harness sources.
+  local lifecycle="$WORKSPACE_ROOT/infra/release-runners/interop-lifecycle.sh"
+  local pbx_output_root="$ARTIFACT_DIR/pbx"
+  local proxy_scenario="${BETA_PROXY_PBX_SCENARIO:-all}"
+  local proxy_api="${BETA_PROXY_PBX_API:-endpoint}"
+
+  if [ ! -f "$lifecycle" ]; then
+    skip_gate "proxy PBX matrix" "interop-lifecycle.sh not found at $lifecycle."
+    return
+  fi
+
+  mkdir -p "$pbx_output_root"
+  local provider
+  for provider in kamailio opensips; do
+    if run_gate "local ${provider} lab up" bash "$lifecycle" "${provider}-up"; then
+      capture_docker_snapshot "after-${provider}-up"
+      run_gate_continue "local ${provider} PBX matrix" \
+        env PBX_OUT_ROOT="$pbx_output_root" \
+        PBX_REPORT_APPEND=1 \
+        "$CRATE_DIR/examples/pbx/run.sh" \
+        --pbx "$provider" --api "$proxy_api" --scenario "$proxy_scenario"
+      capture_docker_snapshot "after-${provider}-matrix"
+    fi
+    run_gate_continue "local ${provider} lab down" bash "$lifecycle" "${provider}-down"
+  done
+}
+
 start_managed_sipp_target() {
   local host="${BETA_SIPP_TARGET_HOST:-127.0.0.1}"
   local port="${BETA_SIPP_TARGET_PORT:-35060}"
@@ -1895,6 +1929,12 @@ run_interop_gates() {
       --scenario "${BETA_PBX_SCENARIO:-all}"
   else
     skip_gate "PBX interop matrix" "Set BETA_RUN_LOCAL_PBX=1 for ~/Developer PBX lifecycle management, or BETA_RUN_PBX=1 after starting PBX containers yourself."
+  fi
+
+  if [ "${BETA_RUN_PROXY_PBX:-0}" = "1" ]; then
+    run_local_proxy_pbx_gate
+  else
+    skip_gate "proxy PBX matrix" "Set BETA_RUN_PROXY_PBX=1 to run the Kamailio/OpenSIPS+rtpengine labs (registration, basic_call, AMR passthrough)."
   fi
 
   run_sipp_standalone_gate

@@ -1,8 +1,9 @@
 # Unified PBX Interop Examples
 
 This directory is the source of truth for `rvoip-sip` PBX interop examples.
-The same scenario code can run against Asterisk or FreeSWITCH and through three
-public API surfaces:
+The same scenario code can run against Asterisk, FreeSWITCH, or the
+registrar-proxy labs (Kamailio and OpenSIPS, each fronting an rtpengine media
+relay) and through three public API surfaces:
 
 - `Endpoint`: simple account/profile API
 - `StreamPeer`: event-stream peer API
@@ -15,10 +16,14 @@ Copy the provider template you need and edit local addresses and credentials:
 ```sh
 cp env/asterisk.env.example env/asterisk.env
 cp env/freeswitch.env.example env/freeswitch.env
+cp env/kamailio.env.example env/kamailio.env      # optional; up.sh writes the live values
+cp env/opensips.env.example env/opensips.env
 ```
 
 `run.sh` also loads `examples/pbx/.env.local` when present. FreeSWITCH runs
-also load `$HOME/Developer/freeswitch/freeswitch-local.env` when present.
+also load `$HOME/Developer/freeswitch/freeswitch-local.env` when present, and
+the proxy providers load `$HOME/Developer/{kamailio,opensips}/*-local.env`,
+which their lab `up.sh` scripts write.
 
 ## Runner
 
@@ -30,7 +35,10 @@ also load `$HOME/Developer/freeswitch/freeswitch-local.env` when present.
 
 Options:
 
-- `--pbx asterisk|freeswitch|both`
+- `--pbx asterisk|freeswitch|both|kamailio|opensips|proxies|all`
+  (`both` deliberately stays Asterisk+FreeSWITCH so existing release matrices
+  are unchanged; `proxies` is the two registrar-proxy labs; `all` is every
+  provider)
 - `--api endpoint|stream_peer|callback|all`
 - `--scenario registration|basic_call|g729_call|amr_call|amr_transcode_call|b2bua_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all`
 
@@ -122,6 +130,43 @@ surfaces:
 Asterisk registered-flow TLS/SRTP is provider-gated: set
 `ASTERISK_TLS_CONTACT_MODE=registered-flow-symmetric` or
 `ASTERISK_TLS_FLOW_REUSE=1` and run the TLS scenarios.
+
+## Registrar-Proxy Labs (Kamailio, OpenSIPS + rtpengine)
+
+`infra/release-runners/pbx/{kamailio,opensips}` bring up a registrar-proxy
+with an rtpengine media relay (`up.sh` / `down.sh`, or
+`infra/release-runners/interop-lifecycle.sh {kamailio,opensips}-{up,down}`).
+These are a different oracle class from the B2BUAs: the proxy stays in the
+signaling path via Record-Route while rtpengine relays RTP **verbatim** — the
+`rtpengine_manage` flags deliberately carry no transcode/codec options, so an
+AMR payload crosses untouched in any framing. That is what the AMR exit
+criterion's "Kamailio+rtpengine" peer proves: our AMR flows through a relay
+that never re-encodes it, in all four framings
+(`amrnb amrwb amrnb_be amrwb_be` — `amr_profile_list` sweeps all four for
+proxies since one config relays them all).
+
+Proxy provider notes:
+
+- v1 scenario set is `registration`, `basic_call`, and `amr_call`; the rest
+  sit behind `PBX_PROXY_ALL_SCENARIOS=1` and `amr_transcode_call` never runs
+  (rtpengine transcoding is out of scope). TLS cells skip (UDP-only labs).
+- The proxy configs **fail closed**: if `rtpengine_manage` cannot reach the
+  relay the INVITE is answered 503 rather than relayed with untouched SDP —
+  otherwise media would flow endpoint-to-endpoint and every media assertion
+  would pass vacuously. The lab `up.sh` readiness gates on the registrar
+  answering AND the rtpengine node being enabled.
+- Because the proxy stays in the path, these labs also exercise Route-set
+  discipline: the 200's Record-Route teaches our UAC its route set and the
+  BYE traverses the proxy (watch `Received command 'delete'` in the
+  rtpengine log — one per call teardown).
+- `PBX_DIAG=1` snapshots `kamcmd ul.dump` / `rtpengine.show all`
+  (`opensips-cli -x mi ul_dump` / `rtpengine_show`) before and after each
+  cell, tails the rtpengine log, and the cell pcap shows the AMR PTs and
+  `a=fmtp` crossing the relay unchanged with only address/port rewritten.
+- Ports: Kamailio SIP 5072 / ng 2223 / RTP 23000-23200 / endpoint bases
+  35070+; OpenSIPS 5074 / 2224 / 23300-23500 / 45070+. All four labs and the
+  sip-proxy interop suite (25070+) can coexist.
+- The beta gate runs these behind `BETA_RUN_PROXY_PBX=1` (default skip).
 
 ## Endpoint Notes
 

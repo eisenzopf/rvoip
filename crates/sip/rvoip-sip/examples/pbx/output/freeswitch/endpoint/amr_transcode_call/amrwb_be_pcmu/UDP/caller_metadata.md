@@ -6,7 +6,7 @@
 - transport: UDP
 - role: caller
 - codec: amrwb_be_pcmu
-- started_at_utc: 2026-08-12T01:58:13Z
+- started_at_utc: 2026-08-12T06:30:24Z
 - output_dir: /Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrwb_be_pcmu/UDP
 - log: /Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrwb_be_pcmu/UDP/caller.log
 
@@ -38,8 +38,13 @@ FREESWITCH_XCODE_UDP_ADDR=192.168.64.2:5064
 PBX_CODEC_PAIRING=amrwb_be_pcmu
 PBX_PROVIDER=freeswitch
 PBX_REPEAT_INDEX=1
+PBX_REQUIRE_AMR=1
+PBX_TRANSPORT=TLS
 RVOIP_ADVERTISED_IP=192.168.64.1
 RVOIP_LOCAL_IP=192.168.64.1
 RVOIP_MEDIA_ADVERTISED_IP=192.168.64.1
+SIP_TRANSPORT=TLS
+TLS_CERT_PATH=/Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/tls/freeswitch/rvoip-freeswitch-listener.pem
 TLS_INSECURE=1
+TLS_KEY_PATH=/Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/tls/freeswitch/rvoip-freeswitch-listener-key.pem
 ```

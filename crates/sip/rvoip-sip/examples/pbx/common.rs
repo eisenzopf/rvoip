@@ -189,6 +189,12 @@ pub const DOMINANCE_RATIO: f32 = 5.0;
 pub enum PbxProvider {
     Asterisk,
     FreeSwitch,
+    /// Kamailio registrar-proxy with rtpengine relaying media
+    /// (infra/release-runners/pbx/kamailio). A proxy, not a B2BUA: it routes
+    /// by registered contact and rtpengine forwards payloads verbatim.
+    Kamailio,
+    /// OpenSIPS sibling of the Kamailio lab.
+    OpenSips,
 }
 
 impl PbxProvider {
@@ -209,6 +215,8 @@ impl PbxProvider {
         }
         match value.trim().to_ascii_lowercase().as_str() {
             "asterisk" | "ast" => Ok(Self::Asterisk),
+            "kamailio" | "kam" => Ok(Self::Kamailio),
+            "opensips" | "open-sips" | "osips" => Ok(Self::OpenSips),
             "freeswitch" | "free-switch" | "fs" => Ok(Self::FreeSwitch),
             other => Err(format!("unknown PBX provider '{}'", other).into()),
         }
@@ -218,6 +226,8 @@ impl PbxProvider {
         match self {
             Self::Asterisk => "asterisk",
             Self::FreeSwitch => "freeswitch",
+            Self::Kamailio => "kamailio",
+            Self::OpenSips => "opensips",
         }
     }
 
@@ -225,6 +235,8 @@ impl PbxProvider {
         match self {
             Self::Asterisk => "Asterisk",
             Self::FreeSwitch => "FreeSWITCH",
+            Self::Kamailio => "Kamailio",
+            Self::OpenSips => "OpenSIPS",
         }
     }
 
@@ -232,6 +244,8 @@ impl PbxProvider {
         match self {
             Self::Asterisk => 5,
             Self::FreeSwitch => 2,
+            // usrloc writes are synchronous and in-memory; nothing to settle.
+            Self::Kamailio | Self::OpenSips => 1,
         }
     }
 
@@ -239,6 +253,7 @@ impl PbxProvider {
         match self {
             Self::Asterisk => 8,
             Self::FreeSwitch => 4,
+            Self::Kamailio | Self::OpenSips => 4,
         }
     }
 
@@ -246,6 +261,8 @@ impl PbxProvider {
         match self {
             Self::Asterisk => env_bool("ASTERISK_EXPECT_TARGET_CANCEL", false).unwrap_or(false),
             Self::FreeSwitch => true,
+            // A proxy relays CANCEL verbatim.
+            Self::Kamailio | Self::OpenSips => true,
         }
     }
 }
@@ -659,6 +676,10 @@ impl TlsContactMode {
         let key = match provider {
             PbxProvider::Asterisk => "ASTERISK_TLS_CONTACT_MODE",
             PbxProvider::FreeSwitch => "FREESWITCH_TLS_CONTACT_MODE",
+            // TLS is not wired for the proxy labs yet; the arms exist so the
+            // match stays exhaustive and the key is ready when it is.
+            PbxProvider::Kamailio => "KAMAILIO_TLS_CONTACT_MODE",
+            PbxProvider::OpenSips => "OPENSIPS_TLS_CONTACT_MODE",
         };
         match env_string(key, "reachable-contact")
             .trim()
@@ -756,6 +777,32 @@ impl EndpointConfig {
                 };
                 split_host_port(&env_string(addr_key, default_addr))?
             }
+            PbxProvider::Kamailio => {
+                let addr_key = if transport.is_tls() {
+                    "KAMAILIO_TLS_ADDR"
+                } else {
+                    "KAMAILIO_UDP_ADDR"
+                };
+                let default_addr = if transport.is_tls() {
+                    "127.0.0.1:5073"
+                } else {
+                    "127.0.0.1:5072"
+                };
+                split_host_port(&env_string(addr_key, default_addr))?
+            }
+            PbxProvider::OpenSips => {
+                let addr_key = if transport.is_tls() {
+                    "OPENSIPS_TLS_ADDR"
+                } else {
+                    "OPENSIPS_UDP_ADDR"
+                };
+                let default_addr = if transport.is_tls() {
+                    "127.0.0.1:5075"
+                } else {
+                    "127.0.0.1:5074"
+                };
+                split_host_port(&env_string(addr_key, default_addr))?
+            }
         };
         let auth_username = auth_username_for(&prefix, username);
         let password = match provider {
@@ -766,13 +813,25 @@ impl EndpointConfig {
                 .or_else(|_| std::env::var("FREESWITCH_PASSWORD"))
                 .or_else(|_| std::env::var("SIP_PASSWORD"))
                 .unwrap_or_else(|_| "1234".to_string()),
+            // The proxy labs run an accept-all registrar; the password is
+            // carried but never challenged for.
+            PbxProvider::Kamailio => std::env::var(format!("{}_PASSWORD", prefix))
+                .or_else(|_| std::env::var("KAMAILIO_PASSWORD"))
+                .or_else(|_| std::env::var("SIP_PASSWORD"))
+                .unwrap_or_else(|_| "password123".to_string()),
+            PbxProvider::OpenSips => std::env::var(format!("{}_PASSWORD", prefix))
+                .or_else(|_| std::env::var("OPENSIPS_PASSWORD"))
+                .or_else(|_| std::env::var("SIP_PASSWORD"))
+                .unwrap_or_else(|_| "password123".to_string()),
         };
         let local_ip: IpAddr = match provider {
             PbxProvider::Asterisk => env_string("LOCAL_IP", "0.0.0.0").parse()?,
-            PbxProvider::FreeSwitch => std::env::var("RVOIP_LOCAL_IP")
-                .or_else(|_| std::env::var("LOCAL_IP"))
-                .unwrap_or_else(|_| "127.0.0.1".to_string())
-                .parse()?,
+            PbxProvider::FreeSwitch | PbxProvider::Kamailio | PbxProvider::OpenSips => {
+                std::env::var("RVOIP_LOCAL_IP")
+                    .or_else(|_| std::env::var("LOCAL_IP"))
+                    .unwrap_or_else(|_| "127.0.0.1".to_string())
+                    .parse()?
+            }
         };
         let advertised_ip = advertised_ip(provider, local_ip)?;
         let media_advertised_ip = media_advertised_ip(provider, advertised_ip)?;
@@ -908,6 +967,10 @@ impl EndpointConfig {
                 &self.username,
                 SocketAddr::new(self.local_ip, self.local_port),
             ),
+            // Plain config: the proxies impose no FreeSWITCH-shaped quirks.
+            PbxProvider::Kamailio | PbxProvider::OpenSips => {
+                Config::on(&self.username, self.local_ip, self.local_port)
+            }
         };
         config.local_uri = self.aor_uri();
         config.contact_uri = Some(self.contact_uri());
@@ -965,6 +1028,8 @@ impl EndpointConfig {
         config.srtp_required = match self.provider {
             PbxProvider::Asterisk => env_bool("ASTERISK_TLS_SRTP_REQUIRED", true)?,
             PbxProvider::FreeSwitch => env_bool("FREESWITCH_TLS_SRTP_REQUIRED", true)?,
+            PbxProvider::Kamailio => env_bool("KAMAILIO_TLS_SRTP_REQUIRED", true)?,
+            PbxProvider::OpenSips => env_bool("OPENSIPS_TLS_SRTP_REQUIRED", true)?,
         };
         if self.provider == PbxProvider::FreeSwitch {
             config = config.with_srtp_suite_policy(SrtpSuitePolicy::FreeSwitchCompatible);
@@ -1242,6 +1307,22 @@ pub fn load_env(provider: PbxProvider) {
                         .join("Developer")
                         .join("freeswitch")
                         .join("freeswitch-local.env"),
+                );
+            }
+            PbxProvider::Kamailio => {
+                let _ = dotenvy::from_filename(
+                    Path::new(&home)
+                        .join("Developer")
+                        .join("kamailio")
+                        .join("kamailio-local.env"),
+                );
+            }
+            PbxProvider::OpenSips => {
+                let _ = dotenvy::from_filename(
+                    Path::new(&home)
+                        .join("Developer")
+                        .join("opensips")
+                        .join("opensips-local.env"),
                 );
             }
         }
@@ -5457,6 +5538,11 @@ fn endpoint_defaults(
     let base = match provider {
         PbxProvider::Asterisk => 0,
         PbxProvider::FreeSwitch => 10_000,
+        // 30k/40k, not 20k: 5070+20_000 = 25070 is the sip-proxy interop
+        // suite's peer port, and its 25xxx block must stay clear so both
+        // suites can run side by side (pinned by a unit test below).
+        PbxProvider::Kamailio => 30_000,
+        PbxProvider::OpenSips => 40_000,
     };
     match (transport, username) {
         (TransportMode::TlsSrtp, "1001") => EndpointDefaults {
@@ -5526,6 +5612,8 @@ async fn settle_after_register(provider: PbxProvider) {
     let secs = std::env::var(match provider {
         PbxProvider::Asterisk => "ASTERISK_POST_REGISTER_SETTLE_SECS",
         PbxProvider::FreeSwitch => "FREESWITCH_POST_REGISTER_SETTLE_SECS",
+        PbxProvider::Kamailio => "KAMAILIO_POST_REGISTER_SETTLE_SECS",
+        PbxProvider::OpenSips => "OPENSIPS_POST_REGISTER_SETTLE_SECS",
     })
     .or_else(|_| std::env::var("POST_REGISTER_SETTLE_SECS"))
     .ok()
@@ -5544,6 +5632,8 @@ fn remote_test_timeout(provider: PbxProvider) -> ExampleResult<Duration> {
     let key = match provider {
         PbxProvider::Asterisk => "ASTERISK_TEST_TIMEOUT_SECS",
         PbxProvider::FreeSwitch => "FREESWITCH_TEST_TIMEOUT_SECS",
+        PbxProvider::Kamailio => "KAMAILIO_TEST_TIMEOUT_SECS",
+        PbxProvider::OpenSips => "OPENSIPS_TEST_TIMEOUT_SECS",
     };
     let secs = std::env::var(key)
         .or_else(|_| std::env::var("REMOTE_TEST_TIMEOUT_SECS"))
@@ -5556,10 +5646,14 @@ fn transfer_settle_duration(provider: PbxProvider, transport: TransportMode) -> 
     let key = match provider {
         PbxProvider::Asterisk => "ASTERISK_TRANSFER_SETTLE_SECS",
         PbxProvider::FreeSwitch => "FREESWITCH_TRANSFER_SETTLE_SECS",
+        PbxProvider::Kamailio => "KAMAILIO_TRANSFER_SETTLE_SECS",
+        PbxProvider::OpenSips => "OPENSIPS_TRANSFER_SETTLE_SECS",
     };
     let tls_key = match provider {
         PbxProvider::Asterisk => "ASTERISK_TLS_TRANSFER_SETTLE_SECS",
         PbxProvider::FreeSwitch => "FREESWITCH_TLS_TRANSFER_SETTLE_SECS",
+        PbxProvider::Kamailio => "KAMAILIO_TLS_TRANSFER_SETTLE_SECS",
+        PbxProvider::OpenSips => "OPENSIPS_TLS_TRANSFER_SETTLE_SECS",
     };
     if transport.is_tls() {
         if let Some(duration) = optional_env_duration_secs(tls_key) {
@@ -5577,6 +5671,8 @@ fn call_retry_attempts(provider: PbxProvider) -> usize {
     let key = match provider {
         PbxProvider::Asterisk => "ASTERISK_CALL_RETRY_ATTEMPTS",
         PbxProvider::FreeSwitch => "FREESWITCH_CALL_RETRY_ATTEMPTS",
+        PbxProvider::Kamailio => "KAMAILIO_CALL_RETRY_ATTEMPTS",
+        PbxProvider::OpenSips => "OPENSIPS_CALL_RETRY_ATTEMPTS",
     };
     std::env::var(key)
         .ok()
@@ -5588,6 +5684,8 @@ fn remote_test_digits(provider: PbxProvider) -> Vec<char> {
     let key = match provider {
         PbxProvider::Asterisk => "ASTERISK_TEST_DIGITS",
         PbxProvider::FreeSwitch => "FREESWITCH_TEST_DIGITS",
+        PbxProvider::Kamailio => "KAMAILIO_TEST_DIGITS",
+        PbxProvider::OpenSips => "OPENSIPS_TEST_DIGITS",
     };
     std::env::var(key)
         .or_else(|_| std::env::var("REMOTE_TEST_DIGITS"))
@@ -5798,7 +5896,7 @@ async fn stop_recv_task(task: JoinHandle<()>) {
 fn advertised_ip(provider: PbxProvider, local_ip: IpAddr) -> ExampleResult<IpAddr> {
     let value = match provider {
         PbxProvider::Asterisk => std::env::var("ADVERTISED_IP"),
-        PbxProvider::FreeSwitch => {
+        PbxProvider::FreeSwitch | PbxProvider::Kamailio | PbxProvider::OpenSips => {
             std::env::var("RVOIP_ADVERTISED_IP").or_else(|_| std::env::var("ADVERTISED_IP"))
         }
     };
@@ -5812,8 +5910,10 @@ fn advertised_ip(provider: PbxProvider, local_ip: IpAddr) -> ExampleResult<IpAdd
 fn media_advertised_ip(provider: PbxProvider, advertised_ip: IpAddr) -> ExampleResult<IpAddr> {
     let value = match provider {
         PbxProvider::Asterisk => std::env::var("MEDIA_ADVERTISED_IP"),
-        PbxProvider::FreeSwitch => std::env::var("RVOIP_MEDIA_ADVERTISED_IP")
-            .or_else(|_| std::env::var("MEDIA_ADVERTISED_IP")),
+        PbxProvider::FreeSwitch | PbxProvider::Kamailio | PbxProvider::OpenSips => {
+            std::env::var("RVOIP_MEDIA_ADVERTISED_IP")
+                .or_else(|_| std::env::var("MEDIA_ADVERTISED_IP"))
+        }
     };
     match value {
         Ok(value) if !value.trim().is_empty() => Ok(value.parse()?),
@@ -6018,6 +6118,24 @@ mod tests {
         let tls = endpoint_defaults(PbxProvider::FreeSwitch, "1001", TransportMode::TlsSrtp);
         assert_eq!(tls.local_port, 15070);
         assert_eq!(tls.tls_local_port, Some(15071));
+    }
+
+    /// The proxy providers' port bases must clear the sip-proxy interop
+    /// suite's 25xxx block (peer port 25070, egress 25071+): a 20_000 base
+    /// would collide exactly, which is why these are 30k/40k.
+    #[test]
+    fn proxy_provider_ports_avoid_the_sip_proxy_interop_block() {
+        for (provider, expected_udp) in [
+            (PbxProvider::Kamailio, 35080),
+            (PbxProvider::OpenSips, 45080),
+        ] {
+            let udp = endpoint_defaults(provider, "2001", TransportMode::Udp);
+            assert_eq!(udp.local_port, expected_udp);
+            assert!(
+                !(25_000..26_000).contains(&udp.local_port),
+                "{provider:?} collides with the sip-proxy interop port block"
+            );
+        }
     }
 
     #[test]

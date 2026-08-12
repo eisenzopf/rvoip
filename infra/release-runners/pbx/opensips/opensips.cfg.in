@@ -1,0 +1,133 @@
+# OpenSIPS registrar-proxy for the rvoip PBX interop harness.
+# Rendered by up.sh: __PUBLIC_HOST__, __SIP_PORT__, __RTPENGINE_SOCK__.
+#
+# The OpenSIPS sibling of kamailio.cfg.in — same shape, its module's flag
+# spellings: accept-all REGISTER into memory usrloc, route by location,
+# rtpengine relays media with NO transcode/codec flags so AMR passes
+# verbatim in any framing.
+
+log_level=2
+stderror_enabled=yes
+syslog_enabled=no
+udp_workers=2
+
+socket=udp:0.0.0.0:__SIP_PORT__ as __PUBLIC_HOST__:__SIP_PORT__
+
+mpath="/usr/lib/x86_64-linux-gnu/opensips/modules/"
+
+loadmodule "proto_udp.so"
+# MI FIFO backs opensips-cli: the image healthcheck, up.sh's readiness
+# probe, and the harness diag snapshots (ul_dump) all go through it.
+loadmodule "mi_fifo.so"
+loadmodule "tm.so"
+loadmodule "sl.so"
+loadmodule "rr.so"
+loadmodule "maxfwd.so"
+loadmodule "signaling.so"
+loadmodule "sipmsgops.so"
+loadmodule "usrloc.so"
+loadmodule "registrar.so"
+loadmodule "rtpengine.so"
+
+modparam("mi_fifo", "fifo_name", "/tmp/opensips_fifo")
+modparam("usrloc", "db_mode", 0)
+modparam("usrloc", "use_domain", 0)
+modparam("rtpengine", "rtpengine_sock", "__RTPENGINE_SOCK__")
+# Retry a briefly-unreachable rtpengine after 5s, not the 60s default:
+# at lab startup the proxy can ping before rtpengine binds its ng socket,
+# and a disabled relay makes the SDP guard 503 every call for a minute.
+modparam("rtpengine", "rtpengine_disable_tout", 5)
+
+route {
+    if (!mf_process_maxfwd_header(10)) {
+        send_reply(483, "Too Many Hops");
+        exit;
+    }
+
+    if (is_method("CANCEL")) {
+        if (t_check_trans()) {
+            t_relay();
+        }
+        exit;
+    }
+
+    if (has_totag()) {
+        if (loose_route()) {
+            if (is_method("INVITE|UPDATE") && has_body("application/sdp")) {
+                # A failed rtpengine_manage MUST fail the request: continuing
+                # would relay the SDP untouched and the endpoints would talk
+                # directly, making every media assertion vacuously green.
+                if (!rtpengine_manage("replace-origin replace-session-connection")) {
+                    send_reply(503, "Media Relay Unavailable");
+                    exit;
+                }
+            }
+            if (is_method("BYE")) {
+                rtpengine_delete();
+            }
+            t_on_reply("manage_reply");
+            t_relay();
+            exit;
+        }
+        if (is_method("ACK")) {
+            if (t_check_trans()) {
+                t_relay();
+            }
+            exit;
+        }
+        send_reply(404, "Not Here");
+        exit;
+    }
+
+    if (t_check_trans()) {
+        exit;
+    }
+
+    if (is_method("REGISTER")) {
+        if (!save("location")) {
+            sl_reply_error();
+        }
+        exit;
+    }
+
+    if (is_method("INVITE")) {
+        record_route();
+        if (!lookup("location")) {
+            send_reply(404, "Not Found");
+            exit;
+        }
+        if (has_body("application/sdp")) {
+            # Fail loudly if rtpengine is down (see the loose_route branch).
+            if (!rtpengine_manage("replace-origin replace-session-connection")) {
+                send_reply(503, "Media Relay Unavailable");
+                exit;
+            }
+        }
+        t_on_reply("manage_reply");
+        t_on_failure("manage_failure");
+        t_relay();
+        exit;
+    }
+
+    if (!lookup("location")) {
+        send_reply(404, "Not Found");
+        exit;
+    }
+    record_route();
+    t_relay();
+}
+
+onreply_route[manage_reply] {
+    if ($rs =~ "18[03]|2[0-9][0-9]") {
+        if (has_body("application/sdp")) {
+            rtpengine_manage("replace-origin replace-session-connection");
+        }
+    }
+}
+
+failure_route[manage_failure] {
+    if (t_was_cancelled()) {
+        exit;
+    }
+    rtpengine_delete();
+}

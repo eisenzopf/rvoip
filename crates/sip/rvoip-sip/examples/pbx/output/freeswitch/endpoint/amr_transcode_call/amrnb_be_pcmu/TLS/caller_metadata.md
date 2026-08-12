@@ -6,7 +6,7 @@
 - transport: TLS
 - role: caller
 - codec: amrnb_be_pcmu
-- started_at_utc: 2026-08-12T02:05:55Z
+- started_at_utc: 2026-08-12T06:30:18Z
 - output_dir: /Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrnb_be_pcmu/TLS
 - log: /Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrnb_be_pcmu/TLS/caller.log
 
@@ -38,6 +38,7 @@ FREESWITCH_XCODE_UDP_ADDR=192.168.64.2:5064
 PBX_CODEC_PAIRING=amrnb_be_pcmu
 PBX_PROVIDER=freeswitch
 PBX_REPEAT_INDEX=1
+PBX_REQUIRE_AMR=1
 PBX_TRANSPORT=TLS
 RVOIP_ADVERTISED_IP=192.168.64.1
 RVOIP_LOCAL_IP=192.168.64.1

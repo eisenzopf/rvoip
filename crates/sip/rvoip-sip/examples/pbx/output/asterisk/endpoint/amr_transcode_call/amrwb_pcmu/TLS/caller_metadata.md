@@ -6,7 +6,7 @@
 - transport: TLS
 - role: caller
 - codec: amrwb_pcmu
-- started_at_utc: 2026-08-12T02:05:01Z
+- started_at_utc: 2026-08-12T06:14:39Z
 - output_dir: /Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrwb_pcmu/TLS
 - log: /Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrwb_pcmu/TLS/caller.log
 
@@ -26,6 +26,7 @@ IDLE_SECS=30
 PBX_CODEC_PAIRING=amrwb_pcmu
 PBX_PROVIDER=asterisk
 PBX_REPEAT_INDEX=1
+PBX_REQUIRE_AMR=1
 PBX_TRANSPORT=TLS
 SIP_AUTH_USERNAME=1001
 SIP_PASSWORD=<redacted>

@@ -492,11 +492,10 @@ survive the two parameters the lag and the codebook consume in between.
    interop section. Both PBXes, both variants, tone verified; benchmarks per
    rate with a real-time-factor gate.
 
-4. **The relay path's exit criterion** is still only half met. Both tiers now
-   exist — foreign PBXes relay our AMR (tier 1) and transcode it with their
-   own AMR implementations (tier 2) — but **rvoip has not been the relaying
-   B2BUA in the middle**, and no run has yet observed a mid-call mode switch
-   on the wire. Kamailio+rtpengine is untried.
+4. ~~**The relay path's exit criterion.**~~ Met in full: rvoip as the
+   relaying B2BUA (Asterisk OA + FreeSWITCH BE, UDP and TLS+SRTP), the
+   mid-call mode switch observed on the wire, and the proxy tier — Kamailio
+   and OpenSIPS with rtpengine relaying all four AMR framings verbatim.
 
 5. **Live DTX and CMR.** Both are implemented and unit-tested, and both are
    structurally off on every live call: the `amr_dtx` MediaConfig key is set
@@ -642,9 +641,10 @@ where we actually are.
 | 8 | Transcoding, interop, performance, hardening | 🟢 **Transcoding, both PBXes, and a real-time-factor gate**; soak and encoder fuzzing not started |
 
 Of the codec proper, nothing is missing: DTX, comfort noise, concealment and
-homing are all in and checked against the normative sequences. What is left is
-around it — rvoip as the relaying B2BUA, a mid-call mode switch observed on the
-wire, a soak test, and a fuzz target for the encoders.
+homing are all in and checked against the normative sequences. The relay-path
+exit criterion is met in full (rvoip as the relaying B2BUA, the mid-call mode
+switch on the wire, and the Kamailio/OpenSIPS+rtpengine proxy tier). What is
+left around the codec: a soak test and a fuzz target for the encoders.
 
 ---
 
@@ -1740,7 +1740,31 @@ rvoip bridging two live legs.
         run fails deterministically and correctly: FS answers `mode-set=8`,
         making any CMR unsatisfiable on that leg, and our endpoint declines
         it per RFC 4867 §3.4.1 — the negative path, exercised live.
-  - [ ] Kamailio+rtpengine (no such lab yet; separate track).
+  - [x] **Kamailio+rtpengine and OpenSIPS+rtpengine** (2026-08-12): committed
+        labs under `infra/release-runners/pbx/{kamailio,opensips}` — a
+        registrar-proxy in the signaling path (Record-Route) with rtpengine
+        relaying media in userspace (`table=-1`) and **no transcode flags**.
+        `amr_call` sweeps all four framings (`amrnb amrwb amrnb_be amrwb_be`)
+        against each proxy, tone-verified at both ends under the quality
+        gate. Passthrough is proven three ways: the cell pcap shows the AMR
+        PT and `a=fmtp` (octet-align, mode-set) crossing the relay unchanged
+        with only address/port rewritten; the rtpengine log carries zero
+        transcoding lines; and both endpoints latch on rtpengine's ports, so
+        the media demonstrably traversed it. The configs **fail closed** — a
+        dead relay 503s the INVITE instead of relaying SDP untouched, which
+        is what made the first (vacuous) green run detectable and is now the
+        guard against it recurring.
+
+        Getting here surfaced a real stack bug the B2BUA labs could never
+        see: neither our UAC nor our UAS ever **learned the route set** (RFC
+        3261 §12.1.1/§12.1.2), so every in-dialog request (BYE, re-INVITE)
+        bypassed record-routing proxies and went straight to the peer
+        Contact. Fixed in `sip-dialog` (UAC learns from the dialog-forming
+        2xx's Record-Route reversed, UAS from the request's in order, both
+        preserving URI parameters; `create_response` now echoes
+        Record-Route), pinned by unit tests and by the wire: the BYE now
+        carries the Route header through the proxy and rtpengine receives
+        one `delete` per call teardown.
 
 ---
 

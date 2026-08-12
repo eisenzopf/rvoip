@@ -1,32 +1,132 @@
 + git -C /Users/jonathan/Developer/rvoip status --short
+ M crates/media/codec-core/docs/AMR_IMPLEMENTATION_STATUS.md
+ M crates/sip/rvoip-sip/examples/pbx/README.md
+ M crates/sip/rvoip-sip/examples/pbx/common.rs
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrnb/TLS/callee_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrnb/TLS/caller_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrnb/UDP/callee_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrnb/UDP/caller_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrnb/UDP/repeat-001/callee_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrnb/UDP/repeat-001/caller_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrnb/UDP/repeat-002/callee_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrnb/UDP/repeat-002/caller_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrnb/UDP/repeat-003/callee_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrnb/UDP/repeat-003/caller_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrwb/UDP/callee_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrwb/UDP/caller_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrnb_pcmu/TLS/callee_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrnb_pcmu/TLS/caller_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrnb_pcmu/UDP/callee_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrnb_pcmu/UDP/caller_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrnb_pcmu/UDP/repeat-001/callee_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrnb_pcmu/UDP/repeat-001/caller_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrnb_pcmu/UDP/repeat-002/callee_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrnb_pcmu/UDP/repeat-002/caller_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrnb_pcmu/UDP/repeat-003/callee_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrnb_pcmu/UDP/repeat-003/caller_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrwb_pcmu/TLS/callee_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrwb_pcmu/TLS/caller_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrwb_pcmu/UDP/callee_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrwb_pcmu/UDP/caller_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrwb_pcmu/UDP/repeat-001/callee_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrwb_pcmu/UDP/repeat-001/caller_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrwb_pcmu/UDP/repeat-002/callee_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrwb_pcmu/UDP/repeat-002/caller_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrwb_pcmu/UDP/repeat-003/callee_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrwb_pcmu/UDP/repeat-003/caller_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/b2bua_call/amrwb/TLS/b2bua_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/b2bua_call/amrwb/TLS/caller_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/b2bua_call/amrwb/TLS/target_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/b2bua_call/amrwb/UDP/b2bua_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/b2bua_call/amrwb/UDP/caller_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/b2bua_call/amrwb/UDP/target_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/b2bua_call/pcmu/TLS/b2bua_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/b2bua_call/pcmu/TLS/caller_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/b2bua_call/pcmu/TLS/target_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/b2bua_call/pcmu/UDP/b2bua_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/b2bua_call/pcmu/UDP/caller_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/b2bua_call/pcmu/UDP/target_metadata.md
  M crates/sip/rvoip-sip/examples/pbx/output/environment-asterisk.md
  M crates/sip/rvoip-sip/examples/pbx/output/environment-freeswitch.md
+ M crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_call/amrnb_be/TLS/callee_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_call/amrnb_be/TLS/caller_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_call/amrnb_be/UDP/callee_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_call/amrnb_be/UDP/caller_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_call/amrnb_be/UDP/repeat-001/callee_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_call/amrnb_be/UDP/repeat-001/caller_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_call/amrnb_be/UDP/repeat-002/callee_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_call/amrnb_be/UDP/repeat-002/caller_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_call/amrnb_be/UDP/repeat-003/callee_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_call/amrnb_be/UDP/repeat-003/caller_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrnb_be_pcmu/TLS/callee_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrnb_be_pcmu/TLS/caller_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrnb_be_pcmu/UDP/callee_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrnb_be_pcmu/UDP/caller_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrnb_be_pcmu/UDP/repeat-001/callee_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrnb_be_pcmu/UDP/repeat-001/caller_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrnb_be_pcmu/UDP/repeat-002/callee_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrnb_be_pcmu/UDP/repeat-002/caller_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrnb_be_pcmu/UDP/repeat-003/callee_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrnb_be_pcmu/UDP/repeat-003/caller_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrwb_be_pcmu/TLS/callee_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrwb_be_pcmu/TLS/caller_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrwb_be_pcmu/UDP/callee_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrwb_be_pcmu/UDP/caller_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrwb_be_pcmu/UDP/repeat-001/callee_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrwb_be_pcmu/UDP/repeat-001/caller_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrwb_be_pcmu/UDP/repeat-002/callee_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrwb_be_pcmu/UDP/repeat-002/caller_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrwb_be_pcmu/UDP/repeat-003/callee_metadata.md
+ D crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrwb_be_pcmu/UDP/repeat-003/caller_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/b2bua_call/amrwb_be/UDP/b2bua_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/b2bua_call/amrwb_be/UDP/caller_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/b2bua_call/amrwb_be/UDP/target_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/b2bua_call/pcmu/UDP/b2bua_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/b2bua_call/pcmu/UDP/caller_metadata.md
+ M crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/b2bua_call/pcmu/UDP/target_metadata.md
  M crates/sip/rvoip-sip/examples/pbx/output/git-status.txt
  M crates/sip/rvoip-sip/examples/pbx/output/matrix.tsv
  M crates/sip/rvoip-sip/examples/pbx/output/summary.md
+ M crates/sip/rvoip-sip/examples/pbx/output/tls-prewarm.tsv
  M crates/sip/rvoip-sip/examples/pbx/run.sh
+ M crates/sip/rvoip-sip/scripts/beta_gate.sh
+ M docs/GAP_PLAN.md
+ M infra/release-runners/interop-lifecycle.sh
+?? ROADMAP.md
+?? crates/sip/rvoip-sip/examples/pbx/env/asterisk.env
 ?? crates/sip/rvoip-sip/examples/pbx/env/freeswitch.env
-?? crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrnb/TLS/
-?? crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrnb/UDP/repeat-001/
-?? crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrnb/UDP/repeat-002/
-?? crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_call/amrnb/UDP/repeat-003/
-?? crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrnb_pcmu/TLS/
-?? crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrnb_pcmu/UDP/repeat-001/
-?? crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrnb_pcmu/UDP/repeat-002/
-?? crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrnb_pcmu/UDP/repeat-003/
-?? crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrwb_pcmu/TLS/
-?? crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrwb_pcmu/UDP/repeat-001/
-?? crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrwb_pcmu/UDP/repeat-002/
-?? crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/amr_transcode_call/amrwb_pcmu/UDP/repeat-003/
-?? crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_call/amrnb/
-?? crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_call/amrnb_be/TLS/
-?? crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_call/amrnb_be/UDP/repeat-001/
-?? crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_call/amrnb_be/UDP/repeat-002/
-?? crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_call/amrnb_be/UDP/repeat-003/
-?? crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrnb_be_pcmu/UDP/repeat-001/
-?? crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrnb_be_pcmu/UDP/repeat-002/
-?? crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrnb_be_pcmu/UDP/repeat-003/
-?? crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrwb_be_pcmu/UDP/repeat-001/
-?? crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrwb_be_pcmu/UDP/repeat-002/
-?? crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrwb_be_pcmu/UDP/repeat-003/
-?? crates/sip/rvoip-sip/examples/pbx/output/tls/
+?? crates/sip/rvoip-sip/examples/pbx/env/kamailio.env.example
+?? crates/sip/rvoip-sip/examples/pbx/env/opensips.env.example
+?? crates/sip/rvoip-sip/examples/pbx/output/asterisk/amr-probe.txt
+?? crates/sip/rvoip-sip/examples/pbx/output/asterisk/callback/
+?? crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/basic_call/
+?? crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/blind_transfer/
+?? crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/dtmf/
+?? crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/g729_call/
+?? crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/hold_resume/
+?? crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/registration/TLS/registration_metadata.md
+?? crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/registration/UDP/
+?? crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/reject/
+?? crates/sip/rvoip-sip/examples/pbx/output/asterisk/endpoint/ring_cancel/
+?? crates/sip/rvoip-sip/examples/pbx/output/asterisk/stream_peer/
+?? crates/sip/rvoip-sip/examples/pbx/output/environment-kamailio.md
+?? crates/sip/rvoip-sip/examples/pbx/output/environment-opensips.md
+?? crates/sip/rvoip-sip/examples/pbx/output/environment-proxies.md
+?? crates/sip/rvoip-sip/examples/pbx/output/freeswitch/amr-probe.txt
+?? crates/sip/rvoip-sip/examples/pbx/output/freeswitch/callback/
+?? crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/b2bua_call/amrwb_be/TLS/
+?? crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/b2bua_call/pcmu/TLS/
+?? crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/basic_call/
+?? crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/blind_transfer/
+?? crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/dtmf/
+?? crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/g729_call/
+?? crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/hold_resume/
+?? crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/registration/TLS/registration_metadata.md
+?? crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/registration/UDP/
+?? crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/reject/
+?? crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/ring_cancel/
+?? crates/sip/rvoip-sip/examples/pbx/output/freeswitch/stream_peer/
+?? crates/sip/rvoip-sip/examples/pbx/output/kamailio/
+?? crates/sip/rvoip-sip/examples/pbx/output/opensips/
+?? infra/release-runners/pbx/kamailio/
+?? infra/release-runners/pbx/opensips/

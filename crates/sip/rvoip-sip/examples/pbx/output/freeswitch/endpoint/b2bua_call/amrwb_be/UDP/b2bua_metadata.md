@@ -6,7 +6,7 @@
 - transport: UDP
 - role: b2bua
 - codec: amrwb_be
-- started_at_utc: 2026-08-12T04:36:44Z
+- started_at_utc: 2026-08-12T06:30:48Z
 - output_dir: /Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/b2bua_call/amrwb_be/UDP
 - log: /Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/b2bua_call/amrwb_be/UDP/b2bua.log
 
@@ -39,8 +39,12 @@ PBX_CODEC_PROFILE=amrwb_be
 PBX_PROVIDER=freeswitch
 PBX_REPEAT_INDEX=1
 PBX_REQUIRE_AMR=1
+PBX_TRANSPORT=TLS
 RVOIP_ADVERTISED_IP=192.168.64.1
 RVOIP_LOCAL_IP=192.168.64.1
 RVOIP_MEDIA_ADVERTISED_IP=192.168.64.1
+SIP_TRANSPORT=TLS
+TLS_CERT_PATH=/Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/tls/freeswitch/rvoip-freeswitch-listener.pem
 TLS_INSECURE=1
+TLS_KEY_PATH=/Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/tls/freeswitch/rvoip-freeswitch-listener-key.pem
 ```

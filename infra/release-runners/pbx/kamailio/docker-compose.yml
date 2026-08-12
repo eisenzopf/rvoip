@@ -1,0 +1,49 @@
+# Kamailio as a registrar-proxy with rtpengine relaying the media — the
+# "Kamailio+rtpengine" peer the AMR plan's exit criterion names.
+#
+# Host networking on purpose: rtpengine allocates RTP ports dynamically, and
+# publishing a range through docker's userland proxy is both slow and a
+# second NAT to reason about. On colima the services bind the VM's routable
+# address (192.168.64.x with `colima start --network-address`); on a Linux
+# runner they bind the host directly.
+#
+# Image digests: kamailio matches the sip-proxy interop suite
+# (crates/sip/sip-proxy/tests/interop/scripts/common.sh) — keep them in sync.
+# rtpengine is run-only GPL, same posture as the Asterisk/FreeSWITCH
+# containers; its config below is ours.
+services:
+  rtpengine:
+    image: ${RTPENGINE_IMAGE:-drachtio/rtpengine@sha256:d5bf3715baa197d89f89a70207d06d5509a4284b7392310a94a466ace07afb96}
+    platform: linux/amd64
+    container_name: rvoip-rtpengine-kamailio
+    init: true
+    network_mode: host
+    entrypoint: ["rtpengine"]
+    # CLI flags rather than --config-file: this image's rtpengine exits 255
+    # with no output on any --config-file invocation (even /dev/null), while
+    # the same options as flags work. table=-1 forces userspace forwarding
+    # (no kernel module in the colima VM or on the runners); there are NO
+    # transcoding flags, so payloads -- AMR in any framing included -- are
+    # forwarded verbatim.
+    command:
+      - "--interface=${RTPENGINE_INTERFACE:?run up.sh, which resolves the public host}"
+      - "--listen-ng=127.0.0.1:2223"
+      - "--port-min=23000"
+      - "--port-max=23200"
+      - "--table=-1"
+      - "--foreground"
+      - "--log-stderr"
+      - "--log-level=6"
+
+  kamailio:
+    image: ${KAMAILIO_IMAGE:-ghcr.io/kamailio/kamailio:6.1.3-bookworm@sha256:26b26c61801d679ffbe54ea3597c38964a46c4bfe60fb6537c7eeacc576b0c92}
+    platform: linux/amd64
+    container_name: rvoip-kamailio
+    init: true
+    network_mode: host
+    entrypoint: ["/usr/sbin/kamailio"]
+    command: ["-DD", "-E", "-f", "/etc/kamailio/kamailio.cfg"]
+    volumes:
+      - ${KAMAILIO_RENDERED_CFG:?run up.sh, which renders kamailio.cfg.in}:/etc/kamailio/kamailio.cfg:ro
+    depends_on:
+      - rtpengine
