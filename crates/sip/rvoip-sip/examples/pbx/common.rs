@@ -451,6 +451,9 @@ impl CodecProfile {
 /// Named pairings rather than a `caller_callee` grammar because profile names
 /// already contain underscores (`amrnb_be`), so a grammar would have to guess
 /// the split.
+// The shared `Amr` prefix is the point: every pairing names which AMR leg is
+// under test, and the far leg after the underscore.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodecPairing {
     /// AMR-NB caller, PCMU callee — the default. One foreign AMR codec in
@@ -1834,13 +1837,13 @@ async fn run_stream_peer_two_party(
             let target = cfg.outbound_call_uri(target_user_for(transport));
             let handle =
                 call_with_answer_retry(peer, &target, remote_test_timeout(provider)?).await?;
-            run_amr_caller(cfg, &handle, transport, &amr_caller_wav(transport)).await?;
+            run_amr_caller(cfg, &handle, transport, amr_caller_wav(transport)).await?;
         }
         (Scenario::AmrCall, Role::Callee) => {
             let incoming =
                 timeout(remote_test_timeout(provider)?, peer.wait_for_incoming()).await??;
             let handle = incoming.accept().await?;
-            run_amr_callee(provider, cfg, &handle, transport, &amr_callee_wav(transport)).await?;
+            run_amr_callee(provider, cfg, &handle, transport, amr_callee_wav(transport)).await?;
         }
         (Scenario::AmrTranscodeCall, Role::Caller) => {
             settle_after_register(provider).await;
@@ -1991,7 +1994,7 @@ async fn run_endpoint_two_party(
                 cfg,
                 handle.as_session_handle(),
                 transport,
-                &amr_caller_wav(transport),
+                amr_caller_wav(transport),
             )
             .await?;
         }
@@ -2004,7 +2007,7 @@ async fn run_endpoint_two_party(
                 cfg,
                 handle.as_session_handle(),
                 transport,
-                &amr_callee_wav(transport),
+                amr_callee_wav(transport),
             )
             .await?;
         }
@@ -2167,7 +2170,7 @@ async fn run_callback_two_party(
             let handle =
                 callback_call_with_answer_retry(runtime, &target, remote_test_timeout(provider)?)
                     .await?;
-            run_amr_caller(&runtime.cfg, &handle, transport, &amr_caller_wav(transport)).await?;
+            run_amr_caller(&runtime.cfg, &handle, transport, amr_caller_wav(transport)).await?;
         }
         (Scenario::AmrCall, Role::Callee) => {
             let handle =
@@ -2178,7 +2181,7 @@ async fn run_callback_two_party(
                 &runtime.cfg,
                 &handle,
                 transport,
-                &amr_callee_wav(transport),
+                amr_callee_wav(transport),
             )
             .await?;
         }

@@ -32,7 +32,7 @@
 | **SDP to a working codec** | **An AMR-WB offer negotiates and codes** |
 | **A real AMR call** | **Three, over loopback, with verified audio** |
 | **RFC 4867 wire format** | **68 payloads agree with Wireshark's dissector** |
-| **Live PBX interop** | **Asterisk and FreeSWITCH, both variants, tone verified** |
+| **Live PBX interop** | **Both PBXes, both variants, relay AND forced-transcode tiers, UDP ×3 + TLS, quality-gated** |
 
 Every claim above is a test, not a note. Both decoders reproduce the reference
 decoders sample for sample; both encoders reproduce the reference *bitstream*
@@ -205,33 +205,49 @@ intact, and a codec built from exactly that negotiation round-trips a frame.
 Each of those four was separately broken during this work, so the test asserts
 all four together.
 
-The live calls are done too. `examples/pbx` has an `amr_call` scenario, and all
-four variant/framing combinations place a real call through a real PBX and
-recover the far end's tone:
+The live calls are done, in two tiers that prove different things.
 
-| PBX | Variant | Framing | Result |
-|---|---|---|---|
-| Asterisk 20.20.1 | AMR-NB | octet-aligned | 1.50 s at 8 kHz, 880 Hz dominant by 9394× |
-| Asterisk 20.20.1 | AMR-WB | octet-aligned | 0.76 s at 16 kHz, 880 Hz dominant by 877× |
-| FreeSWITCH 1.10.12 | AMR-NB | bandwidth-efficient | 1.50 s at 8 kHz, 880 Hz dominant by 889× |
-| FreeSWITCH 1.10.12 | AMR-WB | bandwidth-efficient | 0.76 s at 16 kHz, 880 Hz dominant by 647× |
+**Tier 1 — `amr_call`, the relay tier.** Both legs offer the same codec, so
+both PBXes forward our RTP octets untouched — verified from their own
+behaviour: Asterisk logs `bridge_native_rtp.c: Locally RTP bridged` with
+`ReadTranscode: No` and `codec_amr.so` use count 0; FreeSWITCH's egress
+payloads are byte-identical to its ingress (75/75 narrowband, 38/38 wideband).
+The media path is rvoip's encoder to rvoip's own decoder with a forwarder in
+between, so this tier proves SDP/fmtp negotiation, per-leg dynamic-PT mapping,
+and framing survival — **not** that a foreign codec can read our bitstream. A
+bug shared by our encoder and decoder cancels out here, the same
+symmetric-mistake blindness `tools/verify-amr-rtp-framing.sh` covers one layer
+down. (This tier was briefly claimed as more than it is; the correction is
+recorded in the history rather than erased.)
 
-**What these four runs do not prove, and were briefly claimed to.** Neither PBX
-decoded a single frame our encoder produced. Asterisk's own log says
-`bridge_native_rtp.c: Locally RTP bridged`, with `ReadTranscode: No` /
-`WriteTranscode: No` and `codec_amr.so` use count 0 for the whole call;
-FreeSWITCH emitted egress payloads byte-identical to its ingress payloads
-(75/75 narrowband, 38/38 wideband) having rewritten only the RTP header. Both
-PBXes matched the same codec on both legs and forwarded the octets.
+**Tier 2 — `amr_transcode_call`, the tier that closes that hole.** The caller
+and callee offer *disjoint* codecs (AMR on one leg, PCMU on the other), so the
+PBX physically cannot native-bridge: its own AMR implementation must decode
+every frame we send and encode every frame we receive. The 440 Hz the PCMU leg
+records exists only because the PBX's AMR decoder read our frames; the 880 Hz
+the AMR leg records exists only because the PBX's AMR encoder produced frames
+our decoder read. Corroborated from Asterisk's side: the transcode calls stay
+on `simple_bridge` with `codec_amr.so` use count 2 mid-call (captured as an
+artifact by `PBX_DIAG=1`), where every matched-codec call switches to
+`native_rtp` with use count 0.
 
-So the media path was rvoip's encoder to rvoip's own decoder, with a relay in
-the middle. These runs prove SDP/fmtp negotiation against a real PBX, per-leg
-dynamic-payload-type mapping, and that our framing survives a third-party relay.
-They prove nothing about a foreign AMR implementation being able to read our
-bitstream — which is the same symmetric-mistake blindness
-`tools/verify-amr-rtp-framing.sh` was written to cover, reappearing one layer up.
-Closing it needs the two legs on *different* codecs so the PBX is forced to
-transcode; see "Remaining work".
+The guard on tier 2 is a unit test — every pairing's two legs intersect to
+telephone-event alone — not the call passing. Measured deliberately: forcing
+both legs onto one codec via `ENDPOINT_{user}_CODEC_PROFILE` flips Asterisk
+back to `Locally RTP bridged` and the call *still passes*, which is exactly
+why a passing call cannot be the guard.
+
+All cells pass the quality gate (below), three consecutive repeats each on
+UDP, plus TLS+SRTP — the first AMR-over-SRTP evidence in the repo:
+
+| PBX | Scenario | Cells | UDP ×3 | TLS |
+|---|---|---|---|---|
+| Asterisk 20.20.1 | relay | amrnb, amrwb | ✔ | ✔ |
+| Asterisk 20.20.1 | transcode | amrnb_pcmu, amrwb_pcmu | ✔ | ✔ |
+| FreeSWITCH 1.10.12 | relay | amrnb_be, amrwb_be | ✔ | ✔ |
+| FreeSWITCH 1.10.12 | transcode | amrnb_be_pcmu, amrwb_be_pcmu | ✔ | ✔ |
+
+The `amrwb_pcmu` cells also exercise the PBX's own 16 kHz ↔ 8 kHz resampler.
 
 The framing column is not a preference, it is what each PBX can actually carry
 end to end:
@@ -252,27 +268,50 @@ end to end:
   asked for bandwidth-efficient, which RFC 4867 §8.3.1 does not permit, and
   breaks the inbound leg instead of aligning the outbound one.
 
+  On the *transcoding* path, `mod_amr` has a second framing defect, measured
+  directly: offered octet-aligned AMR (PT 107, `octet-align=1`), it negotiates
+  correctly and then instantiates its **Bandwidth Efficient** decoder anyway —
+  `Codec AMR / Bandwidth Efficient decoder error!` on every frame. So the
+  bandwidth-efficient pairings are FreeSWITCH's transcode defaults too.
+
 That split is better coverage than either alone: Asterisk exercises the
 octet-aligned path and FreeSWITCH the bandwidth-efficient one, whose payload
-boundaries do not fall on octets.
+boundaries do not fall on octets — in both tiers.
 
-**Why the tone is asserted and not just the sample count.** A framing mismatch
-does not drop packets. Every payload decodes into *something*, the recorder's
-buffer fills at the expected rate, and a run gated on sample count alone
-passes while both endpoints hear noise — which is how the first four
-FreeSWITCH attempts looked before the decode errors were read. The scenario now
-asserts the received recording is dominated by the far end's tone, at the rate
-that endpoint actually captured. The check is tested in both directions,
-including against a wideband capture read as narrowband: 16 kHz samples read at
-8 kHz are a clean tone an octave low, which nothing else in the harness
-notices.
+**The audio gate measures quality, not just pitch.** The first tone check was
+a single Goertzel dominance ratio, and it could not discriminate: measured
+against real captures, 1-bit squaring passed at ratio 441, 100× attenuation at
+6820, half the frames zeroed at 922 — and a genuinely degraded capture passed
+at 237×. The gate now requires, continuously for one second at the leg's own
+rate: the far end's tone dominant, per-window fundamental-vs-residual SNR
+≥ 15 dB (a true-dB figure — injected noise reads back within 1 dB), and every
+20 ms frame above a quarter of the sent RMS. Each clause exists because a
+measured failure defeated the others, and each is pinned by a test, including
+the wideband-read-as-narrowband case (a clean tone an octave low) that nothing
+else notices.
 
-Two environment defects were found and fixed along the way, neither of them
-AMR's: the `rvoip_*` FreeSWITCH profiles pinned `inbound-codec-prefs` to
-`G729,PCMU,PCMA`, so an accepted AMR call was bridged out as G.729 and refused;
-and the container advertised its docker-internal address in SDP unless started
-through `scripts/up.sh`, so RTP went to an unroutable host. Both fixes live in
-`~/Developer/freeswitch/docker-entrypoint.sh`.
+**The one real audio defect found was ours, and not in the codec.** The
+harness's tone sender paced with a trailing `sleep(20 ms)`, making the true
+send period 20 ms plus work plus scheduler slop — measured 21.5 ms/frame via
+the Asterisk relay, 24 ms under load. FreeSWITCH re-clocks media to a true
+20 ms; starved by a 24 ms source it stretches, which surfaced as level swings
+and a 0.75 Hz-flat tone offset. (The "−12.6 dB" first measured was itself
+partly metrology: a whole-file Goertzel at exactly 440.00 Hz cancels a
+0.75 Hz-offset tone. Real coherent damage was ~2 dB plus the modulation.)
+With the sender on a proper interval the same cells measure +26 to +30 dB.
+Every audio measurement made through a PBX before that fix was confounded.
+
+Environment defects found and fixed along the way, none of them AMR's: the
+`rvoip_*` FreeSWITCH profiles pinned `inbound-codec-prefs` to `G729,PCMU,PCMA`,
+so an accepted AMR call was bridged out as G.729 and refused; the container
+advertised its docker-internal address in SDP unless started through
+`scripts/up.sh`, so RTP went to an unroutable host; and for the transcode tier,
+FreeSWITCH gained `rvoip_udp_xcode`/`rvoip_tls_srtp_xcode` profile twins
+(5064/5065) with `disable-transcoding=false`, early codec negotiation (late
+negotiation makes its bridge offer the B-leg only the A-leg's codec), and a
+dialplan export of the full codec list to the originated leg. The relay
+profiles are byte-for-byte untouched, so the tier-1 evidence stands. All of it
+lives in `~/Developer/freeswitch/docker-entrypoint.sh`.
 
 Neither reference is committed. `tools/build-amr-reference.sh`,
 `build-amrnb-reference.sh` and the two `*-encoder-reference.sh` scripts fetch
@@ -453,13 +492,28 @@ survive the two parameters the lag and the codebook consume in between.
    interop section. Both PBXes, both variants, tone verified; benchmarks per
    rate with a real-time-factor gate.
 
-4. **The relay path's exit criterion** is still only half met. The calls that
-   pass go through a PBX that either transcodes (Asterisk) or relays
-   (FreeSWITCH), but **rvoip has not been the relaying B2BUA in the middle**,
-   and no run has yet observed a mid-call mode switch. Kamailio+rtpengine is
-   untried.
+4. **The relay path's exit criterion** is still only half met. Both tiers now
+   exist — foreign PBXes relay our AMR (tier 1) and transcode it with their
+   own AMR implementations (tier 2) — but **rvoip has not been the relaying
+   B2BUA in the middle**, and no run has yet observed a mid-call mode switch
+   on the wire. Kamailio+rtpengine is untried.
 
-5. **A soak test**, and a fuzz target for the encoders. The decoders have one;
+5. **Live DTX and CMR.** Both are implemented and unit-tested, and both are
+   structurally off on every live call: the `amr_dtx` MediaConfig key is set
+   by nothing outside one unit test, we never emit a CMR (every payload goes
+   out CMR=15), and neither lab PBX would send us one as configured. Enabling
+   them live is a feature decision, not a bug fix — but until then the live
+   evidence covers speech frames only.
+
+6. **Rates beyond the top of each variant.** Every live cell ran AMR-NB
+   mode 7 (12.2) or AMR-WB mode 8 (23.85) — our encoder opens at the highest
+   permitted mode and nothing in the lab narrows the set. The other 15 rates
+   have conformance-vector evidence but no third-party interop evidence. The
+   quality gate is built mode-aware (`WindowGate` thresholds are constants
+   today) so a rate sweep can calibrate per-mode floors from codec loopback
+   rather than guessing.
+
+7. **A soak test**, and a fuzz target for the encoders. The decoders have one;
    the encoders do not.
 
 ## Conformance against the normative sequences

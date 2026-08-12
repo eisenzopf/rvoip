@@ -1,1 +1,4 @@
 provider	api	scenario	transport	role	duration_s	exit_code	started_at_utc	ended_at_utc	log
+freeswitch	endpoint	tls_prewarm	TLS	registration	1	0	2026-08-12T02:05:52Z	2026-08-12T02:05:53Z	/Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/_prewarm/freeswitch/endpoint/TLS/registration.log
+freeswitch	endpoint	tls_prewarm	TLS	transferee	1	0	2026-08-12T02:05:53Z	2026-08-12T02:05:54Z	/Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/_prewarm/freeswitch/endpoint/TLS/transferee.log
+freeswitch	endpoint	tls_prewarm	TLS	target	0	0	2026-08-12T02:05:54Z	2026-08-12T02:05:54Z	/Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/_prewarm/freeswitch/endpoint/TLS/target.log

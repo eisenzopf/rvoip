@@ -373,14 +373,24 @@ transport_selected() {
 }
 
 codec_profile_for_scenario() {
-  scenario=$1
+  cpfs_provider=$1
+  scenario=$2
   if [ -n "${PBX_CODEC_PROFILE:-}" ]; then
     printf '%s\n' "$PBX_CODEC_PROFILE"
     return
   fi
   case "$scenario" in
     g729_call) printf '%s\n' g729ab ;;
-    amr_call) printf '%s\n' amrnb ;;
+    amr_call)
+      # FreeSWITCH's rvoip profiles relay without re-framing and its
+      # outbound leg is bandwidth-efficient, so octet-aligned AMR cannot
+      # work there end to end; the default must be a profile that can.
+      if [ "$cpfs_provider" = "freeswitch" ]; then
+        printf '%s\n' amrnb_be
+      else
+        printf '%s\n' amrnb
+      fi
+      ;;
     *) printf '%s\n' default ;;
   esac
 }
@@ -390,12 +400,19 @@ codec_profile_for_scenario() {
 # profile name cannot describe a cell. The label feeds the output path and
 # the matrix codec column.
 codec_label_for_scenario() {
-  scenario=$1
+  clfs_provider=$1
+  scenario=$2
   if [ "$scenario" = "amr_transcode_call" ]; then
-    printf '%s\n' "${PBX_CODEC_PAIRING:-amrnb_pcmu}"
+    if [ -n "${PBX_CODEC_PAIRING:-}" ]; then
+      printf '%s\n' "$PBX_CODEC_PAIRING"
+    elif [ "$clfs_provider" = "freeswitch" ]; then
+      printf '%s\n' amrnb_be_pcmu
+    else
+      printf '%s\n' amrnb_pcmu
+    fi
     return
   fi
-  codec_profile_for_scenario "$scenario"
+  codec_profile_for_scenario "$clfs_provider" "$scenario"
 }
 
 # The pairing sweep, mirroring g729_profile_list: PBX_CODEC_PAIRING pins one,
@@ -741,7 +758,7 @@ run_one() {
   out_dir=$6
   log=$7
   api_label=$(example_label "$example")
-  codec_label=$(codec_label_for_scenario "$scenario")
+  codec_label=$(codec_label_for_scenario "$provider" "$scenario")
   if [ "$scenario" = "amr_transcode_call" ]; then
     codec_env="PBX_CODEC_PAIRING=$codec_label"
   else
@@ -1078,7 +1095,7 @@ run_analyze() {
   scenario=$2
   transport=$3
   out_dir=$4
-  codec_profile=$(codec_profile_for_scenario "$scenario")
+  codec_profile=$(codec_profile_for_scenario "$provider" "$scenario")
   log="$out_dir/analyze.log"
   started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   start_epoch=$(date +%s)
@@ -1160,7 +1177,7 @@ run_two_party() {
   scenario=$3
   transport=$4
   api_label=$(example_label "$example")
-  codec_label=$(codec_label_for_scenario "$scenario")
+  codec_label=$(codec_label_for_scenario "$provider" "$scenario")
   if [ "$scenario" = "g729_call" ] || [ "$scenario" = "amr_call" ] || [ "$scenario" = "amr_transcode_call" ]; then
     out_dir="$OUT_ROOT/$provider/$api_label/$scenario/$codec_label/$transport"
   else

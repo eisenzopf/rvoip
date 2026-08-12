@@ -1,7 +1,7 @@
 # PBX Interop Run Summary
 
-- started_at_utc: 2026-08-12T01:58:05Z
-- ended_at_utc: 2026-08-12T01:58:18Z
+- started_at_utc: 2026-08-12T02:05:51Z
+- ended_at_utc: 2026-08-12T02:06:04Z
 - duration_seconds: 13
 - exit_status: 0
 - output_root: /Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output
@@ -18,7 +18,7 @@
 
 | Status | Provider | API | Scenario | Codec | Transport | Role | Duration | Exit | Log |
 |--------|----------|-----|----------|-------|-----------|------|----------|------|-----|
-| PASS | freeswitch | endpoint | amr_transcode_call | amrnb_be_pcmu | UDP | caller | 4s | 0 | `/Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrnb_be_pcmu/UDP/caller.log` |
-| PASS | freeswitch | endpoint | amr_transcode_call | amrnb_be_pcmu | UDP | callee | 6s | 0 | `/Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrnb_be_pcmu/UDP/callee.log` |
-| PASS | freeswitch | endpoint | amr_transcode_call | amrwb_be_pcmu | UDP | callee | 6s | 0 | `/Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrwb_be_pcmu/UDP/callee.log` |
-| PASS | freeswitch | endpoint | amr_transcode_call | amrwb_be_pcmu | UDP | caller | 5s | 0 | `/Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrwb_be_pcmu/UDP/caller.log` |
+| PASS | freeswitch | endpoint | amr_transcode_call | amrnb_be_pcmu | TLS | caller | 4s | 0 | `/Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrnb_be_pcmu/TLS/caller.log` |
+| PASS | freeswitch | endpoint | amr_transcode_call | amrnb_be_pcmu | TLS | callee | 5s | 0 | `/Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrnb_be_pcmu/TLS/callee.log` |
+| PASS | freeswitch | endpoint | amr_transcode_call | amrwb_be_pcmu | TLS | caller | 4s | 0 | `/Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrwb_be_pcmu/TLS/caller.log` |
+| PASS | freeswitch | endpoint | amr_transcode_call | amrwb_be_pcmu | TLS | callee | 5s | 0 | `/Users/jonathan/Developer/rvoip/crates/sip/rvoip-sip/examples/pbx/output/freeswitch/endpoint/amr_transcode_call/amrwb_be_pcmu/TLS/callee.log` |
