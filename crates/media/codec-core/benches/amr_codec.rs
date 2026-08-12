@@ -29,7 +29,7 @@
 //! figure rather than leaving it to a chart.
 
 use codec_core::codecs::amr::mode::{AmrMode, AmrVariant};
-use codec_core::types::{AudioCodec, CodecConfig, VariableRateCodec};
+use codec_core::types::{CodecConfig, VariableRateCodec};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
 

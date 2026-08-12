@@ -24,7 +24,6 @@ const KNOWN_CODEPOINTS: &[(i16, u8, u8, i16, i16)] = &[
 ];
 
 fn sweep_samples() -> impl Iterator<Item = i16> {
-    assert!(!SWEEP_SOURCE.is_empty(), "checked-in PCM sweep is empty");
     assert_eq!(
         SWEEP_SOURCE.len() % 2,
         0,

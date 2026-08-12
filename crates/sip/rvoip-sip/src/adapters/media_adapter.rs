@@ -1593,12 +1593,7 @@ impl MediaAdapter {
     async fn apply_negotiated_media_config(
         &self,
         dialog_id: &DialogId,
-        remote_addr: SocketAddr,
-        codec: &str,
-        payload_type: u8,
-        clock_rate: u32,
-        channels: u8,
-        negotiated_fmtp: Option<&str>,
+        negotiated: &NegotiatedConfig,
     ) -> Result<()> {
         let mut config = self
             .controller
@@ -1608,10 +1603,15 @@ impl MediaAdapter {
                 SessionError::MediaError(format!("No media session for dialog {}", dialog_id))
             })?
             .config;
-        config.remote_addr = Some(remote_addr);
+        config.remote_addr = Some(negotiated.remote_addr);
         config = config
-            .with_negotiated_audio_codec(codec.to_string(), payload_type, clock_rate, channels)
-            .with_negotiated_fmtp(negotiated_fmtp);
+            .with_negotiated_audio_codec(
+                negotiated.codec.clone(),
+                negotiated.payload_type,
+                negotiated.clock_rate,
+                negotiated.channels,
+            )
+            .with_negotiated_fmtp(negotiated.negotiated_fmtp.as_deref());
 
         self.controller
             .update_media(dialog_id.clone(), config)
@@ -2501,16 +2501,8 @@ impl MediaAdapter {
             stable_local_direction: staged.stable_local_direction,
         };
         let apply_result = async {
-            self.apply_negotiated_media_config(
-                &dialog_id,
-                remote_addr,
-                &staged.config.codec,
-                staged.config.payload_type,
-                staged.config.clock_rate,
-                staged.config.channels,
-                staged.config.negotiated_fmtp.as_deref(),
-            )
-            .await?;
+            self.apply_negotiated_media_config(&dialog_id, &staged.config)
+                .await?;
 
             if let Some((_, pair)) = self.negotiated_srtp.remove(&negotiation_key) {
                 let suite = pair.suite;

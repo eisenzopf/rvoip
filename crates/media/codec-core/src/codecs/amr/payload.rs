@@ -1078,11 +1078,11 @@ mod tests {
     ///   which is also why a CRC of zero is *valid*, not "absent".
     ///
     /// This still cannot settle the one genuinely open question — whether
-    /// NO_DATA/SPEECH_LOST frames contribute a CRC octet (`crc_class_a_bits`
+    /// `NO_DATA`/`SPEECH_LOST` frames contribute a CRC octet (`crc_class_a_bits`
     /// says no, per TS 26.201) — because that is a framing choice, not CRC
     /// arithmetic, and no external arbiter exists: Wireshark 4.6's AMR
     /// dissector has no CRC mode at all (`amr.encoding.version` offers only
-    /// octet_aligned/bw_efficient/IF1/IF2).
+    /// `octet_aligned`/`bw_efficient`/IF1/IF2).
     #[test]
     fn crc_matches_hand_worked_vectors() {
         assert_eq!(frame_crc(&[0x80], 1), 0xB8);
