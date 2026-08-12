@@ -92,7 +92,17 @@ pub const ENDPOINT_2002_TONE_HZ: f32 = 880.0;
 pub const ENDPOINT_1001_TONE_HZ: f32 = ENDPOINT_2001_TONE_HZ;
 pub const ENDPOINT_1002_TONE_HZ: f32 = ENDPOINT_2002_TONE_HZ;
 pub const ENDPOINT_1003_TONE_HZ: f32 = 660.0;
-pub const MIN_RECEIVED_SAMPLES: usize = 12_000;
+/// The evidence floor as a duration, which is what it always meant.
+///
+/// It used to be stated only as `MIN_RECEIVED_SAMPLES = 12_000`, a raw sample
+/// count — 1.5 s at 8 kHz but 0.75 s at 16 kHz, so every wideband AMR run
+/// quietly collected half the exercise of a narrowband one and nothing said
+/// so.
+pub const MIN_RECEIVED_MS: usize = 1_500;
+pub const fn min_received_samples(sample_rate: u32) -> usize {
+    sample_rate as usize * MIN_RECEIVED_MS / 1000
+}
+pub const MIN_RECEIVED_SAMPLES: usize = min_received_samples(SAMPLE_RATE);
 // The caller controls call teardown from its local receive count, while the
 // peer's recorder can trail it by several codec frames during PBX transcoding
 // and TLS/SRTP scheduling. Capture another half-second before BYE so both
@@ -2213,19 +2223,24 @@ async fn run_amr_caller(
     if transport.is_tls() {
         assert_srtp_media_security(handle, Duration::from_secs(5)).await?;
     }
+    let sample_rate = amr_sample_rate(cfg.codec_profile);
     let recorder = start_tone_recorder_at_rate(
         handle,
         tone_for_caller(transport),
         amr_frame_size(cfg.codec_profile),
-        amr_sample_rate(cfg.codec_profile),
+        sample_rate,
     )
     .await?;
-    // The same evidence floor both directions, unlike the G.729 pair where the
-    // caller captures half a second extra before driving teardown. Here the
-    // callee reaches its floor first and hangs up, which caps the caller at
-    // the same count -- so asking the caller for more only ever times out.
+    // The caller alone paces teardown, exactly as the G.729 pair does: it
+    // captures the floor plus half a second and only then hangs up, so the
+    // callee — which just waits for the call to end — necessarily holds at
+    // least the floor by the time the BYE lands. The previous shape had both
+    // roles racing to the same floor and hanging up, which was a coin flip
+    // decided by scheduler slop; fixing the send clock made the slop small
+    // enough that the loser came up exactly one frame short.
+    let target = min_received_samples(sample_rate) + sample_rate as usize / 2;
     let outcome = recorder
-        .wait_for_received_samples(MIN_RECEIVED_SAMPLES, Duration::from_secs(20))
+        .wait_for_received_samples(target, Duration::from_secs(20))
         .await;
     handle
         .hangup_and_wait(Some(Duration::from_secs(8)))
@@ -2238,7 +2253,7 @@ async fn run_amr_caller(
     let path = saved?;
     assert_amr_tone(
         &path,
-        amr_sample_rate(cfg.codec_profile),
+        sample_rate,
         tone_for_callee(transport),
         tone_for_caller(transport),
     )?;
@@ -2255,28 +2270,41 @@ async fn run_amr_callee(
     if transport.is_tls() {
         assert_srtp_media_security(handle, Duration::from_secs(5)).await?;
     }
+    let sample_rate = amr_sample_rate(cfg.codec_profile);
     let recorder = start_tone_recorder_at_rate(
         handle,
         tone_for_callee(transport),
         amr_frame_size(cfg.codec_profile),
-        amr_sample_rate(cfg.codec_profile),
+        sample_rate,
     )
     .await?;
-    let outcome = recorder
-        .wait_for_received_samples(MIN_RECEIVED_SAMPLES, remote_test_timeout(provider)?)
-        .await;
+    // No live sample wait and no hangup here: the caller stays up for the
+    // floor plus a margin and drives teardown (see `run_amr_caller`). The
+    // floor is asserted on the recording instead — the evidence bar is the
+    // same, without two roles racing to hang up on each other.
     handle
-        .hangup_and_wait(Some(Duration::from_secs(8)))
+        .wait_for_end(Some(remote_test_timeout(provider)?))
         .await
         .ok();
-    let saved = recorder
+    let path = recorder
         .stop_and_save(&cfg.output_dir, amr_callee_wav(transport))
-        .await;
-    outcome?;
-    let path = saved?;
+        .await?;
+    let received = read_wav(&path)?;
+    let floor = min_received_samples(sample_rate);
+    if received.len() < floor {
+        return Err(format!(
+            "{}: {} samples received, below the {} floor ({} ms at {} Hz)",
+            path.display(),
+            received.len(),
+            floor,
+            MIN_RECEIVED_MS,
+            sample_rate
+        )
+        .into());
+    }
     assert_amr_tone(
         &path,
-        amr_sample_rate(cfg.codec_profile),
+        sample_rate,
         tone_for_caller(transport),
         tone_for_callee(transport),
     )?;
@@ -3383,7 +3411,16 @@ pub async fn start_tone_recorder_at_rate(
     let send_task = tokio::spawn(async move {
         let mut frame_index = 0usize;
         let frame_duration_ms = ((frame_size as u64) * 1000 / u64::from(sample_rate)).max(1);
+        // An interval, not a trailing sleep. `sleep(20ms)` after generate+send
+        // makes the real period 20 ms *plus* the work and scheduler slop —
+        // measured at 21.5 ms/frame through a transparent relay, and 24 ms
+        // under load. A PBX re-clocking the stream to a true 20 ms is starved
+        // by such a source and has to stretch or conceal, which corrupts every
+        // audio measurement downstream of it. The interval's default catch-up
+        // (Burst) keeps the long-run rate exact even when one tick runs late.
+        let mut ticker = tokio::time::interval(Duration::from_millis(frame_duration_ms));
         while send_running.load(Ordering::Relaxed) && sender.is_open() {
+            ticker.tick().await;
             let frame = AudioFrame::new(
                 generate_tone_at_rate(tone_hz, frame_index, frame_size, sample_rate),
                 sample_rate,
@@ -3394,7 +3431,6 @@ pub async fn start_tone_recorder_at_rate(
                 break;
             }
             frame_index += 1;
-            sleep(Duration::from_millis(frame_duration_ms)).await;
         }
     });
     Ok(ToneRecorder {
@@ -4868,6 +4904,29 @@ mod tests {
         assert!(G729_CALLER_CAPTURE_TARGET_SAMPLES > MIN_RECEIVED_SAMPLES);
         assert_eq!(G729_CALLER_CAPTURE_TARGET_SAMPLES % G729_FRAME_SIZE, 0);
         assert!(G729_CALLER_CAPTURE_TARGET_SAMPLES - MIN_RECEIVED_SAMPLES >= G729_FRAME_SIZE * 4);
+    }
+
+    /// The floor is a duration. Stated as a bare sample count it silently
+    /// meant half as much exercise at 16 kHz, which is exactly how every
+    /// wideband AMR run came out at 0.76 s while narrowband got 1.5 s.
+    #[test]
+    fn received_sample_floor_is_the_same_duration_at_either_rate() {
+        assert_eq!(min_received_samples(8_000), 12_000);
+        assert_eq!(min_received_samples(16_000), 24_000);
+        for rate in [8_000u32, 16_000] {
+            assert_eq!(
+                min_received_samples(rate) * 1000 / rate as usize,
+                MIN_RECEIVED_MS
+            );
+        }
+    }
+
+    /// The 8 kHz value is what every non-AMR scenario keys its thresholds to;
+    /// changing the duration must not move it silently.
+    #[test]
+    fn narrowband_floor_is_unchanged_by_the_duration_restatement() {
+        assert_eq!(MIN_RECEIVED_SAMPLES, 12_000);
+        assert_eq!(MIN_RECEIVED_SAMPLES, min_received_samples(SAMPLE_RATE));
     }
 
     #[test]
