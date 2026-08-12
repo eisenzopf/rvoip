@@ -15,6 +15,15 @@ pub fn create_response(request: &Request, status: StatusCode) -> Response {
     if let Some(header) = request.header(&HeaderName::Via) {
         builder = builder.header(header.clone());
     }
+    // RFC 3261 §12.1.1: echo Record-Route so a dialog-forming response
+    // teaches the UAC its route set. Proxies ignore it elsewhere.
+    for header in request
+        .headers
+        .iter()
+        .filter(|header| matches!(header, TypedHeader::RecordRoute(_)))
+    {
+        builder = builder.header(header.clone());
+    }
     if let Some(header) = request.header(&HeaderName::From) {
         builder = builder.header(header.clone());
     }
