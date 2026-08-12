@@ -136,11 +136,20 @@ impl AmrAdapter {
                 })
             })?;
 
+        // Refused on the *send* side, which is what the parameter obliges.
+        // RFC 4867 §8.1 makes fmtp declarative: a peer naming `interleaving`
+        // is asking to receive interleaved payloads, so honouring it means
+        // spreading our frame-blocks across packets — which we do not do.
+        // Receive-side reassembly does exist
+        // (`codec_core::codecs::amr::interleave::Deinterleaver`), so a peer
+        // that interleaves *toward* us could be handled; it is this direction
+        // that is missing, and accepting the session would send frames a
+        // conforming peer reassembles out of order.
         if payload.codec().config().interleaving {
             return Err(Error::Codec(CodecError::InvalidParameters {
-                details: "AMR interleaving is negotiated but not implemented; refusing the \
-                          session rather than sending frames a conforming peer would \
-                          reassemble out of order"
+                details: "AMR interleaving is negotiated, but this endpoint does not \
+                          interleave on transmit; refusing the session rather than sending \
+                          frames a conforming peer would reassemble out of order"
                     .to_string(),
             })
             .into());

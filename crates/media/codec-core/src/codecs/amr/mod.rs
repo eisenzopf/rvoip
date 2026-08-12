@@ -58,6 +58,8 @@ mod qualification;
 /// Long-run stability: mode churn, DTX and loss over a full call.
 #[cfg(test)]
 mod soak;
+/// RFC 4867 §4.4.1 interleaving: undoing it on the receive side.
+pub mod interleave;
 pub mod rate;
 /// RFC 4867 `max-red` redundancy: scheduling repeats and dropping them again.
 pub mod redundancy;

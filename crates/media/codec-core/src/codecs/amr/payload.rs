@@ -180,12 +180,17 @@ impl AmrPayloadFrame {
 
 /// The RFC 4867 §4.4.1 interleaving fields.
 ///
-/// **Carried, not applied.** This type transports ILL/ILP faithfully, but
-/// reassembling the original frame-block order means holding frames from up to
-/// `ill + 1` packets and emitting them out of arrival order — that is jitter
-/// buffer work, and doing it here would duplicate reordering logic that layer
-/// already owns. A receiver that negotiates interleaving must act on these
-/// values itself.
+/// This type transports ILL/ILP faithfully;
+/// [`interleave::Deinterleaver`](crate::codecs::amr::interleave::Deinterleaver)
+/// turns them back into the original frame-block order, reporting the
+/// positions that never arrived as lost so concealment answers for them.
+///
+/// Reassembly being available is not the same as interleaving being usable end
+/// to end. RFC 4867 §8.1 makes these parameters *declarative*: a peer that
+/// puts `interleaving` in its fmtp is saying it wants to **receive**
+/// interleaved payloads, which obliges our sender rather than our receiver.
+/// We do not interleave on transmit, so a session that negotiates it is still
+/// refused — see `AmrAdapter::new`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AmrInterleaving {
     /// Interleaving length minus one, in frame-blocks. The group spans

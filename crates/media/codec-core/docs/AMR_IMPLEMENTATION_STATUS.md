@@ -1852,8 +1852,28 @@ and **20 million fuzz iterations with zero crashes**. Notable coverage:
 |---|---|
 | Frame CRC (§4.4.2.1) | Implemented for **both** variants |
 | Robust sorting (§4.4.3) | Implemented |
-| Interleaving (§4.4.1) | ILL/ILP **carried**, reordering deliberately not performed |
+| Interleaving (§4.4.1) | ILL/ILP carried; **receive-side reassembly implemented**, transmit-side interleaving not |
 | `max-red` redundancy (§3.5, §4.3) | Implemented — `codecs/amr/redundancy.rs` |
+
+**Interleaving** (2026-08-12) gained its receive half:
+`codecs/amr/interleave.rs` reassembles a group's frame-blocks from the ILL/ILP
+fields the parser has always carried, reporting positions that never arrived as
+lost so concealment answers for them. A payload at index `ILP` of a group of
+`ILL + 1` carries the blocks at `ILP`, `ILP + (ILL+1)`, … — a receiver that
+ignores this decodes 20 ms blocks in shuffled order, which sounds broken but
+parses perfectly, so nothing upstream would report it.
+
+The buffer holds exactly one group and is bounded by the field widths (16
+packets × 32 frame-blocks). A peer that never completes a group cannot make it
+grow: the group flushes when the next one starts, and its gaps are reported
+rather than waited for.
+
+**This does not make interleaving usable end to end, and the session is still
+refused.** RFC 4867 §8.1 makes fmtp declarative — a peer naming `interleaving`
+is asking to *receive* interleaved payloads, which obliges our transmit side,
+and we do not interleave on transmit. What closed is the parse-only gap on the
+direction we can control; `AmrAdapter::new` still declines the negotiation, now
+saying which direction is missing.
 
 **`max-red` redundancy** (2026-08-12) is a scheduler and a dedup filter, both
 in `redundancy.rs`. Redundancy in RFC 4867 is not a separate mechanism: it is
