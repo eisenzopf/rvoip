@@ -1179,6 +1179,10 @@ pub struct MediaAdapter {
     /// own DTX switch. Nothing negotiates it (RFC 4867 has no fmtp for DTX).
     amr_dtx: bool,
 
+    /// Automatic AMR codec mode requests, from `Config::amr_auto_cmr`.
+    /// Carried and stamped exactly like `amr_dtx`.
+    amr_auto_cmr: bool,
+
     /// Crypto suites to offer in preference order when `offer_srtp`
     /// is set. Default: AES-CM-128 + HMAC-SHA1-80 then -32 per
     /// RFC 4568 §6.2.1 MTI plus low-bandwidth fallback.
@@ -1330,6 +1334,7 @@ impl MediaAdapter {
             offer_srtp: false,
             srtp_required: false,
             amr_dtx: false,
+            amr_auto_cmr: false,
             srtp_offered_suites: vec![
                 CryptoSuite::AesCm128HmacSha1_80,
                 CryptoSuite::AesCm128HmacSha1_32,
@@ -1385,6 +1390,13 @@ impl MediaAdapter {
     /// session negotiates AMR. It is inert for every other codec.
     pub fn set_amr_dtx(&mut self, enabled: bool) {
         self.amr_dtx = enabled;
+    }
+
+    /// Let AMR sessions ask the peer to change rate on their own. Wired from
+    /// `Config::amr_auto_cmr` at coordinator boot; see that field for why it
+    /// is off by default.
+    pub fn set_amr_auto_cmr(&mut self, enabled: bool) {
+        self.amr_auto_cmr = enabled;
     }
 
     /// Set media allocation behavior.
@@ -1634,7 +1646,8 @@ impl MediaAdapter {
             // the same commit as the codec identity: this is the moment the
             // session learns it is AMR, and media-core reads both out of the
             // one configuration when it builds the codec.
-            .with_amr_dtx(self.amr_dtx);
+            .with_amr_dtx(self.amr_dtx)
+            .with_amr_auto_cmr(self.amr_auto_cmr);
 
         self.controller
             .update_media(dialog_id.clone(), config)
@@ -4693,6 +4706,7 @@ impl Clone for MediaAdapter {
             offer_srtp: self.offer_srtp,
             srtp_required: self.srtp_required,
             amr_dtx: self.amr_dtx,
+            amr_auto_cmr: self.amr_auto_cmr,
             srtp_offered_suites: self.srtp_offered_suites.clone(),
             sdes_base64_mode: self.sdes_base64_mode,
             pending_srtp_offerers: self.pending_srtp_offerers.clone(),

@@ -40,6 +40,16 @@ pub const NEGOTIATED_FMTP_PARAMETER: &str = "negotiated_fmtp";
 /// should opt into that rather than discover it.
 pub const AMR_DTX_PARAMETER: &str = "amr_dtx";
 
+/// Whether an AMR session may ask its peer to change rate on its own.
+///
+/// `"true"` enables it; anything else, or absence, leaves it off.
+///
+/// Local policy like [`AMR_DTX_PARAMETER`]: a codec mode request is advice to
+/// the sender and needs no negotiation. Off by default because an automatic
+/// requester that gets its damping wrong oscillates the peer's rate, which is
+/// worse than never asking at all.
+pub const AMR_AUTO_CMR_PARAMETER: &str = "amr_auto_cmr";
+
 /// Media configuration for a session
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaConfig {
@@ -120,6 +130,20 @@ impl MediaConfig {
         }
         self
     }
+
+    /// Set or clear automatic codec mode requests
+    /// ([`AMR_AUTO_CMR_PARAMETER`]). Cleared rather than falsified, for the
+    /// same reason as [`Self::with_amr_dtx`].
+    #[must_use]
+    pub fn with_amr_auto_cmr(mut self, auto_cmr: bool) -> Self {
+        if auto_cmr {
+            self.parameters
+                .insert(AMR_AUTO_CMR_PARAMETER.to_string(), "true".to_string());
+        } else {
+            self.parameters.remove(AMR_AUTO_CMR_PARAMETER);
+        }
+        self
+    }
 }
 
 /// Exact audio codec parameters used by one media dialog.
@@ -142,6 +166,9 @@ pub struct NegotiatedAudioCodec {
     /// Whether this session's encoder may emit comfort noise — see
     /// [`AMR_DTX_PARAMETER`]. Meaningless for every codec but AMR.
     pub dtx: bool,
+    /// Whether this session may ask its peer to change rate on its own — see
+    /// [`AMR_AUTO_CMR_PARAMETER`]. Meaningless for every codec but AMR.
+    pub auto_cmr: bool,
 }
 
 /// Media session status

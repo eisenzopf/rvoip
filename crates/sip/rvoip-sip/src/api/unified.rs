@@ -2250,6 +2250,21 @@ pub struct Config {
     /// Ignored by every codec but AMR. Default: `false`.
     pub amr_dtx: bool,
 
+    /// Let AMR sessions ask the peer to change rate on their own.
+    ///
+    /// A damper watches which modes actually arrive and, at most once every
+    /// five seconds, asks for one step toward a mode the peer is not using —
+    /// the shape rtpengine documents. Like [`Config::amr_dtx`] this is local
+    /// policy: a codec mode request is advice to the sender and needs no
+    /// negotiation.
+    ///
+    /// Off by default, and deliberately so: an automatic requester that damps
+    /// badly oscillates the peer's rate, which is worse than never asking.
+    /// Explicit `request_peer_codec_mode` calls always outrank it.
+    ///
+    /// Ignored by every codec but AMR. Default: `false`.
+    pub amr_auto_cmr: bool,
+
     /// Media allocation behavior.
     ///
     /// Default: [`MediaMode::Enabled`], which allocates real media-core RTP
@@ -2724,6 +2739,7 @@ impl std::fmt::Debug for Config {
             .field("offer_srtp", &self.offer_srtp)
             .field("srtp_required", &self.srtp_required)
             .field("amr_dtx", &self.amr_dtx)
+            .field("amr_auto_cmr", &self.amr_auto_cmr)
             .field("srtp_suite_count", &self.srtp_offered_suites.len())
             .field(
                 "media_public_address_configured",
@@ -2879,6 +2895,7 @@ impl Config {
             offer_srtp: false,
             srtp_required: false,
             amr_dtx: false,
+            amr_auto_cmr: false,
             srtp_offered_suites: SrtpSuitePolicy::Default.suites(),
             media_public_addr: None,
             media_mode: MediaMode::Enabled,
@@ -2991,6 +3008,7 @@ impl Config {
             offer_srtp: false,
             srtp_required: false,
             amr_dtx: false,
+            amr_auto_cmr: false,
             srtp_offered_suites: SrtpSuitePolicy::Default.suites(),
             media_public_addr: None,
             media_mode: MediaMode::Enabled,
@@ -8698,6 +8716,7 @@ impl UnifiedCoordinator {
         // AMR discontinuous transmission — sender-side policy, nothing to
         // negotiate (RFC 4867 defines no fmtp for DTX).
         media_adapter_inner.set_amr_dtx(config.amr_dtx);
+        media_adapter_inner.set_amr_auto_cmr(config.amr_auto_cmr);
         // Sprint 3.5 — propagate strict codec matching policy.
         media_adapter_inner.set_strict_codec_matching(config.strict_codec_matching);
         // NEXT_STEPS C2 — propagate the configured offered codec list.

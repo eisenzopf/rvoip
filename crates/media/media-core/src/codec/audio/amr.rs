@@ -40,6 +40,7 @@ use super::common::{AudioCodec, CodecInfo};
 use crate::error::{CodecError, Error, Result};
 use crate::rtp_processing::payload::amr::AmrPayloadFormat;
 use crate::types::AudioFrame;
+use codec_core::codecs::amr::rate::CmrDamper;
 use codec_core::codecs::amr::sdp::AmrFmtp;
 use codec_core::codecs::amr::mode::{AmrFrameType, AmrMode, AmrVariant};
 use codec_core::codecs::amr::payload::{AmrPacket, AmrPayloadFrame};
@@ -87,6 +88,22 @@ pub struct AmrAdapter {
     /// (the peer's request to *us*). Without it every payload went out CMR=15
     /// and nothing in the stack could ever ask a peer to slow down.
     outgoing_cmr: Option<u8>,
+    /// Automatic codec mode requests, when the session opted in.
+    ///
+    /// The damper watches which modes actually arrive and, at most once per
+    /// interval, names one the peer is not using. `None` means the feature is
+    /// off, which is the default: an automatic requester that damps badly
+    /// oscillates the peer's rate, and never asking is better than that.
+    ///
+    /// This is the up-shift policy the damper implements (rtpengine's shape).
+    /// A loss-driven *down*-shift — asking a peer to slow down when our
+    /// receive path is losing packets — is a different policy that would need
+    /// receiver statistics this object does not see, and is not implemented.
+    auto_cmr: Option<CmrDamper>,
+    /// A request the damper just produced, waiting to be routed to the
+    /// encoding object. Same seam, and same reason, as
+    /// [`Self::pending_mode_request`].
+    automatic_cmr: Option<u8>,
 }
 
 impl AmrAdapter {
@@ -164,7 +181,55 @@ impl AmrAdapter {
             last_decoded_mode: mode,
             pending_mode_request: None,
             outgoing_cmr: None,
+            auto_cmr: None,
+            automatic_cmr: None,
         })
+    }
+
+    /// Let this session ask its peer to change rate on its own.
+    ///
+    /// Off unless a deployment asks for it — see
+    /// [`AMR_AUTO_CMR_PARAMETER`](crate::relay::controller::AMR_AUTO_CMR_PARAMETER).
+    /// The damper observes the modes the peer actually sends and, once per
+    /// interval, requests at most one step toward a mode it is not using;
+    /// the request rides out on the next payload through the same field an
+    /// explicit `request_peer_mode` uses.
+    ///
+    /// `interval_frames` is counted in 20 ms frame-blocks, so 250 is five
+    /// seconds — the interval rtpengine documents.
+    ///
+    /// # Errors
+    ///
+    /// When `interval_frames` is zero, which would request on every frame.
+    pub fn set_auto_cmr(&mut self, enabled: bool, interval_frames: u32) -> Result<()> {
+        if !enabled {
+            self.auto_cmr = None;
+            return Ok(());
+        }
+        let mode_set = self.codec.mode_set().clone();
+        let damper = CmrDamper::new(mode_set, interval_frames).map_err(|error| {
+            Error::Codec(CodecError::InvalidParameters {
+                details: format!("AMR automatic CMR: {error}"),
+            })
+        })?;
+        self.auto_cmr = Some(damper);
+        Ok(())
+    }
+
+    /// Stage a CMR unless one is already waiting, so an automatic request
+    /// never displaces an explicit one.
+    pub const fn request_peer_mode_if_idle(&mut self, mode_index: u8) {
+        if self.outgoing_cmr.is_none() {
+            self.outgoing_cmr = Some(mode_index);
+        }
+    }
+
+    /// Take the automatic codec mode request the damper produced, if any.
+    ///
+    /// Mirrors [`Self::take_mode_request`]: the caller owns routing it to
+    /// whichever object does the encoding.
+    pub const fn take_automatic_cmr(&mut self) -> Option<u8> {
+        self.automatic_cmr.take()
     }
 
     /// Allow this session's encoder to replace silence with comfort noise.
@@ -327,6 +392,23 @@ impl AudioCodec for AmrAdapter {
 
         let mut samples = Vec::with_capacity(packet.frames.len() * self.frame_samples());
         for frame in &packet.frames {
+            // Every arriving frame-block advances the damper's interval, and
+            // speech frames also tell it which mode the peer chose. SID and
+            // NO_DATA count toward the interval but carry no mode, so a peer
+            // that goes quiet cannot make us request a change on no evidence.
+            if let Some(damper) = self.auto_cmr.as_mut() {
+                if let AmrFrameType::Speech(mode) = frame.frame_type {
+                    damper.observe(mode);
+                }
+                if let Some(request) = damper.advance() {
+                    // Recorded, not applied. This object decodes; the object
+                    // that stamps CMRs on outgoing payloads is a different
+                    // allocation behind a different lock, exactly as for the
+                    // peer's own request above. `DialogCodecRuntime::decode`
+                    // hands it across.
+                    self.automatic_cmr = Some(request.index());
+                }
+            }
             let coded = match frame.frame_type {
                 AmrFrameType::Speech(mode) => {
                     self.last_decoded_mode = mode;

@@ -20,7 +20,8 @@ use crate::types::AudioFrame;
 use crate::types::SampleRate;
 
 use super::types::{
-    MediaConfig, NegotiatedAudioCodec, AMR_DTX_PARAMETER, AUDIO_CHANNELS_PARAMETER,
+    MediaConfig, NegotiatedAudioCodec, AMR_AUTO_CMR_PARAMETER, AMR_DTX_PARAMETER,
+    AUDIO_CHANNELS_PARAMETER,
     NEGOTIATED_FMTP_PARAMETER, RTP_CLOCK_RATE_PARAMETER, RTP_PAYLOAD_TYPE_PARAMETER,
 };
 
@@ -110,10 +111,20 @@ pub(super) fn resolve_codec(config: &MediaConfig) -> Result<NegotiatedAudioCodec
             .parameters
             .get(AMR_DTX_PARAMETER)
             .is_some_and(|value| value.eq_ignore_ascii_case("true")),
+        auto_cmr: config
+            .parameters
+            .get(AMR_AUTO_CMR_PARAMETER)
+            .is_some_and(|value| value.eq_ignore_ascii_case("true")),
     };
     validate_codec_shape(&codec)?;
     Ok(codec)
 }
+
+/// Frame-blocks between automatic codec mode requests: five seconds at the
+/// 20 ms AMR frame-block. Long enough that a request is evidence about the
+/// stream rather than about one packet.
+#[cfg(any(feature = "amr-nb", feature = "amr-wb"))]
+const AUTO_CMR_INTERVAL_FRAMES: u32 = 250;
 
 /// Whether a canonical codec name is one of the two AMR encodings.
 fn is_amr(name: &str) -> bool {
@@ -281,6 +292,9 @@ impl StatefulCodec {
             let mut adapter =
                 AmrAdapter::new(codec.payload_type, &codec.name, codec.fmtp.as_deref())?;
             adapter.set_allow_dtx(codec.dtx);
+            // Five seconds at 20 ms per frame-block, the interval rtpengine
+            // documents for the same policy.
+            adapter.set_auto_cmr(codec.auto_cmr, AUTO_CMR_INTERVAL_FRAMES)?;
             return Ok(Self::Amr(Box::new(adapter)));
         }
 
@@ -333,6 +347,34 @@ impl StatefulCodec {
         match self {
             #[cfg(any(feature = "amr-nb", feature = "amr-wb"))]
             Self::Amr(codec) => codec.request_peer_mode(mode_index),
+            _ => {}
+        }
+    }
+
+    /// Take an automatic codec mode request the damper produced on the
+    /// receive path, if any. AMR only.
+    fn take_automatic_cmr(&mut self) -> Option<u8> {
+        match self {
+            #[cfg(any(feature = "amr-nb", feature = "amr-wb"))]
+            Self::Amr(codec) => codec.take_automatic_cmr(),
+            _ => None,
+        }
+    }
+
+    /// Stage a CMR only if no request is already waiting to go out.
+    ///
+    /// The automatic damper uses this so it can never overwrite an explicit
+    /// application request, which was made for a reason the damper cannot
+    /// see. Explicit requests use [`Self::request_peer_mode`] and do
+    /// overwrite.
+    #[cfg_attr(
+        not(any(feature = "amr-nb", feature = "amr-wb")),
+        allow(unused_variables)
+    )]
+    fn request_peer_mode_if_idle(&mut self, mode_index: u8) {
+        match self {
+            #[cfg(any(feature = "amr-nb", feature = "amr-wb"))]
+            Self::Amr(codec) => codec.request_peer_mode_if_idle(mode_index),
             _ => {}
         }
     }
@@ -446,10 +488,14 @@ impl DialogCodecRuntime {
     }
 
     pub(super) async fn decode(&self, payload: &[u8], timestamp: u32) -> Result<AudioFrame> {
-        let (mut frame, mode_request) = {
+        let (mut frame, mode_request, automatic_cmr) = {
             let mut decoder = self.decoder.lock().await;
             let frame = decoder.decode(payload)?;
-            (frame, decoder.take_mode_request())
+            (
+                frame,
+                decoder.take_mode_request(),
+                decoder.take_automatic_cmr(),
+            )
         };
         frame.timestamp = timestamp;
 
@@ -459,6 +505,14 @@ impl DialogCodecRuntime {
         // the two are never held at once.
         if let Some(cmr) = mode_request {
             self.encoder.lock().await.apply_mode_request(cmr);
+        }
+
+        // The damper watches the receive path and its output is a transmit
+        // action, so it crosses the same seam. An explicit application
+        // request already staged on the encoder wins: it was made for a
+        // reason neither this object nor the damper can see.
+        if let Some(cmr) = automatic_cmr {
+            self.encoder.lock().await.request_peer_mode_if_idle(cmr);
         }
 
         Ok(frame)
@@ -681,6 +735,116 @@ mod tests {
         assert!(
             after < before,
             "the request was for a lower rate, so frames should have shrunk: {before} -> {after}"
+        );
+    }
+
+    /// A session can ask its peer to change rate on its own, and does not by
+    /// default.
+    ///
+    /// `CmrDamper` existed with full unit tests and **zero callers** — the
+    /// rate-adaptation policy was written, tested, and then never given a
+    /// stream to watch. This pins the whole loop: the peer's frames arrive,
+    /// the damper observes their modes, and after its interval the request it
+    /// names is stamped on the next outgoing payload through the same field
+    /// an explicit `request_peer_mode` uses.
+    ///
+    /// The policy is the up-shift one the damper implements (rtpengine's
+    /// shape): it asks for a mode the peer is *not* using. It is not
+    /// loss-driven — asking a peer to slow down when our receive path is
+    /// losing packets needs receiver statistics the codec object never sees.
+    #[tokio::test]
+    #[cfg(feature = "amr-nb")]
+    async fn automatic_mode_requests_reach_the_wire_only_when_enabled() {
+        // A peer sending mode 0 (4.75 kbit/s) octet-aligned: CMR 15 (none),
+        // ToC for FT 0 with Q=1, then the frame itself — 95 bits, so 12
+        // octets.
+        let mut peer_frame = vec![0xf0u8, 0x04];
+        peer_frame.extend(std::iter::repeat_n(0x41u8, 12));
+
+        async fn run(auto: bool, peer_frame: &[u8]) -> Option<u8> {
+            let mut config = amr_config("AMR", 96, 8_000, "octet-align=1");
+            if auto {
+                config
+                    .parameters
+                    .insert(AMR_AUTO_CMR_PARAMETER.to_string(), "true".to_string());
+            }
+            let resolved = resolve_codec(&config).expect("resolves");
+            assert_eq!(
+                resolved.auto_cmr, auto,
+                "the parameter did not reach the format"
+            );
+            let runtime = DialogCodecRuntime::new(resolved).expect("constructs");
+
+            // One interval's worth of the peer's frames, plus one so the
+            // interval closes.
+            for index in 0..=AUTO_CMR_INTERVAL_FRAMES {
+                runtime
+                    .decode(peer_frame, index * 160)
+                    .await
+                    .expect("the peer's mode 0 frame decodes");
+            }
+
+            // Whatever the damper decided rides out on the next payload's CMR
+            // nibble. Encoding one frame is how it gets there.
+            let speech = AudioFrame::new(vec![1_000i16; 160], 8_000, 1, 0);
+            let payload = runtime.encode(&speech).await.expect("encodes");
+            let cmr = payload[0] >> 4;
+            (cmr != 15).then_some(cmr)
+        }
+
+        let requested = run(true, &peer_frame).await;
+        assert!(
+            requested.is_some(),
+            "the damper watched a full interval of mode-0 frames and asked for nothing"
+        );
+        let requested = requested.expect("checked above");
+        assert!(
+            requested > 0,
+            "a request to stay at the mode the peer already uses is not a request"
+        );
+
+        assert_eq!(
+            run(false, &peer_frame).await,
+            None,
+            "automatic requests must stay off unless a deployment asks: a badly              damped requester oscillates the peer's rate"
+        );
+    }
+
+    /// An explicit request outranks the automatic one.
+    ///
+    /// Both write the same single-slot CMR field, so ordering matters: an
+    /// application that asked for a specific mode — because it knows
+    /// something about the call that a frame-counting damper cannot — must
+    /// not have that silently replaced by the damper's own idea.
+    #[tokio::test]
+    #[cfg(feature = "amr-nb")]
+    async fn an_explicit_request_outranks_the_damper() {
+        let mut peer_frame = vec![0xf0u8, 0x04];
+        peer_frame.extend(std::iter::repeat_n(0x41u8, 12));
+
+        let mut config = amr_config("AMR", 96, 8_000, "octet-align=1");
+        config
+            .parameters
+            .insert(AMR_AUTO_CMR_PARAMETER.to_string(), "true".to_string());
+        let runtime =
+            DialogCodecRuntime::new(resolve_codec(&config).expect("resolves")).expect("constructs");
+
+        // The application asks for mode 2 first; then a full damper interval
+        // elapses, which would otherwise stage a request of its own.
+        runtime.request_peer_mode(2).await;
+        for index in 0..=AUTO_CMR_INTERVAL_FRAMES {
+            runtime
+                .decode(&peer_frame, index * 160)
+                .await
+                .expect("decodes");
+        }
+
+        let speech = AudioFrame::new(vec![1_000i16; 160], 8_000, 1, 0);
+        let payload = runtime.encode(&speech).await.expect("encodes");
+        assert_eq!(
+            payload[0] >> 4,
+            2,
+            "the damper overwrote an explicit application request"
         );
     }
 

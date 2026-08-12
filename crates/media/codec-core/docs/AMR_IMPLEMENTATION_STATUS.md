@@ -1744,7 +1744,19 @@ rvoip bridging two live legs.
       `CmrDamper` will be for), `peer_codec_mode` reads back the mode the
       peer is actually sending, and the adapter-level round trip is pinned by
       `a_requested_mode_change_crosses_the_wire_and_moves_the_peer`.
-      `CmrDamper` (automatic congestion-driven requests) remains uncalled.
+      `CmrDamper` **now has its caller** (2026-08-12): with
+      `Config::amr_auto_cmr` set, the decode path feeds every arriving
+      frame-block to the damper, and once per five-second interval the mode it
+      names is routed across the encoder/decoder seam and stamped on the next
+      payload. Off by default — a badly damped requester oscillates the peer's
+      rate, which is worse than never asking — and an explicit
+      `request_peer_codec_mode` always outranks it, which is pinned by a test.
+
+      What this is **not**: the damper implements rtpengine's up-shift policy,
+      asking for a mode the peer is *not* using. A loss-driven *down*-shift —
+      telling a peer to slow down because our receive path is losing packets —
+      needs receiver statistics the codec object never sees, and remains
+      unimplemented.
 - **Exit criterion:**
   - [x] AMR-WB call completed with **rvoip as the relaying B2BUA** against
         Asterisk (octet-aligned) and FreeSWITCH (bandwidth-efficient), UDP and
