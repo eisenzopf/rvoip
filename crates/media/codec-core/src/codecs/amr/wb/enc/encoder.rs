@@ -337,8 +337,10 @@ impl EncoderTrace {
 /// it does — which is the reference's behaviour and is why a mode switch is
 /// audible for a few frames rather than instantaneous.
 ///
-/// Discontinuous transmission is not implemented: every frame is a speech
-/// frame, as the reference's own encoder produces without `-dtx`.
+/// Discontinuous transmission is implemented and off by default, as the
+/// reference's own encoder is without `-dtx`; enabled, the `dtx` field below
+/// produces SID and `NO_DATA` frames on the reference's schedule, pinned against
+/// the normative `tst_md` sequence.
 pub struct WbEncoder {
     front: FrontEnd,
     isf_quantiser: IsfEncoder,

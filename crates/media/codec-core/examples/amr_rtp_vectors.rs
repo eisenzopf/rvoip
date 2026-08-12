@@ -39,35 +39,33 @@ fn tone(rate: u32, index: usize) -> Vec<i16> {
         .collect()
 }
 
-/// Encode one real speech frame at `mode`.
-fn speech_frame(variant: AmrVariant, mode: AmrMode) -> Vec<u8> {
+/// Encode `count` consecutive real speech frames at `mode`.
+///
+/// Consecutive, from one encoder run, because a multi-frame payload carries a
+/// frame *block* — 20 ms neighbours — and the dissector's length accounting
+/// is only meaningfully exercised by genuine back-to-back frames.
+fn speech_frames(variant: AmrVariant, mode: AmrMode, count: usize) -> Vec<Vec<u8>> {
     let mut config = match variant {
         AmrVariant::NarrowBand => CodecConfig::amr_nb(),
         AmrVariant::WideBand => CodecConfig::amr_wb(),
     };
     config.parameters.amr.mode_set = 1u16 << mode.index();
     let mut codec = codec_core::codecs::amr::AmrCodec::new(&config).expect("codec");
+    let rate = match variant {
+        AmrVariant::NarrowBand => 8_000,
+        AmrVariant::WideBand => 16_000,
+    };
     // A couple of frames in, so the encoder is past its cold start.
     for i in 0..3 {
-        let _ = codec.encode_frame(&tone(
-            match variant {
-                AmrVariant::NarrowBand => 8_000,
-                AmrVariant::WideBand => 16_000,
-            },
-            i,
-        ));
+        let _ = codec.encode_frame(&tone(rate, i));
     }
-    let coded: CodedFrame = codec
-        .encode_frame(&tone(
-            match variant {
-                AmrVariant::NarrowBand => 8_000,
-                AmrVariant::WideBand => 16_000,
-            },
-            3,
-        ))
-        .expect("encodes");
-    assert_eq!(coded.kind, FrameKind::Speech);
-    coded.data
+    (0..count)
+        .map(|offset| {
+            let coded: CodedFrame = codec.encode_frame(&tone(rate, 3 + offset)).expect("encodes");
+            assert_eq!(coded.kind, FrameKind::Speech);
+            coded.data
+        })
+        .collect()
 }
 
 /// A 12-byte RTP header plus payload, as text2pcap hex.
@@ -93,12 +91,20 @@ fn main() {
     // Wireshark's AMR framing and variant are *global* preferences, so one
     // capture can only carry one combination. The caller picks which.
     let which = std::env::args().nth(1).unwrap_or_else(|| "nb-oa".to_string());
-    let selected = match which.as_str() {
+    // A `-2f` suffix packs two frames per payload, exercising the F-bit chain
+    // in the table of contents; the plain selections stay single-frame.
+    let (base, frames_per_payload) = match which.strip_suffix("-2f") {
+        Some(base) => (base, 2usize),
+        None => (which.as_str(), 1),
+    };
+    let selected = match base {
         "nb-oa" => (AmrVariant::NarrowBand, true, 107u8),
         "nb-be" => (AmrVariant::NarrowBand, false, 106),
         "wb-oa" => (AmrVariant::WideBand, true, 105),
         "wb-be" => (AmrVariant::WideBand, false, 104),
-        other => panic!("unknown selection `{other}`; use nb-oa, nb-be, wb-oa or wb-be"),
+        other => panic!(
+            "unknown selection `{other}`; use nb-oa, nb-be, wb-oa or wb-be, optionally with -2f"
+        ),
     };
 
     let mut case = 0usize;
@@ -116,30 +122,34 @@ fn main() {
 
         let modes: Vec<AmrMode> = AmrMode::all(variant);
         for mode in modes {
-            let data = speech_frame(variant, mode);
+            let frames_data = speech_frames(variant, mode, frames_per_payload);
             // One with no mode request, one requesting the lowest mode, so the
             // CMR nibble is exercised at both its "absent" and a real value.
             for cmr in [None, Some(0u8)] {
+                let frames: Vec<AmrPayloadFrame> = frames_data
+                    .iter()
+                    .map(|data| {
+                        AmrPayloadFrame::new(AmrFrameType::Speech(mode), true, data.clone())
+                            .expect("frame")
+                    })
+                    .collect();
                 let packet = AmrPacket {
                     cmr,
                     interleaving: None,
-                    frames: vec![AmrPayloadFrame::new(
-                        AmrFrameType::Speech(mode),
-                        true,
-                        data.clone(),
-                    )
-                    .expect("frame")],
+                    frames,
                 };
                 let payload = packer.pack(&packet).expect("packs");
                 case += 1;
+                let ft_list = std::iter::repeat_n(mode.index().to_string(), frames_per_payload)
+                    .collect::<Vec<_>>()
+                    .join(",");
                 eprintln!(
-                    "# case {case} variant={} framing={} pt={payload_type} ft={} cmr={} bytes={}",
+                    "# case {case} variant={} framing={} pt={payload_type} ft={ft_list} cmr={} bytes={}",
                     match variant {
                         AmrVariant::NarrowBand => "nb",
                         AmrVariant::WideBand => "wb",
                     },
                     if octet_aligned { "oa" } else { "be" },
-                    mode.index(),
                     cmr.map_or_else(|| "none".to_string(), |c| c.to_string()),
                     payload.len(),
                 );

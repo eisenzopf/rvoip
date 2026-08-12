@@ -2,8 +2,9 @@
 //!
 //! # Status
 //!
-//! Under construction. The LP analysis front end exists; there is no encoder or
-//! decoder yet, and `AmrCodec` reports `FeatureNotEnabled` for both. See
+//! Complete: encoder and decoder are bit-exact against the TS 26.173
+//! reference over the nine normative speech vectors, DTX in both directions
+//! against `tst_md`, plus concealment and homing. See
 //! `docs/AMR_IMPLEMENTATION_STATUS.md`.
 //!
 //! Everything here is fixed point, because that is what AMR is: TS 26.190 §8.1

@@ -1803,9 +1803,17 @@ RFC 4867 §4.4.2.1 says the CRC list follows the table of contents but does not
 say whether frames carrying no data get a CRC entry. We follow TS 26.201 —
 "When Frame Type Index of table 1a is 14 or 15, the CRC field is not included"
 — so `NO_DATA` and `SPEECH_LOST` contribute no CRC octet. **If a peer disagrees,
-every CRC after the first no-data frame will misalign.** Worth confirming
-against a real implementation during Phase 8 interop; it is the one place in
-Phase 1 where we guessed.
+every CRC after the first no-data frame will misalign.** It is the one place in
+Phase 1 where we guessed, and it was measured to be **externally unsettleable
+for now**: Wireshark 4.6's AMR dissector has no CRC mode at all (its
+`amr.encoding.version` preference offers only octet_aligned / bw_efficient /
+IF1 / IF2 — RFC 3267's CRC variant never made it in), FreeSWITCH's mod_amr does
+not negotiate CRC, and neither reference tree ships CRC framing code. The CRC
+*arithmetic* itself is now triple-checked — the module implementation, an
+independently written prose implementation, and hand-worked register traces
+(`crc_matches_hand_worked_vectors`) — so what remains open is only the
+no-data-octet framing choice, to be confirmed if a CRC-negotiating peer ever
+appears.
 
 ### Remaining for Phase 1
 

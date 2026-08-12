@@ -1058,6 +1058,39 @@ mod tests {
         }
     }
 
+    /// Hand-worked CRC values, independent of *both* in-repo implementations.
+    ///
+    /// The cross-check above proves the two implementations agree; it cannot
+    /// prove they don't share a misreading of the RFC's prose, since they
+    /// share an author. These registers were stepped by hand on paper from
+    /// §4.4.2.1's rule — feedback = LSB ⊕ input, shift right, XOR `0xB8` on
+    /// feedback — and only then confirmed numerically.
+    ///
+    /// Derivations:
+    /// - one `1` bit: feedback fires once on a zero register → exactly the
+    ///   mask, `0xB8`.
+    /// - `11`: second step sees LSB 0 of `0xB8`, input 1 → feedback again:
+    ///   `(0xB8 >> 1) ^ 0xB8 = 0x5C ^ 0xB8 = 0xE4`.
+    /// - `1000_0000`: the seven zero steps after `0xB8` walk
+    ///   `0x5C, 0x2E, 0x17, 0xB3, 0xE1, 0xC8, 0x64` (feedback fires whenever
+    ///   the LSB is 1: at `0x17`, `0xB3`, `0xE1`).
+    /// - all-zero input never sets feedback, so the register stays `0x00` —
+    ///   which is also why a CRC of zero is *valid*, not "absent".
+    ///
+    /// This still cannot settle the one genuinely open question — whether
+    /// NO_DATA/SPEECH_LOST frames contribute a CRC octet (`crc_class_a_bits`
+    /// says no, per TS 26.201) — because that is a framing choice, not CRC
+    /// arithmetic, and no external arbiter exists: Wireshark 4.6's AMR
+    /// dissector has no CRC mode at all (`amr.encoding.version` offers only
+    /// octet_aligned/bw_efficient/IF1/IF2).
+    #[test]
+    fn crc_matches_hand_worked_vectors() {
+        assert_eq!(frame_crc(&[0x80], 1), 0xB8);
+        assert_eq!(frame_crc(&[0xC0], 2), 0xE4);
+        assert_eq!(frame_crc(&[0x80], 8), 0x64);
+        assert_eq!(frame_crc(&[0x00], 8), 0x00);
+    }
+
     #[test]
     fn crc_detects_damage_to_class_a_bits() {
         let variant = AmrVariant::WideBand;

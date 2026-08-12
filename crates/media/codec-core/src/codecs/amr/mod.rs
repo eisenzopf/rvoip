@@ -9,12 +9,11 @@
 //!
 //! Concealment covers both damaged frames and lost ones, on both variants.
 //!
-//! Wideband DTX is complete in both directions and reachable from here:
-//! configure `dtx` and [`VariableRateCodec::encode_frame`] returns comfort
-//! noise and gaps on the reference's own schedule, while
-//! [`VariableRateCodec::decode_frame`] accepts them. Narrowband DTX is not
-//! implemented — it is gated on a VAD1 port that does not exist — and refuses
-//! with a message naming what it needs rather than returning silence.
+//! DTX is complete in both directions for both variants and reachable from
+//! here: configure `dtx` and [`VariableRateCodec::encode_frame`] returns
+//! comfort noise and gaps on the reference's own schedule (narrowband driven
+//! by the bit-exact VAD1 port in `nb/enc/vad.rs`), while
+//! [`VariableRateCodec::decode_frame`] accepts them.
 //!
 //! See `docs/AMR_IMPLEMENTATION_PLAN.md` for the phased plan and
 //! `docs/AMR_IMPLEMENTATION_STATUS.md` for current progress.
@@ -74,13 +73,11 @@ pub use storage::AmrStorageReader;
 
 /// AMR-NB / AMR-WB codec.
 ///
-/// # Not yet implemented
-///
-/// Comfort noise and deliberate gaps fail with
-/// [`CodecError::FeatureNotEnabled`] naming what they need, rather than
-/// returning silence — a codec that quietly produces wrong audio is far harder
-/// to diagnose than one that refuses. Everything else works: both directions,
-/// every rate, plus concealment of damaged and lost frames.
+/// Both directions, every rate, DTX and comfort noise in both variants, plus
+/// concealment of damaged and lost frames. A variant whose feature is not
+/// compiled in fails with [`CodecError::FeatureNotEnabled`] naming what it
+/// needs, rather than returning silence — a codec that quietly produces wrong
+/// audio is far harder to diagnose than one that refuses.
 pub struct AmrCodec {
     variant: AmrVariant,
     mode_set: AmrModeSet,

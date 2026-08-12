@@ -13,10 +13,11 @@
 //! * the **frame assembly** — which parameter word goes where, and the TS
 //!   26.101 permutation that turns codec bits into a payload.
 //!
-//! Discontinuous transmission is not implemented: `coder.c` runs without
-//! `-dtx` for the committed vectors, so `usedMode` is always the requested
-//! mode, `dtx_buffer` has nothing to feed and the `MRDTX` branch of `cod_amr`
-//! is unreachable.
+//! Discontinuous transmission is implemented and off by default, exactly as
+//! `coder.c` is: without `-dtx` every frame is speech, and with it the VAD1
+//! decision drives `dtx_buffer` and the `MRDTX` branch of `cod_amr`. Both
+//! shapes are pinned — the speech-only vectors byte-for-byte, and the DTX
+//! fixtures (SID cadence included) in `super::super::super::tests`.
 //!
 //! # 4.75 kbit/s codes two subframes jointly
 //!

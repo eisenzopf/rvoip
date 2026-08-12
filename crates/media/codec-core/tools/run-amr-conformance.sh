@@ -4,7 +4,7 @@
 #
 # # Why this is not a CI job
 #
-# The TS 26.073 and TS 26.174 sequences are 3GPP copyright. Only generated
+# The TS 26.073 and TS 26.173 sequences are 3GPP copyright. Only generated
 # output is committed to this repository; the sequences themselves are fetched
 # for in-house design and never redistributed. So the tests that consume them
 # are `#[ignore]`d and cannot run on a stock CI runner, and the six strongest
