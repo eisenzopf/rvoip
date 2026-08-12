@@ -1473,17 +1473,23 @@ run_local_proxy_pbx_gate() {
 
   mkdir -p "$pbx_output_root"
   local provider
+  local label
   for provider in kamailio opensips; do
-    if run_gate "local ${provider} lab up" bash "$lifecycle" "${provider}-up"; then
+    case "$provider" in
+      kamailio) label="Kamailio" ;;
+      opensips) label="OpenSIPS" ;;
+      *) label="$provider" ;;
+    esac
+    if run_gate "local ${label} lab up" bash "$lifecycle" "${provider}-up"; then
       capture_docker_snapshot "after-${provider}-up"
-      run_gate_continue "local ${provider} PBX matrix" \
+      run_gate_continue "local ${label} PBX matrix" \
         env PBX_OUT_ROOT="$pbx_output_root" \
         PBX_REPORT_APPEND=1 \
         "$CRATE_DIR/examples/pbx/run.sh" \
         --pbx "$provider" --api "$proxy_api" --scenario "$proxy_scenario"
       capture_docker_snapshot "after-${provider}-matrix"
     fi
-    run_gate_continue "local ${provider} lab down" bash "$lifecycle" "${provider}-down"
+    run_gate_continue "local ${label} lab down" bash "$lifecycle" "${provider}-down"
   done
 }
 

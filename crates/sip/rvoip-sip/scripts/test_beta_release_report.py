@@ -1331,6 +1331,53 @@ class PolicyTests(unittest.TestCase):
                 ["cargo", "fmt", "--check"],
             )
 
+    def test_proxy_pbx_matrix_rows_are_verified_like_the_b2bua_providers(self) -> None:
+        """The registrar-proxy labs append to the same pbx/matrix.tsv as the
+        B2BUA providers, so their gates need the same row-level check. Without
+        it a proxy gate that exited 0 having recorded nothing would pass."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "pbx").mkdir()
+            header = "status\tprovider\tapi\tscenario\ttransport\trole"
+            rows = [
+                "PASS\tkamailio\tendpoint\tamr_call\tUDP\tcaller",
+                "PASS\tkamailio\tendpoint\tamr_call\tUDP\tcallee",
+                "PASS\topensips\tendpoint\tamr_call\tUDP\tcaller",
+                "FAIL\topensips\tendpoint\tamr_call\tUDP\tcallee",
+            ]
+            (root / "pbx/matrix.tsv").write_text("\n".join([header, *rows]) + "\n")
+
+            kamailio = reporting.interop_observed_check(
+                root, "local Kamailio PBX matrix"
+            )
+            self.assertIsNotNone(kamailio)
+            self.assertEqual(kamailio["check"], "kamailio PBX matrix rows")
+            self.assertEqual(kamailio["observed"], {"rows": 2, "pass": 2, "skip": 0})
+            self.assertTrue(kamailio["passed"])
+
+            # A FAIL row must fail the gate, not be averaged away.
+            opensips = reporting.interop_observed_check(
+                root, "local OpenSIPS PBX matrix"
+            )
+            self.assertIsNotNone(opensips)
+            self.assertFalse(opensips["passed"])
+
+    def test_proxy_pbx_matrix_with_no_rows_does_not_pass(self) -> None:
+        """A lab that recorded nothing is not a pass. This is the mutation the
+        whole check exists for: PASS count zero must fail even with no FAILs."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "pbx").mkdir()
+            (root / "pbx/matrix.tsv").write_text(
+                "status\tprovider\tapi\tscenario\ttransport\trole\n"
+                "PASS\tasterisk\tendpoint\tbasic_call\tUDP\tcaller\n"
+            )
+            observed = reporting.interop_observed_check(
+                root, "local Kamailio PBX matrix"
+            )
+            self.assertEqual(observed["observed"], {"rows": 0, "pass": 0, "skip": 0})
+            self.assertFalse(observed["passed"])
+
     def test_proxy_interop_report_validation_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
