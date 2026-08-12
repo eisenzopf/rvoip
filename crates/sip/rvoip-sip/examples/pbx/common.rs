@@ -109,7 +109,50 @@ pub const MIN_RECEIVED_SAMPLES: usize = min_received_samples(SAMPLE_RATE);
 // independently recorded directions satisfy the unchanged evidence floor.
 pub const G729_CALLER_CAPTURE_TARGET_SAMPLES: usize =
     MIN_RECEIVED_SAMPLES + SAMPLE_RATE as usize / 2;
-pub const TONE_ANALYSIS_WINDOW_SAMPLES: usize = FRAME_SIZE * 10;
+/// The tone-analysis window is 200 ms *at any rate*.
+///
+/// Stated as a sample count it was 200 ms at 8 kHz but silently 100 ms at
+/// 16 kHz. The duration is load-bearing twice over: every tone this harness
+/// sends (440, 660, 880 Hz) lands on an exact Goertzel bin of a 200 ms window
+/// at both rates, and an off-bin fundamental caps the measurable SNR near
+/// 17 dB no matter how clean the audio is — see
+/// `harness_tones_land_on_an_exact_goertzel_bin`.
+pub const fn tone_analysis_window_samples(sample_rate: u32) -> usize {
+    sample_rate as usize / 5
+}
+pub const TONE_ANALYSIS_WINDOW_SAMPLES: usize = tone_analysis_window_samples(SAMPLE_RATE);
+/// One 20 ms frame at `sample_rate`: 160 at 8 kHz, 320 at 16 kHz.
+pub const fn frame_samples(sample_rate: u32) -> usize {
+    sample_rate as usize / 50
+}
+
+/// Peak amplitude of the tone this harness sends — `0.3 * 32767` in
+/// [`generate_tone_at_rate`]. Every level threshold below is a fraction of it,
+/// so a deliberate change to the sent level moves the thresholds with it.
+pub const TONE_PEAK_AMPLITUDE: f32 = 0.3 * 32767.0;
+pub const TONE_RMS: f32 = TONE_PEAK_AMPLITUDE / std::f32::consts::SQRT_2;
+
+/// Per-window floor on fundamental-vs-residual power for an AMR capture.
+///
+/// Calibrated against real captures at the top modes (AMR-NB 12.2, AMR-WB
+/// 23.85): the cleanest path's *worst* window measured +25.7 dB and a
+/// degraded path's best *sustained* stretch at 15 dB lasted 0.46 s against
+/// the 1 s required below. Lowering this below ~13 dB without lengthening
+/// [`AMR_REQUIRED_TONE_SECS`] lets that degraded capture back in — the two
+/// constants trade off, and the tradeoff was measured, not guessed. Lower
+/// modes will code a tone worse; when a rate sweep lands, calibrate a
+/// per-mode table from codec loopback rather than relaxing this blanket
+/// figure.
+pub const AMR_MIN_TONE_SNR_DB: f32 = 15.0;
+/// Per-20 ms-frame RMS floor: a quarter of what we send. The cleanest capture
+/// never dipped below 0.6× sent RMS; a degraded one spent whole frames near
+/// 0.02×. Level is checked separately from SNR because attenuation preserves
+/// spectral purity perfectly.
+pub const AMR_MIN_FRAME_RMS: f32 = TONE_RMS / 4.0;
+/// The unbroken stretch of passing windows an AMR capture must contain — the
+/// same one-continuous-second guarantee `assert_audio_path` gives G.711 and
+/// G.729.
+pub const AMR_REQUIRED_TONE_SECS: f32 = 1.0;
 pub const HOLD_RESUME_PRE_HOLD_FRAMES: usize = 100;
 pub const HOLD_RESUME_HELD_FRAMES: usize = 50;
 pub const HOLD_RESUME_POST_RESUME_FRAMES: usize = 200;
@@ -781,6 +824,58 @@ struct ToneWindowScan {
     required_passing_run: usize,
     analysis_window_samples: usize,
     step_samples: usize,
+    /// Quality of the best-ratio window, plus the weakest figures seen in
+    /// *any* window — a failure message must name the limiting window, not
+    /// the flattering one. A degraded capture's best window can measure
+    /// better than a clean capture's worst; only the weakest-window view
+    /// discriminates.
+    best_quality: ToneQuality,
+    weakest_snr_db: f32,
+    weakest_frame_rms: f32,
+}
+
+/// What a single analysis window must satisfy to count as passing.
+///
+/// The dominance ratio alone is scale-invariant and phase-blind: it passed a
+/// capture that was 1-bit square-wave distortion, one that was attenuated
+/// 100×, and one with half its frames zeroed. Each quality clause exists
+/// because a measured failure defeated the others.
+#[derive(Debug, Clone, Copy)]
+struct WindowGate {
+    min_ratio: f32,
+    min_snr_db: Option<f32>,
+    min_frame_rms: Option<f32>,
+}
+
+impl WindowGate {
+    /// Exactly the historical predicate: the right tone dominates the wrong
+    /// one. The scenarios that only ever asked that question keep asking it,
+    /// bit-for-bit.
+    fn tone_only() -> Self {
+        Self {
+            min_ratio: DOMINANCE_RATIO,
+            min_snr_db: None,
+            min_frame_rms: None,
+        }
+    }
+
+    /// The AMR gate: the tone must dominate, must actually *be* a tone, and
+    /// must be there at full level in every 20 ms frame.
+    fn amr() -> Self {
+        Self {
+            min_ratio: DOMINANCE_RATIO,
+            min_snr_db: Some(AMR_MIN_TONE_SNR_DB),
+            min_frame_rms: Some(AMR_MIN_FRAME_RMS),
+        }
+    }
+
+    fn admits(&self, analysis: &ToneAnalysis, quality: &ToneQuality) -> bool {
+        analysis.ratio >= self.min_ratio
+            && self.min_snr_db.is_none_or(|floor| quality.snr_db >= floor)
+            && self
+                .min_frame_rms
+                .is_none_or(|floor| quality.min_frame_rms >= floor)
+    }
 }
 
 pub struct ToneRecorder {
@@ -2251,7 +2346,7 @@ async fn run_amr_caller(
         .await;
     outcome?;
     let path = saved?;
-    assert_amr_tone(
+    assert_amr_tone_quality(
         &path,
         sample_rate,
         tone_for_callee(transport),
@@ -2302,7 +2397,7 @@ async fn run_amr_callee(
         )
         .into());
     }
-    assert_amr_tone(
+    assert_amr_tone_quality(
         &path,
         sample_rate,
         tone_for_caller(transport),
@@ -2689,6 +2784,7 @@ pub async fn run_analyze() -> ExampleResult<()> {
     match scenario {
         Scenario::BasicCall => analyze_basic(&cfg, transport),
         Scenario::G729Call => analyze_g729(&cfg, transport),
+        Scenario::AmrCall => analyze_amr(&cfg, transport),
         Scenario::HoldResume => analyze_hold(&cfg, transport),
         Scenario::Dtmf if transport.is_tls() => analyze_dtmf(&cfg, transport),
         Scenario::BlindTransfer if transport.is_tls() => analyze_transfer(&cfg, transport),
@@ -2740,6 +2836,32 @@ fn analyze_g729(cfg: &EndpointConfig, transport: TransportMode) -> ExampleResult
     Ok(())
 }
 
+/// Re-judge existing AMR captures without placing a call.
+///
+/// The interop WAVs are gitignored, so this analyzer is the only way to check
+/// a threshold change against real captured evidence rather than re-running
+/// two PBXes. `PBX_CODEC_PROFILE` selects the profile whose rate the capture
+/// was made at, exactly as it selected it during the call.
+fn analyze_amr(cfg: &EndpointConfig, transport: TransportMode) -> ExampleResult<()> {
+    write_audio_diagnostics(cfg, Scenario::AmrCall, transport);
+    let rate = amr_sample_rate(cfg.codec_profile);
+    let caller_wav = cfg.output_dir.join(amr_caller_wav(transport));
+    let callee_wav = cfg.output_dir.join(amr_callee_wav(transport));
+    assert_amr_tone_quality(
+        &caller_wav,
+        rate,
+        tone_for_callee(transport),
+        tone_for_caller(transport),
+    )?;
+    assert_amr_tone_quality(
+        &callee_wav,
+        rate,
+        tone_for_caller(transport),
+        tone_for_callee(transport),
+    )?;
+    Ok(())
+}
+
 fn analyze_hold(cfg: &EndpointConfig, transport: TransportMode) -> ExampleResult<()> {
     write_audio_diagnostics(cfg, Scenario::HoldResume, transport);
     let caller_wav = cfg.output_dir.join(hold_resume_caller_wav(transport));
@@ -2753,6 +2875,7 @@ fn analyze_hold(cfg: &EndpointConfig, transport: TransportMode) -> ExampleResult
     let pre_hold = assert_best_window_tone(
         "callee pre-hold caller tone",
         leading_third(&callee_samples),
+        SAMPLE_RATE,
         SAMPLE_RATE as usize,
         FRAME_SIZE,
         ENDPOINT_1001_TONE_HZ,
@@ -2761,6 +2884,7 @@ fn analyze_hold(cfg: &EndpointConfig, transport: TransportMode) -> ExampleResult
     let post_resume = assert_best_window_tone(
         "callee post-resume caller tone",
         trailing_third(&callee_samples),
+        SAMPLE_RATE,
         SAMPLE_RATE as usize,
         FRAME_SIZE,
         ENDPOINT_1003_TONE_HZ,
@@ -2814,6 +2938,7 @@ fn analyze_transfer(cfg: &EndpointConfig, transport: TransportMode) -> ExampleRe
     let initial = assert_best_window_tone(
         "1002 initial leg received 1001 tone",
         leading_third(&transferee_samples),
+        SAMPLE_RATE,
         WINDOW_SAMPLES,
         FRAME_SIZE,
         ENDPOINT_1001_TONE_HZ,
@@ -2822,6 +2947,7 @@ fn analyze_transfer(cfg: &EndpointConfig, transport: TransportMode) -> ExampleRe
     let transferred = assert_best_window_tone(
         "1002 transferred leg received 1003 tone",
         trailing_third(&transferee_samples),
+        SAMPLE_RATE,
         WINDOW_SAMPLES,
         FRAME_SIZE,
         ENDPOINT_1003_TONE_HZ,
@@ -2878,6 +3004,7 @@ fn write_audio_diagnostics_inner(
             add_audio_file_diagnostics(
                 &mut files,
                 &mut markdown,
+                SAMPLE_RATE,
                 "g711 caller",
                 &cfg.output_dir.join(g711_caller_wav(transport)),
                 &[(
@@ -2890,6 +3017,7 @@ fn write_audio_diagnostics_inner(
             add_audio_file_diagnostics(
                 &mut files,
                 &mut markdown,
+                SAMPLE_RATE,
                 "g711 callee",
                 &cfg.output_dir.join(g711_callee_wav(transport)),
                 &[(
@@ -2904,6 +3032,7 @@ fn write_audio_diagnostics_inner(
             add_audio_file_diagnostics(
                 &mut files,
                 &mut markdown,
+                SAMPLE_RATE,
                 "g729 caller",
                 &cfg.output_dir.join(g729_caller_wav(transport)),
                 &[(
@@ -2916,6 +3045,7 @@ fn write_audio_diagnostics_inner(
             add_audio_file_diagnostics(
                 &mut files,
                 &mut markdown,
+                SAMPLE_RATE,
                 "g729 callee",
                 &cfg.output_dir.join(g729_callee_wav(transport)),
                 &[(
@@ -2930,6 +3060,7 @@ fn write_audio_diagnostics_inner(
             add_audio_file_diagnostics(
                 &mut files,
                 &mut markdown,
+                SAMPLE_RATE,
                 "hold caller",
                 &cfg.output_dir.join(hold_resume_caller_wav(transport)),
                 &[(
@@ -2942,6 +3073,7 @@ fn write_audio_diagnostics_inner(
             add_audio_file_diagnostics(
                 &mut files,
                 &mut markdown,
+                SAMPLE_RATE,
                 "hold callee",
                 &cfg.output_dir.join(hold_resume_callee_wav(transport)),
                 &[
@@ -2964,6 +3096,7 @@ fn write_audio_diagnostics_inner(
             add_audio_file_diagnostics(
                 &mut files,
                 &mut markdown,
+                SAMPLE_RATE,
                 "dtmf caller",
                 &cfg.output_dir.join(dtmf_caller_wav(transport)),
                 &[(
@@ -2976,6 +3109,7 @@ fn write_audio_diagnostics_inner(
             add_audio_file_diagnostics(
                 &mut files,
                 &mut markdown,
+                SAMPLE_RATE,
                 "dtmf callee",
                 &cfg.output_dir.join(dtmf_callee_wav(transport)),
                 &[(
@@ -2990,6 +3124,7 @@ fn write_audio_diagnostics_inner(
             add_audio_file_diagnostics(
                 &mut files,
                 &mut markdown,
+                SAMPLE_RATE,
                 "transferor",
                 &cfg.output_dir.join(transferor_wav(transport)),
                 &[(
@@ -3002,6 +3137,7 @@ fn write_audio_diagnostics_inner(
             add_audio_file_diagnostics(
                 &mut files,
                 &mut markdown,
+                SAMPLE_RATE,
                 "transferee",
                 &cfg.output_dir.join(transferee_wav(transport)),
                 &[
@@ -3022,6 +3158,7 @@ fn write_audio_diagnostics_inner(
             add_audio_file_diagnostics(
                 &mut files,
                 &mut markdown,
+                SAMPLE_RATE,
                 "target",
                 &cfg.output_dir.join(transfer_target_wav(transport)),
                 &[(
@@ -3032,14 +3169,50 @@ fn write_audio_diagnostics_inner(
                 )],
             );
         }
+        Scenario::AmrCall => {
+            // The one scenario whose captures are not 8 kHz: the rate follows
+            // the negotiated profile, and so do the file duration, the
+            // analysis window and the Goertzel bins inside.
+            let rate = amr_sample_rate(cfg.codec_profile);
+            add_audio_file_diagnostics(
+                &mut files,
+                &mut markdown,
+                rate,
+                "amr caller",
+                &cfg.output_dir.join(amr_caller_wav(transport)),
+                &[(
+                    "caller received callee AMR tone",
+                    WindowSelector::Stable,
+                    tone_for_callee(transport),
+                    tone_for_caller(transport),
+                )],
+            );
+            add_audio_file_diagnostics(
+                &mut files,
+                &mut markdown,
+                rate,
+                "amr callee",
+                &cfg.output_dir.join(amr_callee_wav(transport)),
+                &[(
+                    "callee received caller AMR tone",
+                    WindowSelector::Stable,
+                    tone_for_caller(transport),
+                    tone_for_callee(transport),
+                )],
+            );
+        }
         _ => {}
     }
 
+    let report_sample_rate = match scenario {
+        Scenario::AmrCall => amr_sample_rate(cfg.codec_profile),
+        _ => SAMPLE_RATE,
+    };
     let report = serde_json::json!({
         "scenario": format!("{:?}", scenario),
         "transport": format!("{:?}", transport),
-        "sample_rate": SAMPLE_RATE,
-        "frame_size": FRAME_SIZE,
+        "sample_rate": report_sample_rate,
+        "frame_size": frame_samples(report_sample_rate),
         "files": files,
     });
     std::fs::write(
@@ -3060,6 +3233,7 @@ enum WindowSelector {
 fn add_audio_file_diagnostics(
     files: &mut Vec<serde_json::Value>,
     markdown: &mut String,
+    sample_rate: u32,
     label: &str,
     path: &Path,
     windows: &[(&str, WindowSelector, f32, f32)],
@@ -3072,7 +3246,7 @@ fn add_audio_file_diagnostics(
             markdown.push_str(&format!("- samples: {}\n", samples.len()));
             markdown.push_str(&format!(
                 "- duration_secs: {:.3}\n",
-                samples.len() as f64 / SAMPLE_RATE as f64
+                samples.len() as f64 / f64::from(sample_rate)
             ));
             if let Some((first, last)) = bounds {
                 markdown.push_str(&format!("- first_non_silence_sample: {}\n", first));
@@ -3085,7 +3259,7 @@ fn add_audio_file_diagnostics(
             for (window_label, selector, expected_hz, rejected_hz) in windows {
                 let selected = match selector {
                     WindowSelector::Stable => {
-                        analysis_slice_for_window(&samples, SAMPLE_RATE as usize)
+                        analysis_slice_for_window(&samples, sample_rate as usize)
                     }
                     WindowSelector::LeadingThird => {
                         if samples.len() >= 3 {
@@ -3104,8 +3278,9 @@ fn add_audio_file_diagnostics(
                 };
                 let window_value = match best_window_tone_for_diag(
                     selected,
-                    SAMPLE_RATE as usize,
-                    FRAME_SIZE,
+                    sample_rate,
+                    sample_rate as usize,
+                    frame_samples(sample_rate),
                     *expected_hz,
                     *rejected_hz,
                 ) {
@@ -3138,7 +3313,11 @@ fn add_audio_file_diagnostics(
                             "rejected_hz": analysis.rejected_hz,
                             "expected_magnitude": analysis.expected_magnitude,
                             "rejected_magnitude": analysis.rejected_magnitude,
-                            "ratio": analysis.ratio
+                            "ratio": analysis.ratio,
+                            "best_window_snr_db": scan.best_quality.snr_db,
+                            "best_window_fundamental_amplitude": scan.best_quality.fundamental_amplitude,
+                            "weakest_window_snr_db": scan.weakest_snr_db,
+                            "weakest_frame_rms": scan.weakest_frame_rms
                         })
                     }
                     Err(error) => {
@@ -3158,7 +3337,7 @@ fn add_audio_file_diagnostics(
                 "path": path.display().to_string(),
                 "status": "ok",
                 "samples": samples.len(),
-                "duration_secs": samples.len() as f64 / SAMPLE_RATE as f64,
+                "duration_secs": samples.len() as f64 / f64::from(sample_rate),
                 "first_non_silence_sample": bounds.map(|(first, _)| first),
                 "last_non_silence_sample": bounds.map(|(_, last)| last),
                 "windows": window_values
@@ -3189,10 +3368,12 @@ fn non_silence_bounds(samples: &[i16], threshold: i16) -> Option<(usize, usize)>
 
 fn scan_tone_windows(
     samples: &[i16],
+    sample_rate: u32,
     window_samples: usize,
     step_samples: usize,
     expected_hz: f32,
     rejected_hz: f32,
+    gate: WindowGate,
 ) -> Result<ToneWindowScan, String> {
     if samples.len() < window_samples {
         return Err(format!(
@@ -3202,30 +3383,38 @@ fn scan_tone_windows(
         ));
     }
 
-    let analysis_window = samples
-        .len()
-        .min(TONE_ANALYSIS_WINDOW_SAMPLES.min(window_samples).max(1));
+    let analysis_window = samples.len().min(
+        tone_analysis_window_samples(sample_rate)
+            .min(window_samples)
+            .max(1),
+    );
     let step = step_samples.max(1);
     let last_start = samples.len() - analysis_window;
     let mut start = 0usize;
-    let mut best: Option<ToneAnalysis> = None;
+    let mut best: Option<(ToneAnalysis, ToneQuality)> = None;
     let mut passing_windows = 0usize;
     let mut total_windows = 0usize;
     let mut current_passing_run = 0usize;
     let mut longest_passing_run = 0usize;
+    let mut weakest_snr_db = f32::INFINITY;
+    let mut weakest_frame_rms = f32::INFINITY;
     loop {
-        let analysis = analyze_tapered_samples(
-            &samples[start..start + analysis_window],
-            expected_hz,
-            rejected_hz,
-        );
-        let passes = analysis.ratio >= DOMINANCE_RATIO;
+        let window = &samples[start..start + analysis_window];
+        let analysis = analyze_tapered_samples(window, sample_rate, expected_hz, rejected_hz);
+        // Quality is measured for every window regardless of whether the gate
+        // enforces it, so the diagnostics report the same numbers a stricter
+        // gate would judge — that is how a future threshold gets chosen from
+        // evidence instead of re-running two PBXes.
+        let quality = tone_quality(window, sample_rate, expected_hz);
+        weakest_snr_db = weakest_snr_db.min(quality.snr_db);
+        weakest_frame_rms = weakest_frame_rms.min(quality.min_frame_rms);
+        let passes = gate.admits(&analysis, &quality);
         let is_best = best
             .as_ref()
-            .map(|current| analysis.ratio > current.ratio)
+            .map(|(current, _)| analysis.ratio > current.ratio)
             .unwrap_or(true);
         if is_best {
-            best = Some(analysis);
+            best = Some((analysis, quality));
         }
         total_windows += 1;
         if passes {
@@ -3247,30 +3436,41 @@ fn scan_tone_windows(
         remaining.div_ceil(step)
     };
     let required_passing_run = (additional_windows + 1).min(total_windows).max(1);
+    let (best, best_quality) = best.ok_or_else(|| "no analysis window available".to_string())?;
     Ok(ToneWindowScan {
-        best: best.ok_or_else(|| "no analysis window available".to_string())?,
+        best,
         total_windows,
         passing_windows,
         longest_passing_run,
         required_passing_run,
         analysis_window_samples: analysis_window,
         step_samples: step,
+        best_quality,
+        weakest_snr_db,
+        weakest_frame_rms,
     })
 }
 
 fn best_window_tone_for_diag(
     samples: &[i16],
+    sample_rate: u32,
     window_samples: usize,
     step_samples: usize,
     expected_hz: f32,
     rejected_hz: f32,
 ) -> Result<ToneWindowScan, String> {
+    // Diagnostics gate on tone dominance alone so the pass/fail bookkeeping
+    // stays comparable across scenarios, but the scan now measures quality
+    // for every window regardless — the JSON below is where a future
+    // threshold gets chosen from evidence.
     scan_tone_windows(
         samples,
+        sample_rate,
         window_samples,
         step_samples,
         expected_hz,
         rejected_hz,
+        WindowGate::tone_only(),
     )
 }
 
@@ -4164,9 +4364,17 @@ pub fn save_wav_at_rate(
 }
 
 pub fn read_wav(path: &Path) -> ExampleResult<Vec<i16>> {
+    Ok(read_wav_with_rate(path)?.0)
+}
+
+/// Read a recording *and* the rate its header claims, so a caller that knows
+/// what rate the leg negotiated can catch a mislabeled capture instead of
+/// silently analysing it an octave off.
+pub fn read_wav_with_rate(path: &Path) -> ExampleResult<(Vec<i16>, u32)> {
     let mut reader = hound::WavReader::open(path)?;
+    let rate = reader.spec().sample_rate;
     let samples = reader.samples::<i16>().collect::<Result<Vec<_>, _>>()?;
-    Ok(samples)
+    Ok((samples, rate))
 }
 
 pub fn analyze_samples(
@@ -4206,6 +4414,7 @@ pub fn assert_audio_path(
     assert_best_window_tone(
         &label,
         &samples,
+        SAMPLE_RATE,
         SAMPLE_RATE as usize,
         FRAME_SIZE,
         expected_hz,
@@ -4213,61 +4422,78 @@ pub fn assert_audio_path(
     )
 }
 
-/// Assert a recording holds the far end's tone rather than our own.
+/// Assert a recording holds a *clean* copy of the far end's tone.
 ///
-/// The recorder's sample floor cannot tell audio from noise. When the two legs
-/// of a bridged call disagree about AMR framing — one octet-aligned, the other
-/// bandwidth-efficient — every payload still decodes into *something*, the
-/// buffer still fills at the expected rate, and a run gated only on sample
-/// count passes while both endpoints hear garbage. This is the check that
-/// separates "packets arrived" from "the call worked".
+/// Three independent things must hold, because each of the ways the old
+/// dominance-only check actually failed defeats a different pair of them:
 ///
-/// It takes the rate as an argument rather than reusing
-/// [`assert_best_window_tone`], whose scan is hard-wired to [`SAMPLE_RATE`] and
-/// would read every wideband tone an octave low.
-fn assert_amr_tone(
+/// - the far end's tone dominates the one we sent (unchanged — rules out
+///   loopback and crossed legs);
+/// - fundamental power beats everything else by [`AMR_MIN_TONE_SNR_DB`],
+///   which is what a decoder producing noise at the right pitch fails
+///   (1-bit squaring, per-frame time reversal: full level, right bin,
+///   single-digit SNR);
+/// - no 20 ms frame falls below [`AMR_MIN_FRAME_RMS`], which is what
+///   attenuation and dropouts fail while the spectrum stays perfect;
+///
+/// and all three must hold *continuously* for [`AMR_REQUIRED_TONE_SECS`] —
+/// a degraded capture's best window can beat a clean capture's worst, so no
+/// whole-capture figure discriminates. Everything runs at the capture's own
+/// rate; a 16 kHz recording read at 8 kHz is a clean tone an octave low,
+/// which nothing else in the harness notices.
+fn assert_amr_tone_quality(
     path: &Path,
     sample_rate: u32,
     expected_hz: f32,
     rejected_hz: f32,
 ) -> ExampleResult<()> {
-    let samples = read_wav(path)?;
-    // Skip the first quarter second: those frames arrive while the far end's
-    // encoder is still converging and the jitter buffer is filling.
-    let start = (sample_rate as usize / 4).min(samples.len());
-    let window = &samples[start..];
-    if window.len() < sample_rate as usize / 8 {
+    let (samples, header_rate) = read_wav_with_rate(path)?;
+    if header_rate != sample_rate {
         return Err(format!(
-            "{}: {} samples after the leading quarter second, too few to analyse",
+            "{}: WAV header says {} Hz but this leg negotiated {} Hz — the recorder \
+             and the assertion disagree about what was captured",
             path.display(),
-            window.len()
+            header_rate,
+            sample_rate
         )
         .into());
     }
-    let expected_magnitude = goertzel_magnitude(window, sample_rate as f32, expected_hz);
-    let rejected_magnitude = goertzel_magnitude(window, sample_rate as f32, rejected_hz);
-    let ratio = dominance_ratio(expected_magnitude, rejected_magnitude);
-    if ratio < DOMINANCE_RATIO {
-        return Err(format!(
-            "{}: {:.0}Hz magnitude {:.1} vs {:.0}Hz magnitude {:.1}, ratio {:.2} \
-             (expected at least {:.2}) — the far end's tone is not what arrived",
-            path.display(),
-            expected_hz,
-            expected_magnitude,
-            rejected_hz,
-            rejected_magnitude,
-            ratio,
-            DOMINANCE_RATIO
-        )
-        .into());
-    }
-    println!(
-        "{}: {:.0}Hz dominant over {:.0}Hz by {:.1}x at {} Hz",
-        path.display(),
+    let label = path.display().to_string();
+    assert_amr_tone_quality_samples(&label, &samples, sample_rate, expected_hz, rejected_hz)
+}
+
+/// The samples-level half of [`assert_amr_tone_quality`], separated so tests
+/// need no files (the interop WAVs are gitignored and can never be fixtures)
+/// and so the wrong-rate test proves the *analysis* catches a mislabeled
+/// capture, not just the header check.
+fn assert_amr_tone_quality_samples(
+    label: &str,
+    samples: &[i16],
+    sample_rate: u32,
+    expected_hz: f32,
+    rejected_hz: f32,
+) -> ExampleResult<()> {
+    let window_samples = (sample_rate as f32 * AMR_REQUIRED_TONE_SECS) as usize;
+    let analysis = assert_best_window_tone_gated(
+        label,
+        samples,
+        sample_rate,
+        window_samples,
+        frame_samples(sample_rate),
         expected_hz,
         rejected_hz,
-        ratio,
-        sample_rate
+        WindowGate::amr(),
+    )?;
+    println!(
+        "{}: {:.0}Hz dominant over {:.0}Hz by {:.1}x at {} Hz, {}s of windows above {:.0} dB SNR and frame RMS {:.0}",
+        label,
+        expected_hz,
+        rejected_hz,
+        analysis.ratio,
+        sample_rate,
+        AMR_REQUIRED_TONE_SECS,
+        AMR_MIN_TONE_SNR_DB,
+        AMR_MIN_FRAME_RMS,
     );
     Ok(())
 }
@@ -4298,23 +4524,64 @@ pub fn assert_samples_tone(
 pub fn assert_best_window_tone(
     label: &str,
     samples: &[i16],
+    sample_rate: u32,
     window_samples: usize,
     step_samples: usize,
     expected_hz: f32,
     rejected_hz: f32,
 ) -> ExampleResult<ToneAnalysis> {
-    let scan = scan_tone_windows(
+    assert_best_window_tone_gated(
+        label,
         samples,
+        sample_rate,
         window_samples,
         step_samples,
         expected_hz,
         rejected_hz,
+        WindowGate::tone_only(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assert_best_window_tone_gated(
+    label: &str,
+    samples: &[i16],
+    sample_rate: u32,
+    window_samples: usize,
+    step_samples: usize,
+    expected_hz: f32,
+    rejected_hz: f32,
+    gate: WindowGate,
+) -> ExampleResult<ToneAnalysis> {
+    let scan = scan_tone_windows(
+        samples,
+        sample_rate,
+        window_samples,
+        step_samples,
+        expected_hz,
+        rejected_hz,
+        gate,
     )
     .map_err(|error| format!("{}: {}", label, error))?;
     let analysis = scan.best;
     if scan.longest_passing_run < scan.required_passing_run {
+        // Name the clause that actually bit: the weakest window's figures are
+        // the diagnosis, the best window's ratio is only the headline.
+        let mut clauses = format!("ratio threshold {:.2}", gate.min_ratio);
+        if let Some(floor) = gate.min_snr_db {
+            clauses.push_str(&format!(
+                ", weakest window SNR {:.1} dB vs floor {:.1} dB",
+                scan.weakest_snr_db, floor
+            ));
+        }
+        if let Some(floor) = gate.min_frame_rms {
+            clauses.push_str(&format!(
+                ", weakest 20ms frame RMS {:.0} vs floor {:.0}",
+                scan.weakest_frame_rms, floor
+            ));
+        }
         return Err(format!(
-            "{}: {}/{} sampled windows matched, longest passing run {}/{}; best {:.0}Hz magnitude {:.1} vs {:.0}Hz magnitude {:.1}, ratio {:.2} (analysis window {} samples, step {} samples, ratio threshold {:.2})",
+            "{}: {}/{} sampled windows matched, longest passing run {}/{}; best {:.0}Hz magnitude {:.1} vs {:.0}Hz magnitude {:.1}, ratio {:.2}, best-window SNR {:.1} dB (analysis window {} samples, step {} samples, {})",
             label,
             scan.passing_windows,
             scan.total_windows,
@@ -4325,9 +4592,10 @@ pub fn assert_best_window_tone(
             analysis.rejected_hz,
             analysis.rejected_magnitude,
             analysis.ratio,
+            scan.best_quality.snr_db,
             scan.analysis_window_samples,
             scan.step_samples,
-            DOMINANCE_RATIO
+            clauses
         )
         .into());
     }
@@ -4365,14 +4633,18 @@ pub fn goertzel_magnitude(samples: &[i16], sample_rate: f32, target_hz: f32) -> 
     (q1 * q1 + q2 * q2 - q1 * q2 * coeff).sqrt()
 }
 
-fn goertzel_magnitude_hann(samples: &[i16], sample_rate: f32, target_hz: f32) -> f32 {
-    if samples.len() < 3 {
-        return goertzel_magnitude(samples, sample_rate, target_hz);
-    }
+/// The integer Goertzel bin `target_hz` snaps to for a window of `len`.
+fn goertzel_bin(len: usize, sample_rate: f32, target_hz: f32) -> usize {
+    (0.5 + (len as f32 * target_hz) / sample_rate).floor() as usize
+}
 
+/// Hann-tapered Goertzel magnitude at an explicit bin, so a neighbouring bin
+/// can be addressed directly. This is the DFT magnitude of the Hann-weighted
+/// window at bin `k` — the quantity [`tone_quality`]'s power arithmetic is
+/// calibrated against.
+fn goertzel_magnitude_hann_bin(samples: &[i16], bin: usize) -> f32 {
     let n = samples.len() as f32;
-    let k = (0.5 + (n * target_hz) / sample_rate).floor();
-    let omega = (2.0 * std::f32::consts::PI * k) / n;
+    let omega = (2.0 * std::f32::consts::PI * bin as f32) / n;
     let coeff = 2.0 * omega.cos();
     let hann_denominator = (samples.len() - 1) as f32;
     let (mut q1, mut q2) = (0.0f32, 0.0f32);
@@ -4386,9 +4658,130 @@ fn goertzel_magnitude_hann(samples: &[i16], sample_rate: f32, target_hz: f32) ->
     (q1 * q1 + q2 * q2 - q1 * q2 * coeff).max(0.0).sqrt()
 }
 
-fn analyze_tapered_samples(samples: &[i16], expected_hz: f32, rejected_hz: f32) -> ToneAnalysis {
-    let expected_magnitude = goertzel_magnitude_hann(samples, SAMPLE_RATE as f32, expected_hz);
-    let rejected_magnitude = goertzel_magnitude_hann(samples, SAMPLE_RATE as f32, rejected_hz);
+fn goertzel_magnitude_hann(samples: &[i16], sample_rate: f32, target_hz: f32) -> f32 {
+    if samples.len() < 3 {
+        return goertzel_magnitude(samples, sample_rate, target_hz);
+    }
+    goertzel_magnitude_hann_bin(samples, goertzel_bin(samples.len(), sample_rate, target_hz))
+}
+
+/// Energy of the Hann-weighted window, `Σ (x·w)²` — the denominator that makes
+/// [`ToneQuality::fundamental_fraction`] a true power fraction.
+fn hann_windowed_energy(samples: &[i16]) -> f64 {
+    if samples.len() < 2 {
+        return 0.0;
+    }
+    let hann_denominator = (samples.len() - 1) as f64;
+    samples
+        .iter()
+        .enumerate()
+        .map(|(index, &sample)| {
+            let phase = (2.0 * std::f64::consts::PI * index as f64) / hann_denominator;
+            let weight = 0.5 - 0.5 * phase.cos();
+            let weighted = f64::from(sample) * weight;
+            weighted * weighted
+        })
+        .sum()
+}
+
+/// What one analysis window actually contains, beyond which tone dominates.
+///
+/// A pure tone lets all of this be measured with no reference signal: the
+/// fundamental's power against everything else *is* THD+N, inverted.
+#[derive(Debug, Clone, Copy)]
+pub struct ToneQuality {
+    pub samples: usize,
+    pub expected_hz: f32,
+    /// Amplitude of the fundamental, directly comparable with
+    /// [`TONE_PEAK_AMPLITUDE`]. Recovers a known amplitude to within 0.1%.
+    pub fundamental_amplitude: f32,
+    /// Share of the window's power in the fundamental bin and its two
+    /// neighbours (the spread tolerates up to ±one bin of frequency drift —
+    /// ±5 Hz at a 200 ms window — without charging the tone as noise).
+    pub fundamental_fraction: f32,
+    /// `10·log10(fundamental / everything else)`, in true dB: noise injected
+    /// at a stated SNR reads back within 1 dB, which is what makes the
+    /// threshold a physical quantity rather than a tuned index.
+    pub snr_db: f32,
+    pub rms: f32,
+    /// The weakest 20 ms frame inside the window — the dropout detector.
+    /// Attenuation and gating change this while leaving `snr_db` perfect.
+    pub min_frame_rms: f32,
+    pub dc_offset: f32,
+}
+
+pub fn tone_quality(samples: &[i16], sample_rate: u32, expected_hz: f32) -> ToneQuality {
+    let n = samples.len();
+    let sum: f64 = samples.iter().map(|&s| f64::from(s)).sum();
+    let energy: f64 = samples.iter().map(|&s| f64::from(s) * f64::from(s)).sum();
+    let rms = if n == 0 { 0.0 } else { (energy / n as f64).sqrt() as f32 };
+    let dc_offset = if n == 0 { 0.0 } else { (sum / n as f64) as f32 };
+
+    let frame = frame_samples(sample_rate).max(1);
+    let mut min_frame_rms = f32::INFINITY;
+    let mut offset = 0usize;
+    while offset + frame <= n {
+        let frame_energy: f64 = samples[offset..offset + frame]
+            .iter()
+            .map(|&s| f64::from(s) * f64::from(s))
+            .sum();
+        min_frame_rms = min_frame_rms.min((frame_energy / frame as f64).sqrt() as f32);
+        offset += frame;
+    }
+    if !min_frame_rms.is_finite() {
+        min_frame_rms = rms;
+    }
+
+    let (fundamental_amplitude, fundamental_fraction, snr_db) = if n < 8 {
+        (0.0, 0.0, -99.0)
+    } else {
+        let k = goertzel_bin(n, sample_rate as f32, expected_hz).clamp(2, n / 2 - 2);
+        let center = f64::from(goertzel_magnitude_hann_bin(samples, k));
+        let below = f64::from(goertzel_magnitude_hann_bin(samples, k - 1));
+        let above = f64::from(goertzel_magnitude_hann_bin(samples, k + 1));
+        let windowed = hann_windowed_energy(samples);
+        // For a Hann window, an exact-bin tone of amplitude A yields
+        // |X_k| = A·N/4 and |X_k±1| = A·N/8, and Parseval over the windowed
+        // signal gives Σ|X_j|² = N·E_w. Both identities are pinned by
+        // `tone_quality_reads_back_true_snr` and the amplitude check inside
+        // `amr_quality_accepts_a_clean_capture_at_either_rate`.
+        let amplitude = (4.0 * center / n as f64) as f32;
+        let tone_power = 2.0 * (below * below + center * center + above * above);
+        let fraction = if windowed <= 0.0 {
+            0.0
+        } else {
+            (tone_power / (n as f64 * windowed)).clamp(0.0, 1.0)
+        };
+        let snr = if fraction <= 1e-9 {
+            -99.0
+        } else if fraction >= 1.0 - 1e-9 {
+            99.0
+        } else {
+            (10.0 * (fraction / (1.0 - fraction)).log10()) as f32
+        };
+        (amplitude, fraction as f32, snr.clamp(-99.0, 99.0))
+    };
+
+    ToneQuality {
+        samples: n,
+        expected_hz,
+        fundamental_amplitude,
+        fundamental_fraction,
+        snr_db,
+        rms,
+        min_frame_rms,
+        dc_offset,
+    }
+}
+
+fn analyze_tapered_samples(
+    samples: &[i16],
+    sample_rate: u32,
+    expected_hz: f32,
+    rejected_hz: f32,
+) -> ToneAnalysis {
+    let expected_magnitude = goertzel_magnitude_hann(samples, sample_rate as f32, expected_hz);
+    let rejected_magnitude = goertzel_magnitude_hann(samples, sample_rate as f32, rejected_hz);
     let ratio = dominance_ratio(expected_magnitude, rejected_magnitude);
     ToneAnalysis {
         samples: samples.len(),
@@ -5001,7 +5394,7 @@ mod tests {
     fn hann_taper_recovers_near_bin_codec_tone_without_lowering_threshold() {
         let samples = codec_like_near_bin_tone(TONE_ANALYSIS_WINDOW_SAMPLES);
         let rectangular = analyze_samples(&samples, 880.0, 440.0).unwrap();
-        let tapered = analyze_tapered_samples(&samples, 880.0, 440.0);
+        let tapered = analyze_tapered_samples(&samples, SAMPLE_RATE, 880.0, 440.0);
 
         assert!(rectangular.ratio < DOMINANCE_RATIO);
         assert!(tapered.ratio >= DOMINANCE_RATIO);
@@ -5011,7 +5404,16 @@ mod tests {
     fn hann_taper_rejects_true_rejected_tone() {
         let samples = tone_samples(&[(SAMPLE_RATE as usize, 8_000.0, 440.0)]);
         let scan =
-            scan_tone_windows(&samples, SAMPLE_RATE as usize, FRAME_SIZE, 880.0, 440.0).unwrap();
+            scan_tone_windows(
+                &samples,
+                SAMPLE_RATE,
+                SAMPLE_RATE as usize,
+                FRAME_SIZE,
+                880.0,
+                440.0,
+                WindowGate::tone_only(),
+            )
+            .unwrap();
 
         assert_eq!(scan.longest_passing_run, 0);
         assert!(scan.longest_passing_run < scan.required_passing_run);
@@ -5021,7 +5423,16 @@ mod tests {
     fn tone_scanner_rejects_silence() {
         let samples = vec![0; SAMPLE_RATE as usize];
         let scan =
-            scan_tone_windows(&samples, SAMPLE_RATE as usize, FRAME_SIZE, 880.0, 440.0).unwrap();
+            scan_tone_windows(
+                &samples,
+                SAMPLE_RATE,
+                SAMPLE_RATE as usize,
+                FRAME_SIZE,
+                880.0,
+                440.0,
+                WindowGate::tone_only(),
+            )
+            .unwrap();
 
         assert_eq!(scan.passing_windows, 0);
         assert_eq!(scan.longest_passing_run, 0);
@@ -5031,7 +5442,16 @@ mod tests {
     fn hann_taper_accepts_one_continuous_second_of_near_bin_tone() {
         let samples = codec_like_near_bin_tone(SAMPLE_RATE as usize);
         let scan =
-            scan_tone_windows(&samples, SAMPLE_RATE as usize, FRAME_SIZE, 880.0, 440.0).unwrap();
+            scan_tone_windows(
+                &samples,
+                SAMPLE_RATE,
+                SAMPLE_RATE as usize,
+                FRAME_SIZE,
+                880.0,
+                440.0,
+                WindowGate::tone_only(),
+            )
+            .unwrap();
 
         assert!(scan.longest_passing_run >= scan.required_passing_run);
     }
@@ -5044,7 +5464,16 @@ mod tests {
             (3_200, 8_000.0, 875.0),
         ]);
         let scan =
-            scan_tone_windows(&samples, SAMPLE_RATE as usize, FRAME_SIZE, 880.0, 440.0).unwrap();
+            scan_tone_windows(
+                &samples,
+                SAMPLE_RATE,
+                SAMPLE_RATE as usize,
+                FRAME_SIZE,
+                880.0,
+                440.0,
+                WindowGate::tone_only(),
+            )
+            .unwrap();
 
         assert!(scan.passing_windows > 0);
         assert!(scan.longest_passing_run < scan.required_passing_run);
@@ -5060,6 +5489,7 @@ mod tests {
             assert_best_window_tone(
                 "cropped-middle",
                 stable_middle_half(&samples),
+                SAMPLE_RATE,
                 SAMPLE_RATE as usize,
                 FRAME_SIZE,
                 880.0,
@@ -5075,51 +5505,315 @@ mod tests {
             .expect("the full capture contains one continuous valid second");
     }
 
-    /// One second of `hz` at `rate`, as the AMR recorder would capture it.
-    fn tone_at_rate(rate: u32, hz: f64) -> Vec<i16> {
-        (0..rate as usize)
-            .map(|index| {
-                let phase = 2.0 * std::f64::consts::PI * hz * index as f64 / f64::from(rate);
-                (12_000.0 * phase.sin()).round() as i16
+    /// `secs` of `hz` at `rate`, produced by the *production* tone generator
+    /// so every threshold test judges the exact signal the harness sends.
+    fn amr_capture(rate: u32, hz: f32, secs: f32) -> Vec<i16> {
+        let frame = frame_samples(rate);
+        let frames = (secs * 50.0).round() as usize;
+        (0..frames)
+            .flat_map(|index| generate_tone_at_rate(hz, index, frame, rate))
+            .collect()
+    }
+
+    /// Rewrite each 20 ms frame, the way a framing or relay defect does.
+    fn per_frame(samples: &[i16], rate: u32, f: impl Fn(usize, &[i16]) -> Vec<i16>) -> Vec<i16> {
+        let frame = frame_samples(rate);
+        samples
+            .chunks(frame)
+            .enumerate()
+            .flat_map(|(index, chunk)| f(index, chunk))
+            .collect()
+    }
+
+    /// Additive white noise at a stated SNR relative to the signal's RMS.
+    /// Deterministic LCG — this does not need to be a good generator, only a
+    /// broadband and repeatable one.
+    fn with_noise_at_snr(samples: &[i16], snr_db: f32, seed: u64) -> Vec<i16> {
+        let energy: f64 = samples.iter().map(|&s| f64::from(s) * f64::from(s)).sum();
+        let rms = (energy / samples.len() as f64).sqrt();
+        let noise_rms = rms / 10f64.powf(f64::from(snr_db) / 20.0);
+        // A uniform variable on [-1, 1) has RMS 1/sqrt(3).
+        let scale = noise_rms * 3f64.sqrt();
+        let mut state = seed;
+        samples
+            .iter()
+            .map(|&s| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let uniform = ((state >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0;
+                (f64::from(s) + uniform * scale).clamp(-32768.0, 32767.0) as i16
             })
             .collect()
     }
 
     #[test]
-    fn amr_tone_check_accepts_the_far_end_tone_at_either_rate() {
+    fn amr_quality_accepts_a_clean_capture_at_either_rate() {
         let temp = tempfile::tempdir().unwrap();
         for rate in [8_000u32, 16_000] {
+            let samples = amr_capture(rate, 880.0, 1.5);
+            assert_amr_tone_quality_samples("clean", &samples, rate, 880.0, 440.0)
+                .unwrap_or_else(|error| panic!("{rate} Hz clean capture should pass: {error}"));
+            // And through the file path, so the header check admits a correct
+            // header rather than only rejecting wrong ones.
             let path =
-                save_wav_at_rate(temp.path(), &format!("{rate}.wav"), &tone_at_rate(rate, 880.0), rate)
-                    .unwrap();
-            assert_amr_tone(&path, rate, 880.0, 440.0)
-                .unwrap_or_else(|error| panic!("{rate} Hz capture should pass: {error}"));
+                save_wav_at_rate(temp.path(), &format!("{rate}.wav"), &samples, rate).unwrap();
+            assert_amr_tone_quality(&path, rate, 880.0, 440.0)
+                .unwrap_or_else(|error| panic!("{rate} Hz file capture should pass: {error}"));
+            // The amplitude calibration: the fundamental of the production
+            // tone reads back as what was sent, within 1%.
+            let window = &samples[..tone_analysis_window_samples(rate)];
+            let quality = tone_quality(window, rate, 880.0);
+            let relative = (quality.fundamental_amplitude - TONE_PEAK_AMPLITUDE).abs()
+                / TONE_PEAK_AMPLITUDE;
+            assert!(
+                relative < 0.01,
+                "fundamental read {} of {} sent",
+                quality.fundamental_amplitude,
+                TONE_PEAK_AMPLITUDE
+            );
         }
     }
 
     #[test]
-    fn amr_tone_check_rejects_our_own_tone_coming_back() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = save_wav_at_rate(temp.path(), "echo.wav", &tone_at_rate(16_000, 440.0), 16_000)
-            .unwrap();
+    fn amr_quality_rejects_our_own_tone_coming_back() {
+        let samples = amr_capture(16_000, 440.0, 1.5);
         assert!(
-            assert_amr_tone(&path, 16_000, 880.0, 440.0).is_err(),
+            assert_amr_tone_quality_samples("echo", &samples, 16_000, 880.0, 440.0).is_err(),
             "a recording of the tone we sent must not pass as the far end's"
         );
     }
 
-    /// The wrong-rate case is the one this check exists for, because nothing
-    /// else catches it: 16 kHz samples read at 8 kHz are a real, clean tone —
-    /// just an octave below the one that was sent.
+    /// The wrong-rate case: 16 kHz samples read at 8 kHz are a real, clean
+    /// tone — an octave low. The *analysis* has to catch it, not only the
+    /// header check, which is why this goes through the samples entry point.
     #[test]
-    fn amr_tone_check_rejects_a_wideband_capture_read_as_narrowband() {
-        let temp = tempfile::tempdir().unwrap();
-        let path =
-            save_wav_at_rate(temp.path(), "wb.wav", &tone_at_rate(16_000, 880.0), 16_000).unwrap();
-        assert_amr_tone(&path, 16_000, 880.0, 440.0).expect("passes at the rate it was captured at");
+    fn amr_quality_rejects_a_wideband_capture_read_as_narrowband() {
+        let samples = amr_capture(16_000, 880.0, 1.5);
+        assert_amr_tone_quality_samples("wb-as-wb", &samples, 16_000, 880.0, 440.0)
+            .expect("passes at the rate it was captured at");
         assert!(
-            assert_amr_tone(&path, 8_000, 880.0, 440.0).is_err(),
+            assert_amr_tone_quality_samples("wb-as-nb", &samples, 8_000, 880.0, 440.0).is_err(),
             "read at half the rate the 880Hz tone lands on 440Hz, which must not pass as 880Hz"
+        );
+    }
+
+    /// And the header check catches the file whose label disagrees with the
+    /// negotiated rate before any analysis runs.
+    #[test]
+    fn amr_quality_rejects_a_mislabeled_wav_header() {
+        let temp = tempfile::tempdir().unwrap();
+        let samples = amr_capture(16_000, 880.0, 1.5);
+        let path = save_wav_at_rate(temp.path(), "wb.wav", &samples, 16_000).unwrap();
+        let error = assert_amr_tone_quality(&path, 8_000, 880.0, 440.0)
+            .expect_err("a 16 kHz header must not satisfy an 8 kHz leg");
+        assert!(
+            error.to_string().contains("WAV header"),
+            "the failure should name the header mismatch, got: {error}"
+        );
+    }
+
+    #[test]
+    fn amr_quality_rejects_one_good_frame_then_silence() {
+        let rate = 8_000u32;
+        let frame = frame_samples(rate);
+        let mut samples = amr_capture(rate, 880.0, 1.5);
+        for sample in samples.iter_mut().skip(frame) {
+            *sample = 0;
+        }
+        assert!(
+            assert_amr_tone_quality_samples("one-frame", &samples, rate, 880.0, 440.0).is_err(),
+            "one correct frame and 1.48s of silence passed the old check at ratio 44"
+        );
+    }
+
+    /// Full level, right pitch, single-digit SNR: a square wave's fundamental
+    /// holds 8/π² of its power (+6.3 dB), so only the SNR clause catches it.
+    /// The same test pins that the *other* clauses do not: its frames are
+    /// louder than the floor and its fundamental reads above what we sent.
+    #[test]
+    fn amr_quality_rejects_a_sign_only_square_wave() {
+        let rate = 8_000u32;
+        let clean = amr_capture(rate, 880.0, 1.5);
+        let squared: Vec<i16> = clean
+            .iter()
+            .map(|&s| {
+                if s > 0 {
+                    TONE_PEAK_AMPLITUDE as i16
+                } else {
+                    -(TONE_PEAK_AMPLITUDE as i16)
+                }
+            })
+            .collect();
+        assert!(
+            assert_amr_tone_quality_samples("square", &squared, rate, 880.0, 440.0).is_err(),
+            "1-bit squaring passed the old check at ratio 441"
+        );
+        let window = &squared[..tone_analysis_window_samples(rate)];
+        let quality = tone_quality(window, rate, 880.0);
+        assert!(quality.snr_db < AMR_MIN_TONE_SNR_DB, "snr {}", quality.snr_db);
+        assert!(
+            quality.min_frame_rms > AMR_MIN_FRAME_RMS,
+            "the square is loud; the level clause must not be what catches it"
+        );
+        assert!(
+            quality.fundamental_amplitude > TONE_PEAK_AMPLITUDE,
+            "a square's fundamental is 4A/π — an amplitude clause would wave it through"
+        );
+    }
+
+    /// Perfect spectrum, no level: only the frame-RMS clause catches
+    /// attenuation, which is why the level floor exists separately from SNR.
+    #[test]
+    fn amr_quality_rejects_a_hundredfold_attenuated_capture() {
+        let rate = 8_000u32;
+        let quiet: Vec<i16> = amr_capture(rate, 880.0, 1.5)
+            .iter()
+            .map(|&s| s / 100)
+            .collect();
+        assert!(
+            assert_amr_tone_quality_samples("quiet", &quiet, rate, 880.0, 440.0).is_err(),
+            "100x attenuation passed the old check at ratio 6820"
+        );
+        let window = &quiet[..tone_analysis_window_samples(rate)];
+        let quality = tone_quality(window, rate, 880.0);
+        assert!(
+            quality.snr_db >= 30.0,
+            "attenuation preserves spectral purity (snr {}); deleting the RMS floor must break this test",
+            quality.snr_db
+        );
+        assert!(quality.min_frame_rms < AMR_MIN_FRAME_RMS);
+    }
+
+    #[test]
+    fn amr_quality_rejects_every_other_frame_zeroed() {
+        let rate = 8_000u32;
+        let clean = amr_capture(rate, 880.0, 1.5);
+        let gated = per_frame(&clean, rate, |index, chunk| {
+            if index % 2 == 0 {
+                chunk.to_vec()
+            } else {
+                vec![0; chunk.len()]
+            }
+        });
+        assert!(
+            assert_amr_tone_quality_samples("gated", &gated, rate, 880.0, 440.0).is_err(),
+            "50% frame dropout passed the old check at ratio 922"
+        );
+    }
+
+    /// The subtle one: full amplitude, no dropouts, energy on the right bin —
+    /// but each frame's phase runs backwards, so the splatter at the frame
+    /// rate wrecks the SNR and nothing else.
+    #[test]
+    fn amr_quality_rejects_per_frame_time_reversal() {
+        let rate = 8_000u32;
+        let clean = amr_capture(rate, 880.0, 1.5);
+        let reversed = per_frame(&clean, rate, |_, chunk| {
+            let mut frame = chunk.to_vec();
+            frame.reverse();
+            frame
+        });
+        assert!(
+            assert_amr_tone_quality_samples("reversed", &reversed, rate, 880.0, 440.0).is_err(),
+            "per-frame reversal passed the old check at ratio 23"
+        );
+        let window = &reversed[..tone_analysis_window_samples(rate)];
+        let quality = tone_quality(window, rate, 880.0);
+        assert!(
+            quality.min_frame_rms > AMR_MIN_FRAME_RMS,
+            "reversal conserves per-frame energy; the level clause must not be what catches it"
+        );
+    }
+
+    /// The regression this whole gate exists for, pinned from both sides with
+    /// the figures measured on real captures: a path measured at −12.6 dB
+    /// passed the old check; the cleanest path's worst window measured
+    /// +25.7 dB.
+    #[test]
+    fn amr_quality_brackets_the_measured_pbx_captures() {
+        let rate = 8_000u32;
+        let clean = amr_capture(rate, 880.0, 1.5);
+        let degraded = with_noise_at_snr(&clean, -12.6, 7);
+        assert!(
+            assert_amr_tone_quality_samples("degraded", &degraded, rate, 880.0, 440.0).is_err(),
+            "the real degraded capture measured -12.6 dB and passed the old check at 237x"
+        );
+        let clean_worst = with_noise_at_snr(&clean, 25.7, 11);
+        assert_amr_tone_quality_samples("clean-worst", &clean_worst, rate, 880.0, 440.0)
+            .expect("the cleanest real capture's worst window (+25.7 dB) must pass");
+    }
+
+    /// What makes the SNR threshold a physical quantity rather than a tuned
+    /// index: noise injected at a stated SNR reads back at that SNR.
+    #[test]
+    fn tone_quality_reads_back_true_snr() {
+        let rate = 8_000u32;
+        let clean = amr_capture(rate, 880.0, 0.2);
+        for (case, injected) in [(1u64, 30.0f32), (2, 20.0), (3, 15.0), (4, 10.0)] {
+            let noisy = with_noise_at_snr(&clean, injected, case);
+            let quality = tone_quality(
+                &noisy[..tone_analysis_window_samples(rate)],
+                rate,
+                880.0,
+            );
+            assert!(
+                (quality.snr_db - injected).abs() < 1.0,
+                "injected {injected} dB, read {} dB",
+                quality.snr_db
+            );
+        }
+    }
+
+    /// The 200 ms window is load-bearing: every harness tone must land on an
+    /// exact Goertzel bin at both rates, or a clean tone's measurable SNR
+    /// caps near 17 dB and the gate becomes unmeetable. Anyone adding a tone
+    /// frequency adds it here.
+    #[test]
+    fn harness_tones_land_on_an_exact_goertzel_bin() {
+        for rate in [8_000u32, 16_000] {
+            let window = tone_analysis_window_samples(rate);
+            for hz in [
+                ENDPOINT_2001_TONE_HZ,
+                ENDPOINT_2002_TONE_HZ,
+                ENDPOINT_1003_TONE_HZ,
+            ] {
+                let exact = window as f32 * hz / rate as f32;
+                assert!(
+                    (exact - exact.round()).abs() < 1e-3,
+                    "{hz} Hz falls {exact} bins into a {window}-sample window at {rate} Hz"
+                );
+            }
+        }
+    }
+
+    /// Pins the continuity requirement — and documents why the wideband
+    /// capture floor had to become a duration: a capture shorter than the
+    /// required run cannot pass no matter how clean it is.
+    #[test]
+    fn amr_quality_rejects_a_clean_but_too_short_capture() {
+        let rate = 8_000u32;
+        let short = amr_capture(rate, 880.0, 0.8);
+        assert!(
+            assert_amr_tone_quality_samples("short", &short, rate, 880.0, 440.0).is_err(),
+            "0.8s cannot contain the required 1.0s of continuous tone"
+        );
+        let enough = amr_capture(rate, 880.0, 1.2);
+        assert_amr_tone_quality_samples("enough", &enough, rate, 880.0, 440.0)
+            .expect("1.2s clean holds a full second");
+    }
+
+    /// The `SAMPLE_RATE`-literal bug that motivated threading the rate, in
+    /// test form: a 16 kHz scan must measure 880 Hz as 880 Hz, not as its
+    /// half or double.
+    #[test]
+    fn scan_at_sixteen_kilohertz_does_not_read_the_tone_an_octave_off() {
+        let samples = amr_capture(16_000, 880.0, 1.5);
+        assert_amr_tone_quality_samples("true-pitch", &samples, 16_000, 880.0, 440.0)
+            .expect("880 Hz at 16 kHz is 880 Hz");
+        assert!(
+            assert_amr_tone_quality_samples("octave-up", &samples, 16_000, 1760.0, 880.0).is_err(),
+            "the same capture must not read as 1760 Hz"
         );
     }
 }

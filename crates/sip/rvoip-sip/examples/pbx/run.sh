@@ -1078,7 +1078,7 @@ run_two_party() {
   esac
 
   case "$scenario" in
-    basic_call|g729_call|hold_resume|dtmf)
+    basic_call|g729_call|amr_call|hold_resume|dtmf)
       if [ "$rc" -eq 0 ]; then
         run_analyze "$provider" "$scenario" "$transport" "$out_dir" || rc=$?
       fi
