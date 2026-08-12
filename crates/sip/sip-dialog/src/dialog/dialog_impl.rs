@@ -717,6 +717,17 @@ impl Dialog {
                 self.remote_target = uri;
             }
 
+            // RFC 3261 §12.1.2: learn the route set from the confirming
+            // 2xx's Record-Route (reversed for the UAC). This overlays any
+            // RFC 3608 Service-Route preload — the per-dialog set wins — but
+            // a 2xx without Record-Route keeps the preload rather than
+            // erasing it. Without this, in-dialog requests (BYE, re-INVITE)
+            // bypass every record-routing proxy in the path.
+            let learned = extract_route_set(response, self.is_initiator);
+            if !learned.is_empty() {
+                self.route_set = learned;
+            }
+
             true
         } else {
             false
@@ -796,8 +807,24 @@ impl Dialog {
 
 /// Extract route set from Record-Route headers
 fn extract_route_set(response: &Response, is_initiator: bool) -> Vec<Uri> {
-    let routes: Vec<Uri> = response
-        .headers
+    route_set_from_record_route(&response.headers, is_initiator)
+}
+
+/// Route set for a UAS dialog: the request's Record-Route in message order
+/// (RFC 3261 §12.1.1). The UAC learns the same set reversed from the
+/// response (§12.1.2); both directions preserve every URI parameter.
+pub(crate) fn route_set_from_request(request: &Request) -> Vec<Uri> {
+    route_set_from_record_route(&request.headers, false)
+}
+
+/// Route set for a UAC dialog: the dialog-forming response's Record-Route
+/// reversed (RFC 3261 §12.1.2), URI parameters preserved.
+pub(crate) fn route_set_from_response_for_uac(response: &Response) -> Vec<Uri> {
+    route_set_from_record_route(&response.headers, true)
+}
+
+fn route_set_from_record_route(headers: &[TypedHeader], reverse: bool) -> Vec<Uri> {
+    let routes: Vec<Uri> = headers
         .iter()
         .filter_map(|h| {
             if h.name() == HeaderName::RecordRoute {
@@ -824,7 +851,7 @@ fn extract_route_set(response: &Response, is_initiator: bool) -> Vec<Uri> {
         .flatten()
         .collect();
 
-    if is_initiator {
+    if reverse {
         // Reverse for initiator
         routes.into_iter().rev().collect()
     } else {
@@ -906,6 +933,90 @@ mod tests {
         dialog.terminate();
         assert!(dialog.is_terminated());
         assert_eq!(dialog.state, DialogState::Terminated);
+    }
+
+    #[test]
+    fn confirming_2xx_teaches_the_uac_its_route_set_reversed() {
+        use rvoip_sip_core::types::record_route::RecordRoute;
+        use std::str::FromStr;
+
+        let mut dialog = Dialog::new_early(
+            "rr-call".to_string(),
+            "sip:alice@example.com".parse().unwrap(),
+            "sip:bob@example.com".parse().unwrap(),
+            Some("local".to_string()),
+            None,
+            true,
+        );
+        // RFC 3608 preload that the per-dialog set must overlay.
+        dialog.route_set = vec!["sip:sr.example.com;lr".parse().unwrap()];
+
+        let mut response = Response::new(StatusCode::Ok);
+        response
+            .headers
+            .push(TypedHeader::Contact(Contact::new_params(vec![
+                ContactParamInfo {
+                    address: Address::new("sip:bob@192.0.2.9:5062".parse().unwrap()),
+                },
+            ])));
+        response.headers.push(TypedHeader::RecordRoute(
+            RecordRoute::from_str("<sip:p1.example.com;lr>, <sip:p2.example.com;lr>")
+                .expect("record-route"),
+        ));
+
+        assert!(dialog.update_from_2xx(&response));
+        assert_eq!(dialog.state, DialogState::Confirmed);
+        // Reversed for the initiator: last Record-Route entry first.
+        assert_eq!(dialog.route_set.len(), 2);
+        assert!(dialog.route_set[0].to_string().contains("p2.example.com"));
+        assert!(dialog.route_set[1].to_string().contains("p1.example.com"));
+        // The lr parameter must survive extraction.
+        assert!(dialog.route_set[0].to_string().contains("lr"));
+    }
+
+    #[test]
+    fn confirming_2xx_without_record_route_keeps_the_service_route_preload() {
+        let mut dialog = Dialog::new_early(
+            "sr-call".to_string(),
+            "sip:alice@example.com".parse().unwrap(),
+            "sip:bob@example.com".parse().unwrap(),
+            Some("local".to_string()),
+            None,
+            true,
+        );
+        let preload: Uri = "sip:sr.example.com;lr".parse().unwrap();
+        dialog.route_set = vec![preload.clone()];
+
+        let mut response = Response::new(StatusCode::Ok);
+        response
+            .headers
+            .push(TypedHeader::Contact(Contact::new_params(vec![
+                ContactParamInfo {
+                    address: Address::new("sip:bob@192.0.2.9:5062".parse().unwrap()),
+                },
+            ])));
+
+        assert!(dialog.update_from_2xx(&response));
+        assert_eq!(dialog.route_set, vec![preload]);
+    }
+
+    #[test]
+    fn uas_route_set_keeps_the_request_record_route_order() {
+        use rvoip_sip_core::types::record_route::RecordRoute;
+        use std::str::FromStr;
+
+        let mut request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap());
+        request.headers.push(TypedHeader::RecordRoute(
+            RecordRoute::from_str("<sip:p1.example.com;lr>, <sip:p2.example.com;lr>")
+                .expect("record-route"),
+        ));
+
+        let routes = route_set_from_request(&request);
+        // RFC 3261 §12.1.1: message order, not reversed.
+        assert_eq!(routes.len(), 2);
+        assert!(routes[0].to_string().contains("p1.example.com"));
+        assert!(routes[1].to_string().contains("p2.example.com"));
+        assert!(routes[0].to_string().contains("lr"));
     }
 
     #[test]
