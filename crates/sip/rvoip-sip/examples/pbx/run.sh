@@ -100,6 +100,27 @@ case "$STOP_ON_FAIL" in
   *) echo "--stop-on-fail requires 0 or 1" >&2; exit 2 ;;
 esac
 
+# The provider env files are sourced with `set -a` *after* process env, so a
+# value in a file would silently override one given on the command line. For
+# the AMR probe knobs that inversion is exactly wrong -- a gate pins
+# PBX_ASSUME_AMR and a lab file pins PBX_REQUIRE_AMR, and an operator must be
+# able to override either for one run. Snapshot what the invocation provided;
+# load_provider_env restores it after sourcing.
+if [ "${PBX_ASSUME_AMR+x}" = "x" ]; then
+  PBX_ASSUME_AMR_INVOKED=$PBX_ASSUME_AMR
+  PBX_ASSUME_AMR_INVOKED_SET=1
+else
+  PBX_ASSUME_AMR_INVOKED=""
+  PBX_ASSUME_AMR_INVOKED_SET=0
+fi
+if [ "${PBX_REQUIRE_AMR+x}" = "x" ]; then
+  PBX_REQUIRE_AMR_INVOKED=$PBX_REQUIRE_AMR
+  PBX_REQUIRE_AMR_INVOKED_SET=1
+else
+  PBX_REQUIRE_AMR_INVOKED=""
+  PBX_REQUIRE_AMR_INVOKED_SET=0
+fi
+
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/tls_cert.sh"
 RUN_ENV="$OUT_ROOT/environment-${PBX_ARG}.md"
@@ -164,6 +185,8 @@ write_run_environment() {
     echo "- pbx_run_with_cargo: $PBX_RUN_WITH_CARGO"
     echo "- pbx_cargo_features: $PBX_CARGO_FEATURES"
     echo "- pbx_g729_profiles: $PBX_G729_PROFILES"
+    echo "- pbx_assume_amr: ${PBX_ASSUME_AMR:-unset}"
+    echo "- pbx_require_amr: ${PBX_REQUIRE_AMR:-unset}"
     echo "- example_bin_dir: $EXAMPLE_BIN_DIR"
     echo "- git_rev: $(git -C "$WORKSPACE_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
     echo "- rustc: $(rustc --version 2>/dev/null || echo unknown)"
@@ -231,6 +254,7 @@ write_run_summary() {
   duration=$(( $(date +%s) - RUN_STARTED_EPOCH ))
   pass_count=$(awk -F '\t' 'NR > 1 && $1 == "PASS" { n++ } END { print n + 0 }' "$RUN_MATRIX" 2>/dev/null || echo 0)
   fail_count=$(awk -F '\t' 'NR > 1 && $1 == "FAIL" { n++ } END { print n + 0 }' "$RUN_MATRIX" 2>/dev/null || echo 0)
+  skip_count=$(awk -F '\t' 'NR > 1 && $1 == "SKIP" { n++ } END { print n + 0 }' "$RUN_MATRIX" 2>/dev/null || echo 0)
   total_count=$(awk 'NR > 1 { n++ } END { print n + 0 }' "$RUN_MATRIX" 2>/dev/null || echo 0)
 
   {
@@ -249,6 +273,7 @@ write_run_summary() {
     echo "- total_cells: $total_count"
     echo "- passed_cells: $pass_count"
     echo "- failed_cells: $fail_count"
+    echo "- skipped_cells: $skip_count"
     echo
     echo "## Matrix"
     echo
@@ -299,7 +324,7 @@ api_examples() {
 
 scenario_list() {
   case "$SCENARIO_ARG" in
-    all) printf '%s\n' registration basic_call g729_call hold_resume ring_cancel dtmf reject blind_transfer ;;
+    all) printf '%s\n' registration basic_call g729_call amr_call amr_transcode_call hold_resume ring_cancel dtmf reject blind_transfer ;;
     amr|amr_call) printf '%s\n' amr_call ;;
     amr_transcode|amr_transcode_call|transcode) printf '%s\n' amr_transcode_call ;;
     basic|basic_call|call) printf '%s\n' basic_call ;;
@@ -348,6 +373,12 @@ load_provider_env() {
     # shellcheck disable=SC1091
     . "$SCRIPT_DIR/.env.local"
     set +a
+  fi
+  if [ "$PBX_ASSUME_AMR_INVOKED_SET" = "1" ]; then
+    export PBX_ASSUME_AMR="$PBX_ASSUME_AMR_INVOKED"
+  fi
+  if [ "$PBX_REQUIRE_AMR_INVOKED_SET" = "1" ]; then
+    export PBX_REQUIRE_AMR="$PBX_REQUIRE_AMR_INVOKED"
   fi
 }
 
@@ -413,6 +444,75 @@ codec_label_for_scenario() {
     return
   fi
   codec_profile_for_scenario "$clfs_provider" "$scenario"
+}
+
+# --- AMR capability probe -------------------------------------------------
+# Whether the PBX *image* carries AMR differs from the provider: the local
+# labs do, the committed release-runner images do not. A cell that would fail
+# for "no codec in this image" proves nothing, so it records SKIP instead --
+# and two guards keep the skip honest: PBX_ASSUME_AMR pins the answer without
+# docker (the release gates set 0), and PBX_REQUIRE_AMR=1 (the AMR-capable
+# labs) turns any skip into a loud FAIL so a lab regression cannot hide.
+AMR_PROBE_STATUS=""
+AMR_PROBE_NB=""
+AMR_PROBE_WB=""
+AMR_PROBE_PROVIDER=""
+
+pbx_amr_probe() {
+  pap_provider=$1
+  if [ "$AMR_PROBE_PROVIDER" = "$pap_provider" ] && [ -n "$AMR_PROBE_STATUS" ]; then
+    return
+  fi
+  mkdir -p "$OUT_ROOT/$pap_provider"
+  pap_transcript="$OUT_ROOT/$pap_provider/amr-probe.txt"
+  pap_line=$(sh "$SCRIPT_DIR/amr_probe.sh" detect "$pap_provider" "$pap_transcript" 2>>"$pap_transcript" || true)
+  AMR_PROBE_STATUS=$(printf '%s' "$pap_line" | sed -n 's/.*status=\([a-z]*\).*/\1/p')
+  AMR_PROBE_NB=$(printf '%s' "$pap_line" | sed -n 's/.*amr=\([a-z]*\).*/\1/p')
+  AMR_PROBE_WB=$(printf '%s' "$pap_line" | sed -n 's/.*amrwb=\([a-z]*\).*/\1/p')
+  AMR_PROBE_PROVIDER=$pap_provider
+  [ -n "$AMR_PROBE_STATUS" ] || AMR_PROBE_STATUS=unknown
+  echo "[$pap_provider] AMR probe: status=$AMR_PROBE_STATUS nb=$AMR_PROBE_NB wb=$AMR_PROBE_WB"
+}
+
+# Which AMR variants a codec label needs: nb, wb, or both.
+amr_variants_for_label() {
+  case "$1" in
+    amrnb|amrnb_be|amrnb_pcmu|amrnb_be_pcmu) printf 'nb\n' ;;
+    amrwb|amrwb_be|amrwb_pcmu|amrwb_be_pcmu) printf 'wb\n' ;;
+    amrnb_amrwb) printf 'nb wb\n' ;;
+    *) printf 'nb\n' ;;
+  esac
+}
+
+# 0 = supported, 1 = not. Records the SKIP or the required-but-absent FAIL.
+amr_cell_supported() {
+  acs_provider=$1
+  acs_scenario=$2
+  acs_transport=$3
+  acs_label=$4
+  pbx_amr_probe "$acs_provider"
+  acs_missing=""
+  for variant in $(amr_variants_for_label "$acs_label"); do
+    case "$variant" in
+      nb) [ "$AMR_PROBE_NB" = "yes" ] || acs_missing="$acs_missing nb" ;;
+      wb) [ "$AMR_PROBE_WB" = "yes" ] || acs_missing="$acs_missing wb" ;;
+    esac
+  done
+  if [ -z "$acs_missing" ]; then
+    return 0
+  fi
+  acs_now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  acs_transcript="$OUT_ROOT/$acs_provider/amr-probe.txt"
+  case "${PBX_REQUIRE_AMR:-0}" in
+    1|true|yes|on)
+      echo "FAIL: $acs_provider lacks AMR ($acs_missing) but PBX_REQUIRE_AMR is set -- an AMR-capable lab losing its codec must not pass as a skip" >&2
+      record_matrix FAIL "$acs_provider" "$(example_label "$example")" "$acs_scenario" "$acs_transport" probe 0 1 "$acs_now" "$acs_now" "$acs_transcript" "$OUT_ROOT/$acs_provider" "$acs_label"
+      return 2
+      ;;
+  esac
+  echo "[$acs_provider] skipping $acs_scenario/$acs_transport ($acs_label): image lacks AMR variant(s):$acs_missing (probe: $AMR_PROBE_STATUS)"
+  record_matrix SKIP "$acs_provider" "$(example_label "$example")" "$acs_scenario" "$acs_transport" probe 0 0 "$acs_now" "$acs_now" "$acs_transcript" "$OUT_ROOT/$acs_provider" "$acs_label"
+  return 1
 }
 
 # The pairing sweep, mirroring g729_profile_list: PBX_CODEC_PAIRING pins one,
@@ -1302,15 +1402,25 @@ run_matrix_cell() {
       # bandwidth-efficient amrnb_be / amrwb_be. Unlike g729_call there is no
       # profile sweep: the two variants are different codecs rather than two
       # annexes of one, and the two framings need a PBX configured for each.
+      amr_label=$(codec_label_for_scenario "$provider" amr_call)
       if transport_selected UDP; then
-        run_two_party "$provider" "$example" amr_call UDP || rc=$?
-        if [ "$rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then return "$rc"; fi
+        if amr_cell_supported "$provider" amr_call UDP "$amr_label"; then
+          run_two_party "$provider" "$example" amr_call UDP || rc=$?
+          if [ "$rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then return "$rc"; fi
+        elif [ "$?" -eq 2 ]; then
+          rc=1
+          if [ "$STOP_ON_FAIL" = "1" ]; then return "$rc"; fi
+        fi
       fi
       if transport_selected TLS; then
-        run_two_party "$provider" "$example" amr_call TLS || {
-          tls_rc=$?
-          if [ "$rc" -eq 0 ]; then rc=$tls_rc; fi
-        }
+        if amr_cell_supported "$provider" amr_call TLS "$amr_label"; then
+          run_two_party "$provider" "$example" amr_call TLS || {
+            tls_rc=$?
+            if [ "$rc" -eq 0 ]; then rc=$tls_rc; fi
+          }
+        elif [ "$?" -eq 2 ] && [ "$rc" -eq 0 ]; then
+          rc=1
+        fi
       fi
       ;;
     amr_transcode_call)
@@ -1326,19 +1436,29 @@ run_matrix_cell() {
         export PBX_CODEC_PAIRING="$pairing"
         pairing_rc=0
         if transport_selected UDP; then
-          run_two_party "$provider" "$example" amr_transcode_call UDP || {
-            pairing_rc=$?
-            if [ "$rc" -eq 0 ]; then rc=$pairing_rc; fi
-          }
+          if amr_cell_supported "$provider" amr_transcode_call UDP "$pairing"; then
+            run_two_party "$provider" "$example" amr_transcode_call UDP || {
+              pairing_rc=$?
+              if [ "$rc" -eq 0 ]; then rc=$pairing_rc; fi
+            }
+          elif [ "$?" -eq 2 ]; then
+            pairing_rc=1
+            if [ "$rc" -eq 0 ]; then rc=1; fi
+          fi
           if [ "$pairing_rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then
             break
           fi
         fi
         if transport_selected TLS; then
-          run_two_party "$provider" "$example" amr_transcode_call TLS || {
-            pairing_rc=$?
-            if [ "$rc" -eq 0 ]; then rc=$pairing_rc; fi
-          }
+          if amr_cell_supported "$provider" amr_transcode_call TLS "$pairing"; then
+            run_two_party "$provider" "$example" amr_transcode_call TLS || {
+              pairing_rc=$?
+              if [ "$rc" -eq 0 ]; then rc=$pairing_rc; fi
+            }
+          elif [ "$?" -eq 2 ]; then
+            pairing_rc=1
+            if [ "$rc" -eq 0 ]; then rc=1; fi
+          fi
         fi
         if [ "$pairing_rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then
           break

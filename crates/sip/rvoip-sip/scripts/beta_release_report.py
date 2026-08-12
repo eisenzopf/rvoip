@@ -2963,10 +2963,19 @@ def interop_observed_check(report_root: Path, name: str) -> dict[str, Any] | Non
             for line in lines[1:]
             if (cells := line.split("\t"))[provider_index] == provider
         ]
+        # SKIP rows are the AMR capability probe declining cells the PBX
+        # image cannot run (see examples/pbx/amr_probe.sh); they are evidence
+        # of a deliberate non-run, not of success, so the gate needs at least
+        # one genuine PASS alongside them and tolerates no FAIL.
         return {
             "check": f"{provider} PBX matrix rows",
-            "observed": {"rows": len(statuses), "pass": statuses.count("PASS")},
-            "passed": bool(statuses) and all(status == "PASS" for status in statuses),
+            "observed": {
+                "rows": len(statuses),
+                "pass": statuses.count("PASS"),
+                "skip": statuses.count("SKIP"),
+            },
+            "passed": statuses.count("PASS") > 0
+            and all(status in {"PASS", "SKIP"} for status in statuses),
         }
     if name == "SIPp standalone matrix":
         counts = count_tsv_results(report_root / "sipp/runs.tsv")

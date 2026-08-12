@@ -1494,14 +1494,14 @@ class PolicyTests(unittest.TestCase):
                     "interop.asterisk-matrix",
                     "local Asterisk PBX matrix",
                     "asterisk PBX matrix rows",
-                    {"rows": 4, "pass": 4},
+                    {"rows": 4, "pass": 4, "skip": 0},
                     pbx_evidence,
                 ),
                 gate(
                     "interop.freeswitch-matrix",
                     "local FreeSWITCH PBX matrix",
                     "freeswitch PBX matrix rows",
-                    {"rows": 4, "pass": 4},
+                    {"rows": 4, "pass": 4, "skip": 0},
                     pbx_evidence,
                 ),
                 gate(

@@ -89,6 +89,12 @@ COMMAND_OVERRIDES = {
         "PBX_OUT_ROOT={artifact_dir}",
         "PBX_REPORT_APPEND=1",
         "PBX_G729_PROFILES=g729a g729ab",
+        # The committed runner PBX images carry no AMR (packaged Alpine
+        # Asterisk cannot take the source patches). Pinning the probe's
+        # answer keeps the gate deterministic -- the AMR cells record SKIP
+        # without a docker exec -- and flipping this to 1 is the one-line
+        # signal when the images reach AMR parity.
+        "PBX_ASSUME_AMR=0",
         "{workspace}/crates/sip/rvoip-sip/examples/pbx/run.sh",
         "--pbx",
         "asterisk",
@@ -102,6 +108,12 @@ COMMAND_OVERRIDES = {
         "PBX_OUT_ROOT={artifact_dir}",
         "PBX_REPORT_APPEND=1",
         "PBX_G729_PROFILES=g729a g729ab",
+        # The committed runner PBX images carry no AMR (packaged Alpine
+        # Asterisk cannot take the source patches). Pinning the probe's
+        # answer keeps the gate deterministic -- the AMR cells record SKIP
+        # without a docker exec -- and flipping this to 1 is the one-line
+        # signal when the images reach AMR parity.
+        "PBX_ASSUME_AMR=0",
         "{workspace}/crates/sip/rvoip-sip/examples/pbx/run.sh",
         "--pbx",
         "freeswitch",

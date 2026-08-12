@@ -32,7 +32,7 @@ Options:
 
 - `--pbx asterisk|freeswitch|both`
 - `--api endpoint|stream_peer|callback|all`
-- `--scenario registration|basic_call|g729_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all`
+- `--scenario registration|basic_call|g729_call|amr_call|amr_transcode_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all`
 
 The runner builds the PBX Cargo examples and stores logs/WAV evidence under
 `examples/pbx/output/<provider>/<api>/<scenario>/<transport>/` by default. Set
@@ -51,6 +51,22 @@ reference tones through the negotiated G.729 media path, record the received
 audio, and run the analyzer before the matrix cell passes. G.729 evidence is
 stored under `.../g729_call/<profile>/<transport>/` with `audio-analysis.*`
 diagnostics when `PBX_DIAG=1`.
+
+`amr_call` and `amr_transcode_call` are part of `--scenario all` and are
+audio-verifying under a stricter gate (tone dominance plus per-window SNR and
+per-frame level, one continuous second, at the leg's own rate). Whether they
+*run* depends on the PBX **image**, not the provider: the local labs carry
+AMR, the committed release-runner images do not. Before each AMR cell,
+`amr_probe.sh` asks the container (`core show codecs` / `show codec`) and
+records a `SKIP` matrix row when the needed variant is absent, with the probe
+transcript as the row's log. Three knobs, all recorded in `environment-*.md`:
+
+- `PBX_ASSUME_AMR=0|1` pins the answer without touching docker — the release
+  gates pin `0` so gate behaviour is deterministic.
+- `PBX_REQUIRE_AMR=1` (set by the AMR-capable labs' env files) turns any skip
+  into a loud FAIL, so a lab losing its codec cannot hide as a skip.
+- Both knobs given on the command line override values from the sourced env
+  files; for everything else the files win.
 
 Each run also writes release-audit artifacts at the output root:
 
