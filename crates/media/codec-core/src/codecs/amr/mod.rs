@@ -55,6 +55,9 @@ pub mod payload;
 /// Where the Apache-2.0 oracles agree with the normative references.
 #[cfg(test)]
 mod qualification;
+/// Long-run stability: mode churn, DTX and loss over a full call.
+#[cfg(test)]
+mod soak;
 pub mod rate;
 pub mod sdp;
 pub mod sid_cadence;
