@@ -60,6 +60,12 @@ PROXY_INTEROP_GATE_IDS = [
     for order in PROXY_INTEROP_ORDERS
     for transport in PROXY_INTEROP_TRANSPORTS
 ]
+PROXY_PBX_PEERS = ["kamailio", "opensips"]
+PROXY_PBX_GATE_IDS = [
+    f"interop.proxy-pbx.{peer}.{stage}"
+    for peer in PROXY_PBX_PEERS
+    for stage in ("up", "matrix", "down")
+]
 COMMAND_OVERRIDES = {
     "security.advisory-audit": [
         "cargo",
@@ -162,8 +168,16 @@ FUZZ_TARGETS = {
     "stun": "stun_response",
     "g711": "g711_unpack",
 }
+# AMR: the RFC 4867 depacketizer on attacker bytes, the decoder DSP behind it,
+# and the encoders on arbitrary PCM. Separate because these have no legacy
+# record and are synthesized by `amr_fuzz_gates`.
+AMR_FUZZ_TARGETS = {
+    "amr-unpack": "amr_unpack",
+    "amr-decode": "amr_decode",
+    "amr-encode": "amr_encode",
+}
 
-for _suffix, _target in FUZZ_TARGETS.items():
+for _suffix, _target in {**FUZZ_TARGETS, **AMR_FUZZ_TARGETS}.items():
     _fuzz_dir = (
         "{workspace}/crates/sip/fuzz"
         if _suffix in {"sip-message", "uri", "header", "sdp"}
@@ -460,6 +474,121 @@ def synthetic_gate(
     }
 
 
+def amr_fuzz_gates() -> list[dict[str, Any]]:
+    """AMR fuzz targets, which post-date the canonical 108-gate run.
+
+    The other fuzz gates ride in as legacy records with a COMMAND_OVERRIDES
+    entry; these have no legacy record to attach to, so they are synthesized
+    with the same command shape. Three targets: the RFC 4867 depacketizer on
+    attacker-controlled bytes, the decoder DSP behind it (where a corrupted
+    field indexes a table), and the encoders on arbitrary PCM.
+    """
+    result = []
+    for suffix, target in AMR_FUZZ_TARGETS.items():
+        gate = synthetic_gate(
+            f"security.fuzz-{suffix}",
+            f"{target} libFuzzer target",
+            executor="argv",
+            command=COMMAND_OVERRIDES[f"security.fuzz-{suffix}"],
+            dependencies=["source.remote-clean"],
+            paths=[
+                "crates/media/fuzz/**",
+                "crates/media/codec-core/src/codecs/amr/**",
+            ],
+        )
+        result.append(gate)
+    return result
+
+
+def proxy_pbx_gates() -> list[dict[str, Any]]:
+    """Kamailio/OpenSIPS registrar-proxy labs with an rtpengine media relay.
+
+    A different oracle class from the B2BUA matrices: the proxy stays in the
+    signalling path via Record-Route while rtpengine relays RTP verbatim, so
+    these are what prove AMR crosses a relay that never re-encodes it. Media
+    flows, unlike the signalling-only `interop.remote-proxies` family, which
+    this deliberately does not replace.
+
+    Each peer is a three-gate chain — up, matrix, down — because the lab has
+    to be torn down even when the matrix fails, and an aggregate cannot
+    express that ordering.
+    """
+    paths = [
+        "crates/sip/rvoip-sip/examples/pbx/**",
+        "crates/media/codec-core/**",
+        "crates/media/media-core/**",
+        "infra/release-runners/pbx/**",
+        "infra/release-runners/interop-lifecycle.sh",
+    ]
+    result = []
+    for peer in PROXY_PBX_PEERS:
+        up = synthetic_gate(
+            f"interop.proxy-pbx.{peer}.up",
+            f"{peer} + rtpengine lab up",
+            executor="argv",
+            command=[
+                "bash",
+                "infra/release-runners/interop-lifecycle.sh",
+                f"{peer}-up",
+            ],
+            resource="gcp-proxy-interop",
+            dependencies=["source.remote-clean"],
+            paths=paths,
+        )
+        up["estimated_seconds"] = 120
+        matrix = synthetic_gate(
+            f"interop.proxy-pbx.{peer}.matrix",
+            f"{peer} + rtpengine AMR passthrough matrix",
+            executor="argv",
+            command=[
+                "env",
+                "PBX_OUT_ROOT={artifact_dir}",
+                "PBX_REPORT_APPEND=1",
+                # The relay forwards payloads verbatim, so one lab config
+                # covers all four AMR framings; the harness sweeps them.
+                "PBX_REQUIRE_AMR=1",
+                "{workspace}/crates/sip/rvoip-sip/examples/pbx/run.sh",
+                "--pbx",
+                peer,
+                "--api",
+                "endpoint",
+                "--scenario",
+                "all",
+            ],
+            resource="gcp-proxy-interop",
+            dependencies=[f"interop.proxy-pbx.{peer}.up"],
+            paths=paths,
+        )
+        matrix["estimated_seconds"] = 600
+        matrix["timeout_minutes"] = 45
+        down = synthetic_gate(
+            f"interop.proxy-pbx.{peer}.down",
+            f"{peer} + rtpengine lab down",
+            executor="argv",
+            command=[
+                "bash",
+                "infra/release-runners/interop-lifecycle.sh",
+                f"{peer}-down",
+            ],
+            resource="gcp-proxy-interop",
+            dependencies=[f"interop.proxy-pbx.{peer}.matrix"],
+            paths=paths,
+            always_fresh=True,
+        )
+        result.extend([up, matrix, down])
+
+    result.append(
+        synthetic_gate(
+            "interop.proxy-pbx",
+            "complete registrar-proxy media matrix (Kamailio and OpenSIPS + rtpengine)",
+            executor="aggregate",
+            dependencies=PROXY_PBX_GATE_IDS,
+            paths=paths,
+        )
+    )
+    return result
+
+
 def proxy_interop_gates() -> list[dict[str, Any]]:
     paths = [
         "crates/sip/sip-proxy/**",
@@ -675,6 +804,8 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
             paths=["scripts/test_libsrtp_interop.sh", "crates/media/rtp-core/**"],
         ),
         *proxy_interop_gates(),
+        *proxy_pbx_gates(),
+        *amr_fuzz_gates(),
         synthetic_gate(
             "interop.browser-dtmf",
             "real Chromium outbound RFC 4733 interoperability (BridgeFu issue #54)",
@@ -755,6 +886,9 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
                 "interop.remote-libsrtp",
                 "interop.remote-proxies",
                 *PROXY_INTEROP_GATE_IDS,
+                "interop.proxy-pbx",
+                *PROXY_PBX_GATE_IDS,
+                *[f"security.fuzz-{suffix}" for suffix in AMR_FUZZ_TARGETS],
                 "interop.browser-dtmf",
                 "report.remote-aggregate",
                 "source.remote-final",

@@ -79,7 +79,18 @@ class GateFrameworkTests(unittest.TestCase):
             for gate in self.catalog["gates"]
             if gate["id"].startswith("security.fuzz-")
         ]
-        self.assertEqual(len(fuzz_gates), 10)
+        # 10 legacy targets (SIP message/uri/header/sdp, RTP, RTCP, SRTP,
+        # DTLS, STUN, G.711) plus the three AMR ones, which are synthesized
+        # because they post-date the canonical run.
+        self.assertEqual(len(fuzz_gates), 13)
+        self.assertEqual(
+            {gate["id"] for gate in fuzz_gates if "amr" in gate["id"]},
+            {
+                "security.fuzz-amr-unpack",
+                "security.fuzz-amr-decode",
+                "security.fuzz-amr-encode",
+            },
+        )
         for gate in fuzz_gates:
             with self.subTest(gate=gate["id"]):
                 self.assertNotIn("--manifest-path", gate["command"])

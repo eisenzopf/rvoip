@@ -5980,6 +5980,421 @@
     {
       "affected_crates": [],
       "affected_paths": [
+        "crates/sip/rvoip-sip/examples/pbx/**",
+        "crates/media/codec-core/**",
+        "crates/media/media-core/**",
+        "infra/release-runners/pbx/**",
+        "infra/release-runners/interop-lifecycle.sh"
+      ],
+      "always_fresh": false,
+      "category": "Remote release framework",
+      "command": [
+        "bash",
+        "infra/release-runners/interop-lifecycle.sh",
+        "kamailio-up"
+      ],
+      "dependencies": [
+        "source.remote-clean"
+      ],
+      "display_command": "bash infra/release-runners/interop-lifecycle.sh kamailio-up",
+      "estimated_seconds": 120,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "interop.proxy-pbx.kamailio.up",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "kamailio + rtpengine lab up",
+      "resource_class": "gcp-proxy-interop",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        "crates/sip/rvoip-sip/examples/pbx/**",
+        "crates/media/codec-core/**",
+        "crates/media/media-core/**",
+        "infra/release-runners/pbx/**",
+        "infra/release-runners/interop-lifecycle.sh"
+      ],
+      "always_fresh": false,
+      "category": "Remote release framework",
+      "command": [
+        "env",
+        "PBX_OUT_ROOT={artifact_dir}",
+        "PBX_REPORT_APPEND=1",
+        "PBX_REQUIRE_AMR=1",
+        "{workspace}/crates/sip/rvoip-sip/examples/pbx/run.sh",
+        "--pbx",
+        "kamailio",
+        "--api",
+        "endpoint",
+        "--scenario",
+        "all"
+      ],
+      "dependencies": [
+        "interop.proxy-pbx.kamailio.up"
+      ],
+      "display_command": "env PBX_OUT_ROOT={artifact_dir} PBX_REPORT_APPEND=1 PBX_REQUIRE_AMR=1 {workspace}/crates/sip/rvoip-sip/examples/pbx/run.sh --pbx kamailio --api endpoint --scenario all",
+      "estimated_seconds": 600,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "interop.proxy-pbx.kamailio.matrix",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "kamailio + rtpengine AMR passthrough matrix",
+      "resource_class": "gcp-proxy-interop",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 45,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        "crates/sip/rvoip-sip/examples/pbx/**",
+        "crates/media/codec-core/**",
+        "crates/media/media-core/**",
+        "infra/release-runners/pbx/**",
+        "infra/release-runners/interop-lifecycle.sh"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "bash",
+        "infra/release-runners/interop-lifecycle.sh",
+        "kamailio-down"
+      ],
+      "dependencies": [
+        "interop.proxy-pbx.kamailio.matrix"
+      ],
+      "display_command": "bash infra/release-runners/interop-lifecycle.sh kamailio-down",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "interop.proxy-pbx.kamailio.down",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "kamailio + rtpengine lab down",
+      "resource_class": "gcp-proxy-interop",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        "crates/sip/rvoip-sip/examples/pbx/**",
+        "crates/media/codec-core/**",
+        "crates/media/media-core/**",
+        "infra/release-runners/pbx/**",
+        "infra/release-runners/interop-lifecycle.sh"
+      ],
+      "always_fresh": false,
+      "category": "Remote release framework",
+      "command": [
+        "bash",
+        "infra/release-runners/interop-lifecycle.sh",
+        "opensips-up"
+      ],
+      "dependencies": [
+        "source.remote-clean"
+      ],
+      "display_command": "bash infra/release-runners/interop-lifecycle.sh opensips-up",
+      "estimated_seconds": 120,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "interop.proxy-pbx.opensips.up",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "opensips + rtpengine lab up",
+      "resource_class": "gcp-proxy-interop",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        "crates/sip/rvoip-sip/examples/pbx/**",
+        "crates/media/codec-core/**",
+        "crates/media/media-core/**",
+        "infra/release-runners/pbx/**",
+        "infra/release-runners/interop-lifecycle.sh"
+      ],
+      "always_fresh": false,
+      "category": "Remote release framework",
+      "command": [
+        "env",
+        "PBX_OUT_ROOT={artifact_dir}",
+        "PBX_REPORT_APPEND=1",
+        "PBX_REQUIRE_AMR=1",
+        "{workspace}/crates/sip/rvoip-sip/examples/pbx/run.sh",
+        "--pbx",
+        "opensips",
+        "--api",
+        "endpoint",
+        "--scenario",
+        "all"
+      ],
+      "dependencies": [
+        "interop.proxy-pbx.opensips.up"
+      ],
+      "display_command": "env PBX_OUT_ROOT={artifact_dir} PBX_REPORT_APPEND=1 PBX_REQUIRE_AMR=1 {workspace}/crates/sip/rvoip-sip/examples/pbx/run.sh --pbx opensips --api endpoint --scenario all",
+      "estimated_seconds": 600,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "interop.proxy-pbx.opensips.matrix",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "opensips + rtpengine AMR passthrough matrix",
+      "resource_class": "gcp-proxy-interop",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 45,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        "crates/sip/rvoip-sip/examples/pbx/**",
+        "crates/media/codec-core/**",
+        "crates/media/media-core/**",
+        "infra/release-runners/pbx/**",
+        "infra/release-runners/interop-lifecycle.sh"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "bash",
+        "infra/release-runners/interop-lifecycle.sh",
+        "opensips-down"
+      ],
+      "dependencies": [
+        "interop.proxy-pbx.opensips.matrix"
+      ],
+      "display_command": "bash infra/release-runners/interop-lifecycle.sh opensips-down",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "interop.proxy-pbx.opensips.down",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "opensips + rtpengine lab down",
+      "resource_class": "gcp-proxy-interop",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        "crates/sip/rvoip-sip/examples/pbx/**",
+        "crates/media/codec-core/**",
+        "crates/media/media-core/**",
+        "infra/release-runners/pbx/**",
+        "infra/release-runners/interop-lifecycle.sh"
+      ],
+      "always_fresh": false,
+      "category": "Remote release framework",
+      "command": null,
+      "dependencies": [
+        "interop.proxy-pbx.kamailio.up",
+        "interop.proxy-pbx.kamailio.matrix",
+        "interop.proxy-pbx.kamailio.down",
+        "interop.proxy-pbx.opensips.up",
+        "interop.proxy-pbx.opensips.matrix",
+        "interop.proxy-pbx.opensips.down"
+      ],
+      "display_command": "aggregate interop.proxy-pbx",
+      "estimated_seconds": 1,
+      "executor": "aggregate",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "interop.proxy-pbx",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "complete registrar-proxy media matrix (Kamailio and OpenSIPS + rtpengine)",
+      "resource_class": "github-evidence",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        "crates/media/fuzz/**",
+        "crates/media/codec-core/src/codecs/amr/**"
+      ],
+      "always_fresh": false,
+      "category": "Remote release framework",
+      "command": [
+        "cargo",
+        "+nightly",
+        "fuzz",
+        "run",
+        "amr_unpack",
+        "--fuzz-dir",
+        "{workspace}/crates/media/fuzz",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--",
+        "-runs=1000",
+        "-max_total_time=10"
+      ],
+      "dependencies": [
+        "source.remote-clean"
+      ],
+      "display_command": "cargo +nightly fuzz run amr_unpack --fuzz-dir {workspace}/crates/media/fuzz --target x86_64-unknown-linux-gnu -- -runs=1000 -max_total_time=10",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "security.fuzz-amr-unpack",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "amr_unpack libFuzzer target",
+      "resource_class": "github-evidence",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        "crates/media/fuzz/**",
+        "crates/media/codec-core/src/codecs/amr/**"
+      ],
+      "always_fresh": false,
+      "category": "Remote release framework",
+      "command": [
+        "cargo",
+        "+nightly",
+        "fuzz",
+        "run",
+        "amr_decode",
+        "--fuzz-dir",
+        "{workspace}/crates/media/fuzz",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--",
+        "-runs=1000",
+        "-max_total_time=10"
+      ],
+      "dependencies": [
+        "source.remote-clean"
+      ],
+      "display_command": "cargo +nightly fuzz run amr_decode --fuzz-dir {workspace}/crates/media/fuzz --target x86_64-unknown-linux-gnu -- -runs=1000 -max_total_time=10",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "security.fuzz-amr-decode",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "amr_decode libFuzzer target",
+      "resource_class": "github-evidence",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        "crates/media/fuzz/**",
+        "crates/media/codec-core/src/codecs/amr/**"
+      ],
+      "always_fresh": false,
+      "category": "Remote release framework",
+      "command": [
+        "cargo",
+        "+nightly",
+        "fuzz",
+        "run",
+        "amr_encode",
+        "--fuzz-dir",
+        "{workspace}/crates/media/fuzz",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--",
+        "-runs=1000",
+        "-max_total_time=10"
+      ],
+      "dependencies": [
+        "source.remote-clean"
+      ],
+      "display_command": "cargo +nightly fuzz run amr_encode --fuzz-dir {workspace}/crates/media/fuzz --target x86_64-unknown-linux-gnu -- -runs=1000 -max_total_time=10",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "security.fuzz-amr-encode",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "amr_encode libFuzzer target",
+      "resource_class": "github-evidence",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
         "crates/webrtc/rvoip-rtc/**",
         "crates/webrtc/rvoip-webrtc/**",
         "crates/core/rvoip-core/**"
@@ -9460,6 +9875,13 @@
         "core.rvoip-websocket",
         "core.rvoip-webtransport",
         "interop.browser-dtmf",
+        "interop.proxy-pbx",
+        "interop.proxy-pbx.kamailio.down",
+        "interop.proxy-pbx.kamailio.matrix",
+        "interop.proxy-pbx.kamailio.up",
+        "interop.proxy-pbx.opensips.down",
+        "interop.proxy-pbx.opensips.matrix",
+        "interop.proxy-pbx.opensips.up",
         "interop.remote-libsrtp",
         "interop.remote-proxies",
         "interop.remote-proxies.kamailio.peer-first.tcp",
@@ -9482,6 +9904,9 @@
         "perf.media-burst.high-density-media-burst",
         "perf.media-burst.overload-recovery",
         "perf.media-burst.shift-change-long-hold",
+        "security.fuzz-amr-decode",
+        "security.fuzz-amr-encode",
+        "security.fuzz-amr-unpack",
         "security.remote-advisories",
         "security.remote-fuzz-dtls",
         "security.remote-fuzz-g711",
@@ -9882,6 +10307,13 @@
       "interop.freeswitch-matrix",
       "interop.freeswitch-up",
       "interop.proxy-descope",
+      "interop.proxy-pbx",
+      "interop.proxy-pbx.kamailio.down",
+      "interop.proxy-pbx.kamailio.matrix",
+      "interop.proxy-pbx.kamailio.up",
+      "interop.proxy-pbx.opensips.down",
+      "interop.proxy-pbx.opensips.matrix",
+      "interop.proxy-pbx.opensips.up",
       "interop.remote-libsrtp",
       "interop.remote-proxies",
       "interop.remote-proxies.kamailio.peer-first.tcp",
@@ -9946,6 +10378,9 @@
       "report.regression-baseline",
       "report.remote-aggregate",
       "security.advisory-audit",
+      "security.fuzz-amr-decode",
+      "security.fuzz-amr-encode",
+      "security.fuzz-amr-unpack",
       "security.fuzz-dtls",
       "security.fuzz-g711",
       "security.fuzz-header",
