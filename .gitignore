@@ -166,3 +166,11 @@ dhat-heap-*.json
 ## Local release helpers
 /scripts/sync_beta_train_versions.sh
 /scripts/publish_beta_train_0.2.2.sh
+
+# PBX interop local env: machine-specific addresses and credentials.
+# The committed *.env.example files are the templates; a real env/<provider>.env
+# is sourced after the lab-generated ~/Developer/<provider>/*-local.env and
+# therefore OVERRIDES it, so committing one silently redirects the release
+# runners at a developer's own lab addresses.
+crates/sip/rvoip-sip/examples/pbx/env/*.env
+!crates/sip/rvoip-sip/examples/pbx/env/*.env.example
