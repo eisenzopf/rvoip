@@ -2411,11 +2411,9 @@ async fn run_callback_two_party(
             let handle =
                 wait_for_next_established(&mut runtime.events, remote_test_timeout(provider)?)
                     .await?;
-            let recorder = if transport.is_tls() {
-                Some(start_tone_recorder(&handle, tone_for_callee(transport)).await?)
-            } else {
-                None
-            };
+            // Unconditional for the same reason as run_dtmf_callee: the caller
+            // holds its digits until it receives our tone.
+            let recorder = start_tone_recorder(&handle, tone_for_callee(transport)).await?;
             wait_for_dtmf_sequence(
                 &mut runtime.events,
                 &remote_test_digits(provider),
@@ -2426,11 +2424,9 @@ async fn run_callback_two_party(
                 .wait_for_end(Some(Duration::from_secs(15)))
                 .await
                 .ok();
-            if let Some(recorder) = recorder {
-                recorder
-                    .stop_and_save(&runtime.cfg.output_dir, dtmf_callee_wav(transport))
-                    .await?;
-            }
+            recorder
+                .stop_and_save(&runtime.cfg.output_dir, dtmf_callee_wav(transport))
+                .await?;
         }
         (Scenario::Reject, Role::Caller) => {
             settle_after_register(provider).await;
@@ -3167,43 +3163,39 @@ async fn run_dtmf_caller(
     if transport.is_tls() {
         assert_srtp_media_security(handle, Duration::from_secs(5)).await?;
     }
-    let recorder = if transport.is_tls() {
-        Some(start_tone_recorder(handle, ENDPOINT_1001_TONE_HZ).await?)
-    } else {
-        None
-    };
-    for digit in remote_test_digits(cfg.provider) {
-        sleep(Duration::from_millis(500)).await;
-        handle.send_dtmf(digit).await?;
-    }
-    sleep(Duration::from_secs(1)).await;
-    let media_ready = match recorder.as_ref() {
-        Some(tone_recorder) => {
-            tone_recorder
-                .wait_for_received_samples(MIN_RECEIVED_SAMPLES, Duration::from_secs(6))
-                .await
-        }
-        None => Ok(()),
-    };
+    // Record on both transports: the tone stream is also how we prove the media
+    // path is live before clocking out digits.
+    let recorder = start_tone_recorder(handle, tone_for_caller(transport)).await?;
+    // Only start the digit train once RTP is actually flowing both ways. A digit
+    // handed to send_dtmf before the media path is up is scheduled against a
+    // dialog that cannot transmit it, and it is dropped with no error — the
+    // callee then waits for a digit that was never sent and only learns anything
+    // is wrong when our BYE arrives ("call ended before DTMF completed"). The TLS
+    // path got this gate for free from assert_srtp_media_security; UDP previously
+    // started sending 500ms after answer and relied on that being enough.
+    let media_ready = recorder
+        .wait_for_received_samples(MIN_RECEIVED_SAMPLES, Duration::from_secs(6))
+        .await;
     if let Err(error) = media_ready {
         handle
             .hangup_and_wait(Some(Duration::from_secs(8)))
             .await
             .ok();
-        if let Some(tone_recorder) = recorder {
-            tone_recorder
-                .stop_and_save(&cfg.output_dir, dtmf_caller_wav(transport))
-                .await
-                .ok();
-        }
-        return Err(error);
-    }
-    handle.hangup_and_wait(Some(Duration::from_secs(8))).await?;
-    if let Some(recorder) = recorder {
         recorder
             .stop_and_save(&cfg.output_dir, dtmf_caller_wav(transport))
-            .await?;
+            .await
+            .ok();
+        return Err(error);
     }
+    for digit in remote_test_digits(cfg.provider) {
+        sleep(Duration::from_millis(500)).await;
+        handle.send_dtmf(digit).await?;
+    }
+    sleep(Duration::from_secs(1)).await;
+    handle.hangup_and_wait(Some(Duration::from_secs(8))).await?;
+    recorder
+        .stop_and_save(&cfg.output_dir, dtmf_caller_wav(transport))
+        .await?;
     Ok(())
 }
 
@@ -3216,11 +3208,10 @@ async fn run_dtmf_callee(
     if transport.is_tls() {
         assert_srtp_media_security(handle, Duration::from_secs(5)).await?;
     }
-    let recorder = if transport.is_tls() {
-        Some(start_tone_recorder(handle, tone_for_callee(transport)).await?)
-    } else {
-        None
-    };
+    // Record on both transports. Beyond the capture, this is what feeds the
+    // caller's media-readiness gate in run_dtmf_caller: it waits for our tone
+    // before sending any digit, so a UDP callee that stayed silent would stall it.
+    let recorder = start_tone_recorder(handle, tone_for_callee(transport)).await?;
     let mut events = handle.events().await?;
     wait_for_dtmf_sequence_on_events(
         &mut events,
@@ -3232,11 +3223,9 @@ async fn run_dtmf_callee(
         .wait_for_end(Some(Duration::from_secs(15)))
         .await
         .ok();
-    if let Some(recorder) = recorder {
-        recorder
-            .stop_and_save(&cfg.output_dir, dtmf_callee_wav(transport))
-            .await?;
-    }
+    recorder
+        .stop_and_save(&cfg.output_dir, dtmf_callee_wav(transport))
+        .await?;
     Ok(())
 }
 
