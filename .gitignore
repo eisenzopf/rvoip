@@ -181,3 +181,8 @@ crates/sip/rvoip-sip/examples/pbx/env/*.env
 # dir) instead — and the files embed absolute paths from whichever machine
 # produced them, so committing them adds churn and leaks local layout.
 crates/sip/rvoip-sip/examples/pbx/output/
+
+# Proxy lab configs rendered by up.sh from the .in templates, with the run's
+# public host, ports and a freshly generated TLS key beside them. Regenerated
+# every bring-up and machine-specific; the templates are what is tracked.
+infra/release-runners/pbx/*/.rendered/
