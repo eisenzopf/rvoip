@@ -123,18 +123,33 @@ fn goertzel_magnitude(samples: &[i16], sample_rate: f32, target_hz: f32) -> f32 
     (q1 * q1 + q2 * q2 - q1 * q2 * coeff).sqrt()
 }
 
-fn amr_only_config(name: &str, sip_port: u16, media: (u16, u16), variant: AmrVariant) -> Config {
+fn amr_only_config(
+    name: &str,
+    sip_port: u16,
+    media: (u16, u16),
+    variant: AmrVariant,
+    srtp: bool,
+) -> Config {
     Config {
         media_port_start: media.0,
         media_port_end: media.1,
         // AMR and DTMF only. No G.711 in the offer, so any audio that
         // arrives was carried by AMR.
         offered_codecs: vec![variant.payload_type, TELEPHONE_EVENT_PT],
+        // Both sides require SRTP when it is on, so a failure to negotiate
+        // fails the call rather than silently downgrading to plaintext and
+        // leaving the tone assertion to pass over RTP.
+        offer_srtp: srtp,
+        srtp_required: srtp,
         ..Config::local(name, sip_port)
     }
 }
 
 async fn run_amr_call(variant: AmrVariant, ports: Ports) {
+    run_amr_call_inner(variant, ports, false).await;
+}
+
+async fn run_amr_call_inner(variant: AmrVariant, ports: Ports, srtp: bool) {
     let _ = tracing_subscriber::fmt::try_init();
 
     let mut bob = StreamPeer::with_config(amr_only_config(
@@ -142,6 +157,7 @@ async fn run_amr_call(variant: AmrVariant, ports: Ports) {
         ports.bob_sip,
         ports.bob_media,
         variant,
+        srtp,
     ))
     .await
     .expect("bob peer starts with an AMR-only codec set");
@@ -151,6 +167,7 @@ async fn run_amr_call(variant: AmrVariant, ports: Ports) {
         ports.alice_sip,
         ports.alice_media,
         variant,
+        srtp,
     ))
     .await
     .expect("alice peer starts with an AMR-only codec set");
@@ -286,8 +303,31 @@ async fn run_amr_call(variant: AmrVariant, ports: Ports) {
     }
     assert!(
         fmtp_line.contains("max-red=0"),
-        "the offer must decline redundancy, which this stack does not handle:\n{offer}"
+        "the offer must decline redundancy unless it was asked for:\n{offer}"
     );
+
+    // With SRTP on, the media line must be the secure profile and carry keys.
+    // Without this the tone assertion would pass identically over plain RTP,
+    // so the encrypted path would be untested while looking covered.
+    //
+    // Asserted in both positions deliberately: if the plaintext cells also
+    // offered SAVP the flag would mean nothing, and every SRTP claim here
+    // would be vacuous while still printing green.
+    if srtp {
+        assert!(
+            offer.contains("RTP/SAVP"),
+            "SRTP was required but the INVITE offered a plaintext profile:\n{offer}"
+        );
+        assert!(
+            offer.contains("a=crypto:"),
+            "SRTP was required but the INVITE carried no SDES key:\n{offer}"
+        );
+    } else {
+        assert!(
+            !offer.contains("RTP/SAVP") && !offer.contains("a=crypto:"),
+            "the plaintext cell offered SRTP anyway, so the SRTP cells prove nothing:\n{offer}"
+        );
+    }
 
     let min_samples = MIN_RECEIVED_FRAMES * variant.frame_size;
     eprintln!(
@@ -409,6 +449,49 @@ async fn amr_wideband_call_carries_real_audio_over_loopback() {
             alice_media: (36_020, 36_070),
             bob_media: (36_080, 36_130),
         },
+    )
+    .await;
+}
+
+/// The same call with SDES-SRTP required on both sides.
+///
+/// AMR is the codec most likely to expose an SRTP bug that G.711 cannot.
+/// PCMU payloads are a fixed 160 octets every time, so a length or padding
+/// mistake in the encrypt/decrypt path lands on the same size repeatedly and
+/// may never be noticed. AMR payload length varies with the mode, and varies
+/// again between speech, SID and NO_DATA frames once DTX is on — so the
+/// authentication tag and the payload boundary move constantly.
+///
+/// Until now AMR-over-SRTP was evidenced only against external PBXes in the
+/// interop lab, which cannot run in CI. These two run in process.
+#[cfg(feature = "amr-nb")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn amr_narrowband_call_carries_real_audio_over_srtp() {
+    run_amr_call_inner(
+        AMR_NB,
+        Ports {
+            alice_sip: 35_496,
+            bob_sip: 35_497,
+            alice_media: (36_260, 36_310),
+            bob_media: (36_320, 36_370),
+        },
+        true,
+    )
+    .await;
+}
+
+#[cfg(feature = "amr-wb")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn amr_wideband_call_carries_real_audio_over_srtp() {
+    run_amr_call_inner(
+        AMR_WB,
+        Ports {
+            alice_sip: 35_498,
+            bob_sip: 35_499,
+            alice_media: (36_380, 36_430),
+            bob_media: (36_440, 36_490),
+        },
+        true,
     )
     .await;
 }
