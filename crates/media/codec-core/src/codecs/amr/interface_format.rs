@@ -1,107 +1,82 @@
-//! The IF2 interface format (TS 26.101 Annex B, TS 26.201 for wideband).
+//! The IF2 interface format: TS 26.101 Annex A (narrowband) and TS 26.201
+//! Annex A (wideband).
 //!
-//! # What IF2 is, and what it is not
+//! # What IF2 is
 //!
-//! IF2 is the compact framing used across 3G interfaces and by some file
-//! tools: a four-bit frame type, then the codec bits, then zero padding to the
-//! next octet. No CMR, no table of contents, no CRC — one frame per unit, and
-//! the frame type is the only metadata.
+//! The octet-aligned framing used across 3G interfaces and by file tools: a
+//! header, the codec's Core Frame bits, then stuffing to the next octet
+//! boundary. No CMR, no table of contents, no CRC — one frame per unit.
 //!
-//! The codec bits are the same importance-sorted order the RFC 4867 payload
-//! already uses, which is the part worth stating plainly: `sort_tables` are
-//! not an RTP thing, they are how AMR orders bits everywhere, so IF2 differs
-//! from an octet-aligned RTP payload only in its header and padding.
+//! # The two variants are genuinely different formats
 //!
-//! # Wideband only, and why
+//! They come from separate specifications and agree on almost nothing:
 //!
-//! Wireshark 4.6 reads our wideband IF2 frames correctly for all nine modes,
-//! which confirms both the frame-type placement (high nibble) and that the
-//! coded bits follow it. For narrowband the same probe says "Illegal
-//! Frametype" for every frame: narrowband carries the type in the *low*
-//! nibble instead, which varying that nibble confirms across all eight modes.
+//! | | narrowband (26.101) | wideband (26.201) |
+//! |---|---|---|
+//! | Frame Type | four **LSBs** of octet 1 | four **MSBs** of octet 1 |
+//! | Frame Quality Indicator | **absent** | 1 bit, after the frame type |
+//! | Bit packing | **LSB-first** within each octet | **MSB-first** |
+//! | SID Core Frame | 39 bits | 40 bits |
 //!
-//! That much is measured. What is *not* measured is where narrowband then
-//! puts its coded bits — the oracle reports a frame's mode but never decodes
-//! its speech bits, so it cannot distinguish "payload starts at octet 1" from
-//! "payload fills the high nibble first". Both round-trip perfectly against
-//! themselves and only one is right on real equipment.
+//! Narrowband octet 1 is `d(3) d(2) d(1) d(0) | FT`, and octet 2 is
+//! `d(11) … d(4)` — the bits walk upward from bit 1. Wideband octet 1 is
+//! `FT | FQI | d(0) d(1) d(2)` and octet 2 is `d(3) … d(10)`, walking down
+//! from bit 8. Assuming either layout covers both produces frames that a
+//! dissector still labels with the right mode, because the mode is read from
+//! the header nibble and nothing downstream checks the rest.
 //!
-//! So narrowband IF2 is **refused** rather than approximated. TS 26.101
-//! Annex B settles it in a paragraph; until this repository has that
-//! paragraph, an error naming the gap is worth more than a plausible guess.
+//! # Provenance
 //!
-//! # IF1 is deliberately absent
+//! The layouts and every frame length here come from the two specifications'
+//! own tables (26.101 Table A.1b, 26.201 Table A.1b, and the worked 6.70 and
+//! 8.85 kbit/s examples). The specs are fetched for design and never
+//! redistributed, exactly as the reference C is; nothing of theirs is in this
+//! tree beyond the constants they define.
 //!
-//! IF1 carries a richer header — frame quality indicator, mode indication,
-//! mode request, and a SID type indicator — whose exact bit positions come
-//! from TS 26.101 §4 and TS 26.201, tables this repository does not have. The
-//! reference implementations we build (TS 26.073/26.173) do not implement IF1
-//! either; they use the MIME storage format. Wireshark's dissector has an IF1
-//! mode, but reading its source is out (copyleft) and probing it as a black
-//! box establishes only where *it* believes the fields sit, which is not the
-//! same as the spec — and it cannot check the codec bits at all.
+//! # IF1
 //!
-//! Guessing those offsets would produce something that looks implemented,
-//! passes its own round-trip tests, and is wrong on the wire against real
-//! equipment. That is the failure mode this codebase has spent the most effort
-//! avoiding, so IF1 waits for the tables rather than being approximated.
+//! Not implemented. Its header adds the mode indication, mode request and
+//! codec CRC fields, which only matter to interfaces this codebase does not
+//! speak; IF2 is what carries AMR over the octet-aligned links that motivated
+//! this module.
 
 use super::mode::{AmrFrameType, AmrVariant};
 use crate::error::{CodecError, Result};
 
-/// Octets an IF2 frame occupies for a given frame type.
+/// Whether a variant's IF2 header carries a Frame Quality Indicator bit.
 ///
-/// Four header bits plus the coded bits, rounded up to an octet.
-#[must_use]
-pub const fn if2_frame_len(frame_type: AmrFrameType) -> usize {
-    (4 + if2_payload_bits(frame_type)).div_ceil(8)
+/// Wideband does (TS 26.201 A.1b); narrowband does not (TS 26.101 A.1b).
+const fn if2_has_fqi(variant: AmrVariant) -> bool {
+    matches!(variant, AmrVariant::WideBand)
 }
 
-/// Coded bits carried for a frame type, excluding the header nibble.
-const fn if2_payload_bits(frame_type: AmrFrameType) -> usize {
+/// Header bits before the Core Frame: the frame type, plus wideband's FQI.
+const fn if2_header_bits(variant: AmrVariant) -> usize {
+    if if2_has_fqi(variant) {
+        5
+    } else {
+        4
+    }
+}
+
+/// Core Frame bits for a frame type, from the specs' Table A.1b.
+const fn if2_core_bits(frame_type: AmrFrameType) -> usize {
     match frame_type {
         AmrFrameType::Speech(mode) => mode.bits(),
-        // SID is 35 bits in both variants (TS 26.101 §4.2.1, TS 26.201).
-        AmrFrameType::Sid(_) => 35,
+        // 26.101 A.1b: narrowband SID is 39 bits (35 comfort-noise bits, the
+        // SID type indicator, and three of mode indication). 26.201 A.1b:
+        // wideband SID is 40.
+        AmrFrameType::Sid(AmrVariant::NarrowBand) => 39,
+        AmrFrameType::Sid(AmrVariant::WideBand) => 40,
         AmrFrameType::NoData | AmrFrameType::SpeechLost => 0,
     }
 }
 
-/// Whether this variant's IF2 frame type sits in the low nibble of the first
-/// octet rather than the high one.
-///
-/// **The two variants differ**, which is the single most surprising thing in
-/// this module and was found by the oracle rather than reasoned out: feeding
-/// Wireshark 4.6 one frame per mode, AMR-WB reads correctly with the type in
-/// the *high* nibble, while AMR-NB reads every such frame as "Illegal
-/// Frametype" and reads the type from the *low* nibble instead — varying that
-/// nibble walks all eight narrowband modes exactly, and varying the high one
-/// changes nothing. TS 26.101 (narrowband) and TS 26.201 (wideband) are
-/// separate documents, so a differing bit convention is theirs to have.
-const fn if2_type_in_low_nibble(variant: AmrVariant) -> bool {
-    matches!(variant, AmrVariant::NarrowBand)
-}
-
-/// The variant an IF2 frame type belongs to.
-const fn if2_variant(frame_type: AmrFrameType) -> Option<AmrVariant> {
-    match frame_type {
-        AmrFrameType::Speech(mode) => Some(mode.variant()),
-        AmrFrameType::Sid(variant) => Some(variant),
-        // NO_DATA and SPEECH_LOST carry no variant of their own; the caller's
-        // session knows it.
-        AmrFrameType::NoData | AmrFrameType::SpeechLost => None,
-    }
-}
-
-/// The error every narrowband IF2 call returns, naming what is missing rather
-/// than what failed.
-fn unverified_narrowband_layout() -> CodecError {
-    CodecError::invalid_format(
-        "AMR-NB IF2 is not implemented: the frame type is known to sit in the low nibble \
-         (confirmed against Wireshark 4.6) but where the coded bits begin is not \
-         externally verifiable here, and TS 26.101 Annex B is not available to this \
-         repository. AMR-WB IF2 is supported.",
-    )
+/// Octets an IF2 frame occupies: header, Core Frame, then stuffing to the
+/// octet boundary.
+#[must_use]
+pub const fn if2_frame_len(variant: AmrVariant, frame_type: AmrFrameType) -> usize {
+    (if2_header_bits(variant) + if2_core_bits(frame_type)).div_ceil(8)
 }
 
 /// The frame-type index IF2 carries, using the same numbering as the RFC 4867
@@ -109,75 +84,145 @@ fn unverified_narrowband_layout() -> CodecError {
 const fn if2_frame_type_index(frame_type: AmrFrameType) -> u8 {
     match frame_type {
         AmrFrameType::Speech(mode) => mode.index(),
-        AmrFrameType::Sid(_) => 8,
+        // 26.101 numbers narrowband SID 8; 26.201 numbers wideband SID 9.
+        AmrFrameType::Sid(AmrVariant::NarrowBand) => 8,
+        AmrFrameType::Sid(AmrVariant::WideBand) => 9,
         AmrFrameType::SpeechLost => 14,
         AmrFrameType::NoData => 15,
     }
 }
 
+/// Write one bit at logical position `index`, in the variant's own bit order.
+///
+/// Narrowband walks upward from bit 1 of each octet, wideband downward from
+/// bit 8 — the single difference that makes the two formats incompatible
+/// beyond their headers.
+fn if2_set_bit(variant: AmrVariant, out: &mut [u8], index: usize, value: bool) {
+    if !value {
+        return;
+    }
+    let octet = index / 8;
+    let within = index % 8;
+    out[octet] |= if if2_has_fqi(variant) {
+        0x80 >> within
+    } else {
+        1 << within
+    };
+}
+
+/// Read one bit at logical position `index`, in the variant's own bit order.
+fn if2_get_bit(variant: AmrVariant, data: &[u8], index: usize) -> bool {
+    let octet = data[index / 8];
+    let within = index % 8;
+    let mask = if if2_has_fqi(variant) {
+        0x80 >> within
+    } else {
+        1 << within
+    };
+    octet & mask != 0
+}
+
 /// Pack one frame into IF2.
 ///
-/// `bits` are the coded bits in the sorted order the payload format uses, one
-/// per element, most significant first.
+/// `bits` are the Core Frame bits in the order the codec produces them, one
+/// per element. `quality_ok` sets wideband's Frame Quality Indicator and is
+/// ignored for narrowband, which has no such field.
 ///
 /// # Errors
 ///
-/// When `bits` does not match the frame type's length.
-pub fn if2_pack(frame_type: AmrFrameType, bits: &[u8]) -> Result<Vec<u8>> {
-    if if2_variant(frame_type).is_some_and(if2_type_in_low_nibble) {
-        return Err(unverified_narrowband_layout());
-    }
-    let expected = if2_payload_bits(frame_type);
+/// When `bits` does not match the frame type's Core Frame length.
+pub fn if2_pack(
+    variant: AmrVariant,
+    frame_type: AmrFrameType,
+    bits: &[u8],
+    quality_ok: bool,
+) -> Result<Vec<u8>> {
+    let expected = if2_core_bits(frame_type);
     if bits.len() != expected {
         return Err(CodecError::invalid_format(format!(
-            "IF2 frame needs {expected} coded bits, got {}",
+            "IF2 {variant:?} frame needs {expected} core bits, got {}",
             bits.len()
         )));
     }
 
-    let mut out = vec![0u8; if2_frame_len(frame_type)];
-    out[0] = if2_frame_type_index(frame_type) << 4;
-    // Coded bits follow the header nibble.
-    for (index, &bit) in bits.iter().enumerate() {
-        if bit != 0 {
-            let position = 4 + index;
-            out[position / 8] |= 0x80 >> (position % 8);
+    let mut out = vec![0u8; if2_frame_len(variant, frame_type)];
+    let index_value = if2_frame_type_index(frame_type);
+
+    // The frame type occupies four bits, most significant first in both
+    // formats -- what differs is where those four bits sit and which way the
+    // rest of the frame then walks.
+    for bit in 0..4 {
+        let set = index_value & (0b1000 >> bit) != 0;
+        if if2_has_fqi(variant) {
+            if2_set_bit(variant, &mut out, bit, set);
+        } else {
+            // Narrowband: the four LSBs of octet 1, MSB of the field at bit 4.
+            if set {
+                out[0] |= 1 << (3 - bit);
+            }
         }
+    }
+
+    let mut position = if2_header_bits(variant);
+    if if2_has_fqi(variant) {
+        if2_set_bit(variant, &mut out, 4, quality_ok);
+    }
+    for &bit in bits {
+        if2_set_bit(variant, &mut out, position, bit != 0);
+        position += 1;
     }
     Ok(out)
 }
 
-/// Unpack one IF2 frame, returning its type and coded bits.
+/// One unpacked IF2 frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct If2Frame {
+    /// What the frame carries.
+    pub frame_type: AmrFrameType,
+    /// Wideband's Frame Quality Indicator. Always `true` for narrowband,
+    /// which has no such field and therefore cannot report a bad frame.
+    pub quality_ok: bool,
+    /// Core Frame bits, one per element.
+    pub bits: Vec<u8>,
+}
+
+/// Unpack one IF2 frame.
 ///
 /// # Errors
 ///
-/// When the data is empty, its frame-type nibble is not a valid type for the
-/// variant, or it is shorter than that type requires.
-pub fn if2_unpack(variant: AmrVariant, data: &[u8]) -> Result<(AmrFrameType, Vec<u8>)> {
+/// When the data is empty, its frame type is not valid for the variant, or it
+/// is shorter than that frame type requires.
+pub fn if2_unpack(variant: AmrVariant, data: &[u8]) -> Result<If2Frame> {
     let Some(&first) = data.first() else {
         return Err(CodecError::invalid_format("IF2 frame is empty"));
     };
-    if if2_type_in_low_nibble(variant) {
-        return Err(unverified_narrowband_layout());
-    }
-    let frame_type = AmrFrameType::from_index(variant, first >> 4)?;
-    let expected_len = if2_frame_len(frame_type);
+    let index_value = if if2_has_fqi(variant) {
+        first >> 4
+    } else {
+        first & 0x0F
+    };
+    let frame_type = AmrFrameType::from_index(variant, index_value)?;
+
+    let expected_len = if2_frame_len(variant, frame_type);
     if data.len() < expected_len {
         return Err(CodecError::invalid_format(format!(
-            "IF2 frame of type {:?} needs {expected_len} octets, got {}",
-            frame_type,
+            "IF2 {variant:?} frame of type {frame_type:?} needs {expected_len} octets, got {}",
             data.len()
         )));
     }
 
-    let bit_count = if2_payload_bits(frame_type);
-    let mut bits = Vec::with_capacity(bit_count);
-    for index in 0..bit_count {
-        let position = 4 + index;
-        let octet = data[position / 8];
-        bits.push(u8::from(octet & (0x80 >> (position % 8)) != 0));
+    let quality_ok = !if2_has_fqi(variant) || if2_get_bit(variant, data, 4);
+    let mut position = if2_header_bits(variant);
+    let mut bits = Vec::with_capacity(if2_core_bits(frame_type));
+    for _ in 0..if2_core_bits(frame_type) {
+        bits.push(u8::from(if2_get_bit(variant, data, position)));
+        position += 1;
     }
-    Ok((frame_type, bits))
+    Ok(If2Frame {
+        frame_type,
+        quality_ok,
+        bits,
+    })
 }
 
 #[cfg(test)]
@@ -185,114 +230,196 @@ mod tests {
     use super::*;
     use crate::codecs::amr::mode::AmrMode;
 
-    fn bits_of(mode: AmrMode) -> Vec<u8> {
-        // A deterministic pattern that is not symmetric, so a reversed or
-        // shifted unpack cannot round-trip by luck.
-        (0..mode.bits())
+    fn bits_of(len: usize) -> Vec<u8> {
+        // Asymmetric on purpose: a reversed or shifted unpack must not
+        // round-trip by luck.
+        (0..len)
             .map(|index| u8::from(index % 3 == 0 || index % 7 == 1))
             .collect()
     }
 
-    #[test]
-    fn every_wideband_mode_round_trips() {
-        let variant = AmrVariant::WideBand;
-        for mode in AmrMode::all(variant) {
-            let bits = bits_of(mode);
-            let packed = if2_pack(AmrFrameType::Speech(mode), &bits).expect("packs");
-            assert_eq!(
-                packed.len(),
-                (4 + mode.bits()).div_ceil(8),
-                "IF2 length is the header nibble plus the coded bits"
-            );
-            let (frame_type, unpacked) = if2_unpack(variant, &packed).expect("unpacks");
-            assert_eq!(frame_type, AmrFrameType::Speech(mode));
-            assert_eq!(unpacked, bits, "{mode:?} did not survive IF2");
-        }
-    }
-
-    /// Narrowband is refused, and the error says why rather than pretending
-    /// the format is unsupported in general.
-    #[test]
-    fn narrowband_is_refused_with_the_reason_named() {
-        let mode = AmrMode::new(AmrVariant::NarrowBand, 7).expect("12.2");
-        let error = if2_pack(AmrFrameType::Speech(mode), &bits_of(mode))
-            .expect_err("narrowband IF2 must be refused, not guessed");
-        let text = error.to_string();
-        assert!(text.contains("26.101"), "the error must name what is missing: {text}");
-
-        let error = if2_unpack(AmrVariant::NarrowBand, &[0x07, 0x00])
-            .expect_err("narrowband IF2 must be refused on the read side too");
-        assert!(error.to_string().contains("AMR-WB IF2 is supported"));
-    }
-
-    /// The two variants put the frame type in different nibbles, and this is
-    /// the assertion that keeps it that way.
+    /// TS 26.101 Table A.1b and TS 26.201 Table A.1b, every row.
     ///
-    /// Pinned against Wireshark 4.6: wideband frames with the type in the high
-    /// nibble read as their mode, and narrowband frames only read correctly
-    /// with it in the low nibble — with the high nibble it calls every one
-    /// "Illegal Frametype". Regenerate with
-    /// `examples/if2_vectors.rs` and check with
-    /// `amr.encoding.version:AMR IF2`.
+    /// These are the numbers the whole module is built on, and they are the
+    /// ones an implementation gets wrong silently: a frame one octet short
+    /// still carries a valid frame type, so a dissector still names the right
+    /// mode.
     #[test]
-    fn the_wideband_frame_type_is_the_high_nibble() {
-        for mode in AmrMode::all(AmrVariant::WideBand) {
-            let packed = if2_pack(AmrFrameType::Speech(mode), &bits_of(mode)).expect("packs");
+    fn frame_lengths_match_the_specification_tables() {
+        let nb = AmrVariant::NarrowBand;
+        // 26.101 A.1b: 4 header bits, then the core frame.
+        let nb_octets = [13usize, 14, 16, 18, 19, 21, 26, 31];
+        for (index, want) in nb_octets.iter().enumerate() {
+            let mode = AmrMode::new(nb, u8::try_from(index).expect("index")).expect("mode");
             assert_eq!(
-                packed[0] >> 4,
-                mode.index(),
-                "AMR-WB carries the IF2 frame type in the high nibble"
+                if2_frame_len(nb, AmrFrameType::Speech(mode)),
+                *want,
+                "narrowband mode {index}"
             );
         }
+        assert_eq!(if2_frame_len(nb, AmrFrameType::Sid(nb)), 6, "narrowband SID");
+        assert_eq!(if2_frame_len(nb, AmrFrameType::NoData), 1, "narrowband no-data");
+
+        let wb = AmrVariant::WideBand;
+        // 26.201 A.1b: 4 header bits plus the FQI, then the core frame.
+        let wb_octets = [18usize, 23, 33, 37, 41, 47, 51, 59, 61];
+        for (index, want) in wb_octets.iter().enumerate() {
+            let mode = AmrMode::new(wb, u8::try_from(index).expect("index")).expect("mode");
+            assert_eq!(
+                if2_frame_len(wb, AmrFrameType::Speech(mode)),
+                *want,
+                "wideband mode {index}"
+            );
+        }
+        assert_eq!(if2_frame_len(wb, AmrFrameType::Sid(wb)), 6, "wideband SID");
+        assert_eq!(if2_frame_len(wb, AmrFrameType::NoData), 1, "wideband no-data");
+    }
+
+    /// TS 26.101 Table A.1a, the worked 6.70 kbit/s example.
+    ///
+    /// Octet 1 is `d(3) d(2) d(1) d(0) | FT(=3)` and octet 2 is
+    /// `d(11) … d(4)`, so the frame type sits in the low nibble and the core
+    /// bits walk upward from bit 1.
+    #[test]
+    fn narrowband_matches_the_worked_example_from_26_101() {
+        let nb = AmrVariant::NarrowBand;
+        let mode = AmrMode::new(nb, 3).expect("6.70 kbit/s");
+        // d(0)=1, d(1)=0, d(2)=1, d(3)=1, then d(4)=1 and the rest zero.
+        let mut bits = vec![0u8; 134];
+        bits[0] = 1;
+        bits[2] = 1;
+        bits[3] = 1;
+        bits[4] = 1;
+
+        let packed = if2_pack(nb, AmrFrameType::Speech(mode), &bits, true).expect("packs");
+        assert_eq!(packed.len(), 18, "26.101 A.1b gives 18 octets for 6.70");
+
+        // Octet 1: low nibble is the frame type 3 = 0b0011; d(0) lands at bit
+        // 5, d(2) at bit 7, d(3) at bit 8.
+        assert_eq!(packed[0] & 0x0F, 3, "frame type in the low nibble");
+        assert_eq!(packed[0] & 0b0001_0000, 0b0001_0000, "d(0) at bit 5");
+        assert_eq!(packed[0] & 0b0010_0000, 0, "d(1) at bit 6 is zero");
+        assert_eq!(packed[0] & 0b0100_0000, 0b0100_0000, "d(2) at bit 7");
+        assert_eq!(packed[0] & 0b1000_0000, 0b1000_0000, "d(3) at bit 8");
+        // Octet 2 starts at d(4), which is bit 1.
+        assert_eq!(packed[1] & 0b0000_0001, 1, "d(4) at bit 1 of octet 2");
+    }
+
+    /// TS 26.201 Table A.1a, the worked 8.85 kbit/s example.
+    ///
+    /// Octet 1 is `FT(=1) | FQI | d(0) d(1) d(2)` and octet 2 is
+    /// `d(3) … d(10)`, so the frame type sits in the high nibble and the core
+    /// bits walk downward from bit 8.
+    #[test]
+    fn wideband_matches_the_worked_example_from_26_201() {
+        let wb = AmrVariant::WideBand;
+        let mode = AmrMode::new(wb, 1).expect("8.85 kbit/s");
+        let mut bits = vec![0u8; 177];
+        bits[0] = 1; // d(0)
+        bits[2] = 1; // d(2)
+        bits[3] = 1; // d(3)
+
+        let packed = if2_pack(wb, AmrFrameType::Speech(mode), &bits, true).expect("packs");
+        assert_eq!(packed.len(), 23, "26.201 A.1b gives 23 octets for 8.85");
+
+        assert_eq!(packed[0] >> 4, 1, "frame type in the high nibble");
+        assert_eq!(packed[0] & 0b0000_1000, 0b0000_1000, "FQI at bit 4");
+        assert_eq!(packed[0] & 0b0000_0100, 0b0000_0100, "d(0) at bit 3");
+        assert_eq!(packed[0] & 0b0000_0010, 0, "d(1) at bit 2 is zero");
+        assert_eq!(packed[0] & 0b0000_0001, 1, "d(2) at bit 1");
+        assert_eq!(packed[1] & 0b1000_0000, 0b1000_0000, "d(3) at bit 8 of octet 2");
+    }
+
+    /// Wideband's Frame Quality Indicator survives the round trip; narrowband
+    /// has no such field and always reports a good frame.
+    #[test]
+    fn the_quality_indicator_is_wideband_only() {
+        let wb = AmrVariant::WideBand;
+        let mode = AmrMode::new(wb, 0).expect("6.60");
+        let bits = bits_of(132);
+        for quality in [true, false] {
+            let packed = if2_pack(wb, AmrFrameType::Speech(mode), &bits, quality).expect("packs");
+            let frame = if2_unpack(wb, &packed).expect("unpacks");
+            assert_eq!(frame.quality_ok, quality, "wideband FQI must round-trip");
+        }
+
+        let nb = AmrVariant::NarrowBand;
+        let mode = AmrMode::new(nb, 0).expect("4.75");
+        let packed = if2_pack(nb, AmrFrameType::Speech(mode), &bits_of(95), false).expect("packs");
+        let frame = if2_unpack(nb, &packed).expect("unpacks");
+        assert!(
+            frame.quality_ok,
+            "narrowband has no FQI, so it cannot report a bad frame"
+        );
     }
 
     #[test]
-    fn sid_and_no_data_carry_their_own_lengths() {
-        let sid = AmrFrameType::Sid(AmrVariant::WideBand);
-        let packed = if2_pack(sid, &[1u8; 35]).expect("packs a SID");
-        // 4 + 35 = 39 bits -> 5 octets.
-        assert_eq!(packed.len(), 5);
-        assert_eq!(packed[0] >> 4, 8, "SID is frame type 8");
+    fn every_mode_of_both_variants_round_trips() {
+        for variant in [AmrVariant::NarrowBand, AmrVariant::WideBand] {
+            for mode in AmrMode::all(variant) {
+                let bits = bits_of(mode.bits());
+                let packed =
+                    if2_pack(variant, AmrFrameType::Speech(mode), &bits, true).expect("packs");
+                let frame = if2_unpack(variant, &packed).expect("unpacks");
+                assert_eq!(frame.frame_type, AmrFrameType::Speech(mode));
+                assert_eq!(frame.bits, bits, "{variant:?} {mode:?} did not survive IF2");
+            }
+            // SID and no-data too: their lengths differ per variant.
+            let sid = AmrFrameType::Sid(variant);
+            let packed = if2_pack(variant, sid, &bits_of(if2_core_bits(sid)), true).expect("packs");
+            assert_eq!(if2_unpack(variant, &packed).expect("unpacks").frame_type, sid);
 
-        let no_data = if2_pack(AmrFrameType::NoData, &[]).expect("packs NO_DATA");
-        assert_eq!(no_data.len(), 1, "a NO_DATA frame is its header alone");
-        assert_eq!(no_data[0] >> 4, 15);
+            let packed = if2_pack(variant, AmrFrameType::NoData, &[], true).expect("packs");
+            assert_eq!(packed.len(), 1, "a no-data frame is its header alone");
+            assert_eq!(
+                if2_unpack(variant, &packed).expect("unpacks").frame_type,
+                AmrFrameType::NoData
+            );
+        }
     }
 
     #[test]
     fn a_wrong_bit_count_is_refused_rather_than_padded() {
-        let mode = AmrMode::new(AmrVariant::WideBand, 8).expect("23.85");
-        assert!(if2_pack(AmrFrameType::Speech(mode), &[1u8; 10]).is_err());
-        assert!(if2_pack(AmrFrameType::Speech(mode), &[1u8; 500]).is_err());
+        let wb = AmrVariant::WideBand;
+        let mode = AmrMode::new(wb, 8).expect("23.85");
+        assert!(if2_pack(wb, AmrFrameType::Speech(mode), &[1u8; 10], true).is_err());
+        assert!(if2_pack(wb, AmrFrameType::Speech(mode), &[1u8; 500], true).is_err());
     }
 
     #[test]
     fn a_truncated_frame_is_refused_rather_than_read_past_its_end() {
-        let mode = AmrMode::new(AmrVariant::WideBand, 8).expect("23.85");
-        let packed = if2_pack(AmrFrameType::Speech(mode), &bits_of(mode)).expect("packs");
-        for length in 0..packed.len() {
-            assert!(
-                if2_unpack(AmrVariant::WideBand, &packed[..length]).is_err(),
-                "a {length}-octet prefix must not parse as a whole frame"
-            );
+        for variant in [AmrVariant::NarrowBand, AmrVariant::WideBand] {
+            let mode = AmrMode::new(variant, 0).expect("lowest mode");
+            let packed = if2_pack(variant, AmrFrameType::Speech(mode), &bits_of(mode.bits()), true)
+                .expect("packs");
+            for length in 0..packed.len() {
+                assert!(
+                    if2_unpack(variant, &packed[..length]).is_err(),
+                    "{variant:?}: a {length}-octet prefix must not parse as a whole frame"
+                );
+            }
         }
     }
 
     #[test]
-    fn padding_bits_are_zero() {
-        // TS 26.101 pads to the octet boundary with zeros; a packer that left
-        // them uninitialised would produce frames that differ byte for byte
-        // between runs while decoding identically, which is a nightmare to
-        // diff against a reference.
-        let mode = AmrMode::new(AmrVariant::WideBand, 0).expect("6.60");
-        // 4 + 132 = 136 bits, an exact 17 octets, so use 8.85 for a partial
-        // octet: 4 + 177 = 181 bits -> 23 octets with 3 padding bits.
-        let packed = if2_pack(AmrFrameType::Speech(mode), &[1u8; 132]).expect("packs");
-        assert_eq!(packed.len(), 17);
+    fn stuffing_bits_are_zero() {
+        // The specs stuff to the octet boundary with unused bits; leaving them
+        // uninitialised would make frames differ byte for byte between runs
+        // while decoding identically.
+        let nb = AmrVariant::NarrowBand;
+        let mode = AmrMode::new(nb, 0).expect("4.75");
+        // 4 + 95 = 99 bits, so the last five bits of octet 13 are stuffing,
+        // and narrowband fills from bit 1 upward.
+        let packed = if2_pack(nb, AmrFrameType::Speech(mode), &[1u8; 95], true).expect("packs");
+        assert_eq!(packed.len(), 13);
+        assert_eq!(packed[12] & 0b1111_1000, 0, "narrowband stuffing must be zero");
 
-        let mode = AmrMode::new(AmrVariant::WideBand, 1).expect("8.85");
-        let packed = if2_pack(AmrFrameType::Speech(mode), &[1u8; 177]).expect("packs");
+        let wb = AmrVariant::WideBand;
+        let mode = AmrMode::new(wb, 1).expect("8.85");
+        // 5 + 177 = 182 bits, so the last two bits of octet 23 are stuffing,
+        // and wideband fills from bit 8 downward.
+        let packed = if2_pack(wb, AmrFrameType::Speech(mode), &[1u8; 177], true).expect("packs");
         assert_eq!(packed.len(), 23);
-        assert_eq!(packed[22] & 0b0000_0111, 0, "padding must be zero");
+        assert_eq!(packed[22] & 0b0000_0011, 0, "wideband stuffing must be zero");
     }
 }

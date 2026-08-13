@@ -1854,7 +1854,7 @@ and **20 million fuzz iterations with zero crashes**. Notable coverage:
 | Robust sorting (§4.4.3) | Implemented |
 | Interleaving (§4.4.1) | ILL/ILP carried; **receive-side reassembly implemented**, transmit-side interleaving not |
 | `max-red` redundancy (§3.5, §4.3) | Implemented — `codecs/amr/redundancy.rs` |
-| IF2 (TS 26.201) | **Wideband implemented** (oracle-verified); narrowband refused, IF1 absent |
+| IF2 (TS 26.101 / 26.201) | 🟢 **Both variants**, against the specs' own tables and worked examples |
 
 **VAD2 is ported and bit-exact** (2026-08-12) — `nb/enc/vad2.rs`, 300
 half-frames of the committed DTX input matching TS 26.073's own `vad2()` on
@@ -1888,33 +1888,41 @@ independent subsystems. A third mutation (`CEE_SM_FAC` by one LSB) is
 genuinely absorbed, because `mult(18022, 16384)` and `mult(18023, 16384)` both
 truncate to 9011; that is arithmetic, not a weak test.
 
-**IF2 (TS 26.201), wideband only** (2026-08-12) —
-`codecs/amr/interface_format.rs`. IF2 is the compact 3G/file framing: a
-four-bit frame type, the coded bits, zero padding to the octet. The coded bits
-are the same importance-sorted order the RFC 4867 payload already uses, so IF2
-differs from an octet-aligned payload only in header and padding.
+**IF2 for both variants** (2026-08-12) — `codecs/amr/interface_format.rs`,
+built from TS 26.101 Annex A and TS 26.201 Annex A after those specs were
+fetched. They are fetched for design and never redistributed, exactly as the
+reference C is.
 
-Verified against Wireshark 4.6 as an external oracle, not by round-trip alone:
-one frame per mode, fed through `amr.encoding.version:AMR IF2`, reads back as
-6.60 through 23.85 kbit/s for all nine wideband modes.
+The two formats agree on almost nothing, which is the whole story here:
 
-**Narrowband IF2 is refused, deliberately.** The same probe calls every
-narrowband frame "Illegal Frametype" with the type in the high nibble, and
-reads all eight modes correctly with it in the *low* nibble — TS 26.101 and
-TS 26.201 are separate documents and differ here. But the oracle reports only
-a frame's mode, never its speech bits, so it cannot say where narrowband's
-coded bits then begin; "payload starts at octet 1" and "payload fills the high
-nibble first" both round-trip against themselves and only one is right on real
-equipment. The error names TS 26.101 Annex B rather than shipping a guess.
+| | narrowband (26.101) | wideband (26.201) |
+|---|---|---|
+| Frame Type | four **LSBs** of octet 1 | four **MSBs** of octet 1 |
+| Frame Quality Indicator | **absent** | 1 bit, after the frame type |
+| Bit packing | **LSB-first** in each octet | **MSB-first** |
+| SID Core Frame | 39 bits | 40 bits |
 
-**IF1 is not implemented at all.** Its header carries a frame quality
-indicator, mode indication, mode request and SID type indicator whose bit
-positions come from the same unavailable tables; the TS 26.073/26.173
-references we build do not implement IF1 either (they use the MIME storage
-format), and Wireshark's IF1 mode can only be probed as a black box, which
-establishes where *it* believes fields sit rather than what the spec says.
+**The first attempt at this was wrong in both variants, and Wireshark called
+it correct.** Narrowband was written with the wideband convention and the
+dissector rejected it outright — that much was caught. But the wideband frames
+it *accepted* were also wrong: they omitted the FQI bit, so every frame was
+one bit short and 6.60 kbit/s was a whole octet short of the spec's 18. The
+dissector reads the mode from the header nibble and never checks the length,
+so it reported all nine modes happily. An oracle that answers a narrower
+question than the one being asked will confirm a broken implementation, and
+this is what that looks like.
 
-Both gaps close the same way: the TS 26.101/26.201 frame-structure tables.
+What settles it now is the specs' own numbers: every frame length is asserted
+against Table A.1b on both sides, and the worked 6.70 kbit/s (26.101 A.1a) and
+8.85 kbit/s (26.201 A.1a) examples are asserted bit by bit — `d(0)` at bit 5 of
+octet 1 for narrowband, `d(0)` at bit 3 after the FQI for wideband. Wireshark
+still agrees, now for all eight narrowband and all nine wideband modes, but it
+is the corroboration rather than the authority.
+
+**IF1 remains unimplemented** and is now a smaller gap than it was: its header
+adds mode indication, mode request and a codec CRC over fields these specs do
+define, but it addresses interfaces this codebase does not speak, and nothing
+in the stack needs it.
 
 **Interleaving** (2026-08-12) gained its receive half:
 `codecs/amr/interleave.rs` reassembles a group's frame-blocks from the ILL/ILP
