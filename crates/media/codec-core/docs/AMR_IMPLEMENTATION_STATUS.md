@@ -1854,6 +1854,35 @@ and **20 million fuzz iterations with zero crashes**. Notable coverage:
 | Robust sorting (§4.4.3) | Implemented |
 | Interleaving (§4.4.1) | ILL/ILP carried; **receive-side reassembly implemented**, transmit-side interleaving not |
 | `max-red` redundancy (§3.5, §4.3) | Implemented — `codecs/amr/redundancy.rs` |
+| IF2 (TS 26.201) | **Wideband implemented** (oracle-verified); narrowband refused, IF1 absent |
+
+**IF2 (TS 26.201), wideband only** (2026-08-12) —
+`codecs/amr/interface_format.rs`. IF2 is the compact 3G/file framing: a
+four-bit frame type, the coded bits, zero padding to the octet. The coded bits
+are the same importance-sorted order the RFC 4867 payload already uses, so IF2
+differs from an octet-aligned payload only in header and padding.
+
+Verified against Wireshark 4.6 as an external oracle, not by round-trip alone:
+one frame per mode, fed through `amr.encoding.version:AMR IF2`, reads back as
+6.60 through 23.85 kbit/s for all nine wideband modes.
+
+**Narrowband IF2 is refused, deliberately.** The same probe calls every
+narrowband frame "Illegal Frametype" with the type in the high nibble, and
+reads all eight modes correctly with it in the *low* nibble — TS 26.101 and
+TS 26.201 are separate documents and differ here. But the oracle reports only
+a frame's mode, never its speech bits, so it cannot say where narrowband's
+coded bits then begin; "payload starts at octet 1" and "payload fills the high
+nibble first" both round-trip against themselves and only one is right on real
+equipment. The error names TS 26.101 Annex B rather than shipping a guess.
+
+**IF1 is not implemented at all.** Its header carries a frame quality
+indicator, mode indication, mode request and SID type indicator whose bit
+positions come from the same unavailable tables; the TS 26.073/26.173
+references we build do not implement IF1 either (they use the MIME storage
+format), and Wireshark's IF1 mode can only be probed as a black box, which
+establishes where *it* believes fields sit rather than what the spec says.
+
+Both gaps close the same way: the TS 26.101/26.201 frame-structure tables.
 
 **Interleaving** (2026-08-12) gained its receive half:
 `codecs/amr/interleave.rs` reassembles a group's frame-blocks from the ILL/ILP

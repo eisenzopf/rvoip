@@ -58,6 +58,8 @@ mod qualification;
 /// Long-run stability: mode churn, DTX and loss over a full call.
 #[cfg(test)]
 mod soak;
+/// The IF2 interface format (TS 26.101 Annex B / TS 26.201).
+pub mod interface_format;
 /// RFC 4867 §4.4.1 interleaving: undoing it on the receive side.
 pub mod interleave;
 pub mod rate;
