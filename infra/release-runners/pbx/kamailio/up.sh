@@ -57,11 +57,16 @@ resolve_client_host() {
 # without them it forwards verbatim, which is what the AMR exit criterion
 # needed. Never both in one run.
 if [ -n "${PBX_PROXY_TRANSCODE:-}" ]; then
-  # AMR-WB must name its framing. rtpengine defaults to bandwidth-efficient,
-  # and our amrwb profile is octet-aligned -- an unqualified
-  # codec-transcode-AMR-WB negotiates the wrong framing and the far leg
-  # receives nothing at all, exactly the shape of FreeSWITCH's mod_amr quirk.
-  TRANSCODE_FLAGS=" codec-transcode-PCMU codec-transcode-AMR-WB/16000/1/octet-align=1"
+  # PCMU only, and deliberately so.
+  #
+  # codec-transcode-X means "offer X to the far side as well". Adding
+  # codec-transcode-AMR-WB here therefore told rtpengine the PCMU callee also
+  # spoke AMR-WB, so it picked a *passthrough* handler for the inbound
+  # AMR-WB ("Sink supports codec AMR-WB/16000"), never built an AMR-WB ->
+  # PCMU decoder, and the PCMU leg received nothing. Offering PCMU to the AMR
+  # side is the whole requirement; the AMR side's own codec is already in its
+  # offer.
+  TRANSCODE_FLAGS=" codec-transcode-PCMU"
 else
   TRANSCODE_FLAGS=""
 fi

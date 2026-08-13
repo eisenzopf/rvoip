@@ -169,13 +169,26 @@ Proxy provider notes:
   probing `rtpengine --codecs` — because without the flags it would pass while
   proving nothing, and without the codecs it would fail for a reason that is
   not ours.
-  - AMR-NB ↔ PCMU works. **AMR-WB ↔ PCMU does not**: the PCMU leg receives
-    nothing, both with `codec-transcode-AMR-WB` and with
-    `codec-transcode-AMR-WB/16000/1/octet-align=1`, and rtpengine logs no
-    complaint about either. That is unresolved rather than known-unsupported,
-    so the wideband pairing is left out of the default list rather than
-    shipped red; `PBX_AMR_TRANSCODE_PAIRINGS` forces it for anyone picking the
-    thread up.
+  - AMR-NB ↔ PCMU works. **AMR-WB ↔ PCMU does not, and the cause is on
+    rtpengine's side of the boundary, not ours.** With
+    `--log-level-codec=7` rtpengine's own decisions show it building
+    `PCMU/8000 -> AMR-WB/16000` for one direction and then choosing a
+    *passthrough* handler for the inbound AMR-WB ("Sink supports codec
+    AMR-WB/16000"), so an `AMR-WB -> PCMU` decoder is never created and the
+    PCMU leg receives nothing. It then logs "Eliminating asymmetric inbound
+    codec AMR-WB/16000". Every one of those is a negotiation decision taken
+    before a single byte of our media is examined.
+    Two independent facts confirm our wideband stream is not the problem:
+    Asterisk transcodes the identical scenario with its own opencore-amrwb
+    (tone-verified, 16160 samples on the PCMU leg), and rtpengine itself
+    relays the same stream untouched in the passthrough lab, where both
+    endpoints decode it. What is still open is whether this is an rtpengine
+    limitation with mixed 8/16 kHz clock rates or a flag incantation not yet
+    found — `codec-transcode-AMR-WB` in any spelling makes it worse, because
+    it tells rtpengine the PCMU side speaks AMR-WB.
+    The wideband pairing is therefore left out of the default list rather
+    than shipped red; `PBX_AMR_TRANSCODE_PAIRINGS` forces it for anyone
+    picking the thread up.
 - **OpenSIPS stays UDP-only.** Its stock 3.6 image ships no TLS modules; the
   pinned-deb TLS image the sip-proxy suite uses is what would unblock it
   (see `crates/sip/sip-proxy/docs/OPENSIPS_TLS_PROVENANCE.md`), and

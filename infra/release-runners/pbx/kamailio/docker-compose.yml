@@ -34,6 +34,12 @@ services:
       - "--foreground"
       - "--log-stderr"
       - "--log-level=6"
+      # Codec and transcoding logging, quiet by default. Raise with
+      # RTPENGINE_CODEC_LOG_LEVEL=7 when diagnosing a transcode that produces
+      # no audio: the default level reports that the engine started and
+      # nothing about what it then did with a frame.
+      - "--log-level-codec=${RTPENGINE_CODEC_LOG_LEVEL:-5}"
+      - "--log-level-transcoding=${RTPENGINE_CODEC_LOG_LEVEL:-5}"
 
   kamailio:
     image: ${KAMAILIO_IMAGE:-ghcr.io/kamailio/kamailio:6.1.3-bookworm@sha256:26b26c61801d679ffbe54ea3597c38964a46c4bfe60fb6537c7eeacc576b0c92}
