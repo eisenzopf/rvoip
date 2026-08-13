@@ -3649,6 +3649,66 @@ mod tests {
         }
     }
 
+    /// The other direction, which the source test says nothing about: AMR as
+    /// the *target* of a transcode, so the graph runs the AMR encoder rather
+    /// than its decoder. Those are separate code paths and separate feature
+    /// arms, and a sink is what "publish this call as AMR" actually needs.
+    ///
+    /// The emitted frame must also be labelled with AMR's negotiated payload
+    /// type: the UCTP pumps fall back to a name table that has no AMR row, so
+    /// an unlabelled frame here is one they would drop.
+    #[cfg(feature = "amr-nb")]
+    #[tokio::test]
+    async fn amr_works_as_a_graph_sink_and_its_frames_leave_labelled() {
+        let (source_tx, source_rx) = mpsc::channel(4);
+        let graph = start_media_graph(source_rx, codec("pcmu", 8_000), Default::default())
+            .expect("pcmu graph starts");
+        let (amr_tx, mut amr_rx) = mpsc::channel(4);
+        graph
+            .add_sink(
+                CodecInfo {
+                    name: "AMR".into(),
+                    clock_rate_hz: 8_000,
+                    channels: 1,
+                    fmtp: Some("octet-align=1".into()),
+                    payload_type: Some(107),
+                },
+                amr_tx,
+            )
+            .expect("AMR is a valid sink once its payload type is reported");
+        graph.snapshot().await;
+
+        source_tx
+            .send(frame_at(0x40, 9_000))
+            .await
+            .expect("the graph is accepting frames");
+
+        let received = tokio::time::timeout(Duration::from_secs(2), amr_rx.recv())
+            .await
+            .expect("the PCMU frame must reach the AMR sink")
+            .expect("the sink channel stays open");
+
+        assert_eq!(received.timestamp_rtp, 9_000);
+        assert_eq!(
+            received.payload_type,
+            Some(107),
+            "an unlabelled frame is one the UCTP pumps drop, since no name \
+             table row can supply AMR's payload type"
+        );
+        assert!(
+            !received.payload.is_empty() && received.payload.len() < 160,
+            "AMR compresses: {} octets is not a plausible encoded frame",
+            received.payload.len()
+        );
+
+        let snapshot = graph.snapshot().await;
+        assert_eq!(
+            snapshot.transcode_operations, 1,
+            "the frame must have been re-encoded into AMR, not forwarded as PCMU"
+        );
+        graph.shutdown();
+    }
+
     /// Reporting a payload type is not a way to smuggle in a codec the graph
     /// cannot build: admission still has to end in a real codec.
     #[tokio::test]
