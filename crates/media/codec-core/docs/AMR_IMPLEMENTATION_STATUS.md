@@ -1854,7 +1854,7 @@ and **20 million fuzz iterations with zero crashes**. Notable coverage:
 | Robust sorting (§4.4.3) | Implemented |
 | Interleaving (§4.4.1) | ILL/ILP carried; **receive-side reassembly implemented**, transmit-side interleaving not |
 | `max-red` redundancy (§3.5, §4.3) | Implemented — `codecs/amr/redundancy.rs` |
-| IF2 (TS 26.101 / 26.201) | 🟢 **Both variants**, against the specs' own tables and worked examples |
+| IF1 + IF2 (TS 26.101 / 26.201) | 🟢 **Both formats, both variants**, against the specs' own tables and worked examples |
 
 **VAD2 is ported and bit-exact** (2026-08-12) — `nb/enc/vad2.rs`, 300
 half-frames of the committed DTX input matching TS 26.073's own `vad2()` on
@@ -1919,10 +1919,28 @@ octet 1 for narrowband, `d(0)` at bit 3 after the FQI for wideband. Wireshark
 still agrees, now for all eight narrowband and all nine wideband modes, but it
 is the corroboration rather than the authority.
 
-**IF1 remains unimplemented** and is now a smaller gap than it was: its header
-adds mode indication, mode request and a codec CRC over fields these specs do
-define, but it addresses interfaces this codebase does not speak, and nothing
-in the stack needs it.
+**IF1 followed** (same day): the generic frame format of both specs' §4 —
+frame type, FQI, mode indication, mode request, an 8-bit codec CRC over the
+class A bits, then the Core Frame, MSB-first throughout. The two variants
+split the auxiliary octets differently (narrowband packs MI into octet 1 and
+MR into octet 2 with five spare bits; wideband spares out octet 1 and gives MI
+and MR four bits each in octet 2), and FT 14/15 are header-only — four bits
+for narrowband, five for wideband, another place the two disagree.
+
+The codec CRC is `G(x) = x^8+x^6+x^5+x^4+1` — the exact bit-reversal of RFC
+4867's payload CRC polynomial, so nothing is shared and each carries its own
+hand-worked vectors. A CRC mismatch on unpack is reported, not refused:
+26.101 Table 1c maps it to `SPEECH_BAD`, whose bits may still assist
+concealment. Coverage is asserted precisely — a flipped class A bit fails the
+CRC, a flipped class B bit does not, which is the CRC doing what the spec
+sized it for.
+
+One extraction hazard recorded for the next reader: flattening the specs'
+docx tables to text interleaves cells, and 26.201's worked example then
+*appears* to show frame type 3 for 12.65 kbit/s. The normative tables (1a, 7,
+A.1b) and the example's own 253-bit core all say frame type 2, and Wireshark
+reads the nibble the same way. Checked against the tables, not the flattened
+prose.
 
 **Interleaving** (2026-08-12) gained its receive half:
 `codecs/amr/interleave.rs` reassembles a group's frame-blocks from the ILL/ILP
