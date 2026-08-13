@@ -2125,6 +2125,9 @@ impl WebRtcAdapter {
                     clock_rate_hz: 48000,
                     channels: 1,
                     fmtp: None,
+                    // Reached only when negotiation produced no audio codec,
+                    // so there is no payload type to report.
+                    payload_type: None,
                 }
             }));
 
@@ -5455,6 +5458,7 @@ mod media_stream_codec_tests {
             clock_rate_hz: 48_000,
             channels: 2,
             fmtp: Some("minptime=10;useinbandfec=1".into()),
+            payload_type: None,
         });
         assert_eq!(mono.channels, 1, "RFC 7587 defaults the signal to mono");
 
@@ -5463,6 +5467,7 @@ mod media_stream_codec_tests {
             clock_rate_hz: 48_000,
             channels: 2,
             fmtp: Some("minptime=10;stereo=1;sprop-stereo=1".into()),
+            payload_type: None,
         });
         assert_eq!(stereo.channels, 2);
     }
@@ -5474,6 +5479,7 @@ mod media_stream_codec_tests {
             clock_rate_hz: 16_000,
             channels: 1,
             fmtp: None,
+            payload_type: None,
         };
 
         assert_ne!(payload_type_for_audio_codec(&pcm), 120);

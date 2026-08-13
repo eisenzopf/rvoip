@@ -2202,6 +2202,11 @@ fn codec_for_payload_type(payload_type: u8) -> Option<CodecInfo> {
         clock_rate_hz,
         channels: 1,
         fmtp: None,
+        // The payload type is this function's own input, so the descriptor
+        // it hands back can carry it. Only static types reach here — the
+        // match refuses everything else — so this never reports a number
+        // that a different call could have assigned to a different codec.
+        payload_type: Some(payload_type),
     })
 }
 
@@ -2318,6 +2323,7 @@ mod tests {
             clock_rate_hz: clock_rate,
             channels: 1,
             fmtp: None,
+            payload_type: None,
         }
     }
 
@@ -2329,6 +2335,7 @@ mod tests {
             clock_rate_hz: 48_000,
             channels: 1,
             fmtp: Some(CANARY.into()),
+            payload_type: None,
         };
         let graph_id = MediaGraphId::from_string(CANARY);
         let key = CodecGroupKey::new(&codec, 111);

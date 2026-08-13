@@ -38,6 +38,7 @@ impl MockMediaStream {
                 clock_rate_hz,
                 channels: 1,
                 fmtp: None,
+                payload_type: None,
             },
             inbound_tx,
             inbound_rx: Mutex::new(Some(inbound_rx)),

@@ -119,6 +119,9 @@ mod bridge {
                     clock_rate_hz: 48000,
                     channels: 2,
                     fmtp: None,
+                    // Fallback for a peer that advertised no audio codec at
+                    // all, so nothing was negotiated to report.
+                    payload_type: None,
                 });
 
             Ok(Self {

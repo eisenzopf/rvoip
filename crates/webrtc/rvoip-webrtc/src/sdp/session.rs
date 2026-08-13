@@ -181,6 +181,10 @@ fn codec_for_payload(
         clock_rate_hz: mapping.clock_rate,
         channels,
         fmtp,
+        // Read straight off the m-line this descriptor was parsed from, and
+        // the same number the fmtp above was looked up by — so it is the
+        // payload type this session actually negotiated, not a convention.
+        payload_type: Some(payload_type),
     }))
 }
 

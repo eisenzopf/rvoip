@@ -11,6 +11,7 @@ fn opus_only() -> CapabilityDescriptor {
             clock_rate_hz: 48000,
             channels: 2,
             fmtp: None,
+            payload_type: None,
         }],
         ..Default::default()
     }
@@ -23,6 +24,7 @@ fn g711_only() -> CapabilityDescriptor {
             clock_rate_hz: 8000,
             channels: 1,
             fmtp: None,
+            payload_type: None,
         }],
         ..Default::default()
     }

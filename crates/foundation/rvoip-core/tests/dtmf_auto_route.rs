@@ -61,6 +61,7 @@ impl StreamHandle {
                 clock_rate_hz: 48000,
                 channels: 1,
                 fmtp: None,
+                payload_type: None,
             },
             _in_tx: in_tx,
             in_rx: Arc::new(StdMutex::new(Some(in_rx))),

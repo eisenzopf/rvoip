@@ -47,6 +47,7 @@ impl MockMediaStream {
                 clock_rate_hz: 48_000,
                 channels: 2,
                 fmtp: None,
+                payload_type: None,
             },
             external_in_tx,
             in_rx: std::sync::Arc::new(StdMutex::new(Some(in_rx))),

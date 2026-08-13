@@ -795,6 +795,7 @@ fn answerer_with(codecs: &[&str]) -> Arc<CapabilityDescriptor> {
                 clock_rate_hz: 48_000,
                 channels: 1,
                 fmtp: None,
+                payload_type: None,
             })
             .collect(),
         ..Default::default()

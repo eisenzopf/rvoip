@@ -40,17 +40,22 @@ impl VapiAudioFormat {
 
     pub fn codec(self) -> CodecInfo {
         match self {
+            // Both advertise what this transport can carry rather than
+            // reporting a negotiation, so neither names a payload type.
+            // Both are static names that `codec_to_pt` already resolves.
             Self::MuLaw8Khz => CodecInfo {
                 name: "PCMU".into(),
                 clock_rate_hz: 8_000,
                 channels: 1,
                 fmtp: None,
+                payload_type: None,
             },
             Self::PcmS16Le16Khz => CodecInfo {
                 name: "pcm_s16le".into(),
                 clock_rate_hz: 16_000,
                 channels: 1,
                 fmtp: None,
+                payload_type: None,
             },
         }
     }

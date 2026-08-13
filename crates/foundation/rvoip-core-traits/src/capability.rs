@@ -18,6 +18,29 @@ pub struct CodecInfo {
     pub clock_rate_hz: u32,
     pub channels: u8,
     pub fmtp: Option<String>,
+    /// The RTP payload type this codec negotiated, when the reporting
+    /// transport knows it.
+    ///
+    /// `None` means "not reported", never "no payload type" — so a consumer
+    /// that needs one must say what it does about the absence rather than
+    /// substitute a guess. Substituting is the bug this field exists to
+    /// close: the media pumps used to fall back to Opus's `111` for any
+    /// codec they could not name, which put a wrong payload type on real
+    /// datagrams.
+    ///
+    /// Static-payload codecs can be recovered from the name alone via
+    /// `rvoip_core::bridge::codec_to_pt`; dynamic ones cannot,
+    /// because the same codec takes different numbers on different calls —
+    /// AMR routinely negotiates two at once, differing only in
+    /// `octet-align`. That is why this is carried rather than derived.
+    #[serde(default)]
+    pub payload_type: Option<u8>,
+}
+
+impl Default for CodecInfo {
+    fn default() -> Self {
+        default_audio_codec()
+    }
 }
 
 impl fmt::Debug for CodecInfo {
@@ -48,6 +71,9 @@ pub fn default_audio_codec() -> CodecInfo {
         clock_rate_hz: 48_000,
         channels: 1,
         fmtp: None,
+        // Pre-negotiation placeholder: nothing has been negotiated yet, so
+        // there is no payload type to report.
+        payload_type: None,
     }
 }
 
@@ -76,7 +102,20 @@ impl CodecInfo {
             clock_rate_hz,
             channels,
             fmtp: None,
+            // Derived from a name alone, so there is no negotiation result
+            // to report. Callers that know the payload type should set it.
+            payload_type: None,
         }
+    }
+
+    /// Record the payload type this codec negotiated.
+    ///
+    /// Chainable so the adapters that do know it can say so at the point
+    /// they build the descriptor, rather than mutating it later.
+    #[must_use]
+    pub fn with_payload_type(mut self, payload_type: u8) -> Self {
+        self.payload_type = Some(payload_type);
+        self
     }
 }
 
@@ -119,6 +158,12 @@ impl From<CodecInfo> for Codec {
         if let Some(fmtp) = c.fmtp {
             params.insert("fmtp".into(), serde_json::Value::String(fmtp));
         }
+        // Carried so a round trip through the wire shape does not silently
+        // drop it. Absent when not reported, which keeps the emitted params
+        // identical to before for every producer that does not set one.
+        if let Some(payload_type) = c.payload_type {
+            params.insert("payload_type".into(), serde_json::json!(payload_type));
+        }
         Self {
             name: c.name,
             params,
@@ -144,11 +189,21 @@ impl TryFrom<Codec> for CodecInfo {
             .get("fmtp")
             .and_then(|v| v.as_str())
             .map(String::from);
+        // Out-of-range values are dropped rather than truncated: an RTP
+        // payload type is 7 bits, and silently wrapping a bad one to a
+        // valid-looking number is how a wrong PT reaches the wire.
+        let payload_type = c
+            .params
+            .get("payload_type")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u8::try_from(value).ok())
+            .filter(|value| *value < 128);
         Ok(Self {
             name: c.name,
             clock_rate_hz,
             channels,
             fmtp,
+            payload_type,
         })
     }
 }
@@ -491,6 +546,42 @@ mod diagnostic_tests {
         assert!(codec.fmtp.is_none());
     }
 
+    /// A payload type that survives the trip out but not back would be worse
+    /// than not carrying one: consumers would see `None` and fall back to
+    /// deriving from the name, which is the behaviour this field replaces.
+    #[test]
+    fn the_negotiated_payload_type_survives_the_wire_shape() {
+        let original = CodecInfo::from_name_with_defaults("opus").with_payload_type(96);
+        let restored = CodecInfo::try_from(Codec::from(original.clone()))
+            .expect("a descriptor this crate produced must parse back");
+        assert_eq!(restored.payload_type, Some(96));
+        assert_eq!(restored, original);
+    }
+
+    /// Producers that report nothing must emit exactly what they emitted
+    /// before, so adding this field cannot change an existing peer's wire.
+    #[test]
+    fn an_unreported_payload_type_adds_nothing_to_the_wire() {
+        let codec = CodecInfo::from_name_with_defaults("opus");
+        assert!(!Codec::from(codec).params.contains_key("payload_type"));
+    }
+
+    /// An RTP payload type is seven bits. Truncating an out-of-range value
+    /// would manufacture a plausible-looking number from a corrupt one.
+    #[test]
+    fn an_out_of_range_payload_type_is_dropped_not_truncated() {
+        for bogus in [128_u64, 256, 300, u64::from(u32::MAX)] {
+            let mut wire = Codec::from(CodecInfo::from_name_with_defaults("opus"));
+            wire.params
+                .insert("payload_type".into(), serde_json::json!(bogus));
+            let restored = CodecInfo::try_from(wire).expect("the rest still parses");
+            assert_eq!(
+                restored.payload_type, None,
+                "{bogus} is not a payload type and must not become one"
+            );
+        }
+    }
+
     #[test]
     fn capability_diagnostics_never_render_peer_strings() {
         const CANARY: &str = "capability-canary\r\nAuthorization: exposed";
@@ -499,6 +590,7 @@ mod diagnostic_tests {
             clock_rate_hz: 48_000,
             channels: 1,
             fmtp: Some(CANARY.into()),
+            payload_type: None,
         };
         let descriptor = CapabilityDescriptor {
             audio_codecs: vec![codec.clone()],

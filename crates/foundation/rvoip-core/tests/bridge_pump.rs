@@ -67,6 +67,7 @@ impl MockMediaStream {
                 clock_rate_hz: 48000,
                 channels: 1,
                 fmtp: None,
+                payload_type: None,
             },
             external_in_tx,
             in_rx: Arc::new(StdMutex::new(Some(in_rx))),
@@ -1218,6 +1219,7 @@ async fn one_way_bridge_renegotiation_updates_the_enabled_graph_route() {
         clock_rate_hz: 8_000,
         channels: 1,
         fmtp: None,
+        payload_type: None,
     });
 
     orch.renegotiate_media(conn_a, CapabilityDescriptor::default())
@@ -1245,6 +1247,7 @@ async fn one_way_bridge_renegotiation_rejects_an_unsupported_codec() {
         clock_rate_hz: 16_000,
         channels: 1,
         fmtp: None,
+        payload_type: None,
     });
 
     assert!(matches!(

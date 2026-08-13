@@ -50,6 +50,7 @@ impl TestMediaStream {
                 clock_rate_hz: 8_000,
                 channels: 1,
                 fmtp: None,
+                payload_type: None,
             },
             inbound_sender,
             inbound_receiver: Arc::new(Mutex::new(Some(inbound_receiver))),

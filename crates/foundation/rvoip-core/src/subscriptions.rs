@@ -722,6 +722,7 @@ mod publisher_registry_tests {
                 clock_rate_hz: 48_000,
                 channels: 1,
                 fmtp: Some(CANARY.into()),
+                payload_type: None,
             }),
         };
         let debug = format!("{entry:?}");

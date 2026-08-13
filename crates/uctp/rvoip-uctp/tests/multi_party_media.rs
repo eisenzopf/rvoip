@@ -84,6 +84,7 @@ fn default_codec() -> rvoip_core::capability::CodecInfo {
         clock_rate_hz: 48_000,
         channels: 1,
         fmtp: None,
+        payload_type: None,
     }
 }
 

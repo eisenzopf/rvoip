@@ -266,12 +266,14 @@ fn opus_pcmu_caps() -> CapabilityDescriptor {
                 clock_rate_hz: 48_000,
                 channels: 1,
                 fmtp: None,
+                payload_type: None,
             },
             CodecInfo {
                 name: "g.711-mu".into(),
                 clock_rate_hz: 8_000,
                 channels: 1,
                 fmtp: None,
+                payload_type: None,
             },
         ],
         ..Default::default()

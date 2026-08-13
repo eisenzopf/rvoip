@@ -242,6 +242,7 @@ async fn loopback_datagram_pump_round_trip() {
         clock_rate_hz: 48000,
         channels: 1,
         fmtp: None,
+        payload_type: None,
     };
 
     // `Direction::Outbound` represents a receive-only wire offer and must

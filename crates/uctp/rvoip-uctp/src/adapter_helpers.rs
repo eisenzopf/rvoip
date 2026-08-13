@@ -292,6 +292,9 @@ fn parse_update_reply(
             clock_rate_hz: 0,
             channels: 0,
             fmtp: None,
+            // Synthesized because the chosen codec was not in the advertised
+            // list, so nothing here is known — the zeroes above say the same.
+            payload_type: None,
         });
     Ok(NegotiatedCodecs {
         audio: Some(chosen),

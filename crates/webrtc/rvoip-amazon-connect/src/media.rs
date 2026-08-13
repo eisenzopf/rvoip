@@ -555,6 +555,7 @@ fn opus_codec() -> CodecInfo {
         clock_rate_hz: 48_000,
         channels: 2,
         fmtp: None,
+        payload_type: None,
     }
 }
 

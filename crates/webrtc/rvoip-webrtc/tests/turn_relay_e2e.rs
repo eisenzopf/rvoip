@@ -83,6 +83,7 @@ async fn relay_only_two_peer_media_round_trip() {
         clock_rate_hz: 48_000,
         channels: 2,
         fmtp: None,
+        payload_type: None,
     };
 
     let offerer_ssrc = offerer.local_audio_ssrc().expect("offerer ssrc");

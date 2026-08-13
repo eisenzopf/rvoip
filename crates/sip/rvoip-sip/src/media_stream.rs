@@ -152,6 +152,11 @@ fn codec_descriptor(
             // groups on this, so a hard-coded `None` puts every SIP leg in one
             // group and silently discards whatever the peer negotiated.
             fmtp: config.fmtp.clone(),
+            // The SIP leg is the one place that unambiguously knows this: it
+            // is the payload type the SDP answer settled on, already this
+            // function's own argument. Reporting it is what lets consumers
+            // downstream stop deriving a payload type from the codec name.
+            payload_type: Some(payload_type),
         },
         payload_type,
     ))
@@ -345,6 +350,10 @@ impl SipMediaStream {
             clock_rate_hz: G711_SAMPLE_RATE,
             channels: 1,
             fmtp: None,
+            // A dormant stream has negotiated nothing, and this descriptor is
+            // a placeholder replaced once it has. Reporting PCMU's 0 here
+            // would be reporting a negotiation that has not happened.
+            payload_type: None,
         };
         let (frames_in_tx, frames_in_rx) = mpsc::channel::<MediaFrame>(FRAME_CHANNEL_CAP);
         let (frames_out_tx, frames_out_rx) = mpsc::channel::<MediaFrame>(FRAME_CHANNEL_CAP);

@@ -62,6 +62,7 @@ async fn renegotiate_media_returns_connection_not_found_for_unknown_conn() {
             clock_rate_hz: 48_000,
             channels: 1,
             fmtp: None,
+            payload_type: None,
         }],
         ..Default::default()
     };

@@ -210,6 +210,7 @@ async fn run_media(
                     clock_rate_hz: 48000,
                     channels: 2,
                     fmtp: None,
+                    payload_type: None,
                 },
                 local,
                 ssrc,

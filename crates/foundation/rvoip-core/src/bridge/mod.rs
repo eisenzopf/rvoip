@@ -106,6 +106,24 @@ pub fn codec_to_pt(name: &str) -> Option<u8> {
     }
 }
 
+/// The payload type to label a codec's frames with: what it negotiated if the
+/// transport reported one, otherwise its conventional static assignment.
+///
+/// `None` means the codec cannot be labelled, and callers must treat that as a
+/// refusal. It is deliberately not an `unwrap_or` with a plausible number:
+/// both media pumps used to default to Opus's `111`, so any codec missing from
+/// [`codec_to_pt`] — AMR included — went onto the wire wearing Opus's payload
+/// type. A receiver has no way to detect that, because the datagram is
+/// perfectly well-formed and simply lies about what it contains.
+///
+/// The negotiated value is preferred because it is the only one that can be
+/// right for a dynamic codec, where the same name takes different numbers on
+/// different calls.
+#[must_use]
+pub fn resolve_payload_type(codec: &crate::capability::CodecInfo) -> Option<u8> {
+    codec.payload_type.or_else(|| codec_to_pt(&codec.name))
+}
+
 #[cfg(test)]
 mod codec_mapping_tests {
     use super::codec_to_pt;
@@ -140,6 +158,53 @@ mod codec_mapping_tests {
                  rather than stamping a fabricated payload type on the wire"
             );
         }
+    }
+
+    fn codec(name: &str, payload_type: Option<u8>) -> crate::capability::CodecInfo {
+        crate::capability::CodecInfo {
+            name: name.into(),
+            clock_rate_hz: 8_000,
+            channels: 1,
+            fmtp: None,
+            payload_type,
+        }
+    }
+
+    /// The property that makes this worth carrying at all: for a dynamic
+    /// codec the negotiated number is the only correct one, so it has to win
+    /// over the conventional table. Opus is the sharp case — 111 is merely
+    /// customary, and a session that negotiated 96 must be labelled 96.
+    #[test]
+    fn a_negotiated_payload_type_beats_the_conventional_one() {
+        assert_eq!(
+            super::resolve_payload_type(&codec("opus", Some(96))),
+            Some(96),
+            "the negotiated payload type must win; 111 is a convention, not a fact"
+        );
+        assert_eq!(super::resolve_payload_type(&codec("opus", None)), Some(111));
+    }
+
+    /// The regression this exists to prevent. Both media pumps used to do
+    /// `codec_to_pt(name).unwrap_or(111)`, so an AMR stream went out wearing
+    /// Opus's payload type — a well-formed datagram that lies about what it
+    /// carries, which a receiver cannot detect.
+    #[test]
+    fn an_unlabellable_codec_resolves_to_nothing_rather_than_to_opus() {
+        for name in ["AMR", "AMR-WB"] {
+            assert_eq!(
+                super::resolve_payload_type(&codec(name, None)),
+                None,
+                "{name} has no conventional payload type, and inventing one \
+                 puts a mislabelled datagram on the wire"
+            );
+        }
+        // Once a transport reports what it negotiated, the same codec labels
+        // correctly — the refusal above is about absent information, not
+        // about AMR being unwelcome.
+        assert_eq!(
+            super::resolve_payload_type(&codec("AMR", Some(107))),
+            Some(107)
+        );
     }
 }
 

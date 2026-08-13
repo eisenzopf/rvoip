@@ -355,6 +355,7 @@ async fn public_media_stream_decodes_the_negotiated_dynamic_dtmf_mapping() {
             clock_rate_hz: 48_000,
             channels: 1,
             fmtp: None,
+            payload_type: None,
         },
         receiver.local_audio_track().expect("receiver audio track"),
         receiver.local_audio_ssrc().expect("receiver audio SSRC"),
