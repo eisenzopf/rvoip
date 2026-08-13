@@ -19,10 +19,13 @@
 //! The makefile's default and the detector the conformance vectors were made
 //! with. The two are not interchangeable: under VAD2 the open-loop pitch stage
 //! accumulates different quantities and the tone detector is replaced
-//! entirely, so supporting both would mean two variants of a bit-exact
-//! module. `tools/build-amr-dtx-fixtures.sh` asserts the committed fixture can
-//! tell them apart — they choose different frame types on 21 of its 150
-//! frames — which is what makes this port qualifiable at all.
+//! entirely, so each is its own bit-exact module.
+//! `tools/build-amr-dtx-fixtures.sh` asserts the committed fixture can tell
+//! them apart — they choose different frame types on 21 of its 150 frames —
+//! which is what makes this port qualifiable at all.
+//!
+//! VAD2 is no longer absent: it lives in [`super::vad2`], bit-exact against
+//! the same reference. Neither replaces the other; the encoder selects one.
 //!
 //! # The three registers
 //!
