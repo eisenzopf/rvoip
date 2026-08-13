@@ -1856,6 +1856,38 @@ and **20 million fuzz iterations with zero crashes**. Notable coverage:
 | `max-red` redundancy (§3.5, §4.3) | Implemented — `codecs/amr/redundancy.rs` |
 | IF2 (TS 26.201) | **Wideband implemented** (oracle-verified); narrowband refused, IF1 absent |
 
+**VAD2 is ported and bit-exact** (2026-08-12) — `nb/enc/vad2.rs`, 300
+half-frames of the committed DTX input matching TS 26.073's own `vad2()` on
+every field.
+
+Worth stating precisely, because the name invites a wrong assumption:
+**VAD2 is narrowband-only.** AMR-NB defines two detectors and ships both
+(`vad1.c`, `vad2.c`, with `vadname.c` reporting which was compiled); AMR-WB
+defines one (`wb_vad.c`), which `wb/enc/vad.rs` already implements bit-exactly.
+There is no "VAD option 2" for wideband and inventing one would be inventing
+spec.
+
+It shares nothing with VAD1 but its output type. VAD1 works from the encoder's
+own analysis — LP residual, open-loop lags, tone flag. VAD2 does its own signal
+analysis: pre-emphasis, a 128-point real FFT, energy summed into sixteen
+non-uniform channels, and an SNR/hangover state machine over those. It also
+consumes 80 samples per call, so a 20 ms frame is two calls and the frame
+decision is their OR.
+
+Verification follows the VAD1 pattern for the same reason — the decision
+appears nowhere in the bitstream, and here a wrong half-frame can additionally
+be masked by its partner. `tools/nb_vad2_probe.c` dumps the reference's whole
+state per half-frame (sixteen channel energies, sixteen noise estimates, the
+long-term dB array, and every counter) and the test compares all of it;
+`tools/trace-amrnb-vad2.sh` regenerates the trace, reproducibly.
+
+The test was checked by mutation rather than assumed: perturbing the
+pre-emphasis factor fails at half-frame 0 channel 1, and perturbing one entry
+of the hangover table fails at half-frame 244 on the counters — two
+independent subsystems. A third mutation (`CEE_SM_FAC` by one LSB) is
+genuinely absorbed, because `mult(18022, 16384)` and `mult(18023, 16384)` both
+truncate to 9011; that is arithmetic, not a weak test.
+
 **IF2 (TS 26.201), wideband only** (2026-08-12) —
 `codecs/amr/interface_format.rs`. IF2 is the compact 3G/file framing: a
 four-bit frame type, the coded bits, zero padding to the octet. The coded bits

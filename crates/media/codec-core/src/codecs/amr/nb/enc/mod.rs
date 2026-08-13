@@ -39,4 +39,6 @@ pub mod lsp_quant;
 pub mod dtx;
 pub mod pitch;
 pub mod vad;
+/// TS 26.073 `vad2.c`: the narrowband detector option 2.
+pub mod vad2;
 pub mod preproc;
