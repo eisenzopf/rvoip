@@ -149,7 +149,21 @@ Proxy provider notes:
 
 - v1 scenario set is `registration`, `basic_call`, and `amr_call`; the rest
   sit behind `PBX_PROXY_ALL_SCENARIOS=1` and `amr_transcode_call` never runs
-  (rtpengine transcoding is out of scope). TLS cells skip (UDP-only labs).
+  (rtpengine transcoding is out of scope).
+- **TLS+SRTP runs against Kamailio** (port 5073, `tls.so` plus a self-signed
+  certificate `up.sh` regenerates per run; `enable_tls=1` is required or
+  Kamailio only *warns* and answers nothing). The endpoints negotiate SDES
+  end-to-end and rtpengine relays the encrypted payload without keys of its
+  own — it logs one "SRTP output wanted, but no crypto suite was negotiated"
+  per session and then forwards transparently, which is the passthrough
+  property working rather than failing. The proof is that the tone gate passes
+  at both ends: that needs each endpoint to decrypt the other's SRTP, which
+  cannot happen unless the crypto attributes crossed verbatim.
+- **OpenSIPS stays UDP-only.** Its stock 3.6 image ships no TLS modules; the
+  pinned-deb TLS image the sip-proxy suite uses is what would unblock it
+  (see `crates/sip/sip-proxy/docs/OPENSIPS_TLS_PROVENANCE.md`), and
+  `provider_supports_tls` returns false for it so TLS cells skip rather than
+  fail.
 - The proxy configs **fail closed**: if `rtpengine_manage` cannot reach the
   relay the INVITE is answered 503 rather than relayed with untouched SDP —
   otherwise media would flow endpoint-to-endpoint and every media assertion

@@ -328,7 +328,11 @@ pbx_list() {
 # until proven; PBX_PROXY_ALL_SCENARIOS=1 lifts the gate for exploration.
 provider_supports_tls() {
   case "$1" in
-    kamailio|opensips) return 1 ;;
+    # Kamailio's lab has a TLS listener (tls.so plus a per-run self-signed
+    # certificate); OpenSIPS's stock image has no TLS modules, so its lab is
+    # UDP-only until it is rebuilt on the pinned-deb TLS image.
+    opensips) return 1 ;;
+    kamailio) [ -n "${KAMAILIO_TLS_ADDR:-}" ] ;;
     *) return 0 ;;
   esac
 }
@@ -757,6 +761,7 @@ pbx_host_for_diag() {
   case "$provider:$transport" in
     freeswitch:TLS) printf '%s\n' "${FREESWITCH_TLS_ADDR%%:*}" ;;
     freeswitch:UDP) printf '%s\n' "${FREESWITCH_UDP_ADDR%%:*}" ;;
+    kamailio:TLS) printf '%s\n' "${KAMAILIO_TLS_ADDR%%:*}" ;;
     kamailio:*) printf '%s\n' "${KAMAILIO_UDP_ADDR%%:*}" ;;
     opensips:*) printf '%s\n' "${OPENSIPS_UDP_ADDR%%:*}" ;;
     *) printf '%s\n' "${SIP_SERVER:-127.0.0.1}" ;;
@@ -769,6 +774,7 @@ pbx_port_for_diag() {
   case "$provider:$transport" in
     freeswitch:TLS) printf '%s\n' "${FREESWITCH_TLS_ADDR##*:}" ;;
     freeswitch:UDP) printf '%s\n' "${FREESWITCH_UDP_ADDR##*:}" ;;
+    kamailio:TLS) printf '%s\n' "${KAMAILIO_TLS_ADDR##*:}" ;;
     kamailio:*) printf '%s\n' "${KAMAILIO_UDP_ADDR##*:}" ;;
     opensips:*) printf '%s\n' "${OPENSIPS_UDP_ADDR##*:}" ;;
     *:TLS) printf '%s\n' "${SIP_TLS_PORT:-5061}" ;;

@@ -45,5 +45,6 @@ services:
     command: ["-DD", "-E", "-f", "/etc/kamailio/kamailio.cfg"]
     volumes:
       - ${KAMAILIO_RENDERED_CFG:?run up.sh, which renders kamailio.cfg.in}:/etc/kamailio/kamailio.cfg:ro
+      - ${KAMAILIO_TLS_DIR:?run up.sh, which generates the lab certificate}:/etc/kamailio/tls:ro
     depends_on:
       - rtpengine

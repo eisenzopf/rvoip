@@ -22,9 +22,14 @@ memlog=5
 fork=yes
 children=2
 auto_aliases=no
+# Kamailio disables TLS unless this is set, and says so in a warning rather
+# than failing to start -- so a lab without it looks up and quietly answers
+# nothing on 5073.
+enable_tls=1
 alias="__PUBLIC_HOST__:__SIP_PORT__"
 
 listen=udp:0.0.0.0:__SIP_PORT__ advertise __PUBLIC_HOST__:__SIP_PORT__
+listen=tls:0.0.0.0:__TLS_PORT__ advertise __PUBLIC_HOST__:__TLS_PORT__
 
 loadmodule "tm.so"
 loadmodule "sl.so"
@@ -41,6 +46,7 @@ loadmodule "corex.so"
 loadmodule "usrloc.so"
 loadmodule "registrar.so"
 loadmodule "rtpengine.so"
+loadmodule "tls.so"
 
 # In-memory location only: the lab has no DB and needs none.
 modparam("usrloc", "db_mode", 0)
@@ -52,6 +58,14 @@ modparam("rtpengine", "rtpengine_sock", "__RTPENGINE_SOCK__")
 # at lab startup the proxy can ping before rtpengine binds its ng socket,
 # and a disabled relay makes the SDP guard 503 every call for a minute.
 modparam("rtpengine", "rtpengine_disable_tout", 5)
+
+# Lab TLS: a self-signed certificate up.sh generates per run. The endpoints
+# set TLS_INSECURE=1 against it, exactly as they do for the Asterisk and
+# FreeSWITCH labs -- this proves the SIP transport and the SRTP keys that ride
+# in its SDP, not a PKI.
+modparam("tls", "certificate", "/etc/kamailio/tls/cert.pem")
+modparam("tls", "private_key", "/etc/kamailio/tls/key.pem")
+modparam("tls", "tls_method", "TLSv1.2+")
 
 request_route {
     if (!mf_process_maxfwd_header("10")) {
