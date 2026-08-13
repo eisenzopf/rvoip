@@ -146,10 +146,17 @@ fn amr_only_config(
 }
 
 async fn run_amr_call(variant: AmrVariant, ports: Ports) {
-    run_amr_call_inner(variant, ports, false).await;
+    run_amr_call_inner(variant, ports, false, &[]).await;
 }
 
-async fn run_amr_call_inner(variant: AmrVariant, ports: Ports, srtp: bool) {
+/// `sweep_modes` asks the peer, mid-call, to transmit at each mode in turn
+/// and records which ones it was observed using. Empty for an ordinary call.
+async fn run_amr_call_inner(
+    variant: AmrVariant,
+    ports: Ports,
+    srtp: bool,
+    sweep_modes: &[u8],
+) {
     let _ = tracing_subscriber::fmt::try_init();
 
     let mut bob = StreamPeer::with_config(amr_only_config(
@@ -242,6 +249,16 @@ async fn run_amr_call_inner(variant: AmrVariant, ports: Ports, srtp: bool) {
         }
     });
 
+    // Space the mode changes evenly across the call, leaving room after each
+    // for the request to reach Bob, for his encoder to switch, and for a
+    // frame at the new mode to arrive back and be decoded.
+    let sweep_every = if sweep_modes.is_empty() {
+        usize::MAX
+    } else {
+        FRAMES / (sweep_modes.len() + 1)
+    };
+    let mut observed_modes: Vec<u8> = Vec::new();
+
     for i in 0..FRAMES {
         let frame = AudioFrame::new(
             generate_tone(variant, ALICE_TONE_HZ, i),
@@ -253,8 +270,85 @@ async fn run_amr_call_inner(variant: AmrVariant, ports: Ports, srtp: bool) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
+
+        if sweep_every != usize::MAX && i > 0 && i % sweep_every == 0 {
+            let index = i / sweep_every - 1;
+            // Read first, then request. The reading belongs to the *previous*
+            // request, which has had this whole interval to take effect.
+            //
+            // Reading straight after requesting does not work, and the reason
+            // is the codec behaving correctly rather than slowly: RFC 4867
+            // `mode-change-period` and `mode-change-neighbor` let the encoder
+            // move only on permitted frames and only to an adjacent mode, so
+            // a request is a destination reached over several frames, not a
+            // switch thrown. Sampling too early reports the mode still in
+            // flight and the whole sequence reads one step stale.
+            if index > 0 {
+                if let Some(seen) = alice.coordinator().peer_codec_mode(handle.id()).await {
+                    observed_modes.push(seen);
+                }
+            }
+            if let Some(&mode) = sweep_modes.get(index) {
+                alice
+                    .coordinator()
+                    .request_peer_codec_mode(handle.id(), mode)
+                    .await
+                    .expect("the CMR request reaches the media layer");
+            }
+        }
     }
+    // One last sample, taken while media is still flowing: the final request
+    // is issued at the last sweep point and has no interval after it, so
+    // without this the descent is recorded as stopping one mode short of
+    // where it actually got to.
+    if !sweep_modes.is_empty() {
+        if let Some(seen) = alice.coordinator().peer_codec_mode(handle.id()).await {
+            observed_modes.push(seen);
+        }
+    }
+
     drop(sender);
+
+    if !sweep_modes.is_empty() {
+        // Two samples can legitimately land on the same mode — the encoder
+        // reached its destination and stayed there. What is being asserted is
+        // the sequence of modes visited, not how often each was sampled.
+        observed_modes.dedup();
+        let top = sweep_modes[0];
+        // Asserted as a property rather than as an exact schedule. Where the
+        // run starts depends on how far the encoder had already stepped when
+        // the first sample landed, and that is a timing detail; that it
+        // descends through every mode without skipping, and reaches the
+        // lowest one, is the behaviour.
+        assert!(
+            observed_modes.len() >= sweep_modes.len() - 1,
+            "{}: expected to sample {} modes, saw {observed_modes:?}",
+            variant.rtpmap,
+            sweep_modes.len() - 1
+        );
+        for pair in observed_modes.windows(2) {
+            assert_eq!(
+                pair[0].checked_sub(pair[1]),
+                Some(1),
+                "{}: the peer must step down one mode at a time and skip none, \
+                 got {observed_modes:?}",
+                variant.rtpmap
+            );
+        }
+        assert_eq!(
+            observed_modes.last(),
+            Some(&0),
+            "{}: the descent must reach mode 0, got {observed_modes:?}",
+            variant.rtpmap
+        );
+        assert!(
+            observed_modes[0] >= top - 1,
+            "{}: the descent must start at or next to the opening mode {top}, \
+             got {observed_modes:?} — starting lower would mean whole modes \
+             were never transmitted",
+            variant.rtpmap
+        );
+    }
 
     handle.hangup().await.expect("alice hangs up");
     let _ = tokio::time::timeout(Duration::from_secs(5), alice.wait_for_ended(&call_id)).await;
@@ -476,6 +570,7 @@ async fn amr_narrowband_call_carries_real_audio_over_srtp() {
             bob_media: (36_320, 36_370),
         },
         true,
+        &[],
     )
     .await;
 }
@@ -492,6 +587,60 @@ async fn amr_wideband_call_carries_real_audio_over_srtp() {
             bob_media: (36_440, 36_490),
         },
         true,
+        &[],
+    )
+    .await;
+}
+
+/// Every AMR mode, exercised in a live call rather than only in a fixture.
+///
+/// The bit-exactness suites already cover all seventeen modes against the
+/// 3GPP reference, but every *call* until now ran at the top mode: the
+/// encoder opens at the highest permitted rate and nothing asked it to move.
+/// So negotiation, RTP framing and the decode path were only ever proven for
+/// AMR-NB mode 7 and AMR-WB mode 8.
+///
+/// This walks the peer down through every mode mid-call with a Codec Mode
+/// Request and reads back what it actually transmitted. `peer_codec_mode`
+/// reports the mode of the last speech frame *decoded from the peer*, so a
+/// peer that ignored the requests would sit on one mode and a decoder that
+/// misread the frame type would report the wrong ones — neither can produce
+/// the requested sequence by accident.
+///
+/// The tone assertion still runs at the end, so the audio has to survive the
+/// whole descent and not merely change rate.
+#[cfg(feature = "amr-nb")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_amr_narrowband_mode_carries_audio_in_a_live_call() {
+    // 7 down to 0: descending, so a stack that silently stayed at its opening
+    // mode would report 7 throughout and fail on the first comparison.
+    run_amr_call_inner(
+        AMR_NB,
+        Ports {
+            alice_sip: 35_500,
+            bob_sip: 35_501,
+            alice_media: (36_500, 36_550),
+            bob_media: (36_560, 36_610),
+        },
+        false,
+        &[7, 6, 5, 4, 3, 2, 1, 0],
+    )
+    .await;
+}
+
+#[cfg(feature = "amr-wb")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_amr_wideband_mode_carries_audio_in_a_live_call() {
+    run_amr_call_inner(
+        AMR_WB,
+        Ports {
+            alice_sip: 35_502,
+            bob_sip: 35_503,
+            alice_media: (36_620, 36_670),
+            bob_media: (36_680, 36_730),
+        },
+        false,
+        &[8, 7, 6, 5, 4, 3, 2, 1, 0],
     )
     .await;
 }
