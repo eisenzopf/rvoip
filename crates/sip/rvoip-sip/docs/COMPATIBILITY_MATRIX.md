@@ -100,6 +100,8 @@ Developer-facing auth API and crate-boundary guidance is in
 | Comfort Noise PT 13 | Supported | Config validation and SDP/media tests | Requires `comfort_noise_enabled=true`. |
 | Opus | Feature-gated | Real codec round trips plus SIP/RTP dynamic-payload tests | Requires the `opus` feature. |
 | G.729 | Feature-gated | Codec, SDP, and media tests | Requires the `g729` feature. |
+| AMR-NB | Feature-gated | Bit-exact against the 3GPP reference plus the normative sequences; RFC 4867 framing checked against Wireshark's dissector; loopback and SRTP call tests; PBX and proxy lab rows | Requires the `amr-nb` feature. Not part of the bounded SIP beta media claim. |
+| AMR-WB | Feature-gated | Same evidence set as AMR-NB at 16 kHz, all 9 modes | Requires the `amr-wb` feature. Not part of the bounded SIP beta media claim. |
 | G.722 | Not supported | Construction/negotiation rejection tests | RTP payload parsing metadata remains available. |
 | SDES-SRTP | Partial | SRTP integration/negotiator tests and PBX rows where present | Limited to tested suites. |
 | DTLS-SRTP | Post-beta | Explicit non-claim | Do not claim. |

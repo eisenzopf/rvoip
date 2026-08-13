@@ -6,7 +6,8 @@
 
 > **Beta scope notice:** for the `rvoip-sip` beta, full-media claims are
 > limited to the paths that are wired and tested end to end through SIP:
-> PCMU/PCMA, optional G.729A/G.729AB behind the `g729` feature,
+> PCMU/PCMA, optional G.729A/G.729AB behind the `g729` feature, optional
+> AMR-NB/AMR-WB behind the `amr-nb`/`amr-wb` features,
 > telephone-event DTMF, optional comfort noise, RTP, and tested SDES-SRTP/PBX
 > flows. Older sections in this README describe intended or lower-level
 > capabilities and must not be read as beta release claims until they are
@@ -48,7 +49,7 @@ The Media Core sits at the heart of the media processing stack, providing intell
 ### Key Components
 
 1. **Media Processing Engine**: Advanced audio processing with AEC, AGC, VAD, and noise suppression
-2. **Codec Management**: G.711 plus optional G.729A/G.729AB support with real-time transcoding among wired codecs
+2. **Codec Management**: G.711 plus optional G.729A/G.729AB, Opus and AMR-NB/AMR-WB support with real-time transcoding among wired codecs
 3. **Session Coordination**: Per-dialog media session management with SIP integration
 4. **Conference Mixing**: N-way audio mixing for multi-party conferences
 5. **Quality Monitoring**: Real-time quality metrics and adaptive processing
@@ -115,13 +116,15 @@ Clean separation of concerns across the rvoip stack:
   - ✅ 8-sample parallel processing for audio operations
 
 #### **Codec Support and Transcoding**
-- ✅ **Multi-Codec Support**: G.711 plus feature-gated G.729A/G.729AB and Opus
+- ✅ **Multi-Codec Support**: G.711 plus feature-gated G.729A/G.729AB, Opus and AMR
   - ✅ **G.711**: μ-law/A-law (PCMU/PCMA) with ITU-T compliance
   - ✅ **G.729A/G.729AB**: optional low-bitrate 8 kbps codec with Annex B VAD/DTX/CNG under the `g729` feature
   - ✅ **Opus**: real libopus-backed encode/decode under the `opus` feature
+  - ✅ **AMR-NB**: all 8 modes, RFC 4867 framing, DTX and CMR under the `amr-nb` feature
+  - ✅ **AMR-WB (G.722.2)**: all 9 modes, 16 kHz, same framing and DTX support under the `amr-wb` feature
   - ⛔ **G.722**: RTP payload metadata only; encoder/decoder construction and negotiation are rejected
 - ✅ **Real-Time Transcoding**: Seamless format conversion
-  - ✅ PCMU ↔ PCMA plus feature-gated G.729A/G.729AB and Opus paths
+  - ✅ PCMU ↔ PCMA plus feature-gated G.729A/G.729AB, Opus and AMR paths
   - ✅ Session management with performance statistics
   - ✅ Format conversion with sample rate adaptation
 
@@ -476,11 +479,13 @@ The library provides cutting-edge audio processing algorithms competitive with c
 - **G.711 (PCMU/PCMA)**: ITU-T compliant μ-law/A-law implementation
 - **G.729A/G.729AB**: Optional low-bitrate 8 kbps codec with Annex B VAD/DTX/CNG
 - **Opus**: Optional real libopus-backed codec
+- **AMR-NB / AMR-WB**: Optional 3GPP speech codecs, bit-exact against the
+  reference implementations, with RFC 4867 framing, DTX and mode negotiation
 - **G.722**: Unsupported as a working codec; low-level RTP payload handling remains available
 
 ### Transcoding Capabilities
 
-- **Real-Time Transcoding**: PCMU/PCMA and feature-gated G.729A/G.729AB and Opus paths
+- **Real-Time Transcoding**: PCMU/PCMA and feature-gated G.729A/G.729AB, Opus and AMR paths
 - **Format Conversion**: Automatic sample rate and channel conversion
 - **Session Management**: Performance statistics and caching
 - **Quality Preservation**: Optimal transcoding paths to minimize quality loss
@@ -534,7 +539,7 @@ async fn main() -> Result<()> {
 
 **Technical Implementation:**
 - **Silence Generation**: PCM samples replaced with zeros before codec encoding
-- **Codec Compatibility**: Works with wired codecs (G.711 and optional G.729A/G.729AB)
+- **Codec Compatibility**: Works with wired codecs (G.711 and optional G.729A/G.729AB, Opus and AMR-NB/AMR-WB)
 - **State Tracking**: Per-session mute state in `RtpSessionWrapper`
 - **Processing Pipeline**: Muting occurs in `encode_and_send_audio_frame()`
 

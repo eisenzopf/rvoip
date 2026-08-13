@@ -145,17 +145,21 @@ unless the generated report records the complete required matrix as PASS.
 
 The 0.3.2 full release run passed all 16 selected PBX and interoperability
 gates. Asterisk and FreeSWITCH were executed as external PBX peers; Kamailio
-and OpenSIPS were named and audited, but their proxy/RTPengine topology was
+and OpenSIPS were named and audited, but their proxy/rtpengine topology was
 explicitly de-scoped rather than silently presented as tested.
 
-| Peer/tool | 0.3.2 status | Executed scope |
+Both proxies have since been exercised in the AMR interop lab. That is lab
+evidence and is labelled as such below — it does not move them into the 0.3.2
+release claim, and it does not meet the four-peer attestation boundary.
+
+| Peer/tool | Status | Executed scope |
 | --- | --- | --- |
-| **Asterisk** | **Interop matrix passed** | `Endpoint`, `StreamPeer`, and `CallbackPeer` across registration, basic call, G.729A/G.729AB, hold/resume, ring-cancel, RFC 4733 DTMF, rejection, and blind transfer over UDP and TLS |
-| **FreeSWITCH** | **Interop matrix passed** | The same API, scenario, codec, and UDP/TLS matrix as Asterisk |
-| **SIPp** | **Standalone matrix passed** | 30, 100, 300, 1,000, and 2,000 CPS with 100% configured call completion |
-| **baresip** | **Strict-UA check passed** | External user-agent call against the rvoip SIP listener |
-| **Kamailio** | **Not release-tested** | Proxy/RTPengine investigation track; only the explicit de-scope audit passed |
-| **OpenSIPS** | **Not release-tested** | Proxy/RTPengine investigation track; only the explicit de-scope audit passed |
+| **Asterisk** | **0.3.2 interop matrix passed** | `Endpoint`, `StreamPeer`, and `CallbackPeer` across registration, basic call, G.729A/G.729AB, hold/resume, ring-cancel, RFC 4733 DTMF, rejection, and blind transfer over UDP and TLS |
+| **FreeSWITCH** | **0.3.2 interop matrix passed** | The same API, scenario, codec, and UDP/TLS matrix as Asterisk |
+| **SIPp** | **0.3.2 standalone matrix passed** | 30, 100, 300, 1,000, and 2,000 CPS with 100% configured call completion |
+| **baresip** | **0.3.2 strict-UA check passed** | External user-agent call against the rvoip SIP listener |
+| **Kamailio** | **Lab-tested; not release-gated** | Registrar-proxy with an rtpengine media relay: registration, calls, AMR in all four framings relayed verbatim, DTMF, and SDES-SRTP, over UDP and TLS. No TCP, no second adjacency order, not bound into the release attestation |
+| **OpenSIPS** | **Lab-tested; not release-gated** | The same lab scope over UDP only — no TLS image yet |
 
 The machine-bound [0.3.2 gate
 record](docs/BETA_GATE_EXCEPTION.md), [compatibility
@@ -291,6 +295,11 @@ Operational references:
 | `generated-validation` | Development and CI validation for generated SIP messages. |
 | `dev-insecure-tls` | Local test-only TLS convenience; never enable for deployed systems. |
 | `g729` | Optional G.729A/G.729AB media support with PT 18 SDP and Annex B `fmtp` negotiation. |
+| `amr-nb` | Optional AMR narrowband media support with RFC 4867 payload framing, DTX, CMR, and `mode-set`/`octet-align` negotiation. |
+| `amr-wb` | The same for AMR wideband (G.722.2) at 16 kHz. |
+| `amr` | Both AMR variants. |
+| `opus` | Optional Opus media support; requires libopus on the build host. |
+| `all-codecs` | `g729` + `opus` + `amr`. |
 | `perf-tests` | Opt-in performance gate and benchmark support. |
 | `dhat` | Heap profiling support for `examples/profiling/dhat_*.rs`. |
 | `tokio-console` | Tokio console support for profiling examples; requires `RUSTFLAGS="--cfg tokio_unstable"`. |
@@ -300,8 +309,12 @@ Operational references:
 - This is a beta release approved with one performance exception, not a broad
   production-readiness claim.
 - Carrier SBC readiness is partial and not certified.
-- Kamailio/OpenSIPS plus RTPengine were explicitly de-scoped; they are named
-  validation targets, not 0.3.2 interoperability claims.
+- Kamailio/OpenSIPS plus rtpengine are lab-tested, not release-gated. The AMR
+  interop lab runs registration and call scenarios through both proxies with an
+  rtpengine media relay — Kamailio over UDP and TLS with SDES-SRTP, OpenSIPS
+  over UDP only — but neither runs TCP or both adjacency orders, and neither is
+  bound into the four-peer release attestation. They were explicitly de-scoped
+  from the 0.3.2 claim and that has not changed.
 - WebRTC/browser interop, ICE, TURN, DTLS-SRTP, and WSS outbound are outside
   the SIP beta claim unless separately completed and tested.
 - The default full-media performance claim is bounded to the documented

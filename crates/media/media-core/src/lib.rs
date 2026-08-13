@@ -8,7 +8,8 @@
 //!
 //! - **MediaEngine**: Central orchestrator for all media processing
 //! - **MediaSession**: Per-dialog media management
-//! - **Codec Framework**: Audio codec support (G.711, Opus, etc.)
+//! - **Codec Framework**: Audio codec support — G.711 by default, plus
+//!   feature-gated G.729A/G.729AB, Opus and AMR-NB/AMR-WB
 //! - **Audio Processing**: AEC, AGC, VAD, noise suppression
 //! - **Quality Monitoring**: Real-time quality metrics and adaptation
 //!

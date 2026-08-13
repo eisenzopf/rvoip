@@ -31,8 +31,14 @@
 | **Performance** | **Measured, with a gate** — see below |
 | **SDP to a working codec** | **An AMR-WB offer negotiates and codes** |
 | **A real AMR call** | **Three, over loopback, with verified audio** |
-| **RFC 4867 wire format** | **68 payloads agree with Wireshark's dissector** |
+| **RFC 4867 wire format** | **136 payloads agree with Wireshark's dissector** |
 | **Live PBX interop** | **Both PBXes, both variants, relay AND forced-transcode tiers, UDP ×3 + TLS, quality-gated** |
+| **Live proxy interop** | **Kamailio and OpenSIPS with rtpengine relaying all four framings verbatim** |
+| **AMR-NB VAD2** | **Bit-exact against TS 26.073** — whole state, 300 half-frames |
+| **Interface formats** | **IF1 and IF2, both variants**, from TS 26.101 and TS 26.201 |
+| **Redundancy and interleaving** | **`max-red` scheduling with dedup; receive-side deinterleaving** |
+| **Soak** | **Opt-in long-run encode/decode, `RVOIP_AMR_SOAK_SECS`** |
+| **Fuzz** | **Encoders and decoders both have targets** |
 
 Every claim above is a test, not a note. Both decoders reproduce the reference
 decoders sample for sample; both encoders reproduce the reference *bitstream*
@@ -178,10 +184,11 @@ runs on every pull request through the `codec-features` gate.
 crates/media/codec-core/tools/verify-amr-rtp-framing.sh
 ```
 
-68 payloads — both variants, both framings, every speech mode, with and
-without a mode request — packed by this crate and read back by **Wireshark's**
-AMR dissector, which is an independent implementation of RFC 4867. Frame type
-and CMR agree on all of them.
+136 payloads across eight selections — both variants, both framings, every
+speech mode, with and without a mode request, and single- and two-frame
+payloads — packed by this crate and read back by **Wireshark's** AMR dissector,
+which is an independent implementation of RFC 4867. Frame type and CMR agree on
+all of them.
 
 This closes a gap that neither the 3GPP vectors nor an rvoip-to-rvoip call can
 reach. The codec *bits* are bit-exact against the reference implementations and
@@ -193,10 +200,79 @@ in the wrong four bits and our depacker reads it out of the wrong four bits,
 the audio is perfect, and no peer can read the stream. Two rvoip endpoints
 calling each other cannot find that either, for exactly the same reason.
 
-Verified by mutation: rotating the first octet's nibbles makes 47 of the 68
-disagree.
+Verified by mutation: rotating the first octet's nibbles makes the dissector
+disagree — 47 of the 68 payloads the corpus held when that check was run by
+hand. The script has no mutation mode, so that figure is a record of a
+one-off run against the smaller corpus, not something the current 136-payload
+run reproduces.
 
-## Interop, against both PBXes
+## The other two interface formats, IF1 and IF2
+
+```bash
+cargo test -p rvoip-codec-core --features amr interface_format
+```
+
+RFC 4867 is how AMR crosses an IP network, but it is not how AMR crosses a
+radio access network or a 3GPP-defined interface. TS 26.101 (narrowband) and
+TS 26.201 (wideband) define IF1 and IF2 for that, and `interface_format.rs`
+implements both for both variants.
+
+The two are not one format with a width parameter, and assuming they were is
+what made the first attempt wrong. IF2 differs between variants in every field
+that matters: narrowband puts the frame type in the **low** nibble and orders
+bits **LSB-first** with no frame-quality bit and a 39-bit SID; wideband puts it
+in the **high** nibble, orders bits **MSB-first**, carries a 1-bit FQI and a
+40-bit SID. IF1 adds the codec CRC, whose generator `G(x) = x⁸+x⁶+x⁵+x⁴+1` is
+the bit-reversal of the polynomial RFC 4867 uses for its payload CRC — close
+enough to look like a typo and produce wrong bytes silently.
+
+**What this cost, and the lesson.** An earlier wideband IF2 implementation was
+committed as "oracle-verified" and was wrong: it omitted the FQI bit, so every
+frame was one bit short. The oracle was tshark, which reads the frame-type
+nibble and never checks the payload length — so it agreed with a stream no
+real IF2 peer could parse. The error surfaced only when the field tables were
+read directly. An oracle that does not examine the field you got wrong is not
+evidence about that field, however green it prints.
+
+## AMR-NB VAD2
+
+```bash
+cargo test -p rvoip-codec-core --features amr-nb vad2
+```
+
+TS 26.094 specifies two voice-activity detectors for narrowband and the encoder
+selects between them; VAD1 alone is half the specification. VAD2 is a 128-point
+FFT over 16 channels feeding an SNR and hangover state machine, bit-exact here
+against the reference over 300 half-frames of committed trace covering the
+whole state — every counter and all three sixteen-element arrays, not just the
+boolean.
+
+Comparing the decision alone would have been close to worthless. It is one bit,
+it agrees with a constant most of the time, and VAD2's frame decision is the OR
+of two calls per frame — so a wrong half-frame can be masked entirely by its
+partner. `tools/nb_vad2_probe.c` dumps the full per-half-frame state from the
+reference so a divergence localises to a stage instead of to "somewhere".
+
+## Soak and fuzz
+
+```bash
+crates/media/codec-core/tools/run-amr-soak.sh
+crates/media/codec-core/tools/run-amr-fuzz.sh
+```
+
+The bit-exactness fixtures are 50 frames. Nothing in them can catch state that
+degrades over minutes, or an allocation that grows once per thousand frames.
+`soak.rs` holds `#[ignore]`d long-run encode/decode tests scaled by
+`RVOIP_AMR_SOAK_SECS` so the default `cargo test` stays fast and the long run
+is deliberate.
+
+Fuzzing covers both directions. The decoders had a target already — the obvious
+one, since decoders eat hostile input by definition. The encoders now have
+`fuzz/fuzz_targets/amr_encode.rs` too, because mode changes, DTX transitions and
+CMR requests form a state machine that arbitrary drivers can walk into corners
+that fixtures never visit.
+
+## Interop, against both PBXes and both proxies
 
 The SDP half is done and tested: an AMR-WB offer with
 `octet-align=1; mode-set=0,2,4` negotiates through the SIP layer, reaches
@@ -205,7 +281,7 @@ intact, and a codec built from exactly that negotiation round-trips a frame.
 Each of those four was separately broken during this work, so the test asserts
 all four together.
 
-The live calls are done, in two tiers that prove different things.
+The live calls are done, in three tiers that prove different things.
 
 **Tier 1 — `amr_call`, the relay tier.** Both legs offer the same codec, so
 both PBXes forward our RTP octets untouched — verified from their own
@@ -248,6 +324,23 @@ UDP, plus TLS+SRTP — the first AMR-over-SRTP evidence in the repo:
 | FreeSWITCH 1.10.12 | transcode | amrnb_be_pcmu, amrwb_be_pcmu | ✔ | ✔ |
 
 The `amrwb_pcmu` cells also exercise the PBX's own 16 kHz ↔ 8 kHz resampler.
+
+**Tier 3 — the proxy tier, Kamailio and OpenSIPS with rtpengine.** A B2BUA
+terminates the media; a proxy does not. This tier puts a registrar-proxy in the
+signalling path via Record-Route and rtpengine on the media path as a pure
+relay, so all four AMR framings cross a middlebox that rewrites addresses and
+ports and nothing else. rtpengine's own totals report zero transcoded media,
+which is the assertion: our payloads arrive verbatim.
+
+The lab is built to fail closed. A `rtpengine_manage` that does not succeed
+returns 503 rather than passing the SDP through, because the alternative is the
+endpoints negotiating directly and every media assertion passing vacuously —
+which is exactly what an earlier version of this lab did before the guard
+existed. Kamailio runs over UDP and TLS with SDES-SRTP; OpenSIPS runs UDP only,
+having no TLS image yet.
+
+This tier is lab evidence, not release-gate evidence: it does not run TCP or
+both adjacency orders, and it is not bound into the four-peer attestation.
 
 The framing column is not a preference, it is what each PBX can actually carry
 end to end:
@@ -456,8 +549,7 @@ survive the two parameters the lag and the codebook consume in between.
 
 ## Remaining work, in order
 
-1. **DTX, comfort noise and homing.** Partly done; see the table above for what
-   is claimed.
+1. ~~**DTX, comfort noise and homing.**~~ Done, both variants, both directions.
 
    The ground truth landed first, as it did for the encoders:
    `tools/build-amr-dtx-fixtures.sh` produces a 150-frame signal with real
@@ -465,26 +557,23 @@ survive the two parameters the lag and the codebook consume in between.
    variants, plus `_mute` variants whose SID updates are dropped so the
    `DTX_MUTE` fade is reachable at all. Five assertions keep it from being
    vacuous, the sharpest being that VAD1 and VAD2 choose different frame types
-   on 21 of the 150 frames — established *before* the VAD1 port is written,
+   on 21 of the 150 frames — established *before* the VAD1 port was written,
    because otherwise nothing would tell the two detectors apart.
 
-   That also closes the caveat this entry used to carry: the wideband VAD is
-   no longer only weakly differentiated, since the frame-type sequence test
-   depends on its per-frame decisions directly.
+   Everything this entry once listed as remaining has landed: the wideband
+   decoder side (`rx_dtx_handler`, `dtx_dec` and the `DTX_MUTE` fade), homing
+   for both variants, and narrowband — including VAD1, whose long pole was that
+   it has no directly observable output at all, and VAD2 alongside it.
 
-   What remains: the wideband decoder side (`rx_dtx_handler`, `dtx_dec`, the
-   `DTX_MUTE` fade), homing for both variants, and then narrowband — whose
-   long pole is VAD1, roughly 2000 lines with no directly observable output.
-
-   Both reference tarballs also ship normative DTX vectors that nothing here
-   reads yet: the wideband one has `testv/tst_md.cod` and `.out` (80 speech, 1
-   SID_FIRST, 15 SID_UPDATE, 104 NO_DATA at 12.65 kbit/s), and the narrowband
-   one has `spch_dos.inp`, `spch_dos.cod` and `spch_dos.out` — 425 frames
-   encoded with `-dtx` across all eight rates, which is the reference's own
-   installation check (`amr_chk.csh`). They are ground truth for this work and
-   for the VAD1 port, which otherwise has *no* directly observable output: the
-   narrowband VAD decision appears nowhere in the bitstream, only in which
-   frames become SID or NO_DATA.
+   The normative DTX vectors this entry used to describe as unread are now
+   read: the wideband `testv/tst_md.cod` and `.out` (80 speech, 1 SID_FIRST, 15
+   SID_UPDATE, 104 NO_DATA at 12.65 kbit/s), and the narrowband `spch_dos.inp`,
+   `spch_dos.cod` and `spch_dos.out` — 425 frames encoded with `-dtx` across all
+   eight rates, which is the reference's own installation check
+   (`amr_chk.csh`). Both appear in the table above and in the conformance
+   section below. They were the ground truth for the VAD ports, which otherwise
+   have *no* directly observable output: the narrowband VAD decision appears
+   nowhere in the bitstream, only in which frames become SID or NO_DATA.
 
 2. ~~**Transcoding.**~~ Done — six pairs, tested by property.
 
@@ -535,8 +624,14 @@ survive the two parameters the lag and the codebook consume in between.
    today) so a rate sweep can calibrate per-mode floors from codec loopback
    rather than guessing.
 
-7. **A soak test**, and a fuzz target for the encoders. The decoders have one;
-   the encoders do not.
+7. ~~**A soak test**, and a fuzz target for the encoders.~~ Both done.
+   `soak.rs` holds `#[ignore]`d long-run encode/decode tests scaled by
+   `RVOIP_AMR_SOAK_SECS`, driven by `tools/run-amr-soak.sh`; the encoders now
+   have `fuzz/fuzz_targets/amr_encode.rs` beside the decoders' target, and both
+   run from `tools/run-amr-fuzz.sh`.
+
+   The one item above still open is **6**, and it is an evidence gap rather than
+   a code gap: it blocks no feature and no rate is unimplemented.
 
 ## Conformance against the normative sequences
 
@@ -576,13 +671,26 @@ Mutation-checked: turning DTX off fails mode 8 at frame 0.
 
 ## What is *not* claimed
 
-Bit-exactness here means agreement with the 3GPP reference implementations over
+Two different claims live in this document and they should not be conflated.
+
+**Bit-exactness** means agreement with the 3GPP reference implementations over
 the committed fixtures — 50 frames of one deterministic signal per rate, plus
-25 frames of a second for the decoders. That is strong evidence and it is not
-the same as conformance: TS 26.074 and TS 26.174 are the normative test
-sequences and are not in this tree (IP-2a). The distinction is worth keeping,
-because this repo's own G.711 tests already disclaim evidence from files that
-are not present, and the same discipline applies here.
+25 frames of a second for the decoders. Those fixtures are ours; we generated
+them.
+
+**Conformance** means the normative sequences that ship with the reference
+distributions, which the section above records as passing: all nine TS 26.173
+wideband vectors in both directions, the wideband DTX vectors, and the
+narrowband `spch_dos` set at 425 frames. Those we did not choose.
+
+What is still *not* claimed is certification. TS 26.074 and TS 26.174 define the
+conformance process, and passing the sequences a reference distribution ships is
+not the same as being certified against that process by anyone but ourselves. No
+3GPP material — neither the reference C nor the specifications — is in this tree;
+it is fetched to work against and never redistributed, so every fixture and trace
+committed here is generated output. The distinction is worth keeping, because
+this repo's own G.711 tests already disclaim evidence from files that are not
+present, and the same discipline applies here.
 
 ## The normative encoder vectors are DTX-on, and mode 8 needs it
 
@@ -645,7 +753,7 @@ Living tracker for the AMR-NB / AMR-WB work. The plan is in
 where we actually are.
 
 **Branch:** `feat/amr-codecs`
-**Last updated:** 2026-08-10
+**Last updated:** 2026-08-13
 
 ---
 
