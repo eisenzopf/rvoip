@@ -128,15 +128,28 @@ class RunChecksTests(unittest.TestCase):
         self.assertIn("--all-targets", commands[0][0])
 
     def test_codec_gate_runs_what_the_default_feature_shards_compile_out(self) -> None:
+        # Every crate whose feature-gated codec tests the shards compile out.
+        # Adding one here is the point of the list; the count is derived from
+        # it rather than written down, because the previous hard-coded 4 went
+        # stale the moment rvoip-sip was added and left this test failing on
+        # every run until someone read the assertion rather than the summary.
+        expected_packages = (
+            "rvoip-codec-core",
+            "rvoip-media-core",
+            "rvoip-sip",
+            "rvoip-core",
+        )
         commands = run_checks.specialty_commands("codec-features", Path("/workspace"))
         argv = [item[0] for item in commands]
-        self.assertEqual(len(argv), 4)
+        self.assertEqual(len(argv), 2 * len(expected_packages))
         # Every command asks for all features. A command here without it is a
         # command that duplicates the shard and proves nothing.
         for command in argv:
             self.assertIn("--all-features", command)
-        for package in ("rvoip-codec-core", "rvoip-media-core"):
+        for package in expected_packages:
             with self.subTest(package=package):
+                # Exact list membership, not a substring match, so
+                # "rvoip-core" does not also claim rvoip-codec-core's rows.
                 owned = [command for command in argv if package in command]
                 self.assertEqual(len(owned), 2)
                 self.assertEqual(

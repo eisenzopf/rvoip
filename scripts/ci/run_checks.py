@@ -340,8 +340,21 @@ def specialty_commands(
         # defaults are empty, so its AMR SDP-negotiation test -- the one that
         # checks a peer's offer reaches media-core with its framing intact and
         # builds a codec that works -- is compiled out on every pull request.
+        #
+        # `rvoip-core` last, and it is the worst of the four to omit. Its
+        # `amr-nb`/`amr-wb` features gate the media-graph tests that prove an
+        # AMR frame crosses the graph and comes out as PCMU. Without them the
+        # default run still executes the two tests asserting the graph
+        # *refuses* AMR -- so the shard prints green while demonstrating the
+        # opposite of what is true. A hole that reports the inverse of reality
+        # is worse than one that reports nothing.
         commands = []
-        for package in ("rvoip-codec-core", "rvoip-media-core", "rvoip-sip"):
+        for package in (
+            "rvoip-codec-core",
+            "rvoip-media-core",
+            "rvoip-sip",
+            "rvoip-core",
+        ):
             commands.extend(
                 [
                     (

@@ -829,7 +829,10 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
             paths=[
                 "crates/webrtc/rvoip-rtc/**",
                 "crates/webrtc/rvoip-webrtc/**",
-                "crates/core/rvoip-core/**",
+                # `crates/core/` has not existed since the directory reorg that
+                # moved this crate to `crates/foundation/`; the glob matched
+                # nothing, so rvoip-core changes never selected this gate.
+                "crates/foundation/rvoip-core/**",
             ],
         ),
     ]

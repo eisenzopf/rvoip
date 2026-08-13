@@ -142,7 +142,10 @@
         "crates/media/media-core/Cargo.toml",
         "crates/sip/rvoip-sip/src/adapters/media_adapter.rs",
         "crates/sip/rvoip-sip/src/media_stream.rs",
-        "crates/sip/rvoip-sip/Cargo.toml"
+        "crates/sip/rvoip-sip/Cargo.toml",
+        "crates/foundation/rvoip-core/src/media_graph.rs",
+        "crates/foundation/rvoip-core/src/bridge/mod.rs",
+        "crates/foundation/rvoip-core/Cargo.toml"
       ]
     },
     {

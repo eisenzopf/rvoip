@@ -6397,7 +6397,7 @@
       "affected_paths": [
         "crates/webrtc/rvoip-rtc/**",
         "crates/webrtc/rvoip-webrtc/**",
-        "crates/core/rvoip-core/**"
+        "crates/foundation/rvoip-core/**"
       ],
       "always_fresh": false,
       "category": "Remote release framework",
