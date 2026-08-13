@@ -52,6 +52,20 @@ resolve_client_host() {
   esac
 }
 
+# Transcoding is opt-in and changes what this lab proves: with flags the relay
+# re-encodes, which exercises rtpengine's own AMR decoder against our stream;
+# without them it forwards verbatim, which is what the AMR exit criterion
+# needed. Never both in one run.
+if [ -n "${PBX_PROXY_TRANSCODE:-}" ]; then
+  # AMR-WB must name its framing. rtpengine defaults to bandwidth-efficient,
+  # and our amrwb profile is octet-aligned -- an unqualified
+  # codec-transcode-AMR-WB negotiates the wrong framing and the far leg
+  # receives nothing at all, exactly the shape of FreeSWITCH's mod_amr quirk.
+  TRANSCODE_FLAGS=" codec-transcode-PCMU codec-transcode-AMR-WB/16000/1/octet-align=1"
+else
+  TRANSCODE_FLAGS=""
+fi
+
 PUBLIC_HOST=$(resolve_public_host)
 CLIENT_HOST=$(resolve_client_host "$PUBLIC_HOST")
 
@@ -72,6 +86,7 @@ fi
 sed -e "s/__PUBLIC_HOST__/$PUBLIC_HOST/g" \
     -e "s/__SIP_PORT__/$SIP_PORT/g" \
     -e "s/__TLS_PORT__/$TLS_PORT/g" \
+    -e "s#__TRANSCODE_FLAGS__#$TRANSCODE_FLAGS#g" \
     -e "s#__RTPENGINE_SOCK__#$NG_SOCK#g" \
     "$SCRIPT_DIR/kamailio.cfg.in" >"$RENDER_DIR/kamailio.cfg"
 KAMAILIO_RENDERED_CFG="$RENDER_DIR/kamailio.cfg" \
@@ -129,5 +144,6 @@ RVOIP_ADVERTISED_IP=$CLIENT_HOST
 RVOIP_MEDIA_ADVERTISED_IP=$CLIENT_HOST
 EOF
 
+echo "Kamailio transcoding: ${PBX_PROXY_TRANSCODE:-off}"
 echo "Kamailio lab up: sip $PUBLIC_HOST:$SIP_PORT, tls $PUBLIC_HOST:$TLS_PORT, rtpengine ng $NG_SOCK, rtp $RTP_START-$RTP_END"
 echo "Env: $LOCAL_ENV_ROOT/kamailio/kamailio-local.env"

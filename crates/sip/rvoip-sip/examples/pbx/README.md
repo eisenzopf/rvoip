@@ -159,6 +159,23 @@ Proxy provider notes:
   property working rather than failing. The proof is that the tone gate passes
   at both ends: that needs each endpoint to decrypt the other's SRTP, which
   cannot happen unless the crypto attributes crossed verbatim.
+- **rtpengine transcoding is opt-in** and is a different claim from the
+  passthrough labs. Bring the lab up with `PBX_PROXY_TRANSCODE=1` and
+  `amr_transcode_call` becomes available: Kamailio then passes
+  `codec-transcode-*` flags, rtpengine decodes our AMR with its own
+  opencore-amr and re-encodes to PCMU, and the far leg is tone-verified. That
+  makes rtpengine a **third independent foreign decoder** of our AMR, after
+  Asterisk and FreeSWITCH. The cell is gated twice — on the flag and on
+  probing `rtpengine --codecs` — because without the flags it would pass while
+  proving nothing, and without the codecs it would fail for a reason that is
+  not ours.
+  - AMR-NB ↔ PCMU works. **AMR-WB ↔ PCMU does not**: the PCMU leg receives
+    nothing, both with `codec-transcode-AMR-WB` and with
+    `codec-transcode-AMR-WB/16000/1/octet-align=1`, and rtpengine logs no
+    complaint about either. That is unresolved rather than known-unsupported,
+    so the wideband pairing is left out of the default list rather than
+    shipped red; `PBX_AMR_TRANSCODE_PAIRINGS` forces it for anyone picking the
+    thread up.
 - **OpenSIPS stays UDP-only.** Its stock 3.6 image ships no TLS modules; the
   pinned-deb TLS image the sip-proxy suite uses is what would unblock it
   (see `crates/sip/sip-proxy/docs/OPENSIPS_TLS_PROVENANCE.md`), and

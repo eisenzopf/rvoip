@@ -92,7 +92,7 @@ request_route {
                 # A failed rtpengine_manage MUST fail the request: continuing
                 # would relay the SDP untouched and the endpoints would talk
                 # directly, making every media assertion vacuously green.
-                if (!rtpengine_manage("replace-origin replace-session-connection")) {
+                if (!rtpengine_manage("replace-origin replace-session-connection__TRANSCODE_FLAGS__")) {
                     sl_send_reply("503", "Media Relay Unavailable");
                     exit;
                 }
@@ -135,7 +135,14 @@ request_route {
         }
         if (has_body("application/sdp")) {
             # Fail loudly if rtpengine is down (see the loose_route branch).
-            if (!rtpengine_manage("replace-origin replace-session-connection")) {
+            #
+            # The rendered codec flags are empty for the default lab: no such flags
+            # means rtpengine forwards payloads verbatim, which is the whole
+            # point of this peer. up.sh fills it in only when the operator asks
+            # for the transcoding variant, and the two are different claims --
+            # passthrough proves our AMR crosses untouched, transcoding proves
+            # a third independent decoder can read it.
+            if (!rtpengine_manage("replace-origin replace-session-connection__TRANSCODE_FLAGS__")) {
                 sl_send_reply("503", "Media Relay Unavailable");
                 exit;
             }
@@ -159,7 +166,7 @@ onreply_route[MANAGE_REPLY] {
     # The answer side of the offer/answer: 180/183 with SDP and the 200.
     if (status =~ "18[03]|2[0-9][0-9]") {
         if (has_body("application/sdp")) {
-            rtpengine_manage("replace-origin replace-session-connection");
+            rtpengine_manage("replace-origin replace-session-connection__TRANSCODE_FLAGS__");
         }
     }
 }

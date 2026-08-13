@@ -337,6 +337,20 @@ provider_supports_tls() {
   esac
 }
 
+# Whether this provider's rtpengine can transcode AMR at all.
+#
+# Probed rather than assumed: the image is pinned by digest but its codec
+# support depends on how it was built, and a transcode cell against an
+# rtpengine without AMR fails in a way that looks like our bug.
+rtpengine_supports_amr() {
+  rsa_container="rvoip-rtpengine-$1"
+  if ! command -v docker >/dev/null 2>&1; then
+    return 1
+  fi
+  docker exec "$rsa_container" rtpengine --codecs 2>/dev/null |
+    grep -qE "^[[:space:]]*AMR-WB:[[:space:]]*fully supported"
+}
+
 provider_scenario_supported() {
   pss_provider=$1
   pss_scenario=$2
@@ -344,7 +358,17 @@ provider_scenario_supported() {
     kamailio|opensips)
       case "$pss_scenario" in
         registration|basic_call|amr_call) return 0 ;;
-        amr_transcode_call) return 1 ;;
+        amr_transcode_call)
+          # Only when the lab was brought up with transcoding flags AND the
+          # rtpengine image can actually transcode AMR. Both are checked:
+          # without the flags the relay forwards verbatim and the cell would
+          # pass while proving nothing about rtpengine's decoder, and without
+          # the codecs it would fail for a reason that is not our bug.
+          case "${PBX_PROXY_TRANSCODE:-0}" in
+            1|true|yes|on) rtpengine_supports_amr "$pss_provider" ;;
+            *) return 1 ;;
+          esac
+          ;;
         *)
           case "${PBX_PROXY_ALL_SCENARIOS:-0}" in
             1|true|yes|on) return 0 ;;
@@ -681,6 +705,14 @@ amr_transcode_pairing_list() {
   fi
   case "$atpl_provider" in
     freeswitch) printf '%s\n' amrnb_be_pcmu amrwb_be_pcmu ;;
+    # rtpengine transcodes our AMR-NB against PCMU cleanly, tone-verified both
+    # ways. AMR-WB does not: the PCMU leg receives nothing, with
+    # codec-transcode-AMR-WB spelled plainly and with
+    # /16000/1/octet-align=1, and rtpengine logs no complaint about either
+    # spelling -- so this is unresolved rather than known-unsupported, and the
+    # cell is left out rather than shipped red. Force it with
+    # PBX_AMR_TRANSCODE_PAIRINGS if you are working on it.
+    kamailio|opensips) printf '%s\n' amrnb_pcmu ;;
     *) printf '%s\n' amrnb_pcmu amrwb_pcmu ;;
   esac
 }
