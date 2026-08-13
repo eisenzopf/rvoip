@@ -90,6 +90,32 @@ impl AudioCodecSpec {
         (self.clock_rate as usize / 50) * self.channels as usize
     }
 
+    /// Samples this codec requires in exactly one `encode` call, or `None`
+    /// when it accepts whatever length it is handed.
+    ///
+    /// The distinction is not cosmetic. G.711 encodes any buffer sample by
+    /// sample and Opus accepts several frame durations, so a caller can pass
+    /// a 10 ms or 30 ms buffer and get sensible output. AMR cannot: both
+    /// variants are defined on exactly one 20 ms frame, and
+    /// `AmrAdapter::encode` rejects anything else outright rather than
+    /// truncating or padding it.
+    ///
+    /// Callers that re-frame — a transcoding graph fed by a source with a
+    /// different packet time — need to know which of those two worlds a
+    /// target codec lives in before they buffer anything.
+    ///
+    /// G.729 is deliberately absent: its own 10 ms framing is handled inside
+    /// `G729Codec`, which accepts whole multiples and is fed 20 ms buffers
+    /// today, so declaring a requirement here would change working behaviour
+    /// to no benefit.
+    #[must_use]
+    pub fn required_frame_samples(&self) -> Option<usize> {
+        if self.name.eq_ignore_ascii_case("AMR") || self.name.eq_ignore_ascii_case("AMR-WB") {
+            return Some(self.frame_samples_20ms());
+        }
+        None
+    }
+
     /// Construct the codec this spec describes.
     ///
     /// # Errors

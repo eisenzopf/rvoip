@@ -44,21 +44,36 @@ ask *before* it acquires a stream's single-consumer receiver to hand over:
 leftover — it is the correct answer. There is no number to label its frames
 with, and the key the graph computes is stamped onto what it emits.
 
-### AMR's remaining constraint: 20 ms frames
+### Packet time: AMR re-frames rather than refusing
 
-`ConfiguredTranscoder::transcode` decodes, resamples, and encodes. It never
-re-frames. `AmrAdapter::encode` requires exactly one frame — 160 samples
-narrowband, 320 wideband — so a 20 ms source works and a 10 ms or 30 ms one
-fails on every frame with a codec error rather than a graph refusal, because
-the codec built fine and only the frame size is wrong.
+`AmrAdapter::encode` takes exactly one frame — 160 samples narrowband, 320
+wideband — and rejects anything else. A source whose packet time is not 20 ms
+therefore used to fail on every packet: 10 ms is common on G.711 trunks and
+30 ms is what several SIP stacks default to.
 
-This is documented rather than fixed. A re-framing accumulator in the graph
-would change buffering and latency for every codec that flows through it, which
-is a larger decision than AMR support and should be made on its own terms.
+`ConfiguredTranscodingSession` now accumulates decoded PCM and emits exactly
+one frame's worth at a time, so a transcode yields zero, one, or several
+payloads rather than always one. 10 ms packets are joined; 30 ms packets are
+split with the remainder carried forward.
 
-AMR as a *source* can also emit several frames concatenated (redundancy,
-bundling), which a target codec with its own fixed frame size will reject. The
-same accumulator question governs that case.
+Two properties keep this honest:
+
+- **It engages only for codecs that need it.** `AudioCodecSpec::required_frame_samples`
+  returns `Some` for AMR and `None` for everything else, so G.711, Opus and
+  `pcm_s16le` still pass through whatever length they are handed. Nothing about
+  their buffering or latency changed.
+- **Timestamps re-sync whenever the buffer empties**, which is every packet in
+  the 20 ms case. A stream that never needs buffering emits exactly the
+  timestamps it did before, and a stream resuming after a gap picks up the
+  sender's clock rather than free-running from its own.
+
+Emitted timestamps advance one frame at a time, asserted directly — stamping
+several re-framed outputs with their shared input's timestamp would collapse
+them onto one instant and the audio would not play.
+
+AMR as a *source* can still emit several frames concatenated (redundancy,
+bundling). That is a separate case: the accumulator handles a target that needs
+fixed frames, not a source that delivers several at once.
 
 ## The design decision
 
@@ -166,7 +181,7 @@ order matters to anyone adding the next dynamic codec.
 5. **`codec_for_payload_type` still refuses dynamic payload types**, unchanged,
    for the reason in the section above.
 
-6. **Framing** is documented rather than solved — see the 20 ms constraint
+6. **Framing** is solved by the accumulator — see the packet-time section
    above.
 
 ## A related hazard, fixed
