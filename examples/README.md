@@ -14,7 +14,8 @@ cross-transport WebRTC-to-SIP escalation, Amazon Connect integration, and
 hosted Vapi voice agents.
 
 Beta media defaults to **PCMU/PCMA**; the fully integrated optional
-**G.729A/G.729AB** path is developer preview and is not exercised here.
+**G.729A/G.729AB** and **AMR-NB/AMR-WB** paths are developer preview and are
+not exercised here.
 Transports are **UDP** (interop-tested) and **TCP/TLS** (supported), with
 **SDES-SRTP** in the qualified SIP media envelope. **Opus/G.722** are
 developer-preview additions. **DTLS-SRTP, ICE, external TURN configuration,

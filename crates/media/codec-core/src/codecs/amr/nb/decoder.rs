@@ -689,8 +689,9 @@ impl Decoder {
         if !self.started {
             return Err(CodecError::feature_not_enabled(
                 "AMR-NB cannot conceal the first frame of a stream: the reference starts in \
-                 the DTX state and routes that frame to comfort noise, which is not \
-                 implemented (see codec-core/docs/AMR_IMPLEMENTATION_PLAN.md)",
+                 the DTX state and routes that frame to comfort noise rather than to \
+                 concealment, and concealment here extrapolates from decoder history that \
+                 does not exist yet. Decode at least one frame first.",
             ));
         }
         let mut ctx = DspContext::default();
