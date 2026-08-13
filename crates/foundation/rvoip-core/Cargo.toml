@@ -100,6 +100,13 @@ identity = []
 webrtc = []
 aauth-experimental = []
 identity-fingerprint-binding = []
+# AMR in the media graph. Opt-in rather than default, unlike `opus` above:
+# these are full 3GPP speech codecs and most consumers of the graph never
+# carry one. Without them `AudioCodecSpec::build`'s AMR arm is not compiled,
+# so the graph refuses AMR no matter what payload type a transport reports.
+amr-nb = ["rvoip-media-core/amr-nb"]
+amr-wb = ["rvoip-media-core/amr-wb"]
+amr = ["amr-nb", "amr-wb"]
 # V2.A.8 — Exposes the opt-in vCon JWS signing API. The normal `vcon`
 # feature already pulls the canonical document model used by core's
 # unsigned auto-emission path.

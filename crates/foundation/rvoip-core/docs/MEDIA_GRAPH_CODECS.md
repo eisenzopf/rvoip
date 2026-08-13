@@ -14,36 +14,51 @@ added.
 | PCMU | 0 | RFC 3551 static assignment |
 | PCMA | 8 | RFC 3551 static assignment |
 | G.729 | 18 | RFC 3551 static assignment |
-| Opus | 111 | Conventional dynamic PT |
+| Opus | 111, or whatever was negotiated | Conventional dynamic PT, overridden by a reported one |
+| AMR-NB / AMR-WB | The negotiated PT only | `amr-nb` / `amr-wb` feature; no conventional fallback exists |
 | `pcm_s16le` | 120 | Internal only; transports must not advertise or emit it |
 
-The table lives in three places that must agree:
-[`bridge::codec_to_pt`](../src/bridge/mod.rs) (name → key),
-`media_graph::create_configured_codec` (key → constructed codec), and
-`media_graph::codec_for_payload_type` (key → codec descriptor, for the
-`update_route` compatibility wrapper).
+A codec's key is `CodecInfo::payload_type` when the transport reported one, and
+otherwise its row in [`bridge::codec_to_pt`](../src/bridge/mod.rs). The
+reported value wins, which is what admits a dynamic codec at all: its number is
+chosen per call, so no table row could describe it.
+
+Admission goes through `media_graph::admit_codec`, which resolves that key
+**and** builds the codec to prove it exists, discarding the result. Both halves
+are necessary. Before payload types were carried, a resolvable key implied a
+buildable codec because keys came from a table of five the graph could all
+construct; now a transport can report any number, and a key alone would let a
+misspelled codec name through the door to fail somewhere downstream.
 
 ## What it does not carry
 
-**AMR-NB and AMR-WB.** Both variants are implemented in `rvoip-codec-core`,
-reachable through media-core's `AudioCodecSpec` and `AmrAdapter`, and carried
-end to end on the SIP media path — see
-[`AMR_IMPLEMENTATION_STATUS.md`](../../../media/codec-core/docs/AMR_IMPLEMENTATION_STATUS.md).
-The graph refuses them.
+Any codec that reports no payload type and has no row in `codec_to_pt`, and any
+codec whose name does not build. Both fail at every entry point —
+`start_media_graph`, `add_sink` / `add_managed_sink`, `update_source_codec`,
+`update_sink_codec` — with `RvoipError::UnsupportedCodec`, naming the codec.
+`validate_media_graph_codec` exposes the same check standalone so a caller can
+ask *before* it acquires a stream's single-consumer receiver to hand over:
+`start_media_graph` takes that receiver by value and drops it on the error path.
 
-`codec_to_pt("AMR")` returns `None`, so every graph entry point — the
-`start_media_graph` source codec, `add_sink` / `add_managed_sink`,
-`update_source_codec` and `update_sink_codec` — fails with
-`RvoipError::UnsupportedCodec("AMR")`, naming the codec. `validate_media_graph_codec`
-exposes the same check standalone so a caller can ask *before* it acquires a
-stream's single-consumer receiver to hand over, which is worth doing:
-`start_media_graph` takes that receiver by value and drops it on the error
-path. The refusal is deliberate and it is loud; nothing is silently degraded.
+**AMR without a reported payload type is still refused**, and that is not a
+leftover — it is the correct answer. There is no number to label its frames
+with, and the key the graph computes is stamped onto what it emits.
 
-The consequence is narrow and worth stating exactly: **a SIP AMR call works,
-but it cannot be published over UCTP, recorded through the graph, or fanned out
-to MOQT.** "AMR is implemented" and "AMR works everywhere media flows" are
-different claims, and only the first is true.
+### AMR's remaining constraint: 20 ms frames
+
+`ConfiguredTranscoder::transcode` decodes, resamples, and encodes. It never
+re-frames. `AmrAdapter::encode` requires exactly one frame — 160 samples
+narrowband, 320 wideband — so a 20 ms source works and a 10 ms or 30 ms one
+fails on every frame with a codec error rather than a graph refusal, because
+the codec built fine and only the frame size is wrong.
+
+This is documented rather than fixed. A re-framing accumulator in the graph
+would change buffering and latency for every codec that flows through it, which
+is a larger decision than AMR support and should be made on its own terms.
+
+AMR as a *source* can also emit several frames concatenated (redundancy,
+bundling), which a target codec with its own fixed frame size will reject. The
+same accumulator question governs that case.
 
 ## The design decision
 
@@ -109,68 +124,69 @@ is a broken one" — the framing is wrong and the peer cannot parse the stream a
 all. Any future AMR support must reach the codec through the negotiated fmtp,
 never through a payload type alone.
 
-## What wiring AMR in actually requires
+## How AMR was wired in
 
-Ordered, because the first two are what make this a feature rather than a patch.
+This section was a plan. It is now a record of what was done, kept because the
+order matters to anyone adding the next dynamic codec.
 
-1. **A negotiated-PT channel into the graph.** `MediaStream::codec()` returns
-   `capability::CodecInfo`, which carries name, clock rate, channels and fmtp —
-   and no payload type. No transport reports its negotiated PT to the graph
-   today. Either add `payload_type: Option<u8>` to `CodecInfo` (`#[serde(default)]`
-   keeps the wire format compatible; roughly 106 struct-literal sites across 11
-   crates need updating), or add a payload-type-carrying entry point beside
-   `add_managed_sink` / `update_source_codec` / `update_sink_codec`. The graph's
-   internal `Command::UpdateRoute` already carries explicit payload types, so
-   the actor side needs little change.
+1. **A negotiated-PT channel into the graph.** `CodecInfo` gained
+   `payload_type: Option<u8>` with `#[serde(default)]`, round-tripped through
+   the `Codec` wire shape so a value cannot be silently lost on the way back.
+   `None` means "not reported", never "no payload type" — a consumer that needs
+   one must decide what to do about the absence rather than substitute a guess.
 
-2. **Adapters populating it.** Plumbing alone changes nothing. SIP, WebRTC,
-   QUIC and WebTransport each have to report the payload type they negotiated,
-   or the field is always `None` and AMR still cannot attach.
+2. **Adapters populating it.** Three producers report one, and they are the
+   three that know: the SIP adapter (`codec_descriptor`, where it is already
+   the argument the SDP answer settled on), the WebRTC SDP parser (read off the
+   m-line, the same number the fmtp beside it is looked up by), and
+   `codec_for_payload_type`, whose input is the payload type. Capability
+   advertisements, pre-negotiation placeholders and synthesised fallbacks all
+   report `None`: an advertisement is not a result.
 
-3. **A feature flag.** rvoip-core pulls media-core as `features = ["opus"]`,
-   and `AudioCodecSpec::build`'s AMR arm is behind `amr-nb` / `amr-wb`. Without
-   enabling them the arm is not compiled and no amount of routing reaches it.
-   AMR is a full 3GPP codec, so this should be opt-in rather than added to
-   rvoip-core's defaults.
+   UCTP negotiates codecs **by name** and has no payload type to report, which
+   is why QUIC and WebTransport still resolve through the name table.
 
-4. **Codec construction through `AudioCodecSpec`, not `CodecFactory`.**
-   `CodecFactory::create_codec(payload_type, sample_rate, channels)` has no
-   fmtp parameter and therefore cannot build AMR at all. media-core already
-   has the replacement:
-   [`AudioCodecSpec`](../../../media/media-core/src/codec/spec.rs) carries name,
-   payload type, clock rate, channels and fmtp, and its `build()` handles AMR
-   today. Its module doc names this exact gap — Opus "got a special case in the
-   transcoder and another in `rvoip-core::media_graph`", and AMR "cannot get one
-   at all". `create_configured_codec` should migrate onto it rather than grow a
-   third special case.
+3. **A feature flag.** `amr-nb` / `amr-wb` / `amr` on rvoip-core, forwarding to
+   media-core. Opt-in rather than default, unlike `opus`: these are full 3GPP
+   codecs and most consumers of the graph never carry one.
 
-   One trap when migrating: the graph's inline Opus arm honours
-   `maxaveragebitrate` and `cbr=1`, while `AudioCodecSpec::build`'s Opus arm
-   uses `OpusConfig::default()`. A naive migration silently drops both.
+4. **Codec construction through `AudioCodecSpec`.** `create_configured_codec`
+   keeps its existing arms for payload types 0/8/18/111/`pcm_s16le` and falls
+   through to `AudioCodecSpec::build` for everything else — the only
+   constructor that takes fmtp, which AMR needs because `octet-align` decides
+   the framing.
 
-5. **`codec_for_payload_type` left refusing dynamic payload types**, for the
-   reason in the section above.
+   The existing arms were deliberately *not* migrated. The trap this document
+   recorded is real: the graph's inline Opus arm honours `maxaveragebitrate`
+   and `cbr=1`, and `AudioCodecSpec::build`'s Opus arm uses
+   `OpusConfig::default()`, so migrating it would silently drop both.
+   Consolidating those two is worth doing on its own terms, by teaching
+   `AudioCodecSpec` the fmtp handling rather than by discarding it here.
 
-6. **Framing.** `AmrAdapter::encode` requires exactly one frame — 160 samples
-   narrowband, 320 wideband. The graph's transcode path resamples but never
-   re-frames, so a 20 ms source works and a 10 ms or 30 ms one fails on every
-   frame. AMR as a *source* can also return several frames concatenated
-   (redundancy, bundling), which a target codec with its own fixed frame size
-   will then reject. Whoever wires AMR in should decide whether the graph grows
-   a re-framing accumulator or documents a 20 ms-only constraint.
+5. **`codec_for_payload_type` still refuses dynamic payload types**, unchanged,
+   for the reason in the section above.
 
-## A related hazard, unfixed
+6. **Framing** is documented rather than solved — see the 20 ms constraint
+   above.
 
-The QUIC and WebTransport media pumps both do:
+## A related hazard, fixed
+
+The QUIC and WebTransport media pumps both did:
 
 ```rust
 let default_payload_type = rvoip_core::bridge::codec_to_pt(&codec.name).unwrap_or(111);
 ```
 
-Where the graph refuses a codec it does not know, these two stamp **Opus's
-payload type on the datagrams of any codec the table does not know** — AMR
-included — for every frame that does not carry its own payload type
-(transcoder output and synthetic frames both have `payload_type: None`). The
-graph boundary fails loudly; this one does not. It is out of scope for the AMR
-decision above, but it is the same missing-negotiated-PT root cause and should
-be fixed by item 1 rather than by widening the `codec_to_pt` table.
+which stamped **Opus's payload type on the datagrams of any codec the table did
+not know** — AMR included — for every frame that did not carry its own
+(transcoder output and synthetic frames both leave it `None`). Where the graph
+refused an unknown codec and said so, these two accepted it and corrupted it,
+producing a well-formed datagram that lies about its contents. A receiver
+cannot detect that; there is nothing malformed to notice.
+
+Both now resolve through `bridge::resolve_payload_type`, which prefers the
+negotiated value and falls back to the name table. When neither yields a
+number the frame is dropped with a counter and a log line naming the codec —
+`uctp_datagram_drops_total{reason="unlabelled-payload-type"}` — rather than
+sent under a fabricated one. A dropped frame is visible and recoverable; a
+mislabelled one is neither.

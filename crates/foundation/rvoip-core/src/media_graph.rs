@@ -520,8 +520,7 @@ impl MediaGraphHandle {
         codec: CodecInfo,
         target: mpsc::Sender<MediaFrame>,
     ) -> Result<ManagedMediaRoute> {
-        payload_type_for_codec(&codec)
-            .ok_or_else(|| RvoipError::UnsupportedCodec(codec.name.clone()))?;
+        admit_codec(&codec)?;
         let Some(admission) = self.sink_admission.try_acquire() else {
             metrics::counter!(
                 "rvoip_media_graph_sink_admission_rejections_total",
@@ -590,8 +589,7 @@ impl MediaGraphHandle {
 
     /// Update the source codec and rebuild every codec group's transcoder.
     pub async fn update_source_codec(&self, codec: CodecInfo) -> Result<()> {
-        let source_pt = payload_type_for_codec(&codec)
-            .ok_or_else(|| RvoipError::UnsupportedCodec(codec.name.clone()))?;
+        let source_pt = admit_codec(&codec)?;
         let (ack, done) = oneshot::channel();
         self.send_control(Command::UpdateSourceCodec {
             codec,
@@ -604,8 +602,7 @@ impl MediaGraphHandle {
 
     /// Move one sink to the codec group represented by `codec`.
     pub async fn update_sink_codec(&self, route_id: MediaRouteId, codec: CodecInfo) -> Result<()> {
-        let target_pt = payload_type_for_codec(&codec)
-            .ok_or_else(|| RvoipError::UnsupportedCodec(codec.name.clone()))?;
+        let target_pt = admit_codec(&codec)?;
         let (ack, done) = oneshot::channel();
         self.send_control(Command::UpdateSinkCodec {
             route_id,
@@ -753,15 +750,45 @@ fn map_try_send_error(error: mpsc::error::TrySendError<Command>) -> RvoipError {
 }
 
 fn payload_type_for_codec(codec: &CodecInfo) -> Option<u8> {
-    codec_to_pt(codec.name.trim())
+    // A reported payload type wins over the name table, which is what lets a
+    // dynamic codec in at all: its number is chosen per call, so there is no
+    // row that could describe it. AMR routinely negotiates two at once that
+    // differ only in `octet-align`, and this key is stamped onto the frames
+    // the graph emits — deriving it from the name would put the wrong number
+    // on the wire for one of them.
+    codec
+        .payload_type
+        .or_else(|| codec_to_pt(codec.name.trim()))
 }
 
 /// Validate codec identity before transferring ownership of a stream's
 /// single-consumer receiver into a graph.
+///
+/// Having a payload type is necessary but not sufficient. Before this field
+/// existed, a resolvable key implied a buildable codec, because keys came from
+/// a table of five codecs the graph could all construct. Now a transport can
+/// report any number, so admission has to end in a codec that actually exists
+/// — otherwise a typo in a codec name would be accepted here and fail
+/// somewhere downstream, which is the "quietly half-works" outcome the whole
+/// boundary is meant to avoid.
+///
+/// The codec built here is discarded. That is one construction per stream
+/// admission, not per frame.
 pub fn validate_media_graph_codec(codec: &CodecInfo) -> Result<()> {
-    payload_type_for_codec(codec)
-        .map(|_| ())
-        .ok_or_else(|| RvoipError::UnsupportedCodec(codec.name.clone()))
+    admit_codec(codec).map(|_| ())
+}
+
+/// Resolve a codec's graph key and prove the codec behind it can be built.
+///
+/// Every entry point goes through here so the two checks cannot drift apart;
+/// each one previously resolved the key alone, which was sufficient only while
+/// keys came from a fixed table of buildable codecs.
+fn admit_codec(codec: &CodecInfo) -> Result<u8> {
+    let payload_type = payload_type_for_codec(codec)
+        .ok_or_else(|| RvoipError::UnsupportedCodec(codec.name.clone()))?;
+    create_configured_codec(codec, payload_type)
+        .map(|_| payload_type)
+        .map_err(|_| RvoipError::UnsupportedCodec(codec.name.clone()))
 }
 
 async fn await_update(done: oneshot::Receiver<Result<()>>) -> Result<()> {
@@ -1146,7 +1173,25 @@ fn create_configured_codec(
             codec.clock_rate_hz,
             codec.channels,
         )?)),
-        _ => Err(CodecError::UnsupportedPayloadType { payload_type }.into()),
+        // Anything with a negotiated payload type goes through media-core's
+        // own spec, which is the only constructor that takes fmtp — and for
+        // AMR fmtp is not decoration: `octet-align` decides the framing, so
+        // building it without the negotiated parameters produces a stream no
+        // peer can parse rather than a degraded one.
+        //
+        // The arms above stay as they are. They predate `AudioCodecSpec` and
+        // the Opus one honours `maxaveragebitrate` and `cbr=1`, which
+        // `AudioCodecSpec::build` does not; routing them here would silently
+        // drop both.
+        _ => rvoip_media_core::codec::spec::AudioCodecSpec {
+            name: codec.name.clone(),
+            payload_type,
+            clock_rate: codec.clock_rate_hz,
+            channels: codec.channels,
+            fmtp: codec.fmtp.clone(),
+        }
+        .build()
+        .map_err(|_| CodecError::UnsupportedPayloadType { payload_type }.into()),
     }
 }
 
@@ -3460,6 +3505,58 @@ mod tests {
             ));
             graph.shutdown();
         }
+    }
+
+    /// The other half of the boundary above, and the reason it is a boundary
+    /// rather than a ban: AMR is refused for want of a payload type, so a
+    /// transport that reports one gets in.
+    ///
+    /// Both variants are checked at the two numbers a single AMR session
+    /// commonly negotiates at once — 106 bandwidth-efficient and 107
+    /// octet-aligned. That pair is exactly what no name-keyed table could
+    /// have expressed, so it is the case worth pinning.
+    #[cfg(feature = "amr-nb")]
+    #[tokio::test]
+    async fn amr_is_admitted_once_a_transport_reports_its_negotiated_payload_type() {
+        for (name, clock_rate, payload_type, fmtp) in [
+            ("AMR", 8_000, 106_u8, None),
+            ("AMR", 8_000, 107, Some("octet-align=1".to_string())),
+        ] {
+            let amr = CodecInfo {
+                name: name.into(),
+                clock_rate_hz: clock_rate,
+                channels: 1,
+                fmtp,
+                payload_type: Some(payload_type),
+            };
+
+            validate_media_graph_codec(&amr).unwrap_or_else(|error| {
+                panic!("{name} at PT {payload_type} must be admitted, got {error:?}")
+            });
+
+            let (_source_tx, source_rx) = mpsc::channel(1);
+            let graph = start_media_graph(source_rx, amr, Default::default())
+                .unwrap_or_else(|error| panic!("{name} graph must start, got {error:?}"));
+            graph.shutdown();
+        }
+    }
+
+    /// Reporting a payload type is not a way to smuggle in a codec the graph
+    /// cannot build: admission still has to end in a real codec.
+    #[tokio::test]
+    async fn a_reported_payload_type_does_not_admit_a_codec_that_cannot_be_built() {
+        let bogus = CodecInfo {
+            name: "not-a-codec".into(),
+            clock_rate_hz: 8_000,
+            channels: 1,
+            fmtp: None,
+            payload_type: Some(100),
+        };
+        let (_source_tx, source_rx) = mpsc::channel(1);
+        assert!(
+            start_media_graph(source_rx, bogus, Default::default()).is_err(),
+            "a payload type is not evidence that a codec exists"
+        );
     }
 
     #[tokio::test]
