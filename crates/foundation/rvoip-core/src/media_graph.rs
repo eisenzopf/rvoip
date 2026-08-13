@@ -3541,6 +3541,114 @@ mod tests {
         }
     }
 
+    /// Admission is not the claim that matters. This pushes a real AMR frame
+    /// through the graph and takes PCMU out the other side, which is the thing
+    /// UCTP publishing, recording and MOQT fan-out actually need.
+    ///
+    /// The payload is produced by the AMR encoder rather than by hand, so the
+    /// graph's own decoder has to agree with it — a hand-written buffer would
+    /// only prove the decoder rejects garbage in some particular way.
+    ///
+    /// `transcode_operations` is the non-vacuity guard. Without it a graph
+    /// that quietly forwarded the AMR bytes untouched would satisfy every
+    /// other assertion here: a frame arrives, at the right timestamp, on the
+    /// right sink. That count is what proves the AMR decoder ran.
+    #[cfg(all(feature = "amr-nb", feature = "amr-wb"))]
+    #[tokio::test]
+    async fn an_amr_frame_crosses_the_graph_and_comes_out_as_pcmu() {
+        use rvoip_media_core::types::AudioFrame;
+
+        // Both variants, because they take different routes through the graph.
+        // Narrowband is already at PCMU's 8 kHz and skips conversion entirely;
+        // wideband is 16 kHz and 320 samples, so it goes through the resampler
+        // on the way out. A pass on narrowband alone says nothing about that.
+        for (name, clock_rate, frame_samples, payload_type) in
+            [("AMR", 8_000_u32, 160_usize, 107_u8), ("AMR-WB", 16_000, 320, 105)]
+        {
+            let amr_info = CodecInfo {
+                name: name.into(),
+                clock_rate_hz: clock_rate,
+                channels: 1,
+                fmtp: Some("octet-align=1".into()),
+                payload_type: Some(payload_type),
+            };
+
+            // 20 ms of a tone, which is exactly one frame for either variant.
+            let samples: Vec<i16> = (0..frame_samples)
+                .map(|n| {
+                    let t = n as f64 / f64::from(clock_rate);
+                    (8_000.0 * (2.0 * std::f64::consts::PI * 440.0 * t).sin()) as i16
+                })
+                .collect();
+            let mut encoder = rvoip_media_core::codec::spec::AudioCodecSpec {
+                name: amr_info.name.clone(),
+                payload_type,
+                clock_rate,
+                channels: 1,
+                fmtp: amr_info.fmtp.clone(),
+            }
+            .build()
+            .unwrap_or_else(|error| panic!("{name} codec must build, got {error:?}"));
+            let amr_payload = encoder
+                .encode(&AudioFrame::new(samples, clock_rate, 1, 0))
+                .unwrap_or_else(|error| {
+                    panic!("{frame_samples} samples is one {name} frame, got {error:?}")
+                });
+            assert!(
+                !amr_payload.is_empty(),
+                "an empty {name} payload would make the assertions below meaningless"
+            );
+
+            let (source_tx, source_rx) = mpsc::channel(4);
+            let graph = start_media_graph(source_rx, amr_info, Default::default())
+                .unwrap_or_else(|error| panic!("{name} graph must start, got {error:?}"));
+            let (pcmu_tx, mut pcmu_rx) = mpsc::channel(4);
+            graph
+                .add_sink(codec("pcmu", 8_000), pcmu_tx)
+                .expect("pcmu is a valid sink for an AMR source");
+            graph.snapshot().await;
+
+            source_tx
+                .send(MediaFrame {
+                    stream_id: StreamId::from_string("strm_amr_graph_test"),
+                    kind: StreamKind::Audio,
+                    payload: Bytes::from(amr_payload),
+                    timestamp_rtp: 12_345,
+                    captured_at: Utc::now(),
+                    payload_type: Some(payload_type),
+                })
+                .await
+                .expect("the graph is accepting frames");
+
+            let received = tokio::time::timeout(Duration::from_secs(2), pcmu_rx.recv())
+                .await
+                .unwrap_or_else(|_| panic!("the {name} frame must reach the PCMU sink"))
+                .expect("the sink channel stays open");
+
+            assert_eq!(received.timestamp_rtp, 12_345);
+            assert_eq!(
+                received.payload.len(),
+                160,
+                "{name}: 20 ms of PCMU at 8 kHz is 160 octets, one per sample"
+            );
+            assert!(
+                received
+                    .payload
+                    .iter()
+                    .any(|&byte| byte != received.payload[0]),
+                "{name}: a constant payload would mean the decoder produced silence \
+                 rather than the tone that was encoded"
+            );
+
+            let snapshot = graph.snapshot().await;
+            assert_eq!(
+                snapshot.transcode_operations, 1,
+                "{name}: the frame must have been decoded and re-encoded, not forwarded"
+            );
+            graph.shutdown();
+        }
+    }
+
     /// Reporting a payload type is not a way to smuggle in a codec the graph
     /// cannot build: admission still has to end in a real codec.
     #[tokio::test]
