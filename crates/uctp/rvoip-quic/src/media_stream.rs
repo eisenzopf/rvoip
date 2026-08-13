@@ -93,7 +93,13 @@ impl QuicDatagramMediaStream {
         // Outbound pump: frames_out → pack → quinn::Connection::send_datagram.
         let conn_for_pump = conn.clone();
         let stream_id_for_pump = id.clone();
-        let default_payload_type = rvoip_core::bridge::codec_to_pt(&codec.name).unwrap_or(111);
+        // `None` when this codec has neither a negotiated payload type nor a
+        // conventional one. Frames that cannot be labelled are dropped below
+        // rather than sent under a fabricated number — this used to default to
+        // Opus's 111, which put well-formed datagrams on the wire claiming to
+        // carry a codec they did not.
+        let default_payload_type = rvoip_core::bridge::resolve_payload_type(&codec);
+        let codec_name_for_pump = codec.name.clone();
         let ssrc = stable_ssrc(&id);
         let outbound_task = tokio::spawn(async move {
             let mut seq: u32 = 0;
@@ -114,13 +120,28 @@ impl QuicDatagramMediaStream {
                     seq,
                 )
                 .entered();
+                let Some(payload_type) = frame.payload_type.or(default_payload_type) else {
+                    metrics::counter!(
+                        "uctp_datagram_drops_total",
+                        "direction" => "out",
+                        "transport" => "quic",
+                        "reason" => "unlabelled-payload-type"
+                    )
+                    .increment(1);
+                    debug!(
+                        codec = %codec_name_for_pump,
+                        "rvoip-quic: no negotiated or conventional payload type for this \
+                         codec; dropping rather than mislabelling the datagram"
+                    );
+                    continue;
+                };
                 let datagram = RtpDatagram {
                     flags: 0,
                     stream_local_id,
                     seq,
                     rtp: RtpMediaPayload {
                         payload: frame.payload,
-                        payload_type: frame.payload_type.unwrap_or(default_payload_type),
+                        payload_type,
                         sequence_number: rtp_seq,
                         timestamp: frame.timestamp_rtp,
                         ssrc,
@@ -502,6 +523,7 @@ mod receiver_ownership_tests {
                 clock_rate_hz: 48_000,
                 channels: 1,
                 fmtp: None,
+                payload_type: None,
             },
             direction: Direction::Inbound,
             stream_local_id: 1,
