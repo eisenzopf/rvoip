@@ -77,6 +77,24 @@ impl DirectionalMediaBridgePlan {
 /// ([`crate::RvoipError::UnsupportedCodec`]) instead of forwarding an
 /// arbitrary dynamic PT (e.g. `96`) and getting a generic transcoder
 /// error several layers down.
+///
+/// # AMR is absent by decision, not by oversight
+///
+/// AMR-NB and AMR-WB are implemented in `rvoip-codec-core`, reachable through
+/// media-core, and carried end to end on the SIP media path — and they are
+/// deliberately not in this table, so the media graph refuses them.
+///
+/// A name-to-key function cannot express AMR. One session routinely negotiates
+/// the same AMR variant under two payload types that differ only in
+/// `octet-align` (the SIP integration test uses 106 and 107), so there is no
+/// single key to return; and the key this function produces is stamped onto
+/// outgoing frames, so inventing one puts a wrong payload type on the wire.
+/// AMR must key on its negotiated payload type instead, which means reaching
+/// the graph through a payload-type-carrying entry point that does not exist
+/// yet.
+///
+/// See `docs/MEDIA_GRAPH_CODECS.md` for the full decision and what wiring AMR
+/// in would require. Do not add AMR here without reading it.
 pub fn codec_to_pt(name: &str) -> Option<u8> {
     match name.to_ascii_lowercase().as_str() {
         "pcmu" | "g.711-mu" | "g711-mu" | "g711-u" => Some(0),
@@ -98,6 +116,30 @@ mod codec_mapping_tests {
         assert_eq!(codec_to_pt("pcm_s16le"), Some(PCM_S16LE));
         assert_eq!(codec_to_pt("PCM_S16LE"), Some(PCM_S16LE));
         assert_eq!(PCM_S16LE, 120);
+    }
+
+    /// AMR's absence is a decision, and this pins it so it cannot be undone by
+    /// pattern-matching on the Opus row.
+    ///
+    /// Giving AMR a conventional key here would compile and would look like
+    /// the `opus => 111` line above, but the key this function returns is
+    /// stamped onto emitted frames, and AMR's payload type is negotiated per
+    /// call — one session commonly carries the same variant at two payload
+    /// types that differ only in `octet-align`. If AMR is ever wired into the
+    /// media graph it must arrive with its negotiated payload type, which
+    /// means a new entry point rather than a new row here.
+    ///
+    /// See `docs/MEDIA_GRAPH_CODECS.md` before changing this.
+    #[test]
+    fn amr_has_no_conventional_key_by_decision() {
+        for name in ["AMR", "amr", "AMR-WB", "amr-wb"] {
+            assert_eq!(
+                codec_to_pt(name),
+                None,
+                "{name} must stay absent so the graph refuses it loudly \
+                 rather than stamping a fabricated payload type on the wire"
+            );
+        }
     }
 }
 

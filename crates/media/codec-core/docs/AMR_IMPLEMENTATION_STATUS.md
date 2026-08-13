@@ -26,6 +26,7 @@
 | **AMR-NB conformance, encode** | **`spch_dos`, 425 frames, every bit** |
 | **AMR-NB conformance, decode** | **`spch_dos`, 425 frames, sample for sample** |
 | **AMR reachable through media-core** | **Both variants resolve, encode and decode end to end** |
+| **AMR through `rvoip-core`'s media graph** | **Not wired** — UCTP publishing, graph recording and MOQT fan-out refuse AMR; see "Where AMR does not flow" |
 | **Transcoding** | **Six AMR pairs, tested by property** |
 | **`mode-change-period` / `-neighbor`** | **Honoured** — they were parsed and obeyed by nothing |
 | **Performance** | **Measured, with a gate** — see below |
@@ -630,8 +631,21 @@ survive the two parameters the lag and the codebook consume in between.
    have `fuzz/fuzz_targets/amr_encode.rs` beside the decoders' target, and both
    run from `tools/run-amr-fuzz.sh`.
 
-   The one item above still open is **6**, and it is an evidence gap rather than
-   a code gap: it blocks no feature and no rate is unimplemented.
+8. **AMR through `rvoip-core`'s media graph.** Not wired, so UCTP publishing,
+   graph recording and MOQT fan-out cannot observe an AMR call — see "Where AMR
+   does not flow" above. Unlike **6** this *is* a code gap, but it is not an AMR
+   gap: the codec builds fine from a name and an fmtp
+   (`AudioCodecSpec::build`), and what is missing is a negotiated payload type
+   at the graph's entry points, which no transport reports to it today for any
+   codec. The design question it turned on — whether AMR gets a conventional
+   payload type the way Opus got 111 — is **settled: it does not**, and the
+   reasoning plus the six-item work list is in
+   [`MEDIA_GRAPH_CODECS.md`](../../../foundation/rvoip-core/docs/MEDIA_GRAPH_CODECS.md).
+
+   The two items above still open are **6** and **8**. **6** is an evidence gap
+   rather than a code gap: it blocks no feature and no rate is unimplemented.
+   **8** is a code gap in `rvoip-core`, not in the codec, and it blocks the
+   non-SIP media paths only.
 
 ## Conformance against the normative sequences
 
@@ -668,6 +682,41 @@ instead of from the C. Both are described above. All six sequences now compare
 with zero tolerance.
 
 Mutation-checked: turning DTX off fails mode 8 at frame 0.
+
+## Where AMR does not flow
+
+Everything above is about whether AMR *codes* correctly, and it does. It is a
+separate question whether AMR reaches every path media travels in this
+workspace, and there the answer is no.
+
+**AMR cannot enter `rvoip-core`'s media graph.** That graph is the
+one-source-to-many fan-out behind UCTP publishing, recording and MOQT
+fan-out. It identifies every codec by a key derived from the codec *name*
+(`rvoip_core::bridge::codec_to_pt`), AMR is deliberately not in that table, and
+every graph entry point refuses an AMR codec with
+`RvoipError::UnsupportedCodec`, naming it. The refusal is also available
+standalone as `validate_media_graph_codec`, so a caller can ask before it
+acquires a stream's single-consumer receiver to hand over.
+
+So the honest scope of "a real AMR call" in the table above is: **a SIP AMR
+call works, and it cannot be published over UCTP, recorded through the media
+graph, or fanned out to MOQT.** No claim in this document is weakened by that —
+the interop rows are all SIP media path — but "AMR is implemented" should not be
+read as "AMR works everywhere media flows".
+
+The reason is not that AMR is hard to construct there; media-core's
+`AudioCodecSpec::build` already builds either variant from a name and an fmtp.
+It is that the graph's entry points derive a payload type from a codec name,
+and AMR has no such number to derive: one session routinely negotiates the same
+variant under two payload types differing only in `octet-align` (this repo's own
+`amr_call_integration.rs` uses 106 and 107), and the key the graph computes is
+stamped onto the frames it emits, so inventing one puts a wrong payload type on
+the wire.
+
+That was settled as a design decision rather than left open: **AMR gets no
+conventional payload type; dynamic codecs must key on the negotiated one.** The
+decision, its evidence, and the six things wiring AMR in would require are in
+[`crates/foundation/rvoip-core/docs/MEDIA_GRAPH_CODECS.md`](../../../foundation/rvoip-core/docs/MEDIA_GRAPH_CODECS.md).
 
 ## What is *not* claimed
 

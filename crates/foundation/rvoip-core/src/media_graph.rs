@@ -4,6 +4,24 @@
 //! media graph owns that receiver once and exposes dynamic sink routes so a
 //! call peer, recorder, UCTP publisher, and MOQT publisher can observe the
 //! same source without racing for frames.
+//!
+//! # Which codecs the graph carries
+//!
+//! PCMU, PCMA, G.729, Opus, and the internal `pcm_s16le`. Every codec entering
+//! the graph is identified by a key derived from its *name*, via
+//! [`crate::bridge::codec_to_pt`]; a name outside that table is refused with
+//! [`RvoipError::UnsupportedCodec`] before any receiver ownership transfers.
+//!
+//! **AMR-NB and AMR-WB are not among them.** They are fully implemented in
+//! `rvoip-codec-core` and carried end to end on the SIP media path, but they
+//! cannot flow through this graph — so an AMR call cannot be published over
+//! UCTP, recorded through the graph, or fanned out to MOQT. The boundary is
+//! deliberate: AMR's payload type is negotiated per call and one session
+//! routinely uses two of them at once, so a name-derived key cannot describe
+//! it, and this graph stamps that key onto the frames it emits.
+//!
+//! The decision, its evidence, and the six things wiring AMR in would require
+//! are recorded in `docs/MEDIA_GRAPH_CODECS.md`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -3391,6 +3409,50 @@ mod tests {
 
         let mut to_pcm = ConfiguredTranscodingSession::new(&opus, 111, &pcm, PCM_S16LE).unwrap();
         assert_eq!(to_pcm.transcode(&encoded).unwrap().len(), 640);
+    }
+
+    /// The AMR boundary, asserted rather than only documented.
+    ///
+    /// AMR codes correctly everywhere else in this workspace, so the failure
+    /// that matters is not "AMR is broken" but "AMR quietly half-works here".
+    /// This pins the two properties that keep it honest: the refusal names the
+    /// codec, and it is available through `validate_media_graph_codec` — which
+    /// exists precisely so a caller can learn the answer *before* it acquires
+    /// a stream's single-consumer receiver to hand over, since
+    /// `start_media_graph` consumes that receiver whether or not it succeeds.
+    ///
+    /// See `docs/MEDIA_GRAPH_CODECS.md`.
+    #[tokio::test]
+    async fn amr_is_refused_by_name_on_every_graph_entry_point() {
+        for name in ["AMR", "AMR-WB"] {
+            let amr = codec(name, if name == "AMR" { 8_000 } else { 16_000 });
+
+            match validate_media_graph_codec(&amr) {
+                Err(RvoipError::UnsupportedCodec(refused)) => assert_eq!(
+                    refused, name,
+                    "the diagnostic must name the codec that was refused"
+                ),
+                other => panic!("{name} must be refused by the media graph, got {other:?}"),
+            }
+
+            // The same refusal as a source codec.
+            let (_source_tx, source_rx) = mpsc::channel(1);
+            assert!(matches!(
+                start_media_graph(source_rx, amr.clone(), Default::default()).map(|_| ()),
+                Err(RvoipError::UnsupportedCodec(_))
+            ));
+
+            // And as a sink codec on an otherwise-valid graph.
+            let (_pcmu_tx, pcmu_rx) = mpsc::channel(1);
+            let graph = start_media_graph(pcmu_rx, codec("pcmu", 8_000), Default::default())
+                .expect("pcmu graph starts");
+            let (target_tx, _target_rx) = mpsc::channel(1);
+            assert!(matches!(
+                graph.add_sink(amr, target_tx),
+                Err(RvoipError::UnsupportedCodec(_))
+            ));
+            graph.shutdown();
+        }
     }
 
     #[tokio::test]
