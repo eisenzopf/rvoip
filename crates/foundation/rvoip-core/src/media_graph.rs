@@ -1417,9 +1417,14 @@ fn make_transcoder(
 ) -> Option<ConfiguredTranscoder> {
     let source_key = CodecGroupKey::new(source_codec, source_pt);
     let target_key = CodecGroupKey::new(target_codec, target_pt);
+    // Payload type deliberately not compared: it is a per-leg SDP artifact,
+    // not a property of the encoded audio. A SIP leg that negotiated opus at
+    // 96 bridging to a leg that resolved the default 111 carries identical
+    // bytes; `route_source_frame` restamps the group's target PT on egress.
+    // Requiring equal PTs here silently re-enabled a full decode/re-encode
+    // the moment SIP legs started reporting their negotiated PT.
     let opus_payload_is_compatible = source_key.name == "opus"
         && target_key.name == "opus"
-        && source_key.payload_type == target_key.payload_type
         && source_key.clock_rate_hz == target_key.clock_rate_hz
         && source_key.channels == target_key.channels;
     (source_key != target_key && !opus_payload_is_compatible).then(|| {
@@ -2333,7 +2338,13 @@ fn route_source_frame(
                     }
                 }
             } else {
-                grouped.push(frame.clone());
+                // Passthrough still egresses as the group's codec: restamp the
+                // target PT so a bypassed opus↔opus bridge whose legs
+                // negotiated different numbers delivers what the sink's SDP
+                // promised. Same bytes, correct header.
+                let mut out = frame.clone();
+                out.payload_type = Some(group.target_pt);
+                grouped.push(out);
             }
         } else {
             grouped.push(frame.clone());
@@ -3953,6 +3964,34 @@ mod tests {
         let received = target_rx.recv().await.unwrap();
         assert_eq!(received.payload.len(), 160);
         assert!(received.payload.iter().all(|byte| *byte == 0x7f));
+        assert_eq!(received.payload_type, Some(111));
+        let snapshot = graph.snapshot().await;
+        assert!(!snapshot.codec_groups[0].transcoding);
+        assert_eq!(snapshot.transcode_operations, 0);
+        assert_eq!(snapshot.transcode_errors, 0);
+        graph.shutdown_and_wait().await.unwrap();
+    }
+
+    /// A SIP leg reports the payload type its SDP answer settled on; a
+    /// Connect-style leg reports none and resolves to the default 111. The
+    /// numbers differ, the encoded audio does not: the bridge must stay
+    /// passthrough and restamp the sink's PT on egress, not fall back to a
+    /// full decode/re-encode because the per-leg numbering disagrees.
+    #[tokio::test]
+    async fn opus_negotiated_payload_type_mismatch_stays_passthrough_and_restamps() {
+        let (source_tx, source_rx) = mpsc::channel(1);
+        let mut source_codec = codec("opus", 48_000);
+        source_codec.payload_type = Some(96);
+        let graph = start_media_graph(source_rx, source_codec, Default::default()).unwrap();
+        let (target_tx, mut target_rx) = mpsc::channel(1);
+        graph.add_sink(codec("opus", 48_000), target_tx).unwrap();
+
+        let mut frame = frame_at(0x5a, 960);
+        frame.payload_type = Some(96);
+        source_tx.send(frame).await.unwrap();
+        let received = target_rx.recv().await.unwrap();
+        assert_eq!(received.payload.len(), 160);
+        assert!(received.payload.iter().all(|byte| *byte == 0x5a));
         assert_eq!(received.payload_type, Some(111));
         let snapshot = graph.snapshot().await;
         assert!(!snapshot.codec_groups[0].transcoding);
