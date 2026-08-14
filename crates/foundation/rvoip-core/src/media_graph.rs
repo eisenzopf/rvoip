@@ -1206,6 +1206,19 @@ impl ConfiguredTranscodingSession {
             .unwrap_or(u32::MAX)
     }
 
+    /// Drop audio held back waiting for a full target frame.
+    ///
+    /// A flush declares everything queued stale; that must include the
+    /// re-framer's partial frame, or the first packet after a barge-in gets
+    /// pre-interruption audio prepended to it. Clearing `next_timestamp`
+    /// matters as much as clearing the samples: with pending audio gone, the
+    /// next packet re-syncs to the sender's clock instead of continuing a
+    /// timeline that ended at the flush.
+    fn discard_pending(&mut self) {
+        self.pending.clear();
+        self.next_timestamp = None;
+    }
+
     fn transcode(
         &mut self,
         encoded_data: &[u8],
@@ -1311,6 +1324,13 @@ impl ConfiguredTranscoder {
             .as_mut()
             .expect("configured transcoder session initialized")
             .transcode(payload, timestamp_rtp)
+    }
+
+    /// Forward a flush to the live session, if one was ever started.
+    fn discard_pending(&mut self) {
+        if let Some(session) = self.session.as_mut() {
+            session.discard_pending();
+        }
     }
 }
 
@@ -1854,7 +1874,17 @@ fn start_media_graph_with_activity_interval(
                         Command::Flush { ack } => {
                             // Barge-in: everything queued is stale. Drop it on
                             // every sink so playout stops now rather than
-                            // after the jitter buffer drains.
+                            // after the jitter buffer drains. "Queued" also
+                            // means audio a re-framing transcoder is holding
+                            // for a full target frame — it predates the flush
+                            // just as surely as anything in a sink queue, it
+                            // is simply less than one frame of it. The ack
+                            // still counts whole queued frames only.
+                            for group in groups.values_mut() {
+                                if let Some(transcoder) = group.transcoder.as_mut() {
+                                    transcoder.discard_pending();
+                                }
+                            }
                             let dropped: usize =
                                 sinks.values().map(|sink| sink.queue.flush()).sum();
                             if dropped > 0 {
@@ -4517,6 +4547,126 @@ mod tests {
             sender.await.expect("the sending task finished cleanly");
             graph.shutdown();
         }
+    }
+
+    /// A flush empties the re-framer, not just the sink queues.
+    ///
+    /// Everything held at the moment of a barge-in is stale, and the
+    /// accumulator holds audio the same way a queue does — it is simply less
+    /// than one frame of it. Without the discard, the first frame after a
+    /// flush gets pre-interruption samples prepended and, because pending
+    /// audio suppresses re-sync, carries the dead timeline's timestamp
+    /// instead of the sender's.
+    #[cfg(feature = "amr-nb")]
+    #[test]
+    fn discard_pending_empties_the_reframer_and_resyncs_the_clock() {
+        let mut session =
+            ConfiguredTranscodingSession::new(&codec("pcmu", 8_000), 0, &codec("AMR", 8_000), 106)
+                .expect("pcmu->amr session builds");
+
+        // 10 ms in: half an AMR frame, held back.
+        let held = session
+            .transcode(&[0xff; 80], 0)
+            .expect("a partial frame is buffered, not an error");
+        assert!(held.is_empty(), "80 samples cannot fill a 160-sample frame");
+        assert!(!session.pending.is_empty());
+        assert_eq!(session.next_timestamp, Some(0));
+
+        session.discard_pending();
+        assert!(session.pending.is_empty());
+        assert_eq!(session.next_timestamp, None);
+
+        // The next packet is a fresh timeline: exactly one frame out, at the
+        // sender's own timestamp, with no stale audio joined to the front.
+        let fresh = session
+            .transcode(&[0xff; 160], 8_000)
+            .expect("a whole frame transcodes");
+        assert_eq!(fresh.len(), 1);
+        assert_eq!(fresh[0].timestamp_rtp, 8_000);
+        assert!(session.pending.is_empty());
+    }
+
+    /// The command-plumbing half of the discard: `Flush` reaches the
+    /// re-framer through the actor, not only the sink queues.
+    ///
+    /// A 30 ms packet leaves 10 ms in the accumulator after its frame is
+    /// recovered. Pre-fix, the packet sent after the flush was joined to that
+    /// leftover and surfaced at the dead timeline's next tick (160); the
+    /// timestamp assert is the discriminator.
+    #[cfg(feature = "amr-nb")]
+    #[tokio::test]
+    async fn flush_discards_the_reframers_pending_audio() {
+        let (source_tx, source_rx) = mpsc::channel(4);
+        let graph = start_media_graph(source_rx, codec("pcmu", 8_000), Default::default())
+            .expect("pcmu graph starts");
+        let (amr_tx, mut amr_rx) = mpsc::channel(4);
+        graph
+            .add_sink(
+                CodecInfo {
+                    name: "AMR".into(),
+                    clock_rate_hz: 8_000,
+                    channels: 1,
+                    fmtp: Some("octet-align=1".into()),
+                    payload_type: Some(107),
+                },
+                amr_tx,
+            )
+            .expect("AMR sink is admitted");
+
+        let mut encoder = build_codec("PCMU", 0, 8_000, None);
+        let mut send_pcmu = |samples: usize, timestamp_rtp: u32| {
+            let payload = encoder
+                .encode(&rvoip_media_core::types::AudioFrame::new(
+                    tone_samples(samples, 8_000, 440.0, 0),
+                    8_000,
+                    1,
+                    0,
+                ))
+                .expect("PCMU encodes any length");
+            MediaFrame {
+                stream_id: StreamId::from_string("strm_amr_flush_test"),
+                kind: StreamKind::Audio,
+                payload: Bytes::from(payload),
+                timestamp_rtp,
+                captured_at: Utc::now(),
+                payload_type: Some(0),
+            }
+        };
+
+        // 30 ms: one frame comes out now, 10 ms stays pending. Receiving the
+        // frame is also the synchronisation point — the flush sent next is
+        // ordered strictly after the packet that armed the accumulator.
+        source_tx
+            .send(send_pcmu(240, 0))
+            .await
+            .expect("the graph is accepting frames");
+        let first = tokio::time::timeout(Duration::from_secs(2), amr_rx.recv())
+            .await
+            .expect("the 30 ms packet yields its whole frame")
+            .expect("the sink channel stays open");
+        assert_eq!(first.timestamp_rtp, 0);
+
+        // Barge-in. Nothing is queued on the sink (we drained it), so the
+        // only stale audio in the graph is the re-framer's 10 ms.
+        graph
+            .flush_sinks_and_wait()
+            .await
+            .expect("the flush is acknowledged");
+
+        source_tx
+            .send(send_pcmu(160, 8_000))
+            .await
+            .expect("the graph is accepting frames");
+        let resumed = tokio::time::timeout(Duration::from_secs(2), amr_rx.recv())
+            .await
+            .expect("the post-flush packet yields a frame")
+            .expect("the sink channel stays open");
+        assert_eq!(
+            resumed.timestamp_rtp, 8_000,
+            "the post-flush frame must open the sender's new timeline, not \
+             continue the flushed one from tick 160"
+        );
+        graph.shutdown();
     }
 
     /// Reporting a payload type is not a way to smuggle in a codec the graph
