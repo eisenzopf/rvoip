@@ -26,7 +26,11 @@
 | **AMR-NB conformance, encode** | **`spch_dos`, 425 frames, every bit** |
 | **AMR-NB conformance, decode** | **`spch_dos`, 425 frames, sample for sample** |
 | **AMR reachable through media-core** | **Both variants resolve, encode and decode end to end** |
-| **AMR through `rvoip-core`'s media graph** | **Not wired** — UCTP publishing, graph recording and MOQT fan-out refuse AMR; see "Where AMR does not flow" |
+| **AMR through `rvoip-core`'s media graph** | **Wired**, behind rvoip-core's `amr-nb`/`amr-wb` — frames cross both directions, tone-verified |
+| **Non-20 ms senders** | **Re-framed** — 10 ms and 30 ms sources transcode into AMR |
+| **AMR over a QUIC datagram** | **Payload type survives; an unlabellable frame is dropped, not mislabelled** |
+| **Every mode in a live call** | **All 8 narrowband and all 9 wideband, walked by CMR** |
+| **AMR over SDES-SRTP, in process** | **Both variants, tone-verified** |
 | **Transcoding** | **Six AMR pairs, tested by property** |
 | **`mode-change-period` / `-neighbor`** | **Honoured** — they were parsed and obeyed by nothing |
 | **Performance** | **Measured, with a gate** — see below |
@@ -617,13 +621,27 @@ survive the two parameters the lag and the codebook consume in between.
    actually constructed with; that line is now permanent, because every AMR
    field in it has been silently wrong at some point on this branch.
 
-6. **Rates beyond the top of each variant.** Every live cell ran AMR-NB
-   mode 7 (12.2) or AMR-WB mode 8 (23.85) — our encoder opens at the highest
-   permitted mode and nothing in the lab narrows the set. The other 15 rates
-   have conformance-vector evidence but no third-party interop evidence. The
-   quality gate is built mode-aware (`WindowGate` thresholds are constants
-   today) so a rate sweep can calibrate per-mode floors from codec loopback
-   rather than guessing.
+6. **Rates beyond the top, against a third party.** Half closed.
+
+   Every mode is now exercised in a live call:
+   `every_amr_narrowband_mode_carries_audio_in_a_live_call` and its wideband
+   twin walk the peer down through all 8 and all 9 modes with codec mode
+   requests, reading back the mode of frames actually decoded from the peer,
+   and the tone assertion still runs at the end. So SDP negotiation, RTP
+   framing and the decode path are proven for every rate rather than only for
+   the one the encoder opens at.
+
+   What remains is that those calls are between two of *our* endpoints. Every
+   PBX and proxy lab cell still runs at the top mode, because the harness has
+   no way to pin one: `CodecProfile` is a fixed enum and `Config` has no
+   `mode_set` knob, so nothing can make the offer say `mode-set=N`. A carrier
+   or PBX decoding each individual rate is therefore still unevidenced.
+
+   Closing it is a small feature rather than a test: `fmtp_for_pt_*` returns
+   `&'static str` today and would need to build an owned string from a new
+   config field. Note the current behaviour is *correct* for production —
+   omitting `mode-set` is what an endpoint supporting every mode should say —
+   so the knob is for pinning a rate under test, not a fix.
 
 7. ~~**A soak test**, and a fuzz target for the encoders.~~ Both done.
    `soak.rs` holds `#[ignore]`d long-run encode/decode tests scaled by
@@ -631,21 +649,30 @@ survive the two parameters the lag and the codebook consume in between.
    have `fuzz/fuzz_targets/amr_encode.rs` beside the decoders' target, and both
    run from `tools/run-amr-fuzz.sh`.
 
-8. **AMR through `rvoip-core`'s media graph.** Not wired, so UCTP publishing,
-   graph recording and MOQT fan-out cannot observe an AMR call — see "Where AMR
-   does not flow" above. Unlike **6** this *is* a code gap, but it is not an AMR
-   gap: the codec builds fine from a name and an fmtp
-   (`AudioCodecSpec::build`), and what is missing is a negotiated payload type
-   at the graph's entry points, which no transport reports to it today for any
-   codec. The design question it turned on — whether AMR gets a conventional
-   payload type the way Opus got 111 — is **settled: it does not**, and the
-   reasoning plus the six-item work list is in
+8. ~~**AMR through `rvoip-core`'s media graph.**~~ Done. UCTP publishing,
+   graph recording and MOQT fan-out can observe an AMR call.
+
+   It was never an AMR gap: the codec built fine from a name and an fmtp all
+   along, and what was missing was a negotiated payload type at the graph's
+   entry points — which no transport reported, for any codec. `CodecInfo` now
+   carries one, the SIP adapter and the WebRTC SDP parser report it, and the
+   graph keys on it. The design question it turned on — whether AMR gets a
+   conventional payload type the way Opus got 111 — was **settled: it does
+   not**, because one AMR session routinely negotiates two payload types at
+   once that differ only in `octet-align`.
+
+   Two things came out of it that were not about AMR. The graph's admission
+   check now also builds the codec, since a resolvable key stopped implying a
+   buildable one. And the QUIC and WebTransport pumps had been stamping
+   **Opus's payload type on any codec they could not name** — a well-formed
+   datagram that lies about its contents, which a receiver cannot detect.
+
+   The full reasoning is in
    [`MEDIA_GRAPH_CODECS.md`](../../../foundation/rvoip-core/docs/MEDIA_GRAPH_CODECS.md).
 
-   The two items above still open are **6** and **8**. **6** is an evidence gap
-   rather than a code gap: it blocks no feature and no rate is unimplemented.
-   **8** is a code gap in `rvoip-core`, not in the codec, and it blocks the
-   non-SIP media paths only.
+   The only item above still open is **6**, and only its third-party half: an
+   evidence gap, not a code gap. No rate is unimplemented and no feature is
+   blocked.
 
 ## Conformance against the normative sequences
 
@@ -683,39 +710,35 @@ with zero tolerance.
 
 Mutation-checked: turning DTX off fails mode 8 at frame 0.
 
-## Where AMR does not flow
+## Where AMR flows, and the one place it does not
 
-Everything above is about whether AMR *codes* correctly, and it does. It is a
-separate question whether AMR reaches every path media travels in this
-workspace, and there the answer is no.
+Everything above is about whether AMR *codes* correctly. Whether it reaches
+every path media travels in this workspace was a separate question, and for a
+while the answer was no. It is now yes, with one boundary worth stating.
 
-**AMR cannot enter `rvoip-core`'s media graph.** That graph is the
-one-source-to-many fan-out behind UCTP publishing, recording and MOQT
-fan-out. It identifies every codec by a key derived from the codec *name*
-(`rvoip_core::bridge::codec_to_pt`), AMR is deliberately not in that table, and
-every graph entry point refuses an AMR codec with
-`RvoipError::UnsupportedCodec`, naming it. The refusal is also available
-standalone as `validate_media_graph_codec`, so a caller can ask before it
-acquires a stream's single-consumer receiver to hand over.
+**AMR crosses `rvoip-core`'s media graph** — the one-source-to-many fan-out
+behind UCTP publishing, recording and MOQT fan-out — behind rvoip-core's own
+`amr-nb`/`amr-wb` features. Frames go through in both directions, decoded and
+tone-verified rather than counted, and a source whose packet time is not 20 ms
+is re-framed rather than refused.
 
-So the honest scope of "a real AMR call" in the table above is: **a SIP AMR
-call works, and it cannot be published over UCTP, recorded through the media
-graph, or fanned out to MOQT.** No claim in this document is weakened by that —
-the interop rows are all SIP media path — but "AMR is implemented" should not be
-read as "AMR works everywhere media flows".
+Getting there was not about constructing the codec: `AudioCodecSpec::build`
+always built either variant from a name and an fmtp. It was that the graph
+derived a payload type from a codec *name*, and AMR has no such number — one
+session routinely negotiates the same variant under two payload types
+differing only in `octet-align` (`amr_call_integration.rs` uses 106 and 107),
+and the key the graph computes is stamped onto the frames it emits. The
+decision stands: **AMR gets no conventional payload type; dynamic codecs key on
+the negotiated one**, which `CodecInfo` now carries.
 
-The reason is not that AMR is hard to construct there; media-core's
-`AudioCodecSpec::build` already builds either variant from a name and an fmtp.
-It is that the graph's entry points derive a payload type from a codec name,
-and AMR has no such number to derive: one session routinely negotiates the same
-variant under two payload types differing only in `octet-align` (this repo's own
-`amr_call_integration.rs` uses 106 and 107), and the key the graph computes is
-stamped onto the frames it emits, so inventing one puts a wrong payload type on
-the wire.
+**AMR without a reported payload type is still refused**, and that is the
+correct answer rather than a leftover — there is no number to label its frames
+with. UCTP negotiates codecs by name and reports none, so AMR over QUIC or
+WebTransport depends on frames carrying their own label; graph-transcoded
+frames do, and one that does not is dropped rather than sent under a
+fabricated number.
 
-That was settled as a design decision rather than left open: **AMR gets no
-conventional payload type; dynamic codecs must key on the negotiated one.** The
-decision, its evidence, and the six things wiring AMR in would require are in
+The decision and its evidence are in
 [`crates/foundation/rvoip-core/docs/MEDIA_GRAPH_CODECS.md`](../../../foundation/rvoip-core/docs/MEDIA_GRAPH_CODECS.md).
 
 ## What is *not* claimed
