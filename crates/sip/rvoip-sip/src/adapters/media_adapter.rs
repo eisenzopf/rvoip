@@ -7057,6 +7057,7 @@ a=fmtp:101 0-15\r\n";
         assert_eq!(answer_rtpmap_for_pt(&offer, 99), None);
     }
 
+    #[cfg(feature = "amr-wb")]
     #[test]
     fn amr_matches_a_peers_own_dynamic_payload_type() {
         // Asterisk and most handsets pick their own number for AMR. Opus
