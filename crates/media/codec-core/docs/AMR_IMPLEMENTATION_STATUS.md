@@ -732,11 +732,32 @@ the rate.
   weakest margin across all 17 was 8,508× (AMR-WB mode 0, the 6.6 kbit/s rate,
   where a lower margin is expected); the strongest was 116,348×.
 
-What this does and does not say: a third-party implementation decoded our AMR
-and encoded audio we decoded, at each of the seventeen rates, one rate at a
-time. It is one peer, one version, one topology, UDP only, and it is not a
-carrier certification. The evidence lives under the PBX output tree, which is
-gitignored — rerun with `PBX_AMR_MODE_SET=<mode>` to reproduce a row.
+Reproduce with the sweep tool, which is what produced the rows above:
+
+```bash
+crates/sip/rvoip-sip/examples/pbx/rate-sweep.sh --profile amrnb --transport UDP
+crates/sip/rvoip-sip/examples/pbx/rate-sweep.sh --profile amrwb --transport UDP
+```
+
+It fails the run if any cell's `built_mode_set` disagrees with the mode it
+pinned, so a sweep cannot quietly attest to a rate it did not test, and it
+clears each cell's directory first — a cell that never executes otherwise
+leaves the previous run's logs in place, and reading those reports a rate as
+attested when nothing ran. This tool did exactly that on its first attempt.
+
+**What this does and does not say.** A third-party implementation decoded our
+AMR and encoded audio we decoded, at each of the seventeen rates, one rate at
+a time. It is one peer, one version, one topology, and it is not a carrier
+certification.
+
+**UDP only.** The same sweep over TLS does not run in this lab, and the reason
+is environmental rather than anything about AMR: the Asterisk endpoint's
+default TLS port for user `1002` is 5073, which is also what the Kamailio
+lab's colima forward holds while that lab is up, so the callee cannot bind its
+listener and never registers. `rate-sweep.sh --transport TLS` reports
+`no cell ran` rather than a pass. AMR over TLS with SRTP is covered elsewhere —
+the `amr_call` TLS cells in the PBX matrix, and the in-process
+`amr_*_call_carries_real_audio_over_srtp` tests — but not per-rate.
 
 ## Where AMR flows, and the one place it does not
 
