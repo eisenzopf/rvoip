@@ -38,7 +38,7 @@
 | **A real AMR call** | **Three, over loopback, with verified audio** |
 | **RFC 4867 wire format** | **136 payloads agree with Wireshark's dissector** |
 | **Live PBX interop** | **Both PBXes, both variants, relay AND forced-transcode tiers, UDP ×3 + TLS, quality-gated** |
-| **Per-rate PBX interop** | **All 17 modes against Asterisk, each pinned by `mode-set`** — see below |
+| **Per-rate PBX interop** | **All 17 modes against Asterisk over UDP *and* TLS+SRTP, each pinned by `mode-set`** — see below |
 | **`mode-set` negotiation** | **Offered, echoed in answers, and obeyed by the encoder** |
 | **Live proxy interop** | **Kamailio and OpenSIPS with rtpengine relaying all four framings verbatim** |
 | **AMR-NB VAD2** | **Bit-exact against TS 26.073** — whole state, 300 half-frames |
@@ -712,10 +712,12 @@ RFC 4867 `mode-set` in the INVITE naming exactly that mode, and the set is
 bi-directional, so it governs what Asterisk sends as well as what we send.
 The lab reaches it through `PBX_AMR_MODE_SET=<mode>`.
 
-| Variant | Modes | Result |
-|---|---|---|
-| AMR-NB | 0, 1, 2, 3, 4, 5, 6, 7 | all PASS |
-| AMR-WB | 0, 1, 2, 3, 4, 5, 6, 7, 8 | all PASS |
+| Variant | Modes | UDP | TLS + SDES-SRTP |
+|---|---|---|---|
+| AMR-NB | 0, 1, 2, 3, 4, 5, 6, 7 | all PASS | all PASS |
+| AMR-WB | 0, 1, 2, 3, 4, 5, 6, 7, 8 | all PASS | all PASS |
+
+Thirty-four cells: every mode of both variants, over both transports.
 
 **Two independent facts are recorded per cell, because the interesting failure
 passes the obvious check.** A cell pinned to one rate and a cell that ignored
@@ -735,8 +737,11 @@ the rate.
 Reproduce with the sweep tool, which is what produced the rows above:
 
 ```bash
-crates/sip/rvoip-sip/examples/pbx/rate-sweep.sh --profile amrnb --transport UDP
-crates/sip/rvoip-sip/examples/pbx/rate-sweep.sh --profile amrwb --transport UDP
+for transport in UDP TLS; do
+  for profile in amrnb amrwb; do
+    crates/sip/rvoip-sip/examples/pbx/rate-sweep.sh --profile "$profile" --transport "$transport"
+  done
+done
 ```
 
 It fails the run if any cell's `built_mode_set` disagrees with the mode it
@@ -750,14 +755,16 @@ AMR and encoded audio we decoded, at each of the seventeen rates, one rate at
 a time. It is one peer, one version, one topology, and it is not a carrier
 certification.
 
-**UDP only.** The same sweep over TLS does not run in this lab, and the reason
-is environmental rather than anything about AMR: the Asterisk endpoint's
-default TLS port for user `1002` is 5073, which is also what the Kamailio
-lab's colima forward holds while that lab is up, so the callee cannot bind its
-listener and never registers. `rate-sweep.sh --transport TLS` reports
-`no cell ran` rather than a pass. AMR over TLS with SRTP is covered elsewhere —
-the `amr_call` TLS cells in the PBX matrix, and the in-process
-`amr_*_call_carries_real_audio_over_srtp` tests — but not per-rate.
+**The TLS half needed a port-allocation fix first**, and it is worth recording
+because it made the suite order-dependent rather than broken. The Kamailio lab
+listened on host 5072/5073 and OpenSIPS on 5074 — which are this suite's own
+endpoint ports for users 1002 and 1003. With a proxy lab up, the Asterisk TLS
+callee could not bind, never registered, and every TLS cell failed with a 404
+that named nothing about ports; whichever started first won. The labs moved to
+5066/5067 and 5068, below the 5070+ endpoint block, and
+`lab_daemon_ports_stay_clear_of_the_endpoint_block` now fails if a daemon is
+ever allocated back into it. The TLS rows above were then run with the Kamailio
+lab deliberately left running, which is the combination that used to fail.
 
 ## Where AMR flows, and the one place it does not
 

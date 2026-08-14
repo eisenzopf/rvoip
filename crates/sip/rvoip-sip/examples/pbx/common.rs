@@ -817,9 +817,9 @@ impl EndpointConfig {
                     "KAMAILIO_UDP_ADDR"
                 };
                 let default_addr = if transport.is_tls() {
-                    "127.0.0.1:5073"
+                    "127.0.0.1:5067"
                 } else {
-                    "127.0.0.1:5072"
+                    "127.0.0.1:5066"
                 };
                 split_host_port(&env_string(addr_key, default_addr))?
             }
@@ -832,7 +832,7 @@ impl EndpointConfig {
                 let default_addr = if transport.is_tls() {
                     "127.0.0.1:5075"
                 } else {
-                    "127.0.0.1:5074"
+                    "127.0.0.1:5068"
                 };
                 split_host_port(&env_string(addr_key, default_addr))?
             }
@@ -5633,6 +5633,12 @@ fn endpoint_defaults(
     transport: TransportMode,
 ) -> EndpointDefaults {
     let base = match provider {
+        // Asterisk's endpoints stay at 5070-5075 and 5080-5084, pinned by
+        // `asterisk_defaults_preserve_existing_lab_ports`. That block is
+        // load-bearing -- the local env files and the lab's PJSIP endpoint
+        // configuration name these ports -- so anything that lands on it
+        // moves, not this. The Kamailio lab did land on it (5072/5073) and
+        // was moved to 5090/5091; see `infra/release-runners/pbx/kamailio/up.sh`.
         PbxProvider::Asterisk => 0,
         PbxProvider::FreeSwitch => 10_000,
         // 30k/40k, not 20k: 5070+20_000 = 25070 is the sip-proxy interop
@@ -6231,6 +6237,61 @@ mod tests {
             assert!(
                 !(25_000..26_000).contains(&udp.local_port),
                 "{provider:?} collides with the sip-proxy interop port block"
+            );
+        }
+    }
+
+    /// Lab daemons and our own endpoints must not claim the same host port.
+    ///
+    /// They did. The Kamailio lab listened on 5072/5073 and OpenSIPS on 5074,
+    /// which are the Asterisk suite's endpoint ports for users 1002 and 1003 —
+    /// so with a proxy lab up, an Asterisk TLS cell could not bind its callee
+    /// and every one failed with a 404 that named nothing about ports.
+    /// Whichever started first won, which is why it looked intermittent.
+    ///
+    /// Two blocks, kept apart on purpose: daemons at 5060-5069, our endpoints
+    /// from 5070 up with a per-provider base. This asserts the daemon side
+    /// stays below the endpoint block rather than checking today's exact
+    /// numbers, so moving a lab within its block does not fail the test but
+    /// moving one back into ours does.
+    #[test]
+    fn lab_daemon_ports_stay_clear_of_the_endpoint_block() {
+        // Every endpoint port this suite binds at base 0.
+        let endpoint_ports: Vec<u16> = [
+            ("1001", TransportMode::TlsSrtp),
+            ("1002", TransportMode::TlsSrtp),
+            ("1003", TransportMode::TlsSrtp),
+            ("2001", TransportMode::Udp),
+            ("2002", TransportMode::Udp),
+            ("2003", TransportMode::Udp),
+        ]
+        .into_iter()
+        .flat_map(|(user, transport)| {
+            let defaults = endpoint_defaults(PbxProvider::Asterisk, user, transport);
+            std::iter::once(defaults.local_port).chain(defaults.tls_local_port)
+        })
+        .collect();
+
+        // The lab daemons' host ports, as `up.sh` defaults them.
+        for (lab, port) in [
+            ("asterisk", 5060u16),
+            ("asterisk-tls", 5061),
+            ("freeswitch", 5062),
+            ("freeswitch-tls", 5063),
+            ("kamailio", 5066),
+            ("kamailio-tls", 5067),
+            ("opensips", 5068),
+        ] {
+            assert!(
+                !endpoint_ports.contains(&port),
+                "the {lab} lab listens on {port}, which this suite also binds \
+                 as an endpoint — one of them will fail to start, and which \
+                 one depends on start order"
+            );
+            assert!(
+                port < 5070,
+                "the {lab} lab's {port} is inside the endpoint block; daemons \
+                 belong below 5070"
             );
         }
     }
