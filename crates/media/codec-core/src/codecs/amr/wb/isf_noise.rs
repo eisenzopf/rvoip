@@ -23,9 +23,7 @@
 //! [`nearest_entry`] rather than restating it.
 
 use super::enc::isf_quant::{enforce_min_spacing, nearest_entry, ISF_GAP};
-use super::isf_noise_tables::{
-    DICO1_NS, DICO2_NS, DICO3_NS, DICO4_NS, DICO5_NS, MEAN_ISF_NOISE,
-};
+use super::isf_noise_tables::{DICO1_NS, DICO2_NS, DICO3_NS, DICO4_NS, DICO5_NS, MEAN_ISF_NOISE};
 use super::lp::autocorr::LP_ORDER;
 use crate::fixed_point::arith::{add, sub};
 use crate::fixed_point::types::{DspContext, Word16};
@@ -171,7 +169,10 @@ mod tests {
         let mut cases = 0usize;
         let mut seen = std::collections::HashSet::new();
 
-        for line in text.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()) {
+        for line in text
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+        {
             let mut parts = line.split('|');
             let read = |field: Option<&str>| -> Vec<i16> {
                 field

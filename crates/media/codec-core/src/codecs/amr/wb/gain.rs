@@ -50,12 +50,7 @@ const MEAN_ENER: i16 = 30;
 const L_LTPHIST: usize = 5;
 
 /// MA prediction coefficients `{0.5, 0.4, 0.3, 0.2}` in Q13.
-const PRED: [Word16; PRED_ORDER] = [
-    Word16(4096),
-    Word16(3277),
-    Word16(2458),
-    Word16(1638),
-];
+const PRED: [Word16; PRED_ORDER] = [Word16(4096), Word16(3277), Word16(2458), Word16(1638)];
 
 /// Pitch-gain attenuation by consecutive-erasure state, for unusable frames.
 const PDOWN_UNUSABLE: [Word16; 7] = [
@@ -266,7 +261,11 @@ impl GainDecoder {
         let gcode0 = extract_l(pow2(ctx, 14, frac));
         exp_gcode0 = Word16(exp_gcode0.0 - 14);
 
-        let table: &[i16] = if bits == 6 { &QUA_GAIN_6B } else { &QUA_GAIN_7B };
+        let table: &[i16] = if bits == 6 {
+            &QUA_GAIN_6B
+        } else {
+            &QUA_GAIN_7B
+        };
         let entry = index as usize * 2;
         let pitch = Word16(table[entry]);
         let g_code = Word16(table[entry + 1]);
@@ -385,9 +384,9 @@ impl GainDecoder {
 
 #[cfg(test)]
 mod tests {
+    use super::super::codebook;
     use super::super::lp::isp_to_lp::tests_support::{block_has, block_row_i32, has_block};
     use super::super::params::FrameParams;
-    use super::super::codebook;
     use super::*;
     use crate::codecs::amr::mode::{AmrMode, AmrVariant};
     use crate::codecs::amr::storage;
@@ -482,7 +481,16 @@ mod tests {
 
         let mut previous = i64::MAX;
         for state in 1..7 {
-            let g = dec.decode(0, 7, &code, FrameContext { quality: FrameQuality::Unusable, erasure_state: state, ..FrameContext::good() });
+            let g = dec.decode(
+                0,
+                7,
+                &code,
+                FrameContext {
+                    quality: FrameQuality::Unusable,
+                    erasure_state: state,
+                    ..FrameContext::good()
+                },
+            );
             let level = i64::from(g.pitch.0);
             assert!(
                 level <= previous,
@@ -504,7 +512,16 @@ mod tests {
             let _ = dec.decode(63, 7, &code, FrameContext::good());
         }
         for state in 0..7 {
-            let g = dec.decode(0, 7, &code, FrameContext { quality: FrameQuality::Unusable, erasure_state: state, ..FrameContext::good() });
+            let g = dec.decode(
+                0,
+                7,
+                &code,
+                FrameContext {
+                    quality: FrameQuality::Unusable,
+                    erasure_state: state,
+                    ..FrameContext::good()
+                },
+            );
             assert!(
                 g.pitch.0 < 16384,
                 "erasure state {state}: pitch gain {} would self-oscillate",

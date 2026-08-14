@@ -49,33 +49,31 @@ mod bits;
 /// The normative 3GPP sequences, when the environment names them.
 #[cfg(test)]
 mod conformance;
+/// The IF2 interface format (TS 26.101 Annex B / TS 26.201).
+pub mod interface_format;
+/// RFC 4867 §4.4.1 interleaving: undoing it on the receive side.
+pub mod interleave;
 pub mod mode;
 pub mod nb;
 pub mod payload;
 /// Where the Apache-2.0 oracles agree with the normative references.
 #[cfg(test)]
 mod qualification;
-/// Long-run stability: mode churn, DTX and loss over a full call.
-#[cfg(test)]
-mod soak;
-/// The IF2 interface format (TS 26.101 Annex B / TS 26.201).
-pub mod interface_format;
-/// RFC 4867 §4.4.1 interleaving: undoing it on the receive side.
-pub mod interleave;
 pub mod rate;
 /// RFC 4867 `max-red` redundancy: scheduling repeats and dropping them again.
 pub mod redundancy;
 pub mod sdp;
 pub mod sid_cadence;
+/// Long-run stability: mode churn, DTX and loss over a full call.
+#[cfg(test)]
+mod soak;
 pub mod storage;
 
 #[cfg(feature = "amr-wb")]
 pub mod wb;
 
 pub use mode::{AmrFrameType, AmrMode, AmrModeSet, AmrVariant};
-pub use payload::{
-    AmrInterleaving, AmrPacket, AmrPayloadCodec, AmrPayloadConfig, AmrPayloadFrame,
-};
+pub use payload::{AmrInterleaving, AmrPacket, AmrPayloadCodec, AmrPayloadConfig, AmrPayloadFrame};
 pub use rate::{CmrDamper, ModeChangePolicy};
 pub use sdp::{AmrCapabilities, AmrFmtp};
 pub use storage::AmrStorageReader;
@@ -497,7 +495,6 @@ impl AmrCodec {
     pub const fn mode(&self) -> AmrMode {
         self.current_mode
     }
-
 }
 
 impl AudioCodec for AmrCodec {
@@ -612,8 +609,7 @@ impl VariableRateCodec for AmrCodec {
             FrameKind::Lost => match &mut self.decoder {
                 #[cfg(feature = "amr-wb")]
                 Decoder::WideBand(decoder) => {
-                    let mode = AmrMode::new(self.variant, frame.mode)
-                        .unwrap_or(self.current_mode);
+                    let mode = AmrMode::new(self.variant, frame.mode).unwrap_or(self.current_mode);
                     decoder
                         .decode_frame(mode, &[], wb::gain::FrameQuality::Unusable)
                         .map(Vec::from)
@@ -630,8 +626,7 @@ impl VariableRateCodec for AmrCodec {
                     // and comfort noise is the right answer rather than
                     // extrapolated speech. `decode_typed` makes that
                     // distinction, which `conceal_lost_frame` cannot.
-                    let mode = AmrMode::new(self.variant, frame.mode)
-                        .unwrap_or(self.current_mode);
+                    let mode = AmrMode::new(self.variant, frame.mode).unwrap_or(self.current_mode);
                     Ok(decoder
                         .decode_typed(nb::dtx::RxFrameType::NoData, mode.index(), &[])
                         .to_vec())
@@ -692,15 +687,13 @@ impl VariableRateCodec for AmrCodec {
                     // which speech mode the encoder had been using; a gap says
                     // nothing and takes the mode from the caller.
                     let (rx, mode_index, params) = if frame.kind == FrameKind::NoData {
-                        let mode = AmrMode::new(self.variant, frame.mode)
-                            .unwrap_or(self.current_mode);
+                        let mode =
+                            AmrMode::new(self.variant, frame.mode).unwrap_or(self.current_mode);
                         (nb::dtx::RxFrameType::NoData, mode.index(), Vec::new())
                     } else {
-                        let header = nb::bitstream::parse_sid_header(&frame.data)
-                            .ok_or_else(|| {
-                                CodecError::decoding_failed(
-                                    "an AMR-NB SID frame is five octets",
-                                )
+                        let header =
+                            nb::bitstream::parse_sid_header(&frame.data).ok_or_else(|| {
+                                CodecError::decoding_failed("an AMR-NB SID frame is five octets")
                             })?;
                         let kind = if !frame.quality_ok {
                             nb::dtx::RxFrameType::SidBad
@@ -775,8 +768,7 @@ mod tests {
 
     #[test]
     fn mode_set_is_enforced_on_explicit_selection() {
-        let mut wb =
-            AmrCodec::new(&CodecConfig::amr_wb().with_amr_mode_set(&[0, 2, 4])).unwrap();
+        let mut wb = AmrCodec::new(&CodecConfig::amr_wb().with_amr_mode_set(&[0, 2, 4])).unwrap();
         assert_eq!(wb.allowed_modes(), vec![0, 2, 4]);
 
         wb.set_mode(0).unwrap();
@@ -784,7 +776,11 @@ mod tests {
 
         // In range for the variant but outside the negotiated set.
         assert!(wb.set_mode(3).is_err());
-        assert_eq!(wb.current_mode(), 0, "a rejected change must not take effect");
+        assert_eq!(
+            wb.current_mode(),
+            0,
+            "a rejected change must not take effect"
+        );
 
         // Outside the variant's range entirely.
         assert!(wb.set_mode(9).is_err());
@@ -794,8 +790,7 @@ mod tests {
     fn peer_mode_requests_are_clamped_not_errors() {
         // A CMR arrives from the network, so an out-of-set value is a peer bug,
         // not ours: ignore it rather than failing the call.
-        let mut wb =
-            AmrCodec::new(&CodecConfig::amr_wb().with_amr_mode_set(&[0, 2, 4])).unwrap();
+        let mut wb = AmrCodec::new(&CodecConfig::amr_wb().with_amr_mode_set(&[0, 2, 4])).unwrap();
         wb.set_mode(4).unwrap();
 
         wb.apply_mode_request(Some(2)).unwrap();
@@ -1032,9 +1027,10 @@ mod tests {
                 .iter()
                 .filter_map(|wb| {
                     let len = wb.octet_aligned_bytes();
-                    nb_lengths.iter().position(|&n| n == len).map(|i| {
-                        (u8::try_from(i).expect("mode index"), wb.index(), len)
-                    })
+                    nb_lengths
+                        .iter()
+                        .position(|&n| n == len)
+                        .map(|i| (u8::try_from(i).expect("mode index"), wb.index(), len))
                 })
                 .collect();
             assert!(
@@ -1054,7 +1050,9 @@ mod tests {
                 .iter()
                 .find(|f| f.data.len() == len)
                 .expect("a wideband frame of the colliding length");
-            let decoded = nb.decode(&wb_frame.data).expect("a valid narrowband length");
+            let decoded = nb
+                .decode(&wb_frame.data)
+                .expect("a valid narrowband length");
             assert_eq!(decoded.len(), 160, "decoded as narrowband mode {nb_mode}");
         }
 
@@ -1170,7 +1168,8 @@ mod tests {
                 assert_eq!(concealed, if lost { 6 } else { 0 });
                 let masked: Vec<i16> = got.iter().map(|s| s & !7).collect();
                 assert_eq!(
-                    masked, want,
+                    masked,
+                    want,
                     "{} stream is not bit-exact through the trait",
                     if lost { "lost" } else { "damaged" }
                 );
@@ -1241,11 +1240,10 @@ mod tests {
                 assert_eq!(got.len(), want.len(), "mode {mode} sample count");
                 // The reference's 14-bit output convention, applied to ours.
                 let masked: Vec<i16> = got.iter().map(|s| s & !3).collect();
-                let first_bad = masked
-                    .iter()
-                    .zip(&want)
-                    .position(|(a, b)| a != b)
-                    .map(|i| format!("first differs at sample {i}: {} vs {}", masked[i], want[i]));
+                let first_bad =
+                    masked.iter().zip(&want).position(|(a, b)| a != b).map(|i| {
+                        format!("first differs at sample {i}: {} vs {}", masked[i], want[i])
+                    });
                 assert!(first_bad.is_none(), "mode {mode}: {}", first_bad.unwrap());
             }
         }
@@ -1345,7 +1343,8 @@ mod tests {
 
                 let masked: Vec<i16> = got.iter().map(|s| s & !3).collect();
                 assert_eq!(
-                    masked, want,
+                    masked,
+                    want,
                     "{} stream is not bit-exact through the trait",
                     if lost { "lost" } else { "damaged" }
                 );
@@ -1452,7 +1451,11 @@ mod tests {
                     }
                     AmrFrameType::Sid(_) => {
                         sids += 1;
-                        assert_eq!(got.kind, FrameKind::ComfortNoise, "mode {mode} frame {n} kind");
+                        assert_eq!(
+                            got.kind,
+                            FrameKind::ComfortNoise,
+                            "mode {mode} frame {n} kind"
+                        );
                         assert_eq!(got.data, frame.data, "mode {mode} frame {n} SID payload");
                     }
                     AmrFrameType::NoData => {
@@ -1463,7 +1466,11 @@ mod tests {
                     other @ AmrFrameType::SpeechLost => panic!("unexpected {other:?} at {n}"),
                 }
             }
-            assert_eq!((speech, sids, gaps), (75, 12, 63), "mode {mode} frame-type mix");
+            assert_eq!(
+                (speech, sids, gaps),
+                (75, 12, 63),
+                "mode {mode} frame-type mix"
+            );
         }
 
         /// The narrowband DTX stream decoded through the public API,
@@ -1563,7 +1570,12 @@ mod tests {
                 }
 
                 assert_eq!(kinds, [75, 12, 63], "mode {mode} frame-type mix");
-                assert_eq!(exact, total, "mode {mode}: {} of {total} differ", total - exact);
+                assert_eq!(
+                    exact,
+                    total,
+                    "mode {mode}: {} of {total} differ",
+                    total - exact
+                );
             }
         }
 
@@ -1809,8 +1821,7 @@ mod tests {
     fn reset_preserves_negotiated_mode() {
         // Mode selection is negotiated state, not stream state: a
         // discontinuity must not silently renegotiate the bit rate.
-        let mut wb =
-            AmrCodec::new(&CodecConfig::amr_wb().with_amr_mode_set(&[0, 2, 4])).unwrap();
+        let mut wb = AmrCodec::new(&CodecConfig::amr_wb().with_amr_mode_set(&[0, 2, 4])).unwrap();
         wb.set_mode(0).unwrap();
         wb.reset().unwrap();
         assert_eq!(wb.current_mode(), 0);

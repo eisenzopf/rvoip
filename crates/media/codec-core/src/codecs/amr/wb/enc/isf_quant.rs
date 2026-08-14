@@ -401,7 +401,11 @@ fn search_split(
             // Assigned for the first split and saturating-accumulated after —
             // the saturation can manufacture a tie a wider accumulator would
             // have broken, and the tie-break below is then load-bearing.
-            total = if n == 0 { error } else { l_add(ctx, total, error) };
+            total = if n == 0 {
+                error
+            } else {
+                l_add(ctx, total, error)
+            };
             offset += dim;
         }
 
@@ -469,7 +473,11 @@ fn n_best_entries(
 /// write is dead at every call site here (each survivor recomputes the
 /// refinement target from scratch, and the splits within a survivor are
 /// disjoint), so this returns the index instead of mutating.
-pub(crate) fn nearest_entry(ctx: &mut DspContext, target: &[Word16], book: &[i16]) -> (u16, Word32) {
+pub(crate) fn nearest_entry(
+    ctx: &mut DspContext,
+    target: &[Word16],
+    book: &[i16],
+) -> (u16, Word32) {
     let mut best = Word32(MAX_32);
     let mut index = 0usize;
 
@@ -604,7 +612,11 @@ mod tests {
             }
         }
 
-        assert_eq!(compared, 3 * LP_ORDER, "compared {compared} ISFs, expected 48");
+        assert_eq!(
+            compared,
+            3 * LP_ORDER,
+            "compared {compared} ISFs, expected 48"
+        );
     }
 
     #[test]
@@ -720,7 +732,10 @@ mod tests {
     fn a_refinement_tie_goes_to_the_lower_codebook_index() {
         let mut ctx = DspContext::default();
         let (index, error) = nearest_entry(&mut ctx, &[Word16(1), Word16(0)], &TIED_STAGE2);
-        assert_eq!(index, 0, "an equal distance must not displace the incumbent");
+        assert_eq!(
+            index, 0,
+            "an equal distance must not displace the incumbent"
+        );
         assert_eq!(error.0, 2, "twice the squared error of one LSB");
 
         let (index, _) = nearest_entry(&mut ctx, &[Word16(2), Word16(0)], &TIED_STAGE2);
@@ -742,7 +757,10 @@ mod tests {
 
         let (index, error) = nearest_entry(&mut ctx, &target, &book);
         assert_eq!(index, 0);
-        assert_eq!(error.0, MAX_32, "the accumulator saturates rather than wraps");
+        assert_eq!(
+            error.0, MAX_32,
+            "the accumulator saturates rather than wraps"
+        );
     }
 
     #[test]
@@ -802,7 +820,10 @@ mod tests {
 
         enforce_min_spacing(&mut ctx, &mut isf);
 
-        assert_eq!(isf[0].0, ISF_GAP.0, "the floor starts at the gap, not at isf[0]");
+        assert_eq!(
+            isf[0].0, ISF_GAP.0,
+            "the floor starts at the gap, not at isf[0]"
+        );
         for (i, slot) in isf.iter().enumerate().take(LP_ORDER - 1).skip(1) {
             assert_eq!(
                 slot.0,
@@ -833,12 +854,7 @@ mod tests {
         let mut ctx = DspContext::default();
         let residual = IsfEncoder::new().residual(&mut ctx, &isf);
         let low = n_best_entries(&mut ctx, &residual[..LOW_DIM], &DICO1, LOW_DIM);
-        let high = n_best_entries(
-            &mut ctx,
-            &residual[LOW_DIM..],
-            &DICO2,
-            LP_ORDER - LOW_DIM,
-        );
+        let high = n_best_entries(&mut ctx, &residual[LOW_DIM..], &DICO2, LP_ORDER - LOW_DIM);
 
         let mut checked = 0;
         for picked in [wide.indices(), narrow.indices()] {

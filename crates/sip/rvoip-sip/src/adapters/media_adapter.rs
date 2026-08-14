@@ -280,7 +280,6 @@ pub(crate) const AMR_NB_BE_PT: u8 = 106;
 /// AMR-NB, octet-aligned framing.
 pub(crate) const AMR_NB_OA_PT: u8 = 107;
 
-
 /// NEXT_STEPS C2 — `a=fmtp:` value for payload types that require
 /// one. Returns `None` for codecs that work fine without an fmtp.
 #[cfg(test)]
@@ -4854,10 +4853,10 @@ pub(crate) fn compute_answer_formats(
     // AMR needs this at least as much as Opus does: both its variants are
     // dynamic, and Asterisk and most handsets pick their own numbers. Without
     // it a peer offering AMR-WB on 96 got a 488 for a codec we support.
-    let amr_wb_offered = offered_codecs.contains(&AMR_WB_BE_PT)
-        || offered_codecs.contains(&AMR_WB_OA_PT);
-    let amr_nb_offered = offered_codecs.contains(&AMR_NB_BE_PT)
-        || offered_codecs.contains(&AMR_NB_OA_PT);
+    let amr_wb_offered =
+        offered_codecs.contains(&AMR_WB_BE_PT) || offered_codecs.contains(&AMR_WB_OA_PT);
+    let amr_nb_offered =
+        offered_codecs.contains(&AMR_NB_BE_PT) || offered_codecs.contains(&AMR_NB_OA_PT);
     if (cfg!(feature = "amr-wb") && amr_wb_offered) || (cfg!(feature = "amr-nb") && amr_nb_offered)
     {
         if let Some(audio) = offer
@@ -6582,7 +6581,10 @@ a=fmtp:101 0-15\r\n";
             "the negotiated codec name did not reach media-core"
         );
         assert_eq!(
-            config.parameters.get(NEGOTIATED_FMTP_PARAMETER).map(String::as_str),
+            config
+                .parameters
+                .get(NEGOTIATED_FMTP_PARAMETER)
+                .map(String::as_str),
             Some("octet-align=1; mode-set=0,2,4"),
             "the framing did not reach media-core"
         );
@@ -6592,8 +6594,12 @@ a=fmtp:101 0-15\r\n";
         // a path that assumed 8 kHz would refuse this and pass a narrowband
         // test.
         use rvoip_media_core::codec::spec::AudioCodecSpec;
-        let spec = AudioCodecSpec::new("AMR-WB", AMR_WB_OA_PT, 16_000, 1)
-            .with_fmtp(config.parameters.get(NEGOTIATED_FMTP_PARAMETER).map(String::as_str));
+        let spec = AudioCodecSpec::new("AMR-WB", AMR_WB_OA_PT, 16_000, 1).with_fmtp(
+            config
+                .parameters
+                .get(NEGOTIATED_FMTP_PARAMETER)
+                .map(String::as_str),
+        );
         let mut codec = spec.build().expect("the negotiated codec builds");
         let pcm: Vec<i16> = (0..320)
             .map(|i| ((f64::from(i) * 0.05).sin() * 6000.0) as i16)
@@ -6603,7 +6609,10 @@ a=fmtp:101 0-15\r\n";
         assert!(!payload.is_empty());
         let decoded = codec.decode(&payload).expect("decodes");
         assert_eq!(decoded.samples.len(), 320);
-        assert!(decoded.samples.iter().any(|&s| s != 0), "round trip was silent");
+        assert!(
+            decoded.samples.iter().any(|&s| s != 0),
+            "round trip was silent"
+        );
 
         adapter
             .cleanup_session(&session_id)
@@ -6951,7 +6960,9 @@ a=fmtp:101 0-15\r\n";
         );
         let opus = dynamic_audio_offer("104", "opus/48000/2");
         assert_eq!(
-            negotiated_audio_shape_from_sdp(&opus, 104, false).unwrap().0,
+            negotiated_audio_shape_from_sdp(&opus, 104, false)
+                .unwrap()
+                .0,
             "opus"
         );
     }
@@ -7038,7 +7049,10 @@ a=fmtp:101 0-15\r\n";
             "an answer on the peer's number must echo its rtpmap"
         );
         // A static type still comes from the local table.
-        assert_eq!(answer_rtpmap_for_pt(&offer, 0).as_deref(), Some("PCMU/8000"));
+        assert_eq!(
+            answer_rtpmap_for_pt(&offer, 0).as_deref(),
+            Some("PCMU/8000")
+        );
         // And an unmapped dynamic type yields nothing rather than a guess.
         assert_eq!(answer_rtpmap_for_pt(&offer, 99), None);
     }
@@ -7096,7 +7110,11 @@ a=fmtp:101 0-15\r\n";
                 .formats(&[pt.as_str()])
                 .rtpmap(
                     pt.as_str(),
-                    if offer_pt >= AMR_NB_BE_PT { "AMR/8000" } else { "AMR-WB/16000" },
+                    if offer_pt >= AMR_NB_BE_PT {
+                        "AMR/8000"
+                    } else {
+                        "AMR-WB/16000"
+                    },
                 );
             if let Some(fmtp) = offered_fmtp {
                 media = media.fmtp(pt.as_str(), fmtp);

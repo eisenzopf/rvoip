@@ -772,7 +772,6 @@ pub fn search_multi_pulse(
         *slot = i16::try_from(k).expect("at most 24 pulses");
     }
 
-
     let signs = decide_signs(ctx, dn, cn, budget.mix_weight(), true);
 
     // Rank the eight best positions of each track by the mixed correlation,
@@ -1583,15 +1582,7 @@ mod tests {
 
         let mut correlation = Word16(0);
         let mut energy = Word16(0);
-        let (ix, iy) = best_pulse_pair(
-            &mut ctx,
-            8,
-            0,
-            1,
-            &mut correlation,
-            &mut energy,
-            &tables,
-        );
+        let (ix, iy) = best_pulse_pair(&mut ctx, 8, 0, 1, &mut correlation, &mut energy, &tables);
 
         assert_eq!(
             (ix, iy),
@@ -1630,17 +1621,13 @@ mod tests {
 
         let mut correlation = Word16(50);
         let mut energy = Word16(1234);
-        let (ix, iy) = best_pulse_pair(
-            &mut ctx,
-            8,
-            2,
-            3,
-            &mut correlation,
-            &mut energy,
-            &tables,
-        );
+        let (ix, iy) = best_pulse_pair(&mut ctx, 8, 2, 3, &mut correlation, &mut energy, &tables);
 
-        assert_eq!((ix, iy), (2, 3), "the defaults are position 0 of each track");
+        assert_eq!(
+            (ix, iy),
+            (2, 3),
+            "the defaults are position 0 of each track"
+        );
         assert_eq!(energy.0, 1, "the untouched incumbent energy is written out");
         assert_eq!(correlation.0, 2050, "the defaults still update the sum");
     }
@@ -1954,11 +1941,7 @@ mod tests {
                     for (pos, positive) in result.positions.iter().zip(result.positive) {
                         if i >= *pos {
                             let tap = h2[i - *pos];
-                            let signed = if positive {
-                                tap
-                            } else {
-                                negate(&mut ctx, tap)
-                            };
+                            let signed = if positive { tap } else { negate(&mut ctx, tap) };
                             sum = add(&mut ctx, sum, signed);
                         }
                     }
@@ -2037,7 +2020,10 @@ mod tests {
     fn negative_normalisation_uses_the_complement_rule() {
         assert_eq!(norm_l(Word32(0xC000_0000u32 as i32)), 1);
         let mut ctx = DspContext::new();
-        assert_eq!(l_negate(&mut ctx, Word32(0x8000_0000u32 as i32)).0, i32::MAX);
+        assert_eq!(
+            l_negate(&mut ctx, Word32(0x8000_0000u32 as i32)).0,
+            i32::MAX
+        );
     }
 
     /// The packers never exceed their advertised width, which is what licenses

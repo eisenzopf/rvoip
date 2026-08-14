@@ -328,8 +328,7 @@ mod tests {
             let t = (sf * L_SUBFR + n) as f64;
             #[allow(clippy::cast_possible_truncation)]
             {
-                *slot =
-                    Word16((2000.0 * (2.0 * std::f64::consts::PI * t / 37.0).sin()) as i16);
+                *slot = Word16((2000.0 * (2.0 * std::f64::consts::PI * t / 37.0).sin()) as i16);
             }
         }
         v
@@ -464,8 +463,7 @@ mod tests {
                 #[allow(clippy::cast_possible_truncation)]
                 {
                     *slot = Word16(
-                        (8000.0 * (2.0 * std::f64::consts::PI * 1000.0 * t / 12800.0).sin())
-                            as i16,
+                        (8000.0 * (2.0 * std::f64::consts::PI * 1000.0 * t / 12800.0).sin()) as i16,
                     );
                 }
             }

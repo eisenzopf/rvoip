@@ -254,10 +254,16 @@ mod tests {
         // And a kept bit of the same word must still be rejected, or the test
         // above would pass for a comparison that ignored everything.
         let kept = 10 * PRML + 1;
-        assert!(!is_decoder_homing_frame(&homing_payload_with_flip(8, Some(kept)), 8));
+        assert!(!is_decoder_homing_frame(
+            &homing_payload_with_flip(8, Some(kept)),
+            8
+        ));
 
         // The same position in a rate that masks nothing must be rejected.
-        assert!(!is_decoder_homing_frame(&homing_payload_with_flip(7, Some(masked)), 7));
+        assert!(!is_decoder_homing_frame(
+            &homing_payload_with_flip(7, Some(masked)),
+            7
+        ));
     }
 
     /// Serialise a mode's pattern into the payload a receiver would see.

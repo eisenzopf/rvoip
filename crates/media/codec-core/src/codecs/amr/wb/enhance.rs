@@ -28,8 +28,8 @@ use super::gain_tables::{PH_IMP_LOW, PH_IMP_MID};
 use super::math::dot_product12;
 use crate::fixed_point::arith::{add, extract_h, mult, mult_r, negate, round, sub};
 use crate::fixed_point::arith32::{l_add, l_deposit_h, l_mac, l_msu, l_mult};
-use crate::fixed_point::oper32::{l_extract, mpy_32_16};
 use crate::fixed_point::div::div_s;
+use crate::fixed_point::oper32::{l_extract, mpy_32_16};
 use crate::fixed_point::shift::{l_shl, norm_l, norm_s, shl, shr};
 use crate::fixed_point::types::{DspContext, Word16, Word32};
 
@@ -253,7 +253,12 @@ pub fn pitch_enhance_with(
         out[i] = round(ctx, acc);
     }
 
-    let acc = l_msu(ctx, l_deposit_h(code[L_SUBFR - 1]), code[L_SUBFR - 2], strength);
+    let acc = l_msu(
+        ctx,
+        l_deposit_h(code[L_SUBFR - 1]),
+        code[L_SUBFR - 2],
+        strength,
+    );
     out[L_SUBFR - 1] = round(ctx, acc);
 
     out
@@ -523,8 +528,7 @@ mod tests {
             for i in 0..16usize {
                 let base = 1000 + i16::try_from(i).expect("index") * 900;
                 isf[i] = Word16(base);
-                let offset =
-                    i16::try_from(blk * blk * 220 * (i % 3)).expect("perturbation fits");
+                let offset = i16::try_from(blk * blk * 220 * (i % 3)).expect("perturbation fits");
                 isf_old[i] = Word16(base + offset);
             }
 
@@ -535,14 +539,8 @@ mod tests {
             let exc = excitation(blk);
             let code = innovation(blk);
             let meta = block_row("enhance", &format!("emeta{blk}"));
-            let voice_fac = voice_factor(
-                &mut ctx,
-                &exc,
-                -3,
-                Word16(meta[0]),
-                &code,
-                Word16(meta[1]),
-            );
+            let voice_fac =
+                voice_factor(&mut ctx, &exc, -3, Word16(meta[0]), &code, Word16(meta[1]));
 
             let gain_code = Word32(want[2]);
             let out = enhancer.apply(&mut ctx, gain_code, voice_fac, stab);

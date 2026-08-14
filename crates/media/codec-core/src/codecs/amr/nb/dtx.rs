@@ -35,8 +35,8 @@
 
 use super::cn::{a_refl, build_cn_code, pseudonoise, PN_INITIAL_SEED};
 use super::decoder_tables::{LSP_INIT, MEAN_LSF_3};
-use super::enc::lsp_quant::lsp_to_lsf;
 use super::enc::dtx::DTX_HIST_SIZE;
+use super::enc::lsp_quant::lsp_to_lsf;
 use super::gain::CodeGainPredictor;
 use super::lsp::{lsf_to_lsp, lsp_to_lp, reorder_lsf, LsfDecoder, M, MP1};
 use super::math::{log2, pow2};
@@ -267,31 +267,34 @@ impl DtxDecoder {
         let quiet_continuation =
             in_dtx && matches!(frame_type, F::NoData | F::SpeechBad | F::Onset);
 
-        let new_state = if matches!(frame_type, F::SidFirst | F::SidUpdate | F::SidBad)
-            || quiet_continuation
-        {
-            // Muting is sticky: these four inputs carry no new description, so
-            // a decoder already muting stays muted.
-            let sticky = self.global_state == DtxState::DtxMute
-                && matches!(frame_type, F::SidBad | F::SidFirst | F::Onset | F::NoData);
-            let mut state = if sticky { DtxState::DtxMute } else { DtxState::Dtx };
+        let new_state =
+            if matches!(frame_type, F::SidFirst | F::SidUpdate | F::SidBad) || quiet_continuation {
+                // Muting is sticky: these four inputs carry no new description, so
+                // a decoder already muting stays muted.
+                let sticky = self.global_state == DtxState::DtxMute
+                    && matches!(frame_type, F::SidBad | F::SidFirst | F::Onset | F::NoData);
+                let mut state = if sticky {
+                    DtxState::DtxMute
+                } else {
+                    DtxState::Dtx
+                };
 
-            self.since_last_sid = add(ctx, self.since_last_sid, Word16(1));
+                self.since_last_sid = add(ctx, self.since_last_sid, Word16(1));
 
-            // A SID_UPDATE is exempt even when the counter has already passed
-            // the threshold: the counter is incremented before this test, so a
-            // late but genuine update would otherwise be punished for its own
-            // lateness.
-            if frame_type != F::SidUpdate
-                && sub(ctx, self.since_last_sid, DTX_MAX_EMPTY_THRESH).0 > 0
-            {
-                state = DtxState::DtxMute;
-            }
-            state
-        } else {
-            self.since_last_sid = Word16(0);
-            DtxState::Speech
-        };
+                // A SID_UPDATE is exempt even when the counter has already passed
+                // the threshold: the counter is incremented before this test, so a
+                // late but genuine update would otherwise be punished for its own
+                // lateness.
+                if frame_type != F::SidUpdate
+                    && sub(ctx, self.since_last_sid, DTX_MAX_EMPTY_THRESH).0 > 0
+                {
+                    state = DtxState::DtxMute;
+                }
+                state
+            } else {
+                self.since_last_sid = Word16(0);
+                DtxState::Speech
+            };
 
         // First ever description: resynchronise the hangover counter, which
         // may be arbitrarily stale after a handover.
@@ -393,7 +396,11 @@ impl DtxDecoder {
     ///
     /// # Panics
     /// If `mode` is above 8.
-    #[allow(clippy::too_many_lines, clippy::similar_names, clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_lines,
+        clippy::similar_names,
+        clippy::too_many_arguments
+    )]
     pub fn comfort_noise(
         &mut self,
         ctx: &mut DspContext,
@@ -480,7 +487,11 @@ impl DtxDecoder {
             self.data_updated = true;
         }
 
-        ComfortNoise { synth, a_t, lsf: lsf_int }
+        ComfortNoise {
+            synth,
+            a_t,
+            lsf: lsf_int,
+        }
     }
 
     /// Derive a noise description from the decoded speech that preceded it.
@@ -496,8 +507,9 @@ impl DtxDecoder {
         // be averaged and the newest frame is the most representative, so it
         // gets counted twice -- and the pointers themselves do *not* advance.
         let ptr = (self.lsf_hist_ptr + M) % (M * DTX_HIST_SIZE);
-        let newest: [Word16; M] =
-            self.lsf_hist[self.lsf_hist_ptr..self.lsf_hist_ptr + M].try_into().expect("M wide");
+        let newest: [Word16; M] = self.lsf_hist[self.lsf_hist_ptr..self.lsf_hist_ptr + M]
+            .try_into()
+            .expect("M wide");
         self.lsf_hist[ptr..ptr + M].copy_from_slice(&newest);
 
         let ptr = (self.log_en_hist_ptr + 1) % DTX_HIST_SIZE;
@@ -687,7 +699,12 @@ impl DtxDecoder {
     /// out. That gain is computed from the reflection coefficients: the product
     /// of `1 - k²` is the prediction error power, and its logarithm is
     /// subtracted from the target level.
-    fn level(&mut self, ctx: &mut DspContext, acoeff: &[Word16; MP1], mut l_log_en: Word32) -> Word16 {
+    fn level(
+        &mut self,
+        ctx: &mut DspContext,
+        acoeff: &[Word16; MP1],
+        mut l_log_en: Word32,
+    ) -> Word16 {
         let refl = a_refl(ctx, &acoeff[1..]);
 
         let mut pred_err = Word16(i16::MAX);
@@ -845,7 +862,10 @@ mod tests {
         stream.extend(std::iter::repeat_n(F::NoData, 55));
         stream.push(F::SpeechBad);
         let states = drive(&stream);
-        assert_eq!(states[55], DtxMute, "the stream must be muting first, or this proves nothing");
+        assert_eq!(
+            states[55], DtxMute,
+            "the stream must be muting first, or this proves nothing"
+        );
         assert_eq!(*states.last().expect("non-empty"), Dtx);
     }
 
@@ -887,7 +907,11 @@ mod tests {
         stream.push(RxFrameType::SidUpdate);
         let states = drive(&stream);
         assert_eq!(*states.last().expect("non-empty"), DtxState::Dtx);
-        assert_eq!(states[55], DtxState::DtxMute, "it should have been muting before");
+        assert_eq!(
+            states[55],
+            DtxState::DtxMute,
+            "it should have been muting before"
+        );
     }
 
     /// Speech resets the staleness counter even when it never reaches DTX.
@@ -917,7 +941,10 @@ mod tests {
         dtx.commit(DtxState::Speech);
         let state = dtx.receive(&mut ctx, RxFrameType::SidFirst);
         assert_eq!(state, DtxState::Dtx);
-        assert!(dtx.dtx_hangover_added, "hangover was not detected on the first SID");
+        assert!(
+            dtx.dtx_hangover_added,
+            "hangover was not detected on the first SID"
+        );
         assert!(dtx.sid_frame);
         assert!(!dtx.valid_data, "a SID_FIRST carries no parameters");
 
@@ -926,7 +953,10 @@ mod tests {
         dtx.dec_ana_elapsed_count = Word16(0);
         dtx.commit(DtxState::Speech);
         dtx.receive(&mut ctx, RxFrameType::SidFirst);
-        assert!(!dtx.dtx_hangover_added, "the test is vacuous if this also fires");
+        assert!(
+            !dtx.dtx_hangover_added,
+            "the test is vacuous if this also fires"
+        );
     }
 
     /// A damaged SID keeps the old description rather than re-deriving one.
@@ -938,6 +968,9 @@ mod tests {
         dtx.receive(&mut ctx, RxFrameType::SidBad);
         assert!(dtx.sid_frame, "it is still a SID frame");
         assert!(!dtx.valid_data);
-        assert!(!dtx.dtx_hangover_added, "damaged bits must not drive the analysis");
+        assert!(
+            !dtx.dtx_hangover_added,
+            "damaged bits must not drive the analysis"
+        );
     }
 }

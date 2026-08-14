@@ -33,26 +33,94 @@ use super::mode::{AmrMode, AmrVariant};
 
 /// `(mode index, apache fixture, reference fixture)`.
 const NARROWBAND: [(u8, &[u8], &[u8]); 8] = [
-    (0, include_bytes!("testdata/amrnb_mode0.amr"), include_bytes!("testdata/amrnb_enc_mode0.amr")),
-    (1, include_bytes!("testdata/amrnb_mode1.amr"), include_bytes!("testdata/amrnb_enc_mode1.amr")),
-    (2, include_bytes!("testdata/amrnb_mode2.amr"), include_bytes!("testdata/amrnb_enc_mode2.amr")),
-    (3, include_bytes!("testdata/amrnb_mode3.amr"), include_bytes!("testdata/amrnb_enc_mode3.amr")),
-    (4, include_bytes!("testdata/amrnb_mode4.amr"), include_bytes!("testdata/amrnb_enc_mode4.amr")),
-    (5, include_bytes!("testdata/amrnb_mode5.amr"), include_bytes!("testdata/amrnb_enc_mode5.amr")),
-    (6, include_bytes!("testdata/amrnb_mode6.amr"), include_bytes!("testdata/amrnb_enc_mode6.amr")),
-    (7, include_bytes!("testdata/amrnb_mode7.amr"), include_bytes!("testdata/amrnb_enc_mode7.amr")),
+    (
+        0,
+        include_bytes!("testdata/amrnb_mode0.amr"),
+        include_bytes!("testdata/amrnb_enc_mode0.amr"),
+    ),
+    (
+        1,
+        include_bytes!("testdata/amrnb_mode1.amr"),
+        include_bytes!("testdata/amrnb_enc_mode1.amr"),
+    ),
+    (
+        2,
+        include_bytes!("testdata/amrnb_mode2.amr"),
+        include_bytes!("testdata/amrnb_enc_mode2.amr"),
+    ),
+    (
+        3,
+        include_bytes!("testdata/amrnb_mode3.amr"),
+        include_bytes!("testdata/amrnb_enc_mode3.amr"),
+    ),
+    (
+        4,
+        include_bytes!("testdata/amrnb_mode4.amr"),
+        include_bytes!("testdata/amrnb_enc_mode4.amr"),
+    ),
+    (
+        5,
+        include_bytes!("testdata/amrnb_mode5.amr"),
+        include_bytes!("testdata/amrnb_enc_mode5.amr"),
+    ),
+    (
+        6,
+        include_bytes!("testdata/amrnb_mode6.amr"),
+        include_bytes!("testdata/amrnb_enc_mode6.amr"),
+    ),
+    (
+        7,
+        include_bytes!("testdata/amrnb_mode7.amr"),
+        include_bytes!("testdata/amrnb_enc_mode7.amr"),
+    ),
 ];
 
 const WIDEBAND: [(u8, &[u8], &[u8]); 9] = [
-    (0, include_bytes!("testdata/amrwb_mode0.amr"), include_bytes!("testdata/amrwb_enc_mode0.amr")),
-    (1, include_bytes!("testdata/amrwb_mode1.amr"), include_bytes!("testdata/amrwb_enc_mode1.amr")),
-    (2, include_bytes!("testdata/amrwb_mode2.amr"), include_bytes!("testdata/amrwb_enc_mode2.amr")),
-    (3, include_bytes!("testdata/amrwb_mode3.amr"), include_bytes!("testdata/amrwb_enc_mode3.amr")),
-    (4, include_bytes!("testdata/amrwb_mode4.amr"), include_bytes!("testdata/amrwb_enc_mode4.amr")),
-    (5, include_bytes!("testdata/amrwb_mode5.amr"), include_bytes!("testdata/amrwb_enc_mode5.amr")),
-    (6, include_bytes!("testdata/amrwb_mode6.amr"), include_bytes!("testdata/amrwb_enc_mode6.amr")),
-    (7, include_bytes!("testdata/amrwb_mode7.amr"), include_bytes!("testdata/amrwb_enc_mode7.amr")),
-    (8, include_bytes!("testdata/amrwb_mode8.amr"), include_bytes!("testdata/amrwb_enc_mode8.amr")),
+    (
+        0,
+        include_bytes!("testdata/amrwb_mode0.amr"),
+        include_bytes!("testdata/amrwb_enc_mode0.amr"),
+    ),
+    (
+        1,
+        include_bytes!("testdata/amrwb_mode1.amr"),
+        include_bytes!("testdata/amrwb_enc_mode1.amr"),
+    ),
+    (
+        2,
+        include_bytes!("testdata/amrwb_mode2.amr"),
+        include_bytes!("testdata/amrwb_enc_mode2.amr"),
+    ),
+    (
+        3,
+        include_bytes!("testdata/amrwb_mode3.amr"),
+        include_bytes!("testdata/amrwb_enc_mode3.amr"),
+    ),
+    (
+        4,
+        include_bytes!("testdata/amrwb_mode4.amr"),
+        include_bytes!("testdata/amrwb_enc_mode4.amr"),
+    ),
+    (
+        5,
+        include_bytes!("testdata/amrwb_mode5.amr"),
+        include_bytes!("testdata/amrwb_enc_mode5.amr"),
+    ),
+    (
+        6,
+        include_bytes!("testdata/amrwb_mode6.amr"),
+        include_bytes!("testdata/amrwb_enc_mode6.amr"),
+    ),
+    (
+        7,
+        include_bytes!("testdata/amrwb_mode7.amr"),
+        include_bytes!("testdata/amrwb_enc_mode7.amr"),
+    ),
+    (
+        8,
+        include_bytes!("testdata/amrwb_mode8.amr"),
+        include_bytes!("testdata/amrwb_enc_mode8.amr"),
+    ),
 ];
 
 /// First byte at which the shorter file leaves the longer one's prefix.
@@ -148,6 +216,10 @@ fn the_two_runs_are_comparable_at_all() {
             "AMR-WB mode {index}: the reference run should be the longer one"
         );
         assert_eq!(&apache[..9], b"#!AMR-WB\n", "mode {index} apache magic");
-        assert_eq!(&reference[..9], b"#!AMR-WB\n", "mode {index} reference magic");
+        assert_eq!(
+            &reference[..9],
+            b"#!AMR-WB\n",
+            "mode {index} reference magic"
+        );
     }
 }

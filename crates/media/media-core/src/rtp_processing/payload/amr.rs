@@ -26,10 +26,10 @@
 
 use super::traits::PayloadFormat;
 use bytes::Bytes;
+use codec_core::codecs::amr::mode::AmrFrameType;
 use codec_core::codecs::amr::{
     AmrFmtp, AmrMode, AmrPacket, AmrPayloadCodec, AmrPayloadConfig, AmrPayloadFrame, AmrVariant,
 };
-use codec_core::codecs::amr::mode::AmrFrameType;
 use std::any::Any;
 
 /// RFC 4867 payload format handler for AMR-NB and AMR-WB.
@@ -380,8 +380,7 @@ mod tests {
         // produce different bytes for identical content, and a relay that
         // guesses emits a stream the peer cannot parse.
         let be = AmrPayloadFormat::from_negotiated(104, "AMR-WB", None).unwrap();
-        let oa =
-            AmrPayloadFormat::from_negotiated(105, "AMR-WB", Some("octet-align=1")).unwrap();
+        let oa = AmrPayloadFormat::from_negotiated(105, "AMR-WB", Some("octet-align=1")).unwrap();
 
         let coded = coded_frame(be.mode(), 3);
         let be_bytes = be.pack(&coded, 0);
@@ -407,8 +406,7 @@ mod tests {
 
     #[test]
     fn negotiated_mode_set_bounds_the_starting_mode() {
-        let fmt =
-            AmrPayloadFormat::from_negotiated(104, "AMR-WB", Some("mode-set=0,1,2")).unwrap();
+        let fmt = AmrPayloadFormat::from_negotiated(104, "AMR-WB", Some("mode-set=0,1,2")).unwrap();
         assert_eq!(fmt.mode().index(), 2, "start at the highest permitted mode");
 
         let nb = AmrPayloadFormat::from_negotiated(106, "AMR", Some("mode-set=0")).unwrap();
@@ -454,7 +452,10 @@ mod tests {
         assert!(config.octet_aligned && config.crc && config.robust_sorting);
 
         let coded = coded_frame(fmt.mode(), 7);
-        assert_eq!(fmt.unpack(&fmt.pack(&coded, 0), 0).as_ref(), coded.as_slice());
+        assert_eq!(
+            fmt.unpack(&fmt.pack(&coded, 0), 0).as_ref(),
+            coded.as_slice()
+        );
     }
 
     #[test]
@@ -478,6 +479,9 @@ mod tests {
         assert_eq!(codec.unpack(&bytes).unwrap(), packet);
 
         // The shim sees only the first frame of that same payload.
-        assert_eq!(fmt.unpack(&bytes, 0).len(), frame_type.octet_aligned_bytes());
+        assert_eq!(
+            fmt.unpack(&bytes, 0).len(),
+            frame_type.octet_aligned_bytes()
+        );
     }
 }

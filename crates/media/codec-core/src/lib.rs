@@ -293,7 +293,9 @@ mod tests {
     #[test]
     fn test_supported_codecs() {
         #[cfg(any(feature = "g711", feature = "g729", feature = "opus"))]
-        const { assert!(!SUPPORTED_CODECS.is_empty()) };
+        const {
+            assert!(!SUPPORTED_CODECS.is_empty())
+        };
 
         #[cfg(not(any(feature = "g711", feature = "g729", feature = "opus")))]
         assert!(SUPPORTED_CODECS.is_empty());

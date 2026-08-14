@@ -42,7 +42,10 @@ fn parse(provider: &str, fixture_name: &str) -> String {
     }
     let output = child.wait_with_output().expect("waits");
     assert!(output.status.success(), "parse exited nonzero");
-    String::from_utf8(output.stdout).expect("utf8").trim().to_string()
+    String::from_utf8(output.stdout)
+        .expect("utf8")
+        .trim()
+        .to_string()
 }
 
 fn detect_with_assumption(provider: &str, assume: &str) -> String {
@@ -60,7 +63,10 @@ fn detect_with_assumption(provider: &str, assume: &str) -> String {
         .expect("runs");
     let _ = std::fs::remove_file(&transcript);
     assert!(output.status.success(), "detect exited nonzero");
-    String::from_utf8(output.stdout).expect("utf8").trim().to_string()
+    String::from_utf8(output.stdout)
+        .expect("utf8")
+        .trim()
+        .to_string()
 }
 
 #[test]
@@ -118,7 +124,12 @@ fn asterisk_name_column_is_matched_exactly() {
         .stdout(Stdio::piped())
         .spawn()
         .expect("spawns");
-    child.stdin.take().expect("stdin").write_all(&input).expect("writes");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(&input)
+        .expect("writes");
     let output = child.wait_with_output().expect("waits");
     assert_eq!(
         String::from_utf8(output.stdout).expect("utf8").trim(),

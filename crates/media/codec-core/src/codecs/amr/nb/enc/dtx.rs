@@ -104,11 +104,7 @@ impl DtxEncoder {
     /// still have to retransmit the previous parameters, because recomputing
     /// immediately after a talk spurt would describe the talker rather than
     /// the background.
-    pub fn classify(
-        &mut self,
-        ctx: &mut DspContext,
-        voice_active: bool,
-    ) -> (TxDecision, bool) {
+    pub fn classify(&mut self, ctx: &mut DspContext, voice_active: bool) -> (TxDecision, bool) {
         self.dec_ana_elapsed_count = add(ctx, self.dec_ana_elapsed_count, Word16(1));
 
         if voice_active {
@@ -243,9 +239,10 @@ mod tests {
         for _ in 0..3 {
             assert_eq!(dtx.classify(&mut ctx, true).0, TxDecision::Speech);
         }
-        let decisions: Vec<TxDecision> =
-            (0..10).map(|_| dtx.classify(&mut ctx, false).0).collect();
-        let first_cn = decisions.iter().position(|&d| d == TxDecision::ComfortNoise);
+        let decisions: Vec<TxDecision> = (0..10).map(|_| dtx.classify(&mut ctx, false).0).collect();
+        let first_cn = decisions
+            .iter()
+            .position(|&d| d == TxDecision::ComfortNoise);
         assert_eq!(first_cn, Some(7), "the hangover is seven frames");
     }
 
@@ -267,7 +264,10 @@ mod tests {
                 recomputes += 1;
             }
         }
-        assert_eq!(recomputes, 3, "recomputation should be rare, not every frame");
+        assert_eq!(
+            recomputes, 3,
+            "recomputation should be rare, not every frame"
+        );
     }
 
     #[test]

@@ -36,8 +36,8 @@
 //! because the reference's shifts are arithmetic and the masks are its own.
 
 use crate::fixed_point::arith::{abs_s, add, extract_h, mult, mult_r, round, sub};
-use crate::fixed_point::arith32::{l_add, l_mac, l_msu, l_sub};
 use crate::fixed_point::arith32::l_deposit_h;
+use crate::fixed_point::arith32::{l_add, l_mac, l_msu, l_sub};
 use crate::fixed_point::div::div_s;
 use crate::fixed_point::shift::{l_shl, norm_s, shl, shr};
 use crate::fixed_point::types::{DspContext, Word16, Word32};
@@ -353,7 +353,14 @@ impl VoiceActivityDetector {
         for (band, count1, count2, stride, offset, scale) in BANDS {
             let mut carried = self.sub_level[band];
             level[band] = level_calculation(
-                ctx, &buf, &mut carried, count1, count2, stride, offset, scale,
+                ctx,
+                &buf,
+                &mut carried,
+                count1,
+                count2,
+                stride,
+                offset,
+                scale,
             );
             self.sub_level[band] = carried;
         }
@@ -590,12 +597,7 @@ impl VoiceActivityDetector {
     }
 
     /// `hangover_addition`: hold the decision on past the end of a burst.
-    fn add_hangover(
-        &mut self,
-        ctx: &mut DspContext,
-        noise_level: Word16,
-        low_power: bool,
-    ) -> bool {
+    fn add_hangover(&mut self, ctx: &mut DspContext, noise_level: Word16, low_power: bool) -> bool {
         let (burst_len, hang_len) = if sub(ctx, noise_level, HANG_NOISE_THR).0 > 0 {
             (BURST_LEN_HIGH_NOISE, HANG_LEN_HIGH_NOISE)
         } else {
@@ -622,8 +624,7 @@ impl VoiceActivityDetector {
             self.complex_hang_count = sub(ctx, self.complex_hang_count, Word16(1));
             return true;
         }
-        if (self.vadreg.0 & 0x3ff0) == 0
-            && sub(ctx, self.corr_hp_fast, CVAD_THRESH_IN_NOISE).0 > 0
+        if (self.vadreg.0 & 0x3ff0) == 0 && sub(ctx, self.corr_hp_fast, CVAD_THRESH_IN_NOISE).0 > 0
         {
             return true;
         }
@@ -743,7 +744,10 @@ mod tests {
         let mut compared = 0usize;
         let mut decisions = (0usize, 0usize);
 
-        for line in text.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()) {
+        for line in text
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+        {
             let fields: Vec<&str> = line.split('|').collect();
             assert_eq!(fields.len(), 3, "malformed row `{line}`");
             let head: Vec<i32> = fields[0]
@@ -834,6 +838,9 @@ mod tests {
         // above: without them they stay at zero for all 150 frames and agree
         // with anything.
         assert_eq!(decisions, (62, 88), "the fixture stopped discriminating");
-        assert!(vad.pitch.0 != 0 || vad.tone.0 != 0, "the registers never moved");
+        assert!(
+            vad.pitch.0 != 0 || vad.tone.0 != 0,
+            "the registers never moved"
+        );
     }
 }

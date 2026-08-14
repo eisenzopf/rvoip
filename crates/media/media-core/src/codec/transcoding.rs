@@ -23,9 +23,8 @@ fn spec_for(payload_type: PayloadType) -> Result<AudioCodecSpec> {
     if payload_type == PCM_S16LE {
         return Ok(AudioCodecSpec::new("PCM_S16LE", PCM_S16LE, 16_000, 1));
     }
-    AudioCodecSpec::from_static_payload_type(payload_type).ok_or_else(|| {
-        Error::Codec(CodecError::UnsupportedPayloadType { payload_type })
-    })
+    AudioCodecSpec::from_static_payload_type(payload_type)
+        .ok_or_else(|| Error::Codec(CodecError::UnsupportedPayloadType { payload_type }))
 }
 
 /// Transcoding path between two codecs
@@ -446,16 +445,24 @@ mod tests {
 
         let paths = transcoder.get_supported_paths();
         assert!(!paths.is_empty());
-        assert!(paths.iter().any(|p| p.from.name == "PCMU" && p.to.name == "PCMA"));
+        assert!(paths
+            .iter()
+            .any(|p| p.from.name == "PCMU" && p.to.name == "PCMA"));
         #[cfg(feature = "opus")]
-        assert!(paths.iter().any(|p| p.from.name == "PCMU" && p.to.name == "opus"));
+        assert!(paths
+            .iter()
+            .any(|p| p.from.name == "PCMU" && p.to.name == "opus"));
         #[cfg(not(feature = "opus"))]
         assert!(!paths
             .iter()
             .any(|path| path.from.name == "opus" || path.to.name == "opus"));
-        assert!(paths.iter().any(|p| p.from.name == "PCM_S16LE" && p.to.name == "PCMU"));
+        assert!(paths
+            .iter()
+            .any(|p| p.from.name == "PCM_S16LE" && p.to.name == "PCMU"));
         #[cfg(feature = "opus")]
-        assert!(paths.iter().any(|p| p.from.name == "opus" && p.to.name == "PCM_S16LE"));
+        assert!(paths
+            .iter()
+            .any(|p| p.from.name == "opus" && p.to.name == "PCM_S16LE"));
     }
 
     #[tokio::test]
@@ -626,7 +633,9 @@ mod tests {
             (0..samples)
                 .map(|i| {
                     let t = ((frame * samples + i) as f64) / f64::from(rate);
-                    (t * 440.0 * std::f64::consts::TAU).sin().mul_add(8000.0, 0.0) as i16
+                    (t * 440.0 * std::f64::consts::TAU)
+                        .sin()
+                        .mul_add(8000.0, 0.0) as i16
                 })
                 .collect()
         }
@@ -700,7 +709,13 @@ mod tests {
                 let payloads = encode_all(&from, 20);
                 let (pcm, produced) = transcode_stream(&from, &to, &payloads).await;
 
-                assert_eq!(produced, payloads.len(), "{} -> {}: frame count", from.name, to.name);
+                assert_eq!(
+                    produced,
+                    payloads.len(),
+                    "{} -> {}: frame count",
+                    from.name,
+                    to.name
+                );
                 assert_eq!(
                     pcm.len(),
                     payloads.len() * to.frame_samples_20ms(),
@@ -775,7 +790,10 @@ mod tests {
             for payload in &nb_payloads {
                 // Fed to a wideband session, which must not accept it.
                 assert!(
-                    transcoder.transcode_between(payload, &wb, &pcmu).await.is_err(),
+                    transcoder
+                        .transcode_between(payload, &wb, &pcmu)
+                        .await
+                        .is_err(),
                     "a narrowband payload decoded as wideband"
                 );
             }
@@ -824,9 +842,9 @@ mod tests {
         // Paths are named by codec now, not by payload type -- a dynamic
         // payload type does not identify one.
         let has = |from: &str, to: &str| {
-            paths
-                .iter()
-                .any(|p| p.from.name.eq_ignore_ascii_case(from) && p.to.name.eq_ignore_ascii_case(to))
+            paths.iter().any(|p| {
+                p.from.name.eq_ignore_ascii_case(from) && p.to.name.eq_ignore_ascii_case(to)
+            })
         };
         assert!(has("G729", "PCMU"));
         assert!(has("PCMU", "G729"));
@@ -845,7 +863,7 @@ mod tests {
     #[cfg(feature = "opus")]
     #[tokio::test]
     async fn pcmu_opus_roundtrip_preserves_tone() {
-                use crate::types::AudioFrame;
+        use crate::types::AudioFrame;
 
         fn goertzel_mag(samples: &[i16], sample_rate: f64, freq: f64) -> f64 {
             let n = samples.len() as f64;

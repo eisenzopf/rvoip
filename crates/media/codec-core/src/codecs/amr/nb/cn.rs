@@ -123,7 +123,11 @@ pub fn a_refl(ctx: &mut DspContext, a: &[Word16]) -> [Word16; 10] {
     use crate::fixed_point::shift::{l_shl, l_shr_r, norm_l};
 
     const M: usize = 10;
-    assert_eq!(a.len(), M, "A_Refl takes the ten coefficients after the leading 1.0");
+    assert_eq!(
+        a.len(),
+        M,
+        "A_Refl takes the ten coefficients after the leading 1.0"
+    );
 
     let mut refl = [Word16(0); M];
     let mut state = [Word16(0); M];
@@ -192,7 +196,10 @@ mod tests {
                 seen_initial_again = true;
             }
         }
-        assert!(!seen_initial_again, "the register returned to its seed inside a million draws");
+        assert!(
+            !seen_initial_again,
+            "the register returned to its seed inside a million draws"
+        );
         assert!(
             (490_000..=510_000).contains(&ones),
             "{ones} ones in a million draws is not a balanced sequence"
@@ -228,8 +235,7 @@ mod tests {
 
         for _ in 0..200 {
             let cod = build_cn_code(&mut ctx, &mut reg);
-            let placed: Vec<usize> =
-                (0..L_SUBFR).filter(|&i| cod[i].0 != 0).collect();
+            let placed: Vec<usize> = (0..L_SUBFR).filter(|&i| cod[i].0 != 0).collect();
             assert_eq!(placed.len(), NB_PULSE, "pulses collided");
             // One pulse per track: the ten residues mod ten are all distinct,
             // which is what makes a collision impossible rather than merely
@@ -238,13 +244,20 @@ mod tests {
             // statement about the set, not about the sequence.
             let mut tracks: Vec<usize> = placed.iter().map(|&p| p % NB_PULSE).collect();
             tracks.sort_unstable();
-            assert_eq!(tracks, (0..NB_PULSE).collect::<Vec<_>>(), "two pulses shared a track");
+            assert_eq!(
+                tracks,
+                (0..NB_PULSE).collect::<Vec<_>>(),
+                "two pulses shared a track"
+            );
             positives += placed.iter().filter(|&&p| cod[p].0 > 0).count();
             negatives += placed.iter().filter(|&&p| cod[p].0 < 0).count();
         }
 
         assert_eq!(positives + negatives, 2000);
-        assert!(positives > 800 && negatives > 800, "signs are not balanced: {positives}/{negatives}");
+        assert!(
+            positives > 800 && negatives > 800,
+            "signs are not balanced: {positives}/{negatives}"
+        );
     }
 
     /// Reflection coefficients of a known filter, checked against the

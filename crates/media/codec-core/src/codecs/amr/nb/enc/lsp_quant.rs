@@ -47,7 +47,8 @@
 
 use super::super::decoder_tables::{
     COS_TABLE, DICO1_LSF_3, DICO1_LSF_5, DICO2_LSF_3, DICO2_LSF_5, DICO3_LSF_3, DICO3_LSF_5,
-    DICO4_LSF_5, DICO5_LSF_5, MEAN_LSF_3, MEAN_LSF_5, MR515_3_LSF, MR795_1_LSF, PAST_RQ_INIT, PRED_FAC_3,
+    DICO4_LSF_5, DICO5_LSF_5, MEAN_LSF_3, MEAN_LSF_5, MR515_3_LSF, MR795_1_LSF, PAST_RQ_INIT,
+    PRED_FAC_3,
 };
 use super::super::lsp::{lsf_to_lsp, reorder_lsf, M};
 use crate::fixed_point::arith::{add, mult, negate, round, sub};
@@ -196,7 +197,10 @@ impl LsfQuantiser {
         mode_index: u8,
         lsp: &[Word16; M],
     ) -> Quantised {
-        assert!(mode_index < 7, "12.2 kbit/s quantises through quantise_pair");
+        assert!(
+            mode_index < 7,
+            "12.2 kbit/s quantises through quantise_pair"
+        );
 
         let lsf = lsp_to_lsf(ctx, lsp);
         let weights = lsf_weights(ctx, &lsf);
@@ -497,7 +501,11 @@ pub fn lsp_to_lsf(ctx: &mut DspContext, lsp: &[Word16; M]) -> [Word16; M] {
         let step = sub(ctx, lsp[i], Word16(COS_TABLE[ind]));
         // Both operands are non-positive here — the slope table is entirely
         // negative — so the product is non-negative. A sign slip is silent.
-        let scaled = l_mult(ctx, step, Word16(super::super::decoder_tables::ACOS_SLOPE[ind]));
+        let scaled = l_mult(
+            ctx,
+            step,
+            Word16(super::super::decoder_tables::ACOS_SLOPE[ind]),
+        );
         let promoted = l_shl(ctx, scaled, 3);
         let fine = round(ctx, promoted);
         let coarse = shl(
@@ -634,7 +642,10 @@ pub fn search_split4(
     weights: &[Word16; 4],
     size: usize,
 ) -> u16 {
-    assert!(book.len() >= size * 4, "codebook holds fewer than {size} candidates");
+    assert!(
+        book.len() >= size * 4,
+        "codebook holds fewer than {size} candidates"
+    );
 
     let mut dist_min = Word32(MAX_32);
     let mut index = 0usize;
@@ -669,7 +680,11 @@ fn matrix_distance(
 ) -> Word32 {
     let mut dist = Word32(0);
     for k in 0..4 {
-        let (value, weight) = if k < 2 { (r1[k], w1[k]) } else { (r2[k - 2], w2[k - 2]) };
+        let (value, weight) = if k < 2 {
+            (r1[k], w1[k])
+        } else {
+            (r2[k - 2], w2[k - 2])
+        };
         // The negative hypothesis is evaluated as `r + cb`, not by negating the
         // codeword: `negate(-32768)` saturates to 32767 and the two differ.
         let err = if invert {
@@ -704,7 +719,10 @@ pub fn search_matrix(
     w2: &[Word16; 2],
     size: usize,
 ) -> u16 {
-    assert!(book.len() >= size * 4, "codebook holds fewer than {size} candidates");
+    assert!(
+        book.len() >= size * 4,
+        "codebook holds fewer than {size} candidates"
+    );
 
     let mut dist_min = Word32(MAX_32);
     let mut index = 0usize;
@@ -751,7 +769,10 @@ pub fn search_matrix_signed(
     w2: &[Word16; 2],
     size: usize,
 ) -> u16 {
-    assert!(book.len() >= size * 4, "codebook holds fewer than {size} candidates");
+    assert!(
+        book.len() >= size * 4,
+        "codebook holds fewer than {size} candidates"
+    );
 
     let mut dist_min = Word32(MAX_32);
     let mut index = 0usize;
@@ -796,9 +817,9 @@ pub fn search_matrix_signed(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::super::bitstream::parse;
     use super::super::super::lsp::LsfDecoder;
+    use super::*;
 
     /// The committed 7.40 kbit/s encoder trace, three frames.
     const TRACE: &str = include_str!("../../testdata/nb_enc_trace.txt");
@@ -858,7 +879,9 @@ mod tests {
         let mut compared = 0;
 
         for frame in 0..3 {
-            let got = quantiser.quantise(&mut ctx, MR74, &trace_lsp(frame)).indices;
+            let got = quantiser
+                .quantise(&mut ctx, MR74, &trace_lsp(frame))
+                .indices;
             let want = reference_parameters(frame);
             for (split, &index) in got.iter().enumerate() {
                 assert_eq!(
@@ -916,7 +939,10 @@ mod tests {
         );
         let hot = warm.quantise(&mut ctx, MR74, &trace_lsp(1)).indices;
 
-        assert_ne!(cold, hot, "the prediction had no effect on the chosen indices");
+        assert_ne!(
+            cold, hot,
+            "the prediction had no effect on the chosen indices"
+        );
         // And the warm run is the one the reference agrees with.
         assert_eq!(hot.to_vec(), reference_parameters(1)[..3].to_vec());
     }
@@ -945,7 +971,10 @@ mod tests {
                 for (split, (&index, &size)) in
                     encoded.indices.iter().zip(widths.iter()).enumerate()
                 {
-                    assert!(index < size, "mode {mode_index} split {split}: {index} >= {size}");
+                    assert!(
+                        index < size,
+                        "mode {mode_index} split {split}: {index} >= {size}"
+                    );
                 }
                 compared += 3;
             }
@@ -989,7 +1018,8 @@ mod tests {
         let mut quantiser = LsfQuantiser::new();
         let mut odd = 0;
         for frame in 0..3 {
-            let q = quantiser.quantise_pair(&mut ctx, &trace_lsp(frame), &trace_lsp((frame + 1) % 3));
+            let q =
+                quantiser.quantise_pair(&mut ctx, &trace_lsp(frame), &trace_lsp((frame + 1) % 3));
             assert!(q.indices[2] < 512, "signed index is nine bits");
             odd += usize::from(q.indices[2] % 2 == 1);
         }
@@ -1013,13 +1043,20 @@ mod tests {
 
         lsf[1] = Word16(1843);
         let shallow = lsf_weights(&mut ctx, &lsf)[0];
-        assert_eq!(shallow.0, shl(&mut ctx, WEIGHT_KNEE, 3).0, "at the knee the correction is zero");
+        assert_eq!(
+            shallow.0,
+            shl(&mut ctx, WEIGHT_KNEE, 3).0,
+            "at the knee the correction is zero"
+        );
         assert!(shallow.0 < steep.0, "the weight decreases with spacing");
 
         // wf[9] is measured against 16384, the Nyquist frequency on this scale.
         let mut wide = [Word16(0); M];
         wide[8] = Word16(16384 - 1843);
-        assert_eq!(lsf_weights(&mut ctx, &wide)[9].0, shl(&mut ctx, WEIGHT_KNEE, 3).0);
+        assert_eq!(
+            lsf_weights(&mut ctx, &wide)[9].0,
+            shl(&mut ctx, WEIGHT_KNEE, 3).0
+        );
     }
 
     #[test]
@@ -1034,7 +1071,10 @@ mod tests {
             let lsf = lsp_to_lsf(&mut ctx, &lsp);
             // LSFs are ascending and inside the normalised range.
             for i in 1..M {
-                assert!(lsf[i].0 > lsf[i - 1].0, "frame {frame}: lsf {i} out of order");
+                assert!(
+                    lsf[i].0 > lsf[i - 1].0,
+                    "frame {frame}: lsf {i} out of order"
+                );
             }
             assert!(lsf[M - 1].0 < 16384, "frame {frame}: lsf above Nyquist");
             let back = lsf_to_lsp(&mut ctx, &lsf);
@@ -1062,7 +1102,7 @@ mod tests {
         let book3: [i16; 12] = [
             100, 0, 0, // index 0
             100, 0, 0, // index 1: the same distance, exactly
-            0, 0, 0,   // index 2: exact, so it must win outright
+            0, 0, 0, // index 2: exact, so it must win outright
             7, 7, 7,
         ];
         let mut residual = [Word16(0); 3];
@@ -1127,13 +1167,20 @@ mod tests {
         let weights = [Word16(8192); 3];
         let book: [i16; 12] = [
             500, 500, 500, // codevector 0, visited
-            0, 0, 0,       // codevector 1, skipped even though it is exact
-            9, 9, 9,       // codevector 2, visited
-            0, 0, 0,       // codevector 3, skipped
+            0, 0, 0, // codevector 1, skipped even though it is exact
+            9, 9, 9, // codevector 2, visited
+            0, 0, 0, // codevector 3, skipped
         ];
 
         let mut residual = [Word16(0); 3];
-        let index = search_split3(&mut ctx, &mut residual, &book, &weights, 2, Stride::EveryOther);
+        let index = search_split3(
+            &mut ctx,
+            &mut residual,
+            &book,
+            &weights,
+            2,
+            Stride::EveryOther,
+        );
         assert_eq!(index, 1, "codevector 2 is candidate 1 at this stride");
         assert_eq!(
             residual,
@@ -1190,7 +1237,11 @@ mod tests {
         let mut r2 = [Word16(-100); 2];
         let index = search_matrix_signed(&mut ctx, &mut r1, &mut r2, &book, &w, &w, 2);
         assert_eq!(index, 1, "index 0 with the sign bit, i.e. 2*0 + 1");
-        assert_eq!(r1, [Word16(-100); 2], "the codevector is written back negated");
+        assert_eq!(
+            r1,
+            [Word16(-100); 2],
+            "the codevector is written back negated"
+        );
         assert_eq!(r2, [Word16(-100); 2]);
     }
 

@@ -106,26 +106,22 @@ const UP_SAMP: i16 = 4;
 /// previous lag, indexed `98 + lag - L_0`. The flat 16384 plateau at indices
 /// 95..=101 is the centre of the second.
 const CORR_WEIGHT: [i16; 199] = [
-    10772, 10794, 10816, 10839, 10862, 10885, 10908, 10932, 10955, 10980,
-    11004, 11029, 11054, 11079, 11105, 11131, 11157, 11183, 11210, 11238,
-    11265, 11293, 11322, 11350, 11379, 11409, 11439, 11469, 11500, 11531,
-    11563, 11595, 11628, 11661, 11694, 11728, 11763, 11798, 11834, 11870,
-    11907, 11945, 11983, 12022, 12061, 12101, 12142, 12184, 12226, 12270,
-    12314, 12358, 12404, 12451, 12498, 12547, 12596, 12647, 12699, 12751,
-    12805, 12861, 12917, 12975, 13034, 13095, 13157, 13221, 13286, 13353,
-    13422, 13493, 13566, 13641, 13719, 13798, 13880, 13965, 14053, 14143,
-    14237, 14334, 14435, 14539, 14648, 14761, 14879, 15002, 15130, 15265,
-    15406, 15554, 15710, 15874, 16056, 16384, 16384, 16384, 16384, 16384,
-    16384, 16384, 16056, 15874, 15710, 15554, 15406, 15265, 15130, 15002,
-    14879, 14761, 14648, 14539, 14435, 14334, 14237, 14143, 14053, 13965,
-    13880, 13798, 13719, 13641, 13566, 13493, 13422, 13353, 13286, 13221,
-    13157, 13095, 13034, 12975, 12917, 12861, 12805, 12751, 12699, 12647,
-    12596, 12547, 12498, 12451, 12404, 12358, 12314, 12270, 12226, 12184,
-    12142, 12101, 12061, 12022, 11983, 11945, 11907, 11870, 11834, 11798,
-    11763, 11728, 11694, 11661, 11628, 11595, 11563, 11531, 11500, 11469,
-    11439, 11409, 11379, 11350, 11322, 11293, 11265, 11238, 11210, 11183,
-    11157, 11131, 11105, 11079, 11054, 11029, 11004, 10980, 10955, 10932,
-    10908, 10885, 10862, 10839, 10816, 10794, 10772, 10750, 10728,
+    10772, 10794, 10816, 10839, 10862, 10885, 10908, 10932, 10955, 10980, 11004, 11029, 11054,
+    11079, 11105, 11131, 11157, 11183, 11210, 11238, 11265, 11293, 11322, 11350, 11379, 11409,
+    11439, 11469, 11500, 11531, 11563, 11595, 11628, 11661, 11694, 11728, 11763, 11798, 11834,
+    11870, 11907, 11945, 11983, 12022, 12061, 12101, 12142, 12184, 12226, 12270, 12314, 12358,
+    12404, 12451, 12498, 12547, 12596, 12647, 12699, 12751, 12805, 12861, 12917, 12975, 13034,
+    13095, 13157, 13221, 13286, 13353, 13422, 13493, 13566, 13641, 13719, 13798, 13880, 13965,
+    14053, 14143, 14237, 14334, 14435, 14539, 14648, 14761, 14879, 15002, 15130, 15265, 15406,
+    15554, 15710, 15874, 16056, 16384, 16384, 16384, 16384, 16384, 16384, 16384, 16056, 15874,
+    15710, 15554, 15406, 15265, 15130, 15002, 14879, 14761, 14648, 14539, 14435, 14334, 14237,
+    14143, 14053, 13965, 13880, 13798, 13719, 13641, 13566, 13493, 13422, 13353, 13286, 13221,
+    13157, 13095, 13034, 12975, 12917, 12861, 12805, 12751, 12699, 12647, 12596, 12547, 12498,
+    12451, 12404, 12358, 12314, 12270, 12226, 12184, 12142, 12101, 12061, 12022, 11983, 11945,
+    11907, 11870, 11834, 11798, 11763, 11728, 11694, 11661, 11628, 11595, 11563, 11531, 11500,
+    11469, 11439, 11409, 11379, 11350, 11322, 11293, 11265, 11238, 11210, 11183, 11157, 11131,
+    11105, 11079, 11054, 11029, 11004, 10980, 10955, 10932, 10908, 10885, 10862, 10839, 10816,
+    10794, 10772, 10750, 10728,
 ];
 
 /// Quarter-sample interpolation of the normalised correlation, Q14, −3 dB at
@@ -136,10 +132,8 @@ const CORR_WEIGHT: [i16; 199] = [
 /// [`super::super::ltp`]: shorter, and tuned for a correlation rather than a
 /// waveform.
 const INTER4_1: [i16; 32] = [
-    -12, -26, 32, 206, 420, 455, 73, -766,
-    -1732, -2142, -1242, 1376, 5429, 9910, 13418, 14746,
-    13418, 9910, 5429, 1376, -1242, -2142, -1732, -766,
-    73, 455, 420, 206, 32, -26, -12, 0,
+    -12, -26, 32, 206, 420, 455, 73, -766, -1732, -2142, -1242, 1376, 5429, 9910, 13418, 14746,
+    13418, 9910, 5429, 1376, -1242, -2142, -1732, -766, 73, 455, 420, 206, 32, -26, -12, 0,
 ];
 
 /// Feedback taps of the weighted-speech high-pass.
@@ -1002,7 +996,11 @@ fn normalised_correlation(
     let (t_min, t_max) = bounds;
     let back = |t: i16| offset - usize::try_from(t).expect("delays are positive");
 
-    let mut filtered = convolve(ctx, &excitation[back(t_min)..back(t_min) + L_SUBFR], response);
+    let mut filtered = convolve(
+        ctx,
+        &excitation[back(t_min)..back(t_min) + L_SUBFR],
+        response,
+    );
 
     // A per-subframe headroom shift from the target's energy. It is applied
     // identically to every candidate so it cannot reorder them on its own —
@@ -1143,7 +1141,11 @@ impl GainClipping {
 
         let carried = l_mult(ctx, Word16(26214), self.isf_gap);
         let mut smoothed = extract_h(l_mac(ctx, carried, Word16(6554), smallest));
-        let ceiling = if mode.interoperable_clipping() { 384 } else { 307 };
+        let ceiling = if mode.interoperable_clipping() {
+            384
+        } else {
+            307
+        };
         if sub(ctx, smoothed, Word16(ceiling)).0 > 0 {
             smoothed = Word16(ceiling);
         }
@@ -1475,9 +1477,8 @@ mod tests {
                     exc[base..base + L_SUBFR].try_into().expect("one subframe");
                 let mut updated = update_target(&mut ctx, &residual, &winner, decision.gain());
                 scale_sig(&mut ctx, &mut updated, shift);
-                let codebook_residual: [Word16; L_SUBFR / 2] = updated[L_SUBFR / 2..]
-                    .try_into()
-                    .expect("half a subframe");
+                let codebook_residual: [Word16; L_SUBFR / 2] =
+                    updated[L_SUBFR / 2..].try_into().expect("half a subframe");
 
                 outcomes.push(Outcome {
                     frame,
@@ -1599,7 +1600,11 @@ mod tests {
             );
             compared += 1;
         }
-        assert_eq!(compared, TRACE_FRAMES * SUBFRAMES, "expected every subframe");
+        assert_eq!(
+            compared,
+            TRACE_FRAMES * SUBFRAMES,
+            "expected every subframe"
+        );
     }
 
     #[test]
@@ -1652,7 +1657,11 @@ mod tests {
             );
             compared += 1;
         }
-        assert_eq!(compared, TRACE_FRAMES * SUBFRAMES, "expected every subframe");
+        assert_eq!(
+            compared,
+            TRACE_FRAMES * SUBFRAMES,
+            "expected every subframe"
+        );
 
         // The committed frames exercise both edges of `G_pitch`: frame 0
         // subframe 1 takes the negative-correlation early return, and subframe
@@ -1686,7 +1695,11 @@ mod tests {
             sharp += usize::from(want);
             compared += 1;
         }
-        assert_eq!(compared, TRACE_FRAMES * SUBFRAMES, "expected every subframe");
+        assert_eq!(
+            compared,
+            TRACE_FRAMES * SUBFRAMES,
+            "expected every subframe"
+        );
         // Both branches occur, so neither a hard-wired 0 nor a hard-wired 1
         // could pass this test.
         assert!(
@@ -1722,7 +1735,11 @@ mod tests {
             }
             compared += 1;
         }
-        assert_eq!(compared, TRACE_FRAMES * SUBFRAMES, "expected every subframe");
+        assert_eq!(
+            compared,
+            TRACE_FRAMES * SUBFRAMES,
+            "expected every subframe"
+        );
     }
 
     #[test]
@@ -1946,7 +1963,10 @@ mod tests {
         clipping.isf_gap = Word16(384);
 
         clipping.mean_gain = Word16(16358);
-        assert!(!clipping.clips(&mut ctx, mode), "the threshold is a strict >");
+        assert!(
+            !clipping.clips(&mut ctx, mode),
+            "the threshold is a strict >"
+        );
         clipping.mean_gain = Word16(16359);
         assert!(
             clipping.clips(&mut ctx, mode),
@@ -1968,11 +1988,17 @@ mod tests {
         );
 
         clipping.isf_gap = Word16(154);
-        assert!(!clipping.clips(&mut ctx, mode), "the gap test is a strict <");
+        assert!(
+            !clipping.clips(&mut ctx, mode),
+            "the gap test is a strict <"
+        );
 
         clipping.isf_gap = Word16(153);
         clipping.mean_gain = Word16(14746);
-        assert!(!clipping.clips(&mut ctx, mode), "the gain test is a strict >");
+        assert!(
+            !clipping.clips(&mut ctx, mode),
+            "the gain test is a strict >"
+        );
     }
 
     #[test]

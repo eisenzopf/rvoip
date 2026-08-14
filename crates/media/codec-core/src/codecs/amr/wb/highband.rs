@@ -371,7 +371,11 @@ pub fn match_energy(ctx: &mut DspContext, excitation: &[Word16], hf: &mut [Word1
 /// 1 is strongly voiced (falling spectrum), 0 unvoiced. `synth` is consumed:
 /// the 400 Hz high-pass is applied in place.
 #[must_use]
-pub fn spectral_tilt(ctx: &mut DspContext, filter: &mut TiltFilter, synth: &mut [Word16]) -> Word16 {
+pub fn spectral_tilt(
+    ctx: &mut DspContext,
+    filter: &mut TiltFilter,
+    synth: &mut [Word16],
+) -> Word16 {
     filter.filter(ctx, synth);
 
     let mut acc = Word32(1);
@@ -567,7 +571,6 @@ pub fn extrapolate_isf(ctx: &mut DspContext, isf: &mut [Word16]) {
 
     super::lp::isf::isf_to_isp_in_place(ctx, isf);
 }
-
 
 #[cfg(test)]
 mod tests {

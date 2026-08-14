@@ -21,18 +21,18 @@
 use super::codebook::{self, L_SUBFR};
 use super::conceal::Erasure;
 use super::enhance::{
-    agc2, enhance_strength, pitch_enhance_with, stability_factor, voice_factor,
-    DispersionLevel, NoiseEnhancer, PhaseDispersion,
+    agc2, enhance_strength, pitch_enhance_with, stability_factor, voice_factor, DispersionLevel,
+    NoiseEnhancer, PhaseDispersion,
 };
 use super::excitation::{Excitation, Upsampler, L_SUBFR16K};
 use super::gain::{FrameContext, FrameQuality, GainDecoder};
 use super::highband::{self, BandFilter, NoiseGenerator, NoiseShaper, TiltFilter};
 use super::lp::autocorr::LP_ORDER;
-use super::math::scale_sig;
 use super::lp::isf::{interpolate_isp, isf_to_isp, INTERPOL_FRAC, NB_SUBFR};
-use super::lp::isp_to_lp::isp_to_lp_order;
 use super::lp::isf_dequant::{IsfDecoder, IsfQuantizer, ISF_INIT};
+use super::lp::isp_to_lp::isp_to_lp_order;
 use super::ltp::{self, PIT_SHARP};
+use super::math::scale_sig;
 use super::params::{FrameParams, SubframeParams};
 use super::synthesis::{deemphasis, HighPass50, SynthesisFilter, PREEMPH_FAC};
 use crate::codecs::amr::mode::AmrMode;
@@ -284,7 +284,10 @@ impl Decoder {
 
         trace!("bfi", i16::from(bad));
         trace!("unusable", i16::from(unusable));
-        trace!("state", i16::try_from(self.erasure.severity()).unwrap_or(-1));
+        trace!(
+            "state",
+            i16::try_from(self.erasure.severity()).unwrap_or(-1)
+        );
         trace!("prev_bfi", i16::from(self.erasure.previous_frame_was_bad()));
         trace!("vad_hist", self.vad_history);
         let isf = self.isf.decode(quantizer, &params.isf_indices, bad);
@@ -316,25 +319,18 @@ impl Decoder {
             // A suspect lag is rebuilt from the pitch contour before it is
             // used, because a wrong lag rings for hundreds of milliseconds
             // where a wrong pulse costs one subframe.
-            let (pitch_lag, pitch_frac) = self.erasure.pitch_lag(
-                &mut ctx,
-                subframe.pitch_lag,
-                subframe.pitch_frac,
-                quality,
-            );
+            let (pitch_lag, pitch_frac) =
+                self.erasure
+                    .pitch_lag(&mut ctx, subframe.pitch_lag, subframe.pitch_frac, quality);
 
             // Adaptive codebook. One extra sample: the low-pass reads ahead.
             let (buffer, offset) = self.excitation.buffer_mut();
-            ltp::predict(
-                buffer,
-                offset,
-                pitch_lag as usize,
-                pitch_frac,
-                L_SUBFR + 1,
-            );
+            ltp::predict(buffer, offset, pitch_lag as usize, pitch_frac, L_SUBFR + 1);
             #[cfg(test)]
-            let pred_snapshot: Vec<i16> =
-                buffer[offset..offset + L_SUBFR].iter().map(|w| w.0).collect();
+            let pred_snapshot: Vec<i16> = buffer[offset..offset + L_SUBFR]
+                .iter()
+                .map(|w| w.0)
+                .collect();
             #[cfg(test)]
             self.vtrace.push(("pred", pred_snapshot));
             // Below 12.65 the filter is always on; above it the encoder picks.
@@ -403,7 +399,8 @@ impl Decoder {
             exc2.copy_from_slice(&buffer[offset..offset + L_SUBFR]);
 
             // The plain total, written back to the history.
-            self.excitation.build(&code, gains.pitch, gain_code_word, q_new);
+            self.excitation
+                .build(&code, gains.pitch, gain_code_word, q_new);
             // Snapshot this subframe, keeping the whole frame in one
             // exponent. `rescale_to` rescales the entire excitation history
             // when a subframe needs a different one, so the reference's buffer
@@ -412,7 +409,11 @@ impl Decoder {
             // instead mixes four exponents, and the energies a later SID
             // averages come out wrong on exactly the frames where q moved.
             if q_new != frame_q_new && sf > 0 {
-                scale_sig(&mut ctx, &mut frame_excitation[..sf * L_SUBFR], q_new - frame_q_new);
+                scale_sig(
+                    &mut ctx,
+                    &mut frame_excitation[..sf * L_SUBFR],
+                    q_new - frame_q_new,
+                );
             }
             frame_q_new = q_new;
             {
@@ -433,14 +434,7 @@ impl Decoder {
             // the low-rate sharpening.
             let mut scaled = exc2;
             scale_sig(&mut ctx, &mut scaled, -3);
-            let voice_fac = voice_factor(
-                &mut ctx,
-                &scaled,
-                -3,
-                gains.pitch,
-                &code,
-                gain_code_word,
-            );
+            let voice_fac = voice_factor(&mut ctx, &scaled, -3, gains.pitch, &code, gain_code_word);
             // Tilt for the next subframe: 0.5 voiced, 0 unvoiced.
             let quartered = shr(&mut ctx, voice_fac, 2);
             self.tilt_code = add(&mut ctx, quartered, Word16(8192));
@@ -472,9 +466,9 @@ impl Decoder {
             let (gain_code_hi, _) = l_extract(gains.code);
             self.dispersion
                 .apply(&mut ctx, &mut code, gain_code_hi, gains.pitch, dispersion);
-            let enhanced_gain =
-                self.noise_enhancer
-                    .apply(&mut ctx, gains.code, voice_fac, stab_fac);
+            let enhanced_gain = self
+                .noise_enhancer
+                .apply(&mut ctx, gains.code, voice_fac, stab_fac);
             let strength = enhance_strength(&mut ctx, voice_fac);
             let code2 = pitch_enhance_with(&mut ctx, &code, strength);
 
@@ -581,12 +575,7 @@ impl Decoder {
             // above and must not run again, hence the pre-decided state.
             let mode =
                 AmrMode::new(crate::codecs::amr::mode::AmrVariant::WideBand, mode_index).ok()?;
-            return self.decode_frame_with_state(
-                mode,
-                &[],
-                FrameQuality::Unusable,
-                Some(state),
-            );
+            return self.decode_frame_with_state(mode, &[], FrameQuality::Unusable, Some(state));
         }
         // Only a SID_UPDATE's bits are worth reading. A SID_FIRST's are blank
         // and a SID_BAD's are not trusted; both fall back to what the decoder
@@ -696,7 +685,6 @@ impl Decoder {
         self.started = false;
     }
 }
-
 
 #[cfg(test)]
 mod comfort_noise_tests {
@@ -862,7 +850,13 @@ mod comfort_noise_tests {
         // decode compares its own prefix and passes. Measured: a mutation
         // cutting the fixture to three frames left this test green.
         assert_eq!(kinds, [77, 12, 61], "the fixture's frame-type mix changed");
-        assert_eq!(got.len(), want.len(), "decoded {} samples, want {}", got.len(), want.len());
+        assert_eq!(
+            got.len(),
+            want.len(),
+            "decoded {} samples, want {}",
+            got.len(),
+            want.len()
+        );
         assert_eq!(got.len(), 150 * FRAME_SIZE_16K, "the fixture is 150 frames");
 
         for (i, (&mine, &theirs)) in got.iter().zip(&want).enumerate() {
@@ -929,7 +923,9 @@ impl Decoder {
         ctx: &mut DspContext,
         inputs: &SynthesisInputs<'_>,
     ) -> [Word16; L_SUBFR16K] {
-        let (high, low) = self.synthesis.filter(inputs.a, inputs.excitation, inputs.q_new);
+        let (high, low) = self
+            .synthesis
+            .filter(inputs.a, inputs.excitation, inputs.q_new);
         let mut speech = deemphasis(&high, &low, PREEMPH_FAC, &mut self.deemph_memory);
         #[cfg(test)]
         self.vtrace
@@ -940,8 +936,10 @@ impl Decoder {
             .push(("hp50", speech.iter().map(|w: &Word16| w.0).collect()));
         let upsampled = self.upsampler.process(&speech);
         #[cfg(test)]
-        self.vtrace
-            .push(("upsampled", upsampled.iter().map(|w: &Word16| w.0).collect()));
+        self.vtrace.push((
+            "upsampled",
+            upsampled.iter().map(|w: &Word16| w.0).collect(),
+        ));
 
         // --- high band ---
         let mut hf = self.noise.fill(ctx);
@@ -1088,9 +1086,11 @@ mod tests {
         let (bits, pcm) = fixture(mode_index);
         let want = reference(pcm);
         let (_, frames) = storage::read(bits).expect("fixture parses");
-        let mode =
-            AmrMode::new(AmrVariant::WideBand, u8::try_from(mode_index).expect("index"))
-                .expect("mode");
+        let mode = AmrMode::new(
+            AmrVariant::WideBand,
+            u8::try_from(mode_index).expect("index"),
+        )
+        .expect("mode");
 
         let mut dec = Decoder::new();
         let mut matched = 0usize;
@@ -1173,11 +1173,12 @@ mod tests {
         println!("want {:?}", &want[20..30]);
 
         for sf in 0..4 {
-            let n = (sf * 80..(sf + 1) * 80).filter(|&i| got[i] == want[i]).count();
+            let n = (sf * 80..(sf + 1) * 80)
+                .filter(|&i| got[i] == want[i])
+                .count();
             println!("  subframe {sf}: {n}/80 exact");
         }
     }
-
 
     /// The 6.60 kbit/s high band uses a different filter from every other mode.
     ///
@@ -1190,7 +1191,6 @@ mod tests {
         let (matched, total, worst) = compare(0);
         assert_eq!(matched, total, "6.60 kbit/s is not exact, worst {worst}");
     }
-
 
     /// 6.60 kbit/s is the one mode not yet bit-exact.
     ///
@@ -1206,9 +1206,11 @@ mod tests {
             let (bits, pcm) = fixture(mode_index);
             let want = reference(pcm);
             let (_, frames) = storage::read(bits).expect("fixture parses");
-            let mode =
-                AmrMode::new(AmrVariant::WideBand, u8::try_from(mode_index).expect("index"))
-                    .expect("mode");
+            let mode = AmrMode::new(
+                AmrVariant::WideBand,
+                u8::try_from(mode_index).expect("index"),
+            )
+            .expect("mode");
 
             let mut dec = Decoder::new();
             let mut worst = 0i32;
@@ -1355,9 +1357,8 @@ mod tests {
             0usize, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 2, 3, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0,
         ];
         let want_prev = [
-            false, false, false, false, false, false, true, false, false, false, false, true,
-            true, true, false, false, false, false, false, false, false, true, false, true,
-            false,
+            false, false, false, false, false, false, true, false, false, false, false, true, true,
+            true, false, false, false, false, false, false, false, true, false, true, false,
         ];
 
         for (f, frame) in frames.iter().enumerate() {
@@ -1468,7 +1469,11 @@ mod tests {
                 compared += 1;
             }
         }
-        assert_eq!(compared, want.len(), "compared fewer samples than the fixture holds");
+        assert_eq!(
+            compared,
+            want.len(),
+            "compared fewer samples than the fixture holds"
+        );
     }
 
     /// A sustained outage must fade out, not hold a tone.
@@ -1489,9 +1494,8 @@ mod tests {
             dec.decode(mode, &frame.data).expect("decodes");
         }
 
-        let energy = |f: &[i16; FRAME_SIZE_16K]| -> i64 {
-            f.iter().map(|&s| i64::from(s).abs()).sum()
-        };
+        let energy =
+            |f: &[i16; FRAME_SIZE_16K]| -> i64 { f.iter().map(|&s| i64::from(s).abs()).sum() };
         let first = energy(
             &dec.decode_frame(mode, &[], FrameQuality::Unusable)
                 .expect("decodes"),

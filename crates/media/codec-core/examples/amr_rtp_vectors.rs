@@ -34,7 +34,9 @@ fn tone(rate: u32, index: usize) -> Vec<i16> {
     (0..samples)
         .map(|i| {
             let t = ((index * samples + i) as f64) / f64::from(rate);
-            (t * 440.0 * std::f64::consts::TAU).sin().mul_add(7000.0, 0.0) as i16
+            (t * 440.0 * std::f64::consts::TAU)
+                .sin()
+                .mul_add(7000.0, 0.0) as i16
         })
         .collect()
 }
@@ -61,7 +63,9 @@ fn speech_frames(variant: AmrVariant, mode: AmrMode, count: usize) -> Vec<Vec<u8
     }
     (0..count)
         .map(|offset| {
-            let coded: CodedFrame = codec.encode_frame(&tone(rate, 3 + offset)).expect("encodes");
+            let coded: CodedFrame = codec
+                .encode_frame(&tone(rate, 3 + offset))
+                .expect("encodes");
             assert_eq!(coded.kind, FrameKind::Speech);
             coded.data
         })
@@ -90,7 +94,9 @@ fn emit(case: usize, payload_type: u8, sequence: u16, payload: &[u8]) {
 fn main() {
     // Wireshark's AMR framing and variant are *global* preferences, so one
     // capture can only carry one combination. The caller picks which.
-    let which = std::env::args().nth(1).unwrap_or_else(|| "nb-oa".to_string());
+    let which = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "nb-oa".to_string());
     // A `-2f` suffix packs two frames per payload, exercising the F-bit chain
     // in the table of contents; the plain selections stay single-frame.
     let (base, frames_per_payload) = match which.strip_suffix("-2f") {

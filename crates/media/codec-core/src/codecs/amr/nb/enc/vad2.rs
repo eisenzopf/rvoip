@@ -83,27 +83,37 @@ const FFT_HEADROOM: i16 = 2;
 /// Lower and upper FFT bin of each of the sixteen channels. Bins 0 (DC), 1 and
 /// 64 (foldover) are deliberately excluded.
 const CH_TBL: [[usize; 2]; NUM_CHAN] = [
-    [2, 3], [4, 5], [6, 7], [8, 9], [10, 11], [12, 13], [14, 16], [17, 19],
-    [20, 22], [23, 26], [27, 30], [31, 35], [36, 41], [42, 48], [49, 55], [56, 63],
+    [2, 3],
+    [4, 5],
+    [6, 7],
+    [8, 9],
+    [10, 11],
+    [12, 13],
+    [14, 16],
+    [17, 19],
+    [20, 22],
+    [23, 26],
+    [27, 30],
+    [31, 35],
+    [36, 41],
+    [42, 48],
+    [49, 55],
+    [56, 63],
 ];
 
 /// Reciprocal of each channel's bin count, so the division is a multiply.
 const CH_TBL_SH: [i16; NUM_CHAN] = [
-    16384, 16384, 16384, 16384, 16384, 16384, 10923, 10923,
-    10923, 8192, 8192, 6554, 5461, 4681, 4681, 4096,
+    16384, 16384, 16384, 16384, 16384, 16384, 10923, 10923, 10923, 8192, 8192, 6554, 5461, 4681,
+    4681, 4096,
 ];
 
 /// Voice metric as a function of quantised channel SNR. Non-linear, with a
 /// deadband near zero.
 const VM_TBL: [i16; 90] = [
-    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-    3, 3, 3, 3, 3, 4, 4, 4, 5, 5, 5, 6, 6, 7, 7, 7,
-    8, 8, 9, 9, 10, 10, 11, 12, 12, 13, 13, 14, 15,
-    15, 16, 17, 17, 18, 19, 20, 20, 21, 22, 23, 24,
-    24, 25, 26, 27, 28, 28, 29, 30, 31, 32, 33, 34,
-    35, 36, 37, 37, 38, 39, 40, 41, 42, 43, 44, 45,
-    46, 47, 48, 49, 50, 50, 50, 50, 50, 50, 50, 50,
-    50, 50,
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 4, 4, 4, 5, 5, 5, 6, 6, 7, 7, 7, 8, 8, 9, 9,
+    10, 10, 11, 12, 12, 13, 13, 14, 15, 15, 16, 17, 17, 18, 19, 20, 20, 21, 22, 23, 24, 24, 25, 26,
+    27, 28, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48,
+    49, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50,
 ];
 
 /// Hangover length as a function of peak SNR, in 3 dB steps.
@@ -112,9 +122,7 @@ const HANGOVER_TABLE: [i16; 20] = [
 ];
 
 /// Burst sensitivity as a function of peak SNR, in 3 dB steps.
-const BURSTCOUNT_TABLE: [i16; 20] = [
-    8, 8, 8, 8, 8, 8, 8, 8, 7, 6, 5, 4, 4, 4, 4, 4, 4, 4, 4, 4,
-];
+const BURSTCOUNT_TABLE: [i16; 20] = [8, 8, 8, 8, 8, 8, 8, 8, 7, 6, 5, 4, 4, 4, 4, 4, 4, 4, 4, 4];
 
 /// Voice-metric threshold as a function of peak SNR, in 3 dB steps.
 const VM_THRESHOLD_TABLE: [i16; 20] = [
@@ -131,22 +139,17 @@ const ENRG_NORM_SHIFT: [i16; 2] = [FRACTIONAL_BITS_0 - 1 + 2, FRACTIONAL_BITS_1 
 
 /// Twiddle factors: cos/sin pairs for the 128-point FFT.
 const PHS_TBL: [i16; 128] = [
-    32767, 0, 32729, -1608, 32610, -3212, 32413, -4808,
-    32138, -6393, 31786, -7962, 31357, -9512, 30853, -11039,
-    30274, -12540, 29622, -14010, 28899, -15447, 28106, -16846,
-    27246, -18205, 26320, -19520, 25330, -20788, 24279, -22006,
-    23170, -23170, 22006, -24279, 20788, -25330, 19520, -26320,
-    18205, -27246, 16846, -28106, 15447, -28899, 14010, -29622,
-    12540, -30274, 11039, -30853, 9512, -31357, 7962, -31786,
-    6393, -32138, 4808, -32413, 3212, -32610, 1608, -32729,
-    0, -32768, -1608, -32729, -3212, -32610, -4808, -32413,
-    -6393, -32138, -7962, -31786, -9512, -31357, -11039, -30853,
-    -12540, -30274, -14010, -29622, -15447, -28899, -16846, -28106,
-    -18205, -27246, -19520, -26320, -20788, -25330, -22006, -24279,
-    -23170, -23170, -24279, -22006, -25330, -20788, -26320, -19520,
-    -27246, -18205, -28106, -16846, -28899, -15447, -29622, -14010,
-    -30274, -12540, -30853, -11039, -31357, -9512, -31786, -7962,
-    -32138, -6393, -32413, -4808, -32610, -3212, -32729, -1608,
+    32767, 0, 32729, -1608, 32610, -3212, 32413, -4808, 32138, -6393, 31786, -7962, 31357, -9512,
+    30853, -11039, 30274, -12540, 29622, -14010, 28899, -15447, 28106, -16846, 27246, -18205,
+    26320, -19520, 25330, -20788, 24279, -22006, 23170, -23170, 22006, -24279, 20788, -25330,
+    19520, -26320, 18205, -27246, 16846, -28106, 15447, -28899, 14010, -29622, 12540, -30274,
+    11039, -30853, 9512, -31357, 7962, -31786, 6393, -32138, 4808, -32413, 3212, -32610, 1608,
+    -32729, 0, -32768, -1608, -32729, -3212, -32610, -4808, -32413, -6393, -32138, -7962, -31786,
+    -9512, -31357, -11039, -30853, -12540, -30274, -14010, -29622, -15447, -28899, -16846, -28106,
+    -18205, -27246, -19520, -26320, -20788, -25330, -22006, -24279, -23170, -23170, -24279, -22006,
+    -25330, -20788, -26320, -19520, -27246, -18205, -28106, -16846, -28899, -15447, -29622, -14010,
+    -30274, -12540, -30853, -11039, -31357, -9512, -31786, -7962, -32138, -6393, -32413, -4808,
+    -32610, -3212, -32729, -1608,
 ];
 
 /// `10*log10(x)/128`, scaled 7,8. TS 26.073 `fn10Log10`.
@@ -164,12 +167,7 @@ fn fn10_log10(ctx: &mut DspContext, l_input: Word32, fbits: i16) -> Word16 {
 ///
 /// An all-zero sequence returns the maximum shift rather than `norm_s(0)`,
 /// deliberately: the point is to associate silence with low energy.
-fn block_norm(
-    ctx: &mut DspContext,
-    input: &[Word16],
-    out: &mut [Word16],
-    headroom: i16,
-) -> i16 {
+fn block_norm(ctx: &mut DspContext, input: &[Word16], out: &mut [Word16], headroom: i16) -> i16 {
     let mut max = abs_s(ctx, input[0]);
     for &sample in &input[1..] {
         let adata = abs_s(ctx, sample);
@@ -243,10 +241,20 @@ fn c_fft(ctx: &mut DspContext, farray: &mut [Word16; FFT_LEN]) {
                 let (ku, kju) = (k as usize, kj as usize);
 
                 let mut ftmp_real = l_mult(ctx, farray[kju], Word16(PHS_TBL[ji as usize]));
-                ftmp_real = l_msu(ctx, ftmp_real, farray[kju + 1], Word16(PHS_TBL[ji as usize + 1]));
+                ftmp_real = l_msu(
+                    ctx,
+                    ftmp_real,
+                    farray[kju + 1],
+                    Word16(PHS_TBL[ji as usize + 1]),
+                );
 
                 let mut ftmp_imag = l_mult(ctx, farray[kju + 1], Word16(PHS_TBL[ji as usize]));
-                ftmp_imag = l_mac(ctx, ftmp_imag, farray[kju], Word16(PHS_TBL[ji as usize + 1]));
+                ftmp_imag = l_mac(
+                    ctx,
+                    ftmp_imag,
+                    farray[kju],
+                    Word16(PHS_TBL[ji as usize + 1]),
+                );
 
                 let tmp1 = round(ctx, ftmp_real);
                 let tmp2 = round(ctx, ftmp_imag);
@@ -528,7 +536,13 @@ pub fn vad2(ctx: &mut DspContext, farray: &[Word16; FRM_LEN], st: &mut Vad2State
 
         let (hi1, lo1) = l_extract(st.ch_enrg[i]);
         st.ch_enrg[i] = l_add(ctx, ltmp, mpy_32_16(hi1, lo1, one_m_alpha));
-        if l_sub(ctx, st.ch_enrg[i], Word32(i32::from(MIN_CHAN_ENRG[st.shift_state]))).0 < 0 {
+        if l_sub(
+            ctx,
+            st.ch_enrg[i],
+            Word32(i32::from(MIN_CHAN_ENRG[st.shift_state])),
+        )
+        .0 < 0
+        {
             st.ch_enrg[i] = Word32(i32::from(MIN_CHAN_ENRG[st.shift_state]));
         }
     }
@@ -583,7 +597,11 @@ pub fn vad2(ctx: &mut DspContext, farray: &[Word16; FRM_LEN], st: &mut Vad2State
         let scaled = mult(ctx, Word16(21845), ch_snr[i]);
         let ch_snrq = shr_r(ctx, scaled, 6);
         let j = if sub(ctx, ch_snrq, Word16(89)).0 < 0 {
-            if ch_snrq.0 > 0 { ch_snrq.0 } else { 0 }
+            if ch_snrq.0 > 0 {
+                ch_snrq.0
+            } else {
+                0
+            }
         } else {
             89
         };
@@ -661,11 +679,19 @@ pub fn vad2(ctx: &mut DspContext, farray: &[Word16; FRM_LEN], st: &mut Vad2State
         let diff = sub(ctx, st.neg_snr_var, Word16(166));
         let scaled = shl(ctx, diff, 4);
         let tmp = mult_r(ctx, scaled, Word16(24576));
-        st.neg_snr_bias = if tmp.0 < 0 { Word16(0) } else { shr(ctx, tmp, 8) };
+        st.neg_snr_bias = if tmp.0 < 0 {
+            Word16(0)
+        } else {
+            shr(ctx, tmp, 8)
+        };
     }
 
     // The decision itself: voice metric sum against an SNR-dependent threshold.
-    let tmp = add(ctx, Word16(VM_THRESHOLD_TABLE[tsnrq as usize]), st.neg_snr_bias);
+    let tmp = add(
+        ctx,
+        Word16(VM_THRESHOLD_TABLE[tsnrq as usize]),
+        st.neg_snr_bias,
+    );
     let ivad;
     if sub(ctx, vm_sum, tmp).0 > 0 {
         ivad = true;
@@ -699,9 +725,15 @@ pub fn vad2(ctx: &mut DspContext, farray: &[Word16; FRM_LEN], st: &mut Vad2State
     // Integration constant from instantaneous SNR: high SNR integrates slower.
     let tmp = sub(ctx, st.tsnr, xt);
     let (alpha, one_m_alpha) = if tmp.0 <= 0 || st.tsnr.0 <= 0 {
-        (Word16(HIGH_ALPHA), Word16((32768i32 - i32::from(HIGH_ALPHA)) as i16))
+        (
+            Word16(HIGH_ALPHA),
+            Word16((32768i32 - i32::from(HIGH_ALPHA)) as i16),
+        )
     } else if sub(ctx, tmp, st.tsnr).0 > 0 {
-        (Word16(LOW_ALPHA), Word16((32768i32 - i32::from(LOW_ALPHA)) as i16))
+        (
+            Word16(LOW_ALPHA),
+            Word16((32768i32 - i32::from(LOW_ALPHA)) as i16),
+        )
     } else {
         let ratio = div_s(tmp, st.tsnr);
         let scaled = mult(ctx, Word16(ALPHA_RANGE), ratio);
@@ -725,7 +757,12 @@ pub fn vad2(ctx: &mut DspContext, farray: &[Word16; FRM_LEN], st: &mut Vad2State
             update_flag = true;
             st.update_cnt = Word16(0);
         }
-    } else if l_sub(ctx, ltce, Word32(i32::from(NOISE_FLOOR_CHAN[st.shift_state]))).0 > 0
+    } else if l_sub(
+        ctx,
+        ltce,
+        Word32(i32::from(NOISE_FLOOR_CHAN[st.shift_state])),
+    )
+    .0 > 0
         && sub(ctx, ch_enrg_dev, Word16(DEV_THLD)).0 < 0
         && !p2a_flag
         && !st.ltp_flag
@@ -750,7 +787,11 @@ pub fn vad2(ctx: &mut DspContext, farray: &[Word16; FRM_LEN], st: &mut Vad2State
     // Conditionally update the channel noise estimates.
     if update_flag {
         // Noise is always state 0, so shift the energy down when in state 1.
-        let tmp = if st.shift_state == 1 { STATE_CHANGE_SHIFT_R[0] } else { 0 };
+        let tmp = if st.shift_state == 1 {
+            STATE_CHANGE_SHIFT_R[0]
+        } else {
+            0
+        };
         for i in 0..NUM_CHAN {
             let shifted = l_shr(ctx, st.ch_enrg[i], tmp);
             let (hi1, lo1) = l_extract(shifted);
@@ -825,8 +866,14 @@ mod tests {
                 Expected {
                     vad: head[1] == "1",
                     counters: (
-                        counters[0], counters[1], counters[2], counters[3],
-                        counters[4], counters[5], counters[6], counters[7],
+                        counters[0],
+                        counters[1],
+                        counters[2],
+                        counters[3],
+                        counters[4],
+                        counters[5],
+                        counters[6],
+                        counters[7],
                     ),
                     ch_enrg,
                     ch_noise,
@@ -870,7 +917,11 @@ mod tests {
             let got = vad2(&mut ctx, &frame, &mut state);
 
             assert_eq!(got, want.vad, "half-frame {half}: decision");
-            assert_eq!(state.counters(), want.counters, "half-frame {half}: counters");
+            assert_eq!(
+                state.counters(),
+                want.counters,
+                "half-frame {half}: counters"
+            );
             for i in 0..NUM_CHAN {
                 assert_eq!(
                     state.channel_energies()[i].0,

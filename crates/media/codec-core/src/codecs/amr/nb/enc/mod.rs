@@ -33,12 +33,12 @@
 
 pub mod analysis;
 pub mod codebook;
+pub mod dtx;
 pub mod encoder;
 pub mod gain_quant;
 pub mod lsp_quant;
-pub mod dtx;
 pub mod pitch;
+pub mod preproc;
 pub mod vad;
 /// TS 26.073 `vad2.c`: the narrowband detector option 2.
 pub mod vad2;
-pub mod preproc;

@@ -59,7 +59,6 @@ use crate::fixed_point::types::{DspContext, Word16};
 /// that the ratio still describes the tilt rather than the whole spectrum.
 const L_H: usize = 22;
 
-
 /// High-pass numerator, Q13 — `0.9398` and its mirror, for a 60 Hz corner.
 const HP_B: [Word16; 3] = [Word16(7699), Word16(-15398), Word16(7699)];
 
@@ -342,7 +341,6 @@ impl PostProcessor {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,7 +385,10 @@ mod tests {
                 other => panic!("{section}: unexpected row {other:?}"),
             }
         }
-        assert!(pending.is_none(), "{section}: a trailing `in` with no `out`");
+        assert!(
+            pending.is_none(),
+            "{section}: a trailing `in` with no `out`"
+        );
         pairs
     }
 
@@ -396,7 +397,10 @@ mod tests {
     /// The count is returned rather than discarded because a fixture row that
     /// parsed as empty would otherwise make the loop below agree with itself.
     fn compare(label: &str, frame: usize, got: &[Word16], want: &[Word16]) -> usize {
-        assert!(!want.is_empty(), "{label} frame {frame}: the fixture row is empty");
+        assert!(
+            !want.is_empty(),
+            "{label} frame {frame}: the fixture row is empty"
+        );
         assert_eq!(got.len(), want.len(), "{label} frame {frame}: length");
         for (i, (g, w)) in got.iter().zip(want).enumerate() {
             assert_eq!(g, w, "{label} frame {frame} sample {i}");
@@ -489,7 +493,10 @@ mod tests {
             }
         }
 
-        assert_eq!(differs, 3, "every frame after the first depends on its predecessor");
+        assert_eq!(
+            differs, 3,
+            "every frame after the first depends on its predecessor"
+        );
     }
 
     #[test]
@@ -575,7 +582,10 @@ mod tests {
         let mut post = PostProcessor::new();
         let mut signal = [Word16(4000); 8 * L_FRAME];
         post.process(&mut ctx, &mut signal);
-        let tail = signal[7 * L_FRAME..].iter().map(|v| i32::from(v.0).abs()).max();
+        let tail = signal[7 * L_FRAME..]
+            .iter()
+            .map(|v| i32::from(v.0).abs())
+            .max();
         assert!(
             tail.expect("non-empty tail") < 40,
             "DC survived the high-pass: {tail:?}"
@@ -625,7 +635,11 @@ mod tests {
 
         let mut residual = vec![Word16(0); L_SUBFR];
         lp_residual(&mut ctx, &flat, &signal, &mut residual);
-        assert_eq!(residual, signal[M..], "Residu is not the identity at A(z) = 1");
+        assert_eq!(
+            residual,
+            signal[M..],
+            "Residu is not the identity at A(z) = 1"
+        );
 
         let mut synthesised = vec![Word16(0); L_SUBFR];
         let memory = synthesis_filter(
@@ -635,7 +649,10 @@ mod tests {
             &mut synthesised,
             &[Word16(0); M],
         );
-        assert_eq!(synthesised, residual, "Syn_filt is not the identity at A(z) = 1");
+        assert_eq!(
+            synthesised, residual,
+            "Syn_filt is not the identity at A(z) = 1"
+        );
         assert_eq!(
             memory.as_slice(),
             &synthesised[L_SUBFR - M..],

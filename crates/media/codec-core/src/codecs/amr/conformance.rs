@@ -157,7 +157,11 @@ mod tests {
     fn read_narrowband_serial(path: &Path) -> Vec<SerialFrame> {
         const WORDS: usize = 1 + 244 + 5;
         let bytes = std::fs::read(path).expect("the bitstream is readable");
-        assert_eq!(bytes.len() % (WORDS * 2), 0, "not a whole number of serial frames");
+        assert_eq!(
+            bytes.len() % (WORDS * 2),
+            0,
+            "not a whole number of serial frames"
+        );
 
         bytes
             .chunks_exact(WORDS * 2)
@@ -195,8 +199,14 @@ mod tests {
         let want = read_narrowband_serial(&root.join("c-code/spch_dos.cod"));
 
         assert!(frames.len() >= 400, "only {} input frames", frames.len());
-        assert!(want.len() >= frames.len(), "the bitstream is shorter than the input");
-        assert!(modes.len() >= frames.len(), "the mode file is shorter than the input");
+        assert!(
+            want.len() >= frames.len(),
+            "the bitstream is shorter than the input"
+        );
+        assert!(
+            modes.len() >= frames.len(),
+            "the mode file is shorter than the input"
+        );
 
         let mut encoder = NbEncoder::new();
         encoder.set_allow_dtx(true);
@@ -227,7 +237,14 @@ mod tests {
                 AmrFrameType::Speech(_) => (0i16, i16::from(mode)),
                 AmrFrameType::Sid(_) => {
                     sids += 1;
-                    (if cadence.last_sid_was_an_update() { 2 } else { 1 }, i16::from(mode))
+                    (
+                        if cadence.last_sid_was_an_update() {
+                            2
+                        } else {
+                            1
+                        },
+                        i16::from(mode),
+                    )
                 }
                 AmrFrameType::NoData => {
                     gaps += 1;
@@ -248,7 +265,11 @@ mod tests {
             // So this unpacks back to codec order, which also exercises the
             // sort table in both directions.
             if want_tx != 3 {
-                let (unpack_mode, bits) = if want_tx == 0 { (mode, rate.bits()) } else { (8, 35) };
+                let (unpack_mode, bits) = if want_tx == 0 {
+                    (mode, rate.bits())
+                } else {
+                    (8, 35)
+                };
                 let codec = crate::codecs::amr::nb::bitstream::unpack(unpack_mode, &data)
                     .expect("the payload unpacks");
                 for (i, &want_bit) in want[n].bits[..bits].iter().enumerate() {
@@ -271,10 +292,16 @@ mod tests {
 
         // Exact, not a floor: these are properties of a fixed stream, and a
         // floor would let a future change quietly compare fewer frames.
-        assert_eq!(compared, 36_575, "the bit count changed; the stream is fixed");
+        assert_eq!(
+            compared, 36_575,
+            "the bit count changed; the stream is fixed"
+        );
         assert_eq!((sids, gaps), (26, 157), "the DTX frame mix changed");
         assert_eq!(switches, 424, "the mode file did not cycle every frame");
-        assert_eq!(homings, 0, "this stream has no homing frame; see the module header");
+        assert_eq!(
+            homings, 0,
+            "this stream has no homing frame; see the module header"
+        );
     }
 
     /// The narrowband decoder against the reference's own output.
@@ -356,8 +383,7 @@ mod tests {
             } else {
                 let params = match rx {
                     RxFrameType::SidUpdate | RxFrameType::SidBad => {
-                        crate::codecs::amr::nb::bitstream::parse(8, &payload)
-                            .expect("a SID parses")
+                        crate::codecs::amr::nb::bitstream::parse(8, &payload).expect("a SID parses")
                     }
                     RxFrameType::NoData | RxFrameType::SidFirst | RxFrameType::Onset => Vec::new(),
                     _ => crate::codecs::amr::nb::bitstream::parse(mode, &payload)
@@ -384,15 +410,26 @@ mod tests {
             homed = reset;
         }
 
-        assert_eq!(compared, 425 * 160, "the sample count changed; the stream is fixed");
+        assert_eq!(
+            compared,
+            425 * 160,
+            "the sample count changed; the stream is fixed"
+        );
         assert_eq!(kinds, [242, 26, 157], "the frame-type mix changed");
-        assert_eq!(homings, 0, "this stream has no homing frame; see the module header");
+        assert_eq!(
+            homings, 0,
+            "this stream has no homing frame; see the module header"
+        );
     }
 
     /// One frame of the input sequence.    /// One frame of the input sequence.
     fn frames(root: &Path) -> Vec<[i16; 320]> {
         let raw = std::fs::read(root.join("testv/tst.inp")).expect("tst.inp reads");
-        assert_eq!(raw.len() % 640, 0, "tst.inp is not a whole number of frames");
+        assert_eq!(
+            raw.len() % 640,
+            0,
+            "tst.inp is not a whole number of frames"
+        );
         raw.chunks_exact(640)
             .map(|chunk| {
                 let mut frame = [0i16; 320];
@@ -525,8 +562,8 @@ mod tests {
                     payload[i / 8] |= frame[source as usize] << (7 - (i % 8));
                 }
 
-                let mut is_homing = homed
-                    && homing::is_decoder_homing_frame_first(&payload, mode as usize);
+                let mut is_homing =
+                    homed && homing::is_decoder_homing_frame_first(&payload, mode as usize);
                 let out = if is_homing {
                     [homing::HOMING_SAMPLE; 320]
                 } else {
@@ -608,9 +645,9 @@ mod tests {
                 .map(|&w| u8::from(w == 127))
                 .collect();
 
-            let source = input.get(frame).unwrap_or_else(|| {
-                panic!("dtx.inp is shorter than tst_md.cod at frame {frame}")
-            });
+            let source = input
+                .get(frame)
+                .unwrap_or_else(|| panic!("dtx.inp is shorter than tst_md.cod at frame {frame}"));
             let homing = homing::is_encoder_homing_frame(source);
             let (comfort_noise, payload) = encoder.encode_frame_typed(source, rate);
             let scheduled = cadence.next(comfort_noise, mode);
@@ -730,8 +767,7 @@ mod tests {
                 for (i, &source) in sort.iter().enumerate() {
                     payload[i / 8] |= codec[source as usize] << (7 - (i % 8));
                 }
-                let is_homing = homed
-                    && homing::is_decoder_homing_frame_first(&payload, 2);
+                let is_homing = homed && homing::is_decoder_homing_frame_first(&payload, 2);
                 let out = if is_homing {
                     [homing::HOMING_SAMPLE; 320]
                 } else {

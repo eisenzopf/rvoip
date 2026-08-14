@@ -41,8 +41,8 @@
 
 use super::codebook::{sharpen, sharpening_factor, sharpening_state, FixedCodebook};
 use super::conceal;
-use super::dtx::{DtxDecoder, DtxState, RxFrameType};
 use super::detect::{interpolate_lsf, LsfAverage, SourceDetector};
+use super::dtx::{DtxDecoder, DtxState, RxFrameType};
 use super::gain::{
     decode_code_gain, decode_joint, decode_pitch_gain, CodeGainConcealer, CodeGainPredictor,
     CodeGainSmoother, FrameQuality, PitchGainConcealer, SubframeGains, WithPrevious,
@@ -343,7 +343,8 @@ impl Decoder {
                 cursor += 1;
             }
 
-            let mut code = Self::decode_codebook(&mut ctx, mode_index, params, &mut cursor, subframe);
+            let mut code =
+                Self::decode_codebook(&mut ctx, mode_index, params, &mut cursor, subframe);
             self.vtrace("code_raw", &code);
 
             let sharpening = if mode_index == MR122 {
@@ -384,9 +385,8 @@ impl Decoder {
             }
 
             let sharpening = shl(&mut ctx, sharpening, 1);
-            let sharpened = (sub(&mut ctx, sharpening, Word16(16384)).0 > 0).then(|| {
-                self.pitch_sharpened_copy(&mut ctx, mode_index, sharpening, gain_pitch)
-            });
+            let sharpened = (sub(&mut ctx, sharpening, Word16(16384)).0 > 0)
+                .then(|| self.pitch_sharpened_copy(&mut ctx, mode_index, sharpening, gain_pitch));
 
             if !bad {
                 self.ltp_gains.copy_within(1.., 0);
@@ -541,7 +541,8 @@ impl Decoder {
 
         let new_state = self.dtx.receive(&mut ctx, frame_type);
         let out = if new_state == DtxState::Speech {
-            let (state, params) = self.speech_frame_inputs(&mut ctx, frame_type, mode_index, params);
+            let (state, params) =
+                self.speech_frame_inputs(&mut ctx, frame_type, mode_index, params);
             self.decode_parameters(mode_index, &params, state)
         } else {
             self.comfort_noise_frame(&mut ctx, new_state, mode_index, params)
@@ -1119,9 +1120,8 @@ impl Decoder {
     /// Push this subframe's energy, unless the frame is being concealed in
     /// noise — in which case the history must not learn from it.
     fn update_energy_history(&mut self, energy: Word16, quality: FrameQuality) {
-        let frozen = self.detector.background_noise()
-            && quality.bad.either()
-            && self.erasure_state < 4;
+        let frozen =
+            self.detector.background_noise() && quality.bad.either() && self.erasure_state < 4;
         if frozen {
             return;
         }
@@ -1302,7 +1302,11 @@ mod tests {
     fn classify(frame: &crate::codecs::amr::AmrPayloadFrame, last_mode: u8) -> (RxFrameType, u8) {
         match frame.frame_type {
             AmrFrameType::Speech(mode) => (
-                if frame.quality_ok { RxFrameType::SpeechGood } else { RxFrameType::SpeechBad },
+                if frame.quality_ok {
+                    RxFrameType::SpeechGood
+                } else {
+                    RxFrameType::SpeechBad
+                },
                 mode.index(),
             ),
             AmrFrameType::Sid(_) => {
@@ -1352,7 +1356,8 @@ mod tests {
                     crate::codecs::amr::nb::bitstream::parse(8, &frame.data).expect("a SID parses")
                 }
                 RxFrameType::NoData | RxFrameType::Onset | RxFrameType::SidFirst => Vec::new(),
-                _ => crate::codecs::amr::nb::bitstream::parse(frame_mode, &frame.data).expect("speech parses"),
+                _ => crate::codecs::amr::nb::bitstream::parse(frame_mode, &frame.data)
+                    .expect("speech parses"),
             };
 
             let got = decoder.decode_typed(kind, frame_mode, &params);
@@ -1378,12 +1383,24 @@ mod tests {
     fn comfort_noise_matches_the_reference_sample_for_sample() {
         for mode in 0..8u8 {
             let (exact, total, kinds) = run_dtx(mode);
-            assert!(total >= 150 * L_FRAME, "mode {mode}: only {total} samples compared");
-            assert!(kinds[0] >= 40, "mode {mode}: only {} speech frames", kinds[0]);
+            assert!(
+                total >= 150 * L_FRAME,
+                "mode {mode}: only {total} samples compared"
+            );
+            assert!(
+                kinds[0] >= 40,
+                "mode {mode}: only {} speech frames",
+                kinds[0]
+            );
             assert!(kinds[1] >= 8, "mode {mode}: only {} SID frames", kinds[1]);
-            assert!(kinds[2] >= 40, "mode {mode}: only {} NO_DATA frames", kinds[2]);
+            assert!(
+                kinds[2] >= 40,
+                "mode {mode}: only {} NO_DATA frames",
+                kinds[2]
+            );
             assert_eq!(
-                exact, total,
+                exact,
+                total,
                 "mode {mode}: {} of {total} samples differ",
                 total - exact
             );
@@ -1421,7 +1438,9 @@ mod tests {
                     super::super::bitstream::parse(8, &frame.data).expect("a SID parses")
                 }
                 RxFrameType::NoData | RxFrameType::Onset | RxFrameType::SidFirst => Vec::new(),
-                _ => super::super::bitstream::parse(frame_mode, &frame.data).expect("speech parses"),
+                _ => {
+                    super::super::bitstream::parse(frame_mode, &frame.data).expect("speech parses")
+                }
             };
 
             let got = decoder.decode_typed(kind, frame_mode, &params);
@@ -1592,7 +1611,11 @@ mod tests {
                 compared += 1;
             }
         }
-        assert_eq!(compared, want.len(), "compared fewer samples than the fixture holds");
+        assert_eq!(
+            compared,
+            want.len(),
+            "compared fewer samples than the fixture holds"
+        );
     }
 
     /// The same erasure pattern, but the frames are *lost* rather than damaged.
@@ -1639,7 +1662,11 @@ mod tests {
             }
         }
         assert_eq!(concealed, 6, "the concealment path was not taken six times");
-        assert_eq!(compared, want.len(), "compared fewer samples than the fixture holds");
+        assert_eq!(
+            compared,
+            want.len(),
+            "compared fewer samples than the fixture holds"
+        );
     }
 
     /// The first frame of a stream cannot be concealed, and says so.

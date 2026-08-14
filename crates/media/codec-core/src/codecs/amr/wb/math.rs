@@ -42,7 +42,8 @@ pub fn isqrt_n(ctx: &mut DspContext, value: Normalised) -> Normalised {
 
     // Bits 25..31 select the table entry, 10..24 interpolate within it.
     frac = l_shr(ctx, frac, 9);
-    let i = usize::try_from(extract_h(frac).0 - 16).expect("normalised input keeps the index in range");
+    let i =
+        usize::try_from(extract_h(frac).0 - 16).expect("normalised input keeps the index in range");
     frac = l_shr(ctx, frac, 1);
     let a = Word16(extract_l(frac).0 & 0x7fff);
 
@@ -215,9 +216,9 @@ mod tests {
         let spiked = [1000i16, 1010, 32000, 1005, 995];
 
         let mean = |v: [i16; 5]| v.iter().map(|&x| i32::from(x)).sum::<i32>() / 5;
-        let median_shift =
-            (i32::from(median5(&spiked.map(Word16)).0) - i32::from(median5(&steady.map(Word16)).0))
-                .abs();
+        let median_shift = (i32::from(median5(&spiked.map(Word16)).0)
+            - i32::from(median5(&steady.map(Word16)).0))
+        .abs();
         let mean_shift = (mean(spiked) - mean(steady)).abs();
 
         assert!(
@@ -235,7 +236,11 @@ mod tests {
             let (exp, frac) = log2(&mut ctx, Word32(x));
             let back = pow2(&mut ctx, exp, frac);
             let error = (f64::from(back.0) - f64::from(x)).abs() / f64::from(x);
-            assert!(error < 0.01, "log2/pow2 round trip of {x} gave {} ({error:.4})", back.0);
+            assert!(
+                error < 0.01,
+                "log2/pow2 round trip of {x} gave {} ({error:.4})",
+                back.0
+            );
         }
     }
 
@@ -252,7 +257,10 @@ mod tests {
             let got = f64::from(frac.0) / 2f64.powi(31) * 2f64.powi(i32::from(exp));
             let want = 1.0 / f64::from(x).sqrt();
             let error = (got - want).abs() / want;
-            assert!(error < 0.01, "isqrt({x}) gave {got}, want {want} ({error:.4})");
+            assert!(
+                error < 0.01,
+                "isqrt({x}) gave {got}, want {want} ({error:.4})"
+            );
         }
     }
 

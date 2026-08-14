@@ -83,15 +83,15 @@ use super::analysis::{
     MR475,
 };
 use super::codebook::{search as codebook_search, CodebookInputs};
-use super::gain_quant::{GainParams, GainQuantiser, SubframeSignals};
 use super::dtx::{DtxEncoder, TxDecision};
+use super::gain_quant::{GainParams, GainQuantiser, SubframeSignals};
 use super::lsp_quant::LsfQuantiser;
-use super::vad::VoiceActivityDetector;
 use super::pitch::{
     closed_loop_ltp, convolve, open_loop_lags, ClosedLoopPitch, ToneStability, WeightedOpenLoop,
     EXC_ORIGIN,
 };
 use super::preproc::Preprocessor;
+use super::vad::VoiceActivityDetector;
 
 use crate::fixed_point::arith::{add, extract_h, round, sub};
 use crate::fixed_point::arith32::{l_mac, l_mult};
@@ -659,7 +659,8 @@ impl NbEncoder {
         // `vad_pitch_detection`, after both open-loop lags exist and before
         // anything else uses them.
         if self.dtx_enabled {
-            self.vad.observe_pitch(&mut ctx, [Word16(t_op[0]), Word16(t_op[1])]);
+            self.vad
+                .observe_pitch(&mut ctx, [Word16(t_op[0]), Word16(t_op[1])]);
         }
 
         // `goto the_end`: a comfort-noise frame runs the analysis and the
@@ -734,7 +735,9 @@ impl NbEncoder {
             let quantised = self.lsf.quantise_sid(ctx, &lsp);
             self.dtx.set_indices(
                 Word16(i16::try_from(quantised.seed_index).expect("three bits")),
-                quantised.indices.map(|i| Word16(i16::try_from(i).expect("nine bits"))),
+                quantised
+                    .indices
+                    .map(|i| Word16(i16::try_from(i).expect("nine bits"))),
             );
 
             let (ordinary, mr122) = self.dtx.predictor_reset(ctx);
@@ -1863,7 +1866,11 @@ mod tests {
             let want = refs[usize::from(mode)];
             assert_eq!(out.len(), want.len(), "mode {mode}: file length");
             let first = out.iter().zip(want).position(|(a, b)| a != b);
-            assert!(first.is_none(), "mode {mode}: first differs at byte {}", first.unwrap());
+            assert!(
+                first.is_none(),
+                "mode {mode}: first differs at byte {}",
+                first.unwrap()
+            );
 
             // Not vacuous. The perturbation is deliberately larger than the
             // one LSB the coded signal can resolve: the encoder masks the low
@@ -1884,7 +1891,10 @@ mod tests {
                 other.push((mode << 3) | 0x04);
                 other.extend_from_slice(&enc.encode_frame(&block, rate));
             }
-            assert_ne!(other, out, "mode {mode}: the input change left the bitstream alone");
+            assert_ne!(
+                other, out,
+                "mode {mode}: the input change left the bitstream alone"
+            );
             println!("mode {mode}: {} bytes byte-identical", out.len());
         }
     }

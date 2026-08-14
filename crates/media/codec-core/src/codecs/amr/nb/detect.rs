@@ -472,7 +472,11 @@ mod tests {
 
     /// Read a fixture row of exactly `len` `Word16`s.
     fn words(row: &Row, label: &str, len: usize) -> Vec<Word16> {
-        assert_eq!(row.label, label, "expected a {label:?} row, got {:?}", row.label);
+        assert_eq!(
+            row.label, label,
+            "expected a {label:?} row, got {:?}",
+            row.label
+        );
         let v = row.words();
         assert_eq!(v.len(), len, "{label} row should carry {len} values");
         v
@@ -487,7 +491,10 @@ mod tests {
     #[test]
     fn background_noise_detection_is_bit_exact_against_ts26073() {
         let rows = rows("bgnscd");
-        assert_eq!(rows[0].label, "seed", "the bgnscd section should open with its seed");
+        assert_eq!(
+            rows[0].label, "seed",
+            "the bgnscd section should open with its seed"
+        );
 
         let mut detector = SourceDetector::new();
         let mut ctx = DspContext::default();
@@ -499,7 +506,10 @@ mod tests {
         for (n, frame) in rows[1..].chunks(3).enumerate() {
             let gains = words(&frame[0], "ltp", MEDIAN_MAX);
             let synth = words(&frame[1], "syn", L_FRAME);
-            assert_eq!(frame[2].label, "step", "each bgnscd case ends with a step row");
+            assert_eq!(
+                frame[2].label, "step",
+                "each bgnscd case ends with a step row"
+            );
 
             let want = frame[2].i16s();
             assert_eq!(want.len(), 2, "a step row is `bgn hangover`");
@@ -528,13 +538,19 @@ mod tests {
             compared += 1;
         }
 
-        assert_eq!(compared, 10, "compared {compared} bgnscd cases, expected 10");
+        assert_eq!(
+            compared, 10,
+            "compared {compared} bgnscd cases, expected 10"
+        );
     }
 
     #[test]
     fn the_lsf_average_is_bit_exact_against_ts26073() {
         let rows = rows("lspavg");
-        assert_eq!(rows[0].label, "seed", "the lspavg section should open with its seed");
+        assert_eq!(
+            rows[0].label, "seed",
+            "the lspavg section should open with its seed"
+        );
 
         let mut average = LsfAverage::new();
         let mut ctx = DspContext::default();
@@ -558,13 +574,19 @@ mod tests {
             compared += 1;
         }
 
-        assert_eq!(compared, 10, "compared {compared} lspavg cases, expected 10");
+        assert_eq!(
+            compared, 10,
+            "compared {compared} lspavg cases, expected 10"
+        );
     }
 
     #[test]
     fn lsf_interpolation_is_bit_exact_against_ts26073() {
         let rows = rows("intlsf");
-        assert_eq!(rows[0].label, "seed", "the intlsf section should open with its seed");
+        assert_eq!(
+            rows[0].label, "seed",
+            "the intlsf section should open with its seed"
+        );
 
         let lsf_old: [Word16; LP_ORDER] = array(&words(&rows[1], "old", LP_ORDER));
         let lsf_new: [Word16; LP_ORDER] = array(&words(&rows[2], "new", LP_ORDER));
@@ -573,8 +595,12 @@ mod tests {
         let mut compared = 0;
 
         for case in rows[3..].chunks(2) {
-            assert_eq!(case[0].label, "case", "each intlsf case opens with its subframe start");
-            let start = usize::try_from(case[0].ints()[0]).expect("a subframe start is non-negative");
+            assert_eq!(
+                case[0].label, "case",
+                "each intlsf case opens with its subframe start"
+            );
+            let start =
+                usize::try_from(case[0].ints()[0]).expect("a subframe start is non-negative");
             let want = words(&case[1], "out", LP_ORDER);
 
             let got = interpolate_lsf(&mut ctx, &lsf_old, &lsf_new, start);
@@ -650,12 +676,24 @@ mod tests {
 
         // Sorted middle is `i16::MIN`; the reference returns 5, because after
         // round 0 the index stops moving and every later rank repeats index 2.
-        let window = [Word16(i16::MIN), Word16(i16::MIN), Word16(5), Word16(i16::MIN), Word16(i16::MIN)];
+        let window = [
+            Word16(i16::MIN),
+            Word16(i16::MIN),
+            Word16(5),
+            Word16(i16::MIN),
+            Word16(i16::MIN),
+        ];
         assert_eq!(median(&mut ctx, &window).0, 5);
 
         // -32767 *is* selectable, so it takes rank 1 and the repeat starts one
         // round later — landing on a different wrong answer.
-        let window = [Word16(i16::MIN), Word16(-32767), Word16(5), Word16(i16::MIN), Word16(i16::MIN)];
+        let window = [
+            Word16(i16::MIN),
+            Word16(-32767),
+            Word16(5),
+            Word16(i16::MIN),
+            Word16(i16::MIN),
+        ];
         assert_eq!(median(&mut ctx, &window).0, -32767);
 
         let window = [
@@ -677,7 +715,13 @@ mod tests {
 
         // With one genuine `i16::MIN` among ordinary values the ranking is
         // still a permutation, so the answer agrees with a sort.
-        let window = [Word16(i16::MIN), Word16(5), Word16(-9), Word16(400), Word16(7)];
+        let window = [
+            Word16(i16::MIN),
+            Word16(5),
+            Word16(-9),
+            Word16(400),
+            Word16(7),
+        ];
         let mut sorted: Vec<i16> = window.iter().map(|w| w.0).collect();
         sorted.sort_unstable();
         assert_eq!(median(&mut ctx, &window).0, sorted[2]);
@@ -755,7 +799,10 @@ mod tests {
             );
         }
 
-        assert_eq!(compared, 2000, "compared {compared} interpolations, expected 2000");
+        assert_eq!(
+            compared, 2000,
+            "compared {compared} interpolations, expected 2000"
+        );
     }
 
     #[test]
@@ -796,7 +843,10 @@ mod tests {
             // to *exactly* the target is not something to assert.
             for (i, (&settled, &want)) in average.mean().iter().zip(target.iter()).enumerate() {
                 let gap = i32::from(settled.0) - i32::from(want.0);
-                assert!(gap.abs() <= 3, "coefficient {i} settled {gap} away from its target");
+                assert!(
+                    gap.abs() <= 3,
+                    "coefficient {i} settled {gap} away from its target"
+                );
             }
         }
     }
@@ -932,10 +982,16 @@ mod tests {
                 "frame {frame}: 0.885 clears the 0.85 limit and should read as voiced"
             );
         }
-        assert_eq!(detector.noise_hangover.0, 8, "hangover should sit at the first threshold");
+        assert_eq!(
+            detector.noise_hangover.0, 8,
+            "hangover should sit at the first threshold"
+        );
 
         detector.update(&mut ctx, &gains, &synth);
-        assert_eq!(detector.noise_hangover.0, 9, "hangover should have crossed 8");
+        assert_eq!(
+            detector.noise_hangover.0, 9,
+            "hangover should have crossed 8"
+        );
         assert_eq!(
             detector.voiced_hangover().0,
             1,
@@ -963,7 +1019,10 @@ mod tests {
                 "frame {frame}: 0.977 still clears the 0.95 limit"
             );
         }
-        assert_eq!(detector.noise_hangover.0, 15, "hangover should sit on the second threshold");
+        assert_eq!(
+            detector.noise_hangover.0, 15,
+            "hangover should sit on the second threshold"
+        );
 
         detector.update(&mut ctx, &gains, &synth);
         assert_eq!(detector.noise_hangover.0, 16);
@@ -1039,10 +1098,16 @@ mod tests {
                 "frame {frame}: the five-tap median alone should still read voiced"
             );
         }
-        assert_eq!(detector.noise_hangover.0, 20, "hangover should sit exactly on the threshold");
+        assert_eq!(
+            detector.noise_hangover.0, 20,
+            "hangover should sit exactly on the threshold"
+        );
 
         detector.update(&mut ctx, &gains, &synth);
-        assert_eq!(detector.noise_hangover.0, 21, "hangover should have crossed 20");
+        assert_eq!(
+            detector.noise_hangover.0, 21,
+            "hangover should have crossed 20"
+        );
         assert_eq!(
             detector.voiced_hangover().0,
             1,

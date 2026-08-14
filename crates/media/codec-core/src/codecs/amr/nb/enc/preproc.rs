@@ -211,7 +211,11 @@ pub(crate) mod trace_support {
     /// One row as `Word16`s, with its length asserted.
     pub fn words(frame: usize, subframe: i32, name: &str, expected: usize) -> Vec<Word16> {
         let values = row(frame, subframe, name);
-        assert_eq!(values.len(), expected, "frame {frame}/{subframe}: {name} length");
+        assert_eq!(
+            values.len(),
+            expected,
+            "frame {frame}/{subframe}: {name} length"
+        );
         values
             .into_iter()
             .map(|v| Word16(i16::try_from(v).expect("row holds Word16 values")))
@@ -221,7 +225,11 @@ pub(crate) mod trace_support {
     /// One scalar row.
     pub fn scalar(frame: usize, subframe: i32, name: &str) -> i32 {
         let values = row(frame, subframe, name);
-        assert_eq!(values.len(), 1, "frame {frame}/{subframe}: {name} is a scalar");
+        assert_eq!(
+            values.len(),
+            1,
+            "frame {frame}/{subframe}: {name} is a scalar"
+        );
         values[0]
     }
 
@@ -379,10 +387,10 @@ mod tests {
             let composed = compose(y1.0, y1.1);
             // `round` would have produced `extract_h(composed + 0x8000)`; a
             // non-zero low word is precision the output does not carry.
-            sub_lsb_state += usize::from(y1.1.0 != 0);
+            sub_lsb_state += usize::from(y1.1 .0 != 0);
             assert_eq!(
                 crate::fixed_point::arith::extract_h(composed).0,
-                y1.0.0,
+                y1.0 .0,
                 "the double-precision pair does not recompose"
             );
         }

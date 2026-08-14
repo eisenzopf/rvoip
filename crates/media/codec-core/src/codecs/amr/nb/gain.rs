@@ -324,10 +324,10 @@ impl CodeGainPredictor {
         // operand pair, not a product to be pre-multiplied: 32588 and 32268 do
         // not fit the ×64 form, which is why two rates use ×32 instead.
         let (k, k_scale) = match mode_index {
-            R7_40 => (32588, 32),  // 30 dB
-            R6_70 => (32268, 32),  // 28.75 dB
-            R7_95 => (17062, 64),  // 36 dB
-            _ => (16678, 64),      // 33 dB: 4.75, 5.15, 5.90, 10.2
+            R7_40 => (32588, 32), // 30 dB
+            R6_70 => (32268, 32), // 28.75 dB
+            R7_95 => (17062, 64), // 36 dB
+            _ => (16678, 64),     // 33 dB: 4.75, 5.15, 5.90, 10.2
         };
         acc = l_mac(ctx, acc, Word16(k), Word16(k_scale));
 
@@ -1008,7 +1008,10 @@ fn spectral_motion(
     let mut diff = Word16(0);
 
     for (&current, &average) in lsf.iter().zip(lsf_avg.iter()) {
-        assert!(average.0 > 0, "the LSF average must be positive to divide by");
+        assert!(
+            average.0 > 0,
+            "the LSF average must be positive to divide by"
+        );
 
         let gap = sub(ctx, average, current);
         let numerator = abs_s(ctx, gap);
@@ -1226,7 +1229,10 @@ mod tests {
         }
 
         // Six jointly quantised rates and two split ones, 24 subframes each.
-        assert_eq!(compared, 192, "compared {compared} gain steps, expected 192");
+        assert_eq!(
+            compared, 192,
+            "compared {compared} gain steps, expected 192"
+        );
     }
 
     #[test]
@@ -1278,7 +1284,10 @@ mod tests {
             }
         }
 
-        assert_eq!(compared, 40, "compared {compared} conceal steps, expected 40");
+        assert_eq!(
+            compared, 40,
+            "compared {compared} conceal steps, expected 40"
+        );
     }
 
     #[test]
@@ -1349,7 +1358,10 @@ mod tests {
             }
         }
 
-        assert_eq!(compared, 12, "compared {compared} smoothing steps, expected 12");
+        assert_eq!(
+            compared, 12,
+            "compared {compared} smoothing steps, expected 12"
+        );
     }
 
     // ---------------------------------------------------------------------
@@ -1483,9 +1495,15 @@ mod tests {
         let predictor = CodeGainPredictor::new();
         let (log2_avg, db_avg) = predictor.limited_average(&mut c);
 
-        assert_eq!(log2_avg.0, MIN_ENERGY_LOG2, "the log2 sum must not saturate");
+        assert_eq!(
+            log2_avg.0, MIN_ENERGY_LOG2,
+            "the log2 sum must not saturate"
+        );
         assert_eq!(db_avg.0, -8192, "the dB sum must saturate before scaling");
-        assert!(db_avg.0 > MIN_ENERGY_DB, "the floor is never actually reached here");
+        assert!(
+            db_avg.0 > MIN_ENERGY_DB,
+            "the floor is never actually reached here"
+        );
     }
 
     #[test]
@@ -1625,7 +1643,10 @@ mod tests {
 
         let pitch = PitchGainConcealer::new();
         let _substituted = pitch.conceal(&mut c, 3);
-        assert_eq!(predictor, before, "ec_gain_pitch must not touch the predictor");
+        assert_eq!(
+            predictor, before,
+            "ec_gain_pitch must not touch the predictor"
+        );
 
         let code = CodeGainConcealer::new();
         code.conceal(&mut c, &mut predictor, 3);
@@ -1720,7 +1741,10 @@ mod tests {
         let with_nine = extract_h(l_shr(&mut c, product, nine));
         let ten = sub(&mut c, Word16(10), prediction.exponent).0;
         let with_ten = extract_h(l_shr(&mut c, product, ten));
-        assert_ne!(with_nine, with_ten, "pick a louder case; the two shifts agree");
+        assert_ne!(
+            with_nine, with_ten,
+            "pick a louder case; the two shifts agree"
+        );
 
         let split = decode_code_gain(&mut c, &mut split_state, R7_95, index, &code);
         assert_eq!(split, with_nine, "the split path must shift by 9 - exp");
@@ -1737,10 +1761,16 @@ mod tests {
         let with_nine = extract_h(l_shr(&mut c, product, nine));
         let ten = sub(&mut c, Word16(10), prediction.exponent).0;
         let with_ten = extract_h(l_shr(&mut c, product, ten));
-        assert_ne!(with_nine, with_ten, "pick a louder case; the two shifts agree");
+        assert_ne!(
+            with_nine, with_ten,
+            "pick a louder case; the two shifts agree"
+        );
 
         let joint = decode_joint(&mut c, &mut joint_state, R6_70, joint_index, &code, true);
-        assert_eq!(joint.code, with_ten, "the joint path must shift by 10 - exp");
+        assert_eq!(
+            joint.code, with_ten,
+            "the joint path must shift by 10 - exp"
+        );
     }
 
     #[test]
@@ -1885,6 +1915,9 @@ mod tests {
         smoother.reset_for_comfort_noise();
         assert_eq!(smoother.history, [Word16(0); GAIN_HISTORY]);
         assert_eq!(smoother.hang_count.0, 0);
-        assert_eq!(smoother.hang_var.0, 20, "the hangover is re-armed, not cleared");
+        assert_eq!(
+            smoother.hang_var.0, 20,
+            "the hangover is re-armed, not cleared"
+        );
     }
 }

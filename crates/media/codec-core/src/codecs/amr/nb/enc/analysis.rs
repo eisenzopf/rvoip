@@ -838,7 +838,9 @@ impl WeightedSpeech {
     /// A filter memory in the state `cod_amr_reset` leaves behind: silent.
     #[must_use]
     pub const fn new() -> Self {
-        Self { mem_w: [Word16(0); M] }
+        Self {
+            mem_w: [Word16(0); M],
+        }
     }
 
     /// Weight one half-frame in place, writing `wsp[offset..offset + 80]`.
@@ -1053,8 +1055,7 @@ mod tests {
 
         /// `Aq_t` for one frame, Q12, four `MP1` blocks.
         fn next(&mut self, frame: usize) -> [Word16; AZ_SIZE] {
-            let params =
-                bitstream::parse(TRACE_MODE, &self.payloads[frame]).expect("frame parses");
+            let params = bitstream::parse(TRACE_MODE, &self.payloads[frame]).expect("frame parses");
             let lsp_new = self.lsf.decode(TRACE_MODE, &params[..3], false);
             let mut ctx = DspContext::default();
             let az = interpolate_lsp(&mut ctx, &self.lsp_old, &lsp_new);
@@ -1214,7 +1215,8 @@ mod tests {
             let want = words(frame, -1, "A_t", AZ_SIZE);
             for (i, &got) in out.az.iter().enumerate() {
                 assert_eq!(
-                    got.0, want[i].0,
+                    got.0,
+                    want[i].0,
                     "frame {frame}: A_t[{i}] (subframe {}, tap {}) differs",
                     i / MP1,
                     i % MP1
@@ -1266,7 +1268,11 @@ mod tests {
             }
         });
         assert_eq!(count, 3, "the committed trace covers three frames");
-        assert_eq!(compared, 3 * NB_SUBFR * M, "120 line spectral pairs compared");
+        assert_eq!(
+            compared,
+            3 * NB_SUBFR * M,
+            "120 line spectral pairs compared"
+        );
     }
 
     #[test]
@@ -1349,8 +1355,14 @@ mod tests {
         // Subframe 1 straddles the boundary: ten samples of history that are
         // still the previous frame, then the pushed frame's first sample.
         let s = buffer.with_history(L_NEXT, L_SUBFR);
-        assert!(s[..M].iter().all(|v| v.0 == 0), "the history is still silent");
-        assert_eq!(s[M].0, 1, "the pushed frame starts exactly one lookahead in");
+        assert!(
+            s[..M].iter().all(|v| v.0 == 0),
+            "the history is still silent"
+        );
+        assert_eq!(
+            s[M].0, 1,
+            "the pushed frame starts exactly one lookahead in"
+        );
     }
 
     #[test]
@@ -1535,11 +1547,7 @@ mod tests {
         r_h[0] = Word16(0x4000);
         r_h[1] = Word16(0x3fff);
         r_l[1] = Word16(0x7fff);
-        let unstable = Autocorrelation {
-            r_h,
-            r_l,
-            norm: 0,
-        };
+        let unstable = Autocorrelation { r_h, r_l, norm: 0 };
         let (a, rc) = levinson.solve(&mut ctx, &unstable);
         assert_eq!(a, stable, "the unstable path re-emits the previous filter");
         assert!(
@@ -1547,7 +1555,10 @@ mod tests {
             "unstable zeroes all four reflection coefficients"
         );
         let (again, _) = levinson.solve(&mut ctx, &unstable);
-        assert_eq!(again, stable, "an unstable frame must not update the stored filter");
+        assert_eq!(
+            again, stable,
+            "an unstable frame must not update the stored filter"
+        );
     }
 
     #[test]
@@ -1557,7 +1568,10 @@ mod tests {
         assert_eq!(K_UNSTABLE.0, 32750, "the threshold moved");
         let mut ctx = DspContext::default();
         assert!(
-            { let m = abs_s(&mut ctx, K_UNSTABLE); sub(&mut ctx, m, K_UNSTABLE).0 <= 0 },
+            {
+                let m = abs_s(&mut ctx, K_UNSTABLE);
+                sub(&mut ctx, m, K_UNSTABLE).0 <= 0
+            },
             "equality must not trip the instability test"
         );
     }
@@ -1621,7 +1635,11 @@ mod tests {
         assert_eq!(w2, first, "the first half-frame does not read slots 2 or 3");
         assert_eq!(other[..80], wsp[..80], "the first half-frame is unchanged");
         w2.half_frame(&mut ctx, TRACE_MODE, &swapped, 80, &buffer, &mut other);
-        assert_ne!(other[80..], wsp[80..], "the second half-frame reads slots 2 and 3");
+        assert_ne!(
+            other[80..],
+            wsp[80..],
+            "the second half-frame reads slots 2 and 3"
+        );
     }
 
     #[test]
@@ -1709,6 +1727,9 @@ mod tests {
         assert_eq!(r.r_h[0].0, before.0, "r[0] must not be windowed");
         // And the off-by-one: r[1] gets lag[0], the largest factor, so it moves
         // least of all the windowed lags.
-        assert!(r.r_h[1].0 > r.r_h[M].0, "the lag window is applied from r[1]");
+        assert!(
+            r.r_h[1].0 > r.r_h[M].0,
+            "the lag window is applied from r[1]"
+        );
     }
 }

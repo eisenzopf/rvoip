@@ -209,9 +209,18 @@ mod tests {
 
     #[test]
     fn a_frame_is_twenty_milliseconds_of_the_negotiated_rate() {
-        assert_eq!(AudioCodecSpec::new("PCMU", 0, 8_000, 1).frame_samples_20ms(), 160);
-        assert_eq!(AudioCodecSpec::new("AMR-WB", 97, 16_000, 1).frame_samples_20ms(), 320);
-        assert_eq!(AudioCodecSpec::new("opus", 111, 48_000, 2).frame_samples_20ms(), 1920);
+        assert_eq!(
+            AudioCodecSpec::new("PCMU", 0, 8_000, 1).frame_samples_20ms(),
+            160
+        );
+        assert_eq!(
+            AudioCodecSpec::new("AMR-WB", 97, 16_000, 1).frame_samples_20ms(),
+            320
+        );
+        assert_eq!(
+            AudioCodecSpec::new("opus", 111, 48_000, 2).frame_samples_20ms(),
+            1920
+        );
     }
 
     #[test]

@@ -107,7 +107,6 @@ const THIRD: Word16 = Word16(10923);
 /// decoder produces (at most a nine-bit index plus five).
 const SIXTH: Word16 = Word16(5462);
 
-
 /// How finely a rate resolves the pitch lag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LagResolution {
@@ -618,9 +617,8 @@ mod tests {
     use super::super::decoder_tables::{INTER_6_PRED, INTER_6_SEARCH};
     use super::super::vectors;
     use super::{
-        FIR_SIZE,
         absolute_lag, delta_coding, delta_lag_1_3, delta_lag_1_6, delta_window, is_delta_coded,
-        DeltaCoding, Excitation, LagResolution, LagWindow, PitchLag, EXC_LEN, HISTORY,
+        DeltaCoding, Excitation, LagResolution, LagWindow, PitchLag, EXC_LEN, FIR_SIZE, HISTORY,
         MODE_MR795, TAPS_PER_SIDE, UP_SAMP_MAX,
     };
     use super::{L_INTERPOL, L_SUBFR, PIT_MAX, PIT_MIN};

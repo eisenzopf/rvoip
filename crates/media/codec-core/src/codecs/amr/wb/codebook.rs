@@ -45,7 +45,11 @@ pub const fn decode_2t64(index: u16) -> [i16; L_SUBFR] {
     let i0 = ((index >> 5) & 0x003E) as usize;
     let i1 = (((index & 0x001F) << 1) + 1) as usize;
 
-    code[i0] = if (index >> 6) & 32 == 0 { PULSE } else { -PULSE };
+    code[i0] = if (index >> 6) & 32 == 0 {
+        PULSE
+    } else {
+        -PULSE
+    };
     code[i1] = if index & 32 == 0 { PULSE } else { -PULSE };
     code
 }
@@ -365,7 +369,11 @@ mod tests {
                     let got = decode(&sub.pulses, frame_bits)
                         .unwrap_or_else(|| panic!("{block} frame {f} subframe {sf}: no codebook"));
                     let want = block_row(&block, &format!("code{f}_{sf}"));
-                    assert_eq!(want.len(), L_SUBFR, "{block} frame {f} subframe {sf}: length");
+                    assert_eq!(
+                        want.len(),
+                        L_SUBFR,
+                        "{block} frame {f} subframe {sf}: length"
+                    );
                     for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
                         assert_eq!(
                             g, w,
@@ -389,8 +397,7 @@ mod tests {
 
         for (mode_index, &frame_bits) in FRAME_BITS.iter().enumerate() {
             let (_, frames) = storage::read(fixture(mode_index)).expect("fixture parses");
-            let params =
-                FrameParams::parse(mode_for(mode_index), &frames[0].data).expect("parses");
+            let params = FrameParams::parse(mode_for(mode_index), &frames[0].data).expect("parses");
             let code = decode(&params.subframes[0].pulses, frame_bits).expect("code");
 
             // Pulses can coincide and cancel or reinforce, so count magnitude
@@ -438,8 +445,7 @@ mod tests {
         // plausible, but the pulses are in the wrong places.
         for (mode_index, &frame_bits) in FRAME_BITS.iter().enumerate().skip(1) {
             let (_, frames) = storage::read(fixture(mode_index)).expect("fixture parses");
-            let params =
-                FrameParams::parse(mode_for(mode_index), &frames[0].data).expect("parses");
+            let params = FrameParams::parse(mode_for(mode_index), &frames[0].data).expect("parses");
 
             // Decode each track in isolation and check where its pulses fall.
             let bits = pulse_bits(frame_bits);

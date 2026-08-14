@@ -36,9 +36,9 @@ use super::lp::autocorr::LP_ORDER;
 use super::lp::isf_dequant::ISF_INIT;
 use super::math::{dot_product12, isqrt_n, pow2};
 use crate::fixed_point::arith::{add, extract_h, extract_l, mult, mult_r, sub};
+use crate::fixed_point::arith32::{l_add, l_deposit_h, l_mac, l_mult, l_sub};
 use crate::fixed_point::div::div_s;
 use crate::fixed_point::shift::shr;
-use crate::fixed_point::arith32::{l_add, l_deposit_h, l_mac, l_mult, l_sub};
 use crate::fixed_point::shift::{l_shl, l_shr, norm_l, shl};
 use crate::fixed_point::types::{DspContext, Word16, Word32};
 
@@ -698,7 +698,10 @@ mod tests {
         let mut rows = 0usize;
         let mut states = std::collections::HashSet::new();
 
-        for line in text.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()) {
+        for line in text
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+        {
             let fields: Vec<&str> = line.split('|').collect();
             assert_eq!(fields.len(), 4, "malformed row `{line}`");
             let head: Vec<i32> = fields[0]

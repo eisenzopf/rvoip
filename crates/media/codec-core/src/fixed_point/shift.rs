@@ -1,7 +1,5 @@
 use crate::fixed_point::arith::{add, extract_l};
-use crate::fixed_point::types::{
-    DspContext, Word16, Word32, MAX_16, MAX_32, MIN_16, MIN_32,
-};
+use crate::fixed_point::types::{DspContext, Word16, Word32, MAX_16, MAX_32, MIN_16, MIN_32};
 
 /// Public function `shl`.
 #[inline(always)]

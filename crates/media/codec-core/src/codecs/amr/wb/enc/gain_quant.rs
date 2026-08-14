@@ -581,8 +581,7 @@ mod tests {
                     checked += 1;
                 } else {
                     // Step the predictor with the entry the reference chose.
-                    let table_gain =
-                        Word16(QUA_GAIN_7B[2 * usize::from(expected_index) + 1]);
+                    let table_gain = Word16(QUA_GAIN_7B[2 * usize::from(expected_index) + 1]);
                     predictor.remember(&mut ctx, table_gain);
                 }
             }
@@ -663,7 +662,10 @@ mod tests {
         let expected = {
             let (_, frames) = storage::read(BITSTREAM).expect("the fixture parses");
             let mode = AmrMode::new(AmrVariant::WideBand, 2).expect("12.65 kbit/s");
-            FrameParams::parse(mode, &frames[2].data).expect("parses").subframes[2].gain_index
+            FrameParams::parse(mode, &frames[2].data)
+                .expect("parses")
+                .subframes[2]
+                .gain_index
         };
         assert_ne!(
             from_reset.index, expected,

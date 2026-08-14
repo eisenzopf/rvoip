@@ -126,23 +126,107 @@ const GRID: [Word16; GRID_POINTS + 1] = {
         Word16(v)
     }
     [
-        w(32767), w(32751), w(32703), w(32622), w(32509), w(32364),
-        w(32187), w(31978), w(31738), w(31466), w(31164), w(30830),
-        w(30466), w(30072), w(29649), w(29196), w(28714), w(28204),
-        w(27666), w(27101), w(26509), w(25891), w(25248), w(24579),
-        w(23886), w(23170), w(22431), w(21669), w(20887), w(20083),
-        w(19260), w(18418), w(17557), w(16680), w(15786), w(14876),
-        w(13951), w(13013), w(12062), w(11099), w(10125), w(9141),
-        w(8149), w(7148), w(6140), w(5126), w(4106), w(3083),
-        w(2057), w(1029), w(0), w(-1029), w(-2057), w(-3083),
-        w(-4106), w(-5126), w(-6140), w(-7148), w(-8149), w(-9141),
-        w(-10125), w(-11099), w(-12062), w(-13013), w(-13951), w(-14876),
-        w(-15786), w(-16680), w(-17557), w(-18418), w(-19260), w(-20083),
-        w(-20887), w(-21669), w(-22431), w(-23170), w(-23886), w(-24579),
-        w(-25248), w(-25891), w(-26509), w(-27101), w(-27666), w(-28204),
-        w(-28714), w(-29196), w(-29649), w(-30072), w(-30466), w(-30830),
-        w(-31164), w(-31466), w(-31738), w(-31978), w(-32187), w(-32364),
-        w(-32509), w(-32622), w(-32703), w(-32751), w(-32760),
+        w(32767),
+        w(32751),
+        w(32703),
+        w(32622),
+        w(32509),
+        w(32364),
+        w(32187),
+        w(31978),
+        w(31738),
+        w(31466),
+        w(31164),
+        w(30830),
+        w(30466),
+        w(30072),
+        w(29649),
+        w(29196),
+        w(28714),
+        w(28204),
+        w(27666),
+        w(27101),
+        w(26509),
+        w(25891),
+        w(25248),
+        w(24579),
+        w(23886),
+        w(23170),
+        w(22431),
+        w(21669),
+        w(20887),
+        w(20083),
+        w(19260),
+        w(18418),
+        w(17557),
+        w(16680),
+        w(15786),
+        w(14876),
+        w(13951),
+        w(13013),
+        w(12062),
+        w(11099),
+        w(10125),
+        w(9141),
+        w(8149),
+        w(7148),
+        w(6140),
+        w(5126),
+        w(4106),
+        w(3083),
+        w(2057),
+        w(1029),
+        w(0),
+        w(-1029),
+        w(-2057),
+        w(-3083),
+        w(-4106),
+        w(-5126),
+        w(-6140),
+        w(-7148),
+        w(-8149),
+        w(-9141),
+        w(-10125),
+        w(-11099),
+        w(-12062),
+        w(-13013),
+        w(-13951),
+        w(-14876),
+        w(-15786),
+        w(-16680),
+        w(-17557),
+        w(-18418),
+        w(-19260),
+        w(-20083),
+        w(-20887),
+        w(-21669),
+        w(-22431),
+        w(-23170),
+        w(-23886),
+        w(-24579),
+        w(-25248),
+        w(-25891),
+        w(-26509),
+        w(-27101),
+        w(-27666),
+        w(-28204),
+        w(-28714),
+        w(-29196),
+        w(-29649),
+        w(-30072),
+        w(-30466),
+        w(-30830),
+        w(-31164),
+        w(-31466),
+        w(-31738),
+        w(-31978),
+        w(-32187),
+        w(-32364),
+        w(-32509),
+        w(-32622),
+        w(-32703),
+        w(-32751),
+        w(-32760),
     ]
 };
 
@@ -365,10 +449,7 @@ pub fn az_isp(a: &[Word16; LP_ORDER + 1], old_isp: &[Word16; LP_ORDER]) -> [Word
 
 /// [`az_isp`], keeping the search's own record of what it did.
 #[must_use]
-pub fn az_isp_detail(
-    a: &[Word16; LP_ORDER + 1],
-    old_isp: &[Word16; LP_ORDER],
-) -> IspSearch {
+pub fn az_isp_detail(a: &[Word16; LP_ORDER + 1], old_isp: &[Word16; LP_ORDER]) -> IspSearch {
     let mut ctx = DspContext::default();
     let (f1, f2) = sum_difference_polynomials(&mut ctx, a);
 
@@ -682,7 +763,10 @@ pub fn deemph2(x: &mut [Word16], mu: Word16, memory: &mut Word16) {
 /// If `x` is longer than a frame or has an odd length.
 pub fn lp_decim2(x: &mut [Word16], memory: &mut [Word16; 3]) {
     let n = x.len();
-    assert!(n <= L_FRAME && n.is_multiple_of(2), "decimation needs an even block");
+    assert!(
+        n <= L_FRAME && n.is_multiple_of(2),
+        "decimation needs an even block"
+    );
     let mut ctx = DspContext::default();
 
     let mut buffer = [Word16(0); 3 + L_FRAME];
@@ -815,7 +899,8 @@ impl FrontEnd {
         let mut window = [Word16(0); L_TOTAL];
         window[..L_TOTAL - L_FRAME].copy_from_slice(&self.old_speech);
 
-        self.preproc.band_limit(speech16k, &mut window[NEW_SPEECH..]);
+        self.preproc
+            .band_limit(speech16k, &mut window[NEW_SPEECH..]);
         let scaling = self.preproc.preemphasise(&mut window[NEW_SPEECH..]);
 
         // Bring the carried history onto the new frame's scale. The bound is
@@ -824,7 +909,11 @@ impl FrontEnd {
         // it are never read before the decimator overwrites them.
         scale_sig(&mut ctx, &mut window[..NEW_SPEECH], scaling.exp);
         scale_sig(&mut ctx, &mut self.decim2_memory, scaling.exp);
-        scale_sig(&mut ctx, core::slice::from_mut(&mut self.wsp_memory), scaling.exp);
+        scale_sig(
+            &mut ctx,
+            core::slice::from_mut(&mut self.wsp_memory),
+            scaling.exp,
+        );
 
         // LP analysis, centred on the fourth subframe. `autocorrelation`
         // already applies the lag window on its way out.
@@ -842,7 +931,8 @@ impl FrontEnd {
         self.isp_old = isp;
         let isf = isp_to_isf(&isp);
 
-        let (wsp, wsp_history, wsp_shift, wsp_exp) = self.weighted_speech(&window, &a_interp, scaling);
+        let (wsp, wsp_history, wsp_shift, wsp_exp) =
+            self.weighted_speech(&window, &a_interp, scaling);
 
         self.old_speech.copy_from_slice(&window[L_FRAME..]);
 
@@ -994,7 +1084,12 @@ mod tests {
         // only becomes a real test from frame 1 onward.
         let mut compared = 0usize;
         let count = replay(|frame, got| {
-            compared += compare(frame, "window", &got.window, &words(frame, "window", L_TOTAL));
+            compared += compare(
+                frame,
+                "window",
+                &got.window,
+                &words(frame, "window", L_TOTAL),
+            );
         });
         assert_eq!(count, 3, "the committed trace covers three frames");
         assert_eq!(compared, 3 * L_TOTAL, "1152 window samples compared");
@@ -1046,7 +1141,11 @@ mod tests {
             compared += compare(frame, "rc", &got.rc, &words(frame, "rc", LP_ORDER));
         });
         assert_eq!(count, 3, "the committed trace covers three frames");
-        assert_eq!(compared, 3 * (LP_ORDER + 1 + LP_ORDER), "99 values compared");
+        assert_eq!(
+            compared,
+            3 * (LP_ORDER + 1 + LP_ORDER),
+            "99 values compared"
+        );
     }
 
     #[test]
@@ -1086,7 +1185,11 @@ mod tests {
             compared += compare(frame, "A_interp", &flat, &want);
         });
         assert_eq!(count, 3, "the committed trace covers three frames");
-        assert_eq!(compared, 3 * NB_SUBFR * (LP_ORDER + 1), "204 values compared");
+        assert_eq!(
+            compared,
+            3 * NB_SUBFR * (LP_ORDER + 1),
+            "204 values compared"
+        );
     }
 
     #[test]
@@ -1111,7 +1214,11 @@ mod tests {
         assert_eq!(compared, 3 * L_FRAME / OPL_DECIM, "384 samples compared");
         // The shift is not constant across the trace, so the peak hysteresis
         // and the `exp` mutation that depends on it are genuinely exercised.
-        assert_eq!(shifts, vec![-1, -1, 0], "wsp_shift must vary across the trace");
+        assert_eq!(
+            shifts,
+            vec![-1, -1, 0],
+            "wsp_shift must vary across the trace"
+        );
     }
 
     // ---- the root search's decisions ----
@@ -1124,7 +1231,11 @@ mod tests {
         // roots must descend (F1 and F2 interlace).
         let count = replay(|frame, got| {
             let search = az_isp_detail(&got.a, &ISP_INIT);
-            assert_eq!(search.roots_found, LP_ORDER - 1, "frame {frame}: root count");
+            assert_eq!(
+                search.roots_found,
+                LP_ORDER - 1,
+                "frame {frame}: root count"
+            );
             assert!(!search.fell_back, "frame {frame}: fell back to old ISPs");
 
             let mut previous_index = 0usize;
@@ -1214,7 +1325,11 @@ mod tests {
                 continue;
             }
 
-            let halvings = if variant == Variant::FourBisections { 4 } else { 2 };
+            let halvings = if variant == Variant::FourBisections {
+                4
+            } else {
+                2
+            };
             for _ in 0..halvings {
                 let xmid = if variant == Variant::MidpointRoundsTogether {
                     Word16(((i32::from(xlow.0) + i32::from(xhigh.0)) >> 1) as i16)
@@ -1391,7 +1506,11 @@ mod tests {
 
         let (a, rc) = levinson(&r, &mut mem);
         assert_eq!(a[0].0, 4096, "a[0] is written even on the unstable path");
-        assert_eq!(&a[1..], &before.previous_a[..], "the old filter is re-emitted");
+        assert_eq!(
+            &a[1..],
+            &before.previous_a[..],
+            "the old filter is re-emitted"
+        );
         assert_eq!(rc[0], before.previous_rc[0]);
         assert_eq!(rc[1], before.previous_rc[1]);
         assert_eq!(mem, before, "the unstable path must not update the memory");
@@ -1423,11 +1542,8 @@ mod tests {
 
             let mut ctx = DspContext::default();
             let mut fac = GAMMA1;
-            for (i, (&weighted, &plain)) in ap
-                .iter()
-                .zip(got.a_interp[0].iter())
-                .enumerate()
-                .skip(1)
+            for (i, (&weighted, &plain)) in
+                ap.iter().zip(got.a_interp[0].iter()).enumerate().skip(1)
             {
                 let scaled = l_mult(&mut ctx, plain, fac);
                 let want = round(&mut ctx, scaled);

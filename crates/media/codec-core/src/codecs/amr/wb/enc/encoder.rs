@@ -54,20 +54,18 @@
 
 use super::super::isf_noise;
 use super::super::lp::isf::{interpolate_isp, isf_to_isp};
-use super::super::lp::isp_to_lp::isp_to_lp;
-use super::dtx::{DtxEncoder, TxDecision};
 use super::super::lp::isf_dequant::{IsfQuantizer, ISF_INIT};
+use super::super::lp::isp_to_lp::isp_to_lp;
 use super::super::math::{dot_product12, isqrt_n, scale_sig};
 use super::super::sort_tables::{
     SORT_1265, SORT_1425, SORT_1585, SORT_1825, SORT_1985, SORT_2305, SORT_2385, SORT_660,
-    SORT_SID,
-    SORT_885,
+    SORT_885, SORT_SID,
 };
 use super::analysis::{deemph2, residu, weight_a, FrontEnd, GAMMA1, L_SUBFR, TILT_FAC};
 use super::codebook::{
-    correlate_target, pitch_sharpen, search_multi_pulse, search_two_pulse, PulseBudget,
-    PITCH_SHARP,
+    correlate_target, pitch_sharpen, search_multi_pulse, search_two_pulse, PulseBudget, PITCH_SHARP,
 };
+use super::dtx::{DtxEncoder, TxDecision};
 use super::gain_quant::{scale_code_gain, GainBits, GainInputs, GainPredictor, PitchCorrelations};
 use super::isf_quant::IsfEncoder;
 use super::pitch::{
@@ -519,11 +517,7 @@ impl WbEncoder {
     /// [`SidCadence`](crate::codecs::amr::sid_cadence::SidCadence) -- because
     /// the encoder builds a SID on every comfort-noise frame and most are
     /// discarded.
-    pub fn encode_frame_typed(
-        &mut self,
-        pcm: &[i16; L_FRAME16K],
-        rate: Rate,
-    ) -> (bool, Vec<u8>) {
+    pub fn encode_frame_typed(&mut self, pcm: &[i16; L_FRAME16K], rate: Rate) -> (bool, Vec<u8>) {
         let mut prms = Parameters::new();
         let comfort_noise = self.encode_into(pcm, rate, &mut prms);
         let payload = prms.pack(if comfort_noise { Rate::SID } else { rate });
@@ -592,8 +586,8 @@ impl WbEncoder {
         // leaves its reset value and 23.85 kbit/s's `gain_alpha` stays pinned
         // at unity. Calling it anyway and discarding the decision would move
         // mode 8's bitstream on quiet input.
-        let comfort_noise = self.allow_dtx
-            && self.dtx.classify(&mut ctx, vad_flag) == TxDecision::ComfortNoise;
+        let comfort_noise =
+            self.allow_dtx && self.dtx.classify(&mut ctx, vad_flag) == TxDecision::ComfortNoise;
 
         // A SID frame carries no VAD bit: the frame type says what it is.
         if comfort_noise {
@@ -630,9 +624,9 @@ impl WbEncoder {
             .measure(&mut ctx, &frame.wsp[..half], lags.first_half / 2);
         self.vad.tone_detection(&mut ctx, tone_gain);
         if !mode.open_loop_spans_frame() {
-            let tone_gain = self
-                .tone_probe
-                .measure(&mut ctx, &frame.wsp[half..], lags.second_half / 2);
+            let tone_gain =
+                self.tone_probe
+                    .measure(&mut ctx, &frame.wsp[half..], lags.second_half / 2);
             self.vad.tone_detection(&mut ctx, tone_gain);
         }
 
@@ -685,8 +679,7 @@ impl WbEncoder {
             if rate.has_high_band() {
                 let hangover = self.dtx.hangover_count();
                 for k in 0..NB_SUBFR {
-                    let sub: [Word16; L_SUBFR] = cn_excitation
-                        [k * L_SUBFR..(k + 1) * L_SUBFR]
+                    let sub: [Word16; L_SUBFR] = cn_excitation[k * L_SUBFR..(k + 1) * L_SUBFR]
                         .try_into()
                         .expect("one subframe");
                     let reference: [Word16; L_SUBFR16K] = input
@@ -711,8 +704,14 @@ impl WbEncoder {
 
         // --- ISF quantisation ------------------------------------------------
         let narrow = rate.bits() <= NBBITS_7K;
-        self.trc(-1, if narrow { "isf_unq36" } else { "isf_unq46" }, &frame.isf);
-        let quantised = self.isf_quantiser.quantize(&frame.isf, rate.isf_quantiser());
+        self.trc(
+            -1,
+            if narrow { "isf_unq36" } else { "isf_unq46" },
+            &frame.isf,
+        );
+        let quantised = self
+            .isf_quantiser
+            .quantize(&frame.isf, rate.isf_quantiser());
         for (&index, &width) in quantised
             .indices()
             .iter()
@@ -1157,8 +1156,7 @@ impl WbEncoder {
                     q_new,
                 },
             );
-            let reference: [Word16; L_SUBFR16K] = pcm
-                [index * L_SUBFR16K..(index + 1) * L_SUBFR16K]
+            let reference: [Word16; L_SUBFR16K] = pcm[index * L_SUBFR16K..(index + 1) * L_SUBFR16K]
                 .try_into()
                 .expect("one subframe at 16 kHz");
             let gain_index = self.high_band.analyse(
@@ -1372,7 +1370,7 @@ fn voice_factor(
     code: &[Word16; L_SUBFR],
     gain_code: Word16,
 ) -> Word16 {
-    let (energy, exp1) = dot_product12(ctx,excitation, excitation);
+    let (energy, exp1) = dot_product12(ctx, excitation, excitation);
     let mut ener1 = extract_h(energy);
     let mut exp1 = exp1 - 2 * q_exc;
     let product = l_mult(ctx, gain_pit, gain_pit);
@@ -1382,7 +1380,7 @@ fn voice_factor(
     // 10 brings the Q14 pitch gain down to the codeword's Q9.
     exp1 = exp1 - exp - 10;
 
-    let (energy, exp2) = dot_product12(ctx,code, code);
+    let (energy, exp2) = dot_product12(ctx, code, code);
     let mut ener2 = extract_h(energy);
     let exp = norm_s(gain_code);
     let tmp = shl(ctx, gain_code, exp);
@@ -1750,8 +1748,7 @@ mod vad {
 
             let mut level = [Word16(0); COMPLEN];
             for &(band, span) in &BANDS {
-                level[band] =
-                    level_calculation(ctx, &buf, &mut self.sub_level[band], span);
+                level[band] = level_calculation(ctx, &buf, &mut self.sub_level[band], span);
             }
             level
         }
@@ -1973,8 +1970,7 @@ mod vad {
             }
             self.sp_est_cnt = add(ctx, Word16(self.sp_est_cnt), Word16(1)).0;
 
-            let active =
-                (self.vadreg & 0x4000) != 0 || sub(ctx, in_level, self.speech_level).0 > 0;
+            let active = (self.vadreg & 0x4000) != 0 || sub(ctx, in_level, self.speech_level).0 > 0;
             if !active || sub(ctx, in_level, Word16(MIN_SPEECH_LEVEL1)).0 <= 0 {
                 return;
             }
@@ -2079,7 +2075,13 @@ mod vad {
     /// band first — exactly the order `filter_bank` writes them in, since each
     /// call also advances that band's carried tail.
     const BANDS: [(usize, LevelSpan); COMPLEN] = {
-        const fn span(count1: usize, count2: usize, stride: usize, offset: usize, scale: i16) -> LevelSpan {
+        const fn span(
+            count1: usize,
+            count2: usize,
+            stride: usize,
+            offset: usize,
+            scale: i16,
+        ) -> LevelSpan {
             LevelSpan {
                 count1,
                 count2,
@@ -2583,7 +2585,11 @@ mod tests {
             got.push(frame_type);
         }
 
-        assert_eq!(got.len(), want.len(), "the fixture and the run disagree on length");
+        assert_eq!(
+            got.len(),
+            want.len(),
+            "the fixture and the run disagree on length"
+        );
         let want_types: Vec<AmrFrameType> = want.iter().map(|f| f.frame_type).collect();
         // Report the first divergence rather than a wall of frame types.
         for (frame, (&mine, &theirs)) in got.iter().zip(&want_types).enumerate() {
@@ -2601,17 +2607,29 @@ mod tests {
             .map(|f| f.data.clone())
             .collect();
         assert_eq!(sid_payloads.len(), want_sids.len(), "SID count differs");
-        assert!(sid_payloads.len() >= 8, "too few SIDs to be worth comparing");
+        assert!(
+            sid_payloads.len() >= 8,
+            "too few SIDs to be worth comparing"
+        );
         for (n, (mine, theirs)) in sid_payloads.iter().zip(&want_sids).enumerate() {
             assert_eq!(mine, theirs, "SID {n} payload differs");
         }
 
         // And the sequence has to be worth comparing: all three kinds present,
         // in both directions.
-        let speech = got.iter().filter(|t| matches!(t, AmrFrameType::Speech(_))).count();
-        let sid = got.iter().filter(|t| matches!(t, AmrFrameType::Sid(_))).count();
+        let speech = got
+            .iter()
+            .filter(|t| matches!(t, AmrFrameType::Speech(_)))
+            .count();
+        let sid = got
+            .iter()
+            .filter(|t| matches!(t, AmrFrameType::Sid(_)))
+            .count();
         let quiet = got.iter().filter(|t| **t == AmrFrameType::NoData).count();
-        assert!(speech > 50 && sid >= 8 && quiet > 40, "{speech} / {sid} / {quiet}");
+        assert!(
+            speech > 50 && sid >= 8 && quiet > 40,
+            "{speech} / {sid} / {quiet}"
+        );
     }
 
     /// The DTX hangover counter reaches the wire, and only at 23.85 kbit/s.
@@ -2916,7 +2934,11 @@ mod tests {
             let want = refs[usize::from(mode)];
             assert_eq!(out.len(), want.len(), "mode {mode}: file length");
             let first = out.iter().zip(want).position(|(a, b)| a != b);
-            assert!(first.is_none(), "mode {mode}: first differs at byte {}", first.unwrap());
+            assert!(
+                first.is_none(),
+                "mode {mode}: first differs at byte {}",
+                first.unwrap()
+            );
             println!("mode {mode}: {} bytes byte-identical", out.len());
 
             // The comparison must not be vacuous. Nudging one input sample by

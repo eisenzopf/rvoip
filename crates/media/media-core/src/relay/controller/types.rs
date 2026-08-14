@@ -387,7 +387,10 @@ mod tests {
     fn amr_dtx_opt_in_is_written_and_cleared_rather_than_falsified() {
         let enabled = config().with_amr_dtx(true);
         assert_eq!(
-            enabled.parameters.get(AMR_DTX_PARAMETER).map(String::as_str),
+            enabled
+                .parameters
+                .get(AMR_DTX_PARAMETER)
+                .map(String::as_str),
             Some("true")
         );
 

@@ -93,36 +93,126 @@ const FIR_DOWN: [Word16; 4 * NB_COEF_DOWN * 2] = {
         Word16(v)
     }
     [
-        w(-1), w(-3), w(-6), w(-5),
-        w(0), w(9), w(19), w(24),
-        w(18), w(0), w(-26), w(-50),
-        w(-58), w(-41), w(0), w(54),
-        w(99), w(111), w(77), w(0),
-        w(-95), w(-170), w(-188), w(-128),
-        w(0), w(153), w(270), w(294),
-        w(198), w(0), w(-233), w(-408),
-        w(-441), w(-295), w(0), w(344),
-        w(601), w(649), w(434), w(0),
-        w(-507), w(-888), w(-964), w(-647),
-        w(0), w(770), w(1366), w(1505),
-        w(1030), w(0), w(-1293), w(-2379),
-        w(-2746), w(-1997), w(0), w(3034),
-        w(6575), w(9894), w(12254), w(13107),
-        w(12254), w(9894), w(6575), w(3034),
-        w(0), w(-1997), w(-2746), w(-2379),
-        w(-1293), w(0), w(1030), w(1505),
-        w(1366), w(770), w(0), w(-647),
-        w(-964), w(-888), w(-507), w(0),
-        w(434), w(649), w(601), w(344),
-        w(0), w(-295), w(-441), w(-408),
-        w(-233), w(0), w(198), w(294),
-        w(270), w(153), w(0), w(-128),
-        w(-188), w(-170), w(-95), w(0),
-        w(77), w(111), w(99), w(54),
-        w(0), w(-41), w(-58), w(-50),
-        w(-26), w(0), w(18), w(24),
-        w(19), w(9), w(0), w(-5),
-        w(-6), w(-3), w(-1), w(0),
+        w(-1),
+        w(-3),
+        w(-6),
+        w(-5),
+        w(0),
+        w(9),
+        w(19),
+        w(24),
+        w(18),
+        w(0),
+        w(-26),
+        w(-50),
+        w(-58),
+        w(-41),
+        w(0),
+        w(54),
+        w(99),
+        w(111),
+        w(77),
+        w(0),
+        w(-95),
+        w(-170),
+        w(-188),
+        w(-128),
+        w(0),
+        w(153),
+        w(270),
+        w(294),
+        w(198),
+        w(0),
+        w(-233),
+        w(-408),
+        w(-441),
+        w(-295),
+        w(0),
+        w(344),
+        w(601),
+        w(649),
+        w(434),
+        w(0),
+        w(-507),
+        w(-888),
+        w(-964),
+        w(-647),
+        w(0),
+        w(770),
+        w(1366),
+        w(1505),
+        w(1030),
+        w(0),
+        w(-1293),
+        w(-2379),
+        w(-2746),
+        w(-1997),
+        w(0),
+        w(3034),
+        w(6575),
+        w(9894),
+        w(12254),
+        w(13107),
+        w(12254),
+        w(9894),
+        w(6575),
+        w(3034),
+        w(0),
+        w(-1997),
+        w(-2746),
+        w(-2379),
+        w(-1293),
+        w(0),
+        w(1030),
+        w(1505),
+        w(1366),
+        w(770),
+        w(0),
+        w(-647),
+        w(-964),
+        w(-888),
+        w(-507),
+        w(0),
+        w(434),
+        w(649),
+        w(601),
+        w(344),
+        w(0),
+        w(-295),
+        w(-441),
+        w(-408),
+        w(-233),
+        w(0),
+        w(198),
+        w(294),
+        w(270),
+        w(153),
+        w(0),
+        w(-128),
+        w(-188),
+        w(-170),
+        w(-95),
+        w(0),
+        w(77),
+        w(111),
+        w(99),
+        w(54),
+        w(0),
+        w(-41),
+        w(-58),
+        w(-50),
+        w(-26),
+        w(0),
+        w(18),
+        w(24),
+        w(19),
+        w(9),
+        w(0),
+        w(-5),
+        w(-6),
+        w(-3),
+        w(-1),
+        w(0),
     ]
 };
 
@@ -211,14 +301,19 @@ impl Decimator {
 
         let mut ctx = DspContext::default();
         let lg_down = mult(&mut ctx, Word16(lg as i16), DOWN_FAC).0 as usize;
-        assert_eq!(out.len(), lg_down, "output length must be floor(4/5 · input)");
+        assert_eq!(
+            out.len(),
+            lg_down,
+            "output length must be floor(4/5 · input)"
+        );
 
         down_sample(&signal, out);
 
         // The last 30 words of the *concatenation*, not of the input. For a
         // short call (the 15-sample tail) that is part carried state and part
         // new input, which is why the tail call must be given a scratch copy.
-        self.memory.copy_from_slice(&signal[lg..lg + 2 * NB_COEF_DOWN]);
+        self.memory
+            .copy_from_slice(&signal[lg..lg + 2 * NB_COEF_DOWN]);
     }
 }
 
@@ -426,9 +521,7 @@ impl Preprocessor {
             // through `norm_s(0) - 1 = -1`.
             Q_MAX
         } else {
-            sub(ctx, Word16(norm_s(top)), Word16(1))
-                .0
-                .clamp(0, Q_MAX)
+            sub(ctx, Word16(norm_s(top)), Word16(1)).0.clamp(0, Q_MAX)
         }
     }
 }

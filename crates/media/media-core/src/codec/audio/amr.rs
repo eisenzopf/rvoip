@@ -40,11 +40,11 @@ use super::common::{AudioCodec, CodecInfo};
 use crate::error::{CodecError, Error, Result};
 use crate::rtp_processing::payload::amr::AmrPayloadFormat;
 use crate::types::AudioFrame;
+use codec_core::codecs::amr::mode::{AmrFrameType, AmrMode, AmrVariant};
+use codec_core::codecs::amr::payload::{AmrPacket, AmrPayloadFrame};
 use codec_core::codecs::amr::rate::CmrDamper;
 use codec_core::codecs::amr::redundancy::RedundancyScheduler;
 use codec_core::codecs::amr::sdp::AmrFmtp;
-use codec_core::codecs::amr::mode::{AmrFrameType, AmrMode, AmrVariant};
-use codec_core::codecs::amr::payload::{AmrPacket, AmrPayloadFrame};
 use codec_core::codecs::amr::AmrCodec as CoreAmrCodec;
 use codec_core::types::{
     AudioCodec as CoreAudioCodec, CodecConfig as CoreCodecConfig, CodedFrame, FrameKind,
@@ -129,8 +129,8 @@ impl AmrAdapter {
     /// requests interleaving, or when the codec cannot be constructed for the
     /// negotiated mode set.
     pub fn new(payload_type: u8, codec_name: &str, fmtp: Option<&str>) -> Result<Self> {
-        let payload = AmrPayloadFormat::from_negotiated(payload_type, codec_name, fmtp)
-            .map_err(|error| {
+        let payload =
+            AmrPayloadFormat::from_negotiated(payload_type, codec_name, fmtp).map_err(|error| {
                 Error::Codec(CodecError::InvalidParameters {
                     details: format!("AMR fmtp: {error}"),
                 })
@@ -269,7 +269,9 @@ impl AmrAdapter {
     /// Frames per outgoing payload: 1 unless redundancy is on.
     #[must_use]
     pub fn redundancy_depth(&self) -> usize {
-        self.redundancy.as_ref().map_or(1, RedundancyScheduler::depth)
+        self.redundancy
+            .as_ref()
+            .map_or(1, RedundancyScheduler::depth)
     }
 
     /// Stage a CMR unless one is already waiting, so an automatic request
@@ -394,16 +396,19 @@ impl AudioCodec for AmrAdapter {
             .into());
         }
 
-        let coded = self.codec.encode_frame(&audio_frame.samples).map_err(|error| {
-            Error::Codec(CodecError::InvalidParameters {
-                details: format!("AMR encode: {error}"),
-            })
-        })?;
+        let coded = self
+            .codec
+            .encode_frame(&audio_frame.samples)
+            .map_err(|error| {
+                Error::Codec(CodecError::InvalidParameters {
+                    details: format!("AMR encode: {error}"),
+                })
+            })?;
 
         let frame_type = match coded.kind {
-            FrameKind::Speech => AmrFrameType::Speech(
-                AmrMode::new(self.variant, coded.mode).unwrap_or(self.mode),
-            ),
+            FrameKind::Speech => {
+                AmrFrameType::Speech(AmrMode::new(self.variant, coded.mode).unwrap_or(self.mode))
+            }
             FrameKind::ComfortNoise => AmrFrameType::Sid(self.variant),
             FrameKind::NoData => AmrFrameType::NoData,
             FrameKind::Lost => AmrFrameType::SpeechLost,
@@ -617,7 +622,10 @@ mod tests {
         variants.push(("AMR", 160, 8_000));
         #[cfg(feature = "amr-wb")]
         variants.push(("AMR-WB", 320, 16_000));
-        assert!(!variants.is_empty(), "this module needs at least one variant");
+        assert!(
+            !variants.is_empty(),
+            "this module needs at least one variant"
+        );
 
         for (name, samples, rate) in variants {
             let mut codec = AmrAdapter::new(96, name, None).expect("constructs");
@@ -625,7 +633,10 @@ mod tests {
             assert_eq!(codec.clock_rate(), rate, "{name} clock rate");
 
             let payload = codec.encode(&pcm(samples, rate)).expect("encodes");
-            assert!(!payload.is_empty(), "{name}: an encoded frame is never empty");
+            assert!(
+                !payload.is_empty(),
+                "{name}: an encoded frame is never empty"
+            );
 
             let decoded = codec.decode(&payload).expect("decodes");
             assert_eq!(decoded.samples.len(), samples, "{name} decoded length");
@@ -734,11 +745,16 @@ mod tests {
         // A's payload before any request carries no CMR (15 = none).
         let quiet = side_a.encode(&pcm(320, 16_000)).expect("A encodes");
         let quiet_cmr = side_a.payload.codec().unpack(&quiet).expect("unpack").cmr;
-        assert_eq!(quiet_cmr, None, "no request yet, so CMR must be none (15 unpacks to None)");
+        assert_eq!(
+            quiet_cmr, None,
+            "no request yet, so CMR must be none (15 unpacks to None)"
+        );
 
         // A asks B to drop to mode 0 (6.60 kbit/s), the lowest.
         side_a.request_peer_mode(0);
-        let request_payload = side_a.encode(&pcm(320, 16_000)).expect("A encodes with CMR");
+        let request_payload = side_a
+            .encode(&pcm(320, 16_000))
+            .expect("A encodes with CMR");
         let request_cmr = side_a
             .payload
             .codec()
@@ -765,7 +781,9 @@ mod tests {
         }
 
         // B now encodes at the requested mode; A decodes it and sees the move.
-        let b_payload = side_b.encode(&pcm(320, 16_000)).expect("B encodes at new rate");
+        let b_payload = side_b
+            .encode(&pcm(320, 16_000))
+            .expect("B encodes at new rate");
         let b_frame = side_b
             .payload
             .codec()
@@ -882,13 +900,16 @@ mod tests {
     fn the_negotiated_rate_change_constraints_reach_the_codec() {
         let frame = pcm(160, 8_000);
 
-        let mut deferred =
-            AmrAdapter::new(96, "AMR", Some("mode-set=0,4,7; mode-change-period=2"))
-                .expect("constructs");
+        let mut deferred = AmrAdapter::new(96, "AMR", Some("mode-set=0,4,7; mode-change-period=2"))
+            .expect("constructs");
         let mut prompt = AmrAdapter::new(96, "AMR", Some("mode-set=0,4,7")).expect("constructs");
 
         for codec in [&mut deferred, &mut prompt] {
-            assert_ne!(codec.mode.index(), 4, "vacuous if it starts at the first target");
+            assert_ne!(
+                codec.mode.index(),
+                4,
+                "vacuous if it starts at the first target"
+            );
             codec.apply_mode_request(Some(4));
             assert_eq!(codec.mode.index(), 4, "the first request should land");
             codec.encode(&frame).expect("encodes");
@@ -910,7 +931,11 @@ mod tests {
         // the same request takes.
         deferred.encode(&frame).expect("encodes");
         deferred.apply_mode_request(Some(0));
-        assert_eq!(deferred.mode.index(), 0, "the second frame-block should allow it");
+        assert_eq!(
+            deferred.mode.index(),
+            0,
+            "the second frame-block should allow it"
+        );
     }
 
     /// A peer's mode request moves the encoder, and an impossible one does not
@@ -930,7 +955,11 @@ mod tests {
         codec.apply_mode_request(Some(3));
         codec.apply_mode_request(Some(9));
         codec.apply_mode_request(None);
-        assert_eq!(codec.mode.index(), 0, "an unsatisfiable request must be ignored");
+        assert_eq!(
+            codec.mode.index(),
+            0,
+            "an unsatisfiable request must be ignored"
+        );
 
         // And the codec still works.
         assert!(codec.encode(&pcm(160, 8_000)).is_ok());
@@ -966,12 +995,18 @@ mod tests {
             plain.set_redundancy_depth(2).is_err(),
             "a peer that declared no max-red has not permitted redundancy"
         );
-        assert_eq!(plain.redundancy_depth(), 1, "a refused request must change nothing");
+        assert_eq!(
+            plain.redundancy_depth(),
+            1,
+            "a refused request must change nothing"
+        );
 
         // max-red=40 permits three transmissions of a frame (0, 20, 40 ms).
         let mut permitted =
             AmrAdapter::new(96, "AMR", Some("octet-align=1; max-red=40")).expect("constructs");
-        permitted.set_redundancy_depth(3).expect("40ms allows depth 3");
+        permitted
+            .set_redundancy_depth(3)
+            .expect("40ms allows depth 3");
         assert_eq!(permitted.redundancy_depth(), 3);
         assert!(
             permitted.set_redundancy_depth(4).is_err(),
@@ -1014,5 +1049,4 @@ mod tests {
         let decoded = receiver.decode(&second).expect("a bundled payload decodes");
         assert_eq!(decoded.samples.len(), 320, "two frame-blocks of audio");
     }
-
 }

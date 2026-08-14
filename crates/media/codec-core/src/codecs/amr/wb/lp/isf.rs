@@ -36,12 +36,8 @@ pub const NB_SUBFR: usize = 4;
 /// because the analysis window that produced it is itself concentrated at the
 /// end of the frame, so the "new" ISPs already describe the region the first
 /// subframe sits in.
-pub const INTERPOL_FRAC: [Word16; NB_SUBFR] = [
-    Word16(14746),
-    Word16(26214),
-    Word16(31457),
-    Word16(32767),
-];
+pub const INTERPOL_FRAC: [Word16; NB_SUBFR] =
+    [Word16(14746), Word16(26214), Word16(31457), Word16(32767)];
 
 /// Convert ISPs (Q15 cosines) to ISFs (Q15 normalised frequencies).
 ///
@@ -103,8 +99,8 @@ pub fn isf_to_isp_in_place(ctx: &mut DspContext, isf: &mut [Word16]) {
     isf[m - 1] = shl(ctx, isf[m - 1], 1);
 
     for slot in isf.iter_mut() {
-        let ind = usize::try_from(shr(ctx, *slot, 7).0)
-            .expect("ISFs are non-negative by construction");
+        let ind =
+            usize::try_from(shr(ctx, *slot, 7).0).expect("ISFs are non-negative by construction");
         let offset = Word16(slot.0 & 0x007f);
 
         let step = sub(ctx, Word16(COS_TABLE[ind + 1]), Word16(COS_TABLE[ind]));
@@ -140,11 +136,7 @@ pub fn isf_to_isp(isf: &[Word16; LP_ORDER]) -> [Word16; LP_ORDER] {
             .expect("ISFs are non-negative by construction");
         let offset = Word16(slot.0 & 0x007f);
 
-        let step = sub(
-            &mut ctx,
-            Word16(COS_TABLE[ind + 1]),
-            Word16(COS_TABLE[ind]),
-        );
+        let step = sub(&mut ctx, Word16(COS_TABLE[ind + 1]), Word16(COS_TABLE[ind]));
         let interp = l_mult(&mut ctx, step, offset);
         let shifted = l_shr(&mut ctx, interp, 8);
         *slot = add(&mut ctx, Word16(COS_TABLE[ind]), extract_l(shifted));
@@ -263,9 +255,8 @@ mod tests {
         let mut isp = [Word16(0); LP_ORDER];
         for (i, slot) in isp.iter_mut().enumerate() {
             #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-            let v = (f64::cos(
-                std::f64::consts::PI * (i + 1) as f64 / (LP_ORDER + 1) as f64,
-            ) * 32767.0) as i16;
+            let v = (f64::cos(std::f64::consts::PI * (i + 1) as f64 / (LP_ORDER + 1) as f64)
+                * 32767.0) as i16;
             *slot = Word16(v);
         }
         isp

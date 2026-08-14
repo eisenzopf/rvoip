@@ -242,7 +242,8 @@ impl CmrDamper {
         }
         // `seen` is non-zero here, so leading_zeros() is at most 15 and the
         // subtraction cannot underflow.
-        let highest_seen = 15u8.saturating_sub(u8::try_from(self.seen.leading_zeros()).unwrap_or(15));
+        let highest_seen =
+            15u8.saturating_sub(u8::try_from(self.seen.leading_zeros()).unwrap_or(15));
         self.mode_set
             .modes()
             .into_iter()
@@ -498,7 +499,12 @@ mod tests {
         assert_eq!(*trajectory.last().unwrap(), 6);
         for pair in trajectory.windows(2) {
             let step = i32::from(pair[1]) - i32::from(pair[0]);
-            assert!(step == 0 || step == 2, "jumped from {} to {}", pair[0], pair[1]);
+            assert!(
+                step == 0 || step == 2,
+                "jumped from {} to {}",
+                pair[0],
+                pair[1]
+            );
         }
     }
 }

@@ -1202,8 +1202,10 @@ impl ConfiguredTranscodingSession {
     /// clock translation afterwards; converting here would apply it twice.
     fn source_ticks_per_frame(&self, frame_samples: usize, channels: usize) -> u32 {
         let frames = (frame_samples / channels.max(1)) as u64;
-        u32::try_from(frames * u64::from(self.source_clock_rate) / u64::from(self.target_clock_rate))
-            .unwrap_or(u32::MAX)
+        u32::try_from(
+            frames * u64::from(self.source_clock_rate) / u64::from(self.target_clock_rate),
+        )
+        .unwrap_or(u32::MAX)
     }
 
     /// Drop audio held back waiting for a full target frame.
@@ -4204,7 +4206,11 @@ mod tests {
         // A frequency that was never transmitted. If it scores comparably the
         // output is broadband noise and the "tone" reading means nothing.
         let decoy = goertzel_magnitude(pcm, rate, sent_hz * 2.7);
-        let ratio = if decoy > 1.0 { sent / decoy } else { f32::INFINITY };
+        let ratio = if decoy > 1.0 {
+            sent / decoy
+        } else {
+            f32::INFINITY
+        };
         assert!(
             ratio >= TONE_DOMINANCE,
             "{label}: {sent_hz} Hz scored {sent:.1} against {:.1} at an \
@@ -4269,9 +4275,10 @@ mod tests {
         // Narrowband is already at PCMU's 8 kHz and skips conversion entirely;
         // wideband is 16 kHz and 320 samples, so it goes through the resampler
         // on the way out. A pass on narrowband alone says nothing about that.
-        for (name, clock_rate, frame_samples, payload_type) in
-            [("AMR", 8_000_u32, 160_usize, 107_u8), ("AMR-WB", 16_000, 320, 105)]
-        {
+        for (name, clock_rate, frame_samples, payload_type) in [
+            ("AMR", 8_000_u32, 160_usize, 107_u8),
+            ("AMR-WB", 16_000, 320, 105),
+        ] {
             let amr_info = CodecInfo {
                 name: name.into(),
                 clock_rate_hz: clock_rate,

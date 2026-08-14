@@ -315,7 +315,11 @@ mod tests {
                 );
 
                 let frame = frames.get(f).expect("fixture has this frame");
-                let mode = AmrMode::new(AmrVariant::WideBand, u8::try_from(mode_index).expect("mode index")).expect("mode");
+                let mode = AmrMode::new(
+                    AmrVariant::WideBand,
+                    u8::try_from(mode_index).expect("mode index"),
+                )
+                .expect("mode");
                 let bits = CodecBits::unpack(mode, &frame.data).expect("unpacks");
 
                 assert_eq!(bits.len(), want_bits, "{block} frame {f}: bit count");
@@ -359,13 +363,23 @@ mod tests {
         // A duplicate or gap would silently drop a codec bit and leave another
         // at zero — a corruption that still decodes into plausible audio.
         for mode_index in 0..9 {
-            let mode = AmrMode::new(AmrVariant::WideBand, u8::try_from(mode_index).expect("mode index")).expect("mode");
+            let mode = AmrMode::new(
+                AmrVariant::WideBand,
+                u8::try_from(mode_index).expect("mode index"),
+            )
+            .expect("mode");
             let sort = sort_table(mode);
             let mut seen = vec![false; sort.len()];
             for &target in sort {
                 let target = target as usize;
-                assert!(target < seen.len(), "mode {mode_index}: index {target} out of range");
-                assert!(!seen[target], "mode {mode_index}: index {target} appears twice");
+                assert!(
+                    target < seen.len(),
+                    "mode {mode_index}: index {target} out of range"
+                );
+                assert!(
+                    !seen[target],
+                    "mode {mode_index}: index {target} appears twice"
+                );
                 seen[target] = true;
             }
         }
@@ -405,7 +419,11 @@ mod tests {
         // indices, which is exactly why this needs a real-bitstream test
         // rather than a round trip.
         for mode_index in 0..9 {
-            let mode = AmrMode::new(AmrVariant::WideBand, u8::try_from(mode_index).expect("mode index")).expect("mode");
+            let mode = AmrMode::new(
+                AmrVariant::WideBand,
+                u8::try_from(mode_index).expect("mode index"),
+            )
+            .expect("mode");
             let sort = sort_table(mode);
             assert!(
                 sort.iter().enumerate().any(|(i, &t)| usize::from(t) != i),

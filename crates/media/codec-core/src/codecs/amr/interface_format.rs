@@ -237,7 +237,6 @@ pub fn if2_unpack(variant: AmrVariant, data: &[u8]) -> Result<If2Frame> {
     })
 }
 
-
 // ---------------------------------------------------------------------------
 // IF1: the generic frame format of TS 26.101 §4 / TS 26.201 §4.
 // ---------------------------------------------------------------------------
@@ -381,7 +380,11 @@ pub fn if1_pack(variant: AmrVariant, frame: &If1Frame) -> Result<Vec<u8>> {
             // 26.101 Table 5: MI at bits 3..1 of octet 1, MR at bits 8..6 of
             // octet 2, five spare bits, then the CRC octet.
             for bit in 0..3 {
-                if1_set_bit(&mut out, 5 + bit, frame.mode_indication & (0b100 >> bit) != 0);
+                if1_set_bit(
+                    &mut out,
+                    5 + bit,
+                    frame.mode_indication & (0b100 >> bit) != 0,
+                );
             }
             for bit in 0..3 {
                 if1_set_bit(&mut out, 8 + bit, frame.mode_request & (0b100 >> bit) != 0);
@@ -391,10 +394,18 @@ pub fn if1_pack(variant: AmrVariant, frame: &If1Frame) -> Result<Vec<u8>> {
             // 26.201 Table 5: three spare bits close octet 1, then MI at bits
             // 8..5 and MR at bits 4..1 of octet 2.
             for bit in 0..4 {
-                if1_set_bit(&mut out, 8 + bit, frame.mode_indication & (0b1000 >> bit) != 0);
+                if1_set_bit(
+                    &mut out,
+                    8 + bit,
+                    frame.mode_indication & (0b1000 >> bit) != 0,
+                );
             }
             for bit in 0..4 {
-                if1_set_bit(&mut out, 12 + bit, frame.mode_request & (0b1000 >> bit) != 0);
+                if1_set_bit(
+                    &mut out,
+                    12 + bit,
+                    frame.mode_request & (0b1000 >> bit) != 0,
+                );
             }
         }
     }
@@ -429,10 +440,7 @@ pub fn if1_unpack(variant: AmrVariant, data: &[u8]) -> Result<If1Frame> {
         )));
     }
 
-    if matches!(
-        frame_type,
-        AmrFrameType::NoData | AmrFrameType::SpeechLost
-    ) {
+    if matches!(frame_type, AmrFrameType::NoData | AmrFrameType::SpeechLost) {
         return Ok(If1Frame {
             frame_type,
             quality_ok: !if2_has_fqi(variant) || if1_get_bit(data, 4),
@@ -499,8 +507,16 @@ mod tests {
                 "narrowband mode {index}"
             );
         }
-        assert_eq!(if2_frame_len(nb, AmrFrameType::Sid(nb)), 6, "narrowband SID");
-        assert_eq!(if2_frame_len(nb, AmrFrameType::NoData), 1, "narrowband no-data");
+        assert_eq!(
+            if2_frame_len(nb, AmrFrameType::Sid(nb)),
+            6,
+            "narrowband SID"
+        );
+        assert_eq!(
+            if2_frame_len(nb, AmrFrameType::NoData),
+            1,
+            "narrowband no-data"
+        );
 
         let wb = AmrVariant::WideBand;
         // 26.201 A.1b: 4 header bits plus the FQI, then the core frame.
@@ -514,7 +530,11 @@ mod tests {
             );
         }
         assert_eq!(if2_frame_len(wb, AmrFrameType::Sid(wb)), 6, "wideband SID");
-        assert_eq!(if2_frame_len(wb, AmrFrameType::NoData), 1, "wideband no-data");
+        assert_eq!(
+            if2_frame_len(wb, AmrFrameType::NoData),
+            1,
+            "wideband no-data"
+        );
     }
 
     /// TS 26.101 Table A.1a, the worked 6.70 kbit/s example.
@@ -569,7 +589,11 @@ mod tests {
         assert_eq!(packed[0] & 0b0000_0100, 0b0000_0100, "d(0) at bit 3");
         assert_eq!(packed[0] & 0b0000_0010, 0, "d(1) at bit 2 is zero");
         assert_eq!(packed[0] & 0b0000_0001, 1, "d(2) at bit 1");
-        assert_eq!(packed[1] & 0b1000_0000, 0b1000_0000, "d(3) at bit 8 of octet 2");
+        assert_eq!(
+            packed[1] & 0b1000_0000,
+            0b1000_0000,
+            "d(3) at bit 8 of octet 2"
+        );
     }
 
     /// Wideband's Frame Quality Indicator survives the round trip; narrowband
@@ -609,7 +633,10 @@ mod tests {
             // SID and no-data too: their lengths differ per variant.
             let sid = AmrFrameType::Sid(variant);
             let packed = if2_pack(variant, sid, &bits_of(if2_core_bits(sid)), true).expect("packs");
-            assert_eq!(if2_unpack(variant, &packed).expect("unpacks").frame_type, sid);
+            assert_eq!(
+                if2_unpack(variant, &packed).expect("unpacks").frame_type,
+                sid
+            );
 
             let packed = if2_pack(variant, AmrFrameType::NoData, &[], true).expect("packs");
             assert_eq!(packed.len(), 1, "a no-data frame is its header alone");
@@ -632,8 +659,13 @@ mod tests {
     fn a_truncated_frame_is_refused_rather_than_read_past_its_end() {
         for variant in [AmrVariant::NarrowBand, AmrVariant::WideBand] {
             let mode = AmrMode::new(variant, 0).expect("lowest mode");
-            let packed = if2_pack(variant, AmrFrameType::Speech(mode), &bits_of(mode.bits()), true)
-                .expect("packs");
+            let packed = if2_pack(
+                variant,
+                AmrFrameType::Speech(mode),
+                &bits_of(mode.bits()),
+                true,
+            )
+            .expect("packs");
             for length in 0..packed.len() {
                 assert!(
                     if2_unpack(variant, &packed[..length]).is_err(),
@@ -873,7 +905,11 @@ mod tests {
         // and narrowband fills from bit 1 upward.
         let packed = if2_pack(nb, AmrFrameType::Speech(mode), &[1u8; 95], true).expect("packs");
         assert_eq!(packed.len(), 13);
-        assert_eq!(packed[12] & 0b1111_1000, 0, "narrowband stuffing must be zero");
+        assert_eq!(
+            packed[12] & 0b1111_1000,
+            0,
+            "narrowband stuffing must be zero"
+        );
 
         let wb = AmrVariant::WideBand;
         let mode = AmrMode::new(wb, 1).expect("8.85");
@@ -881,6 +917,10 @@ mod tests {
         // and wideband fills from bit 8 downward.
         let packed = if2_pack(wb, AmrFrameType::Speech(mode), &[1u8; 177], true).expect("packs");
         assert_eq!(packed.len(), 23);
-        assert_eq!(packed[22] & 0b0000_0011, 0, "wideband stuffing must be zero");
+        assert_eq!(
+            packed[22] & 0b0000_0011,
+            0,
+            "wideband stuffing must be zero"
+        );
     }
 }

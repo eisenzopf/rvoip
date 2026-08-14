@@ -284,14 +284,18 @@ mod tests {
         let mut worst = 0i32;
         for (n, &entry) in ANALYSIS_WINDOW.iter().enumerate() {
             let w = if n < l1 {
-                0.54 - 0.46 * (2.0 * std::f64::consts::PI * n as f64 / (2.0 * l1 as f64 - 1.0)).cos()
+                0.54 - 0.46
+                    * (2.0 * std::f64::consts::PI * n as f64 / (2.0 * l1 as f64 - 1.0)).cos()
             } else {
                 (2.0 * std::f64::consts::PI * (n - l1) as f64 / (4.0 * l2 as f64 - 1.0)).cos()
             };
             let expected = (w * 32767.0).round() as i32;
             worst = worst.max((i32::from(entry) - expected).abs());
         }
-        assert!(worst <= 1, "window table diverges from the formula by {worst}");
+        assert!(
+            worst <= 1,
+            "window table diverges from the formula by {worst}"
+        );
     }
 
     #[test]
@@ -371,7 +375,11 @@ mod tests {
         // cannot yield r(0) = 0 and make Levinson-Durbin divide by zero.
         let mut r = autocorrelation(&[Word16(0); WINDOW_LEN]);
         lag_window(&mut r);
-        assert!(value(&r, 0) > 0, "silent frame gave r(0) = {}", value(&r, 0));
+        assert!(
+            value(&r, 0) > 0,
+            "silent frame gave r(0) = {}",
+            value(&r, 0)
+        );
     }
 
     #[test]
@@ -390,7 +398,10 @@ mod tests {
         assert_eq!(value(&r, 0), before, "r(0) must not be scaled");
         for lag in 1..=LP_ORDER {
             let after = value(&r, lag);
-            assert!(after < before, "lag {lag} should shrink: {after} vs {before}");
+            assert!(
+                after < before,
+                "lag {lag} should shrink: {after} vs {before}"
+            );
             // A 60 Hz expansion is gentle; nothing should collapse.
             assert!(after > before / 2, "lag {lag} shrank too far: {after}");
         }

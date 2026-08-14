@@ -206,11 +206,7 @@ fn decode_absolute_lag(bits: &mut CodecBits, nb_bits: usize) -> Option<(u16, u8)
 }
 
 /// Decode a lag coded relative to the previous subframe's window.
-fn decode_relative_lag(
-    bits: &mut CodecBits,
-    nb_bits: usize,
-    base: u16,
-) -> Option<(u16, u8)> {
+fn decode_relative_lag(bits: &mut CodecBits, nb_bits: usize, base: u16) -> Option<(u16, u8)> {
     if nb_bits <= NBBITS_9K {
         let index = bits.take(5)?;
         let lag = base + (index >> 1);
@@ -305,13 +301,18 @@ mod tests {
                 }
                 let meta = block_row(&block, &format!("meta{f}"));
                 let frame = frames.get(f).expect("fixture has this frame");
-                let got = FrameParams::parse(mode, &frame.data)
-                    .unwrap_or_else(|| panic!("{block} frame {f}: layout did not consume the frame"));
+                let got = FrameParams::parse(mode, &frame.data).unwrap_or_else(|| {
+                    panic!("{block} frame {f}: layout did not consume the frame")
+                });
 
                 // The row is mode, bit count, VAD flag -- the label is not
                 // part of it.
                 assert_eq!(meta.len(), 3, "{block} frame {f}: meta row shape");
-                assert_eq!(i16::from(got.vad_flag), meta[2], "{block} frame {f}: VAD flag");
+                assert_eq!(
+                    i16::from(got.vad_flag),
+                    meta[2],
+                    "{block} frame {f}: VAD flag"
+                );
 
                 let want_isf = block_row(&block, &format!("isfind{f}"));
                 assert_eq!(
@@ -350,7 +351,9 @@ mod tests {
                         "{block} frame {f} subframe {sf}: gain index"
                     );
                     assert_eq!(
-                        params.hf_gain.map_or(-1, |g| i16::try_from(g).expect("gain")),
+                        params
+                            .hf_gain
+                            .map_or(-1, |g| i16::try_from(g).expect("gain")),
                         want[4],
                         "{block} frame {f} subframe {sf}: high-band gain"
                     );

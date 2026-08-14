@@ -189,7 +189,10 @@ impl FixedCodebook {
 /// decode pulse 7 to slot 79 instead of at most 9.
 #[inline]
 fn field(value: u16, bits: u32) -> Word16 {
-    debug_assert!(bits <= 13, "the widest AMR-NB parameter field is thirteen bits");
+    debug_assert!(
+        bits <= 13,
+        "the widest AMR-NB parameter field is thirteen bits"
+    );
     // Plain arithmetic: a bit field is a bit field, not a fixed-point quantity.
     let masked = value & ((1u16 << bits) - 1);
     // Thirteen bits cannot reach the sign bit, so the conversion never fails;
@@ -751,7 +754,10 @@ mod tests {
             }
         }
 
-        assert!(pending.is_none(), "{section}: trailing case without a vector");
+        assert!(
+            pending.is_none(),
+            "{section}: trailing case without a vector"
+        );
         out
     }
 
@@ -775,7 +781,11 @@ mod tests {
                 as_u16(signs),
                 as_u16(positions),
             );
-            assert_eq!(&got[..], &want[..], "subframe {sub_nr} sign {signs} index {positions}");
+            assert_eq!(
+                &got[..],
+                &want[..],
+                "subframe {sub_nr} sign {signs} index {positions}"
+            );
         }
     }
 
@@ -944,7 +954,10 @@ mod tests {
         let mut seen = [false; 8];
         for &slot in &DGRAY {
             let slot = usize::try_from(slot).expect("slot 0..=7");
-            assert!(slot < 8 && !seen[slot], "dgray must permute the eight slots");
+            assert!(
+                slot < 8 && !seen[slot],
+                "dgray must permute the eight slots"
+            );
             seen[slot] = true;
         }
     }
@@ -956,7 +969,10 @@ mod tests {
         // vanish. They do not, and this is the invariant that says so.
         assert_eq!(START_POS_2I40_9.len(), 16);
         for entry in START_POS_2I40_9 {
-            assert!((0..5).contains(&entry), "track offsets are 0..=4, got {entry}");
+            assert!(
+                (0..5).contains(&entry),
+                "track offsets are 0..=4, got {entry}"
+            );
         }
         for pair in 0..2 {
             for subframe in 0..4 {
@@ -993,16 +1009,25 @@ mod tests {
             for (slot, value) in params.iter_mut().zip(&case) {
                 *slot = as_u16(*value);
             }
-            assert_eq!(total_magnitude(&decode_eight_pulses_31bit(&mut c, &params)), 8 * 8191);
+            assert_eq!(
+                total_magnitude(&decode_eight_pulses_31bit(&mut c, &params)),
+                8 * 8191
+            );
             compared += 1;
         }
         for (case, want) in cases("cb10i40_35") {
-            assert_eq!(total_magnitude(&want.clone().try_into().unwrap()), 10 * 4096);
+            assert_eq!(
+                total_magnitude(&want.clone().try_into().unwrap()),
+                10 * 4096
+            );
             let mut params = [0u16; 10];
             for (slot, value) in params.iter_mut().zip(&case) {
                 *slot = as_u16(*value);
             }
-            assert_eq!(total_magnitude(&decode_ten_pulses_35bit(&mut c, &params)), 10 * 4096);
+            assert_eq!(
+                total_magnitude(&decode_ten_pulses_35bit(&mut c, &params)),
+                10 * 4096
+            );
             compared += 1;
         }
 
@@ -1024,7 +1049,10 @@ mod tests {
         let mut c = ctx();
 
         let residues = |code: &Codevector| -> Vec<usize> {
-            let mut r: Vec<usize> = (0..L_SUBFR).filter(|&i| code[i].0 != 0).map(|i| i % 5).collect();
+            let mut r: Vec<usize> = (0..L_SUBFR)
+                .filter(|&i| code[i].0 != 0)
+                .map(|i| i % 5)
+                .collect();
             r.sort_unstable();
             r
         };
@@ -1032,7 +1060,10 @@ mod tests {
         for positions in 0u16..2048 {
             let tracks = residues(&decode_three_pulses_14bit(&mut c, 0, positions));
             assert_eq!(tracks.len(), 3, "index {positions} lost a pulse");
-            assert!(tracks.contains(&0), "index {positions}: no pulse on track 0");
+            assert!(
+                tracks.contains(&0),
+                "index {positions}: no pulse on track 0"
+            );
             assert_eq!(
                 tracks.iter().filter(|t| [1, 3].contains(t)).count(),
                 1,
@@ -1049,7 +1080,10 @@ mod tests {
             let tracks = residues(&decode_four_pulses_17bit(&mut c, 0, positions));
             assert_eq!(tracks.len(), 4, "index {positions} lost a pulse");
             for track in [0, 1, 2] {
-                assert!(tracks.contains(&track), "index {positions}: no pulse on track {track}");
+                assert!(
+                    tracks.contains(&track),
+                    "index {positions}: no pulse on track {track}"
+                );
             }
             assert_eq!(
                 tracks.iter().filter(|t| [3, 4].contains(t)).count(),
@@ -1072,14 +1106,20 @@ mod tests {
             let nonzero: Vec<Word16> = code.into_iter().filter(|s| s.0 != 0).collect();
             assert!(!nonzero.is_empty() && nonzero.len() <= 2);
             for sample in &nonzero {
-                assert_eq!(sample.0, POSITIVE_PULSE.0, "index {positions} doubled a pulse");
+                assert_eq!(
+                    sample.0, POSITIVE_PULSE.0,
+                    "index {positions} doubled a pulse"
+                );
             }
             if nonzero.len() == 1 {
                 collisions += 1;
             }
         }
 
-        assert!(collisions > 0, "the collision case must be reachable at all");
+        assert!(
+            collisions > 0,
+            "the collision case must be reachable at all"
+        );
     }
 
     // --------------------------------------------------------- bounds safety
@@ -1141,7 +1181,10 @@ mod tests {
             decode_eight_pulses_31bit(&mut c, &wide),
             decode_eight_pulses_31bit(&mut c, &masked)
         );
-        assert_eq!(total_magnitude(&decode_eight_pulses_31bit(&mut c, &wide)), 8 * 8191);
+        assert_eq!(
+            total_magnitude(&decode_eight_pulses_31bit(&mut c, &wide)),
+            8 * 8191
+        );
 
         let wide = [u16::MAX; 10];
         let masked = [0xFu16, 0xF, 0xF, 0xF, 0xF, 7, 7, 7, 7, 7];
@@ -1149,7 +1192,10 @@ mod tests {
             decode_ten_pulses_35bit(&mut c, &wide),
             decode_ten_pulses_35bit(&mut c, &masked)
         );
-        assert_eq!(total_magnitude(&decode_ten_pulses_35bit(&mut c, &wide)), 10 * 4096);
+        assert_eq!(
+            total_magnitude(&decode_ten_pulses_35bit(&mut c, &wide)),
+            10 * 4096
+        );
 
         // The four narrow books consume only their own bits, so an over-wide
         // parameter is inert there too; and an impossible subframe number must
@@ -1253,7 +1299,11 @@ mod tests {
         sharpen(&mut c, &mut code, 19, factor);
 
         assert_eq!(code[19].0, -29398);
-        assert_eq!(code[38].0, i16::MIN, "-39739 saturates to -32768, not -32767");
+        assert_eq!(
+            code[38].0,
+            i16::MIN,
+            "-39739 saturates to -32768, not -32767"
+        );
     }
 
     #[test]

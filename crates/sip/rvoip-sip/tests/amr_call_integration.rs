@@ -151,12 +151,7 @@ async fn run_amr_call(variant: AmrVariant, ports: Ports) {
 
 /// `sweep_modes` asks the peer, mid-call, to transmit at each mode in turn
 /// and records which ones it was observed using. Empty for an ordinary call.
-async fn run_amr_call_inner(
-    variant: AmrVariant,
-    ports: Ports,
-    srtp: bool,
-    sweep_modes: &[u8],
-) {
+async fn run_amr_call_inner(variant: AmrVariant, ports: Ports, srtp: bool, sweep_modes: &[u8]) {
     let _ = tracing_subscriber::fmt::try_init();
 
     let mut bob = StreamPeer::with_config(amr_only_config(
@@ -364,9 +359,15 @@ async fn run_amr_call_inner(
     // the config that produced it: AMR on its dynamic payload type, and no
     // G.711 anywhere for the negotiation to quietly land on.
     let offer = offer_sdp.lock().map(|g| g.clone()).unwrap_or_default();
-    eprintln!("--- {} INVITE offer as received by Bob ---\n{offer}", variant.rtpmap);
+    eprintln!(
+        "--- {} INVITE offer as received by Bob ---\n{offer}",
+        variant.rtpmap
+    );
     assert!(
-        offer.contains(&format!("a=rtpmap:{} {}", variant.payload_type, variant.rtpmap)),
+        offer.contains(&format!(
+            "a=rtpmap:{} {}",
+            variant.payload_type, variant.rtpmap
+        )),
         "the INVITE did not offer {}:\n{offer}",
         variant.rtpmap
     );
@@ -667,9 +668,10 @@ async fn run_amr_call_with_mode_set(
     let mut bob = StreamPeer::with_config(with_modes("bob", ports.bob_sip, ports.bob_media))
         .await
         .expect("bob starts");
-    let mut alice = StreamPeer::with_config(with_modes("alice", ports.alice_sip, ports.alice_media))
-        .await
-        .expect("alice starts");
+    let mut alice =
+        StreamPeer::with_config(with_modes("alice", ports.alice_sip, ports.alice_media))
+            .await
+            .expect("alice starts");
 
     let offer_sdp = Arc::new(Mutex::new(String::new()));
     let offer_slot = offer_sdp.clone();
@@ -744,7 +746,11 @@ async fn run_amr_call_with_mode_set(
     let offer = offer_sdp.lock().expect("offer captured").clone();
     let rendered = format!(
         "mode-set={}",
-        permitted.iter().map(u8::to_string).collect::<Vec<_>>().join(",")
+        permitted
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
     );
     assert!(
         offer.contains(&rendered),

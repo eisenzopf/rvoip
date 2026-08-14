@@ -59,8 +59,8 @@ const EN_ADJUST: [i16; 9] = [230, 179, 141, 128, 122, 115, 115, 115, 115];
 
 /// The reset ISF vector, `cod_main.c`'s `isf_init`.
 const ISF_INIT: [i16; LP_ORDER] = [
-    1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192, 9216, 10240, 11264, 12288, 13312, 14336,
-    15360, 3840,
+    1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192, 9216, 10240, 11264, 12288, 13312, 14336, 15360,
+    3840,
 ];
 
 /// Where row `r` of the flattened upper-triangular distance matrix begins.
@@ -284,7 +284,7 @@ impl DtxEncoder {
 
         let mut excitation = [Word16(0); 256];
         for slot in &mut excitation {
-                let sample = self.next_noise(ctx);
+            let sample = self.next_noise(ctx);
             *slot = shr(ctx, sample, 4);
         }
 
@@ -373,7 +373,11 @@ impl DtxEncoder {
         let newest = self.hist_ptr * LP_ORDER;
         let mut slot = self.hist_ptr;
         for age in 1..DTX_HIST_SIZE {
-            slot = if slot == 0 { DTX_HIST_SIZE - 1 } else { slot - 1 };
+            slot = if slot == 0 {
+                DTX_HIST_SIZE - 1
+            } else {
+                slot - 1
+            };
             let other = slot * LP_ORDER;
             let mut acc = Word32(0);
             for i in 0..LP_ORDER {
@@ -447,7 +451,11 @@ impl DtxEncoder {
     ///
     /// The substitution is for the mean only: the reference saves the replaced
     /// rows and restores them afterwards, so the history is left untouched.
-    fn average_isf_history(&self, ctx: &mut DspContext, order: &[Option<usize>; 3]) -> [Word32; LP_ORDER] {
+    fn average_isf_history(
+        &self,
+        ctx: &mut DspContext,
+        order: &[Option<usize>; 3],
+    ) -> [Word32; LP_ORDER] {
         let central = order[2].expect("the most central frame is never a sentinel");
         let mut view = self.isf_hist;
         for slot in order.iter().take(2).flatten() {
@@ -526,7 +534,10 @@ mod tests {
             i -= tmp;
         }
 
-        assert_eq!(direct, literal, "the closed form and the stride walk diverge");
+        assert_eq!(
+            direct, literal,
+            "the closed form and the stride walk diverge"
+        );
 
         // And rows 1 onward against what the reference's own instrumented run
         // printed for this exact input. Row 0 is excluded because the caller
@@ -547,8 +558,8 @@ mod tests {
     /// leaves 1 and the test says nothing about it.
     fn probe_input(frame: usize, lcg: &mut u32) -> ([Word16; LP_ORDER], Word32) {
         const MEAN_NS: [i16; LP_ORDER] = [
-            478, 1100, 2213, 3267, 4219, 5222, 6198, 7240, 8229, 9153, 10098, 11108, 12144,
-            13184, 14165, 3803,
+            478, 1100, 2213, 3267, 4219, 5222, 6198, 7240, 8229, 9153, 10098, 11108, 12144, 13184,
+            14165, 3803,
         ];
         let step = |lcg: &mut u32| {
             *lcg = lcg.wrapping_mul(1_103_515_245).wrapping_add(12345);
@@ -592,7 +603,10 @@ mod tests {
         let mut energies_seen = std::collections::HashSet::new();
         let mut dithers_seen = std::collections::HashSet::new();
 
-        for line in text.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()) {
+        for line in text
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+        {
             let fields: Vec<&str> = line.split('|').collect();
             assert_eq!(fields.len(), 5, "malformed row `{line}`");
             let frame: usize = fields[0].trim().parse().expect("frame number");
@@ -618,7 +632,10 @@ mod tests {
                 isf_indices_seen.insert((split, got));
                 compared += 1;
             }
-            assert_eq!(sid.energy_index.0, want_energy, "frame {frame} energy index");
+            assert_eq!(
+                sid.energy_index.0, want_energy,
+                "frame {frame} energy index"
+            );
             energies_seen.insert(sid.energy_index.0);
             assert_eq!(sid.dither, want_dither, "frame {frame} dithering flag");
             dithers_seen.insert(sid.dither);
@@ -636,8 +653,16 @@ mod tests {
         // The fixture has to keep discriminating. A sweep that collapsed onto
         // one codevector, one energy or one dithering decision would still
         // pass every assertion above.
-        assert!(isf_indices_seen.len() >= 40, "{} distinct ISF indices", isf_indices_seen.len());
-        assert!(energies_seen.len() >= 15, "{} distinct energies", energies_seen.len());
+        assert!(
+            isf_indices_seen.len() >= 40,
+            "{} distinct ISF indices",
+            isf_indices_seen.len()
+        );
+        assert!(
+            energies_seen.len() >= 15,
+            "{} distinct energies",
+            energies_seen.len()
+        );
         assert_eq!(dithers_seen.len(), 2, "the dithering flag never varied");
     }
 
@@ -660,7 +685,10 @@ mod tests {
                 first_cn = Some(frame);
             }
         }
-        assert_eq!(speech_after_spurt, 7, "the extra hangover is not seven frames");
+        assert_eq!(
+            speech_after_spurt, 7,
+            "the extra hangover is not seven frames"
+        );
         assert_eq!(first_cn, Some(7));
     }
 

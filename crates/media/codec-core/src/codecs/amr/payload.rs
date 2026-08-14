@@ -679,7 +679,13 @@ mod tests {
     fn frame_data(bits: usize, seed: u8) -> Vec<u8> {
         let len = bits.div_ceil(8);
         let mut data: Vec<u8> = (0..len)
-            .map(|i| u8::try_from(i % 256).unwrap_or(0).wrapping_mul(31).wrapping_add(seed) | 0x41)
+            .map(|i| {
+                u8::try_from(i % 256)
+                    .unwrap_or(0)
+                    .wrapping_mul(31)
+                    .wrapping_add(seed)
+                    | 0x41
+            })
             .collect();
         // Zero the unused tail bits so the left-aligned convention holds and
         // round-trip comparison is meaningful.
@@ -804,12 +810,18 @@ mod tests {
 
             for cmr in 0..variant.speech_mode_count() {
                 let packet = AmrPacket::single(speech(variant, 0, 1)).with_cmr(Some(cmr));
-                assert_eq!(codec.unpack(&codec.pack(&packet).unwrap()).unwrap().cmr, Some(cmr));
+                assert_eq!(
+                    codec.unpack(&codec.pack(&packet).unwrap()).unwrap().cmr,
+                    Some(cmr)
+                );
             }
 
             // 15 is "no request" and must decode as None.
             let packet = AmrPacket::single(speech(variant, 0, 1)).with_cmr(None);
-            assert_eq!(codec.unpack(&codec.pack(&packet).unwrap()).unwrap().cmr, None);
+            assert_eq!(
+                codec.unpack(&codec.pack(&packet).unwrap()).unwrap().cmr,
+                None
+            );
 
             // 8-14 are reserved for AMR-NB. They come from the network, so the
             // RFC says ignore them rather than dropping the packet.
@@ -825,7 +837,9 @@ mod tests {
         // Byte 0: CMR=15, reserved=0. Byte 1: F=0, FT=15 (NO_DATA), Q=1, P=00.
         let codec =
             AmrPayloadCodec::new(AmrPayloadConfig::octet_aligned(AmrVariant::WideBand)).unwrap();
-        let bytes = codec.pack(&AmrPacket::single(AmrPayloadFrame::no_data())).unwrap();
+        let bytes = codec
+            .pack(&AmrPacket::single(AmrPayloadFrame::no_data()))
+            .unwrap();
         assert_eq!(bytes, vec![0b1111_0000, 0b0_1111_1_00]);
 
         // AMR-WB mode 0 is 132 bits -> 17 octets, so a single-frame packet is
@@ -854,7 +868,9 @@ mod tests {
         assert_eq!(bytes[1] >> 6, 0b01);
 
         // NO_DATA alone: 4 + 6 = 10 bits -> 2 octets.
-        let bytes = codec.pack(&AmrPacket::single(AmrPayloadFrame::no_data())).unwrap();
+        let bytes = codec
+            .pack(&AmrPacket::single(AmrPayloadFrame::no_data()))
+            .unwrap();
         assert_eq!(bytes.len(), 2);
     }
 
@@ -907,8 +923,8 @@ mod tests {
     fn rejects_reserved_frame_types() {
         // RFC 4867: a ToC entry with a reserved FT means discard the packet.
         // NB reserves 9-14; WB reserves 10-13.
-        let nb = AmrPayloadCodec::new(AmrPayloadConfig::octet_aligned(AmrVariant::NarrowBand))
-            .unwrap();
+        let nb =
+            AmrPayloadCodec::new(AmrPayloadConfig::octet_aligned(AmrVariant::NarrowBand)).unwrap();
         for ft in 9..=14u8 {
             let bytes = vec![0b1111_0000, ft << 3 | 0b100];
             assert!(nb.unpack(&bytes).is_err(), "NB FT {ft} should be rejected");
@@ -944,7 +960,9 @@ mod tests {
         let variant = AmrVariant::WideBand;
         for config in both_configs(variant) {
             let codec = AmrPayloadCodec::new(config).unwrap();
-            let mut bytes = codec.pack(&AmrPacket::single(speech(variant, 0, 6))).unwrap();
+            let mut bytes = codec
+                .pack(&AmrPacket::single(speech(variant, 0, 6)))
+                .unwrap();
             // A whole extra octet means the sender's frame sizing disagrees
             // with ours; sub-octet padding would be legitimate.
             bytes.push(0x00);
@@ -1046,7 +1064,9 @@ mod tests {
                     }
                 }
             }
-            reg.iter().enumerate().fold(0u8, |acc, (i, &b)| acc | b << i)
+            reg.iter()
+                .enumerate()
+                .fold(0u8, |acc, (i, &b)| acc | b << i)
         }
 
         for variant in [AmrVariant::NarrowBand, AmrVariant::WideBand] {
@@ -1099,8 +1119,8 @@ mod tests {
     #[test]
     fn crc_detects_damage_to_class_a_bits() {
         let variant = AmrVariant::WideBand;
-        let codec = AmrPayloadCodec::new(AmrPayloadConfig::octet_aligned(variant).with_crc())
-            .unwrap();
+        let codec =
+            AmrPayloadCodec::new(AmrPayloadConfig::octet_aligned(variant).with_crc()).unwrap();
         let mode = AmrMode::new(variant, 2).unwrap();
         let packet = AmrPacket::single(speech(variant, 2, 5));
         let mut bytes = codec.pack(&packet).unwrap();
@@ -1263,8 +1283,8 @@ mod tests {
         for ill in 0..=15u8 {
             for ilp in 0..=ill {
                 let interleaving = AmrInterleaving::new(ill, ilp).unwrap();
-                let packet = AmrPacket::single(speech(variant, 0, 3))
-                    .with_interleaving(Some(interleaving));
+                let packet =
+                    AmrPacket::single(speech(variant, 0, 3)).with_interleaving(Some(interleaving));
                 let back = codec.unpack(&codec.pack(&packet).unwrap()).unwrap();
                 assert_eq!(back.interleaving, Some(interleaving));
                 assert_eq!(back.frames, packet.frames);
@@ -1324,7 +1344,9 @@ mod tests {
                 .unwrap();
         // Negotiated but absent: silently emitting zeros would put every packet
         // in group 0, which a receiver would reassemble wrongly.
-        assert!(codec.pack(&AmrPacket::single(speech(variant, 0, 3))).is_err());
+        assert!(codec
+            .pack(&AmrPacket::single(speech(variant, 0, 3)))
+            .is_err());
     }
 
     #[test]
@@ -1335,7 +1357,10 @@ mod tests {
             AmrPayloadConfig::bandwidth_efficient(variant).with_robust_sorting(),
             AmrPayloadConfig::bandwidth_efficient(variant).with_interleaving(),
         ] {
-            assert!(config.octet_aligned, "{config:?} must force octet alignment");
+            assert!(
+                config.octet_aligned,
+                "{config:?} must force octet alignment"
+            );
         }
 
         // A hand-built inconsistent config is rejected rather than silently
@@ -1403,8 +1428,7 @@ mod tests {
     /// capture using `&echo` produced 50 byte-identical payloads because
     /// `FreeSWITCH` passed them through untouched — which would have made this a
     /// test of our own packetizer wearing a disguise.
-    const FREESWITCH_AMRWB_RTP: &[u8] =
-        include_bytes!("testdata/freeswitch_amrwb_be.rtp");
+    const FREESWITCH_AMRWB_RTP: &[u8] = include_bytes!("testdata/freeswitch_amrwb_be.rtp");
 
     /// Split the length-prefixed capture into individual RTP payloads.
     fn freeswitch_payloads() -> Vec<Vec<u8>> {
@@ -1440,7 +1464,10 @@ mod tests {
             assert_eq!(packet.frames.len(), 1, "payload {index}");
             let frame = &packet.frames[0];
             let AmrFrameType::Speech(mode) = frame.frame_type else {
-                panic!("payload {index} was not a speech frame: {:?}", frame.frame_type);
+                panic!(
+                    "payload {index} was not a speech frame: {:?}",
+                    frame.frame_type
+                );
             };
             assert_eq!(mode.index(), 8, "payload {index}: expected mode 8 (23.85)");
             assert_eq!(mode.bits(), 477);
@@ -1490,8 +1517,8 @@ mod tests {
         // The capture is bandwidth-efficient (the peer offered
         // octet-align=0). Parsing it as octet-aligned must not quietly
         // succeed — that is the interop failure mode this format has.
-        let oa = AmrPayloadCodec::new(AmrPayloadConfig::octet_aligned(AmrVariant::WideBand))
-            .unwrap();
+        let oa =
+            AmrPayloadCodec::new(AmrPayloadConfig::octet_aligned(AmrVariant::WideBand)).unwrap();
         let mismatched = freeswitch_payloads()
             .iter()
             .filter(|p| oa.unpack(p).is_ok())
@@ -1516,8 +1543,9 @@ mod tests {
                 for seed in 0u16..=u16::from(u8::MAX) {
                     let byte = u8::try_from(seed).unwrap_or(0);
                     for len in 0..8usize {
-                        let bytes: Vec<u8> =
-                            (0..len).map(|i| byte.rotate_left(u32::try_from(i).unwrap_or(0))).collect();
+                        let bytes: Vec<u8> = (0..len)
+                            .map(|i| byte.rotate_left(u32::try_from(i).unwrap_or(0)))
+                            .collect();
                         // Only requirement: it returns, either way.
                         let _ = codec.unpack(&bytes);
                     }

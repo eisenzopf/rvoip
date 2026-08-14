@@ -86,7 +86,10 @@ pub fn is_decoder_homing_frame_first(payload: &[u8], mode_index: u8) -> bool {
 /// `dhf_test`: compare the first `count` decoded parameters against the
 /// pattern.
 fn matches(payload: &[u8], mode_index: u8, count: usize) -> bool {
-    assert!(mode_index < 8, "homing is defined for the eight speech modes");
+    assert!(
+        mode_index < 8,
+        "homing is defined for the eight speech modes"
+    );
     let Some(params) = parse(mode_index, payload) else {
         return false;
     };
@@ -164,7 +167,10 @@ mod tests {
         let mut cross = 0;
         for mode in 0..8u8 {
             let payload = homing_payload(mode, None);
-            assert!(is_decoder_homing_frame(&payload, mode), "mode {mode} rejected its own");
+            assert!(
+                is_decoder_homing_frame(&payload, mode),
+                "mode {mode} rejected its own"
+            );
             assert!(is_decoder_homing_frame_first(&payload, mode));
 
             for other in 0..8u8 {
@@ -213,7 +219,10 @@ mod tests {
         for mode in 0..8u8 {
             let widths = parameter_widths(mode);
             let first = PRMNOFSF[usize::from(mode)];
-            assert!(first < widths.len(), "mode {mode}: PRMNOFSF covers the whole frame");
+            assert!(
+                first < widths.len(),
+                "mode {mode}: PRMNOFSF covers the whole frame"
+            );
 
             // The first bit of the parameter just past the first subframe.
             let offset: usize = widths[..first].iter().sum();

@@ -70,8 +70,8 @@ use super::super::decoder_tables::{CORR_WEIGHT, INTER_6_SEARCH, QUA_GAIN_PITCH};
 use super::super::lag::{Excitation, LagResolution, LagWindow, PitchLag};
 use super::super::lsp::M;
 use super::super::math::inv_sqrt;
-use super::vad::VoiceActivityDetector;
 use super::super::{L_FRAME, L_INTERPOL, L_SUBFR, PIT_MAX, PIT_MIN, PIT_MIN_MR122};
+use super::vad::VoiceActivityDetector;
 use crate::fixed_point::arith::{abs_s, add, extract_h, extract_l, mult, round, sub};
 use crate::fixed_point::arith32::{l_abs, l_mac, l_msu, l_mult, l_sub};
 use crate::fixed_point::div::div_s;
@@ -394,22 +394,39 @@ pub fn open_loop_lag(
     let half = shl(ctx, Word16(pit_min), 1).0;
 
     let long = section_peak(
-        ctx, &corr, &scaled, efr_scaling, l_frame, PIT_MAX, quarter,
+        ctx,
+        &corr,
+        &scaled,
+        efr_scaling,
+        l_frame,
+        PIT_MAX,
+        quarter,
         vad.as_deref_mut(),
     );
     let middle = section_peak(
-        ctx, &corr, &scaled, efr_scaling, l_frame, quarter - 1, half,
+        ctx,
+        &corr,
+        &scaled,
+        efr_scaling,
+        l_frame,
+        quarter - 1,
+        half,
         vad.as_deref_mut(),
     );
     let short = section_peak(
-        ctx, &corr, &scaled, efr_scaling, l_frame, half - 1, pit_min,
+        ctx,
+        &corr,
+        &scaled,
+        efr_scaling,
+        l_frame,
+        half - 1,
+        pit_min,
         vad.as_deref_mut(),
     );
 
     if let Some(vad) = vad {
         if second_half {
-            let correlation =
-                high_pass_correlation(ctx, &corr, &scaled, l_frame, PIT_MAX, pit_min);
+            let correlation = high_pass_correlation(ctx, &corr, &scaled, l_frame, PIT_MAX, pit_min);
             vad.observe_correlation(correlation);
         }
     }
@@ -544,8 +561,7 @@ impl WeightedOpenLoop {
     ) -> i16 {
         let scaled = scale_for_correlation(ctx, signal, origin, l_frame);
         let corr = correlations(ctx, &scaled, l_frame, PIT_MIN);
-        let chosen =
-            self.weighted_peak(ctx, &corr, &scaled, l_frame, voiced, vad.as_deref_mut());
+        let chosen = self.weighted_peak(ctx, &corr, &scaled, l_frame, voiced, vad.as_deref_mut());
 
         if let Some(vad) = vad {
             if second_half {
@@ -804,7 +820,10 @@ pub struct ModeParams {
 /// give a search window of width zero at lag zero.
 #[must_use]
 pub const fn mode_params(mode_index: u8) -> ModeParams {
-    assert!(mode_index <= MR122, "no closed-loop parameters for this mode");
+    assert!(
+        mode_index <= MR122,
+        "no closed-loop parameters for this mode"
+    );
     let (max_frac_lag, one_third, first_frac, last_frac, pit_min) = match mode_index {
         MR122 => (94, false, -3, 3, PIT_MIN_MR122),
         _ => (84, true, -2, 2, PIT_MIN),
@@ -866,7 +885,10 @@ pub fn lag_window(
 /// If either input is shorter than a subframe.
 #[must_use]
 pub fn convolve(ctx: &mut DspContext, x: &[Word16], h: &[Word16]) -> [Word16; L_SUBFR] {
-    assert!(x.len() >= L_SUBFR && h.len() >= L_SUBFR, "convolve needs a full subframe");
+    assert!(
+        x.len() >= L_SUBFR && h.len() >= L_SUBFR,
+        "convolve needs a full subframe"
+    );
     let mut y = [Word16(0); L_SUBFR];
     for n in 0..L_SUBFR {
         let mut s = Word32(0);
@@ -945,14 +967,19 @@ pub fn normalised_correlation(
     t_max: i16,
 ) -> Correlations {
     let width = usize::try_from(t_max - t_min + 1).expect("a non-empty window");
-    assert!(width <= 40, "the closed-loop window is at most 40 lags wide");
+    assert!(
+        width <= 40,
+        "the closed-loop window is at most 40 lags wide"
+    );
     assert!(
         xn.len() >= L_SUBFR && h.len() >= L_SUBFR,
         "the target and impulse response are one subframe each"
     );
 
     let mut back = usize::try_from(i32::from(t_min)).expect("delays are positive");
-    let start = origin.checked_sub(back).expect("excitation history is too short");
+    let start = origin
+        .checked_sub(back)
+        .expect("excitation history is too short");
     let mut filtered = convolve(ctx, &exc[start..start + L_SUBFR], h);
 
     // Computed unconditionally, before the test that decides whether it is
@@ -1033,7 +1060,11 @@ pub fn interpolate(
     frac: i16,
     one_third: bool,
 ) -> Word16 {
-    let mut phase = if one_third { shl(ctx, Word16(frac), 1).0 } else { frac };
+    let mut phase = if one_third {
+        shl(ctx, Word16(frac), 1).0
+    } else {
+        frac
+    };
     let mut centre = lag;
     if phase < 0 {
         phase += UP_SAMP_MAX;
@@ -1046,8 +1077,18 @@ pub fn interpolate(
     for i in 0..INTERP_TAPS {
         let k = i * usize::try_from(UP_SAMP_MAX).expect("six is positive");
         let step = i16::try_from(i).expect("four taps fit in i16");
-        s = l_mac(ctx, s, corr.at(centre - step), Word16(INTER_6_SEARCH[phase + k]));
-        s = l_mac(ctx, s, corr.at(centre + 1 + step), Word16(INTER_6_SEARCH[mirror + k]));
+        s = l_mac(
+            ctx,
+            s,
+            corr.at(centre - step),
+            Word16(INTER_6_SEARCH[phase + k]),
+        );
+        s = l_mac(
+            ctx,
+            s,
+            corr.at(centre + 1 + step),
+            Word16(INTER_6_SEARCH[mirror + k]),
+        );
     }
     round(ctx, s)
 }
@@ -1463,7 +1504,10 @@ pub fn pitch_gain(
     xn: &[Word16],
     y1: &[Word16],
 ) -> (Word16, GainCoefficients) {
-    assert!(xn.len() >= L_SUBFR && y1.len() >= L_SUBFR, "a full subframe");
+    assert!(
+        xn.len() >= L_SUBFR && y1.len() >= L_SUBFR,
+        "a full subframe"
+    );
 
     let mut quartered = [Word16(0); L_SUBFR];
     for (slot, &value) in quartered.iter_mut().zip(y1.iter()) {
@@ -1726,13 +1770,11 @@ pub struct LtpResult {
 /// # Panics
 ///
 /// If either slice is shorter than a subframe.
-pub fn update_target(
-    ctx: &mut DspContext,
-    target: &mut [Word16],
-    source: &[Word16],
-    gain: Word16,
-) {
-    assert!(target.len() >= L_SUBFR && source.len() >= L_SUBFR, "a full subframe");
+pub fn update_target(ctx: &mut DspContext, target: &mut [Word16], source: &[Word16], gain: Word16) {
+    assert!(
+        target.len() >= L_SUBFR && source.len() >= L_SUBFR,
+        "a full subframe"
+    );
     for i in 0..L_SUBFR {
         let product = l_mult(ctx, source[i], gain);
         let scaled = extract_h(l_shl(ctx, product, 1));
@@ -1797,8 +1839,7 @@ pub fn closed_loop_ltp(
 
     let mut gain_limit = Word16(MAX_16);
     // Evaluated on the *unclipped* gain, before the per-rate cap below.
-    let clipped =
-        resonant && sub(ctx, gain_pitch, GP_CLIP).0 > 0 && tone.clipping(ctx, gain_pitch);
+    let clipped = resonant && sub(ctx, gain_pitch, GP_CLIP).0 > 0 && tone.clipping(ctx, gain_pitch);
 
     let mut gain_index = None;
     if matches!(mode_index, MR475 | MR515) {
@@ -2164,7 +2205,10 @@ mod tests {
                 replay.close_subframe(frame, subframe);
             }
         }
-        assert_eq!(compared, 6, "two full-search subframes in each of three frames");
+        assert_eq!(
+            compared, 6,
+            "two full-search subframes in each of three frames"
+        );
     }
 
     #[test]
@@ -2225,15 +2269,18 @@ mod tests {
             let uniform = delta_window(&mut ctx, MR74, Word16(previous));
             for lag in uniform.min.0..=uniform.max.0 {
                 for frac in -1..=1 {
-                    let index =
-                        encode_lag_1_3(&mut ctx, lag, frac, previous, uniform, true, false);
+                    let index = encode_lag_1_3(&mut ctx, lag, frac, previous, uniform, true, false);
                     let back = delta_lag_1_3(
                         &mut ctx,
                         code(index),
                         uniform,
                         delta_coding(MR74, Word16(previous)),
                     );
-                    assert_eq!((back.integer.0, back.frac.0), (lag, frac), "delta 1/3, 5 bit");
+                    assert_eq!(
+                        (back.integer.0, back.frac.0),
+                        (lag, frac),
+                        "delta 1/3, 5 bit"
+                    );
                     compared += 1;
                 }
             }
@@ -2274,7 +2321,11 @@ mod tests {
 
         // One-sixth, both branches.
         for lag in PIT_MIN_MR122..=PIT_MAX {
-            let fracs: &[i16] = if lag <= 94 { &[-2, -1, 0, 1, 2, 3] } else { &[0] };
+            let fracs: &[i16] = if lag <= 94 {
+                &[-2, -1, 0, 1, 2, 3]
+            } else {
+                &[0]
+            };
             for &frac in fracs {
                 let index = encode_lag_1_6(&mut ctx, lag, frac, 0, false);
                 let back = absolute_lag(&mut ctx, code(index), LagResolution::OneSixth);
@@ -2465,7 +2516,10 @@ mod tests {
                 _ => 0,
             });
         }
-        assert_eq!(open_loop_lag(&mut ctx, MR122, &signal, origin, L_FRAME_BY2, None, false), 19);
+        assert_eq!(
+            open_loop_lag(&mut ctx, MR122, &signal, origin, L_FRAME_BY2, None, false),
+            19
+        );
         assert_eq!(mode_params(MR122).pit_min, 18);
         assert_eq!(mode_params(MR74).pit_min, 20);
     }
@@ -2577,9 +2631,15 @@ mod tests {
             *slot = Word16(30000 - 100 * i16::try_from(i).expect("ten fits"));
         }
         for frame in 0..11 {
-            assert!(!tone.check_lsp(&mut ctx, &resonant), "frame {frame} fired early");
+            assert!(
+                !tone.check_lsp(&mut ctx, &resonant),
+                "frame {frame} fired early"
+            );
         }
-        assert!(tone.check_lsp(&mut ctx, &resonant), "the twelfth frame sets it");
+        assert!(
+            tone.check_lsp(&mut ctx, &resonant),
+            "the twelfth frame sets it"
+        );
         assert!(tone.check_lsp(&mut ctx, &resonant), "and it stays set");
 
         // A single wide-spaced frame clears the counter outright.
@@ -2623,16 +2683,17 @@ mod tests {
     fn the_median_takes_the_middle_of_five() {
         let mut ctx = DspContext::default();
         assert_eq!(
-            median_of_five(&mut ctx, &[Word16(10), Word16(50), Word16(20), Word16(40), Word16(30)]).0,
+            median_of_five(
+                &mut ctx,
+                &[Word16(10), Word16(50), Word16(20), Word16(40), Word16(30)]
+            )
+            .0,
             30
         );
         // Ties: the ranking prefers the highest index, which decides which of
         // two equal values the middle rank names — the value is the same
         // either way, but the rank it comes from is not.
-        assert_eq!(
-            median_of_five(&mut ctx, &[Word16(7); 5]).0,
-            7
-        );
+        assert_eq!(median_of_five(&mut ctx, &[Word16(7); 5]).0, 7);
     }
 
     #[test]
@@ -2687,7 +2748,10 @@ mod tests {
         // Without the resonance flag the clipping test is never even consulted.
         let quiet = run(MR74, false);
         assert_eq!(quiet.gain_limit.0, MAX_16, "no limit reported");
-        assert!(quiet.gain_pitch.0 > GP_CLIP.0, "the raw gain is above the clip");
+        assert!(
+            quiet.gain_pitch.0 > GP_CLIP.0,
+            "the raw gain is above the clip"
+        );
 
         let clipped = run(MR74, true);
         assert_eq!(clipped.gain_limit, GP_CLIP);
@@ -2695,12 +2759,20 @@ mod tests {
 
         let low = run(MR475, true);
         assert_eq!(low.gain_limit, GP_CLIP, "4.75 reports the limit");
-        assert_eq!(low.gain_pitch.0, 13926, "and caps at 0.85 rather than at GP_CLIP");
+        assert_eq!(
+            low.gain_pitch.0, 13926,
+            "and caps at 0.85 rather than at GP_CLIP"
+        );
 
         // 12.2 quantises the pitch gain here rather than with the code gain.
         let fine = run(MR122, false);
-        let index = fine.gain_index.expect("12.2 quantises its pitch gain in cl_ltp");
-        assert_eq!(fine.gain_pitch.0, QUA_GAIN_PITCH[usize::from(index)] & !0x0003);
+        let index = fine
+            .gain_index
+            .expect("12.2 quantises its pitch gain in cl_ltp");
+        assert_eq!(
+            fine.gain_pitch.0,
+            QUA_GAIN_PITCH[usize::from(index)] & !0x0003
+        );
         assert!(run(MR74, false).gain_index.is_none(), "no other rate does");
     }
 

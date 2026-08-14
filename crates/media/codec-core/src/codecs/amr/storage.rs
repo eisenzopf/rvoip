@@ -178,7 +178,13 @@ mod tests {
     fn frame_data(bits: usize, seed: u8) -> Vec<u8> {
         let len = bits.div_ceil(8);
         let mut data: Vec<u8> = (0..len)
-            .map(|i| u8::try_from(i).unwrap_or(0).wrapping_mul(29).wrapping_add(seed) | 0x21)
+            .map(|i| {
+                u8::try_from(i)
+                    .unwrap_or(0)
+                    .wrapping_mul(29)
+                    .wrapping_add(seed)
+                    | 0x21
+            })
             .collect();
         let tail = bits % 8;
         if tail != 0 {
@@ -353,8 +359,7 @@ mod tests {
         let file = write(variant, &frames).unwrap();
         let (_, decoded) = read(&file).unwrap();
 
-        let codec =
-            AmrPayloadCodec::new(AmrPayloadConfig::bandwidth_efficient(variant)).unwrap();
+        let codec = AmrPayloadCodec::new(AmrPayloadConfig::bandwidth_efficient(variant)).unwrap();
         for frame in decoded {
             let packet = AmrPacket::single(frame);
             let bytes = codec.pack(&packet).unwrap();
@@ -405,9 +410,13 @@ mod tests {
             assert_eq!(frames.len(), 25, "NB mode {expected_mode}");
 
             let mode = AmrMode::new(AmrVariant::NarrowBand, expected_mode).unwrap();
-            let expected_len =
-                AmrVariant::NarrowBand.storage_magic().len() + 25 * (1 + mode.octet_aligned_bytes());
-            assert_eq!(bytes.len(), expected_len, "NB mode {expected_mode} file length");
+            let expected_len = AmrVariant::NarrowBand.storage_magic().len()
+                + 25 * (1 + mode.octet_aligned_bytes());
+            assert_eq!(
+                bytes.len(),
+                expected_len,
+                "NB mode {expected_mode} file length"
+            );
 
             for frame in &frames {
                 let AmrFrameType::Speech(got) = frame.frame_type else {
@@ -415,7 +424,11 @@ mod tests {
                 };
                 assert_eq!(got.index(), expected_mode);
             }
-            assert_eq!(write(variant, &frames).unwrap(), bytes, "NB mode {expected_mode}");
+            assert_eq!(
+                write(variant, &frames).unwrap(),
+                bytes,
+                "NB mode {expected_mode}"
+            );
         }
     }
 
@@ -429,16 +442,24 @@ mod tests {
         let mode3 = len(REFERENCE_NB_FILES[3].0);
         let mode4 = len(REFERENCE_NB_FILES[4].0);
         let magic = AmrVariant::NarrowBand.storage_magic().len();
-        assert_eq!((mode3 - magic) / 25, 1 + 17, "6.70 is 134 bits => 17 octets");
-        assert_eq!((mode4 - magic) / 25, 1 + 19, "7.40 is 148 bits => 19 octets");
+        assert_eq!(
+            (mode3 - magic) / 25,
+            1 + 17,
+            "6.70 is 134 bits => 17 octets"
+        );
+        assert_eq!(
+            (mode4 - magic) / 25,
+            1 + 19,
+            "7.40 is 148 bits => 19 octets"
+        );
         assert!(mode3 < mode4, "6.70 must be the smaller of the two");
     }
 
     #[test]
     fn reads_reference_encoder_output_for_every_mode() {
         for (bytes, expected_mode) in REFERENCE_FILES {
-            let (variant, frames) = read(bytes)
-                .unwrap_or_else(|e| panic!("mode {expected_mode} failed to parse: {e}"));
+            let (variant, frames) =
+                read(bytes).unwrap_or_else(|e| panic!("mode {expected_mode} failed to parse: {e}"));
 
             assert_eq!(variant, AmrVariant::WideBand, "mode {expected_mode}");
             assert_eq!(frames.len(), 25, "mode {expected_mode}: frame count");
@@ -511,7 +532,11 @@ mod tests {
                     frames: frames.clone(),
                 };
                 let wire = codec.pack(&packet).unwrap();
-                assert_eq!(codec.unpack(&wire).unwrap(), packet, "mode {expected_mode} bulk");
+                assert_eq!(
+                    codec.unpack(&wire).unwrap(),
+                    packet,
+                    "mode {expected_mode} bulk"
+                );
             }
         }
     }

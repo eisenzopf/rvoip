@@ -113,7 +113,8 @@ fn frame_samples(variant: AmrVariant, index: usize) -> Vec<i16> {
     if (index / 50) % 8 == 7 {
         return vec![0i16; samples];
     }
-    let mut seed = 0x2545_f491u32.wrapping_add(u32::try_from(index % u32::MAX as usize).unwrap_or(0));
+    let mut seed =
+        0x2545_f491u32.wrapping_add(u32::try_from(index % u32::MAX as usize).unwrap_or(0));
     (0..samples)
         .map(|i| {
             let t = ((index * samples + i) as f64) / rate;

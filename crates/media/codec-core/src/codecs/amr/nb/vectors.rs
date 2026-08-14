@@ -118,7 +118,11 @@ impl Row {
         let v = self.ints();
         assert_eq!(self.label, "nz", "not a sparse codevector row");
         let count = usize::try_from(v[0]).expect("non-negative pulse count");
-        assert_eq!(v.len(), 1 + 2 * count, "sparse row length disagrees with its count");
+        assert_eq!(
+            v.len(),
+            1 + 2 * count,
+            "sparse row length disagrees with its count"
+        );
         let mut out = vec![Word16(0); len];
         for pair in v[1..].chunks_exact(2) {
             let pos = usize::try_from(pair[0]).expect("non-negative position");
@@ -144,7 +148,9 @@ pub fn rows(section: &str) -> Vec<Row> {
         if line.starts_with(char::is_whitespace) {
             if inside {
                 let trimmed = line.trim_start();
-                let (label, tokens) = trimmed.split_once(char::is_whitespace).unwrap_or((trimmed, ""));
+                let (label, tokens) = trimmed
+                    .split_once(char::is_whitespace)
+                    .unwrap_or((trimmed, ""));
                 out.push(Row {
                     label,
                     tokens: tokens.trim(),

@@ -47,6 +47,14 @@ name = "amr_codec"
 harness = false
 required-features = ["amr-nb", "amr-wb"]
 
+# `codecs::amr` is gated on `any(amr-nb, amr-wb)`, and this example imports it
+# unconditionally and walks both variants. Without the declaration Cargo builds
+# it under the default feature set, so `--all-targets` fails to compile on any
+# build that does not happen to enable AMR.
+[[example]]
+name = "amr_rtp_vectors"
+required-features = ["amr-nb", "amr-wb"]
+
 [features]
 default = ["g711"]
 

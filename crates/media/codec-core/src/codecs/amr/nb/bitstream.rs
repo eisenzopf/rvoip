@@ -16,9 +16,8 @@
 //! bug that cost two rounds of debugging on the wideband side.
 
 use super::tables::{
-    BITNO_102, BITNO_122, BITNO_475, BITNO_515, BITNO_59, BITNO_67, BITNO_74, BITNO_795,
-    BITNO_SID, SORT_102, SORT_122, SORT_475, SORT_515, SORT_59, SORT_67, SORT_74, SORT_795,
-    SORT_SID,
+    BITNO_102, BITNO_122, BITNO_475, BITNO_515, BITNO_59, BITNO_67, BITNO_74, BITNO_795, BITNO_SID,
+    SORT_102, SORT_122, SORT_475, SORT_515, SORT_59, SORT_67, SORT_74, SORT_795, SORT_SID,
 };
 
 /// The largest AMR-NB frame, in bits — 12.2 kbit/s.
@@ -360,9 +359,7 @@ mod tests {
     fn the_parameter_count_grows_with_the_bit_rate() {
         // 4.75 codes two pulses per subframe and 12.2 codes ten, so the higher
         // rates carry strictly more parameters.
-        let counts: Vec<usize> = (0..8u8)
-            .map(|m| parameter_widths(m).len())
-            .collect();
+        let counts: Vec<usize> = (0..8u8).map(|m| parameter_widths(m).len()).collect();
         assert!(
             counts[7] > counts[0],
             "12.2 carries {} parameters against 4.75's {}",

@@ -242,7 +242,11 @@ impl LsfDecoder {
     pub fn seed_predictor(&mut self, index: u16) {
         assert!(index < 8, "past_rq_init holds eight vectors, not {index}");
         let base = usize::from(index) * M;
-        for (slot, &v) in self.past_residual.iter_mut().zip(&PAST_RQ_INIT[base..base + M]) {
+        for (slot, &v) in self
+            .past_residual
+            .iter_mut()
+            .zip(&PAST_RQ_INIT[base..base + M])
+        {
             *slot = Word16(v);
         }
     }
@@ -335,7 +339,10 @@ impl LsfDecoder {
         let mut lsf = if bad_frame {
             self.conceal(&mut ctx)
         } else {
-            assert!(indices.len() >= 3, "the 3-split quantiser needs three indices");
+            assert!(
+                indices.len() >= 3,
+                "the 3-split quantiser needs three indices"
+            );
             self.decode_good(&mut ctx, mode_index, indices)
         };
 
@@ -437,17 +444,16 @@ impl LsfDecoder {
     ///
     /// If `indices` holds fewer than five entries on a good frame, or if an
     /// index overruns its codebook.
-    pub fn decode_pair(
-        &mut self,
-        indices: &[u16],
-        bad_frame: bool,
-    ) -> ([Word16; M], [Word16; M]) {
+    pub fn decode_pair(&mut self, indices: &[u16], bad_frame: bool) -> ([Word16; M], [Word16; M]) {
         let mut ctx = DspContext::default();
 
         let (mut lsf_mid, mut lsf_new) = if bad_frame {
             self.conceal_pair(&mut ctx)
         } else {
-            assert!(indices.len() >= 5, "the 5-split quantiser needs five indices");
+            assert!(
+                indices.len() >= 5,
+                "the 5-split quantiser needs five indices"
+            );
             self.decode_pair_good(&mut ctx, indices)
         };
 
@@ -462,7 +468,10 @@ impl LsfDecoder {
         // raw, unspaced residual. Two different vectors, deliberately.
         self.past_lsf = lsf_new;
 
-        (lsf_to_lsp(&mut ctx, &lsf_mid), lsf_to_lsp(&mut ctx, &lsf_new))
+        (
+            lsf_to_lsp(&mut ctx, &lsf_mid),
+            lsf_to_lsp(&mut ctx, &lsf_new),
+        )
     }
 
     /// Dequantise both LSF sets from five received indices.
@@ -888,7 +897,10 @@ mod tests {
         // counterpart there. The eighth rate's evidence is the `plsf5` section
         // of the other fixture, replayed here so this test still spans all
         // eight rates.
-        assert!(!has_row("nb7", "lsp0"), "nb7 now carries its own spectral rows");
+        assert!(
+            !has_row("nb7", "lsp0"),
+            "nb7 now carries its own spectral rows"
+        );
         let five_split = replay_five_split();
         assert_eq!(five_split, 8, "plsf5 carries eight frames");
     }
@@ -990,8 +1002,14 @@ mod tests {
         // accident of transcription. Losing any of them changes the decoded
         // spectrum without changing its shape, which is the failure mode this
         // module is most exposed to.
-        assert_ne!(MEAN_LSF_3, MEAN_LSF_5, "the two long-term means are the same");
-        assert_ne!(ALPHA_3.0, ALPHA_5.0, "the two concealment weights are the same");
+        assert_ne!(
+            MEAN_LSF_3, MEAN_LSF_5,
+            "the two long-term means are the same"
+        );
+        assert_ne!(
+            ALPHA_3.0, ALPHA_5.0,
+            "the two concealment weights are the same"
+        );
         assert!(
             PRED_FAC_3.iter().any(|&f| f != LSP_PRED_FAC_MR122.0),
             "the per-coefficient predictor collapsed onto the 12.2 scalar"
@@ -1015,13 +1033,19 @@ mod tests {
         // it is the one used here.
         let mut ctx = DspContext::default();
         let lsp = initial_lsp();
-        assert!(lsp.iter().all(|v| v.0 % 2 == 0), "the reset LSPs are not all even");
+        assert!(
+            lsp.iter().all(|v| v.0 % 2 == 0),
+            "the reset LSPs are not all even"
+        );
 
         let az = interpolate_lsp_mid(&mut ctx, &lsp, &lsp, &lsp);
         let want = lsp_to_lp(&mut ctx, &lsp);
         for sf in 0..NB_SUBFR {
             assert_eq!(
-                az[sf * MP1..(sf + 1) * MP1].iter().map(|w| w.0).collect::<Vec<_>>(),
+                az[sf * MP1..(sf + 1) * MP1]
+                    .iter()
+                    .map(|w| w.0)
+                    .collect::<Vec<_>>(),
                 want.iter().map(|w| w.0).collect::<Vec<_>>(),
                 "subframe {sf} does not reproduce a frozen spectrum"
             );
@@ -1087,7 +1111,10 @@ mod tests {
             if n == 0 {
                 first_gap = gap;
             } else if n == 11 {
-                assert!(gap <= first_gap, "erasure {n} moved {gap}, not below {first_gap}");
+                assert!(
+                    gap <= first_gap,
+                    "erasure {n} moved {gap}, not below {first_gap}"
+                );
             }
             previous = new;
         }
@@ -1141,7 +1168,10 @@ mod tests {
             if n == 0 {
                 first_gap = gap;
             } else if n == 11 {
-                assert!(gap <= first_gap, "erasure {n} moved {gap}, not below {first_gap}");
+                assert!(
+                    gap <= first_gap,
+                    "erasure {n} moved {gap}, not below {first_gap}"
+                );
             }
             previous = next;
         }

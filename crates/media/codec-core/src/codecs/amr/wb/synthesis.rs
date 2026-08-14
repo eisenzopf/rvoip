@@ -349,7 +349,13 @@ mod tests {
             hp.filter(&mut samples);
             // Skip the first blocks while the filter settles.
             if block >= 4 {
-                peak = peak.max(samples.iter().map(|s| i32::from(s.0).abs()).max().unwrap_or(0));
+                peak = peak.max(
+                    samples
+                        .iter()
+                        .map(|s| i32::from(s.0).abs())
+                        .max()
+                        .unwrap_or(0),
+                );
             }
         }
         assert!(

@@ -333,11 +333,16 @@ static void gen_gains(void) {
         printf("  seq joint %d %d\n", (int)joint[m], (int)seed);
         for (int n = 0; n < 24; n++) {
             Word16 gain_pit = 0, gain_cod = 0;
-            Word16 index = (Word16)(((unsigned)rnd(&seed) >> 3) & joint_mask[m]);
+            /* Not `index`: that shadows the POSIX `index()` declared via
+               <string.h>, and a reader (or an analyzer) resolving the printf
+               argument to the function rather than this local reads the
+               format as printing a pointer with %d. */
+            Word16 gain_index = (Word16)(((unsigned)rnd(&seed) >> 3) & joint_mask[m]);
             Word16 evenSubfr = (Word16)(1 - (n & 1));
             for (int i = 0; i < L_SUBFR; i++) code[i] = shr(rnd(&seed), 4);
-            Dec_gain(ps, joint[m], index, code, evenSubfr, &gain_pit, &gain_cod);
-            printf("    step %d %d %d %d\n", index, evenSubfr, gain_pit, gain_cod);
+            Dec_gain(ps, joint[m], gain_index, code, evenSubfr, &gain_pit, &gain_cod);
+            printf("    step %d %d %d %d\n", (int)gain_index, (int)evenSubfr,
+                   (int)gain_pit, (int)gain_cod);
         }
         gc_pred_exit(&ps);
     }

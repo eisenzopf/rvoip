@@ -52,13 +52,7 @@ fn expand_roots(isp: &[Word16], f: &mut [Word32], n: usize) {
 ///
 /// Order 20 runs the same recursion four times smaller and shifts back
 /// afterwards, because twenty accumulations overflow Q23 where sixteen do not.
-fn expand_roots_scaled(
-    isp: &[Word16],
-    f: &mut [Word32],
-    n: usize,
-    unit: Word16,
-    step: Word16,
-) {
+fn expand_roots_scaled(isp: &[Word16], f: &mut [Word32], n: usize, unit: Word16, step: Word16) {
     let mut ctx = DspContext::default();
 
     // 1.0 and -2·q₀.

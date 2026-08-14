@@ -140,7 +140,9 @@ impl AmrFmtp {
                 }
                 "channels" => {
                     let channels = value.parse::<u8>().map_err(|_| {
-                        CodecError::invalid_format(format!("AMR channels must be 1-6, got {value:?}"))
+                        CodecError::invalid_format(format!(
+                            "AMR channels must be 1-6, got {value:?}"
+                        ))
                     })?;
                     if channels != 1 {
                         return Err(CodecError::invalid_format(format!(
@@ -532,8 +534,11 @@ mod tests {
 
     #[test]
     fn parses_a_realistic_volte_fmtp_line() {
-        let fmtp =
-            AmrFmtp::parse(WB, "octet-align=1; mode-set=0,1,2; mode-change-capability=2").unwrap();
+        let fmtp = AmrFmtp::parse(
+            WB,
+            "octet-align=1; mode-set=0,1,2; mode-change-capability=2",
+        )
+        .unwrap();
         assert!(fmtp.octet_align);
         assert_eq!(fmtp.mode_set.as_ref().unwrap().to_sdp_value(), "0,1,2");
         assert_eq!(fmtp.mode_change_capability, 2);
@@ -569,7 +574,11 @@ mod tests {
         ] {
             let fmtp = AmrFmtp::parse(NB, text).unwrap();
             assert!(fmtp.octet_align, "{text}");
-            assert_eq!(fmtp.mode_set.as_ref().unwrap().to_sdp_value(), "0,1", "{text}");
+            assert_eq!(
+                fmtp.mode_set.as_ref().unwrap().to_sdp_value(),
+                "0,1",
+                "{text}"
+            );
         }
     }
 
@@ -636,8 +645,8 @@ mod tests {
 
         // And when our own set is narrower than the offer, the payload type is
         // rejected outright — not answered with the smaller set.
-        let narrow = AmrCapabilities::new(WB)
-            .with_modes(AmrModeSet::from_indices(WB, &[0, 2]).unwrap());
+        let narrow =
+            AmrCapabilities::new(WB).with_modes(AmrModeSet::from_indices(WB, &[0, 2]).unwrap());
         let err = narrow.answer(&offer).unwrap_err();
         assert!(err.to_string().contains("mode-set"), "{err}");
     }

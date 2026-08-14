@@ -448,9 +448,8 @@ impl CodecProfile {
     /// filled in; the precedence and every refusal live in that pure function
     /// where they are testable without env mutation.
     pub fn for_endpoint(username: Option<&str>, role: Option<Role>) -> ExampleResult<Self> {
-        let endpoint_override = username.and_then(|user| {
-            std::env::var(format!("ENDPOINT_{}_CODEC_PROFILE", user)).ok()
-        });
+        let endpoint_override = username
+            .and_then(|user| std::env::var(format!("ENDPOINT_{}_CODEC_PROFILE", user)).ok());
         let global = std::env::var("PBX_CODEC_PROFILE").ok();
         let pairing = std::env::var("PBX_CODEC_PAIRING").ok();
         select_codec_profile(
@@ -639,7 +638,8 @@ fn select_codec_profile(
             Some(value) => CodecPairing::parse(value)?,
             None => CodecPairing::AmrNbPcmu,
         };
-        let role = role.ok_or("a transcode call resolves its codec per role, and no role was given")?;
+        let role =
+            role.ok_or("a transcode call resolves its codec per role, and no role was given")?;
         return pairing.profile_for(role);
     }
     if let Some(value) = global {
@@ -1506,7 +1506,12 @@ pub fn endpoint_config_for(
     transport: TransportMode,
     role: Role,
 ) -> ExampleResult<EndpointConfig> {
-    EndpointConfig::new_for_role(provider, username_for(transport, role), transport, Some(role))
+    EndpointConfig::new_for_role(
+        provider,
+        username_for(transport, role),
+        transport,
+        Some(role),
+    )
 }
 
 pub async fn new_stream_peer(cfg: &EndpointConfig) -> ExampleResult<StreamPeer> {
@@ -1890,9 +1895,7 @@ async fn run_stream_peer(
             run_stream_peer_two_party(provider, scenario, transport, role, &cfg, &mut peer).await?;
         }
         Scenario::B2buaCall => {
-            return Err(
-                "b2bua_call runs through the endpoint API only; use --api endpoint".into(),
-            );
+            return Err("b2bua_call runs through the endpoint API only; use --api endpoint".into());
         }
         Scenario::BlindTransfer => {
             run_stream_peer_transfer(provider, transport, role, &cfg, &mut peer).await?;
@@ -1968,9 +1971,7 @@ async fn run_callback(
             run_callback_two_party(provider, scenario, transport, role, &mut runtime).await?;
         }
         Scenario::B2buaCall => {
-            return Err(
-                "b2bua_call runs through the endpoint API only; use --api endpoint".into(),
-            );
+            return Err("b2bua_call runs through the endpoint API only; use --api endpoint".into());
         }
         Scenario::BlindTransfer => {
             run_callback_transfer(transport, role, &mut runtime).await?;
@@ -2746,8 +2747,15 @@ async fn run_amr_caller(
     transport: TransportMode,
     wav_name: &str,
 ) -> ExampleResult<()> {
-    run_amr_caller_toned(cfg, handle, transport, tone_for_caller(transport),
-        tone_for_callee(transport), wav_name, None)
+    run_amr_caller_toned(
+        cfg,
+        handle,
+        transport,
+        tone_for_caller(transport),
+        tone_for_callee(transport),
+        wav_name,
+        None,
+    )
     .await
 }
 
@@ -2795,8 +2803,7 @@ async fn run_amr_caller_toned(
     let mut switch_outcome: ExampleResult<()> = Ok(());
     if let (Some(coordinator), true) = (mode_switch, amr_mode_switch_requested()) {
         if outcome.is_ok() {
-            switch_outcome =
-                exercise_amr_mode_switch(coordinator, handle, cfg.codec_profile).await;
+            switch_outcome = exercise_amr_mode_switch(coordinator, handle, cfg.codec_profile).await;
         }
     }
     // DTX, on the same sequencing principle as the mode switch: the quality
@@ -2891,7 +2898,9 @@ async fn exercise_amr_mode_switch(
         top
     );
     diag_event(
-        &std::env::var("AUDIO_OUTPUT_DIR").map(PathBuf::from).unwrap_or_default(),
+        &std::env::var("AUDIO_OUTPUT_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_default(),
         "amr_mode_switch",
         serde_json::json!({ "from": top, "to": 0 }),
     );
@@ -3043,7 +3052,11 @@ async fn run_b2bua_bridge_role(
         .invite(Some(cfg.aor_uri()), cfg.remote_call_uri())
         .send()
         .await?;
-    println!("[b2bua] outbound leg B = {} to {}", outbound_id.0, cfg.remote_call_uri());
+    println!(
+        "[b2bua] outbound leg B = {} to {}",
+        outbound_id.0,
+        cfg.remote_call_uri()
+    );
     let mut outbound_events = coordinator.events_for_session(&outbound_id).await?;
 
     let answered = timeout(remote_test_timeout(provider)?, async {
@@ -3063,24 +3076,28 @@ async fn run_b2bua_bridge_role(
     }
 
     coordinator.accept_call(&inbound_id).await?;
-    wait_for_call_state(&coordinator, &inbound_id, CallState::Active, Duration::from_secs(10))
-        .await?;
-    wait_for_call_state(&coordinator, &outbound_id, CallState::Active, Duration::from_secs(10))
-        .await?;
+    wait_for_call_state(
+        &coordinator,
+        &inbound_id,
+        CallState::Active,
+        Duration::from_secs(10),
+    )
+    .await?;
+    wait_for_call_state(
+        &coordinator,
+        &outbound_id,
+        CallState::Active,
+        Duration::from_secs(10),
+    )
+    .await?;
 
     if transport.is_tls() {
         // Each leg negotiates its own SRTP; both must be secured before we
         // relay decrypted payloads between them.
-        assert_srtp_media_security(
-            &coordinator.session(&inbound_id),
-            Duration::from_secs(5),
-        )
-        .await?;
-        assert_srtp_media_security(
-            &coordinator.session(&outbound_id),
-            Duration::from_secs(5),
-        )
-        .await?;
+        assert_srtp_media_security(&coordinator.session(&inbound_id), Duration::from_secs(5))
+            .await?;
+        assert_srtp_media_security(&coordinator.session(&outbound_id), Duration::from_secs(5))
+            .await?;
     }
 
     let bridge = coordinator.bridge(&inbound_id, &outbound_id).await?;
@@ -4431,12 +4448,7 @@ pub async fn start_tone_recorder_at_rate(
             } else {
                 generate_tone_at_rate(tone_hz, frame_index, frame_size, sample_rate)
             };
-            let frame = AudioFrame::new(
-                samples,
-                sample_rate,
-                1,
-                (frame_index * frame_size) as u32,
-            );
+            let frame = AudioFrame::new(samples, sample_rate, 1, (frame_index * frame_size) as u32);
             if sender.send(frame).await.is_err() {
                 break;
             }
@@ -5544,7 +5556,11 @@ pub fn tone_quality(samples: &[i16], sample_rate: u32, expected_hz: f32) -> Tone
     let n = samples.len();
     let sum: f64 = samples.iter().map(|&s| f64::from(s)).sum();
     let energy: f64 = samples.iter().map(|&s| f64::from(s) * f64::from(s)).sum();
-    let rms = if n == 0 { 0.0 } else { (energy / n as f64).sqrt() as f32 };
+    let rms = if n == 0 {
+        0.0
+    } else {
+        (energy / n as f64).sqrt() as f32
+    };
     let dc_offset = if n == 0 { 0.0 } else { (sum / n as f64) as f32 };
 
     let frame = frame_samples(sample_rate).max(1);
@@ -6368,17 +6384,16 @@ mod tests {
     #[test]
     fn hann_taper_rejects_true_rejected_tone() {
         let samples = tone_samples(&[(SAMPLE_RATE as usize, 8_000.0, 440.0)]);
-        let scan =
-            scan_tone_windows(
-                &samples,
-                SAMPLE_RATE,
-                SAMPLE_RATE as usize,
-                FRAME_SIZE,
-                880.0,
-                440.0,
-                WindowGate::tone_only(),
-            )
-            .unwrap();
+        let scan = scan_tone_windows(
+            &samples,
+            SAMPLE_RATE,
+            SAMPLE_RATE as usize,
+            FRAME_SIZE,
+            880.0,
+            440.0,
+            WindowGate::tone_only(),
+        )
+        .unwrap();
 
         assert_eq!(scan.longest_passing_run, 0);
         assert!(scan.longest_passing_run < scan.required_passing_run);
@@ -6387,17 +6402,16 @@ mod tests {
     #[test]
     fn tone_scanner_rejects_silence() {
         let samples = vec![0; SAMPLE_RATE as usize];
-        let scan =
-            scan_tone_windows(
-                &samples,
-                SAMPLE_RATE,
-                SAMPLE_RATE as usize,
-                FRAME_SIZE,
-                880.0,
-                440.0,
-                WindowGate::tone_only(),
-            )
-            .unwrap();
+        let scan = scan_tone_windows(
+            &samples,
+            SAMPLE_RATE,
+            SAMPLE_RATE as usize,
+            FRAME_SIZE,
+            880.0,
+            440.0,
+            WindowGate::tone_only(),
+        )
+        .unwrap();
 
         assert_eq!(scan.passing_windows, 0);
         assert_eq!(scan.longest_passing_run, 0);
@@ -6406,17 +6420,16 @@ mod tests {
     #[test]
     fn hann_taper_accepts_one_continuous_second_of_near_bin_tone() {
         let samples = codec_like_near_bin_tone(SAMPLE_RATE as usize);
-        let scan =
-            scan_tone_windows(
-                &samples,
-                SAMPLE_RATE,
-                SAMPLE_RATE as usize,
-                FRAME_SIZE,
-                880.0,
-                440.0,
-                WindowGate::tone_only(),
-            )
-            .unwrap();
+        let scan = scan_tone_windows(
+            &samples,
+            SAMPLE_RATE,
+            SAMPLE_RATE as usize,
+            FRAME_SIZE,
+            880.0,
+            440.0,
+            WindowGate::tone_only(),
+        )
+        .unwrap();
 
         assert!(scan.longest_passing_run >= scan.required_passing_run);
     }
@@ -6428,17 +6441,16 @@ mod tests {
             (1_600, 8_000.0, 440.0),
             (3_200, 8_000.0, 875.0),
         ]);
-        let scan =
-            scan_tone_windows(
-                &samples,
-                SAMPLE_RATE,
-                SAMPLE_RATE as usize,
-                FRAME_SIZE,
-                880.0,
-                440.0,
-                WindowGate::tone_only(),
-            )
-            .unwrap();
+        let scan = scan_tone_windows(
+            &samples,
+            SAMPLE_RATE,
+            SAMPLE_RATE as usize,
+            FRAME_SIZE,
+            880.0,
+            440.0,
+            WindowGate::tone_only(),
+        )
+        .unwrap();
 
         assert!(scan.passing_windows > 0);
         assert!(scan.longest_passing_run < scan.required_passing_run);
@@ -6529,8 +6541,8 @@ mod tests {
             // tone reads back as what was sent, within 1%.
             let window = &samples[..tone_analysis_window_samples(rate)];
             let quality = tone_quality(window, rate, 880.0);
-            let relative = (quality.fundamental_amplitude - TONE_PEAK_AMPLITUDE).abs()
-                / TONE_PEAK_AMPLITUDE;
+            let relative =
+                (quality.fundamental_amplitude - TONE_PEAK_AMPLITUDE).abs() / TONE_PEAK_AMPLITUDE;
             assert!(
                 relative < 0.01,
                 "fundamental read {} of {} sent",
@@ -6616,7 +6628,11 @@ mod tests {
         );
         let window = &squared[..tone_analysis_window_samples(rate)];
         let quality = tone_quality(window, rate, 880.0);
-        assert!(quality.snr_db < AMR_MIN_TONE_SNR_DB, "snr {}", quality.snr_db);
+        assert!(
+            quality.snr_db < AMR_MIN_TONE_SNR_DB,
+            "snr {}",
+            quality.snr_db
+        );
         assert!(
             quality.min_frame_rms > AMR_MIN_FRAME_RMS,
             "the square is loud; the level clause must not be what catches it"
@@ -6717,11 +6733,7 @@ mod tests {
         let clean = amr_capture(rate, 880.0, 0.2);
         for (case, injected) in [(1u64, 30.0f32), (2, 20.0), (3, 15.0), (4, 10.0)] {
             let noisy = with_noise_at_snr(&clean, injected, case);
-            let quality = tone_quality(
-                &noisy[..tone_analysis_window_samples(rate)],
-                rate,
-                880.0,
-            );
+            let quality = tone_quality(&noisy[..tone_analysis_window_samples(rate)], rate, 880.0);
             assert!(
                 (quality.snr_db - injected).abs() < 1.0,
                 "injected {injected} dB, read {} dB",
@@ -6834,7 +6846,10 @@ mod tests {
         for pairing in ALL_PAIRINGS {
             assert_eq!(CodecPairing::parse(pairing.env_value()).unwrap(), pairing);
         }
-        assert!(CodecPairing::parse("amrnb").is_err(), "a profile is not a pairing");
+        assert!(
+            CodecPairing::parse("amrnb").is_err(),
+            "a profile is not a pairing"
+        );
     }
 
     #[test]
@@ -6866,8 +6881,14 @@ mod tests {
         assert_eq!(callee, CodecProfile::Pcmu);
         // No pairing set: the default pairing, not the default profile.
         assert_eq!(
-            select_codec_profile(Scenario::AmrTranscodeCall, Some(Role::Caller), None, None, None)
-                .unwrap(),
+            select_codec_profile(
+                Scenario::AmrTranscodeCall,
+                Some(Role::Caller),
+                None,
+                None,
+                None
+            )
+            .unwrap(),
             CodecProfile::AmrNb
         );
     }
@@ -6877,18 +6898,22 @@ mod tests {
     /// PCMU, so this pins the explicit arm.
     #[test]
     fn b2bua_scenario_defaults_to_wideband_and_honours_overrides() {
+        assert_eq!(Scenario::parse("b2bua_call").unwrap(), Scenario::B2buaCall);
         assert_eq!(
-            Scenario::parse("b2bua_call").unwrap(),
-            Scenario::B2buaCall
-        );
-        assert_eq!(
-            select_codec_profile(Scenario::B2buaCall, Some(Role::Caller), None, None, None).unwrap(),
+            select_codec_profile(Scenario::B2buaCall, Some(Role::Caller), None, None, None)
+                .unwrap(),
             CodecProfile::AmrWb
         );
         // A global override still wins outside the transcode scenario.
         assert_eq!(
-            select_codec_profile(Scenario::B2buaCall, Some(Role::B2bua), None, Some("pcmu"), None)
-                .unwrap(),
+            select_codec_profile(
+                Scenario::B2buaCall,
+                Some(Role::B2bua),
+                None,
+                Some("pcmu"),
+                None
+            )
+            .unwrap(),
             CodecProfile::Pcmu
         );
     }
@@ -6959,8 +6984,14 @@ mod tests {
         assert_eq!(forced, CodecProfile::AmrNb);
         // And outside the transcode scenario nothing changed.
         assert_eq!(
-            select_codec_profile(Scenario::AmrCall, Some(Role::Caller), None, Some("amrwb"), None)
-                .unwrap(),
+            select_codec_profile(
+                Scenario::AmrCall,
+                Some(Role::Caller),
+                None,
+                Some("amrwb"),
+                None
+            )
+            .unwrap(),
             CodecProfile::AmrWb
         );
         assert_eq!(

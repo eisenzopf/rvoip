@@ -57,8 +57,8 @@ const L_MEANBUF: usize = 3;
 /// Exported because the decoder seeds its own previous-frame ISF history from
 /// the same values — the stability measure compares against it on frame 0.
 pub const ISF_INIT: [i16; LP_ORDER] = [
-    1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192, 9216, 10240, 11264, 12288, 13312, 14336,
-    15360, 3840,
+    1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192, 9216, 10240, 11264, 12288, 13312, 14336, 15360,
+    3840,
 ];
 
 /// Which of the two quantiser rates a frame uses.
@@ -293,7 +293,11 @@ mod tests {
                 .iter()
                 .map(|&v| u16::try_from(v).expect("index is non-negative"))
                 .collect();
-            assert_eq!(indices.len(), quantizer.index_count(), "frame {f}: index count");
+            assert_eq!(
+                indices.len(),
+                quantizer.index_count(),
+                "frame {f}: index count"
+            );
 
             // The oracle marks its final frame bad; everything before is good.
             let next_exists =
@@ -304,7 +308,8 @@ mod tests {
             let want = vector(block, &format!("isfq{f}"));
             for i in 0..LP_ORDER {
                 assert_eq!(
-                    got[i].0, want[i],
+                    got[i].0,
+                    want[i],
                     "{block} frame {f}{}: isf[{i}] = {} but the reference gives {}",
                     if bad { " (erased)" } else { "" },
                     got[i].0,
@@ -324,7 +329,10 @@ mod tests {
             }
         }
 
-        assert!(frames >= 2, "{block}: only {frames} frames, prediction untested");
+        assert!(
+            frames >= 2,
+            "{block}: only {frames} frames, prediction untested"
+        );
     }
 
     #[test]
@@ -432,6 +440,9 @@ mod tests {
         let gap: i32 = (0..LP_ORDER)
             .map(|i| i32::from(from_46[i].0 - from_36[i].0).abs())
             .sum();
-        assert!(gap < 8000, "the two rates disagree by {gap} on a shared first stage");
+        assert!(
+            gap < 8000,
+            "the two rates disagree by {gap} on a shared first stage"
+        );
     }
 }

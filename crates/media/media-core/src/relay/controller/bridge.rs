@@ -348,7 +348,11 @@ impl MediaSessionController {
         dialog_id: &DialogId,
         proposed: &MediaConfig,
     ) -> std::result::Result<(), BridgeError> {
-        let Some(partner) = self.bridge_partners.get(dialog_id).map(|e| e.value().clone()) else {
+        let Some(partner) = self
+            .bridge_partners
+            .get(dialog_id)
+            .map(|e| e.value().clone())
+        else {
             return Ok(());
         };
 
@@ -749,7 +753,10 @@ mod tests {
         // the far end cannot parse.
         let same = |a, b| wire_formats_are_interchangeable("AMR", a, "AMR", b);
         assert!(!same("", "octet-align=1"));
-        assert!(!same("octet-align=0; mode-set=0,1", "octet-align=1; mode-set=0,1"));
+        assert!(!same(
+            "octet-align=0; mode-set=0,1",
+            "octet-align=1; mode-set=0,1"
+        ));
     }
 
     #[test]
@@ -781,7 +788,12 @@ mod tests {
                 !wire_formats_are_interchangeable("AMR", bad, "AMR", bad),
                 "{bad:?} must not bridge, even with itself"
             );
-            assert!(!wire_formats_are_interchangeable("AMR", bad, "AMR", "octet-align=1"));
+            assert!(!wire_formats_are_interchangeable(
+                "AMR",
+                bad,
+                "AMR",
+                "octet-align=1"
+            ));
         }
     }
 
@@ -851,7 +863,12 @@ mod tests {
     /// five parameter names the old implementation matched.
     #[test]
     fn g729_annexb_is_compared() {
-        assert!(!wire_formats_are_interchangeable("G729", "annexb=no", "G729", ""));
+        assert!(!wire_formats_are_interchangeable(
+            "G729",
+            "annexb=no",
+            "G729",
+            ""
+        ));
         assert!(!wire_formats_are_interchangeable(
             "G729",
             "annexb=no",
@@ -859,10 +876,14 @@ mod tests {
             "annexb=yes"
         ));
         // Absent means yes, per RFC 3555.
-        assert!(wire_formats_are_interchangeable("G729", "annexb=yes", "G729", ""));
+        assert!(wire_formats_are_interchangeable(
+            "G729",
+            "annexb=yes",
+            "G729",
+            ""
+        ));
         assert!(wire_formats_are_interchangeable("G729", "", "G729", ""));
     }
-
 
     /// Real-world spacing, case and quoting, which the delegated parser owns.
     #[test]
@@ -899,12 +920,14 @@ mod tests {
     #[cfg(feature = "amr-nb")]
     fn amr_config_with_fmtp(fmtp: &str) -> MediaConfig {
         let mut config = test_config("AMR").with_negotiated_fmtp(Some(fmtp));
-        config
-            .parameters
-            .insert(super::super::types::RTP_PAYLOAD_TYPE_PARAMETER.to_string(), "96".to_string());
-        config
-            .parameters
-            .insert(super::super::types::RTP_CLOCK_RATE_PARAMETER.to_string(), "8000".to_string());
+        config.parameters.insert(
+            super::super::types::RTP_PAYLOAD_TYPE_PARAMETER.to_string(),
+            "96".to_string(),
+        );
+        config.parameters.insert(
+            super::super::types::RTP_CLOCK_RATE_PARAMETER.to_string(),
+            "8000".to_string(),
+        );
         config
     }
 
@@ -958,11 +981,17 @@ mod tests {
         let b = DialogId::new("amr-ok-b");
 
         controller
-            .start_media(a.clone(), amr_config_with_fmtp("octet-align=1; mode-set=0,1,2"))
+            .start_media(
+                a.clone(),
+                amr_config_with_fmtp("octet-align=1; mode-set=0,1,2"),
+            )
             .await
             .unwrap();
         controller
-            .start_media(b.clone(), amr_config_with_fmtp("octet-align=1; mode-set=3,4"))
+            .start_media(
+                b.clone(),
+                amr_config_with_fmtp("octet-align=1; mode-set=3,4"),
+            )
             .await
             .unwrap();
 

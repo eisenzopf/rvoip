@@ -179,7 +179,11 @@ pub fn synthesis_filter(
     out: &mut [Word16],
     mem: &[Word16; M],
 ) -> [Word16; M] {
-    assert_eq!(out.len(), excitation.len(), "synthesis in/out length mismatch");
+    assert_eq!(
+        out.len(),
+        excitation.len(),
+        "synthesis in/out length mismatch"
+    );
     assert!(out.len() >= M, "a subframe shorter than the filter memory");
     let tmp = synthesis_recursion(ctx, a, excitation, mem);
     commit(&tmp, out)
@@ -200,7 +204,10 @@ pub fn synthesis_filter_in_place(
     signal: &mut [Word16],
     mem: &[Word16; M],
 ) -> [Word16; M] {
-    assert!(signal.len() >= M, "a subframe shorter than the filter memory");
+    assert!(
+        signal.len() >= M,
+        "a subframe shorter than the filter memory"
+    );
     let tmp = synthesis_recursion(ctx, a, signal, mem);
     commit(&tmp, signal)
 }
@@ -280,7 +287,9 @@ impl Preemphasis {
     /// A filter in its reset state.
     #[must_use]
     pub const fn new() -> Self {
-        Self { previous: Word16(0) }
+        Self {
+            previous: Word16(0),
+        }
     }
 
     /// Filter `signal` in place. `signal` is Q0, `coefficient` Q15.
@@ -673,9 +682,20 @@ impl PhaseDispersion {
         innovation: &mut [Word16],
         gains: ExcitationGains,
     ) {
-        assert_eq!(excitation.len(), L_SUBFR, "phase dispersion takes a subframe");
-        assert_eq!(innovation.len(), L_SUBFR, "phase dispersion takes a subframe");
-        assert!(mode_index <= MR122, "mode {mode_index} is not a speech mode");
+        assert_eq!(
+            excitation.len(),
+            L_SUBFR,
+            "phase dispersion takes a subframe"
+        );
+        assert_eq!(
+            innovation.len(),
+            L_SUBFR,
+            "phase dispersion takes a subframe"
+        );
+        assert!(
+            mode_index <= MR122,
+            "mode {mode_index} is not a speech mode"
+        );
 
         let level = self.choose_level(ctx, gains.codebook, gains.pitch);
 
@@ -965,7 +985,10 @@ mod tests {
             }
         }
 
-        assert_eq!(compared, 4, "synfilt replays four subframes, compared {compared}");
+        assert_eq!(
+            compared, 4,
+            "synfilt replays four subframes, compared {compared}"
+        );
     }
 
     #[test]
@@ -982,7 +1005,10 @@ mod tests {
             .flat_map(Row::words)
             .collect();
         assert_eq!(dumped.len(), 4 * L_SUBFR);
-        assert_eq!(drawn, dumped, "the regenerated excitation is not the oracle's");
+        assert_eq!(
+            drawn, dumped,
+            "the regenerated excitation is not the oracle's"
+        );
     }
 
     #[test]
@@ -996,7 +1022,11 @@ mod tests {
 
         let mut c = ctx();
         let mut agc = AdaptiveGain::new();
-        assert_eq!(agc.past_gain().0, 4096, "AGC resets to unity, not to silence");
+        assert_eq!(
+            agc.past_gain().0,
+            4096,
+            "AGC resets to unity, not to silence"
+        );
 
         let mut compared = 0usize;
         let mut n = 0usize;
@@ -1008,7 +1038,12 @@ mod tests {
                     let base = n * 2 * L_SUBFR;
                     let reference = &drawn[base..base + L_SUBFR];
                     let mut signal = drawn[base + L_SUBFR..base + 2 * L_SUBFR].to_vec();
-                    agc.scale(&mut c, reference, &mut signal, Word16(super::super::AGC_FAC));
+                    agc.scale(
+                        &mut c,
+                        reference,
+                        &mut signal,
+                        Word16(super::super::AGC_FAC),
+                    );
                     let want = row.words();
                     for (i, (&g, &w)) in signal.iter().zip(want.iter()).enumerate() {
                         assert_eq!(
@@ -1024,12 +1059,7 @@ mod tests {
                 "mem" => {
                     assert!(produced.take().is_some(), "a mem row follows every out row");
                     let want = i16::try_from(row.ints()[0]).expect("gain fits");
-                    assert_eq!(
-                        agc.past_gain().0,
-                        want,
-                        "agc case {}: carried gain",
-                        n - 1
-                    );
+                    assert_eq!(agc.past_gain().0, want, "agc case {}: carried gain", n - 1);
                 }
                 _ => {}
             }
@@ -1103,7 +1133,10 @@ mod tests {
             }
         }
 
-        assert_eq!(compared, 4, "weightai sweeps four factor sets, compared {compared}");
+        assert_eq!(
+            compared, 4,
+            "weightai sweeps four factor sets, compared {compared}"
+        );
     }
 
     #[test]
@@ -1117,7 +1150,11 @@ mod tests {
             .expect("residu has an out row")
             .words();
 
-        assert_eq!(signal.len(), L_SUBFR + M, "residu supplies M samples of history");
+        assert_eq!(
+            signal.len(),
+            L_SUBFR + M,
+            "residu supplies M samples of history"
+        );
         assert_eq!(want.len(), L_SUBFR);
 
         let mut c = ctx();
@@ -1192,7 +1229,10 @@ mod tests {
             }
         }
 
-        assert_eq!(compared, 4, "preemph replays four blocks, compared {compared}");
+        assert_eq!(
+            compared, 4,
+            "preemph replays four blocks, compared {compared}"
+        );
     }
 
     #[test]
@@ -1254,7 +1294,8 @@ mod tests {
                     let want = row.words();
                     for (i, (&g, &w)) in x.iter().zip(want.iter()).enumerate() {
                         assert_eq!(
-                            g.0, w.0,
+                            g.0,
+                            w.0,
                             "phdisp mode {mode_index} case {}: x[{i}] = {} but the reference \
                              gives {}",
                             compared % 5,
@@ -1274,8 +1315,14 @@ mod tests {
         }
 
         assert_eq!(sequences, 8, "phdisp sweeps all eight rates");
-        assert_eq!(compared, 40, "phdisp replays five subframes per rate, compared {compared}");
-        assert_eq!(levels_seen, [true; 3], "the sweep did not reach all three dispersion levels");
+        assert_eq!(
+            compared, 40,
+            "phdisp replays five subframes per rate, compared {compared}"
+        );
+        assert_eq!(
+            levels_seen, [true; 3],
+            "the sweep did not reach all three dispersion levels"
+        );
         assert!(
             dispersed >= 8,
             "only {dispersed} of {compared} cases actually dispersed anything"
@@ -1334,12 +1381,21 @@ mod tests {
             }
         }
 
-        assert_eq!(compared, 8, "exctrl replays eight subframes, compared {compared}");
+        assert_eq!(
+            compared, 8,
+            "exctrl replays eight subframes, compared {compared}"
+        );
         // Both branches must appear: the gate is what most of these cases
         // exercise, and matching eight untouched vectors would say nothing
         // about the scaling itself.
-        assert!(scaled >= 1, "no exctrl case actually rescaled the excitation");
-        assert!(scaled < compared, "no exctrl case exercised the pass-through gate");
+        assert!(
+            scaled >= 1,
+            "no exctrl case actually rescaled the excitation"
+        );
+        assert!(
+            scaled < compared,
+            "no exctrl case exercised the pass-through gate"
+        );
     }
 
     // --------------------------------------------------------- properties --
@@ -1365,7 +1421,10 @@ mod tests {
         let mut aliased = exc.clone();
         let mem_b = synthesis_filter_in_place(&mut c2, &az[..MP1], &mut aliased, &mem);
 
-        assert_eq!(separate, aliased, "in-place filtering diverged from the copying form");
+        assert_eq!(
+            separate, aliased,
+            "in-place filtering diverged from the copying form"
+        );
         assert_eq!(mem_a, mem_b);
         assert_eq!(mem_a.to_vec(), separate[L_SUBFR - M..].to_vec());
     }
@@ -1442,7 +1501,10 @@ mod tests {
         let original = noise(999, L_SUBFR, 4);
         let mut signal = original.clone();
         filter.filter(&mut c, &mut signal, Word16(0));
-        assert_eq!(signal, original, "a zero coefficient must not alter the block");
+        assert_eq!(
+            signal, original,
+            "a zero coefficient must not alter the block"
+        );
         assert_eq!(
             filter.memory(),
             original[L_SUBFR - 1],
@@ -1459,7 +1521,11 @@ mod tests {
         let original = noise(2024, L_SUBFR, 4);
         let mut signal = original.clone();
         filter.filter(&mut c, &mut signal, Word16(16384));
-        assert_ne!(signal[L_SUBFR - 1], original[L_SUBFR - 1], "the block was not filtered");
+        assert_ne!(
+            signal[L_SUBFR - 1],
+            original[L_SUBFR - 1],
+            "the block was not filtered"
+        );
         assert_eq!(filter.memory(), original[L_SUBFR - 1]);
     }
 
@@ -1469,7 +1535,10 @@ mod tests {
         // only say the numbers match; this says they mean what they should.
         let mut c = ctx();
         let reference = noise(5150, L_SUBFR, 3);
-        let mut signal: Vec<Word16> = noise(5900, L_SUBFR, 6).iter().map(|w| Word16(w.0)).collect();
+        let mut signal: Vec<Word16> = noise(5900, L_SUBFR, 6)
+            .iter()
+            .map(|w| Word16(w.0))
+            .collect();
 
         let energy = |v: &[Word16]| -> f64 { v.iter().map(|w| f64::from(w.0).powi(2)).sum() };
         let target = energy(&reference);
@@ -1512,7 +1581,13 @@ mod tests {
                 // dispersed innovation back into the excitation being read.
                 let mut excitation = vec![Word16(0); L_SUBFR];
 
-                state.apply(&mut c, mode_index, &mut excitation, &mut innovation, PROBE_GAINS);
+                state.apply(
+                    &mut c,
+                    mode_index,
+                    &mut excitation,
+                    &mut innovation,
+                    PROBE_GAINS,
+                );
 
                 for (i, got) in innovation.iter().enumerate() {
                     let tap = (i + L_SUBFR - position) % L_SUBFR;
@@ -1547,7 +1622,11 @@ mod tests {
         // Subframe 0 fires the onset (gain 1000 against a remembered 0) and
         // subframes 1 and 2 run the hold down; only by 3 is the LTP-gain
         // history allowed to force maximum dispersion.
-        assert_eq!(levels, vec![1, 1, 0, 0], "onset hold did not run for two subframes");
+        assert_eq!(
+            levels,
+            vec![1, 1, 0, 0],
+            "onset hold did not run for two subframes"
+        );
     }
 
     #[test]
@@ -1558,7 +1637,13 @@ mod tests {
             let original = noise(777, L_SUBFR, 4);
             let mut innovation = original.clone();
             let mut excitation = vec![Word16(0); L_SUBFR];
-            state.apply(&mut c, mode_index, &mut excitation, &mut innovation, PROBE_GAINS);
+            state.apply(
+                &mut c,
+                mode_index,
+                &mut excitation,
+                &mut innovation,
+                PROBE_GAINS,
+            );
             assert_eq!(
                 innovation, original,
                 "mode {mode_index} dispersed an innovation it must not touch"
@@ -1574,7 +1659,13 @@ mod tests {
         for mode_index in 0..=MR122 {
             let mut c = ctx();
             let mut state = PhaseDispersion::new();
-            let gains = [Word16(100), Word16(200), Word16(300), Word16(400), Word16(500)];
+            let gains = [
+                Word16(100),
+                Word16(200),
+                Word16(300),
+                Word16(400),
+                Word16(500),
+            ];
             for &g in &gains {
                 let mut excitation = vec![Word16(0); L_SUBFR];
                 let mut innovation = vec![Word16(0); L_SUBFR];
@@ -1621,8 +1712,14 @@ mod tests {
                 ..PROBE_GAINS
             },
         );
-        assert_eq!(state.previous_level.0, 0, "the lock did not force full dispersion");
-        assert_ne!(innovation[0].0, 0, "a locked disperser left the innovation alone");
+        assert_eq!(
+            state.previous_level.0, 0,
+            "the lock did not force full dispersion"
+        );
+        assert_ne!(
+            innovation[0].0, 0,
+            "a locked disperser left the innovation alone"
+        );
     }
 
     #[test]
@@ -1671,13 +1768,32 @@ mod tests {
 
         let mut careful = original.clone();
         let mut c = ctx();
-        control_excitation(&mut c, &mut careful, Word16(6), &history, Word16(9), false, true);
+        control_excitation(
+            &mut c,
+            &mut careful,
+            Word16(6),
+            &history,
+            Word16(9),
+            false,
+            true,
+        );
 
         let mut free = original.clone();
-        control_excitation(&mut c, &mut free, Word16(6), &history, Word16(9), false, false);
+        control_excitation(
+            &mut c,
+            &mut free,
+            Word16(6),
+            &history,
+            Word16(9),
+            false,
+            false,
+        );
 
         let peak = |v: &[Word16]| v.iter().map(|w| i32::from(w.0).abs()).max().unwrap_or(0);
-        assert!(peak(&careful) < peak(&free), "the careful flag did not restrain the gain");
+        assert!(
+            peak(&careful) < peak(&free),
+            "the careful flag did not restrain the gain"
+        );
         assert!(
             peak(&careful) <= 3 * peak(&original) + 1,
             "the careful cap let the excitation past three times its input"

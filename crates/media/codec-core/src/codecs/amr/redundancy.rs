@@ -379,8 +379,8 @@ mod tests {
         scheduler.next_payload(speech(0));
         // A NO_DATA frame goes out, but nothing repeats it later: it carries
         // no audio a receiver could not infer.
-        let gap = AmrPayloadFrame::new(AmrFrameType::NoData, true, Vec::new())
-            .expect("a NO_DATA frame");
+        let gap =
+            AmrPayloadFrame::new(AmrFrameType::NoData, true, Vec::new()).expect("a NO_DATA frame");
         scheduler.next_payload(gap);
         let next = scheduler.next_payload(speech(2));
         assert!(

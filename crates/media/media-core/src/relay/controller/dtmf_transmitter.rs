@@ -223,8 +223,9 @@ async fn run_schedule(
     // duration is never truncated; the final interval below may be shorter
     // than one full tick and carries the exact requested sample duration.
     let total_ticks = duration_ms.div_ceil(20).max(1);
-    let final_duration_samples = u16::try_from(u64::from(duration_ms) * u64::from(clock_rate) / 1000)
-        .map_err(|_| Error::config("DTMF duration exceeds the telephone-event clock range"))?;
+    let final_duration_samples =
+        u16::try_from(u64::from(duration_ms) * u64::from(clock_rate) / 1000)
+            .map_err(|_| Error::config("DTMF duration exceeds the telephone-event clock range"))?;
 
     // Start packet: E=0, marker=1, duration = one tick.
     let mut duration_samples: u16 = per_tick;
@@ -405,7 +406,11 @@ mod tests {
             } => {
                 assert_eq!(event, 5, "event code maps to digit '5'");
                 assert!(!end_of_event, "start packet must have E=0");
-                assert_eq!(duration, samples_per_tick(DEFAULT_CLOCK_RATE), "start packet carries one tick");
+                assert_eq!(
+                    duration,
+                    samples_per_tick(DEFAULT_CLOCK_RATE),
+                    "start packet carries one tick"
+                );
             }
             other => panic!("expected start DtmfEvent, got {:?}", other),
         }

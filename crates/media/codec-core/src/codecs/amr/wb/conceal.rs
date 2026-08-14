@@ -199,8 +199,10 @@ impl Erasure {
     /// own guess, and feeding it back would let one erasure define the pitch
     /// contour for the next five.
     pub fn note_good_subframe(&mut self, lag: u16, pitch_gain: Word16) {
-        self.lags
-            .push(Word16(i16::try_from(lag).unwrap_or(RESET_LAG.0)), pitch_gain);
+        self.lags.push(
+            Word16(i16::try_from(lag).unwrap_or(RESET_LAG.0)),
+            pitch_gain,
+        );
     }
 
     /// A substituted innovation vector for a frame that carried no usable bits,
@@ -428,7 +430,11 @@ mod tests {
         for _ in 0..20 {
             e.begin_frame(FrameQuality::Bad);
         }
-        assert_eq!(e.severity(), 6, "the attenuation tables only have seven rows");
+        assert_eq!(
+            e.severity(),
+            6,
+            "the attenuation tables only have seven rows"
+        );
     }
 
     #[test]
@@ -437,7 +443,10 @@ mod tests {
         e.begin_frame(FrameQuality::Good);
         assert!(!e.previous_frame_was_bad());
         e.begin_frame(FrameQuality::Bad);
-        assert!(!e.previous_frame_was_bad(), "the flag is about the frame before");
+        assert!(
+            !e.previous_frame_was_bad(),
+            "the flag is about the frame before"
+        );
         e.begin_frame(FrameQuality::Good);
         assert!(e.previous_frame_was_bad());
         e.begin_frame(FrameQuality::Good);
@@ -455,7 +464,10 @@ mod tests {
         // reach the output.
         let (lag, frac) = e.pitch_lag(&mut ctx, 200, 3, FrameQuality::Unusable);
         assert_eq!(lag, 80);
-        assert_eq!(frac, 0, "a guessed lag does not get a quarter-sample fraction");
+        assert_eq!(
+            frac, 0,
+            "a guessed lag does not get a quarter-sample fraction"
+        );
     }
 
     #[test]
@@ -546,7 +558,10 @@ mod tests {
         }
         e.begin_frame(FrameQuality::Unusable);
         let (lag, _) = e.pitch_lag(&mut ctx, 0, 0, FrameQuality::Unusable);
-        assert_eq!(lag, 100, "the history drifted, so concealed lags fed back into it");
+        assert_eq!(
+            lag, 100,
+            "the history drifted, so concealed lags fed back into it"
+        );
     }
 
     #[test]
@@ -563,7 +578,14 @@ mod tests {
             "the substituted innovation exceeds the codebook's Q9 headroom"
         );
         // It must actually vary; a constant vector is a dead generator.
-        let distinct = code.iter().map(|c| c.0).collect::<std::collections::BTreeSet<_>>();
-        assert!(distinct.len() > 32, "only {} distinct samples", distinct.len());
+        let distinct = code
+            .iter()
+            .map(|c| c.0)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            distinct.len() > 32,
+            "only {} distinct samples",
+            distinct.len()
+        );
     }
 }

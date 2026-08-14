@@ -92,11 +92,7 @@ mod tests {
                 } else {
                     (i32::from(num) << 15) / i32::from(var2)
                 };
-                assert_eq!(
-                    i32::from(got),
-                    want,
-                    "div_s({num}, {var2})"
-                );
+                assert_eq!(i32::from(got), want, "div_s({num}, {var2})");
             }
         }
     }

@@ -8,10 +8,10 @@ use super::{features_update::refine_marker, VadState};
 use crate::codecs::g729::impls::constants::{M, NP};
 use crate::codecs::g729::impls::dsp::arith::{add, extract_h, mult, sub};
 use crate::codecs::g729::impls::dsp::arith32::{l_deposit_h, l_mac};
-use crate::codecs::g729::impls::math::Log2;
 use crate::codecs::g729::impls::dsp::oper32::{l_comp, mpy_32_16};
 use crate::codecs::g729::impls::dsp::shift::{l_shl, shr};
 use crate::codecs::g729::impls::dsp::types::{DspContext, Word16, Word32};
+use crate::codecs::g729::impls::math::Log2;
 use crate::codecs::g729::impls::tables::sid::LBF_CORR;
 use crate::codecs::g729::impls::tables::vad::{INIT_FRAME, NOISE, VOICE, ZC_END, ZC_START};
 

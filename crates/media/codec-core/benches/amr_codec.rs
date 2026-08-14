@@ -86,17 +86,13 @@ fn bench_encode(c: &mut Criterion) {
             let frames: Vec<Vec<i16>> = (0..8).map(|i| frame(variant, i)).collect();
             let mut at = 0usize;
 
-            group.bench_with_input(
-                BenchmarkId::new(label, mode.bitrate()),
-                &mode,
-                |b, _| {
-                    b.iter(|| {
-                        let pcm = &frames[at % frames.len()];
-                        at += 1;
-                        black_box(codec.encode_frame(black_box(pcm)).expect("encodes"))
-                    });
-                },
-            );
+            group.bench_with_input(BenchmarkId::new(label, mode.bitrate()), &mode, |b, _| {
+                b.iter(|| {
+                    let pcm = &frames[at % frames.len()];
+                    at += 1;
+                    black_box(codec.encode_frame(black_box(pcm)).expect("encodes"))
+                });
+            });
         }
     }
     group.finish();
@@ -115,17 +111,13 @@ fn bench_decode(c: &mut Criterion) {
 
             let mut codec = codec_core::codecs::amr::AmrCodec::new(&config).expect("constructs");
             let mut at = 0usize;
-            group.bench_with_input(
-                BenchmarkId::new(label, mode.bitrate()),
-                &mode,
-                |b, _| {
-                    b.iter(|| {
-                        let coded = &payloads[at % payloads.len()];
-                        at += 1;
-                        black_box(codec.decode_frame(black_box(coded)).expect("decodes"))
-                    });
-                },
-            );
+            group.bench_with_input(BenchmarkId::new(label, mode.bitrate()), &mode, |b, _| {
+                b.iter(|| {
+                    let coded = &payloads[at % payloads.len()];
+                    at += 1;
+                    black_box(codec.decode_frame(black_box(coded)).expect("decodes"))
+                });
+            });
         }
     }
     group.finish();

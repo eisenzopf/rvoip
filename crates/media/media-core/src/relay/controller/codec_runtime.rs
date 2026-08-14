@@ -6,10 +6,10 @@
 
 use tokio::sync::Mutex;
 
-use crate::codec::audio::common::AudioCodec;
-use crate::codec::audio::G711Codec;
 #[cfg(any(feature = "amr-nb", feature = "amr-wb"))]
 use crate::codec::audio::amr::AmrAdapter;
+use crate::codec::audio::common::AudioCodec;
+use crate::codec::audio::G711Codec;
 #[cfg(feature = "g729")]
 use crate::codec::audio::{G729Annexes, G729Codec, G729Config};
 #[cfg(feature = "opus")]
@@ -21,8 +21,8 @@ use crate::types::SampleRate;
 
 use super::types::{
     MediaConfig, NegotiatedAudioCodec, AMR_AUTO_CMR_PARAMETER, AMR_DTX_PARAMETER,
-    AUDIO_CHANNELS_PARAMETER,
-    NEGOTIATED_FMTP_PARAMETER, RTP_CLOCK_RATE_PARAMETER, RTP_PAYLOAD_TYPE_PARAMETER,
+    AUDIO_CHANNELS_PARAMETER, NEGOTIATED_FMTP_PARAMETER, RTP_CLOCK_RATE_PARAMETER,
+    RTP_PAYLOAD_TYPE_PARAMETER,
 };
 
 fn parse_parameter<T>(config: &MediaConfig, key: &str) -> Result<Option<T>>
@@ -88,13 +88,17 @@ pub(super) fn resolve_codec(config: &MediaConfig) -> Result<NegotiatedAudioCodec
             // always carries the negotiated one.
             "AMR" => {
                 #[cfg(not(feature = "amr-nb"))]
-                return Err(Error::unsupported_codec("AMR (enable the `amr-nb` feature)"));
+                return Err(Error::unsupported_codec(
+                    "AMR (enable the `amr-nb` feature)",
+                ));
                 #[cfg(feature = "amr-nb")]
                 ("AMR", 96, 8_000, 1)
             }
             "AMRWB" => {
                 #[cfg(not(feature = "amr-wb"))]
-                return Err(Error::unsupported_codec("AMR-WB (enable the `amr-wb` feature)"));
+                return Err(Error::unsupported_codec(
+                    "AMR-WB (enable the `amr-wb` feature)",
+                ));
                 #[cfg(feature = "amr-wb")]
                 ("AMR-WB", 97, 16_000, 1)
             }
@@ -570,10 +574,9 @@ mod tests {
             RTP_PAYLOAD_TYPE_PARAMETER.to_string(),
             payload_type.to_string(),
         );
-        config.parameters.insert(
-            RTP_CLOCK_RATE_PARAMETER.to_string(),
-            clock_rate.to_string(),
-        );
+        config
+            .parameters
+            .insert(RTP_CLOCK_RATE_PARAMETER.to_string(), clock_rate.to_string());
         config
             .parameters
             .insert(NEGOTIATED_FMTP_PARAMETER.to_string(), fmtp.to_string());
@@ -594,8 +597,13 @@ mod tests {
         assert_eq!(nb.clock_rate, 8_000);
         assert_eq!(nb.fmtp.as_deref(), Some("octet-align=1"));
 
-        let wb = resolve_codec(&amr_config("AMR-WB", 97, 16_000, "octet-align=1;mode-set=0,2"))
-            .expect("AMR-WB");
+        let wb = resolve_codec(&amr_config(
+            "AMR-WB",
+            97,
+            16_000,
+            "octet-align=1;mode-set=0,2",
+        ))
+        .expect("AMR-WB");
         assert_eq!(wb.name, "AMR-WB");
         assert_eq!(wb.clock_rate, 16_000, "AMR-WB is a 16 kHz codec");
         assert_eq!(wb.fmtp.as_deref(), Some("octet-align=1;mode-set=0,2"));
@@ -607,7 +615,10 @@ mod tests {
             // name was *recognised* rather than falling through to
             // `unsupported_codec`.
             assert!(
-                !matches!(resolved, Err(Error::Codec(CodecError::UnsupportedCodec { .. }))),
+                !matches!(
+                    resolved,
+                    Err(Error::Codec(CodecError::UnsupportedCodec { .. }))
+                ),
                 "`{spelling}` was not recognised as AMR"
             );
         }
@@ -650,11 +661,13 @@ mod tests {
     #[test]
     #[cfg(all(feature = "amr-nb", feature = "amr-wb"))]
     fn a_resolved_amr_codec_round_trips_through_the_runtime() {
-        for (name, payload_type, clock_rate, samples) in
-            [("AMR", 96u8, 8_000u32, 160usize), ("AMR-WB", 97, 16_000, 320)]
-        {
-            let resolved = resolve_codec(&amr_config(name, payload_type, clock_rate, "octet-align=1"))
-                .expect("resolves");
+        for (name, payload_type, clock_rate, samples) in [
+            ("AMR", 96u8, 8_000u32, 160usize),
+            ("AMR-WB", 97, 16_000, 320),
+        ] {
+            let resolved =
+                resolve_codec(&amr_config(name, payload_type, clock_rate, "octet-align=1"))
+                    .expect("resolves");
             let mut codec = StatefulCodec::new(&resolved).expect("constructs");
 
             let pcm: Vec<i16> = (0..samples)
@@ -666,7 +679,11 @@ mod tests {
             assert!(!payload.is_empty(), "{name}: empty payload");
 
             let decoded = codec.decode(&payload).expect("decodes");
-            assert_eq!(decoded.samples.len(), samples, "{name}: decoded frame length");
+            assert_eq!(
+                decoded.samples.len(),
+                samples,
+                "{name}: decoded frame length"
+            );
             assert!(
                 decoded.samples.iter().any(|&s| s != 0),
                 "{name}: the round trip produced silence"
@@ -687,7 +704,10 @@ mod tests {
         let mut codec = StatefulCodec::new(&resolved).expect("constructs");
         for length in [80usize, 159, 161, 320] {
             let frame = AudioFrame::new(vec![0i16; length], 8_000, 1, 0);
-            assert!(codec.encode(&frame).is_err(), "{length} samples should be refused");
+            assert!(
+                codec.encode(&frame).is_err(),
+                "{length} samples should be refused"
+            );
         }
     }
 
