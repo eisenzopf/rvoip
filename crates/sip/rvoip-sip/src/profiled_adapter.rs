@@ -231,6 +231,16 @@ impl SipEgressProfileRegistration {
         &self.policy
     }
 
+    /// Borrow the isolated child's coordinator for observation-only
+    /// subscriptions installed by the application before registration.
+    ///
+    /// The composite adapter remains the sole signaling and lifecycle owner;
+    /// callers must use [`UnifiedCoordinator::events`] rather than claiming
+    /// the response-capable control stream.
+    pub fn coordinator(&self) -> &Arc<UnifiedCoordinator> {
+        self.adapter.coordinator()
+    }
+
     /// Stop a child that was constructed successfully but could not be
     /// installed into a composite adapter because a later startup step
     /// failed. This keeps partial profile startup from leaking signaling or
@@ -1005,6 +1015,12 @@ mod tests {
         )
         .await
         .expect("first profile");
+        let observation = first
+            .coordinator()
+            .events()
+            .await
+            .expect("profile coordinator observation stream");
+        drop(observation);
 
         let mut second_config = Config::local("second", 0);
         second_config.offer_srtp = true;
