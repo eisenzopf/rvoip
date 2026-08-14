@@ -29,8 +29,12 @@ struct MockMediaStream {
 
 impl MockMediaStream {
     fn new(name: &str, clock_rate_hz: u32) -> Arc<Self> {
+        Self::with_output_capacity(name, clock_rate_hz, 16)
+    }
+
+    fn with_output_capacity(name: &str, clock_rate_hz: u32, output_capacity: usize) -> Arc<Self> {
         let (inbound_tx, inbound_rx) = mpsc::channel(16);
-        let (outbound_tx, outbound_rx) = mpsc::channel(16);
+        let (outbound_tx, outbound_rx) = mpsc::channel(output_capacity);
         Arc::new(Self {
             id: StreamId::new(),
             codec: CodecInfo {
@@ -295,4 +299,63 @@ async fn bridge_retains_stream_owners_until_teardown() {
     bridge.stop();
     assert!(sip_weak.upgrade().is_none());
     assert!(connect_weak.upgrade().is_none());
+}
+
+#[tokio::test]
+async fn connect_startup_backpressure_does_not_evict_the_media_route() {
+    const STARTUP_FRAMES: usize = 75;
+    let sip = MockMediaStream::new("pcmu", 8_000);
+    let connect = MockMediaStream::with_output_capacity("opus", 48_000, 1);
+    let mut connect_output = connect.take_output();
+    let bridge = bridge_streams(
+        Arc::clone(&sip) as Arc<dyn MediaStream>,
+        Arc::clone(&connect) as Arc<dyn MediaStream>,
+    )
+    .expect("create SIP-to-Connect bridge");
+
+    for index in 0..STARTUP_FRAMES {
+        sip.inject(Bytes::from(vec![0xff; 160]), 0, index as u32 * 160)
+            .await;
+    }
+
+    let snapshot = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let snapshot = bridge.a_graph().snapshot().await;
+            if snapshot.source_frames >= STARTUP_FRAMES as u64 {
+                break snapshot;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("media graph consumes the bounded startup burst");
+    assert_eq!(
+        snapshot.evictions, 0,
+        "startup stall must not evict Connect"
+    );
+    assert_eq!(snapshot.sinks.len(), 1, "Connect route remains installed");
+    assert!(
+        snapshot.dropped_frames > 0,
+        "fixture exercises backpressure"
+    );
+
+    // Releasing the downstream stall must resume delivery on the same route.
+    let first = tokio::time::timeout(Duration::from_secs(2), connect_output.recv())
+        .await
+        .expect("Connect output resumes")
+        .expect("Connect output remains open");
+    assert_eq!(first.payload_type, Some(111));
+    let resumed_timestamp = snapshot.source_frames as u32 * 960;
+    sip.inject(Bytes::from(vec![0xff; 160]), 0, resumed_timestamp / 6)
+        .await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(frame) = connect_output.recv().await {
+            if frame.timestamp_rtp >= resumed_timestamp {
+                return;
+            }
+        }
+        panic!("Connect output closed after its startup stall");
+    })
+    .await
+    .expect("post-stall media reaches Connect");
 }

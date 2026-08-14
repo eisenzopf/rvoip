@@ -333,6 +333,12 @@ where
                 }
             }
 
+            // Entries are removed from the back so indices remain valid, but
+            // the answer must preserve the offerer's preference order.  In
+            // particular, reversing an `opus, PCMU, PCMA` offer makes browsers
+            // select PCMA while the rest of the connection still records Opus
+            // as the negotiated primary codec.
+            filtered_codecs.reverse();
             filtered_codecs
         };
 

@@ -638,7 +638,7 @@ pub(crate) fn draw_ui(frame: &mut Frame<'_>, app: &TuiApp) {
             Constraint::Min(12),
             Constraint::Length(5),
         ])
-        .split(frame.size());
+        .split(frame.area());
 
     draw_header(frame, app, root[0]);
 

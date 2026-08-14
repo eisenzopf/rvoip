@@ -47,6 +47,10 @@ name = "rtc"
 path = "src/lib.rs"
 
 [[test]]
+name = "answer_codec_preference_order"
+path = "tests/answer_codec_preference_order.rs"
+
+[[test]]
 name = "data_channels_close_by_rtc_interop"
 path = "tests/data_channels_close_by_rtc_interop.rs"
 
@@ -177,7 +181,7 @@ version = "=0.20.0-alpha.1"
 package = "rtc-interceptor-derive"
 
 [dependencies.log]
-version = "0.4.29"
+workspace = true
 
 [dependencies.mdns]
 version = "=0.20.0-alpha.1"
@@ -195,14 +199,11 @@ optional = true
 version = "0.9.2"
 
 [dependencies.rcgen]
-version = "0.14.6"
-features = [
-    "pem",
-    "x509-parser",
-]
+workspace = true
+features = ["pem", "x509-parser"]
 
 [dependencies.ring]
-version = "0.17.14"
+workspace = true
 
 [dependencies.rtcp]
 version = "=0.20.0-alpha.1"
@@ -235,11 +236,10 @@ package = "rtc-sdp"
 version = "1"
 
 [dependencies.serde_json]
-version = "1"
-features = []
+workspace = true
 
 [dependencies.sha2]
-version = "0.10"
+workspace = true
 
 [dependencies.shared]
 version = "=0.20.0-alpha.1"
@@ -267,14 +267,13 @@ package = "rtc-turn"
 version = "2.8"
 
 [dependencies.url]
-version = "2"
-features = []
+workspace = true
 
 [dev-dependencies.anyhow]
-version = "1"
+workspace = true
 
 [dev-dependencies.env_logger]
-version = "0.11.8"
+workspace = true
 
 [dev-dependencies.tokio]
 version = "1.49.0"

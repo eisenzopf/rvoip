@@ -297,7 +297,7 @@ fn telephone_event_packet(
 #[allow(clippy::too_many_arguments)]
 async fn write_telephone_event(
     writer: &Arc<OutboundAudioRtpWriter>,
-    mid: &str,
+    mid: Option<&str>,
     codec: TelephoneEventCodec,
     event: u8,
     end_of_event: bool,
@@ -311,7 +311,7 @@ async fn write_telephone_event(
         payload_type = codec.payload_type,
         clock_rate_hz = codec.clock_rate_hz,
         ssrc = writer.ssrc(),
-        mid,
+        ?mid,
         event,
         end_of_event,
         duration,
@@ -330,7 +330,7 @@ async fn write_telephone_event(
 
 async fn send_single_digit(
     writer: &Arc<OutboundAudioRtpWriter>,
-    mid: &str,
+    mid: Option<&str>,
     codec: TelephoneEventCodec,
     digit: char,
     duration_ms: u32,
@@ -399,19 +399,23 @@ async fn send_single_digit(
 /// payload type and clock rate.
 ///
 /// Telephone events use the primary negotiated audio SSRC, sequence-number
-/// owner, timestamp base, and MID as required by RFC 4733. Pending or
-/// unsupported final SDP fails closed before any packet is written.
+/// owner, and timestamp base as required by RFC 4733, and carry the negotiated
+/// SDES MID when the peer agreed one. Pending or unsupported final SDP fails
+/// closed before any packet is written; a peer that simply never offers the
+/// MID extension does not, since primary audio to that peer is already written
+/// without it.
 pub async fn send_dtmf(
     peer: &Arc<RvoipPeerConnection>,
     digits: &str,
     duration_ms: u32,
 ) -> Result<()> {
     let codec = outbound_codec_for_sender(peer.outbound_dtmf_negotiation())?;
-    // Require the exact mutually negotiated audio MID so BUNDLE demux never
-    // falls back to payload-type or first-m-line heuristics.
-    let mid = peer
-        .negotiated_outbound_audio_mid()
-        .ok_or(WebRtcError::IncompatibleCapabilities)?;
+    // Carry the exact mutually negotiated audio MID when one exists so BUNDLE
+    // demux never falls back to payload-type or first-m-line heuristics. A
+    // peer that does not negotiate the SDES MID extension at all (Amazon
+    // Connect) still receives events on the primary audio SSRC, exactly as it
+    // receives primary audio.
+    let mid = peer.negotiated_outbound_audio_mid();
     let digits = digits
         .chars()
         .filter(|digit| !digit.is_whitespace())
@@ -422,7 +426,7 @@ pub async fn send_dtmf(
         .outbound_audio_writer()
         .ok_or(WebRtcError::IncompatibleCapabilities)?;
     for (index, digit) in digits.iter().copied().enumerate() {
-        send_single_digit(&writer, &mid, codec, digit, duration_ms).await?;
+        send_single_digit(&writer, mid.as_deref(), codec, digit, duration_ms).await?;
         if index + 1 < digits.len() {
             tokio::time::sleep(TICK).await;
         }

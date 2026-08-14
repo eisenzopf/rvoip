@@ -1077,6 +1077,7 @@ struct DirectionalGraphSource {
     connection_id: ConnectionId,
     stream: Arc<dyn crate::stream::MediaStream>,
     codec: crate::capability::CodecInfo,
+    policy: MediaGraphPolicy,
 }
 
 struct ReservedDirectionalGraphSource {
@@ -1084,6 +1085,20 @@ struct ReservedDirectionalGraphSource {
     transport: Transport,
     lifecycle: ConnectionLifecycleTicket,
     receiver: MediaReceiverReservation,
+}
+
+// Amazon Connect's Chime WebRTC sender can briefly stop draining outbound
+// media while its contact and DTLS/SRTP state converge. The graph remains
+// bounded and drop-oldest during that pause; only slow-consumer eviction is
+// delayed from one second to five seconds of 20 ms audio.
+const AMAZON_CONNECT_MINIMUM_EVICTION_SAMPLES: usize = 250;
+
+fn directional_bridge_media_graph_policy(left: Transport, right: Transport) -> MediaGraphPolicy {
+    let mut policy = MediaGraphPolicy::default();
+    if matches!(left, Transport::AmazonConnect) || matches!(right, Transport::AmazonConnect) {
+        policy.minimum_eviction_samples = AMAZON_CONNECT_MINIMUM_EVICTION_SAMPLES;
+    }
+    policy
 }
 
 pub struct Orchestrator {
@@ -9595,6 +9610,10 @@ impl Orchestrator {
         b_stream: Arc<dyn crate::stream::MediaStream>,
         media_plan: DirectionalMediaBridgePlan,
     ) -> Result<(Option<MediaGraphHandle>, Option<MediaGraphHandle>)> {
+        let bridge_policy = directional_bridge_media_graph_policy(
+            self.connection_transport(&a)?,
+            self.connection_transport(&b)?,
+        );
         let mut sources = Vec::with_capacity(2);
         if media_plan.a_to_b() {
             sources.push(DirectionalGraphSource {
@@ -9602,6 +9621,7 @@ impl Orchestrator {
                 connection_id: a,
                 codec: a_stream.codec(),
                 stream: a_stream,
+                policy: bridge_policy.clone(),
             });
         }
         if media_plan.b_to_a() {
@@ -9610,6 +9630,7 @@ impl Orchestrator {
                 connection_id: b,
                 codec: b_stream.codec(),
                 stream: b_stream,
+                policy: bridge_policy,
             });
         }
         sources.sort_by(|left, right| left.connection_id.cmp(&right.connection_id));
@@ -9689,8 +9710,9 @@ impl Orchestrator {
         for reserved_source in reserved {
             let connection_id = reserved_source.source.connection_id.clone();
             let codec = reserved_source.source.codec;
+            let policy = reserved_source.source.policy;
             let receiver = reserved_source.receiver.commit();
-            let graph = start_media_graph(receiver, codec, MediaGraphPolicy::default())
+            let graph = start_media_graph(receiver, codec, policy)
                 .expect("directional graph codec was validated before receiver commit");
             self.media_graphs
                 .insert(connection_id.clone(), graph.clone());
@@ -9921,6 +9943,24 @@ impl Orchestrator {
     /// Return the latest retained operational snapshot for a connection's
     /// reusable source graph. The snapshot is aggregate-safe and contains no
     /// tenant, participant, or packet payload data.
+    /// Discard queued media on a connection's graph — barge-in.
+    ///
+    /// Audio already queued for playout is stale the moment the far party
+    /// starts speaking. Without this the jitter-buffer depth becomes the
+    /// barge-in latency floor: the agent keeps talking for the buffer's worth
+    /// of time after the caller interrupts. Asterisk (`FLUSH_MEDIA`), Twilio
+    /// (`clear`) and jambonz (`killAudio`) all expose the same primitive.
+    ///
+    /// Returns the number of frames discarded, or `None` if the connection has
+    /// no media graph.
+    pub async fn flush_media_graph(&self, connection_id: &ConnectionId) -> Option<usize> {
+        let graph = self
+            .media_graphs
+            .get(connection_id)
+            .map(|entry| entry.value().clone())?;
+        graph.flush_sinks_and_wait().await.ok()
+    }
+
     pub fn media_graph_latest_snapshot(
         &self,
         connection_id: &ConnectionId,
@@ -10249,6 +10289,44 @@ mod cross_crate_publisher_tests {
     use rvoip_infra_common::events::cross_crate::RvoipCoreCrossCrateEvent;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::Semaphore as TokioSemaphore;
+
+    #[test]
+    fn amazon_connect_directional_bridges_tolerate_startup_backpressure() {
+        for (left, right) in [
+            (Transport::Sip, Transport::AmazonConnect),
+            (Transport::AmazonConnect, Transport::Sip),
+        ] {
+            let default = MediaGraphPolicy::default();
+            let policy = directional_bridge_media_graph_policy(left, right);
+            assert_eq!(
+                policy.minimum_eviction_samples,
+                AMAZON_CONNECT_MINIMUM_EVICTION_SAMPLES
+            );
+            // The Connect policy overrides only minimum_eviction_samples, so the
+            // queue sizes must track the default rather than a literal. Asserting
+            // the v0.3.5 values here is what broke when the default moved to 25.
+            assert_eq!(policy.sink_queue_frames, default.sink_queue_frames);
+            assert_eq!(
+                policy.pre_sink_buffer_frames,
+                default.pre_sink_buffer_frames
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_directional_bridges_retain_default_eviction_policy() {
+        let default = MediaGraphPolicy::default();
+        let policy = directional_bridge_media_graph_policy(Transport::Sip, Transport::WebRtc);
+        assert_eq!(
+            policy.minimum_eviction_samples,
+            default.minimum_eviction_samples
+        );
+        assert_eq!(policy.sink_queue_frames, default.sink_queue_frames);
+        assert_eq!(
+            policy.pre_sink_buffer_frames,
+            default.pre_sink_buffer_frames
+        );
+    }
 
     struct RecordingSink {
         events: Mutex<Vec<String>>,

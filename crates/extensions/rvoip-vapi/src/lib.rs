@@ -15,6 +15,8 @@ pub mod agent;
 pub mod config;
 pub mod error;
 pub mod events;
+pub mod health;
+mod jitter;
 pub mod types;
 
 pub use adapter::{
@@ -24,4 +26,5 @@ pub use agent::{VapiAgentCall, VapiAgentOutcome};
 pub use config::{VapiApiKey, VapiConfig};
 pub use error::{Result, VapiError};
 pub use events::{VapiEvent, VapiEventEnvelope};
+pub use health::VapiMediaHealth;
 pub use types::{VapiAssistant, VapiAudioFormat, VapiCallOptions, VapiPeerFailurePolicy};

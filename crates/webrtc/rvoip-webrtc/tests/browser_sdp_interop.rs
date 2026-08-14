@@ -392,7 +392,7 @@ async fn receive_only_offer_rejects_outbound_dtmf_before_writing() {
 }
 
 #[tokio::test]
-async fn pending_or_midless_dtmf_fails_closed_before_writing() {
+async fn pending_dtmf_fails_closed_but_a_midless_peer_still_receives_events() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let pending = RvoipPeerConnection::new(&WebRtcConfig::loopback(), PeerRole::Offerer)
         .await
@@ -409,8 +409,10 @@ async fn pending_or_midless_dtmf_fails_closed_before_writing() {
     ));
 
     // This fixture negotiates telephone-event but deliberately has no SDES
-    // MID extmap. The track is not connected, so receiving the capability
-    // error proves rejection happened before a write was attempted.
+    // MID extmap. Telephone events ride the primary negotiated audio SSRC,
+    // which is itself written without a MID against endpoints that never
+    // offer the extension (Amazon Connect), so a missing MID must NOT reject
+    // the digit. Only an unnegotiated or unsupported codec fails closed.
     let adapter = WebRtcAdapter::new(WebRtcConfig::loopback());
     let conn_id = adapter
         .apply_remote_offer(CHROME_MULTI_CODEC_OFFER_SDP)
@@ -425,10 +427,13 @@ async fn pending_or_midless_dtmf_fails_closed_before_writing() {
         OutboundDtmfNegotiation::Negotiated(TelephoneEventCodec::new(110, 48_000))
     );
     assert_eq!(peer.negotiated_outbound_audio_mid(), None);
-    assert!(matches!(
-        rvoip_webrtc::media::dtmf::send_dtmf(&peer, "5", 120).await,
-        Err(WebRtcError::IncompatibleCapabilities)
-    ));
+    assert!(
+        rvoip_webrtc::media::dtmf::send_dtmf(&peer, "5", 120)
+            .await
+            .is_ok(),
+        "a peer that never negotiates SDES MID must still accept DTMF, \
+         because primary audio to that same peer is already written without one"
+    );
 }
 
 #[tokio::test]

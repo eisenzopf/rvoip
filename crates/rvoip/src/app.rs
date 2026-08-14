@@ -37,10 +37,16 @@ use rvoip_core::message::{ContentType, Message, MessageOrigin, MessageRecipients
 use rvoip_core::orchestrator::Orchestrator;
 use rvoip_core::session::SessionMedium;
 use rvoip_core::store::MessageFilter;
+use rvoip_core_traits::identity::{
+    AuthenticatedPrincipal, AuthenticationMethod, IdentityAssurance,
+};
 use rvoip_sip::server::contact_resolver::{
     ContactRequest, ContactResolver, RegistrarContactResolver, ResolvedContact,
 };
-use rvoip_sip::{Config as LowSipConfig, SipAdapter, UnifiedCoordinator};
+use rvoip_sip::{
+    Config as LowSipConfig, IpNet, SipAdapter, SipInboundContextPolicy, SipListenerAuthPolicy,
+    UnifiedCoordinator,
+};
 use rvoip_webrtc::{
     WebRtcAdapter, WebRtcConfig as LowWebRtcConfig, WebRtcServer, WebRtcServerBuilder,
 };
@@ -197,6 +203,12 @@ pub struct SipConfig {
     media_public_addr: Option<SocketAddr>,
     role_capabilities: RoleCapabilities,
     registrar_users: HashMap<String, String>,
+    tenant: Option<String>,
+    /// `(CIDR, subject)` pairs. A request whose source IP falls inside a
+    /// trusted CIDR is admitted with the corresponding principal.
+    trusted_trunks: Vec<(String, String)>,
+    /// `X-*` headers to capture into the inbound context.
+    captured_headers: Vec<String>,
 }
 
 impl SipConfig {
@@ -209,7 +221,52 @@ impl SipConfig {
             media_public_addr: None,
             role_capabilities: RoleCapabilities::default(),
             registrar_users: HashMap::new(),
+            tenant: None,
+            trusted_trunks: Vec::new(),
+            captured_headers: Vec::new(),
         }
+    }
+
+    /// Ownership namespace for every identity this listener admits.
+    ///
+    /// Required by [`Self::trusted_trunk`]: an enabled listener policy without
+    /// a tenant fails closed rather than admitting an unowned principal.
+    pub fn tenant(mut self, tenant: impl Into<String>) -> Self {
+        self.tenant = Some(tenant.into());
+        self
+    }
+
+    /// Trust calls arriving from `cidr` and give them `subject` as their
+    /// identity.
+    ///
+    /// This is the carrier-trunk model: a trunk authenticates by source
+    /// address rather than by digest, so nothing else gives those calls a
+    /// principal. Without a principal the SIP adapter captures no inbound
+    /// context at all, which means **the dialed number is unavailable** and
+    /// DID-based routing cannot work.
+    ///
+    /// `cidr` is parsed at build time; an invalid one fails startup rather
+    /// than silently trusting nothing.
+    pub fn trusted_trunk(mut self, cidr: impl Into<String>, subject: impl Into<String>) -> Self {
+        self.trusted_trunks.push((cidr.into(), subject.into()));
+        self
+    }
+
+    /// Capture these headers from the inbound INVITE into the connection's
+    /// context, readable via `Orchestrator::take_inbound_context`.
+    ///
+    /// Only `X-*` headers are eligible. `From`, `To` and `P-Asserted-Identity`
+    /// are rejected by design — a peer-supplied identity header is a claim, not
+    /// a fact, and admitting one would let whoever is on the trunk influence
+    /// routing.
+    pub fn capture_headers<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.captured_headers
+            .extend(names.into_iter().map(Into::into));
+        self
     }
 
     /// Set the SIP AOR domain/realm.
@@ -660,16 +717,59 @@ impl RvoipAppBuilder {
             }
             let sip_addr = resolve_udp_bind_addr(sip_addr)?;
             let low_sip = make_low_sip_config(&sip, sip_addr);
-            let coordinator = UnifiedCoordinator::new(low_sip)
-                .await
-                .map_err(|error| AppError::Sip(error.to_string()))?;
+
+            // A listener auth policy is what gives an inbound INVITE a
+            // principal, and the SIP adapter captures no inbound context
+            // without one — no dialed number, no custom headers. Left
+            // unconfigured the listener stays disabled, preserving the
+            // previous behaviour.
+            let coordinator = if sip.trusted_trunks.is_empty() {
+                UnifiedCoordinator::new(low_sip).await
+            } else {
+                let tenant = sip.tenant.clone().ok_or_else(|| {
+                    AppError::Policy(
+                        "a tenant is required when trusted trunks are configured: \
+                         every admitted principal must have an owner"
+                            .into(),
+                    )
+                })?;
+                let mut policy = SipListenerAuthPolicy::enabled_for_tenant(&tenant)
+                    .map_err(|error| AppError::Policy(error.to_string()))?;
+                for (cidr, subject) in &sip.trusted_trunks {
+                    let parsed: IpNet = cidr.parse().map_err(|_| {
+                        AppError::Policy(format!(
+                            "trusted trunk CIDR {cidr:?} is not valid, e.g. 203.0.113.0/24"
+                        ))
+                    })?;
+                    policy =
+                        policy.with_trusted_cidr(parsed, trusted_trunk_principal(subject, &tenant));
+                }
+                UnifiedCoordinator::new_with_listener_auth(low_sip, policy).await
+            }
+            .map_err(|error| AppError::Sip(error.to_string()))?;
+
             let registrar = coordinator
                 .start_registration_server(&sip.domain, sip.registrar_users)
                 .await
                 .map_err(|error| AppError::Sip(error.to_string()))?;
-            let adapter = SipAdapter::new(Arc::clone(&coordinator))
-                .await
-                .map_err(|error| AppError::Sip(error.to_string()))?;
+
+            // The default context policy captures no headers at all, so the
+            // allowlist has to be installed explicitly or `metadata()` is
+            // always empty. The Request-URI routing hint comes through either
+            // way, provided a principal exists.
+            let adapter = if sip.captured_headers.is_empty() {
+                SipAdapter::new(Arc::clone(&coordinator)).await
+            } else {
+                let policy =
+                    SipInboundContextPolicy::new(&sip.captured_headers).map_err(|error| {
+                        AppError::Policy(format!(
+                            "inbound header allowlist rejected: {error:?}. \
+                         Only X-* headers are eligible."
+                        ))
+                    })?;
+                SipAdapter::new_with_inbound_context_policy(Arc::clone(&coordinator), policy).await
+            }
+            .map_err(|error| AppError::Sip(error.to_string()))?;
             orchestrator.register(adapter as Arc<dyn ConnectionAdapter>)?;
             if employee_voice {
                 for employee in &self.employees.employees {
@@ -1398,6 +1498,26 @@ async fn serve_customer_html(State(state): State<StaticState>) -> impl IntoRespo
             Html(format!("failed to read customer page: {error}")),
         )
             .into_response(),
+    }
+}
+
+/// The identity a call arriving from a trusted trunk is admitted with.
+///
+/// Trust here derives from network location, not from a presented credential.
+/// `AuthenticationMethod` has no variant for that, so `ApiKey` is used as the
+/// closest available sense — an out-of-band arrangement rather than a
+/// challenge-response — matching how rvoip's own listener tests construct a
+/// trusted-CIDR principal. The scope is the minimum needed to attach a call.
+#[cfg(feature = "sip")]
+fn trusted_trunk_principal(subject: &str, tenant: &str) -> AuthenticatedPrincipal {
+    AuthenticatedPrincipal {
+        subject: subject.to_owned(),
+        tenant: Some(tenant.to_owned()),
+        scopes: vec!["call:attach".to_owned()],
+        issuer: Some("rvoip-app-trusted-trunk".to_owned()),
+        expires_at: None,
+        method: AuthenticationMethod::ApiKey,
+        assurance: IdentityAssurance::Anonymous,
     }
 }
 

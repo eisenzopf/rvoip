@@ -24,8 +24,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    let bob_port = env_port("BOB_PORT", 5061);
-    let charlie_port = env_port("CHARLIE_PORT", 5062);
+    // Defaults avoid the combined examples-smoke ports used by quickstart-p2p
+    // (5060/5061) and secure-call-srtp (5060).
+    let bob_port = env_port("BOB_PORT", 5081);
+    let charlie_port = env_port("CHARLIE_PORT", 5082);
 
     let mut bob = StreamPeer::with_config(Config::local("bob", bob_port)).await?;
     println!("[BOB] Waiting for call...");
@@ -55,10 +57,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .transfer_attended(&format!("sip:charlie@127.0.0.1:{charlie_port}"), &replaces)
         .await?;
 
-    // Give Alice time to place the replacing INVITE, then drop both legs.
-    sleep(Duration::from_secs(3)).await;
-    let _ = alice_leg.hangup_and_wait(Some(Duration::from_secs(5))).await;
-    let _ = consult.hangup_and_wait(Some(Duration::from_secs(5))).await;
+    // Give Alice time to place the replacing INVITE and observe answer before
+    // tearing down the consultation/original legs.
+    sleep(Duration::from_secs(12)).await;
+    let _ = alice_leg.hangup_and_wait(Some(Duration::from_secs(3))).await;
+    let _ = consult.hangup_and_wait(Some(Duration::from_secs(3))).await;
     println!("[BOB] Done.");
-    std::process::exit(0);
+    Ok(())
 }

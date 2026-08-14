@@ -24,7 +24,7 @@ restructure is planned.
 
 ```toml
 [dependencies]
-rvoip-auth-core = "0.3.5"
+rvoip-auth-core = "0.3.7"
 ```
 
 ## Where to start

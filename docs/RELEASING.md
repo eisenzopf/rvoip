@@ -12,7 +12,7 @@ remain experimental.
 ## Prepare
 
 Use the **Prepare release PR** workflow with the next version, for example
-`0.3.6`. It checks out the current `main`, runs the unified preparation and
+`0.3.7`. It checks out the current `main`, runs the unified preparation and
 release-tooling tests, and opens a draft release pull request. The release PR
 must pass the normal `PR Gate`; it is never pushed directly to `main`.
 

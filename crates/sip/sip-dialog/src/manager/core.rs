@@ -4110,8 +4110,21 @@ impl DialogManager {
         dialog_id: DialogId,
         transaction_id: TransactionKey,
         _request: rvoip_sip_core::Request,
-        _source: SocketAddr,
+        source: SocketAddr,
     ) {
+        // A wildcard Contact is useful while a UAC is binding its socket, but
+        // it is never a routable next hop. Retain the transaction-observed
+        // packet source so later UAS-originated in-dialog requests can use the
+        // active signaling path without changing their Contact-derived
+        // Request-URI. Routable Contacts remain authoritative.
+        if let Some(mut dialog) = self.dialogs.get_mut(&dialog_id) {
+            if matches!(
+                dialog.remote_target.host,
+                rvoip_sip_core::Host::Address(address) if address.is_unspecified()
+            ) {
+                dialog.update_remote_address(source);
+            }
+        }
         self.session_to_dialog
             .insert(session_id.to_string(), dialog_id.clone());
         self.dialog_to_session
@@ -4767,6 +4780,20 @@ mod outbound_flow_handler_tests {
                 })
                 .collect()
         }
+
+        async fn request_destinations(&self, method: Method) -> Vec<(String, SocketAddr)> {
+            self.sent
+                .lock()
+                .await
+                .iter()
+                .filter_map(|(message, destination)| match message {
+                    rvoip_sip_core::Message::Request(request) if request.method() == method => {
+                        Some((request.uri().to_string(), *destination))
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
     }
 
     impl NoopTransport {
@@ -4944,6 +4971,162 @@ mod outbound_flow_handler_tests {
         *manager.session_coordinator.write().await = Some(sc_tx);
 
         (manager, sc_rx)
+    }
+
+    async fn make_recording_manager() -> (DialogManager, Arc<CancelRecordingTransport>) {
+        let transport = CancelRecordingTransport::new();
+        let transaction_transport: Arc<dyn Transport> = transport.clone();
+        let (_transport_tx, transport_rx) = mpsc::channel::<TransportEvent>(16);
+        let (transaction_manager, mut transaction_events) =
+            TransactionManager::new(transaction_transport, transport_rx, Some(16))
+                .await
+                .expect("build recording TransactionManager");
+        tokio::spawn(async move { while transaction_events.recv().await.is_some() {} });
+        let manager = DialogManager::new(
+            Arc::new(transaction_manager),
+            SocketAddr::from_str("127.0.0.1:5060").unwrap(),
+        )
+        .await
+        .expect("build recording DialogManager");
+        (manager, transport)
+    }
+
+    fn inbound_invite(contact: &str) -> Request {
+        SimpleRequestBuilder::new(Method::Invite, "sip:service@127.0.0.1:5060")
+            .unwrap()
+            .from("Caller", "sip:caller@example.invalid", Some("caller-tag"))
+            .to("Service", "sip:service@127.0.0.1:5060", None)
+            .call_id("symmetric-dialog-call")
+            .cseq(1)
+            .via("0.0.0.0:5076", "UDP", Some("z9hG4bK-symmetric-dialog"))
+            .contact(contact, None)
+            .max_forwards(70)
+            .build()
+    }
+
+    #[tokio::test]
+    async fn wildcard_contact_uses_observed_source_for_uas_bye() {
+        let (manager, transport) = make_recording_manager().await;
+        let observed_source = SocketAddr::from_str("203.0.113.10:2339").unwrap();
+        let remote_target: Uri = "sip:caller@0.0.0.0:5076".parse().unwrap();
+        let mut dialog = Dialog::new(
+            "symmetric-dialog-call".to_string(),
+            "sip:service@127.0.0.1:5060".parse().unwrap(),
+            remote_target,
+            Some("service-tag".to_string()),
+            Some("caller-tag".to_string()),
+            false,
+        );
+        dialog.state = DialogState::Confirmed;
+        let dialog_id = dialog.id.clone();
+        manager.store_dialog(dialog).await.expect("store dialog");
+        manager.store_dialog_mapping(
+            "symmetric-dialog-session",
+            dialog_id.clone(),
+            TransactionKey::new("z9hG4bK-symmetric-dialog".to_string(), Method::Invite, true),
+            inbound_invite("sip:caller@0.0.0.0:5076"),
+            observed_source,
+        );
+
+        assert_eq!(
+            manager
+                .get_dialog(&dialog_id)
+                .expect("stored dialog")
+                .last_known_remote_addr,
+            Some(observed_source)
+        );
+        manager
+            .send_request(&dialog_id, Method::Bye, None)
+            .await
+            .expect("send UAS BYE");
+
+        let sent = transport.request_destinations(Method::Bye).await;
+        assert_eq!(
+            sent.first(),
+            Some(&("sip:caller@0.0.0.0:5076".to_string(), observed_source))
+        );
+    }
+
+    #[tokio::test]
+    async fn routable_contact_does_not_use_observed_source_for_uas_bye() {
+        let (manager, transport) = make_recording_manager().await;
+        let observed_source = SocketAddr::from_str("203.0.113.10:2339").unwrap();
+        let advertised_target = SocketAddr::from_str("192.0.2.25:5076").unwrap();
+        let remote_target: Uri = "sip:caller@192.0.2.25:5076".parse().unwrap();
+        let mut dialog = Dialog::new(
+            "routable-dialog-call".to_string(),
+            "sip:service@127.0.0.1:5060".parse().unwrap(),
+            remote_target,
+            Some("service-tag".to_string()),
+            Some("caller-tag".to_string()),
+            false,
+        );
+        dialog.state = DialogState::Confirmed;
+        let dialog_id = dialog.id.clone();
+        manager.store_dialog(dialog).await.expect("store dialog");
+        manager.store_dialog_mapping(
+            "routable-dialog-session",
+            dialog_id.clone(),
+            TransactionKey::new("z9hG4bK-routable-dialog".to_string(), Method::Invite, true),
+            inbound_invite("sip:caller@192.0.2.25:5076"),
+            observed_source,
+        );
+
+        assert_eq!(
+            manager
+                .get_dialog(&dialog_id)
+                .expect("stored dialog")
+                .last_known_remote_addr,
+            None
+        );
+        manager
+            .send_request(&dialog_id, Method::Bye, None)
+            .await
+            .expect("send UAS BYE");
+
+        let sent = transport.request_destinations(Method::Bye).await;
+        assert_eq!(
+            sent.first(),
+            Some(&("sip:caller@192.0.2.25:5076".to_string(), advertised_target,))
+        );
+    }
+
+    #[tokio::test]
+    async fn route_set_is_not_bypassed_by_observed_source_for_uas_bye() {
+        let (manager, transport) = make_recording_manager().await;
+        let observed_source = SocketAddr::from_str("203.0.113.10:2339").unwrap();
+        let proxy = SocketAddr::from_str("192.0.2.44:5080").unwrap();
+        let remote_target: Uri = "sip:caller@0.0.0.0:5076".parse().unwrap();
+        let mut dialog = Dialog::new(
+            "routed-dialog-call".to_string(),
+            "sip:service@127.0.0.1:5060".parse().unwrap(),
+            remote_target,
+            Some("service-tag".to_string()),
+            Some("caller-tag".to_string()),
+            false,
+        );
+        dialog.state = DialogState::Confirmed;
+        dialog.route_set = vec!["sip:proxy@192.0.2.44:5080;lr".parse().unwrap()];
+        let dialog_id = dialog.id.clone();
+        manager.store_dialog(dialog).await.expect("store dialog");
+        manager.store_dialog_mapping(
+            "routed-dialog-session",
+            dialog_id.clone(),
+            TransactionKey::new("z9hG4bK-routed-dialog".to_string(), Method::Invite, true),
+            inbound_invite("sip:caller@0.0.0.0:5076"),
+            observed_source,
+        );
+
+        manager
+            .send_request(&dialog_id, Method::Bye, None)
+            .await
+            .expect("send routed UAS BYE");
+
+        let sent = transport.request_destinations(Method::Bye).await;
+        assert_eq!(
+            sent.first(),
+            Some(&("sip:caller@0.0.0.0:5076".to_string(), proxy))
+        );
     }
 
     async fn make_selected_success_manager(

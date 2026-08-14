@@ -115,7 +115,7 @@ OPENSIPS_PACKAGES = {
     "opensips-tls-openssl-module": {
         "version": "3.6.7-1",
         "deb_sha256": (
-            "05e0c80de73b352390981352f08183f9acc3dd0187577688c4c174f94fd9bc68"
+            "690c52e06b9d0f8d76483900a4185f3a3d7cc3ec30a752ff762bdca254750209"
         ),
     },
 }
@@ -137,7 +137,7 @@ OPENSIPS_MODULES = {
             "/usr/lib/x86_64-linux-gnu/opensips/modules/tls_openssl.so"
         ),
         "sha256": (
-            "ec8dbf7164f48b8ae6298f4d014980f567ef4d7cc426ce39d83071b4a4ca956e"
+            "77714d25e26933b4a18408b3ef65bad75400d5840d1bcf58efde99292e21ba6f"
         ),
     },
 }
