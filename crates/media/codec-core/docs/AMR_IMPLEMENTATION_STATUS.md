@@ -734,7 +734,13 @@ the rate.
   weakest margin across all 17 was 8,508× (AMR-WB mode 0, the 6.6 kbit/s rate,
   where a lower margin is expected); the strongest was 116,348×.
 
-Reproduce with the sweep tool, which is what produced the rows above:
+These rows are a release gate, not a one-off run. `interop.amr-rate-sweep`
+aggregates four cells — narrowband and wideband over each transport — in the
+`remote-release` profile, with its own Asterisk lab up/down chain so a failing
+sweep still tears the lab down. The gate fails, rather than reporting, when a
+cell's codec was not built at the mode it pinned.
+
+Reproduce locally with the same tool the gate runs:
 
 ```bash
 for transport in UDP TLS; do

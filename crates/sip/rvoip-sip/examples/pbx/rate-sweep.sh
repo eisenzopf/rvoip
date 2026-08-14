@@ -32,7 +32,12 @@ set -uo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 WORKSPACE_ROOT=$(cd "$SCRIPT_DIR/../../../../.." && pwd)
-OUT_ROOT="$SCRIPT_DIR/output"
+# Same resolution as run.sh, and it has to be: this script reads the logs and
+# analyser output that run.sh writes. Hardcoding the local default would send
+# a release gate -- which sets PBX_OUT_ROOT to its artifact directory --
+# looking in the developer tree, where it would find either nothing or a
+# previous local run to misreport.
+OUT_ROOT="${PBX_OUT_ROOT:-$SCRIPT_DIR/output}"
 
 PROFILE=amrnb
 TRANSPORT=UDP

@@ -66,6 +66,22 @@ PROXY_PBX_GATE_IDS = [
     for peer in PROXY_PBX_PEERS
     for stage in ("up", "matrix", "down")
 ]
+# One cell per (variant, transport); each sweeps every mode that variant has.
+AMR_RATE_SWEEP_CELLS = [
+    ("amrnb", "UDP"),
+    ("amrwb", "UDP"),
+    ("amrnb", "TLS"),
+    ("amrwb", "TLS"),
+]
+AMR_RATE_SWEEP_CELL_IDS = [
+    f"interop.amr-rate-sweep.{profile}-{transport.lower()}"
+    for profile, transport in AMR_RATE_SWEEP_CELLS
+]
+AMR_RATE_SWEEP_GATE_IDS = [
+    "interop.amr-rate-sweep.up",
+    *AMR_RATE_SWEEP_CELL_IDS,
+    "interop.amr-rate-sweep.down",
+]
 COMMAND_OVERRIDES = {
     "security.advisory-audit": [
         "cargo",
@@ -589,6 +605,101 @@ def proxy_pbx_gates() -> list[dict[str, Any]]:
     return result
 
 
+def amr_rate_sweep_gates() -> list[dict[str, Any]]:
+    """Every AMR mode against a live PBX, one cell per rate.
+
+    The ordinary AMR rows in `interop.asterisk-matrix` all run at whichever
+    mode the encoder opens at, which is the highest the negotiation permits.
+    That leaves the other sixteen rates with conformance-vector evidence and
+    no third-party evidence at all -- so a regression that broke, say, AMR-WB
+    at 12.65 kbit/s would pass the entire release gate.
+
+    Each cell pins one rate the standard way: `Config::amr_mode_set` puts an
+    RFC 4867 `mode-set` in the INVITE naming exactly that mode. `rate-sweep.sh`
+    then fails the gate unless the codec was *built* at the pinned mode --
+    read from media-core's `codec generation built` line, not from the
+    environment variable meant to cause it -- because a cell pinned to one
+    rate and a cell that ignored the pin both carry clean audio, and the
+    status column alone attests to nothing about the rate.
+
+    Both transports, because they are different claims: UDP carries RTP, TLS
+    carries SDES-SRTP, and AMR payload length varies per mode, so the
+    encrypted path exercises frame boundaries that a fixed-size codec never
+    moves.
+
+    Its own up/down chain rather than a link in the shared interop sequence:
+    that chain tears the Asterisk lab down after `interop.asterisk-matrix`,
+    and a sweep appended afterwards would find no lab.
+    """
+    paths = [
+        "crates/sip/rvoip-sip/examples/pbx/**",
+        "crates/media/codec-core/**",
+        "crates/media/media-core/**",
+        "crates/sip/rvoip-sip/src/adapters/media_adapter.rs",
+        "infra/release-runners/interop-lifecycle.sh",
+    ]
+    up = synthetic_gate(
+        "interop.amr-rate-sweep.up",
+        "Asterisk lab up for the AMR per-rate sweep",
+        executor="argv",
+        command=["bash", "infra/release-runners/interop-lifecycle.sh", "asterisk-up"],
+        resource="gcp-interop",
+        dependencies=["source.remote-clean"],
+        paths=paths,
+    )
+    up["estimated_seconds"] = 120
+
+    cells = []
+    for profile, transport in AMR_RATE_SWEEP_CELLS:
+        cell = synthetic_gate(
+            f"interop.amr-rate-sweep.{profile}-{transport.lower()}",
+            f"AMR {profile} every mode over {transport}, each pinned by mode-set",
+            executor="argv",
+            command=[
+                "env",
+                "PBX_OUT_ROOT={artifact_dir}",
+                "PBX_REPORT_APPEND=1",
+                "PBX_REQUIRE_AMR=1",
+                "{workspace}/crates/sip/rvoip-sip/examples/pbx/rate-sweep.sh",
+                "--pbx",
+                "asterisk",
+                "--profile",
+                profile,
+                "--transport",
+                transport,
+            ],
+            resource="gcp-interop",
+            dependencies=["interop.amr-rate-sweep.up"],
+            paths=paths,
+        )
+        # Eight or nine cells, each a full call plus teardown.
+        cell["estimated_seconds"] = 420
+        cell["timeout_minutes"] = 45
+        cells.append(cell)
+
+    down = synthetic_gate(
+        "interop.amr-rate-sweep.down",
+        "Asterisk lab down after the AMR per-rate sweep",
+        executor="argv",
+        command=["bash", "infra/release-runners/interop-lifecycle.sh", "asterisk-down"],
+        resource="gcp-interop",
+        dependencies=[cell["id"] for cell in cells],
+        paths=paths,
+        # Runs even when a sweep fails: a lab left up holds its ports and the
+        # next suite to want them fails for a reason that looks unrelated.
+        always_fresh=True,
+    )
+
+    aggregate = synthetic_gate(
+        "interop.amr-rate-sweep",
+        "complete AMR per-rate matrix (17 modes x UDP and TLS+SRTP)",
+        executor="aggregate",
+        dependencies=[cell["id"] for cell in cells],
+        paths=paths,
+    )
+    return [up, *cells, down, aggregate]
+
+
 def proxy_interop_gates() -> list[dict[str, Any]]:
     paths = [
         "crates/sip/sip-proxy/**",
@@ -805,6 +916,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
         ),
         *proxy_interop_gates(),
         *proxy_pbx_gates(),
+        *amr_rate_sweep_gates(),
         *amr_fuzz_gates(),
         synthetic_gate(
             "interop.browser-dtmf",
@@ -891,6 +1003,8 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
                 *PROXY_INTEROP_GATE_IDS,
                 "interop.proxy-pbx",
                 *PROXY_PBX_GATE_IDS,
+                "interop.amr-rate-sweep",
+                *AMR_RATE_SWEEP_GATE_IDS,
                 *[f"security.fuzz-{suffix}" for suffix in AMR_FUZZ_TARGETS],
                 "interop.browser-dtmf",
                 "report.remote-aggregate",
