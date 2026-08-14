@@ -232,13 +232,9 @@ fn test_automatic_host_candidate_gathering() {
         let _ = gathering_rx.recv().await;
 
         // Verify that a host candidate was gathered
-        let mut candidate_count = 0;
-        while let Some(_) = candidate_rx.recv().await {
-            candidate_count += 1;
-            break;
-        }
+        let candidate = candidate_rx.recv().await;
         assert!(
-            candidate_count > 0,
+            candidate.is_some(),
             "Should have received at least one ICE candidate"
         );
 
@@ -315,11 +311,11 @@ fn test_stun_gathering_with_google_stun() {
         );
 
         // Verify we have a host candidate
-        let has_host = gathered.iter().any(|t| *t == RTCIceCandidateType::Host);
+        let has_host = gathered.contains(&RTCIceCandidateType::Host);
         assert!(has_host, "Missing host candidate");
 
         // Verify we have an srflx candidate from STUN
-        let has_srflx = gathered.iter().any(|t| *t == RTCIceCandidateType::Srflx);
+        let has_srflx = gathered.contains(&RTCIceCandidateType::Srflx);
         assert!(
             has_srflx,
             "Missing srflx candidate - STUN gathering may have failed"
