@@ -14,6 +14,8 @@ use tempfile::TempDir;
 use time::{OffsetDateTime, Time};
 use tokio::time::timeout;
 
+mod common;
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const REJECT_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -139,20 +141,14 @@ fn client_identity(
     })
 }
 
-fn fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join(name)
-}
-
 fn server_tls(
     ca: &std::path::Path,
     client_auth: tls::ClientAuthMode,
 ) -> anyhow::Result<tls::Config> {
+    let identity = common::localhost_server_identity()?;
     tls::Args {
-        cert: vec![fixture("localhost-cert.pem")],
-        key: vec![fixture("localhost-key.pem")],
+        cert: vec![identity.cert],
+        key: vec![identity.key],
         client_auth,
         client_ca: if client_auth == tls::ClientAuthMode::Disabled {
             Vec::new()
