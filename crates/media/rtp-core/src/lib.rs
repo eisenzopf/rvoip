@@ -64,6 +64,7 @@ mod error;
 // Main modules
 pub mod dtmf;
 pub mod packet;
+pub mod quality;
 pub mod session;
 pub mod srtp;
 pub mod stats;

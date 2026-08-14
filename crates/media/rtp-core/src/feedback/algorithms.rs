@@ -546,10 +546,21 @@ impl QualityAssessment {
         bandwidth_score * self.bandwidth_weight
     }
 
-    /// Calculate MOS (Mean Opinion Score) from quality score
-    pub fn quality_to_mos(&self, quality_score: f32) -> f32 {
-        // Convert 0.0-1.0 quality to 1.0-5.0 MOS scale
+    /// Convert the internal normalized quality to its presentation score.
+    pub fn quality_to_score(&self, quality_score: f32) -> f32 {
         1.0 + quality_score * 4.0
+    }
+
+    /// Convert the internal quality score to its legacy presentation scale.
+    ///
+    /// This value is not an E-model Mean Opinion Score. Use
+    /// [`crate::quality::e_model`] when a standards-based MOS is required.
+    #[deprecated(
+        since = "0.3.3",
+        note = "this is not MOS; use quality_to_score or quality::e_model"
+    )]
+    pub fn quality_to_mos(&self, quality_score: f32) -> f32 {
+        self.quality_to_score(quality_score)
     }
 
     /// Determine if quality degradation requires feedback
