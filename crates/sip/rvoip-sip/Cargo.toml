@@ -699,3 +699,13 @@ optional = true
 [dependencies.sysinfo]
 workspace = true
 optional = true
+
+# 0.3.8 API decision: `Config` accepts additive public fields within the 0.3.x
+# line (first case: the three AMR knobs). `cargo semver-checks` classifies a
+# field added to a fully-public constructible struct as major because it
+# breaks downstream struct literals; the project ships `Config` additions
+# anyway — construction is expected through the documented constructors — so
+# the lint reports without failing the API gate. Removals and every other
+# breaking class still fail.
+[package.metadata.cargo-semver-checks.lints]
+constructible_struct_adds_field = "warn"
