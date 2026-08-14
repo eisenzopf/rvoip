@@ -2265,6 +2265,30 @@ pub struct Config {
     /// Ignored by every codec but AMR. Default: `false`.
     pub amr_auto_cmr: bool,
 
+    /// Restrict AMR to these modes, offered as RFC 4867 `mode-set`.
+    ///
+    /// Unlike [`Config::amr_dtx`] and [`Config::amr_auto_cmr`], this one is
+    /// negotiated rather than local policy. `mode-set` is bi-directional
+    /// (RFC 4867 §8.1): one active set governs both directions, so naming
+    /// modes here constrains what the peer may send as well as what this
+    /// endpoint sends, and a conforming answerer must echo the set or reject
+    /// the payload type.
+    ///
+    /// Members are mode *indices*, not bitrates: 0..=7 for narrowband
+    /// (4.75 – 12.2 kbit/s) and 0..=8 for wideband (6.6 – 23.85 kbit/s).
+    /// Members outside the variant's range are dropped rather than offered,
+    /// since a set naming a mode the variant lacks is one a peer may reject
+    /// the whole payload type over. The rendered list is sorted and
+    /// deduplicated so an offer and its echo compare byte for byte.
+    ///
+    /// Empty or `None` offers no `mode-set` at all, which is the correct
+    /// thing for an endpoint that supports every mode — and is the default.
+    /// Set it when a deployment or a conformance run needs a specific rate,
+    /// such as pinning AMR-WB to 12.65 kbit/s with `Some(vec![2])`.
+    ///
+    /// Ignored by every codec but AMR. Default: `None`.
+    pub amr_mode_set: Option<Vec<u8>>,
+
     /// Media allocation behavior.
     ///
     /// Default: [`MediaMode::Enabled`], which allocates real media-core RTP
@@ -2740,6 +2764,7 @@ impl std::fmt::Debug for Config {
             .field("srtp_required", &self.srtp_required)
             .field("amr_dtx", &self.amr_dtx)
             .field("amr_auto_cmr", &self.amr_auto_cmr)
+            .field("amr_mode_set", &self.amr_mode_set)
             .field("srtp_suite_count", &self.srtp_offered_suites.len())
             .field(
                 "media_public_address_configured",
@@ -2896,6 +2921,7 @@ impl Config {
             srtp_required: false,
             amr_dtx: false,
             amr_auto_cmr: false,
+            amr_mode_set: None,
             srtp_offered_suites: SrtpSuitePolicy::Default.suites(),
             media_public_addr: None,
             media_mode: MediaMode::Enabled,
@@ -3009,6 +3035,7 @@ impl Config {
             srtp_required: false,
             amr_dtx: false,
             amr_auto_cmr: false,
+            amr_mode_set: None,
             srtp_offered_suites: SrtpSuitePolicy::Default.suites(),
             media_public_addr: None,
             media_mode: MediaMode::Enabled,
@@ -8717,6 +8744,7 @@ impl UnifiedCoordinator {
         // negotiate (RFC 4867 defines no fmtp for DTX).
         media_adapter_inner.set_amr_dtx(config.amr_dtx);
         media_adapter_inner.set_amr_auto_cmr(config.amr_auto_cmr);
+        media_adapter_inner.set_amr_mode_set(config.amr_mode_set.clone());
         // Sprint 3.5 — propagate strict codec matching policy.
         media_adapter_inner.set_strict_codec_matching(config.strict_codec_matching);
         // NEXT_STEPS C2 — propagate the configured offered codec list.

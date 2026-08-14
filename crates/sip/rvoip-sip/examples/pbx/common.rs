@@ -115,6 +115,26 @@ fn amr_dtx_requested() -> bool {
     )
 }
 
+/// `PBX_AMR_MODE_SET=0,2,4` restricts the cell to those AMR modes.
+///
+/// Unlike `PBX_AMR_DTX` this one *is* visible in the SDP: it becomes
+/// RFC 4867 `mode-set` on the offer, and the set is bi-directional, so it
+/// governs what the PBX sends us as well as what we send it. That is what
+/// makes a per-rate lab cell possible at all — without it every cell runs at
+/// whatever mode the encoder opens at, which is the highest permitted one.
+///
+/// Unparseable entries are dropped rather than defaulted, so a typo narrows
+/// the set or empties it rather than silently testing a different rate than
+/// the label claims.
+fn amr_mode_set_requested() -> Option<Vec<u8>> {
+    let raw = std::env::var("PBX_AMR_MODE_SET").ok()?;
+    let modes: Vec<u8> = raw
+        .split(',')
+        .filter_map(|part| part.trim().parse::<u8>().ok())
+        .collect();
+    (!modes.is_empty()).then_some(modes)
+}
+
 pub const fn amr_frame_size(profile: CodecProfile) -> usize {
     match profile {
         CodecProfile::AmrWb | CodecProfile::AmrWbBe => 320,
@@ -1010,6 +1030,9 @@ impl EndpointConfig {
         // its tail reaches TLS cells only — which is exactly how the first
         // version of this silently did nothing on UDP.
         config.amr_dtx = amr_dtx_requested();
+        // Same placement reasoning as `amr_dtx` above, and the same trap: set
+        // in `session_config` this would reach TLS cells only.
+        config.amr_mode_set = amr_mode_set_requested();
         self.codec_profile.apply(&mut config);
         config
     }

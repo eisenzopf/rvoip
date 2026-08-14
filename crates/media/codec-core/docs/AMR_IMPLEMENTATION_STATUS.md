@@ -38,6 +38,8 @@
 | **A real AMR call** | **Three, over loopback, with verified audio** |
 | **RFC 4867 wire format** | **136 payloads agree with Wireshark's dissector** |
 | **Live PBX interop** | **Both PBXes, both variants, relay AND forced-transcode tiers, UDP ×3 + TLS, quality-gated** |
+| **Per-rate PBX interop** | **All 17 modes against Asterisk, each pinned by `mode-set`** — see below |
+| **`mode-set` negotiation** | **Offered, echoed in answers, and obeyed by the encoder** |
 | **Live proxy interop** | **Kamailio and OpenSIPS with rtpengine relaying all four framings verbatim** |
 | **AMR-NB VAD2** | **Bit-exact against TS 26.073** — whole state, 300 half-frames |
 | **Interface formats** | **IF1 and IF2, both variants**, from TS 26.101 and TS 26.201 |
@@ -621,27 +623,14 @@ survive the two parameters the lag and the codebook consume in between.
    actually constructed with; that line is now permanent, because every AMR
    field in it has been silently wrong at some point on this branch.
 
-6. **Rates beyond the top, against a third party.** Half closed.
+6. ~~**Rates beyond the top of each variant.**~~ Closed, in both senses — see
+   [Per-rate attestation](#per-rate-attestation) below.
 
-   Every mode is now exercised in a live call:
-   `every_amr_narrowband_mode_carries_audio_in_a_live_call` and its wideband
-   twin walk the peer down through all 8 and all 9 modes with codec mode
-   requests, reading back the mode of frames actually decoded from the peer,
-   and the tone assertion still runs at the end. So SDP negotiation, RTP
-   framing and the decode path are proven for every rate rather than only for
-   the one the encoder opens at.
-
-   What remains is that those calls are between two of *our* endpoints. Every
-   PBX and proxy lab cell still runs at the top mode, because the harness has
-   no way to pin one: `CodecProfile` is a fixed enum and `Config` has no
-   `mode_set` knob, so nothing can make the offer say `mode-set=N`. A carrier
-   or PBX decoding each individual rate is therefore still unevidenced.
-
-   Closing it is a small feature rather than a test: `fmtp_for_pt_*` returns
-   `&'static str` today and would need to build an owned string from a new
-   config field. Note the current behaviour is *correct* for production —
-   omitting `mode-set` is what an endpoint supporting every mode should say —
-   so the knob is for pinning a rate under test, not a fix.
+   Between our own endpoints, `every_amr_narrowband_mode_carries_audio_in_a_live_call`
+   and its wideband twin walk the peer down through all 8 and all 9 modes with
+   codec mode requests, reading back the mode of frames actually decoded from
+   the peer. Against a third party, all 17 modes were run individually against
+   Asterisk, each pinned by an RFC 4867 `mode-set` in the offer.
 
 7. ~~**A soak test**, and a fuzz target for the encoders.~~ Both done.
    `soak.rs` holds `#[ignore]`d long-run encode/decode tests scaled by
@@ -709,6 +698,45 @@ instead of from the C. Both are described above. All six sequences now compare
 with zero tolerance.
 
 Mutation-checked: turning DTX off fails mode 8 at frame 0.
+
+## Per-rate attestation
+
+Every AMR mode, run individually against a live third-party PBX.
+
+**Peer:** Asterisk 20.20.1 (aarch64, Linux, built 2026-08-11), `chan_pjsip`
+with `codec_amr`. **Run:** 2026-08-13, `amr_call` scenario, `endpoint` API,
+UDP, one cell per mode.
+
+Each cell pins one rate the standard way — `Config::amr_mode_set` puts an
+RFC 4867 `mode-set` in the INVITE naming exactly that mode, and the set is
+bi-directional, so it governs what Asterisk sends as well as what we send.
+The lab reaches it through `PBX_AMR_MODE_SET=<mode>`.
+
+| Variant | Modes | Result |
+|---|---|---|
+| AMR-NB | 0, 1, 2, 3, 4, 5, 6, 7 | all PASS |
+| AMR-WB | 0, 1, 2, 3, 4, 5, 6, 7, 8 | all PASS |
+
+**Two independent facts are recorded per cell, because the interesting failure
+passes the obvious check.** A cell pinned to one rate and a cell that ignored
+the pin both produce clean audio, so "the call passed" attests to nothing about
+the rate.
+
+- *The rate was actually in force.* `codec generation built` now logs
+  `mode_set=` alongside the codec it constructed, so each cell's log shows the
+  mode the codec was built with rather than the environment variable that was
+  meant to cause it. Every cell logged the mode it was pinned to: mode 0 logged
+  `mode_set="0"`, mode 7 logged `mode_set="7"`, and so on across both variants.
+- *The audio survived at that rate.* The analyser's tone check ran per cell —
+  the far tone dominating the near one, with a 1 s window above 15 dB SNR. The
+  weakest margin across all 17 was 8,508× (AMR-WB mode 0, the 6.6 kbit/s rate,
+  where a lower margin is expected); the strongest was 116,348×.
+
+What this does and does not say: a third-party implementation decoded our AMR
+and encoded audio we decoded, at each of the seventeen rates, one rate at a
+time. It is one peer, one version, one topology, UDP only, and it is not a
+carrier certification. The evidence lives under the PBX output tree, which is
+gitignored — rerun with `PBX_AMR_MODE_SET=<mode>` to reproduce a row.
 
 ## Where AMR flows, and the one place it does not
 

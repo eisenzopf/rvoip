@@ -356,20 +356,37 @@ fn answer_fmtp_for_pt(offer: &SdpSession, pt: u8, g729_annex_b: bool) -> Option<
             continue;
         };
         let value = value.trim().trim_matches('"');
+        let name = name.trim().to_ascii_lowercase();
         // Only the parameters that decide the bit layout, and only when set:
         // an explicit `octet-align=0` means the default, which is stated by
         // omission.
-        let carries = matches!(
-            name.trim().to_ascii_lowercase().as_str(),
-            "octet-align" | "crc" | "robust-sorting"
-        ) && value == "1";
-        if carries {
+        let carries =
+            matches!(name.as_str(), "octet-align" | "crc" | "robust-sorting") && value == "1";
+        // `mode-set` is different in kind, and omitting it was a real
+        // compliance gap. RFC 4867 §8.1 makes it bi-directional — one active
+        // set for both directions — and §8.3.1 requires the answer to carry
+        // the offered set or reject the payload type outright. Answering
+        // silently reads as "no restriction", which is the opposite of what
+        // a peer that named one asked for.
+        //
+        // Echoed verbatim rather than re-rendered, so a set we would order or
+        // space differently still goes back byte-identical. Our own encoder
+        // was already constrained correctly — the negotiated fmtp on the
+        // answering side is read from the *offer* — so this changes what we
+        // say, not what we send.
+        let is_mode_set = name == "mode-set" && !value.is_empty();
+        if carries || is_mode_set {
             echoed.push(trimmed);
         }
     }
     // `max-red` is not a transport parameter and is not echoed: each side
     // declares its own. Ours is always 0 — see
     // [`fmtp_for_pt_with_g729_annex_b`].
+    //
+    // `mode-change-period` and `-neighbor` are not echoed either, and for the
+    // opposite reason to `mode-set`: they are declarative about what the
+    // *sender* must do, so each side states its own and obeys the other's.
+    // Ours are already applied from the peer's offer in `AmrAdapter::new`.
     echoed.push("max-red=0");
     Some(echoed.join("; "))
 }
@@ -379,6 +396,57 @@ fn sdp_payload_is_amr(offer: &SdpSession, pt: u8) -> bool {
     audio_rtpmap(offer, pt).is_some_and(|mapping| {
         mapping.encoding_name.eq_ignore_ascii_case("AMR")
             || mapping.encoding_name.eq_ignore_ascii_case("AMR-WB")
+    })
+}
+
+/// Render `mode-set` for an AMR payload type, or `None` when unrestricted.
+///
+/// RFC 4867 §8.1: the list is ascending, comma-separated, and its members are
+/// mode *indices* — 0..=7 narrowband, 0..=8 wideband. Out-of-range members are
+/// dropped rather than offered, because a mode-set naming a mode the variant
+/// does not have is one a conforming peer may reject the payload type over,
+/// and silently trading a whole codec for a typo is a bad trade.
+///
+/// Sorted and deduplicated so the same set always renders the same way: this
+/// string goes into an offer that a peer must echo back byte-comparably.
+fn amr_mode_set_param(pt: u8, modes: &[u8]) -> Option<String> {
+    let top = match pt {
+        AMR_WB_OA_PT | AMR_WB_BE_PT => 8,
+        AMR_NB_OA_PT | AMR_NB_BE_PT => 7,
+        _ => return None,
+    };
+    let mut permitted: Vec<u8> = modes.iter().copied().filter(|m| *m <= top).collect();
+    permitted.sort_unstable();
+    permitted.dedup();
+    if permitted.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "mode-set={}",
+        permitted
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    ))
+}
+
+/// The fmtp this endpoint puts in an *offer*, including any AMR `mode-set`
+/// the application asked for.
+///
+/// Separate from [`fmtp_for_pt_with_g729_annex_b`] because a mode-set is a
+/// per-session choice rather than a property of the payload type, and because
+/// the answer path must echo the offerer's set rather than assert its own.
+pub(crate) fn offer_fmtp_for_pt(
+    pt: u8,
+    g729_annex_b: bool,
+    amr_mode_set: Option<&[u8]>,
+) -> Option<String> {
+    let base = fmtp_for_pt_with_g729_annex_b(pt, g729_annex_b)?;
+    let param = amr_mode_set.and_then(|modes| amr_mode_set_param(pt, modes));
+    Some(match param {
+        Some(param) => format!("{base}; {param}"),
+        None => base.to_string(),
     })
 }
 
@@ -1256,6 +1324,11 @@ pub struct MediaAdapter {
     /// Answers disable Annex B when either side advertises `annexb=no`.
     g729_annex_b: bool,
 
+    /// The AMR modes this endpoint restricts a session to, offered as
+    /// RFC 4867 `mode-set`. `None` offers no restriction, which is what an
+    /// endpoint supporting every mode should say.
+    amr_mode_set: Option<Vec<u8>>,
+
     #[cfg(test)]
     pause_media_create_after_allocation: Arc<AtomicBool>,
     #[cfg(test)]
@@ -1350,6 +1423,7 @@ impl MediaAdapter {
             strict_codec_matching: true,
             offered_codecs: vec![0, 8, 101],
             g729_annex_b: true,
+            amr_mode_set: None,
             #[cfg(test)]
             pause_media_create_after_allocation: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
@@ -1519,6 +1593,15 @@ impl MediaAdapter {
     /// Set local G.729 Annex B preference for PT 18 SDP offer/answer.
     pub fn set_g729_annex_b(&mut self, enabled: bool) {
         self.g729_annex_b = enabled;
+    }
+
+    /// Restrict AMR to `modes`, offered as RFC 4867 `mode-set`.
+    ///
+    /// Empty or `None` offers no restriction. The set is bi-directional by
+    /// RFC 4867 §8.1, so this constrains what the peer sends as well as what
+    /// this endpoint sends.
+    pub fn set_amr_mode_set(&mut self, modes: Option<Vec<u8>>) {
+        self.amr_mode_set = modes.filter(|modes| !modes.is_empty());
     }
 
     /// Feature-gated retained-object counts for perf leak investigations.
@@ -3637,7 +3720,9 @@ impl MediaAdapter {
             if let Some(rtpmap) = rtpmap_for_pt(*pt) {
                 media_builder = media_builder.rtpmap(pt_str.as_str(), rtpmap);
             }
-            if let Some(fmtp) = fmtp_for_pt_with_g729_annex_b(*pt, self.g729_annex_b) {
+            if let Some(fmtp) =
+                offer_fmtp_for_pt(*pt, self.g729_annex_b, self.amr_mode_set.as_deref())
+            {
                 media_builder = media_builder.fmtp(pt_str.as_str(), fmtp);
             }
         }
@@ -4508,7 +4593,9 @@ impl MediaAdapter {
             if let Some(rtpmap) = rtpmap_for_pt(*pt) {
                 media_builder = media_builder.rtpmap(pt_str.as_str(), rtpmap);
             }
-            if let Some(fmtp) = fmtp_for_pt_with_g729_annex_b(*pt, self.g729_annex_b) {
+            if let Some(fmtp) =
+                offer_fmtp_for_pt(*pt, self.g729_annex_b, self.amr_mode_set.as_deref())
+            {
                 media_builder = media_builder.fmtp(pt_str.as_str(), fmtp);
             }
         }
@@ -4707,6 +4794,7 @@ impl Clone for MediaAdapter {
             srtp_required: self.srtp_required,
             amr_dtx: self.amr_dtx,
             amr_auto_cmr: self.amr_auto_cmr,
+            amr_mode_set: self.amr_mode_set.clone(),
             srtp_offered_suites: self.srtp_offered_suites.clone(),
             sdes_base64_mode: self.sdes_base64_mode,
             pending_srtp_offerers: self.pending_srtp_offerers.clone(),
@@ -5320,6 +5408,85 @@ mod sdp_format_tests {
         assert_eq!(fmtp_for_pt_with_g729_annex_b(18, true), Some("annexb=yes"));
         assert_eq!(fmtp_for_pt_with_g729_annex_b(18, false), Some("annexb=no"));
         assert_eq!(fmtp_for_pt(101), Some("0-15"));
+    }
+
+    /// `mode-set` is rendered canonically, and a mode the variant does not
+    /// have is dropped rather than offered.
+    ///
+    /// Narrowband stops at 7 and wideband at 8. Offering `mode-set=8` on
+    /// narrowband names a mode that does not exist, which a conforming peer
+    /// may reject the entire payload type over — losing the codec to a typo.
+    #[test]
+    fn amr_mode_set_is_canonical_and_range_checked() {
+        // Sorted and deduplicated, so an offer and its echo compare directly.
+        assert_eq!(
+            amr_mode_set_param(AMR_NB_BE_PT, &[4, 0, 2, 4]).as_deref(),
+            Some("mode-set=0,2,4")
+        );
+        // 8 exists for wideband and not for narrowband.
+        assert_eq!(
+            amr_mode_set_param(AMR_WB_BE_PT, &[8]).as_deref(),
+            Some("mode-set=8")
+        );
+        assert_eq!(amr_mode_set_param(AMR_NB_BE_PT, &[8]), None);
+        assert_eq!(amr_mode_set_param(AMR_NB_OA_PT, &[9, 200]), None);
+        // Not an AMR payload type at all.
+        assert_eq!(amr_mode_set_param(0, &[0, 1]), None);
+        // An unrestricted offer says nothing, rather than listing every mode.
+        assert_eq!(
+            offer_fmtp_for_pt(AMR_NB_BE_PT, false, None).as_deref(),
+            Some("max-red=0")
+        );
+        assert_eq!(
+            offer_fmtp_for_pt(AMR_NB_OA_PT, false, Some(&[0, 2, 4])).as_deref(),
+            Some("octet-align=1; max-red=0; mode-set=0,2,4")
+        );
+    }
+
+    /// The answer must carry the offered `mode-set`.
+    ///
+    /// RFC 4867 §8.1 makes the set bi-directional and §8.3.1 requires the
+    /// answerer to use the offered set or reject the payload type. An answer
+    /// that omits it reads as "no restriction" — the opposite of what a peer
+    /// naming a set asked for, and the kind of thing a carrier flags even
+    /// though the media happens to work.
+    #[test]
+    fn an_answer_echoes_the_offered_mode_set() {
+        let pt = AMR_WB_OA_PT.to_string();
+        let offer = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(35200, "RTP/AVP")
+            .formats(&[pt.as_str()])
+            .rtpmap(pt.as_str(), "AMR-WB/16000")
+            .fmtp(pt.as_str(), "octet-align=1; mode-set=0,2,4")
+            .attribute("sendrecv", None::<String>)
+            .done()
+            .build()
+            .expect("offer builds")
+            .to_string();
+        let parsed: SdpSession = offer.parse().expect("offer parses");
+
+        let answer = answer_fmtp_for_pt(&parsed, AMR_WB_OA_PT, false).expect("an AMR answer fmtp");
+        assert!(
+            answer.contains("mode-set=0,2,4"),
+            "the answer dropped the offered mode-set: {answer}"
+        );
+        assert!(
+            answer.contains("octet-align=1"),
+            "the framing must still be echoed: {answer}"
+        );
+
+        // An offer with no mode-set must not gain one: that would assert a
+        // restriction the offerer never asked for.
+        let unrestricted = offer.replace("; mode-set=0,2,4", "");
+        let parsed: SdpSession = unrestricted.parse().expect("offer parses");
+        let answer = answer_fmtp_for_pt(&parsed, AMR_WB_OA_PT, false).expect("an AMR answer fmtp");
+        assert!(
+            !answer.contains("mode-set"),
+            "an unrestricted offer must not be answered with a restriction: {answer}"
+        );
     }
 
     #[test]

@@ -454,12 +454,27 @@ impl DialogCodecRuntime {
         // this branch -- the framing from a dropped fmtp, DTX from a switch
         // that reached the configuration but not the codec -- and each cost
         // more to find than this log costs to carry.
+        // `mode_set` is named rather than left inside `fmtp_present`, because
+        // it is the one negotiated parameter whose effect is invisible in a
+        // passing call: a cell pinned to one AMR rate and a cell that ignored
+        // the pin both carry clean audio, and only this distinguishes them.
+        // It is what makes a per-rate interop run self-attesting instead of
+        // resting on the environment variable that was meant to cause it.
+        let mode_set = format.fmtp.as_deref().and_then(|fmtp| {
+            fmtp.split(';').find_map(|part| {
+                let part = part.trim();
+                part.strip_prefix("mode-set=")
+                    .or_else(|| part.strip_prefix("mode-set ="))
+                    .map(|value| value.trim().to_string())
+            })
+        });
         tracing::info!(
             codec = %format.name,
             payload_type = format.payload_type,
             clock_rate = format.clock_rate,
             channels = format.channels,
             fmtp_present = format.fmtp.is_some(),
+            mode_set = mode_set.as_deref().unwrap_or("unrestricted"),
             dtx = format.dtx,
             "codec generation built"
         );

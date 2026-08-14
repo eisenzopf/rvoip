@@ -644,3 +644,159 @@ async fn every_amr_wideband_mode_carries_audio_in_a_live_call() {
     )
     .await;
 }
+
+/// Place an AMR call restricted to `permitted`, and report every codec mode
+/// observed on frames decoded from the peer.
+///
+/// Asserts on the way through that the offer Bob received actually carried
+/// the `mode-set` — the claim is about the wire, not about the `Config` that
+/// produced it.
+#[cfg(feature = "amr-nb")]
+async fn run_amr_call_with_mode_set(
+    variant: AmrVariant,
+    ports: Ports,
+    permitted: &[u8],
+) -> Vec<u8> {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let with_modes = |name: &str, sip: u16, media: (u16, u16)| Config {
+        amr_mode_set: Some(permitted.to_vec()),
+        ..amr_only_config(name, sip, media, variant, false)
+    };
+
+    let mut bob = StreamPeer::with_config(with_modes("bob", ports.bob_sip, ports.bob_media))
+        .await
+        .expect("bob starts");
+    let mut alice = StreamPeer::with_config(with_modes("alice", ports.alice_sip, ports.alice_media))
+        .await
+        .expect("alice starts");
+
+    let offer_sdp = Arc::new(Mutex::new(String::new()));
+    let offer_slot = offer_sdp.clone();
+
+    let bob_task = tokio::spawn(async move {
+        let incoming = tokio::time::timeout(Duration::from_secs(10), bob.wait_for_incoming())
+            .await
+            .expect("bob timed out")
+            .expect("bob got the INVITE");
+        if let (Some(sdp), Ok(mut slot)) = (incoming.sdp.clone(), offer_slot.lock()) {
+            *slot = sdp;
+        }
+        let handle = incoming.accept().await.expect("bob accepts");
+        let audio = handle.audio().await.expect("bob opens audio");
+        let (sender, mut receiver) = audio.split();
+        let drain = tokio::spawn(async move { while receiver.recv().await.is_some() {} });
+        for i in 0..FRAMES {
+            let frame = AudioFrame::new(
+                generate_tone(variant, BOB_TONE_HZ, i),
+                variant.sample_rate,
+                1,
+                (i * variant.frame_size) as u32,
+            );
+            if sender.send(frame).await.is_err() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        drop(sender);
+        let _ = tokio::time::timeout(Duration::from_secs(2), drain).await;
+    });
+
+    let call_id = alice
+        .invite(format!("sip:bob@127.0.0.1:{}", ports.bob_sip))
+        .send()
+        .await
+        .expect("alice invites");
+    let handle = tokio::time::timeout(Duration::from_secs(10), alice.wait_for_answered(&call_id))
+        .await
+        .expect("alice timed out")
+        .expect("answered");
+
+    let audio = handle.audio().await.expect("alice opens audio");
+    let (sender, mut receiver) = audio.split();
+    let recv = tokio::spawn(async move { while receiver.recv().await.is_some() {} });
+
+    let mut observed: Vec<u8> = Vec::new();
+    for i in 0..FRAMES {
+        let frame = AudioFrame::new(
+            generate_tone(variant, ALICE_TONE_HZ, i),
+            variant.sample_rate,
+            1,
+            (i * variant.frame_size) as u32,
+        );
+        if sender.send(frame).await.is_err() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        if i % 15 == 0 {
+            if let Some(mode) = alice.coordinator().peer_codec_mode(handle.id()).await {
+                observed.push(mode);
+            }
+        }
+    }
+    drop(sender);
+
+    handle.hangup().await.expect("alice hangs up");
+    let _ = tokio::time::timeout(Duration::from_secs(5), alice.wait_for_ended(&call_id)).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), bob_task).await;
+    let _ = tokio::time::timeout(Duration::from_secs(2), recv).await;
+
+    let offer = offer_sdp.lock().expect("offer captured").clone();
+    let rendered = format!(
+        "mode-set={}",
+        permitted.iter().map(u8::to_string).collect::<Vec<_>>().join(",")
+    );
+    assert!(
+        offer.contains(&rendered),
+        "the INVITE must carry `{rendered}`; a set applied only locally is not \
+         negotiation and the peer would be free to send anything:\n{offer}"
+    );
+
+    observed.sort_unstable();
+    observed.dedup();
+    observed
+}
+
+/// A restricted `mode-set`, negotiated the way RFC 4867 says to.
+///
+/// This is the shape a carrier or mobile core almost always uses: rather than
+/// letting the endpoint pick from all eight or nine rates, it names the set it
+/// will carry. §8.1 makes the set bi-directional — one active set governs both
+/// directions — and §8.3.1 requires the answerer to carry the offered set or
+/// reject the payload type, so agreement here is not optional.
+///
+/// Three things are checked, and the middle one is the point:
+///
+/// 1. The offer Bob receives carries the set we asked for, rendered sorted.
+/// 2. Every mode observed on decoded frames is *inside* the set. An encoder
+///    that ignored the restriction would open at the top mode, which is
+///    outside it, so this fails loudly rather than subtly.
+/// 3. The audio still arrives, so restricting the rate did not simply stop
+///    the media.
+#[cfg(feature = "amr-nb")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restricted_mode_set_is_offered_and_obeyed() {
+    // 0, 2 and 4 — a sparse set, so an encoder that merely clamped to a
+    // range rather than honouring the list would land on 1 or 3 and fail.
+    const PERMITTED: &[u8] = &[0, 2, 4];
+
+    let ports = Ports {
+        alice_sip: 35_504,
+        bob_sip: 35_505,
+        alice_media: (36_740, 36_790),
+        bob_media: (36_800, 36_850),
+    };
+    let observed = run_amr_call_with_mode_set(AMR_NB, ports, PERMITTED).await;
+
+    assert!(
+        !observed.is_empty(),
+        "no AMR frames were decoded, so the restriction was never exercised"
+    );
+    for mode in &observed {
+        assert!(
+            PERMITTED.contains(mode),
+            "mode {mode} is outside the negotiated set {PERMITTED:?}; observed \
+             {observed:?} — an endpoint that ignored mode-set would sit at 7"
+        );
+    }
+}
