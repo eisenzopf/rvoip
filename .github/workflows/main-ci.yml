@@ -48,7 +48,10 @@ jobs:
             --job-mode combined
             --deferred-sip-mode separate
             --github-output "$GITHUB_OUTPUT"
-            --specialty-gate codec-features
+            --specialty-gate codec-features-codec-core
+            --specialty-gate codec-features-media-core
+            --specialty-gate codec-features-sip
+            --specialty-gate codec-features-core
             --specialty-gate release-tooling
             --specialty-gate rtp-interop
             --specialty-gate vcon-postgres

@@ -139,15 +139,24 @@ class RunChecksTests(unittest.TestCase):
             "rvoip-sip",
             "rvoip-core",
         )
-        commands = run_checks.specialty_commands("codec-features", Path("/workspace"))
-        argv = [item[0] for item in commands]
-        self.assertEqual(len(argv), 2 * len(expected_packages))
-        # Every command asks for all features. A command here without it is a
-        # command that duplicates the shard and proves nothing.
-        for command in argv:
-            self.assertIn("--all-features", command)
-        for package in expected_packages:
-            with self.subTest(package=package):
+        # One gate per package, so no gate carries more than one package's
+        # worth of `--all-features` building. The combined gate timed out.
+        self.assertEqual(
+            sorted(run_checks.CODEC_FEATURE_GATES.values()),
+            sorted(expected_packages),
+        )
+        for gate, package in run_checks.CODEC_FEATURE_GATES.items():
+            with self.subTest(gate=gate):
+                commands = run_checks.specialty_commands(gate, Path("/workspace"))
+                argv = [item[0] for item in commands]
+                # Exactly this package's test and clippy, and nothing else:
+                # a gate that quietly grew a second package would restore the
+                # timeout this split exists to remove.
+                self.assertEqual(len(argv), 2)
+                # Every command asks for all features. A command here without
+                # it is a command that duplicates the shard and proves nothing.
+                for command in argv:
+                    self.assertIn("--all-features", command)
                 # Exact list membership, not a substring match, so
                 # "rvoip-core" does not also claim rvoip-codec-core's rows.
                 owned = [command for command in argv if package in command]

@@ -21,6 +21,17 @@ PACKAGE = re.compile(r"^[A-Za-z0-9_-]+$")
 GATE = re.compile(r"^[A-Za-z0-9_-]+$")
 TARGET = re.compile(r"^[A-Za-z0-9_-]+$")
 
+# The optional-codec gates, one per package. Keep in step with the matching
+# `specialty_rules` entries in `policy.json` and the `--specialty-gate` flags
+# in `.github/workflows/main-ci.yml`: a gate named in only one of the three
+# either never runs or fails the plan.
+CODEC_FEATURE_GATES = {
+    "codec-features-codec-core": "rvoip-codec-core",
+    "codec-features-media-core": "rvoip-media-core",
+    "codec-features-sip": "rvoip-sip",
+    "codec-features-core": "rvoip-core",
+}
+
 
 class CheckError(RuntimeError):
     """Invalid CI input or environment."""
@@ -322,7 +333,7 @@ def specialty_commands(
                 None,
             ),
         ]
-    if gate == "codec-features":
+    if gate in CODEC_FEATURE_GATES:
         # The shards run `cargo test -p <crate>` with default features only.
         # `rvoip-codec-core` defaults to `["g711"]` and `rvoip-media-core` to
         # `["pcmu", "pcma"]`, so every test behind `g729`, `opus`, `amr-nb` or
@@ -348,13 +359,21 @@ def specialty_commands(
         # *refuses* AMR -- so the shard prints green while demonstrating the
         # opposite of what is true. A hole that reports the inverse of reality
         # is worse than one that reports nothing.
+        #
+        # One gate per package rather than one gate over four. Each package
+        # needs `--all-features` for both a test build and a clippy build, and
+        # sharing a job made that eight dependency-tree builds against a single
+        # 45-minute specialty budget: the combined gate timed out with the last
+        # package still compiling, having run no tests at all. Worse, it could
+        # not recover on a retry -- `Swatinem/rust-cache` keys on the gate name
+        # and does not save a cache from a job that failed, so the one gate
+        # that needed a warm cache was the one that could never populate it.
+        # Split, the packages build concurrently, each against its own budget
+        # and its own cache key. The patterns in `policy.json` stay identical
+        # across the four, so any change that selected the combined gate still
+        # verifies all four packages.
         commands = []
-        for package in (
-            "rvoip-codec-core",
-            "rvoip-media-core",
-            "rvoip-sip",
-            "rvoip-core",
-        ):
+        for package in (CODEC_FEATURE_GATES[gate],):
             commands.extend(
                 [
                     (
