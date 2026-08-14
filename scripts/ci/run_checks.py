@@ -32,6 +32,15 @@ CODEC_FEATURE_GATES = {
     "codec-features-core": "rvoip-core",
 }
 
+# Every `rvoip-sip` feature except the release-only `perf-*` harness. Written
+# out rather than computed so the command is inspectable from here; the
+# accompanying test derives the same set from the manifest and fails if a new
+# feature is added without a decision about this gate.
+NON_PERF_SIP_FEATURES = (
+    "all-codecs,amr,amr-nb,amr-wb,dev-insecure-tls,dhat,event-history,g729,"
+    "generated-validation,opus,opus-sim,persistence,tokio-console"
+)
+
 
 class CheckError(RuntimeError):
     """Invalid CI input or environment."""
@@ -372,42 +381,51 @@ def specialty_commands(
         # and its own cache key. The patterns in `policy.json` stay identical
         # across the four, so any change that selected the combined gate still
         # verifies all four packages.
-        commands = []
-        for package in (CODEC_FEATURE_GATES[gate],):
-            commands.extend(
+        package = CODEC_FEATURE_GATES[gate]
+        # `--all-features` everywhere except `rvoip-sip`, whose feature set
+        # includes the `perf-*` harness. Those targets are release-only by
+        # contract -- `EnvironmentBlock::capture` panics under
+        # `debug_assertions` rather than publish a number nobody should cite,
+        # and the release catalog runs them as `--release --features
+        # perf-tests,... --test <name>`. Turning them on in a debug gate does
+        # not measure anything, it just fails. Every other feature stays on,
+        # so the codec surface this gate exists for is unchanged.
+        selection = (
+            ["--features", NON_PERF_SIP_FEATURES]
+            if package == "rvoip-sip"
+            else ["--all-features"]
+        )
+        return [
+            (
                 [
-                    (
-                        [
-                            "cargo",
-                            "test",
-                            "--locked",
-                            "--all-features",
-                            "--lib",
-                            "--tests",
-                            "--bins",
-                            "--examples",
-                            "-p",
-                            package,
-                        ],
-                        None,
-                        None,
-                    ),
-                    (
-                        [
-                            "cargo",
-                            "clippy",
-                            "--locked",
-                            "--all-features",
-                            "--all-targets",
-                            "-p",
-                            package,
-                        ],
-                        None,
-                        None,
-                    ),
-                ]
-            )
-        return commands
+                    "cargo",
+                    "test",
+                    "--locked",
+                    *selection,
+                    "--lib",
+                    "--tests",
+                    "--bins",
+                    "--examples",
+                    "-p",
+                    package,
+                ],
+                None,
+                None,
+            ),
+            (
+                [
+                    "cargo",
+                    "clippy",
+                    "--locked",
+                    *selection,
+                    "--all-targets",
+                    "-p",
+                    package,
+                ],
+                None,
+                None,
+            ),
+        ]
     if gate == "rtp-interop":
         return [(["bash", "scripts/test_libsrtp_interop.sh"], None, None)]
     if gate == "amazon-connect-aws-control":
