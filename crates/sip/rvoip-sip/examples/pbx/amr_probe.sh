@@ -1,9 +1,10 @@
 #!/usr/bin/env sh
 # Does this PBX support AMR? Asked before every AMR interop cell, because the
-# answer differs by *image*, not by provider: the local lab containers carry
-# AMR (Asterisk source-built with the traud patches, FreeSWITCH with
-# mod_amr/mod_amrwb) while the committed release-runner images do not — the
-# packaged Alpine Asterisk cannot take the patches at all.
+# answer differs by *image*, not by provider: both the local lab containers
+# and the committed release-runner images now build AMR from source (Asterisk
+# with the traud patches, FreeSWITCH with mod_amr/mod_amrwb against the
+# Apache-2.0 codec libraries), but a third-party or packaged image generally
+# will not — the packaged Alpine Asterisk cannot take the patches at all.
 #
 # A cell that would fail for "this image has no AMR" is not interop evidence
 # of anything, so the runner records it as SKIP instead. Two guards keep the
