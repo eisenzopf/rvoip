@@ -77,6 +77,12 @@ write_rvoip_profile() {
   local_rtp_ip=$7
   external_sip_ip=$8
   external_rtp_ip=$9
+  # "true" pins disable-transcoding, which REFUSES a call whose legs cannot
+  # share a codec. That is what the matrix wants almost everywhere -- a row
+  # that quietly transcodes proves nothing about codec negotiation -- but the
+  # amr_transcode_call row needs the opposite, so it registers against the
+  # _xcode twins written below.
+  disable_transcoding=${10:-true}
   secure_media_line=""
   if [ "$secure_media" = "true" ]; then
     secure_media_line='    <param name="rtp_secure_media" value="mandatory"/>'
@@ -106,7 +112,7 @@ write_rvoip_profile() {
     <param name="inbound-codec-prefs" value="AMR-WB,AMR,G729,PCMU,PCMA"/>
     <param name="outbound-codec-prefs" value="AMR-WB,AMR,G729,PCMU,PCMA"/>
     <param name="inbound-late-negotiation" value="true"/>
-    <param name="disable-transcoding" value="true"/>
+    <param name="disable-transcoding" value="$disable_transcoding"/>
     <param name="rtp-timer-name" value="soft"/>
     <param name="auth-calls" value="true"/>
     <param name="auth-subscriptions" value="false"/>
@@ -140,11 +146,26 @@ write_rvoip_profiles() {
   external_rtp_ip=$3
   udp_port=${FS_RVOIP_UDP_SIP_PORT:-5062}
   tls_port=${FS_RVOIP_TLS_SIP_PORT:-5063}
+  udp_xcode_port=${FS_RVOIP_UDP_XCODE_SIP_PORT:-5064}
+  tls_xcode_port=${FS_RVOIP_TLS_XCODE_SIP_PORT:-5065}
 
   write_rvoip_profile rvoip_udp "$udp_port" false false false "$tls_port" \
-    "$local_rtp_ip" "$external_sip_ip" "$external_rtp_ip"
+    "$local_rtp_ip" "$external_sip_ip" "$external_rtp_ip" true
   write_rvoip_profile rvoip_tls_srtp "$tls_port" true true true "$tls_port" \
-    "$local_rtp_ip" "$external_sip_ip" "$external_rtp_ip"
+    "$local_rtp_ip" "$external_sip_ip" "$external_rtp_ip" true
+
+  # Transcoding twins, on their own ports.
+  #
+  # amr_transcode_call bridges two legs that deliberately share no codec
+  # (AMR-NB one side, PCMU the other) and asks the PBX to convert between
+  # them. The profiles above pin disable-transcoding, so such a call is
+  # refused rather than converted -- correct for every other row, fatal for
+  # this one. run.sh redirects that scenario to FREESWITCH_XCODE_*_ADDR, and
+  # these are the profiles those addresses point at.
+  write_rvoip_profile rvoip_udp_xcode "$udp_xcode_port" false false false \
+    "$tls_xcode_port" "$local_rtp_ip" "$external_sip_ip" "$external_rtp_ip" false
+  write_rvoip_profile rvoip_tls_srtp_xcode "$tls_xcode_port" true true true \
+    "$tls_xcode_port" "$local_rtp_ip" "$external_sip_ip" "$external_rtp_ip" false
 }
 
 write_rvoip_user() {
