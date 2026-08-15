@@ -610,11 +610,39 @@ mod tests {
     }
 
     async fn send_test_frame(ws: &mut WebSocketStream<TcpStream>, frame: SdkSignalFrame) {
-        let mut bytes = vec![TEST_FRAME_TYPE_RTC];
-        frame.encode(&mut bytes).expect("encode Chime frame");
-        ws.send(WsMessage::Binary(bytes.into()))
+        try_send_test_frame(ws, frame)
             .await
             .expect("send Chime frame");
+    }
+
+    /// Send without asserting the peer is still there.
+    ///
+    /// Only the keepalive loop uses this. The connector pings every
+    /// `keepalive_interval`, so a ping can arrive while the client is already
+    /// tearing the socket down; writing the pong then fails with
+    /// `ConnectionReset` through no fault of the code under test. Every
+    /// handshake send stays on [`send_test_frame`], where a failure is a real
+    /// protocol break and must still panic.
+    async fn try_send_test_frame(
+        ws: &mut WebSocketStream<TcpStream>,
+        frame: SdkSignalFrame,
+    ) -> std::result::Result<(), tokio_tungstenite::tungstenite::Error> {
+        let mut bytes = vec![TEST_FRAME_TYPE_RTC];
+        frame.encode(&mut bytes).expect("encode Chime frame");
+        ws.send(WsMessage::Binary(bytes.into())).await
+    }
+
+    /// Receive, treating a closed socket as "the client left" rather than a
+    /// failure. Same reasoning as [`try_send_test_frame`]: at teardown the
+    /// stream can end before the loop observes a `Leave`.
+    async fn try_recv_test_frame(ws: &mut WebSocketStream<TcpStream>) -> Option<SdkSignalFrame> {
+        loop {
+            let message = ws.next().await?.ok()?;
+            if let WsMessage::Binary(bytes) = message {
+                assert_eq!(bytes.first().copied(), Some(TEST_FRAME_TYPE_RTC));
+                return Some(SdkSignalFrame::decode(&bytes[1..]).expect("valid Chime frame"));
+            }
+        }
     }
 
     fn local_webrtc_config() -> WebRtcConfig {
@@ -762,14 +790,18 @@ mod tests {
                     .expect("send delayed remote DTMF");
             });
 
-            loop {
-                let frame = recv_test_frame(&mut ws).await;
+            // Keepalive service until the client leaves. A `None` frame or a
+            // failed pong both mean the socket went away during teardown,
+            // which is the same outcome as `Leave` for this test and must not
+            // be reported as a failure — the assertions that matter are the
+            // handshake above and the media checks below.
+            while let Some(frame) = try_recv_test_frame(&mut ws).await {
                 if frame.r#type == FrameType::Leave as i32 {
                     break;
                 }
                 if let Some(ping) = frame.ping_pong {
-                    if ping.r#type == SdkPingPongType::Ping as i32 {
-                        send_test_frame(
+                    if ping.r#type == SdkPingPongType::Ping as i32
+                        && try_send_test_frame(
                             &mut ws,
                             SdkSignalFrame {
                                 timestamp_ms: 3,
@@ -781,7 +813,10 @@ mod tests {
                                 ..Default::default()
                             },
                         )
-                        .await;
+                        .await
+                        .is_err()
+                    {
+                        break;
                     }
                 }
             }
