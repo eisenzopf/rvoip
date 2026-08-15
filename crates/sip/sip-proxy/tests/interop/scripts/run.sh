@@ -749,18 +749,68 @@ route-strict|route-loose-record-route|auth-aggregation|capacity-overload)
     --expected-peer-sent-by "$PEER_ADDRESS:$PROXY_INTEROP_PEER_PORT"
 }
 
+# Run one externally-driven scenario, keeping its output whatever happens.
+#
+# Two properties this has to have, both learned from a release qualification
+# that failed here and left nothing to read:
+#
+#   - the driver's stdout/stderr lands in the scenario directory, so a failure
+#     is diagnosable from the evidence bundle alone. Previously it went to the
+#     harness's own stdout, which the gate runner does not fold into the
+#     per-scenario artifacts -- a failed scenario produced a bare non-zero exit
+#     and no explanation anywhere in the archive;
+#   - a failure that is environmental (a container that lost a race, a socket
+#     that was still draining) gets exactly one retry, and the retry is
+#     RECORDED. A deterministic failure still fails, because it fails twice;
+#     a flake costs seconds instead of taking a 206-gate candidate down with
+#     it. `retry.log` existing at all is the signal that a row was unstable,
+#     so a flake can never pass silently as if it were clean.
 run_captured_external_scenario() {
   local scenario=$1
   shift
-  mkdir -p "$row_dir/scenarios/$scenario"
-  start_captures "$scenario" || return
-  local result=0
-  "$@" || result=$?
-  stop_captures
-  if [[ "$result" -ne 0 ]]; then
-    return "$result"
-  fi
-  validate_scenario_packet_evidence "$scenario"
+  local scenario_dir="$row_dir/scenarios/$scenario"
+  mkdir -p "$scenario_dir"
+
+  local attempts=${PROXY_INTEROP_SCENARIO_ATTEMPTS:-2}
+  local attempt result=0
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    local driver_log="$scenario_dir/driver.stdout.log"
+    if [[ "$attempt" -gt 1 ]]; then
+      driver_log="$scenario_dir/driver.attempt-$attempt.stdout.log"
+    fi
+
+    # `|| result=$?` rather than `if ! ...`: inside an `if !` branch `$?` is the
+    # negation's own status, which is always 0 — it would report every capture
+    # failure as a success.
+    result=0
+    start_captures "$scenario" >>"$driver_log" 2>&1 || result=$?
+    if [[ "$result" -ne 0 ]]; then
+      printf 'scenario %s: packet capture failed to start (exit %s)\n' \
+        "$scenario" "$result" >>"$driver_log"
+    else
+      "$@" >>"$driver_log" 2>&1 || result=$?
+      stop_captures
+    fi
+
+    if [[ "$result" -eq 0 ]]; then
+      validate_scenario_packet_evidence "$scenario" || return
+      if [[ "$attempt" -gt 1 ]]; then
+        printf 'scenario %s passed on attempt %s of %s\n' \
+          "$scenario" "$attempt" "$attempts" >>"$scenario_dir/retry.log"
+        echo "scenario $scenario passed on attempt $attempt (see retry.log)" >&2
+      fi
+      return 0
+    fi
+
+    printf 'scenario %s attempt %s of %s exited %s\n' \
+      "$scenario" "$attempt" "$attempts" "$result" >>"$scenario_dir/retry.log"
+    if [[ "$attempt" -lt "$attempts" ]]; then
+      echo "scenario $scenario failed (exit $result); retrying once" >&2
+    fi
+  done
+
+  echo "scenario $scenario failed after $attempts attempt(s); see $scenario_dir" >&2
+  return "$result"
 }
 
 sipp_mode() {

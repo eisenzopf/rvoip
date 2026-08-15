@@ -266,9 +266,26 @@ class RunFailStopTests(unittest.TestCase):
         wrapper_start = self.source.index("\nrun_captured_external_scenario() {")
         wrapper_end = self.source.index("\n}\n\nsipp_mode", wrapper_start)
         wrapper = normalized(self.source[wrapper_start:wrapper_end])
-        self.assertIn('start_captures "$scenario" || return', wrapper)
+        # Each scenario still owns its own capture lifecycle: started for that
+        # scenario, stopped, and validated. The capture-start failure is
+        # captured into `result` rather than tested with `if !`, where `$?`
+        # would be the negation's status and every failure would read as a
+        # success.
+        self.assertIn('start_captures "$scenario"', wrapper)
+        self.assertIn("|| result=$?", wrapper)
         self.assertIn("stop_captures", wrapper)
         self.assertIn('validate_scenario_packet_evidence "$scenario"', wrapper)
+
+        # A failed scenario has to leave something to read. A qualification
+        # run failed here once and the evidence bundle held only a non-zero
+        # exit, because the driver wrote to the harness's stdout.
+        self.assertIn("driver.stdout.log", wrapper)
+
+        # The retry is bounded and always recorded, so an unstable row cannot
+        # read as clean, and a deterministic failure still fails: it fails on
+        # every attempt and the driver's own exit code is what propagates.
+        self.assertIn("retry.log", wrapper)
+        self.assertIn('return "$result"', wrapper)
 
         core_start = self.source.index("\nrun_core_scenarios() {")
         core_end = self.source.index("\n}\n\nadvanced_scenarios_for_row", core_start)
