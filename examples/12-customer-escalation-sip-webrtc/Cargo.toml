@@ -1,6 +1,6 @@
 [package]
 name = "rvoip-example-customer-escalation-sip-webrtc"
-version = "0.3.7"
+version = "0.3.8"
 edition = "2021"
 rust-version = "1.91"
 publish = false
@@ -10,11 +10,11 @@ bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"
-rvoip = { version = "0.3.7", path = "../../crates/rvoip", features = ["app"] }
-rvoip-core = { version = "0.3.7", path = "../../crates/foundation/rvoip-core" }
-rvoip-media-core = { version = "0.3.7", path = "../../crates/media/media-core", features = ["opus"] }
-rvoip-sip = { version = "0.3.7", path = "../../crates/sip/rvoip-sip" }
-rvoip-webrtc = { version = "0.3.7", path = "../../crates/webrtc/rvoip-webrtc", features = ["signaling-ws"] }
+rvoip = { version = "0.3.8", path = "../../crates/rvoip", features = ["app"] }
+rvoip-core = { version = "0.3.8", path = "../../crates/foundation/rvoip-core" }
+rvoip-media-core = { version = "0.3.8", path = "../../crates/media/media-core", features = ["opus"] }
+rvoip-sip = { version = "0.3.8", path = "../../crates/sip/rvoip-sip" }
+rvoip-webrtc = { version = "0.3.8", path = "../../crates/webrtc/rvoip-webrtc", features = ["signaling-ws"] }
 rustls = "0.23"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

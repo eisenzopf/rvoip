@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/rvoip-rtp-core/badge.svg)](https://docs.rs/rvoip-rtp-core)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-> **rvoip 0.3.7 security notice:** direct AES-CM SRTP and SDES are the available
+> **rvoip 0.3.8 security notice:** direct AES-CM SRTP and SDES are the available
 > security paths. DTLS-SRTP, every MIKEY mode, ZRTP, AES-GCM, and SRTCP are
 > unavailable and fail with typed errors. Retained public identifiers are for
 > source compatibility, not advertisements of working security.
@@ -45,7 +45,7 @@ The RTP Core sits at the foundation of the media transport stack, providing reli
 ### Security Architecture
 
 The library retains types for multiple security protocols. Only the paths shown
-as available below may be selected in 0.3.7.
+as available below may be selected in 0.3.8.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -202,7 +202,7 @@ async fn main() -> Result<()> {
 ### Unavailable Security Configuration
 
 DTLS-SRTP, MIKEY, and ZRTP constructors are retained for source compatibility,
-but validation rejects them in 0.3.7. Applications must handle the typed error
+but validation rejects them in 0.3.8. Applications must handle the typed error
 and must not fall back to plaintext.
 
 ```rust
@@ -247,7 +247,7 @@ async fn main() -> Result<()> {
 }
 ```
 
-## SRTP availability in 0.3.7
+## SRTP availability in 0.3.8
 
 The reviewed low-level RTP protection path supports four exact AES-CM/HMAC
 suite identities. SRTCP and several public compatibility identities remain
@@ -415,7 +415,7 @@ cargo run --example socket_validation
 - **Security Context**: Minimal overhead for established sessions
 
 ### Optimization Recommendations
-- **Security Protocol Selection**: use exact-suite direct SRTP or SDES; DTLS-SRTP, MIKEY, ZRTP, AES-GCM, and SRTCP are unavailable in 0.3.7
+- **Security Protocol Selection**: use exact-suite direct SRTP or SDES; DTLS-SRTP, MIKEY, ZRTP, AES-GCM, and SRTCP are unavailable in 0.3.8
 - **Buffer Configuration**: Tune based on network RTT and jitter characteristics
 - **Memory Management**: Use memory pooling for high-volume applications
 - **Transport Selection**: UDP for low latency, TCP for reliability

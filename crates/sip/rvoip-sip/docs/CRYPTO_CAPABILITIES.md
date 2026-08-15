@@ -1,6 +1,6 @@
 # rvoip-sip Crypto Capability Boundaries
 
-This file defines the public, end-to-end crypto claim for `rvoip-sip 0.3.7`.
+This file defines the public, end-to-end crypto claim for `rvoip-sip 0.3.8`.
 A lower crate containing a type, constant, parser, or partial state machine does
 not by itself make that mechanism available through SIP offer/answer.
 

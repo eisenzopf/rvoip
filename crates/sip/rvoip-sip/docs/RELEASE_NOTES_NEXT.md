@@ -1,80 +1,94 @@
-# rvoip 0.3.7 Release Candidate Notes
+# rvoip 0.3.8 Release Candidate Notes
 
-Date: 2026-08-06
+Date: 2026-08-14
 
-These notes describe the coordinated 44-crate `0.3.7` release candidate.
-Publication requires a fresh strict full-beta qualification bound to the exact
-clean release source. Prior `0.3.4` carry-forward and `0.3.6` qualification
-evidence do not qualify this release.
+These notes describe the coordinated 44-crate `0.3.8` release candidate.
+Publication requires a fresh `remote-release` qualification bound to the exact
+clean release source and to the current gate catalog. Prior `0.3.6` and
+`0.3.7` qualification evidence does not qualify this release.
 
 ## Headline
 
-`0.3.7` is a media-reliability and edge-interop release. It hardens the Vapi
-bridge and WebRTC/Connect paths under backpressure, exposes inbound SIP auth
-and dialed-number context on the app facade, and repairs SIP/WebRTC cases that
-dropped wildcard contacts, late tracks, or DTMF without MID.
+`0.3.8` is a codec and interop release. AMR-NB and AMR-WB ship end to end —
+both interface formats, DTX, redundancy, interleaving, and a negotiated
+mode-set — and every rate is proved in a live call through a record-routing
+proxy rather than only in unit vectors. Kamailio and OpenSIPS join the
+qualification matrix over TLS with SRTP through rtpengine.
 
-The security, RTP/SRTP correctness, transactional renegotiation, and Tokio-only
-WebRTC work from `0.3.5` remains in force. This candidate adds operator-facing
-reliability on top of that baseline.
+Two SIP correctness repairs ride with it: secure dialogs now answer with a
+`sips:` fallback Contact, and a UAC learns its route set from the
+dialog-forming 2xx, so in-dialog requests follow the proxy path instead of
+bypassing it.
 
-## Vapi and media reliability
+The media-reliability, backpressure, and inbound-auth work from `0.3.7`
+remains in force.
 
-- Inbound and outbound audio queues are bounded so bursts and uplink stalls no
-  longer terminate the session. The RTP clock keeps advancing across underruns,
-  and jitter depth re-converges when renegotiation re-arms warm-up.
-- An adaptive jitter target (RFC 3550 arrival jitter, held and clamped) replaces
-  a fixed five-frame target. The inbound catch-up valve now has stream capacity
-  to release more than one frame, and outbound gets a matching drain valve.
-- Barge-in flushes stale playout audio so queued assistant speech does not talk
-  over the caller for a full buffer depth.
-- WebSocket writes move off the media loop. Control (Ping/Pong/commands) uses
-  its own channel so media backpressure cannot look like a heartbeat failure.
-- Per-call `VapiMediaHealth` reports depth and high-water in milliseconds,
-  drops by reason, underrun/catch-up ticks (including catch-up blocked), and
-  media write timeouts. Logs carry `connection_id`.
+## AMR
 
-## WebRTC, Connect, and SIP
+- Both variants at both interface formats (IF1 and IF2), bit-exact against
+  3GPP's own reference material for TS 26.073, TS 26.101 and TS 26.201. No
+  3GPP source is vendored into this repository; the oracles fetch it.
+- VAD1 and VAD2, DTX reaching the wire, receive-side interleaving reassembly,
+  max-red redundancy with dedup, and CMR damping.
+- The SDP `mode-set` is negotiated and obeyed, and each negotiated rate is
+  attested in the release evidence rather than assumed from the top mode.
+- The media graph admits a codec by the payload type a transport reports, so
+  a peer's own dynamic numbering is honored — including the two numbers an
+  AMR session commonly negotiates at once, which no name-keyed table could
+  express. Packet times AMR cannot accept are re-framed (10 ms joined,
+  30 ms split with the remainder carried).
 
-- Media continues under driver backpressure; unbind stays responsive. Connect
-  startup backpressure no longer evicts media sinks or drops retained routes.
-- Primary audio and DTMF work when a peer never negotiates the SDES MID
-  extension (Amazon Connect and similar). Late remote audio tracks attach; per-
-  peer UDP allocation is bounded; remote codec preference order is preserved.
-- Wildcard `Contact` routes use the observed source address.
-- `SipConfig` surfaces listener auth and inbound context policy already present
-  one layer down: `tenant`, `trusted_trunk(cidr, subject)`, and
-  `capture_headers`. Defaults remain fail-closed and behavior-compatible when
-  unset. `IpNet` is re-exported from `rvoip-sip` for CIDR literals.
+## Proxy and PBX interop
+
+- Kamailio and OpenSIPS registrar-proxy labs, TLS to the proxy and SRTP
+  through rtpengine, with opt-in AMR-NB transcoding. The AMR-WB transcode
+  failure is attributed to rtpengine and recorded as such.
+- A per-rate AMR sweep bound to the gate catalog, and proxy-PBX matrix rows
+  verified in the release report.
+- New gates in the catalog: the AMR per-rate sweep family, the proxy-PBX
+  media family, and AMR decode/encode/unpack fuzz targets.
+
+## SIP correctness
+
+- RFC 3261 §12.1.1: a secure fallback Contact is generated for every trigger
+  — SIPS Request-URI, SIPS topmost Record-Route, or SIPS Contact when no
+  Record-Route is present — at the TLS-advertised address. Explicit Contact
+  and plain-SIP behavior are unchanged. This also repairs rvoip-to-rvoip
+  SIPS setup, since `Dialog::from_2xx_response` refuses a secure dialog whose
+  Contact is not `sips:` (issue #176).
+- RFC 3261 §12.1.2: the UAC learns its route set from the dialog-forming
+  2xx's Record-Route, reversed, preserving every URI parameter. Without it,
+  in-dialog requests bypassed every record-routing proxy in the path.
+- The profiled egress registration exposes its coordinator for
+  observation-only subscriptions, so an application can install security
+  evidence monitors before registration. The composite adapter remains the
+  sole signaling and lifecycle owner.
 
 ## Architecture and compatibility
 
-- Changes preserve the sharded, exact-key, generation-protected, bounded-
-  retention SIP signaling architecture in
-  [`SIGNALING_PERFORMANCE_ARCHITECTURE.md`](SIGNALING_PERFORMANCE_ARCHITECTURE.md).
-- Crypto non-claims from
-  [`CRYPTO_CAPABILITIES.md`](CRYPTO_CAPABILITIES.md) are unchanged: AEAD AES-GCM,
-  end-to-end SIP DTLS-SRTP, MIKEY, ZRTP, and G.722 codec negotiation remain
-  unsupported through the public SIP surface.
-- Public compatibility is compared with the documented `0.3.6` baseline.
-  Additive facade configuration and typed media-health APIs do not remove
-  existing call sites.
-- General-user 10,000 CPS full-media capability is not claimed. The strict SIP
-  beta envelope remains bounded by its recorded 2,000-CPS real-media profile,
-  exact host configuration, peer matrix, workloads, and soak durations.
-- Browser/WebRTC edge qualification remains separate from the SIP beta claim;
-  Connect and MID/DTMF repairs do not broaden that claim to untested browsers,
-  ICE/TURN deployments, or network topologies.
+- `CodecInfo` carries the payload type it negotiated, and `Config` gains
+  `amr_dtx`, `amr_auto_cmr`, and `amr_mode_set`. The 0.3.x line accepts
+  additive `Config` fields; construct through the documented constructors
+  rather than struct literals.
+- An opus↔opus bridge stays passthrough when its two legs numbered opus
+  differently. The payload type is a per-leg SDP artifact, not a property of
+  the encoded audio, so the bypass compares name, clock rate and channels,
+  and passthrough restamps the sink's payload type on egress.
+- A barge-in flush empties the re-framing accumulator as well as the sink
+  queues, so no pre-interruption audio and no dead-timeline timestamp
+  survives into the first frame after the flush.
+- The AMR claim is bounded by what was measured: the recorded lab matrix,
+  its peer versions, and the rates actually swept. It does not extend to
+  untested handsets, carriers, or transcoding gateways.
 
 ## Qualification
 
-The release candidate must pass the one-command full beta gate from a clean,
-committed `0.3.7` source tree. Required evidence includes three fresh canonical
-2,000-CPS runs; workspace, public-API, security, parser, PBX, SIPp, strict-UA,
-Kamailio, and OpenSIPS gates; full-media performance and resiliency matrices;
-and both one-hour monolithic and split soaks. The generated report package and
-its source fingerprint are verified before crates.io publication.
+The candidate must pass a fresh `remote-release` qualification from a clean,
+committed `0.3.8` source tree. The aggregate is bound to the exact candidate
+commit and to the catalog hash, and this release changes the catalog — it adds
+the AMR per-rate sweep, proxy-PBX media, and AMR fuzz families — so no earlier
+run's evidence can be reused for any gate.
 
-Historical `0.3.2` exception, `0.3.4` carry-forward, and prior `0.3.6`
-attestations remain unchanged release history. They are not presented as
-current `0.3.7` evidence.
+Historical `0.3.2` exception, `0.3.4` carry-forward, and prior `0.3.6` and
+`0.3.7` attestations remain unchanged release history. They are not presented
+as current `0.3.8` evidence.
