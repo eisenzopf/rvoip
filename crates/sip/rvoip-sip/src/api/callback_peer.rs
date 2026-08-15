@@ -1559,7 +1559,7 @@ impl CallbackPeerControl {
 ///     }
 /// }
 ///
-/// let config = Config { sip_port: 5060, ..Default::default() };
+/// let config = Config::local("router", 5060);
 /// let peer = CallbackPeer::new(Router, config).await?;
 /// peer.run().await?;
 /// # Ok(())
@@ -1658,10 +1658,8 @@ impl<H: CallHandler> CallbackPeer<H> {
     /// use rvoip_sip::{CallbackPeer, Config, SipClientAuth};
     /// use rvoip_sip::api::handlers::AutoAnswerHandler;
     ///
-    /// let config = Config {
-    ///     auth: Some(SipClientAuth::digest("alice", "secret")),
-    ///     ..Config::default()
-    /// };
+    /// let mut config = Config::local("alice", 5060);
+    /// config.auth = Some(SipClientAuth::digest("alice", "secret"));
     /// let peer = CallbackPeer::new(AutoAnswerHandler, config).await?;
     /// # Ok(())
     /// # }
