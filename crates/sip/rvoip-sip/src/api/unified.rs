@@ -2248,27 +2248,33 @@ pub struct Config {
     /// it is off unless a deployment asks for it.
     ///
     /// Ignored by every codec but AMR. Default: `false`.
-    pub amr_dtx: bool,
+    ///
+    /// Private with a builder on purpose: `Config`'s constructible shape is
+    /// frozen for the 0.3.x line, and this is media policy, not signaling —
+    /// set it with [`Config::with_amr_dtx`].
+    amr_dtx: bool,
 
     /// Let AMR sessions ask the peer to change rate on their own.
     ///
     /// A damper watches which modes actually arrive and, at most once every
     /// five seconds, asks for one step toward a mode the peer is not using —
-    /// the shape rtpengine documents. Like [`Config::amr_dtx`] this is local
-    /// policy: a codec mode request is advice to the sender and needs no
-    /// negotiation.
+    /// the shape rtpengine documents. Like [`Config::with_amr_dtx`] this is
+    /// local policy: a codec mode request is advice to the sender and needs
+    /// no negotiation.
     ///
     /// Off by default, and deliberately so: an automatic requester that damps
     /// badly oscillates the peer's rate, which is worse than never asking.
     /// Explicit `request_peer_codec_mode` calls always outrank it.
     ///
-    /// Ignored by every codec but AMR. Default: `false`.
-    pub amr_auto_cmr: bool,
+    /// Ignored by every codec but AMR. Default: `false`. Set with
+    /// [`Config::with_amr_auto_cmr`].
+    amr_auto_cmr: bool,
 
     /// Restrict AMR to these modes, offered as RFC 4867 `mode-set`.
     ///
-    /// Unlike [`Config::amr_dtx`] and [`Config::amr_auto_cmr`], this one is
-    /// negotiated rather than local policy. `mode-set` is bi-directional
+    /// Unlike [`Config::with_amr_dtx`] and [`Config::with_amr_auto_cmr`],
+    /// this one is negotiated rather than local policy. `mode-set` is
+    /// bi-directional
     /// (RFC 4867 §8.1): one active set governs both directions, so naming
     /// modes here constrains what the peer may send as well as what this
     /// endpoint sends, and a conforming answerer must echo the set or reject
@@ -2286,8 +2292,9 @@ pub struct Config {
     /// Set it when a deployment or a conformance run needs a specific rate,
     /// such as pinning AMR-WB to 12.65 kbit/s with `Some(vec![2])`.
     ///
-    /// Ignored by every codec but AMR. Default: `None`.
-    pub amr_mode_set: Option<Vec<u8>>,
+    /// Ignored by every codec but AMR. Default: `None`. Set with
+    /// [`Config::with_amr_mode_set`].
+    amr_mode_set: Option<Vec<u8>>,
 
     /// Media allocation behavior.
     ///
@@ -3307,6 +3314,56 @@ impl Config {
     pub fn with_g729_annex_b(mut self, enabled: bool) -> Self {
         self.g729_annex_b = enabled;
         self
+    }
+
+    /// Enable AMR discontinuous transmission (silence as SID/comfort noise).
+    ///
+    /// Local sender policy, never negotiated — see the field's documentation
+    /// for the RFC 4867 reasoning. Ignored by every codec but AMR.
+    pub fn with_amr_dtx(mut self, enabled: bool) -> Self {
+        self.amr_dtx = enabled;
+        self
+    }
+
+    /// The configured AMR DTX policy.
+    pub fn amr_dtx(&self) -> bool {
+        self.amr_dtx
+    }
+
+    /// Let AMR sessions issue automatic damped codec-mode requests.
+    ///
+    /// Local policy; explicit `request_peer_codec_mode` calls always outrank
+    /// it. Ignored by every codec but AMR.
+    pub fn with_amr_auto_cmr(mut self, enabled: bool) -> Self {
+        self.amr_auto_cmr = enabled;
+        self
+    }
+
+    /// The configured automatic-CMR policy.
+    pub fn amr_auto_cmr(&self) -> bool {
+        self.amr_auto_cmr
+    }
+
+    /// Restrict AMR to these mode indices, offered as RFC 4867 `mode-set`.
+    ///
+    /// Bi-directional and negotiated: one active set governs both directions.
+    /// An empty slice clears the restriction (no `mode-set` is offered, the
+    /// correct shape for an endpoint supporting every mode). Out-of-range
+    /// members are dropped at offer time rather than offered; the rendered
+    /// list is sorted and deduplicated so an offer and its echo compare byte
+    /// for byte. Ignored by every codec but AMR.
+    pub fn with_amr_mode_set(mut self, modes: &[u8]) -> Self {
+        self.amr_mode_set = if modes.is_empty() {
+            None
+        } else {
+            Some(modes.to_vec())
+        };
+        self
+    }
+
+    /// The configured AMR `mode-set` restriction, if any.
+    pub fn amr_mode_set(&self) -> Option<&[u8]> {
+        self.amr_mode_set.as_deref()
     }
 
     /// Set the legacy incoming-call compatibility channel capacity.

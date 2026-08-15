@@ -31,11 +31,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or(DEFAULT_DURATION_SECS),
     );
 
-    let mut server = StreamPeer::with_config(Config {
-        media_port_start: 45100,
-        media_port_end: 45299,
-        ..Config::local("profiling-server", SERVER_PORT)
-    })
+    let mut server = StreamPeer::with_config(
+        Config::local("profiling-server", SERVER_PORT).with_media_ports(45100, 45299),
+    )
     .await?;
 
     let server_task = tokio::spawn(async move {
@@ -50,11 +48,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let mut client = StreamPeer::with_config(Config {
-        media_port_start: 45300,
-        media_port_end: 45499,
-        ..Config::local("profiling-client", CLIENT_PORT)
-    })
+    let mut client = StreamPeer::with_config(
+        Config::local("profiling-client", CLIENT_PORT).with_media_ports(45300, 45499),
+    )
     .await?;
     let target = format!("sip:profiling-server@127.0.0.1:{}", SERVER_PORT);
 

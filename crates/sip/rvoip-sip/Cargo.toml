@@ -700,12 +700,15 @@ optional = true
 workspace = true
 optional = true
 
-# 0.3.8 API decision: `Config` accepts additive public fields within the 0.3.x
-# line (first case: the three AMR knobs). `cargo semver-checks` classifies a
-# field added to a fully-public constructible struct as major because it
-# breaks downstream struct literals; the project ships `Config` additions
-# anyway — construction is expected through the documented constructors — so
-# the lint reports without failing the API gate. Removals and every other
-# breaking class still fail.
+# Struct-literal construction is not this crate's supported API: `Config` is
+# built through its constructors and `with_*` builders (its new fields are
+# private), and `internals::NegotiatedConfig` is an internals type whose one
+# external literal lives in this repo's own guard tests. cargo-semver-checks
+# cannot scope lints per struct, so the two literal-construction lints report
+# as warnings instead of failing the gate; every other breaking class —
+# removals, retypes, renames — still fails. New public fields on non-internals
+# config types remain forbidden by review policy even though the tool can no
+# longer enforce it alone.
 [package.metadata.cargo-semver-checks.lints]
 constructible_struct_adds_field = "warn"
+constructible_struct_adds_private_field = "warn"

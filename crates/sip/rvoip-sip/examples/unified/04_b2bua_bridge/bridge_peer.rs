@@ -60,11 +60,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let media_end = env_u16("BRIDGE_MEDIA_PORT_END", 35810);
     let call_duration_secs = env_u16("BRIDGE_CALL_DURATION_SECS", 4) as u64;
 
-    let coord = UnifiedCoordinator::new(Config {
-        media_port_start: media_start,
-        media_port_end: media_end,
-        ..Config::local("bridge", bridge_port)
-    })
+    let coord = UnifiedCoordinator::new(
+        Config::local("bridge", bridge_port).with_media_ports(media_start, media_end),
+    )
     .await?;
 
     // Unfiltered receiver used only to catch the first IncomingCall —

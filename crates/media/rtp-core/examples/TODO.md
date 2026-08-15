@@ -1,7 +1,7 @@
-# RTP-core example status for 0.3.7
+# RTP-core example status for 0.3.8
 
 This file replaces an older debugging report that described prototype security
-paths as complete or production-ready. Those claims are not valid for 0.3.7.
+paths as complete or production-ready. Those claims are not valid for 0.3.8.
 
 ## Available security examples
 

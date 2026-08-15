@@ -373,13 +373,26 @@ async fn run_media_proof(
         .peer
         .local_audio_ssrc()
         .ok_or("customer WebRTC peer has no local audio SSRC")?;
+    // The payload type this leg carries opus on. Stated once and handed to
+    // both the codec and the stream: `CodecInfo` reports what was negotiated
+    // so the media graph keys and labels frames by that number rather than
+    // guessing it from the codec name.
+    const OPUS_PAYLOAD_TYPE: u8 = 111;
     let codec = CodecInfo {
         name: "opus".into(),
         clock_rate_hz: 48000,
         channels: 2,
         fmtp: None,
+        payload_type: Some(OPUS_PAYLOAD_TYPE),
     };
-    let customer_stream = from_tracks(StreamId::new(), codec, local_track, local_ssrc, 111, None);
+    let customer_stream = from_tracks(
+        StreamId::new(),
+        codec,
+        local_track,
+        local_ssrc,
+        OPUS_PAYLOAD_TYPE,
+        None,
+    );
 
     verify_webrtc_to_sip(alice, alice_session, &customer_stream).await?;
     verify_sip_to_webrtc(alice, alice_session, &customer.peer, &customer_stream).await?;

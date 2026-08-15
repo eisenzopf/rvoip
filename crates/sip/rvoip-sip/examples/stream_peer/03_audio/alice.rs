@@ -66,11 +66,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let media_end = env_u16("ALICE_MEDIA_PORT_END", 10100);
     let out_dir = env_string("AUDIO_OUTPUT_DIR", "output");
 
-    let mut alice = StreamPeer::with_config(Config {
-        media_port_start: media_start,
-        media_port_end: media_end,
-        ..Config::local("alice", alice_port)
-    })
+    let mut alice = StreamPeer::with_config(
+        Config::local("alice", alice_port).with_media_ports(media_start, media_end),
+    )
     .await?;
 
     println!("[ALICE] Calling Bob on port {}...", bob_port);

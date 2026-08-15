@@ -4,7 +4,7 @@ This status replaces the obsolete 2025 “all options complete” notes. Those
 notes described prototypes as production-ready and must not be used as an
 availability or interoperability claim.
 
-## rvoip 0.3.7 availability
+## rvoip 0.3.8 availability
 
 - Direct SRTP supports one explicitly selected AES-CM-128/HMAC-SHA1 profile
   with exactly 30 bytes of provisioned key and salt material.

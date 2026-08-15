@@ -44,11 +44,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         handles.push(tokio::spawn(async move {
             let port = CLIENT_BASE_PORT + id as u16;
             let media_start = 49500 + (id * 50) as u16;
-            let cfg = Config {
-                media_port_start: media_start,
-                media_port_end: media_start + 49,
-                ..Config::local(&format!("dhat-reg-{}", id), port)
-            };
+            let cfg = Config::local(&format!("dhat-reg-{}", id), port)
+                .with_media_ports(media_start, media_start + 49);
             let peer = StreamPeer::with_config(cfg).await.expect("peer");
             for _ in 0..REGISTRATIONS_PER_CLIENT {
                 let handle = peer

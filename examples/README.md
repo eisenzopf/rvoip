@@ -52,7 +52,7 @@ The source of truth is
 
 - **Self-contained projects.** Each example is its own Cargo workspace and uses
   local rvoip crates from this checkout through `path`. The paired `version`
-  tracks the unified workspace train (`0.3.7`). When copying an example into
+  tracks the unified workspace train (`0.3.8`). When copying an example into
   your own project, drop `path` and select the published version you intend to
   use.
 - **`./run_demo.sh`** builds release binaries, boots every process with port

@@ -16,12 +16,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     const NUM_CALLERS: usize = 5;
 
-    let mut peer = StreamPeer::with_config(Config {
-        media_port_start: 20000,
-        media_port_end: 20200,
-        ..Config::local("answerer", 6000)
-    })
-    .await?;
+    let mut peer =
+        StreamPeer::with_config(Config::local("answerer", 6000).with_media_ports(20000, 20200))
+            .await?;
 
     println!("Listening on port 6000...");
     println!("Press Ctrl+C to stop.");

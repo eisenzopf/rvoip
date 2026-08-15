@@ -130,19 +130,16 @@ fn amr_only_config(
     variant: AmrVariant,
     srtp: bool,
 ) -> Config {
-    Config {
-        media_port_start: media.0,
-        media_port_end: media.1,
-        // AMR and DTMF only. No G.711 in the offer, so any audio that
-        // arrives was carried by AMR.
-        offered_codecs: vec![variant.payload_type, TELEPHONE_EVENT_PT],
-        // Both sides require SRTP when it is on, so a failure to negotiate
-        // fails the call rather than silently downgrading to plaintext and
-        // leaving the tone assertion to pass over RTP.
-        offer_srtp: srtp,
-        srtp_required: srtp,
-        ..Config::local(name, sip_port)
-    }
+    let mut config = Config::local(name, sip_port).with_media_ports(media.0, media.1);
+    // AMR and DTMF only. No G.711 in the offer, so any audio that
+    // arrives was carried by AMR.
+    config.offered_codecs = vec![variant.payload_type, TELEPHONE_EVENT_PT];
+    // Both sides require SRTP when it is on, so a failure to negotiate
+    // fails the call rather than silently downgrading to plaintext and
+    // leaving the tone assertion to pass over RTP.
+    config.offer_srtp = srtp;
+    config.srtp_required = srtp;
+    config
 }
 
 async fn run_amr_call(variant: AmrVariant, ports: Ports) {
@@ -660,9 +657,8 @@ async fn run_amr_call_with_mode_set(
 ) -> Vec<u8> {
     let _ = tracing_subscriber::fmt::try_init();
 
-    let with_modes = |name: &str, sip: u16, media: (u16, u16)| Config {
-        amr_mode_set: Some(permitted.to_vec()),
-        ..amr_only_config(name, sip, media, variant, false)
+    let with_modes = |name: &str, sip: u16, media: (u16, u16)| {
+        amr_only_config(name, sip, media, variant, false).with_amr_mode_set(permitted)
     };
 
     let mut bob = StreamPeer::with_config(with_modes("bob", ports.bob_sip, ports.bob_media))

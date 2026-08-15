@@ -2,6 +2,71 @@
 
 ## Unreleased
 
+## 0.3.8 — 2026-08-14
+
+This coordinated 44-crate patch release brings AMR-NB and AMR-WB into the
+codec set end to end — negotiation, transport, transcoding, and release
+evidence — adds record-routed proxy interop to the qualification matrix, and
+repairs SIPS dialog and opus-bridge edge cases found on the way.
+
+### AMR codecs
+
+- Add AMR-NB and AMR-WB with IF1 and IF2 interface formats, VAD1/VAD2 and DTX
+  reaching the wire, receive-side interleaving reassembly, max-red redundancy
+  scheduling with dedup, and CMR damping — bit-exact against the fetched
+  TS 26.073/26.101/26.201 material, with no 3GPP sources in the repository.
+- Negotiate and obey the SDP mode-set, prove every mode in a live call, and
+  attest each rate in the release evidence; long-run soaks cover both
+  variants.
+- Admit dynamic codecs into the media graph by their negotiated payload type
+  (`CodecInfo` now carries it), re-frame packet times AMR cannot accept
+  (10 ms joins and 30 ms splits), and label emitted frames so the UCTP pumps
+  stop stamping Opus's number on everything else.
+- Prove AMR crosses SRTP in process and a QUIC datagram in both directions.
+
+### SIP, proxies, and interop
+
+- Generate a secure fallback Contact for every RFC 3261 §12.1.1 trigger, so
+  secure dialogs answer with `sips:` at the TLS-advertised address while
+  explicit Contact and plain-SIP behavior are preserved (issue #176). This
+  also repairs rvoip-to-rvoip SIPS setup: `Dialog::from_2xx_response` refuses
+  a secure dialog whose Contact is not `sips:`, which the old plain fallback
+  tripped.
+- Learn the UAC route set from the dialog-forming 2xx's Record-Route
+  (reversed per §12.1.2), so in-dialog requests stop bypassing
+  record-routing proxies; the UAS side reads it from the request.
+- Add Kamailio and OpenSIPS registrar-proxy labs with TLS and SRTP through
+  rtpengine, opt-in AMR-NB transcoding (the AMR-WB transcode failure is
+  attributed to rtpengine), and a per-rate sweep bound to the gate catalog.
+- Expose the profiled egress registration's coordinator for
+  observation-only event subscriptions; the composite adapter remains the
+  sole signaling and lifecycle owner.
+- `Config` gains `with_amr_dtx`, `with_amr_auto_cmr`, and
+  `with_amr_mode_set` builders (private fields — `Config`'s constructible
+  shape stays frozen). DTX and auto-CMR are local media policy; only the
+  RFC 4867 `mode-set` is negotiated.
+- `CodecInfo` carries the payload type a transport negotiated
+  (`payload_type: Option<u8>`). Code constructing `CodecInfo` literals adds
+  one field on upgrade; `None` preserves the name-table behavior.
+
+### Media graph and bridges
+
+- Keep opus↔opus bridges passthrough when the two legs numbered opus
+  differently: the payload type is a per-leg SDP artifact, so the bypass
+  compares name, rate, and channels, and passthrough restamps the sink's
+  payload type on egress.
+- Make a barge-in flush empty the re-framing accumulator as well as the sink
+  queues, so no pre-interruption audio or dead-timeline timestamp survives
+  into the first post-flush frame.
+- Reach the opus and all-codecs feature sets from the rvoip facade.
+
+### Qualification
+
+`0.3.8` requires a fresh `remote-release` qualification bound to the updated
+gate catalog, which adds the AMR per-rate sweep, the proxy-PBX media family,
+and the AMR fuzz targets. Because the aggregate is bound to the catalog hash,
+no `0.3.7` evidence qualifies this release.
+
 ## 0.3.7 — 2026-08-06
 
 This coordinated 44-crate patch release hardens voice-AI and WebRTC media under
