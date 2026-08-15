@@ -245,6 +245,15 @@ write_modules_conf() {
     <load module="mod_say_en"/>
     <load module="mod_xml_rpc"/>
     <load module="mod_g729"/>
+    <!-- Built and installed by the image (modules.conf lists codecs/mod_amr
+         and codecs/mod_amrwb, and the builder carries the opencore/vo-amrwbenc
+         dev packages), but this file replaces FreeSWITCH's sample autoload
+         list wholesale — so a codec missing here is a codec the running
+         switch does not have, however well it compiled. Leaving them out is
+         what made `show codec` report neither, and the AMR interop rows fail
+         against a PBX that could not have answered them. -->
+    <load module="mod_amr"/>
+    <load module="mod_amrwb"/>
   </modules>
 </configuration>
 EOF
