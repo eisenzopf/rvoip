@@ -13,6 +13,7 @@ parse surfaces that face untrusted network input. Mirrors `crates/sip/fuzz`.
 | `dtls_record`    | `Record::parse_multiple`             | DTLS record layer |
 | `stun_response`  | `decode_binding_response`            | STUN / ICE NAT discovery |
 | `g711_unpack`    | `G711UPayloadFormat::unpack`         | payload depacketize |
+| `amr_unpack`     | `AmrPayloadCodec::unpack`            | RFC 4867 AMR/AMR-WB depacketize |
 
 ## Run
 

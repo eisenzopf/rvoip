@@ -17,6 +17,9 @@ pub use audio::common::*;
 pub use transcoding::{Transcoder, TranscodingPath, TranscodingStats};
 
 // Re-export codec mapping types
+pub mod spec;
+pub use spec::AudioCodecSpec;
+
 pub use mapping::{CodecCapability, CodecMapper};
 
 // Re-export codec factory
@@ -35,6 +38,11 @@ pub fn audio_codec_available(name: &str) -> bool {
         "PCMU" | "PCMA" | "G711MU" | "G711U" | "G711A" => true,
         "G729" | "G729A" | "G729BA" | "G729AB" => cfg!(feature = "g729"),
         "OPUS" => cfg!(feature = "opus"),
+        // The normaliser above strips '-', so "AMR-WB" arrives here as
+        // "AMRWB". Matching on "AMR-WB" would compile, never fire, and leave
+        // wideband silently unadvertised.
+        "AMR" => cfg!(feature = "amr-nb"),
+        "AMRWB" => cfg!(feature = "amr-wb"),
         "G722" => false,
         _ => false,
     }

@@ -4,10 +4,10 @@
 use crate::codecs::g729::impls::constants::L_SUBFR;
 use crate::codecs::g729::impls::dsp::arith::{extract_h, mult, sub};
 use crate::codecs::g729::impls::dsp::arith32::{l_mac, l_mult};
-use crate::codecs::g729::impls::dsp::div::{Log2, Pow2};
 use crate::codecs::g729::impls::dsp::oper32::{l_comp, l_extract, mpy_32_16};
 use crate::codecs::g729::impls::dsp::shift::{l_shl, l_shr};
 use crate::codecs::g729::impls::dsp::types::{DspContext, Word16, Word32};
+use crate::codecs::g729::impls::math::{Log2, Pow2};
 use crate::codecs::g729::impls::tables::annexa::PRED;
 
 pub(crate) fn predict_encoder_gain(

@@ -49,6 +49,7 @@ async fn test_has_negotiated_config_true() {
         codec: "PCMU".into(),
         sample_rate: 8000,
         channels: 1,
+        fmtp: None,
     });
     assert!(check_guard(&Guard::HasNegotiatedConfig, &s).await);
 }

@@ -9,10 +9,10 @@ use super::{
 use crate::codecs::g729::impls::constants::M;
 use crate::codecs::g729::impls::dsp::arith::{add, mult, mult_r, sub};
 use crate::codecs::g729::impls::dsp::arith32::{l_add, l_deposit_l};
-use crate::codecs::g729::impls::dsp::div::Log2;
 use crate::codecs::g729::impls::dsp::oper32::{l_extract, mpy_32_16};
 use crate::codecs::g729::impls::dsp::shift::{l_shl, shl, shr};
 use crate::codecs::g729::impls::dsp::types::{DspContext, Word32};
+use crate::codecs::g729::impls::math::Log2;
 use crate::codecs::g729::impls::tables::annexa::{lspcb1, lspcb2};
 use crate::codecs::g729::impls::tables::sid::{FACT, MARG, PTR_TAB_1, PTR_TAB_2};
 

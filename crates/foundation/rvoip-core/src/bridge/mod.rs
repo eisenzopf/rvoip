@@ -77,6 +77,24 @@ impl DirectionalMediaBridgePlan {
 /// ([`crate::RvoipError::UnsupportedCodec`]) instead of forwarding an
 /// arbitrary dynamic PT (e.g. `96`) and getting a generic transcoder
 /// error several layers down.
+///
+/// # AMR is absent by decision, not by oversight
+///
+/// AMR-NB and AMR-WB are implemented in `rvoip-codec-core`, reachable through
+/// media-core, and carried end to end on the SIP media path — and they are
+/// deliberately not in this table, so the media graph refuses them.
+///
+/// A name-to-key function cannot express AMR. One session routinely negotiates
+/// the same AMR variant under two payload types that differ only in
+/// `octet-align` (the SIP integration test uses 106 and 107), so there is no
+/// single key to return; and the key this function produces is stamped onto
+/// outgoing frames, so inventing one puts a wrong payload type on the wire.
+/// AMR must key on its negotiated payload type instead, which means reaching
+/// the graph through a payload-type-carrying entry point that does not exist
+/// yet.
+///
+/// See `docs/MEDIA_GRAPH_CODECS.md` for the full decision and what wiring AMR
+/// in would require. Do not add AMR here without reading it.
 pub fn codec_to_pt(name: &str) -> Option<u8> {
     match name.to_ascii_lowercase().as_str() {
         "pcmu" | "g.711-mu" | "g711-mu" | "g711-u" => Some(0),
@@ -86,6 +104,24 @@ pub fn codec_to_pt(name: &str) -> Option<u8> {
         "pcm_s16le" | "pcm-s16le" => Some(rvoip_media_core::codec::audio::payload_type::PCM_S16LE),
         _ => None,
     }
+}
+
+/// The payload type to label a codec's frames with: what it negotiated if the
+/// transport reported one, otherwise its conventional static assignment.
+///
+/// `None` means the codec cannot be labelled, and callers must treat that as a
+/// refusal. It is deliberately not an `unwrap_or` with a plausible number:
+/// both media pumps used to default to Opus's `111`, so any codec missing from
+/// [`codec_to_pt`] — AMR included — went onto the wire wearing Opus's payload
+/// type. A receiver has no way to detect that, because the datagram is
+/// perfectly well-formed and simply lies about what it contains.
+///
+/// The negotiated value is preferred because it is the only one that can be
+/// right for a dynamic codec, where the same name takes different numbers on
+/// different calls.
+#[must_use]
+pub fn resolve_payload_type(codec: &crate::capability::CodecInfo) -> Option<u8> {
+    codec.payload_type.or_else(|| codec_to_pt(&codec.name))
 }
 
 #[cfg(test)]
@@ -98,6 +134,77 @@ mod codec_mapping_tests {
         assert_eq!(codec_to_pt("pcm_s16le"), Some(PCM_S16LE));
         assert_eq!(codec_to_pt("PCM_S16LE"), Some(PCM_S16LE));
         assert_eq!(PCM_S16LE, 120);
+    }
+
+    /// AMR's absence is a decision, and this pins it so it cannot be undone by
+    /// pattern-matching on the Opus row.
+    ///
+    /// Giving AMR a conventional key here would compile and would look like
+    /// the `opus => 111` line above, but the key this function returns is
+    /// stamped onto emitted frames, and AMR's payload type is negotiated per
+    /// call — one session commonly carries the same variant at two payload
+    /// types that differ only in `octet-align`. If AMR is ever wired into the
+    /// media graph it must arrive with its negotiated payload type, which
+    /// means a new entry point rather than a new row here.
+    ///
+    /// See `docs/MEDIA_GRAPH_CODECS.md` before changing this.
+    #[test]
+    fn amr_has_no_conventional_key_by_decision() {
+        for name in ["AMR", "amr", "AMR-WB", "amr-wb"] {
+            assert_eq!(
+                codec_to_pt(name),
+                None,
+                "{name} must stay absent so the graph refuses it loudly \
+                 rather than stamping a fabricated payload type on the wire"
+            );
+        }
+    }
+
+    fn codec(name: &str, payload_type: Option<u8>) -> crate::capability::CodecInfo {
+        crate::capability::CodecInfo {
+            name: name.into(),
+            clock_rate_hz: 8_000,
+            channels: 1,
+            fmtp: None,
+            payload_type,
+        }
+    }
+
+    /// The property that makes this worth carrying at all: for a dynamic
+    /// codec the negotiated number is the only correct one, so it has to win
+    /// over the conventional table. Opus is the sharp case — 111 is merely
+    /// customary, and a session that negotiated 96 must be labelled 96.
+    #[test]
+    fn a_negotiated_payload_type_beats_the_conventional_one() {
+        assert_eq!(
+            super::resolve_payload_type(&codec("opus", Some(96))),
+            Some(96),
+            "the negotiated payload type must win; 111 is a convention, not a fact"
+        );
+        assert_eq!(super::resolve_payload_type(&codec("opus", None)), Some(111));
+    }
+
+    /// The regression this exists to prevent. Both media pumps used to do
+    /// `codec_to_pt(name).unwrap_or(111)`, so an AMR stream went out wearing
+    /// Opus's payload type — a well-formed datagram that lies about what it
+    /// carries, which a receiver cannot detect.
+    #[test]
+    fn an_unlabellable_codec_resolves_to_nothing_rather_than_to_opus() {
+        for name in ["AMR", "AMR-WB"] {
+            assert_eq!(
+                super::resolve_payload_type(&codec(name, None)),
+                None,
+                "{name} has no conventional payload type, and inventing one \
+                 puts a mislabelled datagram on the wire"
+            );
+        }
+        // Once a transport reports what it negotiated, the same codec labels
+        // correctly — the refusal above is about absent information, not
+        // about AMR being unwelcome.
+        assert_eq!(
+            super::resolve_payload_type(&codec("AMR", Some(107))),
+            Some(107)
+        );
     }
 }
 

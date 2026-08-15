@@ -130,11 +130,79 @@
       ]
     },
     {
-      "gate": "infra-otel",
+      "gate": "codec-features-codec-core",
       "patterns": [
         "Cargo.lock",
-        "crates/foundation/infra-common/Cargo.toml",
-        "crates/foundation/infra-common/src/logging/**"
+        "crates/media/codec-core/**",
+        "crates/media/media-core/src/codec/**",
+        "crates/media/media-core/src/rtp_processing/payload/**",
+        "crates/media/media-core/src/relay/controller/bridge.rs",
+        "crates/media/media-core/src/relay/controller/codec_runtime.rs",
+        "crates/media/media-core/src/relay/controller/dtmf_transmitter.rs",
+        "crates/media/media-core/Cargo.toml",
+        "crates/sip/rvoip-sip/src/adapters/media_adapter.rs",
+        "crates/sip/rvoip-sip/src/media_stream.rs",
+        "crates/sip/rvoip-sip/Cargo.toml",
+        "crates/foundation/rvoip-core/src/media_graph.rs",
+        "crates/foundation/rvoip-core/src/bridge/mod.rs",
+        "crates/foundation/rvoip-core/Cargo.toml"
+      ]
+    },
+    {
+      "gate": "codec-features-core",
+      "patterns": [
+        "Cargo.lock",
+        "crates/media/codec-core/**",
+        "crates/media/media-core/src/codec/**",
+        "crates/media/media-core/src/rtp_processing/payload/**",
+        "crates/media/media-core/src/relay/controller/bridge.rs",
+        "crates/media/media-core/src/relay/controller/codec_runtime.rs",
+        "crates/media/media-core/src/relay/controller/dtmf_transmitter.rs",
+        "crates/media/media-core/Cargo.toml",
+        "crates/sip/rvoip-sip/src/adapters/media_adapter.rs",
+        "crates/sip/rvoip-sip/src/media_stream.rs",
+        "crates/sip/rvoip-sip/Cargo.toml",
+        "crates/foundation/rvoip-core/src/media_graph.rs",
+        "crates/foundation/rvoip-core/src/bridge/mod.rs",
+        "crates/foundation/rvoip-core/Cargo.toml"
+      ]
+    },
+    {
+      "gate": "codec-features-media-core",
+      "patterns": [
+        "Cargo.lock",
+        "crates/media/codec-core/**",
+        "crates/media/media-core/src/codec/**",
+        "crates/media/media-core/src/rtp_processing/payload/**",
+        "crates/media/media-core/src/relay/controller/bridge.rs",
+        "crates/media/media-core/src/relay/controller/codec_runtime.rs",
+        "crates/media/media-core/src/relay/controller/dtmf_transmitter.rs",
+        "crates/media/media-core/Cargo.toml",
+        "crates/sip/rvoip-sip/src/adapters/media_adapter.rs",
+        "crates/sip/rvoip-sip/src/media_stream.rs",
+        "crates/sip/rvoip-sip/Cargo.toml",
+        "crates/foundation/rvoip-core/src/media_graph.rs",
+        "crates/foundation/rvoip-core/src/bridge/mod.rs",
+        "crates/foundation/rvoip-core/Cargo.toml"
+      ]
+    },
+    {
+      "gate": "codec-features-sip",
+      "patterns": [
+        "Cargo.lock",
+        "crates/media/codec-core/**",
+        "crates/media/media-core/src/codec/**",
+        "crates/media/media-core/src/rtp_processing/payload/**",
+        "crates/media/media-core/src/relay/controller/bridge.rs",
+        "crates/media/media-core/src/relay/controller/codec_runtime.rs",
+        "crates/media/media-core/src/relay/controller/dtmf_transmitter.rs",
+        "crates/media/media-core/Cargo.toml",
+        "crates/sip/rvoip-sip/src/adapters/media_adapter.rs",
+        "crates/sip/rvoip-sip/src/media_stream.rs",
+        "crates/sip/rvoip-sip/Cargo.toml",
+        "crates/foundation/rvoip-core/src/media_graph.rs",
+        "crates/foundation/rvoip-core/src/bridge/mod.rs",
+        "crates/foundation/rvoip-core/Cargo.toml"
       ]
     },
     {
@@ -149,6 +217,14 @@
       "gate": "examples-smoke",
       "patterns": [
         "examples/**"
+      ]
+    },
+    {
+      "gate": "infra-otel",
+      "patterns": [
+        "Cargo.lock",
+        "crates/foundation/infra-common/Cargo.toml",
+        "crates/foundation/infra-common/src/logging/**"
       ]
     },
     {

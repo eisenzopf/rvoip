@@ -9,24 +9,30 @@ use crate::peer::builder::{MIME_TYPE_OPUS, MIME_TYPE_PCMA, MIME_TYPE_PCMU};
 /// Default WebRTC interop capabilities: Opus + G.711.
 pub fn default_webrtc_capabilities() -> CapabilityDescriptor {
     CapabilityDescriptor {
+        // What this endpoint is willing to accept, not what a session chose.
+        // The negotiated payload type is reported by the SDP parser once an
+        // offer or answer names one.
         audio_codecs: vec![
             CodecInfo {
                 name: "opus".into(),
                 clock_rate_hz: 48000,
                 channels: 2,
                 fmtp: Some("minptime=10;useinbandfec=1".into()),
+                payload_type: None,
             },
             CodecInfo {
                 name: "g.711-mu".into(),
                 clock_rate_hz: 8000,
                 channels: 1,
                 fmtp: None,
+                payload_type: None,
             },
             CodecInfo {
                 name: "g.711-a".into(),
                 clock_rate_hz: 8000,
                 channels: 1,
                 fmtp: None,
+                payload_type: None,
             },
         ],
         max_streams_per_connection: 4,

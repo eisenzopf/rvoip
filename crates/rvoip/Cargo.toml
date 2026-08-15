@@ -77,6 +77,12 @@ vapi     = ["dep:rvoip-vapi"]
 
 # ── SIP media add-ons ──
 g729 = ["sip", "rvoip-sip/g729"]
+amr-nb = ["sip", "rvoip-sip/amr-nb"]
+amr-wb = ["sip", "rvoip-sip/amr-wb"]
+amr = ["amr-nb", "amr-wb"]
+# Opus needs libopus on the build host, which is why it is not in `full`.
+opus = ["sip", "rvoip-sip/opus"]
+all-codecs = ["g729", "amr", "opus"]
 
 # ── SIP add-on (requires SIP): RFC 8224 caller-ID attestation ──
 sip-stir-shaken = ["sip", "dep:rvoip-stir-shaken"]
@@ -103,8 +109,11 @@ app = [
     "dep:tracing",
 ]
 
-# ── Everything ──
-full = ["voip-3", "vapi", "sip-stir-shaken", "client", "app"]
+# ── Everything that builds with no system libraries ──
+# The pure-Rust codecs are included; `opus` is not, because libopus must be
+# present on the build host and `full` should not turn a missing system
+# package into a build failure. Use `all-codecs` (or `opus`) to add it.
+full = ["voip-3", "vapi", "sip-stir-shaken", "client", "app", "g729", "amr"]
 
 [dev-dependencies]
 tokio              = { workspace = true }

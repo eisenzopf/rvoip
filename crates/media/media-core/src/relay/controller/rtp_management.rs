@@ -249,7 +249,8 @@ impl MediaSessionController {
             .await
             .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
 
-        let transmitter = DtmfTransmitter::new(rtp_session);
+        let transmitter =
+            DtmfTransmitter::with_clock_rate(rtp_session, self.negotiated_clock_rate(dialog_id));
         let _handle = transmitter.send_digit(digit, duration_ms);
         // Drop the handle — fire-and-forget. The schedule runs to
         // completion in the background and logs any wire-level send
@@ -259,6 +260,18 @@ impl MediaSessionController {
             digit, duration_ms, dialog_id
         );
         Ok(())
+    }
+
+    /// The RTP clock rate this dialog negotiated, or 8000 if it has none.
+    ///
+    /// RFC 4733 events share the audio stream's SSRC and therefore its
+    /// timestamp clock, so a wideband session's tone durations are counted at
+    /// 16 kHz. Reading it from the codec runtime rather than assuming keeps
+    /// AMR-WB's tones the length they claim to be.
+    fn negotiated_clock_rate(&self, dialog_id: &DialogId) -> u32 {
+        self.codec_runtimes
+            .get(dialog_id)
+            .map_or(8_000, |entry| entry.value().format.clock_rate)
     }
 
     /// Send a bounded RFC 4733 sequence with non-overlapping tones.
@@ -281,7 +294,7 @@ impl MediaSessionController {
             .get_rtp_session(dialog_id)
             .await
             .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
-        DtmfTransmitter::new(rtp_session)
+        DtmfTransmitter::with_clock_rate(rtp_session, self.negotiated_clock_rate(dialog_id))
             .send_sequence(digits, duration_ms, inter_digit_ms)
             .await
     }
@@ -532,6 +545,35 @@ impl MediaSessionController {
                 w.transmission_enabled && w.audio_transmitter.is_some()
             })
             .unwrap_or(false)
+    }
+
+    /// Ask the peer of this dialog to change the codec mode it sends.
+    ///
+    /// For AMR this stamps a CMR on the next outgoing payload; for codecs with
+    /// no such mechanism it is a no-op. Returns `false` when the dialog has no
+    /// codec runtime (no media negotiated yet).
+    pub async fn request_peer_codec_mode(&self, dialog_id: &DialogId, mode_index: u8) -> bool {
+        let Some(runtime) = self
+            .codec_runtimes
+            .get(dialog_id)
+            .map(|entry| Arc::clone(entry.value()))
+        else {
+            return false;
+        };
+        runtime.request_peer_mode(mode_index).await;
+        true
+    }
+
+    /// The codec mode of the last speech frame decoded from this dialog's
+    /// peer — how a caller confirms a requested change took effect on the
+    /// wire. `None` when the dialog has no codec runtime or the codec does not
+    /// track a mode (everything but AMR).
+    pub async fn peer_codec_mode(&self, dialog_id: &DialogId) -> Option<u8> {
+        let runtime = self
+            .codec_runtimes
+            .get(dialog_id)
+            .map(|entry| Arc::clone(entry.value()))?;
+        runtime.last_decoded_mode().await
     }
 
     /// Set custom audio samples for transmission. The transmitter is
@@ -805,15 +847,17 @@ impl MediaSessionController {
             .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
 
         // Sprint 3.6 C1 follow-up — RFC 3389 Comfort Noise gating.
-        // When CN is enabled at the controller level, run the
-        // per-dialog VAD over the outgoing PCM frame and decide
-        // whether to send the audio normally, suppress it (a recent
-        // CN packet already covers this silence run), or emit one PT
-        // 13 CN packet now and then suppress.
-        if codec_runtime.format.clock_rate == 8_000
-            && self
-                .comfort_noise_enabled
-                .load(std::sync::atomic::Ordering::Relaxed)
+        // When CN is enabled at the controller level and the codec can
+        // carry a foreign payload type at all, run the per-dialog VAD
+        // over the outgoing PCM frame and decide whether to send the
+        // audio normally, suppress it (a recent CN packet already
+        // covers this silence run), or emit one PT 13 CN packet now
+        // and then suppress.
+        if crate::relay::controller::cn_gate::supports_rfc3389_comfort_noise(
+            &codec_runtime.format.name,
+        ) && self
+            .comfort_noise_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
         {
             // Build (or retrieve) the per-dialog gate. The gate's
             // CnTransmitter shares this dialog's RtpSession arc so PT

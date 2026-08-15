@@ -4,6 +4,24 @@
 //! media graph owns that receiver once and exposes dynamic sink routes so a
 //! call peer, recorder, UCTP publisher, and MOQT publisher can observe the
 //! same source without racing for frames.
+//!
+//! # Which codecs the graph carries
+//!
+//! PCMU, PCMA, G.729, Opus, and the internal `pcm_s16le`. Every codec entering
+//! the graph is identified by a key derived from its *name*, via
+//! [`crate::bridge::codec_to_pt`]; a name outside that table is refused with
+//! [`RvoipError::UnsupportedCodec`] before any receiver ownership transfers.
+//!
+//! **AMR-NB and AMR-WB are not among them.** They are fully implemented in
+//! `rvoip-codec-core` and carried end to end on the SIP media path, but they
+//! cannot flow through this graph — so an AMR call cannot be published over
+//! UCTP, recorded through the graph, or fanned out to MOQT. The boundary is
+//! deliberate: AMR's payload type is negotiated per call and one session
+//! routinely uses two of them at once, so a name-derived key cannot describe
+//! it, and this graph stamps that key onto the frames it emits.
+//!
+//! The decision, its evidence, and the six things wiring AMR in would require
+//! are recorded in `docs/MEDIA_GRAPH_CODECS.md`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -545,8 +563,7 @@ impl MediaGraphHandle {
         codec: CodecInfo,
         target: mpsc::Sender<MediaFrame>,
     ) -> Result<ManagedMediaRoute> {
-        payload_type_for_codec(&codec)
-            .ok_or_else(|| RvoipError::UnsupportedCodec(codec.name.clone()))?;
+        admit_codec(&codec)?;
         let Some(admission) = self.sink_admission.try_acquire() else {
             metrics::counter!(
                 "rvoip_media_graph_sink_admission_rejections_total",
@@ -633,8 +650,7 @@ impl MediaGraphHandle {
 
     /// Update the source codec and rebuild every codec group's transcoder.
     pub async fn update_source_codec(&self, codec: CodecInfo) -> Result<()> {
-        let source_pt = payload_type_for_codec(&codec)
-            .ok_or_else(|| RvoipError::UnsupportedCodec(codec.name.clone()))?;
+        let source_pt = admit_codec(&codec)?;
         let (ack, done) = oneshot::channel();
         self.send_control(Command::UpdateSourceCodec {
             codec,
@@ -647,8 +663,7 @@ impl MediaGraphHandle {
 
     /// Move one sink to the codec group represented by `codec`.
     pub async fn update_sink_codec(&self, route_id: MediaRouteId, codec: CodecInfo) -> Result<()> {
-        let target_pt = payload_type_for_codec(&codec)
-            .ok_or_else(|| RvoipError::UnsupportedCodec(codec.name.clone()))?;
+        let target_pt = admit_codec(&codec)?;
         let (ack, done) = oneshot::channel();
         self.send_control(Command::UpdateSinkCodec {
             route_id,
@@ -796,15 +811,45 @@ fn map_try_send_error(error: mpsc::error::TrySendError<Command>) -> RvoipError {
 }
 
 fn payload_type_for_codec(codec: &CodecInfo) -> Option<u8> {
-    codec_to_pt(codec.name.trim())
+    // A reported payload type wins over the name table, which is what lets a
+    // dynamic codec in at all: its number is chosen per call, so there is no
+    // row that could describe it. AMR routinely negotiates two at once that
+    // differ only in `octet-align`, and this key is stamped onto the frames
+    // the graph emits — deriving it from the name would put the wrong number
+    // on the wire for one of them.
+    codec
+        .payload_type
+        .or_else(|| codec_to_pt(codec.name.trim()))
 }
 
 /// Validate codec identity before transferring ownership of a stream's
 /// single-consumer receiver into a graph.
+///
+/// Having a payload type is necessary but not sufficient. Before this field
+/// existed, a resolvable key implied a buildable codec, because keys came from
+/// a table of five codecs the graph could all construct. Now a transport can
+/// report any number, so admission has to end in a codec that actually exists
+/// — otherwise a typo in a codec name would be accepted here and fail
+/// somewhere downstream, which is the "quietly half-works" outcome the whole
+/// boundary is meant to avoid.
+///
+/// The codec built here is discarded. That is one construction per stream
+/// admission, not per frame.
 pub fn validate_media_graph_codec(codec: &CodecInfo) -> Result<()> {
-    payload_type_for_codec(codec)
-        .map(|_| ())
-        .ok_or_else(|| RvoipError::UnsupportedCodec(codec.name.clone()))
+    admit_codec(codec).map(|_| ())
+}
+
+/// Resolve a codec's graph key and prove the codec behind it can be built.
+///
+/// Every entry point goes through here so the two checks cannot drift apart;
+/// each one previously resolved the key alone, which was sufficient only while
+/// keys came from a fixed table of buildable codecs.
+fn admit_codec(codec: &CodecInfo) -> Result<u8> {
+    let payload_type = payload_type_for_codec(codec)
+        .ok_or_else(|| RvoipError::UnsupportedCodec(codec.name.clone()))?;
+    create_configured_codec(codec, payload_type)
+        .map(|_| payload_type)
+        .map_err(|_| RvoipError::UnsupportedCodec(codec.name.clone()))
 }
 
 async fn await_update(done: oneshot::Receiver<Result<()>>) -> Result<()> {
@@ -1096,10 +1141,32 @@ impl RtpClockTranslator {
     }
 }
 
+/// One re-encoded payload and the source-domain RTP timestamp it belongs at.
+///
+/// A transcode yields a list of these rather than a single payload because a
+/// fixed-frame target does not consume its input one packet at a time: 30 ms
+/// in produces one 20 ms frame and 10 ms of remainder, and the packet after
+/// it produces two.
+struct TranscodedFrame {
+    payload: Vec<u8>,
+    timestamp_rtp: u32,
+}
+
 struct ConfiguredTranscodingSession {
     source_codec: Box<dyn AudioCodec>,
     target_codec: Box<dyn AudioCodec>,
     format_converter: FormatConverter,
+    /// Decoded PCM at the target's rate and channel count, awaiting enough
+    /// samples to fill one frame. Empty unless `required_samples` is set.
+    pending: Vec<i16>,
+    /// `Some` when the target rejects anything but an exact frame.
+    required_samples: Option<usize>,
+    /// Source-domain timestamp for the next frame emitted, tracked across
+    /// calls because a buffered frame's audio began before the packet that
+    /// completed it.
+    next_timestamp: Option<u32>,
+    source_clock_rate: u32,
+    target_clock_rate: u32,
 }
 
 impl ConfiguredTranscodingSession {
@@ -1109,14 +1176,56 @@ impl ConfiguredTranscodingSession {
         target: &CodecInfo,
         target_pt: u8,
     ) -> rvoip_media_core::Result<Self> {
+        let required_samples = rvoip_media_core::codec::spec::AudioCodecSpec {
+            name: target.name.clone(),
+            payload_type: target_pt,
+            clock_rate: target.clock_rate_hz,
+            channels: target.channels,
+            fmtp: target.fmtp.clone(),
+        }
+        .required_frame_samples();
         Ok(Self {
             source_codec: create_configured_codec(source, source_pt)?,
             target_codec: create_configured_codec(target, target_pt)?,
             format_converter: FormatConverter::new(),
+            pending: Vec::new(),
+            required_samples,
+            next_timestamp: None,
+            source_clock_rate: source.clock_rate_hz.max(1),
+            target_clock_rate: target.clock_rate_hz.max(1),
         })
     }
 
-    fn transcode(&mut self, encoded_data: &[u8]) -> rvoip_media_core::Result<Vec<u8>> {
+    /// Source-domain RTP ticks spanned by one target frame.
+    ///
+    /// Timestamps stay in the source domain because each sink applies its own
+    /// clock translation afterwards; converting here would apply it twice.
+    fn source_ticks_per_frame(&self, frame_samples: usize, channels: usize) -> u32 {
+        let frames = (frame_samples / channels.max(1)) as u64;
+        u32::try_from(
+            frames * u64::from(self.source_clock_rate) / u64::from(self.target_clock_rate),
+        )
+        .unwrap_or(u32::MAX)
+    }
+
+    /// Drop audio held back waiting for a full target frame.
+    ///
+    /// A flush declares everything queued stale; that must include the
+    /// re-framer's partial frame, or the first packet after a barge-in gets
+    /// pre-interruption audio prepended to it. Clearing `next_timestamp`
+    /// matters as much as clearing the samples: with pending audio gone, the
+    /// next packet re-syncs to the sender's clock instead of continuing a
+    /// timeline that ended at the flush.
+    fn discard_pending(&mut self) {
+        self.pending.clear();
+        self.next_timestamp = None;
+    }
+
+    fn transcode(
+        &mut self,
+        encoded_data: &[u8],
+        timestamp_rtp: u32,
+    ) -> rvoip_media_core::Result<Vec<TranscodedFrame>> {
         let source_frame = self.source_codec.decode(encoded_data)?;
         let target_info = self.target_codec.get_info();
         let converted = if source_frame.sample_rate != target_info.sample_rate
@@ -1136,7 +1245,48 @@ impl ConfiguredTranscodingSession {
         } else {
             source_frame
         };
-        self.target_codec.encode(&converted)
+
+        let Some(frame_samples) = self.required_samples else {
+            // The target takes whatever it is handed, which is every codec
+            // here except AMR. Unchanged from before re-framing existed:
+            // one payload out per payload in, at the input's own timestamp.
+            return Ok(vec![TranscodedFrame {
+                payload: self.target_codec.encode(&converted)?,
+                timestamp_rtp,
+            }]);
+        };
+
+        // Re-sync whenever nothing is held back, which is every packet in the
+        // common case where source and target packet times already agree. It
+        // keeps output timestamps identical to the input's rather than
+        // free-running, so a stream that never needed buffering behaves
+        // exactly as it did before, and a stream that resumes after a gap
+        // picks up the sender's clock instead of drifting from it.
+        if self.pending.is_empty() {
+            self.next_timestamp = Some(timestamp_rtp);
+        }
+        self.pending.extend_from_slice(&converted.samples);
+
+        let channels = converted.channels.max(1) as usize;
+        let ticks = self.source_ticks_per_frame(frame_samples, channels);
+        let mut out = Vec::new();
+        while self.pending.len() >= frame_samples {
+            let rest = self.pending.split_off(frame_samples);
+            let whole = std::mem::replace(&mut self.pending, rest);
+            let stamp = self.next_timestamp.unwrap_or(timestamp_rtp);
+            let frame = rvoip_media_core::types::AudioFrame::new(
+                whole,
+                converted.sample_rate,
+                converted.channels,
+                stamp,
+            );
+            out.push(TranscodedFrame {
+                payload: self.target_codec.encode(&frame)?,
+                timestamp_rtp: stamp,
+            });
+            self.next_timestamp = Some(stamp.wrapping_add(ticks));
+        }
+        Ok(out)
     }
 }
 
@@ -1159,7 +1309,11 @@ impl ConfiguredTranscoder {
         }
     }
 
-    fn transcode(&mut self, payload: &[u8]) -> rvoip_media_core::Result<Vec<u8>> {
+    fn transcode(
+        &mut self,
+        payload: &[u8],
+        timestamp_rtp: u32,
+    ) -> rvoip_media_core::Result<Vec<TranscodedFrame>> {
         if self.session.is_none() {
             self.session = Some(ConfiguredTranscodingSession::new(
                 &self.source_codec,
@@ -1171,7 +1325,14 @@ impl ConfiguredTranscoder {
         self.session
             .as_mut()
             .expect("configured transcoder session initialized")
-            .transcode(payload)
+            .transcode(payload, timestamp_rtp)
+    }
+
+    /// Forward a flush to the live session, if one was ever started.
+    fn discard_pending(&mut self) {
+        if let Some(session) = self.session.as_mut() {
+            session.discard_pending();
+        }
     }
 }
 
@@ -1221,7 +1382,25 @@ fn create_configured_codec(
             codec.clock_rate_hz,
             codec.channels,
         )?)),
-        _ => Err(CodecError::UnsupportedPayloadType { payload_type }.into()),
+        // Anything with a negotiated payload type goes through media-core's
+        // own spec, which is the only constructor that takes fmtp — and for
+        // AMR fmtp is not decoration: `octet-align` decides the framing, so
+        // building it without the negotiated parameters produces a stream no
+        // peer can parse rather than a degraded one.
+        //
+        // The arms above stay as they are. They predate `AudioCodecSpec` and
+        // the Opus one honours `maxaveragebitrate` and `cbr=1`, which
+        // `AudioCodecSpec::build` does not; routing them here would silently
+        // drop both.
+        _ => rvoip_media_core::codec::spec::AudioCodecSpec {
+            name: codec.name.clone(),
+            payload_type,
+            clock_rate: codec.clock_rate_hz,
+            channels: codec.channels,
+            fmtp: codec.fmtp.clone(),
+        }
+        .build()
+        .map_err(|_| CodecError::UnsupportedPayloadType { payload_type }.into()),
     }
 }
 
@@ -1260,9 +1439,14 @@ fn make_transcoder(
 ) -> Option<ConfiguredTranscoder> {
     let source_key = CodecGroupKey::new(source_codec, source_pt);
     let target_key = CodecGroupKey::new(target_codec, target_pt);
+    // Payload type deliberately not compared: it is a per-leg SDP artifact,
+    // not a property of the encoded audio. A SIP leg that negotiated opus at
+    // 96 bridging to a leg that resolved the default 111 carries identical
+    // bytes; `route_source_frame` restamps the group's target PT on egress.
+    // Requiring equal PTs here silently re-enabled a full decode/re-encode
+    // the moment SIP legs started reporting their negotiated PT.
     let opus_payload_is_compatible = source_key.name == "opus"
         && target_key.name == "opus"
-        && source_key.payload_type == target_key.payload_type
         && source_key.clock_rate_hz == target_key.clock_rate_hz
         && source_key.channels == target_key.channels;
     (source_key != target_key && !opus_payload_is_compatible).then(|| {
@@ -1692,7 +1876,17 @@ fn start_media_graph_with_activity_interval(
                         Command::Flush { ack } => {
                             // Barge-in: everything queued is stale. Drop it on
                             // every sink so playout stops now rather than
-                            // after the jitter buffer drains.
+                            // after the jitter buffer drains. "Queued" also
+                            // means audio a re-framing transcoder is holding
+                            // for a full target frame — it predates the flush
+                            // just as surely as anything in a sink queue, it
+                            // is simply less than one frame of it. The ack
+                            // still counts whole queued frames only.
+                            for group in groups.values_mut() {
+                                if let Some(transcoder) = group.transcoder.as_mut() {
+                                    transcoder.discard_pending();
+                                }
+                            }
                             let dropped: usize =
                                 sinks.values().map(|sink| sink.queue.flush()).sum();
                             if dropped > 0 {
@@ -2139,7 +2333,11 @@ fn route_source_frame(
 
     for group in groups.values_mut() {
         group.source_frames_routed = group.source_frames_routed.saturating_add(1);
-        let mut grouped = frame.clone();
+
+        // What this group emits for this input. Usually one frame; a
+        // fixed-frame target fed a different packet time can yield none (the
+        // audio is held until a frame is full) or several.
+        let mut grouped = Vec::with_capacity(1);
         if !is_telephone_event {
             if let Some(transcoder) = group.transcoder.as_mut() {
                 group.transcode_operations = group.transcode_operations.saturating_add(1);
@@ -2149,10 +2347,15 @@ fn route_source_frame(
                     "target_payload_type" => group.target_pt.to_string()
                 )
                 .increment(1);
-                match transcoder.transcode(&frame.payload) {
-                    Ok(payload) => {
-                        grouped.payload = payload.into();
-                        grouped.payload_type = Some(group.target_pt);
+                match transcoder.transcode(&frame.payload, frame.timestamp_rtp) {
+                    Ok(transcoded) => {
+                        for produced in transcoded {
+                            let mut out = frame.clone();
+                            out.payload = produced.payload.into();
+                            out.payload_type = Some(group.target_pt);
+                            out.timestamp_rtp = produced.timestamp_rtp;
+                            grouped.push(out);
+                        }
                     }
                     Err(error) => {
                         stats.transcode_errors = stats.transcode_errors.saturating_add(1);
@@ -2166,35 +2369,50 @@ fn route_source_frame(
                         continue;
                     }
                 }
+            } else {
+                // Passthrough still egresses as the group's codec: restamp the
+                // target PT so a bypassed opus↔opus bridge whose legs
+                // negotiated different numbers delivers what the sink's SDP
+                // promised. Same bytes, correct header.
+                let mut out = frame.clone();
+                out.payload_type = Some(group.target_pt);
+                grouped.push(out);
             }
+        } else {
+            grouped.push(frame.clone());
         }
 
         for route_id in &group.sinks {
             let Some(sink) = sinks.get_mut(route_id) else {
                 continue;
             };
-            let mut routed = grouped.clone();
-            if !is_telephone_event {
-                routed.timestamp_rtp = sink.clock.translate(frame.timestamp_rtp);
-            }
-            let offer = sink.queue.offer(routed);
-            if offer == OfferResult::Closed {
-                closed.push(route_id.clone());
-                continue;
-            }
-            let dropped = offer == OfferResult::DroppedOldest;
-            stats.sink_offers = stats.sink_offers.saturating_add(1);
-            metrics::counter!("rvoip_media_graph_frames_total").increment(1);
-            if dropped {
-                stats.dropped_frames = stats.dropped_frames.saturating_add(1);
-                metrics::counter!(
-                    "rvoip_media_graph_drops_total",
-                    "reason" => "queue-full"
-                )
-                .increment(1);
-            }
-            if sink.record_offer(now, dropped, policy) {
-                evict.push(route_id.clone());
+            for produced in &grouped {
+                let mut routed = produced.clone();
+                if !is_telephone_event {
+                    // Translated from the produced frame's own timestamp, not
+                    // the input's: a re-framed run emits several, and they
+                    // must not all land on one instant.
+                    routed.timestamp_rtp = sink.clock.translate(produced.timestamp_rtp);
+                }
+                let offer = sink.queue.offer(routed);
+                if offer == OfferResult::Closed {
+                    closed.push(route_id.clone());
+                    break;
+                }
+                let dropped = offer == OfferResult::DroppedOldest;
+                stats.sink_offers = stats.sink_offers.saturating_add(1);
+                metrics::counter!("rvoip_media_graph_frames_total").increment(1);
+                if dropped {
+                    stats.dropped_frames = stats.dropped_frames.saturating_add(1);
+                    metrics::counter!(
+                        "rvoip_media_graph_drops_total",
+                        "reason" => "queue-full"
+                    )
+                    .increment(1);
+                }
+                if sink.record_offer(now, dropped, policy) {
+                    evict.push(route_id.clone());
+                }
             }
         }
     }
@@ -2339,6 +2557,11 @@ fn codec_for_payload_type(payload_type: u8) -> Option<CodecInfo> {
         clock_rate_hz,
         channels: 1,
         fmtp: None,
+        // The payload type is this function's own input, so the descriptor
+        // it hands back can carry it. Only static types reach here — the
+        // match refuses everything else — so this never reports a number
+        // that a different call could have assigned to a different codec.
+        payload_type: Some(payload_type),
     })
 }
 
@@ -2456,6 +2679,7 @@ mod tests {
             clock_rate_hz: clock_rate,
             channels: 1,
             fmtp: None,
+            payload_type: None,
         }
     }
 
@@ -2467,6 +2691,7 @@ mod tests {
             clock_rate_hz: 48_000,
             channels: 1,
             fmtp: Some(CANARY.into()),
+            payload_type: None,
         };
         let graph_id = MediaGraphId::from_string(CANARY);
         let key = CodecGroupKey::new(&codec, 111);
@@ -3779,6 +4004,34 @@ mod tests {
         graph.shutdown_and_wait().await.unwrap();
     }
 
+    /// A SIP leg reports the payload type its SDP answer settled on; a
+    /// Connect-style leg reports none and resolves to the default 111. The
+    /// numbers differ, the encoded audio does not: the bridge must stay
+    /// passthrough and restamp the sink's PT on egress, not fall back to a
+    /// full decode/re-encode because the per-leg numbering disagrees.
+    #[tokio::test]
+    async fn opus_negotiated_payload_type_mismatch_stays_passthrough_and_restamps() {
+        let (source_tx, source_rx) = mpsc::channel(1);
+        let mut source_codec = codec("opus", 48_000);
+        source_codec.payload_type = Some(96);
+        let graph = start_media_graph(source_rx, source_codec, Default::default()).unwrap();
+        let (target_tx, mut target_rx) = mpsc::channel(1);
+        graph.add_sink(codec("opus", 48_000), target_tx).unwrap();
+
+        let mut frame = frame_at(0x5a, 960);
+        frame.payload_type = Some(96);
+        source_tx.send(frame).await.unwrap();
+        let received = target_rx.recv().await.unwrap();
+        assert_eq!(received.payload.len(), 160);
+        assert!(received.payload.iter().all(|byte| *byte == 0x5a));
+        assert_eq!(received.payload_type, Some(111));
+        let snapshot = graph.snapshot().await;
+        assert!(!snapshot.codec_groups[0].transcoding);
+        assert_eq!(snapshot.transcode_operations, 0);
+        assert_eq!(snapshot.transcode_errors, 0);
+        graph.shutdown_and_wait().await.unwrap();
+    }
+
     #[test]
     fn configured_transcoder_honors_canonical_opus_mono() {
         let source = codec("pcmu", 8_000);
@@ -3805,12 +4058,19 @@ mod tests {
             let g711 = codec(g711_name, 8_000);
             let mut to_g711 =
                 ConfiguredTranscodingSession::new(&pcm, PCM_S16LE, &g711, g711_pt).unwrap();
-            let encoded = to_g711.transcode(&linear).unwrap();
+            // Neither target is fixed-frame, so each still yields exactly one
+            // payload per input at the input's own timestamp.
+            let produced = to_g711.transcode(&linear, 0).unwrap();
+            assert_eq!(produced.len(), 1);
+            let encoded = produced[0].payload.clone();
             assert_eq!(encoded.len(), 160);
+            assert_eq!(produced[0].timestamp_rtp, 0);
 
             let mut to_pcm =
                 ConfiguredTranscodingSession::new(&g711, g711_pt, &pcm, PCM_S16LE).unwrap();
-            assert_eq!(to_pcm.transcode(&encoded).unwrap().len(), 640);
+            let back = to_pcm.transcode(&encoded, 0).unwrap();
+            assert_eq!(back.len(), 1);
+            assert_eq!(back[0].payload.len(), 640);
         }
     }
 
@@ -3824,11 +4084,614 @@ mod tests {
             .collect::<Vec<_>>();
 
         let mut to_opus = ConfiguredTranscodingSession::new(&pcm, PCM_S16LE, &opus, 111).unwrap();
-        let encoded = to_opus.transcode(&linear).unwrap();
+        let produced = to_opus.transcode(&linear, 0).unwrap();
+        assert_eq!(produced.len(), 1);
+        let encoded = produced[0].payload.clone();
         assert!(!encoded.is_empty());
 
         let mut to_pcm = ConfiguredTranscodingSession::new(&opus, 111, &pcm, PCM_S16LE).unwrap();
-        assert_eq!(to_pcm.transcode(&encoded).unwrap().len(), 640);
+        let back = to_pcm.transcode(&encoded, 0).unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].payload.len(), 640);
+    }
+
+    /// The AMR boundary, asserted rather than only documented.
+    ///
+    /// AMR codes correctly everywhere else in this workspace, so the failure
+    /// that matters is not "AMR is broken" but "AMR quietly half-works here".
+    /// This pins the two properties that keep it honest: the refusal names the
+    /// codec, and it is available through `validate_media_graph_codec` — which
+    /// exists precisely so a caller can learn the answer *before* it acquires
+    /// a stream's single-consumer receiver to hand over, since
+    /// `start_media_graph` consumes that receiver whether or not it succeeds.
+    ///
+    /// See `docs/MEDIA_GRAPH_CODECS.md`.
+    #[tokio::test]
+    async fn amr_is_refused_by_name_on_every_graph_entry_point() {
+        for name in ["AMR", "AMR-WB"] {
+            let amr = codec(name, if name == "AMR" { 8_000 } else { 16_000 });
+
+            match validate_media_graph_codec(&amr) {
+                Err(RvoipError::UnsupportedCodec(refused)) => assert_eq!(
+                    refused, name,
+                    "the diagnostic must name the codec that was refused"
+                ),
+                other => panic!("{name} must be refused by the media graph, got {other:?}"),
+            }
+
+            // The same refusal as a source codec.
+            let (_source_tx, source_rx) = mpsc::channel(1);
+            assert!(matches!(
+                start_media_graph(source_rx, amr.clone(), Default::default()).map(|_| ()),
+                Err(RvoipError::UnsupportedCodec(_))
+            ));
+
+            // And as a sink codec on an otherwise-valid graph.
+            let (_pcmu_tx, pcmu_rx) = mpsc::channel(1);
+            let graph = start_media_graph(pcmu_rx, codec("pcmu", 8_000), Default::default())
+                .expect("pcmu graph starts");
+            let (target_tx, _target_rx) = mpsc::channel(1);
+            assert!(matches!(
+                graph.add_sink(amr, target_tx),
+                Err(RvoipError::UnsupportedCodec(_))
+            ));
+            graph.shutdown();
+        }
+    }
+
+    /// Energy at `target_hz`, by Goertzel — the same measure
+    /// `amr_call_integration.rs` uses on the SIP side.
+    ///
+    /// Length and non-constancy assertions only prove a codec emitted
+    /// *something*; they pass just as well for a decoder that produces the
+    /// wrong pitch, wrong rate, or channel-swapped noise. Comparing the tone
+    /// that went in against everything else in the band is what shows the
+    /// audio survived rather than merely some bytes.
+    #[cfg(feature = "amr-nb")]
+    fn goertzel_magnitude(samples: &[i16], sample_rate: f32, target_hz: f32) -> f32 {
+        let k = (0.5 + (samples.len() as f32 * target_hz) / sample_rate).floor();
+        let omega = (2.0 * std::f32::consts::PI * k) / samples.len() as f32;
+        let coeff = 2.0 * omega.cos();
+        let (mut q1, mut q2) = (0.0_f32, 0.0_f32);
+        for &sample in samples {
+            let q0 = coeff * q1 - q2 + f32::from(sample);
+            q2 = q1;
+            q1 = q0;
+        }
+        (q1 * q1 + q2 * q2 - q1 * q2 * coeff).sqrt()
+    }
+
+    /// The peer tone must dominate every other tone we look for by this much.
+    #[cfg(feature = "amr-nb")]
+    const TONE_DOMINANCE: f32 = 5.0;
+
+    #[cfg(feature = "amr-nb")]
+    fn tone_samples(count: usize, sample_rate: u32, hz: f32, phase: usize) -> Vec<i16> {
+        (0..count)
+            .map(|n| {
+                let t = (n + phase) as f32 / sample_rate as f32;
+                (8_000.0 * (2.0 * std::f32::consts::PI * hz * t).sin()) as i16
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "amr-nb")]
+    fn build_codec(
+        name: &str,
+        payload_type: u8,
+        clock_rate: u32,
+        fmtp: Option<&str>,
+    ) -> Box<dyn AudioCodec> {
+        rvoip_media_core::codec::spec::AudioCodecSpec {
+            name: name.into(),
+            payload_type,
+            clock_rate,
+            channels: 1,
+            fmtp: fmtp.map(ToString::to_string),
+        }
+        .build()
+        .unwrap_or_else(|error| panic!("{name} must build: {error:?}"))
+    }
+
+    /// Assert the tone that was sent dominates the decoded audio, and that a
+    /// decoy frequency we never sent does not.
+    #[cfg(feature = "amr-nb")]
+    fn assert_tone_survived(pcm: &[i16], sample_rate: u32, sent_hz: f32, label: &str) {
+        assert!(
+            !pcm.is_empty(),
+            "{label}: nothing decoded, so there is no audio to judge"
+        );
+        let rate = sample_rate as f32;
+        let sent = goertzel_magnitude(pcm, rate, sent_hz);
+        // A frequency that was never transmitted. If it scores comparably the
+        // output is broadband noise and the "tone" reading means nothing.
+        let decoy = goertzel_magnitude(pcm, rate, sent_hz * 2.7);
+        let ratio = if decoy > 1.0 {
+            sent / decoy
+        } else {
+            f32::INFINITY
+        };
+        assert!(
+            ratio >= TONE_DOMINANCE,
+            "{label}: {sent_hz} Hz scored {sent:.1} against {:.1} at an \
+             untransmitted frequency (ratio {ratio:.2}, want >= {TONE_DOMINANCE:.2}) \
+             — the audio did not survive the round trip",
+            decoy
+        );
+    }
+
+    /// The other half of the boundary above, and the reason it is a boundary
+    /// rather than a ban: AMR is refused for want of a payload type, so a
+    /// transport that reports one gets in.
+    ///
+    /// Both variants are checked at the two numbers a single AMR session
+    /// commonly negotiates at once — 106 bandwidth-efficient and 107
+    /// octet-aligned. That pair is exactly what no name-keyed table could
+    /// have expressed, so it is the case worth pinning.
+    #[cfg(feature = "amr-nb")]
+    #[tokio::test]
+    async fn amr_is_admitted_once_a_transport_reports_its_negotiated_payload_type() {
+        for (name, clock_rate, payload_type, fmtp) in [
+            ("AMR", 8_000, 106_u8, None),
+            ("AMR", 8_000, 107, Some("octet-align=1".to_string())),
+        ] {
+            let amr = CodecInfo {
+                name: name.into(),
+                clock_rate_hz: clock_rate,
+                channels: 1,
+                fmtp,
+                payload_type: Some(payload_type),
+            };
+
+            validate_media_graph_codec(&amr).unwrap_or_else(|error| {
+                panic!("{name} at PT {payload_type} must be admitted, got {error:?}")
+            });
+
+            let (_source_tx, source_rx) = mpsc::channel(1);
+            let graph = start_media_graph(source_rx, amr, Default::default())
+                .unwrap_or_else(|error| panic!("{name} graph must start, got {error:?}"));
+            graph.shutdown();
+        }
+    }
+
+    /// Admission is not the claim that matters. This pushes a real AMR frame
+    /// through the graph and takes PCMU out the other side, which is the thing
+    /// UCTP publishing, recording and MOQT fan-out actually need.
+    ///
+    /// The payload is produced by the AMR encoder rather than by hand, so the
+    /// graph's own decoder has to agree with it — a hand-written buffer would
+    /// only prove the decoder rejects garbage in some particular way.
+    ///
+    /// `transcode_operations` is the non-vacuity guard. Without it a graph
+    /// that quietly forwarded the AMR bytes untouched would satisfy every
+    /// other assertion here: a frame arrives, at the right timestamp, on the
+    /// right sink. That count is what proves the AMR decoder ran.
+    #[cfg(all(feature = "amr-nb", feature = "amr-wb"))]
+    #[tokio::test]
+    async fn an_amr_frame_crosses_the_graph_and_comes_out_as_pcmu() {
+        use rvoip_media_core::types::AudioFrame;
+
+        // Both variants, because they take different routes through the graph.
+        // Narrowband is already at PCMU's 8 kHz and skips conversion entirely;
+        // wideband is 16 kHz and 320 samples, so it goes through the resampler
+        // on the way out. A pass on narrowband alone says nothing about that.
+        for (name, clock_rate, frame_samples, payload_type) in [
+            ("AMR", 8_000_u32, 160_usize, 107_u8),
+            ("AMR-WB", 16_000, 320, 105),
+        ] {
+            let amr_info = CodecInfo {
+                name: name.into(),
+                clock_rate_hz: clock_rate,
+                channels: 1,
+                fmtp: Some("octet-align=1".into()),
+                payload_type: Some(payload_type),
+            };
+
+            // 20 ms of a tone, which is exactly one frame for either variant.
+            let samples: Vec<i16> = (0..frame_samples)
+                .map(|n| {
+                    let t = n as f64 / f64::from(clock_rate);
+                    (8_000.0 * (2.0 * std::f64::consts::PI * 440.0 * t).sin()) as i16
+                })
+                .collect();
+            let mut encoder = rvoip_media_core::codec::spec::AudioCodecSpec {
+                name: amr_info.name.clone(),
+                payload_type,
+                clock_rate,
+                channels: 1,
+                fmtp: amr_info.fmtp.clone(),
+            }
+            .build()
+            .unwrap_or_else(|error| panic!("{name} codec must build, got {error:?}"));
+            let amr_payload = encoder
+                .encode(&AudioFrame::new(samples, clock_rate, 1, 0))
+                .unwrap_or_else(|error| {
+                    panic!("{frame_samples} samples is one {name} frame, got {error:?}")
+                });
+            assert!(
+                !amr_payload.is_empty(),
+                "an empty {name} payload would make the assertions below meaningless"
+            );
+
+            let (source_tx, source_rx) = mpsc::channel(4);
+            let graph = start_media_graph(source_rx, amr_info, Default::default())
+                .unwrap_or_else(|error| panic!("{name} graph must start, got {error:?}"));
+            let (pcmu_tx, mut pcmu_rx) = mpsc::channel(4);
+            graph
+                .add_sink(codec("pcmu", 8_000), pcmu_tx)
+                .expect("pcmu is a valid sink for an AMR source");
+            graph.snapshot().await;
+
+            source_tx
+                .send(MediaFrame {
+                    stream_id: StreamId::from_string("strm_amr_graph_test"),
+                    kind: StreamKind::Audio,
+                    payload: Bytes::from(amr_payload),
+                    timestamp_rtp: 12_345,
+                    captured_at: Utc::now(),
+                    payload_type: Some(payload_type),
+                })
+                .await
+                .expect("the graph is accepting frames");
+
+            let received = tokio::time::timeout(Duration::from_secs(2), pcmu_rx.recv())
+                .await
+                .unwrap_or_else(|_| panic!("the {name} frame must reach the PCMU sink"))
+                .expect("the sink channel stays open");
+
+            assert_eq!(received.timestamp_rtp, 12_345);
+            assert_eq!(
+                received.payload.len(),
+                160,
+                "{name}: 20 ms of PCMU at 8 kHz is 160 octets, one per sample"
+            );
+
+            // The 440 Hz that went in as AMR has to still be there after the
+            // graph decoded it and re-encoded it as PCMU.
+            let decoded = build_codec("PCMU", 0, 8_000, None)
+                .decode(&received.payload)
+                .expect("the sink emitted a well-formed PCMU frame");
+            assert_tone_survived(&decoded.samples, 8_000, 440.0, name);
+
+            let snapshot = graph.snapshot().await;
+            assert_eq!(
+                snapshot.transcode_operations, 1,
+                "{name}: the frame must have been decoded and re-encoded, not forwarded"
+            );
+            graph.shutdown();
+        }
+    }
+
+    /// The other direction, which the source test says nothing about: AMR as
+    /// the *target* of a transcode, so the graph runs the AMR encoder rather
+    /// than its decoder. Those are separate code paths and separate feature
+    /// arms, and a sink is what "publish this call as AMR" actually needs.
+    ///
+    /// The emitted frame must also be labelled with AMR's negotiated payload
+    /// type: the UCTP pumps fall back to a name table that has no AMR row, so
+    /// an unlabelled frame here is one they would drop.
+    #[cfg(feature = "amr-nb")]
+    #[tokio::test]
+    async fn amr_works_as_a_graph_sink_and_its_frames_leave_labelled() {
+        let (source_tx, source_rx) = mpsc::channel(4);
+        let graph = start_media_graph(source_rx, codec("pcmu", 8_000), Default::default())
+            .expect("pcmu graph starts");
+        let (amr_tx, mut amr_rx) = mpsc::channel(4);
+        graph
+            .add_sink(
+                CodecInfo {
+                    name: "AMR".into(),
+                    clock_rate_hz: 8_000,
+                    channels: 1,
+                    fmtp: Some("octet-align=1".into()),
+                    payload_type: Some(107),
+                },
+                amr_tx,
+            )
+            .expect("AMR is a valid sink once its payload type is reported");
+        graph.snapshot().await;
+
+        // A real 440 Hz tone rather than a constant byte, so the assertion at
+        // the end is about audio rather than about bytes moving.
+        let pcmu = build_codec("PCMU", 0, 8_000, None)
+            .encode(&rvoip_media_core::types::AudioFrame::new(
+                tone_samples(160, 8_000, 440.0, 0),
+                8_000,
+                1,
+                0,
+            ))
+            .expect("160 samples encodes as one PCMU frame");
+        source_tx
+            .send(MediaFrame {
+                stream_id: StreamId::from_string("strm_amr_sink_test"),
+                kind: StreamKind::Audio,
+                payload: Bytes::from(pcmu),
+                timestamp_rtp: 9_000,
+                captured_at: Utc::now(),
+                payload_type: Some(0),
+            })
+            .await
+            .expect("the graph is accepting frames");
+
+        let received = tokio::time::timeout(Duration::from_secs(2), amr_rx.recv())
+            .await
+            .expect("the PCMU frame must reach the AMR sink")
+            .expect("the sink channel stays open");
+
+        assert_eq!(received.timestamp_rtp, 9_000);
+        assert_eq!(
+            received.payload_type,
+            Some(107),
+            "an unlabelled frame is one the UCTP pumps drop, since no name \
+             table row can supply AMR's payload type"
+        );
+        assert!(
+            !received.payload.is_empty() && received.payload.len() < 160,
+            "AMR compresses: {} octets is not a plausible encoded frame",
+            received.payload.len()
+        );
+
+        // Decode the AMR the graph produced and confirm the tone is in it.
+        let decoded = build_codec("AMR", 107, 8_000, Some("octet-align=1"))
+            .decode(&received.payload)
+            .expect("the sink emitted a well-formed AMR frame");
+        assert_tone_survived(&decoded.samples, 8_000, 440.0, "pcmu->amr");
+
+        let snapshot = graph.snapshot().await;
+        assert_eq!(
+            snapshot.transcode_operations, 1,
+            "the frame must have been re-encoded into AMR, not forwarded as PCMU"
+        );
+        graph.shutdown();
+    }
+
+    /// AMR from a source whose packet time is not 20 ms.
+    ///
+    /// `AmrAdapter::encode` takes exactly one frame and rejects everything
+    /// else, and the transcoder used to hand it whatever the source sent — so
+    /// a 10 ms or 30 ms sender failed on every single packet. Neither packet
+    /// time is exotic: 10 ms is common on G.711 trunks and 30 ms is what
+    /// several SIP stacks default to.
+    ///
+    /// Both directions of mismatch are covered, because they exercise
+    /// opposite halves of the accumulator: 10 ms packets have to be *joined*
+    /// before a frame can be emitted, and 30 ms packets have to be *split*
+    /// with a remainder carried into the next one.
+    ///
+    /// The tone check is what makes this more than a count. Re-framing that
+    /// dropped, duplicated, or misordered a chunk would still produce the
+    /// right number of frames of the right size.
+    #[cfg(feature = "amr-nb")]
+    #[tokio::test]
+    async fn amr_accepts_a_source_whose_packet_time_is_not_twenty_milliseconds() {
+        for (label, packet_samples, packets, expected_frames) in [
+            // 10 ms in: two packets make one 20 ms AMR frame.
+            ("10ms", 80_usize, 8_usize, 4_usize),
+            // 30 ms in: each packet yields one frame and leaves 10 ms over,
+            // so every second packet yields two.
+            ("30ms", 240, 8, 12),
+        ] {
+            let (source_tx, source_rx) = mpsc::channel(32);
+            let graph = start_media_graph(source_rx, codec("pcmu", 8_000), Default::default())
+                .expect("pcmu graph starts");
+            let (amr_tx, mut amr_rx) = mpsc::channel(32);
+            graph
+                .add_sink(
+                    CodecInfo {
+                        name: "AMR".into(),
+                        clock_rate_hz: 8_000,
+                        channels: 1,
+                        fmtp: Some("octet-align=1".into()),
+                        payload_type: Some(107),
+                    },
+                    amr_tx,
+                )
+                .expect("AMR sink is admitted");
+            graph.snapshot().await;
+
+            // Sent from a separate task so the sink drains while it fills.
+            // Pushing every packet first overruns the sink queue's depth and
+            // the graph drops the overflow by design, which would make this a
+            // test of the queue rather than of re-framing.
+            let sender = tokio::spawn(async move {
+                let mut encoder = build_codec("PCMU", 0, 8_000, None);
+                for packet in 0..packets {
+                    let samples =
+                        tone_samples(packet_samples, 8_000, 440.0, packet * packet_samples);
+                    let payload = encoder
+                        .encode(&rvoip_media_core::types::AudioFrame::new(
+                            samples, 8_000, 1, 0,
+                        ))
+                        .expect("PCMU encodes any length");
+                    source_tx
+                        .send(MediaFrame {
+                            stream_id: StreamId::from_string("strm_amr_reframe_test"),
+                            kind: StreamKind::Audio,
+                            payload: Bytes::from(payload),
+                            timestamp_rtp: (packet * packet_samples) as u32,
+                            captured_at: Utc::now(),
+                            payload_type: Some(0),
+                        })
+                        .await
+                        .expect("the graph is accepting frames");
+                    tokio::task::yield_now().await;
+                }
+            });
+
+            let mut decoder = build_codec("AMR", 107, 8_000, Some("octet-align=1"));
+            let mut pcm = Vec::new();
+            let mut stamps = Vec::new();
+            for index in 0..expected_frames {
+                let received = tokio::time::timeout(Duration::from_secs(2), amr_rx.recv())
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!("{label}: expected {expected_frames} frames, stalled at {index}")
+                    })
+                    .expect("the sink channel stays open");
+                stamps.push(received.timestamp_rtp);
+                pcm.extend_from_slice(
+                    &decoder
+                        .decode(&received.payload)
+                        .unwrap_or_else(|error| {
+                            panic!("{label}: frame {index} did not decode: {error:?}")
+                        })
+                        .samples,
+                );
+            }
+
+            // Each emitted frame is one 20 ms AMR frame, so the timestamps
+            // must advance by exactly 160 and never repeat. A re-framer that
+            // stamped every output with its input's timestamp would collapse
+            // several frames onto one instant and the audio would not play.
+            for pair in stamps.windows(2) {
+                assert_eq!(
+                    pair[1].wrapping_sub(pair[0]),
+                    160,
+                    "{label}: timestamps must advance one 20 ms frame at a time, got {stamps:?}"
+                );
+            }
+            assert_tone_survived(&pcm, 8_000, 440.0, label);
+            sender.await.expect("the sending task finished cleanly");
+            graph.shutdown();
+        }
+    }
+
+    /// A flush empties the re-framer, not just the sink queues.
+    ///
+    /// Everything held at the moment of a barge-in is stale, and the
+    /// accumulator holds audio the same way a queue does — it is simply less
+    /// than one frame of it. Without the discard, the first frame after a
+    /// flush gets pre-interruption samples prepended and, because pending
+    /// audio suppresses re-sync, carries the dead timeline's timestamp
+    /// instead of the sender's.
+    #[cfg(feature = "amr-nb")]
+    #[test]
+    fn discard_pending_empties_the_reframer_and_resyncs_the_clock() {
+        let mut session =
+            ConfiguredTranscodingSession::new(&codec("pcmu", 8_000), 0, &codec("AMR", 8_000), 106)
+                .expect("pcmu->amr session builds");
+
+        // 10 ms in: half an AMR frame, held back.
+        let held = session
+            .transcode(&[0xff; 80], 0)
+            .expect("a partial frame is buffered, not an error");
+        assert!(held.is_empty(), "80 samples cannot fill a 160-sample frame");
+        assert!(!session.pending.is_empty());
+        assert_eq!(session.next_timestamp, Some(0));
+
+        session.discard_pending();
+        assert!(session.pending.is_empty());
+        assert_eq!(session.next_timestamp, None);
+
+        // The next packet is a fresh timeline: exactly one frame out, at the
+        // sender's own timestamp, with no stale audio joined to the front.
+        let fresh = session
+            .transcode(&[0xff; 160], 8_000)
+            .expect("a whole frame transcodes");
+        assert_eq!(fresh.len(), 1);
+        assert_eq!(fresh[0].timestamp_rtp, 8_000);
+        assert!(session.pending.is_empty());
+    }
+
+    /// The command-plumbing half of the discard: `Flush` reaches the
+    /// re-framer through the actor, not only the sink queues.
+    ///
+    /// A 30 ms packet leaves 10 ms in the accumulator after its frame is
+    /// recovered. Pre-fix, the packet sent after the flush was joined to that
+    /// leftover and surfaced at the dead timeline's next tick (160); the
+    /// timestamp assert is the discriminator.
+    #[cfg(feature = "amr-nb")]
+    #[tokio::test]
+    async fn flush_discards_the_reframers_pending_audio() {
+        let (source_tx, source_rx) = mpsc::channel(4);
+        let graph = start_media_graph(source_rx, codec("pcmu", 8_000), Default::default())
+            .expect("pcmu graph starts");
+        let (amr_tx, mut amr_rx) = mpsc::channel(4);
+        graph
+            .add_sink(
+                CodecInfo {
+                    name: "AMR".into(),
+                    clock_rate_hz: 8_000,
+                    channels: 1,
+                    fmtp: Some("octet-align=1".into()),
+                    payload_type: Some(107),
+                },
+                amr_tx,
+            )
+            .expect("AMR sink is admitted");
+
+        let mut encoder = build_codec("PCMU", 0, 8_000, None);
+        let mut send_pcmu = |samples: usize, timestamp_rtp: u32| {
+            let payload = encoder
+                .encode(&rvoip_media_core::types::AudioFrame::new(
+                    tone_samples(samples, 8_000, 440.0, 0),
+                    8_000,
+                    1,
+                    0,
+                ))
+                .expect("PCMU encodes any length");
+            MediaFrame {
+                stream_id: StreamId::from_string("strm_amr_flush_test"),
+                kind: StreamKind::Audio,
+                payload: Bytes::from(payload),
+                timestamp_rtp,
+                captured_at: Utc::now(),
+                payload_type: Some(0),
+            }
+        };
+
+        // 30 ms: one frame comes out now, 10 ms stays pending. Receiving the
+        // frame is also the synchronisation point — the flush sent next is
+        // ordered strictly after the packet that armed the accumulator.
+        source_tx
+            .send(send_pcmu(240, 0))
+            .await
+            .expect("the graph is accepting frames");
+        let first = tokio::time::timeout(Duration::from_secs(2), amr_rx.recv())
+            .await
+            .expect("the 30 ms packet yields its whole frame")
+            .expect("the sink channel stays open");
+        assert_eq!(first.timestamp_rtp, 0);
+
+        // Barge-in. Nothing is queued on the sink (we drained it), so the
+        // only stale audio in the graph is the re-framer's 10 ms.
+        graph
+            .flush_sinks_and_wait()
+            .await
+            .expect("the flush is acknowledged");
+
+        source_tx
+            .send(send_pcmu(160, 8_000))
+            .await
+            .expect("the graph is accepting frames");
+        let resumed = tokio::time::timeout(Duration::from_secs(2), amr_rx.recv())
+            .await
+            .expect("the post-flush packet yields a frame")
+            .expect("the sink channel stays open");
+        assert_eq!(
+            resumed.timestamp_rtp, 8_000,
+            "the post-flush frame must open the sender's new timeline, not \
+             continue the flushed one from tick 160"
+        );
+        graph.shutdown();
+    }
+
+    /// Reporting a payload type is not a way to smuggle in a codec the graph
+    /// cannot build: admission still has to end in a real codec.
+    #[tokio::test]
+    async fn a_reported_payload_type_does_not_admit_a_codec_that_cannot_be_built() {
+        let bogus = CodecInfo {
+            name: "not-a-codec".into(),
+            clock_rate_hz: 8_000,
+            channels: 1,
+            fmtp: None,
+            payload_type: Some(100),
+        };
+        let (_source_tx, source_rx) = mpsc::channel(1);
+        assert!(
+            start_media_graph(source_rx, bogus, Default::default()).is_err(),
+            "a payload type is not evidence that a codec exists"
+        );
     }
 
     #[tokio::test]

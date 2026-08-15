@@ -8,7 +8,7 @@
 //!    samples.
 //! 2. **Continuation packets** — emitted every 20 ms while the tone
 //!    is active. `E=0`, `marker=0`, duration incrementing by
-//!    `SAMPLES_PER_TICK` each step. Timestamp stays anchored to the
+//!    `samples_per_tick(DEFAULT_CLOCK_RATE)` each step. Timestamp stays anchored to the
 //!    start timestamp (the "tone start" per RFC 4733 §2.1).
 //! 3. **Three end-of-event retransmits** — `E=1`, all sharing the
 //!    start timestamp + final duration value, sent back-to-back per
@@ -44,9 +44,26 @@ use crate::error::{Error, Result};
 /// One audio tick = 20 ms (matches the audio frame cadence used for
 /// PCMU / PCMA / Opus across the stack).
 const TICK: Duration = Duration::from_millis(20);
-/// 20 ms × 8 kHz = 160 samples per tick at the RFC 4733 telephone-event
-/// clock rate.
-const SAMPLES_PER_TICK: u16 = 160;
+/// The RTP clock rate a session falls back to when none is known.
+///
+/// RFC 4733 telephone events travel in the *audio* stream — same SSRC, same
+/// timestamp clock — so both the timestamp cursor and the event's own duration
+/// field are counted in the audio codec's rate, not in a fixed 8 kHz. AMR-WB
+/// runs at 16 kHz, and a hard-coded 160 samples per 20 ms tick reports every
+/// tone as half its real length to such a peer.
+const DEFAULT_CLOCK_RATE: u32 = 8_000;
+
+/// Samples in one [`TICK`] at `clock_rate`.
+const fn samples_per_tick(clock_rate: u32) -> u16 {
+    // 20 ms of any sane rate fits a u16; the saturation is for a nonsense
+    // negotiated value rather than for any real one.
+    let per_tick = clock_rate / 50;
+    if per_tick > u16::MAX as u32 {
+        u16::MAX
+    } else {
+        per_tick as u16
+    }
+}
 /// RFC 4733 §2.5.1.3 — the sender emits up to three identical
 /// end-of-event packets back-to-back for loss resilience. The
 /// receive-side dedup at `rtp-core::transport::udp` collapses these
@@ -115,11 +132,33 @@ pub fn validate_dtmf_sequence(
 /// session.
 pub struct DtmfTransmitter {
     rtp_session: Arc<Mutex<RtpSession>>,
+    /// The audio stream's RTP clock rate, which the events share.
+    clock_rate: u32,
 }
 
 impl DtmfTransmitter {
+    /// A transmitter on a session whose clock rate is not known.
+    ///
+    /// Assumes [`DEFAULT_CLOCK_RATE`]. Prefer
+    /// [`with_clock_rate`](Self::with_clock_rate) wherever the negotiated
+    /// codec is in hand — for AMR-WB the assumption is wrong.
     pub fn new(rtp_session: Arc<Mutex<RtpSession>>) -> Self {
-        Self { rtp_session }
+        Self {
+            rtp_session,
+            clock_rate: DEFAULT_CLOCK_RATE,
+        }
+    }
+
+    /// A transmitter on a session with a known RTP clock rate.
+    pub fn with_clock_rate(rtp_session: Arc<Mutex<RtpSession>>, clock_rate: u32) -> Self {
+        Self {
+            rtp_session,
+            clock_rate: if clock_rate == 0 {
+                DEFAULT_CLOCK_RATE
+            } else {
+                clock_rate
+            },
+        }
     }
 
     /// Spawn the RFC 4733 §2.5.1.3 packet schedule for one digit.
@@ -128,7 +167,8 @@ impl DtmfTransmitter {
     /// tone has fully drained onto the wire.
     pub fn send_digit(&self, digit: char, duration_ms: u32) -> tokio::task::JoinHandle<Result<()>> {
         let rtp_session = self.rtp_session.clone();
-        tokio::spawn(async move { run_schedule(rtp_session, digit, duration_ms).await })
+        let clock_rate = self.clock_rate;
+        tokio::spawn(async move { run_schedule(rtp_session, digit, duration_ms, clock_rate).await })
     }
 
     /// Send a prevalidated sequence without overlapping telephone events.
@@ -161,7 +201,9 @@ async fn run_schedule(
     rtp_session: Arc<Mutex<RtpSession>>,
     digit: char,
     duration_ms: u32,
+    clock_rate: u32,
 ) -> Result<()> {
+    let per_tick = samples_per_tick(clock_rate);
     let event_code = DtmfEvent::from_digit(digit)
         .ok_or_else(|| Error::config("unsupported RFC 4733 DTMF digit"))?
         .0;
@@ -181,11 +223,12 @@ async fn run_schedule(
     // duration is never truncated; the final interval below may be shorter
     // than one full tick and carries the exact requested sample duration.
     let total_ticks = duration_ms.div_ceil(20).max(1);
-    let final_duration_samples = u16::try_from(duration_ms.saturating_mul(8))
-        .map_err(|_| Error::config("DTMF duration exceeds the telephone-event clock range"))?;
+    let final_duration_samples =
+        u16::try_from(u64::from(duration_ms) * u64::from(clock_rate) / 1000)
+            .map_err(|_| Error::config("DTMF duration exceeds the telephone-event clock range"))?;
 
     // Start packet: E=0, marker=1, duration = one tick.
-    let mut duration_samples: u16 = SAMPLES_PER_TICK;
+    let mut duration_samples: u16 = per_tick;
     send_packet(
         &rtp_session,
         event_code,
@@ -203,7 +246,7 @@ async fn run_schedule(
     let continuation_count = total_ticks.saturating_sub(2);
     for _ in 0..continuation_count {
         tokio::time::sleep(TICK).await;
-        duration_samples = duration_samples.saturating_add(SAMPLES_PER_TICK);
+        duration_samples = duration_samples.saturating_add(per_tick);
         send_packet(
             &rtp_session,
             event_code,
@@ -363,7 +406,11 @@ mod tests {
             } => {
                 assert_eq!(event, 5, "event code maps to digit '5'");
                 assert!(!end_of_event, "start packet must have E=0");
-                assert_eq!(duration, SAMPLES_PER_TICK, "start packet carries one tick");
+                assert_eq!(
+                    duration,
+                    samples_per_tick(DEFAULT_CLOCK_RATE),
+                    "start packet carries one tick"
+                );
             }
             other => panic!("expected start DtmfEvent, got {:?}", other),
         }
@@ -412,7 +459,7 @@ mod tests {
         for w in durations.windows(2) {
             assert_eq!(
                 w[1].saturating_sub(w[0]),
-                SAMPLES_PER_TICK,
+                samples_per_tick(DEFAULT_CLOCK_RATE),
                 "duration must grow by one tick (160 samples) per continuation"
             );
         }

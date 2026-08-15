@@ -142,6 +142,7 @@ async fn dial_quic_client_with_stream(
         clock_rate_hz: 48000,
         channels: 1,
         fmtp: None,
+        payload_type: None,
     };
     let stream = QuicDatagramMediaStream::start(
         StreamId::new(),
@@ -1084,6 +1085,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         clock_rate_hz: 48000,
                         channels: 2,
                         fmtp: None,
+                        payload_type: None,
                     };
                     let offerer_local = offerer.local_audio_track();
                     let offerer_ssrc = offerer.local_audio_ssrc();
@@ -1459,6 +1461,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             clock_rate_hz: 48000,
                             channels: 2,
                             fmtp: None,
+                            payload_type: None,
                         };
                         let offerer_stream =
                             from_tracks(StreamId::new(), codec, local, ssrc, 111, None);

@@ -6470,6 +6470,22 @@ impl DialogManager {
                     crate::dialog::DialogState::Initial | crate::dialog::DialogState::Early => {
                         dialog.state = crate::dialog::DialogState::Confirmed;
 
+                        // RFC 3261 §12.1.2: the UAC route set comes from the
+                        // dialog-forming 2xx's Record-Route, reversed, URI
+                        // parameters preserved. Overlays any RFC 3608
+                        // Service-Route preload; a 2xx without Record-Route
+                        // keeps that preload. Deliberately NOT re-learned on
+                        // re-INVITE 2xxs (§12.2 fixes the set for the
+                        // dialog's lifetime — see the Confirmed arm below).
+                        // Without this, BYE and every other in-dialog request
+                        // bypasses record-routing proxies and goes straight
+                        // to the peer Contact.
+                        let learned =
+                            crate::dialog::dialog_impl::route_set_from_response_for_uac(&response);
+                        if !learned.is_empty() {
+                            dialog.route_set = learned;
+                        }
+
                         // CRITICAL FIX: Update dialog lookup now that we have both tags
                         if let Some(tuple) = dialog.dialog_id_tuple() {
                             let key = crate::manager::utils::DialogUtils::create_lookup_key(

@@ -466,13 +466,16 @@ generated-validation = [
 dev-insecure-tls = ["rvoip-sip-dialog/dev-insecure-tls"]
 # Optional G.729A/G.729AB media support. Off by default.
 g729 = ["rvoip-media-core/g729"]
+amr-nb = ["rvoip-media-core/amr-nb"]
+amr-wb = ["rvoip-media-core/amr-wb"]
+amr = ["amr-nb", "amr-wb"]
 # Optional native Opus media support for negotiated SIP legs. Bridgefu enables
 # this so SIP Opus is represented as Opus codec payload in MediaFrame rather
 # than being mis-decoded as G.711.
 opus = ["rvoip-media-core/opus"]
 # Deprecated compatibility alias; this selects the same real backend.
 opus-sim = ["opus"]
-all-codecs = ["g729", "opus"]
+all-codecs = ["g729", "opus", "amr"]
 # Heap profiling for `examples/profiling/dhat_*.rs`. Pulls in the dhat
 # global allocator and turns the gated examples into compilable
 # binaries. Off by default so `cargo build` / `cargo test` never see
@@ -696,3 +699,13 @@ optional = true
 [dependencies.sysinfo]
 workspace = true
 optional = true
+
+# 0.3.8 API decision: `Config` accepts additive public fields within the 0.3.x
+# line (first case: the three AMR knobs). `cargo semver-checks` classifies a
+# field added to a fully-public constructible struct as major because it
+# breaks downstream struct literals; the project ships `Config` additions
+# anyway — construction is expected through the documented constructors — so
+# the lint reports without failing the API gate. Removals and every other
+# breaking class still fail.
+[package.metadata.cargo-semver-checks.lints]
+constructible_struct_adds_field = "warn"

@@ -242,6 +242,7 @@ async fn loopback_datagram_pump_round_trip() {
         clock_rate_hz: 48000,
         channels: 1,
         fmtp: None,
+        payload_type: None,
     };
 
     // `Direction::Outbound` represents a receive-only wire offer and must
@@ -325,5 +326,139 @@ async fn loopback_datagram_pump_round_trip() {
         received,
         (0u8..10).map(|i| 100 + i).collect::<Vec<_>>(),
         "ordering broken on server→client"
+    );
+}
+
+/// AMR over a real QUIC datagram, both the carrying case and the refusal.
+///
+/// The pump resolves a frame's payload type from the frame itself, falling
+/// back to a name table that has no AMR row — so everything about AMR here
+/// depends on the frame carrying its own. That was previously argued from
+/// reading the code; this runs it over a live connection instead.
+///
+/// The negative half matters more than the positive one. Before
+/// `resolve_payload_type`, an unlabelled frame took `unwrap_or(111)` and went
+/// out wearing Opus's payload type: well-formed, right length, parses fine,
+/// and lying about what it contains. A receiver cannot detect that. So the
+/// unlabelled frame must not arrive at all, and a labelled frame sent after it
+/// must, which is what separates "dropped" from "the test was too impatient".
+#[tokio::test]
+async fn loopback_amr_datagram_keeps_its_payload_type_and_drops_the_unlabelled() {
+    use bytes::Bytes;
+    use rvoip_core::capability::CodecInfo;
+    use rvoip_core::connection::Direction;
+    use rvoip_core::ids::StreamId;
+    use rvoip_core::stream::{MediaFrame, MediaStream, StreamKind};
+
+    const AMR_OA_PT: u8 = 107;
+
+    install_crypto_provider();
+
+    let (server_ep, cert_der) = server_endpoint("127.0.0.1:0".parse().unwrap());
+    let server_addr = server_ep.local_addr().expect("local_addr");
+    let server_conn_handle = {
+        let ep = Arc::clone(&server_ep);
+        tokio::spawn(async move {
+            let incoming = ep.accept().await.expect("incoming");
+            incoming.accept().expect("connecting").await.expect("conn")
+        })
+    };
+
+    let client_ep = client_endpoint();
+    let mut tls = rvoip_uctp::substrate::dev_client_config_trusting(&cert_der).expect("cfg");
+    tls.alpn_protocols = vec![ALPN_UCTP.to_vec()];
+    let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).expect("crypto");
+    let qc = quinn::ClientConfig::new(Arc::new(crypto));
+    let client_conn = client_ep
+        .connect_with(qc, server_addr, "localhost")
+        .expect("connect_with")
+        .await
+        .expect("client conn");
+    let server_conn = server_conn_handle.await.expect("server conn");
+
+    // `payload_type: None` is what UCTP actually produces: it negotiates
+    // codecs by name and has no payload type to report. So the stream's own
+    // descriptor cannot supply one, and every frame is on its own.
+    let codec = CodecInfo {
+        name: "AMR".into(),
+        clock_rate_hz: 8_000,
+        channels: 1,
+        fmtp: Some("octet-align=1".into()),
+        payload_type: None,
+    };
+
+    let client_stream = rvoip_quic::QuicDatagramMediaStream::start(
+        StreamId::new(),
+        StreamKind::Audio,
+        codec.clone(),
+        Direction::Inbound,
+        1,
+        client_conn.clone(),
+    );
+    let server_stream = rvoip_quic::QuicDatagramMediaStream::start(
+        StreamId::new(),
+        StreamKind::Audio,
+        codec.clone(),
+        Direction::Inbound,
+        1,
+        server_conn.clone(),
+    );
+    let client_router = Arc::new(parking_lot::RwLock::new(vec![Arc::clone(&client_stream)]));
+    let server_router = Arc::new(parking_lot::RwLock::new(vec![Arc::clone(&server_stream)]));
+    rvoip_quic::spawn_datagram_reader(client_conn.clone(), client_router, None);
+    rvoip_quic::spawn_datagram_reader(server_conn.clone(), server_router, None);
+
+    let client_out = rvoip_core::stream::MediaStream::frames_out(client_stream.as_ref());
+    let mut server_in = rvoip_core::stream::MediaStream::frames_in(server_stream.as_ref());
+
+    // Payload bytes are markers, not audio: the pump packs and labels, it
+    // never decodes, so what is being asserted is the label.
+    for (marker, payload_type) in [
+        (0xAA_u8, Some(AMR_OA_PT)),
+        (0xBB, None), // must be dropped rather than labelled 111
+        (0xCC, Some(AMR_OA_PT)),
+    ] {
+        client_out
+            .send(MediaFrame {
+                stream_id: client_stream.id(),
+                kind: StreamKind::Audio,
+                payload: Bytes::from(vec![marker; 32]),
+                timestamp_rtp: u32::from(marker),
+                captured_at: Utc::now(),
+                payload_type,
+            })
+            .await
+            .expect("client send");
+    }
+
+    let mut seen = Vec::new();
+    while seen.len() < 2 {
+        let frame = tokio::time::timeout(Duration::from_secs(5), server_in.recv())
+            .await
+            .expect("server recv timed out")
+            .expect("server stream closed");
+        assert_eq!(
+            frame.payload_type,
+            Some(AMR_OA_PT),
+            "AMR's negotiated payload type must reach the peer intact; 111 \
+             would mean the pump relabelled it as Opus"
+        );
+        seen.push(frame.payload[0]);
+    }
+
+    assert_eq!(
+        seen,
+        vec![0xAA, 0xCC],
+        "the unlabelled frame must be dropped, not delivered under a \
+         fabricated payload type"
+    );
+
+    // The frame after the dropped one already arrived, so anything still
+    // queued would be the dropped frame turning up late.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), server_in.recv())
+            .await
+            .is_err(),
+        "nothing further should arrive: the unlabelled frame was dropped"
     );
 }

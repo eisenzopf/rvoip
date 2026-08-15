@@ -55,25 +55,29 @@ them.
 
 - **Beta-qualified** — covered by the SIP release gate and its bounded
   interoperability, security, standards, performance, and soak evidence.
-- **Available — developer preview** — implemented and included in `0.3.2`,
-  but API-unstable or outside the SIP beta attestation.
+- **Available — developer preview** — implemented and available in the
+  workspace, but API-unstable or outside the SIP beta attestation.
 - **Planned** — not implemented; listed only in the [roadmap](#roadmap).
 
 ## SIP interoperability
 
 The 0.3.2 full release run passed all 16 selected PBX and interoperability
-gates. The table distinguishes peers that were actually exercised from proxy
-targets that were only audited and deliberately excluded from the release
-claim.
+gates. The table distinguishes peers that were exercised by that release run
+from proxy targets that it audited and deliberately excluded.
 
-| Peer/tool | 0.3.2 status | Executed scope |
+Both proxies have since been exercised in the AMR interop lab. That is lab
+evidence, labelled as such: it does not join the 0.3.2 release claim, and it
+does not meet the four-peer attestation boundary described
+[below](#sip-interoperability-attestation).
+
+| Peer/tool | Status | Executed scope |
 | --- | --- | --- |
-| **Asterisk** | **Interop matrix passed** | `Endpoint`, `StreamPeer`, and `CallbackPeer`; registration, basic call, G.729A/G.729AB, hold/resume, ring-cancel, RFC 4733 DTMF, rejection, and blind transfer over UDP and TLS |
-| **FreeSWITCH** | **Interop matrix passed** | The same API, scenario, codec, and UDP/TLS matrix as Asterisk |
-| **SIPp** | **Standalone matrix passed** | 30, 100, 300, 1,000, and 2,000 CPS; every configured call completed |
-| **baresip** | **Strict-UA check passed** | External user-agent call against the rvoip SIP listener |
-| **Kamailio** | **Not release-tested** | Named proxy/RTPengine investigation track; the 0.3.2 gate records a de-scope audit, not a Kamailio interoperability claim |
-| **OpenSIPS** | **Not release-tested** | Named proxy/RTPengine investigation track; the 0.3.2 gate records a de-scope audit, not an OpenSIPS interoperability claim |
+| **Asterisk** | **0.3.2 interop matrix passed** | `Endpoint`, `StreamPeer`, and `CallbackPeer`; registration, basic call, G.729A/G.729AB, hold/resume, ring-cancel, RFC 4733 DTMF, rejection, and blind transfer over UDP and TLS |
+| **FreeSWITCH** | **0.3.2 interop matrix passed** | The same API, scenario, codec, and UDP/TLS matrix as Asterisk |
+| **SIPp** | **0.3.2 standalone matrix passed** | 30, 100, 300, 1,000, and 2,000 CPS; every configured call completed |
+| **baresip** | **0.3.2 strict-UA check passed** | External user-agent call against the rvoip SIP listener |
+| **Kamailio** | **Lab-tested; not release-gated** | Registrar-proxy with an rtpengine media relay: registration, calls, AMR in all four framings relayed verbatim, DTMF, and SDES-SRTP, over UDP and TLS. No TCP, no second adjacency order, and not bound into the release attestation |
+| **OpenSIPS** | **Lab-tested; not release-gated** | The same lab scope over UDP only — no TLS image yet |
 
 See the [0.3.2 complete gate
 record](crates/sip/rvoip-sip/docs/BETA_GATE_EXCEPTION.md) and
@@ -198,6 +202,7 @@ voice AI, and cross-transport integrations:
 | RTP/RTCP and G.711 | **Beta-qualified** | PCMU/PCMA media delivery, RTCP receiver reports, telephone-event DTMF, hold/resume, and bridging | [`rvoip-media-core`](crates/media/media-core) |
 | SDES-SRTP | **Beta-qualified** | Tested AES-CM/HMAC profiles with negotiated encrypted media | [`07-secure-call-srtp`](examples/07-secure-call-srtp) |
 | G.729A/G.729AB | **Available — developer preview** | Fully integrated optional path: PT 18 SDP/Annex B negotiation, RTP encode/decode, G.711 transcoding, and Asterisk/FreeSWITCH matrix coverage; excluded only from the general SIP full-media performance claim | [0.3.2 gate record](crates/sip/rvoip-sip/docs/BETA_GATE_EXCEPTION.md) |
+| AMR-NB and AMR-WB | **Available — developer preview** | Both variants behind `amr-nb`/`amr-wb`: encoders and decoders bit-exact against the 3GPP reference implementations over the committed fixtures and the normative sequences, RFC 4867 octet-aligned and bandwidth-efficient framing checked against Wireshark's dissector, DTX, CMR and mode negotiation, every mode exercised in a live call, SDES-SRTP, and live calls through Asterisk, FreeSWITCH, Kamailio and OpenSIPS; outside the SIP beta attestation | [AMR status](crates/media/codec-core/docs/AMR_IMPLEMENTATION_STATUS.md) |
 | Opus and G.722 paths | **Available — developer preview** | Feature-gated codec/media support; not part of the bounded SIP beta media claim | [`rvoip-media-core`](crates/media/media-core) |
 | OS audio devices | **Available — developer preview** | Microphone/speaker bridge, drift-free pacing, resampling, jitter buffering, mute-as-silence, and VU metering | [`02-softphone-audio`](examples/02-softphone-audio) |
 | Conference mixing | **Available — developer preview** | Lower-level N-way/N-1 mixing and conference monitoring primitives; not an integrated SIP beta conference product | [Media README](crates/media/media-core/README.md) |

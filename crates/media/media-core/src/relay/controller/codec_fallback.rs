@@ -13,7 +13,6 @@ use tracing::{debug, error, info, warn};
 use crate::codec::mapping::CodecMapper;
 use crate::codec::transcoding::Transcoder;
 use crate::error::{Error, Result};
-use crate::processing::format::FormatConverter;
 use crate::types::{AudioFrame, DialogId};
 
 use super::codec_detection::{CodecDetectionResult, CodecDetector};
@@ -320,9 +319,9 @@ impl FallbackHandler {
             from_codec, to_codec, self.dialog_id
         );
 
-        // Create format converter and transcoder
-        let format_converter = Arc::new(tokio::sync::RwLock::new(FormatConverter::new()));
-        let transcoder = Transcoder::new(format_converter);
+        // Create the transcoder. Its sessions build their own format
+        // converters, one per direction.
+        let transcoder = Transcoder::new();
 
         self.transcoder = Some(Arc::new(Mutex::new(transcoder)));
 

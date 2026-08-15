@@ -2237,6 +2237,58 @@ pub struct Config {
     /// behaviour).
     pub media_public_addr: Option<SocketAddr>,
 
+    /// Enable AMR discontinuous transmission: replace silence with SID
+    /// (comfort-noise) frames and gaps rather than coding it as speech.
+    ///
+    /// Local sender policy, not a negotiated parameter. RFC 4867 defines no
+    /// fmtp for DTX and a sender may use it without telling the peer, because
+    /// every conforming AMR receiver must handle SID and NO_DATA frames
+    /// regardless. It therefore needs no offer/answer support and cannot be
+    /// refused by the far end — but it does change what goes on the wire, so
+    /// it is off unless a deployment asks for it.
+    ///
+    /// Ignored by every codec but AMR. Default: `false`.
+    pub amr_dtx: bool,
+
+    /// Let AMR sessions ask the peer to change rate on their own.
+    ///
+    /// A damper watches which modes actually arrive and, at most once every
+    /// five seconds, asks for one step toward a mode the peer is not using —
+    /// the shape rtpengine documents. Like [`Config::amr_dtx`] this is local
+    /// policy: a codec mode request is advice to the sender and needs no
+    /// negotiation.
+    ///
+    /// Off by default, and deliberately so: an automatic requester that damps
+    /// badly oscillates the peer's rate, which is worse than never asking.
+    /// Explicit `request_peer_codec_mode` calls always outrank it.
+    ///
+    /// Ignored by every codec but AMR. Default: `false`.
+    pub amr_auto_cmr: bool,
+
+    /// Restrict AMR to these modes, offered as RFC 4867 `mode-set`.
+    ///
+    /// Unlike [`Config::amr_dtx`] and [`Config::amr_auto_cmr`], this one is
+    /// negotiated rather than local policy. `mode-set` is bi-directional
+    /// (RFC 4867 §8.1): one active set governs both directions, so naming
+    /// modes here constrains what the peer may send as well as what this
+    /// endpoint sends, and a conforming answerer must echo the set or reject
+    /// the payload type.
+    ///
+    /// Members are mode *indices*, not bitrates: 0..=7 for narrowband
+    /// (4.75 – 12.2 kbit/s) and 0..=8 for wideband (6.6 – 23.85 kbit/s).
+    /// Members outside the variant's range are dropped rather than offered,
+    /// since a set naming a mode the variant lacks is one a peer may reject
+    /// the whole payload type over. The rendered list is sorted and
+    /// deduplicated so an offer and its echo compare byte for byte.
+    ///
+    /// Empty or `None` offers no `mode-set` at all, which is the correct
+    /// thing for an endpoint that supports every mode — and is the default.
+    /// Set it when a deployment or a conformance run needs a specific rate,
+    /// such as pinning AMR-WB to 12.65 kbit/s with `Some(vec![2])`.
+    ///
+    /// Ignored by every codec but AMR. Default: `None`.
+    pub amr_mode_set: Option<Vec<u8>>,
+
     /// Media allocation behavior.
     ///
     /// Default: [`MediaMode::Enabled`], which allocates real media-core RTP
@@ -2710,6 +2762,9 @@ impl std::fmt::Debug for Config {
             )
             .field("offer_srtp", &self.offer_srtp)
             .field("srtp_required", &self.srtp_required)
+            .field("amr_dtx", &self.amr_dtx)
+            .field("amr_auto_cmr", &self.amr_auto_cmr)
+            .field("amr_mode_set", &self.amr_mode_set)
             .field("srtp_suite_count", &self.srtp_offered_suites.len())
             .field(
                 "media_public_address_configured",
@@ -2864,6 +2919,9 @@ impl Config {
             tls_insecure_skip_verify: false,
             offer_srtp: false,
             srtp_required: false,
+            amr_dtx: false,
+            amr_auto_cmr: false,
+            amr_mode_set: None,
             srtp_offered_suites: SrtpSuitePolicy::Default.suites(),
             media_public_addr: None,
             media_mode: MediaMode::Enabled,
@@ -2975,6 +3033,9 @@ impl Config {
             tls_insecure_skip_verify: false,
             offer_srtp: false,
             srtp_required: false,
+            amr_dtx: false,
+            amr_auto_cmr: false,
+            amr_mode_set: None,
             srtp_offered_suites: SrtpSuitePolicy::Default.suites(),
             media_public_addr: None,
             media_mode: MediaMode::Enabled,
@@ -4560,11 +4621,17 @@ fn validate_beta_media_codecs(offered_codecs: &[u8], comfort_noise_enabled: bool
         ));
     }
 
-    let supported_payloads = match (cfg!(feature = "g729"), cfg!(feature = "opus")) {
+    let base_payloads = match (cfg!(feature = "g729"), cfg!(feature = "opus")) {
         (true, true) => "0, 8, 18, 111, 101, and 13 when comfort_noise_enabled=true",
         (true, false) => "0, 8, 18, 101, and 13 when comfort_noise_enabled=true",
         (false, true) => "0, 8, 111, 101, and 13 when comfort_noise_enabled=true",
         (false, false) => "0, 8, 101, and 13 when comfort_noise_enabled=true",
+    };
+    let supported_payloads = match (cfg!(feature = "amr-wb"), cfg!(feature = "amr-nb")) {
+        (true, true) => format!("{base_payloads}, plus 104/105 (AMR-WB) and 106/107 (AMR-NB)"),
+        (true, false) => format!("{base_payloads}, plus 104/105 (AMR-WB)"),
+        (false, true) => format!("{base_payloads}, plus 106/107 (AMR-NB)"),
+        (false, false) => base_payloads.to_string(),
     };
     let mut has_audio = false;
     let mut seen = std::collections::BTreeSet::new();
@@ -4599,6 +4666,40 @@ fn validate_beta_media_codecs(offered_codecs: &[u8], comfort_noise_enabled: bool
                 {
                     return Err(SessionError::ConfigError(
                         "payload type 111 requires the rvoip-sip `opus` feature".to_string(),
+                    ));
+                }
+            }
+            // AMR, on the payload types this stack assigns in
+            // `adapters/media_adapter.rs`: 104/105 are AMR-WB
+            // (bandwidth-efficient / octet-aligned) and 106/107 are AMR-NB.
+            //
+            // Everything below this validation already handled them — the
+            // offer builder emits their rtpmap and fmtp, the answerer
+            // resolves them from `a=rtpmap`, and media-core builds an
+            // `AmrAdapter` for each — but the gate here had no arm for
+            // them, so the whole path was unreachable from `Config` and
+            // every AMR offer was rejected before a socket was opened.
+            104 | 105 => {
+                #[cfg(feature = "amr-wb")]
+                {
+                    has_audio = true;
+                }
+                #[cfg(not(feature = "amr-wb"))]
+                {
+                    return Err(SessionError::ConfigError(
+                        "payload types 104/105 require the rvoip-sip `amr-wb` feature".to_string(),
+                    ));
+                }
+            }
+            106 | 107 => {
+                #[cfg(feature = "amr-nb")]
+                {
+                    has_audio = true;
+                }
+                #[cfg(not(feature = "amr-nb"))]
+                {
+                    return Err(SessionError::ConfigError(
+                        "payload types 106/107 require the rvoip-sip `amr-nb` feature".to_string(),
                     ));
                 }
             }
@@ -8639,6 +8740,11 @@ impl UnifiedCoordinator {
         media_adapter_inner.set_sdes_base64_mode(sdes_base64_mode);
         // Sprint 3 C1 — propagate Comfort Noise opt-in.
         media_adapter_inner.set_comfort_noise(config.comfort_noise_enabled);
+        // AMR discontinuous transmission — sender-side policy, nothing to
+        // negotiate (RFC 4867 defines no fmtp for DTX).
+        media_adapter_inner.set_amr_dtx(config.amr_dtx);
+        media_adapter_inner.set_amr_auto_cmr(config.amr_auto_cmr);
+        media_adapter_inner.set_amr_mode_set(config.amr_mode_set.clone());
         // Sprint 3.5 — propagate strict codec matching policy.
         media_adapter_inner.set_strict_codec_matching(config.strict_codec_matching);
         // NEXT_STEPS C2 — propagate the configured offered codec list.
@@ -10443,6 +10549,32 @@ impl UnifiedCoordinator {
         self.media_adapter
             .bridge_rtp_sessions(session_a, session_b)
             .await
+    }
+
+    /// Ask the peer of `session` to change the codec mode it transmits.
+    ///
+    /// AMR only for now: this emits a Codec Mode Request (RFC 4867 §3.4.1) on
+    /// the next outgoing payload, asking the peer to switch to `mode_index`.
+    /// The peer may decline. Returns `Ok(false)` when the session has no
+    /// active media; other codecs accept the call and no-op.
+    ///
+    /// Confirm the peer honoured it with [`peer_codec_mode`](Self::peer_codec_mode).
+    pub async fn request_peer_codec_mode(
+        &self,
+        session: &SessionId,
+        mode_index: u8,
+    ) -> std::result::Result<bool, SessionError> {
+        self.media_adapter
+            .request_peer_codec_mode(session, mode_index)
+            .await
+    }
+
+    /// The codec mode of the last speech frame decoded from `session`'s peer,
+    /// or `None` when there is no media or the codec tracks no mode. For AMR
+    /// this is how a caller sees whether a
+    /// [`request_peer_codec_mode`](Self::request_peer_codec_mode) took effect.
+    pub async fn peer_codec_mode(&self, session: &SessionId) -> Option<u8> {
+        self.media_adapter.peer_codec_mode(session).await
     }
 
     /// Send a reliable 183 Session Progress with early-media SDP (RFC 3262).

@@ -140,6 +140,10 @@ impl DialogStore for DialogManager {
                 ));
             }
         }
+        // RFC 3261 §12.1.1: the UAS route set is the request's Record-Route,
+        // in message order with all URI parameters preserved. Without it our
+        // in-dialog requests (BYE, re-INVITE) bypass the proxy chain.
+        dialog.route_set = crate::dialog::dialog_impl::route_set_from_request(request);
 
         let dialog_id = dialog.id.clone();
         self.store_dialog(dialog).await?;
@@ -549,6 +553,9 @@ impl DialogLookup for DialogManager {
                 ));
             }
         }
+        // RFC 3261 §12.1.1: UAS route set from the INVITE's Record-Route,
+        // in message order (see create_dialog).
+        dialog.route_set = crate::dialog::dialog_impl::route_set_from_request(request);
 
         let dialog_id = dialog.id.clone();
 

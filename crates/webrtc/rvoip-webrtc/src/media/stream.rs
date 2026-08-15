@@ -347,6 +347,7 @@ mod receiver_ownership_tests {
                     clock_rate_hz: 48_000,
                     channels: 1,
                     fmtp: None,
+                    payload_type: None,
                 },
                 direction: Direction::Inbound,
                 frames_in_tx,

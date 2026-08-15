@@ -21,6 +21,26 @@ PACKAGE = re.compile(r"^[A-Za-z0-9_-]+$")
 GATE = re.compile(r"^[A-Za-z0-9_-]+$")
 TARGET = re.compile(r"^[A-Za-z0-9_-]+$")
 
+# The optional-codec gates, one per package. Keep in step with the matching
+# `specialty_rules` entries in `policy.json` and the `--specialty-gate` flags
+# in `.github/workflows/main-ci.yml`: a gate named in only one of the three
+# either never runs or fails the plan.
+CODEC_FEATURE_GATES = {
+    "codec-features-codec-core": "rvoip-codec-core",
+    "codec-features-media-core": "rvoip-media-core",
+    "codec-features-sip": "rvoip-sip",
+    "codec-features-core": "rvoip-core",
+}
+
+# Every `rvoip-sip` feature except the release-only `perf-*` harness. Written
+# out rather than computed so the command is inspectable from here; the
+# accompanying test derives the same set from the manifest and fails if a new
+# feature is added without a decision about this gate.
+NON_PERF_SIP_FEATURES = (
+    "all-codecs,amr,amr-nb,amr-wb,dev-insecure-tls,dhat,event-history,g729,"
+    "generated-validation,opus,opus-sim,persistence,tokio-console"
+)
+
 
 class CheckError(RuntimeError):
     """Invalid CI input or environment."""
@@ -317,6 +337,90 @@ def specialty_commands(
                     "crates/media/fuzz",
                     "--target",
                     "x86_64-unknown-linux-gnu",
+                ],
+                None,
+                None,
+            ),
+        ]
+    if gate in CODEC_FEATURE_GATES:
+        # The shards run `cargo test -p <crate>` with default features only.
+        # `rvoip-codec-core` defaults to `["g711"]` and `rvoip-media-core` to
+        # `["pcmu", "pcma"]`, so every test behind `g729`, `opus`, `amr-nb` or
+        # `amr-wb` is compiled out on every pull request -- 104 tests run where
+        # `--all-features` runs 740. The skipped ones are the expensive ones to
+        # be wrong about: the AMR bit-exactness suites against TS 26.073 and
+        # TS 26.173. This gate is where they actually execute.
+        #
+        # Both crates and not just the codec, because media-core's own codec
+        # adapters sit behind the same feature names and inherit the identical
+        # hole: 290 tests run there by default and 316 with every feature on,
+        # and 14 of the 26 missing are the RFC 4867 AMR payload-format tests
+        # the relay's framing guard depends on.
+        # `rvoip-sip` too, and for the same reason one step further out: its
+        # defaults are empty, so its AMR SDP-negotiation test -- the one that
+        # checks a peer's offer reaches media-core with its framing intact and
+        # builds a codec that works -- is compiled out on every pull request.
+        #
+        # `rvoip-core` last, and it is the worst of the four to omit. Its
+        # `amr-nb`/`amr-wb` features gate the media-graph tests that prove an
+        # AMR frame crosses the graph and comes out as PCMU. Without them the
+        # default run still executes the two tests asserting the graph
+        # *refuses* AMR -- so the shard prints green while demonstrating the
+        # opposite of what is true. A hole that reports the inverse of reality
+        # is worse than one that reports nothing.
+        #
+        # One gate per package rather than one gate over four. Each package
+        # needs `--all-features` for both a test build and a clippy build, and
+        # sharing a job made that eight dependency-tree builds against a single
+        # 45-minute specialty budget: the combined gate timed out with the last
+        # package still compiling, having run no tests at all. Worse, it could
+        # not recover on a retry -- `Swatinem/rust-cache` keys on the gate name
+        # and does not save a cache from a job that failed, so the one gate
+        # that needed a warm cache was the one that could never populate it.
+        # Split, the packages build concurrently, each against its own budget
+        # and its own cache key. The patterns in `policy.json` stay identical
+        # across the four, so any change that selected the combined gate still
+        # verifies all four packages.
+        package = CODEC_FEATURE_GATES[gate]
+        # `--all-features` everywhere except `rvoip-sip`, whose feature set
+        # includes the `perf-*` harness. Those targets are release-only by
+        # contract -- `EnvironmentBlock::capture` panics under
+        # `debug_assertions` rather than publish a number nobody should cite,
+        # and the release catalog runs them as `--release --features
+        # perf-tests,... --test <name>`. Turning them on in a debug gate does
+        # not measure anything, it just fails. Every other feature stays on,
+        # so the codec surface this gate exists for is unchanged.
+        selection = (
+            ["--features", NON_PERF_SIP_FEATURES]
+            if package == "rvoip-sip"
+            else ["--all-features"]
+        )
+        return [
+            (
+                [
+                    "cargo",
+                    "test",
+                    "--locked",
+                    *selection,
+                    "--lib",
+                    "--tests",
+                    "--bins",
+                    "--examples",
+                    "-p",
+                    package,
+                ],
+                None,
+                None,
+            ),
+            (
+                [
+                    "cargo",
+                    "clippy",
+                    "--locked",
+                    *selection,
+                    "--all-targets",
+                    "-p",
+                    package,
                 ],
                 None,
                 None,

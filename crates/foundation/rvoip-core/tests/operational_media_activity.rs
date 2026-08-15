@@ -26,6 +26,7 @@ fn pcmu() -> CodecInfo {
         clock_rate_hz: 8_000,
         channels: 1,
         fmtp: None,
+        payload_type: None,
     }
 }
 

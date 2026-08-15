@@ -259,10 +259,26 @@ pub(crate) fn rtpmap_for_pt(pt: u8) -> Option<&'static str> {
         13 => Some("CN/8000"),
         18 => Some("G729/8000"),
         101 => Some("telephone-event/8000"),
+        // RFC 4867 transport configurations are mutually incompatible bit
+        // patterns, so each is offered as its own payload type rather than
+        // negotiated down. Wideband first: it is the HD-voice codec.
+        AMR_WB_BE_PT => Some("AMR-WB/16000"),
+        AMR_WB_OA_PT => Some("AMR-WB/16000"),
+        AMR_NB_BE_PT => Some("AMR/8000"),
+        AMR_NB_OA_PT => Some("AMR/8000"),
         111 => Some("opus/48000/2"),
         _ => None,
     }
 }
+
+/// AMR-WB, bandwidth-efficient framing (the RFC 4867 default).
+pub(crate) const AMR_WB_BE_PT: u8 = 104;
+/// AMR-WB, octet-aligned framing.
+pub(crate) const AMR_WB_OA_PT: u8 = 105;
+/// AMR-NB, bandwidth-efficient framing.
+pub(crate) const AMR_NB_BE_PT: u8 = 106;
+/// AMR-NB, octet-aligned framing.
+pub(crate) const AMR_NB_OA_PT: u8 = 107;
 
 /// NEXT_STEPS C2 — `a=fmtp:` value for payload types that require
 /// one. Returns `None` for codecs that work fine without an fmtp.
@@ -271,11 +287,186 @@ pub(crate) fn fmtp_for_pt(pt: u8) -> Option<&'static str> {
     fmtp_for_pt_with_g729_annex_b(pt, true)
 }
 
+/// The `a=rtpmap` to put in an answer for `pt`.
+///
+/// For a *dynamic* payload type the answer must carry an rtpmap: the number
+/// alone means nothing, and RFC 3264 requires the answerer to describe what it
+/// accepted. [`rtpmap_for_pt`] is keyed on the payload types this stack
+/// assigns, so the moment we answer on a number the *peer* chose it returns
+/// `None` and the line is silently omitted.
+///
+/// Asterisk exposed this immediately: it offers AMR on payload type 98, we
+/// answered `m=audio ... 98` with an `a=fmtp:98` and no `a=rtpmap:98`, and it
+/// tore the call down with 488 Not Acceptable Here. Two rvoip endpoints never
+/// hit it, because they both use the same constants and the table always has
+/// an answer.
+///
+/// So the offer's own rtpmap is echoed when there is one, and the local table
+/// is the fallback for static types.
+fn answer_rtpmap_for_pt(offer: &SdpSession, pt: u8) -> Option<String> {
+    if let Some(mapping) = audio_rtpmap(offer, pt) {
+        let mut rtpmap = format!("{}/{}", mapping.encoding_name, mapping.clock_rate);
+        // Channels are written only when the peer wrote them: `AMR/8000/1` and
+        // `AMR/8000` are equivalent, but echoing the offer's exact spelling
+        // keeps the answer a mirror rather than a paraphrase.
+        if let Some(params) = mapping.encoding_params.as_ref() {
+            rtpmap.push('/');
+            rtpmap.push_str(params);
+        }
+        return Some(rtpmap);
+    }
+    rtpmap_for_pt(pt).map(ToString::to_string)
+}
+
+/// The `a=fmtp` to put in an answer for `pt`.
+///
+/// For every codec but AMR this is the fixed per-payload-type string
+/// [`fmtp_for_pt_with_g729_annex_b`] returns.
+///
+/// # Why AMR cannot use that table
+///
+/// RFC 4867 §8.3.1 makes the transport-format parameters — `octet-align`,
+/// `crc`, `robust-sorting`, `interleaving`, `channels` — a mutually
+/// incompatible set that an answerer must echo rather than renegotiate. The
+/// table keys on *our* payload-type constants, which says nothing about what
+/// the peer actually offered on that number:
+///
+/// - a peer offering `octet-align=1` on PT 104, our bandwidth-efficient
+///   number, was answered with no fmtp at all — so we advertised
+///   bandwidth-efficient and then transmitted octet-aligned, because the codec
+///   is configured from the offer. Unparseable audio, no error;
+/// - a peer using its own dynamic number gets nothing from a table keyed on
+///   ours.
+///
+/// So the answer echoes the offer's transport parameters for that payload
+/// type. `mode-set` and the rest are deliberately not echoed: they constrain
+/// which modes may be used rather than how a frame is laid out, and an
+/// answerer states its own.
+fn answer_fmtp_for_pt(offer: &SdpSession, pt: u8, g729_annex_b: bool) -> Option<String> {
+    if !sdp_payload_is_amr(offer, pt) {
+        return fmtp_for_pt_with_g729_annex_b(pt, g729_annex_b).map(ToString::to_string);
+    }
+
+    let offered = audio_fmtp_params(offer, pt).unwrap_or_default();
+    let mut echoed: Vec<&str> = Vec::new();
+    for part in offered.split(';') {
+        let trimmed = part.trim();
+        let Some((name, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let value = value.trim().trim_matches('"');
+        let name = name.trim().to_ascii_lowercase();
+        // Only the parameters that decide the bit layout, and only when set:
+        // an explicit `octet-align=0` means the default, which is stated by
+        // omission.
+        let carries =
+            matches!(name.as_str(), "octet-align" | "crc" | "robust-sorting") && value == "1";
+        // `mode-set` is different in kind, and omitting it was a real
+        // compliance gap. RFC 4867 §8.1 makes it bi-directional — one active
+        // set for both directions — and §8.3.1 requires the answer to carry
+        // the offered set or reject the payload type outright. Answering
+        // silently reads as "no restriction", which is the opposite of what
+        // a peer that named one asked for.
+        //
+        // Echoed verbatim rather than re-rendered, so a set we would order or
+        // space differently still goes back byte-identical. Our own encoder
+        // was already constrained correctly — the negotiated fmtp on the
+        // answering side is read from the *offer* — so this changes what we
+        // say, not what we send.
+        let is_mode_set = name == "mode-set" && !value.is_empty();
+        if carries || is_mode_set {
+            echoed.push(trimmed);
+        }
+    }
+    // `max-red` is not a transport parameter and is not echoed: each side
+    // declares its own. Ours is always 0 — see
+    // [`fmtp_for_pt_with_g729_annex_b`].
+    //
+    // `mode-change-period` and `-neighbor` are not echoed either, and for the
+    // opposite reason to `mode-set`: they are declarative about what the
+    // *sender* must do, so each side states its own and obeys the other's.
+    // Ours are already applied from the peer's offer in `AmrAdapter::new`.
+    echoed.push("max-red=0");
+    Some(echoed.join("; "))
+}
+
+/// Whether `pt` in this offer is mapped to one of the AMR encodings.
+fn sdp_payload_is_amr(offer: &SdpSession, pt: u8) -> bool {
+    audio_rtpmap(offer, pt).is_some_and(|mapping| {
+        mapping.encoding_name.eq_ignore_ascii_case("AMR")
+            || mapping.encoding_name.eq_ignore_ascii_case("AMR-WB")
+    })
+}
+
+/// Render `mode-set` for an AMR payload type, or `None` when unrestricted.
+///
+/// RFC 4867 §8.1: the list is ascending, comma-separated, and its members are
+/// mode *indices* — 0..=7 narrowband, 0..=8 wideband. Out-of-range members are
+/// dropped rather than offered, because a mode-set naming a mode the variant
+/// does not have is one a conforming peer may reject the payload type over,
+/// and silently trading a whole codec for a typo is a bad trade.
+///
+/// Sorted and deduplicated so the same set always renders the same way: this
+/// string goes into an offer that a peer must echo back byte-comparably.
+fn amr_mode_set_param(pt: u8, modes: &[u8]) -> Option<String> {
+    let top = match pt {
+        AMR_WB_OA_PT | AMR_WB_BE_PT => 8,
+        AMR_NB_OA_PT | AMR_NB_BE_PT => 7,
+        _ => return None,
+    };
+    let mut permitted: Vec<u8> = modes.iter().copied().filter(|m| *m <= top).collect();
+    permitted.sort_unstable();
+    permitted.dedup();
+    if permitted.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "mode-set={}",
+        permitted
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    ))
+}
+
+/// The fmtp this endpoint puts in an *offer*, including any AMR `mode-set`
+/// the application asked for.
+///
+/// Separate from [`fmtp_for_pt_with_g729_annex_b`] because a mode-set is a
+/// per-session choice rather than a property of the payload type, and because
+/// the answer path must echo the offerer's set rather than assert its own.
+pub(crate) fn offer_fmtp_for_pt(
+    pt: u8,
+    g729_annex_b: bool,
+    amr_mode_set: Option<&[u8]>,
+) -> Option<String> {
+    let base = fmtp_for_pt_with_g729_annex_b(pt, g729_annex_b)?;
+    let param = amr_mode_set.and_then(|modes| amr_mode_set_param(pt, modes));
+    Some(match param {
+        Some(param) => format!("{base}; {param}"),
+        None => base.to_string(),
+    })
+}
+
 pub(crate) fn fmtp_for_pt_with_g729_annex_b(pt: u8, g729_annex_b: bool) -> Option<&'static str> {
     match pt {
         18 if g729_annex_b => Some("annexb=yes"),
         18 => Some("annexb=no"),
         101 => Some("0-15"),
+        // `max-red=0` says this endpoint wants no redundant transmissions.
+        // RFC 4867 §8.1 makes an *absent* max-red mean no limit, so a peer in
+        // poor coverage may start repeating frames without asking — and this
+        // stack concatenates every frame-block in a payload as if it were new
+        // audio, which would turn redundancy into a stutter. Declining it is
+        // honest; handling it needs the timestamp arithmetic of §4.3, which is
+        // not implemented.
+        //
+        // `mode-set` stays absent, which is what an endpoint supporting every
+        // mode should say. Bandwidth-efficient is the RFC 4867 default and is
+        // stated by omitting `octet-align` rather than by setting it to 0.
+        AMR_WB_OA_PT | AMR_NB_OA_PT => Some("octet-align=1; max-red=0"),
+        AMR_WB_BE_PT | AMR_NB_BE_PT => Some("max-red=0"),
         // Opus (PT 111) defaults are fine for VoIP without fmtp; a
         // production deployment may want `useinbandfec=1; minptime=10`.
         _ => None,
@@ -294,6 +485,21 @@ fn parse_annex_b_param(parameters: &str) -> Option<bool> {
             _ => None,
         }
     })
+}
+
+/// The raw `a=fmtp` parameter string for `payload_type` in the audio stream.
+///
+/// Returns `None` when the payload type has no `a=fmtp` line, which is
+/// meaningful rather than missing data: for AMR it selects every RFC 4867
+/// default (bandwidth-efficient framing, all modes).
+fn audio_fmtp_params(session: &SdpSession, payload_type: u8) -> Option<String> {
+    let format = payload_type.to_string();
+    session
+        .media_descriptions
+        .iter()
+        .find(|m| m.media.eq_ignore_ascii_case("audio"))
+        .and_then(|m| m.get_fmtp(&format))
+        .map(|fmtp| fmtp.parameters.clone())
 }
 
 fn audio_fmtp_annex_b(session: &SdpSession, payload_type: u8) -> Option<bool> {
@@ -336,6 +542,8 @@ fn codec_name_for_payload(payload_type: u8, g729_annex_b: bool) -> String {
         18 if g729_annex_b => "G729BA",
         18 => "G729A",
         101 => "telephone-event",
+        AMR_WB_BE_PT | AMR_WB_OA_PT => "AMR-WB",
+        AMR_NB_BE_PT | AMR_NB_OA_PT => "AMR",
         111 => "opus",
         _ => return format!("PT{}", payload_type),
     }
@@ -347,6 +555,8 @@ fn payload_codec_available(payload_type: u8) -> bool {
         0 | 8 | 13 | 101 => true,
         18 => cfg!(feature = "g729"),
         111 => cfg!(feature = "opus"),
+        AMR_WB_BE_PT | AMR_WB_OA_PT => cfg!(feature = "amr-wb"),
+        AMR_NB_BE_PT | AMR_NB_OA_PT => cfg!(feature = "amr-nb"),
         // G.722 remains wire-parseable but has no encoder/decoder.
         9 => false,
         _ => false,
@@ -376,7 +586,14 @@ fn sdp_payload_codec_available(session: &SdpSession, payload_type: u8) -> bool {
         // Telephone-event uses a dynamic PT in this stack and therefore
         // always requires an explicit RFC 4733 mapping.
         101 => mapping_matches("telephone-event", 8_000, &[1]),
-        96..=127 => cfg!(feature = "opus") && mapping_matches("opus", 48_000, &[1, 2]),
+        // Dynamic payload types carry no fixed meaning, so dispatch on the
+        // encoding name the peer declared rather than assuming one codec owns
+        // the whole range. This is what lets AMR and Opus coexist above 96.
+        96..=127 => {
+            mapping_matches("opus", 48_000, &[1, 2]) && cfg!(feature = "opus")
+                || mapping_matches("AMR-WB", 16_000, &[1]) && cfg!(feature = "amr-wb")
+                || mapping_matches("AMR", 8_000, &[1]) && cfg!(feature = "amr-nb")
+        }
         _ => false,
     }
 }
@@ -441,6 +658,16 @@ fn negotiated_audio_shape_from_sdp(
             return Err(bounded_sdp_failure("codec", "opus-disabled"));
         }
         "opus"
+    } else if wire_name.eq_ignore_ascii_case("AMR-WB") {
+        if !cfg!(feature = "amr-wb") {
+            return Err(bounded_sdp_failure("codec", "amr-wb-disabled"));
+        }
+        "AMR-WB"
+    } else if wire_name.eq_ignore_ascii_case("AMR") {
+        if !cfg!(feature = "amr-nb") {
+            return Err(bounded_sdp_failure("codec", "amr-nb-disabled"));
+        }
+        "AMR"
     } else if wire_name.eq_ignore_ascii_case("G722") {
         return Err(bounded_sdp_failure("codec", "g722-unsupported"));
     } else {
@@ -449,6 +676,10 @@ fn negotiated_audio_shape_from_sdp(
 
     let valid_shape = if canonical.eq_ignore_ascii_case("opus") {
         clock_rate == 48_000 && matches!(channels, 1 | 2)
+    } else if canonical.eq_ignore_ascii_case("AMR-WB") {
+        // AMR-WB is the one 16 kHz codec here. Its clock rate is what
+        // distinguishes it from AMR on the wire when both are offered.
+        clock_rate == 16_000 && channels == 1
     } else {
         clock_rate == 8_000 && channels == 1
     };
@@ -459,7 +690,13 @@ fn negotiated_audio_shape_from_sdp(
         0 => canonical == "PCMU",
         8 => canonical == "PCMA",
         18 => canonical.starts_with("G729"),
-        96..=127 if payload_type != 101 => canonical.eq_ignore_ascii_case("opus"),
+        // Any dynamic payload type may carry any of these; the rtpmap decided
+        // which, and the shape check above already validated the clock rate.
+        96..=127 if payload_type != 101 => {
+            canonical.eq_ignore_ascii_case("opus")
+                || canonical.eq_ignore_ascii_case("AMR-WB")
+                || canonical.eq_ignore_ascii_case("AMR")
+        }
         _ => false,
     };
     if !valid_payload_identity {
@@ -648,6 +885,16 @@ pub struct NegotiatedConfig {
     pub clock_rate: u32,
     #[serde(default = "default_negotiated_channels")]
     pub channels: u8,
+    /// Raw `a=fmtp` parameters agreed for `payload_type`, if the negotiated
+    /// SDP carried any.
+    ///
+    /// Deliberately unparsed. Interpreting format parameters is the codec
+    /// layer's job — for AMR they select the wire framing itself
+    /// (`octet-align`) and the permitted bit rates (`mode-set`), and a relay
+    /// that ignores them frames packets the peer cannot parse. Carrying the
+    /// string keeps that knowledge out of the signalling layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub negotiated_fmtp: Option<String>,
     pub local_direction: crate::types::MediaDirection,
     pub remote_direction: crate::types::MediaDirection,
 }
@@ -993,6 +1240,16 @@ pub struct MediaAdapter {
     /// machine surfaces as `488 Not Acceptable Here`.
     srtp_required: bool,
 
+    /// AMR discontinuous transmission, from `Config::amr_dtx`. Sender-side
+    /// local policy: it is stamped into the media configuration when the
+    /// negotiated codec is applied, and media-core turns it into the codec's
+    /// own DTX switch. Nothing negotiates it (RFC 4867 has no fmtp for DTX).
+    amr_dtx: bool,
+
+    /// Automatic AMR codec mode requests, from `Config::amr_auto_cmr`.
+    /// Carried and stamped exactly like `amr_dtx`.
+    amr_auto_cmr: bool,
+
     /// Crypto suites to offer in preference order when `offer_srtp`
     /// is set. Default: AES-CM-128 + HMAC-SHA1-80 then -32 per
     /// RFC 4568 §6.2.1 MTI plus low-bandwidth fallback.
@@ -1065,6 +1322,11 @@ pub struct MediaAdapter {
     /// `a=fmtp:18 annexb=yes` when this is true and `annexb=no` when false.
     /// Answers disable Annex B when either side advertises `annexb=no`.
     g729_annex_b: bool,
+
+    /// The AMR modes this endpoint restricts a session to, offered as
+    /// RFC 4867 `mode-set`. `None` offers no restriction, which is what an
+    /// endpoint supporting every mode should say.
+    amr_mode_set: Option<Vec<u8>>,
 
     #[cfg(test)]
     pause_media_create_after_allocation: Arc<AtomicBool>,
@@ -1143,6 +1405,8 @@ impl MediaAdapter {
             media_mode: MediaMode::Enabled,
             offer_srtp: false,
             srtp_required: false,
+            amr_dtx: false,
+            amr_auto_cmr: false,
             srtp_offered_suites: vec![
                 CryptoSuite::AesCm128HmacSha1_80,
                 CryptoSuite::AesCm128HmacSha1_32,
@@ -1158,6 +1422,7 @@ impl MediaAdapter {
             strict_codec_matching: true,
             offered_codecs: vec![0, 8, 101],
             g729_annex_b: true,
+            amr_mode_set: None,
             #[cfg(test)]
             pause_media_create_after_allocation: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
@@ -1187,6 +1452,24 @@ impl MediaAdapter {
     pub fn set_comfort_noise(&mut self, enabled: bool) {
         self.comfort_noise_enabled = enabled;
         self.controller.set_comfort_noise_enabled(enabled);
+    }
+
+    /// Enable AMR discontinuous transmission for sessions this adapter
+    /// creates. Wired from `Config::amr_dtx` at coordinator boot, mirroring
+    /// `set_comfort_noise`.
+    ///
+    /// Unlike comfort noise there is nothing to advertise: DTX is invisible
+    /// to offer/answer, so this only affects what the encoder emits once a
+    /// session negotiates AMR. It is inert for every other codec.
+    pub fn set_amr_dtx(&mut self, enabled: bool) {
+        self.amr_dtx = enabled;
+    }
+
+    /// Let AMR sessions ask the peer to change rate on their own. Wired from
+    /// `Config::amr_auto_cmr` at coordinator boot; see that field for why it
+    /// is off by default.
+    pub fn set_amr_auto_cmr(&mut self, enabled: bool) {
+        self.amr_auto_cmr = enabled;
     }
 
     /// Set media allocation behavior.
@@ -1311,6 +1594,15 @@ impl MediaAdapter {
         self.g729_annex_b = enabled;
     }
 
+    /// Restrict AMR to `modes`, offered as RFC 4867 `mode-set`.
+    ///
+    /// Empty or `None` offers no restriction. The set is bi-directional by
+    /// RFC 4867 §8.1, so this constrains what the peer sends as well as what
+    /// this endpoint sends.
+    pub fn set_amr_mode_set(&mut self, modes: Option<Vec<u8>>) {
+        self.amr_mode_set = modes.filter(|modes| !modes.is_empty());
+    }
+
     /// Feature-gated retained-object counts for perf leak investigations.
     #[cfg(feature = "perf-tests")]
     pub(crate) fn perf_diagnostic_counts(&self) -> serde_json::Value {
@@ -1399,14 +1691,21 @@ impl MediaAdapter {
         out
     }
 
+    /// Commit one negotiated media generation to the media layer.
+    ///
+    /// `negotiated_fmtp` is the peer's `a=fmtp` parameter string for the
+    /// primary audio payload type, carried verbatim and uninterpreted — the
+    /// signalling layer has no business parsing it, but losing it is not
+    /// neutral either. For AMR those parameters select the wire framing
+    /// itself (RFC 4867 §8.3.1), so a relay that never sees them will forward
+    /// bytes the far end cannot parse. `None` means the peer sent no usable
+    /// `a=fmtp` line, and is passed through as such rather than flattened to
+    /// an empty string: the configuration below is seeded from the previous
+    /// generation, so `None` has to clear what a previous negotiation left.
     async fn apply_negotiated_media_config(
         &self,
         dialog_id: &DialogId,
-        remote_addr: SocketAddr,
-        codec: &str,
-        payload_type: u8,
-        clock_rate: u32,
-        channels: u8,
+        negotiated: &NegotiatedConfig,
     ) -> Result<()> {
         let mut config = self
             .controller
@@ -1416,13 +1715,21 @@ impl MediaAdapter {
                 SessionError::MediaError(format!("No media session for dialog {}", dialog_id))
             })?
             .config;
-        config.remote_addr = Some(remote_addr);
-        config = config.with_negotiated_audio_codec(
-            codec.to_string(),
-            payload_type,
-            clock_rate,
-            channels,
-        );
+        config.remote_addr = Some(negotiated.remote_addr);
+        config = config
+            .with_negotiated_audio_codec(
+                negotiated.codec.clone(),
+                negotiated.payload_type,
+                negotiated.clock_rate,
+                negotiated.channels,
+            )
+            .with_negotiated_fmtp(negotiated.negotiated_fmtp.as_deref())
+            // Sender policy rather than a negotiated value, but it belongs on
+            // the same commit as the codec identity: this is the moment the
+            // session learns it is AMR, and media-core reads both out of the
+            // one configuration when it builds the codec.
+            .with_amr_dtx(self.amr_dtx)
+            .with_amr_auto_cmr(self.amr_auto_cmr);
 
         self.controller
             .update_media(dialog_id.clone(), config)
@@ -1811,6 +2118,7 @@ impl MediaAdapter {
             payload_type,
             clock_rate,
             channels,
+            negotiated_fmtp: audio_fmtp_params(&parsed_answer, payload_type),
             local_direction: local_direction_from_remote_answer(&answer_direction),
             remote_direction: answer_direction
                 .map(sip_direction_to_session)
@@ -2040,6 +2348,9 @@ impl MediaAdapter {
                 payload_type: 0,
                 clock_rate: 8_000,
                 channels: 1,
+                // A port-zero rejection carries no media, so no format
+                // parameters apply.
+                negotiated_fmtp: None,
                 local_direction: crate::types::MediaDirection::Inactive,
                 remote_direction: crate::types::MediaDirection::Inactive,
             };
@@ -2168,11 +2479,11 @@ impl MediaAdapter {
             if pt == negotiated_payload_type && negotiated_codec.eq_ignore_ascii_case("opus") {
                 let rtpmap = format!("opus/{clock_rate}/{channels}");
                 media_builder = media_builder.rtpmap(fmt.as_str(), rtpmap.as_str());
-            } else if let Some(rtpmap) = rtpmap_for_pt(pt) {
-                media_builder = media_builder.rtpmap(fmt.as_str(), rtpmap);
+            } else if let Some(rtpmap) = answer_rtpmap_for_pt(&parsed_offer, pt) {
+                media_builder = media_builder.rtpmap(fmt.as_str(), rtpmap.as_str());
             }
-            if let Some(fmtp) = fmtp_for_pt_with_g729_annex_b(pt, negotiated_annex_b) {
-                media_builder = media_builder.fmtp(fmt.as_str(), fmtp);
+            if let Some(fmtp) = answer_fmtp_for_pt(&parsed_offer, pt, negotiated_annex_b) {
+                media_builder = media_builder.fmtp(fmt.as_str(), fmtp.as_str());
             }
         }
         if let Some(attr) = answer_attr {
@@ -2192,6 +2503,10 @@ impl MediaAdapter {
             payload_type: negotiated_payload_type,
             clock_rate,
             channels,
+            // RFC 4867 §8.3.1 requires the answerer to echo the transport
+            // parameters unmodified, so the offer is the authority here.
+            // Reading back our own answer would be circular.
+            negotiated_fmtp: audio_fmtp_params(&parsed_offer, negotiated_payload_type),
             local_direction: answer_direction,
             remote_direction: offered_direction
                 .map(sip_direction_to_session)
@@ -2304,15 +2619,8 @@ impl MediaAdapter {
             stable_local_direction: staged.stable_local_direction,
         };
         let apply_result = async {
-            self.apply_negotiated_media_config(
-                &dialog_id,
-                remote_addr,
-                &staged.config.codec,
-                staged.config.payload_type,
-                staged.config.clock_rate,
-                staged.config.channels,
-            )
-            .await?;
+            self.apply_negotiated_media_config(&dialog_id, &staged.config)
+                .await?;
 
             if let Some((_, pair)) = self.negotiated_srtp.remove(&negotiation_key) {
                 let suite = pair.suite;
@@ -2782,6 +3090,29 @@ impl MediaAdapter {
         }
 
         Ok(handle)
+    }
+
+    /// Ask the peer of `session` to change the codec mode it sends (AMR CMR).
+    /// `Ok(false)` when the session has no active media.
+    pub async fn request_peer_codec_mode(
+        &self,
+        session: &SessionId,
+        mode_index: u8,
+    ) -> std::result::Result<bool, SessionError> {
+        let Some(exact) = self.current_media(session) else {
+            return Ok(false);
+        };
+        Ok(self
+            .controller
+            .request_peer_codec_mode(&exact.dialog_id, mode_index)
+            .await)
+    }
+
+    /// The codec mode of the last speech frame decoded from `session`'s peer.
+    /// `None` when there is no media or the codec tracks no mode.
+    pub async fn peer_codec_mode(&self, session: &SessionId) -> Option<u8> {
+        let exact = self.current_media(session)?;
+        self.controller.peer_codec_mode(&exact.dialog_id).await
     }
 
     /// Compatibility facade retained for source stability. RTP bridge
@@ -3388,7 +3719,9 @@ impl MediaAdapter {
             if let Some(rtpmap) = rtpmap_for_pt(*pt) {
                 media_builder = media_builder.rtpmap(pt_str.as_str(), rtpmap);
             }
-            if let Some(fmtp) = fmtp_for_pt_with_g729_annex_b(*pt, self.g729_annex_b) {
+            if let Some(fmtp) =
+                offer_fmtp_for_pt(*pt, self.g729_annex_b, self.amr_mode_set.as_deref())
+            {
                 media_builder = media_builder.fmtp(pt_str.as_str(), fmtp);
             }
         }
@@ -4259,7 +4592,9 @@ impl MediaAdapter {
             if let Some(rtpmap) = rtpmap_for_pt(*pt) {
                 media_builder = media_builder.rtpmap(pt_str.as_str(), rtpmap);
             }
-            if let Some(fmtp) = fmtp_for_pt_with_g729_annex_b(*pt, self.g729_annex_b) {
+            if let Some(fmtp) =
+                offer_fmtp_for_pt(*pt, self.g729_annex_b, self.amr_mode_set.as_deref())
+            {
                 media_builder = media_builder.fmtp(pt_str.as_str(), fmtp);
             }
         }
@@ -4456,6 +4791,9 @@ impl Clone for MediaAdapter {
             media_mode: self.media_mode,
             offer_srtp: self.offer_srtp,
             srtp_required: self.srtp_required,
+            amr_dtx: self.amr_dtx,
+            amr_auto_cmr: self.amr_auto_cmr,
+            amr_mode_set: self.amr_mode_set.clone(),
             srtp_offered_suites: self.srtp_offered_suites.clone(),
             sdes_base64_mode: self.sdes_base64_mode,
             pending_srtp_offerers: self.pending_srtp_offerers.clone(),
@@ -4507,9 +4845,48 @@ pub(crate) fn compute_answer_formats(
 ) -> Result<Vec<String>> {
     let mut supported: Vec<String> = offered_codecs.iter().map(|pt| pt.to_string()).collect();
 
-    // Dynamic payload numbers belong to the offer, not to a codec. PT 111 in
-    // the local capability list represents Opus support; when the peer maps
-    // Opus to another dynamic PT, match and answer using that exact number.
+    // Dynamic payload numbers belong to the offer, not to a codec. Our
+    // capability list uses fixed numbers to *represent* support; when the peer
+    // maps the same codec to a different dynamic PT, match and answer using
+    // that exact number.
+    //
+    // AMR needs this at least as much as Opus does: both its variants are
+    // dynamic, and Asterisk and most handsets pick their own numbers. Without
+    // it a peer offering AMR-WB on 96 got a 488 for a codec we support.
+    let amr_wb_offered =
+        offered_codecs.contains(&AMR_WB_BE_PT) || offered_codecs.contains(&AMR_WB_OA_PT);
+    let amr_nb_offered =
+        offered_codecs.contains(&AMR_NB_BE_PT) || offered_codecs.contains(&AMR_NB_OA_PT);
+    if (cfg!(feature = "amr-wb") && amr_wb_offered) || (cfg!(feature = "amr-nb") && amr_nb_offered)
+    {
+        if let Some(audio) = offer
+            .media_descriptions
+            .iter()
+            .find(|media| media.media.eq_ignore_ascii_case("audio"))
+        {
+            for format in &audio.formats {
+                let Ok(payload_type) = format.parse::<u8>() else {
+                    continue;
+                };
+                if !(96..=127).contains(&payload_type) || payload_type == 101 {
+                    continue;
+                }
+                let Some(mapping) = audio_rtpmap(offer, payload_type) else {
+                    continue;
+                };
+                let wanted = (mapping.encoding_name.eq_ignore_ascii_case("AMR-WB")
+                    && cfg!(feature = "amr-wb")
+                    && amr_wb_offered)
+                    || (mapping.encoding_name.eq_ignore_ascii_case("AMR")
+                        && cfg!(feature = "amr-nb")
+                        && amr_nb_offered);
+                if wanted && !supported.contains(format) {
+                    supported.push(format.clone());
+                }
+            }
+        }
+    }
+
     if cfg!(feature = "opus") && offered_codecs.contains(&111) {
         if let Some(audio) = offer
             .media_descriptions
@@ -5032,6 +5409,85 @@ mod sdp_format_tests {
         assert_eq!(fmtp_for_pt(101), Some("0-15"));
     }
 
+    /// `mode-set` is rendered canonically, and a mode the variant does not
+    /// have is dropped rather than offered.
+    ///
+    /// Narrowband stops at 7 and wideband at 8. Offering `mode-set=8` on
+    /// narrowband names a mode that does not exist, which a conforming peer
+    /// may reject the entire payload type over — losing the codec to a typo.
+    #[test]
+    fn amr_mode_set_is_canonical_and_range_checked() {
+        // Sorted and deduplicated, so an offer and its echo compare directly.
+        assert_eq!(
+            amr_mode_set_param(AMR_NB_BE_PT, &[4, 0, 2, 4]).as_deref(),
+            Some("mode-set=0,2,4")
+        );
+        // 8 exists for wideband and not for narrowband.
+        assert_eq!(
+            amr_mode_set_param(AMR_WB_BE_PT, &[8]).as_deref(),
+            Some("mode-set=8")
+        );
+        assert_eq!(amr_mode_set_param(AMR_NB_BE_PT, &[8]), None);
+        assert_eq!(amr_mode_set_param(AMR_NB_OA_PT, &[9, 200]), None);
+        // Not an AMR payload type at all.
+        assert_eq!(amr_mode_set_param(0, &[0, 1]), None);
+        // An unrestricted offer says nothing, rather than listing every mode.
+        assert_eq!(
+            offer_fmtp_for_pt(AMR_NB_BE_PT, false, None).as_deref(),
+            Some("max-red=0")
+        );
+        assert_eq!(
+            offer_fmtp_for_pt(AMR_NB_OA_PT, false, Some(&[0, 2, 4])).as_deref(),
+            Some("octet-align=1; max-red=0; mode-set=0,2,4")
+        );
+    }
+
+    /// The answer must carry the offered `mode-set`.
+    ///
+    /// RFC 4867 §8.1 makes the set bi-directional and §8.3.1 requires the
+    /// answerer to use the offered set or reject the payload type. An answer
+    /// that omits it reads as "no restriction" — the opposite of what a peer
+    /// naming a set asked for, and the kind of thing a carrier flags even
+    /// though the media happens to work.
+    #[test]
+    fn an_answer_echoes_the_offered_mode_set() {
+        let pt = AMR_WB_OA_PT.to_string();
+        let offer = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(35200, "RTP/AVP")
+            .formats(&[pt.as_str()])
+            .rtpmap(pt.as_str(), "AMR-WB/16000")
+            .fmtp(pt.as_str(), "octet-align=1; mode-set=0,2,4")
+            .attribute("sendrecv", None::<String>)
+            .done()
+            .build()
+            .expect("offer builds")
+            .to_string();
+        let parsed: SdpSession = offer.parse().expect("offer parses");
+
+        let answer = answer_fmtp_for_pt(&parsed, AMR_WB_OA_PT, false).expect("an AMR answer fmtp");
+        assert!(
+            answer.contains("mode-set=0,2,4"),
+            "the answer dropped the offered mode-set: {answer}"
+        );
+        assert!(
+            answer.contains("octet-align=1"),
+            "the framing must still be echoed: {answer}"
+        );
+
+        // An offer with no mode-set must not gain one: that would assert a
+        // restriction the offerer never asked for.
+        let unrestricted = offer.replace("; mode-set=0,2,4", "");
+        let parsed: SdpSession = unrestricted.parse().expect("offer parses");
+        let answer = answer_fmtp_for_pt(&parsed, AMR_WB_OA_PT, false).expect("an AMR answer fmtp");
+        assert!(
+            !answer.contains("mode-set"),
+            "an unrestricted offer must not be answered with a restriction: {answer}"
+        );
+    }
+
     #[test]
     fn g729_annex_b_negotiation_honors_remote_no() {
         let sdp = "v=0\r\n\
@@ -5053,6 +5509,10 @@ a=fmtp:101 0-15\r\n";
             Some(18)
         );
         assert_eq!(codec_name_for_payload(18, false), "G729A");
+        assert_eq!(codec_name_for_payload(AMR_WB_BE_PT, false), "AMR-WB");
+        assert_eq!(codec_name_for_payload(AMR_WB_OA_PT, false), "AMR-WB");
+        assert_eq!(codec_name_for_payload(AMR_NB_BE_PT, false), "AMR");
+        assert_eq!(codec_name_for_payload(AMR_NB_OA_PT, false), "AMR");
     }
 
     #[test]
@@ -6043,6 +6503,338 @@ a=fmtp:101 0-15\r\n";
             .expect("cleanup media session");
     }
 
+    /// A peer's AMR-WB offer negotiates into a session that actually codes.
+    ///
+    /// The locally-testable half of interop. A live FreeSWITCH or Asterisk
+    /// call exercises the same path plus the wire; this exercises everything
+    /// up to it — SDP in, negotiated payload type, clock rate and fmtp out,
+    /// then a codec built from exactly those and a frame put through it.
+    ///
+    /// Four things have to survive together and each was separately broken on
+    /// this branch: the codec name, the dynamic payload type, the 16 kHz clock
+    /// rate (the shape check refused it), and the `octet-align` that decides
+    /// the payload's bit layout.
+    #[tokio::test]
+    #[cfg(feature = "amr-wb")]
+    async fn an_amr_wideband_offer_negotiates_into_a_working_codec() {
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::{
+            MediaSessionController, NEGOTIATED_FMTP_PARAMETER,
+        };
+        use std::net::Ipv4Addr;
+
+        let controller = Arc::new(MediaSessionController::new());
+        let store = Arc::new(SessionStore::new());
+        let session_id = SessionId("amr-wb-offer".to_string());
+        store
+            .create_session(session_id.clone(), Role::UAS, false)
+            .await
+            .expect("create session");
+
+        let mut adapter = MediaAdapter::new(
+            controller.clone(),
+            store.clone(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16400,
+            16500,
+        );
+        adapter.set_offered_codecs(vec![AMR_WB_OA_PT, 101]);
+        adapter
+            .start_session(&session_id)
+            .await
+            .expect("start session");
+
+        let pt = AMR_WB_OA_PT.to_string();
+        let offer = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(35200, "RTP/AVP")
+            .formats(&[pt.as_str()])
+            .rtpmap(pt.as_str(), "AMR-WB/16000")
+            .fmtp(pt.as_str(), "octet-align=1; mode-set=0,2,4")
+            .attribute("sendrecv", None::<String>)
+            .done()
+            .build()
+            .expect("offer builds")
+            .to_string();
+
+        adapter
+            .negotiate_sdp_as_uas(&session_id, &offer)
+            .await
+            .expect("an AMR-WB offer negotiates");
+
+        let dialog_id = adapter
+            .current_media(&session_id)
+            .expect("media resource exists")
+            .dialog_id;
+        let config = controller
+            .get_session_info(&dialog_id)
+            .await
+            .expect("media session exists")
+            .config;
+
+        assert_eq!(
+            config.preferred_codec.as_deref(),
+            Some("AMR-WB"),
+            "the negotiated codec name did not reach media-core"
+        );
+        assert_eq!(
+            config
+                .parameters
+                .get(NEGOTIATED_FMTP_PARAMETER)
+                .map(String::as_str),
+            Some("octet-align=1; mode-set=0,2,4"),
+            "the framing did not reach media-core"
+        );
+
+        // And the thing that actually matters: a codec built from exactly this
+        // negotiation codes a frame. 320 samples, because AMR-WB is 16 kHz --
+        // a path that assumed 8 kHz would refuse this and pass a narrowband
+        // test.
+        use rvoip_media_core::codec::spec::AudioCodecSpec;
+        let spec = AudioCodecSpec::new("AMR-WB", AMR_WB_OA_PT, 16_000, 1).with_fmtp(
+            config
+                .parameters
+                .get(NEGOTIATED_FMTP_PARAMETER)
+                .map(String::as_str),
+        );
+        let mut codec = spec.build().expect("the negotiated codec builds");
+        let pcm: Vec<i16> = (0..320)
+            .map(|i| ((f64::from(i) * 0.05).sin() * 6000.0) as i16)
+            .collect();
+        let frame = rvoip_media_core::types::AudioFrame::new(pcm, 16_000, 1, 0);
+        let payload = codec.encode(&frame).expect("encodes");
+        assert!(!payload.is_empty());
+        let decoded = codec.decode(&payload).expect("decodes");
+        assert_eq!(decoded.samples.len(), 320);
+        assert!(
+            decoded.samples.iter().any(|&s| s != 0),
+            "round trip was silent"
+        );
+
+        adapter
+            .cleanup_session(&session_id)
+            .await
+            .expect("cleanup media session");
+    }
+
+    /// The negotiated `a=fmtp` string must survive from the peer's SDP into
+    /// the media layer's own configuration.
+    ///
+    /// It did not, for the whole life of the parameter: `NegotiatedConfig`
+    /// carried it, `apply_negotiated_media_config` did not take it, and
+    /// `MediaConfig::with_negotiated_fmtp` had zero callers -- so the bridge's
+    /// AMR framing guard read `None`, compared `""` against `""`, and could
+    /// never fire. Every test that looked like coverage stopped one call short
+    /// of the boundary.
+    ///
+    /// The `Config::amr_dtx` switch reaches the media layer, in both
+    /// positions.
+    ///
+    /// DTX was implemented and unit-tested inside media-core for a long time
+    /// while being unreachable from any public API: `amr_dtx` was set by
+    /// nothing outside one media-core test, so every live call ran with it
+    /// off and no configuration could change that. This pins the whole path —
+    /// `Config` -> adapter -> the media configuration media-core resolves the
+    /// codec from.
+    ///
+    /// Both positions are asserted, and that is the point rather than
+    /// symmetry: on-when-asked proves the switch is not decorative, and
+    /// off-by-default proves it is genuinely opt-in for something that
+    /// changes what goes on the wire.
+    #[cfg(feature = "amr")]
+    #[tokio::test]
+    async fn the_amr_dtx_switch_reaches_the_media_layer_in_both_positions() {
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::{MediaSessionController, AMR_DTX_PARAMETER};
+        use std::net::Ipv4Addr;
+
+        async fn negotiated_parameters(
+            dtx: bool,
+            port_base: u16,
+            label: &str,
+        ) -> std::collections::HashMap<String, String> {
+            let controller = Arc::new(MediaSessionController::new());
+            let store = Arc::new(SessionStore::new());
+            let session_id = SessionId(format!("amr-dtx-{label}"));
+            store
+                .create_session(session_id.clone(), Role::UAS, false)
+                .await
+                .expect("create session");
+
+            let mut adapter = MediaAdapter::new(
+                controller.clone(),
+                store.clone(),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                port_base,
+                port_base + 100,
+            );
+            adapter.set_offered_codecs(vec![AMR_WB_OA_PT, 101]);
+            // The one line under test: what a coordinator does with
+            // `Config::amr_dtx` at boot.
+            adapter.set_amr_dtx(dtx);
+            adapter
+                .start_session(&session_id)
+                .await
+                .expect("start session");
+
+            let pt = AMR_WB_OA_PT.to_string();
+            let offer = SdpBuilder::new("Session")
+                .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+                .connection("IN", "IP4", "127.0.0.1")
+                .time("0", "0")
+                .media_audio(port_base + 200, "RTP/AVP")
+                .formats(&[pt.as_str()])
+                .rtpmap(pt.as_str(), "AMR-WB/16000")
+                .fmtp(pt.as_str(), "octet-align=1")
+                .attribute("sendrecv", None::<String>)
+                .done()
+                .build()
+                .expect("offer builds")
+                .to_string();
+
+            adapter
+                .negotiate_sdp_as_uas(&session_id, &offer)
+                .await
+                .expect("an AMR-WB offer negotiates");
+
+            let dialog_id = adapter
+                .current_media(&session_id)
+                .expect("media resource exists")
+                .dialog_id;
+            controller
+                .get_session_info(&dialog_id)
+                .await
+                .expect("media session exists")
+                .config
+                .parameters
+        }
+
+        let enabled = negotiated_parameters(true, 16600, "on").await;
+        assert_eq!(
+            enabled.get(AMR_DTX_PARAMETER).map(String::as_str),
+            Some("true"),
+            "Config::amr_dtx=true did not reach the media configuration"
+        );
+
+        let disabled = negotiated_parameters(false, 16800, "off").await;
+        assert!(
+            !disabled.contains_key(AMR_DTX_PARAMETER),
+            "DTX must stay off unless asked for: it changes what goes on the wire"
+        );
+    }
+
+    /// G.729 rather than AMR, still: the parameter is codec-agnostic and what
+    /// is under test here is carriage rather than interpretation. The AMR
+    /// case is `an_amr_wideband_offer_negotiates_into_a_working_codec` above,
+    /// which is a different claim -- that the value is not merely carried but
+    /// acted on.
+    #[cfg(feature = "g729")]
+    #[tokio::test]
+    async fn negotiated_fmtp_reaches_the_media_layer() {
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::{
+            MediaSessionController, NEGOTIATED_FMTP_PARAMETER,
+        };
+        use std::net::Ipv4Addr;
+
+        let controller = Arc::new(MediaSessionController::new());
+        let store = Arc::new(SessionStore::new());
+        let session_id = SessionId("fmtp-reaches-media-layer".to_string());
+        store
+            .create_session(session_id.clone(), Role::UAS, false)
+            .await
+            .expect("create session");
+
+        let mut adapter = MediaAdapter::new(
+            controller.clone(),
+            store.clone(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16200,
+            16300,
+        );
+        adapter.set_offered_codecs(vec![18, 101]);
+        adapter.set_g729_annex_b(false);
+        adapter
+            .start_session(&session_id)
+            .await
+            .expect("start session");
+
+        let offer = |fmtp: Option<&str>| {
+            let mut media = SdpBuilder::new("Session")
+                .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+                .connection("IN", "IP4", "127.0.0.1")
+                .time("0", "0")
+                .media_audio(35100, "RTP/AVP")
+                .formats(&["18"])
+                .rtpmap("18", "G729/8000");
+            if let Some(fmtp) = fmtp {
+                media = media.fmtp("18", fmtp);
+            }
+            media
+                .attribute("sendrecv", None::<String>)
+                .done()
+                .build()
+                .expect("offer builds")
+                .to_string()
+        };
+
+        adapter
+            .negotiate_sdp_as_uas(&session_id, &offer(Some("annexb=no")))
+            .await
+            .expect("G.729 offer negotiates");
+
+        let dialog_id = adapter
+            .current_media(&session_id)
+            .expect("exact media resource exists")
+            .dialog_id;
+        let carried = controller
+            .get_session_info(&dialog_id)
+            .await
+            .expect("media session exists")
+            .config
+            .parameters
+            .get(NEGOTIATED_FMTP_PARAMETER)
+            .cloned();
+        assert_eq!(
+            carried.as_deref(),
+            Some("annexb=no"),
+            "the peer's fmtp did not reach media-core"
+        );
+
+        // And a renegotiation carrying no fmtp must CLEAR it rather than leave
+        // the previous generation's string behind. This is the half an
+        // insert-only builder gets wrong: the next configuration is seeded
+        // from this one, so a stale `octet-align=1` would outlive the
+        // negotiation that agreed it and make the bridge refuse a compatible
+        // pair.
+        adapter
+            .negotiate_sdp_as_uas(&session_id, &offer(None))
+            .await
+            .expect("fmtp-less offer negotiates");
+        let after = controller
+            .get_session_info(&dialog_id)
+            .await
+            .expect("media session exists")
+            .config
+            .parameters
+            .get(NEGOTIATED_FMTP_PARAMETER)
+            .cloned();
+        assert_eq!(
+            after, None,
+            "a negotiation without fmtp left the previous value in place"
+        );
+
+        adapter
+            .cleanup_session(&session_id)
+            .await
+            .expect("cleanup media session");
+    }
+
     #[tokio::test]
     async fn default_offered_codecs_omit_opus() {
         // Regression guard: the C2 default (PCMU + PCMA + DTMF) must
@@ -6114,6 +6906,260 @@ a=fmtp:101 0-15\r\n";
     fn auxiliary_only_audio_formats_do_not_fall_back_to_pcmu() {
         let formats = vec!["13".to_string(), "101".to_string()];
         assert_eq!(select_primary_audio_payload(&formats), None);
+    }
+
+    /// A minimal audio offer with one dynamic payload type and its rtpmap.
+    fn dynamic_audio_offer(pt: &str, rtpmap: &str) -> SdpSession {
+        SdpBuilder::new("Session")
+            .origin("-", "1", "1", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16_000, "RTP/AVP")
+            .formats(&[pt])
+            .rtpmap(pt, rtpmap)
+            .done()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    #[cfg(feature = "amr-wb")]
+    fn dynamic_payload_types_are_resolved_from_the_rtpmap_not_assumed_to_be_opus() {
+        // The whole dynamic range used to be hardcoded to Opus, so an AMR-WB
+        // offer on any PT above 95 was rejected. Which codec a dynamic PT
+        // carries is decided by the encoding name the peer declared.
+        let offer = dynamic_audio_offer("100", "AMR-WB/16000");
+        assert!(sdp_payload_codec_available(&offer, 100));
+
+        let (codec, clock_rate, channels) =
+            negotiated_audio_shape_from_sdp(&offer, 100, false).unwrap();
+        assert_eq!(codec, "AMR-WB");
+        assert_eq!(clock_rate, 16_000);
+        assert_eq!(channels, 1);
+    }
+
+    #[test]
+    #[cfg(feature = "amr-nb")]
+    fn amr_narrowband_is_resolved_on_a_dynamic_payload_type() {
+        let offer = dynamic_audio_offer("98", "AMR/8000");
+        assert!(sdp_payload_codec_available(&offer, 98));
+        let (codec, clock_rate, _) = negotiated_audio_shape_from_sdp(&offer, 98, false).unwrap();
+        assert_eq!(codec, "AMR");
+        assert_eq!(clock_rate, 8_000);
+    }
+
+    #[test]
+    #[cfg(all(feature = "amr-wb", feature = "opus"))]
+    fn amr_and_opus_coexist_in_the_dynamic_range() {
+        // Both must be resolvable on arbitrary dynamic payload types, which is
+        // the point of dispatching on the encoding name.
+        let amr = dynamic_audio_offer("111", "AMR-WB/16000");
+        assert_eq!(
+            negotiated_audio_shape_from_sdp(&amr, 111, false).unwrap().0,
+            "AMR-WB"
+        );
+        let opus = dynamic_audio_offer("104", "opus/48000/2");
+        assert_eq!(
+            negotiated_audio_shape_from_sdp(&opus, 104, false)
+                .unwrap()
+                .0,
+            "opus"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "amr-wb")]
+    fn amr_wideband_with_the_wrong_clock_rate_is_rejected() {
+        // AMR-WB is 16 kHz. An offer claiming 8 kHz is malformed, and its
+        // clock rate is what distinguishes it from AMR when both are present.
+        let offer = dynamic_audio_offer("100", "AMR-WB/8000");
+        assert!(negotiated_audio_shape_from_sdp(&offer, 100, false).is_err());
+        assert!(!sdp_payload_codec_available(&offer, 100));
+    }
+
+    #[test]
+    fn unknown_dynamic_encodings_are_still_rejected() {
+        // Widening the dynamic range must not turn it into a wildcard.
+        let offer = dynamic_audio_offer("100", "SPEEX/16000");
+        assert!(!sdp_payload_codec_available(&offer, 100));
+        assert!(negotiated_audio_shape_from_sdp(&offer, 100, false).is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "amr-wb")]
+    fn amr_fmtp_is_read_out_of_the_offer_verbatim() {
+        // Scope: this asserts the SDP parser hands back the parameter string
+        // unchanged. It says nothing about whether the value survives into
+        // media-core -- for a long time it did not, and this test's previous
+        // name claimed otherwise while the body never crossed the boundary.
+        // `negotiated_fmtp_reaches_the_media_layer` below is the one that
+        // crosses it.
+        let offer = SdpBuilder::new("Session")
+            .origin("-", "1", "1", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16_000, "RTP/AVP")
+            .formats(&["100"])
+            .rtpmap("100", "AMR-WB/16000")
+            .fmtp("100", "octet-align=1; mode-set=0,1,2")
+            .done()
+            .build()
+            .unwrap();
+
+        let params = audio_fmtp_params(&offer, 100).expect("fmtp must be carried");
+        assert!(params.contains("octet-align=1"), "{params}");
+        assert!(params.contains("mode-set=0,1,2"), "{params}");
+    }
+
+    #[test]
+    fn a_payload_type_without_fmtp_reports_none_rather_than_empty() {
+        // Absent is meaningful for AMR — it selects every RFC 4867 default —
+        // so it must be distinguishable from an empty parameter string.
+        let offer = dynamic_audio_offer("100", "AMR-WB/16000");
+        assert_eq!(audio_fmtp_params(&offer, 100), None);
+        // And a payload type that is not present at all.
+        assert_eq!(audio_fmtp_params(&offer, 99), None);
+    }
+
+    #[test]
+    #[cfg(feature = "amr-wb")]
+    fn an_answer_on_a_peers_payload_type_carries_its_rtpmap() {
+        // Found by Asterisk, not by a test: it offers AMR on PT 98, we
+        // answered `m=audio ... 98` with an `a=fmtp:98` and no `a=rtpmap:98`,
+        // and it replied 488 Not Acceptable Here. For a dynamic payload type
+        // the number alone means nothing, so the answer must describe it.
+        //
+        // Two rvoip endpoints never hit this: they use the same constants, so
+        // the local table always had an answer.
+        let offer = SdpBuilder::new("Session")
+            .origin("-", "1", "1", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16_000, "RTP/AVP")
+            .formats(&["98"])
+            .rtpmap("98", "AMR/8000")
+            .fmtp("98", "octet-align=1")
+            .done()
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            answer_rtpmap_for_pt(&offer, 98).as_deref(),
+            Some("AMR/8000"),
+            "an answer on the peer's number must echo its rtpmap"
+        );
+        // A static type still comes from the local table.
+        assert_eq!(
+            answer_rtpmap_for_pt(&offer, 0).as_deref(),
+            Some("PCMU/8000")
+        );
+        // And an unmapped dynamic type yields nothing rather than a guess.
+        assert_eq!(answer_rtpmap_for_pt(&offer, 99), None);
+    }
+
+    #[cfg(feature = "amr-wb")]
+    #[test]
+    fn amr_matches_a_peers_own_dynamic_payload_type() {
+        // Asterisk and most handsets pick their own number for AMR. Opus
+        // already has this remap; AMR did not, so a peer offering AMR-WB on
+        // 96 got a 488 even though we support exactly that codec. Our own
+        // call test passed only because both ends used our private constants.
+        let offer = SdpBuilder::new("Session")
+            .origin("-", "1", "1", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16_000, "RTP/AVP")
+            .formats(&["96", "101"])
+            .rtpmap("96", "AMR-WB/16000")
+            .fmtp("96", "octet-align=1")
+            .rtpmap("101", "telephone-event/8000")
+            .done()
+            .build()
+            .unwrap();
+
+        let answer = compute_answer_formats(&offer, &[AMR_WB_OA_PT, 101], true, false, false)
+            .expect("a peer's own dynamic payload type for AMR must negotiate");
+        assert_eq!(
+            answer.first().map(String::as_str),
+            Some("96"),
+            "the answer must use the peer's number, not ours: {answer:?}"
+        );
+    }
+
+    /// What we advertise and what we transmit must be the same framing.
+    ///
+    /// The answer's fmtp came from a fixed per-PT table while the codec was
+    /// configured from the *offer's* fmtp. A peer offering `octet-align=1` on
+    /// PT 104 — our bandwidth-efficient number — was accepted, answered with
+    /// no fmtp at all, and then sent octet-aligned frames. Unparseable audio
+    /// with no error anywhere, which is the exact failure the bridge's framing
+    /// guard exists to catch one layer up.
+    #[test]
+    fn the_answers_framing_matches_what_the_codec_is_given() {
+        for (offer_pt, offered_fmtp) in [
+            (AMR_WB_BE_PT, Some("octet-align=1")),
+            (AMR_WB_OA_PT, Some("octet-align=1")),
+            (AMR_WB_BE_PT, None),
+            (AMR_NB_BE_PT, Some("octet-align=1")),
+        ] {
+            let pt = offer_pt.to_string();
+            let mut media = SdpBuilder::new("Session")
+                .origin("-", "1", "1", "IN", "IP4", "127.0.0.1")
+                .connection("IN", "IP4", "127.0.0.1")
+                .time("0", "0")
+                .media_audio(16_000, "RTP/AVP")
+                .formats(&[pt.as_str()])
+                .rtpmap(
+                    pt.as_str(),
+                    if offer_pt >= AMR_NB_BE_PT {
+                        "AMR/8000"
+                    } else {
+                        "AMR-WB/16000"
+                    },
+                );
+            if let Some(fmtp) = offered_fmtp {
+                media = media.fmtp(pt.as_str(), fmtp);
+            }
+            let offer = media.done().build().unwrap();
+
+            // What the codec will be configured with.
+            let to_codec = audio_fmtp_params(&offer, offer_pt).unwrap_or_default();
+            // What we would put in the answer.
+            let advertised = answer_fmtp_for_pt(&offer, offer_pt, false).unwrap_or_default();
+
+            let transmits_octet_aligned = to_codec.contains("octet-align=1");
+            let advertises_octet_aligned = advertised.contains("octet-align=1");
+            assert_eq!(
+                transmits_octet_aligned, advertises_octet_aligned,
+                "PT {offer_pt} offered {offered_fmtp:?}: we would transmit \
+                 octet-aligned={transmits_octet_aligned} while advertising \
+                 octet-aligned={advertises_octet_aligned} ({advertised:?})"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "amr-wb")]
+    fn amr_offers_advertise_each_framing_as_its_own_payload_type() {
+        // RFC 4867 §8.3.1: transport configurations are mutually incompatible
+        // bit patterns, so they are separate payload types rather than
+        // negotiated down. Bandwidth-efficient is the default and needs no
+        // fmtp; octet-aligned must say so.
+        assert_eq!(rtpmap_for_pt(AMR_WB_BE_PT), Some("AMR-WB/16000"));
+        assert_eq!(rtpmap_for_pt(AMR_WB_OA_PT), Some("AMR-WB/16000"));
+        // Bandwidth-efficient states itself by omitting `octet-align`; both
+        // framings decline redundancy explicitly, because an absent `max-red`
+        // means *no limit* rather than none.
+        assert_eq!(
+            fmtp_for_pt_with_g729_annex_b(AMR_WB_BE_PT, false),
+            Some("max-red=0")
+        );
+        assert_eq!(
+            fmtp_for_pt_with_g729_annex_b(AMR_WB_OA_PT, false),
+            Some("octet-align=1; max-red=0")
+        );
+        assert!(payload_codec_available(AMR_WB_BE_PT));
+        assert!(payload_codec_available(AMR_WB_OA_PT));
     }
 
     #[test]
@@ -6578,6 +7624,7 @@ a=fmtp:101 0-15\r\n";
                 payload_type: 0,
                 clock_rate: 8_000,
                 channels: 1,
+                negotiated_fmtp: None,
                 local_direction: crate::types::MediaDirection::SendRecv,
                 remote_direction: crate::types::MediaDirection::SendRecv,
             },
@@ -6647,6 +7694,7 @@ a=fmtp:101 0-15\r\n";
                 payload_type: 0,
                 clock_rate: 8_000,
                 channels: 1,
+                negotiated_fmtp: None,
                 local_direction: crate::types::MediaDirection::SendRecv,
                 remote_direction: crate::types::MediaDirection::SendRecv,
             },
@@ -6748,6 +7796,7 @@ a=fmtp:101 0-15\r\n";
                     payload_type: 8,
                     clock_rate: 8_000,
                     channels: 1,
+                    negotiated_fmtp: None,
                     local_direction: crate::types::MediaDirection::Inactive,
                     remote_direction: crate::types::MediaDirection::SendRecv,
                 },
@@ -6944,6 +7993,7 @@ a=fmtp:101 0-15\r\n";
                     payload_type: 8,
                     clock_rate: 8_000,
                     channels: 1,
+                    negotiated_fmtp: None,
                     local_direction: crate::types::MediaDirection::Inactive,
                     remote_direction: crate::types::MediaDirection::SendRecv,
                 },

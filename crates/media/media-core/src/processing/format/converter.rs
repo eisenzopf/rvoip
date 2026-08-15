@@ -74,14 +74,26 @@ pub struct ConversionMetrics {
     pub conversion_time_us: u64,
 }
 
+/// The exact conversion a cached resampler was built for.
+///
+/// The input rate belongs in here as much as the output rate does: a
+/// resampler is a fixed ratio plus filter state, and 8 kHz -> 48 kHz is not
+/// the same object as 48 kHz -> 48 kHz even though both target 48 kHz.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResamplerKey {
+    input_rate: u32,
+    target_rate: u32,
+    quality: u8,
+}
+
 /// Audio format converter
 pub struct FormatConverter {
     /// Resampler for sample rate conversion
     resampler: Option<Resampler>,
     /// Channel mixer for channel layout conversion
     channel_mixer: ChannelMixer,
-    /// Current conversion parameters
-    current_params: Option<ConversionParams>,
+    /// What `resampler` was built for, or `None` when there isn't one.
+    current_resampler: Option<ResamplerKey>,
 }
 
 impl FormatConverter {
@@ -90,7 +102,7 @@ impl FormatConverter {
         Self {
             resampler: None,
             channel_mixer: ChannelMixer::new(),
-            current_params: None,
+            current_resampler: None,
         }
     }
 
@@ -175,7 +187,7 @@ impl FormatConverter {
             resampler.reset();
         }
         self.channel_mixer.reset();
-        self.current_params = None;
+        self.current_resampler = None;
         debug!("FormatConverter reset");
     }
 
@@ -185,24 +197,25 @@ impl FormatConverter {
         input_sample_rate: u32,
         params: &ConversionParams,
     ) -> Result<()> {
-        let target_rate = params.target_sample_rate.as_hz();
-
-        // Check if we need to create/update resampler
-        let needs_update = match &self.current_params {
-            None => true,
-            Some(current) => {
-                current.target_sample_rate != params.target_sample_rate
-                    || current.quality != params.quality
-            }
+        // The input rate is part of the key. It used to be dropped, so a
+        // converter that had built an 8 kHz -> 48 kHz resampler kept using it
+        // when 48 kHz frames arrived for the return leg: same target, same
+        // quality, "no update needed", and every sample resampled at the wrong
+        // ratio. Nothing errors -- the audio just comes out at the wrong pitch
+        // and length.
+        let wanted = ResamplerKey {
+            input_rate: input_sample_rate,
+            target_rate: params.target_sample_rate.as_hz(),
+            quality: params.quality,
         };
 
-        if needs_update {
+        if self.current_resampler != Some(wanted) {
             self.resampler = Some(Resampler::new(
-                input_sample_rate,
-                target_rate,
-                params.quality,
+                wanted.input_rate,
+                wanted.target_rate,
+                wanted.quality,
             )?);
-            self.current_params = Some(params.clone());
+            self.current_resampler = Some(wanted);
         }
 
         Ok(())
@@ -319,6 +332,44 @@ mod tests {
                 (amp * (2.0 * std::f64::consts::PI * freq * (i as f64) / sample_rate).sin()) as i16
             })
             .collect()
+    }
+
+    /// The resampler cache used to key on the target rate and the quality
+    /// alone. A converter that had built 8 kHz -> 48 kHz therefore kept using
+    /// it when 16 kHz frames arrived: same target, same quality, "no update
+    /// needed", every sample resampled at twice the right ratio. That is an
+    /// AMR-NB leg and an AMR-WB leg sharing one converter, or either of them
+    /// sharing with Opus.
+    #[test]
+    fn a_new_input_rate_rebuilds_the_resampler() {
+        let params = ConversionParams::new(SampleRate::Rate48000, 1);
+        let mut c = FormatConverter::new();
+
+        // 100 ms of 1 kHz at 8 kHz: 800 samples in, 4800 out.
+        let narrow = AudioFrame::new(sine_i16(1_000.0, 8_000.0, 800, 10_000.0), 8_000, 1, 0);
+        let from_narrow = c.convert_frame(&narrow, &params).unwrap().frame;
+        assert_eq!(from_narrow.samples.len(), 4_800);
+
+        // The same 100 ms at 16 kHz through the same converter: 1600 in, 4800
+        // out. With the stale 6x ratio it was 9600, and the tone landed an
+        // octave down because the buffer claimed 48 kHz while holding 96.
+        let wide = AudioFrame::new(sine_i16(1_000.0, 16_000.0, 1_600, 10_000.0), 16_000, 1, 0);
+        let from_wide = c.convert_frame(&wide, &params).unwrap().frame;
+        assert_eq!(
+            from_wide.samples.len(),
+            4_800,
+            "resampler kept the ratio it was built with for the previous input rate"
+        );
+        let tone = goertzel_mag(&from_wide.samples, 48_000.0, 1_000.0);
+        let octave_down = goertzel_mag(&from_wide.samples, 48_000.0, 500.0);
+        assert!(
+            tone > 1.0 && tone > octave_down * 5.0,
+            "1 kHz not dominant after the rate change: tone={tone}, 500Hz={octave_down}"
+        );
+
+        // And going back is a rebuild too, not a lucky cache hit.
+        let again = c.convert_frame(&narrow, &params).unwrap().frame;
+        assert_eq!(again.samples.len(), 4_800);
     }
 
     #[test]

@@ -28,6 +28,13 @@ qualification instead of holding every SIP PR open. Changes to shared or
 unmapped build inputs deliberately select the full workspace, while CI-policy-
 only changes run the planner and policy tests.
 
+Shards build each crate with its *default* features, so a test that lives
+behind an optional feature is compiled out rather than run. Where a crate keeps
+substantial test code behind such a feature — the codecs do, since G.729, Opus
+and AMR are all optional — a specialty gate repeats the run with
+`--all-features`. If you add an optional feature that carries tests, put it
+behind a gate; otherwise the tests exist and nothing executes them.
+
 ## Pull request expectations
 
 Complete the pull request template, including:

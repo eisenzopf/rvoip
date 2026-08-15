@@ -62,6 +62,11 @@ This table mirrors `crates/rvoip/Cargo.toml`.
 | --- | :---: | --- | --- |
 | `sip` | ✅ | **Beta-qualified** | SIP application and interop surface under `rvoip::sip` |
 | `g729` |  | Developer preview | End-to-end G.729A/G.729AB media, SDP, RTP, and transcoding support; implies `sip` |
+| `amr-nb` |  | Developer preview | End-to-end AMR narrowband media with RFC 4867 framing, DTX, and CMR; implies `sip` |
+| `amr-wb` |  | Developer preview | The same for AMR wideband (G.722.2) at 16 kHz; implies `sip` |
+| `amr` |  | Developer preview | Both AMR variants |
+| `opus` |  | Developer preview | End-to-end Opus media; requires libopus on the build host; implies `sip` |
+| `all-codecs` |  | Developer preview | `g729` + `amr` + `opus` |
 | `webrtc` |  | Developer preview | WebRTC interop adapter under `rvoip::webrtc` |
 | `uctp` |  | Developer preview | UCTP protocol plus QUIC, WebTransport, and WebSocket adapters under `rvoip::uctp` |
 | `vapi` |  | Developer preview | Vapi bidirectional WebSocket agent adapter under `rvoip::vapi` |
@@ -69,7 +74,7 @@ This table mirrors `crates/rvoip/Cargo.toml`.
 | `voip-3` |  | Developer preview | `sip` + `webrtc` + `uctp` + vCon + identity + AI harness |
 | `client` |  | Developer preview | Cross-transport SDK under `rvoip::client` |
 | `app` |  | Developer preview | High-level SIP/WebRTC/UCTP gateway builder under `rvoip::app` |
-| `full` |  | Developer preview | `voip-3` + `vapi` + `sip-stir-shaken` + `client` + `app` |
+| `full` |  | Developer preview | `voip-3` + `vapi` + `sip-stir-shaken` + `client` + `app` + `g729` + `amr`. Excludes `opus`, which needs libopus on the build host — use `all-codecs` for that |
 
 Examples:
 

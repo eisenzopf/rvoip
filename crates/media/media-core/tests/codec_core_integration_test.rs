@@ -140,13 +140,9 @@ fn test_codec_reset() {
 #[test]
 fn test_transcoding_integration() {
     use rvoip_media_core::codec::transcoding::Transcoder;
-    use rvoip_media_core::processing::format::FormatConverter;
-    use std::sync::Arc;
-    use tokio::sync::RwLock;
 
     // Create transcoder with codec-core codecs
-    let format_converter = Arc::new(RwLock::new(FormatConverter::new()));
-    let mut transcoder = Transcoder::new(format_converter);
+    let mut transcoder = Transcoder::new();
 
     // Test μ-law to A-law transcoding
     let pcmu_data = vec![0xFF; 160]; // 20ms μ-law frame

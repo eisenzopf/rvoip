@@ -6,6 +6,8 @@ import re
 import tomllib
 import unittest
 
+import run_checks
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SHA_ACTION = re.compile(r"uses:\s*[^\s#]+@([0-9a-f]{40})(?:\s|#|$)")
@@ -56,6 +58,35 @@ class WorkflowPolicyTests(unittest.TestCase):
         }
         self.assertIn("infra-otel", rules)
         self.assertIn("Cargo.lock", rules["infra-otel"])
+
+    def test_optional_codecs_are_owned_by_a_gate_and_forced_on_main(self) -> None:
+        policy = json.loads((ROOT / "scripts/ci/policy.json").read_text())
+        rules = {
+            rule["gate"]: set(rule["patterns"])
+            for rule in policy["specialty_rules"]
+        }
+        # One gate per package. They carry identical patterns on purpose: any
+        # change that would have selected the old combined gate still verifies
+        # all four packages, it just does so concurrently instead of against
+        # one shared 45-minute budget it could not fit inside.
+        gates = sorted(run_checks.CODEC_FEATURE_GATES)
+        main = (ROOT / ".github/workflows/main-ci.yml").read_text()
+        for gate in gates:
+            with self.subTest(gate=gate):
+                self.assertIn(gate, rules)
+                self.assertIn("crates/media/codec-core/**", rules[gate])
+                # The optional codec backends -- libopus today -- are only
+                # compiled under their feature, so a lockfile bump moves code
+                # no shard builds.
+                self.assertIn("Cargo.lock", rules[gate])
+                # Path matching only fires when the codec crates themselves
+                # change. A change anywhere else that breaks a feature-gated
+                # path would go unnoticed until main, so main runs the gates
+                # unconditionally.
+                self.assertIn(f"--specialty-gate {gate}", main)
+        # Identical patterns across the four, so splitting the job did not
+        # narrow what any one change verifies.
+        self.assertEqual(len({frozenset(rules[gate]) for gate in gates}), 1)
 
     def test_every_sip_process_fixture_is_prebuilt_by_the_dedicated_lane(self) -> None:
         policy = json.loads((ROOT / "scripts/ci/policy.json").read_text())

@@ -146,4 +146,13 @@ fn additive_runtime_and_diagnostic_surfaces_remain_available() {
     }
     let _ = diagnostic_receiver;
     let _ = std::any::type_name::<CallAuthRetryDetails>();
+
+    // 0.3.8: the profiled child's coordinator is observable (Bridgefu
+    // security-evidence monitors subscribe before registration).
+    fn profile_observation_coordinator(
+        registration: &SipEgressProfileRegistration,
+    ) -> &std::sync::Arc<UnifiedCoordinator> {
+        registration.coordinator()
+    }
+    let _ = profile_observation_coordinator;
 }

@@ -472,6 +472,7 @@ mod tests {
             clock_rate_hz,
             channels: 1,
             fmtp: None,
+            payload_type: None,
         }
     }
 

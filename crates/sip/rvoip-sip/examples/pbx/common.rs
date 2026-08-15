@@ -40,10 +40,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rvoip_media_core::types::AudioFrame;
 use rvoip_sip::{
-    AudioSender, CallHandlerDecision, CallId, CallbackPeer, CallbackPeerControl, Config, Endpoint,
-    EndpointAccount, EndpointProfile, Event, EventReceiver, MediaSecurityKeying,
+    AudioSender, CallHandlerDecision, CallId, CallState, CallbackPeer, CallbackPeerControl, Config,
+    Endpoint, EndpointAccount, EndpointProfile, Event, EventReceiver, MediaSecurityKeying,
     MediaSecurityProfile, MediaSecurityState, Registration, RegistrationHandle, SessionHandle,
-    SipAccount, SipContactMode, SrtpSuitePolicy, StreamPeer, TransferOutcome, TransferWaitMode,
+    SessionId, SipAccount, SipContactMode, SrtpSuitePolicy, StreamPeer, TransferOutcome,
+    TransferWaitMode, UnifiedCoordinator,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -54,20 +55,164 @@ pub type ExampleResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub const SAMPLE_RATE: u32 = 8000;
 pub const FRAME_SIZE: usize = 160;
 pub const G729_FRAME_SIZE: usize = 80;
+
+/// One 20 ms AMR frame, which is *not* the same for both variants: AMR-NB is
+/// 160 samples at 8 kHz and AMR-WB is 320 at 16 kHz.
+///
+/// Feeding a wideband session 160-sample frames does not degrade gracefully —
+/// the encoder refuses them outright, because a short frame silently
+/// mis-framed would drift against the far end. So the recorder has to be told
+/// which variant it is driving.
+/// Matched exhaustively rather than with a catch-all: a wildcard here would
+/// give any newly added wideband profile the narrowband rate silently, which is
+/// the failure this function exists to prevent.
+pub const fn amr_sample_rate(profile: CodecProfile) -> u32 {
+    match profile {
+        CodecProfile::AmrWb | CodecProfile::AmrWbBe => 16_000,
+        CodecProfile::Default
+        | CodecProfile::G729A
+        | CodecProfile::G729AB
+        | CodecProfile::AmrNb
+        | CodecProfile::AmrNbBe
+        | CodecProfile::Pcmu => 8_000,
+    }
+}
+
+/// The highest mode index of an AMR profile — where our encoder opens, and
+/// therefore what the peer sends until someone asks otherwise. Used by the
+/// mode-switch step to prove the peer actually *moved*.
+pub const fn amr_top_mode_index(profile: CodecProfile) -> u8 {
+    match profile {
+        CodecProfile::AmrWb | CodecProfile::AmrWbBe => 8,
+        CodecProfile::Default
+        | CodecProfile::G729A
+        | CodecProfile::G729AB
+        | CodecProfile::AmrNb
+        | CodecProfile::AmrNbBe
+        | CodecProfile::Pcmu => 7,
+    }
+}
+
+/// Whether the operator asked the caller to exercise a mid-call codec mode
+/// request (`PBX_AMR_MODE_SWITCH=1`).
+fn amr_mode_switch_requested() -> bool {
+    matches!(
+        std::env::var("PBX_AMR_MODE_SWITCH").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes") | Ok("on")
+    )
+}
+
+/// Whether the operator asked for AMR discontinuous transmission
+/// (`PBX_AMR_DTX=1`).
+///
+/// Sender-side policy with nothing in the SDP, so a cell that enables it
+/// looks identical on the signalling side and differs only in what the
+/// encoder emits during silence.
+fn amr_dtx_requested() -> bool {
+    matches!(
+        std::env::var("PBX_AMR_DTX").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes") | Ok("on")
+    )
+}
+
+/// `PBX_AMR_MODE_SET=0,2,4` restricts the cell to those AMR modes.
+///
+/// Unlike `PBX_AMR_DTX` this one *is* visible in the SDP: it becomes
+/// RFC 4867 `mode-set` on the offer, and the set is bi-directional, so it
+/// governs what the PBX sends us as well as what we send it. That is what
+/// makes a per-rate lab cell possible at all — without it every cell runs at
+/// whatever mode the encoder opens at, which is the highest permitted one.
+///
+/// Unparseable entries are dropped rather than defaulted, so a typo narrows
+/// the set or empties it rather than silently testing a different rate than
+/// the label claims.
+fn amr_mode_set_requested() -> Option<Vec<u8>> {
+    let raw = std::env::var("PBX_AMR_MODE_SET").ok()?;
+    let modes: Vec<u8> = raw
+        .split(',')
+        .filter_map(|part| part.trim().parse::<u8>().ok())
+        .collect();
+    (!modes.is_empty()).then_some(modes)
+}
+
+pub const fn amr_frame_size(profile: CodecProfile) -> usize {
+    match profile {
+        CodecProfile::AmrWb | CodecProfile::AmrWbBe => 320,
+        CodecProfile::Default
+        | CodecProfile::G729A
+        | CodecProfile::G729AB
+        | CodecProfile::AmrNb
+        | CodecProfile::AmrNbBe
+        | CodecProfile::Pcmu => 160,
+    }
+}
 pub const TONE_FRAMES: usize = 150;
 pub const ENDPOINT_2001_TONE_HZ: f32 = 440.0;
 pub const ENDPOINT_2002_TONE_HZ: f32 = 880.0;
 pub const ENDPOINT_1001_TONE_HZ: f32 = ENDPOINT_2001_TONE_HZ;
 pub const ENDPOINT_1002_TONE_HZ: f32 = ENDPOINT_2002_TONE_HZ;
 pub const ENDPOINT_1003_TONE_HZ: f32 = 660.0;
-pub const MIN_RECEIVED_SAMPLES: usize = 12_000;
+/// The evidence floor as a duration, which is what it always meant.
+///
+/// It used to be stated only as `MIN_RECEIVED_SAMPLES = 12_000`, a raw sample
+/// count — 1.5 s at 8 kHz but 0.75 s at 16 kHz, so every wideband AMR run
+/// quietly collected half the exercise of a narrowband one and nothing said
+/// so.
+pub const MIN_RECEIVED_MS: usize = 1_500;
+pub const fn min_received_samples(sample_rate: u32) -> usize {
+    sample_rate as usize * MIN_RECEIVED_MS / 1000
+}
+pub const MIN_RECEIVED_SAMPLES: usize = min_received_samples(SAMPLE_RATE);
 // The caller controls call teardown from its local receive count, while the
 // peer's recorder can trail it by several codec frames during PBX transcoding
 // and TLS/SRTP scheduling. Capture another half-second before BYE so both
 // independently recorded directions satisfy the unchanged evidence floor.
 pub const G729_CALLER_CAPTURE_TARGET_SAMPLES: usize =
     MIN_RECEIVED_SAMPLES + SAMPLE_RATE as usize / 2;
-pub const TONE_ANALYSIS_WINDOW_SAMPLES: usize = FRAME_SIZE * 10;
+/// The tone-analysis window is 200 ms *at any rate*.
+///
+/// Stated as a sample count it was 200 ms at 8 kHz but silently 100 ms at
+/// 16 kHz. The duration is load-bearing twice over: every tone this harness
+/// sends (440, 660, 880 Hz) lands on an exact Goertzel bin of a 200 ms window
+/// at both rates, and an off-bin fundamental caps the measurable SNR near
+/// 17 dB no matter how clean the audio is — see
+/// `harness_tones_land_on_an_exact_goertzel_bin`.
+pub const fn tone_analysis_window_samples(sample_rate: u32) -> usize {
+    sample_rate as usize / 5
+}
+pub const TONE_ANALYSIS_WINDOW_SAMPLES: usize = tone_analysis_window_samples(SAMPLE_RATE);
+/// One 20 ms frame at `sample_rate`: 160 at 8 kHz, 320 at 16 kHz.
+pub const fn frame_samples(sample_rate: u32) -> usize {
+    sample_rate as usize / 50
+}
+
+/// Peak amplitude of the tone this harness sends — `0.3 * 32767` in
+/// [`generate_tone_at_rate`]. Every level threshold below is a fraction of it,
+/// so a deliberate change to the sent level moves the thresholds with it.
+pub const TONE_PEAK_AMPLITUDE: f32 = 0.3 * 32767.0;
+pub const TONE_RMS: f32 = TONE_PEAK_AMPLITUDE / std::f32::consts::SQRT_2;
+
+/// Per-window floor on fundamental-vs-residual power for an AMR capture.
+///
+/// Calibrated against real captures at the top modes (AMR-NB 12.2, AMR-WB
+/// 23.85): the cleanest path's *worst* window measured +25.7 dB and a
+/// degraded path's best *sustained* stretch at 15 dB lasted 0.46 s against
+/// the 1 s required below. Lowering this below ~13 dB without lengthening
+/// [`AMR_REQUIRED_TONE_SECS`] lets that degraded capture back in — the two
+/// constants trade off, and the tradeoff was measured, not guessed. Lower
+/// modes will code a tone worse; when a rate sweep lands, calibrate a
+/// per-mode table from codec loopback rather than relaxing this blanket
+/// figure.
+pub const AMR_MIN_TONE_SNR_DB: f32 = 15.0;
+/// Per-20 ms-frame RMS floor: a quarter of what we send. The cleanest capture
+/// never dipped below 0.6× sent RMS; a degraded one spent whole frames near
+/// 0.02×. Level is checked separately from SNR because attenuation preserves
+/// spectral purity perfectly.
+pub const AMR_MIN_FRAME_RMS: f32 = TONE_RMS / 4.0;
+/// The unbroken stretch of passing windows an AMR capture must contain — the
+/// same one-continuous-second guarantee `assert_audio_path` gives G.711 and
+/// G.729.
+pub const AMR_REQUIRED_TONE_SECS: f32 = 1.0;
 pub const HOLD_RESUME_PRE_HOLD_FRAMES: usize = 100;
 pub const HOLD_RESUME_HELD_FRAMES: usize = 50;
 pub const HOLD_RESUME_POST_RESUME_FRAMES: usize = 200;
@@ -77,6 +222,12 @@ pub const DOMINANCE_RATIO: f32 = 5.0;
 pub enum PbxProvider {
     Asterisk,
     FreeSwitch,
+    /// Kamailio registrar-proxy with rtpengine relaying media
+    /// (infra/release-runners/pbx/kamailio). A proxy, not a B2BUA: it routes
+    /// by registered contact and rtpengine forwards payloads verbatim.
+    Kamailio,
+    /// OpenSIPS sibling of the Kamailio lab.
+    OpenSips,
 }
 
 impl PbxProvider {
@@ -97,6 +248,8 @@ impl PbxProvider {
         }
         match value.trim().to_ascii_lowercase().as_str() {
             "asterisk" | "ast" => Ok(Self::Asterisk),
+            "kamailio" | "kam" => Ok(Self::Kamailio),
+            "opensips" | "open-sips" | "osips" => Ok(Self::OpenSips),
             "freeswitch" | "free-switch" | "fs" => Ok(Self::FreeSwitch),
             other => Err(format!("unknown PBX provider '{}'", other).into()),
         }
@@ -106,6 +259,8 @@ impl PbxProvider {
         match self {
             Self::Asterisk => "asterisk",
             Self::FreeSwitch => "freeswitch",
+            Self::Kamailio => "kamailio",
+            Self::OpenSips => "opensips",
         }
     }
 
@@ -113,6 +268,8 @@ impl PbxProvider {
         match self {
             Self::Asterisk => "Asterisk",
             Self::FreeSwitch => "FreeSWITCH",
+            Self::Kamailio => "Kamailio",
+            Self::OpenSips => "OpenSIPS",
         }
     }
 
@@ -120,6 +277,8 @@ impl PbxProvider {
         match self {
             Self::Asterisk => 5,
             Self::FreeSwitch => 2,
+            // usrloc writes are synchronous and in-memory; nothing to settle.
+            Self::Kamailio | Self::OpenSips => 1,
         }
     }
 
@@ -127,6 +286,7 @@ impl PbxProvider {
         match self {
             Self::Asterisk => 8,
             Self::FreeSwitch => 4,
+            Self::Kamailio | Self::OpenSips => 4,
         }
     }
 
@@ -134,6 +294,8 @@ impl PbxProvider {
         match self {
             Self::Asterisk => env_bool("ASTERISK_EXPECT_TARGET_CANCEL", false).unwrap_or(false),
             Self::FreeSwitch => true,
+            // A proxy relays CANCEL verbatim.
+            Self::Kamailio | Self::OpenSips => true,
         }
     }
 }
@@ -188,6 +350,16 @@ pub enum Scenario {
     Registration,
     BasicCall,
     G729Call,
+    AmrCall,
+    /// Caller and callee offer disjoint codecs, forcing the PBX to transcode
+    /// — the scenario where a foreign AMR implementation must actually read
+    /// our bitstream. See [`CodecPairing`].
+    AmrTranscodeCall,
+    /// rvoip is the B2BUA in the middle: caller → PBX → rvoip → PBX → target,
+    /// with rvoip terminating both legs and bridging their payloads. Closes
+    /// half the exit criterion in `AMR_IMPLEMENTATION_PLAN.md` — rvoip as the
+    /// relaying B2BUA rather than an endpoint through someone else's bridge.
+    B2buaCall,
     HoldResume,
     RingCancel,
     Dtmf,
@@ -208,6 +380,11 @@ impl Scenario {
                     .ok_or_else(|| "--scenario requires a value".to_string())?;
             }
         }
+        Self::parse(&value)
+    }
+
+    /// The pure name parser, so tests need not touch the environment.
+    pub fn parse(value: &str) -> ExampleResult<Self> {
         let normalized = value
             .trim()
             .to_ascii_lowercase()
@@ -218,6 +395,9 @@ impl Scenario {
             "registration" | "registration_tls" | "registration_udp" => Ok(Self::Registration),
             "basic" | "basic_call" | "call" | "udp_call" => Ok(Self::BasicCall),
             "g729" | "g729_call" | "g729ab" | "g729ab_call" => Ok(Self::G729Call),
+            "amr" | "amr_call" | "amrwb" | "amrwb_call" | "amr_wb_call" => Ok(Self::AmrCall),
+            "amr_transcode" | "amr_transcode_call" | "transcode" => Ok(Self::AmrTranscodeCall),
+            "b2bua" | "b2bua_call" => Ok(Self::B2buaCall),
             "hold" | "hold_resume" => Ok(Self::HoldResume),
             "ring" | "ring_cancel" | "ring_remote" => Ok(Self::RingCancel),
             "dtmf" => Ok(Self::Dtmf),
@@ -233,18 +413,52 @@ pub enum CodecProfile {
     Default,
     G729A,
     G729AB,
+    /// AMR-NB, octet-aligned. The framing most PBXes default to, and the one
+    /// whose fmtp has to survive the round trip for anything to be audible.
+    AmrNb,
+    /// AMR-WB, octet-aligned. Separate because it is 16 kHz with 320-sample
+    /// frames, which is where a narrowband assumption shows up.
+    AmrWb,
+    /// AMR-NB, bandwidth-efficient. The framing whose payload boundaries do not
+    /// fall on octets, so a peer that packs it wrongly still produces a payload
+    /// of a plausible length — the error surfaces as noise, not as a refusal.
+    ///
+    /// It is also the only framing a bridged FreeSWITCH call can use end to
+    /// end: FreeSWITCH offers `octet-align=0` on the outbound leg and relays
+    /// payloads between the legs without re-framing them, so an octet-aligned
+    /// inbound leg leaves both endpoints reading the framing they did not
+    /// agree to.
+    AmrNbBe,
+    /// AMR-WB, bandwidth-efficient.
+    AmrWbBe,
+    /// PCMU alone — the far leg of a transcode pairing. PCMU only, no PCMA,
+    /// for the same reason the AMR profiles offer one framing each: the
+    /// negotiated codec must be provable from the profile name.
+    Pcmu,
 }
 
 impl CodecProfile {
     pub fn from_env_or_scenario() -> ExampleResult<Self> {
-        if let Ok(value) = std::env::var("PBX_CODEC_PROFILE") {
-            return Self::parse(&value);
-        }
+        Self::for_endpoint(None, None)
+    }
 
-        match Scenario::from_env_or_args()? {
-            Scenario::G729Call => Ok(Self::G729AB),
-            _ => Ok(Self::Default),
-        }
+    /// The codec profile for one participant.
+    ///
+    /// Delegates to [`select_codec_profile`] with the process environment
+    /// filled in; the precedence and every refusal live in that pure function
+    /// where they are testable without env mutation.
+    pub fn for_endpoint(username: Option<&str>, role: Option<Role>) -> ExampleResult<Self> {
+        let endpoint_override = username
+            .and_then(|user| std::env::var(format!("ENDPOINT_{}_CODEC_PROFILE", user)).ok());
+        let global = std::env::var("PBX_CODEC_PROFILE").ok();
+        let pairing = std::env::var("PBX_CODEC_PAIRING").ok();
+        select_codec_profile(
+            Scenario::from_env_or_args()?,
+            role,
+            endpoint_override.as_deref(),
+            global.as_deref(),
+            pairing.as_deref(),
+        )
     }
 
     fn parse(value: &str) -> ExampleResult<Self> {
@@ -252,21 +466,46 @@ impl CodecProfile {
             "" | "default" | "pcmu_pcma" | "g711" => Ok(Self::Default),
             "g729a" | "g729_annex_a" | "annexb_no" => Ok(Self::G729A),
             "g729" | "g729ab" | "g729ba" | "annexb_yes" => Ok(Self::G729AB),
+            "amr" | "amrnb" | "amr_nb" => Ok(Self::AmrNb),
+            "amrwb" | "amr_wb" => Ok(Self::AmrWb),
+            "amrnb_be" | "amr_nb_be" | "amrnbbe" => Ok(Self::AmrNbBe),
+            "amrwb_be" | "amr_wb_be" | "amrwbbe" => Ok(Self::AmrWbBe),
+            "pcmu" | "ulaw" => Ok(Self::Pcmu),
             other => Err(format!("unknown PBX codec profile '{}'", other).into()),
         }
     }
 
-    fn apply(self, config: &mut Config) {
+    /// The payload types this profile puts in the offer, `None` meaning the
+    /// stack's defaults. Split from [`Self::apply`] so the disjointness of a
+    /// [`CodecPairing`]'s two legs is a unit-testable property of the lists
+    /// themselves, not of a fully-constructed `Config`.
+    pub fn offered_codecs(self) -> Option<Vec<u8>> {
         match self {
-            Self::Default => {}
-            Self::G729A => {
-                config.offered_codecs = vec![18, 101];
-                config.g729_annex_b = false;
-            }
-            Self::G729AB => {
-                config.offered_codecs = vec![18, 101];
-                config.g729_annex_b = true;
-            }
+            Self::Default => None,
+            Self::G729A | Self::G729AB => Some(vec![18, 101]),
+            // Octet-aligned only: offering both framings for one codec lets a
+            // PBX pick the other one, and then a passing call would say
+            // nothing about the framing under test. 107 is AMR-NB
+            // octet-aligned and 105 is AMR-WB octet-aligned.
+            Self::AmrNb => Some(vec![107, 101]),
+            Self::AmrWb => Some(vec![105, 101]),
+            // 106 and 104 are the same two codecs bandwidth-efficient, and are
+            // offered alone for the same reason: a call that passes must have
+            // used the framing named here.
+            Self::AmrNbBe => Some(vec![106, 101]),
+            Self::AmrWbBe => Some(vec![104, 101]),
+            Self::Pcmu => Some(vec![0, 101]),
+        }
+    }
+
+    fn apply(self, config: &mut Config) {
+        if let Some(codecs) = self.offered_codecs() {
+            config.offered_codecs = codecs;
+        }
+        match self {
+            Self::G729A => config.g729_annex_b = false,
+            Self::G729AB => config.g729_annex_b = true,
+            _ => {}
         }
     }
 
@@ -275,7 +514,146 @@ impl CodecProfile {
             Self::Default => "default",
             Self::G729A => "g729a",
             Self::G729AB => "g729ab",
+            Self::AmrNb => "amrnb",
+            Self::AmrWb => "amrwb",
+            Self::AmrNbBe => "amrnb_be",
+            Self::AmrWbBe => "amrwb_be",
+            Self::Pcmu => "pcmu",
         }
+    }
+}
+
+/// A codec per leg, for the scenario whose whole point is that the two legs
+/// cannot agree.
+///
+/// When both legs of a bridged call offer the same codec, both PBXes in this
+/// lab relay the RTP payloads untouched — Asterisk switches to its native_rtp
+/// bridge, FreeSWITCH forwards ingress bytes verbatim — and no foreign codec
+/// ever touches our bitstream. A pairing offers *disjoint* codecs, so the PBX
+/// physically cannot native-bridge: its own AMR implementation must decode
+/// what we encoded and encode what we decode.
+///
+/// Named pairings rather than a `caller_callee` grammar because profile names
+/// already contain underscores (`amrnb_be`), so a grammar would have to guess
+/// the split.
+// The shared `Amr` prefix is the point: every pairing names which AMR leg is
+// under test, and the far leg after the underscore.
+#[allow(clippy::enum_variant_names)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodecPairing {
+    /// AMR-NB caller, PCMU callee — the default. One foreign AMR codec in
+    /// each direction, and a lossless-ish reference on the far side, so a
+    /// tone failure names a suspect.
+    AmrNbPcmu,
+    /// AMR-WB caller, PCMU callee: the wideband decoder/encoder pair, plus
+    /// the PBX's 16 kHz ↔ 8 kHz resampler.
+    AmrWbPcmu,
+    /// Bandwidth-efficient variants, the fallback if a PBX mishandles
+    /// octet-aligned input on its transcoding path.
+    AmrNbBePcmu,
+    AmrWbBePcmu,
+    /// Both our variants through the PBX's transcoder at once. The stretch
+    /// case: four codecs in the path, so run it after a PCMU pairing is
+    /// green, not instead of one.
+    AmrNbAmrWb,
+}
+
+impl CodecPairing {
+    pub fn parse(value: &str) -> ExampleResult<Self> {
+        match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "amrnb_pcmu" => Ok(Self::AmrNbPcmu),
+            "amrwb_pcmu" => Ok(Self::AmrWbPcmu),
+            "amrnb_be_pcmu" => Ok(Self::AmrNbBePcmu),
+            "amrwb_be_pcmu" => Ok(Self::AmrWbBePcmu),
+            "amrnb_amrwb" => Ok(Self::AmrNbAmrWb),
+            other => Err(format!("unknown PBX codec pairing '{}'", other).into()),
+        }
+    }
+
+    pub fn env_value(self) -> &'static str {
+        match self {
+            Self::AmrNbPcmu => "amrnb_pcmu",
+            Self::AmrWbPcmu => "amrwb_pcmu",
+            Self::AmrNbBePcmu => "amrnb_be_pcmu",
+            Self::AmrWbBePcmu => "amrwb_be_pcmu",
+            Self::AmrNbAmrWb => "amrnb_amrwb",
+        }
+    }
+
+    /// Which profile each leg offers. Only the two media roles have one:
+    /// asking for a target/transferor profile is a wiring error, not a
+    /// default.
+    pub fn profile_for(self, role: Role) -> ExampleResult<CodecProfile> {
+        let (caller, callee) = match self {
+            Self::AmrNbPcmu => (CodecProfile::AmrNb, CodecProfile::Pcmu),
+            Self::AmrWbPcmu => (CodecProfile::AmrWb, CodecProfile::Pcmu),
+            Self::AmrNbBePcmu => (CodecProfile::AmrNbBe, CodecProfile::Pcmu),
+            Self::AmrWbBePcmu => (CodecProfile::AmrWbBe, CodecProfile::Pcmu),
+            Self::AmrNbAmrWb => (CodecProfile::AmrNb, CodecProfile::AmrWb),
+        };
+        match role {
+            Role::Caller => Ok(caller),
+            Role::Callee => Ok(callee),
+            other => Err(format!(
+                "codec pairing {} has no profile for role {:?}: only the caller and callee \
+                 carry media in a transcode call",
+                self.env_value(),
+                other
+            )
+            .into()),
+        }
+    }
+}
+
+/// The one place codec-profile precedence is decided, pure so it is testable
+/// without mutating the process environment:
+///
+/// 1. `ENDPOINT_{username}_CODEC_PROFILE` — the per-participant override
+///    channel every other per-endpoint knob already uses;
+/// 2. the pairing, for the transcode scenario;
+/// 3. `PBX_CODEC_PROFILE` — **refused** for the transcode scenario, because
+///    one profile cannot describe two legs, and accepting it would silently
+///    collapse both legs onto one codec: the PBX would native-bridge again
+///    and the scenario would pass while proving nothing;
+/// 4. the per-scenario default.
+fn select_codec_profile(
+    scenario: Scenario,
+    role: Option<Role>,
+    endpoint_override: Option<&str>,
+    global: Option<&str>,
+    pairing: Option<&str>,
+) -> ExampleResult<CodecProfile> {
+    if let Some(value) = endpoint_override {
+        return CodecProfile::parse(value);
+    }
+    if scenario == Scenario::AmrTranscodeCall {
+        if global.is_some() {
+            return Err(
+                "PBX_CODEC_PROFILE is one profile and a transcode call needs one per leg; \
+                 set PBX_CODEC_PAIRING (or ENDPOINT_{user}_CODEC_PROFILE) instead"
+                    .into(),
+            );
+        }
+        let pairing = match pairing {
+            Some(value) => CodecPairing::parse(value)?,
+            None => CodecPairing::AmrNbPcmu,
+        };
+        let role =
+            role.ok_or("a transcode call resolves its codec per role, and no role was given")?;
+        return pairing.profile_for(role);
+    }
+    if let Some(value) = global {
+        return CodecProfile::parse(value);
+    }
+    match scenario {
+        Scenario::G729Call => Ok(CodecProfile::G729AB),
+        // Narrowband by default: it is the variant every AMR-capable PBX
+        // has, and PBX_CODEC_PROFILE=amrwb selects the other.
+        Scenario::AmrCall => Ok(CodecProfile::AmrNb),
+        // The exit criterion names AMR-WB; the run.sh sweep pins the framing
+        // per provider and adds a PCMU control cell.
+        Scenario::B2buaCall => Ok(CodecProfile::AmrWb),
+        _ => Ok(CodecProfile::Default),
     }
 }
 
@@ -287,6 +665,9 @@ pub enum Role {
     Target,
     Transferor,
     Transferee,
+    /// The B2BUA in the middle: registers, accepts an inbound leg, originates
+    /// an outbound leg, and bridges the two.
+    B2bua,
 }
 
 impl Role {
@@ -307,6 +688,7 @@ impl Role {
             "target" | "transfer_target" | "ring_target" => Ok(Self::Target),
             "transferor" => Ok(Self::Transferor),
             "transferee" => Ok(Self::Transferee),
+            "b2bua" => Ok(Self::B2bua),
             other => Err(format!("unknown PBX role '{}'", other).into()),
         }
     }
@@ -327,6 +709,10 @@ impl TlsContactMode {
         let key = match provider {
             PbxProvider::Asterisk => "ASTERISK_TLS_CONTACT_MODE",
             PbxProvider::FreeSwitch => "FREESWITCH_TLS_CONTACT_MODE",
+            // TLS is not wired for the proxy labs yet; the arms exist so the
+            // match stays exhaustive and the key is ready when it is.
+            PbxProvider::Kamailio => "KAMAILIO_TLS_CONTACT_MODE",
+            PbxProvider::OpenSips => "OPENSIPS_TLS_CONTACT_MODE",
         };
         match env_string(key, "reachable-contact")
             .trim()
@@ -387,6 +773,18 @@ impl EndpointConfig {
         username: &str,
         transport: TransportMode,
     ) -> ExampleResult<Self> {
+        Self::new_for_role(provider, username, transport, None)
+    }
+
+    /// The role-aware constructor. The role only matters for scenarios whose
+    /// two legs run different codecs; passing `None` keeps the historical
+    /// behaviour everywhere else.
+    pub fn new_for_role(
+        provider: PbxProvider,
+        username: &str,
+        transport: TransportMode,
+        role: Option<Role>,
+    ) -> ExampleResult<Self> {
         let defaults = endpoint_defaults(provider, username, transport);
         let prefix = format!("ENDPOINT_{}", username);
         let (sip_server, sip_port) = match provider {
@@ -412,6 +810,32 @@ impl EndpointConfig {
                 };
                 split_host_port(&env_string(addr_key, default_addr))?
             }
+            PbxProvider::Kamailio => {
+                let addr_key = if transport.is_tls() {
+                    "KAMAILIO_TLS_ADDR"
+                } else {
+                    "KAMAILIO_UDP_ADDR"
+                };
+                let default_addr = if transport.is_tls() {
+                    "127.0.0.1:5067"
+                } else {
+                    "127.0.0.1:5066"
+                };
+                split_host_port(&env_string(addr_key, default_addr))?
+            }
+            PbxProvider::OpenSips => {
+                let addr_key = if transport.is_tls() {
+                    "OPENSIPS_TLS_ADDR"
+                } else {
+                    "OPENSIPS_UDP_ADDR"
+                };
+                let default_addr = if transport.is_tls() {
+                    "127.0.0.1:5075"
+                } else {
+                    "127.0.0.1:5068"
+                };
+                split_host_port(&env_string(addr_key, default_addr))?
+            }
         };
         let auth_username = auth_username_for(&prefix, username);
         let password = match provider {
@@ -422,13 +846,25 @@ impl EndpointConfig {
                 .or_else(|_| std::env::var("FREESWITCH_PASSWORD"))
                 .or_else(|_| std::env::var("SIP_PASSWORD"))
                 .unwrap_or_else(|_| "1234".to_string()),
+            // The proxy labs run an accept-all registrar; the password is
+            // carried but never challenged for.
+            PbxProvider::Kamailio => std::env::var(format!("{}_PASSWORD", prefix))
+                .or_else(|_| std::env::var("KAMAILIO_PASSWORD"))
+                .or_else(|_| std::env::var("SIP_PASSWORD"))
+                .unwrap_or_else(|_| "password123".to_string()),
+            PbxProvider::OpenSips => std::env::var(format!("{}_PASSWORD", prefix))
+                .or_else(|_| std::env::var("OPENSIPS_PASSWORD"))
+                .or_else(|_| std::env::var("SIP_PASSWORD"))
+                .unwrap_or_else(|_| "password123".to_string()),
         };
         let local_ip: IpAddr = match provider {
             PbxProvider::Asterisk => env_string("LOCAL_IP", "0.0.0.0").parse()?,
-            PbxProvider::FreeSwitch => std::env::var("RVOIP_LOCAL_IP")
-                .or_else(|_| std::env::var("LOCAL_IP"))
-                .unwrap_or_else(|_| "127.0.0.1".to_string())
-                .parse()?,
+            PbxProvider::FreeSwitch | PbxProvider::Kamailio | PbxProvider::OpenSips => {
+                std::env::var("RVOIP_LOCAL_IP")
+                    .or_else(|_| std::env::var("LOCAL_IP"))
+                    .unwrap_or_else(|_| "127.0.0.1".to_string())
+                    .parse()?
+            }
         };
         let advertised_ip = advertised_ip(provider, local_ip)?;
         let media_advertised_ip = media_advertised_ip(provider, advertised_ip)?;
@@ -452,7 +888,7 @@ impl EndpointConfig {
             &format!("{}_MEDIA_PORT_END", prefix),
             defaults.media_port_end,
         )?;
-        let codec_profile = CodecProfile::from_env_or_scenario()?;
+        let codec_profile = CodecProfile::for_endpoint(Some(username), role)?;
         let output_dir = std::env::var("AUDIO_OUTPUT_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| {
@@ -564,6 +1000,10 @@ impl EndpointConfig {
                 &self.username,
                 SocketAddr::new(self.local_ip, self.local_port),
             ),
+            // Plain config: the proxies impose no FreeSWITCH-shaped quirks.
+            PbxProvider::Kamailio | PbxProvider::OpenSips => {
+                Config::on(&self.username, self.local_ip, self.local_port)
+            }
         };
         config.local_uri = self.aor_uri();
         config.contact_uri = Some(self.contact_uri());
@@ -581,6 +1021,18 @@ impl EndpointConfig {
         config.media_port_start = self.media_port_start;
         config.media_port_end = self.media_port_end;
         config.media_public_addr = Some(SocketAddr::new(self.media_advertised_ip, 0));
+        // AMR DTX is sender-side policy with no SDP surface, so it is set on
+        // whichever side the operator runs with PBX_AMR_DTX=1 and the other
+        // side needs no matching setting to receive it.
+        //
+        // Set here rather than in `session_config`: that method returns this
+        // one's result early for every non-TLS transport, so a knob applied to
+        // its tail reaches TLS cells only — which is exactly how the first
+        // version of this silently did nothing on UDP.
+        config.amr_dtx = amr_dtx_requested();
+        // Same placement reasoning as `amr_dtx` above, and the same trap: set
+        // in `session_config` this would reach TLS cells only.
+        config.amr_mode_set = amr_mode_set_requested();
         self.codec_profile.apply(&mut config);
         config
     }
@@ -621,6 +1073,8 @@ impl EndpointConfig {
         config.srtp_required = match self.provider {
             PbxProvider::Asterisk => env_bool("ASTERISK_TLS_SRTP_REQUIRED", true)?,
             PbxProvider::FreeSwitch => env_bool("FREESWITCH_TLS_SRTP_REQUIRED", true)?,
+            PbxProvider::Kamailio => env_bool("KAMAILIO_TLS_SRTP_REQUIRED", true)?,
+            PbxProvider::OpenSips => env_bool("OPENSIPS_TLS_SRTP_REQUIRED", true)?,
         };
         if self.provider == PbxProvider::FreeSwitch {
             config = config.with_srtp_suite_policy(SrtpSuitePolicy::FreeSwitchCompatible);
@@ -697,16 +1151,75 @@ struct ToneWindowScan {
     required_passing_run: usize,
     analysis_window_samples: usize,
     step_samples: usize,
+    /// Quality of the best-ratio window, plus the weakest figures seen in
+    /// *any* window — a failure message must name the limiting window, not
+    /// the flattering one. A degraded capture's best window can measure
+    /// better than a clean capture's worst; only the weakest-window view
+    /// discriminates.
+    best_quality: ToneQuality,
+    weakest_snr_db: f32,
+    weakest_frame_rms: f32,
+}
+
+/// What a single analysis window must satisfy to count as passing.
+///
+/// The dominance ratio alone is scale-invariant and phase-blind: it passed a
+/// capture that was 1-bit square-wave distortion, one that was attenuated
+/// 100×, and one with half its frames zeroed. Each quality clause exists
+/// because a measured failure defeated the others.
+#[derive(Debug, Clone, Copy)]
+struct WindowGate {
+    min_ratio: f32,
+    min_snr_db: Option<f32>,
+    min_frame_rms: Option<f32>,
+}
+
+impl WindowGate {
+    /// Exactly the historical predicate: the right tone dominates the wrong
+    /// one. The scenarios that only ever asked that question keep asking it,
+    /// bit-for-bit.
+    fn tone_only() -> Self {
+        Self {
+            min_ratio: DOMINANCE_RATIO,
+            min_snr_db: None,
+            min_frame_rms: None,
+        }
+    }
+
+    /// The AMR gate: the tone must dominate, must actually *be* a tone, and
+    /// must be there at full level in every 20 ms frame.
+    fn amr() -> Self {
+        Self {
+            min_ratio: DOMINANCE_RATIO,
+            min_snr_db: Some(AMR_MIN_TONE_SNR_DB),
+            min_frame_rms: Some(AMR_MIN_FRAME_RMS),
+        }
+    }
+
+    fn admits(&self, analysis: &ToneAnalysis, quality: &ToneQuality) -> bool {
+        analysis.ratio >= self.min_ratio
+            && self.min_snr_db.is_none_or(|floor| quality.snr_db >= floor)
+            && self
+                .min_frame_rms
+                .is_none_or(|floor| quality.min_frame_rms >= floor)
+    }
 }
 
 pub struct ToneRecorder {
     running: Arc<AtomicBool>,
+    /// Makes the send loop emit digital silence instead of the tone, so a DTX
+    /// cell has something for the encoder's VAD to detect.
+    sending_silence: Arc<AtomicBool>,
     send_task: JoinHandle<()>,
     recv_task: JoinHandle<()>,
     received_buf: Arc<Mutex<Vec<i16>>>,
     counters: Arc<RecorderCounters>,
     diag_output_dir: Option<PathBuf>,
     diag_name: String,
+    /// The rate the far end's audio arrives at, carried so the saved file says
+    /// so. Wideband recordings written with the narrowband default play an
+    /// octave low at twice the duration, and nothing about them looks wrong.
+    sample_rate: u32,
 }
 
 pub struct RecorderCounters {
@@ -844,6 +1357,22 @@ pub fn load_env(provider: PbxProvider) {
                         .join("freeswitch-local.env"),
                 );
             }
+            PbxProvider::Kamailio => {
+                let _ = dotenvy::from_filename(
+                    Path::new(&home)
+                        .join("Developer")
+                        .join("kamailio")
+                        .join("kamailio-local.env"),
+                );
+            }
+            PbxProvider::OpenSips => {
+                let _ = dotenvy::from_filename(
+                    Path::new(&home)
+                        .join("Developer")
+                        .join("opensips")
+                        .join("opensips-local.env"),
+                );
+            }
         }
     }
     let _ = dotenvy::from_filename(
@@ -964,10 +1493,10 @@ pub fn context() -> ExampleResult<(PbxProvider, Scenario, TransportMode, Role)> 
 pub fn username_for(transport: TransportMode, role: Role) -> &'static str {
     match (transport, role) {
         (TransportMode::TlsSrtp, Role::Caller | Role::Transferor | Role::Registration) => "1001",
-        (TransportMode::TlsSrtp, Role::Callee | Role::Transferee) => "1002",
+        (TransportMode::TlsSrtp, Role::Callee | Role::Transferee | Role::B2bua) => "1002",
         (TransportMode::TlsSrtp, Role::Target) => "1003",
         (TransportMode::Udp, Role::Caller | Role::Transferor | Role::Registration) => "2001",
-        (TransportMode::Udp, Role::Callee | Role::Transferee) => "2002",
+        (TransportMode::Udp, Role::Callee | Role::Transferee | Role::B2bua) => "2002",
         (TransportMode::Udp, Role::Target) => "2003",
     }
 }
@@ -977,7 +1506,12 @@ pub fn endpoint_config_for(
     transport: TransportMode,
     role: Role,
 ) -> ExampleResult<EndpointConfig> {
-    EndpointConfig::new(provider, username_for(transport, role), transport)
+    EndpointConfig::new_for_role(
+        provider,
+        username_for(transport, role),
+        transport,
+        Some(role),
+    )
 }
 
 pub async fn new_stream_peer(cfg: &EndpointConfig) -> ExampleResult<StreamPeer> {
@@ -1352,11 +1886,16 @@ async fn run_stream_peer(
         }
         Scenario::BasicCall
         | Scenario::G729Call
+        | Scenario::AmrCall
+        | Scenario::AmrTranscodeCall
         | Scenario::HoldResume
         | Scenario::RingCancel
         | Scenario::Dtmf
         | Scenario::Reject => {
             run_stream_peer_two_party(provider, scenario, transport, role, &cfg, &mut peer).await?;
+        }
+        Scenario::B2buaCall => {
+            return Err("b2bua_call runs through the endpoint API only; use --api endpoint".into());
         }
         Scenario::BlindTransfer => {
             run_stream_peer_transfer(provider, transport, role, &cfg, &mut peer).await?;
@@ -1382,12 +1921,17 @@ async fn run_endpoint(
         }
         Scenario::BasicCall
         | Scenario::G729Call
+        | Scenario::AmrCall
+        | Scenario::AmrTranscodeCall
         | Scenario::HoldResume
         | Scenario::RingCancel
         | Scenario::Dtmf
         | Scenario::Reject => {
             run_endpoint_two_party(provider, scenario, transport, role, &cfg, &mut endpoint)
                 .await?;
+        }
+        Scenario::B2buaCall => {
+            run_endpoint_b2bua(provider, transport, role, &cfg, &mut endpoint).await?;
         }
         Scenario::BlindTransfer => {
             run_endpoint_transfer(provider, transport, role, &cfg, &mut endpoint).await?;
@@ -1418,11 +1962,16 @@ async fn run_callback(
         }
         Scenario::BasicCall
         | Scenario::G729Call
+        | Scenario::AmrCall
+        | Scenario::AmrTranscodeCall
         | Scenario::HoldResume
         | Scenario::RingCancel
         | Scenario::Dtmf
         | Scenario::Reject => {
             run_callback_two_party(provider, scenario, transport, role, &mut runtime).await?;
+        }
+        Scenario::B2buaCall => {
+            return Err("b2bua_call runs through the endpoint API only; use --api endpoint".into());
         }
         Scenario::BlindTransfer => {
             run_callback_transfer(transport, role, &mut runtime).await?;
@@ -1468,6 +2017,34 @@ async fn run_stream_peer_two_party(
                 timeout(remote_test_timeout(provider)?, peer.wait_for_incoming()).await??;
             let handle = incoming.accept().await?;
             run_g729_callee(provider, cfg, &handle, transport).await?;
+        }
+        (Scenario::AmrCall, Role::Caller) => {
+            settle_after_register(provider).await;
+            let target = cfg.outbound_call_uri(target_user_for(transport));
+            let handle =
+                call_with_answer_retry(peer, &target, remote_test_timeout(provider)?).await?;
+            run_amr_caller(cfg, &handle, transport, amr_caller_wav(transport)).await?;
+        }
+        (Scenario::AmrCall, Role::Callee) => {
+            let incoming =
+                timeout(remote_test_timeout(provider)?, peer.wait_for_incoming()).await??;
+            let handle = incoming.accept().await?;
+            run_amr_callee(provider, cfg, &handle, transport, amr_callee_wav(transport)).await?;
+        }
+        (Scenario::AmrTranscodeCall, Role::Caller) => {
+            settle_after_register(provider).await;
+            let target = cfg.outbound_call_uri(target_user_for(transport));
+            let handle =
+                call_with_answer_retry(peer, &target, remote_test_timeout(provider)?).await?;
+            let wav = amr_transcode_wav(cfg);
+            run_amr_caller(cfg, &handle, transport, &wav).await?;
+        }
+        (Scenario::AmrTranscodeCall, Role::Callee) => {
+            let incoming =
+                timeout(remote_test_timeout(provider)?, peer.wait_for_incoming()).await??;
+            let handle = incoming.accept().await?;
+            let wav = amr_transcode_wav(cfg);
+            run_amr_callee(provider, cfg, &handle, transport, &wav).await?;
         }
         (Scenario::HoldResume, Role::Caller) => {
             settle_after_register(provider).await;
@@ -1590,6 +2167,56 @@ async fn run_endpoint_two_party(
                 timeout(remote_test_timeout(provider)?, endpoint.wait_for_incoming()).await??;
             let handle = incoming.accept().await?;
             run_g729_callee(provider, cfg, handle.as_session_handle(), transport).await?;
+        }
+        (Scenario::AmrCall, Role::Caller) => {
+            settle_after_register(provider).await;
+            let handle = endpoint
+                .call_and_wait(
+                    target_user_for(transport),
+                    Some(remote_test_timeout(provider)?),
+                )
+                .await?;
+            run_amr_caller_toned(
+                cfg,
+                handle.as_session_handle(),
+                transport,
+                tone_for_caller(transport),
+                tone_for_callee(transport),
+                amr_caller_wav(transport),
+                Some(endpoint.control().coordinator()),
+            )
+            .await?;
+        }
+        (Scenario::AmrCall, Role::Callee) => {
+            let incoming =
+                timeout(remote_test_timeout(provider)?, endpoint.wait_for_incoming()).await??;
+            let handle = incoming.accept().await?;
+            run_amr_callee(
+                provider,
+                cfg,
+                handle.as_session_handle(),
+                transport,
+                amr_callee_wav(transport),
+            )
+            .await?;
+        }
+        (Scenario::AmrTranscodeCall, Role::Caller) => {
+            settle_after_register(provider).await;
+            let handle = endpoint
+                .call_and_wait(
+                    target_user_for(transport),
+                    Some(remote_test_timeout(provider)?),
+                )
+                .await?;
+            let wav = amr_transcode_wav(cfg);
+            run_amr_caller(cfg, handle.as_session_handle(), transport, &wav).await?;
+        }
+        (Scenario::AmrTranscodeCall, Role::Callee) => {
+            let incoming =
+                timeout(remote_test_timeout(provider)?, endpoint.wait_for_incoming()).await??;
+            let handle = incoming.accept().await?;
+            let wav = amr_transcode_wav(cfg);
+            run_amr_callee(provider, cfg, handle.as_session_handle(), transport, &wav).await?;
         }
         (Scenario::HoldResume, Role::Caller) => {
             settle_after_register(provider).await;
@@ -1726,6 +2353,43 @@ async fn run_callback_two_party(
                     .await?;
             run_g729_callee(runtime.cfg.provider, &runtime.cfg, &handle, transport).await?;
         }
+        (Scenario::AmrCall, Role::Caller) => {
+            settle_after_register(provider).await;
+            let target = runtime.cfg.outbound_call_uri(target_user_for(transport));
+            let handle =
+                callback_call_with_answer_retry(runtime, &target, remote_test_timeout(provider)?)
+                    .await?;
+            run_amr_caller(&runtime.cfg, &handle, transport, amr_caller_wav(transport)).await?;
+        }
+        (Scenario::AmrCall, Role::Callee) => {
+            let handle =
+                wait_for_next_established(&mut runtime.events, remote_test_timeout(provider)?)
+                    .await?;
+            run_amr_callee(
+                runtime.cfg.provider,
+                &runtime.cfg,
+                &handle,
+                transport,
+                amr_callee_wav(transport),
+            )
+            .await?;
+        }
+        (Scenario::AmrTranscodeCall, Role::Caller) => {
+            settle_after_register(provider).await;
+            let target = runtime.cfg.outbound_call_uri(target_user_for(transport));
+            let handle =
+                callback_call_with_answer_retry(runtime, &target, remote_test_timeout(provider)?)
+                    .await?;
+            let wav = amr_transcode_wav(&runtime.cfg);
+            run_amr_caller(&runtime.cfg, &handle, transport, &wav).await?;
+        }
+        (Scenario::AmrTranscodeCall, Role::Callee) => {
+            let handle =
+                wait_for_next_established(&mut runtime.events, remote_test_timeout(provider)?)
+                    .await?;
+            let wav = amr_transcode_wav(&runtime.cfg);
+            run_amr_callee(runtime.cfg.provider, &runtime.cfg, &handle, transport, &wav).await?;
+        }
         (Scenario::HoldResume, Role::Caller) => {
             settle_after_register(provider).await;
             let target = runtime.cfg.outbound_call_uri(target_user_for(transport));
@@ -1796,11 +2460,9 @@ async fn run_callback_two_party(
             let handle =
                 wait_for_next_established(&mut runtime.events, remote_test_timeout(provider)?)
                     .await?;
-            let recorder = if transport.is_tls() {
-                Some(start_tone_recorder(&handle, tone_for_callee(transport)).await?)
-            } else {
-                None
-            };
+            // Unconditional for the same reason as run_dtmf_callee: the caller
+            // holds its digits until it receives our tone.
+            let recorder = start_tone_recorder(&handle, tone_for_callee(transport)).await?;
             wait_for_dtmf_sequence(
                 &mut runtime.events,
                 &remote_test_digits(provider),
@@ -1811,11 +2473,9 @@ async fn run_callback_two_party(
                 .wait_for_end(Some(Duration::from_secs(15)))
                 .await
                 .ok();
-            if let Some(recorder) = recorder {
-                recorder
-                    .stop_and_save(&runtime.cfg.output_dir, dtmf_callee_wav(transport))
-                    .await?;
-            }
+            recorder
+                .stop_and_save(&runtime.cfg.output_dir, dtmf_callee_wav(transport))
+                .await?;
         }
         (Scenario::Reject, Role::Caller) => {
             settle_after_register(provider).await;
@@ -2076,6 +2736,447 @@ async fn run_basic_callee(
     Ok(())
 }
 
+/// Stream a tone over a negotiated AMR call and keep what comes back.
+///
+/// The PBX is the peer here, not another rvoip endpoint — which is the whole
+/// point. Asterisk parses our SDP, negotiates its own AMR framing, and either
+/// relays or transcodes; none of that shares an assumption with our code.
+async fn run_amr_caller(
+    cfg: &EndpointConfig,
+    handle: &SessionHandle,
+    transport: TransportMode,
+    wav_name: &str,
+) -> ExampleResult<()> {
+    run_amr_caller_toned(
+        cfg,
+        handle,
+        transport,
+        tone_for_caller(transport),
+        tone_for_callee(transport),
+        wav_name,
+        None,
+    )
+    .await
+}
+
+/// The teardown-driving half of an AMR call, with the tones spelled out.
+///
+/// `send_hz` is what this side transmits, `expect_hz` what the far end sends
+/// and this side must recover. The two-party `amr_call` uses the caller/callee
+/// tones; `b2bua_call` reuses this with the far leg's tone, since its middle
+/// node sends nothing of its own.
+async fn run_amr_caller_toned(
+    cfg: &EndpointConfig,
+    handle: &SessionHandle,
+    transport: TransportMode,
+    send_hz: f32,
+    expect_hz: f32,
+    wav_name: &str,
+    mode_switch: Option<&UnifiedCoordinator>,
+) -> ExampleResult<()> {
+    if transport.is_tls() {
+        assert_srtp_media_security(handle, Duration::from_secs(5)).await?;
+    }
+    let sample_rate = amr_sample_rate(cfg.codec_profile);
+    let recorder = start_tone_recorder_at_rate(
+        handle,
+        send_hz,
+        amr_frame_size(cfg.codec_profile),
+        sample_rate,
+    )
+    .await?;
+    // The caller alone paces teardown, exactly as the G.729 pair does: it
+    // captures the floor plus half a second and only then hangs up, so the
+    // callee — which just waits for the call to end — necessarily holds at
+    // least the floor by the time the BYE lands. The previous shape had both
+    // roles racing to the same floor and hanging up, which was a coin flip
+    // decided by scheduler slop; fixing the send clock made the slop small
+    // enough that the loser came up exactly one frame short.
+    let target = min_received_samples(sample_rate) + sample_rate as usize / 2;
+    let outcome = recorder
+        .wait_for_received_samples(target, Duration::from_secs(20))
+        .await;
+    // The mode switch runs only after the quality floor is secured, so the
+    // gate's one continuous clean second exists regardless of how the lower
+    // rate codes the tone. Sequenced, not concurrent: evidence first, then
+    // the experiment on top of it.
+    let mut switch_outcome: ExampleResult<()> = Ok(());
+    if let (Some(coordinator), true) = (mode_switch, amr_mode_switch_requested()) {
+        if outcome.is_ok() {
+            switch_outcome = exercise_amr_mode_switch(coordinator, handle, cfg.codec_profile).await;
+        }
+    }
+    // DTX, on the same sequencing principle as the mode switch: the quality
+    // floor is already banked, so the silent window can only add evidence.
+    let mut dtx_outcome: ExampleResult<()> = Ok(());
+    if amr_dtx_requested() && outcome.is_ok() {
+        let silence = Duration::from_secs(2);
+        let received = recorder.hold_silence(silence).await;
+        // The far end must keep delivering audio through our silence. DTX
+        // replaces speech frames with SID updates and gaps on the wire, but
+        // the *decoder* turns those into comfort noise, so the receive stream
+        // stays continuous. A drop to nothing would mean the peer stopped
+        // rather than went quiet -- the failure this scenario exists to catch.
+        let expected = sample_rate as usize * silence.as_secs() as usize / 2;
+        if received < expected {
+            dtx_outcome = Err(format!(
+                "dtx: only {received} samples arrived during a {}s silent window,                  expected at least {expected} (comfort noise should keep the                  stream continuous)",
+                silence.as_secs()
+            )
+            .into());
+        }
+        diag_event(
+            &cfg.output_dir,
+            "amr_dtx_silence_window",
+            serde_json::json!({
+                "silence_secs": silence.as_secs(),
+                "received_samples": received,
+                "expected_at_least": expected,
+            }),
+        );
+    }
+    handle
+        .hangup_and_wait(Some(Duration::from_secs(8)))
+        .await
+        .ok();
+    let saved = recorder.stop_and_save(&cfg.output_dir, wav_name).await;
+    outcome?;
+    switch_outcome?;
+    dtx_outcome?;
+    let path = saved?;
+    assert_amr_tone_quality(&path, sample_rate, expect_hz, send_hz)?;
+    Ok(())
+}
+
+/// Ask the peer to drop to the lowest mode mid-call and prove it did.
+///
+/// Non-vacuous by construction: the peer must be observed at the profile's
+/// *top* mode first (that is where every encoder opens), and at mode 0 after
+/// — a stack that never emitted the CMR, or a peer that ignored it, fails
+/// the second assertion; a test pointed at a stream that was already slow
+/// fails the first.
+async fn exercise_amr_mode_switch(
+    coordinator: &UnifiedCoordinator,
+    handle: &SessionHandle,
+    profile: CodecProfile,
+) -> ExampleResult<()> {
+    let session = handle.id();
+    let top = amr_top_mode_index(profile);
+    let before = coordinator.peer_codec_mode(session).await;
+    if before != Some(top) {
+        return Err(format!(
+            "mode switch: peer was sending mode {:?} before the request, expected the top mode {}",
+            before, top
+        )
+        .into());
+    }
+    if !coordinator.request_peer_codec_mode(session, 0).await? {
+        return Err("mode switch: session has no active media".into());
+    }
+    // The CMR rides the next outgoing payload (20 ms away); the peer's next
+    // frame at the new rate needs one more round trip plus its encoder's
+    // change policy. A second is generous; five covers a congested lab.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if coordinator.peer_codec_mode(session).await == Some(0) {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "mode switch: peer still sending mode {:?} five seconds after CMR 0",
+                coordinator.peer_codec_mode(session).await
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(40)).await;
+    }
+    // Half a second of audio at the new rate, so the switch is on the wire
+    // long enough to appear in the capture and the PBX snapshots.
+    sleep(Duration::from_millis(500)).await;
+    println!(
+        "[mode-switch] peer moved from mode {} to mode 0 on request",
+        top
+    );
+    diag_event(
+        &std::env::var("AUDIO_OUTPUT_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_default(),
+        "amr_mode_switch",
+        serde_json::json!({ "from": top, "to": 0 }),
+    );
+    Ok(())
+}
+
+/// The answering half of [`run_amr_caller`].
+async fn run_amr_callee(
+    provider: PbxProvider,
+    cfg: &EndpointConfig,
+    handle: &SessionHandle,
+    transport: TransportMode,
+    wav_name: &str,
+) -> ExampleResult<()> {
+    run_amr_callee_toned(
+        provider,
+        cfg,
+        handle,
+        transport,
+        tone_for_callee(transport),
+        tone_for_caller(transport),
+        wav_name,
+    )
+    .await
+}
+
+async fn run_amr_callee_toned(
+    provider: PbxProvider,
+    cfg: &EndpointConfig,
+    handle: &SessionHandle,
+    transport: TransportMode,
+    send_hz: f32,
+    expect_hz: f32,
+    wav_name: &str,
+) -> ExampleResult<()> {
+    if transport.is_tls() {
+        assert_srtp_media_security(handle, Duration::from_secs(5)).await?;
+    }
+    let sample_rate = amr_sample_rate(cfg.codec_profile);
+    let recorder = start_tone_recorder_at_rate(
+        handle,
+        send_hz,
+        amr_frame_size(cfg.codec_profile),
+        sample_rate,
+    )
+    .await?;
+    // No live sample wait and no hangup here: the caller stays up for the
+    // floor plus a margin and drives teardown (see `run_amr_caller`). The
+    // floor is asserted on the recording instead — the evidence bar is the
+    // same, without two roles racing to hang up on each other.
+    handle
+        .wait_for_end(Some(remote_test_timeout(provider)?))
+        .await
+        .ok();
+    let path = recorder.stop_and_save(&cfg.output_dir, wav_name).await?;
+    let received = read_wav(&path)?;
+    let floor = min_received_samples(sample_rate);
+    if received.len() < floor {
+        return Err(format!(
+            "{}: {} samples received, below the {} floor ({} ms at {} Hz)",
+            path.display(),
+            received.len(),
+            floor,
+            MIN_RECEIVED_MS,
+            sample_rate
+        )
+        .into());
+    }
+    assert_amr_tone_quality(&path, sample_rate, expect_hz, send_hz)?;
+    Ok(())
+}
+
+/// Poll a session to a target state, bounded, exactly as
+/// `examples/unified/04_b2bua_bridge/bridge_peer.rs` does.
+async fn wait_for_call_state(
+    coordinator: &UnifiedCoordinator,
+    session: &SessionId,
+    target: CallState,
+    deadline: Duration,
+) -> ExampleResult<()> {
+    let end = tokio::time::Instant::now() + deadline;
+    loop {
+        let state = coordinator.get_state(session).await?;
+        if state == target {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= end {
+            return Err(format!(
+                "session {} never reached {:?} (stuck at {:?})",
+                session.0, target, state
+            )
+            .into());
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// rvoip as the B2BUA: accept the caller's inbound leg, originate an outbound
+/// leg to the target through the PBX, and bridge the two.
+///
+/// This composes the same coordinator primitives the CI-proven
+/// `04_b2bua_bridge` example does, in outbound-first order: the target leg is
+/// answered before the caller's INVITE is accepted, so by the time the caller
+/// sees the call established both legs already have media, which keeps the
+/// caller's received-sample clock honest. It reaches the coordinator through
+/// the endpoint's own control handle rather than `SipB2bua`, because the
+/// harness needs both leg session ids to tear down and (under TLS) to assert
+/// SRTP on each — `SipB2bua::handle_inbound` returns only a media-core bridge
+/// handle.
+///
+/// The two legs share the caller's negotiated codec because the b2bua's own
+/// `EndpointConfig` offers the same profile: `bridge` forwards payloads
+/// without transcoding and refuses (`CodecMismatch` / a framing
+/// `FormatMismatch`) if the two legs disagree, so a cell that passes is proof
+/// the same codec crossed both legs and rvoip relayed it.
+async fn run_b2bua_bridge_role(
+    provider: PbxProvider,
+    transport: TransportMode,
+    cfg: &EndpointConfig,
+    endpoint: &Endpoint,
+) -> ExampleResult<()> {
+    let coordinator = endpoint.control().coordinator().clone();
+    let mut events = coordinator.events().await?;
+
+    // Wait for the caller's INVITE. The unfiltered stream is only used to
+    // learn the inbound session id; per-leg streams take over after.
+    let inbound_id = timeout(remote_test_timeout(provider)?, async {
+        loop {
+            match events.next().await {
+                Some(Event::IncomingCall { call_id, from, .. }) => {
+                    diag_event(
+                        &cfg.output_dir,
+                        "b2bua_inbound",
+                        serde_json::json!({ "from": from, "leg_a": call_id.0 }),
+                    );
+                    println!("[b2bua] inbound leg A = {} from {}", call_id.0, from);
+                    return call_id;
+                }
+                Some(_) => continue,
+                None => unreachable!("event stream closed before an inbound call"),
+            }
+        }
+    })
+    .await
+    .map_err(|_| "b2bua never received the caller's INVITE")?;
+
+    // Originate the outbound leg to the target (2003/1003) through the PBX.
+    let outbound_id = coordinator
+        .invite(Some(cfg.aor_uri()), cfg.remote_call_uri())
+        .send()
+        .await?;
+    println!(
+        "[b2bua] outbound leg B = {} to {}",
+        outbound_id.0,
+        cfg.remote_call_uri()
+    );
+    let mut outbound_events = coordinator.events_for_session(&outbound_id).await?;
+
+    let answered = timeout(remote_test_timeout(provider)?, async {
+        loop {
+            match outbound_events.next().await? {
+                Event::CallAnswered { .. } => return Some(()),
+                Event::CallEnded { .. } | Event::CallFailed { .. } => return None,
+                _ => continue,
+            }
+        }
+    })
+    .await;
+    match answered {
+        Ok(Some(())) => {}
+        Ok(None) => return Err("b2bua outbound leg terminated before answering".into()),
+        Err(_) => return Err("b2bua outbound leg answer timeout".into()),
+    }
+
+    coordinator.accept_call(&inbound_id).await?;
+    wait_for_call_state(
+        &coordinator,
+        &inbound_id,
+        CallState::Active,
+        Duration::from_secs(10),
+    )
+    .await?;
+    wait_for_call_state(
+        &coordinator,
+        &outbound_id,
+        CallState::Active,
+        Duration::from_secs(10),
+    )
+    .await?;
+
+    if transport.is_tls() {
+        // Each leg negotiates its own SRTP; both must be secured before we
+        // relay decrypted payloads between them.
+        assert_srtp_media_security(&coordinator.session(&inbound_id), Duration::from_secs(5))
+            .await?;
+        assert_srtp_media_security(&coordinator.session(&outbound_id), Duration::from_secs(5))
+            .await?;
+    }
+
+    let bridge = coordinator.bridge(&inbound_id, &outbound_id).await?;
+    diag_event(
+        &cfg.output_dir,
+        "b2bua_bridged",
+        serde_json::json!({ "inbound": inbound_id.0, "outbound": outbound_id.0 }),
+    );
+    println!("[b2bua] bridged {} <-> {}", inbound_id.0, outbound_id.0);
+
+    // The caller drives teardown once it has its evidence; the b2bua just
+    // holds the bridge until the inbound leg ends, then closes the relay
+    // before hanging up the outbound leg.
+    coordinator
+        .session(&inbound_id)
+        .wait_for_end(Some(remote_test_timeout(provider)?))
+        .await
+        .ok();
+    drop(bridge);
+    let _ = coordinator.hangup(&outbound_id).await;
+    let _ = timeout(Duration::from_secs(3), outbound_events.next()).await;
+    Ok(())
+}
+
+async fn run_endpoint_b2bua(
+    provider: PbxProvider,
+    transport: TransportMode,
+    role: Role,
+    cfg: &EndpointConfig,
+    endpoint: &mut Endpoint,
+) -> ExampleResult<()> {
+    match role {
+        Role::Caller => {
+            settle_after_register(provider).await;
+            let handle = endpoint
+                .call_and_wait(
+                    target_user_for(transport),
+                    Some(remote_test_timeout(provider)?),
+                )
+                .await?;
+            run_amr_caller_toned(
+                cfg,
+                handle.as_session_handle(),
+                transport,
+                tone_for_caller(transport),
+                tone_for_b2bua_far(transport),
+                b2bua_caller_wav(transport),
+                Some(endpoint.control().coordinator()),
+            )
+            .await?;
+        }
+        Role::B2bua => {
+            run_b2bua_bridge_role(provider, transport, cfg, endpoint).await?;
+        }
+        Role::Target => {
+            // The target answers, sends 660 Hz, and waits for the call to
+            // end. It is `run_amr_callee_toned` with the far tone being the
+            // caller's, two PBX hops away through the bridge.
+            let incoming =
+                timeout(remote_test_timeout(provider)?, endpoint.wait_for_incoming()).await??;
+            let handle = incoming.accept().await?;
+            run_amr_callee_toned(
+                provider,
+                cfg,
+                handle.as_session_handle(),
+                transport,
+                tone_for_b2bua_far(transport),
+                tone_for_caller(transport),
+                b2bua_target_wav(transport),
+            )
+            .await?;
+        }
+        other => {
+            return Err(format!("unsupported endpoint role {:?} for b2bua_call", other).into());
+        }
+    }
+    Ok(())
+}
+
 async fn run_g729_caller(
     cfg: &EndpointConfig,
     handle: &SessionHandle,
@@ -2157,43 +3258,39 @@ async fn run_dtmf_caller(
     if transport.is_tls() {
         assert_srtp_media_security(handle, Duration::from_secs(5)).await?;
     }
-    let recorder = if transport.is_tls() {
-        Some(start_tone_recorder(handle, ENDPOINT_1001_TONE_HZ).await?)
-    } else {
-        None
-    };
-    for digit in remote_test_digits(cfg.provider) {
-        sleep(Duration::from_millis(500)).await;
-        handle.send_dtmf(digit).await?;
-    }
-    sleep(Duration::from_secs(1)).await;
-    let media_ready = match recorder.as_ref() {
-        Some(tone_recorder) => {
-            tone_recorder
-                .wait_for_received_samples(MIN_RECEIVED_SAMPLES, Duration::from_secs(6))
-                .await
-        }
-        None => Ok(()),
-    };
+    // Record on both transports: the tone stream is also how we prove the media
+    // path is live before clocking out digits.
+    let recorder = start_tone_recorder(handle, tone_for_caller(transport)).await?;
+    // Only start the digit train once RTP is actually flowing both ways. A digit
+    // handed to send_dtmf before the media path is up is scheduled against a
+    // dialog that cannot transmit it, and it is dropped with no error — the
+    // callee then waits for a digit that was never sent and only learns anything
+    // is wrong when our BYE arrives ("call ended before DTMF completed"). The TLS
+    // path got this gate for free from assert_srtp_media_security; UDP previously
+    // started sending 500ms after answer and relied on that being enough.
+    let media_ready = recorder
+        .wait_for_received_samples(MIN_RECEIVED_SAMPLES, Duration::from_secs(6))
+        .await;
     if let Err(error) = media_ready {
         handle
             .hangup_and_wait(Some(Duration::from_secs(8)))
             .await
             .ok();
-        if let Some(tone_recorder) = recorder {
-            tone_recorder
-                .stop_and_save(&cfg.output_dir, dtmf_caller_wav(transport))
-                .await
-                .ok();
-        }
-        return Err(error);
-    }
-    handle.hangup_and_wait(Some(Duration::from_secs(8))).await?;
-    if let Some(recorder) = recorder {
         recorder
             .stop_and_save(&cfg.output_dir, dtmf_caller_wav(transport))
-            .await?;
+            .await
+            .ok();
+        return Err(error);
     }
+    for digit in remote_test_digits(cfg.provider) {
+        sleep(Duration::from_millis(500)).await;
+        handle.send_dtmf(digit).await?;
+    }
+    sleep(Duration::from_secs(1)).await;
+    handle.hangup_and_wait(Some(Duration::from_secs(8))).await?;
+    recorder
+        .stop_and_save(&cfg.output_dir, dtmf_caller_wav(transport))
+        .await?;
     Ok(())
 }
 
@@ -2206,11 +3303,10 @@ async fn run_dtmf_callee(
     if transport.is_tls() {
         assert_srtp_media_security(handle, Duration::from_secs(5)).await?;
     }
-    let recorder = if transport.is_tls() {
-        Some(start_tone_recorder(handle, tone_for_callee(transport)).await?)
-    } else {
-        None
-    };
+    // Record on both transports. Beyond the capture, this is what feeds the
+    // caller's media-readiness gate in run_dtmf_caller: it waits for our tone
+    // before sending any digit, so a UDP callee that stayed silent would stall it.
+    let recorder = start_tone_recorder(handle, tone_for_callee(transport)).await?;
     let mut events = handle.events().await?;
     wait_for_dtmf_sequence_on_events(
         &mut events,
@@ -2222,11 +3318,9 @@ async fn run_dtmf_callee(
         .wait_for_end(Some(Duration::from_secs(15)))
         .await
         .ok();
-    if let Some(recorder) = recorder {
-        recorder
-            .stop_and_save(&cfg.output_dir, dtmf_callee_wav(transport))
-            .await?;
-    }
+    recorder
+        .stop_and_save(&cfg.output_dir, dtmf_callee_wav(transport))
+        .await?;
     Ok(())
 }
 
@@ -2454,6 +3548,8 @@ pub async fn run_analyze() -> ExampleResult<()> {
     match scenario {
         Scenario::BasicCall => analyze_basic(&cfg, transport),
         Scenario::G729Call => analyze_g729(&cfg, transport),
+        Scenario::AmrCall => analyze_amr(&cfg, transport),
+        Scenario::B2buaCall => analyze_b2bua(&cfg, transport),
         Scenario::HoldResume => analyze_hold(&cfg, transport),
         Scenario::Dtmf if transport.is_tls() => analyze_dtmf(&cfg, transport),
         Scenario::BlindTransfer if transport.is_tls() => analyze_transfer(&cfg, transport),
@@ -2505,6 +3601,55 @@ fn analyze_g729(cfg: &EndpointConfig, transport: TransportMode) -> ExampleResult
     Ok(())
 }
 
+/// Re-judge existing AMR captures without placing a call.
+///
+/// The interop WAVs are gitignored, so this analyzer is the only way to check
+/// a threshold change against real captured evidence rather than re-running
+/// two PBXes. `PBX_CODEC_PROFILE` selects the profile whose rate the capture
+/// was made at, exactly as it selected it during the call.
+fn analyze_amr(cfg: &EndpointConfig, transport: TransportMode) -> ExampleResult<()> {
+    write_audio_diagnostics(cfg, Scenario::AmrCall, transport);
+    let rate = amr_sample_rate(cfg.codec_profile);
+    let caller_wav = cfg.output_dir.join(amr_caller_wav(transport));
+    let callee_wav = cfg.output_dir.join(amr_callee_wav(transport));
+    assert_amr_tone_quality(
+        &caller_wav,
+        rate,
+        tone_for_callee(transport),
+        tone_for_caller(transport),
+    )?;
+    assert_amr_tone_quality(
+        &callee_wav,
+        rate,
+        tone_for_caller(transport),
+        tone_for_callee(transport),
+    )?;
+    Ok(())
+}
+
+/// The caller recovers the target's 660 Hz and the target recovers the
+/// caller's tone, each two PBX hops away through rvoip's bridge; the b2bua
+/// middle node records nothing. Same quality gate as `analyze_amr`.
+fn analyze_b2bua(cfg: &EndpointConfig, transport: TransportMode) -> ExampleResult<()> {
+    write_audio_diagnostics(cfg, Scenario::B2buaCall, transport);
+    let rate = amr_sample_rate(cfg.codec_profile);
+    let caller_wav = cfg.output_dir.join(b2bua_caller_wav(transport));
+    let target_wav = cfg.output_dir.join(b2bua_target_wav(transport));
+    assert_amr_tone_quality(
+        &caller_wav,
+        rate,
+        tone_for_b2bua_far(transport),
+        tone_for_caller(transport),
+    )?;
+    assert_amr_tone_quality(
+        &target_wav,
+        rate,
+        tone_for_caller(transport),
+        tone_for_b2bua_far(transport),
+    )?;
+    Ok(())
+}
+
 fn analyze_hold(cfg: &EndpointConfig, transport: TransportMode) -> ExampleResult<()> {
     write_audio_diagnostics(cfg, Scenario::HoldResume, transport);
     let caller_wav = cfg.output_dir.join(hold_resume_caller_wav(transport));
@@ -2518,6 +3663,7 @@ fn analyze_hold(cfg: &EndpointConfig, transport: TransportMode) -> ExampleResult
     let pre_hold = assert_best_window_tone(
         "callee pre-hold caller tone",
         leading_third(&callee_samples),
+        SAMPLE_RATE,
         SAMPLE_RATE as usize,
         FRAME_SIZE,
         ENDPOINT_1001_TONE_HZ,
@@ -2526,6 +3672,7 @@ fn analyze_hold(cfg: &EndpointConfig, transport: TransportMode) -> ExampleResult
     let post_resume = assert_best_window_tone(
         "callee post-resume caller tone",
         trailing_third(&callee_samples),
+        SAMPLE_RATE,
         SAMPLE_RATE as usize,
         FRAME_SIZE,
         ENDPOINT_1003_TONE_HZ,
@@ -2579,6 +3726,7 @@ fn analyze_transfer(cfg: &EndpointConfig, transport: TransportMode) -> ExampleRe
     let initial = assert_best_window_tone(
         "1002 initial leg received 1001 tone",
         leading_third(&transferee_samples),
+        SAMPLE_RATE,
         WINDOW_SAMPLES,
         FRAME_SIZE,
         ENDPOINT_1001_TONE_HZ,
@@ -2587,6 +3735,7 @@ fn analyze_transfer(cfg: &EndpointConfig, transport: TransportMode) -> ExampleRe
     let transferred = assert_best_window_tone(
         "1002 transferred leg received 1003 tone",
         trailing_third(&transferee_samples),
+        SAMPLE_RATE,
         WINDOW_SAMPLES,
         FRAME_SIZE,
         ENDPOINT_1003_TONE_HZ,
@@ -2643,6 +3792,7 @@ fn write_audio_diagnostics_inner(
             add_audio_file_diagnostics(
                 &mut files,
                 &mut markdown,
+                SAMPLE_RATE,
                 "g711 caller",
                 &cfg.output_dir.join(g711_caller_wav(transport)),
                 &[(
@@ -2655,6 +3805,7 @@ fn write_audio_diagnostics_inner(
             add_audio_file_diagnostics(
                 &mut files,
                 &mut markdown,
+                SAMPLE_RATE,
                 "g711 callee",
                 &cfg.output_dir.join(g711_callee_wav(transport)),
                 &[(
@@ -2669,6 +3820,7 @@ fn write_audio_diagnostics_inner(
             add_audio_file_diagnostics(
                 &mut files,
                 &mut markdown,
+                SAMPLE_RATE,
                 "g729 caller",
                 &cfg.output_dir.join(g729_caller_wav(transport)),
                 &[(
@@ -2681,6 +3833,7 @@ fn write_audio_diagnostics_inner(
             add_audio_file_diagnostics(
                 &mut files,
                 &mut markdown,
+                SAMPLE_RATE,
                 "g729 callee",
                 &cfg.output_dir.join(g729_callee_wav(transport)),
                 &[(
@@ -2695,6 +3848,7 @@ fn write_audio_diagnostics_inner(
             add_audio_file_diagnostics(
                 &mut files,
                 &mut markdown,
+                SAMPLE_RATE,
                 "hold caller",
                 &cfg.output_dir.join(hold_resume_caller_wav(transport)),
                 &[(
@@ -2707,6 +3861,7 @@ fn write_audio_diagnostics_inner(
             add_audio_file_diagnostics(
                 &mut files,
                 &mut markdown,
+                SAMPLE_RATE,
                 "hold callee",
                 &cfg.output_dir.join(hold_resume_callee_wav(transport)),
                 &[
@@ -2729,6 +3884,7 @@ fn write_audio_diagnostics_inner(
             add_audio_file_diagnostics(
                 &mut files,
                 &mut markdown,
+                SAMPLE_RATE,
                 "dtmf caller",
                 &cfg.output_dir.join(dtmf_caller_wav(transport)),
                 &[(
@@ -2741,6 +3897,7 @@ fn write_audio_diagnostics_inner(
             add_audio_file_diagnostics(
                 &mut files,
                 &mut markdown,
+                SAMPLE_RATE,
                 "dtmf callee",
                 &cfg.output_dir.join(dtmf_callee_wav(transport)),
                 &[(
@@ -2755,6 +3912,7 @@ fn write_audio_diagnostics_inner(
             add_audio_file_diagnostics(
                 &mut files,
                 &mut markdown,
+                SAMPLE_RATE,
                 "transferor",
                 &cfg.output_dir.join(transferor_wav(transport)),
                 &[(
@@ -2767,6 +3925,7 @@ fn write_audio_diagnostics_inner(
             add_audio_file_diagnostics(
                 &mut files,
                 &mut markdown,
+                SAMPLE_RATE,
                 "transferee",
                 &cfg.output_dir.join(transferee_wav(transport)),
                 &[
@@ -2787,6 +3946,7 @@ fn write_audio_diagnostics_inner(
             add_audio_file_diagnostics(
                 &mut files,
                 &mut markdown,
+                SAMPLE_RATE,
                 "target",
                 &cfg.output_dir.join(transfer_target_wav(transport)),
                 &[(
@@ -2797,14 +3957,79 @@ fn write_audio_diagnostics_inner(
                 )],
             );
         }
+        Scenario::AmrCall => {
+            // The one scenario whose captures are not 8 kHz: the rate follows
+            // the negotiated profile, and so do the file duration, the
+            // analysis window and the Goertzel bins inside.
+            let rate = amr_sample_rate(cfg.codec_profile);
+            add_audio_file_diagnostics(
+                &mut files,
+                &mut markdown,
+                rate,
+                "amr caller",
+                &cfg.output_dir.join(amr_caller_wav(transport)),
+                &[(
+                    "caller received callee AMR tone",
+                    WindowSelector::Stable,
+                    tone_for_callee(transport),
+                    tone_for_caller(transport),
+                )],
+            );
+            add_audio_file_diagnostics(
+                &mut files,
+                &mut markdown,
+                rate,
+                "amr callee",
+                &cfg.output_dir.join(amr_callee_wav(transport)),
+                &[(
+                    "callee received caller AMR tone",
+                    WindowSelector::Stable,
+                    tone_for_caller(transport),
+                    tone_for_callee(transport),
+                )],
+            );
+        }
+        Scenario::B2buaCall => {
+            let rate = amr_sample_rate(cfg.codec_profile);
+            add_audio_file_diagnostics(
+                &mut files,
+                &mut markdown,
+                rate,
+                "b2bua caller",
+                &cfg.output_dir.join(b2bua_caller_wav(transport)),
+                &[(
+                    "caller received target tone through the bridge",
+                    WindowSelector::Stable,
+                    tone_for_b2bua_far(transport),
+                    tone_for_caller(transport),
+                )],
+            );
+            add_audio_file_diagnostics(
+                &mut files,
+                &mut markdown,
+                rate,
+                "b2bua target",
+                &cfg.output_dir.join(b2bua_target_wav(transport)),
+                &[(
+                    "target received caller tone through the bridge",
+                    WindowSelector::Stable,
+                    tone_for_caller(transport),
+                    tone_for_b2bua_far(transport),
+                )],
+            );
+        }
         _ => {}
     }
 
+    let report_sample_rate = match scenario {
+        Scenario::AmrCall | Scenario::B2buaCall => amr_sample_rate(cfg.codec_profile),
+        _ => SAMPLE_RATE,
+    };
     let report = serde_json::json!({
         "scenario": format!("{:?}", scenario),
         "transport": format!("{:?}", transport),
-        "sample_rate": SAMPLE_RATE,
-        "frame_size": FRAME_SIZE,
+        "sample_rate": report_sample_rate,
+        "frame_size": frame_samples(report_sample_rate),
         "files": files,
     });
     std::fs::write(
@@ -2825,6 +4050,7 @@ enum WindowSelector {
 fn add_audio_file_diagnostics(
     files: &mut Vec<serde_json::Value>,
     markdown: &mut String,
+    sample_rate: u32,
     label: &str,
     path: &Path,
     windows: &[(&str, WindowSelector, f32, f32)],
@@ -2837,7 +4063,7 @@ fn add_audio_file_diagnostics(
             markdown.push_str(&format!("- samples: {}\n", samples.len()));
             markdown.push_str(&format!(
                 "- duration_secs: {:.3}\n",
-                samples.len() as f64 / SAMPLE_RATE as f64
+                samples.len() as f64 / f64::from(sample_rate)
             ));
             if let Some((first, last)) = bounds {
                 markdown.push_str(&format!("- first_non_silence_sample: {}\n", first));
@@ -2850,7 +4076,7 @@ fn add_audio_file_diagnostics(
             for (window_label, selector, expected_hz, rejected_hz) in windows {
                 let selected = match selector {
                     WindowSelector::Stable => {
-                        analysis_slice_for_window(&samples, SAMPLE_RATE as usize)
+                        analysis_slice_for_window(&samples, sample_rate as usize)
                     }
                     WindowSelector::LeadingThird => {
                         if samples.len() >= 3 {
@@ -2869,8 +4095,9 @@ fn add_audio_file_diagnostics(
                 };
                 let window_value = match best_window_tone_for_diag(
                     selected,
-                    SAMPLE_RATE as usize,
-                    FRAME_SIZE,
+                    sample_rate,
+                    sample_rate as usize,
+                    frame_samples(sample_rate),
                     *expected_hz,
                     *rejected_hz,
                 ) {
@@ -2903,7 +4130,11 @@ fn add_audio_file_diagnostics(
                             "rejected_hz": analysis.rejected_hz,
                             "expected_magnitude": analysis.expected_magnitude,
                             "rejected_magnitude": analysis.rejected_magnitude,
-                            "ratio": analysis.ratio
+                            "ratio": analysis.ratio,
+                            "best_window_snr_db": scan.best_quality.snr_db,
+                            "best_window_fundamental_amplitude": scan.best_quality.fundamental_amplitude,
+                            "weakest_window_snr_db": scan.weakest_snr_db,
+                            "weakest_frame_rms": scan.weakest_frame_rms
                         })
                     }
                     Err(error) => {
@@ -2923,7 +4154,7 @@ fn add_audio_file_diagnostics(
                 "path": path.display().to_string(),
                 "status": "ok",
                 "samples": samples.len(),
-                "duration_secs": samples.len() as f64 / SAMPLE_RATE as f64,
+                "duration_secs": samples.len() as f64 / f64::from(sample_rate),
                 "first_non_silence_sample": bounds.map(|(first, _)| first),
                 "last_non_silence_sample": bounds.map(|(_, last)| last),
                 "windows": window_values
@@ -2954,10 +4185,12 @@ fn non_silence_bounds(samples: &[i16], threshold: i16) -> Option<(usize, usize)>
 
 fn scan_tone_windows(
     samples: &[i16],
+    sample_rate: u32,
     window_samples: usize,
     step_samples: usize,
     expected_hz: f32,
     rejected_hz: f32,
+    gate: WindowGate,
 ) -> Result<ToneWindowScan, String> {
     if samples.len() < window_samples {
         return Err(format!(
@@ -2967,30 +4200,38 @@ fn scan_tone_windows(
         ));
     }
 
-    let analysis_window = samples
-        .len()
-        .min(TONE_ANALYSIS_WINDOW_SAMPLES.min(window_samples).max(1));
+    let analysis_window = samples.len().min(
+        tone_analysis_window_samples(sample_rate)
+            .min(window_samples)
+            .max(1),
+    );
     let step = step_samples.max(1);
     let last_start = samples.len() - analysis_window;
     let mut start = 0usize;
-    let mut best: Option<ToneAnalysis> = None;
+    let mut best: Option<(ToneAnalysis, ToneQuality)> = None;
     let mut passing_windows = 0usize;
     let mut total_windows = 0usize;
     let mut current_passing_run = 0usize;
     let mut longest_passing_run = 0usize;
+    let mut weakest_snr_db = f32::INFINITY;
+    let mut weakest_frame_rms = f32::INFINITY;
     loop {
-        let analysis = analyze_tapered_samples(
-            &samples[start..start + analysis_window],
-            expected_hz,
-            rejected_hz,
-        );
-        let passes = analysis.ratio >= DOMINANCE_RATIO;
+        let window = &samples[start..start + analysis_window];
+        let analysis = analyze_tapered_samples(window, sample_rate, expected_hz, rejected_hz);
+        // Quality is measured for every window regardless of whether the gate
+        // enforces it, so the diagnostics report the same numbers a stricter
+        // gate would judge — that is how a future threshold gets chosen from
+        // evidence instead of re-running two PBXes.
+        let quality = tone_quality(window, sample_rate, expected_hz);
+        weakest_snr_db = weakest_snr_db.min(quality.snr_db);
+        weakest_frame_rms = weakest_frame_rms.min(quality.min_frame_rms);
+        let passes = gate.admits(&analysis, &quality);
         let is_best = best
             .as_ref()
-            .map(|current| analysis.ratio > current.ratio)
+            .map(|(current, _)| analysis.ratio > current.ratio)
             .unwrap_or(true);
         if is_best {
-            best = Some(analysis);
+            best = Some((analysis, quality));
         }
         total_windows += 1;
         if passes {
@@ -3012,30 +4253,41 @@ fn scan_tone_windows(
         remaining.div_ceil(step)
     };
     let required_passing_run = (additional_windows + 1).min(total_windows).max(1);
+    let (best, best_quality) = best.ok_or_else(|| "no analysis window available".to_string())?;
     Ok(ToneWindowScan {
-        best: best.ok_or_else(|| "no analysis window available".to_string())?,
+        best,
         total_windows,
         passing_windows,
         longest_passing_run,
         required_passing_run,
         analysis_window_samples: analysis_window,
         step_samples: step,
+        best_quality,
+        weakest_snr_db,
+        weakest_frame_rms,
     })
 }
 
 fn best_window_tone_for_diag(
     samples: &[i16],
+    sample_rate: u32,
     window_samples: usize,
     step_samples: usize,
     expected_hz: f32,
     rejected_hz: f32,
 ) -> Result<ToneWindowScan, String> {
+    // Diagnostics gate on tone dominance alone so the pass/fail bookkeeping
+    // stays comparable across scenarios, but the scan now measures quality
+    // for every window regardless — the JSON below is where a future
+    // threshold gets chosen from evidence.
     scan_tone_windows(
         samples,
+        sample_rate,
         window_samples,
         step_samples,
         expected_hz,
         rejected_hz,
+        WindowGate::tone_only(),
     )
 }
 
@@ -3044,9 +4296,24 @@ pub fn generate_tone(freq: f32, frame_num: usize) -> Vec<i16> {
 }
 
 pub fn generate_tone_with_frame_size(freq: f32, frame_num: usize, frame_size: usize) -> Vec<i16> {
+    generate_tone_at_rate(freq, frame_num, frame_size, SAMPLE_RATE)
+}
+
+/// The same tone at an explicit sample rate.
+///
+/// Everything else in this harness is 8 kHz, so the rate was a constant.
+/// AMR-WB is 16 kHz, and a frame carrying the wrong rate is refused by the
+/// codec runtime rather than resampled — correctly, since a mis-declared rate
+/// would otherwise play back at the wrong pitch.
+pub fn generate_tone_at_rate(
+    freq: f32,
+    frame_num: usize,
+    frame_size: usize,
+    sample_rate: u32,
+) -> Vec<i16> {
     (0..frame_size)
         .map(|j| {
-            let t = (frame_num * frame_size + j) as f32 / SAMPLE_RATE as f32;
+            let t = (frame_num * frame_size + j) as f32 / sample_rate as f32;
             (0.3 * (2.0 * std::f32::consts::PI * freq * t).sin() * 32767.0) as i16
         })
         .collect()
@@ -3083,6 +4350,16 @@ pub async fn start_tone_recorder_with_frame_size(
     handle: &SessionHandle,
     tone_hz: f32,
     frame_size: usize,
+) -> ExampleResult<ToneRecorder> {
+    start_tone_recorder_at_rate(handle, tone_hz, frame_size, SAMPLE_RATE).await
+}
+
+/// [`start_tone_recorder_with_frame_size`] at an explicit sample rate.
+pub async fn start_tone_recorder_at_rate(
+    handle: &SessionHandle,
+    tone_hz: f32,
+    frame_size: usize,
+    sample_rate: u32,
 ) -> ExampleResult<ToneRecorder> {
     let audio = handle.audio().await?;
     let (sender, mut receiver) = audio.split();
@@ -3148,35 +4425,68 @@ pub async fn start_tone_recorder_with_frame_size(
     });
     let running = Arc::new(AtomicBool::new(true));
     let send_running = running.clone();
+    // Digital silence on demand. DTX only does anything when the encoder is
+    // given silence to detect, and the tone source never is — so a DTX cell
+    // without this proves only that the call still works.
+    let sending_silence = Arc::new(AtomicBool::new(false));
+    let send_silence = sending_silence.clone();
     let send_task = tokio::spawn(async move {
         let mut frame_index = 0usize;
-        let frame_duration_ms = ((frame_size as u64) * 1000 / u64::from(SAMPLE_RATE)).max(1);
+        let frame_duration_ms = ((frame_size as u64) * 1000 / u64::from(sample_rate)).max(1);
+        // An interval, not a trailing sleep. `sleep(20ms)` after generate+send
+        // makes the real period 20 ms *plus* the work and scheduler slop —
+        // measured at 21.5 ms/frame through a transparent relay, and 24 ms
+        // under load. A PBX re-clocking the stream to a true 20 ms is starved
+        // by such a source and has to stretch or conceal, which corrupts every
+        // audio measurement downstream of it. The interval's default catch-up
+        // (Burst) keeps the long-run rate exact even when one tick runs late.
+        let mut ticker = tokio::time::interval(Duration::from_millis(frame_duration_ms));
         while send_running.load(Ordering::Relaxed) && sender.is_open() {
-            let frame = AudioFrame::new(
-                generate_tone_with_frame_size(tone_hz, frame_index, frame_size),
-                SAMPLE_RATE,
-                1,
-                (frame_index * frame_size) as u32,
-            );
+            ticker.tick().await;
+            let samples = if send_silence.load(Ordering::Relaxed) {
+                vec![0i16; frame_size]
+            } else {
+                generate_tone_at_rate(tone_hz, frame_index, frame_size, sample_rate)
+            };
+            let frame = AudioFrame::new(samples, sample_rate, 1, (frame_index * frame_size) as u32);
             if sender.send(frame).await.is_err() {
                 break;
             }
             frame_index += 1;
-            sleep(Duration::from_millis(frame_duration_ms)).await;
         }
     });
     Ok(ToneRecorder {
         running,
+        sending_silence,
         send_task,
         recv_task,
         received_buf,
         counters,
         diag_output_dir,
         diag_name,
+        sample_rate,
     })
 }
 
 impl ToneRecorder {
+    /// Send digital silence for `duration`, then resume the tone.
+    ///
+    /// Returns the number of samples received during the silent window, which
+    /// is what makes the DTX assertion possible: with DTX on the far end
+    /// still has to deliver a continuous stream (SID-driven comfort noise
+    /// rather than a gap), so a receiver that goes silent is a bug, not the
+    /// feature working.
+    async fn hold_silence(&self, duration: Duration) -> usize {
+        let before = self.counters.rx_samples.load(Ordering::Relaxed);
+        self.sending_silence.store(true, Ordering::Relaxed);
+        sleep(duration).await;
+        self.sending_silence.store(false, Ordering::Relaxed);
+        self.counters
+            .rx_samples
+            .load(Ordering::Relaxed)
+            .saturating_sub(before)
+    }
+
     async fn wait_for_received_samples(
         &self,
         minimum_samples: usize,
@@ -3211,18 +4521,20 @@ impl ToneRecorder {
     ) -> ExampleResult<PathBuf> {
         let ToneRecorder {
             running,
+            sending_silence: _,
             send_task,
             recv_task,
             received_buf,
             counters,
             diag_output_dir,
             diag_name,
+            sample_rate,
         } = self;
         running.store(false, Ordering::Relaxed);
         let _ = timeout(Duration::from_secs(2), send_task).await;
         stop_recv_task(recv_task).await;
         let received = received_buf.lock().map(|g| g.clone()).unwrap_or_default();
-        let path = save_wav(output_dir, output_name, &received)?;
+        let path = save_wav_at_rate(output_dir, output_name, &received, sample_rate)?;
         if let Some(diag_dir) = diag_output_dir.as_deref() {
             diag_event(
                 diag_dir,
@@ -3858,11 +5170,29 @@ async fn wait_for_incoming_notice(
 }
 
 pub fn save_wav(out_dir: &Path, name: &str, samples: &[i16]) -> ExampleResult<PathBuf> {
+    save_wav_at_rate(out_dir, name, samples, SAMPLE_RATE)
+}
+
+/// Write a recording whose header states the rate the samples were actually
+/// captured at.
+///
+/// The narrowband default is wrong for AMR-WB, and wrong in the way that is
+/// hardest to notice: 16 kHz samples in an 8 kHz header still play, still have
+/// a plausible RMS, and still pass a length check — they are simply an octave
+/// low and twice as long. Every wideband recording this harness wrote before
+/// this took the rate from `SAMPLE_RATE`, so their durations were double the
+/// truth and their tones half the frequency.
+pub fn save_wav_at_rate(
+    out_dir: &Path,
+    name: &str,
+    samples: &[i16],
+    sample_rate: u32,
+) -> ExampleResult<PathBuf> {
     std::fs::create_dir_all(out_dir)?;
     let path = out_dir.join(name);
     let spec = hound::WavSpec {
         channels: 1,
-        sample_rate: SAMPLE_RATE,
+        sample_rate,
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     };
@@ -3876,9 +5206,17 @@ pub fn save_wav(out_dir: &Path, name: &str, samples: &[i16]) -> ExampleResult<Pa
 }
 
 pub fn read_wav(path: &Path) -> ExampleResult<Vec<i16>> {
+    Ok(read_wav_with_rate(path)?.0)
+}
+
+/// Read a recording *and* the rate its header claims, so a caller that knows
+/// what rate the leg negotiated can catch a mislabeled capture instead of
+/// silently analysing it an octave off.
+pub fn read_wav_with_rate(path: &Path) -> ExampleResult<(Vec<i16>, u32)> {
     let mut reader = hound::WavReader::open(path)?;
+    let rate = reader.spec().sample_rate;
     let samples = reader.samples::<i16>().collect::<Result<Vec<_>, _>>()?;
-    Ok(samples)
+    Ok((samples, rate))
 }
 
 pub fn analyze_samples(
@@ -3918,11 +5256,88 @@ pub fn assert_audio_path(
     assert_best_window_tone(
         &label,
         &samples,
+        SAMPLE_RATE,
         SAMPLE_RATE as usize,
         FRAME_SIZE,
         expected_hz,
         rejected_hz,
     )
+}
+
+/// Assert a recording holds a *clean* copy of the far end's tone.
+///
+/// Three independent things must hold, because each of the ways the old
+/// dominance-only check actually failed defeats a different pair of them:
+///
+/// - the far end's tone dominates the one we sent (unchanged — rules out
+///   loopback and crossed legs);
+/// - fundamental power beats everything else by [`AMR_MIN_TONE_SNR_DB`],
+///   which is what a decoder producing noise at the right pitch fails
+///   (1-bit squaring, per-frame time reversal: full level, right bin,
+///   single-digit SNR);
+/// - no 20 ms frame falls below [`AMR_MIN_FRAME_RMS`], which is what
+///   attenuation and dropouts fail while the spectrum stays perfect;
+///
+/// and all three must hold *continuously* for [`AMR_REQUIRED_TONE_SECS`] —
+/// a degraded capture's best window can beat a clean capture's worst, so no
+/// whole-capture figure discriminates. Everything runs at the capture's own
+/// rate; a 16 kHz recording read at 8 kHz is a clean tone an octave low,
+/// which nothing else in the harness notices.
+fn assert_amr_tone_quality(
+    path: &Path,
+    sample_rate: u32,
+    expected_hz: f32,
+    rejected_hz: f32,
+) -> ExampleResult<()> {
+    let (samples, header_rate) = read_wav_with_rate(path)?;
+    if header_rate != sample_rate {
+        return Err(format!(
+            "{}: WAV header says {} Hz but this leg negotiated {} Hz — the recorder \
+             and the assertion disagree about what was captured",
+            path.display(),
+            header_rate,
+            sample_rate
+        )
+        .into());
+    }
+    let label = path.display().to_string();
+    assert_amr_tone_quality_samples(&label, &samples, sample_rate, expected_hz, rejected_hz)
+}
+
+/// The samples-level half of [`assert_amr_tone_quality`], separated so tests
+/// need no files (the interop WAVs are gitignored and can never be fixtures)
+/// and so the wrong-rate test proves the *analysis* catches a mislabeled
+/// capture, not just the header check.
+fn assert_amr_tone_quality_samples(
+    label: &str,
+    samples: &[i16],
+    sample_rate: u32,
+    expected_hz: f32,
+    rejected_hz: f32,
+) -> ExampleResult<()> {
+    let window_samples = (sample_rate as f32 * AMR_REQUIRED_TONE_SECS) as usize;
+    let analysis = assert_best_window_tone_gated(
+        label,
+        samples,
+        sample_rate,
+        window_samples,
+        frame_samples(sample_rate),
+        expected_hz,
+        rejected_hz,
+        WindowGate::amr(),
+    )?;
+    println!(
+        "{}: {:.0}Hz dominant over {:.0}Hz by {:.1}x at {} Hz, {}s of windows above {:.0} dB SNR and frame RMS {:.0}",
+        label,
+        expected_hz,
+        rejected_hz,
+        analysis.ratio,
+        sample_rate,
+        AMR_REQUIRED_TONE_SECS,
+        AMR_MIN_TONE_SNR_DB,
+        AMR_MIN_FRAME_RMS,
+    );
+    Ok(())
 }
 
 pub fn assert_samples_tone(
@@ -3951,23 +5366,64 @@ pub fn assert_samples_tone(
 pub fn assert_best_window_tone(
     label: &str,
     samples: &[i16],
+    sample_rate: u32,
     window_samples: usize,
     step_samples: usize,
     expected_hz: f32,
     rejected_hz: f32,
 ) -> ExampleResult<ToneAnalysis> {
-    let scan = scan_tone_windows(
+    assert_best_window_tone_gated(
+        label,
         samples,
+        sample_rate,
         window_samples,
         step_samples,
         expected_hz,
         rejected_hz,
+        WindowGate::tone_only(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assert_best_window_tone_gated(
+    label: &str,
+    samples: &[i16],
+    sample_rate: u32,
+    window_samples: usize,
+    step_samples: usize,
+    expected_hz: f32,
+    rejected_hz: f32,
+    gate: WindowGate,
+) -> ExampleResult<ToneAnalysis> {
+    let scan = scan_tone_windows(
+        samples,
+        sample_rate,
+        window_samples,
+        step_samples,
+        expected_hz,
+        rejected_hz,
+        gate,
     )
     .map_err(|error| format!("{}: {}", label, error))?;
     let analysis = scan.best;
     if scan.longest_passing_run < scan.required_passing_run {
+        // Name the clause that actually bit: the weakest window's figures are
+        // the diagnosis, the best window's ratio is only the headline.
+        let mut clauses = format!("ratio threshold {:.2}", gate.min_ratio);
+        if let Some(floor) = gate.min_snr_db {
+            clauses.push_str(&format!(
+                ", weakest window SNR {:.1} dB vs floor {:.1} dB",
+                scan.weakest_snr_db, floor
+            ));
+        }
+        if let Some(floor) = gate.min_frame_rms {
+            clauses.push_str(&format!(
+                ", weakest 20ms frame RMS {:.0} vs floor {:.0}",
+                scan.weakest_frame_rms, floor
+            ));
+        }
         return Err(format!(
-            "{}: {}/{} sampled windows matched, longest passing run {}/{}; best {:.0}Hz magnitude {:.1} vs {:.0}Hz magnitude {:.1}, ratio {:.2} (analysis window {} samples, step {} samples, ratio threshold {:.2})",
+            "{}: {}/{} sampled windows matched, longest passing run {}/{}; best {:.0}Hz magnitude {:.1} vs {:.0}Hz magnitude {:.1}, ratio {:.2}, best-window SNR {:.1} dB (analysis window {} samples, step {} samples, {})",
             label,
             scan.passing_windows,
             scan.total_windows,
@@ -3978,9 +5434,10 @@ pub fn assert_best_window_tone(
             analysis.rejected_hz,
             analysis.rejected_magnitude,
             analysis.ratio,
+            scan.best_quality.snr_db,
             scan.analysis_window_samples,
             scan.step_samples,
-            DOMINANCE_RATIO
+            clauses
         )
         .into());
     }
@@ -4018,14 +5475,18 @@ pub fn goertzel_magnitude(samples: &[i16], sample_rate: f32, target_hz: f32) -> 
     (q1 * q1 + q2 * q2 - q1 * q2 * coeff).sqrt()
 }
 
-fn goertzel_magnitude_hann(samples: &[i16], sample_rate: f32, target_hz: f32) -> f32 {
-    if samples.len() < 3 {
-        return goertzel_magnitude(samples, sample_rate, target_hz);
-    }
+/// The integer Goertzel bin `target_hz` snaps to for a window of `len`.
+fn goertzel_bin(len: usize, sample_rate: f32, target_hz: f32) -> usize {
+    (0.5 + (len as f32 * target_hz) / sample_rate).floor() as usize
+}
 
+/// Hann-tapered Goertzel magnitude at an explicit bin, so a neighbouring bin
+/// can be addressed directly. This is the DFT magnitude of the Hann-weighted
+/// window at bin `k` — the quantity [`tone_quality`]'s power arithmetic is
+/// calibrated against.
+fn goertzel_magnitude_hann_bin(samples: &[i16], bin: usize) -> f32 {
     let n = samples.len() as f32;
-    let k = (0.5 + (n * target_hz) / sample_rate).floor();
-    let omega = (2.0 * std::f32::consts::PI * k) / n;
+    let omega = (2.0 * std::f32::consts::PI * bin as f32) / n;
     let coeff = 2.0 * omega.cos();
     let hann_denominator = (samples.len() - 1) as f32;
     let (mut q1, mut q2) = (0.0f32, 0.0f32);
@@ -4039,9 +5500,134 @@ fn goertzel_magnitude_hann(samples: &[i16], sample_rate: f32, target_hz: f32) ->
     (q1 * q1 + q2 * q2 - q1 * q2 * coeff).max(0.0).sqrt()
 }
 
-fn analyze_tapered_samples(samples: &[i16], expected_hz: f32, rejected_hz: f32) -> ToneAnalysis {
-    let expected_magnitude = goertzel_magnitude_hann(samples, SAMPLE_RATE as f32, expected_hz);
-    let rejected_magnitude = goertzel_magnitude_hann(samples, SAMPLE_RATE as f32, rejected_hz);
+fn goertzel_magnitude_hann(samples: &[i16], sample_rate: f32, target_hz: f32) -> f32 {
+    if samples.len() < 3 {
+        return goertzel_magnitude(samples, sample_rate, target_hz);
+    }
+    goertzel_magnitude_hann_bin(samples, goertzel_bin(samples.len(), sample_rate, target_hz))
+}
+
+/// Energy of the Hann-weighted window, `Σ (x·w)²` — the denominator that makes
+/// [`ToneQuality::fundamental_fraction`] a true power fraction.
+fn hann_windowed_energy(samples: &[i16]) -> f64 {
+    if samples.len() < 2 {
+        return 0.0;
+    }
+    let hann_denominator = (samples.len() - 1) as f64;
+    samples
+        .iter()
+        .enumerate()
+        .map(|(index, &sample)| {
+            let phase = (2.0 * std::f64::consts::PI * index as f64) / hann_denominator;
+            let weight = 0.5 - 0.5 * phase.cos();
+            let weighted = f64::from(sample) * weight;
+            weighted * weighted
+        })
+        .sum()
+}
+
+/// What one analysis window actually contains, beyond which tone dominates.
+///
+/// A pure tone lets all of this be measured with no reference signal: the
+/// fundamental's power against everything else *is* THD+N, inverted.
+#[derive(Debug, Clone, Copy)]
+pub struct ToneQuality {
+    pub samples: usize,
+    pub expected_hz: f32,
+    /// Amplitude of the fundamental, directly comparable with
+    /// [`TONE_PEAK_AMPLITUDE`]. Recovers a known amplitude to within 0.1%.
+    pub fundamental_amplitude: f32,
+    /// Share of the window's power in the fundamental bin and its two
+    /// neighbours (the spread tolerates up to ±one bin of frequency drift —
+    /// ±5 Hz at a 200 ms window — without charging the tone as noise).
+    pub fundamental_fraction: f32,
+    /// `10·log10(fundamental / everything else)`, in true dB: noise injected
+    /// at a stated SNR reads back within 1 dB, which is what makes the
+    /// threshold a physical quantity rather than a tuned index.
+    pub snr_db: f32,
+    pub rms: f32,
+    /// The weakest 20 ms frame inside the window — the dropout detector.
+    /// Attenuation and gating change this while leaving `snr_db` perfect.
+    pub min_frame_rms: f32,
+    pub dc_offset: f32,
+}
+
+pub fn tone_quality(samples: &[i16], sample_rate: u32, expected_hz: f32) -> ToneQuality {
+    let n = samples.len();
+    let sum: f64 = samples.iter().map(|&s| f64::from(s)).sum();
+    let energy: f64 = samples.iter().map(|&s| f64::from(s) * f64::from(s)).sum();
+    let rms = if n == 0 {
+        0.0
+    } else {
+        (energy / n as f64).sqrt() as f32
+    };
+    let dc_offset = if n == 0 { 0.0 } else { (sum / n as f64) as f32 };
+
+    let frame = frame_samples(sample_rate).max(1);
+    let mut min_frame_rms = f32::INFINITY;
+    let mut offset = 0usize;
+    while offset + frame <= n {
+        let frame_energy: f64 = samples[offset..offset + frame]
+            .iter()
+            .map(|&s| f64::from(s) * f64::from(s))
+            .sum();
+        min_frame_rms = min_frame_rms.min((frame_energy / frame as f64).sqrt() as f32);
+        offset += frame;
+    }
+    if !min_frame_rms.is_finite() {
+        min_frame_rms = rms;
+    }
+
+    let (fundamental_amplitude, fundamental_fraction, snr_db) = if n < 8 {
+        (0.0, 0.0, -99.0)
+    } else {
+        let k = goertzel_bin(n, sample_rate as f32, expected_hz).clamp(2, n / 2 - 2);
+        let center = f64::from(goertzel_magnitude_hann_bin(samples, k));
+        let below = f64::from(goertzel_magnitude_hann_bin(samples, k - 1));
+        let above = f64::from(goertzel_magnitude_hann_bin(samples, k + 1));
+        let windowed = hann_windowed_energy(samples);
+        // For a Hann window, an exact-bin tone of amplitude A yields
+        // |X_k| = A·N/4 and |X_k±1| = A·N/8, and Parseval over the windowed
+        // signal gives Σ|X_j|² = N·E_w. Both identities are pinned by
+        // `tone_quality_reads_back_true_snr` and the amplitude check inside
+        // `amr_quality_accepts_a_clean_capture_at_either_rate`.
+        let amplitude = (4.0 * center / n as f64) as f32;
+        let tone_power = 2.0 * (below * below + center * center + above * above);
+        let fraction = if windowed <= 0.0 {
+            0.0
+        } else {
+            (tone_power / (n as f64 * windowed)).clamp(0.0, 1.0)
+        };
+        let snr = if fraction <= 1e-9 {
+            -99.0
+        } else if fraction >= 1.0 - 1e-9 {
+            99.0
+        } else {
+            (10.0 * (fraction / (1.0 - fraction)).log10()) as f32
+        };
+        (amplitude, fraction as f32, snr.clamp(-99.0, 99.0))
+    };
+
+    ToneQuality {
+        samples: n,
+        expected_hz,
+        fundamental_amplitude,
+        fundamental_fraction,
+        snr_db,
+        rms,
+        min_frame_rms,
+        dc_offset,
+    }
+}
+
+fn analyze_tapered_samples(
+    samples: &[i16],
+    sample_rate: u32,
+    expected_hz: f32,
+    rejected_hz: f32,
+) -> ToneAnalysis {
+    let expected_magnitude = goertzel_magnitude_hann(samples, sample_rate as f32, expected_hz);
+    let rejected_magnitude = goertzel_magnitude_hann(samples, sample_rate as f32, rejected_hz);
     let ratio = dominance_ratio(expected_magnitude, rejected_magnitude);
     ToneAnalysis {
         samples: samples.len(),
@@ -4063,8 +5649,19 @@ fn endpoint_defaults(
     transport: TransportMode,
 ) -> EndpointDefaults {
     let base = match provider {
+        // Asterisk's endpoints stay at 5070-5075 and 5080-5084, pinned by
+        // `asterisk_defaults_preserve_existing_lab_ports`. That block is
+        // load-bearing -- the local env files and the lab's PJSIP endpoint
+        // configuration name these ports -- so anything that lands on it
+        // moves, not this. The Kamailio lab did land on it (5072/5073) and
+        // was moved to 5090/5091; see `infra/release-runners/pbx/kamailio/up.sh`.
         PbxProvider::Asterisk => 0,
         PbxProvider::FreeSwitch => 10_000,
+        // 30k/40k, not 20k: 5070+20_000 = 25070 is the sip-proxy interop
+        // suite's peer port, and its 25xxx block must stay clear so both
+        // suites can run side by side (pinned by a unit test below).
+        PbxProvider::Kamailio => 30_000,
+        PbxProvider::OpenSips => 40_000,
     };
     match (transport, username) {
         (TransportMode::TlsSrtp, "1001") => EndpointDefaults {
@@ -4134,6 +5731,8 @@ async fn settle_after_register(provider: PbxProvider) {
     let secs = std::env::var(match provider {
         PbxProvider::Asterisk => "ASTERISK_POST_REGISTER_SETTLE_SECS",
         PbxProvider::FreeSwitch => "FREESWITCH_POST_REGISTER_SETTLE_SECS",
+        PbxProvider::Kamailio => "KAMAILIO_POST_REGISTER_SETTLE_SECS",
+        PbxProvider::OpenSips => "OPENSIPS_POST_REGISTER_SETTLE_SECS",
     })
     .or_else(|_| std::env::var("POST_REGISTER_SETTLE_SECS"))
     .ok()
@@ -4152,6 +5751,8 @@ fn remote_test_timeout(provider: PbxProvider) -> ExampleResult<Duration> {
     let key = match provider {
         PbxProvider::Asterisk => "ASTERISK_TEST_TIMEOUT_SECS",
         PbxProvider::FreeSwitch => "FREESWITCH_TEST_TIMEOUT_SECS",
+        PbxProvider::Kamailio => "KAMAILIO_TEST_TIMEOUT_SECS",
+        PbxProvider::OpenSips => "OPENSIPS_TEST_TIMEOUT_SECS",
     };
     let secs = std::env::var(key)
         .or_else(|_| std::env::var("REMOTE_TEST_TIMEOUT_SECS"))
@@ -4164,10 +5765,14 @@ fn transfer_settle_duration(provider: PbxProvider, transport: TransportMode) -> 
     let key = match provider {
         PbxProvider::Asterisk => "ASTERISK_TRANSFER_SETTLE_SECS",
         PbxProvider::FreeSwitch => "FREESWITCH_TRANSFER_SETTLE_SECS",
+        PbxProvider::Kamailio => "KAMAILIO_TRANSFER_SETTLE_SECS",
+        PbxProvider::OpenSips => "OPENSIPS_TRANSFER_SETTLE_SECS",
     };
     let tls_key = match provider {
         PbxProvider::Asterisk => "ASTERISK_TLS_TRANSFER_SETTLE_SECS",
         PbxProvider::FreeSwitch => "FREESWITCH_TLS_TRANSFER_SETTLE_SECS",
+        PbxProvider::Kamailio => "KAMAILIO_TLS_TRANSFER_SETTLE_SECS",
+        PbxProvider::OpenSips => "OPENSIPS_TLS_TRANSFER_SETTLE_SECS",
     };
     if transport.is_tls() {
         if let Some(duration) = optional_env_duration_secs(tls_key) {
@@ -4185,6 +5790,8 @@ fn call_retry_attempts(provider: PbxProvider) -> usize {
     let key = match provider {
         PbxProvider::Asterisk => "ASTERISK_CALL_RETRY_ATTEMPTS",
         PbxProvider::FreeSwitch => "FREESWITCH_CALL_RETRY_ATTEMPTS",
+        PbxProvider::Kamailio => "KAMAILIO_CALL_RETRY_ATTEMPTS",
+        PbxProvider::OpenSips => "OPENSIPS_CALL_RETRY_ATTEMPTS",
     };
     std::env::var(key)
         .ok()
@@ -4196,6 +5803,8 @@ fn remote_test_digits(provider: PbxProvider) -> Vec<char> {
     let key = match provider {
         PbxProvider::Asterisk => "ASTERISK_TEST_DIGITS",
         PbxProvider::FreeSwitch => "FREESWITCH_TEST_DIGITS",
+        PbxProvider::Kamailio => "KAMAILIO_TEST_DIGITS",
+        PbxProvider::OpenSips => "OPENSIPS_TEST_DIGITS",
     };
     std::env::var(key)
         .or_else(|_| std::env::var("REMOTE_TEST_DIGITS"))
@@ -4241,6 +5850,59 @@ fn g711_callee_wav(transport: TransportMode) -> &'static str {
         "tls_srtp_g711_1002_received.wav"
     } else {
         "g711_2002_received.wav"
+    }
+}
+
+fn amr_caller_wav(transport: TransportMode) -> &'static str {
+    if transport.is_tls() {
+        "tls_srtp_amr_1001_received.wav"
+    } else {
+        "amr_2001_received.wav"
+    }
+}
+
+fn amr_callee_wav(transport: TransportMode) -> &'static str {
+    if transport.is_tls() {
+        "tls_srtp_amr_1002_received.wav"
+    } else {
+        "amr_2002_received.wav"
+    }
+}
+
+/// The recording name for one leg of a transcode call.
+///
+/// Unlike [`amr_caller_wav`], the name carries the leg's own codec profile:
+/// the two legs of a transcode call write different codecs' audio into one
+/// directory, and `amr_2002_received.wav` holding PCMU audio would be
+/// actively misleading in an evidence bundle.
+fn amr_transcode_wav(cfg: &EndpointConfig) -> String {
+    format!(
+        "amr_transcode_{}_{}_received.wav",
+        cfg.username,
+        cfg.codec_profile.env_value()
+    )
+}
+
+/// The far end of a b2bua call — the target (2003/1003) — sends 660 Hz. The
+/// caller sends its usual tone; the b2bua in the middle sends nothing, so
+/// 880 Hz appearing anywhere in a b2bua recording would itself be a fault.
+fn tone_for_b2bua_far(_transport: TransportMode) -> f32 {
+    ENDPOINT_1003_TONE_HZ
+}
+
+fn b2bua_caller_wav(transport: TransportMode) -> &'static str {
+    if transport.is_tls() {
+        "tls_srtp_b2bua_1001_received.wav"
+    } else {
+        "b2bua_2001_received.wav"
+    }
+}
+
+fn b2bua_target_wav(transport: TransportMode) -> &'static str {
+    if transport.is_tls() {
+        "tls_srtp_b2bua_1003_received.wav"
+    } else {
+        "b2bua_2003_received.wav"
     }
 }
 
@@ -4353,7 +6015,7 @@ async fn stop_recv_task(task: JoinHandle<()>) {
 fn advertised_ip(provider: PbxProvider, local_ip: IpAddr) -> ExampleResult<IpAddr> {
     let value = match provider {
         PbxProvider::Asterisk => std::env::var("ADVERTISED_IP"),
-        PbxProvider::FreeSwitch => {
+        PbxProvider::FreeSwitch | PbxProvider::Kamailio | PbxProvider::OpenSips => {
             std::env::var("RVOIP_ADVERTISED_IP").or_else(|_| std::env::var("ADVERTISED_IP"))
         }
     };
@@ -4367,8 +6029,10 @@ fn advertised_ip(provider: PbxProvider, local_ip: IpAddr) -> ExampleResult<IpAdd
 fn media_advertised_ip(provider: PbxProvider, advertised_ip: IpAddr) -> ExampleResult<IpAddr> {
     let value = match provider {
         PbxProvider::Asterisk => std::env::var("MEDIA_ADVERTISED_IP"),
-        PbxProvider::FreeSwitch => std::env::var("RVOIP_MEDIA_ADVERTISED_IP")
-            .or_else(|_| std::env::var("MEDIA_ADVERTISED_IP")),
+        PbxProvider::FreeSwitch | PbxProvider::Kamailio | PbxProvider::OpenSips => {
+            std::env::var("RVOIP_MEDIA_ADVERTISED_IP")
+                .or_else(|_| std::env::var("MEDIA_ADVERTISED_IP"))
+        }
     };
     match value {
         Ok(value) if !value.trim().is_empty() => Ok(value.parse()?),
@@ -4543,6 +6207,29 @@ mod tests {
         assert!(G729_CALLER_CAPTURE_TARGET_SAMPLES - MIN_RECEIVED_SAMPLES >= G729_FRAME_SIZE * 4);
     }
 
+    /// The floor is a duration. Stated as a bare sample count it silently
+    /// meant half as much exercise at 16 kHz, which is exactly how every
+    /// wideband AMR run came out at 0.76 s while narrowband got 1.5 s.
+    #[test]
+    fn received_sample_floor_is_the_same_duration_at_either_rate() {
+        assert_eq!(min_received_samples(8_000), 12_000);
+        assert_eq!(min_received_samples(16_000), 24_000);
+        for rate in [8_000u32, 16_000] {
+            assert_eq!(
+                min_received_samples(rate) * 1000 / rate as usize,
+                MIN_RECEIVED_MS
+            );
+        }
+    }
+
+    /// The 8 kHz value is what every non-AMR scenario keys its thresholds to;
+    /// changing the duration must not move it silently.
+    #[test]
+    fn narrowband_floor_is_unchanged_by_the_duration_restatement() {
+        assert_eq!(MIN_RECEIVED_SAMPLES, 12_000);
+        assert_eq!(MIN_RECEIVED_SAMPLES, min_received_samples(SAMPLE_RATE));
+    }
+
     #[test]
     fn freeswitch_defaults_use_local_high_ports() {
         let udp = endpoint_defaults(PbxProvider::FreeSwitch, "2001", TransportMode::Udp);
@@ -4550,6 +6237,79 @@ mod tests {
         let tls = endpoint_defaults(PbxProvider::FreeSwitch, "1001", TransportMode::TlsSrtp);
         assert_eq!(tls.local_port, 15070);
         assert_eq!(tls.tls_local_port, Some(15071));
+    }
+
+    /// The proxy providers' port bases must clear the sip-proxy interop
+    /// suite's 25xxx block (peer port 25070, egress 25071+): a 20_000 base
+    /// would collide exactly, which is why these are 30k/40k.
+    #[test]
+    fn proxy_provider_ports_avoid_the_sip_proxy_interop_block() {
+        for (provider, expected_udp) in [
+            (PbxProvider::Kamailio, 35080),
+            (PbxProvider::OpenSips, 45080),
+        ] {
+            let udp = endpoint_defaults(provider, "2001", TransportMode::Udp);
+            assert_eq!(udp.local_port, expected_udp);
+            assert!(
+                !(25_000..26_000).contains(&udp.local_port),
+                "{provider:?} collides with the sip-proxy interop port block"
+            );
+        }
+    }
+
+    /// Lab daemons and our own endpoints must not claim the same host port.
+    ///
+    /// They did. The Kamailio lab listened on 5072/5073 and OpenSIPS on 5074,
+    /// which are the Asterisk suite's endpoint ports for users 1002 and 1003 —
+    /// so with a proxy lab up, an Asterisk TLS cell could not bind its callee
+    /// and every one failed with a 404 that named nothing about ports.
+    /// Whichever started first won, which is why it looked intermittent.
+    ///
+    /// Two blocks, kept apart on purpose: daemons at 5060-5069, our endpoints
+    /// from 5070 up with a per-provider base. This asserts the daemon side
+    /// stays below the endpoint block rather than checking today's exact
+    /// numbers, so moving a lab within its block does not fail the test but
+    /// moving one back into ours does.
+    #[test]
+    fn lab_daemon_ports_stay_clear_of_the_endpoint_block() {
+        // Every endpoint port this suite binds at base 0.
+        let endpoint_ports: Vec<u16> = [
+            ("1001", TransportMode::TlsSrtp),
+            ("1002", TransportMode::TlsSrtp),
+            ("1003", TransportMode::TlsSrtp),
+            ("2001", TransportMode::Udp),
+            ("2002", TransportMode::Udp),
+            ("2003", TransportMode::Udp),
+        ]
+        .into_iter()
+        .flat_map(|(user, transport)| {
+            let defaults = endpoint_defaults(PbxProvider::Asterisk, user, transport);
+            std::iter::once(defaults.local_port).chain(defaults.tls_local_port)
+        })
+        .collect();
+
+        // The lab daemons' host ports, as `up.sh` defaults them.
+        for (lab, port) in [
+            ("asterisk", 5060u16),
+            ("asterisk-tls", 5061),
+            ("freeswitch", 5062),
+            ("freeswitch-tls", 5063),
+            ("kamailio", 5066),
+            ("kamailio-tls", 5067),
+            ("opensips", 5068),
+        ] {
+            assert!(
+                !endpoint_ports.contains(&port),
+                "the {lab} lab listens on {port}, which this suite also binds \
+                 as an endpoint — one of them will fail to start, and which \
+                 one depends on start order"
+            );
+            assert!(
+                port < 5070,
+                "the {lab} lab's {port} is inside the endpoint block; daemons \
+                 belong below 5070"
+            );
+        }
     }
 
     #[test]
@@ -4615,7 +6375,7 @@ mod tests {
     fn hann_taper_recovers_near_bin_codec_tone_without_lowering_threshold() {
         let samples = codec_like_near_bin_tone(TONE_ANALYSIS_WINDOW_SAMPLES);
         let rectangular = analyze_samples(&samples, 880.0, 440.0).unwrap();
-        let tapered = analyze_tapered_samples(&samples, 880.0, 440.0);
+        let tapered = analyze_tapered_samples(&samples, SAMPLE_RATE, 880.0, 440.0);
 
         assert!(rectangular.ratio < DOMINANCE_RATIO);
         assert!(tapered.ratio >= DOMINANCE_RATIO);
@@ -4624,8 +6384,16 @@ mod tests {
     #[test]
     fn hann_taper_rejects_true_rejected_tone() {
         let samples = tone_samples(&[(SAMPLE_RATE as usize, 8_000.0, 440.0)]);
-        let scan =
-            scan_tone_windows(&samples, SAMPLE_RATE as usize, FRAME_SIZE, 880.0, 440.0).unwrap();
+        let scan = scan_tone_windows(
+            &samples,
+            SAMPLE_RATE,
+            SAMPLE_RATE as usize,
+            FRAME_SIZE,
+            880.0,
+            440.0,
+            WindowGate::tone_only(),
+        )
+        .unwrap();
 
         assert_eq!(scan.longest_passing_run, 0);
         assert!(scan.longest_passing_run < scan.required_passing_run);
@@ -4634,8 +6402,16 @@ mod tests {
     #[test]
     fn tone_scanner_rejects_silence() {
         let samples = vec![0; SAMPLE_RATE as usize];
-        let scan =
-            scan_tone_windows(&samples, SAMPLE_RATE as usize, FRAME_SIZE, 880.0, 440.0).unwrap();
+        let scan = scan_tone_windows(
+            &samples,
+            SAMPLE_RATE,
+            SAMPLE_RATE as usize,
+            FRAME_SIZE,
+            880.0,
+            440.0,
+            WindowGate::tone_only(),
+        )
+        .unwrap();
 
         assert_eq!(scan.passing_windows, 0);
         assert_eq!(scan.longest_passing_run, 0);
@@ -4644,8 +6420,16 @@ mod tests {
     #[test]
     fn hann_taper_accepts_one_continuous_second_of_near_bin_tone() {
         let samples = codec_like_near_bin_tone(SAMPLE_RATE as usize);
-        let scan =
-            scan_tone_windows(&samples, SAMPLE_RATE as usize, FRAME_SIZE, 880.0, 440.0).unwrap();
+        let scan = scan_tone_windows(
+            &samples,
+            SAMPLE_RATE,
+            SAMPLE_RATE as usize,
+            FRAME_SIZE,
+            880.0,
+            440.0,
+            WindowGate::tone_only(),
+        )
+        .unwrap();
 
         assert!(scan.longest_passing_run >= scan.required_passing_run);
     }
@@ -4657,8 +6441,16 @@ mod tests {
             (1_600, 8_000.0, 440.0),
             (3_200, 8_000.0, 875.0),
         ]);
-        let scan =
-            scan_tone_windows(&samples, SAMPLE_RATE as usize, FRAME_SIZE, 880.0, 440.0).unwrap();
+        let scan = scan_tone_windows(
+            &samples,
+            SAMPLE_RATE,
+            SAMPLE_RATE as usize,
+            FRAME_SIZE,
+            880.0,
+            440.0,
+            WindowGate::tone_only(),
+        )
+        .unwrap();
 
         assert!(scan.passing_windows > 0);
         assert!(scan.longest_passing_run < scan.required_passing_run);
@@ -4674,6 +6466,7 @@ mod tests {
             assert_best_window_tone(
                 "cropped-middle",
                 stable_middle_half(&samples),
+                SAMPLE_RATE,
                 SAMPLE_RATE as usize,
                 FRAME_SIZE,
                 880.0,
@@ -4687,5 +6480,537 @@ mod tests {
         let path = save_wav(temp.path(), "full-capture.wav", &samples).unwrap();
         assert_audio_path(&path, 880.0, 440.0)
             .expect("the full capture contains one continuous valid second");
+    }
+
+    /// `secs` of `hz` at `rate`, produced by the *production* tone generator
+    /// so every threshold test judges the exact signal the harness sends.
+    fn amr_capture(rate: u32, hz: f32, secs: f32) -> Vec<i16> {
+        let frame = frame_samples(rate);
+        let frames = (secs * 50.0).round() as usize;
+        (0..frames)
+            .flat_map(|index| generate_tone_at_rate(hz, index, frame, rate))
+            .collect()
+    }
+
+    /// Rewrite each 20 ms frame, the way a framing or relay defect does.
+    fn per_frame(samples: &[i16], rate: u32, f: impl Fn(usize, &[i16]) -> Vec<i16>) -> Vec<i16> {
+        let frame = frame_samples(rate);
+        samples
+            .chunks(frame)
+            .enumerate()
+            .flat_map(|(index, chunk)| f(index, chunk))
+            .collect()
+    }
+
+    /// Additive white noise at a stated SNR relative to the signal's RMS.
+    /// Deterministic LCG — this does not need to be a good generator, only a
+    /// broadband and repeatable one.
+    fn with_noise_at_snr(samples: &[i16], snr_db: f32, seed: u64) -> Vec<i16> {
+        let energy: f64 = samples.iter().map(|&s| f64::from(s) * f64::from(s)).sum();
+        let rms = (energy / samples.len() as f64).sqrt();
+        let noise_rms = rms / 10f64.powf(f64::from(snr_db) / 20.0);
+        // A uniform variable on [-1, 1) has RMS 1/sqrt(3).
+        let scale = noise_rms * 3f64.sqrt();
+        let mut state = seed;
+        samples
+            .iter()
+            .map(|&s| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let uniform = ((state >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0;
+                (f64::from(s) + uniform * scale).clamp(-32768.0, 32767.0) as i16
+            })
+            .collect()
+    }
+
+    #[test]
+    fn amr_quality_accepts_a_clean_capture_at_either_rate() {
+        let temp = tempfile::tempdir().unwrap();
+        for rate in [8_000u32, 16_000] {
+            let samples = amr_capture(rate, 880.0, 1.5);
+            assert_amr_tone_quality_samples("clean", &samples, rate, 880.0, 440.0)
+                .unwrap_or_else(|error| panic!("{rate} Hz clean capture should pass: {error}"));
+            // And through the file path, so the header check admits a correct
+            // header rather than only rejecting wrong ones.
+            let path =
+                save_wav_at_rate(temp.path(), &format!("{rate}.wav"), &samples, rate).unwrap();
+            assert_amr_tone_quality(&path, rate, 880.0, 440.0)
+                .unwrap_or_else(|error| panic!("{rate} Hz file capture should pass: {error}"));
+            // The amplitude calibration: the fundamental of the production
+            // tone reads back as what was sent, within 1%.
+            let window = &samples[..tone_analysis_window_samples(rate)];
+            let quality = tone_quality(window, rate, 880.0);
+            let relative =
+                (quality.fundamental_amplitude - TONE_PEAK_AMPLITUDE).abs() / TONE_PEAK_AMPLITUDE;
+            assert!(
+                relative < 0.01,
+                "fundamental read {} of {} sent",
+                quality.fundamental_amplitude,
+                TONE_PEAK_AMPLITUDE
+            );
+        }
+    }
+
+    #[test]
+    fn amr_quality_rejects_our_own_tone_coming_back() {
+        let samples = amr_capture(16_000, 440.0, 1.5);
+        assert!(
+            assert_amr_tone_quality_samples("echo", &samples, 16_000, 880.0, 440.0).is_err(),
+            "a recording of the tone we sent must not pass as the far end's"
+        );
+    }
+
+    /// The wrong-rate case: 16 kHz samples read at 8 kHz are a real, clean
+    /// tone — an octave low. The *analysis* has to catch it, not only the
+    /// header check, which is why this goes through the samples entry point.
+    #[test]
+    fn amr_quality_rejects_a_wideband_capture_read_as_narrowband() {
+        let samples = amr_capture(16_000, 880.0, 1.5);
+        assert_amr_tone_quality_samples("wb-as-wb", &samples, 16_000, 880.0, 440.0)
+            .expect("passes at the rate it was captured at");
+        assert!(
+            assert_amr_tone_quality_samples("wb-as-nb", &samples, 8_000, 880.0, 440.0).is_err(),
+            "read at half the rate the 880Hz tone lands on 440Hz, which must not pass as 880Hz"
+        );
+    }
+
+    /// And the header check catches the file whose label disagrees with the
+    /// negotiated rate before any analysis runs.
+    #[test]
+    fn amr_quality_rejects_a_mislabeled_wav_header() {
+        let temp = tempfile::tempdir().unwrap();
+        let samples = amr_capture(16_000, 880.0, 1.5);
+        let path = save_wav_at_rate(temp.path(), "wb.wav", &samples, 16_000).unwrap();
+        let error = assert_amr_tone_quality(&path, 8_000, 880.0, 440.0)
+            .expect_err("a 16 kHz header must not satisfy an 8 kHz leg");
+        assert!(
+            error.to_string().contains("WAV header"),
+            "the failure should name the header mismatch, got: {error}"
+        );
+    }
+
+    #[test]
+    fn amr_quality_rejects_one_good_frame_then_silence() {
+        let rate = 8_000u32;
+        let frame = frame_samples(rate);
+        let mut samples = amr_capture(rate, 880.0, 1.5);
+        for sample in samples.iter_mut().skip(frame) {
+            *sample = 0;
+        }
+        assert!(
+            assert_amr_tone_quality_samples("one-frame", &samples, rate, 880.0, 440.0).is_err(),
+            "one correct frame and 1.48s of silence passed the old check at ratio 44"
+        );
+    }
+
+    /// Full level, right pitch, single-digit SNR: a square wave's fundamental
+    /// holds 8/π² of its power (+6.3 dB), so only the SNR clause catches it.
+    /// The same test pins that the *other* clauses do not: its frames are
+    /// louder than the floor and its fundamental reads above what we sent.
+    #[test]
+    fn amr_quality_rejects_a_sign_only_square_wave() {
+        let rate = 8_000u32;
+        let clean = amr_capture(rate, 880.0, 1.5);
+        let squared: Vec<i16> = clean
+            .iter()
+            .map(|&s| {
+                if s > 0 {
+                    TONE_PEAK_AMPLITUDE as i16
+                } else {
+                    -(TONE_PEAK_AMPLITUDE as i16)
+                }
+            })
+            .collect();
+        assert!(
+            assert_amr_tone_quality_samples("square", &squared, rate, 880.0, 440.0).is_err(),
+            "1-bit squaring passed the old check at ratio 441"
+        );
+        let window = &squared[..tone_analysis_window_samples(rate)];
+        let quality = tone_quality(window, rate, 880.0);
+        assert!(
+            quality.snr_db < AMR_MIN_TONE_SNR_DB,
+            "snr {}",
+            quality.snr_db
+        );
+        assert!(
+            quality.min_frame_rms > AMR_MIN_FRAME_RMS,
+            "the square is loud; the level clause must not be what catches it"
+        );
+        assert!(
+            quality.fundamental_amplitude > TONE_PEAK_AMPLITUDE,
+            "a square's fundamental is 4A/π — an amplitude clause would wave it through"
+        );
+    }
+
+    /// Perfect spectrum, no level: only the frame-RMS clause catches
+    /// attenuation, which is why the level floor exists separately from SNR.
+    #[test]
+    fn amr_quality_rejects_a_hundredfold_attenuated_capture() {
+        let rate = 8_000u32;
+        let quiet: Vec<i16> = amr_capture(rate, 880.0, 1.5)
+            .iter()
+            .map(|&s| s / 100)
+            .collect();
+        assert!(
+            assert_amr_tone_quality_samples("quiet", &quiet, rate, 880.0, 440.0).is_err(),
+            "100x attenuation passed the old check at ratio 6820"
+        );
+        let window = &quiet[..tone_analysis_window_samples(rate)];
+        let quality = tone_quality(window, rate, 880.0);
+        assert!(
+            quality.snr_db >= 30.0,
+            "attenuation preserves spectral purity (snr {}); deleting the RMS floor must break this test",
+            quality.snr_db
+        );
+        assert!(quality.min_frame_rms < AMR_MIN_FRAME_RMS);
+    }
+
+    #[test]
+    fn amr_quality_rejects_every_other_frame_zeroed() {
+        let rate = 8_000u32;
+        let clean = amr_capture(rate, 880.0, 1.5);
+        let gated = per_frame(&clean, rate, |index, chunk| {
+            if index % 2 == 0 {
+                chunk.to_vec()
+            } else {
+                vec![0; chunk.len()]
+            }
+        });
+        assert!(
+            assert_amr_tone_quality_samples("gated", &gated, rate, 880.0, 440.0).is_err(),
+            "50% frame dropout passed the old check at ratio 922"
+        );
+    }
+
+    /// The subtle one: full amplitude, no dropouts, energy on the right bin —
+    /// but each frame's phase runs backwards, so the splatter at the frame
+    /// rate wrecks the SNR and nothing else.
+    #[test]
+    fn amr_quality_rejects_per_frame_time_reversal() {
+        let rate = 8_000u32;
+        let clean = amr_capture(rate, 880.0, 1.5);
+        let reversed = per_frame(&clean, rate, |_, chunk| {
+            let mut frame = chunk.to_vec();
+            frame.reverse();
+            frame
+        });
+        assert!(
+            assert_amr_tone_quality_samples("reversed", &reversed, rate, 880.0, 440.0).is_err(),
+            "per-frame reversal passed the old check at ratio 23"
+        );
+        let window = &reversed[..tone_analysis_window_samples(rate)];
+        let quality = tone_quality(window, rate, 880.0);
+        assert!(
+            quality.min_frame_rms > AMR_MIN_FRAME_RMS,
+            "reversal conserves per-frame energy; the level clause must not be what catches it"
+        );
+    }
+
+    /// The regression this whole gate exists for, pinned from both sides with
+    /// the figures measured on real captures: a path measured at −12.6 dB
+    /// passed the old check; the cleanest path's worst window measured
+    /// +25.7 dB.
+    #[test]
+    fn amr_quality_brackets_the_measured_pbx_captures() {
+        let rate = 8_000u32;
+        let clean = amr_capture(rate, 880.0, 1.5);
+        let degraded = with_noise_at_snr(&clean, -12.6, 7);
+        assert!(
+            assert_amr_tone_quality_samples("degraded", &degraded, rate, 880.0, 440.0).is_err(),
+            "the real degraded capture measured -12.6 dB and passed the old check at 237x"
+        );
+        let clean_worst = with_noise_at_snr(&clean, 25.7, 11);
+        assert_amr_tone_quality_samples("clean-worst", &clean_worst, rate, 880.0, 440.0)
+            .expect("the cleanest real capture's worst window (+25.7 dB) must pass");
+    }
+
+    /// What makes the SNR threshold a physical quantity rather than a tuned
+    /// index: noise injected at a stated SNR reads back at that SNR.
+    #[test]
+    fn tone_quality_reads_back_true_snr() {
+        let rate = 8_000u32;
+        let clean = amr_capture(rate, 880.0, 0.2);
+        for (case, injected) in [(1u64, 30.0f32), (2, 20.0), (3, 15.0), (4, 10.0)] {
+            let noisy = with_noise_at_snr(&clean, injected, case);
+            let quality = tone_quality(&noisy[..tone_analysis_window_samples(rate)], rate, 880.0);
+            assert!(
+                (quality.snr_db - injected).abs() < 1.0,
+                "injected {injected} dB, read {} dB",
+                quality.snr_db
+            );
+        }
+    }
+
+    /// The 200 ms window is load-bearing: every harness tone must land on an
+    /// exact Goertzel bin at both rates, or a clean tone's measurable SNR
+    /// caps near 17 dB and the gate becomes unmeetable. Anyone adding a tone
+    /// frequency adds it here.
+    #[test]
+    fn harness_tones_land_on_an_exact_goertzel_bin() {
+        for rate in [8_000u32, 16_000] {
+            let window = tone_analysis_window_samples(rate);
+            for hz in [
+                ENDPOINT_2001_TONE_HZ,
+                ENDPOINT_2002_TONE_HZ,
+                ENDPOINT_1003_TONE_HZ,
+            ] {
+                let exact = window as f32 * hz / rate as f32;
+                assert!(
+                    (exact - exact.round()).abs() < 1e-3,
+                    "{hz} Hz falls {exact} bins into a {window}-sample window at {rate} Hz"
+                );
+            }
+        }
+    }
+
+    /// Pins the continuity requirement — and documents why the wideband
+    /// capture floor had to become a duration: a capture shorter than the
+    /// required run cannot pass no matter how clean it is.
+    #[test]
+    fn amr_quality_rejects_a_clean_but_too_short_capture() {
+        let rate = 8_000u32;
+        let short = amr_capture(rate, 880.0, 0.8);
+        assert!(
+            assert_amr_tone_quality_samples("short", &short, rate, 880.0, 440.0).is_err(),
+            "0.8s cannot contain the required 1.0s of continuous tone"
+        );
+        let enough = amr_capture(rate, 880.0, 1.2);
+        assert_amr_tone_quality_samples("enough", &enough, rate, 880.0, 440.0)
+            .expect("1.2s clean holds a full second");
+    }
+
+    /// The `SAMPLE_RATE`-literal bug that motivated threading the rate, in
+    /// test form: a 16 kHz scan must measure 880 Hz as 880 Hz, not as its
+    /// half or double.
+    #[test]
+    fn scan_at_sixteen_kilohertz_does_not_read_the_tone_an_octave_off() {
+        let samples = amr_capture(16_000, 880.0, 1.5);
+        assert_amr_tone_quality_samples("true-pitch", &samples, 16_000, 880.0, 440.0)
+            .expect("880 Hz at 16 kHz is 880 Hz");
+        assert!(
+            assert_amr_tone_quality_samples("octave-up", &samples, 16_000, 1760.0, 880.0).is_err(),
+            "the same capture must not read as 1760 Hz"
+        );
+    }
+
+    const ALL_PAIRINGS: [CodecPairing; 5] = [
+        CodecPairing::AmrNbPcmu,
+        CodecPairing::AmrWbPcmu,
+        CodecPairing::AmrNbBePcmu,
+        CodecPairing::AmrWbBePcmu,
+        CodecPairing::AmrNbAmrWb,
+    ];
+
+    /// The load-bearing property of the whole transcode scenario: the two
+    /// legs' offers share nothing but telephone-event, so the PBX physically
+    /// cannot native-bridge them — its own codecs must be in the path. This
+    /// test, not the call passing, is what guards against a future edit
+    /// quietly returning the scenario to a relayed call that still passes.
+    #[test]
+    fn transcode_pairings_put_disjoint_codecs_on_the_two_legs() {
+        for pairing in ALL_PAIRINGS {
+            let caller = pairing
+                .profile_for(Role::Caller)
+                .unwrap()
+                .offered_codecs()
+                .expect("a pairing leg always names its codecs");
+            let callee = pairing
+                .profile_for(Role::Callee)
+                .unwrap()
+                .offered_codecs()
+                .expect("a pairing leg always names its codecs");
+            let shared: Vec<u8> = caller
+                .iter()
+                .copied()
+                .filter(|pt| callee.contains(pt))
+                .collect();
+            assert_eq!(
+                shared,
+                vec![101],
+                "{}: the legs share {:?} beyond telephone-event, so a PBX could \
+                 native-bridge and the scenario would prove nothing",
+                pairing.env_value(),
+                shared
+            );
+        }
+    }
+
+    #[test]
+    fn pcmu_profile_offers_pcmu_alone() {
+        assert_eq!(CodecProfile::Pcmu.offered_codecs(), Some(vec![0, 101]));
+    }
+
+    #[test]
+    fn transcode_pairings_round_trip_their_names() {
+        for pairing in ALL_PAIRINGS {
+            assert_eq!(CodecPairing::parse(pairing.env_value()).unwrap(), pairing);
+        }
+        assert!(
+            CodecPairing::parse("amrnb").is_err(),
+            "a profile is not a pairing"
+        );
+    }
+
+    #[test]
+    fn transcode_pairings_have_no_profile_for_non_media_roles() {
+        assert!(CodecPairing::AmrNbPcmu.profile_for(Role::Target).is_err());
+    }
+
+    /// The precedence ladder, pinned as a pure function so no test mutates
+    /// the process environment.
+    #[test]
+    fn select_codec_profile_resolves_the_transcode_legs_per_role() {
+        let caller = select_codec_profile(
+            Scenario::AmrTranscodeCall,
+            Some(Role::Caller),
+            None,
+            None,
+            Some("amrwb_pcmu"),
+        )
+        .unwrap();
+        let callee = select_codec_profile(
+            Scenario::AmrTranscodeCall,
+            Some(Role::Callee),
+            None,
+            None,
+            Some("amrwb_pcmu"),
+        )
+        .unwrap();
+        assert_eq!(caller, CodecProfile::AmrWb);
+        assert_eq!(callee, CodecProfile::Pcmu);
+        // No pairing set: the default pairing, not the default profile.
+        assert_eq!(
+            select_codec_profile(
+                Scenario::AmrTranscodeCall,
+                Some(Role::Caller),
+                None,
+                None,
+                None
+            )
+            .unwrap(),
+            CodecProfile::AmrNb
+        );
+    }
+
+    /// The b2bua scenario defaults to AMR-WB — the exit criterion's codec.
+    /// A `_` catch-all in `select_codec_profile` would silently default it to
+    /// PCMU, so this pins the explicit arm.
+    #[test]
+    fn b2bua_scenario_defaults_to_wideband_and_honours_overrides() {
+        assert_eq!(Scenario::parse("b2bua_call").unwrap(), Scenario::B2buaCall);
+        assert_eq!(
+            select_codec_profile(Scenario::B2buaCall, Some(Role::Caller), None, None, None)
+                .unwrap(),
+            CodecProfile::AmrWb
+        );
+        // A global override still wins outside the transcode scenario.
+        assert_eq!(
+            select_codec_profile(
+                Scenario::B2buaCall,
+                Some(Role::B2bua),
+                None,
+                Some("pcmu"),
+                None
+            )
+            .unwrap(),
+            CodecProfile::Pcmu
+        );
+    }
+
+    /// The three b2bua roles map to three distinct users, and the b2bua is the
+    /// user the caller dials — otherwise the inbound leg would never reach it.
+    #[test]
+    fn b2bua_roles_use_three_distinct_users() {
+        for transport in [TransportMode::Udp, TransportMode::TlsSrtp] {
+            let caller = username_for(transport, Role::Caller);
+            let b2bua = username_for(transport, Role::B2bua);
+            let target = username_for(transport, Role::Target);
+            assert_ne!(caller, b2bua);
+            assert_ne!(b2bua, target);
+            assert_ne!(caller, target);
+            assert_eq!(
+                b2bua,
+                target_user_for(transport),
+                "the caller dials the b2bua, so they must share a user"
+            );
+        }
+    }
+
+    /// The tone the caller expects is the target's, and vice versa; the b2bua
+    /// itself sends nothing, so neither side should ever expect its tone.
+    #[test]
+    fn b2bua_tone_mapping_is_asymmetric() {
+        for transport in [TransportMode::Udp, TransportMode::TlsSrtp] {
+            let caller_sends = tone_for_caller(transport);
+            let far = tone_for_b2bua_far(transport);
+            assert_ne!(caller_sends, far);
+            assert_eq!(far, ENDPOINT_1003_TONE_HZ);
+            // The b2bua's own (callee-slot) tone must not be what either end
+            // listens for.
+            assert_ne!(far, tone_for_callee(transport));
+            assert_ne!(caller_sends, tone_for_callee(transport));
+        }
+    }
+
+    #[test]
+    fn select_codec_profile_rejects_a_single_profile_for_the_transcode_scenario() {
+        let error = select_codec_profile(
+            Scenario::AmrTranscodeCall,
+            Some(Role::Caller),
+            None,
+            Some("amrnb"),
+            None,
+        )
+        .expect_err("one profile cannot describe two legs");
+        assert!(
+            error.to_string().contains("PBX_CODEC_PAIRING"),
+            "the refusal should say what to use instead: {error}"
+        );
+    }
+
+    #[test]
+    fn select_codec_profile_lets_an_endpoint_override_win() {
+        // The per-endpoint channel outranks the pairing — it is the designed
+        // escape hatch, including the deliberate same-codec vacuity check.
+        let forced = select_codec_profile(
+            Scenario::AmrTranscodeCall,
+            Some(Role::Callee),
+            Some("amrnb"),
+            None,
+            Some("amrnb_pcmu"),
+        )
+        .unwrap();
+        assert_eq!(forced, CodecProfile::AmrNb);
+        // And outside the transcode scenario nothing changed.
+        assert_eq!(
+            select_codec_profile(
+                Scenario::AmrCall,
+                Some(Role::Caller),
+                None,
+                Some("amrwb"),
+                None
+            )
+            .unwrap(),
+            CodecProfile::AmrWb
+        );
+        assert_eq!(
+            select_codec_profile(Scenario::G729Call, None, None, None, None).unwrap(),
+            CodecProfile::G729AB
+        );
+    }
+
+    /// The pairing whose legs run at different rates exercises the floor as
+    /// a duration: same milliseconds, different sample counts.
+    #[test]
+    fn transcode_legs_run_at_their_own_rate() {
+        let caller = CodecPairing::AmrWbPcmu.profile_for(Role::Caller).unwrap();
+        let callee = CodecPairing::AmrWbPcmu.profile_for(Role::Callee).unwrap();
+        assert_eq!(amr_sample_rate(caller), 16_000);
+        assert_eq!(amr_sample_rate(callee), 8_000);
+        assert_eq!(
+            min_received_samples(amr_sample_rate(caller)) * 1000 / 16_000,
+            min_received_samples(amr_sample_rate(callee)) * 1000 / 8_000,
+        );
     }
 }

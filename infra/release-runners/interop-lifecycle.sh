@@ -101,7 +101,7 @@ PY
     -subj '/CN=localhost' -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' \
     >/dev/null 2>&1
   cp "$build/keys/asterisk.pem" "$build/keys/ca.pem"
-  docker build -t rvoip-release-asterisk "$build"
+  docker build --build-arg MAKE_JOBS="$(nproc)" -t rvoip-release-asterisk "$build"
   docker run -d --name rvoip-release-asterisk --network host \
     -v "$build/config/pjsip.conf:/etc/asterisk/pjsip.conf:ro" \
     -v "$build/config/extensions.conf:/etc/asterisk/extensions.conf:ro" \
@@ -127,6 +127,7 @@ MEDIA_ADVERTISED_IP=127.0.0.1
 LOCAL_PORT=5070
 POST_REGISTER_SETTLE_SECS=2
 REGISTRATION_IDLE_SECS=1
+PBX_REQUIRE_AMR=1
 EOF
 }
 
@@ -187,6 +188,7 @@ FREESWITCH_TLS_USERS=1001,1002,1003
 RVOIP_LOCAL_IP=127.0.0.1
 RVOIP_ADVERTISED_IP=127.0.0.1
 RVOIP_MEDIA_ADVERTISED_IP=127.0.0.1
+PBX_REQUIRE_AMR=1
 EOF
 }
 
@@ -221,11 +223,25 @@ sipp_stop() {
   fi
 }
 
+proxy_up() {
+  # The compose-based proxy labs own their rendering, readiness gates
+  # (registrar answering AND rtpengine enabled), and env-file writing.
+  RVOIP_PBX_LOCAL_ENV_ROOT="$LOCAL_ENV_ROOT" sh "$PBX_SNAPSHOT/$1/up.sh"
+}
+
+proxy_down() {
+  sh "$PBX_SNAPSHOT/$1/down.sh"
+}
+
 case "$ACTION" in
   asterisk-up) asterisk_up ;;
   asterisk-down|restore-asterisk-down) down rvoip-release-asterisk ;;
   freeswitch-up) freeswitch_up ;;
   freeswitch-down|restore-freeswitch-down) down rvoip-freeswitch ;;
+  kamailio-up) proxy_up kamailio ;;
+  kamailio-down|restore-kamailio-down) proxy_down kamailio ;;
+  opensips-up) proxy_up opensips ;;
+  opensips-down|restore-opensips-down) proxy_down opensips ;;
   sipp-start) sipp_start ;;
   sipp-stop) sipp_stop ;;
   *) echo "unknown interop lifecycle action: $ACTION" >&2; exit 2 ;;

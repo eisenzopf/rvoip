@@ -38,6 +38,7 @@ fn descriptor_with_opus() -> Arc<CapabilityDescriptor> {
             clock_rate_hz: 48_000,
             channels: 1,
             fmtp: None,
+            payload_type: None,
         }],
         ..Default::default()
     })
@@ -543,6 +544,7 @@ async fn subscribe_refuses_unsupported_codec_with_488() {
                 clock_rate_hz: 48_000,
                 channels: 1,
                 fmtp: None,
+                payload_type: None,
             }),
         },
     );
@@ -615,6 +617,7 @@ async fn subscribe_accepts_when_codec_in_default_set() {
                 clock_rate_hz: 48_000,
                 channels: 1,
                 fmtp: None,
+                payload_type: None,
             }),
         },
     );
@@ -672,6 +675,7 @@ async fn from_participant_skips_unsupported_codec_streams() {
                 clock_rate_hz: 48_000,
                 channels: 1,
                 fmtp: None,
+                payload_type: None,
             }),
         },
     );
@@ -687,6 +691,7 @@ async fn from_participant_skips_unsupported_codec_streams() {
                 clock_rate_hz: 48_000,
                 channels: 1,
                 fmtp: None,
+                payload_type: None,
             }),
         },
     );

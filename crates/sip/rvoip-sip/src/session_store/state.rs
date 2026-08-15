@@ -24,6 +24,15 @@ pub struct NegotiatedConfig {
     pub codec: String,
     pub sample_rate: u32,
     pub channels: u8,
+    /// The peer's `a=fmtp` parameter string, when the answer carried one.
+    ///
+    /// Not decoration for every codec: AMR's `octet-align` selects the RTP
+    /// payload's bit layout, so a leg that reached the media layer without it
+    /// builds a framing the peer cannot parse. Opus's `maxaveragebitrate` and
+    /// `cbr` are quieter but real — `rvoip-core` keys its transcoding groups
+    /// on this field, so dropping it puts every SIP leg in one group.
+    #[serde(default)]
+    pub fmtp: Option<String>,
 }
 
 impl fmt::Debug for NegotiatedConfig {
@@ -35,6 +44,7 @@ impl fmt::Debug for NegotiatedConfig {
             .field("codec_bytes", &self.codec.len())
             .field("sample_rate", &self.sample_rate)
             .field("channels", &self.channels)
+            .field("fmtp_present", &self.fmtp.is_some())
             .finish()
     }
 }
@@ -1397,14 +1407,26 @@ mod tests {
             codec: codec.to_string(),
             sample_rate: 48_000,
             channels: 2,
+            fmtp: None,
         }
     }
 
+    /// The hot state's inline footprint, pinned.
+    ///
+    /// The exact-equality assertion is a tripwire rather than a limit: growth
+    /// is allowed, but it must be noticed and explained rather than
+    /// accumulating a field at a time. It last moved 576 → 608 when
+    /// [`NegotiatedConfig`] gained its `fmtp`, which is an `Option<String>`
+    /// like every other fmtp field in the stack — 24 bytes plus alignment.
+    /// The alternative, a `Box<str>`, saves eight of those and costs a
+    /// representation that differs from the three layers this value is copied
+    /// into; the ratio below is what actually matters and 608 is under a third
+    /// of the pre-split budget.
     #[test]
     fn session_state_cold_split_keeps_hot_revision_below_sixty_percent() {
         const PRE_COLD_SPLIT_INLINE_BYTES: usize = 1_984;
         let current = std::mem::size_of::<SessionState>();
-        assert_eq!(current, 576, "SessionState hot layout changed unexpectedly");
+        assert_eq!(current, 608, "SessionState hot layout changed unexpectedly");
         assert!(
             current * 100 <= PRE_COLD_SPLIT_INLINE_BYTES * 60,
             "SessionState inline size regressed: before={PRE_COLD_SPLIT_INLINE_BYTES}, current={current}"

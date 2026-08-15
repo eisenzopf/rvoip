@@ -2950,9 +2950,21 @@ def validate_proxy_interop_result(report_root: Path) -> dict[str, Any]:
     }
 
 
+# Gate name -> the `provider` column value its rows carry in pbx/matrix.tsv.
+# The proxy labs (registrar-proxy + rtpengine media relay) append to the same
+# matrix as the B2BUA providers, so their rows need the same row-level check:
+# without one, a proxy gate that exits 0 having recorded nothing would pass.
+PBX_MATRIX_PROVIDERS = {
+    "local Asterisk PBX matrix": "asterisk",
+    "local FreeSWITCH PBX matrix": "freeswitch",
+    "local Kamailio PBX matrix": "kamailio",
+    "local OpenSIPS PBX matrix": "opensips",
+}
+
+
 def interop_observed_check(report_root: Path, name: str) -> dict[str, Any] | None:
-    if name in {"local Asterisk PBX matrix", "local FreeSWITCH PBX matrix"}:
-        provider = "asterisk" if "Asterisk" in name else "freeswitch"
+    if name in PBX_MATRIX_PROVIDERS:
+        provider = PBX_MATRIX_PROVIDERS[name]
         path = report_root / "pbx/matrix.tsv"
         lines = path.read_text().splitlines()
         header = lines[0].split("\t")
@@ -2963,10 +2975,19 @@ def interop_observed_check(report_root: Path, name: str) -> dict[str, Any] | Non
             for line in lines[1:]
             if (cells := line.split("\t"))[provider_index] == provider
         ]
+        # SKIP rows are the AMR capability probe declining cells the PBX
+        # image cannot run (see examples/pbx/amr_probe.sh); they are evidence
+        # of a deliberate non-run, not of success, so the gate needs at least
+        # one genuine PASS alongside them and tolerates no FAIL.
         return {
             "check": f"{provider} PBX matrix rows",
-            "observed": {"rows": len(statuses), "pass": statuses.count("PASS")},
-            "passed": bool(statuses) and all(status == "PASS" for status in statuses),
+            "observed": {
+                "rows": len(statuses),
+                "pass": statuses.count("PASS"),
+                "skip": statuses.count("SKIP"),
+            },
+            "passed": statuses.count("PASS") > 0
+            and all(status in {"PASS", "SKIP"} for status in statuses),
         }
     if name == "SIPp standalone matrix":
         counts = count_tsv_results(report_root / "sipp/runs.tsv")

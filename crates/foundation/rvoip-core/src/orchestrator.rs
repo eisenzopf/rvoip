@@ -60,7 +60,6 @@ use dashmap::DashMap;
 use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
 use rvoip_infra_common::events::cross_crate::RvoipCrossCrateEvent;
 use rvoip_media_core::codec::transcoding::Transcoder;
-use rvoip_media_core::processing::format::FormatConverter;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -10269,9 +10268,7 @@ async fn await_media_route(graph: &MediaGraphHandle, route_id: &MediaRouteId) ->
 /// otherwise leaves the transcoder slot empty (passthrough).
 fn make_swap(from_pt: u8, to_pt: u8) -> frame_pump::TranscoderSwap {
     let transcoder = if from_pt != to_pt {
-        Some(Transcoder::new(Arc::new(TokioRwLock::new(
-            FormatConverter::new(),
-        ))))
+        Some(Transcoder::new())
     } else {
         None
     };

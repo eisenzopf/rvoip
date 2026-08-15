@@ -3,9 +3,11 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import sys
+import tomllib
 import unittest
 
 
+ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = Path(__file__).with_name("run_checks.py")
 SPEC = importlib.util.spec_from_file_location("run_checks", SCRIPT)
 assert SPEC and SPEC.loader
@@ -126,6 +128,80 @@ class RunChecksTests(unittest.TestCase):
         self.assertIn("rvoip-infra-common", commands[0][0])
         self.assertIn("otel", commands[0][0])
         self.assertIn("--all-targets", commands[0][0])
+
+    def test_codec_gate_runs_what_the_default_feature_shards_compile_out(self) -> None:
+        # Every crate whose feature-gated codec tests the shards compile out.
+        # Adding one here is the point of the list; the count is derived from
+        # it rather than written down, because the previous hard-coded 4 went
+        # stale the moment rvoip-sip was added and left this test failing on
+        # every run until someone read the assertion rather than the summary.
+        expected_packages = (
+            "rvoip-codec-core",
+            "rvoip-media-core",
+            "rvoip-sip",
+            "rvoip-core",
+        )
+        # One gate per package, so no gate carries more than one package's
+        # worth of `--all-features` building. The combined gate timed out.
+        self.assertEqual(
+            sorted(run_checks.CODEC_FEATURE_GATES.values()),
+            sorted(expected_packages),
+        )
+        for gate, package in run_checks.CODEC_FEATURE_GATES.items():
+            with self.subTest(gate=gate):
+                commands = run_checks.specialty_commands(gate, Path("/workspace"))
+                argv = [item[0] for item in commands]
+                # Exactly this package's test and clippy, and nothing else:
+                # a gate that quietly grew a second package would restore the
+                # timeout this split exists to remove.
+                self.assertEqual(len(argv), 2)
+                # Every command turns the optional features on. A command here
+                # limited to the defaults duplicates the shard and proves
+                # nothing. `rvoip-sip` names them instead of asking for all,
+                # because "all" includes the release-only perf harness.
+                for command in argv:
+                    if package == "rvoip-sip":
+                        self.assertIn("--features", command)
+                        self.assertIn(run_checks.NON_PERF_SIP_FEATURES, command)
+                        self.assertNotIn("--all-features", command)
+                    else:
+                        self.assertIn("--all-features", command)
+                # Exact list membership, not a substring match, so
+                # "rvoip-core" does not also claim rvoip-codec-core's rows.
+                owned = [command for command in argv if package in command]
+                self.assertEqual(len(owned), 2)
+                self.assertEqual(
+                    sorted(command[1] for command in owned), ["clippy", "test"]
+                )
+
+    def test_sip_codec_gate_names_every_feature_except_the_perf_harness(self) -> None:
+        # Derived from the manifest rather than restated, so adding a feature
+        # to rvoip-sip fails here instead of silently going ungated -- the
+        # same staleness that let the hard-coded package count above rot.
+        manifest = ROOT / "crates/sip/rvoip-sip/Cargo.toml"
+        with manifest.open("rb") as handle:
+            features = tomllib.load(handle)["features"]
+        expected = sorted(
+            name
+            for name in features
+            if name != "default" and not name.startswith("perf")
+        )
+        self.assertEqual(run_checks.NON_PERF_SIP_FEATURES.split(","), expected)
+        # The exclusion is the perf harness and nothing else. If rvoip-sip
+        # ever stops having one, this gate should go back to --all-features.
+        self.assertTrue(any(name.startswith("perf") for name in features))
+
+    def test_shards_alone_never_reach_the_optional_codecs(self) -> None:
+        # The reason the gate above exists, asserted rather than assumed: the
+        # shard that owns rvoip-codec-core builds it with its default features,
+        # which is g711 only. Should the shards ever gain --all-features, this
+        # fails and the specialty gate becomes removable.
+        for commands in (
+            run_checks.shard_commands("rvoip-codec-core,rvoip-media-core"),
+            run_checks.shard_test_commands("rvoip-codec-core"),
+        ):
+            for command, _, _ in commands:
+                self.assertNotIn("--all-features", command)
 
     def test_release_tooling_gate_owns_proxy_harness_tests(self) -> None:
         commands = run_checks.specialty_commands("release-tooling", Path("/workspace"))

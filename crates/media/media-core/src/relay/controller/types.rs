@@ -22,6 +22,33 @@ pub const RTP_PAYLOAD_TYPE_PARAMETER: &str = "rtp_payload_type";
 pub const RTP_CLOCK_RATE_PARAMETER: &str = "rtp_clock_rate";
 /// `MediaConfig::parameters` key carrying the negotiated audio channel count.
 pub const AUDIO_CHANNELS_PARAMETER: &str = "audio_channels";
+/// `MediaConfig::parameters` key carrying the negotiated `a=fmtp` parameters.
+///
+/// Codec-agnostic and deliberately unparsed. For AMR these select the wire
+/// framing itself, which makes them part of a session's media identity rather
+/// than a tuning detail — see [`super::bridge`].
+pub const NEGOTIATED_FMTP_PARAMETER: &str = "negotiated_fmtp";
+
+/// Whether an AMR session may replace silence with comfort noise.
+///
+/// `"true"` enables it; anything else, or absence, leaves it off.
+///
+/// Local policy rather than a negotiated parameter: RFC 4867 has no fmtp for
+/// DTX, and a sender may use it or not without telling the peer — every
+/// conforming AMR receiver must handle SID and NO_DATA frames regardless.
+/// Off by default because it changes what goes on the wire, and a deployment
+/// should opt into that rather than discover it.
+pub const AMR_DTX_PARAMETER: &str = "amr_dtx";
+
+/// Whether an AMR session may ask its peer to change rate on its own.
+///
+/// `"true"` enables it; anything else, or absence, leaves it off.
+///
+/// Local policy like [`AMR_DTX_PARAMETER`]: a codec mode request is advice to
+/// the sender and needs no negotiation. Off by default because an automatic
+/// requester that gets its damping wrong oscillates the peer's rate, which is
+/// worse than never asking at all.
+pub const AMR_AUTO_CMR_PARAMETER: &str = "amr_auto_cmr";
 
 /// Media configuration for a session
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +88,62 @@ impl MediaConfig {
             .insert(AUDIO_CHANNELS_PARAMETER.to_string(), channels.to_string());
         self
     }
+
+    /// Record the negotiated `a=fmtp` parameter string, or clear it.
+    ///
+    /// `None` means the peer sent no usable `a=fmtp` line, which is a
+    /// statement rather than an absence of one: for AMR it selects every RFC
+    /// 4867 default. It therefore has to *remove* any value a previous
+    /// negotiation left behind. A re-INVITE from octet-aligned AMR to
+    /// bandwidth-efficient AMR — or to any codec at all — reaches this with
+    /// `None`, and callers seed the new configuration from the old one, so
+    /// skipping the write would leave the stale string in place and make the
+    /// bridge's framing guard refuse a pair that is in fact compatible.
+    #[must_use]
+    pub fn with_negotiated_fmtp(mut self, fmtp: Option<&str>) -> Self {
+        match fmtp {
+            Some(fmtp) => {
+                self.parameters
+                    .insert(NEGOTIATED_FMTP_PARAMETER.to_string(), fmtp.to_string());
+            }
+            None => {
+                self.parameters.remove(NEGOTIATED_FMTP_PARAMETER);
+            }
+        }
+        self
+    }
+
+    /// Set or clear the AMR discontinuous-transmission opt-in
+    /// ([`AMR_DTX_PARAMETER`]).
+    ///
+    /// Clears rather than writing `"false"` so an absent key and a disabled
+    /// one are the same state — `resolve_codec` treats anything that is not
+    /// `"true"` as off, and a stale `"true"` from a previous generation must
+    /// not survive a configuration that disables it.
+    #[must_use]
+    pub fn with_amr_dtx(mut self, dtx: bool) -> Self {
+        if dtx {
+            self.parameters
+                .insert(AMR_DTX_PARAMETER.to_string(), "true".to_string());
+        } else {
+            self.parameters.remove(AMR_DTX_PARAMETER);
+        }
+        self
+    }
+
+    /// Set or clear automatic codec mode requests
+    /// ([`AMR_AUTO_CMR_PARAMETER`]). Cleared rather than falsified, for the
+    /// same reason as [`Self::with_amr_dtx`].
+    #[must_use]
+    pub fn with_amr_auto_cmr(mut self, auto_cmr: bool) -> Self {
+        if auto_cmr {
+            self.parameters
+                .insert(AMR_AUTO_CMR_PARAMETER.to_string(), "true".to_string());
+        } else {
+            self.parameters.remove(AMR_AUTO_CMR_PARAMETER);
+        }
+        self
+    }
 }
 
 /// Exact audio codec parameters used by one media dialog.
@@ -74,6 +157,18 @@ pub struct NegotiatedAudioCodec {
     pub clock_rate: u32,
     /// Number of interleaved PCM channels.
     pub channels: u8,
+    /// The negotiated `a=fmtp` line for this codec, when there was one.
+    ///
+    /// Carried because for AMR it is not decoration: `octet-align` selects the
+    /// payload's bit layout, so a session that lost it would build a framing
+    /// the peer cannot parse. Every other codec here ignores it.
+    pub fmtp: Option<String>,
+    /// Whether this session's encoder may emit comfort noise — see
+    /// [`AMR_DTX_PARAMETER`]. Meaningless for every codec but AMR.
+    pub dtx: bool,
+    /// Whether this session may ask its peer to change rate on its own — see
+    /// [`AMR_AUTO_CMR_PARAMETER`]. Meaningless for every codec but AMR.
+    pub auto_cmr: bool,
 }
 
 /// Media session status
@@ -272,4 +367,57 @@ pub struct RtpSessionWrapper {
 
     #[cfg(feature = "memory-diagnostics")]
     pub memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn config() -> MediaConfig {
+        MediaConfig {
+            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 10_000),
+            remote_addr: None,
+            preferred_codec: None,
+            parameters: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn amr_dtx_opt_in_is_written_and_cleared_rather_than_falsified() {
+        let enabled = config().with_amr_dtx(true);
+        assert_eq!(
+            enabled
+                .parameters
+                .get(AMR_DTX_PARAMETER)
+                .map(String::as_str),
+            Some("true")
+        );
+
+        // Disabling must remove the key, not write "false": resolve_codec
+        // reads anything-but-"true" as off, so a leftover value would be
+        // indistinguishable from absence to a reader but would still show up
+        // in diagnostics as though DTX had been configured.
+        let disabled = enabled.with_amr_dtx(false);
+        assert!(!disabled.parameters.contains_key(AMR_DTX_PARAMETER));
+    }
+
+    #[test]
+    fn amr_dtx_does_not_disturb_the_negotiated_fmtp() {
+        // Both live in the same parameter map and are set on the same commit
+        // when a codec is applied; neither may clobber the other.
+        let both = config()
+            .with_negotiated_fmtp(Some("octet-align=1"))
+            .with_amr_dtx(true);
+        assert_eq!(
+            both.parameters
+                .get(NEGOTIATED_FMTP_PARAMETER)
+                .map(String::as_str),
+            Some("octet-align=1")
+        );
+        assert_eq!(
+            both.parameters.get(AMR_DTX_PARAMETER).map(String::as_str),
+            Some("true")
+        );
+    }
 }

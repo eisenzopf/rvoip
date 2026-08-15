@@ -175,6 +175,7 @@ async fn whip_webrtc_bridged_to_real_quic_leg() {
         clock_rate_hz: 48000,
         channels: 1,
         fmtp: None,
+        payload_type: None,
     };
     let client_stream = QuicDatagramMediaStream::start(
         StreamId::new(),

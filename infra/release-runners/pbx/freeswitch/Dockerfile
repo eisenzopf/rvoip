@@ -30,11 +30,14 @@ RUN apt-get update \
         libjpeg-dev \
         libldns-dev \
         liblua5.2-dev \
+        libopencore-amrnb-dev \
+        libopencore-amrwb-dev \
         libopus-dev \
         libpcre3-dev \
         libperl-dev \
         libsndfile1-dev \
         libspeex-dev \
+        libvo-amrwbenc-dev \
         libspeexdsp-dev \
         libsqlite3-dev \
         libssl-dev \
@@ -117,9 +120,12 @@ RUN apt-get update \
         libjpeg62-turbo \
         libldns3 \
         liblua5.2-0 \
+        libopencore-amrnb0 \
+        libopencore-amrwb0 \
         libopus0 \
         libpcre3 \
         libsndfile1 \
+        libvo-amrwbenc0 \
         libspeex1 \
         libspeexdsp1 \
         libsqlite3-0 \

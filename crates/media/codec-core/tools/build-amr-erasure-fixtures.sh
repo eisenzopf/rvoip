@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# Generate erased-frame fixtures and the reference PCM for them, both variants.
+#
+# Both decoders implement concealment and neither can be shown to run it: every
+# committed fixture is a clean stream, so `FrameQuality::Good` is the only path
+# a test has ever taken. Concealment is also where a decoder is least likely to
+# be right by accident — it is pure state machine, it only runs when something
+# has already gone wrong, and getting it wrong sounds like a bad network rather
+# than like a bug.
+#
+# The storage format carries the frame quality in the ToC byte's bit 2 (RFC 4867
+# §5.3, and `decoder.c`: `q = (toc >> 2) & 1`). Clearing it marks the frame
+# SPEECH_BAD, which is exactly what an RTP receiver does when the payload's Q bit
+# is zero — so the fixture is the real signal, not a simulation of one.
+#
+# The erasure pattern is deliberate rather than random:
+#   frame 5        a single loss in a clean run
+#   frames 10-12   a burst, so the erasure state machine climbs past one
+#   frame 13       the first good frame after a burst, where both gain
+#                  concealers limit against the last known-good value
+#   frames 20,22   alternating, which keeps the machine oscillating instead of
+#                  settling
+#
+# Usage: build-amr-erasure-fixtures.sh
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TESTDATA="$HERE/../src/codecs/amr/testdata"
+NB_WORK="${TMPDIR:-/tmp}/rvoip-amrnb-reference"
+WB_WORK="${TMPDIR:-/tmp}/rvoip-amr-reference"
+
+for d in "$NB_WORK/c-code" "$WB_WORK"; do
+  test -e "$d" || { echo "reference missing at $d; run the build scripts first" >&2; exit 1; }
+done
+
+ERASED="5 10 11 12 20 22"
+
+erase() { # in, out, magic-length, frame-size-table-lookup handled in python
+  python3 - "$1" "$2" "$3" "$ERASED" <<'PYEOF'
+import sys
+src, dst, magic_len, erased = sys.argv[1], sys.argv[2], int(sys.argv[3]), set(map(int, sys.argv[4].split()))
+
+# Frame body sizes by frame type, excluding the ToC byte. Narrowband and
+# wideband disagree on every entry, so the table is chosen by magic length.
+NB = [12, 13, 15, 17, 19, 20, 26, 31, 5, 0, 0, 0, 0, 0, 0, 0]
+WB = [17, 23, 32, 36, 40, 46, 50, 58, 60, 5, 0, 0, 0, 0, 0, 0]
+sizes = NB if magic_len == 6 else WB
+
+data = open(src, "rb").read()
+out = bytearray(data[:magic_len])
+pos, frame = magic_len, 0
+while pos < len(data):
+    toc = data[pos]
+    ft = (toc >> 3) & 0x0F
+    body = sizes[ft]
+    # Bit 2 is the quality bit: clearing it says "these bits arrived damaged".
+    out.append(toc & ~0x04 if frame in erased else toc)
+    out += data[pos + 1 : pos + 1 + body]
+    pos += 1 + body
+    frame += 1
+open(dst, "wb").write(bytes(out))
+print(f"    {frame} frames, {len(erased)} erased")
+PYEOF
+}
+
+echo "==> AMR-NB: erasing frames $ERASED from 7.40 kbit/s"
+erase "$TESTDATA/amrnb_mode4.amr" "$TESTDATA/amrnb_erased.amr" 6
+"$NB_WORK/amrnb_dec" "$TESTDATA/amrnb_erased.amr" "$TESTDATA/amrnb_erased.pcm" >/dev/null 2>&1
+ls -l "$TESTDATA/amrnb_erased.pcm" | awk '{print "    reference PCM: " $5 " bytes"}'
+
+echo "==> AMR-NB: the same frames LOST rather than damaged"
+# Narrowband has no SPEECH_LOST frame type. RFC 4867 §4.3.1 gives AMR-NB frame
+# type 15 for NO_DATA, and that is what a receiver marks a frame it never got:
+# the reference's `RX_NO_DATA` path fills the parameter vector with pseudo-random
+# values sized by the mode and decodes them as if they were real, with the bad-
+# frame flag set. So the same distinction wideband draws with FT 14 is drawn
+# here with FT 15, and the two decode differently for the same reason: a damaged
+# frame still carries usable pulses.
+python3 - "$TESTDATA/amrnb_mode4.amr" "$TESTDATA/amrnb_lost.amr" "$ERASED" <<'NBLOSTEOF'
+import sys
+src, dst, erased = sys.argv[1], sys.argv[2], set(map(int, sys.argv[3].split()))
+NB = [12, 13, 15, 17, 19, 20, 26, 31, 5] + [0] * 7
+data = open(src, "rb").read()
+out = bytearray(data[:6])
+pos, frame = 6, 0
+while pos < len(data):
+    toc = data[pos]
+    body = NB[(toc >> 3) & 0x0F]
+    if frame in erased:
+        # FT 15 with the quality bit set: the transport knows the frame is
+        # gone, which is a different statement from "these bits may be wrong".
+        out.append((15 << 3) | 0x04)
+    else:
+        out.append(toc)
+        out += data[pos + 1 : pos + 1 + body]
+    pos += 1 + body
+    frame += 1
+open(dst, "wb").write(bytes(out))
+print(f"    {frame} frames, {len(erased)} lost")
+NBLOSTEOF
+"$NB_WORK/amrnb_dec" "$TESTDATA/amrnb_lost.amr" "$TESTDATA/amrnb_lost.pcm" >/dev/null 2>&1
+ls -l "$TESTDATA/amrnb_lost.pcm" | awk '{print "    reference PCM: " $5 " bytes"}'
+# A lost frame still produces 160 samples: the decoder conceals rather than
+# skipping. Anything else means the reference dropped the frame instead of
+# concealing it, and the fixture would be measuring the wrong thing.
+python3 - "$TESTDATA/amrnb_lost.pcm" "$TESTDATA/amrnb_mode4.pcm" <<'LENEOF'
+import sys
+lost, clean = (open(p, "rb").read() for p in sys.argv[1:3])
+if len(lost) != len(clean):
+    sys.exit(f"    lost stream is {len(lost)} bytes, clean is {len(clean)}: frames were dropped, not concealed")
+print(f"    {len(lost) // 320} frames concealed in place")
+LENEOF
+
+echo "==> AMR-WB: erasing the same frames from 12.65 kbit/s"
+erase "$TESTDATA/amrwb_mode2.amr" "$TESTDATA/amrwb_erased.amr" 9
+"$WB_WORK/amrwb_dec" -mime "$TESTDATA/amrwb_erased.amr" "$TESTDATA/amrwb_erased.pcm" >/dev/null 2>&1
+ls -l "$TESTDATA/amrwb_erased.pcm" | awk '{print "    reference PCM: " $5 " bytes"}'
+
+echo "==> AMR-WB: the same frames LOST rather than damaged"
+# A damaged frame and a lost one are different inputs, not two names for one.
+# A damaged frame still carries usable codebook bits and an LTP filter select
+# bit, and the reference decodes both; a lost one carries nothing and its
+# innovation becomes noise. Collapsing the two discards good pulses and sounds
+# hollow. Frame type 14 is AMR-WB's SPEECH_LOST, with a zero-length body.
+python3 - "$TESTDATA/amrwb_mode2.amr" "$TESTDATA/amrwb_lost.amr" "$ERASED" <<'LOSTEOF'
+import sys
+src, dst, erased = sys.argv[1], sys.argv[2], set(map(int, sys.argv[3].split()))
+WB = [17, 23, 32, 36, 40, 46, 50, 58, 60, 5] + [0] * 6
+data = open(src, "rb").read()
+out = bytearray(data[:9])
+pos, frame = 9, 0
+while pos < len(data):
+    toc = data[pos]
+    body = WB[(toc >> 3) & 0x0F]
+    if frame in erased:
+        # FT 14 with the quality bit still set: the transport knows the frame
+        # is gone, which is a different statement from "these bits may be
+        # wrong".
+        out.append((14 << 3) | 0x04)
+    else:
+        out.append(toc)
+        out += data[pos + 1 : pos + 1 + body]
+    pos += 1 + body
+    frame += 1
+open(dst, "wb").write(bytes(out))
+print(f"    {frame} frames, {len(erased)} lost")
+LOSTEOF
+"$WB_WORK/amrwb_dec" -mime "$TESTDATA/amrwb_lost.amr" "$TESTDATA/amrwb_lost.pcm" >/dev/null 2>&1
+ls -l "$TESTDATA/amrwb_lost.pcm" | awk '{print "    reference PCM: " $5 " bytes"}'
+
+echo "==> sanity check: the erased streams must NOT decode to the clean ones"
+# Otherwise the fixture proves nothing — the erasures would have had no effect,
+# which is what a mis-set quality bit looks like.
+for pair in "amrnb_erased.pcm amrnb_mode4.pcm" "amrwb_erased.pcm amrwb_mode2.pcm" \
+            "amrwb_lost.pcm amrwb_mode2.pcm" "amrwb_lost.pcm amrwb_erased.pcm" \
+            "amrnb_lost.pcm amrnb_mode4.pcm" "amrnb_lost.pcm amrnb_erased.pcm"; do
+  set -- $pair
+  if cmp -s "$TESTDATA/$1" "$TESTDATA/$2"; then
+    echo "    $1 is identical to the clean stream — the quality bit did not take" >&2
+    exit 1
+  fi
+done
+echo "    all six comparisons differ, as they must"
+# The lost-vs-damaged pairs are the ones that matter most, one per variant:
+# lost and damaged decode differently, so a test that conflated the two would
+# fail visibly rather than merely be wrong.

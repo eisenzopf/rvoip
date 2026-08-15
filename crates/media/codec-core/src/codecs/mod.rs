@@ -84,6 +84,9 @@ pub mod g729;
 #[cfg(feature = "opus")]
 pub mod opus;
 
+#[cfg(any(feature = "amr-nb", feature = "amr-wb"))]
+pub mod amr;
+
 /// Codec factory for creating codec instances
 pub struct CodecFactory;
 
@@ -130,6 +133,18 @@ impl CodecFactory {
                 Ok(Box::new(codec))
             }
 
+            #[cfg(feature = "amr-nb")]
+            CodecType::AmrNb => {
+                let codec = amr::AmrCodec::new(&config)?;
+                Ok(Box::new(codec))
+            }
+
+            #[cfg(feature = "amr-wb")]
+            CodecType::AmrWb => {
+                let codec = amr::AmrCodec::new(&config)?;
+                Ok(Box::new(codec))
+            }
+
             codec_type => Err(CodecError::feature_not_enabled(format!(
                 "Codec {codec_type} not enabled in build features"
             ))),
@@ -150,6 +165,8 @@ impl CodecFactory {
             "G729A" => CodecType::G729A,
             "G729AB" | "G729BA" => CodecType::G729BA,
             "OPUS" => CodecType::Opus,
+            "AMR" => CodecType::AmrNb,
+            "AMR-WB" | "AMRWB" => CodecType::AmrWb,
             _ => return Err(CodecError::unsupported_codec(name)),
         };
 
@@ -203,6 +220,10 @@ impl CodecFactory {
             "G729BA",
             #[cfg(feature = "opus")]
             "OPUS",
+            #[cfg(feature = "amr-nb")]
+            "AMR",
+            #[cfg(feature = "amr-wb")]
+            "AMR-WB",
         ]
     }
 
@@ -217,6 +238,10 @@ impl CodecFactory {
             "G729" | "G729A" | "G729AB" | "G729BA" => true,
             #[cfg(feature = "opus")]
             "OPUS" => true,
+            #[cfg(feature = "amr-nb")]
+            "AMR" => true,
+            #[cfg(feature = "amr-wb")]
+            "AMR-WB" | "AMRWB" => true,
             _ => false,
         }
     }
@@ -300,6 +325,49 @@ pub struct CodecCapabilities {
     pub codec_info: HashMap<CodecType, CodecInfo>,
 }
 
+/// Register the AMR variants enabled by feature flags.
+///
+/// Split out of [`CodecCapabilities::get_all`] to keep that function within the
+/// workspace line limit as codecs accumulate.
+// Both parameters go unused in a build with neither AMR feature enabled.
+#[allow(unused_variables)]
+fn add_amr_capabilities(
+    codec_types: &mut Vec<CodecType>,
+    codec_info: &mut HashMap<CodecType, CodecInfo>,
+) {
+    #[cfg(feature = "amr-nb")]
+    {
+        codec_types.push(CodecType::AmrNb);
+        codec_info.insert(
+            CodecType::AmrNb,
+            CodecInfo {
+                name: "AMR",
+                sample_rate: 8000,
+                channels: 1,
+                bitrate: CodecType::AmrNb.default_bitrate(),
+                frame_size: 160,
+                payload_type: None,
+            },
+        );
+    }
+
+    #[cfg(feature = "amr-wb")]
+    {
+        codec_types.push(CodecType::AmrWb);
+        codec_info.insert(
+            CodecType::AmrWb,
+            CodecInfo {
+                name: "AMR-WB",
+                sample_rate: 16000,
+                channels: 1,
+                bitrate: CodecType::AmrWb.default_bitrate(),
+                frame_size: 320,
+                payload_type: None,
+            },
+        );
+    }
+}
+
 impl CodecCapabilities {
     /// Get capabilities for all supported codecs
     #[must_use]
@@ -356,6 +424,8 @@ impl CodecCapabilities {
                 },
             );
         }
+
+        add_amr_capabilities(&mut codec_types, &mut codec_info);
 
         #[cfg(feature = "g729")]
         {

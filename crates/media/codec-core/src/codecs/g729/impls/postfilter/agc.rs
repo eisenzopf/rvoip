@@ -6,9 +6,10 @@ use crate::codecs::g729::impls::codec::state::DecoderState;
 use crate::codecs::g729::impls::constants::{AGC_FAC, AGC_FAC1, L_SUBFR};
 use crate::codecs::g729::impls::dsp::arith::{add, extract_h, mult, round, sub};
 use crate::codecs::g729::impls::dsp::arith32::{l_mac, l_mult};
-use crate::codecs::g729::impls::dsp::div::{div_s, Inv_sqrt};
+use crate::codecs::g729::impls::dsp::div::div_s;
 use crate::codecs::g729::impls::dsp::shift::{l_shl, norm_l, shr};
 use crate::codecs::g729::impls::dsp::types::{DspContext, Word16, Word32};
+use crate::codecs::g729::impls::math::Inv_sqrt;
 
 pub(crate) fn agc(state: &mut DecoderState, sig_in: &[i16; L_SUBFR], sig_out: &mut [i16; L_SUBFR]) {
     let mut ctx = DspContext::default();

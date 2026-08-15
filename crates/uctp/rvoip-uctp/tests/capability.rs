@@ -17,6 +17,7 @@ fn descriptor_with(audio: &[&str]) -> CapabilityDescriptor {
                 clock_rate_hz: 48000,
                 channels: 1,
                 fmtp: None,
+                payload_type: None,
             })
             .collect(),
         ..Default::default()

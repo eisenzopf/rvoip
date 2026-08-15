@@ -269,6 +269,7 @@ cargo test -p rvoip-sip --test beta_release_docs
 |-----|-------|-------------|------------|-------------|
 | **G.711** (ITU) | PCMU / PCMA | μ-law / A-law audio using static payload types 0/8. | 🟡 **Partial** — audio round-trip is executable; PBX rows require a source-matched release attestation | `T-RTP-W1`, `T-RTP-W2`; PBX matrix is supplemental interop evidence |
 | **G.729** (ITU) | G.729 / G.729A/AB | Low-bitrate audio in the configured PBX profiles. | 🟡 **Partial** — historical `g729a`/`g729ab` PBX rows do not qualify the current source | PBX `g729a g729ab` matrix profiles, subject to clean attestation |
+| **4867** | RTP Payload Format for AMR and AMR-WB | `a=rtpmap:… AMR/8000` / `AMR-WB/16000` with `mode-set`, `octet-align` and `mode-change-*` fmtp; octet-aligned and bandwidth-efficient framing, CMR and DTX. | 🟡 **Partial** — codec and payload format are implemented and lab-verified, including against an independent dissector; no release attestation covers them | Framing agreement with Wireshark's AMR dissector; loopback and SDES-SRTP call tests; PBX and proxy interop lab rows |
 | **6716** | Definition of the Opus Audio Codec | Opus codec. | ⚪ Out of SIP scope — media/webrtc crates | `rvoip-webrtc` |
 | **7587** | RTP Payload Format for Opus | `a=rtpmap:… opus`. | 🔵 **Types only** (SDP) — media in webrtc crate | SDP rtpmap parsing |
 | **6184** | RTP Payload Format for H.264 | Video payload. | ⚪ Out of SIP scope — media/webrtc crates | `rvoip-webrtc` |

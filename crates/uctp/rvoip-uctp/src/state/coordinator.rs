@@ -380,24 +380,30 @@ pub struct UctpCoordinator {
 /// with their own descriptor.
 pub fn default_v0_descriptor() -> CapabilityDescriptor {
     CapabilityDescriptor {
+        // Advertised capabilities, not a negotiation result, so none of them
+        // names a payload type. The one the session settles on is reported by
+        // whichever transport does the negotiating.
         audio_codecs: vec![
             CodecInfo {
                 name: "opus".into(),
                 clock_rate_hz: 48_000,
                 channels: 1,
                 fmtp: None,
+                payload_type: None,
             },
             CodecInfo {
                 name: "g.711-mu".into(),
                 clock_rate_hz: 8_000,
                 channels: 1,
                 fmtp: None,
+                payload_type: None,
             },
             CodecInfo {
                 name: "g.711-a".into(),
                 clock_rate_hz: 8_000,
                 channels: 1,
                 fmtp: None,
+                payload_type: None,
             },
         ],
         ..Default::default()

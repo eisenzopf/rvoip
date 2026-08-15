@@ -13,7 +13,7 @@ categories.workspace = true
 keywords.workspace = true
 
 # Crate-specific description
-description = "G.711 and optional G.729/Opus audio codec implementations for RVOIP"
+description = "G.711 and optional G.729/Opus/AMR audio codec implementations for RVOIP"
 
 [lib]
 name = "codec_core"
@@ -42,6 +42,19 @@ name = "g711_codec"
 harness = false
 required-features = ["g711"]
 
+[[bench]]
+name = "amr_codec"
+harness = false
+required-features = ["amr-nb", "amr-wb"]
+
+# `codecs::amr` is gated on `any(amr-nb, amr-wb)`, and this example imports it
+# unconditionally and walks both variants. Without the declaration Cargo builds
+# it under the default feature set, so `--all-targets` fails to compile on any
+# build that does not happen to enable AMR.
+[[example]]
+name = "amr_rtp_vectors"
+required-features = ["amr-nb", "amr-wb"]
+
 [features]
 default = ["g711"]
 
@@ -52,4 +65,16 @@ opus = ["dep:opus"]          # Opus codec backed by libopus
 # Deprecated compatibility alias. This now enables the real backend; it no
 # longer selects a simulated codec.
 opus-sim = ["opus"]
-all-codecs = ["g711", "g729", "opus"]
+
+# AMR-NB / AMR-WB (3GPP TS 26.071 / TS 26.171, RFC 4867).
+# Both variants encode and decode bit-exactly against the 3GPP reference
+# implementations, including DTX, comfort noise, concealment and homing
+# frames, and both pass the normative conformance sequences shipped with
+# TS 26.073 and TS 26.173. Those sequences are 3GPP copyright and cannot be
+# committed, so the tests covering them are `#[ignore]`d and need a local
+# reference tree -- see docs/AMR_IMPLEMENTATION_STATUS.md for how to run them
+# and for exactly what is and is not claimed.
+amr-nb = []                  # AMR narrowband, 8 kHz
+amr-wb = []                  # AMR wideband (G.722.2), 16 kHz -- the HD voice codec
+amr = ["amr-nb", "amr-wb"]
+all-codecs = ["g711", "g729", "opus", "amr"]

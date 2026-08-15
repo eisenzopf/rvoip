@@ -58,6 +58,9 @@ pub fn validate_frame_size(codec_type: CodecType, frame_size: usize) -> Result<(
             // Opus supports various frame sizes
             vec![120, 240, 480, 960, 1920, 2880]
         }
+        // AMR is fixed at 20 ms: 160 samples at 8 kHz, 320 at 16 kHz.
+        CodecType::AmrNb => vec![160],
+        CodecType::AmrWb => vec![320],
     };
 
     if !expected_sizes.contains(&frame_size) {

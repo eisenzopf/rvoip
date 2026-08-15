@@ -333,6 +333,7 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
         clock_rate_hz: 48000,
         channels: 1,
         fmtp: None,
+        payload_type: None,
     };
 
     let client_a_stream = QuicDatagramMediaStream::start(

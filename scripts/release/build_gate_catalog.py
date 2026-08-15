@@ -60,6 +60,28 @@ PROXY_INTEROP_GATE_IDS = [
     for order in PROXY_INTEROP_ORDERS
     for transport in PROXY_INTEROP_TRANSPORTS
 ]
+PROXY_PBX_PEERS = ["kamailio", "opensips"]
+PROXY_PBX_GATE_IDS = [
+    f"interop.proxy-pbx.{peer}.{stage}"
+    for peer in PROXY_PBX_PEERS
+    for stage in ("up", "matrix", "down")
+]
+# One cell per (variant, transport); each sweeps every mode that variant has.
+AMR_RATE_SWEEP_CELLS = [
+    ("amrnb", "UDP"),
+    ("amrwb", "UDP"),
+    ("amrnb", "TLS"),
+    ("amrwb", "TLS"),
+]
+AMR_RATE_SWEEP_CELL_IDS = [
+    f"interop.amr-rate-sweep.{profile}-{transport.lower()}"
+    for profile, transport in AMR_RATE_SWEEP_CELLS
+]
+AMR_RATE_SWEEP_GATE_IDS = [
+    "interop.amr-rate-sweep.up",
+    *AMR_RATE_SWEEP_CELL_IDS,
+    "interop.amr-rate-sweep.down",
+]
 COMMAND_OVERRIDES = {
     "security.advisory-audit": [
         "cargo",
@@ -89,6 +111,11 @@ COMMAND_OVERRIDES = {
         "PBX_OUT_ROOT={artifact_dir}",
         "PBX_REPORT_APPEND=1",
         "PBX_G729_PROFILES=g729a g729ab",
+        # The runner PBX images build AMR from source (Asterisk: pinned
+        # traud/asterisk-amr patches; FreeSWITCH: mod_amr/mod_amrwb against
+        # the Apache-2.0 codec libraries), so the probe must FIND the codec:
+        # a lab losing it fails the AMR rows loudly instead of skipping.
+        "PBX_REQUIRE_AMR=1",
         "{workspace}/crates/sip/rvoip-sip/examples/pbx/run.sh",
         "--pbx",
         "asterisk",
@@ -102,6 +129,11 @@ COMMAND_OVERRIDES = {
         "PBX_OUT_ROOT={artifact_dir}",
         "PBX_REPORT_APPEND=1",
         "PBX_G729_PROFILES=g729a g729ab",
+        # The runner PBX images build AMR from source (Asterisk: pinned
+        # traud/asterisk-amr patches; FreeSWITCH: mod_amr/mod_amrwb against
+        # the Apache-2.0 codec libraries), so the probe must FIND the codec:
+        # a lab losing it fails the AMR rows loudly instead of skipping.
+        "PBX_REQUIRE_AMR=1",
         "{workspace}/crates/sip/rvoip-sip/examples/pbx/run.sh",
         "--pbx",
         "freeswitch",
@@ -152,8 +184,16 @@ FUZZ_TARGETS = {
     "stun": "stun_response",
     "g711": "g711_unpack",
 }
+# AMR: the RFC 4867 depacketizer on attacker bytes, the decoder DSP behind it,
+# and the encoders on arbitrary PCM. Separate because these have no legacy
+# record and are synthesized by `amr_fuzz_gates`.
+AMR_FUZZ_TARGETS = {
+    "amr-unpack": "amr_unpack",
+    "amr-decode": "amr_decode",
+    "amr-encode": "amr_encode",
+}
 
-for _suffix, _target in FUZZ_TARGETS.items():
+for _suffix, _target in {**FUZZ_TARGETS, **AMR_FUZZ_TARGETS}.items():
     _fuzz_dir = (
         "{workspace}/crates/sip/fuzz"
         if _suffix in {"sip-message", "uri", "header", "sdp"}
@@ -450,6 +490,216 @@ def synthetic_gate(
     }
 
 
+def amr_fuzz_gates() -> list[dict[str, Any]]:
+    """AMR fuzz targets, which post-date the canonical 108-gate run.
+
+    The other fuzz gates ride in as legacy records with a COMMAND_OVERRIDES
+    entry; these have no legacy record to attach to, so they are synthesized
+    with the same command shape. Three targets: the RFC 4867 depacketizer on
+    attacker-controlled bytes, the decoder DSP behind it (where a corrupted
+    field indexes a table), and the encoders on arbitrary PCM.
+    """
+    result = []
+    for suffix, target in AMR_FUZZ_TARGETS.items():
+        gate = synthetic_gate(
+            f"security.fuzz-{suffix}",
+            f"{target} libFuzzer target",
+            executor="argv",
+            command=COMMAND_OVERRIDES[f"security.fuzz-{suffix}"],
+            dependencies=["source.remote-clean"],
+            paths=[
+                "crates/media/fuzz/**",
+                "crates/media/codec-core/src/codecs/amr/**",
+            ],
+        )
+        result.append(gate)
+    return result
+
+
+def proxy_pbx_gates() -> list[dict[str, Any]]:
+    """Kamailio/OpenSIPS registrar-proxy labs with an rtpengine media relay.
+
+    A different oracle class from the B2BUA matrices: the proxy stays in the
+    signalling path via Record-Route while rtpengine relays RTP verbatim, so
+    these are what prove AMR crosses a relay that never re-encodes it. Media
+    flows, unlike the signalling-only `interop.remote-proxies` family, which
+    this deliberately does not replace.
+
+    Each peer is a three-gate chain — up, matrix, down — because the lab has
+    to be torn down even when the matrix fails, and an aggregate cannot
+    express that ordering.
+    """
+    paths = [
+        "crates/sip/rvoip-sip/examples/pbx/**",
+        "crates/media/codec-core/**",
+        "crates/media/media-core/**",
+        "infra/release-runners/pbx/**",
+        "infra/release-runners/interop-lifecycle.sh",
+    ]
+    result = []
+    for peer in PROXY_PBX_PEERS:
+        up = synthetic_gate(
+            f"interop.proxy-pbx.{peer}.up",
+            f"{peer} + rtpengine lab up",
+            executor="argv",
+            command=[
+                "bash",
+                "infra/release-runners/interop-lifecycle.sh",
+                f"{peer}-up",
+            ],
+            resource="gcp-proxy-interop",
+            dependencies=["source.remote-clean"],
+            paths=paths,
+        )
+        up["estimated_seconds"] = 120
+        matrix = synthetic_gate(
+            f"interop.proxy-pbx.{peer}.matrix",
+            f"{peer} + rtpengine AMR passthrough matrix",
+            executor="argv",
+            command=[
+                "env",
+                "PBX_OUT_ROOT={artifact_dir}",
+                "PBX_REPORT_APPEND=1",
+                # The relay forwards payloads verbatim, so one lab config
+                # covers all four AMR framings; the harness sweeps them.
+                "PBX_REQUIRE_AMR=1",
+                "{workspace}/crates/sip/rvoip-sip/examples/pbx/run.sh",
+                "--pbx",
+                peer,
+                "--api",
+                "endpoint",
+                "--scenario",
+                "all",
+            ],
+            resource="gcp-proxy-interop",
+            dependencies=[f"interop.proxy-pbx.{peer}.up"],
+            paths=paths,
+        )
+        matrix["estimated_seconds"] = 600
+        matrix["timeout_minutes"] = 45
+        down = synthetic_gate(
+            f"interop.proxy-pbx.{peer}.down",
+            f"{peer} + rtpengine lab down",
+            executor="argv",
+            command=[
+                "bash",
+                "infra/release-runners/interop-lifecycle.sh",
+                f"{peer}-down",
+            ],
+            resource="gcp-proxy-interop",
+            dependencies=[f"interop.proxy-pbx.{peer}.matrix"],
+            paths=paths,
+            always_fresh=True,
+        )
+        result.extend([up, matrix, down])
+
+    result.append(
+        synthetic_gate(
+            "interop.proxy-pbx",
+            "complete registrar-proxy media matrix (Kamailio and OpenSIPS + rtpengine)",
+            executor="aggregate",
+            dependencies=PROXY_PBX_GATE_IDS,
+            paths=paths,
+        )
+    )
+    return result
+
+
+def amr_rate_sweep_gates() -> list[dict[str, Any]]:
+    """Every AMR mode against a live PBX, one cell per rate.
+
+    The ordinary AMR rows in `interop.asterisk-matrix` all run at whichever
+    mode the encoder opens at, which is the highest the negotiation permits.
+    That leaves the other sixteen rates with conformance-vector evidence and
+    no third-party evidence at all -- so a regression that broke, say, AMR-WB
+    at 12.65 kbit/s would pass the entire release gate.
+
+    Each cell pins one rate the standard way: `Config::amr_mode_set` puts an
+    RFC 4867 `mode-set` in the INVITE naming exactly that mode. `rate-sweep.sh`
+    then fails the gate unless the codec was *built* at the pinned mode --
+    read from media-core's `codec generation built` line, not from the
+    environment variable meant to cause it -- because a cell pinned to one
+    rate and a cell that ignored the pin both carry clean audio, and the
+    status column alone attests to nothing about the rate.
+
+    Both transports, because they are different claims: UDP carries RTP, TLS
+    carries SDES-SRTP, and AMR payload length varies per mode, so the
+    encrypted path exercises frame boundaries that a fixed-size codec never
+    moves.
+
+    Its own up/down chain rather than a link in the shared interop sequence:
+    that chain tears the Asterisk lab down after `interop.asterisk-matrix`,
+    and a sweep appended afterwards would find no lab.
+    """
+    paths = [
+        "crates/sip/rvoip-sip/examples/pbx/**",
+        "crates/media/codec-core/**",
+        "crates/media/media-core/**",
+        "crates/sip/rvoip-sip/src/adapters/media_adapter.rs",
+        "infra/release-runners/interop-lifecycle.sh",
+    ]
+    up = synthetic_gate(
+        "interop.amr-rate-sweep.up",
+        "Asterisk lab up for the AMR per-rate sweep",
+        executor="argv",
+        command=["bash", "infra/release-runners/interop-lifecycle.sh", "asterisk-up"],
+        resource="gcp-interop",
+        dependencies=["source.remote-clean"],
+        paths=paths,
+    )
+    up["estimated_seconds"] = 120
+
+    cells = []
+    for profile, transport in AMR_RATE_SWEEP_CELLS:
+        cell = synthetic_gate(
+            f"interop.amr-rate-sweep.{profile}-{transport.lower()}",
+            f"AMR {profile} every mode over {transport}, each pinned by mode-set",
+            executor="argv",
+            command=[
+                "env",
+                "PBX_OUT_ROOT={artifact_dir}",
+                "PBX_REPORT_APPEND=1",
+                "PBX_REQUIRE_AMR=1",
+                "{workspace}/crates/sip/rvoip-sip/examples/pbx/rate-sweep.sh",
+                "--pbx",
+                "asterisk",
+                "--profile",
+                profile,
+                "--transport",
+                transport,
+            ],
+            resource="gcp-interop",
+            dependencies=["interop.amr-rate-sweep.up"],
+            paths=paths,
+        )
+        # Eight or nine cells, each a full call plus teardown.
+        cell["estimated_seconds"] = 420
+        cell["timeout_minutes"] = 45
+        cells.append(cell)
+
+    down = synthetic_gate(
+        "interop.amr-rate-sweep.down",
+        "Asterisk lab down after the AMR per-rate sweep",
+        executor="argv",
+        command=["bash", "infra/release-runners/interop-lifecycle.sh", "asterisk-down"],
+        resource="gcp-interop",
+        dependencies=[cell["id"] for cell in cells],
+        paths=paths,
+        # Runs even when a sweep fails: a lab left up holds its ports and the
+        # next suite to want them fails for a reason that looks unrelated.
+        always_fresh=True,
+    )
+
+    aggregate = synthetic_gate(
+        "interop.amr-rate-sweep",
+        "complete AMR per-rate matrix (17 modes x UDP and TLS+SRTP)",
+        executor="aggregate",
+        dependencies=[cell["id"] for cell in cells],
+        paths=paths,
+    )
+    return [up, *cells, down, aggregate]
+
+
 def proxy_interop_gates() -> list[dict[str, Any]]:
     paths = [
         "crates/sip/sip-proxy/**",
@@ -665,6 +915,9 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
             paths=["scripts/test_libsrtp_interop.sh", "crates/media/rtp-core/**"],
         ),
         *proxy_interop_gates(),
+        *proxy_pbx_gates(),
+        *amr_rate_sweep_gates(),
+        *amr_fuzz_gates(),
         synthetic_gate(
             "interop.browser-dtmf",
             "real Chromium outbound RFC 4733 interoperability (BridgeFu issue #54)",
@@ -688,7 +941,10 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
             paths=[
                 "crates/webrtc/rvoip-rtc/**",
                 "crates/webrtc/rvoip-webrtc/**",
-                "crates/core/rvoip-core/**",
+                # `crates/core/` has not existed since the directory reorg that
+                # moved this crate to `crates/foundation/`; the glob matched
+                # nothing, so rvoip-core changes never selected this gate.
+                "crates/foundation/rvoip-core/**",
             ],
         ),
     ]
@@ -745,6 +1001,11 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
                 "interop.remote-libsrtp",
                 "interop.remote-proxies",
                 *PROXY_INTEROP_GATE_IDS,
+                "interop.proxy-pbx",
+                *PROXY_PBX_GATE_IDS,
+                "interop.amr-rate-sweep",
+                *AMR_RATE_SWEEP_GATE_IDS,
+                *[f"security.fuzz-{suffix}" for suffix in AMR_FUZZ_TARGETS],
                 "interop.browser-dtmf",
                 "report.remote-aggregate",
                 "source.remote-final",
