@@ -230,13 +230,12 @@ impl OpusCodec {
             })?;
             apply_encoder_config(&mut encoder, &opus_config)?;
 
-            let decoder =
-                opus::Decoder::new(sample_rate, opus_channels).map_err(|e| {
-                    CodecError::ExternalLibraryError {
-                        library: "opus".to_string(),
-                        error: format!("decoder init: {e}"),
-                    }
-                })?;
+            let decoder = opus::Decoder::new(sample_rate, opus_channels).map_err(|e| {
+                CodecError::ExternalLibraryError {
+                    library: "opus".to_string(),
+                    error: format!("decoder init: {e}"),
+                }
+            })?;
 
             RealBackend { encoder, decoder }
         };
@@ -326,13 +325,13 @@ impl OpusCodec {
     #[cfg(feature = "opus")]
     fn real_decode(&mut self, data: &[u8]) -> Result<Vec<i16>> {
         let mut output = vec![0i16; self.frame_size * self.channels as usize];
-        let per_channel_written = self
-            .real
-            .decoder
-            .decode(data, &mut output, false)
-            .map_err(|e| CodecError::DecodingFailed {
-                reason: e.to_string(),
-            })?;
+        let per_channel_written =
+            self.real
+                .decoder
+                .decode(data, &mut output, false)
+                .map_err(|e| CodecError::DecodingFailed {
+                    reason: e.to_string(),
+                })?;
         output.truncate(per_channel_written * self.channels as usize);
         Ok(output)
     }

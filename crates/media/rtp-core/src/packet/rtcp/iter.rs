@@ -52,7 +52,10 @@ pub struct RtcpPacketIter<'a> {
 impl<'a> RtcpPacketIter<'a> {
     /// Create an iterator over the compound RTCP sub-packets in `data`.
     pub fn new(data: &'a [u8]) -> Self {
-        Self { buf: data, done: false }
+        Self {
+            buf: data,
+            done: false,
+        }
     }
 }
 
@@ -134,7 +137,10 @@ mod tests {
     fn sr_bytes(ssrc: u32) -> Bytes {
         RtcpPacket::SenderReport(RtcpSenderReport {
             ssrc,
-            ntp_timestamp: NtpTimestamp { seconds: 1, fraction: 2 },
+            ntp_timestamp: NtpTimestamp {
+                seconds: 1,
+                fraction: 2,
+            },
             rtp_timestamp: 3,
             sender_packet_count: 4,
             sender_octet_count: 5,
@@ -168,12 +174,19 @@ mod tests {
             .expect("all sub-packets should be readable");
 
         assert_eq!(items.len(), 3);
-        assert!(matches!(&items[0], RtcpPacketItem::Known(RtcpPacket::SenderReport(sr)) if sr.ssrc == 0x1111_1111));
+        assert!(
+            matches!(&items[0], RtcpPacketItem::Known(RtcpPacket::SenderReport(sr)) if sr.ssrc == 0x1111_1111)
+        );
         assert!(matches!(
             &items[1],
-            RtcpPacketItem::Unknown { packet_type: 206, .. }
+            RtcpPacketItem::Unknown {
+                packet_type: 206,
+                ..
+            }
         ));
-        assert!(matches!(&items[2], RtcpPacketItem::Known(RtcpPacket::ReceiverReport(rr)) if rr.ssrc == 0x3333_3333));
+        assert!(
+            matches!(&items[2], RtcpPacketItem::Known(RtcpPacket::ReceiverReport(rr)) if rr.ssrc == 0x3333_3333)
+        );
     }
 
     #[test]
@@ -205,7 +218,10 @@ mod tests {
 
         let mut iter = RtcpPacketIter::new(&bad);
         assert!(iter.next().expect("one item").is_err());
-        assert!(iter.next().is_none(), "iterator must not continue after an error");
+        assert!(
+            iter.next().is_none(),
+            "iterator must not continue after an error"
+        );
     }
 
     #[test]

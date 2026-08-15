@@ -14,12 +14,12 @@ pub mod controller;
 
 // Re-export controller types for convenience
 pub use crate::types::DialogId;
+#[cfg(feature = "dtls-srtp")]
+pub use controller::DtlsRole;
 pub use controller::{
     DtmfNotification, MediaConfig, MediaSessionController, MediaSessionControllerConfig,
     MediaSessionEvent, MediaSessionInfo, MediaSessionStatus,
 };
-#[cfg(feature = "dtls-srtp")]
-pub use controller::DtlsRole;
 
 /// Simple G.711 PCMU codec implementation
 #[derive(Debug, Clone)]

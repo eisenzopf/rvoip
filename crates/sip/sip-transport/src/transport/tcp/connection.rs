@@ -213,7 +213,12 @@ impl TcpConnection {
     /// caller wait there is deliberate, since dropping a SIP message on
     /// a reliable transport has no recovery path.
     async fn queue_write(&self, bytes: Bytes) -> Result<()> {
-        if self.writer_tx.send(WriteCommand::Data(bytes)).await.is_err() {
+        if self
+            .writer_tx
+            .send(WriteCommand::Data(bytes))
+            .await
+            .is_err()
+        {
             // The writer task only ends after a failed write, a write
             // timeout, or a shutdown. This socket is gone in all three.
             self.closed.store(true, Ordering::Relaxed);
