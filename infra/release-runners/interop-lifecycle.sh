@@ -180,6 +180,11 @@ FREESWITCH_UDP_ADDR=127.0.0.1:5062
 FREESWITCH_TLS_ADDR=127.0.0.1:5063
 FREESWITCH_UDP_SIP_PORT=5062
 FREESWITCH_TLS_SIP_PORT=5063
+# Transcoding-enabled profile twins. run.sh redirects amr_transcode_call here,
+# because the profiles above pin disable-transcoding and would refuse a call
+# whose two legs share no codec -- which is exactly what that row asks for.
+FREESWITCH_XCODE_UDP_ADDR=127.0.0.1:5064
+FREESWITCH_XCODE_TLS_ADDR=127.0.0.1:5065
 FREESWITCH_RTP_START=16384
 FREESWITCH_RTP_END=16484
 FREESWITCH_PASSWORD=1234
