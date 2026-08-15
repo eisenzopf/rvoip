@@ -94,6 +94,13 @@ shape-identical to `0.3.7`.
 - The AMR claim is bounded by what was measured: the recorded lab matrix,
   its peer versions, and the rates actually swept. It does not extend to
   untested handsets, carriers, or transcoding gateways.
+- General-user 10,000 CPS full-media capability is not claimed. The strict
+  SIP beta envelope remains bounded by its recorded 2,000-CPS real-media
+  profile, exact host configuration, peer matrix, workloads, and soak
+  durations.
+- Browser/WebRTC edge qualification remains separate from the SIP beta
+  claim; the AMR and proxy-interop work does not broaden it to untested
+  browsers, ICE/TURN deployments, or network topologies.
 
 ## Qualification
 
