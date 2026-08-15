@@ -1029,10 +1029,12 @@ impl EndpointConfig {
         // one's result early for every non-TLS transport, so a knob applied to
         // its tail reaches TLS cells only — which is exactly how the first
         // version of this silently did nothing on UDP.
-        config.amr_dtx = amr_dtx_requested();
+        config = config.with_amr_dtx(amr_dtx_requested());
         // Same placement reasoning as `amr_dtx` above, and the same trap: set
-        // in `session_config` this would reach TLS cells only.
-        config.amr_mode_set = amr_mode_set_requested();
+        // in `session_config` this would reach TLS cells only. An absent
+        // request and an empty one are the same state — the builder maps an
+        // empty slice to "no mode-set offered".
+        config = config.with_amr_mode_set(&amr_mode_set_requested().unwrap_or_default());
         self.codec_profile.apply(&mut config);
         config
     }

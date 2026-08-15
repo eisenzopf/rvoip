@@ -36,11 +36,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_BACKLOG);
 
-    let mut server = StreamPeer::with_config(Config {
-        media_port_start: 47100,
-        media_port_end: 47999,
-        ..Config::local("profiling-steady-server", SERVER_PORT)
-    })
+    let mut server = StreamPeer::with_config(
+        Config::local("profiling-steady-server", SERVER_PORT).with_media_ports(47100, 47999),
+    )
     .await?;
     let server_task = tokio::spawn(async move {
         while let Ok(Ok(incoming)) =
@@ -54,11 +52,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let mut client = StreamPeer::with_config(Config {
-        media_port_start: 48000,
-        media_port_end: 48999,
-        ..Config::local("profiling-steady-client", CLIENT_PORT)
-    })
+    let mut client = StreamPeer::with_config(
+        Config::local("profiling-steady-client", CLIENT_PORT).with_media_ports(48000, 48999),
+    )
     .await?;
     let target = format!("sip:profiling-steady-server@127.0.0.1:{}", SERVER_PORT);
 

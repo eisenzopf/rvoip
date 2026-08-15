@@ -41,9 +41,13 @@ repairs SIPS dialog and opus-bridge edge cases found on the way.
 - Expose the profiled egress registration's coordinator for
   observation-only event subscriptions; the composite adapter remains the
   sole signaling and lifecycle owner.
-- `Config` gains `amr_dtx`, `amr_auto_cmr`, and `amr_mode_set`. The 0.3.x
-  line accepts additive `Config` fields; construct through the documented
-  constructors rather than struct literals.
+- `Config` gains `with_amr_dtx`, `with_amr_auto_cmr`, and
+  `with_amr_mode_set` builders (private fields — `Config`'s constructible
+  shape stays frozen). DTX and auto-CMR are local media policy; only the
+  RFC 4867 `mode-set` is negotiated.
+- `CodecInfo` carries the payload type a transport negotiated
+  (`payload_type: Option<u8>`). Code constructing `CodecInfo` literals adds
+  one field on upgrade; `None` preserves the name-table behavior.
 
 ### Media graph and bridges
 

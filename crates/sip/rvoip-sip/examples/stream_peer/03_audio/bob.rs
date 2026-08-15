@@ -65,11 +65,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let media_end = env_u16("BOB_MEDIA_PORT_END", 10200);
     let out_dir = env_string("AUDIO_OUTPUT_DIR", "output");
 
-    let mut bob = StreamPeer::with_config(Config {
-        media_port_start: media_start,
-        media_port_end: media_end,
-        ..Config::local("bob", bob_port)
-    })
+    let mut bob = StreamPeer::with_config(
+        Config::local("bob", bob_port).with_media_ports(media_start, media_end),
+    )
     .await?;
 
     println!("[BOB] Waiting for call...");

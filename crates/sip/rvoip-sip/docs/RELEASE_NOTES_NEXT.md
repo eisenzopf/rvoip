@@ -55,7 +55,10 @@ remains in force.
   Record-Route is present — at the TLS-advertised address. Explicit Contact
   and plain-SIP behavior are unchanged. This also repairs rvoip-to-rvoip
   SIPS setup, since `Dialog::from_2xx_response` refuses a secure dialog whose
-  Contact is not `sips:` (issue #176).
+  Contact is not `sips:` (issue #176). Bounded claim: the fallback still
+  requires a routable TLS advertisement — a wildcard TLS bind with no
+  `tls_advertised_addr` or `contact_uri` emits a syntactically correct but
+  unroutable Contact, exactly as the plain-SIP fallback always has.
 - RFC 3261 §12.1.2: the UAC learns its route set from the dialog-forming
   2xx's Record-Route, reversed, preserving every URI parameter. Without it,
   in-dialog requests bypassed every record-routing proxy in the path.
@@ -66,10 +69,21 @@ remains in force.
 
 ## Architecture and compatibility
 
-- `CodecInfo` carries the payload type it negotiated, and `Config` gains
-  `amr_dtx`, `amr_auto_cmr`, and `amr_mode_set`. The 0.3.x line accepts
-  additive `Config` fields; construct through the documented constructors
-  rather than struct literals.
+- `Config` gains `with_amr_dtx`, `with_amr_auto_cmr`, and
+  `with_amr_mode_set` builders with matching getters. The fields are
+  private: `Config`'s constructible shape is unchanged from `0.3.7`, and
+  functional-record-update construction keeps working against it.
+- `CodecInfo` (rvoip-core-traits, re-exported by rvoip-core) carries the
+  payload type a transport negotiated: `payload_type: Option<u8>`, where
+  `None` preserves the historical name-table resolution.
+
+### Upgrading from 0.3.7
+
+The one source-level change for downstream code: any `CodecInfo { .. }`
+struct literal must add `payload_type: None` (or the negotiated number).
+Everything else in this release is additive — `Config` construction,
+`MediaFrame`, `SymmetricRtpPolicy`, `SipTraceConfig`, and `MediaMode` are
+shape-identical to `0.3.7`.
 - An opus↔opus bridge stays passthrough when its two legs numbered opus
   differently. The payload type is a per-leg SDP artifact, not a property of
   the encoded audio, so the bypass compares name, clock rate and channels,

@@ -26,11 +26,9 @@ const CHURN_CALLS: usize = 50;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _profiler = dhat::Profiler::new_heap();
 
-    let mut server = StreamPeer::with_config(Config {
-        media_port_start: 50100,
-        media_port_end: 50499,
-        ..Config::local("dhat-steady-server", SERVER_PORT)
-    })
+    let mut server = StreamPeer::with_config(
+        Config::local("dhat-steady-server", SERVER_PORT).with_media_ports(50100, 50499),
+    )
     .await?;
     let server_task = tokio::spawn(async move {
         while let Ok(Ok(incoming)) =
@@ -44,11 +42,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let mut client = StreamPeer::with_config(Config {
-        media_port_start: 50500,
-        media_port_end: 50999,
-        ..Config::local("dhat-steady-client", CLIENT_PORT)
-    })
+    let mut client = StreamPeer::with_config(
+        Config::local("dhat-steady-client", CLIENT_PORT).with_media_ports(50500, 50999),
+    )
     .await?;
     let target = format!("sip:dhat-steady-server@127.0.0.1:{}", SERVER_PORT);
 

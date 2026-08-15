@@ -20,11 +20,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for id in 0..NUM_CALLERS {
         let task = tokio::spawn(async move {
             let port = 6001 + id as u16;
-            let mut peer = StreamPeer::with_config(Config {
-                media_port_start: 21000 + (id * 100) as u16,
-                media_port_end: 21100 + (id * 100) as u16,
-                ..Config::local(&format!("caller{}", id), port)
-            })
+            let mut peer = StreamPeer::with_config(
+                Config::local(&format!("caller{}", id), port)
+                    .with_media_ports(21000 + (id * 100) as u16, 21100 + (id * 100) as u16),
+            )
             .await?;
 
             println!("[CALLER-{}] Calling answerer...", id);

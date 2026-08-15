@@ -66,11 +66,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         handles.push(tokio::spawn(async move {
             let port = 45600 + id as u16;
             let media_start = 46000 + (id * 50) as u16;
-            let cfg = Config {
-                media_port_start: media_start,
-                media_port_end: media_start + 49,
-                ..Config::local(&format!("profiling-reg-{}", id), port)
-            };
+            let cfg = Config::local(&format!("profiling-reg-{}", id), port)
+                .with_media_ports(media_start, media_start + 49);
             let peer = match StreamPeer::with_config(cfg).await {
                 Ok(p) => p,
                 Err(e) => {

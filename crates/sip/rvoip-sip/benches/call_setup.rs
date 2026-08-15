@@ -28,21 +28,13 @@ const CONCURRENCY: [usize; 3] = [1, 4, 16];
 
 async fn build_server(port: u16) -> StreamPeer {
     let (media_start, media_end) = common::next_media_window();
-    let cfg = Config {
-        media_port_start: media_start,
-        media_port_end: media_end,
-        ..Config::local("bench-server", port)
-    };
+    let cfg = Config::local("bench-server", port).with_media_ports(media_start, media_end);
     StreamPeer::with_config(cfg).await.expect("server peer")
 }
 
 async fn build_client(port: u16) -> StreamPeer {
     let (media_start, media_end) = common::next_media_window();
-    let cfg = Config {
-        media_port_start: media_start,
-        media_port_end: media_end,
-        ..Config::local("bench-client", port)
-    };
+    let cfg = Config::local("bench-client", port).with_media_ports(media_start, media_end);
     StreamPeer::with_config(cfg).await.expect("client peer")
 }
 
