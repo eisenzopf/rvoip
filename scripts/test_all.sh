@@ -3,6 +3,13 @@
 # RVOIP Comprehensive Test Runner
 # This script ensures ALL tests are run across all crates in the workspace
 
+export CARGO_INCREMENTAL=0
+
+if ((EUID == 0)); then
+    echo "Refusing to run Cargo validation as root; use the invoking user." >&2
+    exit 2
+fi
+
 # DO NOT exit on error - we want to run all tests and report failures at the end
 # set -e  # Exit on error
 
