@@ -383,6 +383,31 @@ class RunFailStopTests(unittest.TestCase):
         self.assertIn("sipp_path:", self.source)
         self.assertIn("first_nonempty_line", self.source)
 
+    def test_evidence_validation_failure_is_retryable(self) -> None:
+        """A scenario whose driver succeeds but whose packet evidence fails
+        must still get its recorded retry.
+
+        The flake this retry exists for lands on the packet assertion, not on
+        the driver's exit code: the call completes and SIPp reports success,
+        so a bare `return` after validation abandoned the retry in precisely
+        the case it was built for. Validation must feed `$result` like every
+        other step, and the success path must be guarded by `$result` alone.
+        """
+        start = self.source.index("\nrun_captured_external_scenario() {")
+        end = self.source.index("\n}\n", start)
+        body = self.source[start:end]
+
+        self.assertIn("validate_scenario_packet_evidence \"$scenario\" || result=$?", body)
+        # The abandoning form must not come back.
+        self.assertNotRegex(
+            body, r"validate_scenario_packet_evidence[^\n]*\|\|\s*return\b"
+        )
+        # Validation has to run before the success path is taken, so that a
+        # failed assertion still reaches the retry.
+        validation = body.index("validate_scenario_packet_evidence")
+        success = body.index("return 0")
+        self.assertLess(validation, success)
+
 
 if __name__ == "__main__":
     unittest.main()

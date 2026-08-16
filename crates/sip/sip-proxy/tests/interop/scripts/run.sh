@@ -792,8 +792,19 @@ run_captured_external_scenario() {
       stop_captures
     fi
 
+    # Evidence validation is a scenario outcome like any other, so it has to be
+    # retryable too. This class of failure lands here rather than on the
+    # driver's exit code: the call completes, SIPp reports success, and the
+    # assertion that fails is the packet one -- a capture window that opened
+    # after a reused TLS connection's handshake sees mid-stream bytes tshark
+    # will not label application data for that hop. A bare `return` here
+    # abandoned the retry the moment the driver succeeded but the evidence did
+    # not, which is exactly the case the retry exists for.
     if [[ "$result" -eq 0 ]]; then
-      validate_scenario_packet_evidence "$scenario" || return
+      validate_scenario_packet_evidence "$scenario" || result=$?
+    fi
+
+    if [[ "$result" -eq 0 ]]; then
       if [[ "$attempt" -gt 1 ]]; then
         printf 'scenario %s passed on attempt %s of %s\n' \
           "$scenario" "$attempt" "$attempts" >>"$scenario_dir/retry.log"
