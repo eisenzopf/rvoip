@@ -83,6 +83,18 @@ write_rvoip_profile() {
   # amr_transcode_call row needs the opposite, so it registers against the
   # _xcode twins written below.
   disable_transcoding=${10:-true}
+  # Late negotiation defers codec selection so the inbound offer can be handed
+  # to the B-leg untouched -- which is what a relay wants, and precisely what
+  # makes transcoding impossible. The two settings express the same choice
+  # (relay vs convert), so they must agree: a transcoding profile that left
+  # late negotiation on would forward the caller's AMR offer to a PCMU-only
+  # callee and get a correct SDPNegotiationFailed back, having converted
+  # nothing.
+  if [ "$disable_transcoding" = "true" ]; then
+    late_negotiation=true
+  else
+    late_negotiation=false
+  fi
   secure_media_line=""
   if [ "$secure_media" = "true" ]; then
     secure_media_line='    <param name="rtp_secure_media" value="mandatory"/>'
@@ -111,7 +123,7 @@ write_rvoip_profile() {
     <param name="ext-rtp-ip" value="$external_rtp_ip"/>
     <param name="inbound-codec-prefs" value="AMR-WB,AMR,G729,PCMU,PCMA"/>
     <param name="outbound-codec-prefs" value="AMR-WB,AMR,G729,PCMU,PCMA"/>
-    <param name="inbound-late-negotiation" value="true"/>
+    <param name="inbound-late-negotiation" value="$late_negotiation"/>
     <param name="disable-transcoding" value="$disable_transcoding"/>
     <param name="rtp-timer-name" value="soft"/>
     <param name="auth-calls" value="true"/>
@@ -212,6 +224,19 @@ write_rvoip_dialplan() {
   cat > "$CONF_DIR/dialplan/rvoip.xml" <<'EOF'
 <include>
   <context name="rvoip">
+    <!-- Calls arriving on the *_xcode (transcoding) profiles offer the
+         originated leg the whole codec list instead of inheriting the
+         A-leg's codec: FreeSWITCH's bridge otherwise offers only what the
+         calling leg negotiated, and a B-leg endpoint that cannot speak that
+         codec is refused before the transcoder gets a say. nolocal: keeps
+         the A-leg's own negotiation untouched. continue=true so the call
+         falls through to the ordinary extensions below. -->
+    <extension name="rvoip_xcode_codec_export" continue="true">
+      <condition field="${sofia_profile_name}" expression="^rvoip_(udp|tls_srtp)_xcode$" break="never">
+        <action application="export" data="nolocal:absolute_codec_string=PCMU,PCMA,AMR,AMR-WB"/>
+      </condition>
+    </extension>
+
     <extension name="rvoip_tls_srtp_extensions">
       <condition field="destination_number" expression="^(100[1-3])$">
         <action application="set" data="dialed_extension=$1"/>
