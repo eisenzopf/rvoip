@@ -3,6 +3,7 @@
 //! line-for-line; only `transport()` and the WT-upgrade in the accept
 //! path differ.
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -66,6 +67,12 @@ pub struct UctpWtConfig {
     pub max_concurrent_connections: usize,
     /// HTTP/3 `:path` to accept the WebTransport upgrade on.
     pub mount_path: String,
+    /// Exact browser origins permitted to establish a WebTransport session.
+    ///
+    /// `None` preserves the pre-policy behavior for non-browser and legacy
+    /// deployments. `Some` requires exactly one `Origin` header whose value is
+    /// present in the set; an empty set therefore denies every request.
+    pub allowed_origins: Option<Arc<HashSet<String>>>,
     pub quinn_stats_interval: std::time::Duration,
     pub client_endpoint: Option<Arc<quinn::Endpoint>>,
     pub client_tls: Option<Arc<rustls::ClientConfig>>,
@@ -102,6 +109,7 @@ impl UctpWtConfig {
             bearer_validator,
             max_concurrent_connections: 1024,
             mount_path: "/uctp".into(),
+            allowed_origins: None,
             quinn_stats_interval: std::time::Duration::from_secs(5),
             client_endpoint: None,
             client_tls: None,
@@ -141,6 +149,15 @@ impl UctpWtConfig {
 
     pub fn with_orchestrator(mut self, orch: Arc<rvoip_core::Orchestrator>) -> Self {
         self.orchestrator = Some(orch);
+        self
+    }
+
+    /// Require an exact `Origin` match before accepting WebTransport CONNECT.
+    pub fn with_allowed_origins(
+        mut self,
+        allowed_origins: impl IntoIterator<Item = String>,
+    ) -> Self {
+        self.allowed_origins = Some(Arc::new(allowed_origins.into_iter().collect()));
         self
     }
 
@@ -202,6 +219,7 @@ impl UctpWtAdapter {
             Arc::clone(&routes),
             config.max_concurrent_connections,
             config.mount_path,
+            config.allowed_origins,
             config.quinn_stats_interval,
             config.subscription_handler,
             config.session_binding_resolver,
