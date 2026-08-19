@@ -113,6 +113,13 @@ pub(crate) struct ConferenceMember {
     /// member tears the tap down with it, rather than leaving a route
     /// feeding a receiver nobody reads.
     _tap: Option<Box<dyn std::any::Any + Send + Sync>>,
+    /// Whether this member's voice enters the mix.
+    ///
+    /// A member who hears the conference without contributing to it is a
+    /// supervisor monitoring a call. Muting at the mixer rather than at the
+    /// member's transport means the rest of the conference cannot tell that
+    /// anyone is listening, which is the point of monitoring.
+    pub(crate) contributes: bool,
 }
 
 impl ConferenceMember {
@@ -208,7 +215,14 @@ pub(crate) fn mix_once(
     let mut total = vec![0_i32; samples_per_tick];
     for (connection_id, member) in members.iter_mut() {
         member.collect();
+        // A silenced member still has their audio drained, so unmuting
+        // resumes from live speech rather than replaying a backlog.
         let taken = member.take(samples_per_tick);
+        let taken = if member.contributes {
+            taken
+        } else {
+            vec![0_i16; samples_per_tick]
+        };
         for (slot, sample) in total.iter_mut().zip(taken.iter()) {
             *slot += i32::from(*sample);
         }
@@ -354,6 +368,7 @@ pub(crate) fn build_member(
         pending: Vec::new(),
         timestamp: 0,
         _tap: tap,
+        contributes: true,
     })
 }
 

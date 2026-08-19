@@ -26,6 +26,10 @@ fix. Additive: the convenience builder path is unchanged.
 - A member whose transport has closed is removed from the mix rather than
   retried; one member's undecodable packet is skipped rather than silencing
   the conference.
+- `conference_set_contribution` silences a member's voice while leaving them
+  hearing the mix — a supervisor monitoring a call. Silencing at the mixer
+  rather than at the member's transport keeps the rest of the conference
+  unable to tell anyone is listening, which is what monitoring means.
 
 ### AMR in the codec factory
 

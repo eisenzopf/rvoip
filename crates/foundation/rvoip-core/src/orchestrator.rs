@@ -8589,6 +8589,34 @@ impl Orchestrator {
         Ok(())
     }
 
+    /// Set whether a member's voice enters the conference mix.
+    ///
+    /// A member who hears without contributing is a supervisor monitoring
+    /// the call. Silencing at the mixer keeps that invisible to the rest of
+    /// the conference, which is what monitoring means.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the conference or the member is unknown.
+    pub async fn conference_set_contribution(
+        &self,
+        conference_id: &crate::conference::ConferenceId,
+        connection_id: &ConnectionId,
+        contributes: bool,
+    ) -> Result<()> {
+        let conference = self
+            .conferences
+            .get(conference_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or(RvoipError::AdmissionRejected("conference not found"))?;
+        let mut members = conference.members.lock().await;
+        let member = members
+            .get_mut(connection_id)
+            .ok_or(RvoipError::AdmissionRejected("connection is not a member"))?;
+        member.contributes = contributes;
+        Ok(())
+    }
+
     /// The connections currently mixed into a conference.
     ///
     /// # Errors

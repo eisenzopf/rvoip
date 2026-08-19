@@ -802,3 +802,27 @@ async fn an_unknown_conference_is_refused_rather_than_created() {
     assert!(orch.conference_join(&absent, connid).await.is_err());
     assert!(orch.conference_end(&absent).await.is_err());
 }
+
+#[tokio::test]
+async fn a_silenced_member_hears_without_being_heard() {
+    let (orch, _tx, _stream, connid) = setup().await;
+    let conference = orch.conference_create(8_000);
+    orch.conference_join(&conference, connid.clone())
+        .await
+        .expect("join");
+
+    orch.conference_set_contribution(&conference, &connid, false)
+        .await
+        .expect("a member can be silenced without leaving");
+    orch.conference_set_contribution(&conference, &connid, true)
+        .await
+        .expect("and unsilenced again");
+
+    let stranger = ConnectionId::new();
+    assert!(
+        orch.conference_set_contribution(&conference, &stranger, false)
+            .await
+            .is_err(),
+        "silencing a connection that is not a member is refused"
+    );
+}
