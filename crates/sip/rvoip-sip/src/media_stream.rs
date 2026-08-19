@@ -712,6 +712,9 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+use rvoip_media_core::processing::audio::playout::{PlayoutBuffer, PlayoutConfig};
+use rvoip_media_core::types::AudioFrame;
+
 async fn run_media_driver(
     lifecycle: Arc<SipMediaLifecycleState>,
     cancel_tx: watch::Sender<bool>,
@@ -723,6 +726,7 @@ async fn run_media_driver(
     frames_in_tx: mpsc::Sender<MediaFrame>,
     frames_out_rx: mpsc::Receiver<MediaFrame>,
 ) {
+    let playout = coordinator.playout_policy();
     let setup_deadline =
         tokio::time::Instant::now() + coordinator.setup_teardown_timeout_duration();
     // Inbound `IncomingCall` publication may win a narrow race with the
@@ -865,7 +869,14 @@ async fn run_media_driver(
         return;
     }
 
-    let inbound = run_inbound_pump(subscriber, encoder, stream_id, payload_type, frames_in_tx);
+    let inbound = run_inbound_pump(
+        subscriber,
+        encoder,
+        stream_id,
+        payload_type,
+        frames_in_tx,
+        playout,
+    );
     let outbound = run_outbound_pump(
         Arc::clone(&coordinator),
         session_id.clone(),
@@ -894,25 +905,74 @@ async fn run_inbound_pump(
     stream_id: StreamId,
     payload_type: u8,
     frames_in_tx: mpsc::Sender<MediaFrame>,
+    playout: Option<PlayoutConfig>,
 ) -> &'static str {
+    // Without a playout buffer this pump forwards whatever arrives, in
+    // arrival order, with a gap wherever a packet was lost — the behaviour
+    // every release before this had. With one, frames are reordered onto the
+    // media clock and losses are concealed rather than heard as clicks.
+    let mut playout = playout.map(PlayoutBuffer::new);
+    let mut reported = std::time::Instant::now();
+
     while let Some(audio_frame) = subscriber.receiver.recv().await {
-        let encoded = match encoder.encode(&audio_frame) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                tracing::trace!(target: "rvoip_sip", error = %error, "SipMediaStream: audio encode failed");
-                continue;
+        let ready: Vec<AudioFrame> = match playout.as_mut() {
+            Some(buffer) => {
+                buffer.push(audio_frame, std::time::Instant::now());
+                // Drain everything now due. One arrival can release several
+                // frames when it fills a hole earlier arrivals left.
+                let mut ready = Vec::new();
+                while let Some(frame) = buffer.pop() {
+                    ready.push(frame);
+                    // A burst this long means the buffer is unloading, not
+                    // pacing; stop rather than spin.
+                    if ready.len() >= 8 {
+                        break;
+                    }
+                }
+                ready
             }
+            None => vec![audio_frame],
         };
-        let media_frame = MediaFrame {
-            stream_id: stream_id.clone(),
-            kind: StreamKind::Audio,
-            payload: Bytes::from(encoded),
-            timestamp_rtp: audio_frame.timestamp,
-            captured_at: Utc::now(),
-            payload_type: Some(payload_type),
-        };
-        if frames_in_tx.send(media_frame).await.is_err() {
-            return "inbound-consumer-closed";
+
+        if let Some(buffer) = playout.as_ref() {
+            // Periodic, not per frame: this is a hot path and the numbers
+            // are only useful as a trend.
+            if reported.elapsed() >= std::time::Duration::from_secs(10) {
+                reported = std::time::Instant::now();
+                let stats = buffer.stats();
+                if stats.frames_concealed > 0 || stats.frames_late > 0 {
+                    tracing::debug!(
+                        target: "rvoip_sip",
+                        emitted = stats.frames_emitted,
+                        concealed = stats.frames_concealed,
+                        late = stats.frames_late,
+                        depth = stats.depth,
+                        "SipMediaStream playout quality"
+                    );
+                }
+            }
+        }
+
+        for frame in ready {
+            let timestamp_rtp = frame.timestamp;
+            let encoded = match encoder.encode(&frame) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    tracing::trace!(target: "rvoip_sip", error = %error, "SipMediaStream: audio encode failed");
+                    continue;
+                }
+            };
+            let media_frame = MediaFrame {
+                stream_id: stream_id.clone(),
+                kind: StreamKind::Audio,
+                payload: Bytes::from(encoded),
+                timestamp_rtp,
+                captured_at: Utc::now(),
+                payload_type: Some(payload_type),
+            };
+            if frames_in_tx.send(media_frame).await.is_err() {
+                return "inbound-consumer-closed";
+            }
         }
     }
     "sip-audio-source-closed"

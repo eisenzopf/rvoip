@@ -2192,6 +2192,17 @@ pub struct Config {
     /// See [`Config::srtp_required`] for the strict-mode variant.
     pub offer_srtp: bool,
 
+    /// Playout smoothing and packet-loss concealment for inbound audio.
+    ///
+    /// `None` (the default) forwards frames exactly as they arrive, gaps
+    /// included — the behaviour of every release before this, and the right
+    /// choice for a LAN or a lab where reordering only adds latency.
+    ///
+    /// Set it on any route crossing the public internet: a carrier trunk
+    /// delivers audio in bursts and loses packets, and without a buffer
+    /// those arrive as clicks and dropouts a listener hears directly.
+    pub playout: Option<crate::PlayoutConfig>,
+
     /// Refuse to fall back to plaintext RTP when SRTP can't be
     /// negotiated.
     ///
@@ -2885,6 +2896,10 @@ impl Config {
             media_port_start: Self::DEFAULT_MEDIA_PORT_START,
             media_port_end: Self::DEFAULT_MEDIA_PORT_END,
             media_port_capacity: None,
+            // Off by default: forwarding frames exactly as they arrive is
+            // what every release before this did, and a caller opting into
+            // smoothing should say so.
+            playout: None,
             bind_addr: SocketAddr::new(ip, port),
             sip_advertised_addr: None,
             state_table_path: None,
@@ -2999,6 +3014,10 @@ impl Config {
             media_port_start: Self::DEFAULT_MEDIA_PORT_START,
             media_port_end: Self::DEFAULT_MEDIA_PORT_END,
             media_port_capacity: None,
+            // Off by default: forwarding frames exactly as they arrive is
+            // what every release before this did, and a caller opting into
+            // smoothing should say so.
+            playout: None,
             bind_addr: SocketAddr::new(ip, port),
             sip_advertised_addr: None,
             state_table_path: None,
@@ -10099,6 +10118,13 @@ impl UnifiedCoordinator {
 
     pub(crate) fn setup_teardown_timeout_duration(&self) -> Duration {
         Duration::from_secs(self.config.setup_teardown_timeout_secs)
+    }
+
+    /// Playout smoothing and concealment posture for inbound media.
+    pub(crate) const fn playout_policy(
+        &self,
+    ) -> Option<crate::PlayoutConfig> {
+        self.config.playout
     }
 
     async fn schedule_setup_teardown_timeout_if_current(

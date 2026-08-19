@@ -8,6 +8,45 @@ A pre-release cut from `0.3.8` that makes two shipped correctness
 primitives reachable from the high-level app, plus one signature-freshness
 fix. Additive: the convenience builder path is unchanged.
 
+### Carrier-grade media on the SIP path
+
+- **`PlayoutBuffer`** (`media-core::processing::audio::playout`) smooths and
+  conceals a decoded audio stream: frames are reordered onto the media clock,
+  a short backlog absorbs burst arrival, and a frame that never arrives is
+  synthesized rather than left as a gap. Concealment is repeat-with-fade —
+  the cheap technique, named as such — which removes the click that dominates
+  the artifact budget; a long burst fades to silence rather than repeating
+  the same 20 ms indefinitely. RTP timestamp wrap is handled, without which a
+  single wrap discards every later frame.
+- `Config::playout` on the SIP config, `SipConfig::playout` on the app
+  builder. Off by default: forwarding frames exactly as they arrive is what
+  earlier releases did, and is still right on a LAN.
+- Note for anyone surveying this area: `media-core`'s
+  `rtp_processing::jitter::JitterBuffer` is a stub — `get_packet` is
+  `pop_first` and `flush_old_packets` clears the whole buffer. It has no
+  callers. The real packet-level buffer is `rtp-core`'s
+  `AdaptiveJitterBuffer`.
+
+### SRTP reachable from the app builder
+
+- `SipConfig::media_security(SipMediaSecurity::{Disabled, Preferred,
+  Required})`. `rvoip-sip::Config` already carried `offer_srtp` and
+  `srtp_required`, but no builder surfaced them, so an application had no way
+  to ask for encrypted media. `Required` refuses plaintext fallback;
+  `Preferred` carries the call in the clear when the peer declines, which is
+  the case an operator most needs to know about.
+
+### P-Asserted-Identity surfaced to the application
+
+- A trusted trunk's `P-Asserted-Identity` now reaches the inbound context
+  under the reserved name `rvoip.asserted-identity`, so an application can
+  use the carrier's assertion as caller identity instead of the
+  caller-controlled request URI.
+- Surfaced **only** when the peer was admitted by trusted-trunk policy. RFC
+  3325 makes PAI meaningful only inside a trust domain; from an unverified
+  peer it is a forgeable header that looks authoritative, which is worse than
+  its absence. The reserved name prevents a captured header impersonating it.
+
 ### N-way conferencing
 
 - `Orchestrator::conference_create/join/leave/end/members` plus a

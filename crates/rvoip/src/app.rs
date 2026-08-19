@@ -212,9 +212,53 @@ pub struct SipConfig {
     trusted_trunks: Vec<(String, String)>,
     /// `X-*` headers to capture into the inbound context.
     captured_headers: Vec<String>,
+    /// Playout smoothing and packet-loss concealment for inbound audio.
+    playout: Option<rvoip_sip::PlayoutConfig>,
+    /// SRTP posture: whether to offer it, and whether to insist on it.
+    srtp: SipMediaSecurity,
+}
+
+/// How much media encryption a SIP listener insists on.
+///
+/// The default is `Disabled`, which is what every release before this did
+/// and what a LAN PBX or a lab wants. A trunk crossing the public internet
+/// should be `Required`: `Preferred` will silently carry a call in the clear
+/// when the far end declines, which is exactly the case where the operator
+/// most needs to know.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SipMediaSecurity {
+    /// Carry media as plaintext RTP.
+    #[default]
+    Disabled,
+    /// Offer SRTP, but carry the call unencrypted if the peer declines.
+    Preferred,
+    /// Offer SRTP and fail the call rather than fall back to plaintext RTP.
+    Required,
 }
 
 impl SipConfig {
+    /// Smooth inbound audio and conceal lost packets.
+    ///
+    /// A carrier trunk delivers audio in bursts and loses packets; without
+    /// this those are heard directly as clicks and dropouts. It costs the
+    /// buffer's depth in added latency, which is why it is opt-in rather
+    /// than assumed.
+    #[must_use]
+    pub fn playout(
+        mut self,
+        config: rvoip_sip::PlayoutConfig,
+    ) -> Self {
+        self.playout = Some(config);
+        self
+    }
+
+    /// Set the media-encryption posture for this listener.
+    #[must_use]
+    pub const fn media_security(mut self, security: SipMediaSecurity) -> Self {
+        self.srtp = security;
+        self
+    }
+
     /// Bind the SIP listener/registrar to `addr`.
     pub fn bind(addr: impl Into<String>) -> Self {
         Self {
@@ -227,6 +271,11 @@ impl SipConfig {
             tenant: None,
             trusted_trunks: Vec::new(),
             captured_headers: Vec::new(),
+            // Both off by default: unchanged behaviour for every existing
+            // caller, and a deployment that wants smoothing or encryption
+            // says so rather than inheriting it.
+            playout: None,
+            srtp: SipMediaSecurity::Disabled,
         }
     }
 
@@ -1732,6 +1781,17 @@ fn trusted_trunk_principal(subject: &str, tenant: &str) -> AuthenticatedPrincipa
 
 fn make_low_sip_config(config: &SipConfig, bind: SocketAddr) -> LowSipConfig {
     let mut low = LowSipConfig::on("rvoip-gateway", bind.ip(), bind.port());
+    low.playout = config.playout;
+    // `srtp_required` without `offer_srtp` is rejected as an invalid policy
+    // downstream, so the two move together.
+    match config.srtp {
+        SipMediaSecurity::Disabled => {}
+        SipMediaSecurity::Preferred => low.offer_srtp = true,
+        SipMediaSecurity::Required => {
+            low.offer_srtp = true;
+            low.srtp_required = true;
+        }
+    }
     if let Some(advertised) = config.sip_advertised_addr {
         low = low
             .with_sip_advertised_addr(advertised)
@@ -1760,6 +1820,51 @@ fn resolve_udp_bind_addr(addr: SocketAddr) -> AppResult<SocketAddr> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Media posture set on the builder must reach the coordinator, or a
+    /// deployment that asked for encryption silently carries calls in clear.
+    #[cfg(feature = "sip")]
+    #[test]
+    fn media_posture_reaches_the_low_level_config() {
+        use rvoip_sip::PlayoutConfig;
+
+        let bind: SocketAddr = "127.0.0.1:5060".parse().expect("addr");
+
+        // Default: unchanged from every release before this.
+        let plain = make_low_sip_config(&SipConfig::bind("127.0.0.1:5060"), bind);
+        assert!(plain.playout.is_none());
+        assert!(!plain.offer_srtp);
+        assert!(!plain.srtp_required);
+
+        let smoothed = make_low_sip_config(
+            &SipConfig::bind("127.0.0.1:5060").playout(PlayoutConfig {
+                target_depth_frames: 4,
+                ..PlayoutConfig::default()
+            }),
+            bind,
+        );
+        assert_eq!(
+            smoothed.playout.expect("playout reaches the coordinator").target_depth_frames,
+            4
+        );
+
+        // Preferred offers but tolerates plaintext; required refuses it.
+        let preferred = make_low_sip_config(
+            &SipConfig::bind("127.0.0.1:5060").media_security(SipMediaSecurity::Preferred),
+            bind,
+        );
+        assert!(preferred.offer_srtp);
+        assert!(
+            !preferred.srtp_required,
+            "preferred must fall back, or it is not preferred"
+        );
+
+        let required = make_low_sip_config(
+            &SipConfig::bind("127.0.0.1:5060").media_security(SipMediaSecurity::Required),
+            bind,
+        );
+        assert!(required.offer_srtp && required.srtp_required);
+    }
     use super::*;
 
     #[test]

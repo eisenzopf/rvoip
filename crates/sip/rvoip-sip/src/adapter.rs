@@ -794,7 +794,7 @@ impl SipInboundContextPolicy {
                 .username()
                 .map(|username| InboundRoutingHint::new(username.to_owned()))
                 .transpose()?;
-            let metadata = request
+            let mut metadata = request
                 .headers
                 .iter()
                 .filter_map(|header| {
@@ -805,6 +805,36 @@ impl SipInboundContextPolicy {
                 })
                 .collect::<Option<Vec<_>>>()
                 .ok_or(InboundContextError::InvalidMetadataValue)?;
+
+            // P-Asserted-Identity is the carrier's own statement of who is
+            // calling, and unlike From it is not caller-supplied. RFC 3325
+            // makes it meaningful only inside a trust domain, so it is
+            // surfaced only when this peer was admitted by trusted-trunk
+            // policy — from anyone else it is an unverified header that
+            // would be worse than the request URI, because it looks
+            // authoritative. Carried under a reserved name so a captured
+            // header cannot impersonate it.
+            let trusted_peer = observation
+                .principal
+                .as_ref()
+                .and_then(|principal| principal.issuer.as_deref())
+                == Some(TRUSTED_TRUNK_ISSUER);
+            if trusted_peer {
+                if let Some(asserted) = request
+                    .headers
+                    .iter()
+                    .find(|header| {
+                        header
+                            .name()
+                            .as_str()
+                            .eq_ignore_ascii_case("p-asserted-identity")
+                    })
+                    .and_then(sip_header_value)
+                {
+                    metadata.push((ASSERTED_IDENTITY_METADATA.to_owned(), asserted));
+                }
+            }
+
             (routing_hint, InboundSignalingMetadata::new(metadata)?)
         } else {
             // Authentication remains usable even when a legacy compatibility
@@ -917,6 +947,17 @@ fn failed_inbound_termination(
         FailedInboundTermination::Hangup
     }
 }
+
+/// Issuer stamped on a principal admitted because its source address fell
+/// inside a configured trusted CIDR. Kept in sync with the app builder's
+/// `trusted_trunk_principal`.
+pub(crate) const TRUSTED_TRUNK_ISSUER: &str = "rvoip-app-trusted-trunk";
+
+/// Reserved metadata name carrying a carrier-asserted caller identity.
+///
+/// Reserved rather than the raw header name so a peer cannot forge it by
+/// sending a header that happens to be on the capture allowlist.
+pub const ASSERTED_IDENTITY_METADATA: &str = "rvoip.asserted-identity";
 
 struct PendingSipInboundContext {
     routing_hint: Option<InboundRoutingHint>,
@@ -4364,6 +4405,85 @@ Signal=5\r\nDuration=160\r\n";
             rvoip_sip_core::Message::Request(request) => Arc::new(request),
             _ => panic!("expected request"),
         }
+    }
+
+    /// An INVITE carrying a carrier-asserted identity.
+    fn request_with_asserted_identity(route: &str, asserted: &str) -> Arc<rvoip_sip_core::Request> {
+        let wire = format!(
+            "INVITE sip:{route}@example.test SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-test\r\n\
+             From: <sip:spoofed@example.test>;tag=from-tag\r\n\
+             To: <sip:bridge@example.test>\r\n\
+             Call-ID: pai-context@example.test\r\n\
+             CSeq: 1 INVITE\r\n\
+             Max-Forwards: 70\r\n\
+             P-Asserted-Identity: {asserted}\r\n\
+             Content-Length: 0\r\n\r\n"
+        );
+        match rvoip_sip_core::parse_message(wire.as_bytes()).expect("parse INVITE") {
+            rvoip_sip_core::Message::Request(request) => Arc::new(request),
+            _ => panic!("expected request"),
+        }
+    }
+
+    fn principal_from(issuer: &str) -> AuthenticatedPrincipal {
+        AuthenticatedPrincipal {
+            subject: "trunk-a".into(),
+            tenant: Some("tenant".into()),
+            scopes: vec!["call:attach".into()],
+            issuer: Some(issuer.to_owned()),
+            expires_at: None,
+            method: rvoip_core_traits::identity::AuthenticationMethod::ApiKey,
+            assurance: rvoip_core_traits::identity::IdentityAssurance::Anonymous,
+        }
+    }
+
+    /// A carrier's assertion of who is calling is only meaningful inside a
+    /// trust domain (RFC 3325). From an untrusted peer it is an unverified
+    /// header that *looks* authoritative, which is worse than not having it.
+    #[test]
+    fn asserted_identity_is_surfaced_only_from_a_trusted_trunk() {
+        let policy = SipInboundContextPolicy::new(Vec::<String>::new()).expect("policy");
+        let asserted = "<sip:+14085551212@carrier.example>";
+
+        let trusted = policy
+            .capture(&InboundInviteObservation {
+                session_id: SessionId::new(),
+                request: Some(request_with_asserted_identity("bridge", asserted)),
+                principal: Some(principal_from(TRUSTED_TRUNK_ISSUER)),
+            })
+            .expect("capture")
+            .expect("context");
+        let asserted_from = |context: &PendingSipInboundContext| -> Option<String> {
+            context
+                .metadata
+                .iter()
+                .filter(|entry| entry.0 == ASSERTED_IDENTITY_METADATA)
+                .map(|entry| entry.1.to_owned())
+                .next()
+        };
+        // The parser re-serializes the URI canonically, percent-encoding
+        // `+` in the userinfo per RFC 3261. Assert on the identity it
+        // carries rather than on one particular spelling of it.
+        let surfaced = asserted_from(&trusted).expect("a trusted trunk's assertion is surfaced");
+        assert!(
+            surfaced.contains("14085551212") && surfaced.contains("carrier.example"),
+            "unexpected asserted identity: {surfaced}"
+        );
+
+        let untrusted = policy
+            .capture(&InboundInviteObservation {
+                session_id: SessionId::new(),
+                request: Some(request_with_asserted_identity("bridge", asserted)),
+                principal: Some(principal_from("some-other-issuer")),
+            })
+            .expect("capture")
+            .expect("context");
+        assert_eq!(
+            asserted_from(&untrusted),
+            None,
+            "an unverified peer's assertion must not be presented as identity"
+        );
     }
 
     fn observation(

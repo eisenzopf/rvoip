@@ -585,6 +585,10 @@ pub use auth::{
     TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
 };
 pub use rvoip_media_core::performance::pool::PoolConfig as MediaPoolConfig;
+pub use crate::adapter::ASSERTED_IDENTITY_METADATA;
+pub use rvoip_media_core::processing::audio::playout::{
+    PlayoutConfig, PlayoutStats,
+};
 pub use rvoip_media_core::types::AudioFrame;
 
 /// SIP_API_DESIGN_2 §3.6 — convenience body constructors. Each

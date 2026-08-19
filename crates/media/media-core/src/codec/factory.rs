@@ -108,9 +108,12 @@ impl CodecFactory {
                 fmtp,
             )?)),
             #[cfg(not(any(feature = "amr-nb", feature = "amr-wb")))]
-            "amr" | "amr-wb" => Err(Error::unsupported_codec(
-                "AMR (enable the `amr-nb` or `amr-wb` feature)",
-            )),
+            "amr" | "amr-wb" => {
+                let _ = fmtp;
+                Err(Error::unsupported_codec(
+                    "AMR (enable the `amr-nb` or `amr-wb` feature)",
+                ))
+            }
             // Every other encoding this build knows is statically assigned,
             // so the payload type is a complete identity for it.
             _ => Self::create_codec(payload_type, sample_rate, channels),

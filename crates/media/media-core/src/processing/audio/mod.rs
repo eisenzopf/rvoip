@@ -6,6 +6,7 @@
 pub mod aec; // New AEC implementation
 pub mod agc; // New AGC implementation
 pub mod mixer;
+pub mod playout; // Playout smoothing + packet-loss concealment
 pub mod processor;
 pub mod stream; // New conference audio stream management
 pub mod vad; // New audio mixer for conference calls
