@@ -116,6 +116,7 @@ pub mod bridge;
 pub mod broadcast;
 pub mod capability;
 pub mod commands;
+pub mod conference;
 pub mod config;
 pub mod connection;
 pub mod conversation;

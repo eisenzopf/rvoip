@@ -3,6 +3,8 @@
 //! This module provides a factory for creating audio codec instances based on
 //! payload types and configuration parameters.
 
+#[cfg(any(feature = "amr-nb", feature = "amr-wb"))]
+use crate::codec::audio::amr::AmrAdapter;
 use crate::codec::audio::common::AudioCodec;
 use crate::codec::audio::g711::G711Codec;
 #[cfg(feature = "g729")]
@@ -75,6 +77,43 @@ impl CodecFactory {
                 })?,
             )?)),
             _ => Err(Error::unsupported_payload_type(payload_type)),
+        }
+    }
+
+    /// Create a codec from its negotiated SDP identity.
+    ///
+    /// [`Self::create_codec`] keys off the RTP payload type alone, which is
+    /// enough only for statically assigned codecs. AMR is assigned a dynamic
+    /// payload type, so the number carries no meaning without the encoding
+    /// name beside it, and its mode set arrives in `fmtp` — two things a
+    /// payload type cannot express. Callers that have completed negotiation
+    /// should prefer this; `create_codec` remains for static types.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the name and payload type do not describe a
+    /// codec this build can construct, or when `fmtp` is malformed.
+    pub fn create_negotiated_codec(
+        payload_type: u8,
+        encoding_name: &str,
+        sample_rate: Option<u32>,
+        channels: Option<u16>,
+        fmtp: Option<&str>,
+    ) -> Result<Box<dyn AudioCodec>> {
+        match encoding_name.to_ascii_lowercase().as_str() {
+            #[cfg(any(feature = "amr-nb", feature = "amr-wb"))]
+            "amr" | "amr-wb" => Ok(Box::new(AmrAdapter::new(
+                payload_type,
+                encoding_name,
+                fmtp,
+            )?)),
+            #[cfg(not(any(feature = "amr-nb", feature = "amr-wb")))]
+            "amr" | "amr-wb" => Err(Error::unsupported_codec(
+                "AMR (enable the `amr-nb` or `amr-wb` feature)",
+            )),
+            // Every other encoding this build knows is statically assigned,
+            // so the payload type is a complete identity for it.
+            _ => Self::create_codec(payload_type, sample_rate, channels),
         }
     }
 

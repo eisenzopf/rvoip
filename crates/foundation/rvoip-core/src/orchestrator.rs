@@ -1231,6 +1231,7 @@ pub struct Orchestrator {
     dialog_managers: Arc<DashMap<String, Arc<dyn crate::harness::DialogManager>>>,
     recording_sinks: Arc<DashMap<String, Arc<dyn crate::harness::RecordingSink>>>,
     recording_sink_factories: Arc<DashMap<String, Arc<dyn crate::harness::RecordingSinkFactory>>>,
+    conferences: Arc<DashMap<crate::conference::ConferenceId, Arc<crate::conference::Conference>>>,
     /// P5 — live recording sessions. Drop the JoinHandle on
     /// `stop_recording` to abort the pump.
     recordings: Arc<DashMap<crate::ids::RecordingId, RecordingHandle>>,
@@ -1568,6 +1569,7 @@ impl Orchestrator {
             dialog_managers: Arc::new(DashMap::new()),
             recording_sinks: Arc::new(DashMap::new()),
             recording_sink_factories: Arc::new(DashMap::new()),
+            conferences: Arc::new(DashMap::new()),
             recordings: Arc::new(DashMap::new()),
             transcriptions: Arc::new(DashMap::new()),
             ai_attachments: Arc::new(DashMap::new()),
@@ -1640,6 +1642,7 @@ impl Orchestrator {
             dialog_managers: Arc::new(DashMap::new()),
             recording_sinks: Arc::new(DashMap::new()),
             recording_sink_factories: Arc::new(DashMap::new()),
+            conferences: Arc::new(DashMap::new()),
             recordings: Arc::new(DashMap::new()),
             transcriptions: Arc::new(DashMap::new()),
             ai_attachments: Arc::new(DashMap::new()),
@@ -8461,6 +8464,147 @@ impl Orchestrator {
         sink: Arc<dyn crate::harness::RecordingSink>,
     ) {
         self.recording_sinks.insert(name.into(), sink);
+    }
+
+    // --- conferencing ----------------------------------------------------
+
+    /// Open a conference mixing at `mix_rate_hz`.
+    ///
+    /// The rate is the conference's own; members on other clock rates are
+    /// converted at join. 8 kHz suits an all-telephony conference and costs
+    /// nothing to convert; pick the highest rate a member will use when
+    /// wideband participants are expected, since upsampling after the mix
+    /// cannot restore what downsampling before it discarded.
+    #[must_use]
+    pub fn conference_create(&self, mix_rate_hz: u32) -> crate::conference::ConferenceId {
+        let id = crate::conference::ConferenceId::new();
+        self.conferences.insert(
+            id.clone(),
+            Arc::new(crate::conference::Conference::start(mix_rate_hz)),
+        );
+        id
+    }
+
+    /// Add a live connection to a conference.
+    ///
+    /// The connection's own negotiated codec is used in both directions, so
+    /// a member never has to renegotiate to join. Joining twice is refused
+    /// rather than silently doubling that member's voice in the mix.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the conference or connection is unknown, when
+    /// the connection has no audio stream yet, when the member is already
+    /// present, or when its codec cannot be constructed.
+    pub async fn conference_join(
+        &self,
+        conference_id: &crate::conference::ConferenceId,
+        connection_id: ConnectionId,
+    ) -> Result<()> {
+        let conference = self
+            .conferences
+            .get(conference_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or(RvoipError::AdmissionRejected("conference not found"))?;
+        if conference
+            .members
+            .lock()
+            .await
+            .contains_key(&connection_id)
+        {
+            return Err(RvoipError::AdmissionRejected(
+                "connection is already a conference member",
+            ));
+        }
+
+        // Outbound first: a member we cannot speak to is not a member, and
+        // discovering that after installing the inbound tap would leave the
+        // tap to clean up.
+        let adapter = self.adapter_for(&connection_id)?;
+        let streams = adapter.streams(connection_id.clone()).await?;
+        let audio = streams
+            .into_iter()
+            .find(|stream| stream.kind() == crate::stream::StreamKind::Audio)
+            .ok_or(RvoipError::AdmissionRejected(
+                "conference member has no audio stream",
+            ))?;
+        let codec = audio.codec();
+        let outbound = audio.try_frames_out()?;
+
+        let (route, inbound) = self
+            .media_tap_for_connection(connection_id.clone(), 16)
+            .await?;
+        // The member owns its tap, so leaving the conference tears the route
+        // down rather than leaving it feeding a receiver nobody reads.
+        let member = crate::conference::build_member(
+            connection_id.clone(),
+            inbound,
+            outbound,
+            codec,
+            conference.mix_rate_hz,
+            Some(Box::new(route)),
+        )?;
+        conference.members.lock().await.insert(connection_id, member);
+        Ok(())
+    }
+
+    /// Remove a connection from a conference.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the conference is unknown. Removing a
+    /// connection that is not a member succeeds: absence is the requested
+    /// end state either way.
+    pub async fn conference_leave(
+        &self,
+        conference_id: &crate::conference::ConferenceId,
+        connection_id: &ConnectionId,
+    ) -> Result<()> {
+        let conference = self
+            .conferences
+            .get(conference_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or(RvoipError::AdmissionRejected("conference not found"))?;
+        conference.members.lock().await.remove(connection_id);
+        Ok(())
+    }
+
+    /// End a conference and release every member.
+    ///
+    /// Members' own connections are left alone: leaving a conference is not
+    /// hanging up, and a caller may well be transferred elsewhere next.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the conference is unknown.
+    pub async fn conference_end(
+        &self,
+        conference_id: &crate::conference::ConferenceId,
+    ) -> Result<()> {
+        let (_, conference) = self
+            .conferences
+            .remove(conference_id)
+            .ok_or(RvoipError::AdmissionRejected("conference not found"))?;
+        conference.members.lock().await.clear();
+        Ok(())
+    }
+
+    /// The connections currently mixed into a conference.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the conference is unknown.
+    pub async fn conference_members(
+        &self,
+        conference_id: &crate::conference::ConferenceId,
+    ) -> Result<Vec<ConnectionId>> {
+        let conference = self
+            .conferences
+            .get(conference_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or(RvoipError::AdmissionRejected("conference not found"))?;
+        let members = conference.members.lock().await;
+        Ok(members.keys().cloned().collect())
     }
 
     /// Register a factory that opens one sink per recording.

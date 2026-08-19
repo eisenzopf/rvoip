@@ -751,3 +751,54 @@ async fn an_unregistered_sink_name_is_still_refused() {
         "resolving neither a factory nor a sink must fail closed"
     );
 }
+
+#[tokio::test]
+async fn a_conference_admits_a_member_and_reports_it() {
+    let (orch, _tx, _stream, connid) = setup().await;
+    let conference = orch.conference_create(8_000);
+
+    orch.conference_join(&conference, connid.clone())
+        .await
+        .expect("a live connection with an audio stream joins");
+    assert_eq!(
+        orch.conference_members(&conference).await.expect("members"),
+        vec![connid.clone()]
+    );
+
+    // Joining twice would double this member's voice in the mix.
+    assert!(
+        orch.conference_join(&conference, connid.clone())
+            .await
+            .is_err(),
+        "a connection cannot join the same conference twice"
+    );
+
+    orch.conference_leave(&conference, &connid)
+        .await
+        .expect("leave");
+    assert!(
+        orch.conference_members(&conference)
+            .await
+            .expect("members")
+            .is_empty()
+    );
+
+    // Leaving again is the same requested end state, not a failure.
+    orch.conference_leave(&conference, &connid)
+        .await
+        .expect("leaving twice is idempotent");
+
+    orch.conference_end(&conference).await.expect("end");
+    assert!(
+        orch.conference_members(&conference).await.is_err(),
+        "an ended conference is gone, not empty"
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_conference_is_refused_rather_than_created() {
+    let (orch, _tx, _stream, connid) = setup().await;
+    let absent = rvoip_core::conference::ConferenceId::new();
+    assert!(orch.conference_join(&absent, connid).await.is_err());
+    assert!(orch.conference_end(&absent).await.is_err());
+}

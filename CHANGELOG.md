@@ -8,6 +8,35 @@ A pre-release cut from `0.3.8` that makes two shipped correctness
 primitives reachable from the high-level app, plus one signature-freshness
 fix. Additive: the convenience builder path is unchanged.
 
+### N-way conferencing
+
+- `Orchestrator::conference_create/join/leave/end/members` plus a
+  `conference` module holding the mixer. Bridging is pairwise and does not
+  generalize: a conference has to *sum* audio, and every participant needs a
+  different sum with their own voice removed, or they hear themselves
+  returned a packet late.
+- One task per conference mixes on a 20 ms tick. The sum is computed once in
+  `i32` and each member receives it minus their own contribution, so the
+  work is linear in members rather than quadratic, and the result saturates
+  rather than wraps — a wrapped sum is an audible click.
+- Members keep their own negotiated codec in both directions and are
+  resampled into and out of the conference rate, so a G.711 carrier leg and
+  an Opus browser leg mix together without either renegotiating. A member's
+  tap is owned by the member, so leaving tears the route down.
+- A member whose transport has closed is removed from the mix rather than
+  retried; one member's undecodable packet is skipped rather than silencing
+  the conference.
+
+### AMR in the codec factory
+
+- `CodecFactory::create_negotiated_codec(payload_type, encoding_name,
+  sample_rate, channels, fmtp)` constructs a codec from its negotiated SDP
+  identity. `create_codec` keys off the payload type alone, which is enough
+  only for statically assigned codecs; AMR is dynamically assigned and its
+  mode set arrives in `fmtp`, neither of which a payload type can express.
+  Non-AMR names delegate to `create_codec`, so existing callers are
+  unaffected.
+
 ### Per-recording sink factories
 
 - `RecordingSinkFactory` opens one `RecordingSink` per recording, and
