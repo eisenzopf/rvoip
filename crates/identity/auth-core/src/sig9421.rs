@@ -35,6 +35,16 @@ use std::fmt;
 /// the spec's 5-minute window.
 pub const DEFAULT_SIG_REPLAY_TTL: Duration = Duration::from_secs(300);
 
+/// How far ahead of local time a signed envelope's `ts` may sit before it is
+/// rejected as unusable.
+///
+/// A freshness window bounded only from below is not a freshness window: a
+/// far-future `ts` produces a negative age, passes an `age > ttl` test, and
+/// stays valid for as long as the sender chose — which is exactly the
+/// property a replay window exists to deny. Real senders drift by seconds;
+/// this allows for that and nothing more.
+pub const DEFAULT_SIG_CLOCK_SKEW: Duration = Duration::from_secs(30);
+
 /// Maximum number of envelope IDs the replay cache holds before
 /// LRU eviction. Mirrors [`crate::dpop::DEFAULT_JTI_CACHE_CAPACITY`].
 pub const DEFAULT_REPLAY_CACHE_CAPACITY: u64 = 100_000;
@@ -162,6 +172,7 @@ pub struct Sig9421Verifier {
     resolver: Arc<dyn KeyResolver>,
     replay_cache: Cache<String, ()>,
     ttl: Duration,
+    clock_skew: Duration,
 }
 
 impl Sig9421Verifier {
@@ -170,6 +181,18 @@ impl Sig9421Verifier {
     }
 
     pub fn with_ttl(resolver: Arc<dyn KeyResolver>, ttl: Duration) -> Self {
+        Self::with_ttl_and_skew(resolver, ttl, DEFAULT_SIG_CLOCK_SKEW)
+    }
+
+    /// Freshness window with an explicit future tolerance. Deployments whose
+    /// senders are tightly synchronized can narrow the skew; nothing should
+    /// widen it far, because the skew is exactly how long a forged future
+    /// timestamp stays usable.
+    pub fn with_ttl_and_skew(
+        resolver: Arc<dyn KeyResolver>,
+        ttl: Duration,
+        clock_skew: Duration,
+    ) -> Self {
         Self {
             resolver,
             replay_cache: Cache::builder()
@@ -177,6 +200,7 @@ impl Sig9421Verifier {
                 .time_to_live(ttl)
                 .build(),
             ttl,
+            clock_skew,
         }
     }
 
@@ -210,6 +234,14 @@ impl Sig9421Verifier {
             .with_timezone(&Utc);
         let age = Utc::now().signed_duration_since(env_ts);
         if age > chrono::Duration::from_std(self.ttl).unwrap_or(chrono::Duration::seconds(300)) {
+            return Err(Sig9421Error::StaleTimestamp(env_ts_str.to_string()));
+        }
+        // Bound the window from above as well: a negative age means the
+        // envelope claims the future, and beyond tolerated skew that claim
+        // buys the sender an unbounded validity period.
+        let skew = chrono::Duration::from_std(self.clock_skew)
+            .unwrap_or_else(|_| chrono::Duration::seconds(30));
+        if age < -skew {
             return Err(Sig9421Error::StaleTimestamp(env_ts_str.to_string()));
         }
 
@@ -440,6 +472,38 @@ mod tests {
 
         let err = verifier.verify(&env).await.unwrap_err();
         assert!(matches!(err, Sig9421Error::InvalidSignature));
+    }
+
+    #[tokio::test]
+    async fn future_timestamp_beyond_skew_rejected() {
+        let (kp, pubkey) = signing_keypair();
+        let mut resolver = StaticKeyResolver::new();
+        resolver.insert("key:agent-1", pubkey);
+        let verifier = Sig9421Verifier::new(Arc::new(resolver));
+
+        // A far-future `ts` yields a negative age. Bounded only from below,
+        // that envelope would verify — and keep verifying for an hour.
+        let mut env = build_envelope();
+        env["ts"] = serde_json::json!((Utc::now() + chrono::Duration::hours(1)).to_rfc3339());
+        sign_envelope(&mut env, "key:agent-1", &kp);
+
+        let err = verifier.verify(&env).await.unwrap_err();
+        assert!(matches!(err, Sig9421Error::StaleTimestamp(_)));
+    }
+
+    #[tokio::test]
+    async fn future_timestamp_within_skew_accepted() {
+        let (kp, pubkey) = signing_keypair();
+        let mut resolver = StaticKeyResolver::new();
+        resolver.insert("key:agent-1", pubkey);
+        let verifier = Sig9421Verifier::new(Arc::new(resolver));
+
+        // Ordinary sender drift must still verify.
+        let mut env = build_envelope();
+        env["ts"] = serde_json::json!((Utc::now() + chrono::Duration::seconds(5)).to_rfc3339());
+        sign_envelope(&mut env, "key:agent-1", &kp);
+
+        verifier.verify(&env).await.expect("skew within tolerance");
     }
 
     #[tokio::test]

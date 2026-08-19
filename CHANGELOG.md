@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+## 0.3.8-thelve.1 — 2026-08-18 (branch `thelve/rvoip-22-ingress`, unpublished)
+
+A pre-release cut from `0.3.8` that makes two shipped correctness
+primitives reachable from the high-level app, plus one signature-freshness
+fix. Additive: the convenience builder path is unchanged.
+
+### Authoritative application ingress (RVOIP-22)
+
+- `RvoipAppBuilder::authoritative_ingress(AuthoritativeIngressConfig)`
+  installs the inbound admission gate and the single-consumer operational
+  event stream **before** any adapter is registered — the ordering core
+  requires and the convenience `build` could not express, because it
+  constructed its Orchestrator, registered adapters, and only then returned.
+- `RvoipApp::take_authoritative_ingress` hands both receivers to the owning
+  application exactly once; `ingress_health` reports mode, core's stream
+  health, and whether the runtime still admits new work; `drain(budget)` is
+  a bounded terminal join point that reports honestly whether it finished.
+- In authoritative mode the app no longer admits inbound connections on the
+  application's behalf: every inbound connection is presented as an
+  `InboundAdmission` ticket and the normalized event follows acceptance.
+- A lagged observational receiver is recorded as degraded ingress instead of
+  a warning that keeps serving — `admits_new_work` goes false so a readiness
+  probe can fail. Losing the operational receiver degrades the runtime and
+  stops admission, which core already enforced and the app now surfaces.
+
+### Signature freshness
+
+- `Sig9421Verifier` bounds envelope timestamps from above as well as below.
+  A far-future `ts` produced a negative age, passed the `age > ttl` test,
+  and stayed valid for as long as the sender chose. `DEFAULT_SIG_CLOCK_SKEW`
+  (30 s) is the tolerated drift; `with_ttl_and_skew` makes it explicit.
+
+
 ## 0.3.8 — 2026-08-14
 
 This coordinated 44-crate patch release brings AMR-NB and AMR-WB into the

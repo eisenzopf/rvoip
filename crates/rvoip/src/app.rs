@@ -33,7 +33,9 @@ use rvoip_core::events::Event;
 use rvoip_core::ids::{
     BridgeId, ConnectionId, ConversationId, MessageId, ParticipantId, SessionId, TenantId,
 };
+use rvoip_core::inbound_admission::InboundAdmission;
 use rvoip_core::message::{ContentType, Message, MessageOrigin, MessageRecipients};
+use rvoip_core::operational_events::{OperationalEvent, OperationalEventStreamHealth};
 use rvoip_core::orchestrator::Orchestrator;
 use rvoip_core::session::SessionMedium;
 use rvoip_core::store::MessageFilter;
@@ -50,9 +52,10 @@ use rvoip_sip::{
 use rvoip_webrtc::{
     WebRtcAdapter, WebRtcConfig as LowWebRtcConfig, WebRtcServer, WebRtcServerBuilder,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, mpsc, Mutex};
 
 /// Result type returned by the high-level app API.
 pub type AppResult<T> = std::result::Result<T, AppError>;
@@ -593,6 +596,99 @@ fn default_message_handler() -> MessageHandler {
     Arc::new(|_, _| Box::pin(async { Ok(()) }))
 }
 
+/// How this app delivers inbound admission and lifecycle to its owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum IngressMode {
+    /// The historical path: the app admits inbound connections itself using
+    /// its assignment policy, and reads lifecycle from the observational
+    /// broadcast. Convenient, and lossy under lag by construction.
+    Convenience,
+    /// The owning application is the single correctness consumer: it decides
+    /// every inbound admission through the gate and reads lifecycle from the
+    /// backpressured operational stream. Losing either receiver degrades the
+    /// runtime and stops new admission instead of dropping work.
+    Authoritative,
+}
+
+/// Requests the authoritative ingress composition on [`RvoipAppBuilder`].
+///
+/// The two correctness primitives must be installed before any adapter is
+/// registered, which the convenience `build` path cannot do on its own —
+/// this configuration is how an application asks for that ordering.
+#[derive(Clone, Copy, Debug)]
+pub struct AuthoritativeIngressConfig {
+    /// Bounded number of undecided inbound admissions. Backpressure, not
+    /// loss: adapters wait for a permit.
+    pub admission_capacity: usize,
+    /// How long one presented admission may remain undecided.
+    pub admission_decision_timeout: Duration,
+    /// Bounded capacity of the authoritative operational event stream.
+    pub operational_capacity: usize,
+}
+
+impl AuthoritativeIngressConfig {
+    /// Bounded capacities with a decision deadline.
+    #[must_use]
+    pub const fn new(
+        admission_capacity: usize,
+        admission_decision_timeout: Duration,
+        operational_capacity: usize,
+    ) -> Self {
+        Self {
+            admission_capacity,
+            admission_decision_timeout,
+            operational_capacity,
+        }
+    }
+}
+
+impl Default for AuthoritativeIngressConfig {
+    fn default() -> Self {
+        Self {
+            admission_capacity: 64,
+            admission_decision_timeout: Duration::from_secs(5),
+            operational_capacity: 256,
+        }
+    }
+}
+
+/// The correctness receivers, taken exactly once by the owning application.
+///
+/// Dropping either receiver is not a way to opt out: core treats the loss as
+/// a degraded runtime and refuses new admission, which is the whole point of
+/// asking for this mode.
+#[derive(Debug)]
+pub struct AuthoritativeIngress {
+    /// Undecided inbound connections awaiting this application's policy.
+    pub admissions: mpsc::Receiver<InboundAdmission>,
+    /// Lossless connection lifecycle for the same runtime.
+    pub operational: mpsc::Receiver<OperationalEvent>,
+}
+
+/// Queryable readiness of the ingress path.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct IngressHealth {
+    /// Which delivery contract this app was built with.
+    pub mode: IngressMode,
+    /// Core's view of the authoritative stream.
+    pub operational_stream: OperationalEventStreamHealth,
+    /// False once a correctness boundary has been lost. A readiness probe
+    /// should fail on this rather than keep taking calls.
+    pub admits_new_work: bool,
+}
+
+/// Result of a bounded drain.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct DrainOutcome {
+    /// Whether every retained lifecycle task finished within the budget.
+    pub completed: bool,
+    /// Tasks still retained when the budget expired.
+    pub remaining_tasks: usize,
+}
+
 /// Builder for [`RvoipApp`].
 pub struct RvoipAppBuilder {
     http: Option<HttpConfig>,
@@ -604,6 +700,7 @@ pub struct RvoipAppBuilder {
     assignment: Option<AssignmentPolicy>,
     voice_routing: VoiceRoutingPolicy,
     on_message: MessageHandler,
+    authoritative_ingress: Option<AuthoritativeIngressConfig>,
 }
 
 impl RvoipAppBuilder {
@@ -655,6 +752,23 @@ impl RvoipAppBuilder {
         self
     }
 
+    /// Take authoritative ownership of inbound admission and lifecycle.
+    ///
+    /// `build` then installs the inbound admission gate and the operational
+    /// event stream **before** registering any adapter — the ordering core
+    /// requires and the convenience path cannot express — and hands both
+    /// receivers back through [`RvoipApp::take_authoritative_ingress`].
+    ///
+    /// In this mode the app stops admitting inbound connections on the
+    /// application's behalf: every inbound connection is presented as an
+    /// [`InboundAdmission`] ticket for the owner to accept or reject, and
+    /// the normalized inbound event follows acceptance. Assignment and
+    /// voice-routing policy still apply to what the owner accepts.
+    pub fn authoritative_ingress(mut self, config: AuthoritativeIngressConfig) -> Self {
+        self.authoritative_ingress = Some(config);
+        self
+    }
+
     /// Configure the async message callback.
     pub fn on_message<F, Fut>(mut self, handler: F) -> Self
     where
@@ -686,6 +800,30 @@ impl RvoipAppBuilder {
         }
 
         let orchestrator = Orchestrator::new(CoreConfig::default());
+        // Both correctness primitives reject installation once an adapter is
+        // registered, so they are installed here — before any listener can
+        // exist — which is the composition the convenience path could not
+        // offer and the reason this builder option exists.
+        let authoritative_ingress = match self.authoritative_ingress {
+            Some(config) => {
+                let admissions = orchestrator.install_inbound_admission_gate(
+                    config.admission_capacity,
+                    config.admission_decision_timeout,
+                )?;
+                let operational =
+                    orchestrator.install_operational_event_stream(config.operational_capacity)?;
+                Some(AuthoritativeIngress {
+                    admissions,
+                    operational,
+                })
+            }
+            None => None,
+        };
+        let ingress_mode = if authoritative_ingress.is_some() {
+            IngressMode::Authoritative
+        } else {
+            IngressMode::Convenience
+        };
         // Subscribe before any adapter starts a listener so an immediate
         // inbound call cannot race app admission-loop startup.
         let core_events = orchestrator.subscribe_events();
@@ -853,6 +991,8 @@ impl RvoipAppBuilder {
             message_handler: self.on_message,
             voice_routing: self.voice_routing,
             escalation_command,
+            ingress_mode,
+            observational_loss: AtomicBool::new(false),
         });
         spawn_app_event_loop(Arc::clone(&state), core_events);
 
@@ -870,6 +1010,7 @@ impl RvoipAppBuilder {
         Ok(RvoipApp {
             state,
             initial_events: StdMutex::new(Some(initial_app_events)),
+            authoritative_ingress: StdMutex::new(authoritative_ingress),
             _webrtc_server: webrtc_server,
             _sip_coordinator: sip_coordinator,
             _http_task: http_task,
@@ -890,6 +1031,7 @@ impl Default for RvoipAppBuilder {
             assignment: None,
             voice_routing: VoiceRoutingPolicy::default(),
             on_message: default_message_handler(),
+            authoritative_ingress: None,
         }
     }
 }
@@ -898,6 +1040,7 @@ impl Default for RvoipAppBuilder {
 pub struct RvoipApp {
     state: Arc<AppState>,
     initial_events: StdMutex<Option<broadcast::Receiver<AppEvent>>>,
+    authoritative_ingress: StdMutex<Option<AuthoritativeIngress>>,
     _webrtc_server: Option<WebRtcServer>,
     _sip_coordinator: Option<Arc<UnifiedCoordinator>>,
     _http_task: Option<tokio::task::JoinHandle<()>>,
@@ -908,6 +1051,52 @@ impl RvoipApp {
     /// Start building an app.
     pub fn builder() -> RvoipAppBuilder {
         RvoipAppBuilder::default()
+    }
+
+    /// Take the correctness receivers, once, when built with
+    /// [`RvoipAppBuilder::authoritative_ingress`].
+    ///
+    /// Returns `None` in convenience mode, and `None` on any later call —
+    /// there is exactly one correctness consumer by construction.
+    pub fn take_authoritative_ingress(&self) -> Option<AuthoritativeIngress> {
+        self.authoritative_ingress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    }
+
+    /// Current ingress readiness. Fail a readiness probe when
+    /// [`IngressHealth::admits_new_work`] is false: a lost correctness
+    /// boundary means this runtime can no longer promise that an accepted
+    /// call was seen exactly once.
+    pub fn ingress_health(&self) -> IngressHealth {
+        let operational_stream = self.state.orchestrator.operational_event_stream_health();
+        let stream_ok = !matches!(operational_stream, OperationalEventStreamHealth::Degraded);
+        let observational_ok = !self.state.observational_loss.load(Ordering::Relaxed);
+        IngressHealth {
+            mode: self.state.ingress_mode,
+            operational_stream,
+            admits_new_work: stream_ok && observational_ok,
+        }
+    }
+
+    /// Stop taking new work and wait, within a budget, for retained
+    /// connection lifecycle tasks to converge.
+    ///
+    /// Terminal: adapter registration and new connection-side work are
+    /// rejected once this begins. The outcome reports honestly whether the
+    /// budget was enough rather than blocking forever.
+    pub async fn drain(&self, budget: Duration) -> DrainOutcome {
+        let orchestrator = &self.state.orchestrator;
+        orchestrator.drain_prepared_outbound_connections().await;
+        let completed =
+            tokio::time::timeout(budget, orchestrator.drain_connection_lifecycle_tasks())
+                .await
+                .is_ok();
+        DrainOutcome {
+            completed,
+            remaining_tasks: orchestrator.connection_lifecycle_task_count(),
+        }
     }
 
     /// Subscribe to high-level app events.
@@ -1071,6 +1260,11 @@ struct AppState {
     message_handler: MessageHandler,
     voice_routing: VoiceRoutingPolicy,
     escalation_command: String,
+    ingress_mode: IngressMode,
+    /// Sticky: the observational stream dropped events this app was relying
+    /// on. Reported through [`RvoipApp::ingress_health`] so a readiness probe
+    /// can fail instead of the runtime quietly serving from a gap.
+    observational_loss: AtomicBool,
 }
 
 impl AppState {
@@ -1269,7 +1463,13 @@ async fn run_app_event_loop(
 ) -> AppResult<()> {
     loop {
         match events.recv().await {
-            Ok(Event::ConnectionInbound { connection_id, .. }) => {
+            // In authoritative mode the owning application already decided
+            // this connection through the admission gate — the normalized
+            // event only follows its accept — so the app must not admit it
+            // a second time on the owner's behalf.
+            Ok(Event::ConnectionInbound { connection_id, .. })
+                if state.ingress_mode == IngressMode::Convenience =>
+            {
                 if let Err(error) = handle_inbound_connection(&state, connection_id.clone()).await {
                     // A caller can CANCEL or disconnect while application
                     // policy is accepting it. That call fails independently;
@@ -1296,7 +1496,16 @@ async fn run_app_event_loop(
             }
             Ok(_) => {}
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                tracing::warn!(skipped, "rvoip app event receiver lagged");
+                // A warning is not a contract. Record the loss so
+                // `ingress_health` stops claiming this runtime saw
+                // everything; in authoritative mode admission itself is
+                // unaffected because it rides the gate, not this bus.
+                state.observational_loss.store(true, Ordering::Relaxed);
+                tracing::error!(
+                    skipped,
+                    mode = ?state.ingress_mode,
+                    "rvoip app event receiver lagged; ingress reported degraded"
+                );
             }
             Err(broadcast::error::RecvError::Closed) => break,
         }
@@ -1678,6 +1887,144 @@ mod tests {
             Err(other) => panic!("expected advertised-address policy error, got {other}"),
             Ok(_) => panic!("wildcard SIP bind must fail without an advertised address"),
         }
+    }
+
+    /// Build one app with adapters actually registered, in authoritative
+    /// mode. If the builder did not install both correctness primitives
+    /// before adapter registration, core would have refused installation and
+    /// this build would fail — so a successful build with both receivers in
+    /// hand *is* the ordering proof.
+    async fn authoritative_app(config: AuthoritativeIngressConfig) -> RvoipApp {
+        RvoipApp::builder()
+            .customers(CustomerPolicy::sip_only())
+            .sip(
+                SipConfig::bind("127.0.0.1:0")
+                    .domain("test.local")
+                    .allow(Role::Customer, [Capability::Voice]),
+            )
+            .employees(EmployeePolicy::named(["agent"]))
+            .assignment(AssignmentPolicy::fixed("agent"))
+            .authoritative_ingress(config)
+            .build()
+            .await
+            .expect("build authoritative app")
+    }
+
+    #[tokio::test]
+    async fn authoritative_ingress_installs_before_adapters_and_hands_over_receivers() {
+        let app = authoritative_app(AuthoritativeIngressConfig::default()).await;
+
+        let ingress = app
+            .take_authoritative_ingress()
+            .expect("authoritative receivers");
+        assert!(!ingress.admissions.is_closed());
+
+        let health = app.ingress_health();
+        assert_eq!(health.mode, IngressMode::Authoritative);
+        assert_eq!(
+            health.operational_stream,
+            OperationalEventStreamHealth::Healthy
+        );
+        assert!(health.admits_new_work);
+    }
+
+    #[tokio::test]
+    async fn authoritative_ingress_has_exactly_one_consumer() {
+        let app = authoritative_app(AuthoritativeIngressConfig::default()).await;
+
+        assert!(app.take_authoritative_ingress().is_some());
+        assert!(
+            app.take_authoritative_ingress().is_none(),
+            "a second correctness consumer would defeat the boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn capacity_one_stream_is_a_supported_configuration() {
+        // The register's acceptance matrix runs at capacity one, where every
+        // delivery is a backpressure decision.
+        let app = authoritative_app(AuthoritativeIngressConfig::new(
+            1,
+            Duration::from_secs(1),
+            1,
+        ))
+        .await;
+
+        let ingress = app
+            .take_authoritative_ingress()
+            .expect("authoritative receivers");
+        drop(ingress);
+        assert_eq!(app.ingress_health().mode, IngressMode::Authoritative);
+    }
+
+    #[tokio::test]
+    async fn losing_the_operational_receiver_degrades_readiness() {
+        let app = authoritative_app(AuthoritativeIngressConfig::default()).await;
+        let ingress = app
+            .take_authoritative_ingress()
+            .expect("authoritative receivers");
+
+        assert!(app.ingress_health().admits_new_work);
+
+        // Losing the correctness receiver must be observable as degraded
+        // readiness, not a log line the operator never reads.
+        drop(ingress.operational);
+        let _ = app
+            .state
+            .orchestrator
+            .open_conversation(
+                TenantId::new(),
+                ConversationPolicy::default(),
+                HashMap::new(),
+            )
+            .await;
+
+        let health = app.ingress_health();
+        assert_eq!(
+            health.operational_stream,
+            OperationalEventStreamHealth::Degraded
+        );
+        assert!(
+            !health.admits_new_work,
+            "a degraded runtime must stop claiming it can take new calls"
+        );
+    }
+
+    #[tokio::test]
+    async fn convenience_mode_keeps_the_legacy_contract() {
+        let app = RvoipApp::builder()
+            .customers(CustomerPolicy::sip_only())
+            .sip(
+                SipConfig::bind("127.0.0.1:0")
+                    .domain("test.local")
+                    .allow(Role::Customer, [Capability::Voice]),
+            )
+            .employees(EmployeePolicy::named(["agent"]))
+            .assignment(AssignmentPolicy::fixed("agent"))
+            .build()
+            .await
+            .expect("build convenience app");
+
+        assert!(app.take_authoritative_ingress().is_none());
+        let health = app.ingress_health();
+        assert_eq!(health.mode, IngressMode::Convenience);
+        assert_eq!(
+            health.operational_stream,
+            OperationalEventStreamHealth::NotInstalled
+        );
+        assert!(health.admits_new_work);
+    }
+
+    #[tokio::test]
+    async fn drain_is_bounded_and_reports_its_outcome() {
+        let app = authoritative_app(AuthoritativeIngressConfig::default()).await;
+        let _ingress = app.take_authoritative_ingress();
+
+        // An idle runtime converges well inside the budget; the point is
+        // that the join point exists and answers honestly either way.
+        let outcome = app.drain(Duration::from_secs(5)).await;
+        assert!(outcome.completed, "idle drain should finish in budget");
+        assert_eq!(outcome.remaining_tasks, 0);
     }
 
     #[tokio::test]
