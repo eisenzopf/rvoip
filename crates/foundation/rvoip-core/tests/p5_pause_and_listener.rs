@@ -674,3 +674,80 @@ async fn disconnect_during_ai_setup_cannot_install_or_emit_stale_attachment() {
         "a stale AiAttached event followed ConnectionEnded"
     );
 }
+
+/// A factory hands every recording its own sink, so concurrent recordings
+/// neither mix frames nor close each other out.
+struct CountingSinkFactory {
+    opened: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl rvoip_core::harness::RecordingSinkFactory for CountingSinkFactory {
+    async fn open(
+        &self,
+        recording_id: &rvoip_core::ids::RecordingId,
+    ) -> RvResult<Arc<dyn RecordingSink>> {
+        self.opened
+            .lock()
+            .unwrap()
+            .push(recording_id.to_string());
+        Ok(Arc::new(VecRecordingSink::new(format!(
+            "memory:rec/{recording_id}"
+        ))))
+    }
+}
+
+#[tokio::test]
+async fn a_sink_factory_gives_each_recording_its_own_sink() {
+    let (orch, _tx, stream, connid) = setup().await;
+    let opened = Arc::new(Mutex::new(Vec::new()));
+    orch.register_recording_sink_factory(
+        "per-recording",
+        Arc::new(CountingSinkFactory {
+            opened: Arc::clone(&opened),
+        }),
+    );
+
+    let first = orch
+        .start_recording(RecordingTarget::Connection(connid.clone()), "per-recording")
+        .await
+        .expect("first recording");
+    let second = orch
+        .start_recording(RecordingTarget::Connection(connid), "per-recording")
+        .await
+        .expect("second recording");
+    assert_ne!(first, second);
+    assert_eq!(
+        opened.lock().unwrap().len(),
+        2,
+        "each recording opens its own sink rather than sharing one"
+    );
+
+    stream
+        .inbound_tx
+        .send(frame(stream.id.clone(), 1))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(40)).await;
+
+    // Stopping the first must not close the second out from under it: the
+    // shared-sink shape closed whichever recording stopped first.
+    let first_artifact = orch.stop_recording(first).await.expect("stop first");
+    assert!(first_artifact.url.contains("memory:rec/"));
+    let second_artifact = orch.stop_recording(second).await.expect("stop second");
+    assert_ne!(
+        first_artifact.url, second_artifact.url,
+        "two recordings must produce two distinct artifacts"
+    );
+}
+
+#[tokio::test]
+async fn an_unregistered_sink_name_is_still_refused() {
+    let (orch, _tx, _stream, connid) = setup().await;
+    assert!(
+        orch.start_recording(RecordingTarget::Connection(connid), "absent")
+            .await
+            .is_err(),
+        "resolving neither a factory nor a sink must fail closed"
+    );
+}

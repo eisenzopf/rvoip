@@ -1230,6 +1230,7 @@ pub struct Orchestrator {
     tts_providers: Arc<DashMap<String, Arc<dyn crate::harness::TtsProvider>>>,
     dialog_managers: Arc<DashMap<String, Arc<dyn crate::harness::DialogManager>>>,
     recording_sinks: Arc<DashMap<String, Arc<dyn crate::harness::RecordingSink>>>,
+    recording_sink_factories: Arc<DashMap<String, Arc<dyn crate::harness::RecordingSinkFactory>>>,
     /// P5 — live recording sessions. Drop the JoinHandle on
     /// `stop_recording` to abort the pump.
     recordings: Arc<DashMap<crate::ids::RecordingId, RecordingHandle>>,
@@ -1566,6 +1567,7 @@ impl Orchestrator {
             tts_providers: Arc::new(DashMap::new()),
             dialog_managers: Arc::new(DashMap::new()),
             recording_sinks: Arc::new(DashMap::new()),
+            recording_sink_factories: Arc::new(DashMap::new()),
             recordings: Arc::new(DashMap::new()),
             transcriptions: Arc::new(DashMap::new()),
             ai_attachments: Arc::new(DashMap::new()),
@@ -1637,6 +1639,7 @@ impl Orchestrator {
             tts_providers: Arc::new(DashMap::new()),
             dialog_managers: Arc::new(DashMap::new()),
             recording_sinks: Arc::new(DashMap::new()),
+            recording_sink_factories: Arc::new(DashMap::new()),
             recordings: Arc::new(DashMap::new()),
             transcriptions: Arc::new(DashMap::new()),
             ai_attachments: Arc::new(DashMap::new()),
@@ -8460,6 +8463,21 @@ impl Orchestrator {
         self.recording_sinks.insert(name.into(), sink);
     }
 
+    /// Register a factory that opens one sink per recording.
+    ///
+    /// Prefer this over [`Self::register_recording_sink`] whenever more than
+    /// one recording can be in flight at a time: a shared sink receives
+    /// every concurrent recording's frames and is closed by whichever one
+    /// stops first. A factory registered under a name takes precedence over
+    /// a plain sink registered under the same name.
+    pub fn register_recording_sink_factory(
+        &self,
+        name: impl Into<String>,
+        factory: Arc<dyn crate::harness::RecordingSinkFactory>,
+    ) {
+        self.recording_sink_factories.insert(name.into(), factory);
+    }
+
     // --- P5 recording / transcription -----------------------------------
 
     /// P5 — start recording the audio MediaStream of a Connection (or
@@ -8472,11 +8490,20 @@ impl Orchestrator {
     ) -> Result<crate::ids::RecordingId> {
         use crate::commands::RecordingTarget;
         let sink_name = sink_name.into();
-        let sink = self
+        // Resolve which source is registered now, so an unregistered name
+        // still fails before any tap or quota work. The sink itself is
+        // opened once this recording has an identity to name it by.
+        let sink_factory = self
+            .recording_sink_factories
+            .get(&sink_name)
+            .map(|e| Arc::clone(e.value()));
+        let shared_sink = self
             .recording_sinks
             .get(&sink_name)
-            .map(|e| Arc::clone(e.value()))
-            .ok_or_else(|| RvoipError::AdmissionRejected("recording sink not registered"))?;
+            .map(|e| Arc::clone(e.value()));
+        if sink_factory.is_none() && shared_sink.is_none() {
+            return Err(RvoipError::AdmissionRejected("recording sink not registered"));
+        }
 
         // Resolve target → list of Connections to tap.
         let (conns, tenant_id) = match target {
@@ -8556,6 +8583,13 @@ impl Orchestrator {
         };
 
         let rid = crate::ids::RecordingId::new();
+        // A factory yields a sink owned by this recording alone; a plain
+        // registered sink is shared with every other recording using the
+        // same name, which is why the factory takes precedence.
+        let sink = match sink_factory {
+            Some(factory) => factory.open(&rid).await?,
+            None => shared_sink.expect("a sink or factory was resolved above"),
+        };
         let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let connection_ids = conns.clone();
         let mut media = MediaTapHandle::default();

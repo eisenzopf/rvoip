@@ -8,6 +8,21 @@ A pre-release cut from `0.3.8` that makes two shipped correctness
 primitives reachable from the high-level app, plus one signature-freshness
 fix. Additive: the convenience builder path is unchanged.
 
+### Per-recording sink factories
+
+- `RecordingSinkFactory` opens one `RecordingSink` per recording, and
+  `Orchestrator::register_recording_sink_factory` registers one under the
+  same namespace as a plain sink, taking precedence over it.
+- Why: a registered `RecordingSink` is a single shared instance. Two
+  concurrent recordings on one name wrote into the same sink, and the first
+  `stop_recording` closed it — so their audio mixed and the artifact was
+  attributed to whichever stopped first. That is invisible with one call in
+  flight, which is the shape the deterministic harness exercises, and wrong
+  for any deployment recording more than one call at a time.
+- `start_recording` resolves a factory first and falls back to a registered
+  sink, so existing single-sink registrations behave exactly as before. An
+  unregistered name still fails closed before any tap or quota work.
+
 ### Authoritative application ingress (RVOIP-22)
 
 - `RvoipAppBuilder::authoritative_ingress(AuthoritativeIngressConfig)`
