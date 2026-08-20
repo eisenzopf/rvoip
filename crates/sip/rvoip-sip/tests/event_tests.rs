@@ -308,6 +308,7 @@ fn test_media_quality_changed_event() {
         call_id: id.clone(),
         packet_loss_percent: 5,
         jitter_ms: 30,
+        mos: Some(3.9),
     };
     assert!(e.is_media_event());
 }

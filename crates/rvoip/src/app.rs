@@ -214,6 +214,8 @@ pub struct SipConfig {
     captured_headers: Vec<String>,
     /// Playout smoothing and packet-loss concealment for inbound audio.
     playout: Option<rvoip_sip::PlayoutConfig>,
+    /// STUN server used to discover the advertised address, when asked.
+    stun_server: Option<SocketAddr>,
     /// SRTP posture: whether to offer it, and whether to insist on it.
     srtp: SipMediaSecurity,
 }
@@ -237,6 +239,28 @@ pub enum SipMediaSecurity {
 }
 
 impl SipConfig {
+    /// Discover the advertised address from a STUN server at startup.
+    ///
+    /// A SIP listener behind NAT must advertise the address the far end can
+    /// reach, not the one it bound. `advertised_addr` states that address
+    /// statically; this learns it instead, which is what a deployment whose
+    /// public address is not known ahead of time needs.
+    ///
+    /// This is deliberately **not** ICE. Full ICE (RFC 8445) negotiates
+    /// candidate pairs with connectivity checks, and a carrier SIP trunk
+    /// does not offer it — the far end expects one reachable media address.
+    /// What ICE's server-reflexive step actually buys here is knowing that
+    /// address, and that is a STUN binding request. Browser legs, where ICE
+    /// genuinely applies, are served by the WebRTC transport.
+    ///
+    /// A static `advertised_addr` wins if both are set: an operator who
+    /// named an address meant it.
+    #[must_use]
+    pub const fn discover_advertised_addr(mut self, stun_server: SocketAddr) -> Self {
+        self.stun_server = Some(stun_server);
+        self
+    }
+
     /// Smooth inbound audio and conceal lost packets.
     ///
     /// A carrier trunk delivers audio in bursts and loses packets; without
@@ -271,6 +295,7 @@ impl SipConfig {
             tenant: None,
             trusted_trunks: Vec::new(),
             captured_headers: Vec::new(),
+            stun_server: None,
             // Both off by default: unchanged behaviour for every existing
             // caller, and a deployment that wants smoothing or encryption
             // says so rather than inheriting it.
@@ -750,6 +775,8 @@ pub struct RvoipAppBuilder {
     voice_routing: VoiceRoutingPolicy,
     on_message: MessageHandler,
     authoritative_ingress: Option<AuthoritativeIngressConfig>,
+    /// Cadence for the periodic media-quality heartbeat, when requested.
+    media_quality_interval: Option<Duration>,
 }
 
 impl RvoipAppBuilder {
@@ -818,6 +845,21 @@ impl RvoipAppBuilder {
         self
     }
 
+    /// Publish per-connection media quality on a fixed cadence.
+    ///
+    /// Quality already reaches the application whenever the media layer
+    /// reports it. This adds a steady heartbeat on top, which is what a
+    /// dashboard wants: a call that has gone quiet still produces a reading,
+    /// so a flat line means "no change" rather than "no data".
+    ///
+    /// Connections that have never been measured are skipped rather than
+    /// averaged in as zeros, so the cadence never invents a perfect score.
+    #[must_use]
+    pub const fn media_quality_interval(mut self, every: Duration) -> Self {
+        self.media_quality_interval = Some(every);
+        self
+    }
+
     /// Configure the async message callback.
     pub fn on_message<F, Fut>(mut self, handler: F) -> Self
     where
@@ -873,6 +915,11 @@ impl RvoipAppBuilder {
         } else {
             IngressMode::Convenience
         };
+        // Started before any adapter, so the first call is already covered by
+        // the heartbeat rather than waiting a full interval to appear.
+        if let Some(every) = self.media_quality_interval {
+            orchestrator.spawn_media_quality_sampler(every);
+        }
         // Subscribe before any adapter starts a listener so an immediate
         // inbound call cannot race app admission-loop startup.
         let core_events = orchestrator.subscribe_events();
@@ -897,9 +944,23 @@ impl RvoipAppBuilder {
                 ));
             }
             let sip_addr = parse_socket_addr(&sip.bind)?;
+            // Learn the reachable address before the listener starts, so the
+            // very first INVITE already advertises somewhere answerable. A
+            // static address wins: an operator who named one meant it.
+            let mut sip = sip;
+            if sip.sip_advertised_addr.is_none() {
+                if let Some(stun_server) = sip.stun_server {
+                    let discovered = discover_advertised_addr(stun_server, sip_addr).await?;
+                    tracing::info!(%discovered, "SIP advertised address discovered via STUN");
+                    sip.sip_advertised_addr = Some(discovered);
+                }
+            }
+            let sip = sip;
             if sip_addr.ip().is_unspecified() && sip.sip_advertised_addr.is_none() {
                 return Err(AppError::Policy(
-                    "a concrete SIP advertised address is required for an unspecified bind".into(),
+                    "a concrete SIP advertised address is required for an unspecified bind: \
+                     set advertised_addr, or discover_advertised_addr with a STUN server"
+                        .into(),
                 ));
             }
             let sip_addr = resolve_udp_bind_addr(sip_addr)?;
@@ -1081,6 +1142,7 @@ impl Default for RvoipAppBuilder {
             voice_routing: VoiceRoutingPolicy::default(),
             on_message: default_message_handler(),
             authoritative_ingress: None,
+            media_quality_interval: None,
         }
     }
 }
@@ -1779,6 +1841,38 @@ fn trusted_trunk_principal(subject: &str, tenant: &str) -> AuthenticatedPrincipa
     }
 }
 
+/// Ask a STUN server what address it sees us from.
+///
+/// The probe binds an ephemeral socket on the same interface the SIP
+/// listener will use rather than the listener's own port: the listener is
+/// not up yet, and a NAT mapping learned from a different port is still the
+/// right *address*, which is what the SDP needs. The port comes from the
+/// listener's own configuration.
+#[cfg(feature = "sip")]
+async fn discover_advertised_addr(
+    stun_server: SocketAddr,
+    sip_addr: SocketAddr,
+) -> Result<SocketAddr, AppError> {
+    use rvoip_sip::StunClient;
+
+    let probe_bind = SocketAddr::new(sip_addr.ip(), 0);
+    let socket = tokio::net::UdpSocket::bind(probe_bind).await.map_err(|error| {
+        AppError::Policy(format!("STUN discovery could not bind a probe socket: {error}"))
+    })?;
+    let mapped = StunClient::new(std::sync::Arc::new(socket), stun_server)
+        .discover()
+        .await
+        .map_err(|error| {
+            // Fail the build rather than start a listener advertising an
+            // address nobody can reach: a call that connects and carries no
+            // audio is harder to diagnose than a service that refused to start.
+            AppError::Policy(format!(
+                "STUN discovery failed against {stun_server}: {error}"
+            ))
+        })?;
+    Ok(SocketAddr::new(mapped.ip(), sip_addr.port()))
+}
+
 fn make_low_sip_config(config: &SipConfig, bind: SocketAddr) -> LowSipConfig {
     let mut low = LowSipConfig::on("rvoip-gateway", bind.ip(), bind.port());
     low.playout = config.playout;
@@ -1820,6 +1914,39 @@ fn resolve_udp_bind_addr(addr: SocketAddr) -> AppResult<SocketAddr> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A listener that cannot learn its reachable address must refuse to
+    /// start. Advertising an unreachable one produces calls that connect and
+    /// carry no audio, which is far harder to diagnose than a refusal.
+    #[cfg(feature = "sip")]
+    #[tokio::test]
+    async fn stun_discovery_fails_closed_rather_than_advertising_a_guess() {
+        // A STUN server that is not there. Discovery exhausts its budget and
+        // the error must surface rather than falling back to the bind address.
+        let unreachable: SocketAddr = "127.0.0.1:1".parse().expect("addr");
+        let sip_addr: SocketAddr = "127.0.0.1:5060".parse().expect("addr");
+        let error = discover_advertised_addr(unreachable, sip_addr)
+            .await
+            .expect_err("an unreachable STUN server cannot yield an address");
+        assert!(
+            format!("{error}").contains("STUN discovery failed"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// A statically configured address is the operator's decision and must
+    /// not be second-guessed by a probe.
+    #[cfg(feature = "sip")]
+    #[test]
+    fn a_static_advertised_address_is_kept_alongside_a_stun_server() {
+        let explicit: SocketAddr = "203.0.113.5:5060".parse().expect("addr");
+        let stun: SocketAddr = "198.51.100.1:3478".parse().expect("addr");
+        let config = SipConfig::bind("0.0.0.0:5060")
+            .advertised_addr(explicit)
+            .discover_advertised_addr(stun);
+        assert_eq!(config.sip_advertised_addr, Some(explicit));
+        assert_eq!(config.stun_server, Some(stun));
+    }
 
     /// Media posture set on the builder must reach the coordinator, or a
     /// deployment that asked for encryption silently carries calls in clear.

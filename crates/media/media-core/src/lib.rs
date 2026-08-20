@@ -226,6 +226,7 @@ pub mod prelude {
     };
 
     // Re-export from RTP core
+    pub use rvoip_rtp_core::network::stun::{StunClient, StunError};
     pub use rvoip_rtp_core::{
         RtpHeader, RtpPacket, RtpSession, RtpSessionBufferConfig, RtpSessionConfig,
         RtpTransportBufferConfig,

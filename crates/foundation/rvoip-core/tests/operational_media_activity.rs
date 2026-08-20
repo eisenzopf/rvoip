@@ -499,3 +499,185 @@ async fn operational_backpressure_coalesces_without_stalling_the_media_graph() {
     let _ = operational.recv().await;
     orchestrator.drain_connection_lifecycle_tasks().await;
 }
+
+/// A degrading call is worth acting on while it is still up, so quality has
+/// to reach the authoritative stream — an application that took the
+/// operational receiver has stopped reading the observational broadcast.
+#[tokio::test]
+async fn quality_reaches_the_authoritative_stream_with_its_mos() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut operational = orchestrator.install_operational_event_stream(8).unwrap();
+    let adapter = TestAdapter::new();
+    orchestrator
+        .register(adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .unwrap();
+    let connection_id = ConnectionId::new();
+    let (stream, _source) = TestStream::new();
+    adapter.add_connection(connection_id.clone(), stream);
+    connect(
+        &orchestrator,
+        &adapter,
+        &mut operational,
+        connection_id.clone(),
+    )
+    .await;
+
+    adapter
+        .send(AdapterEvent::Quality {
+            connection_id: connection_id.clone(),
+            snapshot: rvoip_core::stream::QualitySnapshot {
+                jitter_ms: 17.5,
+                packet_loss_pct: 2.25,
+                mos: Some(3.75),
+            },
+        })
+        .await;
+
+    let event = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let event = operational.recv().await.expect("operational stream");
+            if matches!(event.kind, OperationalEventKind::Quality { .. }) {
+                return event;
+            }
+        }
+    })
+    .await
+    .expect("quality reaches the authoritative stream");
+
+    assert_eq!(event.connection_id, connection_id);
+    match event.kind {
+        OperationalEventKind::Quality {
+            jitter_centi_ms,
+            packet_loss_centi_pct,
+            mos_centi,
+        } => {
+            // Hundredths, so the numbers survive the integer scaling that
+            // keeps this enum comparable.
+            assert_eq!(jitter_centi_ms, 1_750);
+            assert_eq!(packet_loss_centi_pct, 225);
+            assert_eq!(mos_centi, Some(375));
+        }
+        other => panic!("expected quality, got {other:?}"),
+    }
+}
+
+/// A nonsensical reading must not wrap into an enormous unsigned number and
+/// read as catastrophic quality.
+#[tokio::test]
+async fn a_negative_or_absent_reading_reports_zero_rather_than_wrapping() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut operational = orchestrator.install_operational_event_stream(8).unwrap();
+    let adapter = TestAdapter::new();
+    orchestrator
+        .register(adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .unwrap();
+    let connection_id = ConnectionId::new();
+    let (stream, _source) = TestStream::new();
+    adapter.add_connection(connection_id.clone(), stream);
+    connect(
+        &orchestrator,
+        &adapter,
+        &mut operational,
+        connection_id.clone(),
+    )
+    .await;
+
+    adapter
+        .send(AdapterEvent::Quality {
+            connection_id: connection_id.clone(),
+            snapshot: rvoip_core::stream::QualitySnapshot {
+                jitter_ms: -1.0,
+                packet_loss_pct: f32::NAN,
+                mos: None,
+            },
+        })
+        .await;
+
+    let event = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let event = operational.recv().await.expect("operational stream");
+            if matches!(event.kind, OperationalEventKind::Quality { .. }) {
+                return event;
+            }
+        }
+    })
+    .await
+    .expect("quality event");
+
+    match event.kind {
+        OperationalEventKind::Quality {
+            jitter_centi_ms,
+            packet_loss_centi_pct,
+            mos_centi,
+        } => {
+            assert_eq!(jitter_centi_ms, 0);
+            assert_eq!(packet_loss_centi_pct, 0);
+            assert_eq!(mos_centi, None);
+        }
+        other => panic!("expected quality, got {other:?}"),
+    }
+}
+
+/// The quality sampler must not invent readings.
+///
+/// A stream that has never been measured returns `QualitySnapshot::default()`
+/// — all zeros, which reads as flawless. `has_quality_measurement` is how a
+/// transport says "no data", and the sampler must honour it rather than
+/// averaging a perfect score into the report.
+#[tokio::test]
+async fn the_quality_sampler_skips_connections_it_has_never_measured() {
+    struct UnmeasuredStream {
+        id: StreamId,
+    }
+
+    #[async_trait::async_trait]
+    impl MediaStream for UnmeasuredStream {
+        fn id(&self) -> StreamId {
+            self.id.clone()
+        }
+        fn kind(&self) -> StreamKind {
+            StreamKind::Audio
+        }
+        fn codec(&self) -> CodecInfo {
+            CodecInfo {
+                name: "pcmu".into(),
+                clock_rate_hz: 8_000,
+                channels: 1,
+                fmtp: None,
+                payload_type: Some(0),
+            }
+        }
+        fn direction(&self) -> Direction {
+            Direction::Inbound
+        }
+        fn frames_in(&self) -> mpsc::Receiver<MediaFrame> {
+            mpsc::channel(1).1
+        }
+        fn frames_out(&self) -> mpsc::Sender<MediaFrame> {
+            mpsc::channel(1).0
+        }
+        fn quality_snapshot(&self) -> rvoip_core::stream::QualitySnapshot {
+            rvoip_core::stream::QualitySnapshot::default()
+        }
+        fn has_quality_measurement(&self) -> bool {
+            false
+        }
+        async fn close(self: Arc<Self>) -> rvoip_core::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    let unmeasured = UnmeasuredStream {
+        id: StreamId::new(),
+    };
+    assert!(
+        !unmeasured.has_quality_measurement(),
+        "a transport with no report must be able to say so"
+    );
+    // The snapshot it would return is exactly the reading that must never be
+    // published as if it were measured.
+    let snapshot = unmeasured.quality_snapshot();
+    assert_eq!(snapshot.jitter_ms, 0.0);
+    assert_eq!(snapshot.packet_loss_pct, 0.0);
+    assert_eq!(snapshot.mos, None);
+}

@@ -244,6 +244,20 @@ pub trait MediaStream: Send + Sync {
 
     fn quality_snapshot(&self) -> QualitySnapshot;
 
+    /// Whether [`Self::quality_snapshot`] reflects an actual measurement.
+    ///
+    /// `QualitySnapshot::default()` is all zeros, which reads as flawless
+    /// rather than as unknown — the type has no way to say "no data". A
+    /// transport that has not yet received a quality report should return
+    /// `false` here so aggregators skip it instead of averaging in a
+    /// perfect score for a call nobody has measured.
+    ///
+    /// Defaults to `true` for source compatibility: an implementation that
+    /// always returns a real snapshot needs no change.
+    fn has_quality_measurement(&self) -> bool {
+        true
+    }
+
     async fn close(self: Arc<Self>) -> Result<()>;
 }
 

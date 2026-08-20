@@ -785,6 +785,12 @@ pub enum Event {
         packet_loss_percent: u32,
         /// Jitter in milliseconds, rounded to an integer.
         jitter_ms: u32,
+        /// Estimated Mean Opinion Score, when media-core produced one.
+        ///
+        /// Carried as the estimate it is: media-core derives it from loss,
+        /// jitter, and latency rather than measuring perceived quality, so
+        /// it tracks trends well and should not be quoted as a measurement.
+        mos: Option<f32>,
     },
 
     /// SRTP media security was negotiated and installed.

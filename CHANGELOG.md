@@ -8,6 +8,49 @@ A pre-release cut from `0.3.8` that makes two shipped correctness
 primitives reachable from the high-level app, plus one signature-freshness
 fix. Additive: the convenience builder path is unchanged.
 
+### Media quality reaches the application
+
+- **`OperationalEventKind::Quality`** puts per-connection quality on the
+  authoritative stream. An application that took the operational receiver has
+  stopped reading the observational broadcast, so quality it never sees is
+  quality it cannot act on — and a call degrading is worth reacting to while
+  it is still up. Scaled to integers (hundredths) because the enum is `Eq`
+  and floats are not; a negative or non-finite reading clamps to zero rather
+  than wrapping into an enormous unsigned value.
+- **MOS survives the SIP boundary.** `Event::MediaQualityChanged` gained a
+  `mos` field. media-core computed the estimate all along; the adapter was
+  discarding it with a comment saying it would keep doing so "until the
+  ApiEvent grows a `mos` field".
+- **`MediaStream::has_quality_measurement`** (default `true`) lets a
+  transport say it has no measurement. `QualitySnapshot::default()` is all
+  zeros, which reads as *flawless* rather than *unknown*, and the type had no
+  way to distinguish them. `spawn_media_quality_sampler` now skips
+  unmeasured connections instead of averaging a perfect score into the
+  report.
+- **`SipMediaStream` retains its last quality report**, so `quality_snapshot`
+  returns the RTCP-derived measurement the adapter routed to it rather than a
+  default. Before this it always returned zeros, which made the sampler
+  unusable on the SIP path: polling it published flawless quality for every
+  call forever.
+- `RvoipAppBuilder::media_quality_interval` starts the sampler. Off by
+  default.
+
+### STUN-discovered advertised address
+
+- `SipConfig::discover_advertised_addr(stun_server)` learns the reachable
+  address at startup instead of requiring it configured, for a listener
+  behind NAT whose public address is not known ahead of time.
+- **Not ICE, deliberately.** RFC 8445 negotiates candidate pairs with
+  connectivity checks, and a carrier SIP trunk does not offer it — the far
+  end expects one reachable media address. What ICE's server-reflexive step
+  buys on this path is knowing that address, which is a STUN binding request.
+  Browser legs, where ICE genuinely applies, are served by the WebRTC
+  transport.
+- Fails closed: a STUN server that cannot answer fails the build rather than
+  starting a listener that advertises a guess. A call that connects and
+  carries no audio is harder to diagnose than a service that refused to
+  start. A static `advertised_addr` wins over discovery.
+
 ### Carrier-grade media on the SIP path
 
 - **`PlayoutBuffer`** (`media-core::processing::audio::playout`) smooths and

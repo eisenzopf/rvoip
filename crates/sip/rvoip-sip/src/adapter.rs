@@ -2920,26 +2920,35 @@ impl SipAdapter {
                 call_id,
                 packet_loss_percent,
                 jitter_ms,
+                mos,
             } => {
                 // P12.8 — surface per-Connection media quality (RTCP
                 // RR / XR, distilled by media-core) into the
                 // orchestrator's `QualityAggregator` via
-                // `AdapterEvent::Quality`. MOS estimation lives in
-                // media-core and is not propagated through the
-                // current ApiEvent shape; leave as `None` until the
-                // ApiEvent grows a `mos` field.
+                // `AdapterEvent::Quality`. MOS now rides along: it is
+                // media-core's own estimate, which is what makes a
+                // quality report actionable rather than two raw numbers
+                // an operator has to interpret.
                 let Some(epoch) = self.existing_mapped_epoch(&call_id) else {
                     return;
                 };
+                let snapshot = rvoip_core::stream::QualitySnapshot {
+                    jitter_ms: jitter_ms as f32,
+                    packet_loss_pct: packet_loss_percent as f32,
+                    mos,
+                };
+                // Retain it on the stream as well as publishing it, so a
+                // caller polling `quality_snapshot` sees the same measurement
+                // the event carried rather than a default that reads as
+                // flawless.
+                if let Some(stream) = self.streams_cache.get(&epoch.connection_id) {
+                    stream.record_quality(snapshot.clone());
+                }
                 self.try_send_for_epoch(
                     &epoch,
                     AdapterEvent::Quality {
                         connection_id: epoch.connection_id.clone(),
-                        snapshot: rvoip_core::stream::QualitySnapshot {
-                            jitter_ms: jitter_ms as f32,
-                            packet_loss_pct: packet_loss_percent as f32,
-                            mos: None,
-                        },
+                        snapshot,
                     },
                 );
             }

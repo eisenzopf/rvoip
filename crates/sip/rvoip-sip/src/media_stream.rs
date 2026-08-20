@@ -205,6 +205,17 @@ struct SipMediaStreamInner {
     lifecycle: Arc<SipMediaLifecycleState>,
     outbound_writes_activated: AtomicBool,
     cancel: watch::Sender<bool>,
+    /// Last quality the media layer reported for this stream's connection.
+    ///
+    /// Retained here because quality arrives by *push* — media-core distills
+    /// RTCP RR/XR and the adapter routes it per connection — while
+    /// `quality_snapshot` is a *pull*. Without somewhere to land, a poller
+    /// would read defaults and report perfect quality for every call, which
+    /// is worse than reporting none because it looks like evidence.
+    ///
+    /// `None` until the first report, so a caller can tell "no measurement
+    /// yet" from "measured, and it is fine".
+    last_quality: Mutex<Option<QualitySnapshot>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -328,6 +339,15 @@ pub struct SipMediaStream {
 }
 
 impl SipMediaStream {
+    /// Record the media layer's latest quality report for this stream.
+    pub(crate) fn record_quality(&self, snapshot: QualitySnapshot) {
+        *self
+            .inner
+            .last_quality
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(snapshot);
+    }
+
     /// Allocate a local-only media stream without touching a SIP session.
     ///
     /// This constructor allocates only bounded channels and a stable stream
@@ -373,6 +393,7 @@ impl SipMediaStream {
                 lifecycle_gate: AsyncMutex::new(()),
                 lifecycle: Arc::new(SipMediaLifecycleState::new()),
                 outbound_writes_activated: AtomicBool::new(outbound_writes_activated),
+                last_quality: Mutex::new(None),
                 cancel,
             }),
         })
@@ -1130,10 +1151,31 @@ impl MediaStream for SipMediaStream {
     }
 
     fn quality_snapshot(&self) -> QualitySnapshot {
-        // No per-session stats yet — return defaults. Wiring real loss /
-        // jitter metrics from the SIP RTP layer is tracked alongside the
-        // wider observability gap (`GAP_PLAN.md` §2.6 Per-pair RTT).
-        QualitySnapshot::default()
+        // The last report the media layer pushed for this connection.
+        //
+        // Quality originates as RTCP receiver reports and XR, which
+        // media-core distills and the adapter routes here per connection.
+        // Before the first report there is no measurement, and the trait
+        // has no way to say so — `default()` is zeros, which reads as
+        // flawless. `has_quality_measurement` distinguishes the two, and a
+        // poller should consult it rather than averaging in a call that has
+        // not reported yet.
+        self.inner
+            .last_quality
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_default()
+    }
+
+    /// False until the media layer reports quality for this connection, so
+    /// an aggregator does not average in a call it has never measured.
+    fn has_quality_measurement(&self) -> bool {
+        self.inner
+            .last_quality
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
     }
 
     async fn close(self: Arc<Self>) -> RvoipResult<()> {

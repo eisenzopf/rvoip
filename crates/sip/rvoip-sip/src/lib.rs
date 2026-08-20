@@ -586,6 +586,7 @@ pub use auth::{
 };
 pub use rvoip_media_core::performance::pool::PoolConfig as MediaPoolConfig;
 pub use crate::adapter::ASSERTED_IDENTITY_METADATA;
+pub use rvoip_media_core::prelude::{StunClient, StunError};
 pub use rvoip_media_core::processing::audio::playout::{
     PlayoutConfig, PlayoutStats,
 };

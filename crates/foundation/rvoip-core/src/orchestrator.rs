@@ -4746,6 +4746,11 @@ impl Orchestrator {
                     };
                     let mut n = 0usize;
                     for s in streams {
+                        // A stream that has never reported would contribute
+                        // zeros, and zeros read as flawless.
+                        if !s.has_quality_measurement() {
+                            continue;
+                        }
                         let snap = s.quality_snapshot();
                         totaled.jitter_ms += snap.jitter_ms;
                         totaled.packet_loss_pct += snap.packet_loss_pct;
@@ -7190,10 +7195,38 @@ impl Orchestrator {
                 }
                 metrics::gauge!("rvoip_media_jitter_ms").set(snapshot.jitter_ms as f64);
                 metrics::gauge!("rvoip_media_packet_loss_pct").set(snapshot.packet_loss_pct as f64);
+                // Also on the authoritative stream: an application holding
+                // the operational receiver has stopped reading the broadcast
+                // below, and a call degrading is worth acting on while it is
+                // still up.
+                let at = Utc::now();
+                let scale = |value: f32| -> u32 {
+                    // Negative or non-finite readings are treated as zero
+                    // rather than wrapping into an enormous unsigned value.
+                    if value.is_finite() && value > 0.0 {
+                        (value * 100.0).round().min(f64::from(u32::MAX) as f32) as u32
+                    } else {
+                        0
+                    }
+                };
+                self.emit_operational(
+                    connection_id.clone(),
+                    transport,
+                    at,
+                    OperationalEventKind::Quality {
+                        jitter_centi_ms: scale(snapshot.jitter_ms),
+                        packet_loss_centi_pct: scale(snapshot.packet_loss_pct),
+                        mos_centi: snapshot.mos.and_then(|mos| {
+                            (mos.is_finite() && mos > 0.0)
+                                .then(|| (mos * 100.0).round().min(f32::from(u16::MAX)) as u16)
+                        }),
+                    },
+                )
+                .await;
                 self.emit(Event::MediaQuality {
                     connection_id,
                     snapshot,
-                    at: Utc::now(),
+                    at,
                 });
             }
             AdapterEvent::Message {

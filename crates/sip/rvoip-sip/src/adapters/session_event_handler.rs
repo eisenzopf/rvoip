@@ -1436,6 +1436,7 @@ fn media_observation_api_event(event: &MediaToSessionEvent) -> Option<crate::api
             call_id: SessionId(session_id.clone()),
             packet_loss_percent: (quality_metrics.packet_loss * 100.0) as u32,
             jitter_ms: quality_metrics.jitter_ms as u32,
+            mos: Some(quality_metrics.mos_score as f32),
         }),
         _ => None,
     }
@@ -7001,10 +7002,14 @@ mod tests {
                     call_id,
                     packet_loss_percent,
                     jitter_ms,
+                    mos,
                 }) => {
                     assert_eq!(call_id, SessionId("media-reporting".to_string()));
                     assert_eq!(packet_loss_percent, 12);
                     assert_eq!(jitter_ms, 17);
+                    // media-core's estimate now survives the projection
+                    // instead of being dropped at this boundary.
+                    assert_eq!(mos, Some(3.8));
                 }
                 other => panic!("unexpected media quality projection: {other:?}"),
             }
