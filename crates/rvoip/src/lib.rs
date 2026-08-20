@@ -106,6 +106,18 @@ pub mod webrtc {
     pub use rvoip_webrtc::*;
 }
 
+/// Bearer-credential validation shared by transport auth hooks.
+///
+/// An app owner implements [`auth::BearerValidator`] and hands it to a
+/// transport hook (for WebRTC, `webrtc::signaling::auth::AuthCoreHook`)
+/// so signaling upgrades authenticate against the owner's own control
+/// plane. Exposed with the `webrtc` feature because that is the transport
+/// whose app-level config accepts a hook today.
+#[cfg(feature = "webrtc")]
+pub mod auth {
+    pub use rvoip_auth_core::*;
+}
+
 // ---------------------------------------------------------------------------
 // UCTP substrates (developer preview)
 // ---------------------------------------------------------------------------

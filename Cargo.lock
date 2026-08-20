@@ -6793,6 +6793,7 @@ dependencies = [
  "axum",
  "bytes",
  "chrono",
+ "rvoip-auth-core",
  "rvoip-client",
  "rvoip-core",
  "rvoip-core-traits",

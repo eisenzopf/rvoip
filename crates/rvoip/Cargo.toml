@@ -36,6 +36,8 @@ rvoip-stir-shaken  = { workspace = true, optional = true }
 
 # WebRTC interop adapter — `webrtc` feature.
 rvoip-webrtc       = { workspace = true, optional = true }
+# Bearer validation surface exposed alongside the WebRTC auth hooks.
+rvoip-auth-core    = { workspace = true, optional = true }
 
 # UCTP substrate adapters — `uctp` feature.
 rvoip-uctp         = { workspace = true, optional = true }
@@ -71,7 +73,7 @@ default = ["sip"]
 
 # ── Transports / surfaces ──
 sip      = ["dep:rvoip-sip"]
-webrtc   = ["dep:rvoip-webrtc"]
+webrtc   = ["dep:rvoip-webrtc", "dep:rvoip-auth-core"]
 uctp     = ["dep:rvoip-uctp", "dep:rvoip-quic", "dep:rvoip-webtransport", "dep:rvoip-websocket"]
 vapi     = ["dep:rvoip-vapi"]
 

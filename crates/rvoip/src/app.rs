@@ -164,11 +164,24 @@ impl HttpConfig {
 }
 
 /// WebRTC server configuration for the app layer.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct WebRtcConfig {
     ws_bind: String,
     role_capabilities: RoleCapabilities,
     escalation_command: String,
+    ws_auth: Option<Arc<dyn rvoip_webrtc::signaling::auth::WsAuthHook>>,
+}
+
+impl std::fmt::Debug for WebRtcConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WebRtcConfig")
+            .field("ws_bind", &self.ws_bind)
+            .field("role_capabilities", &self.role_capabilities)
+            .field("escalation_command", &self.escalation_command)
+            .field("ws_auth_present", &self.ws_auth.is_some())
+            .finish()
+    }
 }
 
 impl WebRtcConfig {
@@ -178,7 +191,20 @@ impl WebRtcConfig {
             ws_bind: addr.into(),
             role_capabilities: RoleCapabilities::default(),
             escalation_command: "CALL_ASSIGNED_EMPLOYEE".into(),
+            ws_auth: None,
         }
+    }
+
+    /// Enforce `hook` during every WebSocket signaling upgrade.
+    ///
+    /// The authenticated principal the hook produces is retained on the
+    /// connection and surfaces through inbound admission, so an app owner
+    /// can attribute a WebRTC leg to the tenant and subject that presented
+    /// the credential. Without a hook the listener stays open, which is
+    /// only acceptable behind a trusted edge.
+    pub fn ws_auth(mut self, hook: Arc<dyn rvoip_webrtc::signaling::auth::WsAuthHook>) -> Self {
+        self.ws_auth = Some(hook);
+        self
     }
 
     /// Allow `role` to use the supplied capabilities over WebRTC.
@@ -1079,8 +1105,11 @@ impl RvoipAppBuilder {
             }
             let mut config = LowWebRtcConfig::loopback();
             config.trickle_ice = false;
-            let server = WebRtcServerBuilder::new(config)
-                .with_ws(webrtc.ws_bind)
+            let mut builder = WebRtcServerBuilder::new(config).with_ws(webrtc.ws_bind);
+            if let Some(hook) = webrtc.ws_auth {
+                builder = builder.with_ws_auth(hook);
+            }
+            let server = builder
                 .build()
                 .await
                 .map_err(|error| AppError::WebRtc(error.to_string()))?;
