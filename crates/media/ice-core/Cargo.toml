@@ -1,0 +1,19 @@
+[package]
+name = "rvoip-ice-core"
+version = "0.3.8-thelve.1"
+description = "Sans-io ICE agent (RFC 8445) and STUN codec (RFC 8489) for rvoip"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+hmac.workspace = true
+sha1.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# io only ever appears in tests: the crate itself is sans-io by design.
+tokio = { workspace = true, features = ["rt", "net", "time", "macros"] }

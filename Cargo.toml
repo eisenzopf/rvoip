@@ -19,6 +19,7 @@ members = [
     "crates/media/media-core",
     "crates/media/codec-core",
     "crates/media/rtp-core",
+    "crates/media/ice-core",
     # Optional OS audio-device bridge — top-of-stack helper that depends UP on
     # rvoip-sip (so it sits with the SIP product, not below it).
     "crates/media/rvoip-audio-device",
@@ -94,6 +95,7 @@ default-members = [
     "crates/sip/sip-dialog",
     "crates/sip/sip-registrar",
     "crates/media/rtp-core",
+    "crates/media/ice-core",
     "crates/media/media-core",
     "crates/foundation/rvoip-core",
     "crates/media/codec-core",
@@ -219,6 +221,7 @@ rvoip-sip-dialog    = { path = "crates/sip/sip-dialog", version = "0.3.8-thelve.
 rvoip-sip-proxy     = { path = "crates/sip/sip-proxy", version = "0.3.8-thelve.1" }
 rvoip-sip-registrar = { path = "crates/sip/sip-registrar", version = "0.3.8-thelve.1" }
 rvoip-rtp-core      = { path = "crates/media/rtp-core", version = "0.3.8-thelve.1" }
+rvoip-ice-core      = { path = "crates/media/ice-core", version = "0.3.8-thelve.1" }
 rvoip-media-core    = { path = "crates/media/media-core", version = "0.3.8-thelve.1" }
 rvoip-sip           = { path = "crates/sip/rvoip-sip", version = "0.3.8-thelve.1" }
 rvoip-core          = { path = "crates/foundation/rvoip-core", version = "0.3.8-thelve.1" }
@@ -310,6 +313,7 @@ axum-server = { version = "0.7", features = ["tls-rustls"] }
 # feature isn't selected.
 chromiumoxide = { version = "0.7", default-features = false, features = ["tokio-runtime"] }
 sha2 = "0.10"
+sha1 = "0.10"
 zeroize = "1.9"
 hmac = "0.12"
 aes = "0.8"

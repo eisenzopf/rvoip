@@ -6997,6 +6997,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rvoip-ice-core"
+version = "0.3.8-thelve.1"
+dependencies = [
+ "hmac 0.12.1",
+ "rand 0.8.7",
+ "sha1",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "rvoip-identity"
 version = "0.3.8-thelve.1"
 dependencies = [
