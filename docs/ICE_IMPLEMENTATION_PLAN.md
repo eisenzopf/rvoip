@@ -273,11 +273,21 @@ on this branch (bigger than the conference mixer).
 | **M2: rvoip works from behind NAT** | I4→I5 | full agent; UAC + UA↔UA; B2BUA per-leg | ≈ M1 again, mostly I4 |
 | **M3: relay** | I7 | symmetric↔symmetric via TURN | L, on demand |
 
-## 12. Open questions for the owner
+## 12. Decisions of record (owner, 2026-08-19)
 
-1. **rtcp-mux gate for v1 full ICE** — acceptable? (Non-mux peers still work
-   via lite/latching; only *full* ICE against a non-mux peer is deferred.)
-2. **M1 before M2** confirmed? Lite ships user-visible value earliest and
-   de-risks the codec under real interop before the agent lands on it.
-3. **Interop targets on hand** — is there a FreeSWITCH/Asterisk box (or is
-   baresip/linphone + webrtc-rs-under-vnet enough) for the M1 checklist?
+1. **Full M2 out of the gate.** No lite-only checkpoint: I1→I6 are one
+   continuous build ending with the full agent. The phase order stands as a
+   dependency order, not a shipping order.
+2. **`ice-core` crate confirmed** — chosen explicitly to keep the blast
+   radius away from the other crates.
+3. **Interop targets**: local `~/Developer/freeswitch` (dockerized) and
+   `~/Developer/asterisk` checkouts, plus webrtc-rs-under-vnet in tests.
+4. **rtcp-mux gate for v1 full ICE stands** (explained and accepted): a call
+   is two UDP flows (RTP + RTCP) unless RFC 5761 muxes them onto one port;
+   ICE traverses per flow ("component"), so non-mux doubles the check
+   machinery. When ICE is enabled the offer carries `a=rtcp-mux`; a peer
+   that wants ICE-without-mux falls back to non-ICE behavior for that call.
+   Everything that speaks ICE in practice speaks mux (WebRTC mandates it;
+   FreeSWITCH/Asterisk/baresip support it); component ids stay in the data
+   model so two-component support is an extension, not a rewrite. rvoip's
+   own SDP builder already ships `.rtcp_mux()`.
