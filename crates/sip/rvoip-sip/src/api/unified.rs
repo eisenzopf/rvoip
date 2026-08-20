@@ -2203,6 +2203,16 @@ pub struct Config {
     /// those arrive as clicks and dropouts a listener hears directly.
     pub playout: Option<crate::PlayoutConfig>,
 
+    /// ICE posture (RFC 8445). `Disabled` is today's behavior exactly.
+    ///
+    /// `Lite` answers connectivity checks on the advertised address — the
+    /// right mode for a server on a public or 1:1-NAT address. `Full` runs
+    /// the whole agent: gathering, checks, nomination — the mode for an
+    /// endpoint behind NAT, and for reaching peers that are. Requires
+    /// rtcp-mux semantics on the media socket (the default single-socket
+    /// layout): ICE v1 traverses one component.
+    pub ice: crate::adapters::ice_adapter::SipIcePolicy,
+
     /// Refuse to fall back to plaintext RTP when SRTP can't be
     /// negotiated.
     ///
@@ -2779,6 +2789,7 @@ impl std::fmt::Debug for Config {
                 &self.tls_server_client_auth.mode,
             )
             .field("offer_srtp", &self.offer_srtp)
+            .field("ice", &self.ice)
             .field("srtp_required", &self.srtp_required)
             .field("amr_dtx", &self.amr_dtx)
             .field("amr_auto_cmr", &self.amr_auto_cmr)
@@ -2900,6 +2911,7 @@ impl Config {
             // what every release before this did, and a caller opting into
             // smoothing should say so.
             playout: None,
+            ice: crate::adapters::ice_adapter::SipIcePolicy::Disabled,
             bind_addr: SocketAddr::new(ip, port),
             sip_advertised_addr: None,
             state_table_path: None,
@@ -3018,6 +3030,7 @@ impl Config {
             // what every release before this did, and a caller opting into
             // smoothing should say so.
             playout: None,
+            ice: crate::adapters::ice_adapter::SipIcePolicy::Disabled,
             bind_addr: SocketAddr::new(ip, port),
             sip_advertised_addr: None,
             state_table_path: None,
@@ -8807,6 +8820,7 @@ impl UnifiedCoordinator {
             config.media_port_end,
         );
         media_adapter_inner.set_media_mode(config.media_mode);
+        media_adapter_inner.set_ice_policy(config.ice);
         // Apply RFC 4568 SDES-SRTP policy from Config (Step 2B.1).
         media_adapter_inner.set_srtp_policy(
             config.offer_srtp,

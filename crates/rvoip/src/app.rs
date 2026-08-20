@@ -218,6 +218,8 @@ pub struct SipConfig {
     stun_server: Option<SocketAddr>,
     /// SRTP posture: whether to offer it, and whether to insist on it.
     srtp: SipMediaSecurity,
+    /// ICE posture (RFC 8445).
+    ice: rvoip_sip::SipIcePolicy,
 }
 
 /// How much media encryption a SIP listener insists on.
@@ -283,6 +285,21 @@ impl SipConfig {
         self
     }
 
+    /// Set the ICE posture (RFC 8445).
+    ///
+    /// `Lite` answers connectivity checks on this listener's reachable
+    /// address — the mode for a server on a public or 1:1-NAT address, and
+    /// it requires that address to be known (`advertised_addr`,
+    /// `media_public_addr`, or STUN discovery). `Full` runs the whole
+    /// agent — gathering, checks, nomination — for endpoints behind NAT
+    /// and for reaching peers that are. Peers that never offer ICE are
+    /// completely unaffected either way: the SDP default path is unchanged.
+    #[must_use]
+    pub const fn ice(mut self, policy: rvoip_sip::SipIcePolicy) -> Self {
+        self.ice = policy;
+        self
+    }
+
     /// Bind the SIP listener/registrar to `addr`.
     pub fn bind(addr: impl Into<String>) -> Self {
         Self {
@@ -296,6 +313,7 @@ impl SipConfig {
             trusted_trunks: Vec::new(),
             captured_headers: Vec::new(),
             stun_server: None,
+            ice: rvoip_sip::SipIcePolicy::Disabled,
             // Both off by default: unchanged behaviour for every existing
             // caller, and a deployment that wants smoothing or encryption
             // says so rather than inheriting it.
@@ -956,6 +974,19 @@ impl RvoipAppBuilder {
                 }
             }
             let sip = sip;
+            if sip.ice == rvoip_sip::SipIcePolicy::Lite
+                && sip.sip_advertised_addr.is_none()
+                && sip.media_public_addr.is_none()
+                && sip.stun_server.is_none()
+            {
+                return Err(AppError::Policy(
+                    "ice-lite requires a reachable address: set advertised_addr, \
+                     media_public_addr, or discover_advertised_addr — lite answers \
+                     checks but cannot traverse, so an unreachable candidate is a \
+                     call that never gets audio"
+                        .into(),
+                ));
+            }
             if sip_addr.ip().is_unspecified() && sip.sip_advertised_addr.is_none() {
                 return Err(AppError::Policy(
                     "a concrete SIP advertised address is required for an unspecified bind: \
@@ -1876,6 +1907,7 @@ async fn discover_advertised_addr(
 fn make_low_sip_config(config: &SipConfig, bind: SocketAddr) -> LowSipConfig {
     let mut low = LowSipConfig::on("rvoip-gateway", bind.ip(), bind.port());
     low.playout = config.playout;
+    low.ice = config.ice;
     // `srtp_required` without `offer_srtp` is rejected as an invalid policy
     // downstream, so the two move together.
     match config.srtp {
@@ -1914,6 +1946,43 @@ fn resolve_udp_bind_addr(addr: SocketAddr) -> AppResult<SocketAddr> {
 
 #[cfg(test)]
 mod tests {
+
+    /// ICE policy set on the builder must reach the coordinator, and a lite
+    /// listener with no reachable address must refuse to build — lite
+    /// answers checks but cannot traverse, so an unreachable candidate is a
+    /// call that never gets audio.
+    #[cfg(feature = "sip")]
+    #[test]
+    fn ice_policy_reaches_the_low_level_config() {
+        let bind: SocketAddr = "127.0.0.1:5060".parse().expect("addr");
+        let plain = make_low_sip_config(&SipConfig::bind("127.0.0.1:5060"), bind);
+        assert_eq!(plain.ice, rvoip_sip::SipIcePolicy::Disabled);
+        let full = make_low_sip_config(
+            &SipConfig::bind("127.0.0.1:5060").ice(rvoip_sip::SipIcePolicy::Full),
+            bind,
+        );
+        assert_eq!(full.ice, rvoip_sip::SipIcePolicy::Full);
+    }
+
+    #[cfg(feature = "sip")]
+    #[tokio::test]
+    async fn lite_without_a_reachable_address_refuses_to_build() {
+        let result = RvoipApp::builder()
+            .customers(CustomerPolicy::sip_only())
+            .employees(EmployeePolicy::named(["thelve-runtime"]))
+            .assignment(AssignmentPolicy::fixed("thelve-runtime"))
+            .sip(
+                SipConfig::bind("127.0.0.1:0")
+                    .ice(rvoip_sip::SipIcePolicy::Lite)
+                    .allow(Role::Customer, [Capability::Voice]),
+            )
+            .build()
+            .await;
+        assert!(
+            matches!(result, Err(AppError::Policy(_))),
+            "lite with no advertised, public, or discoverable address must refuse"
+        );
+    }
 
     /// A listener that cannot learn its reachable address must refuse to
     /// start. Advertising an unreachable one produces calls that connect and

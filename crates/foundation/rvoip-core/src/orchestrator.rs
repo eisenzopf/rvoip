@@ -8565,7 +8565,10 @@ impl Orchestrator {
         let outbound = audio.try_frames_out()?;
 
         let (route, inbound) = self
-            .media_tap_for_connection(connection_id.clone(), 16)
+            .media_tap_for_connection(
+                connection_id.clone(),
+                crate::conference::MEMBER_TAP_CAPACITY,
+            )
             .await?;
         // The member owns its tap, so leaving the conference tears the route
         // down rather than leaving it feeding a receiver nobody reads.

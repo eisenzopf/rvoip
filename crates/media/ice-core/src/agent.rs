@@ -340,6 +340,17 @@ impl IceAgent {
         self.form_pairs();
     }
 
+    /// Set the role directly, before checks begin.
+    ///
+    /// One rule needs this (RFC 8445 §6.1.1): a full agent whose peer turns
+    /// out to be lite is controlling regardless of who offered. Conflicts
+    /// discovered on the wire still repair through the tie-breaker path.
+    pub fn set_role(&mut self, role: IceRole) {
+        if !self.config.lite {
+            self.role = role;
+        }
+    }
+
     /// Provide the peer's credentials (from its SDP). Checks received before
     /// this are answered immediately and their pairing deferred to here.
     pub fn set_remote_credentials(&mut self, credentials: Credentials) {

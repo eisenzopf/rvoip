@@ -650,6 +650,22 @@ impl UdpRtpTransport {
                             trace!("UDP recv_from returned {} bytes from {}", size, addr);
 
                             let packet_class = classify_rtp_mux_packet(&buffer[..size]);
+                            if packet_class == RtpMuxPacketClass::Stun {
+                                // ICE connectivity checks share the media
+                                // port by design. Forward them to whoever
+                                // subscribed (the ICE agent's pump); with no
+                                // subscriber this send fails silently, which
+                                // is exactly the old drop behavior.
+                                let Some(local) = local_rtp_addr else {
+                                    continue;
+                                };
+                                let _ = event_tx.send(RtpEvent::StunPacket {
+                                    local,
+                                    source: addr,
+                                    payload: Bytes::copy_from_slice(&buffer[..size]),
+                                });
+                                continue;
+                            }
                             if !packet_class.is_media() {
                                 non_rtp_drop_count = non_rtp_drop_count.saturating_add(1);
                                 log_dropped_non_rtp_packet(
@@ -1232,6 +1248,31 @@ impl UdpRtpTransport {
         self.secure_media_required.store(true, Ordering::Release);
     }
 
+    /// Send one STUN datagram on the RTP socket.
+    ///
+    /// ICE checks share the media port and sit *below* SRTP, so this is the
+    /// one legitimate plaintext send on a secured transport. The payload
+    /// must actually classify as STUN — the check is what keeps the
+    /// irreversible secure-media latch meaningful: this door only fits
+    /// packets SRTP was never going to cover.
+    ///
+    /// # Errors
+    ///
+    /// Refuses payloads that do not classify as STUN, and surfaces socket
+    /// errors.
+    pub async fn send_stun_bytes(&self, payload: &[u8], destination: SocketAddr) -> Result<()> {
+        if classify_rtp_mux_packet(payload) != RtpMuxPacketClass::Stun {
+            return Err(Error::InvalidPacket(
+                "send_stun_bytes only accepts STUN datagrams".to_string(),
+            ));
+        }
+        self.rtp_socket
+            .send_to(payload, destination)
+            .await
+            .map_err(|error| Error::Transport(format!("stun send failed: {error}")))?;
+        Ok(())
+    }
+
     /// Send bytes that have already passed the transport's SRTP protection
     /// path. This is crate-internal so public raw-byte callers cannot bypass
     /// the irreversible secure-media requirement.
@@ -1337,6 +1378,10 @@ impl UdpRtpTransport {
 
 #[async_trait]
 impl RtpTransport for UdpRtpTransport {
+    async fn send_stun_bytes(&self, payload: &[u8], destination: SocketAddr) -> Result<()> {
+        UdpRtpTransport::send_stun_bytes(self, payload, destination).await
+    }
+
     fn local_rtp_addr(&self) -> Result<SocketAddr> {
         self.rtp_socket
             .local_addr()
@@ -1408,6 +1453,20 @@ impl RtpTransport for UdpRtpTransport {
             match classify_rtp_mux_packet(&buffer[..size]) {
                 RtpMuxPacketClass::Rtcp => context.unprotect_rtcp(&buffer[..size])?,
                 RtpMuxPacketClass::Rtp => context.unprotect(&buffer[..size])?.serialize()?,
+                RtpMuxPacketClass::Stun => {
+                    // ICE sits below SRTP: connectivity checks are never
+                    // SRTP-wrapped, so a STUN datagram on a secured socket
+                    // is forwarded to the agent, not treated as an attack.
+                    drop(guard);
+                    let _ = self.event_tx.send(RtpEvent::StunPacket {
+                        local: self.local_rtp_addr()?,
+                        source: addr,
+                        payload: Bytes::copy_from_slice(&buffer[..size]),
+                    });
+                    return Err(Error::InvalidState(
+                        "stun datagram forwarded; no media packet".to_string(),
+                    ));
+                }
                 class => {
                     return Err(Error::InvalidPacket(format!(
                         "secure media receive rejected {} datagram",

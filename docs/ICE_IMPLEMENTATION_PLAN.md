@@ -273,7 +273,34 @@ on this branch (bigger than the conference mixer).
 | **M2: rvoip works from behind NAT** | I4→I5 | full agent; UAC + UA↔UA; B2BUA per-leg | ≈ M1 again, mostly I4 |
 | **M3: relay** | I7 | symmetric↔symmetric via TURN | L, on demand |
 
-## 12. Decisions of record (owner, 2026-08-19)
+## 12. Execution status (2026-08-19)
+
+Implemented on the branch, same day, per the owner's "full M2 out of the
+gate" direction:
+
+- **I1+I2+I4 — `rvoip-ice-core`**: sans-io agent (full + lite) and complete
+  STUN codec. RFC 5769 vectors byte-exact; 19 scripted scenarios over a
+  virtual wire with a port-restricted NAT: loss/retransmission,
+  both-controlling role repair, prflx discovery of an unsignaled NAT'd
+  peer, consent expiry, restart, Ta pacing, wrong-password fail-closed.
+- **I3+I5 — SDP and coordinator wiring**: offers/answers carry
+  ufrag/pwd/candidates (+`ice-lite`, `ice-options:ice2`) when enabled;
+  remote material extracted; `ice-mismatch` detected → ICE stands down;
+  peer declining retires the runtime. One pump per media session; STUN
+  demuxed off the RTP socket as `RtpEvent::StunPacket` (plain **and** SRTP
+  paths — ICE sits below SRTP); nomination retargets through
+  `establish_media_flow`. Proven end-to-end over real sockets: a full peer
+  completes against the lite pump through the real `UdpRtpTransport`.
+- **I6 — surfaces**: `SipConfig::ice(Disabled|Lite|Full)` with lite
+  refusing to build without a reachable address; Thelve `RVOIP_SIP_ICE`,
+  chart `realtimeIngress.media.ice` with the same guard.
+- **Deferred, recorded**: post-nomination re-INVITE (media is correct from
+  the retarget; the SDP refresh is an interop nicety), TURN (I7), trickle
+  over SIP (non-goal), SIP `Supported: ice` option-tag (RFC 5768 SHOULD;
+  the SDP attributes are what interops), and the manual
+  FreeSWITCH/Asterisk checklist (§8.4) — not yet run.
+
+## 13. Decisions of record (owner, 2026-08-19)
 
 1. **Full M2 out of the gate.** No lite-only checkpoint: I1→I6 are one
    continuous build ending with the full agent. The phase order stands as a

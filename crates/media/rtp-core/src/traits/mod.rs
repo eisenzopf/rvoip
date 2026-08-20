@@ -66,6 +66,22 @@ pub enum RtpEvent {
         ssrc: u32,
     },
 
+    /// A STUN datagram arrived on the media socket.
+    ///
+    /// ICE connectivity checks share the RTP port by design (candidates ARE
+    /// the media addresses), and STUN is never SRTP-wrapped — ICE sits below
+    /// SRTP. Before this variant these datagrams were counted and dropped;
+    /// forwarding them is what lets an ICE agent live above the transport
+    /// without threading new configuration through every layer.
+    StunPacket {
+        /// The local socket the datagram arrived on.
+        local: SocketAddr,
+        /// Who sent it.
+        source: SocketAddr,
+        /// The raw datagram.
+        payload: Bytes,
+    },
+
     /// RTCP packet received (raw bytes for now)
     RtcpReceived {
         /// RTCP data

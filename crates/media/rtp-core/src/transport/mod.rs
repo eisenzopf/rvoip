@@ -61,6 +61,24 @@ pub trait RtpTransport: Send + Sync {
     /// Returns the number of bytes read and the source address
     async fn receive_packet(&self, buffer: &mut [u8]) -> Result<(usize, SocketAddr)>;
 
+    /// Send one STUN datagram on the media socket.
+    ///
+    /// ICE connectivity checks share the RTP port by design and sit below
+    /// SRTP, so implementations that secure media still send these in
+    /// plaintext. The default refuses: a transport that has not considered
+    /// ICE must not silently half-support it.
+    ///
+    /// # Errors
+    ///
+    /// Refuses non-STUN payloads and unsupporting transports; surfaces
+    /// socket errors.
+    async fn send_stun_bytes(&self, payload: &[u8], destination: SocketAddr) -> Result<()> {
+        let _ = (payload, destination);
+        Err(crate::error::Error::Transport(
+            "this transport does not support STUN/ICE".to_string(),
+        ))
+    }
+
     /// Subscribe to transport events
     ///
     /// This allows receiving both RTP and RTCP packets as events

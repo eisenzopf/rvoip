@@ -1232,6 +1232,10 @@ pub struct MediaAdapter {
     /// answer with `RTP/SAVP` when peer offers SRTP. When `false`,
     /// the adapter behaves like the pre-2B baseline (plain RTP/AVP).
     offer_srtp: bool,
+    /// ICE posture, from [`Config::ice`](crate::api::unified::Config::ice).
+    ice_policy: crate::adapters::ice_adapter::SipIcePolicy,
+    /// One ICE runtime (agent + pump task) per media session.
+    ice: Arc<crate::adapters::ice_adapter::IceRuntimes>,
 
     /// When `true`, refuse to fall back to plaintext RTP. UAC: a
     /// remote SDP without acceptable `a=crypto:` causes the
@@ -1404,6 +1408,8 @@ impl MediaAdapter {
             media_port_end: port_end,
             media_mode: MediaMode::Enabled,
             offer_srtp: false,
+            ice_policy: crate::adapters::ice_adapter::SipIcePolicy::Disabled,
+            ice: Arc::new(crate::adapters::ice_adapter::IceRuntimes::default()),
             srtp_required: false,
             amr_dtx: false,
             amr_auto_cmr: false,
@@ -1863,6 +1869,13 @@ impl MediaAdapter {
         }
     }
 
+    /// Configure the ICE posture. Called by `UnifiedCoordinator` from
+    /// [`Config::ice`](crate::api::unified::Config::ice), mirroring
+    /// [`Self::set_srtp_policy`].
+    pub fn set_ice_policy(&mut self, policy: crate::adapters::ice_adapter::SipIcePolicy) {
+        self.ice_policy = policy;
+    }
+
     /// Configure how inbound SDES inline keys handle trailing Base64 padding.
     pub fn set_sdes_base64_mode(&mut self, mode: SdesBase64Mode) {
         self.sdes_base64_mode = mode;
@@ -1973,6 +1986,39 @@ impl MediaAdapter {
             self.commit_media_lane_state(&snapshot, &session).await?;
             if let Some((lifecycle_handle, state)) = security_observation {
                 self.publish_media_security_observation(lifecycle_handle, state);
+            }
+        }
+        // ICE: hand the answer's material to the runtime our offer created.
+        // A peer that declined (no attributes) or whose answer is
+        // ice-mismatched retires the runtime; the call proceeds on the SDP
+        // path it already has.
+        if result.is_ok() && self.ice.is_active(session_id) {
+            match SdpSession::from_str(remote_sdp)
+                .ok()
+                .and_then(|parsed| crate::adapters::ice_adapter::extract_remote_ice(&parsed))
+            {
+                Some(remote) if !remote.mismatch => {
+                    if !self.ice.apply_remote(session_id, remote).await {
+                        tracing::warn!(
+                            session = %session_id.0,
+                            "ICE runtime disappeared before the answer applied"
+                        );
+                    }
+                }
+                Some(_) => {
+                    tracing::warn!(
+                        session = %session_id.0,
+                        "answer is ice-mismatched; continuing without ICE"
+                    );
+                    self.ice.stop(session_id);
+                }
+                None => {
+                    tracing::info!(
+                        session = %session_id.0,
+                        "peer declined ICE; continuing on the SDP path"
+                    );
+                    self.ice.stop(session_id);
+                }
             }
         }
         result
@@ -2260,6 +2306,24 @@ impl MediaAdapter {
         let parsed_offer = SdpSession::from_str(remote_sdp)
             .map_err(|_| bounded_sdp_failure("remote-offer", "syntax"))?;
         let (remote_ip, remote_port) = self.parse_sdp_connection(remote_sdp)?;
+        // ICE (RFC 8839): honor the peer's offer when policy allows. A
+        // detected mismatch means a middlebox rewrote the SDP after the
+        // peer built it; ICE stands down for this call rather than fighting
+        // the box that owns the path.
+        let remote_ice = if self.ice_policy != crate::adapters::ice_adapter::SipIcePolicy::Disabled {
+            match crate::adapters::ice_adapter::extract_remote_ice(&parsed_offer) {
+                Some(remote) if remote.mismatch => {
+                    tracing::warn!(
+                        session = %session_id.0,
+                        "peer offered ICE but its SDP default is not among its candidates (ice-mismatch); continuing without ICE"
+                    );
+                    None
+                }
+                other => other,
+            }
+        } else {
+            None
+        };
         let srtp_diagnostics = srtp_diagnostics_enabled();
         if sdp_diagnostics_enabled() {
             emit_sdp_diag(format!(
@@ -2401,6 +2465,7 @@ impl MediaAdapter {
         } else {
             Some(self.lane_owned_media(session)?)
         };
+        let ice_dialog_id = exact_media.as_ref().map(|media| media.dialog_id.clone());
         if let Some(exact_media) = exact_media {
             if self
                 .controller
@@ -2441,6 +2506,34 @@ impl MediaAdapter {
         } else {
             "RTP/AVP"
         };
+        let ice_material = match (&remote_ice, &ice_dialog_id) {
+            (Some(_), Some(dialog_id)) => {
+                let host_addr = SocketAddr::new(self.local_ip, local_port);
+                let public_sock = public.map(|sa| {
+                    SocketAddr::new(sa.ip(), if sa.port() != 0 { sa.port() } else { local_port })
+                });
+                self.ice
+                    .ensure_local(
+                        &session_id,
+                        dialog_id,
+                        &self.controller,
+                        self.ice_policy,
+                        false,
+                        host_addr,
+                        public_sock,
+                    )
+                    .await
+            }
+            _ => None,
+        };
+        if let (Some(remote), Some(_)) = (remote_ice.clone(), &ice_material) {
+            if !self.ice.apply_remote(&session_id, remote).await {
+                tracing::warn!(
+                    session = %session_id.0,
+                    "ICE runtime disappeared before the peer's material applied"
+                );
+            }
+        }
 
         if sdp_diagnostics_enabled() {
             emit_sdp_diag(format!(
@@ -2455,7 +2548,7 @@ impl MediaAdapter {
         }
 
         let formats_str: Vec<&str> = formats.iter().map(|s| s.as_str()).collect();
-        let mut media_builder = SdpBuilder::new("Session")
+        let mut sdp_builder = SdpBuilder::new("Session")
             .origin(
                 "-",
                 &origin_session_id,
@@ -2465,9 +2558,25 @@ impl MediaAdapter {
                 &local_ip_str,
             )
             .connection("IN", "IP4", &local_ip_str)
-            .time("0", "0")
+            .time("0", "0");
+        if let Some(material) = &ice_material {
+            if material.lite {
+                sdp_builder = sdp_builder.ice_lite();
+            }
+            sdp_builder = sdp_builder.ice_options(vec!["ice2"]);
+        }
+        let mut media_builder = sdp_builder
             .media_audio(advertised_port, answer_transport)
             .formats(&formats_str);
+        if let Some(material) = &ice_material {
+            media_builder = media_builder
+                .ice_ufrag(&material.ufrag)
+                .ice_pwd(&material.pwd);
+            for candidate in &material.candidates {
+                media_builder =
+                    media_builder.ice_candidate(crate::adapters::ice_adapter::format_candidate(candidate));
+            }
+        }
         // Emit rtpmap/fmtp ONLY for the one primary and any auxiliary
         // formats retained by the validated intersection.
         // NEXT_STEPS C2 — routed through `rtpmap_for_pt` so adding a
@@ -3664,6 +3773,30 @@ impl MediaAdapter {
         let origin_version = origin_version.to_string();
         let advertised_ip = public.map(|sa| sa.ip()).unwrap_or(self.local_ip);
         let local_ip_str = advertised_ip.to_string();
+        // ICE (RFC 8839): offer our material when the policy asks for it.
+        // The classic advertise logic above stays authoritative for the
+        // default `c=`/`m=` destination, so a peer without ICE lands on
+        // exactly the address it always did.
+        let ice_material = if self.ice_policy != crate::adapters::ice_adapter::SipIcePolicy::Disabled {
+            let local_port = info.rtp_port.unwrap_or(info.config.local_addr.port());
+            let host_addr = SocketAddr::new(self.local_ip, local_port);
+            let public_sock = public.map(|sa| {
+                SocketAddr::new(sa.ip(), if sa.port() != 0 { sa.port() } else { local_port })
+            });
+            self.ice
+                .ensure_local(
+                    &session_id,
+                    dialog_id,
+                    &self.controller,
+                    self.ice_policy,
+                    true,
+                    host_addr,
+                    public_sock,
+                )
+                .await
+        } else {
+            None
+        };
 
         // Profile + crypto. RFC 4568 §3.1.4 — `RTP/SAVP` is mandatory
         // when offering SDES.
@@ -3702,7 +3835,7 @@ impl MediaAdapter {
         let format_pts = self.effective_offered_formats();
         let format_strings: Vec<String> = format_pts.iter().map(|pt| pt.to_string()).collect();
         let formats_ref: Vec<&str> = format_strings.iter().map(|s| s.as_str()).collect();
-        let mut media_builder = SdpBuilder::new("Session")
+        let mut sdp_builder = SdpBuilder::new("Session")
             .origin(
                 "-",
                 &origin_session_id,
@@ -3712,9 +3845,25 @@ impl MediaAdapter {
                 &local_ip_str,
             )
             .connection("IN", "IP4", &local_ip_str)
-            .time("0", "0")
+            .time("0", "0");
+        if let Some(material) = &ice_material {
+            if material.lite {
+                sdp_builder = sdp_builder.ice_lite();
+            }
+            sdp_builder = sdp_builder.ice_options(vec!["ice2"]);
+        }
+        let mut media_builder = sdp_builder
             .media_audio(port, transport)
             .formats(&formats_ref);
+        if let Some(material) = &ice_material {
+            media_builder = media_builder
+                .ice_ufrag(&material.ufrag)
+                .ice_pwd(&material.pwd);
+            for candidate in &material.candidates {
+                media_builder =
+                    media_builder.ice_candidate(crate::adapters::ice_adapter::format_candidate(candidate));
+            }
+        }
         for (pt, pt_str) in format_pts.iter().zip(format_strings.iter()) {
             if let Some(rtpmap) = rtpmap_for_pt(*pt) {
                 media_builder = media_builder.rtpmap(pt_str.as_str(), rtpmap);
@@ -4263,6 +4412,8 @@ impl MediaAdapter {
     /// ordered action list. The exact registry association is retired here so
     /// a later action in the same transition can create replacement media.
     pub(crate) async fn cleanup_session_lane_owned(&self, session: &SessionState) -> Result<()> {
+        // The ICE pump must not outlive the media session it steers.
+        self.ice.stop(&session.session_id);
         let handle = session.lifecycle_handle.as_ref().ok_or_else(|| {
             SessionError::InvalidTransition(
                 "media cleanup requires exact session authority".to_string(),
@@ -4790,6 +4941,8 @@ impl Clone for MediaAdapter {
             media_port_end: self.media_port_end,
             media_mode: self.media_mode,
             offer_srtp: self.offer_srtp,
+            ice_policy: self.ice_policy,
+            ice: Arc::clone(&self.ice),
             srtp_required: self.srtp_required,
             amr_dtx: self.amr_dtx,
             amr_auto_cmr: self.amr_auto_cmr,

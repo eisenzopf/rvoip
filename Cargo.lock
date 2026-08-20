@@ -7426,6 +7426,7 @@ dependencies = [
  "rvoip-auth-core",
  "rvoip-core",
  "rvoip-core-traits",
+ "rvoip-ice-core",
  "rvoip-ims-aka",
  "rvoip-infra-common",
  "rvoip-keycloak",

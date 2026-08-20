@@ -85,7 +85,7 @@ const MIX_INTERVAL: Duration = Duration::from_millis(20);
 /// Deep enough to ride out scheduling jitter, shallow enough that a stalled
 /// member's audio is dropped rather than delivered seconds late — in a live
 /// conversation, stale audio is worse than absent audio.
-const MEMBER_TAP_CAPACITY: usize = 16;
+pub(crate) const MEMBER_TAP_CAPACITY: usize = 16;
 
 /// Ceiling on decoded audio held for one member between ticks.
 ///

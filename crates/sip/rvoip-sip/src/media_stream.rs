@@ -732,10 +732,10 @@ where
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 use rvoip_media_core::processing::audio::playout::{PlayoutBuffer, PlayoutConfig};
 use rvoip_media_core::types::AudioFrame;
 
+#[allow(clippy::too_many_arguments)]
 async fn run_media_driver(
     lifecycle: Arc<SipMediaLifecycleState>,
     cancel_tx: watch::Sender<bool>,

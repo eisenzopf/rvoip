@@ -8,6 +8,42 @@ A pre-release cut from `0.3.8` that makes two shipped correctness
 primitives reachable from the high-level app, plus one signature-freshness
 fix. Additive: the convenience builder path is unchanged.
 
+### ICE (RFC 8445) on the SIP path
+
+- New crate **`rvoip-ice-core`**: a sans-io ICE agent and RFC 8489 STUN
+  codec. The agent is handed packets and the clock and polled for
+  transmissions, events, and deadlines — no sockets, no runtime — so role
+  conflicts, nomination races, loss, restarts, and wrong-password handling
+  are scripted deterministic tests (19 of them, over a virtual wire with a
+  port-restricted NAT). The codec is verified against the RFC 5769 vectors,
+  which are self-validating: FINGERPRINT covers every byte before it and the
+  HMAC everything before that.
+- `SipConfig::ice(SipIcePolicy::{Disabled, Lite, Full})` on the app builder,
+  `Config::ice` on the coordinator. **Disabled is the default and is
+  today's behavior byte for byte** — SDP without ICE attributes negotiates
+  exactly as before, and a peer that declines ICE retires the runtime and
+  proceeds on the SDP path.
+- Offers and answers carry `a=ice-ufrag`/`a=ice-pwd`/`a=candidate` (and
+  `a=ice-lite` for lite) when enabled; the peer's material is extracted
+  from parsed SDP; RFC 8839 `ice-mismatch` (a middlebox rewrote c=/m=
+  after the peer built its SDP) is detected and stands ICE down for that
+  call rather than fighting the box that owns the path.
+- One pump task per media session shuttles STUN between the agent and the
+  RTP socket: the transport now forwards demuxed STUN datagrams as
+  `RtpEvent::StunPacket` (both plain and SRTP receive paths — ICE sits
+  below SRTP, so checks on a secured socket are forwarded, not rejected),
+  and `RtpTransport::send_stun_bytes` is the one legitimate plaintext send
+  on a secured transport, gated on the payload actually classifying as
+  STUN. Nomination retargets media through the same `establish_media_flow`
+  the SDP path uses.
+- A full peer beside a lite one is controlling regardless of who offered
+  (RFC 8445 §6.1.1); lite refuses to build without a reachable address.
+- Scope honesty: single component (requires rtcp-mux semantics; component
+  ids stay in the model so two-component is an extension), no TURN yet, no
+  trickle over SIP, and the post-nomination re-INVITE (RFC 8839 §4.4) is a
+  recorded follow-up — the media path itself is already correct from the
+  retarget.
+
 ### Media quality reaches the application
 
 - **`OperationalEventKind::Quality`** puts per-connection quality on the

@@ -786,6 +786,9 @@ impl RtpSession {
             // to avoid race conditions where two tasks read from the same socket
             loop {
                 match transport_events.recv().await {
+                    // STUN belongs to the ICE agent subscribed on the same
+                    // bus, not to the RTP session.
+                    Ok(crate::traits::RtpEvent::StunPacket { .. }) => continue,
                     Ok(crate::traits::RtpEvent::RtcpReceived { data, source: _ }) => {
                         // Parse the complete compound packet. Unknown but
                         // well-formed members are retained by the tolerant
