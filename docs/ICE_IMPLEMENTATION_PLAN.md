@@ -214,10 +214,12 @@ on this branch (bigger than the conference mixer).
   runbook rewrite of the "ICE is not implemented" section.
 
 ### I7 — TURN client (RFC 8656) [L, deferred]
-- Relay candidates; only needed when both peers are behind
-  address/port-dependent (symmetric) NAT — not the server-anchored
-  topologies rvoip ships today. Allocate/refresh/permissions/channels is its
-  own state machine. Schedule when a concrete deployment needs it.
+- Expanded into its own document: `docs/TURN_IMPLEMENTATION_PLAN.md` —
+  per-topology value analysis (where it is the only thing that works and
+  where it adds nothing), the five-phase delivery (long-term credentials →
+  allocation machine → media encapsulation → TCP/TLS transport → exposure),
+  and the coturn deployment half. Awaiting the owner's build-now vs
+  build-on-need decision recorded there.
 
 ## 7. Cross-crate impact
 
