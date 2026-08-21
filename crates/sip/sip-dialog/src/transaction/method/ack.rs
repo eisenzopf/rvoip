@@ -248,7 +248,11 @@ pub(crate) fn create_ack_for_2xx_from_template(
     let mut route_set = Vec::new();
     for header in &ok_response.headers {
         if let TypedHeader::RecordRoute(record_route) = header {
-            route_set.extend(record_route.iter().map(|entry| entry.address().clone()));
+            route_set.extend(
+                record_route
+                    .iter()
+                    .map(|entry| Address::new(entry.uri().clone())),
+            );
         }
     }
     for route_address in route_set.into_iter().rev() {
@@ -482,7 +486,7 @@ mod tests {
                 .build();
         ok_response.headers.push(TypedHeader::RecordRoute(
             RecordRoute::from_str(
-                "<sip:proxy1.example.com;lr>, <sips:proxy2.example.com;lr;transport=tls>",
+                "<sip:proxy1.example.com;lr>;rr-id=one, <sips:proxy2.example.com;lr;transport=tls>;rr-id=two",
             )
             .unwrap(),
         ));
@@ -510,8 +514,8 @@ mod tests {
         assert_eq!(
             route_uris,
             vec![
-                "<sips:proxy2.example.com>;lr;transport=tls".to_string(),
-                "<sip:proxy1.example.com>;lr".to_string(),
+                "<sips:proxy2.example.com;lr;transport=tls>".to_string(),
+                "<sip:proxy1.example.com;lr>".to_string(),
             ]
         );
     }

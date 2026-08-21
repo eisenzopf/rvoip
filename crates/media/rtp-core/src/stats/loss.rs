@@ -624,10 +624,7 @@ mod tests {
         tracker.process(0);
 
         // Immediate repeat of the most recent post-wrap sequence number.
-        assert_eq!(
-            tracker.process(0),
-            PacketLossResult::Duplicate { seq: 0 }
-        );
+        assert_eq!(tracker.process(0), PacketLossResult::Duplicate { seq: 0 });
 
         let stats = tracker.get_stats();
         assert_eq!(stats.duplicates, 1);

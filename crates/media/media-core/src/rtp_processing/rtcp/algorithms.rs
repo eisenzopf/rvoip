@@ -6,6 +6,8 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use rvoip_rtp_core::quality::e_model::{self, QualityInputs, G711};
+
 /// Google Congestion Control (GCC) implementation
 /// Based on the WebRTC implementation for bandwidth estimation
 pub struct GoogleCongestionControl {
@@ -277,54 +279,27 @@ impl Default for GoogleCongestionControl {
 ///
 /// This implements the ITU-T G.107 E-model for calculating MOS from R-factor.
 pub fn calculate_mos_from_rfactor(r_factor: f32) -> f32 {
-    if r_factor < 0.0 {
-        return 1.0;
-    } else if r_factor > 100.0 {
-        return 4.5;
-    }
-
-    // MOS calculation according to ITU-T G.107
-    if r_factor < 0.0 {
-        1.0
-    } else if r_factor < 6.52 {
-        1.0
-    } else if r_factor < 100.0 {
-        1.0 + 0.035 * r_factor + 0.000007 * r_factor * (r_factor - 60.0) * (100.0 - r_factor)
-    } else {
-        4.5
-    }
+    e_model::r_factor_to_mos(r_factor)
 }
 
 /// Calculate R-factor based on network parameters
 ///
-/// The R-factor is a transmission quality rating factor used in the E-model.
+/// This compatibility API uses G.711. `delay_ms` is one-way delay and
+/// `jitter_ms` is additional jitter-buffer playout delay. Packet discards
+/// caused by jitter must be included in `packet_loss_percent`.
+///
+/// # Arguments
+///
+/// * `delay_ms` - One-way network delay in milliseconds.
+/// * `packet_loss_percent` - Effective network loss plus buffer discards.
+/// * `jitter_ms` - Additional jitter-buffer playout delay in milliseconds.
 pub fn calculate_rfactor(delay_ms: f32, packet_loss_percent: f32, jitter_ms: f32) -> f32 {
-    // Base R-factor (perfect conditions)
-    let mut r_factor = 93.2;
-
-    // Delay impairment (Id)
-    let id = if delay_ms < 100.0 {
-        0.0
-    } else if delay_ms < 400.0 {
-        0.024 * delay_ms + 0.11 * (delay_ms - 177.3).max(0.0)
-    } else {
-        0.024 * delay_ms + 0.11 * (delay_ms - 177.3)
-    };
-
-    // Equipment impairment (Ie)
-    let ie = 30.0 * packet_loss_percent;
-
-    // Additional jitter impairment
-    let jitter_impairment = if jitter_ms > 20.0 {
-        (jitter_ms - 20.0) * 0.5
-    } else {
-        0.0
-    };
-
-    // Calculate final R-factor
-    r_factor -= id + ie + jitter_impairment;
-
-    r_factor.max(0.0).min(100.0)
+    e_model::evaluate(QualityInputs {
+        one_way_delay_ms: delay_ms + jitter_ms.max(0.0),
+        loss_percent: packet_loss_percent,
+        codec: G711,
+    })
+    .r_factor
 }
 
 /// Transport-wide congestion control feedback processor
@@ -455,7 +430,7 @@ mod tests {
     fn test_mos_calculation() {
         // Test boundary conditions
         assert_eq!(calculate_mos_from_rfactor(-10.0), 1.0);
-        assert_eq!(calculate_mos_from_rfactor(110.0), 4.5);
+        assert!(calculate_mos_from_rfactor(110.0) < 4.5);
 
         // Test typical R-factor values
         let mos_90 = calculate_mos_from_rfactor(90.0);
@@ -480,11 +455,12 @@ mod tests {
 
         // High packet loss
         let r_loss = calculate_rfactor(50.0, 2.0, 0.0);
-        assert!(r_loss < 70.0);
+        assert!(r_loss > 80.0);
 
         // High jitter
+        let r_without_jitter = calculate_rfactor(50.0, 0.0, 0.0);
         let r_jitter = calculate_rfactor(50.0, 0.0, 50.0);
-        assert!(r_jitter < 85.0);
+        assert!(r_jitter < r_without_jitter);
     }
 
     #[test]

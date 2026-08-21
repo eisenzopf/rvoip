@@ -51,6 +51,7 @@
 use crate::error::{Error, Result};
 use crate::parser::headers::parse_record_route;
 use crate::types::header::Header;
+use crate::types::param::Param;
 use crate::types::uri::Uri;
 use crate::types::Address;
 use crate::types::{HeaderName, TypedHeaderTrait};
@@ -118,7 +119,10 @@ impl RecordRouteEntry {
 
     /// Checks if this record route entry uses loose routing (has 'lr' parameter)
     pub fn is_loose_routing(&self) -> bool {
-        self.has_param("lr")
+        self.uri().parameters.iter().any(|param| {
+            matches!(param, Param::Lr)
+                || matches!(param, Param::Other(name, _) if name.eq_ignore_ascii_case("lr"))
+        })
     }
 }
 

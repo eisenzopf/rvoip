@@ -59,13 +59,10 @@ fn main() {
     let end_of_event_flag = 0x80;
     for (duration, is_last) in [(160u16, false), (320, false), (320, true)] {
         let flags = if is_last { end_of_event_flag } else { 0 };
-        let payload = Bytes::copy_from_slice(&[
-            digit,
-            flags,
-            (duration >> 8) as u8,
-            duration as u8,
-        ]);
-        let packet = sequencer.packetize(DTMF_PAYLOAD_TYPE, event_start_timestamp, is_last, payload);
+        let payload =
+            Bytes::copy_from_slice(&[digit, flags, (duration >> 8) as u8, duration as u8]);
+        let packet =
+            sequencer.packetize(DTMF_PAYLOAD_TYPE, event_start_timestamp, is_last, payload);
         hand_off_to_transport(&packet);
     }
 

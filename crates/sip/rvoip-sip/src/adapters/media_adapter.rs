@@ -2663,6 +2663,7 @@ impl MediaAdapter {
     /// `&mut SessionState`) — e.g. the DTLS-SRTP handshake, which can't
     /// hold a session borrow across a multi-second async handshake and
     /// must re-fetch the session by id once negotiation completes.
+    #[cfg(feature = "dtls-srtp")]
     async fn record_media_security_negotiated_with_keying(
         &self,
         session_id: &SessionId,

@@ -183,7 +183,10 @@ mod tests {
         let wrap = timestamp_delta(u32::MAX - 159, 160, 8000);
         let reorder = timestamp_delta(480, 160, 8000);
         assert!((wrap - 0.04).abs() < 0.000001, "wrap delta: {wrap}");
-        assert!((reorder - (-0.04)).abs() < 0.000001, "reorder delta: {reorder}");
+        assert!(
+            (reorder - (-0.04)).abs() < 0.000001,
+            "reorder delta: {reorder}"
+        );
     }
 
     #[test]

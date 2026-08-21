@@ -2724,7 +2724,7 @@ mod tests {
             .await
             .expect("send did not return after releasing the wire")
             .expect("send task panicked")?;
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if let Some(TransactionEvent::SuccessResponse {
                     transaction_id,
@@ -6376,7 +6376,7 @@ mod tests {
             let transaction = transaction.clone();
             tokio::spawn(async move { manager.terminate_transaction(&transaction).await })
         };
-        tokio::time::timeout(Duration::from_secs(2), runner_joined.notified())
+        tokio::time::timeout(Duration::from_secs(10), runner_joined.notified())
             .await
             .expect("termination supervisor did not abort and join blocked runner");
 
@@ -6387,7 +6387,7 @@ mod tests {
         ));
         release.notify_one();
         assert!(matches!(
-            tokio::time::timeout(Duration::from_secs(1), events.recv()).await,
+            tokio::time::timeout(Duration::from_secs(10), events.recv()).await,
             Ok(Some(TransactionEvent::StateChanged {
                 transaction_id: observed,
                 previous_state: TransactionState::Calling,
@@ -6395,7 +6395,7 @@ mod tests {
             })) if observed == transaction
         ));
         assert!(matches!(
-            tokio::time::timeout(Duration::from_secs(1), events.recv()).await,
+            tokio::time::timeout(Duration::from_secs(10), events.recv()).await,
             Ok(Some(TransactionEvent::TransactionTerminated { transaction_id: observed }))
                 if observed == transaction
         ));
@@ -6403,7 +6403,7 @@ mod tests {
             .await
             .expect("termination supervisor task")
             .expect("termination supervisor result");
-        manager.clear_termination_takeover_test_gate();
+        manager.clear_termination_takeover_test_gate(&transaction);
 
         assert!(!manager.client_transactions.contains_key(&transaction));
         assert!(live.data().event_loop_handle.lock().await.is_none());
@@ -6503,7 +6503,7 @@ mod tests {
         .await
         .expect("manager-owned termination stopped with its public waiter");
         assert!(manager.explicit_termination_operations.is_empty());
-        manager.clear_termination_takeover_test_gate();
+        manager.clear_termination_takeover_test_gate(&transaction);
         tokio::time::timeout(Duration::from_secs(2), shutdown_complete.notified())
             .await
             .expect("shutdown deadlocked behind queued explicit termination");

@@ -610,8 +610,21 @@ async fn setup_two_connection_orchestrator_with_adapter(
     let session = SessionId::new();
     adapter.announce(conn_a.clone(), session.clone()).await;
     adapter.announce(conn_b.clone(), session).await;
-    // Give the pump a beat to consume both events.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Wait for the observable registration condition instead of assuming the
+    // event pump will always run within a fixed delay. Workspace-wide builds
+    // can heavily contend for CPU and make a timing sleep flaky.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if orchestrator.connection_transport(&conn_a).is_ok()
+                && orchestrator.connection_transport(&conn_b).is_ok()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("adapter event pump did not register both test connections");
 
     (orchestrator, stream_a, stream_b, conn_a, conn_b, adapter)
 }

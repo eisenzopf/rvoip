@@ -353,6 +353,17 @@ tracing-appender = "0.2"
 env_logger = "0.11"
 criterion = { version = "0.5", features = ["html_reports"] }
 
+# Keep the very large workspace from retaining one incremental object graph
+# per crate, feature set, and integration-test build. Profiling has dedicated
+# release profiles below when symbols are required.
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false
+
 # 🔧 Optimization Profiles for Binary Size Reduction
 
 [profile.release]

@@ -3,115 +3,27 @@
 // rec-route = name-addr *( SEMI rr-param )
 // rr-param = generic-param
 
-use nom::{
-    branch::alt,
-    bytes::complete::{tag, take_while},
-    combinator::{map, map_res, opt},
-    error::{Error as NomError, ErrorKind},
-};
+use nom::{combinator::map, sequence::pair};
 
 // Import from base parser modules
 // For reference
+use crate::parser::address::name_addr;
 use crate::parser::common::comma_separated_list1;
-use crate::parser::quoted::quoted_string;
-use crate::parser::token::token;
-use crate::parser::uri::params::uri_parameters;
-use crate::parser::uri::parse_uri;
+use crate::parser::common_params::{generic_param, semicolon_separated_params0};
 use crate::parser::ParseResult;
 
 use crate::types::address::Address;
-use crate::types::param::Param;
 use crate::types::record_route::{RecordRoute as RecordRouteHeader, RecordRouteEntry};
-use crate::types::uri::Uri;
-use std::str::{self};
-
-// Helper to parse an optional display name
-fn parse_display_name(input: &[u8]) -> ParseResult<'_, Option<String>> {
-    let (input, display_name_opt) = opt(alt((
-        // Quoted string path
-        map_res(quoted_string, |bytes| {
-            str::from_utf8(bytes).map(|s| s.to_string())
-        }),
-        // Token path
-        map_res(token, |bytes| str::from_utf8(bytes).map(|s| s.to_string())),
-    )))(input)?;
-
-    // If we found a display name, look for whitespace followed by '<'
-    if let Some(_name) = &display_name_opt {
-        // Check if this is actually a display name by looking for a following '<'
-        // First skip any whitespace
-        let (input_after_ws, _) = take_while(|c: u8| c == b' ' || c == b'\t')(input)?;
-
-        // If there's no '<' after possible whitespace, this might not be a display name
-        if input_after_ws.is_empty() || input_after_ws[0] != b'<' {
-            return Ok((input, None));
-        }
-    }
-
-    Ok((input, display_name_opt))
-}
-
-// Parse a URI with parameters inside angle brackets
-fn parse_uri_with_params(input: &[u8]) -> ParseResult<'_, (Uri, Vec<Param>)> {
-    // Check for opening angle bracket
-    let (input, _) = tag(b"<")(input)?;
-
-    // Find the position of the closing angle bracket
-    let closing_bracket_pos = input
-        .iter()
-        .position(|&c| c == b'>')
-        .ok_or_else(|| nom::Err::Error(NomError::new(input, ErrorKind::Tag)))?;
-
-    // Extract content inside angle brackets
-    let uri_part = &input[..closing_bracket_pos];
-    let input_after_uri = &input[closing_bracket_pos..];
-
-    // Find position of semicolon (if any) - this separates URI from its parameters
-    let semicolon_pos = uri_part.iter().position(|&c| c == b';');
-
-    // Parse the URI
-    let uri;
-    let params;
-
-    if let Some(pos) = semicolon_pos {
-        // URI has parameters
-        let (_, parsed_uri) = parse_uri(&uri_part[..pos])?;
-        let (_, parsed_params) = uri_parameters(&uri_part[pos..])?;
-
-        uri = parsed_uri;
-        params = parsed_params;
-    } else {
-        // URI without parameters
-        let (_, parsed_uri) = parse_uri(uri_part)?;
-        uri = parsed_uri;
-        params = Vec::new();
-    }
-
-    // Consume the closing bracket
-    let (input, _) = tag(b">")(input_after_uri)?;
-
-    Ok((input, (uri, params)))
-}
 
 // Parse a single record-route entry
 fn parse_record_route_address(input: &[u8]) -> ParseResult<'_, Address> {
-    // Try to parse a display name
-    let (input, display_name) = parse_display_name(input)?;
-
-    // Skip whitespace after display name
-    let (input, _) = take_while(|c: u8| c == b' ' || c == b'\t')(input)?;
-
-    // Parse the URI with parameters inside angle brackets
-    let (input, (uri, params)) = parse_uri_with_params(input)?;
-
-    Ok((
-        input,
-        Address {
-            display_name,
-            uri,
-            params,
+    map(
+        pair(name_addr, semicolon_separated_params0(generic_param)),
+        |(mut address, params)| {
+            address.params = params;
+            address
         },
-    ))
+    )(input)
 }
 
 /// Parse a Record-Route header value as defined in RFC 3261 Section 20.31
@@ -145,8 +57,8 @@ mod tests {
         assert_eq!(routes.len(), 1);
         assert!(routes[0].0.display_name.is_none());
         assert_eq!(routes[0].0.uri.scheme, Scheme::Sip);
-        assert_eq!(routes[0].0.params.len(), 1);
-        assert!(routes[0].0.params.contains(&Param::Lr));
+        assert!(routes[0].0.params.is_empty());
+        assert!(routes[0].0.uri.parameters.contains(&Param::Lr));
     }
 
     #[test]
@@ -158,8 +70,8 @@ mod tests {
         let routes = rr_header.0;
         assert!(rem.is_empty());
         assert_eq!(routes.len(), 2);
-        assert!(routes[0].0.params.contains(&Param::Lr));
-        assert!(routes[1].0.params.contains(&Param::Lr));
+        assert!(routes[0].0.uri.parameters.contains(&Param::Lr));
+        assert!(routes[1].0.uri.parameters.contains(&Param::Lr));
     }
 
     #[test]
@@ -184,11 +96,12 @@ mod tests {
         let routes = rr_header.0;
         assert!(rem.is_empty());
         assert_eq!(routes.len(), 1);
-        assert_eq!(routes[0].0.params.len(), 2);
-        assert!(routes[0].0.params.contains(&Param::Lr));
+        assert!(routes[0].0.params.is_empty());
+        assert!(routes[0].0.uri.parameters.contains(&Param::Lr));
         assert!(routes[0]
             .0
-            .params
+            .uri
+            .parameters
             .contains(&Param::Transport("tcp".to_string())));
     }
 
@@ -219,10 +132,11 @@ mod tests {
         assert_eq!(routes[0].0.display_name, Some("Gateway".to_string()));
         assert_eq!(routes[0].0.uri.scheme, Scheme::Sip);
         assert_eq!(routes[0].0.uri.port, Some(5061));
-        assert!(routes[0].0.params.contains(&Param::Lr));
+        assert!(routes[0].0.uri.parameters.contains(&Param::Lr));
         assert!(routes[0]
             .0
-            .params
+            .uri
+            .parameters
             .contains(&Param::Transport("tcp".to_string())));
 
         // Second entry
@@ -234,8 +148,38 @@ mod tests {
         );
         assert!(routes[1]
             .0
-            .params
+            .uri
+            .parameters
             .contains(&Param::Maddr("10.0.1.1".to_string())));
+    }
+
+    #[test]
+    fn record_route_uri_parameters_survive_round_trip() {
+        let raw = "<sip:proxy.example.com:5060;transport=tcp;lr;esp=abc>";
+        let record_route: RecordRouteHeader = raw.parse().unwrap();
+
+        assert_eq!(record_route.to_string(), raw);
+        assert!(record_route[0].is_loose_routing());
+    }
+
+    #[test]
+    fn record_route_separates_uri_and_header_parameters() {
+        let raw = "<sip:proxy.example.com;lr;esp=abc>;ftag=xyz";
+        let record_route: RecordRouteHeader = raw.parse().unwrap();
+        let entry = &record_route[0];
+
+        assert!(entry.uri().parameters.contains(&Param::Lr));
+        assert!(entry
+            .uri()
+            .parameters
+            .iter()
+            .any(|param| matches!(param, Param::Other(name, _) if name == "esp")));
+        assert_eq!(entry.address().params.len(), 1);
+        assert!(matches!(
+            &entry.address().params[0],
+            Param::Other(name, _) if name == "ftag"
+        ));
+        assert_eq!(record_route.to_string(), raw);
     }
 
     #[test]

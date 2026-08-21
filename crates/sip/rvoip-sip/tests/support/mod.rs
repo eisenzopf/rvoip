@@ -109,6 +109,7 @@ pub fn build_examples(names: &[&str]) {
 
     let status = command
         .env("CARGO_TARGET_DIR", &target_dir)
+        .env("CARGO_INCREMENTAL", "0")
         .status()
         .expect("failed to invoke cargo build");
     assert!(

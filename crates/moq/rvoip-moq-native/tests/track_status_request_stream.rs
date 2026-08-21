@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Bridgefu contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use std::{path::PathBuf, time::Duration};
+use std::time::Duration;
 
 use anyhow::Context as _;
 use moq_native_ietf::{quic, tls};
@@ -13,20 +13,16 @@ use moq_transport::{
 };
 use tokio::time::timeout;
 
-const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+mod common;
 
-fn fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join(name)
-}
+const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[tokio::test]
 async fn track_status_round_trips_on_independent_request_streams() -> anyhow::Result<()> {
+    let identity = common::localhost_server_identity()?;
     let tls = tls::Args {
-        cert: vec![fixture("localhost-cert.pem")],
-        key: vec![fixture("localhost-key.pem")],
+        cert: vec![identity.cert],
+        key: vec![identity.key],
         root: Vec::new(),
         disable_verify: true,
         ..Default::default()

@@ -279,7 +279,7 @@ pub async fn send_rtcp_xr_voip_metrics_to_client(
         noise_level: metrics.noise_level as u8,   // Convert i8 to u8
         rerl: metrics.rerl,
         r_factor: metrics.r_factor,
-        ext_r_factor: 0, // Not used in our API
+        ext_r_factor: 127, // RFC 3611 unavailable value
         mos_lq: metrics.mos_lq,
         mos_cq: metrics.mos_cq,
         rx_config: 0, // Default configuration

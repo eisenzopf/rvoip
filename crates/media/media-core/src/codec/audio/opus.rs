@@ -106,11 +106,10 @@ impl OpusCodec {
         );
 
         #[cfg(feature = "opus")]
-        let inner = CodecCoreOpus::new(codec_core_config(&config, sample_rate_hz, channels)).map_err(
-            |e| CodecError::InitializationFailed {
+        let inner = CodecCoreOpus::new(codec_core_config(&config, sample_rate_hz, channels))
+            .map_err(|e| CodecError::InitializationFailed {
                 reason: format!("Opus codec-core initialization failed: {e}"),
-            },
-        )?;
+            })?;
 
         Ok(Self {
             config,
@@ -140,12 +139,11 @@ impl AudioCodec for OpusCodec {
                 .into());
             }
 
-            let encoded = self
-                .inner
-                .encode(&audio_frame.samples)
-                .map_err(|e| CodecError::EncodingFailed {
+            let encoded = self.inner.encode(&audio_frame.samples).map_err(|e| {
+                CodecError::EncodingFailed {
                     reason: format!("Opus encoding failed: {e}"),
-                })?;
+                }
+            })?;
             Ok(encoded)
         }
 

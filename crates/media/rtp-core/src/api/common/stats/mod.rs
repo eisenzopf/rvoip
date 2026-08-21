@@ -190,17 +190,7 @@ impl QualityUtils {
 
     /// Calculate MOS from R-factor
     pub fn r_factor_to_mos(r: f32) -> f32 {
-        if r < 0.0 {
-            return 1.0;
-        }
-
-        let mos = if r < 100.0 {
-            1.0 + 0.035 * r + 0.000007 * r * (r - 60.0) * (100.0 - r)
-        } else {
-            4.5
-        };
-
-        mos.max(1.0).min(5.0)
+        crate::quality::e_model::r_factor_to_mos(r)
     }
 
     /// Calculate quality level from network metrics

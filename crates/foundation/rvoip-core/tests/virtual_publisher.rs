@@ -27,6 +27,7 @@ fn opus() -> CodecInfo {
     }
 }
 
+#[cfg(feature = "opus")]
 fn g711(name: &str) -> CodecInfo {
     CodecInfo {
         name: name.to_owned(),
@@ -103,6 +104,7 @@ impl TestMediaStream {
         )
     }
 
+    #[cfg(feature = "opus")]
     fn inbound_acquisitions(&self) -> usize {
         self.inbound_acquisitions.load(Ordering::Acquire)
     }
@@ -307,6 +309,7 @@ fn frame(stream_id: StreamId, payload: &'static [u8]) -> MediaFrame {
     }
 }
 
+#[cfg(feature = "opus")]
 fn encoded_frame(
     stream_id: StreamId,
     payload: Vec<u8>,
@@ -323,6 +326,7 @@ fn encoded_frame(
     }
 }
 
+#[cfg(feature = "opus")]
 async fn assert_g711_source_publishes_canonical_opus(source_codec: CodecInfo, source_pt: u8) {
     let orchestrator = Orchestrator::new(Config::default());
     let (adapter, events) = TestAdapter::new();
@@ -446,11 +450,13 @@ async fn assert_g711_source_publishes_canonical_opus(source_codec: CodecInfo, so
 }
 
 #[tokio::test]
+#[cfg(feature = "opus")]
 async fn pcmu_virtual_publisher_transcodes_once_to_canonical_opus() {
     assert_g711_source_publishes_canonical_opus(g711("pcmu"), 0).await;
 }
 
 #[tokio::test]
+#[cfg(feature = "opus")]
 async fn pcma_virtual_publisher_transcodes_once_to_canonical_opus() {
     assert_g711_source_publishes_canonical_opus(g711("pcma"), 8).await;
 }
