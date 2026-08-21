@@ -2387,6 +2387,74 @@ mod tests {
         }
     }
 
+    /// The day-one gateway posture in one test: a REAL INVITE arriving at
+    /// an app built with BOTH the authoritative admission gate and a
+    /// trusted-trunk listener policy must surface as an admission ticket,
+    /// and accepting that ticket must answer the call. Neither primitive
+    /// had live-INVITE coverage in combination before this.
+    #[tokio::test]
+    async fn authoritative_trunk_invite_surfaces_an_admission_ticket() {
+        let app = RvoipApp::builder()
+            .customers(CustomerPolicy::sip_only())
+            .sip(
+                SipConfig::bind("127.0.0.1:0")
+                    .domain("test.local")
+                    .tenant("edge-namespace")
+                    .trusted_trunk("127.0.0.0/8", "trunk-under-test")
+                    .allow(Role::Customer, [Capability::Voice]),
+            )
+            .employees(EmployeePolicy::named(["agent"]))
+            .assignment(AssignmentPolicy::fixed("agent"))
+            .authoritative_ingress(AuthoritativeIngressConfig::default())
+            .build()
+            .await
+            .expect("build authoritative trunk app");
+        let AuthoritativeIngress {
+            mut admissions,
+            operational,
+        } = app
+            .take_authoritative_ingress()
+            .expect("authoritative receivers");
+        // Losing the operational receiver degrades the runtime and stops
+        // admission by design; a real owner holds and drains it.
+        let _operational_drain = tokio::spawn(async move {
+            let mut operational = operational;
+            while operational.recv().await.is_some() {}
+        });
+        let gateway = app.addresses().sip.expect("SIP listener");
+
+        let caller_addr = resolve_udp_bind_addr("127.0.0.1:0".parse().expect("loopback socket"))
+            .expect("allocate caller port");
+        let caller = UnifiedCoordinator::new(LowSipConfig::on(
+            "caller",
+            caller_addr.ip(),
+            caller_addr.port(),
+        ))
+        .await
+        .expect("start SIP caller");
+        let call_id = caller
+            .invite(
+                Some(format!("sip:caller@{caller_addr}")),
+                format!("sip:+15550001111@{gateway}"),
+            )
+            .send()
+            .await
+            .expect("send SIP INVITE");
+
+        let ticket = tokio::time::timeout(Duration::from_secs(10), admissions.recv())
+            .await
+            .expect("an admission ticket must be presented for a trusted-trunk INVITE")
+            .expect("admission stream must stay open");
+        let principal = ticket
+            .authenticated_principal()
+            .expect("trunk-matched INVITE carries a principal");
+        assert_eq!(principal.subject, "trunk-under-test");
+        ticket.accept().await.expect("accept the admitted call");
+
+        let _ = caller.bye(&call_id).send().await;
+        let _ = caller.shutdown_gracefully(None).await;
+    }
+
     #[tokio::test]
     async fn sip_customer_inbound_emits_accepted_call() {
         let app = RvoipApp::builder()
