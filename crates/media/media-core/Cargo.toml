@@ -48,7 +48,7 @@ tokio.workspace = true
 anyhow.workspace = true
 
 # Error handling
-thiserror = "1.0"
+thiserror = "2.0"
 
 # Bytes handling
 bytes = "1.5"
@@ -69,7 +69,7 @@ num_cpus = "1.0"             # Used for default worker thread configuration
 rustfft = "6.1"
 num-complex = "0.4"          # Used in AEC v2 implementation
 apodize = "1.0"              # Used in VAD v2 for windowing functions
-biquad = "0.4"               # Used in AGC v2 for digital filters
+biquad = "0.6"               # Used in AGC v2 for digital filters
 
 # Media codecs are implemented by codec-core. media-core only provides the
 # media-frame adapter and negotiation/capability plumbing.
@@ -100,7 +100,7 @@ amr = ["amr-nb", "amr-wb"]
 all-codecs = ["pcmu", "pcma", "g729", "opus", "amr"]
 
 [dev-dependencies]
-serial_test = "3.0"
+serial_test = "4.0"
 tempfile = "3.8"
 criterion = { workspace = true }
 futures = "0.3"

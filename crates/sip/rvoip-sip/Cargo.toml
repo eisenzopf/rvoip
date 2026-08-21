@@ -346,13 +346,13 @@ path = "examples/auth/custom_provider.rs"
 tokio = { version = "1.40", features = ["full"] }
 async-trait = "0.1"
 tracing = "0.1"
-thiserror = "1.0"
+thiserror = "2.0"
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
 futures = "0.3"
-roxmltree = "0.20"
+roxmltree = "0.21"
 
 # RVoIP crates — sourced from [workspace.dependencies] so versions, paths,
 # and crates.io publishing all stay coherent. Bare `path = "..."` form is
@@ -368,7 +368,7 @@ rvoip-rtp-core.workspace = true
 rvoip-core-traits.workspace = true
 ipnet = "2.12"
 # RFC 4568 SDES — base64 encoding of `a=crypto: inline:` master keys.
-base64 = "0.22"
+base64 = "0.23"
 rvoip-auth-core.workspace = true
 rvoip-sip-registrar.workspace = true
 sha2.workspace = true
@@ -394,7 +394,7 @@ rand = "0.8"
 # RFC 3261 §8.1 — state-machine `Action` variant reflection for the YAML
 # loader's drift-detection validation pass (see `state_table/yaml_loader.rs`
 # `parse_action_by_name`).
-strum = { version = "0.26", features = ["derive"] }
+strum = { version = "0.28", features = ["derive"] }
 
 [dev-dependencies]
 tokio = { version = "1.40", features = ["full", "test-util"] }
@@ -425,7 +425,7 @@ rcgen = "0.14"
 # automatically when more than one provider feature is reachable).
 rustls = { workspace = true }
 clap = { workspace = true }
-cpal = "0.15"
+cpal = "0.18"
 crossterm = "0.29"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 criterion = { workspace = true }
