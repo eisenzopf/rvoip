@@ -364,13 +364,7 @@ pub fn extract_dialog_template_from_request(
                 Some(
                     route
                         .iter()
-                        .map(|route_entry| {
-                            let mut uri = route_entry.0.uri.clone();
-                            for param in &route_entry.0.params {
-                                uri = uri.with_parameter(param.clone());
-                            }
-                            uri
-                        })
+                        .map(|route_entry| route_entry.0.uri.clone())
                         .collect::<Vec<_>>(),
                 )
             } else {

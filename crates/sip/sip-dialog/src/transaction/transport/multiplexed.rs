@@ -55,9 +55,7 @@ fn safe_method_label(method: &Method) -> &'static str {
 }
 
 /// Returns the URI that determines the next hop for an outbound request:
-/// the first Route URI when present, otherwise the Request-URI. Route
-/// address parameters are folded back into the URI so `;transport=tls`
-/// on a name-addr Route still affects transport and default-port logic.
+/// the first Route URI when present, otherwise the Request-URI.
 pub fn next_hop_uri_for_request(request: &Request) -> Uri {
     top_route_uri(request).unwrap_or_else(|| request.uri().clone())
 }
@@ -73,20 +71,10 @@ pub fn exact_next_hop_uri_for_request(request: &Request) -> TransportResult<Uri>
             continue;
         }
         let next_hop = match header {
-            TypedHeader::Route(route) => route.first().map(|entry| {
-                let mut uri = entry.0.uri.clone();
-                for param in &entry.0.params {
-                    uri = uri.with_parameter(param.clone());
-                }
-                uri
-            }),
-            TypedHeader::Other(_, HeaderValue::Route(entries)) => entries.first().map(|entry| {
-                let mut uri = entry.0.uri.clone();
-                for param in &entry.0.params {
-                    uri = uri.with_parameter(param.clone());
-                }
-                uri
-            }),
+            TypedHeader::Route(route) => route.first().map(|entry| entry.0.uri.clone()),
+            TypedHeader::Other(_, HeaderValue::Route(entries)) => {
+                entries.first().map(|entry| entry.0.uri.clone())
+            }
             _ => None,
         };
         return next_hop.ok_or_else(|| {
@@ -108,21 +96,9 @@ pub fn top_route_uri(request: &Request) -> Option<Uri> {
         .filter_map(|header| {
             if header.name().wire_eq(&HeaderName::Route) {
                 match header {
-                    TypedHeader::Route(route) => route.first().map(|entry| {
-                        let mut uri = entry.0.uri.clone();
-                        for param in &entry.0.params {
-                            uri = uri.with_parameter(param.clone());
-                        }
-                        uri
-                    }),
+                    TypedHeader::Route(route) => route.first().map(|entry| entry.0.uri.clone()),
                     TypedHeader::Other(_, HeaderValue::Route(entries)) => {
-                        entries.first().map(|entry| {
-                            let mut uri = entry.0.uri.clone();
-                            for param in &entry.0.params {
-                                uri = uri.with_parameter(param.clone());
-                            }
-                            uri
-                        })
+                        entries.first().map(|entry| entry.0.uri.clone())
                     }
                     _ => None,
                 }
@@ -1180,9 +1156,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_uses_transport_param_on_route_address() {
+    async fn dispatch_uses_transport_param_on_route_uri() {
         use rvoip_sip_core::builder::SimpleRequestBuilder;
-        use rvoip_sip_core::types::param::Param;
         use rvoip_sip_core::types::route::Route;
         use rvoip_sip_core::{Address, Method, TypedHeader, Uri};
 
@@ -1196,10 +1171,10 @@ mod tests {
         let mux =
             MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour, None).unwrap();
 
-        let route_uri: Uri = "sip:proxy.example.com:5061".parse().unwrap();
-        let mut route_address = Address::new(route_uri);
-        route_address.params.push(Param::Lr);
-        route_address.params.push(Param::transport("tls"));
+        let route_uri: Uri = "sip:proxy.example.com:5061;lr;transport=tls"
+            .parse()
+            .unwrap();
+        let route_address = Address::new(route_uri);
         let route = Route::with_address(route_address);
         let req = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
             .unwrap()
