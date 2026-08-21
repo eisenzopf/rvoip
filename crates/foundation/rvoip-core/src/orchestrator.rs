@@ -9572,7 +9572,71 @@ impl Orchestrator {
         source: AudioSource,
     ) -> Result<PlaybackHandle> {
         let adapter = self.adapter_for(&connection_id)?;
-        adapter.play_audio(connection_id, source).await
+        // Spoken prompts synthesize through the orchestrator's registered
+        // TTS providers and pump into the connection's audio stream — the
+        // same delivery path AI attachments speak through — so any adapter
+        // that exposes streams plays prompts without its own TTS stack.
+        // Other sources (recorded URLs) stay with the adapter, which owns
+        // fetching and decoding for its transport.
+        let AudioSource::TtsRequest {
+            provider_ref,
+            text,
+            voice,
+        } = source
+        else {
+            return adapter.play_audio(connection_id, source).await;
+        };
+        let tts = self
+            .tts_providers
+            .get(&provider_ref)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or(RvoipError::AdmissionRejected(
+                "play_audio: TTS provider not registered",
+            ))?;
+        let streams = adapter.streams(connection_id.clone()).await?;
+        let audio = streams
+            .into_iter()
+            .find(|stream| stream.kind() == StreamKind::Audio)
+            .ok_or(RvoipError::AdmissionRejected(
+                "play_audio: connection has no audio stream",
+            ))?;
+        let frames_out = audio.try_frames_out()?;
+        let playback = tts
+            .synthesize(crate::harness::TtsRequest {
+                voice,
+                text,
+                sample_rate_hz: None,
+            })
+            .await?;
+        let (handle, mut cancel_rx) = PlaybackHandle::new(crate::ids::PlaybackId::new());
+        tokio::spawn(async move {
+            let mut playback = TtsPlaybackCancelGuard::new(playback);
+            let mut completed = false;
+            loop {
+                tokio::select! {
+                    _ = &mut cancel_rx => break,
+                    frame_opt = playback.playback().next_frame() => {
+                        let Some(frame) = frame_opt else {
+                            completed = true;
+                            break;
+                        };
+                        if frames_out.send(frame).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            // Every exit other than the provider's natural end-of-stream
+            // must cancel the provider explicitly: `TtsPlayback` has no
+            // Drop-cancels contract, so merely dropping it can leave remote
+            // synthesis work running.
+            if completed {
+                playback.complete();
+            } else {
+                playback.cancel().await;
+            }
+        });
+        Ok(handle)
     }
 
     /// Bridge two connections — wires a bidirectional frame pump between
