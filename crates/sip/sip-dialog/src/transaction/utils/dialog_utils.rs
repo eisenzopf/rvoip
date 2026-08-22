@@ -98,14 +98,15 @@ pub fn create_request_from_dialog_template(
             TransportType::Wss => "WSS",
         };
 
-    // Via header with local address and new branch
+    // Via header with local address and new branch. The transaction manager
+    // adds UDP `rport` after final transport selection.
     let via = Via::new(
         "SIP",
         "2.0",
         via_transport,
         &local_address.ip().to_string(),
         Some(local_address.port()),
-        vec![Param::branch(&generate_branch()), Param::Rport(None)],
+        vec![Param::branch(&generate_branch())],
     )
     .unwrap_or_else(|e| {
         // Log the error for debugging
@@ -236,6 +237,7 @@ mod tests {
         );
 
         assert_eq!(request.first_via_transport(), Some("TLS"));
+        assert_eq!(request.first_via().unwrap().rport(), None);
         let contact = request.header(&HeaderName::Contact).unwrap().to_string();
         assert!(
             contact.contains("sips:alice@192.0.2.10:5071;transport=tls"),

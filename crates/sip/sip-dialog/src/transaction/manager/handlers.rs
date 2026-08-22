@@ -258,12 +258,6 @@ impl TransactionManager {
 }
 
 /// Create a UDP Via header with a branch parameter for a local address.
-///
-/// Always requests `rport` (RFC 3581) with no value — carriers and NAT
-/// gateways use this to echo back the received port in responses so we
-/// can route ACKs and BYEs back through the same pinhole. The incoming
-/// path honors `received=` / `rport=` echoed on responses (see the
-/// response handler earlier in this module).
 pub fn create_via_header(local_addr: &SocketAddr, branch: &str) -> Result<TypedHeader> {
     create_via_header_for_transport(local_addr, branch, "UDP")
 }
@@ -272,7 +266,8 @@ pub fn create_via_header(local_addr: &SocketAddr, branch: &str) -> Result<TypedH
 ///
 /// This is used by the transaction layer only when a request reaches it without
 /// an existing Via. Request builders normally choose the correct transport
-/// first; transaction normalization must preserve that choice.
+/// first; transaction normalization must preserve that choice. The transaction
+/// manager adds UDP `rport` only after it has selected the final transport.
 pub fn create_via_header_for_transport(
     local_addr: &SocketAddr,
     branch: &str,
@@ -281,7 +276,7 @@ pub fn create_via_header_for_transport(
     use rvoip_sip_core::types::via::Via;
     use rvoip_sip_core::types::Param;
 
-    let via_params = vec![Param::branch(branch.to_string()), Param::Rport(None)];
+    let via_params = vec![Param::branch(branch.to_string())];
 
     let local_host = local_addr.ip().to_string();
     let local_port = local_addr.port();
@@ -304,7 +299,7 @@ mod via_header_tests {
     use super::*;
 
     #[test]
-    fn via_header_includes_rport_param() {
+    fn via_header_defaults_to_udp_with_branch() {
         let local: SocketAddr = "127.0.0.1:5060".parse().unwrap();
         let header = create_via_header(&local, "z9hG4bK-test").expect("create_via_header");
         let serialized = format!("{}", header);
@@ -313,11 +308,7 @@ mod via_header_tests {
             "Via header should default to UDP, got: {}",
             serialized
         );
-        assert!(
-            serialized.contains(";rport"),
-            "Via header should include rport param, got: {}",
-            serialized
-        );
+        assert!(!serialized.contains(";rport"));
         assert!(
             serialized.contains(";branch=z9hG4bK-test"),
             "Via header should include branch param, got: {}",
@@ -336,11 +327,7 @@ mod via_header_tests {
             "Via header should use requested transport, got: {}",
             serialized
         );
-        assert!(
-            serialized.contains(";rport"),
-            "Via header should include rport param, got: {}",
-            serialized
-        );
+        assert!(!serialized.contains(";rport"));
         assert!(
             serialized.contains(";branch=z9hG4bK-test"),
             "Via header should include branch param, got: {}",
