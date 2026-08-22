@@ -437,6 +437,7 @@ impl fmt::Display for SafeTransactionError<'_> {
             ChannelError { .. } => f.write_str("channel"),
             TransactionCreationError { .. } => f.write_str("transaction_creation"),
             TransactionCapacityExhausted { .. } => f.write_str("transaction_capacity"),
+            Ack2xxFailure { stage, .. } => write!(f, "ack_2xx_{stage}"),
             MessageProcessingError { .. } => f.write_str("message_processing"),
             Transport(_) => f.write_str("transport_manager"),
             Other(_) => f.write_str("other"),

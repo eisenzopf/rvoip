@@ -1,3 +1,6 @@
+mod ack_route;
+#[cfg(test)]
+mod ack_route_tests;
 mod functions;
 /// # Transaction Manager for SIP Protocol
 ///
@@ -203,7 +206,7 @@ use crate::transaction::completion::{
     ClientTransactionCompletion, ClientTransactionCompletionEntry,
     ClientTransactionCompletionHandle, RetainedClientTransactionCompletion,
 };
-use crate::transaction::error::{Error, Result};
+use crate::transaction::error::{Ack2xxFailureStage, Error, Result};
 use crate::transaction::event_sender::{
     EventSubscriber, TransactionEventSender, TransactionObserverFanout,
 };
@@ -214,9 +217,7 @@ use crate::transaction::server::{
 };
 use crate::transaction::state::TransactionLifecycle;
 use crate::transaction::timer::{TimerManager, TimerSettings};
-use crate::transaction::transport::multiplexed::{
-    next_hop_uri_for_request, select_transport_for_request, top_route_uri,
-};
+use crate::transaction::transport::multiplexed::{select_transport_for_request, top_route_uri};
 use crate::transaction::transport::{
     NetworkInfoForSdp, SipTraceRuntime, TransportCapabilities, TransportCapabilitiesExt,
     TransportInfo, WebSocketStatus,
@@ -6602,57 +6603,31 @@ impl TransactionManager {
         invite_tx_id: &TransactionKey,
         response: &Response,
     ) -> Result<()> {
-        // Create the ACK request
-        let ack_request = self.create_ack_for_2xx(invite_tx_id, response).await?;
-        let original_route = self.transaction_route(invite_tx_id).await.ok_or_else(|| {
-            Error::transaction_not_found(invite_tx_id.clone(), "ACK route lookup failed")
-        })?;
-
-        // ACK follows the established dialog route set: top Route if present,
-        // otherwise the remote target in the Contact-derived Request-URI.
-        let destination = utils::socket_addr_from_uri(&next_hop_uri_for_request(&ack_request));
-
-        // If the ACK has no route-set destination, try Contact explicitly.
-        let contact_destination =
-            if let Some(TypedHeader::Contact(contact)) = response.header(&HeaderName::Contact) {
-                if let Some(contact_addr) = contact.addresses().next() {
-                    // Try to parse the URI as a socket address
-                    if let Some(addr) = utils::socket_addr_from_uri(&contact_addr.uri) {
-                        Some(addr)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-        // If we couldn't get a route or Contact destination, use the original destination.
-        let destination = if let Some(dest) = destination.or(contact_destination) {
-            dest
-        } else {
-            original_route.destination
-        };
-
-        let mut ack_route = original_route;
-        if ack_route.destination != destination {
-            ack_route.destination = destination;
-            // An opaque stream flow is valid only for the peer it was bound
-            // to. A Contact-selected destination must establish/select its
-            // own flow rather than inheriting the INVITE's flow identity.
-            ack_route.flow_id = None;
-        }
+        let original_route = self
+            .transaction_route(invite_tx_id)
+            .await
+            .ok_or_else(|| {
+                Error::transaction_not_found(invite_tx_id.clone(), "ACK route lookup failed")
+            })
+            .map_err(|error| Error::ack_2xx(Ack2xxFailureStage::RouteLookup, error))?;
+        let ack_request = self
+            .create_ack_for_2xx(invite_tx_id, response)
+            .await
+            .map_err(|error| Error::ack_2xx(Ack2xxFailureStage::Composition, error))?;
+        let ack_route = ack_route::route_for_2xx_ack(&ack_request, &original_route)
+            .map_err(|error| Error::ack_2xx(Ack2xxFailureStage::RouteSelection, error))?;
 
         // Send the ACK directly without creating a transaction, while
         // preserving the authenticated transport/authority/flow selected by
         // the original INVITE whenever its route remains the next hop.
-        rvoip_sip_core::validation::validate_wire_request(&ack_request)?;
+        rvoip_sip_core::validation::validate_wire_request(&ack_request)
+            .map_err(Error::from)
+            .map_err(|error| Error::ack_2xx(Ack2xxFailureStage::Composition, error))?;
         self.transport
             .send_message_via(Message::Request(ack_request), ack_route)
             .await
-            .map_err(|e| Error::transport_error(e, "Failed to send ACK"))?;
+            .map_err(|error| Error::transport_error(error, "Failed to send ACK"))
+            .map_err(|error| Error::ack_2xx(Ack2xxFailureStage::Transport, error))?;
 
         Ok(())
     }

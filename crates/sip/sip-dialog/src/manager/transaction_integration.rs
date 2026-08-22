@@ -6693,7 +6693,7 @@ impl DialogManager {
                             if let Some(session_id) = session_id_for_diag.as_deref() {
                                 crate::diagnostics::record_call_timing_uac_ack_failure(session_id);
                             }
-                            warn!(error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), status, "Failed to send automatic ACK for INVITE 2xx");
+                            warn!(error=%crate::transaction::safe_diagnostics::SafeTransactionError::new(&e), status, "Failed to send automatic ACK for INVITE 2xx");
                             return Err(crate::errors::DialogError::TransactionError {
                                 message: safe_operation_failure(
                                     "automatic_invite_2xx_ack",

@@ -5,6 +5,26 @@ use thiserror::Error;
 /// A type alias for handling `Result`s with `Error`
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Safe stage classification for automatic ACK processing of an INVITE 2xx.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ack2xxFailureStage {
+    Composition,
+    RouteLookup,
+    RouteSelection,
+    Transport,
+}
+
+impl std::fmt::Display for Ack2xxFailureStage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Composition => "composition",
+            Self::RouteLookup => "route_lookup",
+            Self::RouteSelection => "route_selection",
+            Self::Transport => "transport",
+        })
+    }
+}
+
 /// Errors that can occur in SIP transaction handling
 #[derive(Error)]
 pub enum Error {
@@ -69,6 +89,14 @@ pub enum Error {
     TransactionCapacityExhausted {
         resource: &'static str,
         limit: usize,
+    },
+
+    /// Automatic ACK processing failed at a metadata-safe stage.
+    #[error("Automatic INVITE 2xx ACK failed during {stage}")]
+    Ack2xxFailure {
+        stage: Ack2xxFailureStage,
+        #[source]
+        source: Box<Error>,
     },
 
     /// Transaction message processing error
@@ -141,6 +169,14 @@ impl<T> From<tokio::sync::mpsc::error::SendError<T>> for Error {
 
 // Add helper methods to create more specific errors with context
 impl Error {
+    /// Attach a stable, metadata-only stage to an automatic 2xx ACK failure.
+    pub fn ack_2xx(stage: Ack2xxFailureStage, source: Error) -> Self {
+        Self::Ack2xxFailure {
+            stage,
+            source: Box::new(source),
+        }
+    }
+
     /// Create a new TransactionNotFound error with context
     pub fn transaction_not_found(key: TransactionKey, context: impl Into<String>) -> Self {
         Error::TransactionNotFound {
