@@ -39,40 +39,9 @@ use crate::transaction::state::TransactionLifecycle;
 use crate::transaction::{SipRequestAuthorization, SipRequestIngressContext, SipRequestRejection};
 use crate::transaction::{TransactionEvent, TransactionKey, TransactionKind, TransactionState};
 
+use super::response_route::client_response_route_matches;
 use super::types::*;
 use super::TransactionManager;
-
-fn bind_client_response_route(
-    expected: &TransportRoute,
-    source: SocketAddr,
-    transport_type: TransportType,
-    ingress_flow_id: Option<TransportFlowId>,
-) -> Option<TransportRoute> {
-    if expected.destination != source || expected.transport_type != Some(transport_type) {
-        return None;
-    }
-
-    let mut bound = expected.clone();
-    match transport_type {
-        TransportType::Udp => {
-            if ingress_flow_id.is_some() {
-                return None;
-            }
-            bound.flow_id = None;
-        }
-        TransportType::Tcp | TransportType::Tls | TransportType::Ws | TransportType::Wss => {
-            // A stream response is authenticated only by the opaque flow that
-            // carried the original request. Resolving by address here could
-            // bind a retired transaction to a later co-addressed connection.
-            let expected_flow_id = expected.flow_id?;
-            if ingress_flow_id != Some(expected_flow_id) {
-                return None;
-            }
-            bound.flow_id = Some(expected_flow_id);
-        }
-    }
-    Some(bound)
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClientResponseRouteAuthentication {
@@ -201,26 +170,31 @@ impl TransactionManager {
     async fn authenticate_client_response_route(
         &self,
         transaction_id: &TransactionKey,
+        response: &Response,
         source: SocketAddr,
         transport_type: TransportType,
         ingress_flow_id: Option<TransportFlowId>,
     ) -> ClientResponseRouteAuthentication {
-        let Some(mut state) = self.transaction_destinations.get_mut(transaction_id) else {
+        let Some(state) = self.transaction_destinations.get(transaction_id) else {
             return ClientResponseRouteAuthentication::UnknownTransaction;
         };
 
-        let expected = match state.value() {
-            super::ClientResponseRouteState::Active { route, .. } => route.clone(),
+        let (expected, expected_via) = match state.value() {
+            super::ClientResponseRouteState::Active {
+                route,
+                response_via,
+                ..
+            } => (route.clone(), response_via.clone()),
             super::ClientResponseRouteState::Retired(retired) => {
                 if retired.expires_at <= Instant::now() {
                     let expires_at = retired.expires_at;
-                    let deadline_version = retired.deadline_version;
+                    let deadline_version = retired.deadline_version();
                     drop(state);
                     if self
                         .transaction_destinations
                         .remove_if(transaction_id, |_, current| {
                             current.retired().is_some_and(|retired| {
-                                retired.deadline_version == deadline_version
+                                retired.deadline_version() == deadline_version
                                     && retired.expires_at == expires_at
                                     && retired.expires_at <= Instant::now()
                             })
@@ -236,22 +210,19 @@ impl TransactionManager {
                     }
                     return ClientResponseRouteAuthentication::UnknownTransaction;
                 }
-                retired.route.clone()
+                (retired.route.clone(), retired.response_via.clone())
             }
         };
 
-        let Some(bound) =
-            bind_client_response_route(&expected, source, transport_type, ingress_flow_id)
-        else {
+        if !client_response_route_matches(
+            &expected,
+            &expected_via,
+            response,
+            source,
+            transport_type,
+            ingress_flow_id.is_some(),
+        ) {
             return ClientResponseRouteAuthentication::Rejected;
-        };
-
-        match state.value_mut() {
-            super::ClientResponseRouteState::Active { route, .. } => *route = bound,
-            super::ClientResponseRouteState::Retired(retired) if retired.route != bound => {
-                retired.route = bound
-            }
-            super::ClientResponseRouteState::Retired(_) => {}
         }
         ClientResponseRouteAuthentication::Authenticated
     }
@@ -399,7 +370,13 @@ impl TransactionManager {
                     (&message, transaction_key.as_ref())
                 {
                     match self
-                        .authenticate_client_response_route(key, source, transport_type, flow_id)
+                        .authenticate_client_response_route(
+                            key,
+                            response,
+                            source,
+                            transport_type,
+                            flow_id,
+                        )
                         .await
                     {
                         ClientResponseRouteAuthentication::Authenticated => {}

@@ -158,12 +158,14 @@ mod functions;
 ///   Transport Layer
 /// ```
 mod handlers;
+mod response_route;
 #[cfg(test)]
 mod tests;
 mod types;
 pub mod utils;
 
 pub use handlers::*;
+pub(crate) use response_route::ClientResponseViaIdentity;
 pub use types::*;
 pub use utils::*;
 
@@ -338,8 +340,8 @@ pub(crate) struct RetiredClientTransaction {
     request_wire: bytes::Bytes,
     completion: RetainedClientTransactionCompletion,
     route: TransportRoute,
+    response_via: Arc<ClientResponseViaIdentity>,
     expires_at: Instant,
-    deadline_version: u64,
 }
 
 impl RetiredClientTransaction {
@@ -347,6 +349,7 @@ impl RetiredClientTransaction {
         request: &Request,
         completion: &ClientTransactionCompletion,
         route: TransportRoute,
+        response_via: ClientResponseViaIdentity,
         expires_at: Instant,
         deadline_version: u64,
         admission_owner: Option<TransactionAdmissionOwner>,
@@ -368,8 +371,8 @@ impl RetiredClientTransaction {
             request_wire,
             completion,
             route,
+            response_via: Arc::new(response_via),
             expires_at,
-            deadline_version,
         }
     }
 
@@ -380,6 +383,10 @@ impl RetiredClientTransaction {
                 "retired client request wire image parsed as a response".into(),
             )),
         }
+    }
+
+    fn deadline_version(&self) -> u64 {
+        self.completion.deadline().1
     }
 
     #[cfg(test)]
@@ -815,7 +822,7 @@ fn process_retained_client_deadline_batch(
         if transaction_destinations
             .remove_if(deadline.transaction_id.as_ref(), |_, state| {
                 state.retired().is_some_and(|retired| {
-                    retired.deadline_version == deadline.version
+                    retired.deadline_version() == deadline.version
                         && retired.expires_at == deadline.expires_at
                 })
             })
@@ -893,6 +900,7 @@ async fn run_retained_client_deadline_worker(
 pub(crate) enum ClientResponseRouteState {
     Active {
         route: TransportRoute,
+        response_via: Arc<ClientResponseViaIdentity>,
         /// Allocation identity of the client transaction data that installed
         /// this route. Compact Timer K cleanup retains this word-sized proof
         /// rather than a second complete `TransportRoute`.
@@ -902,8 +910,25 @@ pub(crate) enum ClientResponseRouteState {
 }
 
 impl ClientResponseRouteState {
+    #[cfg(test)]
     pub(crate) fn active(route: TransportRoute, owner: usize) -> Self {
-        Self::Active { route, owner }
+        Self::Active {
+            route,
+            response_via: Arc::new(ClientResponseViaIdentity::for_test()),
+            owner,
+        }
+    }
+
+    fn active_with_via(
+        route: TransportRoute,
+        response_via: ClientResponseViaIdentity,
+        owner: usize,
+    ) -> Self {
+        Self::Active {
+            route,
+            response_via: Arc::new(response_via),
+            owner,
+        }
     }
 
     fn route(&self) -> &TransportRoute {
@@ -4814,13 +4839,13 @@ impl TransactionManager {
                 return Some(read(state.value()));
             }
             let expires_at = retired.expires_at;
-            let deadline_version = retired.deadline_version;
+            let deadline_version = retired.deadline_version();
             drop(state);
             if self
                 .transaction_destinations
                 .remove_if(transaction_id, |_, current| {
                     current.retired().is_some_and(|retired| {
-                        retired.deadline_version == deadline_version
+                        retired.deadline_version() == deadline_version
                             && retired.expires_at == expires_at
                             && retired.expires_at <= Instant::now()
                     })
@@ -5105,6 +5130,13 @@ impl TransactionManager {
         }
 
         let exact_route = transaction.data().request_route.lock().await.clone();
+        let Some(response_via) =
+            ClientResponseViaIdentity::from_request(transaction.data().request.as_ref())
+        else {
+            self.transaction_destinations
+                .remove_if(transaction_id, |_, state| state.is_active());
+            return false;
+        };
         let expires_at = Instant::now() + RETIRED_CLIENT_TRANSACTION_TTL;
         // Reserve a unique deadline identity, then serialize the request and
         // exact completion together outside the shared deadline critical
@@ -5119,6 +5151,7 @@ impl TransactionManager {
             transaction.data().request.as_ref(),
             transaction.data().completion.as_ref(),
             exact_route,
+            response_via,
             expires_at,
             deadline_version,
             transaction.data().transaction_admission_owner(),
@@ -5290,9 +5323,12 @@ impl TransactionManager {
         let ClientResponseRouteState::Retired(retired) = state.value_mut() else {
             return false;
         };
-        deadlines.unschedule(transaction_id, retired.expires_at, retired.deadline_version);
+        deadlines.unschedule(
+            transaction_id,
+            retired.expires_at,
+            retired.deadline_version(),
+        );
         retired.expires_at = expires_at;
-        retired.deadline_version = deadline_version;
         retired
             .completion
             .set_deadline(expires_at, deadline_version);
@@ -6356,6 +6392,8 @@ impl TransactionManager {
         }
 
         rvoip_sip_core::validation::validate_wire_request(&modified_request)?;
+        let response_via = ClientResponseViaIdentity::from_request(&modified_request)
+            .ok_or_else(|| Error::Other("outbound client request has no top Via".into()))?;
         let timer_settings =
             timer_settings_override.or_else(|| self.timer_settings_for_request(&modified_request));
 
@@ -6502,7 +6540,7 @@ impl TransactionManager {
                     return false;
                 };
                 match state.value_mut() {
-                    ClientResponseRouteState::Active { route, owner }
+                    ClientResponseRouteState::Active { route, owner, .. }
                         if *owner == response_route_owner =>
                     {
                         *route = prepared_route.clone();
@@ -6515,14 +6553,18 @@ impl TransactionManager {
         self.client_transactions.insert(key.clone(), transaction);
         if let Some(previous) = self.transaction_destinations.insert(
             shared_retention_key,
-            ClientResponseRouteState::active(request_route, response_route_owner),
+            ClientResponseRouteState::active_with_via(
+                request_route,
+                response_via,
+                response_route_owner,
+            ),
         ) {
             if let Some(retired) = previous.retired() {
                 self.decrement_retired_client_transaction_count();
                 self.unschedule_retired_client_deadline(
                     &key,
                     retired.expires_at,
-                    retired.deadline_version,
+                    retired.deadline_version(),
                 );
             }
         }
@@ -7560,7 +7602,7 @@ impl TransactionManager {
                 .transaction_destinations
                 .remove_if(deadline.transaction_id.as_ref(), |_, state| {
                     state.retired().is_some_and(|retired| {
-                        retired.deadline_version == deadline.version
+                        retired.deadline_version() == deadline.version
                             && retired.expires_at == deadline.expires_at
                     })
                 })

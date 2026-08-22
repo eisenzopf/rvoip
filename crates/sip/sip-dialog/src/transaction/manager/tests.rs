@@ -3017,7 +3017,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retired_stream_invite_accepts_original_f1_and_rejects_coaddressed_f2() -> Result<()> {
+    async fn retired_stream_invite_accepts_alternate_flow_and_retains_original_route() -> Result<()>
+    {
         use rvoip_sip_core::builder::SimpleResponseBuilder;
 
         let (original_flow, later_flow) = two_live_tcp_flow_ids().await;
@@ -3050,36 +3051,8 @@ mod tests {
         manager
             .handle_transport_event(dispatch_stream_event_from(
                 Message::Response(response.clone()),
-                destination,
+                "198.51.100.40:5090".parse().unwrap(),
                 later_flow,
-            ))
-            .await?;
-        let wrong_flow_deadline = tokio::time::Instant::now() + Duration::from_millis(75);
-        loop {
-            let remaining =
-                wrong_flow_deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            match tokio::time::timeout(remaining, events.recv()).await {
-                Ok(Some(TransactionEvent::SuccessResponse { transaction_id, .. }))
-                    if transaction_id == transaction =>
-                {
-                    panic!("co-addressed replacement flow authenticated a retired response")
-                }
-                Ok(Some(TransactionEvent::StrayResponse { .. })) => {
-                    panic!("known retired route was reported as stray")
-                }
-                Ok(Some(_)) => continue,
-                Ok(None) | Err(_) => break,
-            }
-        }
-
-        manager
-            .handle_transport_event(dispatch_stream_event_from(
-                Message::Response(response),
-                destination,
-                original_flow,
             ))
             .await?;
         tokio::time::timeout(Duration::from_millis(500), async {
@@ -3095,11 +3068,17 @@ mod tests {
             }
         })
         .await
-        .expect("original stream flow response was not delivered");
+        .expect("alternate reliable-flow response was not delivered");
+        let retained = manager
+            .transaction_route(&transaction)
+            .await
+            .expect("retired transaction route");
+        assert_eq!(retained.destination, destination);
+        assert_eq!(retained.flow_id, Some(original_flow));
         assert_eq!(
             transport.resolve_calls(),
             0,
-            "response authentication must not resolve a replacement flow by address"
+            "response authentication must not rewrite or resolve the outbound route"
         );
 
         manager.shutdown().await;
@@ -3612,6 +3591,8 @@ mod tests {
             &request,
             &completion,
             route.clone(),
+            super::super::ClientResponseViaIdentity::from_request(&request)
+                .expect("test request top Via"),
             Instant::now() + Duration::from_secs(90),
             7,
             None,
@@ -3653,8 +3634,8 @@ mod tests {
             request_wire: bytes::Bytes::from_static(b"not a SIP request"),
             completion: malformed_completion,
             route: route.clone(),
+            response_via: retired.response_via.clone(),
             expires_at: Instant::now() + Duration::from_secs(90),
-            deadline_version: 8,
         };
         assert_eq!(malformed.route, route);
         assert!(malformed.original_request().is_err());
@@ -6808,7 +6789,7 @@ mod tests {
         assert!(retired.has_completion_wire());
         assert!(retired.shares_wire_allocation());
         assert_eq!(retired.completion.last_response()?, Some(response.clone()));
-        let (expires_at, version) = (retired.expires_at, retired.deadline_version);
+        let (expires_at, version) = (retired.expires_at, retired.deadline_version());
         drop(route_entry);
 
         {
