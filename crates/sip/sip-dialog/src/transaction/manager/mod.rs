@@ -1095,7 +1095,23 @@ fn normalize_top_client_via(request: &mut Request, branch: &str) -> bool {
                 .retain(|param| !matches!(param, Param::Branch(_)));
             top_via.params.push(Param::branch(branch.to_string()));
 
-            if !top_via.params.iter().any(is_rport_param) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn add_udp_rport_to_top_client_via(request: &mut Request) -> bool {
+    for header in &mut request.headers {
+        if let TypedHeader::Via(via) = header {
+            let Some(top_via) = via.0.first_mut() else {
+                return false;
+            };
+
+            if top_via.transport().eq_ignore_ascii_case("UDP")
+                && !top_via.params.iter().any(is_rport_param)
+            {
                 top_via.params.push(Param::Rport(None));
             }
 
@@ -1104,6 +1120,17 @@ fn normalize_top_client_via(request: &mut Request, branch: &str) -> bool {
     }
 
     false
+}
+
+fn apply_client_via_transport(request: &mut Request, via_transport: &str) {
+    crate::transaction::utils::set_top_via_protocol(request, via_transport);
+    add_udp_rport_to_top_client_via(request);
+}
+
+fn client_request_wire_size_for_transport(request: &Request, via_transport: &str) -> usize {
+    let mut wire_request = request.clone();
+    apply_client_via_transport(&mut wire_request, via_transport);
+    Message::Request(wire_request).to_bytes().len()
 }
 
 fn sip_diagnostics_enabled() -> bool {
@@ -6261,9 +6288,9 @@ impl TransactionManager {
             tracing::trace!("CANCEL request detected - not adding Via header");
         } else {
             // For non-CANCEL methods, preserve the request builder's selected
-            // Via transport and sent-by address. The transaction layer owns only
-            // the branch/rport normalization needed for transaction matching and
-            // symmetric response routing.
+            // Via transport and sent-by address. The transaction layer owns the
+            // branch normalization needed for transaction matching. Automatic
+            // UDP rport insertion happens after final transport selection below.
             if !normalize_top_client_via(&mut modified_request, &branch) {
                 let local_addr = self.transport.local_addr().map_err(|e| {
                     Error::transport_error(e, "Failed to get local address for Via header")
@@ -6304,12 +6331,17 @@ impl TransactionManager {
         if request_route.authority.is_none() {
             request_route.authority = derived_route.authority;
         }
-        if request_route.transport_type == Some(TransportType::Udp)
-            && Message::Request(modified_request.clone()).to_bytes().len()
-                > self.transport.max_safe_message_size()
-            && self.transport.supports_tcp()
-        {
-            request_route.transport_type = Some(TransportType::Tcp);
+        if request_route.transport_type == Some(TransportType::Udp) {
+            let udp_wire_size = if request.method() == Method::Cancel {
+                Message::Request(modified_request.clone()).to_bytes().len()
+            } else {
+                client_request_wire_size_for_transport(&modified_request, "UDP")
+            };
+            if udp_wire_size > self.transport.max_safe_message_size()
+                && self.transport.supports_tcp()
+            {
+                request_route.transport_type = Some(TransportType::Tcp);
+            }
         }
         if request.method() != Method::Cancel {
             let via_transport = match request_route.transport_type {
@@ -6320,7 +6352,7 @@ impl TransactionManager {
                 Some(TransportType::Wss) => "WSS",
                 None => transport_token_for_request(&modified_request),
             };
-            crate::transaction::utils::set_top_via_protocol(&mut modified_request, via_transport);
+            apply_client_via_transport(&mut modified_request, via_transport);
         }
 
         rvoip_sip_core::validation::validate_wire_request(&modified_request)?;

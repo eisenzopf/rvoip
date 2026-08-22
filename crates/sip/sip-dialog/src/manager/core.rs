@@ -798,7 +798,7 @@ pub struct DialogManager {
     ///
     /// On every inbound response we peek at the top `Via` header; when
     /// it carries `received=<ip>` plus a populated `rport=<port>` (set
-    /// because we put `;rport` on the outgoing Via per RFC 3581 §4),
+    /// because we put `;rport` on outgoing UDP Via values per RFC 3581 §4),
     /// we treat that as our externally-visible address as observed by
     /// the immediate hop. This lets a UA behind NAT discover its
     /// public address without STUN, then advertise it in subsequent
