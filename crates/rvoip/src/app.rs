@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -50,7 +50,8 @@ use rvoip_sip::{
     UnifiedCoordinator,
 };
 use rvoip_webrtc::{
-    WebRtcAdapter, WebRtcConfig as LowWebRtcConfig, WebRtcServer, WebRtcServerBuilder,
+    Nat1To1CandidateType, UdpPortRangeConfig, WebRtcAdapter, WebRtcConfig as LowWebRtcConfig,
+    WebRtcServer, WebRtcServerBuilder,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
@@ -167,6 +168,7 @@ impl HttpConfig {
 #[derive(Clone)]
 pub struct WebRtcConfig {
     ws_bind: String,
+    media: LowWebRtcConfig,
     role_capabilities: RoleCapabilities,
     escalation_command: String,
     ws_auth: Option<Arc<dyn rvoip_webrtc::signaling::auth::WsAuthHook>>,
@@ -177,6 +179,7 @@ impl std::fmt::Debug for WebRtcConfig {
         formatter
             .debug_struct("WebRtcConfig")
             .field("ws_bind", &self.ws_bind)
+            .field("media", &self.media)
             .field("role_capabilities", &self.role_capabilities)
             .field("escalation_command", &self.escalation_command)
             .field("ws_auth_present", &self.ws_auth.is_some())
@@ -189,6 +192,7 @@ impl WebRtcConfig {
     pub fn ws(addr: impl Into<String>) -> Self {
         Self {
             ws_bind: addr.into(),
+            media: LowWebRtcConfig::loopback(),
             role_capabilities: RoleCapabilities::default(),
             escalation_command: "CALL_ASSIGNED_EMPLOYEE".into(),
             ws_auth: None,
@@ -204,6 +208,32 @@ impl WebRtcConfig {
     /// only acceptable behind a trusted edge.
     pub fn ws_auth(mut self, hook: Arc<dyn rvoip_webrtc::signaling::auth::WsAuthHook>) -> Self {
         self.ws_auth = Some(hook);
+        self
+    }
+
+    /// Bind each WebRTC peer to one UDP socket from an inclusive media range.
+    ///
+    /// This is the production alternative to the loopback-only ephemeral
+    /// socket retained by [`Self::ws`]. Cloud and one-to-one NAT deployments
+    /// should pair this with [`Self::nat_1to1_ip`].
+    pub fn media_udp_port_range(mut self, bind_ip: IpAddr, port_start: u16, port_end: u16) -> Self {
+        self.media.udp_bind = format!("{bind_ip}:0");
+        self.media.udp_port_range = Some(UdpPortRangeConfig {
+            bind_ip,
+            port_start,
+            port_end,
+        });
+        self
+    }
+
+    /// Advertise a public ICE host candidate for a one-to-one NAT mapping.
+    ///
+    /// The peer still binds on the address selected by
+    /// [`Self::media_udp_port_range`]; only the ICE candidate exposed to the
+    /// browser is rewritten to `public_ip`.
+    pub fn nat_1to1_ip(mut self, public_ip: IpAddr) -> Self {
+        self.media.nat_1to1_ips = vec![public_ip.to_string()];
+        self.media.nat_1to1_candidate_type = Nat1To1CandidateType::Host;
         self
     }
 
@@ -1103,7 +1133,7 @@ impl RvoipAppBuilder {
                     "WebRTC customer text or voice is required for the app runtime".into(),
                 ));
             }
-            let mut config = LowWebRtcConfig::loopback();
+            let mut config = webrtc.media;
             config.trickle_ice = false;
             let mut builder = WebRtcServerBuilder::new(config).with_ws(webrtc.ws_bind);
             if let Some(hook) = webrtc.ws_auth {
@@ -2103,6 +2133,30 @@ mod tests {
         assert!(!cfg
             .role_capabilities
             .allows(Role::Employee, Capability::Text));
+    }
+
+    #[test]
+    fn webrtc_media_can_bind_a_bounded_range_and_advertise_public_nat() {
+        let bind_ip = "0.0.0.0".parse().expect("bind IP");
+        let public_ip = "203.0.113.44".parse().expect("public IP");
+        let cfg = WebRtcConfig::ws("127.0.0.1:8091")
+            .media_udp_port_range(bind_ip, 49_152, 50_175)
+            .nat_1to1_ip(public_ip);
+
+        assert_eq!(cfg.media.udp_bind, "0.0.0.0:0");
+        assert_eq!(
+            cfg.media.udp_port_range,
+            Some(UdpPortRangeConfig {
+                bind_ip,
+                port_start: 49_152,
+                port_end: 50_175,
+            })
+        );
+        assert_eq!(cfg.media.nat_1to1_ips, vec!["203.0.113.44"]);
+        assert_eq!(
+            cfg.media.nat_1to1_candidate_type,
+            Nat1To1CandidateType::Host
+        );
     }
 
     #[test]
