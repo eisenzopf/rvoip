@@ -260,6 +260,7 @@ pub struct SipConfig {
     domain: String,
     sip_advertised_addr: Option<SocketAddr>,
     media_public_addr: Option<SocketAddr>,
+    media_port_range: Option<(u16, u16)>,
     role_capabilities: RoleCapabilities,
     registrar_users: HashMap<String, String>,
     tenant: Option<String>,
@@ -363,6 +364,7 @@ impl SipConfig {
             domain: "callcenter.local".into(),
             sip_advertised_addr: None,
             media_public_addr: None,
+            media_port_range: None,
             role_capabilities: RoleCapabilities::default(),
             registrar_users: HashMap::new(),
             tenant: None,
@@ -444,6 +446,18 @@ impl SipConfig {
     /// its IP as the media default.
     pub fn media_public_addr(mut self, address: SocketAddr) -> Self {
         self.media_public_addr = Some(address);
+        self
+    }
+
+    /// Restrict locally allocated SIP RTP/RTCP ports to the inclusive range.
+    ///
+    /// The low-level SIP configuration validates the bounds when the app is
+    /// built. Keeping this optional preserves its established defaults while
+    /// allowing a deployment firewall and the actual media listener to share
+    /// one explicit contract.
+    #[must_use]
+    pub const fn media_ports(mut self, start: u16, end: u16) -> Self {
+        self.media_port_range = Some((start, end));
         self
     }
 
@@ -1965,6 +1979,9 @@ async fn discover_advertised_addr(
 
 fn make_low_sip_config(config: &SipConfig, bind: SocketAddr) -> LowSipConfig {
     let mut low = LowSipConfig::on("rvoip-gateway", bind.ip(), bind.port());
+    if let Some((start, end)) = config.media_port_range {
+        low = low.with_media_ports(start, end);
+    }
     low.playout = config.playout;
     low.ice = config.ice;
     // `srtp_required` without `offer_srtp` is rejected as an invalid policy
@@ -2206,6 +2223,15 @@ mod tests {
                     .expect("media address")
             )
         );
+    }
+
+    #[test]
+    fn explicit_sip_media_ports_reach_the_low_level_allocator() {
+        let config = SipConfig::bind("0.0.0.0:5060").media_ports(16_384, 32_768);
+        let low = make_low_sip_config(&config, "0.0.0.0:5060".parse().expect("bind"));
+
+        assert_eq!(low.media_port_start, 16_384);
+        assert_eq!(low.media_port_end, 32_768);
     }
 
     #[test]
