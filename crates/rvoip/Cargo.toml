@@ -103,6 +103,11 @@ app = [
     "webrtc",
     "uctp",
     "rvoip-webrtc/signaling-ws",
+    # The high-level gateway's WebSocket listener must compile the co-located
+    # WebRTC answerer. Without this forwarding edge, authenticated browser
+    # legs are admitted but `connection.offer` never receives SDP, so callers
+    # time out before an application can bridge them.
+    "rvoip-websocket/media-webrtc",
     "dep:tokio",
     "dep:axum",
     "dep:bytes",
