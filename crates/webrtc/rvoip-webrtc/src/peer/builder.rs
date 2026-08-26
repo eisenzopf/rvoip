@@ -2,8 +2,8 @@
 
 use rtc::interceptor::Registry;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::MediaEngine;
 pub use rtc::peer_connection::configuration::media_engine::MIME_TYPE_TELEPHONE_EVENT;
+use rtc::peer_connection::configuration::media_engine::MediaEngine;
 use rtc::peer_connection::configuration::setting_engine::SettingEngine;
 use rtc::peer_connection::configuration::{
     RTCConfiguration, RTCConfigurationBuilder, RTCIceServer, RTCIceTransportPolicy,
@@ -358,26 +358,41 @@ pub async fn build_peer_connection(
         setting_engine.set_nat_1to1_ips(config.nat_1to1_ips.clone(), candidate_type);
     }
 
-    if let Some(range) = &config.udp_port_range {
-        let pc = PeerConnectionBuilder::<String>::new()
-            .with_configuration(rtc_config)
-            .with_media_engine(media_engine)
-            .with_setting_engine(setting_engine)
-            .with_interceptor_registry(registry)
-            .with_handler(handler)
-            .with_runtime(runtime)
-            .build_with_udp_port_range(range.bind_ip, range.port_start, range.port_end)
-            .await?;
-        return Ok(Arc::new(pc));
-    }
-
-    let pc = PeerConnectionBuilder::new()
+    let mut builder = PeerConnectionBuilder::<String>::new()
         .with_configuration(rtc_config)
         .with_media_engine(media_engine)
         .with_setting_engine(setting_engine)
         .with_interceptor_registry(registry)
         .with_handler(handler)
-        .with_runtime(runtime)
+        .with_runtime(runtime);
+    if !config.nat_1to1_ips.is_empty() {
+        if config.nat_1to1_candidate_type != crate::config::Nat1To1CandidateType::Host {
+            return Err(WebRtcError::Webrtc(
+                "the sans-I/O UDP driver supports static 1:1 NAT as host candidates only".into(),
+            ));
+        }
+        if config.nat_1to1_ips.len() != 1 {
+            return Err(WebRtcError::Webrtc(
+                "the sans-I/O UDP driver requires exactly one static 1:1 NAT address".into(),
+            ));
+        }
+        let advertised_ip =
+            config.nat_1to1_ips[0]
+                .parse::<std::net::IpAddr>()
+                .map_err(|error| {
+                    WebRtcError::Webrtc(format!("invalid static 1:1 NAT address: {error}"))
+                })?;
+        builder = builder.with_udp_advertised_ip(advertised_ip);
+    }
+
+    if let Some(range) = &config.udp_port_range {
+        let pc = builder
+            .build_with_udp_port_range(range.bind_ip, range.port_start, range.port_end)
+            .await?;
+        return Ok(Arc::new(pc));
+    }
+
+    let pc = builder
         .with_udp_addrs(vec![config.udp_bind.clone()])
         .build()
         .await?;
@@ -388,6 +403,23 @@ pub async fn build_peer_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static NEXT_TEST_UDP_PORT: std::sync::atomic::AtomicU16 =
+        std::sync::atomic::AtomicU16::new(30_000);
+
+    fn available_udp_port() -> u16 {
+        for _ in 30_000u16..=60_000u16 {
+            let port = NEXT_TEST_UDP_PORT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if port > 60_000 {
+                panic!("test UDP port range exhausted");
+            }
+            if let Ok(socket) = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, port)) {
+                drop(socket);
+                return port;
+            }
+        }
+        panic!("no loopback UDP port available");
+    }
 
     #[test]
     fn media_engine_registers_opus_and_g711() -> Result<()> {
@@ -408,5 +440,69 @@ mod tests {
             };
             let _ = build_rtc_configuration(&config);
         }
+    }
+
+    #[tokio::test]
+    async fn bounded_udp_peer_advertises_static_one_to_one_nat_address() -> Result<()> {
+        let port = available_udp_port();
+        let config = WebRtcConfig {
+            udp_bind: "127.0.0.1:0".into(),
+            udp_port_range: Some(crate::config::UdpPortRangeConfig {
+                bind_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                port_start: port,
+                port_end: port,
+            }),
+            nat_1to1_ips: vec!["203.0.113.44".into()],
+            ..WebRtcConfig::loopback()
+        };
+        let peer =
+            crate::peer::RvoipPeerConnection::new(&config, crate::peer::PeerRole::Offerer).await?;
+        let offer = peer.create_offer_and_gather().await?;
+        assert!(
+            offer.contains(&format!(" 203.0.113.44 {port} typ host")),
+            "static public address and bounded port must reach SDP: {offer}"
+        );
+        assert!(!offer.contains(&format!(" 127.0.0.1 {port} typ host")));
+        peer.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn static_one_to_one_nat_candidate_routes_ice_over_bound_socket() -> Result<()> {
+        let port = available_udp_port();
+        let answerer_config = WebRtcConfig {
+            udp_bind: "0.0.0.0:0".into(),
+            udp_port_range: Some(crate::config::UdpPortRangeConfig {
+                bind_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                port_start: port,
+                port_end: port,
+            }),
+            // 127/8 supplies a deterministic local 1:1-NAT simulation: the
+            // wildcard socket receives traffic sent to this distinct address.
+            nat_1to1_ips: vec!["127.0.0.2".into()],
+            connection_timeout_secs: 5,
+            ..WebRtcConfig::loopback()
+        };
+        let offerer = crate::peer::RvoipPeerConnection::new(
+            &WebRtcConfig::loopback(),
+            crate::peer::PeerRole::Offerer,
+        )
+        .await?;
+        let answerer = crate::peer::RvoipPeerConnection::new(
+            &answerer_config,
+            crate::peer::PeerRole::Answerer,
+        )
+        .await?;
+        let offer = offerer.create_offer_and_gather().await?;
+        let answer = answerer.accept_offer_and_gather(&offer).await?;
+        assert!(answer.contains(&format!(" 127.0.0.2 {port} typ host")));
+        offerer.set_remote_answer(&answer).await?;
+        tokio::try_join!(
+            offerer.wait_connected(std::time::Duration::from_secs(5)),
+            answerer.wait_connected(std::time::Duration::from_secs(5)),
+        )?;
+        offerer.close().await?;
+        answerer.close().await?;
+        Ok(())
     }
 }

@@ -76,6 +76,31 @@ fn bind_udp_from_range(bind_ip: IpAddr, port_start: u16, port_end: u16) -> Resul
     ))
 }
 
+fn advertised_udp_addrs(
+    socket_addrs: &[SocketAddr],
+    advertised_ip: Option<IpAddr>,
+) -> Result<(Vec<SocketAddr>, HashMap<SocketAddr, SocketAddr>)> {
+    let Some(advertised_ip) = advertised_ip else {
+        return Ok((socket_addrs.to_vec(), HashMap::new()));
+    };
+    if socket_addrs.len() != 1 {
+        return Err(Error::OtherPeerConnectionErr(
+            "one-to-one-nat-requires-one-udp-socket".into(),
+        ));
+    }
+    let socket_addr = socket_addrs[0];
+    if socket_addr.is_ipv4() != advertised_ip.is_ipv4() {
+        return Err(Error::OtherPeerConnectionErr(
+            "one-to-one-nat-address-family-mismatch".into(),
+        ));
+    }
+    let advertised_addr = SocketAddr::new(advertised_ip, socket_addr.port());
+    Ok((
+        vec![advertised_addr],
+        HashMap::from([(advertised_addr, socket_addr)]),
+    ))
+}
+
 /// Trait for handling peer connection events asynchronously
 ///
 /// This trait defines callbacks that are invoked when various WebRTC events occur.
@@ -136,6 +161,7 @@ where
     handler: Option<Arc<dyn PeerConnectionEventHandler>>,
     udp_addrs: Vec<A>,
     tcp_addrs: Vec<A>,
+    udp_advertised_ip: Option<IpAddr>,
 }
 
 impl<A: ToSocketAddrs> Default for PeerConnectionBuilder<A, NoopInterceptor> {
@@ -146,6 +172,7 @@ impl<A: ToSocketAddrs> Default for PeerConnectionBuilder<A, NoopInterceptor> {
             handler: None,
             udp_addrs: vec![],
             tcp_addrs: vec![],
+            udp_advertised_ip: None,
         }
     }
 }
@@ -188,6 +215,7 @@ where
             handler: self.handler,
             udp_addrs: self.udp_addrs,
             tcp_addrs: self.tcp_addrs,
+            udp_advertised_ip: self.udp_advertised_ip,
         }
     }
 
@@ -203,6 +231,14 @@ where
 
     pub fn with_udp_addrs(mut self, udp_addrs: Vec<A>) -> Self {
         self.udp_addrs = udp_addrs;
+        self
+    }
+
+    /// Advertise this 1:1-NAT address while retaining the actual bound UDP
+    /// socket for reads and writes. The sans-I/O ICE driver must translate
+    /// both directions because its candidate address is also its routing key.
+    pub fn with_udp_advertised_ip(mut self, advertised_ip: IpAddr) -> Self {
+        self.udp_advertised_ip = Some(advertised_ip);
         self
     }
 
@@ -234,6 +270,7 @@ where
             opts,
             self.udp_addrs,
             self.tcp_addrs,
+            self.udp_advertised_ip,
         )
         .await
     }
@@ -267,6 +304,7 @@ where
             opts,
             socket,
             self.tcp_addrs,
+            self.udp_advertised_ip,
         )
         .await
     }
@@ -414,6 +452,7 @@ where
         opts: RTCIceGatherOptions,
         udp_addrs: Vec<A>,
         _tcp_addrs: Vec<A>,
+        udp_advertised_ip: Option<IpAddr>,
     ) -> Result<Self> {
         let mut local_addrs = vec![];
         let mut async_udp_sockets = HashMap::new();
@@ -445,11 +484,14 @@ where
             driver_handle: Mutex::new(None),
         };
 
-        let ice_gatherer = RTCIceGatherer::new(local_addrs, opts);
+        let (host_candidate_addrs, advertised_to_socket) =
+            advertised_udp_addrs(&local_addrs, udp_advertised_ip)?;
+        let ice_gatherer = RTCIceGatherer::new(local_addrs, host_candidate_addrs, opts);
         let mut driver = PeerConnectionDriver::new(
             peer_connection.inner.clone(),
             ice_gatherer,
             async_udp_sockets,
+            advertised_to_socket,
         )
         .await?;
         let driver_handle = runtime.spawn(Box::pin(async move {
@@ -469,6 +511,7 @@ where
         opts: RTCIceGatherOptions,
         socket: UdpSocket,
         _tcp_addrs: Vec<A>,
+        udp_advertised_ip: Option<IpAddr>,
     ) -> Result<Self> {
         socket.set_nonblocking(true)?;
         let local_addr = socket.local_addr()?;
@@ -490,11 +533,14 @@ where
             }),
             driver_handle: Mutex::new(None),
         };
-        let ice_gatherer = RTCIceGatherer::new(local_addrs, opts);
+        let (host_candidate_addrs, advertised_to_socket) =
+            advertised_udp_addrs(&local_addrs, udp_advertised_ip)?;
+        let ice_gatherer = RTCIceGatherer::new(local_addrs, host_candidate_addrs, opts);
         let mut driver = PeerConnectionDriver::new(
             peer_connection.inner.clone(),
             ice_gatherer,
             async_udp_sockets,
+            advertised_to_socket,
         )
         .await?;
         let driver_handle = runtime.spawn(Box::pin(async move {
@@ -564,6 +610,38 @@ mod udp_port_range_tests {
             let error = bind_udp_from_range(bind_ip, start, end).expect_err("invalid range");
             assert!(error.to_string().contains(INVALID_UDP_PORT_RANGE));
         }
+    }
+
+    #[test]
+    fn one_to_one_nat_preserves_port_and_records_bidirectional_route() {
+        let socket_addr: SocketAddr = "0.0.0.0:49152".parse().expect("socket address");
+        let public_ip: IpAddr = "203.0.113.44".parse().expect("public IP");
+        let (candidates, routes) =
+            advertised_udp_addrs(&[socket_addr], Some(public_ip)).expect("NAT mapping");
+        let advertised: SocketAddr = "203.0.113.44:49152".parse().expect("advertised address");
+        assert_eq!(candidates, vec![advertised]);
+        assert_eq!(routes, HashMap::from([(advertised, socket_addr)]));
+    }
+
+    #[test]
+    fn one_to_one_nat_fails_closed_for_ambiguous_or_mixed_family_sockets() {
+        let two_sockets = [
+            "0.0.0.0:49152".parse().expect("first socket"),
+            "0.0.0.0:49153".parse().expect("second socket"),
+        ];
+        let error = advertised_udp_addrs(
+            &two_sockets,
+            Some("203.0.113.44".parse().expect("public IP")),
+        )
+        .expect_err("ambiguous mapping must fail");
+        assert!(error.to_string().contains("requires-one-udp-socket"));
+
+        let error = advertised_udp_addrs(
+            &["0.0.0.0:49152".parse().expect("IPv4 socket")],
+            Some("2001:db8::44".parse().expect("IPv6 public IP")),
+        )
+        .expect_err("mixed address families must fail");
+        assert!(error.to_string().contains("address-family-mismatch"));
     }
 }
 
