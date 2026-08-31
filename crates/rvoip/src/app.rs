@@ -46,7 +46,8 @@ use rvoip_sip::server::contact_resolver::{
     ContactRequest, ContactResolver, RegistrarContactResolver, ResolvedContact,
 };
 use rvoip_sip::{
-    Config as LowSipConfig, IpNet, SipAdapter, SipInboundContextPolicy, SipListenerAuthPolicy,
+    Config as LowSipConfig, IpNet, ProfiledSipAdapter, SipAdapter, SipEgressProfileRegistration,
+    SipInboundContextPolicy, SipListenerAuthPolicy, SipNatConfig, SipProfileRevision,
     UnifiedCoordinator,
 };
 use rvoip_webrtc::{
@@ -277,6 +278,78 @@ pub struct SipConfig {
     srtp: SipMediaSecurity,
     /// ICE posture (RFC 8445).
     ice: rvoip_sip::SipIcePolicy,
+    /// Independently configured outbound children selected by an immutable
+    /// profile revision on each originate request.
+    egress_profiles: Vec<SipEgressProfileConfig>,
+}
+
+/// One provider-neutral outbound SIP child installed beside the listener.
+///
+/// The revision is the only value carried by a call. Credentials, TLS roots,
+/// codec policy, NAT behavior, and allowed initial headers stay in this
+/// process-local configuration and are never projected into core metadata.
+#[derive(Clone)]
+pub struct SipEgressProfileConfig {
+    revision: SipProfileRevision,
+    config: LowSipConfig,
+    nat: SipNatConfig,
+    allowed_initial_headers: Vec<String>,
+    sip_message: bool,
+}
+
+impl std::fmt::Debug for SipEgressProfileConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SipEgressProfileConfig")
+            .field("revision", &"[redacted]")
+            .field(
+                "allowed_initial_header_count",
+                &self.allowed_initial_headers.len(),
+            )
+            .field("sip_message", &self.sip_message)
+            .finish()
+    }
+}
+
+impl SipEgressProfileConfig {
+    /// Define one exact outbound child from an already validated opaque
+    /// revision and low-level SIP configuration.
+    pub fn new(revision: SipProfileRevision, config: LowSipConfig) -> Self {
+        Self {
+            revision,
+            config,
+            nat: SipNatConfig::default(),
+            allowed_initial_headers: Vec::new(),
+            sip_message: false,
+        }
+    }
+
+    /// Replace the child's RTP/NAT policy.
+    #[must_use]
+    pub const fn nat(mut self, nat: SipNatConfig) -> Self {
+        self.nat = nat;
+        self
+    }
+
+    /// Allow exactly these extra headers on the initial INVITE. Header names
+    /// are validated again while the child is constructed.
+    pub fn allow_initial_headers<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.allowed_initial_headers
+            .extend(names.into_iter().map(Into::into));
+        self
+    }
+
+    /// Permit transport-neutral data messages to use SIP MESSAGE on this
+    /// child.
+    #[must_use]
+    pub const fn allow_sip_message(mut self, allowed: bool) -> Self {
+        self.sip_message = allowed;
+        self
+    }
 }
 
 /// How much media encryption a SIP listener insists on.
@@ -327,10 +400,7 @@ impl SipConfig {
     /// buffer's depth in added latency, which is why it is opt-in rather
     /// than assumed.
     #[must_use]
-    pub fn playout(
-        mut self,
-        config: rvoip_sip::PlayoutConfig,
-    ) -> Self {
+    pub fn playout(mut self, config: rvoip_sip::PlayoutConfig) -> Self {
         self.playout = Some(config);
         self
     }
@@ -377,6 +447,7 @@ impl SipConfig {
             // says so rather than inheriting it.
             playout: None,
             srtp: SipMediaSecurity::Disabled,
+            egress_profiles: Vec::new(),
         }
     }
 
@@ -481,6 +552,14 @@ impl SipConfig {
             .into_iter()
             .map(|(user, password)| (user.into(), password.into()))
             .collect();
+        self
+    }
+
+    /// Install one immutable outbound SIP profile. The app registers one
+    /// composite SIP adapter, so adding profiles does not create a second
+    /// transport owner in the orchestrator.
+    pub fn egress_profile(mut self, profile: SipEgressProfileConfig) -> Self {
+        self.egress_profiles.push(profile);
         self
     }
 }
@@ -1106,7 +1185,7 @@ impl RvoipAppBuilder {
             // allowlist has to be installed explicitly or `metadata()` is
             // always empty. The Request-URI routing hint comes through either
             // way, provided a principal exists.
-            let adapter = if sip.captured_headers.is_empty() {
+            let default_adapter = if sip.captured_headers.is_empty() {
                 SipAdapter::new(Arc::clone(&coordinator)).await
             } else {
                 let policy =
@@ -1119,7 +1198,37 @@ impl RvoipAppBuilder {
                 SipAdapter::new_with_inbound_context_policy(Arc::clone(&coordinator), policy).await
             }
             .map_err(|error| AppError::Sip(error.to_string()))?;
-            orchestrator.register(adapter as Arc<dyn ConnectionAdapter>)?;
+
+            let mut registrations = Vec::with_capacity(sip.egress_profiles.len());
+            for profile in sip.egress_profiles {
+                match SipEgressProfileRegistration::from_config_and_nat(
+                    profile.revision,
+                    profile.config,
+                    profile.nat,
+                    profile.allowed_initial_headers,
+                    profile.sip_message,
+                )
+                .await
+                {
+                    Ok(registration) => registrations.push(registration),
+                    Err(error) => {
+                        for registration in registrations {
+                            let _ = registration.shutdown(Duration::from_secs(1)).await;
+                        }
+                        let _ = coordinator
+                            .shutdown_gracefully(Some(Duration::from_secs(1)))
+                            .await;
+                        return Err(AppError::Sip(error.to_string()));
+                    }
+                }
+            }
+            let adapter: Arc<dyn ConnectionAdapter> = if registrations.is_empty() {
+                default_adapter
+            } else {
+                ProfiledSipAdapter::new(default_adapter, registrations)
+                    .map_err(|error| AppError::Sip(error.to_string()))?
+            };
+            orchestrator.register(adapter)?;
             if employee_voice {
                 for employee in &self.employees.employees {
                     directory.add_sip_aor(employee, format!("sip:{employee}@{}", sip.domain));
@@ -1960,9 +2069,13 @@ async fn discover_advertised_addr(
     use rvoip_sip::StunClient;
 
     let probe_bind = SocketAddr::new(sip_addr.ip(), 0);
-    let socket = tokio::net::UdpSocket::bind(probe_bind).await.map_err(|error| {
-        AppError::Policy(format!("STUN discovery could not bind a probe socket: {error}"))
-    })?;
+    let socket = tokio::net::UdpSocket::bind(probe_bind)
+        .await
+        .map_err(|error| {
+            AppError::Policy(format!(
+                "STUN discovery could not bind a probe socket: {error}"
+            ))
+        })?;
     let mapped = StunClient::new(std::sync::Arc::new(socket), stun_server)
         .discover()
         .await
@@ -2116,7 +2229,10 @@ mod tests {
             bind,
         );
         assert_eq!(
-            smoothed.playout.expect("playout reaches the coordinator").target_depth_frames,
+            smoothed
+                .playout
+                .expect("playout reaches the coordinator")
+                .target_depth_frames,
             4
         );
 
@@ -2136,6 +2252,23 @@ mod tests {
             bind,
         );
         assert!(required.offer_srtp && required.srtp_required);
+    }
+
+    #[cfg(feature = "sip")]
+    #[test]
+    fn sip_egress_profile_retains_only_bounded_public_policy() {
+        let revision = SipProfileRevision::new("carrier-profile-v1").expect("revision");
+        let profile =
+            SipEgressProfileConfig::new(revision.clone(), LowSipConfig::local("egress", 50_620))
+                .allow_initial_headers(["X-Carrier-Account", "P-Charge-Info"]);
+        let config = SipConfig::bind("127.0.0.1:5060").egress_profile(profile);
+
+        assert_eq!(config.egress_profiles.len(), 1);
+        assert_eq!(config.egress_profiles[0].revision, revision);
+        let debug = format!("{:?}", config.egress_profiles[0]);
+        assert!(!debug.contains("carrier-profile-v1"));
+        assert!(!debug.contains("X-Carrier-Account"));
+        assert!(debug.contains("allowed_initial_header_count: 2"));
     }
     use super::*;
 

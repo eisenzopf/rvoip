@@ -765,7 +765,52 @@ impl fmt::Debug for TransferStatus {
 /// in-flight playback.
 pub struct PlaybackHandle {
     id: PlaybackId,
-    cancel_tx: oneshot::Sender<()>,
+    cancel_tx: Option<oneshot::Sender<()>>,
+    completion_rx: Option<oneshot::Receiver<PlaybackOutcome>>,
+}
+
+/// Terminal result of a completion-aware playback.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum PlaybackOutcome {
+    /// The source reached its natural end and every frame was accepted by the
+    /// transport-facing stream.
+    Completed,
+    /// The owner explicitly cancelled playback.
+    Cancelled,
+    /// Playback stopped because synthesis, decoding, or media delivery could
+    /// not continue.
+    Failed,
+}
+
+/// Fixed, payload-free failure returned while waiting for playback.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[non_exhaustive]
+pub enum PlaybackWaitError {
+    /// The adapter used the legacy cancellation-only constructor.
+    #[error("playback completion is not tracked by this adapter")]
+    NotTracked,
+    /// The playback task exited without publishing a terminal result.
+    #[error("playback ended without a completion result")]
+    CompletionLost,
+}
+
+/// Adapter-owned sender for one completion-aware playback.
+///
+/// Dropping this without calling [`Self::finish`] makes a waiter fail closed
+/// with [`PlaybackWaitError::CompletionLost`].
+pub struct PlaybackCompletionSender {
+    completion_tx: Option<oneshot::Sender<PlaybackOutcome>>,
+}
+
+impl PlaybackCompletionSender {
+    /// Publish the one terminal result. Later calls are impossible because the
+    /// sender is consumed.
+    pub fn finish(mut self, outcome: PlaybackOutcome) {
+        if let Some(sender) = self.completion_tx.take() {
+            let _ = sender.send(outcome);
+        }
+    }
 }
 
 impl fmt::Debug for PlaybackHandle {
@@ -773,7 +818,14 @@ impl fmt::Debug for PlaybackHandle {
         formatter
             .debug_struct("PlaybackHandle")
             .field("id", &self.id)
-            .field("cancel_closed", &self.cancel_tx.is_closed())
+            .field(
+                "cancel_closed",
+                &self
+                    .cancel_tx
+                    .as_ref()
+                    .is_none_or(oneshot::Sender::is_closed),
+            )
+            .field("completion_tracked", &self.completion_rx.is_some())
             .finish()
     }
 }
@@ -782,7 +834,33 @@ impl PlaybackHandle {
     /// Adapter helper: build a handle + the matching cancel receiver.
     pub fn new(id: PlaybackId) -> (Self, oneshot::Receiver<()>) {
         let (tx, rx) = oneshot::channel();
-        (Self { id, cancel_tx: tx }, rx)
+        (
+            Self {
+                id,
+                cancel_tx: Some(tx),
+                completion_rx: None,
+            },
+            rx,
+        )
+    }
+
+    /// Adapter helper: build a cancellation handle plus a matching completion
+    /// sender. New playback implementations should use this constructor so a
+    /// policy engine can prove an announcement completed before proceeding.
+    pub fn new_tracked(id: PlaybackId) -> (Self, oneshot::Receiver<()>, PlaybackCompletionSender) {
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let (completion_tx, completion_rx) = oneshot::channel();
+        (
+            Self {
+                id,
+                cancel_tx: Some(cancel_tx),
+                completion_rx: Some(completion_rx),
+            },
+            cancel_rx,
+            PlaybackCompletionSender {
+                completion_tx: Some(completion_tx),
+            },
+        )
     }
 
     pub fn id(&self) -> &PlaybackId {
@@ -791,10 +869,27 @@ impl PlaybackHandle {
 
     /// Best-effort cancellation. Returns `Err` only when the adapter's
     /// playback task already exited.
-    pub fn cancel(self) -> std::result::Result<(), &'static str> {
+    pub fn cancel(mut self) -> std::result::Result<(), &'static str> {
         self.cancel_tx
+            .take()
+            .ok_or("playback already ended")?
             .send(())
             .map_err(|_| "playback already ended")
+    }
+
+    /// Wait for natural completion, cancellation, or failure.
+    ///
+    /// Holding `self` while awaiting deliberately keeps the cancellation
+    /// sender alive; waiting cannot accidentally look like cancellation to the
+    /// playback task.
+    pub async fn wait(mut self) -> std::result::Result<PlaybackOutcome, PlaybackWaitError> {
+        let receiver = self
+            .completion_rx
+            .take()
+            .ok_or(PlaybackWaitError::NotTracked)?;
+        receiver
+            .await
+            .map_err(|_| PlaybackWaitError::CompletionLost)
     }
 }
 
@@ -1254,5 +1349,25 @@ mod tests {
         for debug in values {
             assert!(!debug.contains(CANARY));
         }
+    }
+
+    #[tokio::test]
+    async fn tracked_playback_reports_exact_terminal_outcome() {
+        let (handle, _cancel, completion) = PlaybackHandle::new_tracked(PlaybackId::new());
+        completion.finish(PlaybackOutcome::Completed);
+        assert_eq!(handle.wait().await, Ok(PlaybackOutcome::Completed));
+    }
+
+    #[tokio::test]
+    async fn tracked_playback_fails_closed_when_task_loses_completion() {
+        let (handle, _cancel, completion) = PlaybackHandle::new_tracked(PlaybackId::new());
+        drop(completion);
+        assert_eq!(handle.wait().await, Err(PlaybackWaitError::CompletionLost));
+    }
+
+    #[tokio::test]
+    async fn legacy_playback_is_explicitly_not_completion_aware() {
+        let (handle, _cancel) = PlaybackHandle::new(PlaybackId::new());
+        assert_eq!(handle.wait().await, Err(PlaybackWaitError::NotTracked));
     }
 }

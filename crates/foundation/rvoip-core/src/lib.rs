@@ -143,8 +143,9 @@ pub use adapter::{
     AdapterEvent, AdapterKind, ConnectionAdapter, ConnectionHandle, EndReason,
     ExternalConnectionReference, ExternalConnectionReferenceError, InboundConnectionContext,
     InboundContextError, InboundRoutingHint, InboundSignalingMetadata, OriginateContext,
-    OriginateRequest, OutboundActivation, PlaybackHandle, RejectReason, SignatureHeaders,
-    TransferAttemptId, TransferStatus, TransferTarget, MAX_EXTERNAL_CONNECTION_REFERENCES,
+    OriginateRequest, OutboundActivation, PlaybackCompletionSender, PlaybackHandle,
+    PlaybackOutcome, PlaybackWaitError, RejectReason, SignatureHeaders, TransferAttemptId,
+    TransferStatus, TransferTarget, MAX_EXTERNAL_CONNECTION_REFERENCES,
     MAX_EXTERNAL_REFERENCE_KIND_BYTES, MAX_EXTERNAL_REFERENCE_VALUE_BYTES,
     MAX_INBOUND_ROUTING_HINT_BYTES,
 };

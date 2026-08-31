@@ -13,7 +13,7 @@
 use crate::adapter::{
     AdapterEvent, AdapterLifecycleSink, ConnectionAdapter, ConnectionHandle, EndReason,
     InboundConnectionContext, OrchestratorAdapterEvent, OriginateRequest, PlaybackHandle,
-    RejectReason, TransferAttemptId, TransferTarget,
+    PlaybackOutcome, RejectReason, TransferAttemptId, TransferTarget,
 };
 use crate::bridge::{
     codec_to_pt, frame_pump, BridgeManager, CrossBridgeHandle, DirectionalMediaBridgePlan,
@@ -8539,12 +8539,7 @@ impl Orchestrator {
             .get(conference_id)
             .map(|entry| Arc::clone(entry.value()))
             .ok_or(RvoipError::AdmissionRejected("conference not found"))?;
-        if conference
-            .members
-            .lock()
-            .await
-            .contains_key(&connection_id)
-        {
+        if conference.members.lock().await.contains_key(&connection_id) {
             return Err(RvoipError::AdmissionRejected(
                 "connection is already a conference member",
             ));
@@ -8580,7 +8575,11 @@ impl Orchestrator {
             conference.mix_rate_hz,
             Some(Box::new(route)),
         )?;
-        conference.members.lock().await.insert(connection_id, member);
+        conference
+            .members
+            .lock()
+            .await
+            .insert(connection_id, member);
         Ok(())
     }
 
@@ -8710,7 +8709,9 @@ impl Orchestrator {
             .get(&sink_name)
             .map(|e| Arc::clone(e.value()));
         if sink_factory.is_none() && shared_sink.is_none() {
-            return Err(RvoipError::AdmissionRejected("recording sink not registered"));
+            return Err(RvoipError::AdmissionRejected(
+                "recording sink not registered",
+            ));
         }
 
         // Resolve target → list of Connections to tap.
@@ -9608,33 +9609,33 @@ impl Orchestrator {
                 sample_rate_hz: None,
             })
             .await?;
-        let (handle, mut cancel_rx) = PlaybackHandle::new(crate::ids::PlaybackId::new());
+        let (handle, mut cancel_rx, completion) =
+            PlaybackHandle::new_tracked(crate::ids::PlaybackId::new());
         tokio::spawn(async move {
             let mut playback = TtsPlaybackCancelGuard::new(playback);
-            let mut completed = false;
-            loop {
+            let outcome = loop {
                 tokio::select! {
-                    _ = &mut cancel_rx => break,
+                    _ = &mut cancel_rx => break PlaybackOutcome::Cancelled,
                     frame_opt = playback.playback().next_frame() => {
                         let Some(frame) = frame_opt else {
-                            completed = true;
-                            break;
+                            break PlaybackOutcome::Completed;
                         };
                         if frames_out.send(frame).await.is_err() {
-                            break;
+                            break PlaybackOutcome::Failed;
                         }
                     }
                 }
-            }
+            };
             // Every exit other than the provider's natural end-of-stream
             // must cancel the provider explicitly: `TtsPlayback` has no
             // Drop-cancels contract, so merely dropping it can leave remote
             // synthesis work running.
-            if completed {
+            if outcome == PlaybackOutcome::Completed {
                 playback.complete();
             } else {
                 playback.cancel().await;
             }
+            completion.finish(outcome);
         });
         Ok(handle)
     }
