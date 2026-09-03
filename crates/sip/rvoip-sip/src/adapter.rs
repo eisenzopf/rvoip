@@ -2697,7 +2697,7 @@ impl SipAdapter {
                     },
                 );
             }
-            ApiEvent::CallEnded { call_id, reason } => {
+            ApiEvent::CallEnded { call_id, .. } => {
                 let Some(epoch) = self.existing_mapped_terminal_epoch(&call_id) else {
                     return;
                 };
@@ -2705,7 +2705,12 @@ impl SipAdapter {
                     &epoch,
                     AdapterEvent::Ended {
                         connection_id: epoch.connection_id.clone(),
-                        reason: EndReason::Failed { detail: reason },
+                        // `CallEnded` is the session layer's successful
+                        // terminal event (including a peer BYE). Signaling
+                        // failures arrive separately as `CallFailed`; treating
+                        // a normal remote hangup as failed makes every
+                        // answered outbound call settle incorrectly.
+                        reason: EndReason::Normal,
                     },
                     "call-ended",
                 )
@@ -7640,7 +7645,7 @@ Signal=5\r\nDuration=160\r\n";
             events.recv().await,
             Some(OrchestratorAdapterEvent::Public(AdapterEvent::Ended {
                 connection_id: observed,
-                ..
+                reason: EndReason::Normal,
             })) if observed == connection_id
         ));
 
