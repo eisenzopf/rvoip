@@ -471,6 +471,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("Early failure cutoff", controller)
         self.assertIn("early-failure-decision", controller)
         self.assertIn("gcloud compute instances stop", controller)
+        self.assertIn("gcp-release-shutdown.sh", controller)
 
         self.assertNotIn("strategy:", controller)
         self.assertNotIn("matrix: ${{ fromJSON", controller)
