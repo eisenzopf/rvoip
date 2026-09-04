@@ -22,10 +22,11 @@ use futures::FutureExt;
 use rvoip_core::adapter::{
     legacy_normalized_event_receiver, AdapterEvent, AdapterKind, AdapterLifecycleCapabilities,
     AdapterLifecycleSink, AdapterLifecycleSinkSlot, ConnectionAdapter, ConnectionHandle, EndReason,
-    ExternalConnectionReference, InboundConnectionContext, InboundContextError, InboundRoutingHint,
-    InboundSignalingMetadata, OrchestratorAdapterEvent, OriginateRequest, OutboundActivation,
-    RejectReason, SignatureHeaders, TerminalDelivery, TransferAttemptId, TransferStatus,
-    TransferTarget,
+    ExternalConnectionReference, InboundAssertedIdentity, InboundConnectionContext,
+    InboundContextError, InboundRoutingHint, InboundSignalingMetadata, OrchestratorAdapterEvent,
+    OriginateRequest, OutboundActivation, RejectReason, SignatureHeaders, TerminalDelivery,
+    TransferAttemptId, TransferStatus, TransferTarget, TrustedSignalingMetadata,
+    TrustedSignalingProvenance,
 };
 use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
 use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
@@ -734,6 +735,7 @@ pub enum SipInboundContextPolicyError {
 #[derive(Clone, Default)]
 pub struct SipInboundContextPolicy {
     allowed_headers: Arc<HashSet<String>>,
+    trusted_private_headers: Arc<HashSet<String>>,
 }
 
 impl SipInboundContextPolicy {
@@ -768,12 +770,52 @@ impl SipInboundContextPolicy {
         }
         Ok(Self {
             allowed_headers: Arc::new(allowed),
+            trusted_private_headers: Arc::new(HashSet::new()),
         })
+    }
+
+    /// Add private SIP headers that may be surfaced only for a peer admitted
+    /// by trusted-trunk policy. The default is empty. Identity headers remain
+    /// typed fields and cannot be admitted through this raw-header path.
+    pub fn with_trusted_private_headers<I, S>(
+        mut self,
+        headers: I,
+    ) -> std::result::Result<Self, SipInboundContextPolicyError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut allowed = HashSet::new();
+        for supplied in headers {
+            let supplied = supplied.as_ref();
+            if supplied.is_empty()
+                || supplied.len() > rvoip_core_traits::adapter::MAX_INBOUND_METADATA_NAME_BYTES
+                || !supplied.bytes().all(is_sip_metadata_name_byte)
+            {
+                return Err(SipInboundContextPolicyError::InvalidHeaderName);
+            }
+            let header = HeaderName::from_str(supplied)
+                .map_err(|_| SipInboundContextPolicyError::InvalidHeaderName)?;
+            if !sip_inbound_header_is_private_extension(&header) {
+                return Err(SipInboundContextPolicyError::ForbiddenHeaderName);
+            }
+            let normalized = header.as_str().to_ascii_lowercase();
+            if allowed.insert(normalized) && allowed.len() > MAX_SIP_INBOUND_ALLOWLIST_HEADERS {
+                return Err(SipInboundContextPolicyError::TooManyHeaders);
+            }
+        }
+        self.trusted_private_headers = Arc::new(allowed);
+        Ok(self)
     }
 
     /// Number of distinct case-insensitive header names in the allowlist.
     pub fn allowed_header_count(&self) -> usize {
         self.allowed_headers.len()
+    }
+
+    /// Number of private header names accepted from trusted trunks.
+    pub fn trusted_private_header_count(&self) -> usize {
+        self.trusted_private_headers.len()
     }
 
     fn captures(&self, header: &HeaderName) -> bool {
@@ -788,64 +830,106 @@ impl SipInboundContextPolicy {
         if observation.principal.is_none() {
             return Ok(None);
         }
-        let (routing_hint, metadata) = if let Some(request) = observation.request.as_ref() {
-            let routing_hint = request
-                .uri()
-                .username()
-                .map(|username| InboundRoutingHint::new(username.to_owned()))
-                .transpose()?;
-            let mut metadata = request
-                .headers
-                .iter()
-                .filter_map(|header| {
-                    let name = header.name();
-                    self.captures(&name).then(|| {
-                        sip_header_value(header).map(|value| (name.as_str().to_owned(), value))
-                    })
-                })
-                .collect::<Option<Vec<_>>>()
-                .ok_or(InboundContextError::InvalidMetadataValue)?;
-
-            // P-Asserted-Identity is the carrier's own statement of who is
-            // calling, and unlike From it is not caller-supplied. RFC 3325
-            // makes it meaningful only inside a trust domain, so it is
-            // surfaced only when this peer was admitted by trusted-trunk
-            // policy — from anyone else it is an unverified header that
-            // would be worse than the request URI, because it looks
-            // authoritative. Carried under a reserved name so a captured
-            // header cannot impersonate it.
-            let trusted_peer = observation
-                .principal
-                .as_ref()
-                .and_then(|principal| principal.issuer.as_deref())
-                == Some(TRUSTED_TRUNK_ISSUER);
-            if trusted_peer {
-                if let Some(asserted) = request
+        let (routing_hint, metadata, asserted_identity, trusted_signaling) =
+            if let Some(request) = observation.request.as_ref() {
+                let routing_hint = request
+                    .uri()
+                    .username()
+                    .map(|username| InboundRoutingHint::new(username.to_owned()))
+                    .transpose()?;
+                let metadata = request
                     .headers
                     .iter()
-                    .find(|header| {
-                        header
-                            .name()
-                            .as_str()
-                            .eq_ignore_ascii_case("p-asserted-identity")
+                    .filter_map(|header| {
+                        let name = header.name();
+                        self.captures(&name).then(|| {
+                            sip_header_value(header).map(|value| (name.as_str().to_owned(), value))
+                        })
                     })
-                    .and_then(sip_header_value)
-                {
-                    metadata.push((ASSERTED_IDENTITY_METADATA.to_owned(), asserted));
-                }
-            }
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or(InboundContextError::InvalidMetadataValue)?;
 
-            (routing_hint, InboundSignalingMetadata::new(metadata)?)
-        } else {
-            // Authentication remains usable even when a legacy compatibility
-            // event did not retain parseable raw INVITE bytes. The context is
-            // still principal-bound; it simply carries no routing metadata.
-            (None, InboundSignalingMetadata::default())
-        };
+                // P-Asserted-Identity is the carrier's own statement of who is
+                // calling, and unlike From it is not caller-supplied. RFC 3325
+                // makes it meaningful only inside a trust domain, so it is
+                // surfaced only when this peer was admitted by trusted-trunk
+                // policy — from anyone else it is an unverified header that
+                // would be worse than the request URI, because it looks
+                // authoritative. It is a typed, provenance-marked field rather
+                // than generic metadata.
+                let trusted_peer = observation
+                    .principal
+                    .as_ref()
+                    .and_then(|principal| principal.issuer.as_deref())
+                    == Some(TRUSTED_TRUNK_ISSUER);
+                let asserted_identity = if trusted_peer {
+                    request
+                        .headers
+                        .iter()
+                        .find(|header| {
+                            header
+                                .name()
+                                .as_str()
+                                .eq_ignore_ascii_case("p-asserted-identity")
+                        })
+                        .and_then(sip_header_value)
+                        .map(|asserted| {
+                            InboundAssertedIdentity::new(
+                                asserted,
+                                TrustedSignalingProvenance::SipTrustedTrunk,
+                            )
+                        })
+                        .transpose()?
+                } else {
+                    None
+                };
+                let trusted_signaling = if trusted_peer {
+                    let fields = request
+                        .headers
+                        .iter()
+                        .filter_map(|header| {
+                            let name = header.name();
+                            self.trusted_private_headers
+                                .contains(&name.as_str().to_ascii_lowercase())
+                                .then(|| {
+                                    sip_header_value(header)
+                                        .map(|value| (name.as_str().to_owned(), value))
+                                })
+                        })
+                        .collect::<Option<Vec<_>>>()
+                        .ok_or(InboundContextError::InvalidMetadataValue)?;
+                    (!fields.is_empty())
+                        .then(|| {
+                            InboundSignalingMetadata::new(fields).map(|fields| {
+                                TrustedSignalingMetadata::new(
+                                    TrustedSignalingProvenance::SipTrustedTrunk,
+                                    fields,
+                                )
+                            })
+                        })
+                        .transpose()?
+                } else {
+                    None
+                };
+
+                (
+                    routing_hint,
+                    InboundSignalingMetadata::new(metadata)?,
+                    asserted_identity,
+                    trusted_signaling,
+                )
+            } else {
+                // Authentication remains usable even when a legacy compatibility
+                // event did not retain parseable raw INVITE bytes. The context is
+                // still principal-bound; it simply carries no routing metadata.
+                (None, InboundSignalingMetadata::default(), None, None)
+            };
 
         Ok(Some(PendingSipInboundContext {
             routing_hint,
             metadata,
+            asserted_identity,
+            trusted_signaling,
         }))
     }
 }
@@ -855,6 +939,10 @@ impl fmt::Debug for SipInboundContextPolicy {
         formatter
             .debug_struct("SipInboundContextPolicy")
             .field("allowed_header_count", &self.allowed_headers.len())
+            .field(
+                "trusted_private_header_count",
+                &self.trusted_private_headers.len(),
+            )
             .finish()
     }
 }
@@ -891,6 +979,13 @@ fn sip_inbound_header_is_application_extension(header: &HeaderName) -> bool {
         && normalized != "x-rvoip"
         && !normalized.starts_with("x-bridgefu-")
         && !normalized.starts_with("x-rvoip-")
+}
+
+fn sip_inbound_header_is_private_extension(header: &HeaderName) -> bool {
+    let normalized = header.as_str().to_ascii_lowercase();
+    normalized.starts_with("p-")
+        && normalized != "p-asserted-identity"
+        && normalized != "p-preferred-identity"
 }
 
 fn sip_header_value(header: &TypedHeader) -> Option<String> {
@@ -953,15 +1048,11 @@ fn failed_inbound_termination(
 /// `trusted_trunk_principal`.
 pub(crate) const TRUSTED_TRUNK_ISSUER: &str = "rvoip-app-trusted-trunk";
 
-/// Reserved metadata name carrying a carrier-asserted caller identity.
-///
-/// Reserved rather than the raw header name so a peer cannot forge it by
-/// sending a header that happens to be on the capture allowlist.
-pub const ASSERTED_IDENTITY_METADATA: &str = "rvoip.asserted-identity";
-
 struct PendingSipInboundContext {
     routing_hint: Option<InboundRoutingHint>,
     metadata: InboundSignalingMetadata,
+    asserted_identity: Option<InboundAssertedIdentity>,
+    trusted_signaling: Option<TrustedSignalingMetadata>,
 }
 
 struct PendingSipInboundObservation {
@@ -1090,7 +1181,13 @@ impl SipInboundContextStore {
                     principal,
                     pending.routing_hint,
                     pending.metadata,
-                ) {
+                )
+                .map(|context| {
+                    context.with_trusted_signaling(
+                        pending.asserted_identity,
+                        pending.trusted_signaling,
+                    )
+                }) {
                     Ok(context) => SipInboundContextState::Available(context),
                     Err(error) => {
                         self.by_connection
@@ -4422,7 +4519,7 @@ Signal=5\r\nDuration=160\r\n";
     }
 
     /// An INVITE carrying a carrier-asserted identity.
-    fn request_with_asserted_identity(route: &str, asserted: &str) -> Arc<rvoip_sip_core::Request> {
+    fn request_with_private_identity(route: &str, asserted: &str) -> Arc<rvoip_sip_core::Request> {
         let wire = format!(
             "INVITE sip:{route}@example.test SIP/2.0\r\n\
              Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-test\r\n\
@@ -4432,6 +4529,8 @@ Signal=5\r\nDuration=160\r\n";
              CSeq: 1 INVITE\r\n\
              Max-Forwards: 70\r\n\
              P-Asserted-Identity: {asserted}\r\n\
+             P-Charging-Vector: icid-value=carrier-secret;orig-ioi=carrier.example\r\n\
+             P-Unlisted-Private: must-not-escape\r\n\
              Content-Length: 0\r\n\r\n"
         );
         match rvoip_sip_core::parse_message(wire.as_bytes()).expect("parse INVITE") {
@@ -4456,48 +4555,78 @@ Signal=5\r\nDuration=160\r\n";
     /// trust domain (RFC 3325). From an untrusted peer it is an unverified
     /// header that *looks* authoritative, which is worse than not having it.
     #[test]
-    fn asserted_identity_is_surfaced_only_from_a_trusted_trunk() {
-        let policy = SipInboundContextPolicy::new(Vec::<String>::new()).expect("policy");
+    fn asserted_identity_and_allowlisted_private_headers_require_a_trusted_trunk() {
+        let policy = SipInboundContextPolicy::new(Vec::<String>::new())
+            .expect("policy")
+            .with_trusted_private_headers(["P-Charging-Vector"])
+            .expect("trusted private policy");
         let asserted = "<sip:+14085551212@carrier.example>";
 
         let trusted = policy
             .capture(&InboundInviteObservation {
                 session_id: SessionId::new(),
-                request: Some(request_with_asserted_identity("bridge", asserted)),
+                request: Some(request_with_private_identity("bridge", asserted)),
                 principal: Some(principal_from(TRUSTED_TRUNK_ISSUER)),
             })
             .expect("capture")
             .expect("context");
-        let asserted_from = |context: &PendingSipInboundContext| -> Option<String> {
-            context
-                .metadata
-                .iter()
-                .filter(|entry| entry.0 == ASSERTED_IDENTITY_METADATA)
-                .map(|entry| entry.1.to_owned())
-                .next()
-        };
         // The parser re-serializes the URI canonically, percent-encoding
         // `+` in the userinfo per RFC 3261. Assert on the identity it
         // carries rather than on one particular spelling of it.
-        let surfaced = asserted_from(&trusted).expect("a trusted trunk's assertion is surfaced");
+        let identity = trusted
+            .asserted_identity
+            .as_ref()
+            .expect("a trusted trunk's assertion is surfaced");
+        assert_eq!(
+            identity.provenance(),
+            TrustedSignalingProvenance::SipTrustedTrunk
+        );
+        let surfaced = identity.expose_value();
         assert!(
             surfaced.contains("14085551212") && surfaced.contains("carrier.example"),
             "unexpected asserted identity: {surfaced}"
+        );
+        assert!(
+            trusted
+                .metadata
+                .iter()
+                .all(|(name, _)| name != "rvoip.asserted-identity"),
+            "asserted identity must not masquerade as generic metadata"
+        );
+        let trusted_headers = trusted
+            .trusted_signaling
+            .as_ref()
+            .expect("allowlisted trusted header");
+        assert_eq!(
+            trusted_headers.provenance(),
+            TrustedSignalingProvenance::SipTrustedTrunk
+        );
+        assert_eq!(
+            trusted_headers.fields().values("p-charging-vector").count(),
+            1
+        );
+        assert_eq!(
+            trusted_headers
+                .fields()
+                .values("p-unlisted-private")
+                .count(),
+            0,
+            "unlisted private headers stay hidden"
         );
 
         let untrusted = policy
             .capture(&InboundInviteObservation {
                 session_id: SessionId::new(),
-                request: Some(request_with_asserted_identity("bridge", asserted)),
+                request: Some(request_with_private_identity("bridge", asserted)),
                 principal: Some(principal_from("some-other-issuer")),
             })
             .expect("capture")
             .expect("context");
         assert_eq!(
-            asserted_from(&untrusted),
-            None,
+            untrusted.asserted_identity, None,
             "an unverified peer's assertion must not be presented as identity"
         );
+        assert!(untrusted.trusted_signaling.is_none());
     }
 
     fn observation(
@@ -6810,6 +6939,22 @@ Signal=5\r\nDuration=160\r\n";
             SipInboundContextPolicy::new(["bad header"]),
             Err(SipInboundContextPolicyError::InvalidHeaderName)
         ));
+        let base = SipInboundContextPolicy::default();
+        for forbidden in [
+            "P-Asserted-Identity",
+            "P-Preferred-Identity",
+            "Via",
+            "X-Private",
+        ] {
+            assert!(matches!(
+                base.clone().with_trusted_private_headers([forbidden]),
+                Err(SipInboundContextPolicyError::ForbiddenHeaderName)
+            ));
+        }
+        let trusted = base
+            .with_trusted_private_headers(["P-Charging-Vector"])
+            .expect("explicit private-header allowlist");
+        assert_eq!(trusted.trusted_private_header_count(), 1);
     }
 
     #[test]

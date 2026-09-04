@@ -2,7 +2,7 @@
 
 use std::{fmt, sync::Arc};
 
-use rvoip_sip_core::types::Method;
+use rvoip_sip_core::types::{Method, TypedHeader};
 
 use crate::api::handle::CallId;
 use crate::api::headers::{BuilderHeaderState, SipRequestOptions};
@@ -157,6 +157,7 @@ pub struct OutboundCallBuilder {
     credentials: Option<Credentials>,
     auth: Option<SipClientAuth>,
     pai: PaiOverride,
+    ppi_uri: Option<String>,
     contact_uri: Option<String>,
     outbound_proxy: ProxyOverride,
     subject: Option<String>,
@@ -183,6 +184,7 @@ impl OutboundCallBuilder {
             credentials: None,
             auth: None,
             pai: PaiOverride::default(),
+            ppi_uri: None,
             contact_uri: None,
             outbound_proxy: ProxyOverride::default(),
             subject: None,
@@ -258,6 +260,15 @@ impl OutboundCallBuilder {
     /// `Config.pai_uri` is set.
     pub fn without_pai(mut self) -> Self {
         self.pai = PaiOverride::Suppress;
+        self
+    }
+
+    /// Attach a typed `P-Preferred-Identity` URI to this call.
+    ///
+    /// The URI is validated before any session or network resource is
+    /// allocated and is retained across authenticated INVITE retries.
+    pub fn with_ppi(mut self, uri: impl Into<String>) -> Self {
+        self.ppi_uri = Some(uri.into());
         self
     }
 
@@ -381,6 +392,20 @@ impl OutboundCallBuilder {
             .clone()
             .or_else(|| self.coord.config_auth())
             .or_else(|| credentials.clone().map(Into::into));
+        let mut extra_headers = self.state.headers.clone();
+        if let Some(ppi) = self.ppi_uri.as_deref() {
+            use rvoip_sip_core::types::{PPreferredIdentity, Uri};
+            use std::str::FromStr;
+            let uri = Uri::from_str(ppi).map_err(|_| {
+                crate::errors::SessionError::InvalidInput(
+                    "P-Preferred-Identity URI failed validation".to_string(),
+                )
+            })?;
+            extra_headers.insert(
+                0,
+                TypedHeader::PPreferredIdentity(PPreferredIdentity::with_uri(uri)),
+            );
+        }
 
         // Build the snapshot — folds every override into a frozen
         // struct that the state-machine handler reads back verbatim.
@@ -398,7 +423,7 @@ impl OutboundCallBuilder {
             precomputed_auth: self.precomputed_authorization,
             transfer_leg: self.transfer_leg,
             supported_100rel: self.supported_100rel,
-            extra_headers: self.state.headers.clone(),
+            extra_headers,
             topology_hiding: self.topology_hiding,
         });
 

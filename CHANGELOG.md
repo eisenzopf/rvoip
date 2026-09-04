@@ -115,16 +115,25 @@ fix. Additive: the convenience builder path is unchanged.
   `Preferred` carries the call in the clear when the peer declines, which is
   the case an operator most needs to know about.
 
-### P-Asserted-Identity surfaced to the application
+### Trusted private identity and carrier signaling
 
-- A trusted trunk's `P-Asserted-Identity` now reaches the inbound context
-  under the reserved name `rvoip.asserted-identity`, so an application can
-  use the carrier's assertion as caller identity instead of the
-  caller-controlled request URI.
+- A trusted trunk's `P-Asserted-Identity` now reaches the inbound context as
+  the distinct, redacted `InboundAssertedIdentity` field, with
+  `SipTrustedTrunk` provenance. It is intentionally not generic `X-*`
+  metadata, so an application cannot accidentally treat an untrusted value as
+  carrier-authenticated caller identity.
 - Surfaced **only** when the peer was admitted by trusted-trunk policy. RFC
   3325 makes PAI meaningful only inside a trust domain; from an unverified
   peer it is a forgeable header that looks authoritative, which is worse than
-  its absence. The reserved name prevents a captured header impersonating it.
+  its absence.
+- Trusted trunks can opt in to a bounded private-header allowlist. The first
+  supported carrier field is `P-Charging-Vector`; the default remains empty,
+  unlisted fields are stripped, and PAI/PPI cannot enter through the raw
+  header path.
+- `OutboundCallBuilder::with_ppi` adds typed `P-Preferred-Identity` alongside
+  typed PAI. Both identities are preflight-validated, redacted from
+  diagnostics, emitted on the first INVITE, and retained byte-for-byte across
+  401/407 authentication retries.
 
 ### N-way conferencing
 

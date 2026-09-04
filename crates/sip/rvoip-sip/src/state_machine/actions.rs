@@ -1508,10 +1508,12 @@ pub(crate) fn materialize_invite_options(
     if let Some(pai) = session_pai_uri {
         use rvoip_sip_core::types::{p_asserted_identity::PAssertedIdentity, uri::Uri};
         match Uri::from_str(pai) {
-            Ok(uri) => extras.insert(
-                0,
-                TypedHeader::PAssertedIdentity(PAssertedIdentity::with_uri(uri)),
-            ),
+            Ok(uri) => {
+                extras.insert(
+                    0,
+                    TypedHeader::PAssertedIdentity(PAssertedIdentity::with_uri(uri)),
+                );
+            }
             Err(_) => {
                 return Err(
                     InviteOptionsMaterializationError::InvalidPAssertedIdentityUri {
@@ -6234,6 +6236,12 @@ mod invite_option_diagnostic_tests {
         snapshot.from = None;
         snapshot.outbound_proxy_override =
             ProxyOverride::Use("sip:proxy.example.com;lr".to_string());
+        snapshot.extra_headers.insert(
+            0,
+            TypedHeader::PPreferredIdentity(
+                "sip:preferred@example.com".parse().expect("typed PPI"),
+            ),
+        );
 
         let (options, suppress_global_proxy) = materialize_invite_options(
             &snapshot,
@@ -6250,16 +6258,39 @@ mod invite_option_diagnostic_tests {
             options.outbound_proxy_uri.as_ref().map(ToString::to_string),
             Some("sip:proxy.example.com;lr".to_string())
         );
-        assert_eq!(options.extra_headers.len(), 3);
+        assert_eq!(options.extra_headers.len(), 4);
         assert_eq!(
             options.extra_headers[0].name(),
             HeaderName::PAssertedIdentity
         );
         assert_eq!(
             options.extra_headers[1].name(),
+            HeaderName::PPreferredIdentity
+        );
+        assert_eq!(
+            options.extra_headers[2].name(),
             HeaderName::Other("X-Application-Context".to_string())
         );
-        assert_eq!(options.extra_headers[2].name(), HeaderName::Subject);
+        assert_eq!(options.extra_headers[3].name(), HeaderName::Subject);
+
+        let (retry_options, _) = materialize_invite_options(
+            &snapshot,
+            Some("sip:identity@example.com"),
+            Some("v=0\r\n".to_string()),
+        )
+        .expect("authenticated retry rematerializes options");
+        assert_eq!(
+            retry_options
+                .extra_headers
+                .iter()
+                .map(TypedHeader::name)
+                .collect::<Vec<_>>(),
+            options
+                .extra_headers
+                .iter()
+                .map(TypedHeader::name)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

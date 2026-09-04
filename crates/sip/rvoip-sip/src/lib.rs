@@ -570,6 +570,7 @@ pub use api::trace_redactor::{
 /// mapping without taking their own `ipnet` dependency.
 pub use ipnet::IpNet;
 
+pub use adapters::ice_adapter::SipIcePolicy;
 pub use auth::{
     AAuthValidator, AkaClientConfig, AkaClientProvider, AkaVectorProvider, ApiKeyVerifier,
     AuditFailurePolicy, AuthAttemptAdmission, AuthAttemptReservation, AuthAuditEvent,
@@ -585,12 +586,8 @@ pub use auth::{
     TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
 };
 pub use rvoip_media_core::performance::pool::PoolConfig as MediaPoolConfig;
-pub use crate::adapter::ASSERTED_IDENTITY_METADATA;
 pub use rvoip_media_core::prelude::{StunClient, StunError};
-pub use adapters::ice_adapter::SipIcePolicy;
-pub use rvoip_media_core::processing::audio::playout::{
-    PlayoutConfig, PlayoutStats,
-};
+pub use rvoip_media_core::processing::audio::playout::{PlayoutConfig, PlayoutStats};
 pub use rvoip_media_core::types::AudioFrame;
 
 /// SIP_API_DESIGN_2 §3.6 — convenience body constructors. Each

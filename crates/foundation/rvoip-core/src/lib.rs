@@ -141,13 +141,14 @@ pub mod virtual_publisher;
 
 pub use adapter::{
     AdapterEvent, AdapterKind, ConnectionAdapter, ConnectionHandle, EndReason,
-    ExternalConnectionReference, ExternalConnectionReferenceError, InboundConnectionContext,
-    InboundContextError, InboundRoutingHint, InboundSignalingMetadata, OriginateContext,
-    OriginateRequest, OutboundActivation, PlaybackCompletionSender, PlaybackHandle,
-    PlaybackOutcome, PlaybackWaitError, RejectReason, SignatureHeaders, TransferAttemptId,
-    TransferStatus, TransferTarget, MAX_EXTERNAL_CONNECTION_REFERENCES,
+    ExternalConnectionReference, ExternalConnectionReferenceError, InboundAssertedIdentity,
+    InboundConnectionContext, InboundContextError, InboundRoutingHint, InboundSignalingMetadata,
+    OriginateContext, OriginateRequest, OutboundActivation, PlaybackCompletionSender,
+    PlaybackHandle, PlaybackOutcome, PlaybackWaitError, RejectReason, SignatureHeaders,
+    TransferAttemptId, TransferStatus, TransferTarget, TrustedSignalingMetadata,
+    TrustedSignalingProvenance, MAX_EXTERNAL_CONNECTION_REFERENCES,
     MAX_EXTERNAL_REFERENCE_KIND_BYTES, MAX_EXTERNAL_REFERENCE_VALUE_BYTES,
-    MAX_INBOUND_ROUTING_HINT_BYTES,
+    MAX_INBOUND_ASSERTED_IDENTITY_BYTES, MAX_INBOUND_ROUTING_HINT_BYTES,
 };
 pub use bridge::{BridgeError, BridgeHandle, BridgeManager, DirectionalMediaBridgePlan};
 pub use broadcast::{

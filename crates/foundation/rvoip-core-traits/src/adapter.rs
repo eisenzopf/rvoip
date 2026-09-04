@@ -21,6 +21,8 @@ pub const MAX_INBOUND_METADATA_NAME_BYTES: usize = 128;
 pub const MAX_INBOUND_METADATA_VALUE_BYTES: usize = 4_096;
 /// Maximum aggregate UTF-8 size of inbound metadata names and values.
 pub const MAX_INBOUND_METADATA_BYTES: usize = 16 * 1_024;
+/// Maximum UTF-8 size of a trusted signaling identity assertion.
+pub const MAX_INBOUND_ASSERTED_IDENTITY_BYTES: usize = 4_096;
 /// Maximum number of adapter-owned external identifiers on one activation.
 pub const MAX_EXTERNAL_CONNECTION_REFERENCES: usize = 16;
 /// Maximum UTF-8 size of an external identifier namespace.
@@ -78,6 +80,98 @@ pub enum InboundContextError {
     InvalidMetadataValue,
     #[error("the aggregate inbound metadata is too large")]
     MetadataTooLarge,
+}
+
+/// Trust boundary that authenticated an inbound signaling assertion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum TrustedSignalingProvenance {
+    /// SIP peer admitted by the adapter's explicit trusted-trunk policy.
+    SipTrustedTrunk,
+}
+
+/// A signaling identity accepted only after authenticating its trust domain.
+///
+/// The value is deliberately separate from generic signaling metadata and is
+/// redacted from `Debug`. Consumers must preserve the provenance when using it
+/// for policy, display, or audit decisions.
+#[derive(Eq, PartialEq)]
+pub struct InboundAssertedIdentity {
+    value: String,
+    provenance: TrustedSignalingProvenance,
+}
+
+impl InboundAssertedIdentity {
+    pub fn new(
+        value: impl Into<String>,
+        provenance: TrustedSignalingProvenance,
+    ) -> Result<Self, InboundContextError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(InboundContextError::InvalidMetadataValue);
+        }
+        if value.len() > MAX_INBOUND_ASSERTED_IDENTITY_BYTES {
+            return Err(InboundContextError::MetadataValueTooLarge);
+        }
+        if value.chars().any(char::is_control) {
+            return Err(InboundContextError::InvalidMetadataValue);
+        }
+        Ok(Self { value, provenance })
+    }
+
+    pub fn expose_value(&self) -> &str {
+        &self.value
+    }
+
+    pub const fn provenance(&self) -> TrustedSignalingProvenance {
+        self.provenance
+    }
+}
+
+impl fmt::Debug for InboundAssertedIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InboundAssertedIdentity")
+            .field("provenance", &self.provenance)
+            .field("value", &"[redacted]")
+            .finish()
+    }
+}
+
+impl Drop for InboundAssertedIdentity {
+    fn drop(&mut self) {
+        self.value.zeroize();
+    }
+}
+
+/// Allowlisted private signaling fields accepted at a named trust boundary.
+pub struct TrustedSignalingMetadata {
+    provenance: TrustedSignalingProvenance,
+    fields: InboundSignalingMetadata,
+}
+
+impl TrustedSignalingMetadata {
+    pub fn new(provenance: TrustedSignalingProvenance, fields: InboundSignalingMetadata) -> Self {
+        Self { provenance, fields }
+    }
+
+    pub const fn provenance(&self) -> TrustedSignalingProvenance {
+        self.provenance
+    }
+
+    pub fn fields(&self) -> &InboundSignalingMetadata {
+        &self.fields
+    }
+}
+
+impl fmt::Debug for TrustedSignalingMetadata {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TrustedSignalingMetadata")
+            .field("provenance", &self.provenance)
+            .field("field_count", &self.fields.len())
+            .finish()
+    }
 }
 
 /// Opaque, redacted routing material captured before an inbound adapter
@@ -258,6 +352,8 @@ pub struct InboundConnectionContext {
     owner: PrincipalOwnershipKey,
     routing_hint: Option<InboundRoutingHint>,
     metadata: InboundSignalingMetadata,
+    asserted_identity: Option<InboundAssertedIdentity>,
+    trusted_signaling: Option<TrustedSignalingMetadata>,
 }
 
 impl InboundConnectionContext {
@@ -280,7 +376,21 @@ impl InboundConnectionContext {
             owner: principal.ownership_key(),
             routing_hint,
             metadata,
+            asserted_identity: None,
+            trusted_signaling: None,
         })
+    }
+
+    /// Attach identity and private fields already authenticated by an adapter
+    /// trust boundary. Generic metadata remains untrusted application context.
+    pub fn with_trusted_signaling(
+        mut self,
+        asserted_identity: Option<InboundAssertedIdentity>,
+        trusted_signaling: Option<TrustedSignalingMetadata>,
+    ) -> Self {
+        self.asserted_identity = asserted_identity;
+        self.trusted_signaling = trusted_signaling;
+        self
     }
 
     pub fn connection_id(&self) -> &ConnectionId {
@@ -305,6 +415,14 @@ impl InboundConnectionContext {
         &self.metadata
     }
 
+    pub fn asserted_identity(&self) -> Option<&InboundAssertedIdentity> {
+        self.asserted_identity.as_ref()
+    }
+
+    pub fn trusted_signaling(&self) -> Option<&TrustedSignalingMetadata> {
+        self.trusted_signaling.as_ref()
+    }
+
     pub fn is_bound_to(
         &self,
         connection_id: &ConnectionId,
@@ -327,6 +445,17 @@ impl fmt::Debug for InboundConnectionContext {
             .field("owner", &"[redacted]")
             .field("has_routing_hint", &self.routing_hint.is_some())
             .field("metadata_field_count", &self.metadata.len())
+            .field(
+                "asserted_identity_present",
+                &self.asserted_identity.is_some(),
+            )
+            .field(
+                "trusted_signaling_field_count",
+                &self
+                    .trusted_signaling
+                    .as_ref()
+                    .map_or(0, |signaling| signaling.fields().len()),
+            )
             .finish()
     }
 }
@@ -1103,12 +1232,42 @@ mod tests {
             Some(hint),
             metadata,
         )
-        .unwrap();
+        .unwrap()
+        .with_trusted_signaling(
+            Some(
+                InboundAssertedIdentity::new(
+                    "sip:asserted-secret@example.invalid",
+                    TrustedSignalingProvenance::SipTrustedTrunk,
+                )
+                .unwrap(),
+            ),
+            Some(TrustedSignalingMetadata::new(
+                TrustedSignalingProvenance::SipTrustedTrunk,
+                InboundSignalingMetadata::new([(
+                    "P-Charging-Vector",
+                    "icid-value=charging-secret",
+                )])
+                .unwrap(),
+            )),
+        );
 
         assert!(context.is_bound_to(&connection_id, Transport::Sip, &owner));
         assert_eq!(
             context.routing_hint().unwrap().expose_secret(),
             "attachment-secret"
+        );
+        assert_eq!(
+            context.asserted_identity().unwrap().provenance(),
+            TrustedSignalingProvenance::SipTrustedTrunk
+        );
+        assert_eq!(
+            context
+                .trusted_signaling()
+                .unwrap()
+                .fields()
+                .values("p-charging-vector")
+                .count(),
+            1
         );
         assert_eq!(
             context
@@ -1122,6 +1281,8 @@ mod tests {
         assert!(!debug.contains("attachment-secret"));
         assert!(!debug.contains("correlation-secret"));
         assert!(!debug.contains("second-secret"));
+        assert!(!debug.contains("asserted-secret"));
+        assert!(!debug.contains("charging-secret"));
         assert!(debug.contains("[redacted]"));
     }
 
