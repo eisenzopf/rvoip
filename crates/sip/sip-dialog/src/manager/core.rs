@@ -4,11 +4,11 @@
 //! It serves as the central coordinator for SIP dialog management.
 
 use dashmap::DashMap;
-use std::collections::{hash_map::DefaultHasher, BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
@@ -4357,12 +4357,21 @@ impl DialogManager {
                 context: None,
             })?;
 
+            let observed_source = dialog.last_known_remote_addr;
+            let route_set_is_empty = template.route_set.is_empty();
+            drop(dialog);
+
             let next_hop =
                 crate::transaction::transport::multiplexed::exact_next_hop_uri_for_request(
                     &request,
                 )
                 .map_err(|_| DialogError::routing_error("BYE contains an unusable Route header"))?;
-            let candidates = self.resolve_uri_to_candidates(&next_hop).await;
+            let mut candidates = self.resolve_uri_to_candidates(&next_hop).await;
+            super::transaction_integration::apply_observed_source(
+                observed_source,
+                route_set_is_empty,
+                &mut candidates,
+            );
             if candidates.is_empty() {
                 return Err(DialogError::routing_error(
                     "No address candidates for the exact BYE next hop",
@@ -5004,6 +5013,34 @@ mod outbound_flow_handler_tests {
             .build()
     }
 
+    async fn store_wildcard_observed_dialog(
+        manager: &DialogManager,
+        call_id: &str,
+        observed_source: SocketAddr,
+    ) -> DialogId {
+        let remote_target: Uri = "sip:caller@0.0.0.0:5076".parse().unwrap();
+        let mut dialog = Dialog::new(
+            call_id.to_string(),
+            "sip:service@127.0.0.1:5060".parse().unwrap(),
+            remote_target,
+            Some("service-tag".to_string()),
+            Some("caller-tag".to_string()),
+            false,
+        );
+        dialog.state = DialogState::Confirmed;
+        let dialog_id = dialog.id.clone();
+        manager.store_dialog(dialog).await.expect("store dialog");
+        let session_id = format!("{call_id}-session");
+        manager.store_dialog_mapping(
+            &session_id,
+            dialog_id.clone(),
+            TransactionKey::new(format!("z9hG4bK-{call_id}"), Method::Invite, true),
+            inbound_invite("sip:caller@0.0.0.0:5076"),
+            observed_source,
+        );
+        dialog_id
+    }
+
     #[tokio::test]
     async fn wildcard_contact_uses_observed_source_for_uas_bye() {
         let (manager, transport) = make_recording_manager().await;
@@ -5045,6 +5082,58 @@ mod outbound_flow_handler_tests {
             sent.first(),
             Some(&("sip:caller@0.0.0.0:5076".to_string(), observed_source))
         );
+    }
+
+    #[tokio::test]
+    async fn wildcard_contact_uses_observed_source_for_reason_bye() {
+        let (manager, transport) = make_recording_manager().await;
+        let observed_source = SocketAddr::from_str("203.0.113.11:2340").unwrap();
+        let dialog_id =
+            store_wildcard_observed_dialog(&manager, "reason-bye-dialog", observed_source).await;
+
+        manager
+            .send_bye_with_reason(
+                &dialog_id,
+                rvoip_sip_core::types::reason::Reason::new(
+                    "SIP",
+                    408,
+                    Some("Session expired".to_string()),
+                ),
+            )
+            .await
+            .expect("send reason BYE");
+
+        let sent = transport.request_destinations(Method::Bye).await;
+        assert_eq!(
+            sent.first(),
+            Some(&("sip:caller@0.0.0.0:5076".to_string(), observed_source))
+        );
+    }
+
+    #[tokio::test]
+    async fn wildcard_contact_uses_observed_source_for_info_and_notify() {
+        let (manager, transport) = make_recording_manager().await;
+        let observed_source = SocketAddr::from_str("203.0.113.12:2341").unwrap();
+        let dialog_id =
+            store_wildcard_observed_dialog(&manager, "materialized-dialog", observed_source).await;
+
+        manager
+            .send_request(&dialog_id, Method::Info, None)
+            .await
+            .expect("send INFO");
+        manager
+            .send_request(&dialog_id, Method::Notify, None)
+            .await
+            .expect("send NOTIFY");
+
+        for method in [Method::Info, Method::Notify] {
+            let sent = transport.request_destinations(method.clone()).await;
+            assert_eq!(
+                sent.first(),
+                Some(&("sip:caller@0.0.0.0:5076".to_string(), observed_source)),
+                "{method} must target the admitted packet source"
+            );
+        }
     }
 
     #[tokio::test]
@@ -5694,9 +5783,11 @@ mod outbound_flow_handler_tests {
 
         let error = result.expect_err("blocked transport send times out");
         assert_eq!(error.diagnostic_class(), "timeout");
-        assert!(!manager
-            .active_invite_failover_by_dialog
-            .contains_key(&dialog_id));
+        assert!(
+            !manager
+                .active_invite_failover_by_dialog
+                .contains_key(&dialog_id)
+        );
         let plan = manager
             .invite_failover_plans
             .iter()
@@ -5712,12 +5803,16 @@ mod outbound_flow_handler_tests {
                 .clone()
                 .expect("wire-unknown INVITE transaction retained for CANCEL")
         };
-        assert!(manager
-            .invite_failover_attempts
-            .contains_key(&invite_transaction));
-        assert!(manager
-            .transaction_to_dialog
-            .contains_key(&invite_transaction));
+        assert!(
+            manager
+                .invite_failover_attempts
+                .contains_key(&invite_transaction)
+        );
+        assert!(
+            manager
+                .transaction_to_dialog
+                .contains_key(&invite_transaction)
+        );
         assert_eq!(
             manager
                 .transaction_manager
@@ -5775,12 +5870,16 @@ mod outbound_flow_handler_tests {
                 .try_lock()
                 .is_ok_and(|plan| plan.dialog_id == dialog_id)
         }));
-        assert!(!manager
-            .invite_failover_attempts
-            .contains_key(&invite_transaction));
-        assert!(!manager
-            .transaction_to_dialog
-            .contains_key(&invite_transaction));
+        assert!(
+            !manager
+                .invite_failover_attempts
+                .contains_key(&invite_transaction)
+        );
+        assert!(
+            !manager
+                .transaction_to_dialog
+                .contains_key(&invite_transaction)
+        );
         assert_eq!(
             manager
                 .invite_failover_plan_reservations
@@ -5860,9 +5959,11 @@ mod outbound_flow_handler_tests {
 
         let error = result.expect_err("blocked post-send hook times out");
         assert_eq!(error.diagnostic_class(), "timeout");
-        assert!(!manager
-            .active_invite_failover_by_dialog
-            .contains_key(&dialog_id));
+        assert!(
+            !manager
+                .active_invite_failover_by_dialog
+                .contains_key(&dialog_id)
+        );
         let plan = manager
             .invite_failover_plans
             .iter()
@@ -5878,12 +5979,16 @@ mod outbound_flow_handler_tests {
                 .clone()
                 .expect("wire-unknown INVITE retained for a late response")
         };
-        assert!(manager
-            .invite_failover_attempts
-            .contains_key(&invite_transaction));
-        assert!(manager
-            .transaction_to_dialog
-            .contains_key(&invite_transaction));
+        assert!(
+            manager
+                .invite_failover_attempts
+                .contains_key(&invite_transaction)
+        );
+        assert!(
+            manager
+                .transaction_to_dialog
+                .contains_key(&invite_transaction)
+        );
         assert_eq!(
             manager
                 .transaction_manager
@@ -5949,12 +6054,16 @@ mod outbound_flow_handler_tests {
                 .try_lock()
                 .is_ok_and(|plan| plan.dialog_id == dialog_id)
         }));
-        assert!(!manager
-            .invite_failover_attempts
-            .contains_key(&invite_transaction));
-        assert!(!manager
-            .transaction_to_dialog
-            .contains_key(&invite_transaction));
+        assert!(
+            !manager
+                .invite_failover_attempts
+                .contains_key(&invite_transaction)
+        );
+        assert!(
+            !manager
+                .transaction_to_dialog
+                .contains_key(&invite_transaction)
+        );
         assert_eq!(
             manager
                 .invite_failover_plan_reservations
@@ -5993,16 +6102,18 @@ mod outbound_flow_handler_tests {
         )
         .await
         .expect("build sharded DialogManager");
-        assert!(manager
-            .invite_failover_expiry_scheduler
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .schedule_dialog_cleanup(
-                999,
-                &DialogId::new(),
-                std::sync::Weak::<tokio::sync::Mutex<InviteFailoverPlan>>::new(),
-                Instant::now() + Duration::from_secs(3_600),
-            ));
+        assert!(
+            manager
+                .invite_failover_expiry_scheduler
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .schedule_dialog_cleanup(
+                    999,
+                    &DialogId::new(),
+                    std::sync::Weak::<tokio::sync::Mutex<InviteFailoverPlan>>::new(),
+                    Instant::now() + Duration::from_secs(3_600),
+                )
+        );
         assert_eq!(
             manager
                 .retention_counts()
@@ -6076,13 +6187,17 @@ mod outbound_flow_handler_tests {
             .await
             .expect("blocked pre-send entered");
         pre_task.abort();
-        assert!(pre_task
-            .await
-            .expect_err("pre-send task aborted")
-            .is_cancelled());
-        assert!(!pre_manager
-            .active_invite_failover_by_dialog
-            .contains_key(&pre_dialog));
+        assert!(
+            pre_task
+                .await
+                .expect_err("pre-send task aborted")
+                .is_cancelled()
+        );
+        assert!(
+            !pre_manager
+                .active_invite_failover_by_dialog
+                .contains_key(&pre_dialog)
+        );
         let pre_plan = pre_manager
             .invite_failover_plans
             .iter()
@@ -6133,10 +6248,12 @@ mod outbound_flow_handler_tests {
             .await
             .expect("blocked transport send entered");
         send_task.abort();
-        assert!(send_task
-            .await
-            .expect_err("send task aborted")
-            .is_cancelled());
+        assert!(
+            send_task
+                .await
+                .expect_err("send task aborted")
+                .is_cancelled()
+        );
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 if send_manager
@@ -6152,9 +6269,11 @@ mod outbound_flow_handler_tests {
         })
         .await
         .expect("aborted send transaction compensated");
-        assert!(!send_manager
-            .active_invite_failover_by_dialog
-            .contains_key(&send_dialog));
+        assert!(
+            !send_manager
+                .active_invite_failover_by_dialog
+                .contains_key(&send_dialog)
+        );
         assert!(send_manager.invite_failover_attempts.is_empty());
         let send_plan = send_manager
             .invite_failover_plans
@@ -6284,9 +6403,11 @@ mod outbound_flow_handler_tests {
             source,
         };
         manager.dialog_event_dispatch_worker_index(&invite, 8, &fallback);
-        assert!(manager
-            .transaction_dialog_route_hash
-            .contains_key(&invite_tx));
+        assert!(
+            manager
+                .transaction_dialog_route_hash
+                .contains_key(&invite_tx)
+        );
 
         manager
             .process_timed_global_transaction_event(Arc::new(TransactionEvent::StateChanged {
@@ -6296,9 +6417,11 @@ mod outbound_flow_handler_tests {
             }))
             .await;
 
-        assert!(manager
-            .transaction_dialog_route_hash
-            .contains_key(&invite_tx));
+        assert!(
+            manager
+                .transaction_dialog_route_hash
+                .contains_key(&invite_tx)
+        );
 
         manager
             .process_timed_global_transaction_event(Arc::new(
@@ -6308,9 +6431,11 @@ mod outbound_flow_handler_tests {
             ))
             .await;
 
-        assert!(!manager
-            .transaction_dialog_route_hash
-            .contains_key(&invite_tx));
+        assert!(
+            !manager
+                .transaction_dialog_route_hash
+                .contains_key(&invite_tx)
+        );
     }
 
     #[tokio::test]
@@ -6340,9 +6465,11 @@ mod outbound_flow_handler_tests {
             8,
             &fallback,
         );
-        assert!(manager
-            .transaction_dialog_route_hash
-            .contains_key(&transaction_id));
+        assert!(
+            manager
+                .transaction_dialog_route_hash
+                .contains_key(&transaction_id)
+        );
 
         // Simulate the failed terminal-observation path from the soak: the
         // dialog event consumer disappears after request routing but before
@@ -6505,12 +6632,16 @@ mod outbound_flow_handler_tests {
         }
         manager.prune_invite_failover_state().await;
         assert!(manager.invite_failover_plans.contains_key(&plan_id));
-        assert!(manager
-            .invite_failover_attempts
-            .contains_key(&first_transaction));
-        assert!(manager
-            .transaction_to_dialog
-            .contains_key(&first_transaction));
+        assert!(
+            manager
+                .invite_failover_attempts
+                .contains_key(&first_transaction)
+        );
+        assert!(
+            manager
+                .transaction_to_dialog
+                .contains_key(&first_transaction)
+        );
         assert_eq!(
             manager
                 .invite_failover_plan_reservations
@@ -6543,18 +6674,26 @@ mod outbound_flow_handler_tests {
         manager.prune_invite_failover_state().await;
 
         assert!(!manager.invite_failover_plans.contains_key(&plan_id));
-        assert!(!manager
-            .active_invite_failover_by_dialog
-            .contains_key(&dialog_id));
-        assert!(!manager
-            .invite_failover_attempts
-            .contains_key(&first_transaction));
-        assert!(!manager
-            .transaction_to_dialog
-            .contains_key(&first_transaction));
-        assert!(!manager
-            .transaction_dialog_route_hash
-            .contains_key(&first_transaction));
+        assert!(
+            !manager
+                .active_invite_failover_by_dialog
+                .contains_key(&dialog_id)
+        );
+        assert!(
+            !manager
+                .invite_failover_attempts
+                .contains_key(&first_transaction)
+        );
+        assert!(
+            !manager
+                .transaction_to_dialog
+                .contains_key(&first_transaction)
+        );
+        assert!(
+            !manager
+                .transaction_dialog_route_hash
+                .contains_key(&first_transaction)
+        );
         {
             let captured_plan = captured_plan.lock().await;
             assert_eq!(
@@ -6680,9 +6819,11 @@ mod outbound_flow_handler_tests {
             .clone();
         let busy_plan = first_plan.lock().await;
         manager.remove_invite_failover_state_for_dialog(&first_dialog);
-        assert!(!manager
-            .transaction_to_dialog
-            .contains_key(&first_transaction));
+        assert!(
+            !manager
+                .transaction_to_dialog
+                .contains_key(&first_transaction)
+        );
         assert_eq!(
             manager
                 .transaction_to_dialog
@@ -6700,9 +6841,11 @@ mod outbound_flow_handler_tests {
             second_plan.lock().await.phase,
             InviteFailoverPlanPhase::Active
         );
-        assert!(manager
-            .invite_failover_attempts
-            .contains_key(&first_transaction));
+        assert!(
+            manager
+                .invite_failover_attempts
+                .contains_key(&first_transaction)
+        );
         assert_eq!(
             manager
                 .retention_counts()
@@ -6739,15 +6882,21 @@ mod outbound_flow_handler_tests {
         .expect("one cleanup call converges through manager-owned maintenance");
 
         assert!(manager.invite_failover_plans.contains_key(&first_plan_id));
-        assert!(manager
-            .invite_failover_attempts
-            .contains_key(&first_transaction));
-        assert!(!manager
-            .invite_failover_plans_by_dialog
-            .contains_key(&first_dialog));
-        assert!(!manager
-            .invite_failover_attempts_by_dialog
-            .contains_key(&first_dialog));
+        assert!(
+            manager
+                .invite_failover_attempts
+                .contains_key(&first_transaction)
+        );
+        assert!(
+            !manager
+                .invite_failover_plans_by_dialog
+                .contains_key(&first_dialog)
+        );
+        assert!(
+            !manager
+                .invite_failover_attempts_by_dialog
+                .contains_key(&first_dialog)
+        );
         {
             let mut plan = first_plan.lock().await;
             assert_eq!(plan.phase, InviteFailoverPlanPhase::Cancelled);
@@ -6761,19 +6910,27 @@ mod outbound_flow_handler_tests {
         manager.prune_invite_failover_state().await;
 
         assert!(!manager.invite_failover_plans.contains_key(&first_plan_id));
-        assert!(!manager
-            .invite_failover_attempts
-            .contains_key(&first_transaction));
-        assert!(!manager
-            .invite_failover_plans_by_dialog
-            .contains_key(&first_dialog));
-        assert!(!manager
-            .invite_failover_attempts_by_dialog
-            .contains_key(&first_dialog));
+        assert!(
+            !manager
+                .invite_failover_attempts
+                .contains_key(&first_transaction)
+        );
+        assert!(
+            !manager
+                .invite_failover_plans_by_dialog
+                .contains_key(&first_dialog)
+        );
+        assert!(
+            !manager
+                .invite_failover_attempts_by_dialog
+                .contains_key(&first_dialog)
+        );
         assert!(manager.invite_failover_plans.contains_key(&second_plan_id));
-        assert!(manager
-            .invite_failover_attempts
-            .contains_key(&second_transaction));
+        assert!(
+            manager
+                .invite_failover_attempts
+                .contains_key(&second_transaction)
+        );
         assert_eq!(
             manager
                 .invite_failover_plans_by_dialog
@@ -6878,16 +7035,20 @@ mod outbound_flow_handler_tests {
             assert!(plan.active_payload.is_none());
             assert!(plan.current_transaction.is_some());
         }
-        assert!(manager
-            .invite_failover_plans_by_dialog
-            .get(&dialog_id)
-            .is_some_and(|plans| plans.contains(&plan_id)));
-        assert!(manager
-            .invite_failover_attempts_by_dialog
-            .get(&dialog_id)
-            .is_some_and(|attempts| attempts
-                .iter()
-                .any(|attempt| attempt.as_ref() == &transaction)));
+        assert!(
+            manager
+                .invite_failover_plans_by_dialog
+                .get(&dialog_id)
+                .is_some_and(|plans| plans.contains(&plan_id))
+        );
+        assert!(
+            manager
+                .invite_failover_attempts_by_dialog
+                .get(&dialog_id)
+                .is_some_and(|attempts| attempts
+                    .iter()
+                    .any(|attempt| attempt.as_ref() == &transaction))
+        );
         let retention = manager.retention_counts();
         assert_eq!(retention.invite_failover_dialog_cleanup_retries, 0);
         assert_eq!(retention.invite_failover_expiry_deadlines, 0);
@@ -7017,12 +7178,16 @@ mod outbound_flow_handler_tests {
             })
             .await;
 
-        assert!(manager
-            .invite_failover_attempts
-            .contains_key(&first_transaction));
-        assert!(manager
-            .invite_failover_attempts
-            .contains_key(&second_transaction));
+        assert!(
+            manager
+                .invite_failover_attempts
+                .contains_key(&first_transaction)
+        );
+        assert!(
+            manager
+                .invite_failover_attempts
+                .contains_key(&second_transaction)
+        );
         assert_eq!(
             manager
                 .transaction_to_dialog
@@ -7083,12 +7248,16 @@ mod outbound_flow_handler_tests {
         manager.prune_invite_failover_state().await;
 
         assert!(!manager.invite_failover_plans.contains_key(&plan_id));
-        assert!(!manager
-            .invite_failover_attempts
-            .contains_key(&first_transaction));
-        assert!(!manager
-            .invite_failover_attempts
-            .contains_key(&second_transaction));
+        assert!(
+            !manager
+                .invite_failover_attempts
+                .contains_key(&first_transaction)
+        );
+        assert!(
+            !manager
+                .invite_failover_attempts
+                .contains_key(&second_transaction)
+        );
         assert_eq!(
             manager
                 .invite_failover_plan_reservations
@@ -7294,9 +7463,11 @@ mod outbound_flow_handler_tests {
         assert!(plan.active_payload.is_none());
         assert!(plan.current_transaction.is_none());
         drop(plan);
-        assert!(!manager
-            .active_invite_failover_by_dialog
-            .contains_key(&dialog_id));
+        assert!(
+            !manager
+                .active_invite_failover_by_dialog
+                .contains_key(&dialog_id)
+        );
 
         manager
             .process_global_transaction_event(TransactionEvent::TransactionTerminated {
@@ -7536,14 +7707,17 @@ mod outbound_flow_handler_tests {
             .current_transaction
             .as_ref()
             .expect("cancelled current transaction");
-        assert!(plan
-            .retained_attempts
-            .iter()
-            .any(|attempt| attempt.as_ref() == current_transaction.as_ref()));
+        assert!(
+            plan.retained_attempts
+                .iter()
+                .any(|attempt| attempt.as_ref() == current_transaction.as_ref())
+        );
         drop(plan);
-        assert!(!manager
-            .active_invite_failover_by_dialog
-            .contains_key(&dialog_id));
+        assert!(
+            !manager
+                .active_invite_failover_by_dialog
+                .contains_key(&dialog_id)
+        );
 
         // Exercise the opposite serialized outcome explicitly: once CANCEL
         // owns the plan, a queued Timer-B event cannot create another leg.
@@ -7772,8 +7946,8 @@ mod outbound_flow_handler_tests {
     #[tokio::test]
     async fn direct_initial_invite_200_confirms_once_without_dead_ack_coordination() {
         use crate::manager::transaction_integration::CandidateWirePlan;
-        use rvoip_sip_core::types::session_expires::{Refresher, SessionExpires};
         use rvoip_sip_core::types::TypedHeader;
+        use rvoip_sip_core::types::session_expires::{Refresher, SessionExpires};
 
         const CALL_ID: &str = "direct-initial-invite-200";
         let (manager, mut session_events) = make_manager().await;
@@ -8154,17 +8328,21 @@ mod outbound_flow_handler_tests {
             source: dest_addr(5070),
         };
         manager.dialog_event_dispatch_worker_index(&ack, 8, &fallback);
-        assert!(manager
-            .transaction_dialog_route_hash
-            .contains_key(&invite_tx));
+        assert!(
+            manager
+                .transaction_dialog_route_hash
+                .contains_key(&invite_tx)
+        );
 
         manager
             .process_timed_global_transaction_event(Arc::new(ack))
             .await;
 
-        assert!(manager
-            .transaction_dialog_route_hash
-            .contains_key(&invite_tx));
+        assert!(
+            manager
+                .transaction_dialog_route_hash
+                .contains_key(&invite_tx)
+        );
 
         manager
             .process_timed_global_transaction_event(Arc::new(
@@ -8174,9 +8352,11 @@ mod outbound_flow_handler_tests {
             ))
             .await;
 
-        assert!(!manager
-            .transaction_dialog_route_hash
-            .contains_key(&invite_tx));
+        assert!(
+            !manager
+                .transaction_dialog_route_hash
+                .contains_key(&invite_tx)
+        );
     }
 
     #[tokio::test]
@@ -8454,12 +8634,16 @@ mod outbound_flow_handler_tests {
         );
         assert!(!manager.dialogs.contains_key(&dialog_id));
         assert!(!manager.transaction_to_dialog.contains_key(&transaction_id));
-        assert!(manager
-            .server_transactions_for_dialog(&dialog_id)
-            .is_empty());
-        assert!(!manager
-            .pending_response_transaction_by_dialog
-            .contains_key(&dialog_id));
+        assert!(
+            manager
+                .server_transactions_for_dialog(&dialog_id)
+                .is_empty()
+        );
+        assert!(
+            !manager
+                .pending_response_transaction_by_dialog
+                .contains_key(&dialog_id)
+        );
     }
 
     #[tokio::test]
@@ -8581,20 +8765,28 @@ mod outbound_flow_handler_tests {
         manager
             .transaction_dialog_route_hash
             .insert(server_bye.clone(), 0xB1E);
-        assert!(manager
-            .transaction_dialog_route_hash
-            .contains_key(&server_bye));
+        assert!(
+            manager
+                .transaction_dialog_route_hash
+                .contains_key(&server_bye)
+        );
         manager.retire_unowned_response_indexes(&dialog_id, &server_bye);
-        assert!(manager
-            .pending_response_transaction_for_dialog(&dialog_id)
-            .is_none());
-        assert!(!manager
-            .transaction_dialog_route_hash
-            .contains_key(&server_bye));
+        assert!(
+            manager
+                .pending_response_transaction_for_dialog(&dialog_id)
+                .is_none()
+        );
+        assert!(
+            !manager
+                .transaction_dialog_route_hash
+                .contains_key(&server_bye)
+        );
         assert!(manager.find_dialog_for_transaction(&server_bye).is_err());
-        assert!(manager
-            .server_transactions_for_dialog(&dialog_id)
-            .is_empty());
+        assert!(
+            manager
+                .server_transactions_for_dialog(&dialog_id)
+                .is_empty()
+        );
 
         manager.unlink_transaction_from_dialog_indexed(&client_invite);
         assert_eq!(manager.find_invite_transaction_for_dialog(&dialog_id), None);
@@ -8706,11 +8898,13 @@ mod outbound_flow_handler_tests {
 
         manager.start_outbound_ping(key.clone(), destination);
         assert!(!manager.outbound_flows.contains_key(&key));
-        assert!(!manager.start_outbound_ping_on_route(
-            key.clone(),
-            rvoip_sip_transport::TransportRoute::new(destination)
-                .with_transport_type(rvoip_sip_transport::transport::TransportType::Tcp),
-        ));
+        assert!(
+            !manager.start_outbound_ping_on_route(
+                key.clone(),
+                rvoip_sip_transport::TransportRoute::new(destination)
+                    .with_transport_type(rvoip_sip_transport::transport::TransportType::Tcp),
+            )
+        );
         assert!(!manager.outbound_flows.contains_key(&key));
     }
 }

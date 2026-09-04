@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -24,7 +24,7 @@ use rvoip_core::identity::IdentityAssurance;
 use rvoip_core::ids::ConnectionId;
 use rvoip_core::message::Message;
 use rvoip_core::stream::{MediaStream, MediaStreamHandle};
-use rvoip_core::{CapabilityDescriptor, NegotiatedCodecs};
+use rvoip_core::{CapabilityDescriptor, NegotiatedCodecs, Orchestrator};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
@@ -156,6 +156,7 @@ struct RuntimeEnvironment {
     adapter_events: mpsc::Sender<AdapterEvent>,
     vapi_events: broadcast::Sender<VapiEventEnvelope>,
     lifecycle: AdapterLifecycleSinkSlot,
+    orchestrator: Option<Weak<Orchestrator>>,
 }
 
 #[derive(Clone, Copy)]
@@ -186,6 +187,7 @@ pub struct VapiAdapter {
     adapter_events_rx: StdMutex<Option<mpsc::Receiver<AdapterEvent>>>,
     vapi_events: broadcast::Sender<VapiEventEnvelope>,
     lifecycle: AdapterLifecycleSinkSlot,
+    orchestrator: StdMutex<Option<Weak<Orchestrator>>>,
 }
 
 impl VapiAdapter {
@@ -202,6 +204,7 @@ impl VapiAdapter {
             adapter_events_rx: StdMutex::new(Some(adapter_events_rx)),
             vapi_events,
             lifecycle: AdapterLifecycleSinkSlot::default(),
+            orchestrator: StdMutex::new(None),
         }))
     }
 
@@ -337,7 +340,28 @@ impl VapiAdapter {
             adapter_events: self.adapter_events_tx.clone(),
             vapi_events: self.vapi_events.clone(),
             lifecycle: self.lifecycle.clone(),
+            orchestrator: self
+                .orchestrator
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
         }
+    }
+
+    pub(crate) fn bind_orchestrator(&self, orchestrator: &Arc<Orchestrator>) -> RvoipResult<()> {
+        let mut current = self
+            .orchestrator
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = current.as_ref().and_then(Weak::upgrade) {
+            if !Arc::ptr_eq(&existing, orchestrator) {
+                return Err(RvoipError::InvalidState(
+                    "Vapi adapter is already bound to another orchestrator",
+                ));
+            }
+        }
+        *current = Some(Arc::downgrade(orchestrator));
+        Ok(())
     }
 
     async fn activate_route(&self, route: Arc<Route>) -> RvoipResult<OutboundActivation> {
@@ -819,6 +843,7 @@ async fn activate_route_worker(
         adapter_events: environment.adapter_events.clone(),
         vapi_events: environment.vapi_events.clone(),
         lifecycle: environment.lifecycle.clone(),
+        orchestrator: environment.orchestrator.clone(),
     };
     let task_route = Arc::clone(&route);
     // M4: every media log line inside this task — the overflow warnings, the
@@ -835,6 +860,7 @@ async fn activate_route_worker(
             let outcome = run_websocket_session(
                 &runtime_environment.config,
                 &runtime_environment.vapi_events,
+                runtime_environment.orchestrator.as_ref(),
                 &task_route,
                 socket,
                 outgoing,
@@ -982,6 +1008,7 @@ async fn run_socket_writer(
 async fn run_websocket_session(
     config: &VapiConfig,
     global_events: &broadcast::Sender<VapiEventEnvelope>,
+    orchestrator: Option<&Weak<Orchestrator>>,
     route: &Arc<Route>,
     socket: VapiSocket,
     mut outgoing: mpsc::Receiver<rvoip_core::MediaFrame>,
@@ -1298,16 +1325,31 @@ async fn run_websocket_session(
                             // stale: without dropping it, the jitter buffer's
                             // depth becomes the barge-in latency floor and the
                             // agent talks over the interruption.
-                            let stale = incoming_frames.len();
-                            if stale > 0 {
+                            let mut stale = incoming_frames.len();
+                            if !incoming_frames.is_empty() {
                                 incoming_frames.clear();
                                 incoming_framer.reset();
-                                barge_in_dropped = barge_in_dropped.saturating_add(stale as u64);
-                                route.health.add_barge_in_dropped(stale as u64);
-                                metrics::counter!("rvoip_vapi_barge_in_frames_dropped_total")
-                                    .increment(stale as u64);
                             }
-                            route.stream.request_flush();
+                            stale = stale.saturating_add(route.stream.request_flush());
+                            if let Some(orchestrator) = orchestrator.and_then(Weak::upgrade) {
+                                match orchestrator.flush_media_graph(&route.connection_id).await {
+                                    Some(graph_stale) => {
+                                        stale = stale.saturating_add(graph_stale);
+                                    }
+                                    None => {
+                                        warn!(
+                                            "Vapi barge-in could not flush the media graph"
+                                        );
+                                    }
+                                }
+                            }
+                            if stale > 0 {
+                                let stale = stale as u64;
+                                barge_in_dropped = barge_in_dropped.saturating_add(stale);
+                                route.health.add_barge_in_dropped(stale);
+                                metrics::counter!("rvoip_vapi_barge_in_frames_dropped_total")
+                                    .increment(stale);
+                            }
                         }
                         publish_vapi_event(global_events, route, event);
                         if terminal {

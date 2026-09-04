@@ -495,6 +495,49 @@ mod tests {
     }
 
     #[test]
+    fn tolerant_parser_keeps_reports_around_unmodeled_feedback() {
+        let sender = RtcpSenderReport::new(0x1111_1111);
+        let mut description = RtcpSourceDescription::new();
+        let mut chunk = super::super::RtcpSdesChunk::new(0x1111_1111);
+        chunk.add_item(RtcpSdesItem::new(
+            RtcpSdesItemType::CName,
+            "carrier@example.test".to_string(),
+        ));
+        description.add_chunk(chunk);
+        let feedback = RtcpUnknownPacket {
+            packet_type: 205,
+            count: 1,
+            payload: Bytes::from_static(&[0xaa, 0xbb, 0xcc, 0xdd]),
+            padding: Bytes::new(),
+        };
+        let receiver = RtcpReceiverReport::new(0x2222_2222);
+        let wire = RtcpTolerantCompoundPacket {
+            packets: vec![
+                RtcpCompoundMember::Known(RtcpPacket::SenderReport(sender)),
+                RtcpCompoundMember::Known(RtcpPacket::SourceDescription(description)),
+                RtcpCompoundMember::Unknown(feedback),
+                RtcpCompoundMember::Known(RtcpPacket::ReceiverReport(receiver)),
+            ],
+        }
+        .serialize()
+        .unwrap();
+
+        let parsed = RtcpCompoundPacket::parse_tolerant(&wire).unwrap();
+        assert!(matches!(
+            parsed.packets.as_slice(),
+            [
+                RtcpCompoundMember::Known(RtcpPacket::SenderReport(_)),
+                RtcpCompoundMember::Known(RtcpPacket::SourceDescription(_)),
+                RtcpCompoundMember::Unknown(RtcpUnknownPacket {
+                    packet_type: 205,
+                    ..
+                }),
+                RtcpCompoundMember::Known(RtcpPacket::ReceiverReport(_)),
+            ]
+        ));
+    }
+
+    #[test]
     fn malformed_compound_packets_remain_errors() {
         let rr = [0x80, 201, 0, 1, 0x12, 0x34, 0x56, 0x78];
 

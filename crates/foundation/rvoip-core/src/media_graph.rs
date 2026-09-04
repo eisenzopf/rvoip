@@ -1465,6 +1465,10 @@ struct GraphStats {
     /// Frames consumed while the graph had no sinks at all. Distinguishes a
     /// blackholed media path from a quiet source.
     sinkless_frames: u64,
+    /// Whether the current contiguous sinkless episode has already emitted
+    /// its operator warning. Media arrives every few milliseconds, so logging
+    /// every discarded frame would hide the diagnosis in its own flood.
+    sinkless_episode_reported: bool,
     sink_offers: u64,
     dropped_frames: u64,
     evictions: u64,
@@ -1840,6 +1844,7 @@ fn start_media_graph_with_activity_interval(
                                 let mut terminal = Vec::new();
                                 while let Some(frame) = pre_sink_buffer.pop_front() {
                                     terminal.extend(route_source_frame(
+                                        &graph_id_for_task,
                                         frame,
                                         source_pt,
                                         &policy,
@@ -2136,6 +2141,7 @@ fn start_media_graph_with_activity_interval(
                         }
                     } else {
                         let terminal = route_source_frame(
+                            &graph_id_for_task,
                             frame,
                             source_pt,
                             &policy,
@@ -2307,6 +2313,7 @@ fn publish_actor_snapshot(
 /// per codec group, while each sink advances its own RTP clock so a group
 /// re-key cannot reset that route's timestamp epoch.
 fn route_source_frame(
+    graph_id: &MediaGraphId,
     frame: MediaFrame,
     source_pt: u8,
     policy: &MediaGraphPolicy,
@@ -2324,8 +2331,18 @@ fn route_source_frame(
         // way with no counter to point at.
         stats.sinkless_frames = stats.sinkless_frames.saturating_add(1);
         metrics::counter!("rvoip_media_graph_sinkless_frames_total").increment(1);
+        if !stats.sinkless_episode_reported {
+            stats.sinkless_episode_reported = true;
+            tracing::warn!(
+                graph_id = %graph_id,
+                sinkless_frames = stats.sinkless_frames,
+                "media graph has no sinks; discarding source frames until a route is attached"
+            );
+        }
         return Vec::new();
     }
+    // A later loss of every route is a new operator-visible episode.
+    stats.sinkless_episode_reported = false;
     let now = Instant::now();
     let mut evict = Vec::new();
     let mut closed = Vec::new();

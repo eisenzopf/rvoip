@@ -1461,6 +1461,24 @@ fn candidate_transport_token(
     }
 }
 
+/// Retarget a direct dialog to the validated packet source retained at
+/// admission time. An explicit Route set always wins; the override exists
+/// only for peers whose Contact advertised an unspecified/NAT-only address.
+pub(crate) fn apply_observed_source(
+    observed_source: Option<SocketAddr>,
+    route_set_is_empty: bool,
+    candidates: &mut Vec<rvoip_sip_transport::resolver::ResolvedTarget>,
+) {
+    if !route_set_is_empty {
+        return;
+    }
+    if let (Some(observed_source), Some(candidate)) = (observed_source, candidates.first_mut()) {
+        candidate.addr = observed_source;
+        candidate.expires = None;
+        candidates.truncate(1);
+    }
+}
+
 fn finalize_request_for_candidate(
     manager: &DialogManager,
     request: &Request,
@@ -1959,7 +1977,12 @@ impl DialogManager {
                         "Outbound request contains an unusable Route header",
                     )
                 })?;
-        let candidates = self.resolve_uri_to_candidates(&next_hop).await;
+        let (observed_source, route_set_is_empty) = {
+            let dialog = self.get_dialog(dialog_id)?;
+            (dialog.last_known_remote_addr, dialog.route_set.is_empty())
+        };
+        let mut candidates = self.resolve_uri_to_candidates(&next_hop).await;
+        apply_observed_source(observed_source, route_set_is_empty, &mut candidates);
         if candidates.is_empty() {
             return Err(crate::errors::DialogError::routing_error(
                 "No address candidates for the exact request next hop",
@@ -2386,15 +2409,11 @@ impl DialogManager {
             // preserve the Contact-derived URI on the wire as Request-URI.
             // Reusing the resolved candidate's transport also preserves UDP,
             // TCP, or TLS selection without inventing transport state here.
-            if template.route_set.is_empty() {
-                if let (Some(observed_source), Some(candidate)) =
-                    (dialog.last_known_remote_addr, candidates.first_mut())
-                {
-                    candidate.addr = observed_source;
-                    candidate.expires = None;
-                    candidates.truncate(1);
-                }
-            }
+            apply_observed_source(
+                dialog.last_known_remote_addr,
+                template.route_set.is_empty(),
+                &mut candidates,
+            );
 
             if candidates.is_empty() {
                 return Err(crate::errors::DialogError::routing_error(

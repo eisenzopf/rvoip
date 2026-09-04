@@ -252,8 +252,8 @@ async fn two_sessions_on_one_peer_get_distinct_exact_media_routes() {
     let server_two = adapter.streams(core_two).await.unwrap().pop().unwrap();
     assert_eq!(server_one.id().as_str(), "strm_one");
     assert_eq!(server_two.id().as_str(), "strm_two");
-    let mut receive_one = server_one.frames_in();
-    let mut receive_two = server_two.frames_in();
+    let mut receive_one = server_one.try_frames_in().unwrap();
+    let mut receive_two = server_two.try_frames_in().unwrap();
 
     let codec = rvoip_core::capability::CodecInfo::from_name_with_defaults("opus");
     let client_one = QuicDatagramMediaStream::start(
@@ -361,7 +361,7 @@ async fn pcma_negotiates_over_real_quic_and_keeps_pcma_media_identity() {
     assert_eq!(server_stream.codec().name, "g.711-a");
     assert_eq!(server_stream.codec().clock_rate_hz, 8_000);
     assert_eq!(server_stream.codec().channels, 1);
-    let mut received = server_stream.frames_in();
+    let mut received = server_stream.try_frames_in().unwrap();
 
     let codec = rvoip_core::capability::CodecInfo::from_name_with_defaults("g.711-a");
     let client_stream = QuicDatagramMediaStream::start(

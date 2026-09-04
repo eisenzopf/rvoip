@@ -200,6 +200,10 @@ pub trait MediaStream: Send + Sync {
     /// it has already been acquired. New orchestration code should use
     /// [`Self::try_frames_in`] so duplicate acquisition is reported rather
     /// than silently behaving like end-of-stream.
+    #[deprecated(
+        since = "0.3.9",
+        note = "use try_frames_in or reserve_frames_in so duplicate ownership is observable"
+    )]
     fn frames_in(&self) -> mpsc::Receiver<MediaFrame>;
 
     /// Fallibly acquire the stream's single-consumer inbound receiver.
@@ -209,6 +213,7 @@ pub trait MediaStream: Send + Sync {
     /// override this method and return [`crate::error::RvoipError::InvalidState`]
     /// when ownership has already been transferred.
     fn try_frames_in(&self) -> Result<mpsc::Receiver<MediaFrame>> {
+        #[allow(deprecated)]
         Ok(self.frames_in())
     }
 
