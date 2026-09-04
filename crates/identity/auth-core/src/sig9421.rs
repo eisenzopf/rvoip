@@ -27,7 +27,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use ring::signature::{UnparsedPublicKey, ED25519};
+use ring::signature::{ED25519, UnparsedPublicKey};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -774,6 +774,134 @@ mod tests {
         assert_eq!(
             store.consume(&context, "first", expiry, now).await,
             Err(ReplayConsumeError::AlreadyConsumed)
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_store_rejects_replay_across_two_verifier_instances() {
+        let (kp, pubkey) = signing_keypair();
+        let mut resolver = StaticKeyResolver::new();
+        resolver.insert("key:agent-1", pubkey);
+        let resolver: Arc<dyn KeyResolver> = Arc::new(resolver);
+        let replay_store: Arc<dyn SignatureReplayStore> =
+            Arc::new(InMemorySignatureReplayStore::new(8).unwrap());
+        let now = Utc::now();
+        let make_verifier = || {
+            Sig9421Verifier::with_security_dependencies(
+                Arc::clone(&resolver),
+                Arc::clone(&replay_store),
+                Arc::new(FixedClock(now)),
+                DEFAULT_SIG_REPLAY_TTL,
+                DEFAULT_SIG_CLOCK_SKEW,
+                DEFAULT_MAX_SIGNED_ENVELOPE_BYTES,
+            )
+            .unwrap()
+        };
+        let first_server = make_verifier();
+        let second_server = make_verifier();
+        let mut env = build_envelope();
+        env["ts"] = serde_json::json!(now.to_rfc3339());
+        sign_envelope(&mut env, "key:agent-1", &kp);
+
+        first_server
+            .verify(&env)
+            .await
+            .expect("first server accepts");
+        assert!(matches!(
+            second_server.verify(&env).await,
+            Err(Sig9421Error::ReplayDetected(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn rotated_key_accepts_current_and_rejects_revoked_generation() {
+        let (old_kp, old_public_key) = signing_keypair();
+        let (current_kp, current_public_key) = signing_keypair();
+        let verification_context = context("tenant-a");
+        let mut revoked = resolved_key(old_public_key);
+        revoked.revoked = true;
+        let mut resolver = StaticKeyResolver::new();
+        resolver.insert_contextual(&verification_context, "signing-key:old", revoked);
+        resolver.insert_contextual(
+            &verification_context,
+            "signing-key:current",
+            resolved_key(current_public_key),
+        );
+        let verifier = Sig9421Verifier::new(Arc::new(resolver));
+
+        let mut old_envelope = build_envelope();
+        sign_envelope(&mut old_envelope, "signing-key:old", &old_kp);
+        assert!(matches!(
+            verifier
+                .verify_with_context(&old_envelope, &verification_context)
+                .await,
+            Err(Sig9421Error::KeyRejected)
+        ));
+
+        let mut current_envelope = build_envelope();
+        current_envelope["id"] = serde_json::json!("env_sig_test_current");
+        sign_envelope(&mut current_envelope, "signing-key:current", &current_kp);
+        verifier
+            .verify_with_context(&current_envelope, &verification_context)
+            .await
+            .expect("current key generation verifies");
+    }
+
+    #[tokio::test]
+    async fn malformed_and_oversized_envelopes_fail_closed() {
+        let verifier = Sig9421Verifier::new(Arc::new(StaticKeyResolver::new()));
+        assert!(matches!(
+            verifier
+                .verify(&serde_json::json!(["not", "an", "object"]))
+                .await,
+            Err(Sig9421Error::MalformedEnvelope)
+        ));
+
+        let (kp, pubkey) = signing_keypair();
+        let mut resolver = StaticKeyResolver::new();
+        resolver.insert("key:agent-1", pubkey);
+        let verifier = Sig9421Verifier::with_security_dependencies(
+            Arc::new(resolver),
+            Arc::new(InMemorySignatureReplayStore::new(8).unwrap()),
+            Arc::new(SystemSignatureClock),
+            DEFAULT_SIG_REPLAY_TTL,
+            DEFAULT_SIG_CLOCK_SKEW,
+            128,
+        )
+        .unwrap();
+        let mut envelope = build_envelope();
+        envelope["payload"]["oversized"] = serde_json::json!("x".repeat(1024));
+        sign_envelope(&mut envelope, "key:agent-1", &kp);
+        assert!(matches!(
+            verifier.verify(&envelope).await,
+            Err(Sig9421Error::EnvelopeTooLarge)
+        ));
+    }
+
+    #[tokio::test]
+    async fn published_cross_language_fixture_is_byte_exact() {
+        const SEED_HEX: &str = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
+        const PUBLIC_HEX: &str = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+        const CANONICAL: &str = "{\"id\":\"env_cross_language_1\",\"payload\":{\"a\":2,\"admin\":false,\"emoji\":\"😀\",\"z\":1},\"ts\":\"2030-01-02T03:04:05Z\",\"type\":\"tool.invoke\",\"v\":1}";
+        const SIGNATURE: &str = "Mfs4cn9KID7Aj8dleUs_97zDyANiuvMZ6wuvPWv9N4QZxTALhQs7r5G6OIhyMOGPFDsYONwUCcI2sQe5D6gWBg";
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/sig9421-cross-language-v1.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["private_seed_hex"], SEED_HEX);
+        assert_eq!(fixture["public_key_hex"], PUBLIC_HEX);
+        assert_eq!(fixture["canonical_utf8"], CANONICAL);
+        assert_eq!(fixture["signature_base64url_no_pad"], SIGNATURE);
+
+        let seed = hex::decode(SEED_HEX).unwrap();
+        let keypair = Ed25519KeyPair::from_seed_unchecked(&seed).unwrap();
+        assert_eq!(hex::encode(keypair.public_key().as_ref()), PUBLIC_HEX);
+        let envelope: serde_json::Value = serde_json::from_str(CANONICAL).unwrap();
+        assert_eq!(jcs_canonicalize(&envelope), CANONICAL);
+        assert_eq!(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(keypair.sign(CANONICAL.as_bytes()).as_ref()),
+            SIGNATURE
         );
     }
 

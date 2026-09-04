@@ -1,0 +1,19 @@
+{
+  "schema": "rvoip-sig9421-cross-language-fixture-v1",
+  "private_seed_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+  "public_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+  "unsigned_envelope": {
+    "v": 1,
+    "type": "tool.invoke",
+    "id": "env_cross_language_1",
+    "ts": "2030-01-02T03:04:05Z",
+    "payload": {
+      "z": 1,
+      "emoji": "😀",
+      "admin": false,
+      "a": 2
+    }
+  },
+  "canonical_utf8": "{\"id\":\"env_cross_language_1\",\"payload\":{\"a\":2,\"admin\":false,\"emoji\":\"😀\",\"z\":1},\"ts\":\"2030-01-02T03:04:05Z\",\"type\":\"tool.invoke\",\"v\":1}",
+  "signature_base64url_no_pad": "Mfs4cn9KID7Aj8dleUs_97zDyANiuvMZ6wuvPWv9N4QZxTALhQs7r5G6OIhyMOGPFDsYONwUCcI2sQe5D6gWBg"
+}

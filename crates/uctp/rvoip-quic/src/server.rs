@@ -22,13 +22,13 @@ use rvoip_core::stream::{MediaStream, StreamKind};
 use crate::adapter::Route;
 use crate::media_stream::QuicDatagramMediaStream;
 
-use rvoip_uctp::envelope::UctpEnvelope;
-use rvoip_uctp::state::{UctpCoordinator, UctpSessionEvent, ENVELOPE_CHANNEL_CAP};
-use rvoip_uctp::substrate::{
-    envelope_reader, envelope_writer, PeerMediaConnectionKey, PeerMediaFanoutKey,
-    PeerMediaRegistration, PeerMediaRouteKey, PeerMediaRouter,
-};
 use rvoip_uctp::CorrelationIdDiagnostic;
+use rvoip_uctp::envelope::UctpEnvelope;
+use rvoip_uctp::state::{ENVELOPE_CHANNEL_CAP, UctpCoordinator, UctpSessionEvent};
+use rvoip_uctp::substrate::{
+    PeerMediaConnectionKey, PeerMediaFanoutKey, PeerMediaRegistration, PeerMediaRouteKey,
+    PeerMediaRouter, envelope_reader, envelope_writer,
+};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -434,7 +434,7 @@ async fn spawn_peer_session(
         );
     let drain_grace = coordinator_caps.signaling_send_timeout;
     let coord = if let Some(sig9421) = sig9421 {
-        UctpCoordinator::start_full_with_sig9421(
+        UctpCoordinator::start_full_with_sig9421_context(
             "quic",
             in_rx,
             out_tx,
@@ -442,6 +442,7 @@ async fn spawn_peer_session(
             bearer,
             sig9421.verifier,
             sig9421.policy,
+            sig9421.verification_context,
             Arc::new(rvoip_uctp::state::default_v0_descriptor()),
             subscription_handler,
             coordinator_caps,
