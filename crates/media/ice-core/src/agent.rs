@@ -41,7 +41,9 @@ impl Credentials {
         use rand::Rng;
         let mut rng = rand::thread_rng();
         let take = |n: usize, rng: &mut rand::rngs::ThreadRng| -> String {
-            (0..n).map(|_| char::from(rng.sample(Alphanumeric))).collect()
+            (0..n)
+                .map(|_| char::from(rng.sample(Alphanumeric)))
+                .collect()
         };
         Self {
             ufrag: take(8, &mut rng),
@@ -357,7 +359,12 @@ impl IceAgent {
         self.remote_credentials = Some(credentials);
         let early = std::mem::take(&mut self.early_checks);
         for check in early {
-            self.note_inbound_check(check.local, check.source, check.priority, check.use_candidate);
+            self.note_inbound_check(
+                check.local,
+                check.source,
+                check.priority,
+                check.use_candidate,
+            );
         }
     }
 
@@ -549,7 +556,9 @@ impl IceAgent {
                     self.select(key);
                 }
             }
-            CheckState::InProgress | CheckState::Waiting | CheckState::Frozen
+            CheckState::InProgress
+            | CheckState::Waiting
+            | CheckState::Frozen
             | CheckState::Failed => {
                 // RFC 8445 §7.3.1.4: a failed pair is given another chance by
                 // a triggered check; frozen/waiting are simply expedited.
@@ -779,10 +788,7 @@ impl IceAgent {
     }
 
     fn maybe_nominate(&mut self, now: Instant) {
-        if self.role != IceRole::Controlling
-            || self.nomination_sent
-            || self.selected.is_some()
-        {
+        if self.role != IceRole::Controlling || self.nomination_sent || self.selected.is_some() {
             return;
         }
         let Some(first_valid) = self.first_valid_at else {
@@ -916,15 +922,19 @@ impl IceAgent {
         if !self.config.lite {
             let work = self.remote_credentials.is_some()
                 && (!self.triggered.is_empty()
-                    || self.pairs.iter().any(|pair| pair.state == CheckState::Waiting));
+                    || self
+                        .pairs
+                        .iter()
+                        .any(|pair| pair.state == CheckState::Waiting));
             if work {
                 consider(Some(self.next_check_at.unwrap_or(now)));
             }
-            if self.role == IceRole::Controlling
-                && !self.nomination_sent
-                && self.selected.is_none()
+            if self.role == IceRole::Controlling && !self.nomination_sent && self.selected.is_none()
             {
-                consider(self.first_valid_at.map(|t| t + self.config.nomination_delay));
+                consider(
+                    self.first_valid_at
+                        .map(|t| t + self.config.nomination_delay),
+                );
             }
             consider(self.next_keepalive_at);
             if self.selected.is_some() && !self.consent_expired {
@@ -991,9 +1001,10 @@ impl IceAgent {
     }
 
     fn concluded(&self) -> bool {
-        self.pairs.iter().all(|pair| {
-            matches!(pair.state, CheckState::Succeeded | CheckState::Failed)
-        }) && self.in_flight.iter().all(|flight| flight.consent)
+        self.pairs
+            .iter()
+            .all(|pair| matches!(pair.state, CheckState::Succeeded | CheckState::Failed))
+            && self.in_flight.iter().all(|flight| flight.consent)
             && self.triggered.is_empty()
     }
 
@@ -1002,7 +1013,10 @@ impl IceAgent {
             return;
         }
         let all_failed = !self.pairs.is_empty()
-            && self.pairs.iter().all(|pair| pair.state == CheckState::Failed);
+            && self
+                .pairs
+                .iter()
+                .all(|pair| pair.state == CheckState::Failed);
         if all_failed && self.triggered.is_empty() && self.selected.is_none() {
             self.set_state(IceState::Failed);
         }

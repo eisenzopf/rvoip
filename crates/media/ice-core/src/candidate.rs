@@ -114,7 +114,12 @@ impl Candidate {
 
     /// A peer-reflexive candidate learned from an inbound check's source.
     #[must_use]
-    pub fn peer_reflexive(addr: SocketAddr, base: SocketAddr, component: u8, priority: u32) -> Self {
+    pub fn peer_reflexive(
+        addr: SocketAddr,
+        base: SocketAddr,
+        component: u8,
+        priority: u32,
+    ) -> Self {
         Self {
             foundation: foundation(CandidateKind::PeerReflexive, addr, None),
             component,

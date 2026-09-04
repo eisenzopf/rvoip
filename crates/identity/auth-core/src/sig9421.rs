@@ -27,7 +27,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use ring::signature::{ED25519, UnparsedPublicKey};
+use ring::signature::{UnparsedPublicKey, ED25519};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 

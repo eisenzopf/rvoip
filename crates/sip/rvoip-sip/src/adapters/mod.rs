@@ -1,7 +1,7 @@
 // Adapters for dialog and media integration
 pub mod dialog_adapter;
-pub mod ice_adapter;
 pub mod dtls_negotiator;
+pub mod ice_adapter;
 pub mod media_adapter;
 pub(crate) mod outbound_request_tracker;
 pub mod registration_adapter;

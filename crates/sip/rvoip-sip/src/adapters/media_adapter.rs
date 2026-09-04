@@ -2310,7 +2310,8 @@ impl MediaAdapter {
         // detected mismatch means a middlebox rewrote the SDP after the
         // peer built it; ICE stands down for this call rather than fighting
         // the box that owns the path.
-        let remote_ice = if self.ice_policy != crate::adapters::ice_adapter::SipIcePolicy::Disabled {
+        let remote_ice = if self.ice_policy != crate::adapters::ice_adapter::SipIcePolicy::Disabled
+        {
             match crate::adapters::ice_adapter::extract_remote_ice(&parsed_offer) {
                 Some(remote) if remote.mismatch => {
                     tracing::warn!(
@@ -2510,7 +2511,14 @@ impl MediaAdapter {
             (Some(_), Some(dialog_id)) => {
                 let host_addr = SocketAddr::new(self.local_ip, local_port);
                 let public_sock = public.map(|sa| {
-                    SocketAddr::new(sa.ip(), if sa.port() != 0 { sa.port() } else { local_port })
+                    SocketAddr::new(
+                        sa.ip(),
+                        if sa.port() != 0 {
+                            sa.port()
+                        } else {
+                            local_port
+                        },
+                    )
                 });
                 self.ice
                     .ensure_local(
@@ -2573,8 +2581,8 @@ impl MediaAdapter {
                 .ice_ufrag(&material.ufrag)
                 .ice_pwd(&material.pwd);
             for candidate in &material.candidates {
-                media_builder =
-                    media_builder.ice_candidate(crate::adapters::ice_adapter::format_candidate(candidate));
+                media_builder = media_builder
+                    .ice_candidate(crate::adapters::ice_adapter::format_candidate(candidate));
             }
         }
         // Emit rtpmap/fmtp ONLY for the one primary and any auxiliary
@@ -3777,26 +3785,34 @@ impl MediaAdapter {
         // The classic advertise logic above stays authoritative for the
         // default `c=`/`m=` destination, so a peer without ICE lands on
         // exactly the address it always did.
-        let ice_material = if self.ice_policy != crate::adapters::ice_adapter::SipIcePolicy::Disabled {
-            let local_port = info.rtp_port.unwrap_or(info.config.local_addr.port());
-            let host_addr = SocketAddr::new(self.local_ip, local_port);
-            let public_sock = public.map(|sa| {
-                SocketAddr::new(sa.ip(), if sa.port() != 0 { sa.port() } else { local_port })
-            });
-            self.ice
-                .ensure_local(
-                    &session_id,
-                    dialog_id,
-                    &self.controller,
-                    self.ice_policy,
-                    true,
-                    host_addr,
-                    public_sock,
-                )
-                .await
-        } else {
-            None
-        };
+        let ice_material =
+            if self.ice_policy != crate::adapters::ice_adapter::SipIcePolicy::Disabled {
+                let local_port = info.rtp_port.unwrap_or(info.config.local_addr.port());
+                let host_addr = SocketAddr::new(self.local_ip, local_port);
+                let public_sock = public.map(|sa| {
+                    SocketAddr::new(
+                        sa.ip(),
+                        if sa.port() != 0 {
+                            sa.port()
+                        } else {
+                            local_port
+                        },
+                    )
+                });
+                self.ice
+                    .ensure_local(
+                        &session_id,
+                        dialog_id,
+                        &self.controller,
+                        self.ice_policy,
+                        true,
+                        host_addr,
+                        public_sock,
+                    )
+                    .await
+            } else {
+                None
+            };
 
         // Profile + crypto. RFC 4568 §3.1.4 — `RTP/SAVP` is mandatory
         // when offering SDES.
@@ -3860,8 +3876,8 @@ impl MediaAdapter {
                 .ice_ufrag(&material.ufrag)
                 .ice_pwd(&material.pwd);
             for candidate in &material.candidates {
-                media_builder =
-                    media_builder.ice_candidate(crate::adapters::ice_adapter::format_candidate(candidate));
+                media_builder = media_builder
+                    .ice_candidate(crate::adapters::ice_adapter::format_candidate(candidate));
             }
         }
         for (pt, pt_str) in format_pts.iter().zip(format_strings.iter()) {

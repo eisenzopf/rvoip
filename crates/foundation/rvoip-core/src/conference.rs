@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 
 use crate::error::{Result, RvoipError};
@@ -460,10 +460,7 @@ mod tests {
         // companding error.
         let near = |actual: i16, expected: i16| {
             let error = i32::from(actual) - i32::from(expected);
-            assert!(
-                error.abs() < 300,
-                "expected about {expected}, got {actual}"
-            );
+            assert!(error.abs() < 300, "expected about {expected}, got {actual}");
         };
 
         // The loud member hears only the quiet one.

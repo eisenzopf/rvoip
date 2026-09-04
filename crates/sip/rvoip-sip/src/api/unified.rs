@@ -10135,9 +10135,7 @@ impl UnifiedCoordinator {
     }
 
     /// Playout smoothing and concealment posture for inbound media.
-    pub(crate) const fn playout_policy(
-        &self,
-    ) -> Option<crate::PlayoutConfig> {
+    pub(crate) const fn playout_policy(&self) -> Option<crate::PlayoutConfig> {
         self.config.playout
     }
 

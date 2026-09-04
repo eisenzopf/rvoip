@@ -248,50 +248,73 @@ fn full(role: IceRole, ufrag: &str, tie: u64) -> AgentConfig {
 
 #[test]
 fn two_direct_agents_complete_and_agree() {
-    let mut a = Host::new("a", "198.51.100.1:5004", full(IceRole::Controlling, "aaaa", 10));
-    let mut b = Host::new("b", "198.51.100.2:5004", full(IceRole::Controlled, "bbbb", 5));
+    let mut a = Host::new(
+        "a",
+        "198.51.100.1:5004",
+        full(IceRole::Controlling, "aaaa", 10),
+    );
+    let mut b = Host::new(
+        "b",
+        "198.51.100.2:5004",
+        full(IceRole::Controlled, "bbbb", 5),
+    );
     signal(&mut a, &mut b);
     let mut sim = Sim::new(a, b);
     assert!(
         sim.run_until(Duration::from_secs(5), |sim| {
-            sim.a.agent.state() == IceState::Completed
-                && sim.b.agent.state() == IceState::Completed
+            sim.a.agent.state() == IceState::Completed && sim.b.agent.state() == IceState::Completed
         }),
         "both agents complete"
     );
     assert_eq!(
         sim.a.selected().unwrap(),
-        ("198.51.100.1:5004".parse().unwrap(), "198.51.100.2:5004".parse().unwrap())
+        (
+            "198.51.100.1:5004".parse().unwrap(),
+            "198.51.100.2:5004".parse().unwrap()
+        )
     );
     assert_eq!(
         sim.b.selected().unwrap(),
-        ("198.51.100.2:5004".parse().unwrap(), "198.51.100.1:5004".parse().unwrap())
+        (
+            "198.51.100.2:5004".parse().unwrap(),
+            "198.51.100.1:5004".parse().unwrap()
+        )
     );
 }
 
 #[test]
 fn a_lite_server_admits_a_natted_full_client() {
-    let server = Host::new("server", "198.51.100.5:5004", AgentConfig::lite(creds("srvr", "server-password-of-22char")));
+    let server = Host::new(
+        "server",
+        "198.51.100.5:5004",
+        AgentConfig::lite(creds("srvr", "server-password-of-22char")),
+    );
     let mut nat = Nat::new("203.0.113.9");
     let client_inside: SocketAddr = "10.0.0.2:5004".parse().unwrap();
     let mapped = nat.mapping_for(client_inside);
-    let mut client = Host::new("client", "10.0.0.2:5004", full(IceRole::Controlling, "clnt", 99)).behind(nat);
+    let mut client = Host::new(
+        "client",
+        "10.0.0.2:5004",
+        full(IceRole::Controlling, "clnt", 99),
+    )
+    .behind(nat);
     // The client signals host + srflx, the server only its public host —
     // exactly what the SDP exchange would carry.
-    client.agent.add_local_candidate(Candidate::server_reflexive(
-        mapped,
-        client_inside,
-        "192.0.2.250:3478".parse().unwrap(),
-        1,
-        65_534,
-    ));
+    client
+        .agent
+        .add_local_candidate(Candidate::server_reflexive(
+            mapped,
+            client_inside,
+            "192.0.2.250:3478".parse().unwrap(),
+            1,
+            65_534,
+        ));
     let mut server = server;
     signal(&mut client, &mut server);
     let mut sim = Sim::new(client, server);
     assert!(
         sim.run_until(Duration::from_secs(5), |sim| {
-            sim.a.agent.state() == IceState::Completed
-                && sim.b.agent.state() == IceState::Completed
+            sim.a.agent.state() == IceState::Completed && sim.b.agent.state() == IceState::Completed
         }),
         "client and lite server complete"
     );
@@ -308,8 +331,16 @@ fn a_lite_server_admits_a_natted_full_client() {
 
 #[test]
 fn a_lost_first_check_is_retransmitted_to_success() {
-    let mut a = Host::new("a", "198.51.100.1:5004", full(IceRole::Controlling, "aaaa", 10));
-    let mut b = Host::new("b", "198.51.100.2:5004", full(IceRole::Controlled, "bbbb", 5));
+    let mut a = Host::new(
+        "a",
+        "198.51.100.1:5004",
+        full(IceRole::Controlling, "aaaa", 10),
+    );
+    let mut b = Host::new(
+        "b",
+        "198.51.100.2:5004",
+        full(IceRole::Controlled, "bbbb", 5),
+    );
     signal(&mut a, &mut b);
     let mut sim = Sim::new(a, b);
     let drop_first_request = std::cell::Cell::new(true);
@@ -326,8 +357,7 @@ fn a_lost_first_check_is_retransmitted_to_success() {
     });
     assert!(
         sim.run_until(Duration::from_secs(10), |sim| {
-            sim.a.agent.state() == IceState::Completed
-                && sim.b.agent.state() == IceState::Completed
+            sim.a.agent.state() == IceState::Completed && sim.b.agent.state() == IceState::Completed
         }),
         "retransmission recovers the lost check"
     );
@@ -335,19 +365,34 @@ fn a_lost_first_check_is_retransmitted_to_success() {
 
 #[test]
 fn both_controlling_repairs_by_tiebreaker_and_completes() {
-    let mut a = Host::new("a", "198.51.100.1:5004", full(IceRole::Controlling, "aaaa", 100));
-    let mut b = Host::new("b", "198.51.100.2:5004", full(IceRole::Controlling, "bbbb", 7));
+    let mut a = Host::new(
+        "a",
+        "198.51.100.1:5004",
+        full(IceRole::Controlling, "aaaa", 100),
+    );
+    let mut b = Host::new(
+        "b",
+        "198.51.100.2:5004",
+        full(IceRole::Controlling, "bbbb", 7),
+    );
     signal(&mut a, &mut b);
     let mut sim = Sim::new(a, b);
     assert!(
         sim.run_until(Duration::from_secs(10), |sim| {
-            sim.a.agent.state() == IceState::Completed
-                && sim.b.agent.state() == IceState::Completed
+            sim.a.agent.state() == IceState::Completed && sim.b.agent.state() == IceState::Completed
         }),
         "role conflict repairs and completes"
     );
-    let a_changed = sim.a.events.iter().any(|e| matches!(e, IceEvent::RoleChanged(_)));
-    let b_changed = sim.b.events.iter().any(|e| matches!(e, IceEvent::RoleChanged(_)));
+    let a_changed = sim
+        .a
+        .events
+        .iter()
+        .any(|e| matches!(e, IceEvent::RoleChanged(_)));
+    let b_changed = sim
+        .b
+        .events
+        .iter()
+        .any(|e| matches!(e, IceEvent::RoleChanged(_)));
     assert!(
         a_changed ^ b_changed,
         "exactly one side must repair its role (a: {a_changed}, b: {b_changed})"
@@ -359,7 +404,11 @@ fn both_controlling_repairs_by_tiebreaker_and_completes() {
 
 #[test]
 fn an_unsignaled_natted_peer_is_learned_as_prflx() {
-    let a = Host::new("a", "198.51.100.1:5004", full(IceRole::Controlling, "aaaa", 10));
+    let a = Host::new(
+        "a",
+        "198.51.100.1:5004",
+        full(IceRole::Controlling, "aaaa", 10),
+    );
     let nat = Nat::new("203.0.113.20");
     let b = Host::new("b", "10.0.0.7:5004", full(IceRole::Controlled, "bbbb", 5)).behind(nat);
     let mut a = a;
@@ -370,8 +419,7 @@ fn an_unsignaled_natted_peer_is_learned_as_prflx() {
     let mut sim = Sim::new(a, b);
     assert!(
         sim.run_until(Duration::from_secs(10), |sim| {
-            sim.a.agent.state() == IceState::Completed
-                && sim.b.agent.state() == IceState::Completed
+            sim.a.agent.state() == IceState::Completed && sim.b.agent.state() == IceState::Completed
         }),
         "prflx discovery completes"
     );
@@ -385,8 +433,16 @@ fn an_unsignaled_natted_peer_is_learned_as_prflx() {
 
 #[test]
 fn consent_expires_when_the_peer_vanishes() {
-    let mut a = Host::new("a", "198.51.100.1:5004", full(IceRole::Controlling, "aaaa", 10));
-    let mut b = Host::new("b", "198.51.100.2:5004", full(IceRole::Controlled, "bbbb", 5));
+    let mut a = Host::new(
+        "a",
+        "198.51.100.1:5004",
+        full(IceRole::Controlling, "aaaa", 10),
+    );
+    let mut b = Host::new(
+        "b",
+        "198.51.100.2:5004",
+        full(IceRole::Controlled, "bbbb", 5),
+    );
     signal(&mut a, &mut b);
     let mut sim = Sim::new(a, b);
     assert!(sim.run_until(Duration::from_secs(5), |sim| {
@@ -407,8 +463,16 @@ fn consent_expires_when_the_peer_vanishes() {
 
 #[test]
 fn restart_completes_a_second_time_with_new_credentials() {
-    let mut a = Host::new("a", "198.51.100.1:5004", full(IceRole::Controlling, "aaaa", 10));
-    let mut b = Host::new("b", "198.51.100.2:5004", full(IceRole::Controlled, "bbbb", 5));
+    let mut a = Host::new(
+        "a",
+        "198.51.100.1:5004",
+        full(IceRole::Controlling, "aaaa", 10),
+    );
+    let mut b = Host::new(
+        "b",
+        "198.51.100.2:5004",
+        full(IceRole::Controlled, "bbbb", 5),
+    );
     signal(&mut a, &mut b);
     let mut sim = Sim::new(a, b);
     assert!(sim.run_until(Duration::from_secs(5), |sim| {
@@ -416,13 +480,16 @@ fn restart_completes_a_second_time_with_new_credentials() {
     }));
 
     // Re-INVITE with new ufrag/pwd on both sides (RFC 8445 §9).
-    sim.a.agent.restart(creds("aaa2", "aaa2-password-of-22char!"));
-    sim.b.agent.restart(creds("bbb2", "bbb2-password-of-22char!"));
+    sim.a
+        .agent
+        .restart(creds("aaa2", "aaa2-password-of-22char!"));
+    sim.b
+        .agent
+        .restart(creds("bbb2", "bbb2-password-of-22char!"));
     signal(&mut sim.a, &mut sim.b);
     assert!(
         sim.run_until(Duration::from_secs(10), |sim| {
-            sim.a.agent.state() == IceState::Completed
-                && sim.b.agent.state() == IceState::Completed
+            sim.a.agent.state() == IceState::Completed && sim.b.agent.state() == IceState::Completed
         }),
         "a restarted session completes again"
     );
@@ -432,16 +499,35 @@ fn restart_completes_a_second_time_with_new_credentials() {
         .iter()
         .filter(|event| matches!(event, IceEvent::Selected { .. }))
         .count();
-    assert!(selected_events >= 2, "selection happened before and after restart");
+    assert!(
+        selected_events >= 2,
+        "selection happened before and after restart"
+    );
 }
 
 #[test]
 fn ordinary_checks_are_paced_at_ta() {
-    let mut a = Host::new("a", "198.51.100.1:5004", full(IceRole::Controlling, "aaaa", 10));
+    let mut a = Host::new(
+        "a",
+        "198.51.100.1:5004",
+        full(IceRole::Controlling, "aaaa", 10),
+    );
     // Several remote candidates so multiple ordinary checks queue up.
-    let mut b = Host::new("b", "198.51.100.2:5004", full(IceRole::Controlled, "bbbb", 5));
-    b.agent.add_local_candidate(Candidate::host("198.51.100.2:5006".parse().unwrap(), 1, 65_534));
-    b.agent.add_local_candidate(Candidate::host("198.51.100.2:5008".parse().unwrap(), 1, 65_533));
+    let mut b = Host::new(
+        "b",
+        "198.51.100.2:5004",
+        full(IceRole::Controlled, "bbbb", 5),
+    );
+    b.agent.add_local_candidate(Candidate::host(
+        "198.51.100.2:5006".parse().unwrap(),
+        1,
+        65_534,
+    ));
+    b.agent.add_local_candidate(Candidate::host(
+        "198.51.100.2:5008".parse().unwrap(),
+        1,
+        65_533,
+    ));
     signal(&mut a, &mut b);
     let mut sim = Sim::new(a, b);
     sim.run_until(Duration::from_secs(3), |sim| {
@@ -472,13 +558,23 @@ fn ordinary_checks_are_paced_at_ta() {
 
 #[test]
 fn wrong_passwords_never_validate_and_fail_closed() {
-    let mut a = Host::new("a", "198.51.100.1:5004", full(IceRole::Controlling, "aaaa", 10));
-    let mut b = Host::new("b", "198.51.100.2:5004", full(IceRole::Controlled, "bbbb", 5));
+    let mut a = Host::new(
+        "a",
+        "198.51.100.1:5004",
+        full(IceRole::Controlling, "aaaa", 10),
+    );
+    let mut b = Host::new(
+        "b",
+        "198.51.100.2:5004",
+        full(IceRole::Controlled, "bbbb", 5),
+    );
     // Deliberately cross the wires: both sides hold wrong peer passwords.
     let a_candidates: Vec<Candidate> = a.agent.local_candidates().to_vec();
     let b_candidates: Vec<Candidate> = b.agent.local_candidates().to_vec();
-    a.agent.set_remote_credentials(creds("bbbb", "not-the-real-password-1"));
-    b.agent.set_remote_credentials(creds("aaaa", "not-the-real-password-2"));
+    a.agent
+        .set_remote_credentials(creds("bbbb", "not-the-real-password-1"));
+    b.agent
+        .set_remote_credentials(creds("aaaa", "not-the-real-password-2"));
     for candidate in b_candidates {
         a.agent.add_remote_candidate(candidate);
     }
@@ -493,7 +589,10 @@ fn wrong_passwords_never_validate_and_fail_closed() {
         "authentication failure must converge to Failed, not hang"
     );
     assert!(
-        !sim.a.events.iter().any(|e| matches!(e, IceEvent::PairValidated { .. })),
+        !sim.a
+            .events
+            .iter()
+            .any(|e| matches!(e, IceEvent::PairValidated { .. })),
         "nothing may validate across a wrong password"
     );
 }

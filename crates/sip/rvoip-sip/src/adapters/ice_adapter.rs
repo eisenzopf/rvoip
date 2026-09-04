@@ -238,7 +238,10 @@ async fn run_ice_pump(
     loop {
         agent.handle_timeout(Instant::now());
         while let Some(transmit) = agent.poll_transmit() {
-            if let Err(error) = transport.send_stun_bytes(&transmit.payload, transmit.to).await {
+            if let Err(error) = transport
+                .send_stun_bytes(&transmit.payload, transmit.to)
+                .await
+            {
                 tracing::trace!(session = %session_label, %error, "ICE check send failed");
             }
         }
@@ -345,8 +348,7 @@ pub(crate) fn extract_remote_ice(sdp: &SdpSession) -> Option<RemoteIce> {
                         continue;
                     };
                     let addr = SocketAddr::new(ip, candidate.port);
-                    let Some(kind) = CandidateKind::from_sdp_type(&candidate.candidate_type)
-                    else {
+                    let Some(kind) = CandidateKind::from_sdp_type(&candidate.candidate_type) else {
                         continue;
                     };
                     candidates.push(Candidate {
@@ -526,7 +528,10 @@ mod tests {
             "the full peer must complete against our lite pump over real sockets"
         );
         let (_, selected_remote) = peer.selected_pair().expect("peer selected");
-        assert_eq!(selected_remote, our_addr, "media lands on our real RTP port");
+        assert_eq!(
+            selected_remote, our_addr,
+            "media lands on our real RTP port"
+        );
         runtimes.stop(&session_id);
     }
     use super::*;
@@ -535,7 +540,8 @@ mod tests {
         SdpSession::from_str(sdp).expect("test SDP parses")
     }
 
-    const BASE: &str = "v=0\r\no=- 1 1 IN IP4 198.51.100.7\r\ns=-\r\nc=IN IP4 198.51.100.7\r\nt=0 0\r\n";
+    const BASE: &str =
+        "v=0\r\no=- 1 1 IN IP4 198.51.100.7\r\ns=-\r\nc=IN IP4 198.51.100.7\r\nt=0 0\r\n";
 
     #[test]
     fn a_peer_without_ice_yields_none() {

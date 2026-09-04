@@ -687,10 +687,7 @@ impl rvoip_core::harness::RecordingSinkFactory for CountingSinkFactory {
         &self,
         recording_id: &rvoip_core::ids::RecordingId,
     ) -> RvResult<Arc<dyn RecordingSink>> {
-        self.opened
-            .lock()
-            .unwrap()
-            .push(recording_id.to_string());
+        self.opened.lock().unwrap().push(recording_id.to_string());
         Ok(Arc::new(VecRecordingSink::new(format!(
             "memory:rec/{recording_id}"
         ))))
@@ -776,12 +773,11 @@ async fn a_conference_admits_a_member_and_reports_it() {
     orch.conference_leave(&conference, &connid)
         .await
         .expect("leave");
-    assert!(
-        orch.conference_members(&conference)
-            .await
-            .expect("members")
-            .is_empty()
-    );
+    assert!(orch
+        .conference_members(&conference)
+        .await
+        .expect("members")
+        .is_empty());
 
     // Leaving again is the same requested end state, not a failure.
     orch.conference_leave(&conference, &connid)

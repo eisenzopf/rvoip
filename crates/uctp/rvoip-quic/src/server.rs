@@ -22,13 +22,13 @@ use rvoip_core::stream::{MediaStream, StreamKind};
 use crate::adapter::Route;
 use crate::media_stream::QuicDatagramMediaStream;
 
-use rvoip_uctp::CorrelationIdDiagnostic;
 use rvoip_uctp::envelope::UctpEnvelope;
-use rvoip_uctp::state::{ENVELOPE_CHANNEL_CAP, UctpCoordinator, UctpSessionEvent};
+use rvoip_uctp::state::{UctpCoordinator, UctpSessionEvent, ENVELOPE_CHANNEL_CAP};
 use rvoip_uctp::substrate::{
-    PeerMediaConnectionKey, PeerMediaFanoutKey, PeerMediaRegistration, PeerMediaRouteKey,
-    PeerMediaRouter, envelope_reader, envelope_writer,
+    envelope_reader, envelope_writer, PeerMediaConnectionKey, PeerMediaFanoutKey,
+    PeerMediaRegistration, PeerMediaRouteKey, PeerMediaRouter,
 };
+use rvoip_uctp::CorrelationIdDiagnostic;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};

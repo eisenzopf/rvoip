@@ -140,8 +140,7 @@ impl PlayoutBuffer {
                 // smooths its own jitter estimate.
                 let gap = arrived_at.saturating_duration_since(previous);
                 let deviation = gap.as_secs_f64() - spacing.as_secs_f64();
-                self.jitter_frames += (deviation.abs()
-                    / spacing.as_secs_f64().max(f64::EPSILON)
+                self.jitter_frames += (deviation.abs() / spacing.as_secs_f64().max(f64::EPSILON)
                     - self.jitter_frames)
                     / 16.0;
             }
