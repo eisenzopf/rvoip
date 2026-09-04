@@ -7797,6 +7797,7 @@ dependencies = [
  "rvoip-core",
  "rvoip-quic",
  "rvoip-rtc",
+ "rvoip-rtp-core",
  "rvoip-sip",
  "rvoip-sip-core",
  "rvoip-uctp",

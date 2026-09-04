@@ -235,9 +235,10 @@ fix. Additive: the convenience builder path is unchanged.
 - `RtpPacketizer` owns deterministic SSRC, wrapping sequence, and wrapping
   timestamp state. Mismatched frame kind or payload type fails before state
   advances; `Bytes` payloads remain immutable and shared for fanout.
-- The `checked_rtp_boundary` example shows the same provider-neutral API for
-  SIP, WebRTC, and UCTP gateways, and a dedicated fuzz target covers malformed
-  packet-to-frame conversion under fixed input and payload bounds.
+- The provider-neutral `checked_rtp_boundary` example and concrete SIP,
+  WebRTC, and UCTP gateway examples all use the same shared API. A dedicated
+  fuzz target covers malformed packet-to-frame conversion under fixed input
+  and payload bounds.
 
 ### Signature freshness
 

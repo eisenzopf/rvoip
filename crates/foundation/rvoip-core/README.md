@@ -50,6 +50,11 @@ rvoip-core = "0.3.8"
   SIP + WebRTC + QUIC adapters registered with a single Orchestrator,
   bridged via `BridgeManager`. (Pre-alpha — WebRTC/QUIC paths are
   pinned to upstream alpha crates.)
+- [`checked_rtp_boundary`](examples/checked_rtp_boundary.rs) — convert between
+  validated RTP packets and payload-only `MediaFrame`s with explicit
+  negotiated codec/PT identity, bounded allocation, exact packet preservation,
+  and deterministic egress packetization. The SIP, WebRTC, and UCTP crates
+  include matching gateway examples rather than rebuilding RTP headers.
 
 ## License
 

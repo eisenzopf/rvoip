@@ -355,6 +355,9 @@ mod tests {
             (u32::MAX - 79, 80)
         );
         assert!(first.header.marker);
+
+        let mut restarted = RtpPacketizer::new(mapping, 9, u16::MAX, u32::MAX - 79, 160).unwrap();
+        assert_eq!(restarted.packetize(&good, true).unwrap(), first);
     }
 
     #[test]
@@ -362,7 +365,7 @@ mod tests {
         for mapping in [
             NegotiatedRtpPayload::new(0, RtpCodecKind::Pcmu, 8_000).unwrap(),
             NegotiatedRtpPayload::new(8, RtpCodecKind::Pcma, 8_000).unwrap(),
-            NegotiatedRtpPayload::new(111, RtpCodecKind::Opus, 48_000).unwrap(),
+            NegotiatedRtpPayload::new(120, RtpCodecKind::Opus, 48_000).unwrap(),
             NegotiatedRtpPayload::new(101, RtpCodecKind::TelephoneEvent, 8_000).unwrap(),
         ] {
             let packet = RtpPacket::new_with_payload(
@@ -385,6 +388,12 @@ mod tests {
         assert_eq!(
             depacketize_rtp(malformed, StreamId::new(), Utc::now(), opus, 1_200).unwrap_err(),
             RtpBoundaryError::InvalidHeader
+        );
+
+        let oversized = RtpPacket::new_with_payload(111, 1, 2, 3, Bytes::from_static(b"xx"));
+        assert_eq!(
+            depacketize_rtp(oversized, StreamId::new(), Utc::now(), opus, 1).unwrap_err(),
+            RtpBoundaryError::PayloadTooLarge
         );
     }
 }
