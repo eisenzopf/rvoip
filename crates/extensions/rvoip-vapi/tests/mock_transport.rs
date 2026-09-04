@@ -15,16 +15,31 @@ use axum::{Json, Router};
 use bytes::Bytes;
 use chrono::Utc;
 use futures::StreamExt;
-use rvoip_core::adapter::{AdapterEvent, ConnectionAdapter, EndReason, OriginateRequest};
-use rvoip_core::connection::{Direction, Transport};
-use rvoip_core::ids::{ParticipantId, SessionId};
-use rvoip_core::stream::{MediaFrame, StreamKind};
+use rvoip_core::adapter::{
+    AdapterEvent, AdapterKind, ConnectionAdapter, ConnectionHandle, EndReason, OriginateRequest,
+    RejectReason, SignatureHeaders, TransferTarget,
+};
+use rvoip_core::capability::{CapabilityDescriptor, CodecInfo, NegotiatedCodecs};
+use rvoip_core::commands::InboundAction;
+use rvoip_core::config::Config as CoreConfig;
+use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
+use rvoip_core::conversation::ConversationPolicy;
+use rvoip_core::error::{Result as RvoipResult, RvoipError};
+use rvoip_core::identity::IdentityAssurance;
+use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId, StreamId, TenantId};
+use rvoip_core::message::Message;
+use rvoip_core::orchestrator::Orchestrator;
+use rvoip_core::session::SessionMedium;
+use rvoip_core::stream::{
+    MediaFrame, MediaReceiverReservation, MediaStream, QualitySnapshot, StreamKind,
+};
 use rvoip_vapi::{
     VapiAdapter, VapiApiKey, VapiAssistant, VapiAudioFormat, VapiCallOptions, VapiConfig,
     VapiError, VapiEvent, VAPI_CALL_REFERENCE_KIND,
 };
 use serde_json::{json, Value};
-use tokio::sync::mpsc;
+use std::collections::HashMap;
+use tokio::sync::{broadcast, mpsc};
 use url::Url;
 
 #[derive(Clone)]
@@ -38,6 +53,7 @@ struct MockState {
     socket_behavior: SocketBehavior,
     audio_chunks: Arc<Vec<Vec<u8>>>,
     observed: mpsc::UnboundedSender<Observed>,
+    injected: broadcast::Sender<Injected>,
 }
 
 #[derive(Clone, Copy)]
@@ -57,6 +73,12 @@ enum SocketBehavior {
 enum Observed {
     Binary(Vec<u8>, Instant),
     Json(Value),
+}
+
+#[derive(Clone, Debug)]
+enum Injected {
+    Binary(Vec<u8>),
+    Text(String),
 }
 
 async fn create_call(
@@ -139,7 +161,26 @@ async fn mock_websocket(mut socket: WebSocket, state: MockState) {
         .await;
     let _ = socket.send(AxumWsMessage::Text("{bad".into())).await;
 
-    while let Some(message) = socket.next().await {
+    let mut injected = state.injected.subscribe();
+    loop {
+        let message = tokio::select! {
+            message = socket.next() => {
+                let Some(message) = message else { break };
+                message
+            }
+            injected = injected.recv() => {
+                let message = match injected {
+                    Ok(Injected::Binary(payload)) => AxumWsMessage::Binary(payload),
+                    Ok(Injected::Text(text)) => AxumWsMessage::Text(text.into()),
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                };
+                if socket.send(message).await.is_err() {
+                    break;
+                }
+                continue;
+            }
+        };
         match message {
             Ok(AxumWsMessage::Binary(payload)) => {
                 let _ = state
@@ -207,6 +248,7 @@ async fn start_mock_with_behavior(
         .expect("bind mock Vapi");
     let address = listener.local_addr().expect("mock local address");
     let (observed, observed_rx) = mpsc::unbounded_channel();
+    let (injected, _) = broadcast::channel(32);
     let state = MockState {
         websocket_url: Arc::new(Mutex::new(format!("ws://{address}/transport"))),
         create_count: Arc::new(AtomicUsize::new(0)),
@@ -217,6 +259,7 @@ async fn start_mock_with_behavior(
         socket_behavior,
         audio_chunks: Arc::new(audio_chunks),
         observed,
+        injected,
     };
     let app = Router::new()
         .route("/call", post(create_call))
@@ -231,6 +274,330 @@ async fn start_mock_with_behavior(
         observed_rx,
         server,
     )
+}
+
+struct CallerAdapter {
+    events: Mutex<Option<mpsc::Receiver<AdapterEvent>>>,
+    stream: Arc<CallerStream>,
+}
+
+struct CallerStream {
+    id: StreamId,
+    _inbound_tx: mpsc::Sender<MediaFrame>,
+    inbound_rx: Arc<Mutex<Option<mpsc::Receiver<MediaFrame>>>>,
+    outbound_tx: mpsc::Sender<MediaFrame>,
+    _outbound_rx: Mutex<Option<mpsc::Receiver<MediaFrame>>>,
+}
+
+#[async_trait::async_trait]
+impl MediaStream for CallerStream {
+    fn id(&self) -> StreamId {
+        self.id.clone()
+    }
+
+    fn kind(&self) -> StreamKind {
+        StreamKind::Audio
+    }
+
+    fn codec(&self) -> CodecInfo {
+        CodecInfo {
+            name: "PCMU".into(),
+            clock_rate_hz: 8_000,
+            channels: 1,
+            fmtp: None,
+            payload_type: Some(0),
+        }
+    }
+
+    fn direction(&self) -> Direction {
+        Direction::Inbound
+    }
+
+    #[allow(deprecated)]
+    fn frames_in(&self) -> mpsc::Receiver<MediaFrame> {
+        self.inbound_rx
+            .lock()
+            .expect("caller inbound lock")
+            .take()
+            .expect("caller media receiver acquired once")
+    }
+
+    fn try_frames_in(&self) -> RvoipResult<mpsc::Receiver<MediaFrame>> {
+        Ok(self.reserve_frames_in()?.commit())
+    }
+
+    fn reserve_frames_in(&self) -> RvoipResult<MediaReceiverReservation> {
+        let receiver = self
+            .inbound_rx
+            .lock()
+            .expect("caller inbound lock")
+            .take()
+            .ok_or(RvoipError::InvalidState(
+                "caller media receiver already acquired",
+            ))?;
+        let slot = Arc::clone(&self.inbound_rx);
+        Ok(MediaReceiverReservation::new(receiver, move |receiver| {
+            let mut slot = slot.lock().expect("caller inbound restore lock");
+            if slot.is_none() {
+                *slot = Some(receiver);
+            }
+        }))
+    }
+
+    fn frames_out(&self) -> mpsc::Sender<MediaFrame> {
+        self.outbound_tx.clone()
+    }
+
+    fn quality_snapshot(&self) -> QualitySnapshot {
+        QualitySnapshot::default()
+    }
+
+    async fn close(self: Arc<Self>) -> RvoipResult<()> {
+        Ok(())
+    }
+}
+
+impl CallerAdapter {
+    fn new() -> (Arc<Self>, mpsc::Sender<AdapterEvent>) {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (inbound_tx, inbound_rx) = mpsc::channel(32);
+        // One frame can enter the caller transport; later frames must remain
+        // in the graph sink queue until the test deliberately flushes it.
+        let (outbound_tx, outbound_rx) = mpsc::channel(1);
+        (
+            Arc::new(Self {
+                events: Mutex::new(Some(event_rx)),
+                stream: Arc::new(CallerStream {
+                    id: StreamId::new(),
+                    _inbound_tx: inbound_tx,
+                    inbound_rx: Arc::new(Mutex::new(Some(inbound_rx))),
+                    outbound_tx,
+                    _outbound_rx: Mutex::new(Some(outbound_rx)),
+                }),
+            }),
+            event_tx,
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl ConnectionAdapter for CallerAdapter {
+    fn transport(&self) -> Transport {
+        Transport::Sip
+    }
+
+    fn kind(&self) -> AdapterKind {
+        AdapterKind::Interop
+    }
+
+    async fn originate(&self, _: OriginateRequest) -> RvoipResult<ConnectionHandle> {
+        Err(RvoipError::NotImplemented("test caller origination"))
+    }
+
+    async fn accept(&self, _: ConnectionId) -> RvoipResult<()> {
+        Ok(())
+    }
+
+    async fn reject(&self, _: ConnectionId, _: RejectReason) -> RvoipResult<()> {
+        Ok(())
+    }
+
+    async fn end(&self, _: ConnectionId, _: EndReason) -> RvoipResult<()> {
+        Ok(())
+    }
+
+    async fn hold(&self, _: ConnectionId) -> RvoipResult<()> {
+        Ok(())
+    }
+
+    async fn resume(&self, _: ConnectionId) -> RvoipResult<()> {
+        Ok(())
+    }
+
+    async fn transfer(&self, _: ConnectionId, _: TransferTarget) -> RvoipResult<()> {
+        Ok(())
+    }
+
+    async fn streams(&self, _: ConnectionId) -> RvoipResult<Vec<Arc<dyn MediaStream>>> {
+        Ok(vec![Arc::clone(&self.stream) as Arc<dyn MediaStream>])
+    }
+
+    async fn send_message(&self, _: ConnectionId, _: Message) -> RvoipResult<()> {
+        Ok(())
+    }
+
+    async fn send_dtmf(&self, _: ConnectionId, _: &str, _: u32) -> RvoipResult<()> {
+        Ok(())
+    }
+
+    async fn renegotiate_media(
+        &self,
+        _: ConnectionId,
+        _: CapabilityDescriptor,
+    ) -> RvoipResult<NegotiatedCodecs> {
+        Ok(NegotiatedCodecs::default())
+    }
+
+    fn subscribe_events(&self) -> mpsc::Receiver<AdapterEvent> {
+        self.events
+            .lock()
+            .expect("caller event lock")
+            .take()
+            .expect("caller events subscribed once")
+    }
+
+    fn capabilities(&self) -> CapabilityDescriptor {
+        CapabilityDescriptor::default()
+    }
+
+    async fn verify_request_signature(
+        &self,
+        _: ConnectionId,
+        _: SignatureHeaders,
+    ) -> RvoipResult<IdentityAssurance> {
+        Ok(IdentityAssurance::Anonymous)
+    }
+}
+
+async fn setup_caller() -> (Arc<Orchestrator>, ConnectionId) {
+    let orchestrator = Orchestrator::new(CoreConfig::default());
+    let (adapter, events) = CallerAdapter::new();
+    orchestrator
+        .register(adapter)
+        .expect("register caller adapter");
+    let conversation_id = orchestrator
+        .open_conversation(
+            TenantId::new(),
+            ConversationPolicy::default(),
+            HashMap::new(),
+        )
+        .await
+        .expect("open caller conversation");
+    let session_id = orchestrator
+        .start_session(conversation_id, SessionMedium::Voice, vec![])
+        .await
+        .expect("start caller session");
+    let connection_id = ConnectionId::new();
+    events
+        .send(AdapterEvent::InboundConnection {
+            connection: Connection {
+                id: connection_id.clone(),
+                session_id: session_id.clone(),
+                participant_id: ParticipantId::new(),
+                transport: Transport::Sip,
+                direction: Direction::Inbound,
+                state: ConnectionState::Connecting,
+                capabilities: VapiAudioFormat::MuLaw8Khz.capabilities(),
+                negotiated_codecs: NegotiatedCodecs::default(),
+                streams: vec![],
+                messaging_enabled: false,
+                transport_handle: TransportHandle(Arc::new(())),
+                opened_at: Utc::now(),
+                closed_at: None,
+            },
+        })
+        .await
+        .expect("publish inbound caller");
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    orchestrator
+        .route_inbound_connection(
+            connection_id.clone(),
+            InboundAction::Accept {
+                session_id,
+                participant_id: ParticipantId::new(),
+            },
+        )
+        .await
+        .expect("accept caller");
+    (orchestrator, connection_id)
+}
+
+#[tokio::test]
+async fn user_speech_flushes_real_graph_sink_queue_and_counts_drops() {
+    let (api_base, state, _observed, server) =
+        start_mock_with_behavior(Duration::ZERO, SocketBehavior::Interactive, Vec::new()).await;
+    let mut config = VapiConfig::new(VapiApiKey::new("mock-api-key").expect("mock key"))
+        .with_api_base(api_base)
+        .with_loopback_test_transport();
+    config.heartbeat_interval = Duration::from_secs(60);
+    config.inbound_queue_capacity = 32;
+    config.media_queue_capacity = 32;
+    let adapter = VapiAdapter::new(config).expect("adapter");
+    let (orchestrator, caller_connection_id) = setup_caller().await;
+    let call_result = adapter
+        .attach_agent(
+            &orchestrator,
+            caller_connection_id,
+            VapiCallOptions::new(VapiAssistant::saved("assistant-mock")),
+        )
+        .await;
+    let call = match call_result {
+        Ok(call) => call,
+        Err(RvoipError::InvalidState(reason)) => panic!("attach invalid state: {reason}"),
+        Err(RvoipError::NotImplemented(operation)) => {
+            panic!("attach operation not implemented: {operation}")
+        }
+        Err(error) => panic!("attach Vapi agent: {error:?}"),
+    };
+    let vapi_connection_id = call.vapi_connection_id().clone();
+
+    state
+        .injected
+        .send(Injected::Binary(vec![0x55; 160 * 16]))
+        .expect("inject queued assistant audio");
+
+    let queued_before = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let snapshot = orchestrator
+                .media_graph_snapshot(&vapi_connection_id)
+                .await
+                .expect("Vapi source graph");
+            let queued = snapshot
+                .sinks
+                .iter()
+                .map(|sink| sink.queue_depth)
+                .sum::<usize>();
+            if queued >= 3 {
+                break queued;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("assistant frames never parked in the graph sink queue");
+
+    state
+        .injected
+        .send(Injected::Text(
+            r#"{"type":"speech-update","status":"started","role":"user"}"#.into(),
+        ))
+        .expect("inject user speech start");
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let snapshot = orchestrator
+                .media_graph_snapshot(&vapi_connection_id)
+                .await
+                .expect("Vapi graph after barge-in");
+            let queued = snapshot
+                .sinks
+                .iter()
+                .map(|sink| sink.queue_depth)
+                .sum::<usize>();
+            let health = adapter
+                .media_health(&vapi_connection_id)
+                .expect("Vapi media health");
+            if queued == 0 && health.barge_in_dropped >= queued_before as u64 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("barge-in did not flush and count the real graph queue");
+
+    call.end().await.expect("end Vapi test call");
+    server.abort();
 }
 
 #[tokio::test]

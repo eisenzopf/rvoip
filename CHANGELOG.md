@@ -202,6 +202,16 @@ fix. Additive: the convenience builder path is unchanged.
   probe can fail. Losing the operational receiver degrades the runtime and
   stops admission, which core already enforced and the app now surfaces.
 
+### Vapi barge-in reaches the media graph
+
+- User-speech-start now flushes adapter-local audio and the downstream
+  orchestrator media-graph sink queues in the same barge-in operation. The
+  discarded graph frames contribute to `VapiMediaHealth::barge_in_dropped`
+  and `rvoip_vapi_barge_in_frames_dropped_total`.
+- The mock-transport acceptance test backpressures a real bridged caller sink,
+  proves audio is parked in the graph, then verifies the speech event drives
+  queue depth to zero and accounts for every graph frame dropped.
+
 ### Signature freshness
 
 - `Sig9421Verifier` bounds envelope timestamps from above as well as below.
