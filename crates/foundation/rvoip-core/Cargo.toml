@@ -23,6 +23,7 @@ rvoip-infra-common.workspace = true
 # Opus cannot depend on a downstream crate accidentally unifying an optional
 # feature. Keep the codec available whenever core's media graph is available.
 rvoip-media-core = { workspace = true, features = ["opus"] }
+rvoip-rtp-core.workspace = true
 # V2.A — the pure-type/trait surface that consumer crates depend on.
 # rvoip-core re-exports from it so existing `use rvoip_core::ids::*`
 # and `use rvoip_core::identity::*` call sites keep working unchanged.
@@ -76,6 +77,10 @@ path = "examples/sip_only_orchestrator.rs"
 [[example]]
 name = "cross_transport_bridge"
 path = "examples/cross_transport_bridge.rs"
+
+[[example]]
+name = "checked_rtp_boundary"
+path = "examples/checked_rtp_boundary.rs"
 
 [[test]]
 name = "vcon_emission"

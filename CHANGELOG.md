@@ -212,6 +212,19 @@ fix. Additive: the convenience builder path is unchanged.
   proves audio is parked in the graph, then verifies the speech event drives
   queue depth to zero and accounts for every graph frame dropped.
 
+### Checked RTP/media boundary
+
+- `rvoip_core::rtp_boundary` converts validated RTP packets to payload-only
+  `MediaFrame`s with explicit negotiated codec/PT mappings and bounded payload
+  allocation. A packet-preserving handle retains marker, CSRCs, extensions,
+  padding, SSRC, and sequence identity when no transformation occurred.
+- `RtpPacketizer` owns deterministic SSRC, wrapping sequence, and wrapping
+  timestamp state. Mismatched frame kind or payload type fails before state
+  advances; `Bytes` payloads remain immutable and shared for fanout.
+- The `checked_rtp_boundary` example shows the same provider-neutral API for
+  SIP, WebRTC, and UCTP gateways, and a dedicated fuzz target covers malformed
+  packet-to-frame conversion under fixed input and payload bounds.
+
 ### Signature freshness
 
 - `Sig9421Verifier` bounds envelope timestamps from above as well as below.

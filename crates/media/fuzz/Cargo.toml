@@ -11,6 +11,9 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 # Path deps against local code so the fuzzers always exercise current parsers.
 rvoip-rtp-core = { path = "../rtp-core" }
+rvoip-core = { path = "../../foundation/rvoip-core" }
+chrono = "0.4"
+bytes = "1"
 # default-features = false keeps the fuzz build lean (no libopus / C deps); the
 # g711 payload path is pure Rust and does not need the optional codec features.
 rvoip-media-core = { path = "../media-core", default-features = false }
@@ -21,6 +24,13 @@ rvoip-codec-core = { path = "../codec-core", default-features = false, features 
 [[bin]]
 name = "rtp_packet"
 path = "fuzz_targets/rtp_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rtp_media_frame"
+path = "fuzz_targets/rtp_media_frame.rs"
 test = false
 doc = false
 bench = false

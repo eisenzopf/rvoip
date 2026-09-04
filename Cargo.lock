@@ -6958,6 +6958,7 @@ dependencies = [
  "rvoip-infra-common",
  "rvoip-media-core",
  "rvoip-quic",
+ "rvoip-rtp-core",
  "rvoip-sip",
  "rvoip-uctp",
  "rvoip-vcon",
