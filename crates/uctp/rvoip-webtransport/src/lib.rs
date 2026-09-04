@@ -16,6 +16,7 @@ pub use adapter::{UctpWtAdapter, UctpWtConfig, ADAPTER_EVENT_CAP};
 pub use client::UctpWtClient;
 pub use errors::{Result, UctpWtError};
 pub use media_stream::{
-    spawn_datagram_reader, spawn_datagram_reader_with_cancel, WebTransportDatagramMediaStream,
+    spawn_datagram_reader, spawn_datagram_reader_with_cancel, spawn_datagram_reader_with_observer,
+    WebTransportDatagramMediaStream,
 };
 pub use server::UctpWtServer;

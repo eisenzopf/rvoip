@@ -71,7 +71,10 @@ async fn wt_adapter_emits_inbound_connection_on_session_invite() {
     let accept_rx = routes.take(ALPN_H3).expect("h3 channel");
 
     let cfg = UctpWtConfig::new(Arc::clone(&server_ep), accept_rx, bearer_stub());
-    let adapter = UctpWtAdapter::new(cfg).await.expect("adapter");
+    let (rtp_observer_tx, mut rtp_observer_rx) = tokio::sync::mpsc::channel(4);
+    let adapter = UctpWtAdapter::new_with_rtp_ingress_observer(cfg, rtp_observer_tx)
+        .await
+        .expect("adapter");
 
     assert_eq!(adapter.transport(), Transport::WebTransport);
     assert_eq!(adapter.kind(), AdapterKind::Substrate);
@@ -292,22 +295,50 @@ async fn wt_adapter_emits_inbound_connection_on_session_invite() {
     let mut media_in = bound_streams[0]
         .try_frames_in()
         .expect("acquire negotiated media receiver");
-    let datagram = rvoip_uctp::substrate::pack_rtp_datagram(&rvoip_uctp::substrate::RtpDatagram {
-        flags: 0,
-        stream_local_id: opened.stream.stream_local_id,
-        seq: 9,
-        rtp: rvoip_uctp::substrate::RtpMediaPayload {
-            payload: bytes::Bytes::from_static(b"negotiated-opus-frame"),
-            payload_type: 111,
-            sequence_number: 17,
-            timestamp: 960,
-            ssrc: 0x1020_3040,
-        },
-    })
-    .expect("encode complete RTP datagram");
+    let local_id = opened.stream.stream_local_id;
+    let mut datagram = vec![
+        0x01,
+        0x5a,
+        (local_id >> 8) as u8,
+        local_id as u8,
+        0,
+        0,
+        0,
+        9,
+        0xb2,
+        0xef,
+        0,
+        17,
+        0,
+        0,
+        0x03,
+        0xc0,
+        0x10,
+        0x20,
+        0x30,
+        0x40,
+        0x11,
+        0x11,
+        0x11,
+        0x11,
+        0x22,
+        0x22,
+        0x22,
+        0x22,
+        0xbe,
+        0xde,
+        0,
+        1,
+        0x12,
+        b'v',
+        b'a',
+        b'd',
+    ];
+    datagram.extend_from_slice(b"negotiated-opus-frame");
+    datagram.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 8]);
     client
         .session
-        .send_datagram(datagram)
+        .send_datagram(bytes::Bytes::from(datagram))
         .expect("send media datagram");
     let media_frame = tokio::time::timeout(Duration::from_secs(5), media_in.recv())
         .await
@@ -317,6 +348,26 @@ async fn wt_adapter_emits_inbound_connection_on_session_invite() {
     assert_eq!(media_frame.payload.as_ref(), b"negotiated-opus-frame");
     assert_eq!(media_frame.payload_type, Some(111));
     assert_eq!(media_frame.timestamp_rtp, 960);
+
+    let observation = tokio::time::timeout(Duration::from_secs(5), rtp_observer_rx.recv())
+        .await
+        .expect("RTP observer timeout")
+        .expect("RTP observer closed");
+    assert_eq!(observation.route.stream_id.as_str(), "strm_wt_data");
+    assert_eq!(observation.datagram.seq, 9);
+    let packet = observation.datagram.rtp.packet();
+    assert_eq!(packet.header.sequence_number, 17);
+    assert_eq!(packet.header.timestamp, 960);
+    assert_eq!(packet.header.ssrc, 0x1020_3040);
+    assert!(packet.header.marker);
+    assert_eq!(packet.header.csrc, vec![0x1111_1111, 0x2222_2222]);
+    let extensions = packet.header.extensions.as_ref().expect("RTP extension");
+    assert_eq!(extensions.elements.len(), 1);
+    assert_eq!(extensions.elements[0].id, 1);
+    assert_eq!(extensions.elements[0].data.as_ref(), b"vad");
+    assert_eq!(packet.payload.as_ref(), b"negotiated-opus-frame");
+    assert_eq!(packet.padding_size, 8);
+    assert!(!format!("{observation:?}").contains("negotiated-opus-frame"));
 
     client
         .send(

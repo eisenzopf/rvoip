@@ -21,8 +21,8 @@ use rvoip_core::stream::{
     MediaFrame, MediaReceiverReservation, MediaStream, QualitySnapshot, StreamKind,
 };
 use rvoip_uctp::substrate::{
-    pack_rtp_datagram, unpack_rtp_datagram, PeerMediaRegistration, PeerMediaRouteKey,
-    PeerMediaRouter, RtpDatagram, RtpMediaPayload,
+    observe_rtp_datagram, pack_rtp_datagram, PeerMediaRegistration, PeerMediaRouteKey,
+    PeerMediaRouter, RtpDatagram, RtpIngressObservation, RtpMediaPayload,
 };
 use rvoip_uctp::CorrelationIdDiagnostic;
 use tokio::sync::mpsc;
@@ -322,6 +322,23 @@ pub fn spawn_datagram_reader_with_cancel(
     orchestrator: Option<Arc<rvoip_core::Orchestrator>>,
     peer_cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
+    spawn_datagram_reader_with_observer(conn, router, orchestrator, peer_cancel, None)
+}
+
+/// Spawn the sole datagram reader and optionally publish lossless RTP ingress
+/// observations before conversion to generic codec-payload `MediaFrame`s.
+///
+/// Observation delivery is bounded and best-effort: a full or closed receiver
+/// never delays media. Applications can use RTP sequence/SSRC discontinuities,
+/// marker, CSRCs, and negotiated extensions for jitter, loss, and VAD logic
+/// without taking ownership of the QUIC datagram reader.
+pub fn spawn_datagram_reader_with_observer(
+    conn: quinn::Connection,
+    router: Arc<PeerMediaRouter>,
+    orchestrator: Option<Arc<rvoip_core::Orchestrator>>,
+    peer_cancel: CancellationToken,
+    ingress_observer: Option<mpsc::Sender<RtpIngressObservation>>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             let received = tokio::select! {
@@ -330,7 +347,7 @@ pub fn spawn_datagram_reader_with_cancel(
             };
             match received {
                 Ok(bytes) => {
-                    let datagram = match unpack_rtp_datagram(&bytes) {
+                    let observed = match observe_rtp_datagram(&bytes) {
                         Ok(d) => d,
                         Err(_) => {
                             metrics::counter!(
@@ -343,7 +360,7 @@ pub fn spawn_datagram_reader_with_cancel(
                             continue;
                         }
                     };
-                    let Some(local_id) = NonZeroU16::new(datagram.stream_local_id) else {
+                    let Some(local_id) = NonZeroU16::new(observed.stream_local_id) else {
                         metrics::counter!(
                             "uctp_datagram_drops_total",
                             "direction" => "in",
@@ -368,6 +385,27 @@ pub fn spawn_datagram_reader_with_cancel(
                                 .increment(1);
                                 continue;
                             }
+                            if let Some(observer) = ingress_observer.as_ref() {
+                                if observer
+                                    .try_send(RtpIngressObservation {
+                                        route: binding.route().clone(),
+                                        datagram: observed.clone(),
+                                    })
+                                    .is_err()
+                                {
+                                    metrics::counter!(
+                                        "uctp_rtp_observations_dropped_total",
+                                        "transport" => "quic"
+                                    )
+                                    .increment(1);
+                                }
+                            }
+                            let datagram = RtpDatagram {
+                                flags: observed.flags,
+                                stream_local_id: observed.stream_local_id,
+                                seq: observed.seq,
+                                rtp: observed.rtp.into_media_payload(),
+                            };
                             // Build the frame and do the local route
                             // inside a tight scope so the non-Send
                             // tracing span guard is dropped before we

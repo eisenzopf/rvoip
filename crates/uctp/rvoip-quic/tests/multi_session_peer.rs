@@ -215,11 +215,11 @@ async fn two_sessions_on_one_peer_get_distinct_exact_media_routes() {
     let mut alpn =
         dispatch_by_alpn(Arc::clone(&server_endpoint), &[UCTP_RAW_QUIC_ALPN_BYTES]).unwrap();
     let accept_rx = alpn.take(UCTP_RAW_QUIC_ALPN_BYTES).unwrap();
-    let adapter = UctpQuicAdapter::new(UctpQuicConfig::new(
-        Arc::clone(&server_endpoint),
-        accept_rx,
-        bearer_stub(),
-    ))
+    let (rtp_observer_tx, mut rtp_observer_rx) = tokio::sync::mpsc::channel(4);
+    let adapter = UctpQuicAdapter::new_with_rtp_ingress_observer(
+        UctpQuicConfig::new(Arc::clone(&server_endpoint), accept_rx, bearer_stub()),
+        rtp_observer_tx,
+    )
     .await
     .unwrap();
     let mut events = adapter.subscribe_events();
@@ -256,14 +256,6 @@ async fn two_sessions_on_one_peer_get_distinct_exact_media_routes() {
     let mut receive_two = server_two.try_frames_in().unwrap();
 
     let codec = rvoip_core::capability::CodecInfo::from_name_with_defaults("opus");
-    let client_one = QuicDatagramMediaStream::start(
-        StreamId::from_string("strm_one"),
-        StreamKind::Audio,
-        codec.clone(),
-        rvoip_core::connection::Direction::Outbound,
-        local_one,
-        client.connection.clone(),
-    );
     let client_two = QuicDatagramMediaStream::start(
         StreamId::from_string("strm_two"),
         StreamKind::Audio,
@@ -272,18 +264,52 @@ async fn two_sessions_on_one_peer_get_distinct_exact_media_routes() {
         local_two,
         client.connection.clone(),
     );
-    client_one
-        .frames_out()
-        .send(MediaFrame {
-            stream_id: client_one.id(),
-            kind: StreamKind::Audio,
-            payload: Bytes::from_static(b"session-one"),
-            timestamp_rtp: 960,
-            captured_at: Utc::now(),
-            payload_type: Some(111),
-        })
-        .await
-        .unwrap();
+    // UCTP envelope followed by RTP with P/X/CC=2, M=1, one RFC 8285
+    // one-byte extension, codec payload, and eight bytes of valid padding.
+    let mut lossless_wire = vec![
+        0x01,
+        0x5a,
+        (local_one >> 8) as u8,
+        local_one as u8,
+        0,
+        0,
+        0x03,
+        0x84,
+        0xb2,
+        0xef,
+        0xff,
+        0xff,
+        0xff,
+        0xff,
+        0xff,
+        0x00,
+        0x12,
+        0x34,
+        0x56,
+        0x78,
+        0x11,
+        0x11,
+        0x11,
+        0x11,
+        0x22,
+        0x22,
+        0x22,
+        0x22,
+        0xbe,
+        0xde,
+        0,
+        1,
+        0x12,
+        b'v',
+        b'a',
+        b'd',
+    ];
+    lossless_wire.extend_from_slice(b"session-one");
+    lossless_wire.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 8]);
+    client
+        .connection
+        .send_datagram(Bytes::from(lossless_wire))
+        .expect("send lossless RTP datagram");
     client_two
         .frames_out()
         .send(MediaFrame {
@@ -309,6 +335,26 @@ async fn two_sessions_on_one_peer_get_distinct_exact_media_routes() {
     assert_eq!(frame_two.payload, Bytes::from_static(b"session-two"));
     assert_eq!(frame_one.stream_id.as_str(), "strm_one");
     assert_eq!(frame_two.stream_id.as_str(), "strm_two");
+
+    let observation = tokio::time::timeout(Duration::from_secs(5), rtp_observer_rx.recv())
+        .await
+        .expect("RTP observer timeout")
+        .expect("RTP observer closed");
+    assert_eq!(observation.route.stream_id.as_str(), "strm_one");
+    assert_eq!(observation.datagram.seq, 900);
+    let packet = observation.datagram.rtp.packet();
+    assert_eq!(packet.header.sequence_number, u16::MAX);
+    assert_eq!(packet.header.timestamp, 0xffff_ff00);
+    assert_eq!(packet.header.ssrc, 0x1234_5678);
+    assert!(packet.header.marker);
+    assert_eq!(packet.header.csrc, vec![0x1111_1111, 0x2222_2222]);
+    let extensions = packet.header.extensions.as_ref().expect("RTP extension");
+    assert_eq!(extensions.elements.len(), 1);
+    assert_eq!(extensions.elements[0].id, 1);
+    assert_eq!(extensions.elements[0].data.as_ref(), b"vad");
+    assert_eq!(packet.payload.as_ref(), b"session-one");
+    assert_eq!(packet.padding_size, 8);
+    assert!(!format!("{observation:?}").contains("session-one"));
 }
 
 #[tokio::test]

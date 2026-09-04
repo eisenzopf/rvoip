@@ -181,6 +181,22 @@ pub struct UctpWtAdapter {
 
 impl UctpWtAdapter {
     pub async fn new(config: UctpWtConfig) -> Result<Arc<Self>, crate::errors::UctpWtError> {
+        Self::new_inner(config, None).await
+    }
+
+    /// Construct the adapter with an optional bounded receiver for lossless
+    /// RTP observations emitted before `MediaFrame` normalization.
+    pub async fn new_with_rtp_ingress_observer(
+        config: UctpWtConfig,
+        ingress_observer: mpsc::Sender<rvoip_uctp::substrate::RtpIngressObservation>,
+    ) -> Result<Arc<Self>, crate::errors::UctpWtError> {
+        Self::new_inner(config, Some(ingress_observer)).await
+    }
+
+    async fn new_inner(
+        config: UctpWtConfig,
+        ingress_observer: Option<mpsc::Sender<rvoip_uctp::substrate::RtpIngressObservation>>,
+    ) -> Result<Arc<Self>, crate::errors::UctpWtError> {
         let local_addr = config
             .endpoint
             .local_addr()
@@ -208,6 +224,7 @@ impl UctpWtAdapter {
             config.orchestrator,
             config.coordinator_caps,
             config.sig9421,
+            ingress_observer,
         );
 
         Ok(Arc::new(Self {

@@ -48,6 +48,7 @@ impl UctpWtServer {
         orchestrator: Option<Arc<rvoip_core::Orchestrator>>,
         coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
         sig9421: Option<rvoip_uctp::state::Sig9421Config>,
+        rtp_ingress_observer: Option<mpsc::Sender<rvoip_uctp::substrate::RtpIngressObservation>>,
     ) -> Arc<Self> {
         tokio::spawn(async move {
             let connection_slots = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
@@ -80,6 +81,7 @@ impl UctpWtServer {
                 let orchestrator = orchestrator.clone();
                 let caps = coordinator_caps.clone();
                 let sig9421 = sig9421.clone();
+                let rtp_ingress_observer = rtp_ingress_observer.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
                     metrics::gauge!("uctp_active_connections", "transport" => "webtransport")
@@ -99,6 +101,7 @@ impl UctpWtServer {
                         orchestrator,
                         caps,
                         sig9421,
+                        rtp_ingress_observer,
                     )
                     .await;
                     metrics::gauge!("uctp_active_connections", "transport" => "webtransport")
@@ -329,6 +332,7 @@ async fn spawn_peer_session(
     orchestrator: Option<Arc<rvoip_core::Orchestrator>>,
     coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
     sig9421: Option<rvoip_uctp::state::Sig9421Config>,
+    rtp_ingress_observer: Option<mpsc::Sender<rvoip_uctp::substrate::RtpIngressObservation>>,
 ) {
     // Keep peer-supplied Session IDs in this authenticated peer's namespace.
     let _adapter_global_sid_index = by_uctp_sid;
@@ -464,11 +468,12 @@ async fn spawn_peer_session(
     // `Pending` correlator so per-Route adapter code can await
     // typed responses.
     let pending = coord.pending();
-    let media_reader = crate::media_stream::spawn_datagram_reader_with_cancel(
+    let media_reader = crate::media_stream::spawn_datagram_reader_with_observer(
         session.clone(),
         Arc::clone(&media_router),
         orchestrator.clone(),
         media_cancel.clone(),
+        rtp_ingress_observer,
     );
     let auth_guard =
         rvoip_uctp::state::spawn_auth_lifecycle_guard(Arc::clone(&coord), authentication_deadline);

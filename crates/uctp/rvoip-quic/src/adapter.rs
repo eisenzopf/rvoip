@@ -247,6 +247,25 @@ impl UctpQuicAdapter {
     }
     /// Construct and spawn the server's accept loop.
     pub async fn new(config: UctpQuicConfig) -> Result<Arc<Self>, crate::errors::UctpQuicError> {
+        Self::new_inner(config, None).await
+    }
+
+    /// Construct the adapter with an optional bounded receiver for lossless
+    /// RTP observations emitted before `MediaFrame` normalization.
+    ///
+    /// The receiver is diagnostic/application input only: full or closed
+    /// channels drop observations and never apply backpressure to media.
+    pub async fn new_with_rtp_ingress_observer(
+        config: UctpQuicConfig,
+        ingress_observer: mpsc::Sender<rvoip_uctp::substrate::RtpIngressObservation>,
+    ) -> Result<Arc<Self>, crate::errors::UctpQuicError> {
+        Self::new_inner(config, Some(ingress_observer)).await
+    }
+
+    async fn new_inner(
+        config: UctpQuicConfig,
+        ingress_observer: Option<mpsc::Sender<rvoip_uctp::substrate::RtpIngressObservation>>,
+    ) -> Result<Arc<Self>, crate::errors::UctpQuicError> {
         let local_addr = config
             .endpoint
             .local_addr()
@@ -275,6 +294,7 @@ impl UctpQuicAdapter {
             config.orchestrator,
             config.coordinator_caps,
             config.sig9421,
+            ingress_observer,
         );
 
         Ok(Arc::new(Self {

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Lossless RTP observation on UCTP transports
+
+- `observe_rtp_datagram` and `ObservedRtpDatagram` expose validated RTP
+  sequence, timestamp, SSRC, marker, CSRCs, parsed extensions, padding size,
+  and padding-free codec payload without taking ownership of adapter internals.
+- `UctpQuicAdapter::new_with_rtp_ingress_observer` and
+  `UctpWtAdapter::new_with_rtp_ingress_observer` publish those packets with
+  their authenticated core route before conversion to `MediaFrame`. Delivery
+  is bounded and best-effort, so an unavailable observer never stalls audio.
+- The existing constructors and payload-only media consumers are unchanged.
+  Normal outbound `MediaFrame` forwarding deliberately starts a new RTP hop:
+  marker is false, CSRC/extensions are empty, and padding is omitted. Exact
+  reserialization is available only through `pack_observed_rtp_datagram`.
+
 ## 0.3.8-thelve.1 — 2026-08-18 (branch `thelve/rvoip-22-ingress`, unpublished)
 
 A pre-release cut from `0.3.8` that makes two shipped correctness

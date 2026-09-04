@@ -14,6 +14,83 @@ use std::fmt;
 use crate::compatibility::UCTP_DATAGRAM_VERSION;
 use crate::errors::SubstrateError;
 
+/// Lossless, parsed RTP observation before UCTP adapters normalize it to a
+/// codec-payload `MediaFrame`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ObservedRtpPayload {
+    packet: rvoip_rtp_core::RtpPacket,
+}
+
+impl ObservedRtpPayload {
+    /// Inspect every validated RTP header field and the padding-free payload.
+    pub fn packet(&self) -> &rvoip_rtp_core::RtpPacket {
+        &self.packet
+    }
+
+    /// Consume the observation while preserving the complete packet identity.
+    pub fn into_packet(self) -> rvoip_rtp_core::RtpPacket {
+        self.packet
+    }
+
+    /// Normalize to the source-compatible UCTP media shape. Marker, CSRC,
+    /// extension, and padding metadata are deliberately not forwarded here.
+    pub fn into_media_payload(self) -> RtpMediaPayload {
+        RtpMediaPayload {
+            payload: self.packet.payload,
+            payload_type: self.packet.header.payload_type,
+            sequence_number: self.packet.header.sequence_number,
+            timestamp: self.packet.header.timestamp,
+            ssrc: self.packet.header.ssrc,
+        }
+    }
+}
+
+impl fmt::Debug for ObservedRtpPayload {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ObservedRtpPayload")
+            .field("payload_type", &self.packet.header.payload_type)
+            .field("sequence_number", &self.packet.header.sequence_number)
+            .field("timestamp", &self.packet.header.timestamp)
+            .field("marker", &self.packet.header.marker)
+            .field("csrc_count", &self.packet.header.csrc.len())
+            .field(
+                "extension_count",
+                &self
+                    .packet
+                    .header
+                    .extensions
+                    .as_ref()
+                    .map_or(0, |extensions| extensions.elements.len()),
+            )
+            .field("payload_bytes", &self.packet.payload.len())
+            .field("padding_bytes", &self.packet.padding_size)
+            .finish()
+    }
+}
+
+/// Lossless UCTP envelope plus parsed RTP observation. UCTP `seq` and RTP
+/// sequence remain independently observable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObservedRtpDatagram {
+    pub flags: u8,
+    pub stream_local_id: u16,
+    pub seq: u32,
+    pub rtp: ObservedRtpPayload,
+}
+
+/// A lossless RTP observation associated with its authenticated core route.
+///
+/// QUIC and WebTransport adapters publish this value through their optional
+/// bounded ingress receiver before converting the packet into a generic
+/// codec-payload `MediaFrame`. Slow receivers may miss observations, but can
+/// never delay or interrupt the live media path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RtpIngressObservation {
+    pub route: super::PeerMediaRouteKey,
+    pub datagram: ObservedRtpDatagram,
+}
+
 /// RTP fields recovered from a UCTP media datagram body.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RtpMediaPayload {
@@ -60,6 +137,11 @@ impl fmt::Debug for RtpDatagram {
 }
 
 /// Construct the complete RTP packet required by UCTP §10.1.
+///
+/// This codec-payload compatibility path deliberately creates a new RTP hop:
+/// marker is false, CSRC and extension lists are empty, and no padding is
+/// added. Use [`pack_observed_rtp_datagram`] only when an application has
+/// explicitly decided that preserving the observed packet identity is safe.
 pub fn pack_rtp(
     payload: Bytes,
     payload_type: u8,
@@ -85,15 +167,14 @@ pub fn pack_rtp(
 
 /// Parse and validate the complete RTP packet carried after the UCTP header.
 pub fn unpack_rtp(payload: Bytes) -> Result<RtpMediaPayload, SubstrateError> {
+    Ok(observe_rtp(payload)?.into_media_payload())
+}
+
+/// Parse a complete RTP body without discarding any validated header metadata.
+pub fn observe_rtp(payload: Bytes) -> Result<ObservedRtpPayload, SubstrateError> {
     let packet = rvoip_rtp_core::RtpPacket::parse_from_bytes(payload)
         .map_err(|_| SubstrateError::InvalidDatagram("invalid RTP packet"))?;
-    Ok(RtpMediaPayload {
-        payload: packet.payload,
-        payload_type: packet.header.payload_type,
-        sequence_number: packet.header.sequence_number,
-        timestamp: packet.header.timestamp,
-        ssrc: packet.header.ssrc,
-    })
+    Ok(ObservedRtpPayload { packet })
 }
 
 /// Serialize a typed media datagram as the eight-byte UCTP header followed by
@@ -117,14 +198,40 @@ pub fn pack_rtp_datagram(datagram: &RtpDatagram) -> Result<Bytes, SubstrateError
 /// Parse the eight-byte UCTP header and require its payload to be a complete,
 /// valid RTP packet.
 pub fn unpack_rtp_datagram(input: &[u8]) -> Result<RtpDatagram, SubstrateError> {
-    let raw = unpack(input)?;
-    let rtp = unpack_rtp(raw.payload)?;
+    let observed = observe_rtp_datagram(input)?;
     Ok(RtpDatagram {
+        flags: observed.flags,
+        stream_local_id: observed.stream_local_id,
+        seq: observed.seq,
+        rtp: observed.rtp.into_media_payload(),
+    })
+}
+
+/// Parse the UCTP envelope and expose its complete validated RTP packet before
+/// adapter normalization. QUIC and WebTransport share this exact function.
+pub fn observe_rtp_datagram(input: &[u8]) -> Result<ObservedRtpDatagram, SubstrateError> {
+    let raw = unpack(input)?;
+    Ok(ObservedRtpDatagram {
         flags: raw.flags,
         stream_local_id: raw.stream_local_id,
         seq: raw.seq,
-        rtp,
+        rtp: observe_rtp(raw.payload)?,
     })
+}
+
+/// Serialize a lossless observed datagram without regenerating RTP identity.
+pub fn pack_observed_rtp_datagram(datagram: &ObservedRtpDatagram) -> Result<Bytes, SubstrateError> {
+    let payload = datagram
+        .rtp
+        .packet
+        .serialize()
+        .map_err(|_| SubstrateError::InvalidDatagram("RTP serialization failed"))?;
+    Ok(pack(&MediaDatagram {
+        flags: datagram.flags,
+        stream_local_id: datagram.stream_local_id,
+        seq: datagram.seq,
+        payload,
+    }))
 }
 
 /// In-memory shape of a UCTP media datagram. Wire layout above.
@@ -202,6 +309,7 @@ pub fn unpack(input: &[u8]) -> Result<MediaDatagram, SubstrateError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rvoip_rtp_core::{RtpHeader, RtpHeaderExtensions, RtpPacket};
 
     #[test]
     fn pack_unpack_roundtrip() {
@@ -227,6 +335,49 @@ mod tests {
         assert_eq!(parsed.sequence_number, 7);
         assert_eq!(parsed.timestamp, 9_600);
         assert_eq!(parsed.ssrc, 0x1234_5678);
+    }
+
+    #[test]
+    fn observed_ingress_preserves_full_rtp_metadata_and_strips_padding_from_payload() {
+        let mut header = RtpHeader::new(111, u16::MAX, 0xffff_ff00, 0x1234_5678);
+        header.marker = true;
+        header.csrc = vec![0x1111_1111, 0x2222_2222];
+        header.cc = 2;
+        let mut extensions = RtpHeaderExtensions::new_one_byte();
+        extensions
+            .add_extension(1, Bytes::from_static(b"vad"))
+            .unwrap();
+        header.extension = true;
+        header.extensions = Some(extensions.clone());
+        let mut packet = RtpPacket::new(header, Bytes::from_static(b"codec-only"));
+        packet.set_padding(8);
+        let wire = pack(&MediaDatagram {
+            flags: 0x5a,
+            stream_local_id: 7,
+            seq: 900,
+            payload: packet.serialize().unwrap(),
+        });
+
+        let observed = observe_rtp_datagram(&wire).unwrap();
+        assert_eq!(observed.seq, 900, "UCTP sequence stays independent");
+        let rtp = observed.rtp.packet();
+        assert_eq!(rtp.header.sequence_number, u16::MAX);
+        assert_eq!(rtp.header.timestamp, 0xffff_ff00);
+        assert_eq!(rtp.header.ssrc, 0x1234_5678);
+        assert!(rtp.header.marker);
+        assert_eq!(rtp.header.csrc, vec![0x1111_1111, 0x2222_2222]);
+        assert_eq!(rtp.header.extensions, Some(extensions));
+        assert_eq!(rtp.padding_size, 8);
+        assert_eq!(rtp.payload, Bytes::from_static(b"codec-only"));
+        assert_eq!(pack_observed_rtp_datagram(&observed).unwrap(), wire);
+        let debug = format!("{observed:?}");
+        assert!(!debug.contains("codec-only"));
+        assert!(!debug.contains("vad"));
+
+        let normalized = observed.rtp.into_media_payload();
+        assert_eq!(normalized.payload, Bytes::from_static(b"codec-only"));
+        assert_eq!(normalized.sequence_number, u16::MAX);
+        assert_eq!(normalized.ssrc, 0x1234_5678);
     }
 
     #[test]
@@ -277,6 +428,30 @@ mod tests {
 
         assert_eq!(pack_rtp_datagram(&datagram).unwrap().as_ref(), GOLDEN);
         assert_eq!(unpack_rtp_datagram(GOLDEN).unwrap(), datagram);
+    }
+
+    #[test]
+    fn normalized_outbound_deliberately_regenerates_hop_specific_rtp_metadata() {
+        let datagram = RtpDatagram {
+            flags: 0,
+            stream_local_id: 9,
+            seq: 10,
+            rtp: RtpMediaPayload {
+                payload: Bytes::from_static(b"codec-payload"),
+                payload_type: 111,
+                sequence_number: 22,
+                timestamp: 960,
+                ssrc: 0x1020_3040,
+            },
+        };
+
+        let observed = observe_rtp_datagram(&pack_rtp_datagram(&datagram).unwrap()).unwrap();
+        let packet = observed.rtp.packet();
+        assert!(!packet.header.marker);
+        assert!(packet.header.csrc.is_empty());
+        assert!(packet.header.extensions.is_none());
+        assert_eq!(packet.padding_size, 0);
+        assert_eq!(packet.payload.as_ref(), b"codec-payload");
     }
 
     #[test]

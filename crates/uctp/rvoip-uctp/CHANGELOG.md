@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Added lossless `ObservedRtpDatagram` parsing and exact reserialization,
+  retaining marker, CSRCs, parsed extensions, validated padding metadata,
+  SSRC, and RTP/UCTP sequence identities while exposing only padding-free
+  codec bytes as payload.
+- Added authenticated-route `RtpIngressObservation` for the QUIC and
+  WebTransport adapter receivers.
+- Documented and tested normal outbound hop regeneration: marker false, no
+  CSRCs/extensions, and no padding.
+
 ## 0.2.0 — 2026-07-11
 
 This is a breaking alpha-protocol release.

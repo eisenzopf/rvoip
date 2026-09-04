@@ -361,7 +361,9 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
 
     // --- Inject 10 frames from client A; observe all of them on client B in order. ---
     let client_a_out = rvoip_core::stream::MediaStream::frames_out(client_a_stream.as_ref());
-    let mut client_b_in = rvoip_core::stream::MediaStream::frames_in(client_b_stream.as_ref());
+    let mut client_b_in = client_b_stream
+        .try_frames_in()
+        .expect("client B media receiver");
 
     for i in 0u8..10 {
         let frame = MediaFrame {

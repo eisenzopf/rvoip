@@ -175,6 +175,23 @@ RTP packet. New code must use `RtpDatagram`, `pack_rtp_datagram`, and
 callers and do not validate their opaque body; payload-only datagrams are not a
 valid 0.2 media path.
 
+Code that needs loss, duplicate, reorder, sequence-wrap, SSRC-restart,
+talkspurt, or negotiated-extension input must observe the packet before the
+generic media conversion. Use `observe_rtp_datagram` when you own the bytes, or
+construct the adapter with `UctpQuicAdapter::new_with_rtp_ingress_observer` /
+`UctpWtAdapter::new_with_rtp_ingress_observer` and a bounded Tokio MPSC sender.
+The resulting `RtpIngressObservation` includes the authenticated core route and
+complete parsed RTP packet; valid padding is represented by `padding_size` and
+is not part of `packet.payload`. A full observer channel drops observations,
+not media.
+
+Existing `new` constructors and `unpack_rtp_datagram` callers remain valid.
+Their outbound `RtpDatagram` path intentionally regenerates hop-local RTP
+metadata with marker false and no CSRC, extension, or padding. Preserve an
+observed packet byte-for-byte only through the explicit
+`pack_observed_rtp_datagram` API after deciding that forwarding hop-local
+metadata is correct.
+
 Because the datagram header contains no Session or Connection field,
 `stream_local_id` is allocated once across the entire physical QUIC or
 WebTransport peer. IDs are nonzero, monotonically issued, and never reused
