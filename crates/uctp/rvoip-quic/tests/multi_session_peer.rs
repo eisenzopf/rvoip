@@ -11,11 +11,12 @@ use chrono::Utc;
 use rvoip_auth_core::bearer_stub;
 use rvoip_core::adapter::{AdapterEvent, ConnectionAdapter};
 use rvoip_core::ids::{ConnectionId, StreamId};
-use rvoip_core::stream::{MediaFrame, MediaStream, StreamKind};
+use rvoip_core::stream::{MediaFrame, MediaStream, StreamKind, StreamSelector};
 use rvoip_quic::{QuicDatagramMediaStream, UctpQuicAdapter, UctpQuicClient, UctpQuicConfig};
 use rvoip_uctp::payloads::auth;
 use rvoip_uctp::substrate::{dispatch_by_alpn, self_signed_for_dev};
 use rvoip_uctp::{MessageType, UctpEnvelope, UCTP_RAW_QUIC_ALPN_BYTES};
+use tokio_util::sync::CancellationToken;
 
 fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -239,6 +240,18 @@ async fn two_sessions_on_one_peer_get_distinct_exact_media_routes() {
 
     client.send(invite("sess_one")).await.unwrap();
     let core_one = wait_for_inbound_connection(&mut events, "sess_one").await;
+    let delayed_adapter = adapter.clone();
+    let delayed_connection = core_one.clone();
+    let delayed_stream = tokio::spawn(async move {
+        delayed_adapter
+            .wait_for_stream(
+                delayed_connection,
+                StreamSelector::new(StreamKind::Audio),
+                tokio::time::Instant::now() + Duration::from_secs(5),
+                CancellationToken::new(),
+            )
+            .await
+    });
     let local_one =
         negotiate_stream(&client, &mut inbound, "sess_one", "conn_one", "strm_one").await;
 
@@ -248,8 +261,19 @@ async fn two_sessions_on_one_peer_get_distinct_exact_media_routes() {
         negotiate_stream(&client, &mut inbound, "sess_two", "conn_two", "strm_two").await;
 
     assert_ne!(local_one, local_two, "local IDs are peer-global");
-    let server_one = adapter.streams(core_one).await.unwrap().pop().unwrap();
-    let server_two = adapter.streams(core_two).await.unwrap().pop().unwrap();
+    let server_one = delayed_stream
+        .await
+        .expect("delayed stream wait task")
+        .expect("first negotiated stream readiness");
+    let server_two = adapter
+        .wait_for_stream(
+            core_two,
+            StreamSelector::new(StreamKind::Audio),
+            tokio::time::Instant::now() + Duration::from_secs(5),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("second negotiated stream readiness");
     assert_eq!(server_one.id().as_str(), "strm_one");
     assert_eq!(server_two.id().as_str(), "strm_two");
     let mut receive_one = server_one.try_frames_in().unwrap();
@@ -399,11 +423,14 @@ async fn pcma_negotiates_over_real_quic_and_keeps_pcma_media_identity() {
     )
     .await;
     let server_stream = adapter
-        .streams(core_connection)
+        .wait_for_stream(
+            core_connection,
+            StreamSelector::new(StreamKind::Audio).with_codec("g.711-a"),
+            tokio::time::Instant::now() + Duration::from_secs(5),
+            CancellationToken::new(),
+        )
         .await
-        .unwrap()
-        .pop()
-        .expect("negotiated PCMA stream");
+        .expect("negotiated PCMA stream readiness");
     assert_eq!(server_stream.codec().name, "g.711-a");
     assert_eq!(server_stream.codec().clock_rate_hz, 8_000);
     assert_eq!(server_stream.codec().channels, 1);

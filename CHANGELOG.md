@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Awaitable media readiness
+
+- `ConnectionAdapter::wait_for_stream` now provides a transport-neutral,
+  cancellation- and deadline-aware alternative to application polling loops.
+  Existing adapters inherit a bounded compatibility implementation and may
+  override it with a native registration watch without changing callers.
+- `Orchestrator::wait_for_stream` captures and revalidates the exact connection
+  lifecycle generation. Missing connections, terminal teardown, replacement,
+  adapter loss, cancellation, deadline expiry, and adapter query failure are
+  distinct outcomes.
+- `StreamSelector` filters by media kind, optional codec and direction, plus
+  explicit registered, source-ready, or bidirectional readiness. SIP, WebRTC,
+  QUIC, and WebTransport production-path tests now consume this public surface.
+
 ### Lossless RTP observation on UCTP transports
 
 - `observe_rtp_datagram` and `ObservedRtpDatagram` expose validated RTP

@@ -137,6 +137,7 @@ rcgen.workspace = true
 rvoip-sip = { path = "../../sip/rvoip-sip" }
 rvoip-rtp-core.workspace = true
 rand = { workspace = true }
+tokio-util.workspace = true
 turn-server = { package = "turn", version = "0.11.0" }
 webrtc-util = { version = "0.12.0", features = ["conn", "vnet"] }
 

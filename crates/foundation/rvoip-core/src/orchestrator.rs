@@ -49,7 +49,7 @@ use crate::participant::{Participant, ParticipantKind, ParticipantRole};
 use crate::session::{ConnectionRef, Session, SessionMedium, SessionState};
 use crate::stream::{
     BridgedDataMessageDecision, DataMessageBridgePolicy, MediaReceiverReservation,
-    PassThroughDataMessageBridgePolicy, StreamKind,
+    PassThroughDataMessageBridgePolicy, StreamKind, StreamSelector, StreamWaitError,
 };
 #[cfg(feature = "vcon")]
 use crate::vcon::VconBuilderHandle;
@@ -71,6 +71,7 @@ use tokio::sync::{
     broadcast, mpsc, oneshot, watch, Mutex as TokioMutex, Notify, OwnedSemaphorePermit,
     RwLock as TokioRwLock, Semaphore,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument, warn};
 
 /// Cross-crate observers must not be able to create one Tokio task per event.
@@ -3576,6 +3577,75 @@ impl Orchestrator {
             });
         }
         Ok(tickets)
+    }
+
+    fn capture_stream_wait_context(
+        &self,
+        connection_id: &ConnectionId,
+    ) -> std::result::Result<(ConnectionLifecycleTicket, Transport), StreamWaitError> {
+        let _registry = self
+            .connection_registry_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let connection = self
+            .connections
+            .get(connection_id)
+            .ok_or(StreamWaitError::ConnectionNotFound)?;
+        let lifecycle = self
+            .connection_lifecycles
+            .get(connection_id)
+            .ok_or(StreamWaitError::ConnectionNotFound)?;
+        let state = lifecycle
+            .value()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.active || state.retired {
+            return Err(StreamWaitError::ConnectionNotFound);
+        }
+        let ticket = ConnectionLifecycleTicket {
+            connection_id: connection_id.clone(),
+            generation: state.generation,
+            state: Arc::clone(lifecycle.value()),
+        };
+        let transport = connection.transport;
+        drop(state);
+        drop(lifecycle);
+        drop(connection);
+        Ok((ticket, transport))
+    }
+
+    fn validate_stream_wait_lifecycle(
+        &self,
+        lifecycle: &ConnectionLifecycleTicket,
+    ) -> std::result::Result<(), StreamWaitError> {
+        let _registry = self
+            .connection_registry_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(current) = self.connection_lifecycles.get(&lifecycle.connection_id) else {
+            return Err(StreamWaitError::ConnectionTerminated);
+        };
+        if !Arc::ptr_eq(current.value(), &lifecycle.state) {
+            return Err(StreamWaitError::GenerationReplaced);
+        }
+        let state = lifecycle
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.generation != lifecycle.generation {
+            return if state.retired || !state.active {
+                Err(StreamWaitError::ConnectionTerminated)
+            } else {
+                Err(StreamWaitError::GenerationReplaced)
+            };
+        }
+        if !state.active
+            || state.retired
+            || !self.connections.contains_key(&lifecycle.connection_id)
+        {
+            return Err(StreamWaitError::ConnectionTerminated);
+        }
+        Ok(())
     }
 
     fn lock_connection_lifecycles<'a>(
@@ -8066,6 +8136,43 @@ impl Orchestrator {
         adapter.resume(connection_id).await
     }
 
+    /// Await one matching stream on the exact currently registered Connection
+    /// lifecycle generation.
+    ///
+    /// Signaling can be connected before a stream is registered; registration
+    /// can precede `MediaStream::source_ready`; and bidirectional readiness
+    /// additionally requires a live outbound sender. This method makes those
+    /// states explicit, delegates efficient waiting to the adapter when
+    /// available, and revalidates the captured lifecycle before returning.
+    /// It spawns no detached task and remains safe while the runtime drains.
+    pub async fn wait_for_stream(
+        &self,
+        connection_id: ConnectionId,
+        selector: StreamSelector,
+        deadline: tokio::time::Instant,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<Arc<dyn crate::stream::MediaStream>, StreamWaitError> {
+        let (lifecycle, transport) = self.capture_stream_wait_context(&connection_id)?;
+        let adapter = self
+            .adapter(transport)
+            .map_err(|_| StreamWaitError::AdapterUnavailable)?;
+        if !adapter.is_connection_live(&connection_id) {
+            self.validate_stream_wait_lifecycle(&lifecycle)?;
+            return Err(StreamWaitError::AdapterUnavailable);
+        }
+
+        let result = adapter
+            .wait_for_stream(connection_id.clone(), selector, deadline, cancellation)
+            .await;
+
+        self.validate_stream_wait_lifecycle(&lifecycle)?;
+
+        if !adapter.is_connection_live(&connection_id) {
+            return Err(StreamWaitError::AdapterUnavailable);
+        }
+        result
+    }
+
     /// Submit a transfer command to the owning adapter.
     ///
     /// `Ok(())` confirms command submission, not target completion. Subscribe
@@ -10767,5 +10874,76 @@ mod cross_crate_publisher_tests {
             observed.push(connection_id.to_string());
         }
         assert_eq!(observed, ["one", "two", "three", "four"]);
+    }
+
+    fn install_stream_wait_lifecycle(
+        orchestrator: &Orchestrator,
+        connection_id: &ConnectionId,
+    ) -> ConnectionLifecycleTicket {
+        orchestrator.connections.insert(
+            connection_id.clone(),
+            ConnectionEntry {
+                transport: Transport::Sip,
+                direction: Direction::Inbound,
+                principal: None,
+                inbound_context: None,
+                inbound_context_retired: false,
+                inbound_publication: InboundPublicationState::Unseen,
+                inbound_admission_terminal: None,
+                staged_inbound_data: None,
+                normalized_lifecycle_was_visible: false,
+                deferred_authentication: None,
+                deferred_principal_authentication: None,
+            },
+        );
+        assert!(orchestrator.ensure_connection_lifecycle(connection_id));
+        orchestrator
+            .capture_stream_wait_context(connection_id)
+            .expect("capture active wait lifecycle")
+            .0
+    }
+
+    #[test]
+    fn stream_wait_revalidation_distinguishes_terminal_generation() {
+        let orchestrator = Orchestrator::new(Config::default());
+        let connection_id = ConnectionId::new();
+        let lifecycle = install_stream_wait_lifecycle(&orchestrator, &connection_id);
+        {
+            let mut state = lifecycle
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.generation += 1;
+            state.active = false;
+            state.retired = true;
+        }
+        orchestrator.connections.remove(&connection_id);
+
+        assert_eq!(
+            orchestrator.validate_stream_wait_lifecycle(&lifecycle),
+            Err(StreamWaitError::ConnectionTerminated)
+        );
+    }
+
+    #[test]
+    fn stream_wait_revalidation_distinguishes_replaced_generation() {
+        let orchestrator = Orchestrator::new(Config::default());
+        let connection_id = ConnectionId::new();
+        let lifecycle = install_stream_wait_lifecycle(&orchestrator, &connection_id);
+        orchestrator.connection_lifecycles.insert(
+            connection_id,
+            Arc::new(Mutex::new(ConnectionLifecycleState {
+                generation: lifecycle.generation + 1,
+                active: true,
+                retired: false,
+                admission_outcomes_notified: HashSet::new(),
+                operational_connected_emitted: false,
+            })),
+        );
+
+        assert_eq!(
+            orchestrator.validate_stream_wait_lifecycle(&lifecycle),
+            Err(StreamWaitError::GenerationReplaced)
+        );
     }
 }

@@ -431,6 +431,54 @@ pub trait ConnectionAdapter: Send + Sync {
 
     async fn streams(&self, conn: ConnectionId) -> Result<Vec<Arc<dyn MediaStream>>>;
 
+    /// Await a matching stream without requiring application polling loops.
+    ///
+    /// Adapters may override this with a registration watch. The compatibility
+    /// implementation performs bounded in-future polling: it creates no task,
+    /// checks an already-present stream immediately, and distinguishes route
+    /// loss, cancellation, deadline, and adapter failures. Use
+    /// [`crate::Orchestrator::wait_for_stream`] when exact core lifecycle
+    /// generation fencing is required.
+    async fn wait_for_stream(
+        &self,
+        conn: ConnectionId,
+        selector: crate::stream::StreamSelector,
+        deadline: tokio::time::Instant,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> std::result::Result<Arc<dyn MediaStream>, crate::stream::StreamWaitError> {
+        const COMPATIBILITY_POLL_INTERVAL: std::time::Duration =
+            std::time::Duration::from_millis(10);
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(crate::stream::StreamWaitError::Cancelled);
+            }
+            if !self.is_connection_live(&conn) {
+                return Err(crate::stream::StreamWaitError::AdapterUnavailable);
+            }
+            let streams = self
+                .streams(conn.clone())
+                .await
+                .map_err(|_| crate::stream::StreamWaitError::AdapterFailure)?;
+            if let Some(stream) = streams
+                .into_iter()
+                .find(|stream| selector.matches(stream.as_ref()))
+            {
+                return Ok(stream);
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Err(crate::stream::StreamWaitError::DeadlineExceeded);
+            }
+            let next_probe = std::cmp::min(deadline, now + COMPATIBILITY_POLL_INTERVAL);
+            tokio::select! {
+                _ = cancellation.cancelled() => {
+                    return Err(crate::stream::StreamWaitError::Cancelled);
+                }
+                _ = tokio::time::sleep_until(next_probe) => {}
+            }
+        }
+    }
+
     /// Allocate a fresh per-`(subscriber, publisher_strm)` MediaStream for
     /// the multi-party fanout path (plan §12 MP3c / G4). Required so a
     /// subscriber in an N-party room can demultiplex datagrams from

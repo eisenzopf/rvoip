@@ -208,8 +208,8 @@ pub use store::{
     MemoryVconStore, MessageFilter, MessagePage, MessageStore, PageCursor, VconStore,
 };
 pub use stream::{
-    MediaFrame, MediaReceiverReservation, MediaStream, MediaStreamHandle, QualitySnapshot,
-    StreamKind,
+    MediaFrame, MediaReadiness, MediaReceiverReservation, MediaStream, MediaStreamHandle,
+    QualitySnapshot, StreamKind, StreamSelector, StreamWaitError,
 };
 pub use vcon::{
     DefaultVconBuilder, VconAnalysis, VconAnalysisKind, VconAttachment, VconBuilderHandle,
