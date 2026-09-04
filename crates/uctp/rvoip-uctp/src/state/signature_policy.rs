@@ -95,6 +95,7 @@ impl Sig9421Policy {
 pub struct Sig9421Config {
     pub verifier: Arc<rvoip_auth_core::sig9421::Sig9421Verifier>,
     pub policy: Sig9421Policy,
+    pub verification_context: Option<rvoip_auth_core::sig9421::SignatureVerificationContext>,
 }
 
 impl Sig9421Config {
@@ -102,6 +103,18 @@ impl Sig9421Config {
         verifier: Arc<rvoip_auth_core::sig9421::Sig9421Verifier>,
         policy: Sig9421Policy,
     ) -> Self {
-        Self { verifier, policy }
+        Self {
+            verifier,
+            policy,
+            verification_context: None,
+        }
+    }
+
+    pub fn with_verification_context(
+        mut self,
+        context: rvoip_auth_core::sig9421::SignatureVerificationContext,
+    ) -> Self {
+        self.verification_context = Some(context);
+        self
     }
 }

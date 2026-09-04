@@ -20,12 +20,13 @@
 //! the envelope's `id` is the deduplication key; default TTL is 5
 //! minutes per the spec.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use moka::future::Cache;
 use ring::signature::{UnparsedPublicKey, ED25519};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -49,6 +50,9 @@ pub const DEFAULT_SIG_CLOCK_SKEW: Duration = Duration::from_secs(30);
 /// LRU eviction. Mirrors [`crate::dpop::DEFAULT_JTI_CACHE_CAPACITY`].
 pub const DEFAULT_REPLAY_CACHE_CAPACITY: u64 = 100_000;
 
+/// Maximum canonicalized envelope size accepted at the signature boundary.
+pub const DEFAULT_MAX_SIGNED_ENVELOPE_BYTES: usize = 1024 * 1024;
+
 pub enum Sig9421Error {
     MissingSignature,
     MalformedSignature(String),
@@ -60,6 +64,10 @@ pub enum Sig9421Error {
     MalformedEnvelope,
     MissingEnvelopeId,
     InvalidEnvelopeTimestamp,
+    MissingVerificationContext,
+    KeyRejected,
+    ReplayStoreUnavailable,
+    EnvelopeTooLarge,
 }
 
 impl Sig9421Error {
@@ -75,6 +83,10 @@ impl Sig9421Error {
             Self::MalformedEnvelope => "malformed-envelope",
             Self::MissingEnvelopeId => "missing-envelope-id",
             Self::InvalidEnvelopeTimestamp => "invalid-envelope-timestamp",
+            Self::MissingVerificationContext => "missing-verification-context",
+            Self::KeyRejected => "key-rejected",
+            Self::ReplayStoreUnavailable => "replay-store-unavailable",
+            Self::EnvelopeTooLarge => "envelope-too-large",
         }
     }
 }
@@ -123,6 +135,138 @@ impl fmt::Debug for EnvelopeSignature {
     }
 }
 
+/// Ownership boundary supplied by the authenticated transport before key
+/// resolution. A bare key ID is not globally meaningful in a multi-tenant
+/// deployment and must never select a key across tenant or issuer domains.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SignatureVerificationContext {
+    pub tenant: String,
+    pub issuer: String,
+}
+
+impl SignatureVerificationContext {
+    pub fn new(tenant: impl Into<String>, issuer: impl Into<String>) -> Result<Self, Sig9421Error> {
+        let context = Self {
+            tenant: tenant.into(),
+            issuer: issuer.into(),
+        };
+        if context.tenant.is_empty()
+            || context.issuer.is_empty()
+            || context.tenant.len() > 256
+            || context.issuer.len() > 2048
+        {
+            return Err(Sig9421Error::MissingVerificationContext);
+        }
+        Ok(context)
+    }
+
+    fn replay_namespace(&self) -> String {
+        format!("{}\u{1f}{}", self.tenant, self.issuer)
+    }
+}
+
+/// Contextual key selected for one signature operation.
+#[derive(Clone)]
+pub struct ResolvedVerificationKey {
+    pub public_key: Vec<u8>,
+    pub algorithm: String,
+    pub not_before: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub revoked: bool,
+}
+
+impl fmt::Debug for ResolvedVerificationKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResolvedVerificationKey")
+            .field("public_key_bytes", &self.public_key.len())
+            .field("algorithm", &self.algorithm)
+            .field("not_before", &self.not_before)
+            .field("expires_at", &self.expires_at)
+            .field("revoked", &self.revoked)
+            .finish()
+    }
+}
+
+/// Atomic replay-consumption result. Store failures are distinct from a
+/// duplicate and fail closed at the verifier boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplayConsumeError {
+    AlreadyConsumed,
+    CapacityExhausted,
+    Unavailable,
+}
+
+#[async_trait]
+pub trait SignatureReplayStore: Send + Sync {
+    async fn consume(
+        &self,
+        context: &SignatureVerificationContext,
+        envelope_id: &str,
+        expires_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<(), ReplayConsumeError>;
+}
+
+/// Bounded, fail-closed replay store for one-process deployments and tests.
+/// The mutex covers lookup and insertion as one operation, so concurrent
+/// identical envelopes have exactly one winner.
+pub struct InMemorySignatureReplayStore {
+    capacity: usize,
+    entries: Mutex<HashMap<(String, String), DateTime<Utc>>>,
+}
+
+impl InMemorySignatureReplayStore {
+    pub fn new(capacity: usize) -> Result<Self, ReplayConsumeError> {
+        if capacity == 0 {
+            return Err(ReplayConsumeError::CapacityExhausted);
+        }
+        Ok(Self {
+            capacity,
+            entries: Mutex::new(HashMap::new()),
+        })
+    }
+}
+
+#[async_trait]
+impl SignatureReplayStore for InMemorySignatureReplayStore {
+    async fn consume(
+        &self,
+        context: &SignatureVerificationContext,
+        envelope_id: &str,
+        expires_at: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<(), ReplayConsumeError> {
+        let mut entries = self
+            .entries
+            .lock()
+            .map_err(|_| ReplayConsumeError::Unavailable)?;
+        entries.retain(|_, expiry| *expiry > now);
+        let key = (context.replay_namespace(), envelope_id.to_string());
+        if entries.contains_key(&key) {
+            return Err(ReplayConsumeError::AlreadyConsumed);
+        }
+        if entries.len() >= self.capacity {
+            return Err(ReplayConsumeError::CapacityExhausted);
+        }
+        entries.insert(key, expires_at);
+        Ok(())
+    }
+}
+
+pub trait SignatureClock: Send + Sync {
+    fn now(&self) -> DateTime<Utc>;
+}
+
+#[derive(Default)]
+pub struct SystemSignatureClock;
+
+impl SignatureClock for SystemSignatureClock {
+    fn now(&self) -> DateTime<Utc> {
+        Utc::now()
+    }
+}
+
 /// Trait the verifier uses to look up the public key bytes for a
 /// `keyid`. Production deployments back this with their identity
 /// store; tests typically use [`StaticKeyResolver`].
@@ -131,22 +275,56 @@ pub trait KeyResolver: Send + Sync {
     /// the keyid is unknown. For Ed25519 the slice is the 32-byte
     /// raw public key.
     fn resolve(&self, keyid: &str) -> Option<Vec<u8>>;
+
+    /// Resolve a key inside an authenticated tenant/issuer boundary. The
+    /// compatibility default wraps a legacy global key, while production
+    /// resolvers should override this method and reject unknown contexts.
+    fn resolve_contextual(
+        &self,
+        _context: &SignatureVerificationContext,
+        keyid: &str,
+        algorithm: &str,
+        _now: DateTime<Utc>,
+    ) -> Option<ResolvedVerificationKey> {
+        self.resolve(keyid)
+            .map(|public_key| ResolvedVerificationKey {
+                public_key,
+                algorithm: algorithm.to_string(),
+                not_before: None,
+                expires_at: None,
+                revoked: false,
+            })
+    }
 }
 
 /// In-memory key resolver — useful for tests and static deployments.
 pub struct StaticKeyResolver {
     keys: std::collections::HashMap<String, Vec<u8>>,
+    contextual_keys: std::collections::HashMap<(String, String, String), ResolvedVerificationKey>,
 }
 
 impl StaticKeyResolver {
     pub fn new() -> Self {
         Self {
             keys: std::collections::HashMap::new(),
+            contextual_keys: std::collections::HashMap::new(),
         }
     }
 
     pub fn insert(&mut self, keyid: impl Into<String>, public_key: Vec<u8>) {
         self.keys.insert(keyid.into(), public_key);
+    }
+
+    pub fn insert_contextual(
+        &mut self,
+        context: &SignatureVerificationContext,
+        keyid: impl Into<String>,
+        key: ResolvedVerificationKey,
+    ) {
+        self.contextual_keys.insert(
+            (context.tenant.clone(), context.issuer.clone(), keyid.into()),
+            key,
+        );
     }
 }
 
@@ -160,6 +338,33 @@ impl KeyResolver for StaticKeyResolver {
     fn resolve(&self, keyid: &str) -> Option<Vec<u8>> {
         self.keys.get(keyid).cloned()
     }
+
+    fn resolve_contextual(
+        &self,
+        context: &SignatureVerificationContext,
+        keyid: &str,
+        algorithm: &str,
+        _now: DateTime<Utc>,
+    ) -> Option<ResolvedVerificationKey> {
+        self.contextual_keys
+            .get(&(
+                context.tenant.clone(),
+                context.issuer.clone(),
+                keyid.to_string(),
+            ))
+            .cloned()
+            .or_else(|| {
+                <Self as KeyResolver>::resolve(self, keyid).map(|public_key| {
+                    ResolvedVerificationKey {
+                        public_key,
+                        algorithm: algorithm.to_string(),
+                        not_before: None,
+                        expires_at: None,
+                        revoked: false,
+                    }
+                })
+            })
+    }
 }
 
 /// Verifier for inline RFC 9421 envelope signatures.
@@ -170,9 +375,11 @@ impl KeyResolver for StaticKeyResolver {
 /// process, depending on the threat model).
 pub struct Sig9421Verifier {
     resolver: Arc<dyn KeyResolver>,
-    replay_cache: Cache<String, ()>,
+    replay_store: Arc<dyn SignatureReplayStore>,
+    clock: Arc<dyn SignatureClock>,
     ttl: Duration,
     clock_skew: Duration,
+    max_envelope_bytes: usize,
 }
 
 impl Sig9421Verifier {
@@ -195,13 +402,38 @@ impl Sig9421Verifier {
     ) -> Self {
         Self {
             resolver,
-            replay_cache: Cache::builder()
-                .max_capacity(DEFAULT_REPLAY_CACHE_CAPACITY)
-                .time_to_live(ttl)
-                .build(),
+            replay_store: Arc::new(
+                InMemorySignatureReplayStore::new(DEFAULT_REPLAY_CACHE_CAPACITY as usize)
+                    .expect("non-zero default replay capacity"),
+            ),
+            clock: Arc::new(SystemSignatureClock),
             ttl,
             clock_skew,
+            max_envelope_bytes: DEFAULT_MAX_SIGNED_ENVELOPE_BYTES,
         }
+    }
+
+    /// Construct the production verification boundary with an externally
+    /// durable atomic replay store and an injectable clock.
+    pub fn with_security_dependencies(
+        resolver: Arc<dyn KeyResolver>,
+        replay_store: Arc<dyn SignatureReplayStore>,
+        clock: Arc<dyn SignatureClock>,
+        ttl: Duration,
+        clock_skew: Duration,
+        max_envelope_bytes: usize,
+    ) -> Result<Self, Sig9421Error> {
+        if max_envelope_bytes == 0 {
+            return Err(Sig9421Error::EnvelopeTooLarge);
+        }
+        Ok(Self {
+            resolver,
+            replay_store,
+            clock,
+            ttl,
+            clock_skew,
+            max_envelope_bytes,
+        })
     }
 
     /// Verify an inline-signed envelope. `envelope` is the parsed
@@ -210,6 +442,20 @@ impl Sig9421Verifier {
     /// added to the replay cache so subsequent calls with the same
     /// id are rejected.
     pub async fn verify(&self, envelope: &serde_json::Value) -> Result<(), Sig9421Error> {
+        let context = SignatureVerificationContext::new("legacy", "legacy")?;
+        self.verify_with_context(envelope, &context).await
+    }
+
+    /// Verify an inline-signed envelope within its authenticated ownership
+    /// domain. This is the production entry point for multi-tenant callers.
+    pub async fn verify_with_context(
+        &self,
+        envelope: &serde_json::Value,
+        context: &SignatureVerificationContext,
+    ) -> Result<(), Sig9421Error> {
+        if context.tenant.is_empty() || context.issuer.is_empty() {
+            return Err(Sig9421Error::MissingVerificationContext);
+        }
         let obj = envelope
             .as_object()
             .ok_or(Sig9421Error::MalformedEnvelope)?;
@@ -232,7 +478,11 @@ impl Sig9421Verifier {
         let env_ts: DateTime<Utc> = DateTime::parse_from_rfc3339(env_ts_str)
             .map_err(|_| Sig9421Error::InvalidEnvelopeTimestamp)?
             .with_timezone(&Utc);
-        let age = Utc::now().signed_duration_since(env_ts);
+        if env_id.is_empty() || env_id.len() > 256 {
+            return Err(Sig9421Error::MissingEnvelopeId);
+        }
+        let now = self.clock.now();
+        let age = now.signed_duration_since(env_ts);
         if age > chrono::Duration::from_std(self.ttl).unwrap_or(chrono::Duration::seconds(300)) {
             return Err(Sig9421Error::StaleTimestamp(env_ts_str.to_string()));
         }
@@ -249,21 +499,36 @@ impl Sig9421Verifier {
         // strip `signature`, JCS-serialize.
         let mut bare = obj.clone();
         bare.remove("signature");
-        let canonical = jcs_canonicalize(&serde_json::Value::Object(bare));
+        let canonical = serde_jcs::to_vec(&serde_json::Value::Object(bare))
+            .map_err(|_| Sig9421Error::MalformedEnvelope)?;
+        if canonical.len() > self.max_envelope_bytes {
+            return Err(Sig9421Error::EnvelopeTooLarge);
+        }
 
         // 4. Resolve the signing key and verify.
-        let pubkey = self
+        let resolved = self
             .resolver
-            .resolve(&signature.keyid)
+            .resolve_contextual(context, &signature.keyid, &signature.alg, now)
             .ok_or_else(|| Sig9421Error::UnknownKeyid(signature.keyid.clone()))?;
+        if resolved.revoked
+            || resolved.algorithm != signature.alg
+            || resolved
+                .not_before
+                .is_some_and(|not_before| now < not_before)
+            || resolved
+                .expires_at
+                .is_some_and(|expires_at| now >= expires_at)
+        {
+            return Err(Sig9421Error::KeyRejected);
+        }
         let sig_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(signature.sig.as_bytes())
             .map_err(|_| Sig9421Error::InvalidSignature)?;
 
         match signature.alg.as_str() {
             "EdDSA" => {
-                let key = UnparsedPublicKey::new(&ED25519, &pubkey);
-                key.verify(canonical.as_bytes(), &sig_bytes)
+                let key = UnparsedPublicKey::new(&ED25519, &resolved.public_key);
+                key.verify(&canonical, &sig_bytes)
                     .map_err(|_| Sig9421Error::InvalidSignature)?;
             }
             other => return Err(Sig9421Error::UnsupportedAlgorithm(other.to_string())),
@@ -271,85 +536,31 @@ impl Sig9421Verifier {
 
         // 5. Replay check after signature passes (don't burn cache
         //    slots on rejected signatures).
-        if self.replay_cache.get(&env_id).await.is_some() {
-            return Err(Sig9421Error::ReplayDetected(env_id));
+        let replay_expiry = now
+            + chrono::Duration::from_std(self.ttl)
+                .unwrap_or_else(|_| chrono::Duration::seconds(300));
+        match self
+            .replay_store
+            .consume(context, &env_id, replay_expiry, now)
+            .await
+        {
+            Ok(()) => {}
+            Err(ReplayConsumeError::AlreadyConsumed) => {
+                return Err(Sig9421Error::ReplayDetected(env_id));
+            }
+            Err(ReplayConsumeError::CapacityExhausted | ReplayConsumeError::Unavailable) => {
+                return Err(Sig9421Error::ReplayStoreUnavailable);
+            }
         }
-        self.replay_cache.insert(env_id, ()).await;
 
         Ok(())
     }
 }
 
-/// RFC 8785 JSON Canonical Form serializer for the envelope shape
-/// (objects of strings/numbers/booleans/null/arrays/sub-objects).
-///
-/// Key properties: object keys sorted by code unit, no insignificant
-/// whitespace, strings escaped per JSON, numbers in the shortest
-/// round-trip form. Our envelope payload is bounded to these JSON
-/// primitives (no exotic types), so this minimal implementation is
-/// sufficient. Production hardening would swap in a fully RFC-8785-
-/// compliant crate (e.g. `serde_jcs`).
+/// RFC 8785 JSON Canonical Form serializer backed by `serde_jcs`, including
+/// ECMAScript number formatting and UTF-16 object-key ordering.
 pub fn jcs_canonicalize(value: &serde_json::Value) -> String {
-    let mut out = String::new();
-    jcs_write(value, &mut out);
-    out
-}
-
-fn jcs_write(value: &serde_json::Value, out: &mut String) {
-    match value {
-        serde_json::Value::Null => out.push_str("null"),
-        serde_json::Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-        serde_json::Value::Number(n) => {
-            // serde_json's Number Display uses the shortest
-            // round-trip representation per the underlying float
-            // formatter, which is consistent with JCS for finite
-            // numbers we'd see in an envelope.
-            out.push_str(&n.to_string());
-        }
-        serde_json::Value::String(s) => {
-            out.push('"');
-            for ch in s.chars() {
-                match ch {
-                    '"' => out.push_str("\\\""),
-                    '\\' => out.push_str("\\\\"),
-                    '\n' => out.push_str("\\n"),
-                    '\r' => out.push_str("\\r"),
-                    '\t' => out.push_str("\\t"),
-                    '\u{08}' => out.push_str("\\b"),
-                    '\u{0c}' => out.push_str("\\f"),
-                    c if (c as u32) < 0x20 => {
-                        out.push_str(&format!("\\u{:04x}", c as u32));
-                    }
-                    c => out.push(c),
-                }
-            }
-            out.push('"');
-        }
-        serde_json::Value::Array(items) => {
-            out.push('[');
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                jcs_write(item, out);
-            }
-            out.push(']');
-        }
-        serde_json::Value::Object(map) => {
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
-            out.push('{');
-            for (i, key) in keys.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                jcs_write(&serde_json::Value::String((*key).clone()), out);
-                out.push(':');
-                jcs_write(&map[*key], out);
-            }
-            out.push('}');
-        }
-    }
+    serde_jcs::to_string(value).expect("serde_json::Value is valid JCS input")
 }
 
 #[cfg(test)]
@@ -357,6 +568,28 @@ mod tests {
     use super::*;
     use ring::rand::{SecureRandom, SystemRandom};
     use ring::signature::{Ed25519KeyPair, KeyPair};
+
+    struct FixedClock(DateTime<Utc>);
+
+    impl SignatureClock for FixedClock {
+        fn now(&self) -> DateTime<Utc> {
+            self.0
+        }
+    }
+
+    fn context(tenant: &str) -> SignatureVerificationContext {
+        SignatureVerificationContext::new(tenant, "https://issuer.example").unwrap()
+    }
+
+    fn resolved_key(public_key: Vec<u8>) -> ResolvedVerificationKey {
+        ResolvedVerificationKey {
+            public_key,
+            algorithm: "EdDSA".into(),
+            not_before: None,
+            expires_at: None,
+            revoked: false,
+        }
+    }
 
     fn signing_keypair() -> (Ed25519KeyPair, Vec<u8>) {
         let rng = SystemRandom::new();
@@ -444,6 +677,104 @@ mod tests {
         verifier.verify(&env).await.expect("first verify");
         let err = verifier.verify(&env).await.unwrap_err();
         assert!(matches!(err, Sig9421Error::ReplayDetected(_)));
+    }
+
+    #[tokio::test]
+    async fn concurrent_replay_consumption_has_exactly_one_winner() {
+        let (kp, pubkey) = signing_keypair();
+        let mut resolver = StaticKeyResolver::new();
+        resolver.insert("key:agent-1", pubkey);
+        let verifier = Arc::new(Sig9421Verifier::new(Arc::new(resolver)));
+        let mut env = build_envelope();
+        sign_envelope(&mut env, "key:agent-1", &kp);
+        let env = Arc::new(env);
+
+        let mut tasks = Vec::new();
+        for _ in 0..32 {
+            let verifier = Arc::clone(&verifier);
+            let env = Arc::clone(&env);
+            tasks.push(tokio::spawn(async move { verifier.verify(&env).await }));
+        }
+        let mut accepted = 0;
+        let mut replayed = 0;
+        for task in tasks {
+            match task.await.unwrap() {
+                Ok(()) => accepted += 1,
+                Err(Sig9421Error::ReplayDetected(_)) => replayed += 1,
+                Err(error) => panic!("unexpected verification result: {error:?}"),
+            }
+        }
+        assert_eq!(accepted, 1);
+        assert_eq!(replayed, 31);
+    }
+
+    #[tokio::test]
+    async fn contextual_resolution_prevents_cross_tenant_key_id_collision() {
+        let (kp_a, pubkey_a) = signing_keypair();
+        let (_kp_b, pubkey_b) = signing_keypair();
+        let tenant_a = context("tenant-a");
+        let tenant_b = context("tenant-b");
+        let mut resolver = StaticKeyResolver::new();
+        resolver.insert_contextual(&tenant_a, "shared-key-id", resolved_key(pubkey_a));
+        resolver.insert_contextual(&tenant_b, "shared-key-id", resolved_key(pubkey_b));
+        let verifier = Sig9421Verifier::new(Arc::new(resolver));
+        let mut env = build_envelope();
+        sign_envelope(&mut env, "shared-key-id", &kp_a);
+
+        verifier
+            .verify_with_context(&env, &tenant_a)
+            .await
+            .expect("tenant-a key verifies");
+        assert!(matches!(
+            verifier.verify_with_context(&env, &tenant_b).await,
+            Err(Sig9421Error::InvalidSignature)
+        ));
+    }
+
+    #[tokio::test]
+    async fn revoked_and_expired_contextual_keys_fail_closed() {
+        let (kp, pubkey) = signing_keypair();
+        let context = context("tenant-a");
+        let now = Utc::now();
+        let mut key = resolved_key(pubkey);
+        key.revoked = true;
+        key.expires_at = Some(now - chrono::Duration::seconds(1));
+        let mut resolver = StaticKeyResolver::new();
+        resolver.insert_contextual(&context, "revoked-key", key);
+        let verifier = Sig9421Verifier::with_security_dependencies(
+            Arc::new(resolver),
+            Arc::new(InMemorySignatureReplayStore::new(8).unwrap()),
+            Arc::new(FixedClock(now)),
+            DEFAULT_SIG_REPLAY_TTL,
+            DEFAULT_SIG_CLOCK_SKEW,
+            DEFAULT_MAX_SIGNED_ENVELOPE_BYTES,
+        )
+        .unwrap();
+        let mut env = build_envelope();
+        env["ts"] = serde_json::json!(now.to_rfc3339());
+        sign_envelope(&mut env, "revoked-key", &kp);
+
+        assert!(matches!(
+            verifier.verify_with_context(&env, &context).await,
+            Err(Sig9421Error::KeyRejected)
+        ));
+    }
+
+    #[tokio::test]
+    async fn replay_capacity_pressure_fails_closed_without_evicting_live_ids() {
+        let now = Utc::now();
+        let store = InMemorySignatureReplayStore::new(1).unwrap();
+        let context = context("tenant-a");
+        let expiry = now + chrono::Duration::minutes(5);
+        store.consume(&context, "first", expiry, now).await.unwrap();
+        assert_eq!(
+            store.consume(&context, "second", expiry, now).await,
+            Err(ReplayConsumeError::CapacityExhausted)
+        );
+        assert_eq!(
+            store.consume(&context, "first", expiry, now).await,
+            Err(ReplayConsumeError::AlreadyConsumed)
+        );
     }
 
     #[tokio::test]
@@ -550,6 +881,25 @@ mod tests {
         assert_eq!(
             jcs_canonicalize(&v),
             r#"{"a":null,"b":[1,2,{"x":"w","y":"z"}]}"#
+        );
+    }
+
+    #[test]
+    fn jcs_uses_utf16_key_order_for_non_bmp_names() {
+        let value: serde_json::Value =
+            serde_json::from_str(r#"{"\ue000":1,"\ud800\udc00":2}"#).expect("valid surrogate pair");
+        assert_eq!(jcs_canonicalize(&value), "{\"𐀀\":2,\"\":1}");
+    }
+
+    #[test]
+    fn jcs_uses_ecmascript_number_serialization() {
+        let value: serde_json::Value = serde_json::from_str(
+            "[333333333.33333329,1E30,4.50,2e-3,0.000000000000000000000000001]",
+        )
+        .unwrap();
+        assert_eq!(
+            jcs_canonicalize(&value),
+            "[333333333.3333333,1e+30,4.5,0.002,1e-27]"
         );
     }
 
