@@ -13,6 +13,7 @@ use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
 use rand::Rng;
 use std::net::SocketAddr;
+use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -89,6 +90,56 @@ fn sender_report_totals(
     )
 }
 
+fn compact_ntp_rtt_ms(last_sender_report: u32, delay_since_last_report: u32) -> Option<f64> {
+    if last_sender_report == 0 {
+        return None;
+    }
+    let now = crate::packet::rtcp::NtpTimestamp::now().to_u32();
+    let elapsed = now
+        .wrapping_sub(last_sender_report)
+        .wrapping_sub(delay_since_last_report);
+    // A negative 16.16 fixed-point interval appears with the high bit set.
+    // Ignore it rather than publishing a wrap-sized RTT.
+    if elapsed & 0x8000_0000 != 0 {
+        return None;
+    }
+    Some(f64::from(elapsed) * 1_000.0 / 65_536.0)
+}
+
+fn build_voip_metrics_xr(
+    sender_ssrc: RtpSsrc,
+    report_blocks: &[crate::packet::rtcp::RtcpReportBlock],
+    stats: &RtpSessionStats,
+    clock_rate: u32,
+) -> Option<crate::packet::rtcp::RtcpExtendedReport> {
+    if report_blocks.is_empty() {
+        return None;
+    }
+    let mut xr = crate::packet::rtcp::RtcpExtendedReport::new(sender_ssrc);
+    let discard_rate = if stats.packets_received == 0 {
+        0
+    } else {
+        ((stats.packets_discarded_by_jitter.saturating_mul(256) / stats.packets_received).min(255))
+            as u8
+    };
+    let rtt_ms = stats.rtt_ms.unwrap_or(0.0).clamp(0.0, f64::from(u16::MAX)) as u16;
+    for block in report_blocks {
+        let jitter_ms = if clock_rate == 0 {
+            0.0
+        } else {
+            block.jitter as f32 * 1_000.0 / clock_rate as f32
+        };
+        let loss_percent = block.fraction_lost as f32 * 100.0 / 256.0;
+        let mut metrics = crate::packet::rtcp::VoipMetricsBlock::new(block.ssrc);
+        metrics.loss_rate = block.fraction_lost;
+        metrics.discard_rate = discard_rate;
+        metrics.round_trip_delay = rtt_ms;
+        metrics.calculate_r_factor(loss_percent, rtt_ms, jitter_ms);
+        xr.add_voip_metrics(metrics);
+    }
+    Some(xr)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ReceivedSenderReport {
     lsr: u32,
@@ -146,8 +197,30 @@ pub struct RtpSessionStats {
     /// Current jitter estimate (in milliseconds)
     pub jitter_ms: f64,
 
+    /// Most recently measured round-trip time from an RTCP report block.
+    /// `None` until the peer reflects one of this session's sender reports.
+    pub rtt_ms: Option<f64>,
+
     /// Remote address of the most recent packet
     pub remote_addr: Option<SocketAddr>,
+}
+
+/// Cadence for RFC 3611 VoIP-metrics reports emitted by an RTP session.
+///
+/// The report rides the existing compound RTCP schedule, so it does not add a
+/// timer or a detached task per call. A value of one emits XR beside every
+/// regular report; larger values reduce reporting bandwidth deterministically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RtcpXrQualityConfig {
+    pub every_n_rtcp_reports: NonZeroU32,
+}
+
+impl Default for RtcpXrQualityConfig {
+    fn default() -> Self {
+        Self {
+            every_n_rtcp_reports: NonZeroU32::new(1).expect("one is non-zero"),
+        }
+    }
 }
 
 /// Snapshot of bounded queue occupancy inside an RTP session.
@@ -571,6 +644,9 @@ pub struct RtpSession {
     /// Session bandwidth (bits per second)
     bandwidth_bps: u32,
 
+    /// RFC 3611 quality-report cadence for this session.
+    xr_quality: RtcpXrQualityConfig,
+
     #[cfg(feature = "memory-diagnostics")]
     _memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard,
     #[cfg(feature = "memory-diagnostics")]
@@ -584,7 +660,13 @@ pub struct RtpSession {
 impl RtpSession {
     /// Create a new RTP session
     pub async fn new(config: RtpSessionConfig) -> Result<Self> {
-        Self::new_with_receive_queue(config, true, SymmetricRtpPolicy::default()).await
+        Self::new_with_receive_queue(
+            config,
+            true,
+            SymmetricRtpPolicy::default(),
+            RtcpXrQualityConfig::default(),
+        )
+        .await
     }
 
     /// Create a new RTP session with an explicit symmetric-RTP policy.
@@ -592,7 +674,7 @@ impl RtpSession {
         config: RtpSessionConfig,
         policy: SymmetricRtpPolicy,
     ) -> Result<Self> {
-        Self::new_with_receive_queue(config, true, policy).await
+        Self::new_with_receive_queue(config, true, policy, RtcpXrQualityConfig::default()).await
     }
 
     /// Create a new RTP session for event-driven consumers.
@@ -601,7 +683,13 @@ impl RtpSession {
     /// but they are not duplicated into the polling queue used by
     /// [`RtpSession::receive_packet`].
     pub async fn new_event_driven(config: RtpSessionConfig) -> Result<Self> {
-        Self::new_with_receive_queue(config, false, SymmetricRtpPolicy::default()).await
+        Self::new_with_receive_queue(
+            config,
+            false,
+            SymmetricRtpPolicy::default(),
+            RtcpXrQualityConfig::default(),
+        )
+        .await
     }
 
     /// Create an event-driven RTP session with an explicit symmetric-RTP
@@ -610,13 +698,24 @@ impl RtpSession {
         config: RtpSessionConfig,
         policy: SymmetricRtpPolicy,
     ) -> Result<Self> {
-        Self::new_with_receive_queue(config, false, policy).await
+        Self::new_with_receive_queue(config, false, policy, RtcpXrQualityConfig::default()).await
+    }
+
+    /// Create an event-driven session with explicit symmetric-RTP and RTCP XR
+    /// quality-reporting policy.
+    pub async fn new_event_driven_with_quality_reporting(
+        config: RtpSessionConfig,
+        policy: SymmetricRtpPolicy,
+        xr_quality: RtcpXrQualityConfig,
+    ) -> Result<Self> {
+        Self::new_with_receive_queue(config, false, policy, xr_quality).await
     }
 
     async fn new_with_receive_queue(
         config: RtpSessionConfig,
         receive_queue_enabled: bool,
         symmetric_rtp_policy: SymmetricRtpPolicy,
+        xr_quality: RtcpXrQualityConfig,
     ) -> Result<Self> {
         let session_buffer_config = config.session_buffer_config;
         let transport_buffer_config = config.transport_buffer_config;
@@ -703,6 +802,7 @@ impl RtpSession {
             rtcp_generator: Some(rtcp_generator),
             rtcp_task: None,
             bandwidth_bps: 64000, // Default bandwidth: 64 kbps
+            xr_quality,
             #[cfg(feature = "memory-diagnostics")]
             _memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
                 "rtp_core.rtp_session",
@@ -743,6 +843,7 @@ impl RtpSession {
         let remote_addr = self.config.remote_addr;
         let event_tx_recv = self.event_tx.clone();
         let clock_rate = self.clock_rate.clone();
+        let report_clock_rate = self.clock_rate.clone();
         let _payload_type = self.config.payload_type;
         let ssrc = self.ssrc;
         let streams_map = self.streams.clone();
@@ -751,6 +852,7 @@ impl RtpSession {
         let _jitter_size = self.config.jitter_buffer_size.unwrap_or(50);
         let _max_age_ms = self.config.max_packet_age_ms.unwrap_or(200);
         let receive_queue_enabled = self.receive_queue_enabled;
+        let xr_quality = self.xr_quality;
 
         let media_sync = self.media_sync.clone();
 
@@ -873,6 +975,21 @@ impl RtpSession {
                                                 }
                                             }
 
+                                            // An SR may carry the same report blocks as an RR.
+                                            // Measure RTT from either packet type; otherwise a
+                                            // bidirectional peer that sends SRs never populates
+                                            // quality RTT despite reflecting our timestamps.
+                                            for block in &sr.report_blocks {
+                                                if block.ssrc == ssrc {
+                                                    if let Some(rtt_ms) = compact_ntp_rtt_ms(
+                                                        block.last_sr,
+                                                        block.delay_since_last_sr,
+                                                    ) {
+                                                        stats_recv.lock().rtt_ms = Some(rtt_ms);
+                                                    }
+                                                }
+                                            }
+
                                             // Emit SR event for external processing
                                             let _ = event_tx_recv.send(
                                                 RtpSessionEvent::RtcpSenderReport {
@@ -915,6 +1032,12 @@ impl RtpSession {
                                                         block.fraction_lost,
                                                         block.cumulative_lost
                                                     );
+                                                    if let Some(rtt_ms) = compact_ntp_rtt_ms(
+                                                        block.last_sr,
+                                                        block.delay_since_last_sr,
+                                                    ) {
+                                                        stats_recv.lock().rtt_ms = Some(rtt_ms);
+                                                    }
                                                 }
                                             }
 
@@ -1118,6 +1241,7 @@ impl RtpSession {
 
                 // Initial interval calculation
                 let mut interval = rtcp_generator.calculate_interval();
+                let mut report_index = 0_u64;
                 debug!("Initial RTCP interval: {:?}", interval);
 
                 while *active_state.lock().await {
@@ -1152,11 +1276,24 @@ impl RtpSession {
 
                     let mut sr = rtcp_generator.generate_sender_report(rtp_timestamp);
                     sr.report_blocks = take_rtcp_report_blocks(&report_streams);
+                    let report_blocks = sr.report_blocks.clone();
                     let sdes = rtcp_generator.generate_sdes();
 
                     // Create compound packet
                     let mut compound = crate::packet::rtcp::RtcpCompoundPacket::new_with_sr(sr);
                     compound.add_sdes(sdes);
+                    report_index = report_index.saturating_add(1);
+                    if report_index % u64::from(xr_quality.every_n_rtcp_reports.get()) == 0 {
+                        let stats_snapshot = stats.lock().clone();
+                        if let Some(xr) = build_voip_metrics_xr(
+                            ssrc,
+                            &report_blocks,
+                            &stats_snapshot,
+                            report_clock_rate.load(Ordering::Relaxed),
+                        ) {
+                            compound.add_xr(xr);
+                        }
+                    }
 
                     // Send the compound packet
                     if let Ok(data) = compound.serialize() {
@@ -2529,5 +2666,40 @@ mod tests {
         assert_eq!(session.clock_rate.load(Ordering::Acquire), 48_000);
         assert_eq!(session.stats.lock().jitter_ms, 0.0);
         session.close().await.unwrap();
+    }
+
+    #[test]
+    fn measured_quality_builds_rtcp_xr_voip_metrics() {
+        let mut report = crate::packet::rtcp::RtcpReportBlock::new(0x5566_7788);
+        report.fraction_lost = 8; // 3.125 percent in RFC 3550 fixed-point form.
+        report.jitter = 160; // 20 ms at an 8 kHz RTP clock.
+        let stats = RtpSessionStats {
+            packets_received: 100,
+            packets_discarded_by_jitter: 5,
+            jitter_ms: 20.0,
+            rtt_ms: Some(123.0),
+            ..RtpSessionStats::default()
+        };
+
+        let xr = build_voip_metrics_xr(0x1122_3344, &[report], &stats, 8_000)
+            .expect("one measured source produces an XR packet");
+        assert_eq!(xr.ssrc, 0x1122_3344);
+        assert_eq!(xr.blocks.len(), 1);
+        let crate::packet::rtcp::RtcpXrBlock::VoipMetrics(metrics) = &xr.blocks[0] else {
+            panic!("expected VoIP metrics block")
+        };
+        assert_eq!(metrics.ssrc, 0x5566_7788);
+        assert_eq!(metrics.loss_rate, 8);
+        assert_eq!(metrics.discard_rate, 12);
+        assert_eq!(metrics.round_trip_delay, 123);
+        assert_ne!(metrics.mos_lq, 0);
+        assert_ne!(metrics.r_factor, 0);
+    }
+
+    #[test]
+    fn rtcp_xr_is_not_invented_before_a_remote_stream_exists() {
+        assert!(
+            build_voip_metrics_xr(0x1122_3344, &[], &RtpSessionStats::default(), 8_000,).is_none()
+        );
     }
 }

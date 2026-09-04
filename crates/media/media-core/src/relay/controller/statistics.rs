@@ -67,8 +67,11 @@ impl MediaSessionController {
             .or_else(|| Some("PCMU".to_string())); // Default to PCMU if none set
 
         // Calculate quality metrics from RTP stats
-        let quality_metrics = rtp_stats.as_ref().map(|stats| {
-            QualityMetrics {
+        let quality_metrics = rtp_stats.as_ref().and_then(|stats| {
+            if stats.packets_received == 0 {
+                return None;
+            }
+            Some(QualityMetrics {
                 packet_loss_percent: if stats.packets_received > 0 {
                     (stats.packets_lost as f32
                         / (stats.packets_received + stats.packets_lost) as f32)
@@ -77,10 +80,10 @@ impl MediaSessionController {
                     0.0
                 },
                 jitter_ms: stats.jitter_ms,
-                rtt_ms: None, // TODO: Extract from RTCP SR/RR when available
+                rtt_ms: stats.rtt_ms,
                 mos_score: Self::calculate_mos_from_stats(stats),
                 network_quality: Self::calculate_network_quality(stats),
-            }
+            })
         });
 
         // Build comprehensive statistics
@@ -106,7 +109,9 @@ impl MediaSessionController {
 
     /// Helper to estimate MOS score from RTP statistics
     pub(super) fn calculate_mos_from_stats(stats: &RtpSessionStats) -> Option<f32> {
-        // Simple E-model approximation
+        if stats.packets_received == 0 {
+            return None;
+        }
         let packet_loss_percent = if stats.packets_received > 0 {
             (stats.packets_lost as f32 / (stats.packets_received + stats.packets_lost) as f32)
                 * 100.0
@@ -114,18 +119,11 @@ impl MediaSessionController {
             0.0
         };
 
-        // Basic MOS calculation (simplified)
-        // Start with perfect score and deduct based on impairments
-        let mut mos: f32 = 4.5;
-
-        // Deduct for packet loss (up to 2.5 points)
-        mos -= (packet_loss_percent * 0.25).min(2.5);
-
-        // Deduct for jitter (up to 1.0 point)
-        mos -= (stats.jitter_ms as f32 * 0.01).min(1.0);
-
-        // Ensure MOS is within valid range
-        Some(mos.max(1.0).min(5.0))
+        Some(crate::quality::metrics::QualityMetrics::calculate_mos(
+            packet_loss_percent,
+            stats.jitter_ms as f32,
+            stats.rtt_ms.unwrap_or(0.0) as f32,
+        ))
     }
 
     /// Helper to calculate network quality score
@@ -202,7 +200,7 @@ impl MediaSessionController {
                 let quality_metrics = QualityMetrics {
                     packet_loss_percent,
                     jitter_ms: stats.jitter_ms,
-                    rtt_ms: None,
+                    rtt_ms: stats.rtt_ms,
                     mos_score: MediaSessionController::calculate_mos_from_stats(&stats),
                     network_quality: MediaSessionController::calculate_network_quality(&stats),
                 };
@@ -284,6 +282,27 @@ mod tests {
 
     async fn create_test_controller() -> MediaSessionController {
         MediaSessionController::new()
+    }
+
+    #[test]
+    fn mos_requires_packets_and_uses_measured_rtt() {
+        assert_eq!(
+            MediaSessionController::calculate_mos_from_stats(&RtpSessionStats::default()),
+            None
+        );
+        let low_latency = RtpSessionStats {
+            packets_received: 100,
+            rtt_ms: Some(20.0),
+            ..RtpSessionStats::default()
+        };
+        let high_latency = RtpSessionStats {
+            rtt_ms: Some(400.0),
+            ..low_latency.clone()
+        };
+        assert!(
+            MediaSessionController::calculate_mos_from_stats(&high_latency)
+                < MediaSessionController::calculate_mos_from_stats(&low_latency)
+        );
     }
 
     #[tokio::test]
