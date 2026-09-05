@@ -19,7 +19,7 @@
 ---
 
 > [!IMPORTANT]
-> **Unified `0.3.8` release train.** All 45 publishable workspace crates ship on
+> **Unified `0.3.9` release train.** All 45 publishable workspace crates ship on
 > the same version. Publication requires a fresh, strict full-beta run bound to
 > the exact release source: no skipped gates, no carry-forward qualification,
 > and passing workspace, security, four-peer interoperability, performance,
@@ -126,7 +126,7 @@ Add the SIP product:
 
 ```toml
 [dependencies]
-rvoip-sip = "0.3.8"
+rvoip-sip = "0.3.9"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -232,7 +232,7 @@ RTP-over-QUIC has shipped.
 
 ## Extensions
 
-All 14 extension crates ship at `0.3.8`. They are first-class workspace
+All 14 extension crates ship at `0.3.9`. They are first-class workspace
 capabilities, but remain optional so protocol crates depend on provider
 contracts rather than deployment-specific services.
 
@@ -254,22 +254,22 @@ The supporting contracts live in
 The facade exposes the conversation-model extensions together:
 
 ```toml
-rvoip = { version = "0.3.8", features = ["voip-3"] }
+rvoip = { version = "0.3.9", features = ["voip-3"] }
 ```
 
 `voip-3` enables SIP, WebRTC, UCTP, vCon, the identity provider surface, and
 the AI harness. Vapi and STIR/SHAKEN have separate facade features:
 
 ```toml
-rvoip = { version = "0.3.8", features = ["sip", "vapi", "sip-stir-shaken"] }
+rvoip = { version = "0.3.9", features = ["sip", "vapi", "sip-stir-shaken"] }
 ```
 
 Deployment-specific extensions are direct dependencies:
 
 ```toml
-rvoip-keycloak = "0.3.8"
-rvoip-redis = "0.3.8"
-rvoip-audit = "0.3.8"
+rvoip-keycloak = "0.3.9"
+rvoip-redis = "0.3.9"
+rvoip-audit = "0.3.9"
 ```
 
 The facade's `full` feature does **not** enable every workspace extension,
@@ -346,12 +346,12 @@ product's implementation:
   unified release identity, source compatibility notes, and attestation
   provenance.
 
-The `0.3.8` release requires a fresh strict full-beta report bound to one clean,
+The `0.3.9` release requires a fresh strict full-beta report bound to one clean,
 unchanged release source fingerprint. The gate admits no skipped checks and
 includes the workspace, SIP/media, public API, security, PBX, SIPp, strict-UA,
 proxy interoperability, performance, resiliency, and long-soak scopes. The
 historical `0.3.4` carry-forward receipt remains immutable release history; it
-does not qualify `0.3.8`.
+does not qualify `0.3.9`.
 
 ### SIP interoperability attestation
 
@@ -360,7 +360,7 @@ independently managed peers below. The report generator binds every row to the
 tested source tree, exact peer identity and configuration, selected matrix,
 and hashed evidence; it refuses to produce a strict release-candidate report
 if a required peer is missing, skipped, ambiguous, unpinned, or failing. This
-four-peer matrix is mandatory for the `0.3.8` strict release gate.
+four-peer matrix is mandatory for the `0.3.9` strict release gate.
 
 | Peer | Attested boundary | Required release evidence |
 | --- | --- | --- |

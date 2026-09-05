@@ -1,15 +1,15 @@
-# rvoip 0.3.8 Release Candidate Notes
+# rvoip 0.3.9 Release Candidate Notes
 
 Date: 2026-08-14
 
-These notes describe the coordinated 44-crate `0.3.8` release candidate.
+These notes describe the coordinated 44-crate `0.3.9` release candidate.
 Publication requires a fresh `remote-release` qualification bound to the exact
 clean release source and to the current gate catalog. Prior `0.3.6` and
 `0.3.7` qualification evidence does not qualify this release.
 
 ## Headline
 
-`0.3.8` is a codec and interop release. AMR-NB and AMR-WB ship end to end —
+`0.3.9` is a codec and interop release. AMR-NB and AMR-WB ship end to end —
 both interface formats, DTX, redundancy, interleaving, and a negotiated
 mode-set — and every rate is proved in a live call through a record-routing
 proxy rather than only in unit vectors. Kamailio and OpenSIPS join the
@@ -105,11 +105,11 @@ shape-identical to `0.3.7`.
 ## Qualification
 
 The candidate must pass a fresh `remote-release` qualification from a clean,
-committed `0.3.8` source tree. The aggregate is bound to the exact candidate
+committed `0.3.9` source tree. The aggregate is bound to the exact candidate
 commit and to the catalog hash, and this release changes the catalog — it adds
 the AMR per-rate sweep, proxy-PBX media, and AMR fuzz families — so no earlier
 run's evidence can be reused for any gate.
 
 Historical `0.3.2` exception, `0.3.4` carry-forward, and prior `0.3.6` and
 `0.3.7` attestations remain unchanged release history. They are not presented
-as current `0.3.8` evidence.
+as current `0.3.9` evidence.
