@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -247,6 +248,60 @@ class QualificationReportTests(unittest.TestCase):
         self.assertEqual(rows[0]["source"], "reused")
         self.assertEqual(rows[0]["command_log_verification"], "collector-accepted-reuse")
         self.assertEqual(summary["qualification"]["fresh_count"], 1)
+
+    def test_accepts_reused_performance_receipt_without_local_measurements(self) -> None:
+        self.catalog["gates"][1]["category"] = "Performance and resiliency"
+        receipt_path = self.evidence / "test.workspace/receipt.json"
+        receipt = json.loads(receipt_path.read_text())
+        planned = self.plan["gates"][1]
+        planned["decision"] = "REUSE"
+        planned["reuse_receipt"] = receipt
+        planned["reuse_receipt_sha256"] = reports.sha256_bytes(
+            reports.canonical_bytes(receipt)
+        )
+        self.aggregate["accepted_gates"][1]["source"] = "reused"
+        self.aggregate["fresh_count"] = 1
+        self.aggregate["reused_count"] = 1
+        self.aggregate["catalog_sha256"] = reports.sha256_bytes(
+            reports.canonical_bytes(self.catalog)
+        )
+        self.catalog_path.write_bytes(reports.pretty_bytes(self.catalog))
+        self.plan_path.write_bytes(reports.pretty_bytes(self.plan))
+        self.aggregate_path.write_bytes(reports.pretty_bytes(self.aggregate))
+        shutil.rmtree(self.evidence / "test.workspace")
+        shutil.rmtree(self.evidence / "_perf-results")
+
+        summary, rows, measurements = reports.load_bundle(
+            catalog_path=self.catalog_path,
+            plan_path=self.plan_path,
+            aggregate_path=self.aggregate_path,
+            evidence_root=self.evidence,
+            version="0.3.9",
+        )
+
+        self.assertEqual(rows[1]["source"], "reused")
+        self.assertEqual(measurements, [])
+        self.assertEqual(summary["qualification"]["reused_performance_gate_count"], 1)
+
+    def test_rejects_fresh_performance_gate_without_local_measurements(self) -> None:
+        self.catalog["gates"][1]["category"] = "Performance and resiliency"
+        self.aggregate["catalog_sha256"] = reports.sha256_bytes(
+            reports.canonical_bytes(self.catalog)
+        )
+        self.catalog_path.write_bytes(reports.pretty_bytes(self.catalog))
+        self.aggregate_path.write_bytes(reports.pretty_bytes(self.aggregate))
+        shutil.rmtree(self.evidence / "_perf-results")
+
+        with self.assertRaisesRegex(
+            reports.ReportError, "no archived performance results"
+        ):
+            reports.load_bundle(
+                catalog_path=self.catalog_path,
+                plan_path=self.plan_path,
+                aggregate_path=self.aggregate_path,
+                evidence_root=self.evidence,
+                version="0.3.9",
+            )
 
 
 if __name__ == "__main__":

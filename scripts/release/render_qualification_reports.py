@@ -248,11 +248,21 @@ def load_bundle(
             }
         )
 
+    fresh_performance_gates = sum(
+        1
+        for row in gate_rows
+        if row["category"] == "Performance and resiliency" and row["source"] == "fresh"
+    )
+    reused_performance_gates = sum(
+        1
+        for row in gate_rows
+        if row["category"] == "Performance and resiliency" and row["source"] == "reused"
+    )
     measurements: list[dict[str, Any]] = []
     perf_root = evidence_root / "_perf-results"
-    if not perf_root.is_dir():
+    if not perf_root.is_dir() and fresh_performance_gates > 0:
         raise ReportError("qualification bundle has no archived performance results")
-    for path in sorted(perf_root.rglob("*.json")):
+    for path in sorted(perf_root.rglob("*.json")) if perf_root.is_dir() else ():
         payload = read_object(path, "performance result")
         scenario = payload.get("scenario")
         environment = payload.get("environment")
@@ -289,11 +299,8 @@ def load_bundle(
                 "duration_secs": payload.get("duration_secs"),
             }
         )
-    reused_performance_gates = sum(
-        1
-        for row in gate_rows
-        if row["category"] == "Performance and resiliency" and row["source"] == "reused"
-    )
+    if not measurements and fresh_performance_gates > 0:
+        raise ReportError("qualification bundle has no exact-candidate performance measurements")
     if not measurements and reused_performance_gates == 0:
         raise ReportError("qualification bundle has no exact-candidate performance measurements")
 
