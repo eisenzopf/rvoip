@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::error::{Result, RvoipError};
@@ -101,7 +101,7 @@ pub(crate) struct ConferenceMember {
     pub(crate) codec: CodecInfo,
     pub(crate) decoder: Box<dyn rvoip_media_core::codec::audio::common::AudioCodec>,
     pub(crate) encoder: Box<dyn rvoip_media_core::codec::audio::common::AudioCodec>,
-    /// Decoded audio at the conference's rate, awaiting the next tick.
+    /// Decoded mono audio at the conference's rate, awaiting the next tick.
     pending: Vec<i16>,
     /// Resamplers, present only when this member's rate differs from the mix.
     to_mix: Option<rvoip_media_core::processing::format::resampler::Resampler>,
@@ -132,12 +132,19 @@ impl ConferenceMember {
             let Ok(decoded) = self.decoder.decode(&frame.payload) else {
                 continue;
             };
+            // The conference has one canonical mono mix bus. Channel layout
+            // belongs at each member boundary: keeping interleaved stereo on
+            // this bus would make a 20 ms tick look like 40 ms of mono and
+            // would misalign every other member's contribution.
+            let Some(mono) = downmix_to_mono(&decoded.samples, decoded.channels) else {
+                continue;
+            };
             let at_mix_rate = match self.to_mix.as_mut() {
-                Some(resampler) => match resampler.resample(&decoded.samples) {
+                Some(resampler) => match resampler.resample(&mono) {
                     Ok(samples) => samples,
                     Err(_) => continue,
                 },
-                None => decoded.samples,
+                None => mono,
             };
             self.pending.extend_from_slice(&at_mix_rate);
         }
@@ -157,6 +164,51 @@ impl ConferenceMember {
         taken.resize(samples, 0);
         taken
     }
+}
+
+/// Convert interleaved member PCM to the conference's canonical mono layout.
+///
+/// Averaging in `i64` prevents overflow even if a future codec exposes more
+/// than two channels. A malformed frame is dropped instead of allowing one
+/// member to shift the shared mix bus out of alignment.
+fn downmix_to_mono(samples: &[i16], channels: u8) -> Option<Vec<i16>> {
+    let channels = usize::from(channels);
+    if channels == 0 || !samples.len().is_multiple_of(channels) {
+        return None;
+    }
+    if channels == 1 {
+        return Some(samples.to_vec());
+    }
+
+    let divisor = i64::try_from(channels).ok()?;
+    Some(
+        samples
+            .chunks_exact(channels)
+            .map(|frame| {
+                let sum: i64 = frame.iter().map(|sample| i64::from(*sample)).sum();
+                // The average of i16 values is necessarily in the i16 range.
+                i16::try_from(sum / divisor).expect("channel average remains an i16")
+            })
+            .collect(),
+    )
+}
+
+/// Expand canonical mono PCM into a member's negotiated interleaved layout.
+fn upmix_from_mono(samples: &[i16], channels: u8) -> Option<Vec<i16>> {
+    let channels = usize::from(channels);
+    if channels == 0 {
+        return None;
+    }
+    if channels == 1 {
+        return Some(samples.to_vec());
+    }
+
+    let capacity = samples.len().checked_mul(channels)?;
+    let mut interleaved = Vec::with_capacity(capacity);
+    for sample in samples {
+        interleaved.extend(std::iter::repeat_n(*sample, channels));
+    }
+    Some(interleaved)
 }
 
 /// One live conference and the task mixing it.
@@ -254,14 +306,20 @@ pub(crate) fn mix_once(
             },
             None => mixed,
         };
+        let Some(interleaved) = upmix_from_mono(&at_member_rate, member.codec.channels) else {
+            continue;
+        };
         let outbound_frame = AudioFrame {
             sample_rate: member.codec.clock_rate_hz,
             channels: member.codec.channels,
             duration: MIX_INTERVAL,
             timestamp: member.timestamp,
-            samples: at_member_rate,
+            samples: interleaved,
         };
-        let sample_count = outbound_frame.samples.len();
+        // RTP audio timestamps count sample frames, not interleaved scalar
+        // samples. A stereo Opus packet containing 960 frames therefore
+        // advances by 960, exactly like its mono counterpart.
+        let samples_per_channel = outbound_frame.samples_per_channel();
         let Ok(payload) = member.encoder.encode(&outbound_frame) else {
             continue;
         };
@@ -278,7 +336,7 @@ pub(crate) fn mix_once(
         };
         member.timestamp = member
             .timestamp
-            .wrapping_add(u32::try_from(sample_count).unwrap_or_default());
+            .wrapping_add(u32::try_from(samples_per_channel).unwrap_or_default());
         // A member whose transport has gone is removed rather than retried:
         // the conference continues for everyone still present.
         if member.outbound.try_send(frame).is_err() && member.outbound.is_closed() {
@@ -392,6 +450,15 @@ mod tests {
         sample: i16,
         samples: usize,
     ) -> (ConferenceMember, mpsc::Receiver<MediaFrame>) {
+        seeded_member_at_mix_rate(id, sample, samples, 8_000)
+    }
+
+    fn seeded_member_at_mix_rate(
+        id: &str,
+        sample: i16,
+        samples: usize,
+        mix_rate_hz: u32,
+    ) -> (ConferenceMember, mpsc::Receiver<MediaFrame>) {
         use rvoip_media_core::codec::factory::CodecFactory;
 
         let (inbound_tx, inbound_rx) = mpsc::channel(8);
@@ -401,7 +468,7 @@ mod tests {
             inbound_rx,
             outbound_tx,
             pcmu_codec(),
-            8_000,
+            mix_rate_hz,
             None,
         )
         .expect("member");
@@ -430,6 +497,84 @@ mod tests {
             .expect("seed frame");
         member.timestamp = 0;
         (member, outbound_rx)
+    }
+
+    #[test]
+    fn channel_boundaries_preserve_frame_alignment() {
+        assert_eq!(
+            downmix_to_mono(&[100, 300, -400, 200], 2),
+            Some(vec![200, -100])
+        );
+        assert_eq!(
+            upmix_from_mono(&[200, -100], 2),
+            Some(vec![200, 200, -100, -100])
+        );
+        assert_eq!(downmix_to_mono(&[1, 2, 3], 2), None);
+        assert_eq!(downmix_to_mono(&[1], 0), None);
+        assert_eq!(upmix_from_mono(&[1], 0), None);
+    }
+
+    #[cfg(feature = "opus")]
+    #[tokio::test]
+    async fn stereo_opus_member_receives_aligned_mix_and_timestamp() {
+        use rvoip_media_core::codec::factory::CodecFactory;
+
+        let (opus_in_tx, opus_in_rx) = mpsc::channel(8);
+        let (opus_out_tx, mut opus_out_rx) = mpsc::channel(8);
+        let opus_codec = CodecInfo {
+            name: "opus".into(),
+            clock_rate_hz: 48_000,
+            channels: 2,
+            fmtp: Some("stereo=1".into()),
+            payload_type: Some(111),
+        };
+        let opus = build_member(
+            ConnectionId::from_string("stereo-opus"),
+            opus_in_rx,
+            opus_out_tx,
+            opus_codec,
+            48_000,
+            None,
+        )
+        .expect("stereo Opus member");
+        // Keep the inbound side alive: this test is about receiving a mix,
+        // not transport teardown.
+        let _opus_in_tx = opus_in_tx;
+        let (carrier, _carrier_out) = seeded_member_at_mix_rate("carrier", 4_000, 160, 48_000);
+
+        let opus_id = opus.connection_id.clone();
+        let mut members = HashMap::new();
+        members.insert(opus_id.clone(), opus);
+        members.insert(carrier.connection_id.clone(), carrier);
+
+        mix_once(&mut members, 960);
+
+        let packet = opus_out_rx.try_recv().expect("stereo Opus output");
+        assert_eq!(packet.timestamp_rtp, 0);
+        assert_eq!(members[&opus_id].timestamp, 960);
+
+        let mut decoder =
+            CodecFactory::create_codec(111, Some(48_000), Some(2)).expect("stereo Opus decoder");
+        let decoded = decoder.decode(&packet.payload).expect("valid Opus packet");
+        assert_eq!(decoded.channels, 2);
+        assert_eq!(decoded.samples_per_channel(), 960);
+        let maximum_channel_delta = decoded
+            .samples
+            .chunks_exact(2)
+            .map(|pair| (i32::from(pair[0]) - i32::from(pair[1])).abs())
+            .max()
+            .unwrap_or_default();
+        // The exact duplication is covered by the lossless boundary test.
+        // Opus may introduce a small channel-local quantization difference,
+        // but identical input channels must remain perceptually identical.
+        assert!(
+            maximum_channel_delta < 500,
+            "stereo channels diverged by {maximum_channel_delta} samples"
+        );
+        assert!(
+            decoded.samples.iter().any(|sample| sample.abs() > 500),
+            "the browser member should hear the carrier contribution"
+        );
     }
 
     /// Decode one produced frame back to PCM for assertion.
