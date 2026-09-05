@@ -104,6 +104,10 @@ peers, versions, machine shapes, workloads, and thresholds captured by the
 signed qualification aggregate. TURN, SIP trickle ICE, TLS-SRTP, campaigns,
 and unmeasured carrier networks are not implied.
 
+General-user 10,000 CPS full-media capability is not claimed. The strict SIP
+beta envelope remains bounded by its recorded 2,000-CPS real-media profile,
+exact host configuration, peer matrix, workloads, and soak durations.
+
 ## Qualification
 
 The release candidate must first pass the normal PR Gate, then a complete
