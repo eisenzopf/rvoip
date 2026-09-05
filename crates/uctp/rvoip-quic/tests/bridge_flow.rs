@@ -185,7 +185,7 @@ async fn dial_and_invite(
                         "id": wire_stream_id,
                         "kind": "audio",
                         "direction": "sendrecv",
-                        "codec_preferences": ["opus"]
+                        "codec_preferences": ["g.711-mu"]
                     }],
                     "substrate_setup": null
                 }),
@@ -329,11 +329,14 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
     // pattern. Client A injects on its outbound side; client B observes
     // on its inbound side.
     let codec = rvoip_core::capability::CodecInfo {
-        name: "opus".into(),
-        clock_rate_hz: 48000,
+        // This test runs in the default, system-library-free shard. Exercise
+        // the bridge with the default G.711 codec; Opus is qualified by the
+        // native facade bundle and codec feature matrix.
+        name: "g.711-mu".into(),
+        clock_rate_hz: 8_000,
         channels: 1,
         fmtp: None,
-        payload_type: None,
+        payload_type: Some(0),
     };
 
     let client_a_stream = QuicDatagramMediaStream::start(
