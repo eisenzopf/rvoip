@@ -79,19 +79,19 @@ across commits to track regressions.
 All generated benchmark artifacts live under the workspace root
 `target/perf-results/`. `crates/target/` is not a valid output location.
 
-## Current beta candidate evidence
+## Current release evidence
 
-The canonical current values are generated from clean full run
-`20260724T231400Z` and published in the
-[Beta Performance Report](BETA_PERFORMANCE_REPORT.md). That report contains:
+The canonical current values are generated from protected `remote-release` run
+`33969263241` at `8cab44b10f872d21b304c02111d5d203ee8226da` and published
+in the [Performance Qualification Report](BETA_PERFORMANCE_REPORT.md). That
+report contains:
 
-- all three canonical 2,000-CPS runs;
-- every endpoint, PBX-media-server, and signaling-only profile-matrix point;
-- the 160-CPS high-density full-delivery burst and every tracked threshold;
-- monolithic and split one-hour soak results;
-- regression status and all 59 packaged performance JSON artifacts.
+- every archived endpoint, PBX-media-server, and signaling-only profile point;
+- media, registration, teardown, transfer, encryption, and recovery scenarios;
+- monolithic and split long-soak observations; and
+- hashes for all 35 exact-candidate scenario and sweep JSON records.
 
-The candidate used the clean `perf-tests` feature set with diagnostic hot-path
+The release used the clean `perf-tests` feature set with diagnostic hot-path
 instrumentation disabled, full application `AudioFrame` delivery enabled, and
 the reviewed `20260706T181609Z` regression baseline. The complete release
 result is in [BETA_RELEASE_REPORT.md](BETA_RELEASE_REPORT.md); do not use

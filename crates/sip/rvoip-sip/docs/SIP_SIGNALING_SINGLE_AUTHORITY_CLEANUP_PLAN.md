@@ -1,15 +1,15 @@
 # SIP Signaling Single-Authority Cleanup Plan
 
-- **Status:** Source cleanup implemented; final qualification pending
-  (authorized 2026-07-20, reconciled 2026-07-21)
+- **Status:** Complete; source cleanup shipped and protected qualification
+  passed in 0.3.9 (authorized 2026-07-20, qualified 2026-09-05)
 - **Audience:** `rvoip-sip`, `sip-dialog`, transport, media, test, and release maintainers
 - **Companion document:** [SIP Signaling Single-Authority Implementation Plan](SIP_SIGNALING_SINGLE_AUTHORITY_IMPLEMENTATION_PLAN.md)
 
-> **Release evidence status:** **PENDING.** This document records the source
-> cleanup now present in the working tree. It does not claim that the final
-> Cargo matrix, beta gate, performance/soak runs, PBX/strict-UA matrices, or
-> attestation have passed. Those claims may be added only from the final
-> clean-tree run described in the companion plan.
+> **Release evidence status:** **PASS.** Protected run
+> [`33969263241`](https://github.com/eisenzopf/rvoip/actions/runs/33969263241)
+> completed the exact-candidate Cargo, performance/soak, interoperability,
+> source-integrity, and attestation scopes. See the
+> [qualification report](BETA_RELEASE_REPORT.md).
 
 ## Executive decision
 

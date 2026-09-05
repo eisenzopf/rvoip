@@ -247,6 +247,7 @@
         "scripts/release.sh",
         "scripts/release/**",
         "scripts/release_*.py",
+        "scripts/test_render_qualification_reports.py",
         "scripts/test_release*.py",
         "infra/release-runners/**",
         "docs/RELEASING.md"

@@ -55,6 +55,7 @@ jobs:
           scripts/test_release_gates.py
           scripts/test_release_carry_forward_attestation.py
           scripts/test_release_exception_attestation.py
+          scripts/test_render_qualification_reports.py
 
       - name: Commit release preparation
         env:

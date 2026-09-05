@@ -58,13 +58,23 @@ digest-mismatched. Candidate inventory and final aggregate receipts are always
 regenerated. Use `changed_since` for the previous candidate SHA after a code
 fix; unknown mappings still invalidate the full profile.
 
-The workflow produces a candidate-bound plan, per-gate receipts, and one
-aggregate qualification receipt. A gate can be reused only when its source,
+The workflow produces a candidate-bound plan, per-gate receipts, one aggregate
+qualification receipt, and a generated human-readable report bundle. A gate can be reused only when its source,
 transitive workspace dependency closure, gate definition, toolchain/container,
 resource class, and thresholds have identical SHA-256 inputs. Unknown changes
 fail closed to a full run. The aggregate is signed as a release evidence
 artifact and is the only qualification input accepted by protected
 publication.
+
+After collection, `scripts/release/render_qualification_reports.py` rejects any
+missing, duplicate, stale, cross-candidate, unclean, or hash-mismatched receipt,
+command log, or performance result. It emits the release, complete-gate, and
+performance reports plus a machine summary and checksummed report attestation.
+The bundle is uploaded inside `release-gate-evidence`; after a successful
+release, commit its immutable dated copy and promote the same files into
+`crates/sip/rvoip-sip/docs/`. Reporting does not rerun a gate or rewrite a
+measurement. The artifact's GitHub SHA-256 digest and run URL must be supplied
+when producing the committed derivation.
 
 The release verifier also checks the catalog's 108-gate coverage ledger. It
 rejects a publication aggregate while any legacy gate lacks a structured remote

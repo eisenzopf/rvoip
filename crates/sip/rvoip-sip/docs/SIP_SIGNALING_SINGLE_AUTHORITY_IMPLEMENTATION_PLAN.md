@@ -1,15 +1,17 @@
 # SIP Signaling Single-Authority Gap Analysis and Implementation Plan
 
-- **Status:** Source cleanup implemented; final qualification pending
-  (authorized 2026-07-20, reconciled 2026-07-21)
+- **Status:** Complete; source cleanup shipped and protected qualification
+  passed in 0.3.9 (authorized 2026-07-20, qualified 2026-09-05)
 - **Historical implementation baseline inspected:** 2026-07-20
 - **Historical baseline commit:** `0df3e5ba7b29ce4dc0c641b36381aefcd4b66925`
 - **Companion architecture decision:** [SIP_SIGNALING_SINGLE_AUTHORITY_CLEANUP_PLAN.md](SIP_SIGNALING_SINGLE_AUTHORITY_CLEANUP_PLAN.md)
 
-> **Evidence status:** **PENDING.** Source symbols, deletion fences, and test
-> sources were reconciled on 2026-07-21. No final Cargo matrix, beta gate,
-> performance/soak run, PBX/strict-UA matrix, or release attestation is claimed
-> here. Section 21 remains the required clean-tree qualification procedure.
+> **Evidence status:** **PASS.** Source symbols, deletion fences, and test
+> sources were reconciled on 2026-07-21. Protected run
+> [`33969263241`](https://github.com/eisenzopf/rvoip/actions/runs/33969263241)
+> completed the final exact-candidate Cargo, performance/soak,
+> interoperability, source-integrity, and attestation scopes. Section 21 is
+> retained as the qualification procedure and historical decision record.
 
 ## 1. Purpose and Required Outcome
 

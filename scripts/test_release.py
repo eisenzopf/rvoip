@@ -669,6 +669,76 @@ rvoip-rtc = { path = "../rvoip-rtc" }
                 mock.Mock(),
             )
 
+    def test_current_protected_reports_replace_stale_legacy_beta_docs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            docs = root / "crates/sip/rvoip-sip/docs"
+            docs.mkdir(parents=True)
+            attestation = docs / "QUALIFICATION_REPORT_ATTESTATION.json"
+            attestation.write_text("{}")
+            (docs / "QUALIFICATION_SUMMARY.json").write_text(
+                json.dumps(
+                    {
+                        "schema": release.REMOTE_REPORT_SUMMARY_SCHEMA,
+                        "release": {
+                            "version": "0.3.9",
+                            "candidate_sha": "a" * 40,
+                        },
+                        "qualification": {
+                            "profile": "remote-release",
+                            "status": "PASS",
+                            "gate_count": 208,
+                            "fresh_count": 208,
+                            "reused_count": 0,
+                            "legacy_required_count": 108,
+                            "legacy_covered_count": 108,
+                        },
+                    }
+                )
+            )
+            log = mock.Mock()
+            qualification = release.verify_beta_reporting(
+                root, "0.3.9", None, None, None, log
+            )
+            self.assertEqual(qualification["mode"], "strict")
+            self.assertEqual(qualification["format"], "protected-remote-report")
+            self.assertEqual(qualification["git_commit"], "a" * 40)
+            self.assertEqual(qualification["gate_count"], 208)
+            command = log.command.call_args.args[0]
+            self.assertIn("render_qualification_reports.py", command[1])
+            self.assertEqual(command[-2:], ["--directory", str(docs)])
+
+    def test_current_protected_reports_reject_wrong_release_version(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            docs = root / "crates/sip/rvoip-sip/docs"
+            docs.mkdir(parents=True)
+            (docs / "QUALIFICATION_REPORT_ATTESTATION.json").write_text("{}")
+            (docs / "QUALIFICATION_SUMMARY.json").write_text(
+                json.dumps(
+                    {
+                        "schema": release.REMOTE_REPORT_SUMMARY_SCHEMA,
+                        "release": {
+                            "version": "0.3.8",
+                            "candidate_sha": "a" * 40,
+                        },
+                        "qualification": {
+                            "profile": "remote-release",
+                            "status": "PASS",
+                            "gate_count": 208,
+                            "fresh_count": 208,
+                            "reused_count": 0,
+                            "legacy_required_count": 108,
+                            "legacy_covered_count": 108,
+                        },
+                    }
+                )
+            )
+            with self.assertRaisesRegex(release.ReleaseError, "do not qualify"):
+                release.verify_beta_reporting(
+                    root, "0.3.9", None, None, None, mock.Mock()
+                )
+
     def test_carry_forward_is_explicit_hash_bound_and_not_a_beta_pass(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

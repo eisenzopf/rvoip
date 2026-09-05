@@ -7,12 +7,13 @@ executable test sources. It is a claim boundary, not a declaration that the
 entire RFC is implemented and not a statement that every listed test passed on
 the current source tree.
 
-The earlier July 20 evidence remains bound by the immutable
-[baseline manifest](BETA_BASELINE_EVIDENCE_20260720T055257Z.json) and remains
+The earlier July 20 evidence remains preserved in the
+[legacy archive](releases/beta/20260720T055257Z/baseline-evidence.json) and is
 diagnostic-only. Current execution evidence is the clean, source-matched
-candidate `20260724T231400Z`: see the
-[Beta Release Candidate Report](BETA_RELEASE_REPORT.md) and exact
-[108-gate report](BETA_GATE_REPORT.md).
+`0.3.9` release at `8cab44b10f872d21b304c02111d5d203ee8226da`: see the
+[protected qualification report](BETA_RELEASE_REPORT.md), exact
+[208-gate ledger](BETA_GATE_REPORT.md), and
+[machine summary](QUALIFICATION_SUMMARY.json).
 
 ## Status and evidence rules
 
@@ -142,7 +143,7 @@ missing supplied local summary is recorded as `J20-LOCAL-SUMMARY` with
 
 | Standard | Beta status | Reason |
 |---|---|---|
-| RFC 5763/5764 DTLS-SRTP | Candidate, feature-gated | `dtls_srtp_call_integration` proves two rvoip SIP endpoints install DTLS-derived contexts; `srtp_interop_webrtc_srtp` proves RTP/SRTCP compatibility with an independent implementation. The release claim remains conditional on fresh protected 0.3.9 qualification evidence. |
+| RFC 5763/5764 DTLS-SRTP | Supported, feature-gated (bounded) | `dtls_srtp_call_integration` proves two rvoip SIP endpoints install DTLS-derived contexts; `srtp_interop_webrtc_srtp` and protected `interop.remote-libsrtp` evidence prove bounded RTP/SRTCP compatibility with an independent implementation. |
 | RFC 8445 ICE | Unsupported | Attribute parsing/carry-through does not implement ICE connectivity checks. |
 | RFC 8489 STUN | Unsupported as a compliance claim | A configured address-discovery helper is not a complete STUN or ICE behavior profile. |
 | RFC 8656 TURN | Unsupported | No TURN allocation/relay behavior is claimed. |

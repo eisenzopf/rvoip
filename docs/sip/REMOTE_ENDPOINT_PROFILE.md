@@ -1,6 +1,8 @@
 # Production remote SIP endpoint profile
 
-Status: implemented candidate for 0.3.9; protected live qualification pending.
+Status: shipped in 0.3.9; deterministic and protected hosted qualification
+passed. Live two-UA NAT/TLS/SDES deployment qualification remains pending and
+is tracked separately.
 
 This profile is the bounded way to serve physical SIP phones and independent
 SIP UAs across NAT without making a general ICE/TURN claim. It combines SIP

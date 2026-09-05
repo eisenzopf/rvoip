@@ -4,15 +4,24 @@ This document defines the promotion procedure. It does not duplicate a
 candidate's results. The versioned reporting and selection authority is
 `config/beta-release-policy.yaml`; current outcomes are generated from evidence:
 
-Current candidate and runtime crate version: `0.3.9`.
-The current candidate requires the strict full gate; the historical `0.3.2`
-exception path cannot qualify it.
+Current qualified runtime crate version: `0.3.9`.
+Its protected remote-release run passed 208/208 gates and covered all 108
+requirements in the strict legacy ledger. The historical `0.3.2` exception
+path did not qualify it.
 
 - [Beta Release Candidate Report](BETA_RELEASE_REPORT.md)
 - [Complete Beta Gate Report](BETA_GATE_REPORT.md)
 - [Beta Performance Report](BETA_PERFORMANCE_REPORT.md)
 - [0.3.2 owner-approved release exception](BETA_RELEASE_EXCEPTION.md)
 - [Immutable release history](releases/beta/README.md)
+- [Protected qualification history](releases/qualification/README.md)
+
+Verify the currently promoted protected reports with:
+
+```sh
+python3 scripts/release/render_qualification_reports.py verify \
+  --directory crates/sip/rvoip-sip/docs
+```
 
 ## Promotion rule
 
