@@ -26,7 +26,9 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use base64::Engine;
 use rvoip_auth_core::bearer_stub;
+use rvoip_core::adapter::ConnectionAdapter;
 use rvoip_core::{Config, Orchestrator, Transport};
 use rvoip_quic::{UctpQuicAdapter, UctpQuicConfig};
 use rvoip_sip::api::unified::{Config as SipConfig, UnifiedCoordinator};
@@ -45,6 +47,7 @@ const CERT_DER_PATH: &str = "/tmp/uctp_demo_cert.der";
 /// `wt_smoke.spec.mjs` reads this file to extract the SPKI hash for
 /// the Chromium launch args.
 const CERT_SPKI_PATH: &str = "/tmp/uctp_demo_cert.spki";
+const BROWSER_SMOKE_KEY_ID: &str = "browser-smoke-key";
 
 #[derive(Debug)]
 struct Args {
@@ -164,12 +167,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         bearer_stub(),
     ))
     .await?;
-    let wt_adapter = UctpWtAdapter::new(UctpWtConfig::new(
-        Arc::clone(&quinn_ep),
-        wt_accept_rx,
-        bearer_stub(),
-    ))
-    .await?;
+    let browser_smoke_mode = std::env::var("RVOIP_WT_BROWSER_SIGNATURES").as_deref() == Ok("1");
+    let mut wt_config = UctpWtConfig::new(Arc::clone(&quinn_ep), wt_accept_rx, bearer_stub());
+    if browser_smoke_mode {
+        wt_config.max_concurrent_connections = 2;
+        let context = rvoip_auth_core::sig9421::SignatureVerificationContext::new(
+            "development",
+            "browser-smoke",
+        )?;
+        let public_key_b64 = std::env::var("RVOIP_WT_BROWSER_PUBLIC_KEY_B64").map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "browser smoke mode requires an ephemeral public key",
+            )
+        })?;
+        let public_key = base64::engine::general_purpose::STANDARD.decode(public_key_b64)?;
+        if public_key.len() != 32 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "browser smoke public key must be a raw Ed25519 key",
+            )
+            .into());
+        }
+        let mut resolver = rvoip_auth_core::sig9421::StaticKeyResolver::new();
+        resolver.insert_contextual(
+            &context,
+            BROWSER_SMOKE_KEY_ID,
+            rvoip_auth_core::sig9421::ResolvedVerificationKey {
+                public_key,
+                algorithm: "EdDSA".into(),
+                not_before: None,
+                expires_at: None,
+                revoked: false,
+            },
+        );
+        let verifier = rvoip_auth_core::sig9421::Sig9421Verifier::new(Arc::new(resolver));
+        wt_config = wt_config.with_sig9421(
+            rvoip_uctp::state::Sig9421Config::new(
+                Arc::new(verifier),
+                rvoip_uctp::state::Sig9421Policy::all_post_session_types(),
+            )
+            .with_verification_context(context),
+        );
+    }
+    let wt_adapter = UctpWtAdapter::new(wt_config).await?;
+    let wt_adapter_for_smoke = Arc::clone(&wt_adapter);
 
     // WebSocket listener (TCP, no TLS for v0 demo).
     let ws_listener = TcpListener::bind(args.ws_bind).await?;
@@ -226,6 +268,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     while let Ok(event) = events.recv().await {
         println!("[orchestrator_bridge] {event:?}");
         if let rvoip_core::events::Event::ConnectionInbound { connection_id, .. } = &event {
+            if browser_smoke_mode {
+                wt_adapter_for_smoke.accept(connection_id.clone()).await?;
+                println!("[orchestrator_bridge] browser-smoke accepted {connection_id}");
+            }
             pending.push(connection_id.clone());
             if pending.len() == 2 {
                 let a = pending.remove(0);

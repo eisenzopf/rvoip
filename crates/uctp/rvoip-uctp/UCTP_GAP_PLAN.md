@@ -14,7 +14,7 @@ section-by-section history is in git (`git log --follow` this file) and in
 
 | # | Item | Status / next step |
 |---|---|---|
-| §3.2 | **WebTransport browser bidi-stream interop** | SPKI pinning + WT session readiness work under headless Chromium across `web-transport-quinn` 0.5–0.11, and the full wire path works Rust↔Rust. **Blocked:** the Chromium→Rust *bidirectional-stream* envelope round-trip doesn't complete (`accept_bi` hangs/returns empty across all four versions tried). Upstream-dependency block — track `web-transport-quinn` 0.12+, or reshape the handshake to unidirectional-stream-per-direction + datagrams (better browser interop). The browser-smoke spec asserts the SPKI/readiness deliverable and logs the bidi gap rather than failing. |
+| §3.2 | **WebTransport browser interop** | **Closed for the supported profile:** UCTP uses one finite unidirectional stream per control envelope and WebTransport datagrams for RTP. The required Chromium gate proves TLS/SPKI admission, auth, RFC 8785/Ed25519-signed controls, Connection offer/answer/readiness, sustained bidirectional RTP, DTMF and quality events, teardown, and capacity-releasing reconnect. Long-lived bidirectional control streams are not part of the public profile. |
 | §4.2 | **SIP per-session codec override** | `renegotiate_media` re-INVITE currently uses the SIP layer's configured `offered_codecs`, not the orchestrator-supplied list. Add `UnifiedCoordinator::set_offered_codecs_for_session(session, Vec<u8>)` (a thin wrapper over the existing `MediaAdapter::set_offered_codecs`) so the orchestrator can pass codec preferences through the SIP SDP generator. |
 
 ## Out-of-scope (§6 — tracked, not scheduled)

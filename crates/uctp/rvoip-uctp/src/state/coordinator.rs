@@ -925,6 +925,7 @@ impl UctpCoordinator {
                 next = in_rx.recv() => {
                     match next {
                         Some(env) => {
+                            tracing::trace!(envelope = env.msg_type.diagnostic_label(), "uctp.coordinator: received envelope from substrate");
                             if let Err(e) = self.dispatch(env).await {
                                 warn!(error = %e, "uctp.coordinator: dispatch failed");
                             }

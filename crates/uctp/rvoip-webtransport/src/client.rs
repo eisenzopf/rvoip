@@ -3,9 +3,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use futures::{SinkExt, StreamExt};
 use rvoip_uctp::envelope::UctpEnvelope;
-use rvoip_uctp::substrate::{envelope_reader, envelope_writer};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 use url::Url;
@@ -59,38 +57,54 @@ impl UctpWtClient {
             .await
             .map_err(|e| UctpWtError::Session(format!("{}", e)))?;
 
-        let (send, recv) = session
-            .open_bi()
-            .await
-            .map_err(|e| UctpWtError::Session(format!("open_bi: {}", e)))?;
-
-        let mut reader = Box::pin(envelope_reader(recv));
-        let mut writer = Box::pin(envelope_writer(send));
-
         let (out_tx, mut out_rx) = mpsc::channel::<UctpEnvelope>(256);
         let (in_tx, in_rx) = mpsc::channel::<UctpEnvelope>(256);
 
+        let outbound_session = session.clone();
         tokio::spawn(async move {
             while let Some(env) = out_rx.recv().await {
-                if let Err(e) = writer.send(env).await {
-                    warn!(error = %e, "rvoip-wt-client: write error");
+                let mut send = match outbound_session.open_uni().await {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        warn!(%error, "rvoip-wt-client: outbound signaling open failed");
+                        return;
+                    }
+                };
+                if let Err(error) = crate::framing::write_envelope(&mut send, &env).await {
+                    warn!(%error, "rvoip-wt-client: write error");
+                    return;
+                }
+                if let Err(error) = send.finish() {
+                    warn!(%error, "rvoip-wt-client: envelope stream finish failed");
                     return;
                 }
             }
             debug!("rvoip-wt-client: write pump exiting");
         });
 
+        let inbound_session = session.clone();
         tokio::spawn(async move {
-            while let Some(item) = reader.next().await {
-                match item {
-                    Ok(env) => {
-                        if in_tx.send(env).await.is_err() {
+            loop {
+                let recv = match inbound_session.accept_uni().await {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        debug!(%error, "rvoip-wt-client: inbound signaling accept ended");
+                        break;
+                    }
+                };
+                let mut reader = crate::framing::EnvelopeReader::new(recv);
+                loop {
+                    match reader.next().await {
+                        Ok(Some(envelope)) => {
+                            if in_tx.send(envelope).await.is_err() {
+                                return;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(error) => {
+                            warn!(%error, "rvoip-wt-client: read error");
                             return;
                         }
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "rvoip-wt-client: read error");
-                        return;
                     }
                 }
             }

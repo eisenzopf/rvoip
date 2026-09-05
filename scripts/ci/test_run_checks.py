@@ -155,6 +155,11 @@ class RunChecksTests(unittest.TestCase):
         self.assertIn("otel", commands[0][0])
         self.assertIn("--all-targets", commands[0][0])
 
+    def test_browser_gate_requires_chromium_webtransport(self) -> None:
+        commands = run_checks.specialty_commands("browser-smoke", Path("/workspace"))
+        npm_test = next(command for command in commands if command[0] == ["npm", "test"])
+        self.assertEqual(npm_test[2]["RVOIP_WT_SMOKE"], "1")
+
     def test_codec_gate_runs_what_the_default_feature_shards_compile_out(self) -> None:
         # Every crate whose feature-gated codec tests the shards compile out.
         # Adding one here is the point of the list; the count is derived from

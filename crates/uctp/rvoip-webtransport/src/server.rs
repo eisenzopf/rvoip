@@ -9,7 +9,6 @@ use std::{collections::HashMap, num::NonZeroU16};
 
 use chrono::Utc;
 use dashmap::DashMap;
-use futures::{SinkExt, StreamExt};
 use rvoip_auth_core::BearerValidator;
 use rvoip_core::adapter::{
     AdapterEvent, AdapterLifecycleSinkSlot, EndReason, OrchestratorAdapterEvent, TerminalDelivery,
@@ -23,7 +22,6 @@ use crate::adapter::Route;
 use crate::media_stream::WebTransportDatagramMediaStream;
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::state::{UctpCoordinator, UctpSessionEvent, ENVELOPE_CHANNEL_CAP};
-use rvoip_uctp::substrate::{envelope_reader, envelope_writer};
 use rvoip_uctp::CorrelationIdDiagnostic;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -386,23 +384,6 @@ async fn spawn_peer_session(
         }
     };
 
-    let (send, recv) =
-        match tokio::time::timeout(authentication_deadline, session.accept_bi()).await {
-            Ok(Ok(streams)) => streams,
-            Ok(Err(e)) => {
-                warn!(error = %e, "rvoip-webtransport: accept_bi failed");
-                return;
-            }
-            Err(_) => {
-                warn!(%peer_addr, "rvoip-webtransport: signaling stream setup timed out");
-                conn.close(quinn::VarInt::from_u32(0x102), b"signaling setup timeout");
-                return;
-            }
-        };
-
-    let mut reader = Box::pin(envelope_reader(recv));
-    let mut writer = Box::pin(envelope_writer(send));
-
     let (in_tx, in_rx) = mpsc::channel::<UctpEnvelope>(ENVELOPE_CHANNEL_CAP);
     let (out_tx, mut out_rx) = mpsc::channel::<UctpEnvelope>(ENVELOPE_CHANNEL_CAP);
     let (coord_events_tx, mut coord_events_rx) =
@@ -482,30 +463,64 @@ async fn spawn_peer_session(
         Duration::from_millis(250),
     );
 
+    // Use one finite unidirectional stream per control envelope. Chromium does
+    // not expose bytes written by web-transport-quinn on a long-lived stream
+    // reliably until FIN, while finite streams provide deterministic delivery
+    // in both directions and preserve UCTP's ordered envelope semantics.
+    let inbound_session = session.clone();
     let in_tx_for_pump = in_tx.clone();
     let inbound_pump = tokio::spawn(async move {
-        while let Some(item) = reader.next().await {
-            match item {
-                Ok(env) => {
-                    if in_tx_for_pump.send(env).await.is_err() {
+        loop {
+            let recv = match inbound_session.accept_uni().await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    debug!(%error, "rvoip-webtransport: inbound signaling accept ended");
+                    return;
+                }
+            };
+            let mut reader = crate::framing::EnvelopeReader::new(recv);
+            loop {
+                match reader.next().await {
+                    Ok(Some(envelope)) => {
+                        if in_tx_for_pump.send(envelope).await.is_err() {
+                            return;
+                        }
+                        tracing::trace!("forwarded WebTransport envelope to UCTP coordinator");
+                    }
+                    Ok(None) => break,
+                    Err(error) => {
+                        warn!(%error, "rvoip-webtransport: envelope read error");
                         return;
                     }
-                }
-                Err(e) => {
-                    warn!(error = %e, "rvoip-webtransport: envelope read error");
-                    return;
                 }
             }
         }
     });
     drop(in_tx);
 
+    let outbound_session = session.clone();
     let outbound_pump = tokio::spawn(async move {
         while let Some(env) = out_rx.recv().await {
-            if let Err(e) = writer.send(env).await {
-                warn!(error = %e, "rvoip-webtransport: envelope write error");
+            tracing::trace!(
+                envelope = env.msg_type.diagnostic_label(),
+                "writing WebTransport envelope frame"
+            );
+            let mut send = match outbound_session.open_uni().await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    warn!(%error, "rvoip-webtransport: outbound signaling open failed");
+                    return;
+                }
+            };
+            if let Err(error) = crate::framing::write_envelope(&mut send, &env).await {
+                warn!(%error, "rvoip-webtransport: envelope write error");
                 return;
             }
+            if let Err(error) = send.finish() {
+                warn!(%error, "rvoip-webtransport: envelope stream finish failed");
+                return;
+            }
+            tracing::trace!("wrote WebTransport envelope frame");
         }
     });
 

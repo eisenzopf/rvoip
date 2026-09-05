@@ -617,7 +617,15 @@ def specialty_commands(
             ),
             (["npm", "ci"], browser, None),
             (["npx", "playwright", "install", "--with-deps", "chromium"], browser, None),
-            (["npm", "test"], browser, {**os.environ, "RUST_LOG": "warn"}),
+            (
+                ["npm", "test"],
+                browser,
+                {
+                    **os.environ,
+                    "RUST_LOG": "warn",
+                    "RVOIP_WT_SMOKE": "1",
+                },
+            ),
         ]
     if gate == "vcon-postgres":
         env = {

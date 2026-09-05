@@ -9,6 +9,7 @@
 pub mod adapter;
 pub mod client;
 pub mod errors;
+mod framing;
 pub mod media_stream;
 pub mod server;
 
