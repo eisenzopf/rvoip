@@ -1570,6 +1570,8 @@ mod registered_flow_tests {
 
     #[tokio::test]
     async fn registered_flow_is_opaque_owned_live_and_fail_closed() {
+        const FLOW_ID: u64 = 9_876_543_210_123_456_789;
+
         let service = RegistrarService::new().await.unwrap();
         let aor = AddressOfRecord::parse("sip:alice@example.test").unwrap();
         let other = AddressOfRecord::parse("sip:bob@example.test").unwrap();
@@ -1583,7 +1585,9 @@ mod registered_flow_tests {
             .prepare_register_aor(&aor, contact.clone(), Some(600))
             .await
             .unwrap();
-        service.bind_registered_flow(&aor, &contact, 42).unwrap();
+        service
+            .bind_registered_flow(&aor, &contact, FLOW_ID)
+            .unwrap();
         prepared.commit().await;
 
         let route = service
@@ -1591,10 +1595,12 @@ mod registered_flow_tests {
             .await
             .unwrap();
         assert_eq!(route.remote_addr().to_string(), "198.51.100.20:41000");
-        assert_eq!(route.process_local_flow_id(), 42);
+        assert_eq!(route.process_local_flow_id(), FLOW_ID);
         let diagnostic = format!("{route:?}");
         assert!(!diagnostic.contains("198.51.100.20"));
-        assert!(!diagnostic.contains("42"));
+        assert!(!diagnostic.contains(&FLOW_ID.to_string()));
+        assert!(!diagnostic.contains("remote_addr"));
+        assert!(!diagnostic.contains("process_local_flow_id"));
         assert!(service
             .resolve_registered_flow(&other, &contact)
             .await

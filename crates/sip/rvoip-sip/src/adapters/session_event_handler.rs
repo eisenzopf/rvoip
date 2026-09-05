@@ -5368,6 +5368,31 @@ impl SessionCrossCrateEventHandler {
                     session_id, status
                 );
                 if pending_correlation == PendingOfferTransactionCorrelation::Exact {
+                    // The causal CallFailed delivery precedes dialog-core's
+                    // observational OutboundRequestCompleted event. Retire the
+                    // exact tracker here, after the state rollback commits but
+                    // before waking the application, so an immediate retry
+                    // cannot collide with request ownership that the API has
+                    // already reported as complete. The later completion is
+                    // deliberately stale and therefore observational only.
+                    if let Some(transaction) = response_transaction.as_ref() {
+                        if self
+                            .dialog_adapter
+                            .outbound_request_tracker
+                            .complete_if_matches(
+                                handle,
+                                TrackedInDialogMethod::Reinvite,
+                                transaction,
+                            )
+                        {
+                            self.clear_tracked_request_auth_state(
+                                handle,
+                                TrackedInDialogMethod::Reinvite,
+                                transaction,
+                            )
+                            .await;
+                        }
+                    }
                     self.publish_renegotiation_failure(
                         handle,
                         "INVITE",
