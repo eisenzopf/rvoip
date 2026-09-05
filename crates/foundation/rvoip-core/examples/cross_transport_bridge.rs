@@ -747,7 +747,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 // decode them, concatenate, and verify the dominant
                 // frequency matches.
                 const SIP_TO_QUIC_TONE: f32 = 440.0;
-                let mut client_c_in = MediaStream::frames_in(client_c_stream.as_ref());
+                let mut client_c_in = client_c_stream.try_frames_in()?;
 
                 // Send tone — each AudioFrame is 20 ms = 160 samples @ 8 kHz.
                 let tone_pcm = pcm_sine(SIP_TO_QUIC_TONE, 8000, 16000, 12000); // 2 s
@@ -1100,7 +1100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 None,
                             );
                             let offerer_out = offerer_stream.frames_out();
-                            let mut client_d_in = MediaStream::frames_in(client_d_stream.as_ref());
+                            let mut client_d_in = client_d_stream.try_frames_in()?;
 
                             // --- WebRTC → QUIC (880 Hz tone) ---
                             const WQ_TONE: f32 = 880.0;
@@ -1217,8 +1217,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
                                 // Drain any pre-existing frames in the
                                 // channel so we only collect new tone.
-                                let mut offerer_in =
-                                    MediaStream::frames_in(offerer_stream.as_ref());
+                                let mut offerer_in = offerer_stream.try_frames_in()?;
                                 while offerer_in.try_recv().is_ok() {}
 
                                 // Push the full QUIC→WebRTC tone.
@@ -1555,7 +1554,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             println!(
                                 "[sip-webrtc] Phase 6b: attached remote track to offerer_2 stream"
                             );
-                            let mut off2_in = MediaStream::frames_in(offerer_stream.as_ref());
+                            let mut off2_in = offerer_stream.try_frames_in()?;
                             while off2_in.try_recv().is_ok() {}
 
                             // Push the full SIP→WebRTC tone.
