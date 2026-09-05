@@ -614,7 +614,7 @@ pub use api::unified::{
 };
 pub use api::{
     Config, MediaMode, RegistrationHandle, RegistrationInfo, RegistrationStatus, SdesBase64Mode,
-    SipContactMode, SipTlsMode, SrtpSuitePolicy, UnifiedCoordinator,
+    SipContactMode, SipTlsMode, SrtpKeyingMode, SrtpSuitePolicy, UnifiedCoordinator,
 };
 
 // Events
@@ -673,9 +673,9 @@ pub mod prelude {
         SipDigestAuthService, SipEgressProfilePolicy, SipEgressProfileRegistration,
         SipInitialHeaders, SipOriginateContext, SipProfileRevision, SipProfileSrtpPolicy,
         SipReason, SipRuntimeConfig, SipTlsMode, SipTrace, SipTraceConfig, SipTraceDirection,
-        SrtpSuitePolicy, StreamPeer, StreamPeerBuilder, SubscriptionState, TransferDialogMatcher,
-        TransferKind, TransferLifecycleOptions, TransferOutcome, TransferTargetEvidence,
-        TransferWaitMode, TypedHeader,
+        SrtpKeyingMode, SrtpSuitePolicy, StreamPeer, StreamPeerBuilder, SubscriptionState,
+        TransferDialogMatcher, TransferKind, TransferLifecycleOptions, TransferOutcome,
+        TransferTargetEvidence, TransferWaitMode, TypedHeader,
     };
 }
 

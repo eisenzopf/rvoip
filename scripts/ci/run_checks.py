@@ -38,7 +38,7 @@ CODEC_FEATURE_GATES = {
 # accompanying test derives the same set from the manifest and fails if a new
 # feature is added without a decision about this gate.
 NON_PERF_SIP_FEATURES = (
-    "all-codecs,amr,amr-nb,amr-wb,dev-insecure-tls,dhat,event-history,g729,"
+    "all-codecs,amr,amr-nb,amr-wb,dev-insecure-tls,dhat,dtls-srtp,event-history,g729,"
     "generated-validation,opus,opus-sim,persistence,tokio-console"
 )
 
@@ -470,7 +470,75 @@ def specialty_commands(
             ),
         ]
     if gate == "rtp-interop":
-        return [(["bash", "scripts/test_libsrtp_interop.sh"], None, None)]
+        return [
+            (["bash", "scripts/test_libsrtp_interop.sh"], None, None),
+            (
+                [
+                    "cargo",
+                    "test",
+                    "--locked",
+                    "-p",
+                    "rvoip-media-core",
+                    "--features",
+                    "dtls-srtp",
+                    "--lib",
+                    "dtls_fingerprint_mismatch_fails_before_context_installation",
+                ],
+                None,
+                None,
+            ),
+            (
+                [
+                    "cargo",
+                    "test",
+                    "--locked",
+                    "-p",
+                    "rvoip-rtp-core",
+                    "--features",
+                    "dtls-webrtc",
+                    "--test",
+                    "dtls_srtp_handshake_test",
+                    "--test",
+                    "dtls_srtp_transport_bridge_test",
+                    "--test",
+                    "srtp_interop_webrtc_srtp",
+                ],
+                None,
+                None,
+            ),
+            (
+                [
+                    "cargo",
+                    "test",
+                    "--locked",
+                    "-p",
+                    "rvoip-sip",
+                    "--features",
+                    "dtls-srtp",
+                    "--test",
+                    "dtls_srtp_call_integration",
+                ],
+                None,
+                None,
+            ),
+            (
+                [
+                    "cargo",
+                    "clippy",
+                    "--locked",
+                    "-p",
+                    "rvoip-sip",
+                    "--features",
+                    "dtls-srtp",
+                    "--all-targets",
+                    "--",
+                    "-D",
+                    "warnings",
+                ],
+                None,
+                None,
+            ),
+        ]
     if gate == "amazon-connect-aws-control":
         return [
             (

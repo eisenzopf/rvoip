@@ -20,12 +20,15 @@ use rvoip_rtp_core::transport::{RtpTransport, RtpTransportConfig, UdpRtpTranspor
 
 #[tokio::test]
 async fn handshake_completes_through_the_shared_socket_demux_bridge() {
-    let transport_a = UdpRtpTransport::new(RtpTransportConfig::default())
-        .await
-        .expect("transport A");
-    let transport_b = UdpRtpTransport::new(RtpTransportConfig::default())
-        .await
-        .expect("transport B");
+    // Bind to an address that is valid as a peer destination. The transport
+    // default intentionally binds the wildcard address, whose `local_addr()`
+    // is not a portable send target (notably on macOS).
+    let config = || RtpTransportConfig {
+        local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+        ..RtpTransportConfig::default()
+    };
+    let transport_a = UdpRtpTransport::new(config()).await.expect("transport A");
+    let transport_b = UdpRtpTransport::new(config()).await.expect("transport B");
 
     let addr_a = transport_a
         .local_rtp_addr()

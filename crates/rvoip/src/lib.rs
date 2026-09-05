@@ -211,14 +211,16 @@ mod feature_bundle_contract_tests {
         assert!(cfg!(feature = "sip"));
         assert!(!cfg!(feature = "webrtc"));
         assert!(!cfg!(feature = "uctp"));
+        assert!(!cfg!(feature = "dtls-srtp"));
         assert!(!cfg!(feature = "opus"));
     }
 
     #[cfg(feature = "bundle-carrier-sip")]
     #[test]
-    fn carrier_bundle_enables_identity_and_pure_rust_telephony_codecs() {
+    fn carrier_bundle_enables_security_identity_and_pure_rust_telephony_codecs() {
         assert!(cfg!(feature = "sip"));
         assert!(cfg!(feature = "sip-stir-shaken"));
+        assert!(cfg!(feature = "dtls-srtp"));
         assert!(cfg!(feature = "g729"));
         assert!(cfg!(feature = "amr-nb"));
         assert!(cfg!(feature = "amr-wb"));
@@ -248,6 +250,7 @@ mod feature_bundle_contract_tests {
     #[test]
     fn pure_rust_full_bundle_keeps_native_opus_off() {
         assert!(cfg!(feature = "full"));
+        assert!(cfg!(feature = "dtls-srtp"));
         assert!(cfg!(feature = "g729"));
         assert!(cfg!(feature = "amr-nb"));
         assert!(cfg!(feature = "amr-wb"));
@@ -258,6 +261,7 @@ mod feature_bundle_contract_tests {
     #[test]
     fn native_full_bundle_enables_every_mainline_codec() {
         assert!(cfg!(feature = "full"));
+        assert!(cfg!(feature = "dtls-srtp"));
         assert!(cfg!(feature = "g729"));
         assert!(cfg!(feature = "amr-nb"));
         assert!(cfg!(feature = "amr-wb"));

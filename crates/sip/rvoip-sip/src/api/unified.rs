@@ -324,6 +324,17 @@ pub enum SipContactMode {
     RegisteredFlowSymmetric,
 }
 
+/// SRTP key-agreement mechanism used when [`Config::offer_srtp`] is enabled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SrtpKeyingMode {
+    /// SDP Security Descriptions (RFC 4568).
+    #[default]
+    Sdes,
+    /// DTLS-SRTP with SDP fingerprint binding (RFC 5763/5764).
+    DtlsSrtp,
+}
+
 /// Named SRTP suite offer policies for common PBX/carrier interop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SrtpSuitePolicy {
@@ -2192,6 +2203,12 @@ pub struct Config {
     /// See [`Config::srtp_required`] for the strict-mode variant.
     pub offer_srtp: bool,
 
+    /// Select how SRTP keys are established when [`Config::offer_srtp`] is
+    /// enabled. SDES remains the compatibility default. DTLS-SRTP requires
+    /// the `dtls-srtp` Cargo feature and full media mode; configuration fails
+    /// closed when either requirement is missing.
+    pub srtp_keying: SrtpKeyingMode,
+
     /// Playout smoothing and packet-loss concealment for inbound audio.
     ///
     /// `None` forwards frames exactly as they arrive, gaps included — the
@@ -2791,6 +2808,7 @@ impl std::fmt::Debug for Config {
                 &self.tls_server_client_auth.mode,
             )
             .field("offer_srtp", &self.offer_srtp)
+            .field("srtp_keying", &self.srtp_keying)
             .field("ice", &self.ice)
             .field("srtp_required", &self.srtp_required)
             .field("amr_dtx", &self.amr_dtx)
@@ -2954,6 +2972,7 @@ impl Config {
             #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
             offer_srtp: false,
+            srtp_keying: SrtpKeyingMode::Sdes,
             srtp_required: false,
             amr_dtx: false,
             amr_auto_cmr: false,
@@ -3073,6 +3092,7 @@ impl Config {
             #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
             offer_srtp: false,
+            srtp_keying: SrtpKeyingMode::Sdes,
             srtp_required: false,
             amr_dtx: false,
             amr_auto_cmr: false,
@@ -3339,6 +3359,16 @@ impl Config {
     /// ```
     pub fn with_srtp_suite_policy(mut self, policy: SrtpSuitePolicy) -> Self {
         self.srtp_offered_suites = policy.suites();
+        self
+    }
+
+    /// Select the SRTP key-agreement mechanism.
+    ///
+    /// DTLS-SRTP also requires `offer_srtp = true`, enabled media, and the
+    /// crate's `dtls-srtp` Cargo feature. [`Config::validate`] rejects an
+    /// unavailable or signaling-only combination instead of downgrading.
+    pub fn with_srtp_keying(mut self, keying: SrtpKeyingMode) -> Self {
+        self.srtp_keying = keying;
         self
     }
 
@@ -4596,7 +4626,27 @@ impl Config {
                 "srtp_required=true requires offer_srtp=true".to_string(),
             ));
         }
-        if self.offer_srtp && self.srtp_offered_suites.is_empty() {
+        if self.offer_srtp
+            && self.srtp_keying == SrtpKeyingMode::DtlsSrtp
+            && !cfg!(feature = "dtls-srtp")
+        {
+            return Err(SessionError::ConfigError(
+                "DTLS-SRTP requires the rvoip-sip dtls-srtp Cargo feature".to_string(),
+            ));
+        }
+        if self.offer_srtp
+            && self.srtp_keying == SrtpKeyingMode::DtlsSrtp
+            && matches!(self.media_mode, MediaMode::SignalingOnly { .. })
+        {
+            return Err(SessionError::ConfigError(
+                "DTLS-SRTP requires enabled media so the handshake and fingerprint check remain owned by RVoIP"
+                    .to_string(),
+            ));
+        }
+        if self.offer_srtp
+            && self.srtp_keying == SrtpKeyingMode::Sdes
+            && self.srtp_offered_suites.is_empty()
+        {
             return Err(SessionError::ConfigError(
                 "offer_srtp=true requires at least one srtp_offered_suites entry".to_string(),
             ));
@@ -8830,6 +8880,9 @@ impl UnifiedCoordinator {
             config.offer_srtp,
             config.srtp_required,
             config.srtp_offered_suites.clone(),
+        );
+        media_adapter_inner.set_dtls_srtp_policy(
+            config.offer_srtp && config.srtp_keying == SrtpKeyingMode::DtlsSrtp,
         );
         media_adapter_inner.set_sdes_base64_mode(sdes_base64_mode);
         // Sprint 3 C1 — propagate Comfort Noise opt-in.

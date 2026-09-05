@@ -1321,8 +1321,15 @@ impl UdpRtpTransport {
     }
 
     /// Irreversibly require authenticated RTP and RTCP on this transport.
-    pub(crate) fn require_srtp(&self) {
+    ///
+    /// DTLS-SRTP callers use this before starting the handshake so media
+    /// cannot leak as plaintext while key agreement is still in flight.
+    pub fn require_secure_media(&self) {
         self.secure_media_required.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn require_srtp(&self) {
+        self.require_secure_media();
     }
 
     /// Send one STUN datagram on the RTP socket.

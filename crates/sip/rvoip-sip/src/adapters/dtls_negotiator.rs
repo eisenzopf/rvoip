@@ -3,27 +3,13 @@
 //! This module is the SDP-side scaffold for DTLS-SRTP. It handles:
 //!
 //! 1. Detecting a DTLS-SRTP offer (presence of `a=fingerprint:` and
-//!    `a=setup:` on an audio m-line with `RTP/SAVP` proto).
+//!    `a=setup:` on an audio m-line with `UDP/TLS/RTP/SAVP` proto).
 //! 2. Computing the complementary `a=setup:` role per RFC 8842 §5.1
 //!    so the answer carries the matching active/passive value.
 //! 3. Selecting our advertised fingerprint hash.
 //!
-//! What this module does **not** do yet (separate workstream in
-//! NEXT_STEPS Area C3.2 / C3.3):
-//!
-//! - Drive the actual DTLS handshake — that lives in
-//!   `rtp-core::dtls` and needs an integration call site in
-//!   `MediaAdapter::negotiate_sdp_as_uas`.
-//! - Extract SRTP master keys from the DTLS extractor and feed them
-//!   into rtp-core's `SrtpContext` (the existing SDES key-derivation
-//!   path is at `media-core::relay::controller::install_srtp_contexts`).
-//! - Manage long-lived certificate / private-key state (today the
-//!   SDES path generates a random master key per session; DTLS needs
-//!   a stable cert so peers can pin our fingerprint across calls).
-//!
-//! The split is intentional: this module lets us write byte-fixture
-//! tests for the SDP shape today while the rtp-core DTLS engine is
-//! brought online behind it.
+//! The media adapter owns the matching per-call certificate identity and
+//! hands the validated fingerprint to media-core before context installation.
 
 use crate::errors::{Result, SessionError};
 use rvoip_sip_core::types::sdp::{ParsedAttribute, SdpSession};
@@ -98,42 +84,113 @@ pub struct DtlsOffer {
     pub hash_function: String,
     /// Colon-separated hex fingerprint.
     pub fingerprint: String,
+    /// Parsed SHA-256 fingerprint used for the pre-install certificate check.
+    pub fingerprint_sha256: [u8; 32],
     /// Peer's chosen setup role.
     pub setup_role: SetupRole,
+}
+
+fn parse_sha256_fingerprint(value: &str) -> Result<[u8; 32]> {
+    let parts: Vec<&str> = value.split(':').collect();
+    if parts.len() != 32 || parts.iter().any(|part| part.len() != 2) {
+        return Err(SessionError::SDPNegotiationFailed(
+            "DTLS-SRTP fingerprint must contain exactly 32 colon-separated SHA-256 bytes"
+                .to_string(),
+        ));
+    }
+    let mut out = [0_u8; 32];
+    for (index, part) in parts.into_iter().enumerate() {
+        out[index] = u8::from_str_radix(part, 16).map_err(|_| {
+            SessionError::SDPNegotiationFailed(
+                "DTLS-SRTP fingerprint contains non-hexadecimal bytes".to_string(),
+            )
+        })?;
+    }
+    Ok(out)
+}
+
+/// Parse and validate the DTLS-SRTP attributes for the audio media section.
+/// Partial, malformed, unsupported-hash, and wrong-transport offers are
+/// explicit negotiation failures rather than plaintext fallbacks.
+pub fn parse_dtls_offer(sdp: &SdpSession) -> Result<Option<DtlsOffer>> {
+    let Some(audio) = sdp
+        .media_descriptions
+        .iter()
+        .find(|media| media.media.eq_ignore_ascii_case("audio"))
+    else {
+        return Ok(None);
+    };
+
+    let parse_scope = |attributes: &[ParsedAttribute], scope: &str| {
+        let mut fingerprint = None;
+        let mut setup = None;
+        for attr in attributes {
+            match attr {
+                ParsedAttribute::Fingerprint(hash, value) => {
+                    if fingerprint.is_some() {
+                        return Err(SessionError::SDPNegotiationFailed(format!(
+                            "DTLS-SRTP {scope} scope contains multiple a=fingerprint attributes"
+                        )));
+                    }
+                    fingerprint = Some((hash.clone(), value.clone()));
+                }
+                ParsedAttribute::Setup(value) => {
+                    if setup.is_some() {
+                        return Err(SessionError::SDPNegotiationFailed(format!(
+                            "DTLS-SRTP {scope} scope contains multiple a=setup attributes"
+                        )));
+                    }
+                    setup = Some(value.clone());
+                }
+                _ => {}
+            }
+        }
+        Ok((fingerprint, setup))
+    };
+    let (media_fingerprint, media_setup) = parse_scope(&audio.generic_attributes, "media")?;
+    let (session_fingerprint, session_setup) = parse_scope(&sdp.generic_attributes, "session")?;
+    // RFC 8122/8842 permit session defaults and media-level overrides.
+    let fingerprint = media_fingerprint.or(session_fingerprint);
+    let setup = media_setup.or(session_setup);
+
+    if fingerprint.is_none() && setup.is_none() {
+        return Ok(None);
+    }
+    if !audio.protocol.eq_ignore_ascii_case("UDP/TLS/RTP/SAVP") {
+        return Err(SessionError::SDPNegotiationFailed(
+            "DTLS-SRTP attributes require UDP/TLS/RTP/SAVP".to_string(),
+        ));
+    }
+    let (hash_function, fingerprint) = fingerprint.ok_or_else(|| {
+        SessionError::SDPNegotiationFailed("DTLS-SRTP offer is missing a=fingerprint".to_string())
+    })?;
+    if !hash_function.eq_ignore_ascii_case("sha-256") {
+        return Err(SessionError::SDPNegotiationFailed(
+            "DTLS-SRTP currently requires a SHA-256 certificate fingerprint".to_string(),
+        ));
+    }
+    let setup_role = SetupRole::parse(&setup.ok_or_else(|| {
+        SessionError::SDPNegotiationFailed("DTLS-SRTP offer is missing a=setup".to_string())
+    })?)?;
+    if setup_role == SetupRole::Holdconn {
+        return Err(SessionError::SDPNegotiationFailed(
+            "a=setup:holdconn is not valid for a new DTLS association".to_string(),
+        ));
+    }
+    let fingerprint_sha256 = parse_sha256_fingerprint(&fingerprint)?;
+    Ok(Some(DtlsOffer {
+        hash_function,
+        fingerprint,
+        fingerprint_sha256,
+        setup_role,
+    }))
 }
 
 /// Inspect the parsed offer's audio m-line for DTLS-SRTP attributes.
 /// Returns `Some` only when *both* `a=fingerprint` AND `a=setup` are
 /// present on the audio m-line. RFC 8842 §5.1 requires both.
 pub fn detect_dtls_offer(sdp: &SdpSession) -> Option<DtlsOffer> {
-    let audio = sdp.media_descriptions.iter().find(|m| m.media == "audio")?;
-
-    let mut fingerprint = None;
-    let mut setup = None;
-    for attr in audio
-        .generic_attributes
-        .iter()
-        .chain(sdp.generic_attributes.iter())
-    {
-        match attr {
-            ParsedAttribute::Fingerprint(hash, fp) if fingerprint.is_none() => {
-                fingerprint = Some((hash.clone(), fp.clone()));
-            }
-            ParsedAttribute::Setup(role) if setup.is_none() => {
-                setup = SetupRole::parse(role).ok();
-            }
-            _ => {}
-        }
-    }
-
-    match (fingerprint, setup) {
-        (Some((hash_function, fp)), Some(setup_role)) => Some(DtlsOffer {
-            hash_function,
-            fingerprint: fp,
-            setup_role,
-        }),
-        _ => None,
-    }
+    parse_dtls_offer(sdp).ok().flatten()
 }
 
 #[cfg(test)]
@@ -147,7 +204,7 @@ mod tests {
             .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
             .connection("IN", "IP4", "127.0.0.1")
             .time("0", "0")
-            .media_audio(16000, "RTP/SAVP")
+            .media_audio(16000, "UDP/TLS/RTP/SAVP")
             .formats(&["0"])
             .rtpmap("0", "PCMU/8000")
             .attribute("fingerprint", Some(format!("{} {}", hash, fp)))
@@ -200,7 +257,47 @@ mod tests {
         let detected = detect_dtls_offer(&offer).expect("detect");
         assert_eq!(detected.hash_function, "sha-256");
         assert!(detected.fingerprint.starts_with("AB:CD:EF"));
+        assert_eq!(detected.fingerprint_sha256[0..3], [0xAB, 0xCD, 0xEF]);
         assert_eq!(detected.setup_role, SetupRole::Actpass);
+    }
+
+    #[test]
+    fn parse_rejects_ambiguous_duplicate_fingerprint_and_setup_attributes() {
+        let fingerprint = "AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89";
+        let mut duplicate_fingerprint = dtls_audio_offer("sha-256", fingerprint, "actpass");
+        duplicate_fingerprint.media_descriptions[0]
+            .generic_attributes
+            .push(ParsedAttribute::Fingerprint(
+                "sha-256".to_string(),
+                fingerprint.to_string(),
+            ));
+        assert!(parse_dtls_offer(&duplicate_fingerprint).is_err());
+
+        let mut duplicate_setup = dtls_audio_offer("sha-256", fingerprint, "actpass");
+        duplicate_setup.media_descriptions[0]
+            .generic_attributes
+            .push(ParsedAttribute::Setup("passive".to_string()));
+        assert!(parse_dtls_offer(&duplicate_setup).is_err());
+    }
+
+    #[test]
+    fn media_level_dtls_attributes_override_session_defaults() {
+        let media_fingerprint = "AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89";
+        let session_fingerprint = "10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F:20:21:22:23:24:25:26:27:28:29:2A:2B:2C:2D:2E:2F";
+        let mut offer = dtls_audio_offer("sha-256", media_fingerprint, "actpass");
+        offer.generic_attributes.push(ParsedAttribute::Fingerprint(
+            "sha-256".to_string(),
+            session_fingerprint.to_string(),
+        ));
+        offer
+            .generic_attributes
+            .push(ParsedAttribute::Setup("passive".to_string()));
+
+        let parsed = parse_dtls_offer(&offer)
+            .expect("session defaults plus media override are valid")
+            .expect("DTLS attributes detected");
+        assert_eq!(parsed.fingerprint, media_fingerprint);
+        assert_eq!(parsed.setup_role, SetupRole::Actpass);
     }
 
     #[test]

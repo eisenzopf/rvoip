@@ -326,7 +326,7 @@ pub use crate::types::CallState;
 pub use unified::{
     Config, MediaMode, MediaSessionControllerConfig, RegistrationHandle, RegistrationInfo,
     RegistrationStatus, RtpSessionBufferConfig, RtpTransportBufferConfig, SdesBase64Mode,
-    SipContactMode, SipNatConfig, SipRuntimeConfig, SipTlsMode, SrtpSuitePolicy,
+    SipContactMode, SipNatConfig, SipRuntimeConfig, SipTlsMode, SrtpKeyingMode, SrtpSuitePolicy,
     SymmetricRtpPolicy, UnifiedCoordinator,
 };
 

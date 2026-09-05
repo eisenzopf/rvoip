@@ -13,7 +13,7 @@ run the script with `--write`; CI rejects hand-edited or drifting output.
 | Cargo feature | Deployment shape | Direct members | Audio codecs | Extra system dependency | Maturity |
 | --- | --- | --- | --- | --- | --- |
 | `bundle-sip-endpoint` | SIP endpoint | `sip` | G.711 mu-law and A-law | None | SIP beta |
-| `bundle-carrier-sip` | Carrier SIP | `sip`, `sip-stir-shaken`, `g729`, `amr` | G.711, G.729, AMR-NB, and AMR-WB | None | SIP beta plus preview add-ons |
+| `bundle-carrier-sip` | Carrier SIP | `sip`, `sip-stir-shaken`, `dtls-srtp`, `g729`, `amr` | G.711, G.729, AMR-NB, and AMR-WB | None | SIP beta plus preview add-ons |
 | `bundle-browser-gateway` | Browser gateway | `app`, `opus` | G.711 and Opus | libopus | Developer preview |
 | `bundle-ai-conversation` | AI conversation gateway | `voip-3`, `vapi`, `app`, `opus` | G.711 and Opus | libopus | Developer preview |
 | `bundle-full-pure-rust` | Full pure-Rust facade | `full` | G.711, G.729, AMR-NB, and AMR-WB | None | Mixed: SIP beta and preview surfaces |
@@ -32,7 +32,7 @@ A provider-neutral SIP endpoint or server with the standard G.711 codecs.
 
 ### `bundle-carrier-sip` — Carrier SIP
 
-A carrier-facing SIP service with caller-identity attestation and the pure-Rust telephony codec set.
+A carrier-facing SIP service with DTLS-SRTP, caller-identity attestation, and the pure-Rust telephony codec set.
 
 ### `bundle-browser-gateway` — Browser gateway
 

@@ -3,6 +3,9 @@
 //! Thin translation layer between media-core and state machine.
 //! Focuses only on essential media operations and events.
 
+#[cfg(feature = "dtls-srtp")]
+use crate::adapters::dtls_negotiator::parse_dtls_offer;
+use crate::adapters::dtls_negotiator::SetupRole;
 use crate::adapters::srtp_negotiator::{
     into_public_negotiation_error, SrtpDetailedResult, SrtpNegotiator, SrtpPair,
 };
@@ -243,6 +246,56 @@ fn audio_transport(session: &SdpSession) -> Option<&str> {
         .iter()
         .find(|m| m.media == "audio")
         .map(|m| m.protocol.as_str())
+}
+
+#[cfg(feature = "dtls-srtp")]
+fn fingerprint_hex(fingerprint: &[u8; 32]) -> String {
+    fingerprint
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+#[cfg(feature = "dtls-srtp")]
+fn setup_role_to_dtls_role(role: SetupRole) -> Result<rvoip_media_core::DtlsRole> {
+    match role {
+        SetupRole::Active => Ok(rvoip_media_core::DtlsRole::Client),
+        SetupRole::Passive => Ok(rvoip_media_core::DtlsRole::Server),
+        SetupRole::Actpass | SetupRole::Holdconn => Err(SessionError::SDPNegotiationFailed(
+            format!("cannot start a DTLS handshake with unresolved setup role {role:?}"),
+        )),
+    }
+}
+
+#[cfg(feature = "dtls-srtp")]
+fn dtls_profile_to_crypto_suite(
+    profile: &rvoip_rtp_core::srtp::SrtpCryptoSuite,
+) -> Result<CryptoSuite> {
+    use rvoip_rtp_core::srtp::{SrtpAuthenticationAlgorithm, SrtpEncryptionAlgorithm};
+
+    match (
+        profile.encryption,
+        profile.authentication,
+        profile.key_length,
+        profile.tag_length,
+    ) {
+        (SrtpEncryptionAlgorithm::AesCm, SrtpAuthenticationAlgorithm::HmacSha1_80, 16, 10) => {
+            Ok(CryptoSuite::AesCm128HmacSha1_80)
+        }
+        (SrtpEncryptionAlgorithm::AesCm, SrtpAuthenticationAlgorithm::HmacSha1_32, 16, 4) => {
+            Ok(CryptoSuite::AesCm128HmacSha1_32)
+        }
+        (SrtpEncryptionAlgorithm::AesCm, SrtpAuthenticationAlgorithm::HmacSha1_80, 32, 10) => {
+            Ok(CryptoSuite::AesCm256HmacSha1_80)
+        }
+        (SrtpEncryptionAlgorithm::AesCm, SrtpAuthenticationAlgorithm::HmacSha1_32, 32, 4) => {
+            Ok(CryptoSuite::AesCm256HmacSha1_32)
+        }
+        _ => Err(SessionError::MediaError(
+            "DTLS selected an unsupported SRTP protection profile".to_string(),
+        )),
+    }
 }
 
 /// NEXT_STEPS C2 — lookup helper from RTP payload type to the
@@ -905,6 +958,15 @@ struct StagedMediaNegotiation {
     config: NegotiatedConfig,
     stable_local_direction: crate::types::MediaDirection,
     srtp_negotiated: bool,
+    #[cfg(feature = "dtls-srtp")]
+    dtls: Option<StagedDtlsHandshake>,
+}
+
+#[cfg(feature = "dtls-srtp")]
+#[derive(Debug, Clone)]
+struct StagedDtlsHandshake {
+    role: SetupRole,
+    expected_remote_fingerprint_sha256: [u8; 32],
 }
 
 /// Exact key for pre-commit media artifacts. Production always uses the
@@ -925,6 +987,8 @@ pub(crate) struct PreparedMediaNegotiation {
     remote_addr: SocketAddr,
     previous_media_security: Option<MediaSecurityState>,
     lower: Option<PreparedLowerMediaNegotiation>,
+    #[cfg(feature = "dtls-srtp")]
+    dtls: Option<StagedDtlsHandshake>,
 }
 
 struct PreparedLowerMediaNegotiation {
@@ -1273,6 +1337,16 @@ pub struct MediaAdapter {
     /// `start_secure_media`.
     negotiated_srtp: Arc<DashMap<MediaNegotiationKey, SrtpPair>>,
 
+    /// Whether offers and answers use RFC 5763/5764 DTLS-SRTP instead of
+    /// RFC 4568 SDES when SRTP policy is enabled.
+    offer_dtls_srtp: bool,
+
+    /// Per-negotiation certificate identity retained until the exact SIP
+    /// answer/ACK commit boundary starts the handshake.
+    #[cfg(feature = "dtls-srtp")]
+    pending_dtls_identities:
+        Arc<DashMap<MediaNegotiationKey, rvoip_rtp_core::dtls_srtp::DtlsIdentity>>,
+
     /// SDP results that passed validation but have not crossed their exact
     /// SIP offer/answer commit boundary.
     staged_media_negotiations: Arc<DashMap<MediaNegotiationKey, StagedMediaNegotiation>>,
@@ -1367,12 +1441,16 @@ impl MediaAdapter {
     pub(crate) fn discard_pending_srtp_offer_for_session(&self, session: &SessionState) {
         if let Ok(key) = Self::media_negotiation_key(session) {
             self.pending_srtp_offerers.remove(&key);
+            #[cfg(feature = "dtls-srtp")]
+            self.pending_dtls_identities.remove(&key);
         }
     }
 
     fn discard_pending_srtp_offer_exact(&self, handle: &SessionRegistryHandle) {
-        self.pending_srtp_offerers
-            .remove(&Self::exact_media_negotiation_key(handle));
+        let key = Self::exact_media_negotiation_key(handle);
+        self.pending_srtp_offerers.remove(&key);
+        #[cfg(feature = "dtls-srtp")]
+        self.pending_dtls_identities.remove(&key);
     }
 
     /// Create a new media adapter (no SRTP — equivalent to the
@@ -1420,6 +1498,9 @@ impl MediaAdapter {
             sdes_base64_mode: SdesBase64Mode::default(),
             pending_srtp_offerers: Arc::new(DashMap::new()),
             negotiated_srtp: Arc::new(DashMap::new()),
+            offer_dtls_srtp: false,
+            #[cfg(feature = "dtls-srtp")]
+            pending_dtls_identities: Arc::new(DashMap::new()),
             staged_media_negotiations: Arc::new(DashMap::new()),
             global_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
             app_event_publisher: Arc::new(tokio::sync::RwLock::new(None)),
@@ -1895,6 +1976,41 @@ impl MediaAdapter {
         }
     }
 
+    /// Select DTLS-SRTP rather than SDES for secure media negotiation.
+    pub fn set_dtls_srtp_policy(&mut self, enabled: bool) {
+        self.offer_dtls_srtp = enabled;
+    }
+
+    #[cfg(feature = "dtls-srtp")]
+    fn dtls_offer_identity(
+        &self,
+        negotiation_key: &MediaNegotiationKey,
+    ) -> Result<Option<(String, String)>> {
+        if !self.offer_dtls_srtp {
+            return Ok(None);
+        }
+        let identity = rvoip_rtp_core::dtls_srtp::generate_identity().map_err(|error| {
+            SessionError::MediaError(format!("failed to generate DTLS-SRTP identity: {error}"))
+        })?;
+        let fingerprint = fingerprint_hex(&identity.fingerprint_sha256);
+        self.pending_dtls_identities
+            .insert(negotiation_key.clone(), identity);
+        Ok(Some(("sha-256".to_string(), fingerprint)))
+    }
+
+    #[cfg(not(feature = "dtls-srtp"))]
+    fn dtls_offer_identity(
+        &self,
+        _negotiation_key: &MediaNegotiationKey,
+    ) -> Result<Option<(String, String)>> {
+        if self.offer_dtls_srtp {
+            return Err(SessionError::ConfigError(
+                "DTLS-SRTP requires the rvoip-sip dtls-srtp Cargo feature".to_string(),
+            ));
+        }
+        Ok(None)
+    }
+
     /// Configure the ICE posture. Called by `UnifiedCoordinator` from
     /// [`Config::ice`](crate::api::unified::Config::ice), mirroring
     /// [`Self::set_srtp_policy`].
@@ -2108,72 +2224,134 @@ impl MediaAdapter {
         // silently falling back to plaintext.
         let offered_crypto = Self::extract_audio_crypto(&parsed_offer);
         let answer_crypto = Self::extract_audio_crypto(&parsed_answer);
+        #[cfg(feature = "dtls-srtp")]
+        let offered_dtls = parse_dtls_offer(&parsed_offer)?;
+        #[cfg(feature = "dtls-srtp")]
+        let answer_dtls = parse_dtls_offer(&parsed_answer)?;
+        #[cfg(feature = "dtls-srtp")]
+        let staged_dtls = match (offered_dtls.as_ref(), answer_dtls) {
+            (Some(_), Some(answer)) => {
+                if !answer_crypto.is_empty() {
+                    return Err(SessionError::SDPNegotiationFailed(
+                        "the SDP answer mixed DTLS-SRTP and SDES keying".to_string(),
+                    )
+                    .into());
+                }
+                if !matches!(answer.setup_role, SetupRole::Active | SetupRole::Passive) {
+                    return Err(SessionError::SDPNegotiationFailed(
+                        "a DTLS-SRTP answer must select active or passive setup".to_string(),
+                    )
+                    .into());
+                }
+                if !self.pending_dtls_identities.contains_key(&negotiation_key) {
+                    return Err(SessionError::SDPNegotiationFailed(
+                        "the local DTLS-SRTP offer identity is unavailable".to_string(),
+                    )
+                    .into());
+                }
+                Some(StagedDtlsHandshake {
+                    role: answer.setup_role.complementary(),
+                    expected_remote_fingerprint_sha256: answer.fingerprint_sha256,
+                })
+            }
+            (Some(_), None) if self.srtp_required => {
+                return Err(SessionError::SDPNegotiationFailed(
+                    "srtp_required is set but the answer declined DTLS-SRTP".to_string(),
+                )
+                .into());
+            }
+            (Some(_), None) => {
+                self.pending_dtls_identities.remove(&negotiation_key);
+                None
+            }
+            (None, Some(_)) => {
+                return Err(SessionError::SDPNegotiationFailed(
+                    "the SDP answer selected DTLS-SRTP that was not offered".to_string(),
+                )
+                .into());
+            }
+            (None, None) => None,
+        };
+        #[cfg(feature = "dtls-srtp")]
+        let dtls_was_offered = offered_dtls.is_some();
+        #[cfg(not(feature = "dtls-srtp"))]
+        let dtls_was_offered = false;
         let negotiated_srtp_pair = {
             let offerer_state = self.pending_srtp_offerers.get(&negotiation_key);
-            match (offered_crypto.is_empty(), offerer_state.as_ref()) {
-                (false, None) => {
+            if dtls_was_offered {
+                if offerer_state.is_some() || !offered_crypto.is_empty() {
                     return Err(SessionError::SDPNegotiationFailed(
+                        "the local SDP mixed DTLS-SRTP and SDES keying state".to_string(),
+                    )
+                    .into());
+                }
+                None
+            } else {
+                match (offered_crypto.is_empty(), offerer_state.as_ref()) {
+                    (false, None) => {
+                        return Err(SessionError::SDPNegotiationFailed(
                         "the local SDP offered SRTP but its pending SDES key state is unavailable"
                             .into(),
                     )
                     .into());
-                }
-                (true, Some(_)) => {
-                    return Err(SessionError::SDPNegotiationFailed(
-                        "pending SDES key state does not match the local SDP offer".into(),
-                    )
-                    .into());
-                }
-                (true, None) => {
-                    if !answer_crypto.is_empty() {
+                    }
+                    (true, Some(_)) => {
                         return Err(SessionError::SDPNegotiationFailed(
-                            "the SDP answer selected SRTP that was not offered".into(),
+                            "pending SDES key state does not match the local SDP offer".into(),
                         )
                         .into());
                     }
-                    if self.srtp_required {
-                        return Err(SessionError::SDPNegotiationFailed(
-                            "srtp_required is set but the local SDP did not offer SRTP".into(),
-                        )
-                        .into());
-                    }
-                    None
-                }
-                (false, Some(offerer_state)) => {
-                    if answer_crypto.len() > 1 {
-                        return Err(SessionError::SDPNegotiationFailed(
-                            "the SDP answer selected more than one a=crypto attribute".into(),
-                        )
-                        .into());
-                    }
-                    if let Some(chosen) = answer_crypto.first() {
-                        let pair = offerer_state.accept_answer_detailed(chosen)?;
-                        tracing::info!(
-                            "SDES answer accepted for session {}: tag {} suite {:?}",
-                            session_id.0,
-                            chosen.tag,
-                            chosen.suite
-                        );
-                        if srtp_diagnostics {
-                            emit_srtp_diag(format!(
-                                "sdes_answer_accepted session={} suite={:?}",
-                                session_id.0, chosen.suite
-                            ));
+                    (true, None) => {
+                        if !answer_crypto.is_empty() {
+                            return Err(SessionError::SDPNegotiationFailed(
+                                "the SDP answer selected SRTP that was not offered".into(),
+                            )
+                            .into());
                         }
-                        Some(pair)
-                    } else if self.srtp_required {
-                        return Err(SessionError::SDPNegotiationFailed(
-                            "srtp_required is set but the SDP answer carries no a=crypto: line"
-                                .into(),
-                        )
-                        .into());
-                    } else {
-                        tracing::warn!(
-                            "Session {} offered SRTP but the answer didn't accept it; \
-                             proceeding plaintext (Config::srtp_required = false)",
-                            session_id.0
-                        );
+                        if self.srtp_required {
+                            return Err(SessionError::SDPNegotiationFailed(
+                                "srtp_required is set but the local SDP did not offer SRTP".into(),
+                            )
+                            .into());
+                        }
                         None
+                    }
+                    (false, Some(offerer_state)) => {
+                        if answer_crypto.len() > 1 {
+                            return Err(SessionError::SDPNegotiationFailed(
+                                "the SDP answer selected more than one a=crypto attribute".into(),
+                            )
+                            .into());
+                        }
+                        if let Some(chosen) = answer_crypto.first() {
+                            let pair = offerer_state.accept_answer_detailed(chosen)?;
+                            tracing::info!(
+                                "SDES answer accepted for session {}: tag {} suite {:?}",
+                                session_id.0,
+                                chosen.tag,
+                                chosen.suite
+                            );
+                            if srtp_diagnostics {
+                                emit_srtp_diag(format!(
+                                    "sdes_answer_accepted session={} suite={:?}",
+                                    session_id.0, chosen.suite
+                                ));
+                            }
+                            Some(pair)
+                        } else if self.srtp_required {
+                            return Err(SessionError::SDPNegotiationFailed(
+                                "srtp_required is set but the SDP answer carries no a=crypto: line"
+                                    .into(),
+                            )
+                            .into());
+                        } else {
+                            tracing::warn!(
+                                "Session {} offered SRTP but the answer didn't accept it; \
+                             proceeding plaintext (Config::srtp_required = false)",
+                                session_id.0
+                            );
+                            None
+                        }
                     }
                 }
             }
@@ -2197,7 +2375,16 @@ impl MediaAdapter {
                 .unwrap_or(crate::types::MediaDirection::SendRecv),
         };
 
-        let srtp_negotiated = negotiated_srtp_pair.is_some();
+        let srtp_negotiated = negotiated_srtp_pair.is_some() || {
+            #[cfg(feature = "dtls-srtp")]
+            {
+                staged_dtls.is_some()
+            }
+            #[cfg(not(feature = "dtls-srtp"))]
+            {
+                false
+            }
+        };
         if let Some(pair) = negotiated_srtp_pair {
             self.negotiated_srtp.insert(negotiation_key.clone(), pair);
         }
@@ -2207,6 +2394,8 @@ impl MediaAdapter {
                 config: config.clone(),
                 stable_local_direction: session.local_media_direction,
                 srtp_negotiated,
+                #[cfg(feature = "dtls-srtp")]
+                dtls: staged_dtls,
             },
         );
 
@@ -2241,16 +2430,22 @@ impl MediaAdapter {
         self.parse_sdp_connection(remote_sdp)?;
 
         let offered_crypto = Self::extract_audio_crypto(&parsed_offer);
-        if offered_crypto.is_empty() && self.srtp_required {
+        #[cfg(feature = "dtls-srtp")]
+        let offered_dtls = parse_dtls_offer(&parsed_offer)?;
+        #[cfg(feature = "dtls-srtp")]
+        let dtls_acceptable = self.offer_dtls_srtp && offered_dtls.is_some();
+        #[cfg(not(feature = "dtls-srtp"))]
+        let dtls_acceptable = false;
+        if offered_crypto.is_empty() && !dtls_acceptable && self.srtp_required {
             return Err(SessionError::SDPNegotiationFailed(
-                "srtp_required is set but the SDP offer carries no a=crypto: line".into(),
+                "srtp_required is set but the SDP offer carries no acceptable keying".to_string(),
             )
             .into());
         }
-        if !offered_crypto.is_empty() && !self.offer_srtp {
+        if !offered_crypto.is_empty() && (!self.offer_srtp || self.offer_dtls_srtp) {
             return Ok(());
         }
-        if !offered_crypto.is_empty() {
+        if !offered_crypto.is_empty() && !dtls_acceptable {
             SrtpNegotiator::new_answerer_with_base64_mode(self.sdes_base64_mode)
                 .validate_offer_detailed(&offered_crypto)?;
         }
@@ -2372,49 +2567,101 @@ impl MediaAdapter {
         let offered_transport = audio_transport(&parsed_offer)
             .unwrap_or("RTP/AVP")
             .to_string();
-        let (answer_attr, negotiated_srtp_pair, reject_with_port_zero) =
-            if !offered_crypto.is_empty() && self.offer_srtp {
-                // Both sides want SRTP — negotiate.
-                let answerer = SrtpNegotiator::new_answerer_with_base64_mode(self.sdes_base64_mode);
-                let (chosen, pair) = answerer.process_offer_detailed(&offered_crypto)?;
-                tracing::info!(
-                    "SDES offer provisionally accepted for session {}: tag {} suite {:?}",
-                    session_id.0,
-                    chosen.tag,
-                    chosen.suite
-                );
-                if srtp_diagnostics {
-                    emit_srtp_diag(format!(
-                        "sdes_offer_accepted session={} suite={:?}",
-                        session_id.0, chosen.suite
-                    ));
+        #[cfg(feature = "dtls-srtp")]
+        let offered_dtls = parse_dtls_offer(&parsed_offer)?;
+        #[cfg(feature = "dtls-srtp")]
+        let (dtls_answer_attrs, staged_dtls, dtls_rejected) =
+            match (self.offer_dtls_srtp, offered_dtls) {
+                (true, Some(offer)) => {
+                    if !offered_crypto.is_empty() {
+                        return Err(SessionError::SDPNegotiationFailed(
+                            "the SDP offer mixed DTLS-SRTP and SDES keying".to_string(),
+                        )
+                        .into());
+                    }
+                    let role = offer.setup_role.complementary();
+                    let identity =
+                        rvoip_rtp_core::dtls_srtp::generate_identity().map_err(|error| {
+                            SessionError::MediaError(format!(
+                                "failed to generate DTLS-SRTP answer identity: {error}"
+                            ))
+                        })?;
+                    let fingerprint = fingerprint_hex(&identity.fingerprint_sha256);
+                    self.pending_dtls_identities
+                        .insert(negotiation_key.clone(), identity);
+                    (
+                        Some(("sha-256".to_string(), fingerprint, role)),
+                        Some(StagedDtlsHandshake {
+                            role,
+                            expected_remote_fingerprint_sha256: offer.fingerprint_sha256,
+                        }),
+                        false,
+                    )
                 }
-                (Some(chosen), Some(pair), false)
-            } else if offered_crypto.is_empty() && self.srtp_required {
-                return Err(SessionError::SDPNegotiationFailed(
-                    "srtp_required is set but the SDP offer carries no a=crypto: line".into(),
-                )
-                .into());
-            } else if !offered_crypto.is_empty() && !self.offer_srtp {
-                // RFC 3264 §6 + RFC 4568 §7.3: peer offered SRTP but our
-                // policy is plaintext. Reject the m-line by setting port=0
-                // in the answer, preserving the offered proto so the peer
-                // can distinguish a rejection from a parse error.
-                tracing::info!(
-                    "Session {} received SRTP offer but local policy is offer_srtp=false; \
-                 rejecting m-line with port=0 per RFC 3264 §6",
-                    session_id.0
-                );
-                if srtp_diagnostics {
-                    emit_srtp_diag(format!(
-                        "sdes_offer_rejected session={} reason=local_policy",
-                        session_id.0
-                    ));
+                (true, None) if self.srtp_required => {
+                    return Err(SessionError::SDPNegotiationFailed(
+                        "srtp_required is set but the SDP offer carries no DTLS-SRTP fingerprint"
+                            .to_string(),
+                    )
+                    .into());
                 }
-                (None, None, true)
-            } else {
-                (None, None, false)
+                (true, None) => (None, None, !offered_crypto.is_empty()),
+                (false, Some(_)) => (None, None, true),
+                (false, None) => (None, None, false),
             };
+        #[cfg(feature = "dtls-srtp")]
+        let dtls_in_play = staged_dtls.is_some();
+        #[cfg(not(feature = "dtls-srtp"))]
+        let dtls_in_play = false;
+        #[cfg(not(feature = "dtls-srtp"))]
+        let dtls_rejected = false;
+
+        let (answer_attr, negotiated_srtp_pair, reject_with_port_zero) = if dtls_in_play {
+            (None, None, false)
+        } else if dtls_rejected {
+            (None, None, true)
+        } else if !offered_crypto.is_empty() && self.offer_srtp && !self.offer_dtls_srtp {
+            // Both sides want SRTP — negotiate.
+            let answerer = SrtpNegotiator::new_answerer_with_base64_mode(self.sdes_base64_mode);
+            let (chosen, pair) = answerer.process_offer_detailed(&offered_crypto)?;
+            tracing::info!(
+                "SDES offer provisionally accepted for session {}: tag {} suite {:?}",
+                session_id.0,
+                chosen.tag,
+                chosen.suite
+            );
+            if srtp_diagnostics {
+                emit_srtp_diag(format!(
+                    "sdes_offer_accepted session={} suite={:?}",
+                    session_id.0, chosen.suite
+                ));
+            }
+            (Some(chosen), Some(pair), false)
+        } else if offered_crypto.is_empty() && self.srtp_required {
+            return Err(SessionError::SDPNegotiationFailed(
+                "srtp_required is set but the SDP offer carries no a=crypto: line".into(),
+            )
+            .into());
+        } else if !offered_crypto.is_empty() && (!self.offer_srtp || self.offer_dtls_srtp) {
+            // RFC 3264 §6 + RFC 4568 §7.3: peer offered SRTP but our
+            // policy is plaintext. Reject the m-line by setting port=0
+            // in the answer, preserving the offered proto so the peer
+            // can distinguish a rejection from a parse error.
+            tracing::info!(
+                "Session {} received SRTP offer but local policy is offer_srtp=false; \
+                 rejecting m-line with port=0 per RFC 3264 §6",
+                session_id.0
+            );
+            if srtp_diagnostics {
+                emit_srtp_diag(format!(
+                    "sdes_offer_rejected session={} reason=local_policy",
+                    session_id.0
+                ));
+            }
+            (None, None, true)
+        } else {
+            (None, None, false)
+        };
 
         // Port-zero rejection short-circuit: build a minimal RFC 3264
         // §6 declined m-line answer and return without setting up any
@@ -2451,6 +2698,8 @@ impl MediaAdapter {
                     config: config.clone(),
                     stable_local_direction,
                     srtp_negotiated: false,
+                    #[cfg(feature = "dtls-srtp")]
+                    dtls: None,
                 },
             );
             return Ok((sdp_answer, config));
@@ -2528,7 +2777,9 @@ impl MediaAdapter {
             .filter(|sa| sa.port() != 0)
             .map(|sa| sa.port())
             .unwrap_or(local_port);
-        let answer_transport = if answer_attr.is_some() {
+        let answer_transport = if dtls_in_play {
+            "UDP/TLS/RTP/SAVP"
+        } else if answer_attr.is_some() {
             "RTP/SAVP"
         } else {
             "RTP/AVP"
@@ -2599,9 +2850,17 @@ impl MediaAdapter {
             }
             sdp_builder = sdp_builder.ice_options(vec!["ice2"]);
         }
+        #[cfg(feature = "dtls-srtp")]
+        if let Some((hash, fingerprint, _)) = &dtls_answer_attrs {
+            sdp_builder = sdp_builder.fingerprint(hash.as_str(), fingerprint.as_str());
+        }
         let mut media_builder = sdp_builder
             .media_audio(advertised_port, answer_transport)
             .formats(&formats_str);
+        #[cfg(feature = "dtls-srtp")]
+        if let Some((_, _, role)) = &dtls_answer_attrs {
+            media_builder = media_builder.setup(role.as_str());
+        }
         if let Some(material) = &ice_material {
             media_builder = media_builder
                 .ice_ufrag(&material.ufrag)
@@ -2656,7 +2915,7 @@ impl MediaAdapter {
                 .unwrap_or(crate::types::MediaDirection::SendRecv),
         };
 
-        let srtp_negotiated = negotiated_srtp_pair.is_some();
+        let srtp_negotiated = negotiated_srtp_pair.is_some() || dtls_in_play;
         if let Some(pair) = negotiated_srtp_pair {
             self.negotiated_srtp.insert(negotiation_key.clone(), pair);
         }
@@ -2666,6 +2925,8 @@ impl MediaAdapter {
                 config: config.clone(),
                 stable_local_direction,
                 srtp_negotiated,
+                #[cfg(feature = "dtls-srtp")]
+                dtls: staged_dtls,
             },
         );
 
@@ -2681,6 +2942,8 @@ impl MediaAdapter {
         if let Ok(key) = Self::media_negotiation_key(session) {
             self.staged_media_negotiations.remove(&key);
             self.negotiated_srtp.remove(&key);
+            #[cfg(feature = "dtls-srtp")]
+            self.pending_dtls_identities.remove(&key);
         }
     }
 
@@ -2688,6 +2951,8 @@ impl MediaAdapter {
         let key = Self::exact_media_negotiation_key(handle);
         self.staged_media_negotiations.remove(&key);
         self.negotiated_srtp.remove(&key);
+        #[cfg(feature = "dtls-srtp")]
+        self.pending_dtls_identities.remove(&key);
     }
 
     pub(crate) fn has_staged_media_negotiation(&self, session: &SessionState) -> bool {
@@ -2698,6 +2963,91 @@ impl MediaAdapter {
     #[cfg(test)]
     pub(crate) fn fail_next_staged_media_commit_for_test(&self) {
         self.fail_staged_media_commit.store(true, Ordering::Release);
+    }
+
+    #[cfg(feature = "dtls-srtp")]
+    fn spawn_committed_dtls_handshake(
+        &self,
+        handle: SessionRegistryHandle,
+        dialog_id: DialogId,
+        remote_addr: SocketAddr,
+        identity: rvoip_rtp_core::dtls_srtp::DtlsIdentity,
+        plan: StagedDtlsHandshake,
+    ) {
+        let adapter = self.clone();
+        spawn_memory_tracked("sip.media_adapter.dtls_srtp_handshake", async move {
+            let result = adapter
+                .run_committed_dtls_handshake(&handle, &dialog_id, remote_addr, identity, plan)
+                .await;
+            if let Err(error) = result {
+                tracing::error!(
+                    session = %handle.session_id().0,
+                    "DTLS-SRTP handshake failed after signaling commit: {error}"
+                );
+            }
+        });
+    }
+
+    #[cfg(feature = "dtls-srtp")]
+    async fn run_committed_dtls_handshake(
+        &self,
+        handle: &SessionRegistryHandle,
+        dialog_id: &DialogId,
+        remote_addr: SocketAddr,
+        identity: rvoip_rtp_core::dtls_srtp::DtlsIdentity,
+        plan: StagedDtlsHandshake,
+    ) -> Result<()> {
+        let role = setup_role_to_dtls_role(plan.role)?;
+        let result = self
+            .controller
+            .run_dtls_handshake_and_install(
+                dialog_id,
+                identity,
+                role,
+                remote_addr,
+                plan.expected_remote_fingerprint_sha256,
+                rvoip_rtp_core::dtls_srtp::default_srtp_profiles(),
+                Duration::from_secs(10),
+            )
+            .await
+            .map_err(|error| {
+                SessionError::MediaError(format!("DTLS-SRTP handshake failed: {error}"))
+            })?;
+
+        if !self
+            .media_resources
+            .get(handle.session_id())
+            .is_some_and(|binding| binding.matches(handle, dialog_id))
+        {
+            return Err(SessionError::InvalidTransition(
+                "DTLS-SRTP handshake completed for a retired media lifetime".to_string(),
+            ));
+        }
+        let lane = self.store.state_machine_lane_exact(handle).ok_or_else(|| {
+            SessionError::InvalidTransition(
+                "DTLS-SRTP handshake completed for a retired session lifetime".to_string(),
+            )
+        })?;
+        let guard = lane.lock_owned().await;
+        let suite = dtls_profile_to_crypto_suite(&result.profile)?;
+        let state = MediaSecurityState {
+            keying: MediaSecurityKeying::DtlsSrtp,
+            suite,
+            profile: MediaSecurityProfile::UdpTlsRtpSavp,
+            contexts_installed: true,
+        };
+        self.store
+            .update_session_exact_with(handle, None, |session| {
+                session.media_security = Some(state.clone());
+            })
+            .map_err(|_| {
+                SessionError::InvalidTransition(
+                    "DTLS-SRTP result could not commit to its exact session lifetime".to_string(),
+                )
+            })?;
+        drop(guard);
+        self.publish_media_security_observation(handle.clone(), state);
+        Ok(())
     }
 
     /// Apply one validated negotiation while retaining exact rollback
@@ -2719,6 +3069,13 @@ impl MediaAdapter {
             })?;
         let previous_media_security = session.media_security.clone();
 
+        #[cfg(feature = "dtls-srtp")]
+        if staged.dtls.is_some() && !self.pending_dtls_identities.contains_key(&negotiation_key) {
+            return Err(SessionError::SDPNegotiationFailed(
+                "DTLS-SRTP identity disappeared before the SIP commit boundary".to_string(),
+            ));
+        }
+
         if previous_media_security.is_some() && !staged.srtp_negotiated {
             return Err(SessionError::SDPNegotiationFailed(
                 "an established secure media session cannot be downgraded to plaintext".to_string(),
@@ -2735,6 +3092,8 @@ impl MediaAdapter {
                 remote_addr: staged.config.remote_addr,
                 previous_media_security,
                 lower: None,
+                #[cfg(feature = "dtls-srtp")]
+                dtls: staged.dtls.clone(),
             });
         }
 
@@ -2762,6 +3121,17 @@ impl MediaAdapter {
             stable_local_direction: staged.stable_local_direction,
         };
         let apply_result = async {
+            #[cfg(feature = "dtls-srtp")]
+            if staged.dtls.is_some() {
+                self.controller
+                    .require_secure_media(&dialog_id)
+                    .await
+                    .map_err(|error| {
+                        SessionError::MediaError(format!(
+                            "Failed to latch DTLS-SRTP secure media: {error}"
+                        ))
+                    })?;
+            }
             self.apply_negotiated_media_config(&dialog_id, &staged.config)
                 .await?;
 
@@ -2842,6 +3212,8 @@ impl MediaAdapter {
             remote_addr,
             previous_media_security,
             lower: Some(lower),
+            #[cfg(feature = "dtls-srtp")]
+            dtls: staged.dtls.clone(),
         };
         if let Err(error) = apply_result {
             return match self
@@ -2860,6 +3232,8 @@ impl MediaAdapter {
         session: &mut SessionState,
         prepared: PreparedMediaNegotiation,
     ) -> Result<()> {
+        #[cfg(feature = "dtls-srtp")]
+        let mut prepared = prepared;
         if prepared.session_id != session.session_id {
             return Err(SessionError::InvalidTransition(
                 "prepared media negotiation belongs to another session".to_string(),
@@ -2871,6 +3245,9 @@ impl MediaAdapter {
                 .remove(&prepared.negotiation_key);
             self.negotiated_srtp.remove(&prepared.negotiation_key);
             self.pending_srtp_offerers.remove(&prepared.negotiation_key);
+            #[cfg(feature = "dtls-srtp")]
+            self.pending_dtls_identities
+                .remove(&prepared.negotiation_key);
             if let Some(lower) = prepared.lower.as_ref() {
                 let _ = lower.exact_media._resource.release_lower_once().await;
             }
@@ -2892,6 +3269,9 @@ impl MediaAdapter {
             self.staged_media_negotiations
                 .remove(&prepared.negotiation_key);
             self.negotiated_srtp.remove(&prepared.negotiation_key);
+            #[cfg(feature = "dtls-srtp")]
+            self.pending_dtls_identities
+                .remove(&prepared.negotiation_key);
             return Err(SessionError::InvalidTransition(
                 "media resource changed before negotiated media finalization".to_string(),
             ));
@@ -2900,6 +3280,43 @@ impl MediaAdapter {
             .remove(&prepared.negotiation_key);
         self.negotiated_srtp.remove(&prepared.negotiation_key);
         self.pending_srtp_offerers.remove(&prepared.negotiation_key);
+        #[cfg(feature = "dtls-srtp")]
+        if let Some(plan) = prepared.dtls.take() {
+            let handle = match &prepared.negotiation_key {
+                MediaNegotiationKey::Exact(handle) => handle.clone(),
+                #[cfg(test)]
+                MediaNegotiationKey::Unit(_) => {
+                    return Err(SessionError::InvalidTransition(
+                        "DTLS-SRTP requires an exact session lifetime".to_string(),
+                    ));
+                }
+            };
+            let dialog_id = prepared
+                .lower
+                .as_ref()
+                .map(|lower| lower.exact_media.dialog_id.clone())
+                .ok_or_else(|| {
+                    SessionError::ConfigError(
+                        "DTLS-SRTP cannot run without an owned media transport".to_string(),
+                    )
+                })?;
+            let identity = self
+                .pending_dtls_identities
+                .remove(&prepared.negotiation_key)
+                .map(|(_, identity)| identity)
+                .ok_or_else(|| {
+                    SessionError::InvalidTransition(
+                        "DTLS-SRTP identity disappeared at the SIP commit boundary".to_string(),
+                    )
+                })?;
+            self.spawn_committed_dtls_handshake(
+                handle,
+                dialog_id,
+                prepared.remote_addr,
+                identity,
+                plan,
+            );
+        }
         tracing::info!(
             "Committed negotiated media for session {} at {}",
             session.session_id.0,
@@ -3929,15 +4346,19 @@ impl MediaAdapter {
                 None
             };
 
-        // Profile + crypto. RFC 4568 §3.1.4 — `RTP/SAVP` is mandatory
-        // when offering SDES.
-        let (transport, crypto_attrs) = if self.offer_srtp {
+        // Profile + keying. DTLS-SRTP carries a certificate fingerprint and
+        // setup role; SDES carries a=crypto key material. They are mutually
+        // exclusive on the wire.
+        let dtls_offer_attrs = self.dtls_offer_identity(&negotiation_key)?;
+        let (transport, crypto_attrs) = if dtls_offer_attrs.is_some() {
+            ("UDP/TLS/RTP/SAVP", Vec::new())
+        } else if self.offer_srtp {
             let (negotiator, attrs) = SrtpNegotiator::new_offerer_with_base64_mode(
                 &self.srtp_offered_suites,
                 self.sdes_base64_mode,
             )?;
             self.pending_srtp_offerers
-                .insert(negotiation_key, negotiator);
+                .insert(negotiation_key.clone(), negotiator);
             ("RTP/SAVP", attrs)
         } else {
             ("RTP/AVP", Vec::new())
@@ -3986,9 +4407,15 @@ impl MediaAdapter {
             }
             sdp_builder = sdp_builder.ice_options(vec!["ice2"]);
         }
+        if let Some((hash, fingerprint)) = &dtls_offer_attrs {
+            sdp_builder = sdp_builder.fingerprint(hash.as_str(), fingerprint.as_str());
+        }
         let mut media_builder = sdp_builder
             .media_audio(port, transport)
             .formats(&formats_ref);
+        if dtls_offer_attrs.is_some() {
+            media_builder = media_builder.setup(SetupRole::Actpass.as_str());
+        }
         if let Some(material) = &ice_material {
             media_builder = media_builder
                 .ice_ufrag(&material.ufrag)
@@ -4834,6 +5261,11 @@ impl MediaAdapter {
     ) -> Result<String> {
         let session_id = session.session_id.clone();
         let negotiation_key = Self::media_negotiation_key(session)?;
+        if self.offer_dtls_srtp {
+            return Err(SessionError::ConfigError(
+                "DTLS-SRTP is unavailable in signaling-only media mode".to_string(),
+            ));
+        }
         let (origin_session_id, origin_version) = advance_sdp_origin(session);
         let origin_version = origin_version.to_string();
         let advertised_ip = self
@@ -5089,6 +5521,9 @@ impl Clone for MediaAdapter {
             sdes_base64_mode: self.sdes_base64_mode,
             pending_srtp_offerers: self.pending_srtp_offerers.clone(),
             negotiated_srtp: self.negotiated_srtp.clone(),
+            offer_dtls_srtp: self.offer_dtls_srtp,
+            #[cfg(feature = "dtls-srtp")]
+            pending_dtls_identities: self.pending_dtls_identities.clone(),
             staged_media_negotiations: self.staged_media_negotiations.clone(),
             global_coordinator: self.global_coordinator.clone(),
             app_event_publisher: self.app_event_publisher.clone(),
@@ -5273,6 +5708,27 @@ mod sdp_format_tests {
     //! second fixture for that case.
 
     use super::*;
+
+    #[cfg(feature = "dtls-srtp")]
+    #[test]
+    fn dtls_profile_projection_rejects_unknown_profiles_instead_of_misreporting_them() {
+        use rvoip_rtp_core::srtp::{
+            SrtpAuthenticationAlgorithm, SrtpCryptoSuite, SrtpEncryptionAlgorithm,
+            SRTP_AES128_CM_SHA1_80,
+        };
+
+        assert_eq!(
+            dtls_profile_to_crypto_suite(&SRTP_AES128_CM_SHA1_80).unwrap(),
+            CryptoSuite::AesCm128HmacSha1_80
+        );
+        let unsupported = SrtpCryptoSuite {
+            encryption: SrtpEncryptionAlgorithm::AesF8,
+            authentication: SrtpAuthenticationAlgorithm::HmacSha1_80,
+            key_length: 16,
+            tag_length: 10,
+        };
+        assert!(dtls_profile_to_crypto_suite(&unsupported).is_err());
+    }
 
     fn build_srtp_answer(attr: Option<CryptoAttribute>) -> String {
         let mut media = SdpBuilder::new("Session")
@@ -7985,6 +8441,8 @@ a=fmtp:101 0-15\r\n";
             },
             stable_local_direction: crate::types::MediaDirection::SendRecv,
             srtp_negotiated: false,
+            #[cfg(feature = "dtls-srtp")]
+            dtls: None,
         };
         adapter.staged_media_negotiations.insert(
             MediaNegotiationKey::Exact(generation_a.clone()),
@@ -8055,6 +8513,8 @@ a=fmtp:101 0-15\r\n";
             },
             stable_local_direction: crate::types::MediaDirection::SendRecv,
             srtp_negotiated: false,
+            #[cfg(feature = "dtls-srtp")]
+            dtls: None,
         };
         adapter.staged_media_negotiations.insert(
             MediaNegotiationKey::Exact(generation_a.clone()),
@@ -8157,6 +8617,8 @@ a=fmtp:101 0-15\r\n";
                 },
                 stable_local_direction: crate::types::MediaDirection::SendRecv,
                 srtp_negotiated: true,
+                #[cfg(feature = "dtls-srtp")]
+                dtls: None,
             },
         );
         adapter
@@ -8354,6 +8816,8 @@ a=fmtp:101 0-15\r\n";
                 },
                 stable_local_direction: crate::types::MediaDirection::SendRecv,
                 srtp_negotiated: true,
+                #[cfg(feature = "dtls-srtp")]
+                dtls: None,
             },
         );
 

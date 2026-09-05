@@ -110,6 +110,30 @@ class GateFrameworkTests(unittest.TestCase):
         self.assertEqual([command[-1] for command in cargo_commands], expected)
         self.assertTrue(all("--no-default-features" in command for command in cargo_commands))
 
+    def test_release_srtp_interop_gate_exercises_dtls_srtp_end_to_end(self) -> None:
+        gate = next(
+            gate
+            for gate in self.catalog["gates"]
+            if gate["id"] == "interop.remote-libsrtp"
+        )
+        self.assertIn(gate["id"], self.catalog["profiles"]["remote-release"])
+        self.assertIn("rtp-interop", gate["command"])
+        commands = [
+            command[0]
+            for command in run_checks.specialty_commands("rtp-interop", ROOT)
+        ]
+        rendered = [" ".join(command) for command in commands]
+        self.assertTrue(any("test_libsrtp_interop.sh" in command for command in rendered))
+        self.assertTrue(any("srtp_interop_webrtc_srtp" in command for command in rendered))
+        self.assertTrue(
+            any(
+                "dtls_fingerprint_mismatch_fails_before_context_installation" in command
+                for command in rendered
+            )
+        )
+        self.assertTrue(any("dtls_srtp_call_integration" in command for command in rendered))
+        self.assertTrue(any(command[0:2] == ["cargo", "clippy"] for command in commands))
+
     def test_fuzz_gates_select_their_fuzz_crate_explicitly(self) -> None:
         fuzz_gates = [
             gate

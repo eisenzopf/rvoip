@@ -4,10 +4,11 @@
 [![Documentation](https://docs.rs/rvoip-rtp-core/badge.svg)](https://docs.rs/rvoip-rtp-core)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-> **rvoip 0.3.8 security notice:** direct AES-CM SRTP and SDES are the available
-> security paths. DTLS-SRTP, every MIKEY mode, ZRTP, AES-GCM, and SRTCP are
-> unavailable and fail with typed errors. Retained public identifiers are for
-> source compatibility, not advertisements of working security.
+> **rvoip 0.3.9 candidate security notice:** direct AES-CM SRTP and SDES remain
+> available. The `dtls-webrtc` feature adds the reviewed
+> `rvoip_rtp_core::dtls_srtp` DTLS 1.2 handshake path used by `rvoip-sip`.
+> Legacy DTLS constructors under `api::{client,server,common}`, every MIKEY
+> mode, ZRTP, and AES-GCM remain unavailable and fail with typed errors.
 
 ## Overview
 
@@ -36,7 +37,7 @@ The RTP Core sits at the foundation of the media transport stack, providing reli
 ### Key Components
 
 1. **RTP/RTCP Processing**: RFC 3550 packet processing with beta evidence requirements tracked by `rvoip-sip`
-2. **Security Layer**: exact-suite direct SRTP and SDES are available; DTLS-SRTP, MIKEY, ZRTP, AES-GCM, and SRTCP fail closed
+2. **Security Layer**: exact-suite direct SRTP and SDES are available; the feature-gated dedicated DTLS-SRTP handshake path is available; legacy DTLS constructors, MIKEY, ZRTP, and AES-GCM fail closed
 3. **Transport Management**: UDP is the beta media transport; TCP transport is not a `rvoip-sip` beta claim
 4. **Buffer Management**: Adaptive jitter buffer and high-performance memory pooling
 5. **Statistics & Monitoring**: Comprehensive quality metrics and network analysis
@@ -49,9 +50,10 @@ as available below may be selected in 0.3.8.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ Available: direct AES-CM SRTP | SDES offer/answer           │
+│ Available: direct AES-CM SRTP | SDES | dedicated DTLS-SRTP │
 ├─────────────────────────────────────────────────────────────┤
-│ Unavailable: DTLS-SRTP | MIKEY | ZRTP | AES-GCM | SRTCP     │
+│ Unavailable: legacy DTLS constructors | MIKEY | ZRTP        │
+│              AES-GCM                                        │
 │              (typed rejection, no fallback)                  │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -77,8 +79,12 @@ as available below may be selected in 0.3.8.
   - ✅ Authentication and tamper detection
   - ⛔ Per-SSRC ROC/replay enforcement is deferred to the SRTP state repair
   - ✅ One exact AES-CM suite per direct PSK context
-- ⛔ **SRTCP**: unavailable; RTCP fails closed whenever SRTP is required
-- ⛔ **DTLS-SRTP**: retained public configuration, typed unsupported result
+- ✅ **SRTCP**: AES-CM protection/unprotection with independent interop coverage
+- ✅ **DTLS-SRTP**: `dtls_srtp` handshake functions behind `dtls-webrtc`,
+  shared with RTP/RTCP on one UDP socket and fingerprint-checked by the SIP
+  integration before context installation
+- ⛔ **Legacy DTLS configuration constructors**: retained for source
+  compatibility and still return typed unsupported errors
 - ⛔ **ZRTP**: retained public configuration and packet types, typed unsupported result
 - ⛔ **MIKEY**: PSK, PKE, and DH modes all return typed unsupported results
 - ✅ **SDES-SRTP**: SDP-based key exchange for SIP compatibility
@@ -199,11 +205,12 @@ async fn main() -> Result<()> {
 }
 ```
 
-### Unavailable Security Configuration
+### Legacy unavailable security configuration
 
-DTLS-SRTP, MIKEY, and ZRTP constructors are retained for source compatibility,
-but validation rejects them in 0.3.8. Applications must handle the typed error
-and must not fall back to plaintext.
+The older DTLS-SRTP, MIKEY, and ZRTP constructors are retained for source
+compatibility, but validation still rejects them. Use the feature-gated
+`dtls_srtp` module (normally through `rvoip-sip`) for supported DTLS-SRTP.
+Applications must handle every typed error and must not fall back to plaintext.
 
 ```rust
 use rvoip_rtp_core::api::common::{SecurityConfig, SecurityError};
@@ -247,10 +254,11 @@ async fn main() -> Result<()> {
 }
 ```
 
-## SRTP availability in 0.3.8
+## SRTP availability in the 0.3.9 candidate
 
 The reviewed low-level RTP protection path supports four exact AES-CM/HMAC
-suite identities. SRTCP and several public compatibility identities remain
+suite identities. The dedicated DTLS-SRTP path derives those contexts after a
+real handshake; several older public compatibility identities remain
 unavailable and fail closed; see `MIGRATION_0.3.5.md`.
 
 ### Security Features
@@ -352,7 +360,7 @@ The RTP Core provides the foundation for media transport in the rvoip stack:
 
 - **Upward Interface**: Delivers media frames to media-core and call-engine
 - **Downward Interface**: Handles network-level packet transmission/reception
-- **Security Integration**: Provides exact-suite direct SRTP and SDES; unavailable methods fail closed
+- **Security Integration**: Provides exact-suite direct SRTP, SRTCP, SDES, and the feature-gated dedicated DTLS-SRTP handshake; unavailable compatibility methods fail closed
 - **Event Propagation**: Notifies upper layers of transport events and quality changes
 
 ## Testing
@@ -383,7 +391,7 @@ The library includes working examples and explicit fail-closed availability exam
 # Basic RTP communication
 cargo run --example api_basic
 
-# DTLS, MIKEY, and ZRTP typed rejection
+# Legacy DTLS, MIKEY, and ZRTP typed rejection
 cargo run --example api_complete_security_showcase
 
 cargo run --example api_zrtp_p2p
@@ -415,7 +423,9 @@ cargo run --example socket_validation
 - **Security Context**: Minimal overhead for established sessions
 
 ### Optimization Recommendations
-- **Security Protocol Selection**: use exact-suite direct SRTP or SDES; DTLS-SRTP, MIKEY, ZRTP, AES-GCM, and SRTCP are unavailable in 0.3.8
+- **Security Protocol Selection**: use exact-suite direct SRTP/SDES, or enable
+  `dtls-webrtc` and use the dedicated `dtls_srtp` path; legacy DTLS
+  constructors, MIKEY, ZRTP, and AES-GCM remain unavailable
 - **Buffer Configuration**: Tune based on network RTT and jitter characteristics
 - **Memory Management**: Use memory pooling for high-volume applications
 - **Transport Selection**: UDP for low latency, TCP for reliability

@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### DTLS-SRTP on the SIP media path
+
+- `rvoip-sip` can negotiate `UDP/TLS/RTP/SAVP` with SHA-256 certificate
+  fingerprints and RFC 8842 setup roles when its `dtls-srtp` feature is
+  enabled. `Config::srtp_keying = SrtpKeyingMode::DtlsSrtp` selects the new
+  path; SDES remains the compatible default.
+- DTLS 1.2 shares the call's RTP socket through RFC 7983 demultiplexing. The
+  media transport is latched secure-only before the asynchronous handshake,
+  the certificate fingerprint from DTLS must match authenticated SDP before
+  contexts are installed, and stale call generations cannot receive keys.
+- Release gates now prove a real two-endpoint SIP call, independent
+  `webrtc-srtp` RTP/SRTCP interoperability, shared-socket handshake behavior,
+  strict DTLS-enabled Clippy, and facade feature forwarding. The carrier and
+  full facade bundles include DTLS-SRTP; the minimal SIP endpoint does not.
+- This is a supported dedicated handshake path. The older compatibility
+  constructors under `rvoip-rtp-core::api::{client,server,common}` remain
+  fail-closed and are not silently redirected to it.
+- RTP session, client, and server teardown now send BYE behind a Receiver
+  Report as RFC 3550 compound RTCP. RVoIP no longer emits unnegotiated
+  reduced-size BYE packets that its peer correctly rejects during teardown.
+
 ### Deployment-oriented facade feature bundles
 
 - The `rvoip` facade now offers six additive `bundle-*` starting points for a

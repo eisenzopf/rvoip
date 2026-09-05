@@ -65,6 +65,7 @@ This table mirrors `crates/rvoip/Cargo.toml`.
 | `amr-nb` |  | Developer preview | End-to-end AMR narrowband media with RFC 4867 framing, DTX, and CMR; implies `sip` |
 | `amr-wb` |  | Developer preview | The same for AMR wideband (G.722.2) at 16 kHz; implies `sip` |
 | `amr` |  | Developer preview | Both AMR variants |
+| `dtls-srtp` |  | Developer preview | SIP DTLS-SRTP keying with authenticated SDP fingerprints; implies `sip` |
 | `opus` |  | Developer preview | End-to-end Opus media; requires libopus on the build host; implies `sip` |
 | `all-codecs` |  | Developer preview | `g729` + `amr` + `opus` |
 | `webrtc` |  | Developer preview | WebRTC interop adapter under `rvoip::webrtc` |
@@ -74,7 +75,7 @@ This table mirrors `crates/rvoip/Cargo.toml`.
 | `voip-3` |  | Developer preview | `sip` + `webrtc` + `uctp` + vCon + identity + AI harness |
 | `client` |  | Developer preview | Cross-transport SDK under `rvoip::client` |
 | `app` |  | Developer preview | High-level SIP/WebRTC/UCTP gateway builder under `rvoip::app` |
-| `full` |  | Developer preview | `voip-3` + `vapi` + `sip-stir-shaken` + `client` + `app` + `g729` + `amr`. Excludes `opus`, which needs libopus on the build host — use `all-codecs` for that |
+| `full` |  | Developer preview | `voip-3` + `vapi` + `sip-stir-shaken` + `client` + `app` + `dtls-srtp` + `g729` + `amr`. Excludes `opus`, which needs libopus on the build host — use `all-codecs` for that |
 
 ### Deployment bundles
 
@@ -203,8 +204,8 @@ example for a complete cross-transport application.
 
 - SIP beta evidence does not qualify WebRTC, UCTP, MoQ, Amazon Connect, or
   extension products.
-- WebRTC includes ICE and DTLS-SRTP; that does not make them SIP beta
-  capabilities.
+- SIP DTLS-SRTP is a separate feature-gated path from WebRTC's DTLS transport;
+  neither broadens the maturity claim of the other surface.
 - Published developer-preview crates are available to build with now, but do
   not carry a blanket production-readiness or API-compatibility guarantee.
 - Product READMEs define exact supported scope, configuration, and non-claims.

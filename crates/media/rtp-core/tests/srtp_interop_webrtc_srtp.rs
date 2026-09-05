@@ -110,11 +110,12 @@ fn interop_survives_a_sequence_wrap() {
 }
 
 fn sample_rtcp_packet(ssrc: u32) -> Vec<u8> {
-    // Minimal SR (Sender Report) packet: V=2,P=0,RC=0; PT=200; length=1;
-    // SSRC; 8 bytes of opaque report payload.
-    let mut data = vec![0x80, 200, 0x00, 0x01];
+    // Minimal SR (Sender Report) packet: V=2,P=0,RC=0; PT=200; length=6;
+    // SSRC followed by the mandatory 20-byte sender-info block. RFC 3550's
+    // length counts 32-bit words minus one, so this is a 28-byte member.
+    let mut data = vec![0x80, 200, 0x00, 0x06];
     data.extend_from_slice(&ssrc.to_be_bytes());
-    data.extend_from_slice(&[0x55u8; 8]);
+    data.extend_from_slice(&[0x55u8; 20]);
     data
 }
 

@@ -255,10 +255,23 @@
     {
       "gate": "rtp-interop",
       "patterns": [
+        "Cargo.lock",
         "scripts/test_libsrtp_interop.sh",
+        "crates/media/media-core/src/relay/**",
+        "crates/media/rtp-core/Cargo.toml",
+        "crates/media/rtp-core/src/dtls_srtp.rs",
         "crates/media/rtp-core/src/security/**",
         "crates/media/rtp-core/src/srtp/**",
-        "crates/media/rtp-core/tests/srtp_*.rs"
+        "crates/media/rtp-core/src/transport/**",
+        "crates/media/rtp-core/tests/dtls_*.rs",
+        "crates/media/rtp-core/tests/srtp_*.rs",
+        "crates/sip/rvoip-sip/Cargo.toml",
+        "crates/sip/rvoip-sip/src/adapters/dtls_negotiator.rs",
+        "crates/sip/rvoip-sip/src/adapters/media_adapter.rs",
+        "crates/sip/rvoip-sip/src/api/events.rs",
+        "crates/sip/rvoip-sip/src/api/unified.rs",
+        "crates/sip/rvoip-sip/tests/dtls_srtp_call_integration.rs",
+        "scripts/ci/run_checks.py"
       ]
     },
     {

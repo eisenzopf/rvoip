@@ -61,6 +61,16 @@ pub enum DtlsRole {
     Server,
 }
 
+#[cfg(feature = "dtls-srtp")]
+fn verify_dtls_fingerprint(actual: [u8; 32], expected: [u8; 32]) -> Result<()> {
+    if actual != expected {
+        return Err(Error::config(
+            "DTLS-SRTP certificate fingerprint does not match the authenticated SDP".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Releases a media-controller port reservation if `start_media` is cancelled
 /// before ownership is committed to the controller maps.
 struct MediaPortReservationGuard {
@@ -1113,6 +1123,30 @@ impl MediaSessionController {
             .map_err(|error| Error::config(format!("failed to restore SRTP contexts: {error}")))
     }
 
+    /// Irreversibly latch one media session into secure-only operation before
+    /// asynchronous DTLS key agreement starts. DTLS packets continue through
+    /// RFC 7983 demux, but RTP/RTCP cannot fall back to plaintext.
+    #[cfg(feature = "dtls-srtp")]
+    pub async fn require_secure_media(&self, dialog_id: &DialogId) -> Result<()> {
+        let session_arc = self
+            .rtp_sessions
+            .get(dialog_id)
+            .map(|entry| entry.value().session.clone())
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+        let session_guard = session_arc.lock().await;
+        let transport = session_guard.transport();
+        let udp_transport = transport
+            .as_any()
+            .downcast_ref::<rtp_core::transport::UdpRtpTransport>()
+            .ok_or_else(|| {
+                Error::config(
+                    "require_secure_media: RTP session is not a UdpRtpTransport".to_string(),
+                )
+            })?;
+        udp_transport.require_secure_media();
+        Ok(())
+    }
+
     /// Run a real DTLS-SRTP handshake (RFC 5764) for a dialog's RTP session
     /// and install the resulting keys the same way [`Self::install_srtp_contexts`]
     /// installs SDES ones — this is the DTLS-SRTP equivalent of that call,
@@ -1122,10 +1156,8 @@ impl MediaSessionController {
     /// the peer's RTP address from its SDP answer/offer (the handshake runs
     /// over the same socket RTP/RTCP already use, demultiplexed by the
     /// first byte of each datagram — see `rvoip_rtp_core::transport::dtls_bridge`).
-    /// The caller is responsible for checking the returned
-    /// `remote_fingerprint_sha256` against the SDP `a=fingerprint` the peer
-    /// advertised; this function only runs the handshake, it has no notion
-    /// of SDP or which fingerprint was promised.
+    /// `expected_remote_fingerprint_sha256` is the fingerprint authenticated
+    /// by SIP/SDP. It is checked before any SRTP context is installed.
     #[cfg(feature = "dtls-srtp")]
     pub async fn run_dtls_handshake_and_install(
         &self,
@@ -1133,6 +1165,7 @@ impl MediaSessionController {
         identity: rtp_core::dtls_srtp::DtlsIdentity,
         role: DtlsRole,
         remote_addr: std::net::SocketAddr,
+        expected_remote_fingerprint_sha256: [u8; 32],
         srtp_profiles: Vec<rtp_core::dtls_srtp::SrtpProtectionProfile>,
         timeout: std::time::Duration,
     ) -> Result<rtp_core::dtls_srtp::DtlsSrtpHandshakeResult> {
@@ -1175,6 +1208,14 @@ impl MediaSessionController {
             .await
             .map_err(|_| Error::config("DTLS-SRTP handshake timed out".to_string()))?
             .map_err(|e| Error::config(format!("DTLS-SRTP handshake failed: {e}")))?;
+
+        // Authenticate the peer certificate before deriving or installing any
+        // media context. A mismatch leaves the already-latched transport with
+        // no keys, so RTP/RTCP cannot fall through to plaintext.
+        verify_dtls_fingerprint(
+            result.remote_fingerprint_sha256,
+            expected_remote_fingerprint_sha256,
+        )?;
 
         let (send_key, recv_key) = match role {
             DtlsRole::Client => (

@@ -78,6 +78,7 @@ uctp     = ["dep:rvoip-uctp", "dep:rvoip-quic", "dep:rvoip-webtransport", "dep:r
 vapi     = ["dep:rvoip-vapi"]
 
 # ── SIP media add-ons ──
+dtls-srtp = ["sip", "rvoip-sip/dtls-srtp"]
 g729 = ["sip", "rvoip-sip/g729", "rvoip-core/g729"]
 amr-nb = ["sip", "rvoip-sip/amr-nb", "rvoip-core/amr-nb"]
 amr-wb = ["sip", "rvoip-sip/amr-wb", "rvoip-core/amr-wb"]
@@ -120,14 +121,14 @@ app = [
 # The pure-Rust codecs are included; `opus` is not, because libopus must be
 # present on the build host and `full` should not turn a missing system
 # package into a build failure. Use `all-codecs` (or `opus`) to add it.
-full = ["voip-3", "vapi", "sip-stir-shaken", "client", "app", "g729", "amr"]
+full = ["voip-3", "vapi", "sip-stir-shaken", "client", "app", "dtls-srtp", "g729", "amr"]
 
 # ── Deployment-oriented bundles ──
 # Existing leaf and meta-features remain valid. These additive bundles provide
 # stable, recognizable starting points; exact membership is described by the
 # machine-checked metadata below and rendered into docs/FEATURE_BUNDLES.md.
 bundle-sip-endpoint = ["sip"]
-bundle-carrier-sip = ["sip", "sip-stir-shaken", "g729", "amr"]
+bundle-carrier-sip = ["sip", "sip-stir-shaken", "dtls-srtp", "g729", "amr"]
 bundle-browser-gateway = ["app", "opus"]
 bundle-ai-conversation = ["voip-3", "vapi", "app", "opus"]
 bundle-full-pure-rust = ["full"]
@@ -145,11 +146,11 @@ description = "A provider-neutral SIP endpoint or server with the standard G.711
 [[package.metadata.rvoip.feature-bundles]]
 feature = "bundle-carrier-sip"
 name = "Carrier SIP"
-members = ["sip", "sip-stir-shaken", "g729", "amr"]
+members = ["sip", "sip-stir-shaken", "dtls-srtp", "g729", "amr"]
 codecs = "G.711, G.729, AMR-NB, and AMR-WB"
 system_dependencies = "None"
 maturity = "SIP beta plus preview add-ons"
-description = "A carrier-facing SIP service with caller-identity attestation and the pure-Rust telephony codec set."
+description = "A carrier-facing SIP service with DTLS-SRTP, caller-identity attestation, and the pure-Rust telephony codec set."
 
 [[package.metadata.rvoip.feature-bundles]]
 feature = "bundle-browser-gateway"

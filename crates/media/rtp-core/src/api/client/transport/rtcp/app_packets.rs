@@ -108,8 +108,11 @@ pub async fn send_rtcp_bye(
         reason,
     };
 
-    // Create RTCP packet
-    let rtcp_packet = crate::RtcpPacket::Goodbye(bye_packet);
+    // RFC 3550 compound RTCP must start with SR or RR unless reduced-size
+    // RTCP was negotiated. This API does not negotiate RFC 5506.
+    let rr_packet = crate::RtcpReceiverReport::new(session.get_ssrc());
+    let mut rtcp_packet = crate::RtcpCompoundPacket::new_with_rr(rr_packet);
+    rtcp_packet.add_bye(bye_packet);
 
     // Serialize
     let rtcp_data = rtcp_packet.serialize().map_err(|e| {

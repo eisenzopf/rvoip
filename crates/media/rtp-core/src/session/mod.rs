@@ -1464,8 +1464,12 @@ impl RtpSession {
                 "Session closed".to_string(),
             );
 
-            // Create RTCP packet
-            let rtcp_packet = crate::packet::rtcp::RtcpPacket::Goodbye(bye);
+            // RFC 3550 compound RTCP starts with SR or RR. A standalone BYE is
+            // reduced-size RTCP and is only valid when that profile has been
+            // negotiated (RFC 5506), which this session does not do.
+            let rr = crate::packet::rtcp::RtcpReceiverReport::new(self.ssrc);
+            let mut rtcp_packet = crate::packet::rtcp::RtcpCompoundPacket::new_with_rr(rr);
+            rtcp_packet.add_bye(bye);
 
             // Serialize and send
             match rtcp_packet.serialize() {
@@ -1722,8 +1726,11 @@ impl RtpSession {
             reason.unwrap_or_else(|| "Session terminated".to_string()),
         );
 
-        // Create RTCP packet
-        let rtcp_packet = crate::packet::rtcp::RtcpPacket::Goodbye(bye);
+        // Send BYE as standards-compliant compound RTCP. A standalone BYE is
+        // reduced-size RTCP and requires separate RFC 5506 negotiation.
+        let rr = crate::packet::rtcp::RtcpReceiverReport::new(self.ssrc);
+        let mut rtcp_packet = crate::packet::rtcp::RtcpCompoundPacket::new_with_rr(rr);
+        rtcp_packet.add_bye(bye);
 
         // Serialize and send
         match rtcp_packet.serialize() {
@@ -2000,6 +2007,73 @@ mod tests {
             crate::packet::rtcp::RtcpPacket::ReceiverReport(report) => report,
             packet => panic!("expected receiver report, got {packet:?}"),
         }
+    }
+
+    fn assert_compound_bye(data: &[u8], expected_ssrc: RtpSsrc, expected_reason: &str) {
+        use crate::packet::rtcp::{RtcpCompoundPacket, RtcpPacket};
+
+        let compound = RtcpCompoundPacket::parse(data).expect("BYE must be valid compound RTCP");
+        assert_eq!(compound.packets.len(), 2);
+        match &compound.packets[0] {
+            RtcpPacket::ReceiverReport(report) => assert_eq!(report.ssrc, expected_ssrc),
+            packet => panic!("expected RR before BYE, got {packet:?}"),
+        }
+        match &compound.packets[1] {
+            RtcpPacket::Goodbye(bye) => {
+                assert_eq!(bye.sources, vec![expected_ssrc]);
+                assert_eq!(bye.reason.as_deref(), Some(expected_reason));
+            }
+            packet => panic!("expected BYE after RR, got {packet:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_bye_uses_compound_rtcp_without_reduced_size_negotiation() {
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let expected_ssrc = 0x1020_3040;
+        let session = RtpSession::new(RtpSessionConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            remote_addr: Some(peer.local_addr().unwrap()),
+            ssrc: Some(expected_ssrc),
+            ..RtpSessionConfig::default()
+        })
+        .await
+        .unwrap();
+
+        session
+            .send_bye(Some("test complete".to_string()))
+            .await
+            .unwrap();
+
+        let mut buffer = [0u8; 1500];
+        let (size, _) = tokio::time::timeout(Duration::from_secs(1), peer.recv_from(&mut buffer))
+            .await
+            .expect("timed out waiting for compound RTCP BYE")
+            .unwrap();
+        assert_compound_bye(&buffer[..size], expected_ssrc, "test complete");
+    }
+
+    #[tokio::test]
+    async fn close_uses_compound_rtcp_without_reduced_size_negotiation() {
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let expected_ssrc = 0x5060_7080;
+        let mut session = RtpSession::new(RtpSessionConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            remote_addr: Some(peer.local_addr().unwrap()),
+            ssrc: Some(expected_ssrc),
+            ..RtpSessionConfig::default()
+        })
+        .await
+        .unwrap();
+
+        session.close().await.unwrap();
+
+        let mut buffer = [0u8; 1500];
+        let (size, _) = tokio::time::timeout(Duration::from_secs(1), peer.recv_from(&mut buffer))
+            .await
+            .expect("timed out waiting for close RTCP BYE")
+            .unwrap();
+        assert_compound_bye(&buffer[..size], expected_ssrc, "Session closed");
     }
 
     #[test]

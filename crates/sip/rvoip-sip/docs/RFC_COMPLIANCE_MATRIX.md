@@ -137,7 +137,7 @@ missing supplied local summary is recorded as `J20-LOCAL-SUMMARY` with
 
 | Standard | Beta status | Reason |
 |---|---|---|
-| RFC 5764 DTLS-SRTP | Unsupported | The retained beta SRTP profile is SDES; DTLS-SRTP is not established by executable release evidence. |
+| RFC 5763/5764 DTLS-SRTP | Candidate, feature-gated | `dtls_srtp_call_integration` proves two rvoip SIP endpoints install DTLS-derived contexts; `srtp_interop_webrtc_srtp` proves RTP/SRTCP compatibility with an independent implementation. The release claim remains conditional on fresh protected 0.3.9 qualification evidence. |
 | RFC 8445 ICE | Unsupported | Attribute parsing/carry-through does not implement ICE connectivity checks. |
 | RFC 8489 STUN | Unsupported as a compliance claim | A configured address-discovery helper is not a complete STUN or ICE behavior profile. |
 | RFC 8656 TURN | Unsupported | No TURN allocation/relay behavior is claimed. |

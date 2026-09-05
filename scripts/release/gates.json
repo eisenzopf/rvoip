@@ -5426,19 +5426,35 @@
     {
       "affected_crates": [],
       "affected_paths": [
+        "Cargo.lock",
         "scripts/test_libsrtp_interop.sh",
-        "crates/media/rtp-core/**"
+        "crates/media/media-core/src/relay/**",
+        "crates/media/rtp-core/**",
+        "crates/sip/rvoip-sip/Cargo.toml",
+        "crates/sip/rvoip-sip/src/adapters/dtls_negotiator.rs",
+        "crates/sip/rvoip-sip/src/adapters/media_adapter.rs",
+        "crates/sip/rvoip-sip/src/api/events.rs",
+        "crates/sip/rvoip-sip/src/api/unified.rs",
+        "crates/sip/rvoip-sip/tests/dtls_srtp_call_integration.rs",
+        "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
       "category": "Remote release framework",
       "command": [
-        "bash",
-        "scripts/test_libsrtp_interop.sh"
+        "python3",
+        "scripts/ci/run_checks.py",
+        "specialty",
+        "--name",
+        "release-rtp-interop",
+        "--gate",
+        "rtp-interop",
+        "--output",
+        "{artifact_dir}/nested-ci-receipt.json"
       ],
       "dependencies": [
         "source.remote-clean"
       ],
-      "display_command": "bash scripts/test_libsrtp_interop.sh",
+      "display_command": "python3 scripts/ci/run_checks.py specialty --name release-rtp-interop --gate rtp-interop --output {artifact_dir}/nested-ci-receipt.json",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -5449,7 +5465,7 @@
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
-      "name": "pinned libSRTP bidirectional interoperability",
+      "name": "pinned SRTP and DTLS-SRTP interoperability",
       "resource_class": "gcp-interop",
       "retry_on_exit_codes": [
         75
