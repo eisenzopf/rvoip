@@ -37,6 +37,11 @@ use rvoip_harness::{
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::{mpsc, Barrier, Notify};
 
+// The default-feature shard intentionally has no native codec dependency.
+// Keep its transport/graph behavior tests on the always-available G.711
+// backend; the all-features codec gate separately exercises Opus and AMR.
+const DEFAULT_TEST_CODEC: &str = "PCMU";
+
 // =====================================================================
 // MockMediaStream
 // =====================================================================
@@ -64,11 +69,16 @@ impl MockMediaStream {
     fn with_output_capacity(codec_name: &str, output_capacity: usize) -> Arc<Self> {
         let (external_in_tx, in_rx) = mpsc::channel::<MediaFrame>(64);
         let (out_tx, external_out_rx) = mpsc::channel::<MediaFrame>(output_capacity);
+        let clock_rate_hz = match codec_name.to_ascii_lowercase().as_str() {
+            "opus" => 48_000,
+            "amr-wb" => 16_000,
+            _ => 8_000,
+        };
         Arc::new(Self {
             id: StreamId::new(),
             codec: CodecInfo {
                 name: codec_name.to_string(),
-                clock_rate_hz: 48000,
+                clock_rate_hz,
                 channels: 1,
                 fmtp: None,
                 payload_type: None,
@@ -647,8 +657,8 @@ async fn setup_amazon_connect_bridge_orchestrator() -> (
     let connect_adapter = MockAdapter::new(Transport::AmazonConnect);
     let sip_connection = ConnectionId::new();
     let connect_connection = ConnectionId::new();
-    let sip_stream = MockMediaStream::new("opus");
-    let connect_stream = MockMediaStream::with_output_capacity("opus", 1);
+    let sip_stream = MockMediaStream::new(DEFAULT_TEST_CODEC);
+    let connect_stream = MockMediaStream::with_output_capacity(DEFAULT_TEST_CODEC, 1);
     sip_adapter.register_connection(sip_connection.clone(), Arc::clone(&sip_stream));
     connect_adapter.register_connection(connect_connection.clone(), Arc::clone(&connect_stream));
 
@@ -766,7 +776,7 @@ fn public_bridge_futures_remain_send_for_multithreaded_call_actors() {
 async fn bridge_passes_frames_through_when_codecs_match() {
     let _ = tracing_subscriber::fmt::try_init();
     let (orch, stream_a, stream_b, conn_a, conn_b) =
-        setup_two_connection_orchestrator("opus", "opus").await;
+        setup_two_connection_orchestrator(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC).await;
 
     let mut b_out = stream_b.take_external_out();
     let _bridge_id = orch
@@ -790,10 +800,34 @@ async fn bridge_passes_frames_through_when_codecs_match() {
     assert_eq!(received, (0u8..5).collect::<Vec<_>>());
 }
 
+#[cfg(feature = "opus")]
+#[tokio::test]
+async fn native_codec_bundle_bridges_opus_frames() {
+    let (orch, stream_a, stream_b, conn_a, conn_b) =
+        setup_two_connection_orchestrator("opus", "opus").await;
+    let mut output = stream_b.take_external_out();
+    let bridge = orch
+        .bridge_connections(conn_a, conn_b)
+        .await
+        .expect("Opus bridge with native codec feature");
+
+    stream_a.inject(mk_frame(stream_a.id(), 42)).await;
+    let frame = tokio::time::timeout(Duration::from_secs(2), output.recv())
+        .await
+        .expect("Opus bridge timed out")
+        .expect("Opus bridge output closed");
+    assert_eq!(frame.payload[0], 42);
+
+    orch.unbridge_connections(bridge)
+        .await
+        .expect("remove Opus bridge");
+}
+
 #[tokio::test]
 async fn data_messages_preserve_all_fields_and_route_to_only_the_exact_connection() {
     let (orch, _stream_a, _stream_b, conn_a, conn_b, adapter) =
-        setup_two_connection_orchestrator_with_adapter("opus", "opus").await;
+        setup_two_connection_orchestrator_with_adapter(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC)
+            .await;
     let mut events = orch.subscribe_events();
     let text = DataMessage {
         label: "customer.control/text-v7".to_string(),
@@ -879,7 +913,8 @@ async fn data_messages_preserve_all_fields_and_route_to_only_the_exact_connectio
 #[tokio::test]
 async fn legacy_bridge_passes_arbitrary_data_labels_in_both_exact_directions() {
     let (orch, stream_a, stream_b, conn_a, conn_b, adapter) =
-        setup_two_connection_orchestrator_with_adapter("opus", "opus").await;
+        setup_two_connection_orchestrator_with_adapter(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC)
+            .await;
     let bridge = orch
         .bridge_connections(conn_a.clone(), conn_b.clone())
         .await
@@ -933,7 +968,8 @@ async fn legacy_bridge_passes_arbitrary_data_labels_in_both_exact_directions() {
 #[tokio::test]
 async fn bridge_policy_gets_exact_direction_and_can_drop_transform_or_fail_validation() {
     let (orch, _stream_a, _stream_b, conn_a, conn_b, adapter) =
-        setup_two_connection_orchestrator_with_adapter("opus", "opus").await;
+        setup_two_connection_orchestrator_with_adapter(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC)
+            .await;
     let policy = Arc::new(SelectiveDataPolicy::default());
     let bridge = orch
         .bridge_connections_with_data_policy(conn_a.clone(), conn_b.clone(), policy.clone())
@@ -988,7 +1024,8 @@ async fn bridge_policy_gets_exact_direction_and_can_drop_transform_or_fail_valid
 #[tokio::test]
 async fn slow_data_direction_is_bounded_does_not_stall_peer_and_unbridge_aborts_workers() {
     let (orch, stream_a, stream_b, conn_a, conn_b, adapter) =
-        setup_two_connection_orchestrator_with_adapter("opus", "opus").await;
+        setup_two_connection_orchestrator_with_adapter(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC)
+            .await;
     let gate = adapter.gate_data_send(conn_b.clone());
     let bridge = orch
         .bridge_connections(conn_a.clone(), conn_b.clone())
@@ -1055,7 +1092,8 @@ async fn slow_data_direction_is_bounded_does_not_stall_peer_and_unbridge_aborts_
 #[tokio::test]
 async fn policy_panic_tears_down_only_its_bridge_without_unwinding_or_reacquiring_media() {
     let (orch, stream_a, stream_b, conn_a, conn_b, adapter) =
-        setup_two_connection_orchestrator_with_adapter("opus", "opus").await;
+        setup_two_connection_orchestrator_with_adapter(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC)
+            .await;
     let mut events = orch.subscribe_events();
     let policy = Arc::new(SelectiveDataPolicy::default());
     let first = orch
@@ -1098,7 +1136,7 @@ async fn policy_panic_tears_down_only_its_bridge_without_unwinding_or_reacquirin
 #[tokio::test]
 async fn bridge_propagates_typed_unwritable_sink_before_consuming_sources() {
     let (orch, stream_a, stream_b, conn_a, conn_b) =
-        setup_two_connection_orchestrator("opus", "opus").await;
+        setup_two_connection_orchestrator(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC).await;
     stream_b.set_writable(false);
 
     let error = orch
@@ -1131,7 +1169,7 @@ async fn bridge_propagates_typed_unwritable_sink_before_consuming_sources() {
 #[tokio::test]
 async fn directional_bridge_consumes_only_enabled_sources_and_routes_each_half_independently() {
     let (orch, stream_a, stream_b, conn_a, conn_b) =
-        setup_two_connection_orchestrator("opus", "opus").await;
+        setup_two_connection_orchestrator(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC).await;
     let mut a_out = stream_a.take_external_out();
     let mut b_out = stream_b.take_external_out();
     let bridge = orch
@@ -1170,7 +1208,7 @@ async fn directional_bridge_consumes_only_enabled_sources_and_routes_each_half_i
         .expect("unbridge A-to-B");
 
     let (orch, stream_a, stream_b, conn_a, conn_b) =
-        setup_two_connection_orchestrator("opus", "opus").await;
+        setup_two_connection_orchestrator(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC).await;
     let mut a_out = stream_a.take_external_out();
     let mut b_out = stream_b.take_external_out();
     let bridge = orch
@@ -1273,7 +1311,7 @@ async fn directional_bridge_validates_required_sink_before_any_source_acquisitio
     ));
 
     let (orch, stream_a, stream_b, conn_a, conn_b) =
-        setup_two_connection_orchestrator("opus", "opus").await;
+        setup_two_connection_orchestrator(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC).await;
     // A is not a target in an A-to-B plan, so its dormant output must not
     // reject the plan. B is required and must fail before A is consumed.
     stream_a.set_writable(false);
@@ -1306,7 +1344,7 @@ async fn directional_bridge_validates_required_sink_before_any_source_acquisitio
 #[tokio::test]
 async fn one_way_bridge_renegotiation_updates_the_enabled_graph_route() {
     let (orch, _stream_a, _stream_b, conn_a, conn_b, adapter) =
-        setup_two_connection_orchestrator_with_adapter("PCMU", "opus").await;
+        setup_two_connection_orchestrator_with_adapter("PCMU", "PCMA").await;
     orch.bridge_connections_directional(
         conn_a.clone(),
         conn_b,
@@ -1332,7 +1370,7 @@ async fn one_way_bridge_renegotiation_updates_the_enabled_graph_route() {
     let snapshot = graph.snapshot().await;
     assert_eq!(snapshot.source_payload_type, 8);
     assert_eq!(snapshot.sinks.len(), 1);
-    assert_eq!(snapshot.sinks[0].target_payload_type, 111);
+    assert_eq!(snapshot.sinks[0].target_payload_type, 8);
 }
 
 #[tokio::test]
@@ -1351,8 +1389,8 @@ async fn bridge_renegotiation_uses_the_transports_negotiated_dynamic_payload_typ
         .await
         .expect("source graph");
     adapter.set_renegotiated_audio(CodecInfo {
-        name: "opus".into(),
-        clock_rate_hz: 48_000,
+        name: "PCMA".into(),
+        clock_rate_hz: 8_000,
         channels: 1,
         fmtp: None,
         payload_type: Some(96),
@@ -1364,7 +1402,7 @@ async fn bridge_renegotiation_uses_the_transports_negotiated_dynamic_payload_typ
     let snapshot = graph.snapshot().await;
     assert_eq!(
         snapshot.source_payload_type, 96,
-        "the negotiated dynamic PT must win over Opus's conventional 111"
+        "the negotiated dynamic PT must win over PCMA's static payload type 8"
     );
     assert_eq!(snapshot.sinks[0].target_payload_type, 0);
 }
@@ -1372,7 +1410,7 @@ async fn bridge_renegotiation_uses_the_transports_negotiated_dynamic_payload_typ
 #[tokio::test]
 async fn one_way_bridge_renegotiation_rejects_an_unsupported_codec() {
     let (orch, _stream_a, _stream_b, conn_a, conn_b, adapter) =
-        setup_two_connection_orchestrator_with_adapter("PCMU", "opus").await;
+        setup_two_connection_orchestrator_with_adapter("PCMU", "PCMA").await;
     orch.bridge_connections_directional(
         conn_a.clone(),
         conn_b,
@@ -1398,7 +1436,7 @@ async fn one_way_bridge_renegotiation_rejects_an_unsupported_codec() {
 #[tokio::test]
 async fn bridge_rejects_an_already_closed_target_before_consuming_sources() {
     let (orch, stream_a, stream_b, conn_a, conn_b) =
-        setup_two_connection_orchestrator("opus", "opus").await;
+        setup_two_connection_orchestrator(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC).await;
     drop(stream_b.take_external_out());
 
     assert!(matches!(
@@ -1416,7 +1454,7 @@ async fn bridge_rejects_an_already_closed_target_before_consuming_sources() {
 #[tokio::test]
 async fn unavailable_second_source_rolls_back_first_receiver_reservation() {
     let (orch, stream_a, stream_b, conn_a, conn_b) =
-        setup_two_connection_orchestrator("opus", "opus").await;
+        setup_two_connection_orchestrator(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC).await;
     let (first_stream, unavailable_stream) = if conn_a < conn_b {
         (&stream_a, &stream_b)
     } else {
@@ -1456,7 +1494,7 @@ async fn unavailable_second_source_rolls_back_first_receiver_reservation() {
 #[tokio::test]
 async fn ai_cancels_synthesized_playback_when_media_output_is_not_writable() {
     let (orch, stream, _other, conn, _other_conn) =
-        setup_two_connection_orchestrator("opus", "opus").await;
+        setup_two_connection_orchestrator(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC).await;
     stream.set_writable(false);
     let cancellations = Arc::new(AtomicUsize::new(0));
     orch.register_asr_provider("cancel-output", Arc::new(OneResultAsrProvider));
@@ -1483,7 +1521,7 @@ async fn ai_cancels_synthesized_playback_when_media_output_is_not_writable() {
 #[tokio::test]
 async fn ai_cancels_synthesized_playback_when_media_output_closes() {
     let (orch, stream, _other, conn, _other_conn) =
-        setup_two_connection_orchestrator("opus", "opus").await;
+        setup_two_connection_orchestrator(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC).await;
     drop(stream.take_external_out());
     let cancellations = Arc::new(AtomicUsize::new(0));
     orch.register_asr_provider("cancel-closed", Arc::new(OneResultAsrProvider));
@@ -1510,7 +1548,7 @@ async fn ai_cancels_synthesized_playback_when_media_output_closes() {
 #[tokio::test]
 async fn ai_detach_cancels_in_flight_synthesized_playback() {
     let (orch, stream, _other, conn, _other_conn) =
-        setup_two_connection_orchestrator("opus", "opus").await;
+        setup_two_connection_orchestrator(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC).await;
     let mut output = stream.take_external_out();
     let cancellations = Arc::new(AtomicUsize::new(0));
     orch.register_asr_provider("cancel-detach", Arc::new(OneResultAsrProvider));
@@ -1540,7 +1578,8 @@ async fn ai_detach_cancels_in_flight_synthesized_playback() {
 
 #[tokio::test]
 async fn bridge_self_returns_error() {
-    let (orch, _a, _b, conn_a, _) = setup_two_connection_orchestrator("opus", "opus").await;
+    let (orch, _a, _b, conn_a, _) =
+        setup_two_connection_orchestrator(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC).await;
     let err = orch
         .bridge_connections(conn_a.clone(), conn_a.clone())
         .await
@@ -1550,7 +1589,8 @@ async fn bridge_self_returns_error() {
 
 #[tokio::test]
 async fn bridge_connection_not_found_returns_error() {
-    let (orch, _a, _b, conn_a, _) = setup_two_connection_orchestrator("opus", "opus").await;
+    let (orch, _a, _b, conn_a, _) =
+        setup_two_connection_orchestrator(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC).await;
     let unknown = ConnectionId::new();
     let err = orch
         .bridge_connections(conn_a, unknown.clone())
@@ -1561,7 +1601,8 @@ async fn bridge_connection_not_found_returns_error() {
 
 #[tokio::test]
 async fn bridge_already_bridged_returns_error() {
-    let (orch, _a, _b, conn_a, conn_b) = setup_two_connection_orchestrator("opus", "opus").await;
+    let (orch, _a, _b, conn_a, conn_b) =
+        setup_two_connection_orchestrator(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC).await;
     orch.bridge_connections(conn_a.clone(), conn_b.clone())
         .await
         .expect("first bridge");
@@ -1574,7 +1615,8 @@ async fn bridge_already_bridged_returns_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_bridge_attempts_reserve_both_connections_atomically() {
-    let (orch, _a, _b, conn_a, conn_b) = setup_two_connection_orchestrator("opus", "opus").await;
+    let (orch, _a, _b, conn_a, conn_b) =
+        setup_two_connection_orchestrator(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC).await;
     let barrier = Arc::new(Barrier::new(33));
     let mut tasks = tokio::task::JoinSet::new();
     for _ in 0..32 {
@@ -1621,7 +1663,7 @@ async fn concurrent_bridge_attempts_reserve_both_connections_atomically() {
 #[tokio::test]
 async fn unbridge_aborts_pumps_and_emits_event() {
     let (orch, stream_a, stream_b, conn_a, conn_b) =
-        setup_two_connection_orchestrator("opus", "opus").await;
+        setup_two_connection_orchestrator(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC).await;
     let mut events = orch.subscribe_events();
     let mut b_out = stream_b.take_external_out();
 
@@ -1686,7 +1728,7 @@ async fn unbridge_aborts_pumps_and_emits_event() {
 #[tokio::test]
 async fn full_media_target_is_bounded_and_never_backpressures_the_source() {
     let (orch, stream_a, stream_b, conn_a, conn_b) =
-        setup_two_connection_orchestrator("opus", "opus").await;
+        setup_two_connection_orchestrator(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC).await;
     let b_out = stream_b.take_external_out();
     let bridge_id = orch
         .bridge_connections(conn_a.clone(), conn_b)
@@ -1736,7 +1778,8 @@ async fn full_media_target_is_bounded_and_never_backpressures_the_source() {
 #[tokio::test]
 async fn terminal_bridge_route_removes_owner_and_allows_rebridge() {
     let (orch, stream_a, stream_b, conn_a, conn_b, adapter) =
-        setup_two_connection_orchestrator_with_adapter("opus", "opus").await;
+        setup_two_connection_orchestrator_with_adapter(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC)
+            .await;
     let mut events = orch.subscribe_events();
     let closed_target = stream_b.take_external_out();
     let first = orch
@@ -1758,7 +1801,7 @@ async fn terminal_bridge_route_removes_owner_and_allows_rebridge() {
     .await
     .expect("terminal route did not remove bridge owner");
 
-    let replacement_b = MockMediaStream::new("opus");
+    let replacement_b = MockMediaStream::new(DEFAULT_TEST_CODEC);
     let _replacement_out = replacement_b.take_external_out();
     adapter.register_connection(conn_b.clone(), replacement_b);
     let second = orch
@@ -1773,7 +1816,7 @@ async fn terminal_bridge_route_removes_owner_and_allows_rebridge() {
 #[tokio::test]
 async fn concurrent_graph_initialization_takes_source_once() {
     let (orch, stream_a, _stream_b, conn_a, _conn_b) =
-        setup_two_connection_orchestrator("opus", "opus").await;
+        setup_two_connection_orchestrator(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC).await;
     let mut tasks = tokio::task::JoinSet::new();
     for _ in 0..32 {
         let orch = Arc::clone(&orch);
@@ -1803,7 +1846,7 @@ async fn concurrent_graph_initialization_takes_source_once() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn directional_bridge_and_concurrent_graph_users_share_each_source_once() {
     let (orch, stream_a, stream_b, conn_a, conn_b) =
-        setup_two_connection_orchestrator("opus", "opus").await;
+        setup_two_connection_orchestrator(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC).await;
     let barrier = Arc::new(Barrier::new(34));
     let mut graph_tasks = tokio::task::JoinSet::new();
     for _ in 0..32 {
@@ -1864,8 +1907,8 @@ async fn slow_graph_init_for_one_connection_does_not_block_another() {
     let adapter = MockAdapter::new(Transport::Quic);
     let conn_a = ConnectionId::new();
     let conn_b = ConnectionId::new();
-    let stream_a = MockMediaStream::new("opus");
-    let stream_b = MockMediaStream::new("opus");
+    let stream_a = MockMediaStream::new(DEFAULT_TEST_CODEC);
+    let stream_b = MockMediaStream::new(DEFAULT_TEST_CODEC);
     adapter.register_connection(conn_a.clone(), stream_a);
     adapter.register_connection(conn_b.clone(), stream_b);
     let gate = adapter.gate_next_stream_lookup(conn_a.clone());
@@ -1897,7 +1940,7 @@ async fn slow_graph_init_for_one_connection_does_not_block_another() {
 #[tokio::test]
 async fn bridge_recording_ai_and_listener_share_one_source_and_cleanup_routes() {
     let (orch, stream_a, stream_b, conn_a, conn_b) =
-        setup_two_connection_orchestrator("opus", "opus").await;
+        setup_two_connection_orchestrator(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC).await;
     let mut b_out = stream_b.take_external_out();
     let bridge_id = orch
         .bridge_connections(conn_a.clone(), conn_b)
