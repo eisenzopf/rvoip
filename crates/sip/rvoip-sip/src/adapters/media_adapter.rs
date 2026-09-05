@@ -213,30 +213,49 @@ pub(crate) fn set_sdp_diagnostics(srtp_enabled: bool, media_enabled: bool) {
     );
 }
 
-fn emit_srtp_diag(line: String) {
-    eprintln!("SRTP_DIAG {}", line);
-    tracing::info!("SRTP_DIAG {}", line);
+#[derive(Clone, Copy)]
+enum SdpDiagnostic {
+    RemoteAnswer,
+    RemoteOffer,
+    LocalAnswer,
+    LocalOffer,
+    SdesAnswerAccepted,
+    SdesOfferAccepted,
+    SdesOfferRejected,
+    SrtpContextsInstalled,
 }
 
-fn emit_media_diag(line: String) {
-    eprintln!("MEDIA_DIAG {}", line);
-    tracing::info!("MEDIA_DIAG {}", line);
+impl SdpDiagnostic {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::RemoteAnswer => "remote_sdp_answer",
+            Self::RemoteOffer => "remote_sdp_offer",
+            Self::LocalAnswer => "local_sdp_answer",
+            Self::LocalOffer => "local_sdp_offer",
+            Self::SdesAnswerAccepted => "sdes_answer_accepted",
+            Self::SdesOfferAccepted => "sdes_offer_accepted",
+            Self::SdesOfferRejected => "sdes_offer_rejected",
+            Self::SrtpContextsInstalled => "srtp_contexts_installed",
+        }
+    }
 }
 
-fn emit_sdp_diag(line: String) {
+fn emit_srtp_diag(event: SdpDiagnostic) {
+    eprintln!("SRTP_DIAG event={}", event.label());
+    tracing::info!(event = event.label(), "SRTP diagnostic milestone");
+}
+
+fn emit_media_diag(event: SdpDiagnostic) {
+    eprintln!("MEDIA_DIAG event={}", event.label());
+    tracing::info!(event = event.label(), "media diagnostic milestone");
+}
+
+fn emit_sdp_diag(event: SdpDiagnostic) {
     if srtp_diagnostics_enabled() {
-        emit_srtp_diag(line.clone());
+        emit_srtp_diag(event);
     }
     if media_diagnostics_enabled() {
-        emit_media_diag(line);
-    }
-}
-
-fn crypto_attribute_diag(count: usize) -> String {
-    if count > 0 {
-        format!("crypto_attrs={} sdp_attribute=a=crypto", count)
-    } else {
-        "crypto_attrs=0".to_string()
+        emit_media_diag(event);
     }
 }
 
@@ -2188,14 +2207,7 @@ impl MediaAdapter {
         let answer_direction = audio_direction(&parsed_answer);
         let srtp_diagnostics = srtp_diagnostics_enabled();
         if sdp_diagnostics_enabled() {
-            emit_sdp_diag(format!(
-                "remote_sdp_answer session={} media={}:{} transport={} {}",
-                session_id.0,
-                remote_ip,
-                remote_port,
-                audio_transport(&parsed_answer).unwrap_or("unknown"),
-                crypto_attribute_diag(Self::extract_audio_crypto(&parsed_answer).len())
-            ));
+            emit_sdp_diag(SdpDiagnostic::RemoteAnswer);
         }
 
         // Validate the exact lower owner while leaving address, codec,
@@ -2332,10 +2344,7 @@ impl MediaAdapter {
                                 chosen.suite
                             );
                             if srtp_diagnostics {
-                                emit_srtp_diag(format!(
-                                    "sdes_answer_accepted session={} suite={:?}",
-                                    session_id.0, chosen.suite
-                                ));
+                                emit_srtp_diag(SdpDiagnostic::SdesAnswerAccepted);
                             }
                             Some(pair)
                         } else if self.srtp_required {
@@ -2548,14 +2557,7 @@ impl MediaAdapter {
         };
         let srtp_diagnostics = srtp_diagnostics_enabled();
         if sdp_diagnostics_enabled() {
-            emit_sdp_diag(format!(
-                "remote_sdp_offer session={} media={}:{} transport={} {}",
-                session_id.0,
-                remote_ip,
-                remote_port,
-                audio_transport(&parsed_offer).unwrap_or("unknown"),
-                crypto_attribute_diag(Self::extract_audio_crypto(&parsed_offer).len())
-            ));
+            emit_sdp_diag(SdpDiagnostic::RemoteOffer);
         }
 
         // SDES UAS-side handling. Per RFC 4568 §7.3, if we require
@@ -2631,10 +2633,7 @@ impl MediaAdapter {
                 chosen.suite
             );
             if srtp_diagnostics {
-                emit_srtp_diag(format!(
-                    "sdes_offer_accepted session={} suite={:?}",
-                    session_id.0, chosen.suite
-                ));
+                emit_srtp_diag(SdpDiagnostic::SdesOfferAccepted);
             }
             (Some(chosen), Some(pair), false)
         } else if offered_crypto.is_empty() && self.srtp_required {
@@ -2653,10 +2652,7 @@ impl MediaAdapter {
                 session_id.0
             );
             if srtp_diagnostics {
-                emit_srtp_diag(format!(
-                    "sdes_offer_rejected session={} reason=local_policy",
-                    session_id.0
-                ));
+                emit_srtp_diag(SdpDiagnostic::SdesOfferRejected);
             }
             (None, None, true)
         } else {
@@ -2821,15 +2817,7 @@ impl MediaAdapter {
         }
 
         if sdp_diagnostics_enabled() {
-            emit_sdp_diag(format!(
-                "local_sdp_answer session={} media={}:{} transport={} {} direction={}",
-                session_id.0,
-                advertised_ip,
-                advertised_port,
-                answer_transport,
-                crypto_attribute_diag(usize::from(answer_attr.is_some())),
-                direction_attribute(answer_direction)
-            ));
+            emit_sdp_diag(SdpDiagnostic::LocalAnswer);
         }
 
         let formats_str: Vec<&str> = formats.iter().map(|s| s.as_str()).collect();
@@ -3149,10 +3137,7 @@ impl MediaAdapter {
                 );
                 Self::record_media_security_negotiated_lane_owned(session, suite, true);
                 if srtp_diagnostics_enabled() {
-                    emit_srtp_diag(format!(
-                        "srtp_contexts_installed session={} role=commit suite={suite:?}",
-                        session_id.0
-                    ));
+                    emit_srtp_diag(SdpDiagnostic::SrtpContextsInstalled);
                 }
             }
 
@@ -4381,17 +4366,8 @@ impl MediaAdapter {
         } else {
             ("RTP/AVP", Vec::new())
         };
-        let crypto_attr_count = crypto_attrs.len();
         if sdp_diagnostics_enabled() {
-            emit_sdp_diag(format!(
-                "local_sdp_offer session={} media={}:{} transport={} {} direction={}",
-                session_id.0,
-                advertised_ip,
-                port,
-                transport,
-                crypto_attribute_diag(crypto_attr_count),
-                direction_attribute(direction)
-            ));
+            emit_sdp_diag(SdpDiagnostic::LocalOffer);
         }
 
         // NEXT_STEPS C2 — iterate the configured `offered_codecs` and

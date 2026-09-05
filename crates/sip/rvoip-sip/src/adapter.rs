@@ -4702,7 +4702,7 @@ Signal=5\r\nDuration=160\r\n";
         let surfaced = identity.expose_value();
         assert!(
             surfaced.contains("14085551212") && surfaced.contains("carrier.example"),
-            "unexpected asserted identity: {surfaced}"
+            "trusted asserted identity did not match the expected test fixture"
         );
         assert!(
             trusted
