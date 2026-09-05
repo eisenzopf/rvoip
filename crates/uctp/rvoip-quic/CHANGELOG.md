@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Added `UctpQuicAdapter::new_with_rtp_ingress_observer`, a bounded,
+  non-blocking receiver for lossless RTP packets associated with their
+  authenticated core route before `MediaFrame` normalization.
+- Added live-QUIC coverage for marker, CSRCs, parsed extensions, padding,
+  sequence wrap, SSRC, redacted diagnostics, and padding-free codec delivery.
+
 ## 0.2.0 — 2026-07-11
 
 - Moved raw-QUIC media to one authenticated `PeerMediaRouter` and one datagram

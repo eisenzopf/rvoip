@@ -1647,6 +1647,12 @@ impl DialogManager {
         remote_addr: SocketAddr,
         flow_id: Option<rvoip_sip_transport::TransportFlowId>,
     ) {
+        if let Some(flow_id) = flow_id {
+            self.emit_session_coordination_event(SessionCoordinationEvent::RegisteredFlowClosed {
+                flow_id,
+            })
+            .await;
+        }
         let keys: Vec<(String, u32, String)> = match self.flow_by_destination.get(&remote_addr) {
             Some(entry) => entry.value().clone(),
             None => return,
@@ -4357,12 +4363,21 @@ impl DialogManager {
                 context: None,
             })?;
 
+            let observed_source = dialog.last_known_remote_addr;
+            let route_set_is_empty = template.route_set.is_empty();
+            drop(dialog);
+
             let next_hop =
                 crate::transaction::transport::multiplexed::exact_next_hop_uri_for_request(
                     &request,
                 )
                 .map_err(|_| DialogError::routing_error("BYE contains an unusable Route header"))?;
-            let candidates = self.resolve_uri_to_candidates(&next_hop).await;
+            let mut candidates = self.resolve_uri_to_candidates(&next_hop).await;
+            super::transaction_integration::apply_observed_source(
+                observed_source,
+                route_set_is_empty,
+                &mut candidates,
+            );
             if candidates.is_empty() {
                 return Err(DialogError::routing_error(
                     "No address candidates for the exact BYE next hop",
@@ -5004,6 +5019,34 @@ mod outbound_flow_handler_tests {
             .build()
     }
 
+    async fn store_wildcard_observed_dialog(
+        manager: &DialogManager,
+        call_id: &str,
+        observed_source: SocketAddr,
+    ) -> DialogId {
+        let remote_target: Uri = "sip:caller@0.0.0.0:5076".parse().unwrap();
+        let mut dialog = Dialog::new(
+            call_id.to_string(),
+            "sip:service@127.0.0.1:5060".parse().unwrap(),
+            remote_target,
+            Some("service-tag".to_string()),
+            Some("caller-tag".to_string()),
+            false,
+        );
+        dialog.state = DialogState::Confirmed;
+        let dialog_id = dialog.id.clone();
+        manager.store_dialog(dialog).await.expect("store dialog");
+        let session_id = format!("{call_id}-session");
+        manager.store_dialog_mapping(
+            &session_id,
+            dialog_id.clone(),
+            TransactionKey::new(format!("z9hG4bK-{call_id}"), Method::Invite, true),
+            inbound_invite("sip:caller@0.0.0.0:5076"),
+            observed_source,
+        );
+        dialog_id
+    }
+
     #[tokio::test]
     async fn wildcard_contact_uses_observed_source_for_uas_bye() {
         let (manager, transport) = make_recording_manager().await;
@@ -5045,6 +5088,58 @@ mod outbound_flow_handler_tests {
             sent.first(),
             Some(&("sip:caller@0.0.0.0:5076".to_string(), observed_source))
         );
+    }
+
+    #[tokio::test]
+    async fn wildcard_contact_uses_observed_source_for_reason_bye() {
+        let (manager, transport) = make_recording_manager().await;
+        let observed_source = SocketAddr::from_str("203.0.113.11:2340").unwrap();
+        let dialog_id =
+            store_wildcard_observed_dialog(&manager, "reason-bye-dialog", observed_source).await;
+
+        manager
+            .send_bye_with_reason(
+                &dialog_id,
+                rvoip_sip_core::types::reason::Reason::new(
+                    "SIP",
+                    408,
+                    Some("Session expired".to_string()),
+                ),
+            )
+            .await
+            .expect("send reason BYE");
+
+        let sent = transport.request_destinations(Method::Bye).await;
+        assert_eq!(
+            sent.first(),
+            Some(&("sip:caller@0.0.0.0:5076".to_string(), observed_source))
+        );
+    }
+
+    #[tokio::test]
+    async fn wildcard_contact_uses_observed_source_for_info_and_notify() {
+        let (manager, transport) = make_recording_manager().await;
+        let observed_source = SocketAddr::from_str("203.0.113.12:2341").unwrap();
+        let dialog_id =
+            store_wildcard_observed_dialog(&manager, "materialized-dialog", observed_source).await;
+
+        manager
+            .send_request(&dialog_id, Method::Info, None)
+            .await
+            .expect("send INFO");
+        manager
+            .send_request(&dialog_id, Method::Notify, None)
+            .await
+            .expect("send NOTIFY");
+
+        for method in [Method::Info, Method::Notify] {
+            let sent = transport.request_destinations(method.clone()).await;
+            assert_eq!(
+                sent.first(),
+                Some(&("sip:caller@0.0.0.0:5076".to_string(), observed_source)),
+                "{method} must target the admitted packet source"
+            );
+        }
     }
 
     #[tokio::test]
@@ -8674,6 +8769,30 @@ mod outbound_flow_handler_tests {
                 .await
                 .is_err(),
             "no additional event after second close"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_connection_close_emits_redacted_registered_flow_event() {
+        let (manager, mut rx) = make_manager().await;
+        let flow_id = rvoip_sip_transport::TransportFlowId::from_process_local_value(91).unwrap();
+
+        manager
+            .on_connection_closed_on_flow(dest_addr(5091), Some(flow_id))
+            .await;
+
+        let event = tokio::time::timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .expect("event must arrive")
+            .expect("channel open");
+        assert!(matches!(
+            &event,
+            SessionCoordinationEvent::RegisteredFlowClosed { flow_id: closed }
+                if *closed == flow_id
+        ));
+        assert_eq!(
+            format!("{event:?}"),
+            "RegisteredFlowClosed { flow_present: true }"
         );
     }
 

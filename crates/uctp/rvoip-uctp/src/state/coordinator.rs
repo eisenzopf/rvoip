@@ -362,6 +362,7 @@ pub struct UctpCoordinator {
     /// `sig_policy.requires(env.msg_type)` and `env.signature` is
     /// `None`, the envelope is rejected with `401-1 signature-required`.
     sig_verifier: Option<Arc<rvoip_auth_core::sig9421::Sig9421Verifier>>,
+    sig_verification_context: Option<rvoip_auth_core::sig9421::SignatureVerificationContext>,
     /// Per-deployment policy for which `MessageType`s mandate a
     /// signature when `sig_verifier` is wired. Defaults to empty
     /// (opportunistic verification only).
@@ -533,6 +534,7 @@ impl UctpCoordinator {
             caps,
             aauth: None,
             sig_verifier: None,
+            sig_verification_context: None,
             sig_policy: None,
             shutdown_started: AtomicBool::new(false),
             shutdown_complete: AtomicBool::new(false),
@@ -628,6 +630,7 @@ impl UctpCoordinator {
             caps,
             aauth: Some(aauth),
             sig_verifier: None,
+            sig_verification_context: None,
             sig_policy: None,
             shutdown_started: AtomicBool::new(false),
             shutdown_complete: AtomicBool::new(false),
@@ -665,6 +668,38 @@ impl UctpCoordinator {
         subscription_handler: Arc<dyn SubscriptionHandler>,
         caps: UctpCoordinatorCaps,
     ) -> Arc<Self> {
+        Self::start_full_with_sig9421_context(
+            transport,
+            in_rx,
+            out_tx,
+            events_tx,
+            bearer,
+            sig_verifier,
+            sig_policy,
+            None,
+            local_descriptor,
+            subscription_handler,
+            caps,
+        )
+    }
+
+    /// Context-bound RFC 9421 constructor for multi-tenant production
+    /// deployments. Key resolution and replay identity are scoped to this
+    /// authenticated tenant/issuer pair.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_full_with_sig9421_context(
+        transport: TransportLabel,
+        in_rx: mpsc::Receiver<UctpEnvelope>,
+        out_tx: mpsc::Sender<UctpEnvelope>,
+        events_tx: mpsc::Sender<UctpSessionEvent>,
+        bearer: Arc<dyn BearerValidator>,
+        sig_verifier: Arc<rvoip_auth_core::sig9421::Sig9421Verifier>,
+        sig_policy: super::Sig9421Policy,
+        sig_verification_context: Option<rvoip_auth_core::sig9421::SignatureVerificationContext>,
+        local_descriptor: Arc<CapabilityDescriptor>,
+        subscription_handler: Arc<dyn SubscriptionHandler>,
+        caps: UctpCoordinatorCaps,
+    ) -> Arc<Self> {
         let cancel = CancellationToken::new();
         let coord = Arc::new(Self {
             transport,
@@ -693,6 +728,7 @@ impl UctpCoordinator {
             caps,
             aauth: None,
             sig_verifier: Some(sig_verifier),
+            sig_verification_context,
             sig_policy: Some(sig_policy),
             shutdown_started: AtomicBool::new(false),
             shutdown_complete: AtomicBool::new(false),
@@ -889,6 +925,7 @@ impl UctpCoordinator {
                 next = in_rx.recv() => {
                     match next {
                         Some(env) => {
+                            tracing::trace!(envelope = env.msg_type.diagnostic_label(), "uctp.coordinator: received envelope from substrate");
                             if let Err(e) = self.dispatch(env).await {
                                 warn!(error = %e, "uctp.coordinator: dispatch failed");
                             }
@@ -1024,7 +1061,11 @@ impl UctpCoordinator {
                                 .or_else(|_| Ok(()));
                         }
                     };
-                    if let Err(e) = verifier.verify(&env_value).await {
+                    let verification = match self.sig_verification_context.as_ref() {
+                        Some(context) => verifier.verify_with_context(&env_value, context).await,
+                        None => verifier.verify(&env_value).await,
+                    };
+                    if let Err(e) = verification {
                         let reason = match e {
                             rvoip_auth_core::sig9421::Sig9421Error::ReplayDetected(_) => {
                                 "replay-detected"

@@ -579,7 +579,8 @@ jobs:
                 --shielded-integrity-monitoring \
                 --labels rvoip-role=release-gate,managed-by=github-actions \
                 --metadata "rvoip-candidate=${CANDIDATE},rvoip-run-id=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT},rvoip-shard-id=${shard_id},rvoip-resource-class=${resource_class},rvoip-evidence-bucket=${BUCKET},rvoip-cache-bucket=${CACHE_BUCKET},rvoip-prefix=${prefix},rvoip-gates-b64=${gates_b64},rvoip-environment-b64=${environment_b64},rvoip-prebuilt-uri=${PREBUILT_URI},rvoip-prebuilt-sha256=${PREBUILT_SHA256},rvoip-external-memory-diagnostics=${EXTERNAL_MEMORY_DIAGNOSTICS}" \
-                --metadata-from-file startup-script=infra/release-runners/gcp-release-startup.sh
+                --metadata-from-file \
+                  startup-script=infra/release-runners/gcp-release-startup.sh,shutdown-script=infra/release-runners/gcp-release-shutdown.sh
             ) > "target/gcp-controller/create-logs/${shard_id}.log" 2>&1 &
             pids+=("$!")
           done < <(jq -c '.workers[]' target/gcp-controller/workers.json)

@@ -37,7 +37,7 @@ struct TestStream {
     inbound_tx: mpsc::Sender<MediaFrame>,
     inbound_rx: Mutex<Option<mpsc::Receiver<MediaFrame>>>,
     outbound_tx: mpsc::Sender<MediaFrame>,
-    #[allow(dead_code)] // held to keep the channel open
+
     outbound_rx: Mutex<Option<mpsc::Receiver<MediaFrame>>>,
 }
 
@@ -51,8 +51,8 @@ impl MediaStream for TestStream {
     }
     fn codec(&self) -> CodecInfo {
         CodecInfo {
-            name: "opus".into(),
-            clock_rate_hz: 48_000,
+            name: "PCMU".into(),
+            clock_rate_hz: 8_000,
             channels: 1,
             fmtp: None,
             payload_type: None,
@@ -246,6 +246,82 @@ async fn recording_collects_frames_and_stop_produces_artifact() {
     let artifact = orch.stop_recording(rid).await.unwrap();
     assert_eq!(artifact.bytes_written, 8);
     assert_eq!(sink.bytes().len(), 8);
+}
+
+/// TTS provider emitting a fixed number of one-byte frames, so a test can
+/// assert exactly what `play_audio` pumped into the stream.
+struct CountedTts {
+    frames: usize,
+}
+
+struct CountedPlayback {
+    remaining: Mutex<usize>,
+}
+
+#[async_trait::async_trait]
+impl rvoip_harness::TtsPlayback for CountedPlayback {
+    async fn next_frame(&self) -> Option<MediaFrame> {
+        let mut remaining = self.remaining.lock().unwrap();
+        if *remaining == 0 {
+            return None;
+        }
+        *remaining -= 1;
+        Some(MediaFrame {
+            stream_id: StreamId::new(),
+            kind: StreamKind::Audio,
+            payload: Bytes::from(vec![0x7f]),
+            timestamp_rtp: 0,
+            captured_at: Utc::now(),
+            payload_type: Some(0),
+        })
+    }
+    async fn cancel(&self) -> RvResult<()> {
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl rvoip_harness::TtsProvider for CountedTts {
+    async fn synthesize(
+        &self,
+        _request: rvoip_harness::TtsRequest,
+    ) -> RvResult<Box<dyn rvoip_harness::TtsPlayback>> {
+        Ok(Box::new(CountedPlayback {
+            remaining: Mutex::new(self.frames),
+        }))
+    }
+}
+
+/// A spoken prompt must reach the connection's audio stream through the
+/// orchestrator's own TTS registry — the adapter contributes only the
+/// stream, never a TTS stack. This is the path call-control PlayPrompt
+/// rides on transports whose adapters do not implement `play_audio`.
+#[tokio::test]
+async fn play_audio_tts_pumps_synthesized_frames_into_the_stream() {
+    let (orch, _tx, stream, connid) = setup().await;
+    orch.register_tts_provider("counted", Arc::new(CountedTts { frames: 5 }));
+
+    let _handle = orch
+        .play_audio(
+            connid,
+            rvoip_core::commands::AudioSource::TtsRequest {
+                provider_ref: "counted".into(),
+                text: "prompt under test".into(),
+                voice: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut outbound = stream.outbound_rx.lock().unwrap().take().unwrap();
+    let mut received = 0_usize;
+    while received < 5 {
+        match tokio::time::timeout(Duration::from_millis(500), outbound.recv()).await {
+            Ok(Some(_)) => received += 1,
+            _ => break,
+        }
+    }
+    assert_eq!(received, 5, "all synthesized frames reach the stream");
 }
 
 #[tokio::test]

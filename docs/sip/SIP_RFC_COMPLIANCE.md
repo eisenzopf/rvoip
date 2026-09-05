@@ -6,7 +6,7 @@
 - **Maintained for:** the `rvoip` SIP stack — `rvoip-sip`, `rvoip-sip-dialog`,
   `rvoip-sip-core`, `rvoip-sip-transport`, `rvoip-sip-proxy`,
   `rvoip-sip-registrar`.
-- **Last reviewed:** 2026-07-21
+- **Last reviewed:** 2026-09-05
 - **Evidence basis:** the exact, non-ignored source inventory in the crate-local
   [`RFC_COMPLIANCE_MATRIX.md`](../../crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md).
   The archived July 20 run is diagnostic because it came from a dirty source
@@ -119,12 +119,12 @@ cargo test -p rvoip-sip --test beta_release_docs
 |-----|-------|-------------|------------|-------------|
 | **3327** | Path Header (registering non-adjacent contacts) | `Path` insertion/echo for edge proxies. | 🟡 **Partial** — Path parsed, stored, and echoed | `server/contact_resolver.rs`, `api/send/register.rs`, `api/respond/register_response.rs` |
 | **3608** | Service-Route Discovery During Registration | `Service-Route` returned in 2xx REGISTER and applied to subsequent requests. | 🟡 **Partial** | `sip-core/src/types/service_route.rs`, `api/respond/register_response.rs` |
-| **5626** | Managing Client-Initiated Connections (Outbound) | Outbound Contact construction with `ob`, `+sip.instance`, and `reg-id`, plus registered-flow configuration validation. | 🟡 **Partial** — flow tokens, multi-flow behavior, keepalive/recovery, failover, and registrar-side behavior are not claimed | `T-5626-C1`, `T-5626-U1`, `T-5626-U2`; ignored flow-recovery stubs are excluded |
+| **5626** | Managing Client-Initiated Connections (Outbound) | Outbound Contact construction plus registrar-side opaque exact-flow ownership, deterministic multi-flow selection, close/recovery state, and exact-flow failover. | 🟡 **Partial** — protected two-UA real-NAT, rebinding, and restart-recovery evidence is still pending; see [REMOTE_ENDPOINT_PROFILE.md](REMOTE_ENDPOINT_PROFILE.md) | `T-5626-C1`, `T-5626-U1`–`T-5626-U7`; ignored flow-recovery stubs remain excluded |
 | **5627** | Obtaining and Using GRUUs | Globally Routable UA URIs (temp/pub). | 🟡 **Partial** — instance-id/GRUU params handled in contacts | outbound contact params, registrar contact handling |
 | **5628** | Registration Event Package for GRUU | `reg` package GRUU extension. | ⚪ Not implemented | — |
 | **6140** | Registration for Multiple Phone Numbers (SIP trunking) | Bulk/wildcard registration for trunks. | 🟠 **Planned** | — |
 | **3680** | SIP Event Package for Registrations | (see §3) | 🟠 **Planned** | — |
-| **6223** | Indication of Support for Keep-Alive | CRLF keep-alive framing on supported stream transports. | 🟡 **Partial** — STUN negotiation and end-to-end registered-flow recovery are not claimed | `sip-transport` TCP/TLS keep-alive frame tests; ignored RFC 5626 recovery stubs are excluded |
+| **6223** | Indication of Support for Keep-Alive | CRLF keep-alive framing/pong behavior on supported stream transports, client-side bounded ping monitoring, and exact connection-close degradation. | 🟡 **Partial** — protected end-to-end registered-flow recovery evidence behind real NAT is pending | `sip-transport` TCP/TLS keep-alive frame tests; RFC 5626 exact-close unit evidence |
 
 ---
 

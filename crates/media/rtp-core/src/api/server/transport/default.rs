@@ -372,6 +372,9 @@ impl MediaTransportServer for DefaultMediaTransportServer {
             debug!("Started transport event task");
             while let Ok(event) = transport_events.recv().await {
                 match event {
+                    // ICE material is not media; the server transport API
+                    // predates ICE and has no consumer for it.
+                    crate::traits::RtpEvent::StunPacket { .. } => {}
                     crate::traits::RtpEvent::MediaReceived {
                         source,
                         payload,

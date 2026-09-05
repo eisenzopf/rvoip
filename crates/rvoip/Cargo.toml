@@ -36,6 +36,8 @@ rvoip-stir-shaken  = { workspace = true, optional = true }
 
 # WebRTC interop adapter — `webrtc` feature.
 rvoip-webrtc       = { workspace = true, optional = true }
+# Bearer validation surface exposed alongside the WebRTC auth hooks.
+rvoip-auth-core    = { workspace = true, optional = true }
 
 # UCTP substrate adapters — `uctp` feature.
 rvoip-uctp         = { workspace = true, optional = true }
@@ -71,17 +73,18 @@ default = ["sip"]
 
 # ── Transports / surfaces ──
 sip      = ["dep:rvoip-sip"]
-webrtc   = ["dep:rvoip-webrtc"]
+webrtc   = ["dep:rvoip-webrtc", "dep:rvoip-auth-core"]
 uctp     = ["dep:rvoip-uctp", "dep:rvoip-quic", "dep:rvoip-webtransport", "dep:rvoip-websocket"]
 vapi     = ["dep:rvoip-vapi"]
 
 # ── SIP media add-ons ──
-g729 = ["sip", "rvoip-sip/g729"]
-amr-nb = ["sip", "rvoip-sip/amr-nb"]
-amr-wb = ["sip", "rvoip-sip/amr-wb"]
+dtls-srtp = ["sip", "rvoip-sip/dtls-srtp"]
+g729 = ["sip", "rvoip-sip/g729", "rvoip-core/g729"]
+amr-nb = ["sip", "rvoip-sip/amr-nb", "rvoip-core/amr-nb"]
+amr-wb = ["sip", "rvoip-sip/amr-wb", "rvoip-core/amr-wb"]
 amr = ["amr-nb", "amr-wb"]
 # Opus needs libopus on the build host, which is why it is not in `full`.
-opus = ["sip", "rvoip-sip/opus"]
+opus = ["sip", "rvoip-sip/opus", "rvoip-core/opus"]
 all-codecs = ["g729", "amr", "opus"]
 
 # ── SIP add-on (requires SIP): RFC 8224 caller-ID attestation ──
@@ -101,6 +104,11 @@ app = [
     "webrtc",
     "uctp",
     "rvoip-webrtc/signaling-ws",
+    # The high-level gateway's WebSocket listener must compile the co-located
+    # WebRTC answerer. Without this forwarding edge, authenticated browser
+    # legs are admitted but `connection.offer` never receives SDP, so callers
+    # time out before an application can bridge them.
+    "rvoip-websocket/media-webrtc",
     "dep:tokio",
     "dep:axum",
     "dep:bytes",
@@ -113,7 +121,72 @@ app = [
 # The pure-Rust codecs are included; `opus` is not, because libopus must be
 # present on the build host and `full` should not turn a missing system
 # package into a build failure. Use `all-codecs` (or `opus`) to add it.
-full = ["voip-3", "vapi", "sip-stir-shaken", "client", "app", "g729", "amr"]
+full = ["voip-3", "vapi", "sip-stir-shaken", "client", "app", "dtls-srtp", "g729", "amr"]
+
+# ── Deployment-oriented bundles ──
+# Existing leaf and meta-features remain valid. These additive bundles provide
+# stable, recognizable starting points; exact membership is described by the
+# machine-checked metadata below and rendered into docs/FEATURE_BUNDLES.md.
+bundle-sip-endpoint = ["sip"]
+bundle-carrier-sip = ["sip", "sip-stir-shaken", "dtls-srtp", "g729", "amr"]
+bundle-browser-gateway = ["app", "opus"]
+bundle-ai-conversation = ["voip-3", "vapi", "app", "opus"]
+bundle-full-pure-rust = ["full"]
+bundle-full-native = ["full", "opus"]
+
+[[package.metadata.rvoip.feature-bundles]]
+feature = "bundle-sip-endpoint"
+name = "SIP endpoint"
+members = ["sip"]
+codecs = "G.711 mu-law and A-law"
+system_dependencies = "None"
+maturity = "SIP beta"
+description = "A provider-neutral SIP endpoint or server with the standard G.711 codecs."
+
+[[package.metadata.rvoip.feature-bundles]]
+feature = "bundle-carrier-sip"
+name = "Carrier SIP"
+members = ["sip", "sip-stir-shaken", "dtls-srtp", "g729", "amr"]
+codecs = "G.711, G.729, AMR-NB, and AMR-WB"
+system_dependencies = "None"
+maturity = "SIP beta plus preview add-ons"
+description = "A carrier-facing SIP service with DTLS-SRTP, caller-identity attestation, and the pure-Rust telephony codec set."
+
+[[package.metadata.rvoip.feature-bundles]]
+feature = "bundle-browser-gateway"
+name = "Browser gateway"
+members = ["app", "opus"]
+codecs = "G.711 and Opus"
+system_dependencies = "libopus"
+maturity = "Developer preview"
+description = "The high-level SIP, WebRTC, and UCTP gateway used to connect browser media to telephony."
+
+[[package.metadata.rvoip.feature-bundles]]
+feature = "bundle-ai-conversation"
+name = "AI conversation gateway"
+members = ["voip-3", "vapi", "app", "opus"]
+codecs = "G.711 and Opus"
+system_dependencies = "libopus"
+maturity = "Developer preview"
+description = "Cross-transport conversations, identity, AI harness, Vapi, and the high-level gateway."
+
+[[package.metadata.rvoip.feature-bundles]]
+feature = "bundle-full-pure-rust"
+name = "Full pure-Rust facade"
+members = ["full"]
+codecs = "G.711, G.729, AMR-NB, and AMR-WB"
+system_dependencies = "None"
+maturity = "Mixed: SIP beta and preview surfaces"
+description = "Every facade surface and pure-Rust codec without a native codec library."
+
+[[package.metadata.rvoip.feature-bundles]]
+feature = "bundle-full-native"
+name = "Full facade with native codecs"
+members = ["full", "opus"]
+codecs = "G.711, G.729, AMR-NB, AMR-WB, and Opus"
+system_dependencies = "libopus"
+maturity = "Mixed: SIP beta and preview surfaces"
+description = "Every facade surface and every mainline audio codec, including native Opus."
 
 [dev-dependencies]
 tokio              = { workspace = true }

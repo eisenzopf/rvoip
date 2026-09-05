@@ -71,7 +71,7 @@ async fn loopback_rtp_inbound_round_trip() {
             .expect("answerer receives offerer track after priming RTP");
     answerer_stream.attach_remote(remote);
 
-    let mut inbound = answerer_stream.frames_in();
+    let mut inbound = answerer_stream.try_frames_in().unwrap();
 
     for seq in 1..=5u16 {
         let payload = silent_opus_payload();

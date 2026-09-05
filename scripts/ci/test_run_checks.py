@@ -109,6 +109,32 @@ class RunChecksTests(unittest.TestCase):
         self.assertTrue(any("e2e_full_stack" in command for command in argv))
         self.assertTrue(any("voip-3" in command for command in argv))
 
+    def test_facade_bundle_gate_is_manifest_derived_and_disables_defaults(self) -> None:
+        commands = run_checks.specialty_commands(
+            "facade-feature-bundles", ROOT
+        )
+        self.assertEqual(
+            commands[0][0],
+            [
+                "python3",
+                "scripts/ci/check_facade_feature_bundles.py",
+                "--verify-resolved",
+            ],
+        )
+        with (ROOT / "crates/rvoip/Cargo.toml").open("rb") as handle:
+            manifest = tomllib.load(handle)
+        expected = [
+            row["feature"]
+            for row in manifest["package"]["metadata"]["rvoip"]["feature-bundles"]
+        ]
+        cargo_commands = [command[0] for command in commands[1:]]
+        self.assertEqual([command[-1] for command in cargo_commands], expected)
+        for command in cargo_commands:
+            self.assertEqual(command[0:2], ["cargo", "test"])
+            self.assertIn("--no-default-features", command)
+            self.assertIn("--locked", command)
+            self.assertIn("--lib", command)
+
     def test_amazon_connect_gate_compiles_the_optional_control_plane(self) -> None:
         commands = run_checks.specialty_commands(
             "amazon-connect-aws-control", Path("/workspace")
@@ -128,6 +154,11 @@ class RunChecksTests(unittest.TestCase):
         self.assertIn("rvoip-infra-common", commands[0][0])
         self.assertIn("otel", commands[0][0])
         self.assertIn("--all-targets", commands[0][0])
+
+    def test_browser_gate_requires_chromium_webtransport(self) -> None:
+        commands = run_checks.specialty_commands("browser-smoke", Path("/workspace"))
+        npm_test = next(command for command in commands if command[0] == ["npm", "test"])
+        self.assertEqual(npm_test[2]["RVOIP_WT_SMOKE"], "1")
 
     def test_codec_gate_runs_what_the_default_feature_shards_compile_out(self) -> None:
         # Every crate whose feature-gated codec tests the shards compile out.

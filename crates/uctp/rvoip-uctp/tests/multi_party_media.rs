@@ -409,8 +409,9 @@ async fn fanout_routes_media_from_publisher_to_subscriber_over_quic() {
     quic_spawn_datagram_reader(client_b.connection.clone(), subscriber_router, None);
 
     // --- Inject 5 frames at publisher; observe arrival at subscriber ---
-    let mut subscriber_in =
-        rvoip_core::stream::MediaStream::frames_in(subscriber_client_stream.as_ref());
+    let mut subscriber_in = subscriber_client_stream
+        .try_frames_in()
+        .expect("subscriber media receiver");
 
     for i in 0u8..5 {
         let frame = MediaFrame {
@@ -592,8 +593,9 @@ async fn fanout_with_no_subscription_does_not_leak_frames() {
 
     let publisher_out =
         rvoip_core::stream::MediaStream::frames_out(publisher_client_stream.as_ref());
-    let mut subscriber_in =
-        rvoip_core::stream::MediaStream::frames_in(subscriber_client_stream.as_ref());
+    let mut subscriber_in = subscriber_client_stream
+        .try_frames_in()
+        .expect("subscriber media receiver");
 
     for i in 0u8..5 {
         let frame = MediaFrame {

@@ -28,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let alice_port = env_port("ALICE_PORT", 5080);
     let bob_port = env_port("BOB_PORT", 5081);
 
-    let mut alice = StreamPeer::with_config(Config::local("alice", alice_port)).await?;
+    let alice = StreamPeer::with_config(Config::local("alice", alice_port)).await?;
 
     println!("[ALICE] Calling Bob...");
     let call_id = alice

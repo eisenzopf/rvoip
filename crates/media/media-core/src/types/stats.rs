@@ -75,8 +75,23 @@ impl Default for QualityMetrics {
             packet_loss_percent: 0.0,
             jitter_ms: 0.0,
             rtt_ms: None,
-            mos_score: Some(4.5), // Default to excellent
-            network_quality: 100,
+            // Unknown is not excellent. A score exists only after packets
+            // have produced measurements.
+            mos_score: None,
+            network_quality: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_quality_does_not_claim_an_excellent_mos() {
+        let metrics = QualityMetrics::default();
+        assert_eq!(metrics.mos_score, None);
+        assert_eq!(metrics.rtt_ms, None);
+        assert_eq!(metrics.network_quality, 0);
     }
 }

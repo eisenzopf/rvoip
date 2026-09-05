@@ -22,10 +22,11 @@ use futures::FutureExt;
 use rvoip_core::adapter::{
     legacy_normalized_event_receiver, AdapterEvent, AdapterKind, AdapterLifecycleCapabilities,
     AdapterLifecycleSink, AdapterLifecycleSinkSlot, ConnectionAdapter, ConnectionHandle, EndReason,
-    ExternalConnectionReference, InboundConnectionContext, InboundContextError, InboundRoutingHint,
-    InboundSignalingMetadata, OrchestratorAdapterEvent, OriginateRequest, OutboundActivation,
-    RejectReason, SignatureHeaders, TerminalDelivery, TransferAttemptId, TransferStatus,
-    TransferTarget,
+    ExternalConnectionReference, InboundAssertedIdentity, InboundConnectionContext,
+    InboundContextError, InboundRoutingHint, InboundSignalingMetadata, OrchestratorAdapterEvent,
+    OriginateRequest, OutboundActivation, RejectReason, SignatureHeaders, TerminalDelivery,
+    TransferAttemptId, TransferStatus, TransferTarget, TrustedSignalingMetadata,
+    TrustedSignalingProvenance,
 };
 use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
 use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
@@ -734,6 +735,7 @@ pub enum SipInboundContextPolicyError {
 #[derive(Clone, Default)]
 pub struct SipInboundContextPolicy {
     allowed_headers: Arc<HashSet<String>>,
+    trusted_private_headers: Arc<HashSet<String>>,
 }
 
 impl SipInboundContextPolicy {
@@ -768,12 +770,52 @@ impl SipInboundContextPolicy {
         }
         Ok(Self {
             allowed_headers: Arc::new(allowed),
+            trusted_private_headers: Arc::new(HashSet::new()),
         })
+    }
+
+    /// Add private SIP headers that may be surfaced only for a peer admitted
+    /// by trusted-trunk policy. The default is empty. Identity headers remain
+    /// typed fields and cannot be admitted through this raw-header path.
+    pub fn with_trusted_private_headers<I, S>(
+        mut self,
+        headers: I,
+    ) -> std::result::Result<Self, SipInboundContextPolicyError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut allowed = HashSet::new();
+        for supplied in headers {
+            let supplied = supplied.as_ref();
+            if supplied.is_empty()
+                || supplied.len() > rvoip_core_traits::adapter::MAX_INBOUND_METADATA_NAME_BYTES
+                || !supplied.bytes().all(is_sip_metadata_name_byte)
+            {
+                return Err(SipInboundContextPolicyError::InvalidHeaderName);
+            }
+            let header = HeaderName::from_str(supplied)
+                .map_err(|_| SipInboundContextPolicyError::InvalidHeaderName)?;
+            if !sip_inbound_header_is_private_extension(&header) {
+                return Err(SipInboundContextPolicyError::ForbiddenHeaderName);
+            }
+            let normalized = header.as_str().to_ascii_lowercase();
+            if allowed.insert(normalized) && allowed.len() > MAX_SIP_INBOUND_ALLOWLIST_HEADERS {
+                return Err(SipInboundContextPolicyError::TooManyHeaders);
+            }
+        }
+        self.trusted_private_headers = Arc::new(allowed);
+        Ok(self)
     }
 
     /// Number of distinct case-insensitive header names in the allowlist.
     pub fn allowed_header_count(&self) -> usize {
         self.allowed_headers.len()
+    }
+
+    /// Number of private header names accepted from trusted trunks.
+    pub fn trusted_private_header_count(&self) -> usize {
+        self.trusted_private_headers.len()
     }
 
     fn captures(&self, header: &HeaderName) -> bool {
@@ -788,34 +830,106 @@ impl SipInboundContextPolicy {
         if observation.principal.is_none() {
             return Ok(None);
         }
-        let (routing_hint, metadata) = if let Some(request) = observation.request.as_ref() {
-            let routing_hint = request
-                .uri()
-                .username()
-                .map(|username| InboundRoutingHint::new(username.to_owned()))
-                .transpose()?;
-            let metadata = request
-                .headers
-                .iter()
-                .filter_map(|header| {
-                    let name = header.name();
-                    self.captures(&name).then(|| {
-                        sip_header_value(header).map(|value| (name.as_str().to_owned(), value))
+        let (routing_hint, metadata, asserted_identity, trusted_signaling) =
+            if let Some(request) = observation.request.as_ref() {
+                let routing_hint = request
+                    .uri()
+                    .username()
+                    .map(|username| InboundRoutingHint::new(username.to_owned()))
+                    .transpose()?;
+                let metadata = request
+                    .headers
+                    .iter()
+                    .filter_map(|header| {
+                        let name = header.name();
+                        self.captures(&name).then(|| {
+                            sip_header_value(header).map(|value| (name.as_str().to_owned(), value))
+                        })
                     })
-                })
-                .collect::<Option<Vec<_>>>()
-                .ok_or(InboundContextError::InvalidMetadataValue)?;
-            (routing_hint, InboundSignalingMetadata::new(metadata)?)
-        } else {
-            // Authentication remains usable even when a legacy compatibility
-            // event did not retain parseable raw INVITE bytes. The context is
-            // still principal-bound; it simply carries no routing metadata.
-            (None, InboundSignalingMetadata::default())
-        };
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or(InboundContextError::InvalidMetadataValue)?;
+
+                // P-Asserted-Identity is the carrier's own statement of who is
+                // calling, and unlike From it is not caller-supplied. RFC 3325
+                // makes it meaningful only inside a trust domain, so it is
+                // surfaced only when this peer was admitted by trusted-trunk
+                // policy — from anyone else it is an unverified header that
+                // would be worse than the request URI, because it looks
+                // authoritative. It is a typed, provenance-marked field rather
+                // than generic metadata.
+                let trusted_peer = observation
+                    .principal
+                    .as_ref()
+                    .and_then(|principal| principal.issuer.as_deref())
+                    == Some(TRUSTED_TRUNK_ISSUER);
+                let asserted_identity = if trusted_peer {
+                    request
+                        .headers
+                        .iter()
+                        .find(|header| {
+                            header
+                                .name()
+                                .as_str()
+                                .eq_ignore_ascii_case("p-asserted-identity")
+                        })
+                        .and_then(sip_header_value)
+                        .map(|asserted| {
+                            InboundAssertedIdentity::new(
+                                asserted,
+                                TrustedSignalingProvenance::SipTrustedTrunk,
+                            )
+                        })
+                        .transpose()?
+                } else {
+                    None
+                };
+                let trusted_signaling = if trusted_peer {
+                    let fields = request
+                        .headers
+                        .iter()
+                        .filter_map(|header| {
+                            let name = header.name();
+                            self.trusted_private_headers
+                                .contains(&name.as_str().to_ascii_lowercase())
+                                .then(|| {
+                                    sip_header_value(header)
+                                        .map(|value| (name.as_str().to_owned(), value))
+                                })
+                        })
+                        .collect::<Option<Vec<_>>>()
+                        .ok_or(InboundContextError::InvalidMetadataValue)?;
+                    (!fields.is_empty())
+                        .then(|| {
+                            InboundSignalingMetadata::new(fields).map(|fields| {
+                                TrustedSignalingMetadata::new(
+                                    TrustedSignalingProvenance::SipTrustedTrunk,
+                                    fields,
+                                )
+                            })
+                        })
+                        .transpose()?
+                } else {
+                    None
+                };
+
+                (
+                    routing_hint,
+                    InboundSignalingMetadata::new(metadata)?,
+                    asserted_identity,
+                    trusted_signaling,
+                )
+            } else {
+                // Authentication remains usable even when a legacy compatibility
+                // event did not retain parseable raw INVITE bytes. The context is
+                // still principal-bound; it simply carries no routing metadata.
+                (None, InboundSignalingMetadata::default(), None, None)
+            };
 
         Ok(Some(PendingSipInboundContext {
             routing_hint,
             metadata,
+            asserted_identity,
+            trusted_signaling,
         }))
     }
 }
@@ -825,6 +939,10 @@ impl fmt::Debug for SipInboundContextPolicy {
         formatter
             .debug_struct("SipInboundContextPolicy")
             .field("allowed_header_count", &self.allowed_headers.len())
+            .field(
+                "trusted_private_header_count",
+                &self.trusted_private_headers.len(),
+            )
             .finish()
     }
 }
@@ -861,6 +979,13 @@ fn sip_inbound_header_is_application_extension(header: &HeaderName) -> bool {
         && normalized != "x-rvoip"
         && !normalized.starts_with("x-bridgefu-")
         && !normalized.starts_with("x-rvoip-")
+}
+
+fn sip_inbound_header_is_private_extension(header: &HeaderName) -> bool {
+    let normalized = header.as_str().to_ascii_lowercase();
+    normalized.starts_with("p-")
+        && normalized != "p-asserted-identity"
+        && normalized != "p-preferred-identity"
 }
 
 fn sip_header_value(header: &TypedHeader) -> Option<String> {
@@ -918,9 +1043,16 @@ fn failed_inbound_termination(
     }
 }
 
+/// Issuer stamped on a principal admitted because its source address fell
+/// inside a configured trusted CIDR. Kept in sync with the app builder's
+/// `trusted_trunk_principal`.
+pub(crate) const TRUSTED_TRUNK_ISSUER: &str = "rvoip-app-trusted-trunk";
+
 struct PendingSipInboundContext {
     routing_hint: Option<InboundRoutingHint>,
     metadata: InboundSignalingMetadata,
+    asserted_identity: Option<InboundAssertedIdentity>,
+    trusted_signaling: Option<TrustedSignalingMetadata>,
 }
 
 struct PendingSipInboundObservation {
@@ -1049,7 +1181,13 @@ impl SipInboundContextStore {
                     principal,
                     pending.routing_hint,
                     pending.metadata,
-                ) {
+                )
+                .map(|context| {
+                    context.with_trusted_signaling(
+                        pending.asserted_identity,
+                        pending.trusted_signaling,
+                    )
+                }) {
                     Ok(context) => SipInboundContextState::Available(context),
                     Err(error) => {
                         self.by_connection
@@ -2656,7 +2794,7 @@ impl SipAdapter {
                     },
                 );
             }
-            ApiEvent::CallEnded { call_id, reason } => {
+            ApiEvent::CallEnded { call_id, .. } => {
                 let Some(epoch) = self.existing_mapped_terminal_epoch(&call_id) else {
                     return;
                 };
@@ -2664,7 +2802,12 @@ impl SipAdapter {
                     &epoch,
                     AdapterEvent::Ended {
                         connection_id: epoch.connection_id.clone(),
-                        reason: EndReason::Failed { detail: reason },
+                        // `CallEnded` is the session layer's successful
+                        // terminal event (including a peer BYE). Signaling
+                        // failures arrive separately as `CallFailed`; treating
+                        // a normal remote hangup as failed makes every
+                        // answered outbound call settle incorrectly.
+                        reason: EndReason::Normal,
                     },
                     "call-ended",
                 )
@@ -2879,26 +3022,35 @@ impl SipAdapter {
                 call_id,
                 packet_loss_percent,
                 jitter_ms,
+                mos,
             } => {
                 // P12.8 — surface per-Connection media quality (RTCP
                 // RR / XR, distilled by media-core) into the
                 // orchestrator's `QualityAggregator` via
-                // `AdapterEvent::Quality`. MOS estimation lives in
-                // media-core and is not propagated through the
-                // current ApiEvent shape; leave as `None` until the
-                // ApiEvent grows a `mos` field.
+                // `AdapterEvent::Quality`. MOS now rides along: it is
+                // media-core's own estimate, which is what makes a
+                // quality report actionable rather than two raw numbers
+                // an operator has to interpret.
                 let Some(epoch) = self.existing_mapped_epoch(&call_id) else {
                     return;
                 };
+                let snapshot = rvoip_core::stream::QualitySnapshot {
+                    jitter_ms: jitter_ms as f32,
+                    packet_loss_pct: packet_loss_percent as f32,
+                    mos,
+                };
+                // Retain it on the stream as well as publishing it, so a
+                // caller polling `quality_snapshot` sees the same measurement
+                // the event carried rather than a default that reads as
+                // flawless.
+                if let Some(stream) = self.streams_cache.get(&epoch.connection_id) {
+                    stream.record_quality(snapshot.clone());
+                }
                 self.try_send_for_epoch(
                     &epoch,
                     AdapterEvent::Quality {
                         connection_id: epoch.connection_id.clone(),
-                        snapshot: rvoip_core::stream::QualitySnapshot {
-                            jitter_ms: jitter_ms as f32,
-                            packet_loss_pct: packet_loss_percent as f32,
-                            mos: None,
-                        },
+                        snapshot,
                     },
                 );
             }
@@ -3395,6 +3547,40 @@ async fn activate_outbound_route(
     }
     if let Some(outbound_proxy_uri) = route.context.outbound_proxy_uri() {
         builder = builder.with_outbound_proxy(outbound_proxy_uri.to_owned());
+    }
+    if !route.context.registered_flow_routes().is_empty() {
+        let exact_routes = route
+            .context
+            .registered_flow_routes()
+            .iter()
+            .map(|registered| {
+                let transport = match registered.transport() {
+                    rvoip_sip_registrar::Transport::TCP => {
+                        rvoip_sip_transport::transport::TransportType::Tcp
+                    }
+                    rvoip_sip_registrar::Transport::TLS => {
+                        rvoip_sip_transport::transport::TransportType::Tls
+                    }
+                    rvoip_sip_registrar::Transport::WS => {
+                        rvoip_sip_transport::transport::TransportType::Ws
+                    }
+                    rvoip_sip_registrar::Transport::WSS => {
+                        rvoip_sip_transport::transport::TransportType::Wss
+                    }
+                    _ => return Err(SipActivationFailure::InvalidPlan),
+                };
+                let flow_id = rvoip_sip_transport::TransportFlowId::from_process_local_value(
+                    registered.process_local_flow_id(),
+                )
+                .ok_or(SipActivationFailure::InvalidPlan)?;
+                Ok(
+                    rvoip_sip_transport::TransportRoute::new(registered.remote_addr())
+                        .with_transport_type(transport)
+                        .with_flow_id(flow_id),
+                )
+            })
+            .collect::<Result<Vec<_>, SipActivationFailure>>()?;
+        builder = builder.with_registered_flow_routes(exact_routes);
     }
     let headers = route
         .context
@@ -4176,40 +4362,124 @@ impl ConnectionAdapter for SipAdapter {
         conn: ConnectionId,
         capabilities: CapabilityDescriptor,
     ) -> CoreResult<NegotiatedCodecs> {
-        // Gap plan §4.2C v1 punch list — fire a re-INVITE via the
-        // existing `UnifiedCoordinator::reinvite(...).send()` builder.
-        // The state machine handles the 200 OK SDP answer through
-        // its `NegotiateSDPAsUAC` action; downstream session state
-        // updates automatically.
-        //
-        // **Codec preference caveat.** This impl does NOT yet inject
-        // the orchestrator-provided `capabilities.audio_codecs` into
-        // the re-INVITE SDP — that would need a per-session
-        // `set_offered_codecs` coordinator method that today only
-        // exists at MediaAdapter construction time. The re-INVITE
-        // still uses the SIP layer's configured `offered_codecs`.
-        // For the cross-bridge use case (which is the v1 driver) this
-        // is acceptable: the peer's answer SDP determines what the
-        // bridged-side codec becomes, and the orchestrator's
-        // transcoder hot-swap reads the post-renegotiation codec
-        // off the negotiated session state.
         if capabilities.audio_codecs.is_empty() {
             return Err(RvoipError::UnsupportedCodec(
                 "SipAdapter::renegotiate_media: empty audio_codecs in new capabilities".into(),
             ));
         }
-        let session_id = self.lookup_session_for_non_terminal_control(&conn)?;
-        self.coordinator
-            .reinvite(&session_id)
-            .send()
+        let mut offered_codecs = Vec::with_capacity(capabilities.audio_codecs.len() + 1);
+        for codec in &capabilities.audio_codecs {
+            // A new SIP offer owns its dynamic payload assignments. Prefer
+            // rvoip's canonical assignment for named codecs; retain an exact
+            // negotiated PT only for codecs (such as AMR variants) that have
+            // no single name-to-PT mapping.
+            let payload_type = rvoip_core::bridge::codec_to_pt(&codec.name)
+                .or(codec.payload_type)
+                .ok_or_else(|| {
+                    RvoipError::UnsupportedCodec(
+                        "SipAdapter::renegotiate_media: codec has no SIP payload identity".into(),
+                    )
+                })?;
+            if !offered_codecs.contains(&payload_type) {
+                offered_codecs.push(payload_type);
+            }
+        }
+        // Keep RFC 4733 available during an audio-only codec change. It is a
+        // media event format, not an alternative primary audio codec.
+        if !offered_codecs.contains(&101) {
+            offered_codecs.push(101);
+        }
+        let epoch = {
+            let _mapping = self
+                .mapping_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.route_epoch_for_connection_locked(&conn)
+        }
+        .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
+        let handle = epoch
+            .admitted_handle()
+            .cloned()
+            .ok_or(RvoipError::InvalidState(
+                "SIP renegotiation requires an admitted route generation",
+            ))?;
+        let session_id = epoch.session_id.clone();
+        let mut completions = self.coordinator.subscribe_renegotiation_completions();
+        let sdp = self
+            .coordinator
+            .generate_reinvite_sdp_for_codecs_exact(&handle, &offered_codecs)
             .await
             .map_err(Self::map_session_err)?;
-        // Optimistic return — the requested top preference. The state
-        // machine's NegotiateSDPAsUAC asynchronously updates
-        // `session.negotiated_config` when the 200 OK arrives; the
-        // orchestrator-level hot-swap then reads the live codec via
-        // `adapter.streams(...)` (see `Orchestrator::renegotiate_media`).
-        let chosen = capabilities.audio_codecs.first().cloned().unwrap();
+        crate::api::send::ReInviteBuilder::new_captured(
+            Arc::clone(&self.coordinator),
+            session_id.clone(),
+            Some(handle.clone()),
+        )
+        .with_sdp(sdp)
+        .send()
+        .await
+        .map_err(Self::map_session_err)?;
+
+        let deadline = tokio::time::sleep(self.coordinator.reinvite_completion_timeout_duration());
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                _ = &mut deadline => {
+                    return Err(RvoipError::AdmissionRejected(
+                        "SIP re-INVITE timed out before a committed media result",
+                    ));
+                }
+                result = completions.recv() => {
+                    let completion = result.map_err(|_| RvoipError::AdmissionRejected(
+                        "SIP re-INVITE completion observation was unavailable",
+                    ))?;
+                    if completion.handle != handle || completion.method != "INVITE" {
+                        continue;
+                    }
+                    if completion.outcome
+                        == crate::api::lifecycle::RenegotiationCompletionOutcome::Failed
+                    {
+                        return Err(RvoipError::AdmissionRejected(
+                            "SIP re-INVITE was not committed by the peer",
+                        ));
+                    }
+                    break;
+                }
+            }
+        }
+
+        let still_current = {
+            let _mapping = self
+                .mapping_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.epoch_is_current_locked(&epoch)
+        };
+        if !still_current {
+            return Err(RvoipError::ConnectionNotFound(conn));
+        }
+        let (config, payload_type) = self
+            .coordinator
+            .negotiated_media_config_exact(&handle)
+            .await
+            .map_err(Self::map_session_err)?
+            .ok_or(RvoipError::InvalidState(
+                "SIP re-INVITE committed without negotiated audio media",
+            ))?;
+        let stream = self
+            .streams_cache
+            .get(&conn)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or(RvoipError::InvalidState(
+                "SIP re-INVITE committed after its media stream disappeared",
+            ))?;
+        let chosen = stream
+            .apply_negotiated_media(&config, payload_type)
+            .map_err(|_| {
+                RvoipError::UnsupportedCodec(
+                    "SIP re-INVITE selected a codec unavailable to the media graph".into(),
+                )
+            })?;
         Ok(NegotiatedCodecs {
             audio: Some(chosen),
             video: None,
@@ -4364,6 +4634,117 @@ Signal=5\r\nDuration=160\r\n";
             rvoip_sip_core::Message::Request(request) => Arc::new(request),
             _ => panic!("expected request"),
         }
+    }
+
+    /// An INVITE carrying a carrier-asserted identity.
+    fn request_with_private_identity(route: &str, asserted: &str) -> Arc<rvoip_sip_core::Request> {
+        let wire = format!(
+            "INVITE sip:{route}@example.test SIP/2.0\r\n\
+             Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-test\r\n\
+             From: <sip:spoofed@example.test>;tag=from-tag\r\n\
+             To: <sip:bridge@example.test>\r\n\
+             Call-ID: pai-context@example.test\r\n\
+             CSeq: 1 INVITE\r\n\
+             Max-Forwards: 70\r\n\
+             P-Asserted-Identity: {asserted}\r\n\
+             P-Charging-Vector: icid-value=carrier-secret;orig-ioi=carrier.example\r\n\
+             P-Unlisted-Private: must-not-escape\r\n\
+             Content-Length: 0\r\n\r\n"
+        );
+        match rvoip_sip_core::parse_message(wire.as_bytes()).expect("parse INVITE") {
+            rvoip_sip_core::Message::Request(request) => Arc::new(request),
+            _ => panic!("expected request"),
+        }
+    }
+
+    fn principal_from(issuer: &str) -> AuthenticatedPrincipal {
+        AuthenticatedPrincipal {
+            subject: "trunk-a".into(),
+            tenant: Some("tenant".into()),
+            scopes: vec!["call:attach".into()],
+            issuer: Some(issuer.to_owned()),
+            expires_at: None,
+            method: rvoip_core_traits::identity::AuthenticationMethod::ApiKey,
+            assurance: rvoip_core_traits::identity::IdentityAssurance::Anonymous,
+        }
+    }
+
+    /// A carrier's assertion of who is calling is only meaningful inside a
+    /// trust domain (RFC 3325). From an untrusted peer it is an unverified
+    /// header that *looks* authoritative, which is worse than not having it.
+    #[test]
+    fn asserted_identity_and_allowlisted_private_headers_require_a_trusted_trunk() {
+        let policy = SipInboundContextPolicy::new(Vec::<String>::new())
+            .expect("policy")
+            .with_trusted_private_headers(["P-Charging-Vector"])
+            .expect("trusted private policy");
+        let asserted = "<sip:+14085551212@carrier.example>";
+
+        let trusted = policy
+            .capture(&InboundInviteObservation {
+                session_id: SessionId::new(),
+                request: Some(request_with_private_identity("bridge", asserted)),
+                principal: Some(principal_from(TRUSTED_TRUNK_ISSUER)),
+            })
+            .expect("capture")
+            .expect("context");
+        // The parser re-serializes the URI canonically, percent-encoding
+        // `+` in the userinfo per RFC 3261. Assert on the identity it
+        // carries rather than on one particular spelling of it.
+        let identity = trusted
+            .asserted_identity
+            .as_ref()
+            .expect("a trusted trunk's assertion is surfaced");
+        assert_eq!(
+            identity.provenance(),
+            TrustedSignalingProvenance::SipTrustedTrunk
+        );
+        let surfaced = identity.expose_value();
+        assert!(
+            surfaced.contains("14085551212") && surfaced.contains("carrier.example"),
+            "trusted asserted identity did not match the expected test fixture"
+        );
+        assert!(
+            trusted
+                .metadata
+                .iter()
+                .all(|(name, _)| name != "rvoip.asserted-identity"),
+            "asserted identity must not masquerade as generic metadata"
+        );
+        let trusted_headers = trusted
+            .trusted_signaling
+            .as_ref()
+            .expect("allowlisted trusted header");
+        assert_eq!(
+            trusted_headers.provenance(),
+            TrustedSignalingProvenance::SipTrustedTrunk
+        );
+        assert_eq!(
+            trusted_headers.fields().values("p-charging-vector").count(),
+            1
+        );
+        assert_eq!(
+            trusted_headers
+                .fields()
+                .values("p-unlisted-private")
+                .count(),
+            0,
+            "unlisted private headers stay hidden"
+        );
+
+        let untrusted = policy
+            .capture(&InboundInviteObservation {
+                session_id: SessionId::new(),
+                request: Some(request_with_private_identity("bridge", asserted)),
+                principal: Some(principal_from("some-other-issuer")),
+            })
+            .expect("capture")
+            .expect("context");
+        assert_eq!(
+            untrusted.asserted_identity, None,
+            "an unverified peer's assertion must not be presented as identity"
+        );
+        assert!(untrusted.trusted_signaling.is_none());
     }
 
     fn observation(
@@ -4532,7 +4913,7 @@ Signal=5\r\nDuration=160\r\n";
         assert!(context.initial_headers().is_empty());
         assert_eq!(
             format!("{context:?}"),
-            "SipOriginateContext { has_profile_revision: false, has_from_uri: false, has_outbound_proxy: false, has_auth: false, initial_header_count: 0 }"
+            "SipOriginateContext { has_profile_revision: false, has_from_uri: false, has_outbound_proxy: false, has_auth: false, initial_header_count: 0, registered_flow_route_count: 0 }"
         );
     }
 
@@ -6676,6 +7057,22 @@ Signal=5\r\nDuration=160\r\n";
             SipInboundContextPolicy::new(["bad header"]),
             Err(SipInboundContextPolicyError::InvalidHeaderName)
         ));
+        let base = SipInboundContextPolicy::default();
+        for forbidden in [
+            "P-Asserted-Identity",
+            "P-Preferred-Identity",
+            "Via",
+            "X-Private",
+        ] {
+            assert!(matches!(
+                base.clone().with_trusted_private_headers([forbidden]),
+                Err(SipInboundContextPolicyError::ForbiddenHeaderName)
+            ));
+        }
+        let trusted = base
+            .with_trusted_private_headers(["P-Charging-Vector"])
+            .expect("explicit private-header allowlist");
+        assert_eq!(trusted.trusted_private_header_count(), 1);
     }
 
     #[test]
@@ -7511,7 +7908,7 @@ Signal=5\r\nDuration=160\r\n";
             events.recv().await,
             Some(OrchestratorAdapterEvent::Public(AdapterEvent::Ended {
                 connection_id: observed,
-                ..
+                reason: EndReason::Normal,
             })) if observed == connection_id
         ));
 

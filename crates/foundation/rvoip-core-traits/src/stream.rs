@@ -73,6 +73,107 @@ pub enum StreamKind {
     Data,
 }
 
+/// Non-destructive readiness level required by [`StreamSelector`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum MediaReadiness {
+    /// The adapter has registered a matching stream identity.
+    #[default]
+    Registered,
+    /// The matching stream's negotiated codec and inbound producer are ready.
+    SourceReady,
+    /// Source readiness is true and the stream accepts outbound frames.
+    Bidirectional,
+}
+
+/// Transport-neutral criteria for awaiting one media stream.
+#[derive(Clone, Eq, PartialEq)]
+pub struct StreamSelector {
+    pub kind: StreamKind,
+    pub codec_name: Option<String>,
+    pub direction: Option<Direction>,
+    pub readiness: MediaReadiness,
+}
+
+impl StreamSelector {
+    pub fn new(kind: StreamKind) -> Self {
+        Self {
+            kind,
+            codec_name: None,
+            direction: None,
+            readiness: MediaReadiness::Registered,
+        }
+    }
+
+    pub fn with_codec(mut self, codec_name: impl Into<String>) -> Self {
+        self.codec_name = Some(codec_name.into());
+        self
+    }
+
+    pub fn with_direction(mut self, direction: Direction) -> Self {
+        self.direction = Some(direction);
+        self
+    }
+
+    pub fn with_readiness(mut self, readiness: MediaReadiness) -> Self {
+        self.readiness = readiness;
+        self
+    }
+
+    pub fn matches(&self, stream: &dyn MediaStream) -> bool {
+        if stream.kind() != self.kind
+            || self
+                .codec_name
+                .as_ref()
+                .is_some_and(|codec| !stream.codec().name.eq_ignore_ascii_case(codec))
+            || self
+                .direction
+                .is_some_and(|direction| stream.direction() != direction)
+        {
+            return false;
+        }
+        match self.readiness {
+            MediaReadiness::Registered => true,
+            MediaReadiness::SourceReady => stream.source_ready(),
+            MediaReadiness::Bidirectional => {
+                stream.source_ready() && stream.try_frames_out().is_ok()
+            }
+        }
+    }
+}
+
+impl fmt::Debug for StreamSelector {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StreamSelector")
+            .field("kind", &self.kind)
+            .field("codec_present", &self.codec_name.is_some())
+            .field("direction", &self.direction)
+            .field("readiness", &self.readiness)
+            .finish()
+    }
+}
+
+/// Distinct outcomes from an awaitable stream-registration request.
+#[derive(Clone, Copy, Debug, Eq, thiserror::Error, PartialEq)]
+#[non_exhaustive]
+pub enum StreamWaitError {
+    #[error("connection was not registered when stream waiting began")]
+    ConnectionNotFound,
+    #[error("the captured connection lifecycle terminated before media was ready")]
+    ConnectionTerminated,
+    #[error("the connection lifecycle generation was replaced")]
+    GenerationReplaced,
+    #[error("the owning adapter route is unavailable")]
+    AdapterUnavailable,
+    #[error("stream waiting was cancelled")]
+    Cancelled,
+    #[error("stream readiness deadline elapsed")]
+    DeadlineExceeded,
+    #[error("the owning adapter failed while querying streams")]
+    AdapterFailure,
+}
+
 #[derive(Clone)]
 pub struct MediaFrame {
     pub stream_id: StreamId,
@@ -200,6 +301,10 @@ pub trait MediaStream: Send + Sync {
     /// it has already been acquired. New orchestration code should use
     /// [`Self::try_frames_in`] so duplicate acquisition is reported rather
     /// than silently behaving like end-of-stream.
+    #[deprecated(
+        since = "0.3.9",
+        note = "use try_frames_in or reserve_frames_in so duplicate ownership is observable"
+    )]
     fn frames_in(&self) -> mpsc::Receiver<MediaFrame>;
 
     /// Fallibly acquire the stream's single-consumer inbound receiver.
@@ -209,6 +314,7 @@ pub trait MediaStream: Send + Sync {
     /// override this method and return [`crate::error::RvoipError::InvalidState`]
     /// when ownership has already been transferred.
     fn try_frames_in(&self) -> Result<mpsc::Receiver<MediaFrame>> {
+        #[allow(deprecated)]
         Ok(self.frames_in())
     }
 
@@ -243,6 +349,20 @@ pub trait MediaStream: Send + Sync {
     }
 
     fn quality_snapshot(&self) -> QualitySnapshot;
+
+    /// Whether [`Self::quality_snapshot`] reflects an actual measurement.
+    ///
+    /// `QualitySnapshot::default()` is all zeros, which reads as flawless
+    /// rather than as unknown — the type has no way to say "no data". A
+    /// transport that has not yet received a quality report should return
+    /// `false` here so aggregators skip it instead of averaging in a
+    /// perfect score for a call nobody has measured.
+    ///
+    /// Defaults to `true` for source compatibility: an implementation that
+    /// always returns a real snapshot needs no change.
+    fn has_quality_measurement(&self) -> bool {
+        true
+    }
 
     async fn close(self: Arc<Self>) -> Result<()>;
 }

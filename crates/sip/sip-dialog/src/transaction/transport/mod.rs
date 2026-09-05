@@ -1424,8 +1424,11 @@ mod tests {
     #[tokio::test]
     async fn test_transport_manager_with_defaults() {
         let (mut manager, _rx) = TransportManager::with_defaults().await.unwrap();
+        // Keep the default transport selection while avoiding collisions with
+        // local SIP services and parallel tests that may own ports 5060/8080.
+        manager.config.bind_addresses = vec!["127.0.0.1:0".parse().unwrap()];
 
-        // Initialize the manager - will fail without UDP binding config
+        // Initialize every transport enabled by the default profile.
         let result = manager.initialize().await;
         assert!(
             result.is_ok(),

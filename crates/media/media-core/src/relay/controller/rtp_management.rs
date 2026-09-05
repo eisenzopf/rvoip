@@ -132,6 +132,19 @@ impl MediaSessionController {
             .map(|wrapper| wrapper.session.clone())
     }
 
+    /// The transport beneath a dialog's RTP session, for an ICE pump:
+    /// STUN datagrams arrive on its event bus and checks leave through
+    /// [`RtpTransport::send_stun_bytes`]. Snapshotted under a brief lock so
+    /// the pump never holds the session mutex.
+    pub async fn ice_transport(
+        &self,
+        dialog_id: &DialogId,
+    ) -> Option<std::sync::Arc<dyn rvoip_rtp_core::transport::RtpTransport>> {
+        let session = self.get_rtp_session(dialog_id).await?;
+        let transport = session.lock().await.transport();
+        Some(transport)
+    }
+
     /// Send RTP packet for a dialog.
     ///
     /// Snapshots the session's lock-free `RtpSendHandle` under a brief

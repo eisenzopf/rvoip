@@ -38,7 +38,7 @@
 //! ```
 
 use rvoip_sip_core::{HeaderName, Method, Request, Response, StatusCode, TypedHeader, Uri};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::diagnostics::safe_log::method_class;
 use crate::dialog::{dialog_utils::extract_uri_from_contact, DialogId, DialogState};
@@ -335,19 +335,14 @@ impl DialogManager {
             }
             add_contact_header(&mut response, contact_uri)?;
         } else if is_initial_invite && (200..300).contains(&status_code) {
-            let secure_contact_required = self.get_dialog(dialog_id)?.secure_transport_required
-                || initial_invite_response_requires_sips(&original_request);
-            let contact_uri = self.local_contact_uri().unwrap_or_else(|| {
-                if secure_contact_required {
-                    let local = self.local_address_for_transport(
-                        rvoip_sip_transport::transport::TransportType::Tls,
-                    );
-                    format!("sips:server@{local}")
-                } else {
-                    let local = self.local_address_for_uri(original_request.uri());
-                    format!("sip:server@{local}")
-                }
-            });
+            let contact_uri = match self.local_contact_uri() {
+                Some(contact_uri) => contact_uri,
+                None => self.response_fallback_contact_uri(
+                    dialog_id,
+                    transaction_id,
+                    &original_request,
+                )?,
+            };
             add_contact_header(&mut response, &contact_uri)?;
         }
 
@@ -377,6 +372,90 @@ impl DialogManager {
         }
         self.post_send_response(dialog_id, &response).await?;
         Ok(())
+    }
+
+    /// Build the stack-owned Contact for a dialog-forming response from the
+    /// exact ingress transport retained by transaction-core. A response must
+    /// advertise a target that resolves back onto the same transport class;
+    /// a bare `sip:` Contact would otherwise send TCP and WebSocket dialogs
+    /// back to UDP on their next in-dialog request.
+    fn response_fallback_contact_uri(
+        &self,
+        dialog_id: &DialogId,
+        transaction_id: &TransactionKey,
+        original_request: &Request,
+    ) -> DialogResult<String> {
+        use rvoip_sip_transport::transport::TransportType;
+
+        let ingress_transport = self
+            .transaction_manager()
+            .server_transaction_response_route(transaction_id)
+            .and_then(|route| route.transport_type)
+            .unwrap_or_else(|| {
+                self.transaction_manager()
+                    .get_best_transport_for_uri(original_request.uri())
+            });
+        let contact_only_requests_secure =
+            initial_invite_contact_requires_sips_without_record_route(original_request);
+        let dialog_requires_secure = self.get_dialog(dialog_id)?.secure_transport_required
+            || (initial_invite_response_requires_sips(original_request)
+                && !contact_only_requests_secure);
+
+        let contact_transport = if dialog_requires_secure {
+            match ingress_transport {
+                TransportType::Tls | TransportType::Wss => ingress_transport,
+                _ if self
+                    .transaction_manager()
+                    .is_transport_available(TransportType::Tls) =>
+                {
+                    TransportType::Tls
+                }
+                _ if self
+                    .transaction_manager()
+                    .is_transport_available(TransportType::Wss) =>
+                {
+                    TransportType::Wss
+                }
+                _ => {
+                    return Err(DialogError::routing_error(
+                        "secure dialog response has no configured secure Contact transport",
+                    ));
+                }
+            }
+        } else if contact_only_requests_secure
+            && !matches!(ingress_transport, TransportType::Tls | TransportType::Wss)
+        {
+            // A Contact supplied by an untrusted plain-transport peer cannot
+            // manufacture a local secure listener. Preserve the real ingress
+            // transport and make the downgrade observable without logging the
+            // peer URI.
+            warn!(
+                ingress_transport = %ingress_transport,
+                "ignoring peer SIPS Contact because the dialog arrived on a plain transport"
+            );
+            ingress_transport
+        } else {
+            ingress_transport
+        };
+
+        let local = self.local_address_for_transport(contact_transport);
+        if local.ip().is_unspecified() {
+            return Err(DialogError::routing_error(
+                "response Contact requires an explicit advertised address for a wildcard listener",
+            ));
+        }
+
+        let (scheme, transport_parameter) = match contact_transport {
+            TransportType::Udp => ("sip", None),
+            TransportType::Tcp => ("sip", Some("tcp")),
+            TransportType::Tls => ("sips", Some("tls")),
+            TransportType::Ws => ("sip", Some("ws")),
+            TransportType::Wss => ("sips", Some("wss")),
+        };
+        let suffix = transport_parameter
+            .map(|transport| format!(";transport={transport}"))
+            .unwrap_or_default();
+        Ok(format!("{scheme}:server@{local}{suffix}"))
     }
 
     /// Validate all fallible initial-INVITE lifecycle inputs before the
@@ -641,6 +720,26 @@ fn initial_invite_response_requires_sips(request: &Request) -> bool {
         .is_some_and(|uri| matches!(uri.scheme(), Scheme::Sips))
 }
 
+fn initial_invite_contact_requires_sips_without_record_route(request: &Request) -> bool {
+    use rvoip_sip_core::types::uri::Scheme;
+
+    if request
+        .headers
+        .iter()
+        .any(|header| matches!(header, TypedHeader::RecordRoute(_)))
+    {
+        return false;
+    }
+    request
+        .header(&HeaderName::Contact)
+        .and_then(|header| match header {
+            TypedHeader::Contact(contacts) => contacts.0.first(),
+            _ => None,
+        })
+        .and_then(|contact| extract_uri_from_contact(contact).ok())
+        .is_some_and(|uri| matches!(uri.scheme(), Scheme::Sips))
+}
+
 fn set_response_to_tag(response: &mut Response, tag: &str) -> DialogResult<()> {
     let to_index = response
         .headers
@@ -700,6 +799,7 @@ mod tests {
     use rvoip_sip_core::types::{record_route::RecordRoute, uri::Scheme};
     use rvoip_sip_core::{Message, StatusCode};
     use rvoip_sip_transport::error::{Error as TransportError, Result as TransportResult};
+    use rvoip_sip_transport::transport::{TransportRoute, TransportType};
     use rvoip_sip_transport::{Transport, TransportEvent};
     use std::net::SocketAddr;
     use std::str::FromStr;
@@ -834,6 +934,22 @@ mod tests {
         fn is_closed(&self) -> bool {
             false
         }
+
+        fn supports_tcp(&self) -> bool {
+            true
+        }
+
+        fn supports_tls(&self) -> bool {
+            true
+        }
+
+        fn supports_ws(&self) -> bool {
+            true
+        }
+
+        fn supports_wss(&self) -> bool {
+            true
+        }
     }
 
     async fn make_manager() -> DialogManager {
@@ -930,6 +1046,13 @@ mod tests {
     }
 
     async fn send_initial_invite_ok_and_capture_contact(request: Request) -> Uri {
+        send_initial_invite_ok_and_capture_contact_over(request, TransportType::Udp).await
+    }
+
+    async fn send_initial_invite_ok_and_capture_contact_over(
+        request: Request,
+        transport_type: TransportType,
+    ) -> Uri {
         let (manager, transport) = make_capturing_manager().await;
         let dialog_id = manager
             .create_early_dialog_from_invite(&request)
@@ -937,7 +1060,11 @@ mod tests {
             .expect("create early dialog");
         let transaction = manager
             .transaction_manager()
-            .create_server_transaction(request, SocketAddr::from_str("127.0.0.1:5061").unwrap())
+            .create_server_transaction_on_route(
+                request,
+                TransportRoute::new(SocketAddr::from_str("127.0.0.1:5061").unwrap())
+                    .with_transport_type(transport_type),
+            )
             .await
             .expect("create server transaction");
         let transaction_id = transaction.id().clone();
@@ -986,8 +1113,11 @@ mod tests {
         let contact = send_initial_invite_ok_and_capture_contact(secure_initial_invite()).await;
 
         assert!(matches!(contact.scheme(), Scheme::Sips));
-        assert_eq!(contact.transport(), None);
-        assert_eq!(contact.to_string(), "sips:server@192.0.2.20:5061");
+        assert_eq!(contact.transport(), Some("tls"));
+        assert_eq!(
+            contact.to_string(),
+            "sips:server@192.0.2.20:5061;transport=tls"
+        );
     }
 
     #[tokio::test]
@@ -997,18 +1127,21 @@ mod tests {
                 .await;
 
         assert!(matches!(contact.scheme(), Scheme::Sips));
-        assert_eq!(contact.transport(), None);
-        assert_eq!(contact.to_string(), "sips:server@192.0.2.20:5061");
+        assert_eq!(contact.transport(), Some("tls"));
+        assert_eq!(
+            contact.to_string(),
+            "sips:server@192.0.2.20:5061;transport=tls"
+        );
     }
 
     #[tokio::test]
-    async fn sips_request_contact_without_record_route_requires_sips_response_contact() {
+    async fn peer_sips_contact_cannot_invent_secure_transport_on_udp_dialog() {
         let contact =
             send_initial_invite_ok_and_capture_contact(contact_secure_initial_invite()).await;
 
-        assert!(matches!(contact.scheme(), Scheme::Sips));
+        assert!(matches!(contact.scheme(), Scheme::Sip));
         assert_eq!(contact.transport(), None);
-        assert_eq!(contact.to_string(), "sips:server@192.0.2.20:5061");
+        assert_eq!(contact.to_string(), "sip:server@192.0.2.10:5070");
     }
 
     #[tokio::test]
@@ -1018,6 +1151,34 @@ mod tests {
         assert!(matches!(contact.scheme(), Scheme::Sip));
         assert_eq!(contact.transport(), None);
         assert_eq!(contact.to_string(), "sip:server@192.0.2.10:5070");
+    }
+
+    #[tokio::test]
+    async fn tcp_initial_invite_2xx_fallback_contact_preserves_tcp_transport() {
+        let contact =
+            send_initial_invite_ok_and_capture_contact_over(initial_invite(), TransportType::Tcp)
+                .await;
+
+        assert!(matches!(contact.scheme(), Scheme::Sip));
+        assert_eq!(contact.transport(), Some("tcp"));
+        assert_eq!(
+            contact.to_string(),
+            "sip:server@192.0.2.10:5070;transport=tcp"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_initial_invite_2xx_fallback_contact_preserves_ws_transport() {
+        let contact =
+            send_initial_invite_ok_and_capture_contact_over(initial_invite(), TransportType::Ws)
+                .await;
+
+        assert!(matches!(contact.scheme(), Scheme::Sip));
+        assert_eq!(contact.transport(), Some("ws"));
+        assert_eq!(
+            contact.to_string(),
+            "sip:server@192.0.2.10:5070;transport=ws"
+        );
     }
 
     #[tokio::test]

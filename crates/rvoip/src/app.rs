@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -33,7 +33,9 @@ use rvoip_core::events::Event;
 use rvoip_core::ids::{
     BridgeId, ConnectionId, ConversationId, MessageId, ParticipantId, SessionId, TenantId,
 };
+use rvoip_core::inbound_admission::InboundAdmission;
 use rvoip_core::message::{ContentType, Message, MessageOrigin, MessageRecipients};
+use rvoip_core::operational_events::{OperationalEvent, OperationalEventStreamHealth};
 use rvoip_core::orchestrator::Orchestrator;
 use rvoip_core::session::SessionMedium;
 use rvoip_core::store::MessageFilter;
@@ -44,15 +46,18 @@ use rvoip_sip::server::contact_resolver::{
     ContactRequest, ContactResolver, RegistrarContactResolver, ResolvedContact,
 };
 use rvoip_sip::{
-    Config as LowSipConfig, IpNet, SipAdapter, SipInboundContextPolicy, SipListenerAuthPolicy,
-    UnifiedCoordinator,
+    Config as LowSipConfig, IpNet, ProfiledSipAdapter, SipAdapter, SipEgressProfileRegistration,
+    SipInboundContextPolicy, SipListenerAuthPolicy, SipNatConfig, SipOriginateContext,
+    SipProfileRevision, SipTlsMode, UnifiedCoordinator,
 };
 use rvoip_webrtc::{
-    WebRtcAdapter, WebRtcConfig as LowWebRtcConfig, WebRtcServer, WebRtcServerBuilder,
+    Nat1To1CandidateType, UdpPortRangeConfig, WebRtcAdapter, WebRtcConfig as LowWebRtcConfig,
+    WebRtcServer, WebRtcServerBuilder,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, mpsc, Mutex};
 
 /// Result type returned by the high-level app API.
 pub type AppResult<T> = std::result::Result<T, AppError>;
@@ -161,11 +166,26 @@ impl HttpConfig {
 }
 
 /// WebRTC server configuration for the app layer.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct WebRtcConfig {
     ws_bind: String,
+    media: LowWebRtcConfig,
     role_capabilities: RoleCapabilities,
     escalation_command: String,
+    ws_auth: Option<Arc<dyn rvoip_webrtc::signaling::auth::WsAuthHook>>,
+}
+
+impl std::fmt::Debug for WebRtcConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WebRtcConfig")
+            .field("ws_bind", &self.ws_bind)
+            .field("media", &self.media)
+            .field("role_capabilities", &self.role_capabilities)
+            .field("escalation_command", &self.escalation_command)
+            .field("ws_auth_present", &self.ws_auth.is_some())
+            .finish()
+    }
 }
 
 impl WebRtcConfig {
@@ -173,9 +193,49 @@ impl WebRtcConfig {
     pub fn ws(addr: impl Into<String>) -> Self {
         Self {
             ws_bind: addr.into(),
+            media: LowWebRtcConfig::loopback(),
             role_capabilities: RoleCapabilities::default(),
             escalation_command: "CALL_ASSIGNED_EMPLOYEE".into(),
+            ws_auth: None,
         }
+    }
+
+    /// Enforce `hook` during every WebSocket signaling upgrade.
+    ///
+    /// The authenticated principal the hook produces is retained on the
+    /// connection and surfaces through inbound admission, so an app owner
+    /// can attribute a WebRTC leg to the tenant and subject that presented
+    /// the credential. Without a hook the listener stays open, which is
+    /// only acceptable behind a trusted edge.
+    pub fn ws_auth(mut self, hook: Arc<dyn rvoip_webrtc::signaling::auth::WsAuthHook>) -> Self {
+        self.ws_auth = Some(hook);
+        self
+    }
+
+    /// Bind each WebRTC peer to one UDP socket from an inclusive media range.
+    ///
+    /// This is the production alternative to the loopback-only ephemeral
+    /// socket retained by [`Self::ws`]. Cloud and one-to-one NAT deployments
+    /// should pair this with [`Self::nat_1to1_ip`].
+    pub fn media_udp_port_range(mut self, bind_ip: IpAddr, port_start: u16, port_end: u16) -> Self {
+        self.media.udp_bind = format!("{bind_ip}:0");
+        self.media.udp_port_range = Some(UdpPortRangeConfig {
+            bind_ip,
+            port_start,
+            port_end,
+        });
+        self
+    }
+
+    /// Advertise a public ICE host candidate for a one-to-one NAT mapping.
+    ///
+    /// The peer still binds on the address selected by
+    /// [`Self::media_udp_port_range`]; only the ICE candidate exposed to the
+    /// browser is rewritten to `public_ip`.
+    pub fn nat_1to1_ip(mut self, public_ip: IpAddr) -> Self {
+        self.media.nat_1to1_ips = vec![public_ip.to_string()];
+        self.media.nat_1to1_candidate_type = Nat1To1CandidateType::Host;
+        self
     }
 
     /// Allow `role` to use the supplied capabilities over WebRTC.
@@ -195,12 +255,13 @@ impl WebRtcConfig {
 }
 
 /// SIP server and registrar configuration for the app layer.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SipConfig {
     bind: String,
     domain: String,
     sip_advertised_addr: Option<SocketAddr>,
     media_public_addr: Option<SocketAddr>,
+    media_port_range: Option<(u16, u16)>,
     role_capabilities: RoleCapabilities,
     registrar_users: HashMap<String, String>,
     tenant: Option<String>,
@@ -209,9 +270,289 @@ pub struct SipConfig {
     trusted_trunks: Vec<(String, String)>,
     /// `X-*` headers to capture into the inbound context.
     captured_headers: Vec<String>,
+    /// Playout smoothing and packet-loss concealment for inbound audio.
+    playout: Option<rvoip_sip::PlayoutConfig>,
+    /// STUN server used to discover the advertised address, when asked.
+    stun_server: Option<SocketAddr>,
+    /// SRTP posture: whether to offer it, and whether to insist on it.
+    srtp: SipMediaSecurity,
+    /// Optional SIP-TLS listener address and identity.
+    tls_listener: Option<SipTlsListenerConfig>,
+    /// Optional public address advertised by the SIP-TLS listener.
+    tls_advertised_addr: Option<SocketAddr>,
+    /// Optional additional client trust root for outbound SIP-TLS.
+    tls_extra_ca_path: Option<PathBuf>,
+    /// Explicit RTP payload types offered by the SIP media leg.
+    offered_codecs: Option<Vec<u8>>,
+    /// ICE posture (RFC 8445).
+    ice: rvoip_sip::SipIcePolicy,
+    /// Independently configured outbound children selected by an immutable
+    /// profile revision on each originate request.
+    egress_profiles: Vec<SipEgressProfileConfig>,
+    /// Fail-closed production posture for remote registered SIP endpoints.
+    remote_endpoint_profile: bool,
+}
+
+impl std::fmt::Debug for SipConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SipConfig")
+            .field("bind", &self.bind)
+            .field("domain_present", &!self.domain.is_empty())
+            .field(
+                "sip_advertised_configured",
+                &self.sip_advertised_addr.is_some(),
+            )
+            .field("media_public_configured", &self.media_public_addr.is_some())
+            .field("media_port_range", &self.media_port_range)
+            .field("role_capabilities", &self.role_capabilities)
+            .field("registrar_user_count", &self.registrar_users.len())
+            .field("tenant_present", &self.tenant.is_some())
+            .field("trusted_trunk_count", &self.trusted_trunks.len())
+            .field("captured_header_count", &self.captured_headers.len())
+            .field("playout_configured", &self.playout.is_some())
+            .field("stun_configured", &self.stun_server.is_some())
+            .field("srtp", &self.srtp)
+            .field("ice", &self.ice)
+            .field("tls_listener", &self.tls_listener)
+            .field(
+                "tls_advertised_configured",
+                &self.tls_advertised_addr.is_some(),
+            )
+            .field("tls_extra_ca_configured", &self.tls_extra_ca_path.is_some())
+            .field(
+                "offered_codec_count",
+                &self.offered_codecs.as_ref().map_or(0, Vec::len),
+            )
+            .field("egress_profile_count", &self.egress_profiles.len())
+            .field("remote_endpoint_profile", &self.remote_endpoint_profile)
+            .finish()
+    }
+}
+
+/// SIP-TLS listener identity used by the high-level application facade.
+///
+/// Paths name operator-managed files and are passed directly to the lower
+/// SIP runtime. Debug output reports only whether each item is configured so
+/// secret-bearing deployment paths do not leak into routine diagnostics.
+#[derive(Clone)]
+struct SipTlsListenerConfig {
+    bind: SocketAddr,
+    cert_path: PathBuf,
+    key_path: PathBuf,
+}
+
+impl std::fmt::Debug for SipTlsListenerConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SipTlsListenerConfig")
+            .field("bind", &self.bind)
+            .field("cert_configured", &true)
+            .field("key_configured", &true)
+            .finish()
+    }
+}
+
+/// One provider-neutral outbound SIP child installed beside the listener.
+///
+/// The revision is the only value carried by a call. Credentials, TLS roots,
+/// codec policy, NAT behavior, and allowed initial headers stay in this
+/// process-local configuration and are never projected into core metadata.
+#[derive(Clone)]
+pub struct SipEgressProfileConfig {
+    revision: SipProfileRevision,
+    config: LowSipConfig,
+    nat: SipNatConfig,
+    allowed_initial_headers: Vec<String>,
+    sip_message: bool,
+}
+
+impl std::fmt::Debug for SipEgressProfileConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SipEgressProfileConfig")
+            .field("revision", &"[redacted]")
+            .field(
+                "allowed_initial_header_count",
+                &self.allowed_initial_headers.len(),
+            )
+            .field("sip_message", &self.sip_message)
+            .finish()
+    }
+}
+
+impl SipEgressProfileConfig {
+    /// Define one exact outbound child from an already validated opaque
+    /// revision and low-level SIP configuration.
+    pub fn new(revision: SipProfileRevision, config: LowSipConfig) -> Self {
+        Self {
+            revision,
+            config,
+            nat: SipNatConfig::default(),
+            allowed_initial_headers: Vec::new(),
+            sip_message: false,
+        }
+    }
+
+    /// Replace the child's RTP/NAT policy.
+    #[must_use]
+    pub const fn nat(mut self, nat: SipNatConfig) -> Self {
+        self.nat = nat;
+        self
+    }
+
+    /// Allow exactly these extra headers on the initial INVITE. Header names
+    /// are validated again while the child is constructed.
+    pub fn allow_initial_headers<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.allowed_initial_headers
+            .extend(names.into_iter().map(Into::into));
+        self
+    }
+
+    /// Permit transport-neutral data messages to use SIP MESSAGE on this
+    /// child.
+    #[must_use]
+    pub const fn allow_sip_message(mut self, allowed: bool) -> Self {
+        self.sip_message = allowed;
+        self
+    }
+}
+
+/// How much media encryption a SIP listener insists on.
+///
+/// The default is `Disabled`, which is what every release before this did
+/// and what a LAN PBX or a lab wants. A trunk crossing the public internet
+/// should be `Required`: `Preferred` will silently carry a call in the clear
+/// when the far end declines, which is exactly the case where the operator
+/// most needs to know.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SipMediaSecurity {
+    /// Carry media as plaintext RTP.
+    #[default]
+    Disabled,
+    /// Offer SRTP, but carry the call unencrypted if the peer declines.
+    Preferred,
+    /// Offer SRTP and fail the call rather than fall back to plaintext RTP.
+    Required,
 }
 
 impl SipConfig {
+    /// Discover the advertised address from a STUN server at startup.
+    ///
+    /// A SIP listener behind NAT must advertise the address the far end can
+    /// reach, not the one it bound. `advertised_addr` states that address
+    /// statically; this learns it instead, which is what a deployment whose
+    /// public address is not known ahead of time needs.
+    ///
+    /// This is deliberately **not** ICE. Full ICE (RFC 8445) negotiates
+    /// candidate pairs with connectivity checks, and a carrier SIP trunk
+    /// does not offer it — the far end expects one reachable media address.
+    /// What ICE's server-reflexive step actually buys here is knowing that
+    /// address, and that is a STUN binding request. Browser legs, where ICE
+    /// genuinely applies, are served by the WebRTC transport.
+    ///
+    /// A static `advertised_addr` wins if both are set: an operator who
+    /// named an address meant it.
+    #[must_use]
+    pub const fn discover_advertised_addr(mut self, stun_server: SocketAddr) -> Self {
+        self.stun_server = Some(stun_server);
+        self
+    }
+
+    /// Smooth inbound audio and conceal lost packets.
+    ///
+    /// A carrier trunk delivers audio in bursts and loses packets; without
+    /// this those are heard directly as clicks and dropouts. Trusted trunks
+    /// enable the default policy automatically; this method customizes it.
+    #[must_use]
+    pub fn playout(mut self, config: rvoip_sip::PlayoutConfig) -> Self {
+        self.playout = Some(config);
+        self
+    }
+
+    /// Disable inbound playout smoothing explicitly.
+    ///
+    /// This is useful for a controlled LAN or packet-perfect lab. Call it
+    /// after [`Self::trusted_trunk`] when overriding that carrier-safe default.
+    #[must_use]
+    pub fn disable_playout(mut self) -> Self {
+        self.playout = None;
+        self
+    }
+
+    /// Set the media-encryption posture for this listener.
+    #[must_use]
+    pub const fn media_security(mut self, security: SipMediaSecurity) -> Self {
+        self.srtp = security;
+        self
+    }
+
+    /// Enable a SIP-TLS listener with the certificate and private key it
+    /// presents to peers.
+    ///
+    /// The lower SIP runtime validates and loads both files before startup;
+    /// a missing, unreadable, or mismatched identity therefore fails the app
+    /// build instead of silently falling back to plaintext signalling.
+    pub fn tls_listener(
+        mut self,
+        bind: SocketAddr,
+        cert_path: impl Into<PathBuf>,
+        key_path: impl Into<PathBuf>,
+    ) -> Self {
+        self.tls_listener = Some(SipTlsListenerConfig {
+            bind,
+            cert_path: cert_path.into(),
+            key_path: key_path.into(),
+        });
+        self
+    }
+
+    /// Override the public address advertised by the SIP-TLS listener.
+    ///
+    /// App construction fails when an advertised TLS address is supplied
+    /// without a listener identity. Builder call order does not matter.
+    pub fn tls_advertised_addr(mut self, advertised: SocketAddr) -> Self {
+        self.tls_advertised_addr = Some(advertised);
+        self
+    }
+
+    /// Add a PEM CA bundle to the system roots used for outbound SIP-TLS.
+    pub fn tls_extra_ca(mut self, ca_path: impl Into<PathBuf>) -> Self {
+        self.tls_extra_ca_path = Some(ca_path.into());
+        self
+    }
+
+    /// Set the ordered RTP payload types offered by SIP media negotiation.
+    ///
+    /// The lower runtime rejects an empty list, duplicates, unavailable
+    /// feature-gated codecs, and offers with no supported audio codec.
+    pub fn offered_codecs<I>(mut self, payload_types: I) -> Self
+    where
+        I: IntoIterator<Item = u8>,
+    {
+        self.offered_codecs = Some(payload_types.into_iter().collect());
+        self
+    }
+
+    /// Set the ICE posture (RFC 8445).
+    ///
+    /// `Lite` answers connectivity checks on this listener's reachable
+    /// address — the mode for a server on a public or 1:1-NAT address, and
+    /// it requires that address to be known (`advertised_addr`,
+    /// `media_public_addr`, or STUN discovery). `Full` runs the whole
+    /// agent — gathering, checks, nomination — for endpoints behind NAT
+    /// and for reaching peers that are. Peers that never offer ICE are
+    /// completely unaffected either way: the SDP default path is unchanged.
+    #[must_use]
+    pub const fn ice(mut self, policy: rvoip_sip::SipIcePolicy) -> Self {
+        self.ice = policy;
+        self
+    }
+
     /// Bind the SIP listener/registrar to `addr`.
     pub fn bind(addr: impl Into<String>) -> Self {
         Self {
@@ -219,11 +560,25 @@ impl SipConfig {
             domain: "callcenter.local".into(),
             sip_advertised_addr: None,
             media_public_addr: None,
+            media_port_range: None,
             role_capabilities: RoleCapabilities::default(),
             registrar_users: HashMap::new(),
             tenant: None,
             trusted_trunks: Vec::new(),
             captured_headers: Vec::new(),
+            stun_server: None,
+            ice: rvoip_sip::SipIcePolicy::Disabled,
+            // Both off by default: unchanged behaviour for every existing
+            // caller, and a deployment that wants smoothing or encryption
+            // says so rather than inheriting it.
+            playout: None,
+            srtp: SipMediaSecurity::Disabled,
+            tls_listener: None,
+            tls_advertised_addr: None,
+            tls_extra_ca_path: None,
+            offered_codecs: None,
+            egress_profiles: Vec::new(),
+            remote_endpoint_profile: false,
         }
     }
 
@@ -249,6 +604,7 @@ impl SipConfig {
     /// than silently trusting nothing.
     pub fn trusted_trunk(mut self, cidr: impl Into<String>, subject: impl Into<String>) -> Self {
         self.trusted_trunks.push((cidr.into(), subject.into()));
+        self.playout.get_or_insert_default();
         self
     }
 
@@ -296,6 +652,18 @@ impl SipConfig {
         self
     }
 
+    /// Restrict locally allocated SIP RTP/RTCP ports to the inclusive range.
+    ///
+    /// The low-level SIP configuration validates the bounds when the app is
+    /// built. Keeping this optional preserves its established defaults while
+    /// allowing a deployment firewall and the actual media listener to share
+    /// one explicit contract.
+    #[must_use]
+    pub const fn media_ports(mut self, start: u16, end: u16) -> Self {
+        self.media_port_range = Some((start, end));
+        self
+    }
+
     /// Allow `role` to use the supplied capabilities over SIP.
     pub fn allow<I>(mut self, role: Role, capabilities: I) -> Self
     where
@@ -316,6 +684,27 @@ impl SipConfig {
             .into_iter()
             .map(|(user, password)| (user.into(), password.into()))
             .collect();
+        self
+    }
+
+    /// Install one immutable outbound SIP profile. The app registers one
+    /// composite SIP adapter, so adding profiles does not create a second
+    /// transport owner in the orchestrator.
+    pub fn egress_profile(mut self, profile: SipEgressProfileConfig) -> Self {
+        self.egress_profiles.push(profile);
+        self
+    }
+
+    /// Require the qualified remote-endpoint posture: SIP Outbound over an
+    /// exact TLS flow, required SRTP, and a reachable public media address.
+    ///
+    /// Flow routes are process-local by design. A multi-replica deployment
+    /// must keep calls for an AOR on the registrar process that accepted its
+    /// REGISTER; after restart the stale capability fails closed and the UA
+    /// must re-register.
+    #[must_use]
+    pub const fn remote_endpoint_profile(mut self) -> Self {
+        self.remote_endpoint_profile = true;
         self
     }
 }
@@ -593,6 +982,99 @@ fn default_message_handler() -> MessageHandler {
     Arc::new(|_, _| Box::pin(async { Ok(()) }))
 }
 
+/// How this app delivers inbound admission and lifecycle to its owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum IngressMode {
+    /// The historical path: the app admits inbound connections itself using
+    /// its assignment policy, and reads lifecycle from the observational
+    /// broadcast. Convenient, and lossy under lag by construction.
+    Convenience,
+    /// The owning application is the single correctness consumer: it decides
+    /// every inbound admission through the gate and reads lifecycle from the
+    /// backpressured operational stream. Losing either receiver degrades the
+    /// runtime and stops new admission instead of dropping work.
+    Authoritative,
+}
+
+/// Requests the authoritative ingress composition on [`RvoipAppBuilder`].
+///
+/// The two correctness primitives must be installed before any adapter is
+/// registered, which the convenience `build` path cannot do on its own —
+/// this configuration is how an application asks for that ordering.
+#[derive(Clone, Copy, Debug)]
+pub struct AuthoritativeIngressConfig {
+    /// Bounded number of undecided inbound admissions. Backpressure, not
+    /// loss: adapters wait for a permit.
+    pub admission_capacity: usize,
+    /// How long one presented admission may remain undecided.
+    pub admission_decision_timeout: Duration,
+    /// Bounded capacity of the authoritative operational event stream.
+    pub operational_capacity: usize,
+}
+
+impl AuthoritativeIngressConfig {
+    /// Bounded capacities with a decision deadline.
+    #[must_use]
+    pub const fn new(
+        admission_capacity: usize,
+        admission_decision_timeout: Duration,
+        operational_capacity: usize,
+    ) -> Self {
+        Self {
+            admission_capacity,
+            admission_decision_timeout,
+            operational_capacity,
+        }
+    }
+}
+
+impl Default for AuthoritativeIngressConfig {
+    fn default() -> Self {
+        Self {
+            admission_capacity: 64,
+            admission_decision_timeout: Duration::from_secs(5),
+            operational_capacity: 256,
+        }
+    }
+}
+
+/// The correctness receivers, taken exactly once by the owning application.
+///
+/// Dropping either receiver is not a way to opt out: core treats the loss as
+/// a degraded runtime and refuses new admission, which is the whole point of
+/// asking for this mode.
+#[derive(Debug)]
+pub struct AuthoritativeIngress {
+    /// Undecided inbound connections awaiting this application's policy.
+    pub admissions: mpsc::Receiver<InboundAdmission>,
+    /// Lossless connection lifecycle for the same runtime.
+    pub operational: mpsc::Receiver<OperationalEvent>,
+}
+
+/// Queryable readiness of the ingress path.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct IngressHealth {
+    /// Which delivery contract this app was built with.
+    pub mode: IngressMode,
+    /// Core's view of the authoritative stream.
+    pub operational_stream: OperationalEventStreamHealth,
+    /// False once a correctness boundary has been lost. A readiness probe
+    /// should fail on this rather than keep taking calls.
+    pub admits_new_work: bool,
+}
+
+/// Result of a bounded drain.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct DrainOutcome {
+    /// Whether every retained lifecycle task finished within the budget.
+    pub completed: bool,
+    /// Tasks still retained when the budget expired.
+    pub remaining_tasks: usize,
+}
+
 /// Builder for [`RvoipApp`].
 pub struct RvoipAppBuilder {
     http: Option<HttpConfig>,
@@ -604,6 +1086,9 @@ pub struct RvoipAppBuilder {
     assignment: Option<AssignmentPolicy>,
     voice_routing: VoiceRoutingPolicy,
     on_message: MessageHandler,
+    authoritative_ingress: Option<AuthoritativeIngressConfig>,
+    /// Cadence for the periodic media-quality heartbeat, when requested.
+    media_quality_interval: Option<Duration>,
 }
 
 impl RvoipAppBuilder {
@@ -655,6 +1140,38 @@ impl RvoipAppBuilder {
         self
     }
 
+    /// Take authoritative ownership of inbound admission and lifecycle.
+    ///
+    /// `build` then installs the inbound admission gate and the operational
+    /// event stream **before** registering any adapter — the ordering core
+    /// requires and the convenience path cannot express — and hands both
+    /// receivers back through [`RvoipApp::take_authoritative_ingress`].
+    ///
+    /// In this mode the app stops admitting inbound connections on the
+    /// application's behalf: every inbound connection is presented as an
+    /// [`InboundAdmission`] ticket for the owner to accept or reject, and
+    /// the normalized inbound event follows acceptance. Assignment and
+    /// voice-routing policy still apply to what the owner accepts.
+    pub fn authoritative_ingress(mut self, config: AuthoritativeIngressConfig) -> Self {
+        self.authoritative_ingress = Some(config);
+        self
+    }
+
+    /// Publish per-connection media quality on a fixed cadence.
+    ///
+    /// Quality already reaches the application whenever the media layer
+    /// reports it. This adds a steady heartbeat on top, which is what a
+    /// dashboard wants: a call that has gone quiet still produces a reading,
+    /// so a flat line means "no change" rather than "no data".
+    ///
+    /// Connections that have never been measured are skipped rather than
+    /// averaged in as zeros, so the cadence never invents a perfect score.
+    #[must_use]
+    pub const fn media_quality_interval(mut self, every: Duration) -> Self {
+        self.media_quality_interval = Some(every);
+        self
+    }
+
     /// Configure the async message callback.
     pub fn on_message<F, Fut>(mut self, handler: F) -> Self
     where
@@ -686,6 +1203,35 @@ impl RvoipAppBuilder {
         }
 
         let orchestrator = Orchestrator::new(CoreConfig::default());
+        // Both correctness primitives reject installation once an adapter is
+        // registered, so they are installed here — before any listener can
+        // exist — which is the composition the convenience path could not
+        // offer and the reason this builder option exists.
+        let authoritative_ingress = match self.authoritative_ingress {
+            Some(config) => {
+                let admissions = orchestrator.install_inbound_admission_gate(
+                    config.admission_capacity,
+                    config.admission_decision_timeout,
+                )?;
+                let operational =
+                    orchestrator.install_operational_event_stream(config.operational_capacity)?;
+                Some(AuthoritativeIngress {
+                    admissions,
+                    operational,
+                })
+            }
+            None => None,
+        };
+        let ingress_mode = if authoritative_ingress.is_some() {
+            IngressMode::Authoritative
+        } else {
+            IngressMode::Convenience
+        };
+        // Started before any adapter, so the first call is already covered by
+        // the heartbeat rather than waiting a full interval to appear.
+        if let Some(every) = self.media_quality_interval {
+            orchestrator.spawn_media_quality_sampler(every);
+        }
         // Subscribe before any adapter starts a listener so an immediate
         // inbound call cannot race app admission-loop startup.
         let core_events = orchestrator.subscribe_events();
@@ -710,11 +1256,45 @@ impl RvoipAppBuilder {
                 ));
             }
             let sip_addr = parse_socket_addr(&sip.bind)?;
-            if sip_addr.ip().is_unspecified() && sip.sip_advertised_addr.is_none() {
+            // Learn the reachable address before the listener starts, so the
+            // very first INVITE already advertises somewhere answerable. A
+            // static address wins: an operator who named one meant it.
+            let mut sip = sip;
+            if sip.sip_advertised_addr.is_none() {
+                if let Some(stun_server) = sip.stun_server {
+                    let discovered = discover_advertised_addr(stun_server, sip_addr).await?;
+                    tracing::info!(%discovered, "SIP advertised address discovered via STUN");
+                    sip.sip_advertised_addr = Some(discovered);
+                }
+            }
+            let sip = sip;
+            if sip.ice == rvoip_sip::SipIcePolicy::Lite
+                && sip.sip_advertised_addr.is_none()
+                && sip.media_public_addr.is_none()
+                && sip.stun_server.is_none()
+            {
                 return Err(AppError::Policy(
-                    "a concrete SIP advertised address is required for an unspecified bind".into(),
+                    "ice-lite requires a reachable address: set advertised_addr, \
+                     media_public_addr, or discover_advertised_addr — lite answers \
+                     checks but cannot traverse, so an unreachable candidate is a \
+                     call that never gets audio"
+                        .into(),
                 ));
             }
+            if sip_addr.ip().is_unspecified() && sip.sip_advertised_addr.is_none() {
+                return Err(AppError::Policy(
+                    "a concrete SIP advertised address is required for an unspecified bind: \
+                     set advertised_addr, or discover_advertised_addr with a STUN server"
+                        .into(),
+                ));
+            }
+            if sip.tls_advertised_addr.is_some() && sip.tls_listener.is_none() {
+                return Err(AppError::Policy(
+                    "a SIP-TLS advertised address requires tls_listener with a certificate and key"
+                        .into(),
+                ));
+            }
+            validate_remote_endpoint_profile(&sip)?;
             let sip_addr = resolve_udp_bind_addr(sip_addr)?;
             let low_sip = make_low_sip_config(&sip, sip_addr);
 
@@ -748,16 +1328,22 @@ impl RvoipAppBuilder {
             }
             .map_err(|error| AppError::Sip(error.to_string()))?;
 
-            let registrar = coordinator
-                .start_registration_server(&sip.domain, sip.registrar_users)
-                .await
-                .map_err(|error| AppError::Sip(error.to_string()))?;
+            let registrar = if sip.remote_endpoint_profile {
+                coordinator
+                    .start_remote_endpoint_registration_server(&sip.domain, sip.registrar_users)
+                    .await
+            } else {
+                coordinator
+                    .start_registration_server(&sip.domain, sip.registrar_users)
+                    .await
+            }
+            .map_err(|error| AppError::Sip(error.to_string()))?;
 
             // The default context policy captures no headers at all, so the
             // allowlist has to be installed explicitly or `metadata()` is
             // always empty. The Request-URI routing hint comes through either
             // way, provided a principal exists.
-            let adapter = if sip.captured_headers.is_empty() {
+            let default_adapter = if sip.captured_headers.is_empty() {
                 SipAdapter::new(Arc::clone(&coordinator)).await
             } else {
                 let policy =
@@ -770,7 +1356,37 @@ impl RvoipAppBuilder {
                 SipAdapter::new_with_inbound_context_policy(Arc::clone(&coordinator), policy).await
             }
             .map_err(|error| AppError::Sip(error.to_string()))?;
-            orchestrator.register(adapter as Arc<dyn ConnectionAdapter>)?;
+
+            let mut registrations = Vec::with_capacity(sip.egress_profiles.len());
+            for profile in sip.egress_profiles {
+                match SipEgressProfileRegistration::from_config_and_nat(
+                    profile.revision,
+                    profile.config,
+                    profile.nat,
+                    profile.allowed_initial_headers,
+                    profile.sip_message,
+                )
+                .await
+                {
+                    Ok(registration) => registrations.push(registration),
+                    Err(error) => {
+                        for registration in registrations {
+                            let _ = registration.shutdown(Duration::from_secs(1)).await;
+                        }
+                        let _ = coordinator
+                            .shutdown_gracefully(Some(Duration::from_secs(1)))
+                            .await;
+                        return Err(AppError::Sip(error.to_string()));
+                    }
+                }
+            }
+            let adapter: Arc<dyn ConnectionAdapter> = if registrations.is_empty() {
+                default_adapter
+            } else {
+                ProfiledSipAdapter::new(default_adapter, registrations)
+                    .map_err(|error| AppError::Sip(error.to_string()))?
+            };
+            orchestrator.register(adapter)?;
             if employee_voice {
                 for employee in &self.employees.employees {
                     directory.add_sip_aor(employee, format!("sip:{employee}@{}", sip.domain));
@@ -798,10 +1414,13 @@ impl RvoipAppBuilder {
                     "WebRTC customer text or voice is required for the app runtime".into(),
                 ));
             }
-            let mut config = LowWebRtcConfig::loopback();
+            let mut config = webrtc.media;
             config.trickle_ice = false;
-            let server = WebRtcServerBuilder::new(config)
-                .with_ws(webrtc.ws_bind)
+            let mut builder = WebRtcServerBuilder::new(config).with_ws(webrtc.ws_bind);
+            if let Some(hook) = webrtc.ws_auth {
+                builder = builder.with_ws_auth(hook);
+            }
+            let server = builder
                 .build()
                 .await
                 .map_err(|error| AppError::WebRtc(error.to_string()))?;
@@ -853,6 +1472,8 @@ impl RvoipAppBuilder {
             message_handler: self.on_message,
             voice_routing: self.voice_routing,
             escalation_command,
+            ingress_mode,
+            observational_loss: AtomicBool::new(false),
         });
         spawn_app_event_loop(Arc::clone(&state), core_events);
 
@@ -870,6 +1491,7 @@ impl RvoipAppBuilder {
         Ok(RvoipApp {
             state,
             initial_events: StdMutex::new(Some(initial_app_events)),
+            authoritative_ingress: StdMutex::new(authoritative_ingress),
             _webrtc_server: webrtc_server,
             _sip_coordinator: sip_coordinator,
             _http_task: http_task,
@@ -890,6 +1512,8 @@ impl Default for RvoipAppBuilder {
             assignment: None,
             voice_routing: VoiceRoutingPolicy::default(),
             on_message: default_message_handler(),
+            authoritative_ingress: None,
+            media_quality_interval: None,
         }
     }
 }
@@ -898,6 +1522,7 @@ impl Default for RvoipAppBuilder {
 pub struct RvoipApp {
     state: Arc<AppState>,
     initial_events: StdMutex<Option<broadcast::Receiver<AppEvent>>>,
+    authoritative_ingress: StdMutex<Option<AuthoritativeIngress>>,
     _webrtc_server: Option<WebRtcServer>,
     _sip_coordinator: Option<Arc<UnifiedCoordinator>>,
     _http_task: Option<tokio::task::JoinHandle<()>>,
@@ -908,6 +1533,52 @@ impl RvoipApp {
     /// Start building an app.
     pub fn builder() -> RvoipAppBuilder {
         RvoipAppBuilder::default()
+    }
+
+    /// Take the correctness receivers, once, when built with
+    /// [`RvoipAppBuilder::authoritative_ingress`].
+    ///
+    /// Returns `None` in convenience mode, and `None` on any later call —
+    /// there is exactly one correctness consumer by construction.
+    pub fn take_authoritative_ingress(&self) -> Option<AuthoritativeIngress> {
+        self.authoritative_ingress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    }
+
+    /// Current ingress readiness. Fail a readiness probe when
+    /// [`IngressHealth::admits_new_work`] is false: a lost correctness
+    /// boundary means this runtime can no longer promise that an accepted
+    /// call was seen exactly once.
+    pub fn ingress_health(&self) -> IngressHealth {
+        let operational_stream = self.state.orchestrator.operational_event_stream_health();
+        let stream_ok = !matches!(operational_stream, OperationalEventStreamHealth::Degraded);
+        let observational_ok = !self.state.observational_loss.load(Ordering::Relaxed);
+        IngressHealth {
+            mode: self.state.ingress_mode,
+            operational_stream,
+            admits_new_work: stream_ok && observational_ok,
+        }
+    }
+
+    /// Stop taking new work and wait, within a budget, for retained
+    /// connection lifecycle tasks to converge.
+    ///
+    /// Terminal: adapter registration and new connection-side work are
+    /// rejected once this begins. The outcome reports honestly whether the
+    /// budget was enough rather than blocking forever.
+    pub async fn drain(&self, budget: Duration) -> DrainOutcome {
+        let orchestrator = &self.state.orchestrator;
+        orchestrator.drain_prepared_outbound_connections().await;
+        let completed =
+            tokio::time::timeout(budget, orchestrator.drain_connection_lifecycle_tasks())
+                .await
+                .is_ok();
+        DrainOutcome {
+            completed,
+            remaining_tasks: orchestrator.connection_lifecycle_task_count(),
+        }
     }
 
     /// Subscribe to high-level app events.
@@ -1071,6 +1742,11 @@ struct AppState {
     message_handler: MessageHandler,
     voice_routing: VoiceRoutingPolicy,
     escalation_command: String,
+    ingress_mode: IngressMode,
+    /// Sticky: the observational stream dropped events this app was relying
+    /// on. Reported through [`RvoipApp::ingress_health`] so a readiness probe
+    /// can fail instead of the runtime quietly serving from a gap.
+    observational_loss: AtomicBool,
 }
 
 impl AppState {
@@ -1223,17 +1899,27 @@ impl AppState {
         contact: ResolvedContact,
     ) -> AppResult<BridgeEvidence> {
         let mut connected_events = self.orchestrator.subscribe_events();
+        let sip_context = if contact.registered_flow_routes.is_empty() {
+            SipOriginateContext::new()
+        } else {
+            SipOriginateContext::new()
+                .with_registered_flow_routes(contact.registered_flow_routes.clone())
+                .map_err(|_| AppError::Sip("registered SIP flow failed validation".into()))?
+        };
         let handle = self
             .orchestrator
-            .originate_connection(OriginateRequest {
-                session_id: self.session_id.clone(),
-                participant_id: self.employee_participant.clone(),
-                target: contact.uri.clone(),
-                direction: Direction::Outbound,
-                capabilities: CapabilityDescriptor::default(),
-                transport: Some(CoreTransport::Sip),
-                context: Default::default(),
-            })
+            .originate_connection(
+                OriginateRequest {
+                    session_id: self.session_id.clone(),
+                    participant_id: self.employee_participant.clone(),
+                    target: contact.uri.clone(),
+                    direction: Direction::Outbound,
+                    capabilities: CapabilityDescriptor::default(),
+                    transport: Some(CoreTransport::Sip),
+                    context: Default::default(),
+                }
+                .with_context(sip_context),
+            )
             .await?;
         let employee_connection = handle.connection.id.clone();
         wait_for_core_connection_connected(
@@ -1269,7 +1955,13 @@ async fn run_app_event_loop(
 ) -> AppResult<()> {
     loop {
         match events.recv().await {
-            Ok(Event::ConnectionInbound { connection_id, .. }) => {
+            // In authoritative mode the owning application already decided
+            // this connection through the admission gate — the normalized
+            // event only follows its accept — so the app must not admit it
+            // a second time on the owner's behalf.
+            Ok(Event::ConnectionInbound { connection_id, .. })
+                if state.ingress_mode == IngressMode::Convenience =>
+            {
                 if let Err(error) = handle_inbound_connection(&state, connection_id.clone()).await {
                     // A caller can CANCEL or disconnect while application
                     // policy is accepting it. That call fails independently;
@@ -1296,7 +1988,16 @@ async fn run_app_event_loop(
             }
             Ok(_) => {}
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                tracing::warn!(skipped, "rvoip app event receiver lagged");
+                // A warning is not a contract. Record the loss so
+                // `ingress_health` stops claiming this runtime saw
+                // everything; in authoritative mode admission itself is
+                // unaffected because it rides the gate, not this bus.
+                state.observational_loss.store(true, Ordering::Relaxed);
+                tracing::error!(
+                    skipped,
+                    mode = ?state.ingress_mode,
+                    "rvoip app event receiver lagged; ingress reported degraded"
+                );
             }
             Err(broadcast::error::RecvError::Closed) => break,
         }
@@ -1521,8 +2222,86 @@ fn trusted_trunk_principal(subject: &str, tenant: &str) -> AuthenticatedPrincipa
     }
 }
 
+/// Ask a STUN server what address it sees us from.
+///
+/// The probe binds an ephemeral socket on the same interface the SIP
+/// listener will use rather than the listener's own port: the listener is
+/// not up yet, and a NAT mapping learned from a different port is still the
+/// right *address*, which is what the SDP needs. The port comes from the
+/// listener's own configuration.
+#[cfg(feature = "sip")]
+async fn discover_advertised_addr(
+    stun_server: SocketAddr,
+    sip_addr: SocketAddr,
+) -> Result<SocketAddr, AppError> {
+    use rvoip_sip::StunClient;
+
+    let probe_bind = SocketAddr::new(sip_addr.ip(), 0);
+    let socket = tokio::net::UdpSocket::bind(probe_bind)
+        .await
+        .map_err(|error| {
+            AppError::Policy(format!(
+                "STUN discovery could not bind a probe socket: {error}"
+            ))
+        })?;
+    let mapped = StunClient::new(std::sync::Arc::new(socket), stun_server)
+        .discover()
+        .await
+        .map_err(|error| {
+            // Fail the build rather than start a listener advertising an
+            // address nobody can reach: a call that connects and carries no
+            // audio is harder to diagnose than a service that refused to start.
+            AppError::Policy(format!(
+                "STUN discovery failed against {stun_server}: {error}"
+            ))
+        })?;
+    Ok(SocketAddr::new(mapped.ip(), sip_addr.port()))
+}
+
+fn validate_remote_endpoint_profile(config: &SipConfig) -> AppResult<()> {
+    if config.remote_endpoint_profile
+        && (config.tls_listener.is_none()
+            || config.srtp != SipMediaSecurity::Required
+            || (config.media_public_addr.is_none() && config.sip_advertised_addr.is_none())
+            || config.registrar_users.is_empty())
+    {
+        return Err(AppError::Policy(
+            "remote SIP endpoint profile requires a TLS listener, required SRTP, \
+             at least one registrar identity, and a reachable advertised media address"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn make_low_sip_config(config: &SipConfig, bind: SocketAddr) -> LowSipConfig {
     let mut low = LowSipConfig::on("rvoip-gateway", bind.ip(), bind.port());
+    if let Some((start, end)) = config.media_port_range {
+        low = low.with_media_ports(start, end);
+    }
+    low.playout = config.playout;
+    low.ice = config.ice;
+    // `srtp_required` without `offer_srtp` is rejected as an invalid policy
+    // downstream, so the two move together.
+    match config.srtp {
+        SipMediaSecurity::Disabled => {}
+        SipMediaSecurity::Preferred => low.offer_srtp = true,
+        SipMediaSecurity::Required => {
+            low.offer_srtp = true;
+            low.srtp_required = true;
+        }
+    }
+    if let Some(listener) = &config.tls_listener {
+        low.sip_tls_mode = SipTlsMode::ClientAndServer;
+        low.tls_bind_addr = Some(listener.bind);
+        low.tls_advertised_addr = config.tls_advertised_addr;
+        low.tls_cert_path = Some(listener.cert_path.clone());
+        low.tls_key_path = Some(listener.key_path.clone());
+    }
+    low.tls_extra_ca_path = config.tls_extra_ca_path.clone();
+    if let Some(offered_codecs) = &config.offered_codecs {
+        low.offered_codecs = offered_codecs.clone();
+    }
     if let Some(advertised) = config.sip_advertised_addr {
         low = low
             .with_sip_advertised_addr(advertised)
@@ -1551,6 +2330,263 @@ fn resolve_udp_bind_addr(addr: SocketAddr) -> AppResult<SocketAddr> {
 
 #[cfg(test)]
 mod tests {
+
+    /// ICE policy set on the builder must reach the coordinator, and a lite
+    /// listener with no reachable address must refuse to build — lite
+    /// answers checks but cannot traverse, so an unreachable candidate is a
+    /// call that never gets audio.
+    #[cfg(feature = "sip")]
+    #[test]
+    fn ice_policy_reaches_the_low_level_config() {
+        let bind: SocketAddr = "127.0.0.1:5060".parse().expect("addr");
+        let plain = make_low_sip_config(&SipConfig::bind("127.0.0.1:5060"), bind);
+        assert_eq!(plain.ice, rvoip_sip::SipIcePolicy::Disabled);
+        let full = make_low_sip_config(
+            &SipConfig::bind("127.0.0.1:5060").ice(rvoip_sip::SipIcePolicy::Full),
+            bind,
+        );
+        assert_eq!(full.ice, rvoip_sip::SipIcePolicy::Full);
+    }
+
+    #[cfg(feature = "sip")]
+    #[tokio::test]
+    async fn lite_without_a_reachable_address_refuses_to_build() {
+        let result = RvoipApp::builder()
+            .customers(CustomerPolicy::sip_only())
+            .employees(EmployeePolicy::named(["thelve-runtime"]))
+            .assignment(AssignmentPolicy::fixed("thelve-runtime"))
+            .sip(
+                SipConfig::bind("127.0.0.1:0")
+                    .ice(rvoip_sip::SipIcePolicy::Lite)
+                    .allow(Role::Customer, [Capability::Voice]),
+            )
+            .build()
+            .await;
+        assert!(
+            matches!(result, Err(AppError::Policy(_))),
+            "lite with no advertised, public, or discoverable address must refuse"
+        );
+    }
+
+    /// A listener that cannot learn its reachable address must refuse to
+    /// start. Advertising an unreachable one produces calls that connect and
+    /// carry no audio, which is far harder to diagnose than a refusal.
+    #[cfg(feature = "sip")]
+    #[tokio::test]
+    async fn stun_discovery_fails_closed_rather_than_advertising_a_guess() {
+        // A STUN server that is not there. Discovery exhausts its budget and
+        // the error must surface rather than falling back to the bind address.
+        let unreachable: SocketAddr = "127.0.0.1:1".parse().expect("addr");
+        let sip_addr: SocketAddr = "127.0.0.1:5060".parse().expect("addr");
+        let error = discover_advertised_addr(unreachable, sip_addr)
+            .await
+            .expect_err("an unreachable STUN server cannot yield an address");
+        assert!(
+            format!("{error}").contains("STUN discovery failed"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// A statically configured address is the operator's decision and must
+    /// not be second-guessed by a probe.
+    #[cfg(feature = "sip")]
+    #[test]
+    fn a_static_advertised_address_is_kept_alongside_a_stun_server() {
+        let explicit: SocketAddr = "203.0.113.5:5060".parse().expect("addr");
+        let stun: SocketAddr = "198.51.100.1:3478".parse().expect("addr");
+        let config = SipConfig::bind("0.0.0.0:5060")
+            .advertised_addr(explicit)
+            .discover_advertised_addr(stun);
+        assert_eq!(config.sip_advertised_addr, Some(explicit));
+        assert_eq!(config.stun_server, Some(stun));
+    }
+
+    /// Media posture set on the builder must reach the coordinator, or a
+    /// deployment that asked for encryption silently carries calls in clear.
+    #[cfg(feature = "sip")]
+    #[test]
+    fn media_posture_reaches_the_low_level_config() {
+        use rvoip_sip::PlayoutConfig;
+
+        let bind: SocketAddr = "127.0.0.1:5060".parse().expect("addr");
+
+        // Default: unchanged from every release before this.
+        let plain = make_low_sip_config(&SipConfig::bind("127.0.0.1:5060"), bind);
+        assert!(plain.playout.is_none());
+        assert!(!plain.offer_srtp);
+        assert!(!plain.srtp_required);
+
+        let carrier = make_low_sip_config(
+            &SipConfig::bind("0.0.0.0:5060")
+                .tenant("tenant-a")
+                .trusted_trunk("192.0.2.0/24", "carrier-a"),
+            bind,
+        );
+        assert!(
+            carrier.playout.is_some(),
+            "a carrier-admitted trunk must not inherit raw arrival-order audio"
+        );
+
+        let carrier_lab = make_low_sip_config(
+            &SipConfig::bind("127.0.0.1:5060")
+                .tenant("tenant-a")
+                .trusted_trunk("127.0.0.1/32", "carrier-lab")
+                .disable_playout(),
+            bind,
+        );
+        assert!(carrier_lab.playout.is_none());
+
+        let smoothed = make_low_sip_config(
+            &SipConfig::bind("127.0.0.1:5060").playout(PlayoutConfig {
+                target_depth_frames: 4,
+                ..PlayoutConfig::default()
+            }),
+            bind,
+        );
+        assert_eq!(
+            smoothed
+                .playout
+                .expect("playout reaches the coordinator")
+                .target_depth_frames,
+            4
+        );
+
+        // Preferred offers but tolerates plaintext; required refuses it.
+        let preferred = make_low_sip_config(
+            &SipConfig::bind("127.0.0.1:5060").media_security(SipMediaSecurity::Preferred),
+            bind,
+        );
+        assert!(preferred.offer_srtp);
+        assert!(
+            !preferred.srtp_required,
+            "preferred must fall back, or it is not preferred"
+        );
+
+        let required = make_low_sip_config(
+            &SipConfig::bind("127.0.0.1:5060").media_security(SipMediaSecurity::Required),
+            bind,
+        );
+        assert!(required.offer_srtp && required.srtp_required);
+    }
+
+    #[cfg(feature = "sip")]
+    #[test]
+    fn tls_identity_and_codec_offer_reach_the_low_level_config() {
+        let udp_bind: SocketAddr = "127.0.0.1:5060".parse().expect("UDP bind");
+        let tls_bind: SocketAddr = "0.0.0.0:5061".parse().expect("TLS bind");
+        let tls_advertised: SocketAddr = "192.0.2.10:5061".parse().expect("TLS advertised");
+        let config = SipConfig::bind(udp_bind.to_string())
+            .tls_advertised_addr(tls_advertised)
+            .tls_listener(
+                tls_bind,
+                "/run/secrets/sip-cert.pem",
+                "/run/secrets/sip-key.pem",
+            )
+            .tls_extra_ca("/run/secrets/carrier-ca.pem")
+            .media_security(SipMediaSecurity::Required)
+            .offered_codecs([0, 8, 101]);
+
+        let low = make_low_sip_config(&config, udp_bind);
+        assert_eq!(low.sip_tls_mode, SipTlsMode::ClientAndServer);
+        assert_eq!(low.tls_bind_addr, Some(tls_bind));
+        assert_eq!(low.tls_advertised_addr, Some(tls_advertised));
+        assert_eq!(
+            low.tls_cert_path.as_deref(),
+            Some(std::path::Path::new("/run/secrets/sip-cert.pem"))
+        );
+        assert_eq!(
+            low.tls_key_path.as_deref(),
+            Some(std::path::Path::new("/run/secrets/sip-key.pem"))
+        );
+        assert_eq!(
+            low.tls_extra_ca_path.as_deref(),
+            Some(std::path::Path::new("/run/secrets/carrier-ca.pem"))
+        );
+        assert_eq!(low.offered_codecs, vec![0, 8, 101]);
+        assert!(low.offer_srtp && low.srtp_required);
+        low.validate().expect("complete TLS/SRTP policy validates");
+
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("sip-key.pem"));
+        assert!(!debug.contains("carrier-ca.pem"));
+    }
+
+    #[cfg(feature = "sip")]
+    #[tokio::test]
+    async fn tls_advertisement_without_identity_fails_closed() {
+        let result = RvoipApp::builder()
+            .customers(CustomerPolicy::sip_only())
+            .employees(EmployeePolicy::named(["operator"]))
+            .assignment(AssignmentPolicy::fixed("operator"))
+            .sip(
+                SipConfig::bind("127.0.0.1:0")
+                    .tls_advertised_addr("192.0.2.10:5061".parse().expect("TLS address"))
+                    .allow(Role::Customer, [Capability::Voice]),
+            )
+            .build()
+            .await;
+        assert!(
+            matches!(result, Err(AppError::Policy(detail)) if detail.contains("requires tls_listener")),
+            "TLS advertisement without a certificate-bearing listener must fail startup"
+        );
+    }
+
+    #[cfg(feature = "sip")]
+    #[test]
+    fn sip_config_debug_redacts_registrar_credentials_and_tls_paths() {
+        let config = SipConfig::bind("127.0.0.1:5060")
+            .registrar_users([("alice", "super-secret-password")])
+            .tls_listener(
+                "127.0.0.1:5061".parse().expect("TLS bind"),
+                "/run/secrets/private-cert.pem",
+                "/run/secrets/private-key.pem",
+            );
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("alice"));
+        assert!(!debug.contains("super-secret-password"));
+        assert!(!debug.contains("private-cert.pem"));
+        assert!(!debug.contains("private-key.pem"));
+        assert!(debug.contains("registrar_user_count: 1"));
+    }
+
+    #[cfg(feature = "sip")]
+    #[test]
+    fn remote_endpoint_profile_fails_closed_until_tls_srtp_identity_and_media_are_complete() {
+        let incomplete = SipConfig::bind("127.0.0.1:5060").remote_endpoint_profile();
+        assert!(matches!(
+            validate_remote_endpoint_profile(&incomplete),
+            Err(AppError::Policy(detail)) if detail.contains("remote SIP endpoint profile requires")
+        ));
+
+        let complete = SipConfig::bind("127.0.0.1:5060")
+            .remote_endpoint_profile()
+            .registrar_users([("alice", "secret")])
+            .tls_listener(
+                "0.0.0.0:5061".parse().unwrap(),
+                "/run/secrets/sip-cert.pem",
+                "/run/secrets/sip-key.pem",
+            )
+            .media_security(SipMediaSecurity::Required)
+            .media_public_addr("192.0.2.10:20000".parse().unwrap());
+        validate_remote_endpoint_profile(&complete).expect("complete profile passes preflight");
+    }
+
+    #[cfg(feature = "sip")]
+    #[test]
+    fn sip_egress_profile_retains_only_bounded_public_policy() {
+        let revision = SipProfileRevision::new("carrier-profile-v1").expect("revision");
+        let profile =
+            SipEgressProfileConfig::new(revision.clone(), LowSipConfig::local("egress", 50_620))
+                .allow_initial_headers(["X-Carrier-Account", "P-Charge-Info"]);
+        let config = SipConfig::bind("127.0.0.1:5060").egress_profile(profile);
+
+        assert_eq!(config.egress_profiles.len(), 1);
+        assert_eq!(config.egress_profiles[0].revision, revision);
+        let debug = format!("{:?}", config.egress_profiles[0]);
+        assert!(!debug.contains("carrier-profile-v1"));
+        assert!(!debug.contains("X-Carrier-Account"));
+        assert!(debug.contains("allowed_initial_header_count: 2"));
+    }
     use super::*;
 
     #[test]
@@ -1564,6 +2600,30 @@ mod tests {
         assert!(!cfg
             .role_capabilities
             .allows(Role::Employee, Capability::Text));
+    }
+
+    #[test]
+    fn webrtc_media_can_bind_a_bounded_range_and_advertise_public_nat() {
+        let bind_ip = "0.0.0.0".parse().expect("bind IP");
+        let public_ip = "203.0.113.44".parse().expect("public IP");
+        let cfg = WebRtcConfig::ws("127.0.0.1:8091")
+            .media_udp_port_range(bind_ip, 49_152, 50_175)
+            .nat_1to1_ip(public_ip);
+
+        assert_eq!(cfg.media.udp_bind, "0.0.0.0:0");
+        assert_eq!(
+            cfg.media.udp_port_range,
+            Some(UdpPortRangeConfig {
+                bind_ip,
+                port_start: 49_152,
+                port_end: 50_175,
+            })
+        );
+        assert_eq!(cfg.media.nat_1to1_ips, vec!["203.0.113.44"]);
+        assert_eq!(
+            cfg.media.nat_1to1_candidate_type,
+            Nat1To1CandidateType::Host
+        );
     }
 
     #[test]
@@ -1613,6 +2673,15 @@ mod tests {
                     .expect("media address")
             )
         );
+    }
+
+    #[test]
+    fn explicit_sip_media_ports_reach_the_low_level_allocator() {
+        let config = SipConfig::bind("0.0.0.0:5060").media_ports(16_384, 32_768);
+        let low = make_low_sip_config(&config, "0.0.0.0:5060".parse().expect("bind"));
+
+        assert_eq!(low.media_port_start, 16_384);
+        assert_eq!(low.media_port_end, 32_768);
     }
 
     #[test]
@@ -1680,6 +2749,144 @@ mod tests {
         }
     }
 
+    /// Build one app with adapters actually registered, in authoritative
+    /// mode. If the builder did not install both correctness primitives
+    /// before adapter registration, core would have refused installation and
+    /// this build would fail — so a successful build with both receivers in
+    /// hand *is* the ordering proof.
+    async fn authoritative_app(config: AuthoritativeIngressConfig) -> RvoipApp {
+        RvoipApp::builder()
+            .customers(CustomerPolicy::sip_only())
+            .sip(
+                SipConfig::bind("127.0.0.1:0")
+                    .domain("test.local")
+                    .allow(Role::Customer, [Capability::Voice]),
+            )
+            .employees(EmployeePolicy::named(["agent"]))
+            .assignment(AssignmentPolicy::fixed("agent"))
+            .authoritative_ingress(config)
+            .build()
+            .await
+            .expect("build authoritative app")
+    }
+
+    #[tokio::test]
+    async fn authoritative_ingress_installs_before_adapters_and_hands_over_receivers() {
+        let app = authoritative_app(AuthoritativeIngressConfig::default()).await;
+
+        let ingress = app
+            .take_authoritative_ingress()
+            .expect("authoritative receivers");
+        assert!(!ingress.admissions.is_closed());
+
+        let health = app.ingress_health();
+        assert_eq!(health.mode, IngressMode::Authoritative);
+        assert_eq!(
+            health.operational_stream,
+            OperationalEventStreamHealth::Healthy
+        );
+        assert!(health.admits_new_work);
+    }
+
+    #[tokio::test]
+    async fn authoritative_ingress_has_exactly_one_consumer() {
+        let app = authoritative_app(AuthoritativeIngressConfig::default()).await;
+
+        assert!(app.take_authoritative_ingress().is_some());
+        assert!(
+            app.take_authoritative_ingress().is_none(),
+            "a second correctness consumer would defeat the boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn capacity_one_stream_is_a_supported_configuration() {
+        // The register's acceptance matrix runs at capacity one, where every
+        // delivery is a backpressure decision.
+        let app = authoritative_app(AuthoritativeIngressConfig::new(
+            1,
+            Duration::from_secs(1),
+            1,
+        ))
+        .await;
+
+        let ingress = app
+            .take_authoritative_ingress()
+            .expect("authoritative receivers");
+        drop(ingress);
+        assert_eq!(app.ingress_health().mode, IngressMode::Authoritative);
+    }
+
+    #[tokio::test]
+    async fn losing_the_operational_receiver_degrades_readiness() {
+        let app = authoritative_app(AuthoritativeIngressConfig::default()).await;
+        let ingress = app
+            .take_authoritative_ingress()
+            .expect("authoritative receivers");
+
+        assert!(app.ingress_health().admits_new_work);
+
+        // Losing the correctness receiver must be observable as degraded
+        // readiness, not a log line the operator never reads.
+        drop(ingress.operational);
+        let _ = app
+            .state
+            .orchestrator
+            .open_conversation(
+                TenantId::new(),
+                ConversationPolicy::default(),
+                HashMap::new(),
+            )
+            .await;
+
+        let health = app.ingress_health();
+        assert_eq!(
+            health.operational_stream,
+            OperationalEventStreamHealth::Degraded
+        );
+        assert!(
+            !health.admits_new_work,
+            "a degraded runtime must stop claiming it can take new calls"
+        );
+    }
+
+    #[tokio::test]
+    async fn convenience_mode_keeps_the_legacy_contract() {
+        let app = RvoipApp::builder()
+            .customers(CustomerPolicy::sip_only())
+            .sip(
+                SipConfig::bind("127.0.0.1:0")
+                    .domain("test.local")
+                    .allow(Role::Customer, [Capability::Voice]),
+            )
+            .employees(EmployeePolicy::named(["agent"]))
+            .assignment(AssignmentPolicy::fixed("agent"))
+            .build()
+            .await
+            .expect("build convenience app");
+
+        assert!(app.take_authoritative_ingress().is_none());
+        let health = app.ingress_health();
+        assert_eq!(health.mode, IngressMode::Convenience);
+        assert_eq!(
+            health.operational_stream,
+            OperationalEventStreamHealth::NotInstalled
+        );
+        assert!(health.admits_new_work);
+    }
+
+    #[tokio::test]
+    async fn drain_is_bounded_and_reports_its_outcome() {
+        let app = authoritative_app(AuthoritativeIngressConfig::default()).await;
+        let _ingress = app.take_authoritative_ingress();
+
+        // An idle runtime converges well inside the budget; the point is
+        // that the join point exists and answers honestly either way.
+        let outcome = app.drain(Duration::from_secs(5)).await;
+        assert!(outcome.completed, "idle drain should finish in budget");
+        assert_eq!(outcome.remaining_tasks, 0);
+    }
+
     #[tokio::test]
     async fn unregistered_sip_employee_fails_contact_resolution() {
         let app = RvoipApp::builder()
@@ -1708,6 +2915,74 @@ mod tests {
             Err(other) => panic!("expected contact resolution failure, got {other}"),
             Ok(contact) => panic!("unexpected contact resolution: {contact:?}"),
         }
+    }
+
+    /// The day-one gateway posture in one test: a REAL INVITE arriving at
+    /// an app built with BOTH the authoritative admission gate and a
+    /// trusted-trunk listener policy must surface as an admission ticket,
+    /// and accepting that ticket must answer the call. Neither primitive
+    /// had live-INVITE coverage in combination before this.
+    #[tokio::test]
+    async fn authoritative_trunk_invite_surfaces_an_admission_ticket() {
+        let app = RvoipApp::builder()
+            .customers(CustomerPolicy::sip_only())
+            .sip(
+                SipConfig::bind("127.0.0.1:0")
+                    .domain("test.local")
+                    .tenant("edge-namespace")
+                    .trusted_trunk("127.0.0.0/8", "trunk-under-test")
+                    .allow(Role::Customer, [Capability::Voice]),
+            )
+            .employees(EmployeePolicy::named(["agent"]))
+            .assignment(AssignmentPolicy::fixed("agent"))
+            .authoritative_ingress(AuthoritativeIngressConfig::default())
+            .build()
+            .await
+            .expect("build authoritative trunk app");
+        let AuthoritativeIngress {
+            mut admissions,
+            operational,
+        } = app
+            .take_authoritative_ingress()
+            .expect("authoritative receivers");
+        // Losing the operational receiver degrades the runtime and stops
+        // admission by design; a real owner holds and drains it.
+        let _operational_drain = tokio::spawn(async move {
+            let mut operational = operational;
+            while operational.recv().await.is_some() {}
+        });
+        let gateway = app.addresses().sip.expect("SIP listener");
+
+        let caller_addr = resolve_udp_bind_addr("127.0.0.1:0".parse().expect("loopback socket"))
+            .expect("allocate caller port");
+        let caller = UnifiedCoordinator::new(LowSipConfig::on(
+            "caller",
+            caller_addr.ip(),
+            caller_addr.port(),
+        ))
+        .await
+        .expect("start SIP caller");
+        let call_id = caller
+            .invite(
+                Some(format!("sip:caller@{caller_addr}")),
+                format!("sip:+15550001111@{gateway}"),
+            )
+            .send()
+            .await
+            .expect("send SIP INVITE");
+
+        let ticket = tokio::time::timeout(Duration::from_secs(10), admissions.recv())
+            .await
+            .expect("an admission ticket must be presented for a trusted-trunk INVITE")
+            .expect("admission stream must stay open");
+        let principal = ticket
+            .authenticated_principal()
+            .expect("trunk-matched INVITE carries a principal");
+        assert_eq!(principal.subject, "trunk-under-test");
+        ticket.accept().await.expect("accept the admitted call");
+
+        let _ = caller.bye(&call_id).send().await;
+        let _ = caller.shutdown_gracefully(None).await;
     }
 
     #[tokio::test]

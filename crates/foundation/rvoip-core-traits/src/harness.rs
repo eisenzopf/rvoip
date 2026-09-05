@@ -6,10 +6,11 @@
 //! defaults).
 
 use crate::error::Result;
-use crate::ids::{ConnectionId, ParticipantId, StreamId};
+use crate::ids::{ConnectionId, ParticipantId, RecordingId, StreamId};
 use crate::stream::MediaFrame;
 use async_trait::async_trait;
 use std::fmt;
+use std::sync::Arc;
 
 // --- ASR ---------------------------------------------------------------
 
@@ -159,6 +160,27 @@ impl fmt::Debug for RecordingArtifact {
 pub trait RecordingSink: Send + Sync {
     async fn write(&self, frame: MediaFrame) -> Result<()>;
     async fn close(&self) -> Result<RecordingArtifact>;
+}
+
+/// Opens one sink per recording.
+///
+/// A registered [`RecordingSink`] is a single shared instance, which is
+/// sufficient only while at most one recording is ever in flight: two
+/// concurrent recordings on the same registered name write into the same
+/// sink, and the first `stop_recording` closes it out from under the second.
+/// For a deployment recording many calls at once — and especially for many
+/// tenants at once — that mixes audio and attributes it to whichever
+/// recording stopped first.
+///
+/// Registering a factory instead gives every [`start_recording`] its own
+/// sink instance, so writes and the closing artifact belong to exactly one
+/// recording. The `recording_id` is supplied so an implementation can name
+/// its destination deterministically.
+///
+/// [`start_recording`]: https://docs.rs/rvoip-core
+#[async_trait]
+pub trait RecordingSinkFactory: Send + Sync {
+    async fn open(&self, recording_id: &RecordingId) -> Result<Arc<dyn RecordingSink>>;
 }
 
 #[cfg(test)]

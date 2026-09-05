@@ -48,6 +48,7 @@ pub enum RTCIceGathererEvent {
 /// This is a Sans-I/O configuration object that holds ICE servers and gathering state.
 pub(crate) struct RTCIceGatherer {
     local_addrs: Vec<SocketAddr>,
+    host_candidate_addrs: Vec<SocketAddr>,
     ice_servers: Vec<RTCIceServer>,
     gather_policy: RTCIceTransportPolicy,
     state: RTCIceGatheringState,
@@ -61,9 +62,15 @@ pub(crate) struct RTCIceGatherer {
 
 impl RTCIceGatherer {
     /// Create a new ICE gatherer with ICE servers and gather policy
-    pub(crate) fn new(local_addrs: Vec<SocketAddr>, opts: RTCIceGatherOptions) -> Self {
+    pub(crate) fn new(
+        local_addrs: Vec<SocketAddr>,
+        host_candidate_addrs: Vec<SocketAddr>,
+        opts: RTCIceGatherOptions,
+    ) -> Self {
+        debug_assert_eq!(local_addrs.len(), host_candidate_addrs.len());
         Self {
             local_addrs,
+            host_candidate_addrs,
             ice_servers: opts.ice_servers,
             gather_policy: opts.ice_gather_policy,
             state: RTCIceGatheringState::New,
@@ -108,7 +115,7 @@ impl RTCIceGatherer {
     ///
     /// This is a pure function that creates host candidates without performing I/O.
     fn gather_host_candidates(&mut self) -> Result<(), Error> {
-        for local_addr in &self.local_addrs {
+        for local_addr in &self.host_candidate_addrs {
             let candidate = CandidateHostConfig {
                 base_config: CandidateConfig {
                     network: "udp".to_owned(),

@@ -112,11 +112,23 @@ pub fn read_outbound_contact_params(address: &Address) -> Option<OutboundContact
 
     let reg_id_str = read_string_param(address, "reg-id")?;
     let reg_id = reg_id_str.parse::<u32>().ok()?;
+    if reg_id == 0 {
+        return None;
+    }
 
     Some(OutboundContactParams {
         instance_urn,
         reg_id,
     })
+}
+
+/// Return whether the Contact URI carries the RFC 5626 `ob` marker.
+pub fn is_uri_marked_outbound(address: &Address) -> bool {
+    address
+        .uri
+        .parameters
+        .iter()
+        .any(|parameter| matches!(parameter, Param::Other(name, None) if name.eq_ignore_ascii_case("ob")))
 }
 
 /// Write the RFC 5627 GRUU Contact parameters. Each `None` field is
@@ -218,6 +230,27 @@ mod tests {
     fn outbound_contact_params_read_none_when_missing() {
         let addr = make_address();
         assert!(read_outbound_contact_params(&addr).is_none());
+    }
+
+    #[test]
+    fn outbound_contact_params_reject_zero_reg_id() {
+        let mut addr = make_address();
+        set_outbound_contact_params(
+            &mut addr,
+            &OutboundContactParams {
+                instance_urn: "urn:uuid:11111111-2222-3333-4444-555566667777".into(),
+                reg_id: 0,
+            },
+        );
+        assert!(read_outbound_contact_params(&addr).is_none());
+    }
+
+    #[test]
+    fn outbound_marker_is_detected_independently_from_contact_parameters() {
+        let mut addr = make_address();
+        assert!(!is_uri_marked_outbound(&addr));
+        mark_uri_as_outbound(&mut addr);
+        assert!(is_uri_marked_outbound(&addr));
     }
 
     #[test]

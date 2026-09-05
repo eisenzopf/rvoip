@@ -6,6 +6,9 @@ Documentation for the `rvoip` SIP stack (`rvoip-sip`, `rvoip-sip-dialog`,
 
 ## Contents
 
+- **[REMOTE_ENDPOINT_PROFILE.md](REMOTE_ENDPOINT_PROFILE.md)** — the bounded
+  SIP Outbound/TLS and mandatory SDES-SRTP deployment contract for remote
+  phones behind NAT, including affinity and release-evidence limits.
 - **[SIP_RFC_COMPLIANCE.md](SIP_RFC_COMPLIANCE.md)** — the comprehensive SIP RFC
   compliance matrix: every SIP and SIP-adjacent RFC by number, with title,
   description, implementation status, and the **test/interop evidence** that

@@ -9,6 +9,10 @@ ecosystem — IDs, errors, capability negotiation, identity contracts,
 harness contracts. Has no runtime code and no transitive dependencies
 on `rvoip-core` or any adapter.
 
+The shared media surface includes `StreamSelector`, `MediaReadiness`, and
+`StreamWaitError`, allowing applications and adapters to describe registered,
+source-ready, and bidirectional media without importing a transport crate.
+
 This crate exists to **break dependency cycles**. Many consumer crates
 (`rvoip-auth-core`, `rvoip-harness`, `rvoip-vcon`) need to refer to
 rvoip's identity / session / capability types without pulling in the

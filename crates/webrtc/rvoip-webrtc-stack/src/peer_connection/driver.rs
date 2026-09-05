@@ -66,6 +66,8 @@ where
     /// ICE gatherer for managing ICE candidate gathering
     ice_gatherer: RTCIceGatherer,
     sockets: HashMap<SocketAddr, Arc<dyn AsyncUdpSocket>>,
+    advertised_to_socket: HashMap<SocketAddr, SocketAddr>,
+    socket_to_advertised: HashMap<SocketAddr, SocketAddr>,
 }
 
 impl<I> PeerConnectionDriver<I>
@@ -77,15 +79,22 @@ where
         inner: Arc<PeerConnectionRef<I>>,
         ice_gatherer: RTCIceGatherer,
         sockets: HashMap<SocketAddr, Arc<dyn AsyncUdpSocket>>,
+        advertised_to_socket: HashMap<SocketAddr, SocketAddr>,
     ) -> Result<Self> {
         if sockets.is_empty() {
             return Err(Error::Other("no sockets available".to_owned()));
         }
 
+        let socket_to_advertised = advertised_to_socket
+            .iter()
+            .map(|(advertised, socket)| (*socket, *advertised))
+            .collect();
         Ok(Self {
             inner,
             ice_gatherer,
             sockets,
+            advertised_to_socket,
+            socket_to_advertised,
         })
     }
 
@@ -265,7 +274,12 @@ where
     }
 
     async fn handle_write(&self, msg: TaggedBytesMut) {
-        if let Some(socket) = self.sockets.get(&msg.transport.local_addr) {
+        let socket_addr = self
+            .advertised_to_socket
+            .get(&msg.transport.local_addr)
+            .copied()
+            .unwrap_or(msg.transport.local_addr);
+        if let Some(socket) = self.sockets.get(&socket_addr) {
             match socket.send_to(&msg.message, msg.transport.peer_addr).await {
                 Ok(n) => {
                     trace!(
@@ -283,10 +297,17 @@ where
         }
     }
 
-    async fn handle_read(&mut self, msg: TaggedBytesMut) -> Result<()> {
+    async fn handle_read(&mut self, mut msg: TaggedBytesMut) -> Result<()> {
         if self.ice_gatherer.is_ice_message(&msg) {
             self.ice_gatherer.handle_read(msg)?;
         } else {
+            if let Some(advertised) = self
+                .socket_to_advertised
+                .get(&msg.transport.local_addr)
+                .copied()
+            {
+                msg.transport.local_addr = advertised;
+            }
             let mut core = self.inner.core.lock().await;
             core.handle_read(msg)?;
         }

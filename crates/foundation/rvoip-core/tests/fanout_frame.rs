@@ -57,8 +57,8 @@ impl MediaStream for StubMediaStream {
     }
     fn codec(&self) -> CodecInfo {
         CodecInfo {
-            name: "opus".into(),
-            clock_rate_hz: 48_000,
+            name: "PCMU".into(),
+            clock_rate_hz: 8_000,
             channels: 1,
             fmtp: None,
             payload_type: None,

@@ -12,8 +12,8 @@ use crate::api::client::transport::VoipMetrics;
 use crate::api::common::error::MediaTransportError;
 use crate::api::server::transport::core::connection::ClientConnection;
 use crate::packet::rtcp::{
-    RtcpApplicationDefined, RtcpExtendedReport, RtcpGoodbye, RtcpPacket, RtcpXrBlock,
-    VoipMetricsBlock,
+    RtcpApplicationDefined, RtcpCompoundPacket, RtcpExtendedReport, RtcpGoodbye, RtcpPacket,
+    RtcpReceiverReport, RtcpXrBlock, VoipMetricsBlock,
 };
 use crate::transport::RtpTransport;
 
@@ -180,8 +180,11 @@ pub async fn send_rtcp_bye_to_client(
         reason,
     };
 
-    // Create RTCP packet
-    let rtcp_packet = RtcpPacket::Goodbye(bye_packet);
+    // RFC 3550 compound RTCP must start with SR or RR unless reduced-size
+    // RTCP was negotiated. This API does not negotiate RFC 5506.
+    let rr_packet = RtcpReceiverReport::new(ssrc);
+    let mut rtcp_packet = RtcpCompoundPacket::new_with_rr(rr_packet);
+    rtcp_packet.add_bye(bye_packet);
 
     // Serialize
     let rtcp_data = rtcp_packet.serialize().map_err(|e| {

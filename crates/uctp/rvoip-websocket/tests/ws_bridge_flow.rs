@@ -360,7 +360,7 @@ async fn ws_to_ws_bridge_flows_frames_end_to_end() {
     let stream_2 = offerer_2.media_stream().expect("offerer 2 media stream");
 
     let out_1 = rvoip_core::stream::MediaStream::frames_out(stream_1.as_ref());
-    let mut in_2 = rvoip_core::stream::MediaStream::frames_in(stream_2.as_ref());
+    let mut in_2 = stream_2.try_frames_in().expect("media receiver two");
 
     // Drain any priming-related frames already queued in offerer_2.frames_in
     // (silent RTP from the prime_remote_track step that flowed through the

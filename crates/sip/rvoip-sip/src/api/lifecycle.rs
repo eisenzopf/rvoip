@@ -53,6 +53,25 @@ pub(crate) enum ExactTerminalCompletion {
     OwnerDropped,
 }
 
+/// Exact, signaling-owned completion of one mid-dialog SDP exchange.
+///
+/// This private stream exists so transport adapters can wait for the peer's
+/// final answer before changing a cross-transport media graph.  It carries an
+/// exact registry handle, rather than only a call id, so a reused id can never
+/// satisfy an older operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RenegotiationCompletionOutcome {
+    Committed,
+    Failed,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RenegotiationCompletion {
+    pub(crate) handle: SessionRegistryHandle,
+    pub(crate) method: &'static str,
+    pub(crate) outcome: RenegotiationCompletionOutcome,
+}
+
 impl ExactTerminalCompletion {
     fn encode(self) -> u8 {
         match self {
@@ -2125,6 +2144,7 @@ pub(crate) struct SessionEventPublisher {
     lifecycle: LifecycleIndex,
     dispatcher: SessionEventDispatcher,
     diagnostic_tx: tokio::sync::broadcast::Sender<crate::api::events::DiagnosticEvent>,
+    renegotiation_completion_tx: tokio::sync::broadcast::Sender<RenegotiationCompletion>,
     control_sink: Option<SessionControlSink>,
     exact_terminal_claims: ExactTerminalClaims,
 }
@@ -2156,11 +2176,13 @@ impl SessionEventPublisher {
         let dispatcher =
             SessionEventDispatcher::new(coordinator.clone(), worker_count, channel_capacity);
         let (diagnostic_tx, _) = tokio::sync::broadcast::channel(256);
+        let (renegotiation_completion_tx, _) = tokio::sync::broadcast::channel(256);
         lifecycle.start_background_pruner();
         Self {
             lifecycle,
             dispatcher,
             diagnostic_tx,
+            renegotiation_completion_tx,
             control_sink: None,
             exact_terminal_claims: ExactTerminalClaims::default(),
         }
@@ -2197,6 +2219,27 @@ impl SessionEventPublisher {
         &self,
     ) -> tokio::sync::broadcast::Receiver<crate::api::events::DiagnosticEvent> {
         self.diagnostic_tx.subscribe()
+    }
+
+    pub(crate) fn subscribe_renegotiation_completions(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<RenegotiationCompletion> {
+        self.renegotiation_completion_tx.subscribe()
+    }
+
+    pub(crate) fn publish_renegotiation_completion_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        method: &'static str,
+        outcome: RenegotiationCompletionOutcome,
+    ) {
+        let _ = self
+            .renegotiation_completion_tx
+            .send(RenegotiationCompletion {
+                handle: handle.clone(),
+                method,
+                outcome,
+            });
     }
 
     pub(crate) fn publish_diagnostic_exact(
@@ -2947,6 +2990,7 @@ mod tests {
             .expect("fill synthetic dispatcher queue");
         let lifecycle = LifecycleIndex::new();
         let (diagnostic_tx, _) = tokio::sync::broadcast::channel(1);
+        let (renegotiation_completion_tx, _) = tokio::sync::broadcast::channel(1);
         let publisher = SessionEventPublisher {
             lifecycle: lifecycle.clone(),
             dispatcher: SessionEventDispatcher {
@@ -2959,6 +3003,7 @@ mod tests {
                 worker_tasks: Arc::new(TokioMutex::new(Some(Vec::new()))),
             },
             diagnostic_tx,
+            renegotiation_completion_tx,
             control_sink: None,
             exact_terminal_claims: ExactTerminalClaims::default(),
         };

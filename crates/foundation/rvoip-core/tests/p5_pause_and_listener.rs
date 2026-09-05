@@ -48,8 +48,8 @@ impl MediaStream for TestStream {
     }
     fn codec(&self) -> CodecInfo {
         CodecInfo {
-            name: "opus".into(),
-            clock_rate_hz: 48_000,
+            name: "PCMU".into(),
+            clock_rate_hz: 8_000,
             channels: 1,
             fmtp: None,
             payload_type: None,
@@ -672,5 +672,153 @@ async fn disconnect_during_ai_setup_cannot_install_or_emit_stale_attachment() {
         .await
         .is_err(),
         "a stale AiAttached event followed ConnectionEnded"
+    );
+}
+
+/// A factory hands every recording its own sink, so concurrent recordings
+/// neither mix frames nor close each other out.
+struct CountingSinkFactory {
+    opened: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl rvoip_core::harness::RecordingSinkFactory for CountingSinkFactory {
+    async fn open(
+        &self,
+        recording_id: &rvoip_core::ids::RecordingId,
+    ) -> RvResult<Arc<dyn RecordingSink>> {
+        self.opened.lock().unwrap().push(recording_id.to_string());
+        Ok(Arc::new(VecRecordingSink::new(format!(
+            "memory:rec/{recording_id}"
+        ))))
+    }
+}
+
+#[tokio::test]
+async fn a_sink_factory_gives_each_recording_its_own_sink() {
+    let (orch, _tx, stream, connid) = setup().await;
+    let opened = Arc::new(Mutex::new(Vec::new()));
+    orch.register_recording_sink_factory(
+        "per-recording",
+        Arc::new(CountingSinkFactory {
+            opened: Arc::clone(&opened),
+        }),
+    );
+
+    let first = orch
+        .start_recording(RecordingTarget::Connection(connid.clone()), "per-recording")
+        .await
+        .expect("first recording");
+    let second = orch
+        .start_recording(RecordingTarget::Connection(connid), "per-recording")
+        .await
+        .expect("second recording");
+    assert_ne!(first, second);
+    assert_eq!(
+        opened.lock().unwrap().len(),
+        2,
+        "each recording opens its own sink rather than sharing one"
+    );
+
+    stream
+        .inbound_tx
+        .send(frame(stream.id.clone(), 1))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(40)).await;
+
+    // Stopping the first must not close the second out from under it: the
+    // shared-sink shape closed whichever recording stopped first.
+    let first_artifact = orch.stop_recording(first).await.expect("stop first");
+    assert!(first_artifact.url.contains("memory:rec/"));
+    let second_artifact = orch.stop_recording(second).await.expect("stop second");
+    assert_ne!(
+        first_artifact.url, second_artifact.url,
+        "two recordings must produce two distinct artifacts"
+    );
+}
+
+#[tokio::test]
+async fn an_unregistered_sink_name_is_still_refused() {
+    let (orch, _tx, _stream, connid) = setup().await;
+    assert!(
+        orch.start_recording(RecordingTarget::Connection(connid), "absent")
+            .await
+            .is_err(),
+        "resolving neither a factory nor a sink must fail closed"
+    );
+}
+
+#[tokio::test]
+async fn a_conference_admits_a_member_and_reports_it() {
+    let (orch, _tx, _stream, connid) = setup().await;
+    let conference = orch.conference_create(8_000);
+
+    orch.conference_join(&conference, connid.clone())
+        .await
+        .expect("a live connection with an audio stream joins");
+    assert_eq!(
+        orch.conference_members(&conference).await.expect("members"),
+        vec![connid.clone()]
+    );
+
+    // Joining twice would double this member's voice in the mix.
+    assert!(
+        orch.conference_join(&conference, connid.clone())
+            .await
+            .is_err(),
+        "a connection cannot join the same conference twice"
+    );
+
+    orch.conference_leave(&conference, &connid)
+        .await
+        .expect("leave");
+    assert!(orch
+        .conference_members(&conference)
+        .await
+        .expect("members")
+        .is_empty());
+
+    // Leaving again is the same requested end state, not a failure.
+    orch.conference_leave(&conference, &connid)
+        .await
+        .expect("leaving twice is idempotent");
+
+    orch.conference_end(&conference).await.expect("end");
+    assert!(
+        orch.conference_members(&conference).await.is_err(),
+        "an ended conference is gone, not empty"
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_conference_is_refused_rather_than_created() {
+    let (orch, _tx, _stream, connid) = setup().await;
+    let absent = rvoip_core::conference::ConferenceId::new();
+    assert!(orch.conference_join(&absent, connid).await.is_err());
+    assert!(orch.conference_end(&absent).await.is_err());
+}
+
+#[tokio::test]
+async fn a_silenced_member_hears_without_being_heard() {
+    let (orch, _tx, _stream, connid) = setup().await;
+    let conference = orch.conference_create(8_000);
+    orch.conference_join(&conference, connid.clone())
+        .await
+        .expect("join");
+
+    orch.conference_set_contribution(&conference, &connid, false)
+        .await
+        .expect("a member can be silenced without leaving");
+    orch.conference_set_contribution(&conference, &connid, true)
+        .await
+        .expect("and unsilenced again");
+
+    let stranger = ConnectionId::new();
+    assert!(
+        orch.conference_set_contribution(&conference, &stranger, false)
+            .await
+            .is_err(),
+        "silencing a connection that is not a member is refused"
     );
 }

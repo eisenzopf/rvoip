@@ -27,7 +27,9 @@ use rvoip_sip_dialog::transaction::{
 use rvoip_sip_dialog::DialogManager;
 use rvoip_sip_transport::error::Error as TransportError;
 use rvoip_sip_transport::resolver::{ResolvedTarget, Resolver, ResolverError};
-use rvoip_sip_transport::transport::{TransportEvent, TransportType};
+use rvoip_sip_transport::transport::{
+    TransportEvent, TransportFlowId, TransportRoute, TransportType,
+};
 use rvoip_sip_transport::Transport;
 use tokio::sync::mpsc;
 
@@ -45,6 +47,7 @@ struct ProgrammableTransport {
     via_sent_by: Arc<Mutex<Vec<Option<String>>>>,
     contacts: Arc<Mutex<Vec<Option<String>>>>,
     messages: Arc<Mutex<Vec<(Message, SocketAddr)>>>,
+    routes: Arc<Mutex<Vec<TransportRoute>>>,
 }
 
 /// Programmable per-attempt outcome for the failover tests. `Ok` is
@@ -72,6 +75,7 @@ impl ProgrammableTransport {
             via_sent_by: Arc::new(Mutex::new(Vec::new())),
             contacts: Arc::new(Mutex::new(Vec::new())),
             messages: Arc::new(Mutex::new(Vec::new())),
+            routes: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -113,6 +117,10 @@ impl ProgrammableTransport {
 
     fn messages(&self) -> Vec<(Message, SocketAddr)> {
         self.messages.lock().unwrap().clone()
+    }
+
+    fn routes(&self) -> Vec<TransportRoute> {
+        self.routes.lock().unwrap().clone()
     }
 }
 
@@ -178,6 +186,15 @@ impl Transport for ProgrammableTransport {
                 Err(TransportError::MessageTooLarge(99999))
             }
         }
+    }
+
+    async fn send_message_via(
+        &self,
+        message: rvoip_sip_core::Message,
+        route: TransportRoute,
+    ) -> Result<(), TransportError> {
+        self.routes.lock().unwrap().push(route.clone());
+        self.send_message(message, route.destination).await
     }
 
     fn local_addr(&self) -> Result<SocketAddr, TransportError> {
@@ -268,6 +285,42 @@ async fn first_candidate_recoverable_failure_falls_over_to_second() {
     assert_eq!(inner.sends().len(), 2);
     assert_eq!(inner.sends()[0].to_string(), "10.0.0.1:5060");
     assert_eq!(inner.sends()[1].to_string(), "10.0.0.2:5060");
+}
+
+#[tokio::test]
+async fn failed_primary_registered_flow_uses_secondary_exact_flow() {
+    let inner = Arc::new(ProgrammableTransport::new(
+        "127.0.0.1:5060".parse().unwrap(),
+    ));
+    let mut transports: HashMap<TransportType, Arc<dyn Transport>> = HashMap::new();
+    transports.insert(TransportType::Tls, inner.clone());
+    let mux =
+        MultiplexedTransport::new_without_trace(inner.clone(), transports).expect("mux build");
+    inner.program(
+        "10.0.0.1:5061".parse().unwrap(),
+        Outcome::RecoverableFail("closed primary flow".into()),
+    );
+    let primary = TransportFlowId::from_process_local_value(41).unwrap();
+    let secondary = TransportFlowId::from_process_local_value(42).unwrap();
+    let mut first = target("10.0.0.1:5061", TransportType::Tls);
+    first.flow_id = Some(primary);
+    let mut second = target("10.0.0.2:5061", TransportType::Tls);
+    second.flow_id = Some(secondary);
+
+    let selected = mux
+        .send_message_with_failover(make_invite(), &[first, second])
+        .await
+        .expect("secondary registered flow succeeds");
+
+    assert_eq!(selected, "10.0.0.2:5061".parse::<SocketAddr>().unwrap());
+    assert_eq!(
+        inner
+            .routes()
+            .iter()
+            .map(|route| route.flow_id)
+            .collect::<Vec<_>>(),
+        vec![Some(primary), Some(secondary)]
+    );
 }
 
 #[tokio::test]

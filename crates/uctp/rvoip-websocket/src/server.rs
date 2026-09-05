@@ -233,7 +233,7 @@ async fn spawn_peer_session<S>(
             rvoip_uctp::state::rejecting_handler(),
         );
     let coord = if let Some(sig9421) = sig9421 {
-        UctpCoordinator::start_full_with_sig9421(
+        UctpCoordinator::start_full_with_sig9421_context(
             "websocket",
             in_rx,
             out_tx,
@@ -241,6 +241,7 @@ async fn spawn_peer_session<S>(
             bearer,
             sig9421.verifier,
             sig9421.policy,
+            sig9421.verification_context,
             Arc::new(rvoip_uctp::state::default_v0_descriptor()),
             subscription_handler.clone(),
             coordinator_caps,

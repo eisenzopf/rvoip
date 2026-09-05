@@ -256,6 +256,31 @@ class GcpReleaseFanoutTests(unittest.TestCase):
             self.assertEqual(decision["failed_shards"], [])
             self.assertFalse(decision["should_stop"])
 
+    def test_partial_result_preserves_completed_gates_but_never_qualifies(self) -> None:
+        manifest = self.cutoff_manifest()
+        worker = next(item for item in manifest["workers"] if item["id"] == "long-soak")
+        result = {
+            "schema": fanout.RESULT_SCHEMA,
+            "candidate_sha": manifest["candidate_sha"],
+            "github_run_id": (
+                f"{manifest['github_run_id']}-{manifest['github_run_attempt']}"
+            ),
+            "shard_id": "long-soak",
+            "gates": sorted(worker["gates"]),
+            "completed_gates": ["perf.long-soak"],
+            "exit_code": 143,
+            "status": "PARTIAL",
+            "evidence_archive_sha256": "0" * 64,
+            "publishing_attempted": False,
+        }
+        self.assertFalse(
+            fanout.validate_result(worker=worker, result=result, manifest=manifest)
+        )
+
+        result["completed_gates"] = ["not.in.this.shard"]
+        with self.assertRaisesRegex(fanout.FanoutError, "invalid completed_gates"):
+            fanout.validate_result(worker=worker, result=result, manifest=manifest)
+
     def test_early_failure_cutoff_fails_closed_on_invalid_or_missing_evidence(self) -> None:
         manifest = self.cutoff_manifest()
         states = {worker["name"]: "RUNNING" for worker in manifest["workers"]}

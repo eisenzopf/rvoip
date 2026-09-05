@@ -14,7 +14,7 @@ use rvoip_auth_core::bearer_stub;
 use rvoip_core::adapter::{AdapterEvent, ConnectionAdapter};
 use rvoip_core::events::Event;
 use rvoip_core::ids::{ConnectionId, SessionId, StreamId};
-use rvoip_core::stream::{MediaFrame, MediaStream, StreamKind};
+use rvoip_core::stream::{MediaFrame, MediaStream, StreamKind, StreamSelector};
 use rvoip_core::{Config, Orchestrator};
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::payloads::{auth, connection, session, stream};
@@ -30,6 +30,7 @@ use rvoip_webtransport::{
     WebTransportDatagramMediaStream,
 };
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 const ALPN_H3: &[u8] = b"h3";
@@ -307,20 +308,15 @@ async fn wait_for_stream(
     adapter: &Arc<UctpWtAdapter>,
     connection_id: &ConnectionId,
 ) -> Arc<dyn MediaStream> {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let streams = adapter
-                .streams(connection_id.clone())
-                .await
-                .expect("adapter streams");
-            if let Some(stream) = streams.into_iter().next() {
-                break stream;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("bound stream timeout")
+    adapter
+        .wait_for_stream(
+            connection_id.clone(),
+            StreamSelector::new(StreamKind::Audio),
+            tokio::time::Instant::now() + Duration::from_secs(5),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("bound stream readiness")
 }
 
 fn media_datagram(local_id: u16, seq: u32, body: &'static [u8]) -> Bytes {

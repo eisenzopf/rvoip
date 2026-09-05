@@ -577,6 +577,28 @@ impl StateMachineHelpers {
         }
     }
 
+    pub(crate) async fn negotiated_media_config_exact(
+        &self,
+        handle: &crate::session_registry::SessionRegistryHandle,
+    ) -> Result<Option<(crate::session_store::state::NegotiatedConfig, u8)>> {
+        let snapshot = self
+            .state_machine
+            .store
+            .get_session_snapshot_exact(handle)?;
+        let session = snapshot.state();
+        match session
+            .negotiated_config
+            .clone()
+            .zip(session.negotiated_payload_type())
+        {
+            Some(config) => Ok(Some(config)),
+            None if session.sdp_negotiated => Err(crate::errors::SessionError::MediaError(
+                "SDP was supplied without an anchored negotiated media configuration".to_string(),
+            )),
+            None => Ok(None),
+        }
+    }
+
     /// Check if a session is in conference
     pub async fn is_in_conference(&self, session_id: &SessionId) -> Result<bool> {
         // Conference functionality is handled via bridging

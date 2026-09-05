@@ -369,6 +369,7 @@ impl SipRequestIngressAuthorizer for SipListenerAuthPolicy {
                 rvoip_sip_transport::transport::TransportType::Tls
                     | rvoip_sip_transport::transport::TransportType::Wss
             ),
+            flow_id: context.flow_id.map(|flow_id| flow_id.as_u64()),
         };
         let auth_context = SipAuthContext::new()
             // Source ports are ephemeral and attacker-controlled. Aggregate

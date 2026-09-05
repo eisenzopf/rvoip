@@ -1240,7 +1240,7 @@ rvoip-rtc = { path = "../rvoip-rtc" }
                 qualified_head=head,
             )
 
-    def test_current_workspace_has_all_44_unique_publishable_packages(self) -> None:
+    def test_current_workspace_has_all_45_unique_publishable_packages(self) -> None:
         root = SCRIPT.parent.parent
         workspace_version = tomllib.loads(
             (root / "Cargo.toml").read_text()
@@ -1249,7 +1249,7 @@ rvoip-rtc = { path = "../rvoip-rtc" }
             root, workspace_version, locked=True
         )
         self.assertEqual(len(packages), release.EXPECTED_PACKAGE_COUNT)
-        self.assertEqual(len(ordered), 44)
+        self.assertEqual(len(ordered), 45)
         self.assertIn("rvoip-sip-dialog", packages)
         self.assertIn("rvoip-sip-transport", packages)
         self.assertIn("rvoip-moq", packages)

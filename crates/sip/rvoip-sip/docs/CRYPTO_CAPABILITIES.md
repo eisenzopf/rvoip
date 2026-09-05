@@ -1,6 +1,7 @@
 # rvoip-sip Crypto Capability Boundaries
 
-This file defines the public, end-to-end crypto claim for `rvoip-sip 0.3.8`.
+This file defines the public, end-to-end crypto claim for the `rvoip-sip 0.3.9`
+candidate.
 A lower crate containing a type, constant, parser, or partial state machine does
 not by itself make that mechanism available through SIP offer/answer.
 
@@ -13,7 +14,7 @@ not by itself make that mechanism available through SIP offer/answer.
 | SDES `AES_256_CM_HMAC_SHA1_80` | Supported | Exact 32-byte key plus 14-byte salt; canonical and compatible unpadded-answer coverage. |
 | SDES `AES_256_CM_HMAC_SHA1_32` | Supported | Same end-to-end path as the AES-256 `_80` profile. |
 | AEAD AES-128-GCM / AES-256-GCM | Unsupported | Profile identities remain for compatibility, but construction, configuration, advertisement, conversion, and negotiation fail closed. |
-| DTLS-SRTP | Unsupported through SIP | Lower-layer profile identifiers remain, but DTLS construction returns a typed unsupported error and `rvoip-sip` has no fingerprint/setup negotiation path. |
+| DTLS-SRTP with AES-128 CM/SHA1-80 | Candidate behind `dtls-srtp` | SIP offer/answer uses `UDP/TLS/RTP/SAVP`, SHA-256 `a=fingerprint`, and RFC 8842 `a=setup`; DTLS 1.2 shares the RTP socket, verifies the SDP fingerprint before context installation, and derives directional RTP/SRTCP contexts. Fresh protected 0.3.9 evidence is still required for the release claim. |
 | MIKEY | Unsupported through SIP | Incomplete lower-layer code is not advertised, negotiated, or claimed as an end-to-end capability. |
 | ZRTP | Unsupported through SIP | Incomplete lower-layer code is not advertised, negotiated, or claimed as an end-to-end capability. |
 | NULL encryption/authentication suites | Test primitives only | They cannot become ready secure transports and are never placed in SIP capability or SDP offer lists. |
@@ -27,6 +28,15 @@ canonical padding. Direct coordinator users pass
 `SipRuntimeConfig::default().with_sdes_base64_mode(...)` to
 `UnifiedCoordinator::new_with_runtime`. Both modes require the suite's exact
 decoded key-plus-salt length.
+
+For DTLS-SRTP, enable the `dtls-srtp` Cargo feature, set `offer_srtp` (and
+normally `srtp_required`) and select
+`Config::with_srtp_keying(SrtpKeyingMode::DtlsSrtp)`. Configuration fails
+closed when the feature or an owned media transport is absent. DTLS packets
+are demultiplexed on the RTP socket; the transport rejects plaintext media
+from the moment the handshake is armed. The legacy DTLS constructors under
+`rvoip_rtp_core::api::{client,server,common}` remain unsupported compatibility
+surfaces and are not aliases for this reviewed path.
 
 `DiagnosticEvent::SdesNegotiationFailed`, received from
 `subscribe_diagnostics`, reports the stage, failure class, crypto tag, suite,

@@ -95,7 +95,7 @@ async fn nack_round_trip_through_lossy_turn() {
             .expect("answerer receives offerer track via lossy relay");
     answerer_stream.attach_remote(remote);
 
-    let mut inbound = answerer_stream.frames_in();
+    let mut inbound = answerer_stream.try_frames_in().unwrap();
     let loss_before_media = fixture.snapshot();
     fixture.enable_loss();
 

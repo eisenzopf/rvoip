@@ -493,6 +493,12 @@ impl DialogEventHub {
                 ))
             }
 
+            SessionCoordinationEvent::RegisteredFlowClosed { flow_id } => Some(
+                RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::RegisteredFlowClosed {
+                    flow_id: flow_id.as_u64(),
+                }),
+            ),
+
             SessionCoordinationEvent::RequestFailed {
                 dialog_id: Some(dialog_id),
                 status_code,

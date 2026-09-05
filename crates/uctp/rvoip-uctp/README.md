@@ -24,6 +24,18 @@ the RTP header and cannot accidentally emit codec payload bytes alone. The raw
 `MediaDatagram` helpers remain hidden compatibility APIs for the alpha adapter
 line.
 
+Applications that need packet-loss, reorder, SSRC-restart, talkspurt, or RTP
+header-extension input can use `observe_rtp_datagram` directly, or configure a
+QUIC/WebTransport adapter's bounded RTP ingress receiver. Each
+`RtpIngressObservation` retains the complete validated packet and its
+authenticated core route before `MediaFrame` normalization. Padding remains
+observable as a byte count but is never included in the codec payload.
+
+Normal `RtpDatagram` packing represents a new RTP hop and deliberately emits
+`marker=false`, no CSRCs or header extensions, and no padding. Exact packet
+identity is preserved only by the explicit `pack_observed_rtp_datagram` API;
+bridges should not copy hop-specific metadata blindly.
+
 For packet-capture conformance runs, set `SSLKEYLOGFILE` and explicitly call
 `enable_server_key_log_from_env` / `enable_client_key_log_from_env` on the
 rustls configurations before constructing the quinn endpoints. The helpers do

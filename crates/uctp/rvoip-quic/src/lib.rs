@@ -17,7 +17,8 @@ pub use broadcast::{UctpBroadcastPublisher, UCTP_QUIC_PROTOCOL_VERSION};
 pub use client::UctpQuicClient;
 pub use errors::{Result, UctpQuicError};
 pub use media_stream::{
-    spawn_datagram_reader, spawn_datagram_reader_with_cancel, QuicDatagramMediaStream,
+    spawn_datagram_reader, spawn_datagram_reader_with_cancel, spawn_datagram_reader_with_observer,
+    QuicDatagramMediaStream,
 };
 pub use rvoip_core::adapter::{AdapterEvent, ConnectionAdapter};
 pub use server::UctpQuicServer;

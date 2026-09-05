@@ -570,6 +570,7 @@ pub use api::trace_redactor::{
 /// mapping without taking their own `ipnet` dependency.
 pub use ipnet::IpNet;
 
+pub use adapters::ice_adapter::SipIcePolicy;
 pub use auth::{
     AAuthValidator, AkaClientConfig, AkaClientProvider, AkaVectorProvider, ApiKeyVerifier,
     AuditFailurePolicy, AuthAttemptAdmission, AuthAttemptReservation, AuthAuditEvent,
@@ -585,6 +586,8 @@ pub use auth::{
     TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
 };
 pub use rvoip_media_core::performance::pool::PoolConfig as MediaPoolConfig;
+pub use rvoip_media_core::prelude::{StunClient, StunError};
+pub use rvoip_media_core::processing::audio::playout::{PlayoutConfig, PlayoutStats};
 pub use rvoip_media_core::types::AudioFrame;
 
 /// SIP_API_DESIGN_2 §3.6 — convenience body constructors. Each
@@ -611,7 +614,7 @@ pub use api::unified::{
 };
 pub use api::{
     Config, MediaMode, RegistrationHandle, RegistrationInfo, RegistrationStatus, SdesBase64Mode,
-    SipContactMode, SipTlsMode, SrtpSuitePolicy, UnifiedCoordinator,
+    SipContactMode, SipTlsMode, SrtpKeyingMode, SrtpSuitePolicy, UnifiedCoordinator,
 };
 
 // Events
@@ -670,9 +673,9 @@ pub mod prelude {
         SipDigestAuthService, SipEgressProfilePolicy, SipEgressProfileRegistration,
         SipInitialHeaders, SipOriginateContext, SipProfileRevision, SipProfileSrtpPolicy,
         SipReason, SipRuntimeConfig, SipTlsMode, SipTrace, SipTraceConfig, SipTraceDirection,
-        SrtpSuitePolicy, StreamPeer, StreamPeerBuilder, SubscriptionState, TransferDialogMatcher,
-        TransferKind, TransferLifecycleOptions, TransferOutcome, TransferTargetEvidence,
-        TransferWaitMode, TypedHeader,
+        SrtpKeyingMode, SrtpSuitePolicy, StreamPeer, StreamPeerBuilder, SubscriptionState,
+        TransferDialogMatcher, TransferKind, TransferLifecycleOptions, TransferOutcome,
+        TransferTargetEvidence, TransferWaitMode, TypedHeader,
     };
 }
 

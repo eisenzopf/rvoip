@@ -3,9 +3,8 @@
 The media graph is the one-source-to-many fan-out in
 [`media_graph.rs`](../src/media_graph.rs). It is what UCTP publishing,
 recording and MOQT fan-out observe a call through. This document records which
-codecs it carries, which it does not, and — for AMR, the one that is fully
-implemented everywhere else — the design decision that governs how it would be
-added.
+codecs it carries, which it does not, and the negotiated-payload-type design
+that lets AMR flow without inventing a conventional dynamic number.
 
 ## What the graph carries
 
@@ -161,9 +160,12 @@ order matters to anyone adding the next dynamic codec.
    UCTP negotiates codecs **by name** and has no payload type to report, which
    is why QUIC and WebTransport still resolve through the name table.
 
-3. **A feature flag.** `amr-nb` / `amr-wb` / `amr` on rvoip-core, forwarding to
-   media-core. Opt-in rather than default, unlike `opus`: these are full 3GPP
-   codecs and most consumers of the graph never carry one.
+3. **Feature flags.** `g729`, `opus`, `amr-nb`, `amr-wb`, `amr`, and
+   `all-codecs` on rvoip-core forward to media-core. G.711 remains the baseline;
+   every other codec is explicit so a pure-Rust dependency graph cannot acquire
+   native Opus through unrelated feature unification. Direct rvoip-core users
+   that need Opus must select `opus` or `all-codecs`; `full` includes
+   `all-codecs`.
 
 4. **Codec construction through `AudioCodecSpec`.** `create_configured_codec`
    keeps its existing arms for payload types 0/8/18/111/`pcm_s16le` and falls

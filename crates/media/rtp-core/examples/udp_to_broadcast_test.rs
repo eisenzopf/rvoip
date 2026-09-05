@@ -41,12 +41,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let transport = Arc::new(transport);
 
     // Subscribe to events
-    let mut transport_events = transport.subscribe();
+    let transport_events = transport.subscribe();
     println!("Subscribed to transport events");
 
     // Spawn event handler task
     let tx_clone = tx.clone();
     let event_task = tokio::spawn(async move {
+        let mut transport_events = transport_events;
         println!("Event handler task started");
 
         while let Ok(event) = transport_events.recv().await {
@@ -102,6 +103,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "Received DTMF (RFC 4733) from {}: event {}, volume -{}dBm0, duration {} ts-units",
                         source, event, volume, duration
                     );
+                }
+                rvoip_rtp_core::traits::RtpEvent::StunPacket { source, .. } => {
+                    println!("Received STUN packet from {}", source);
                 }
             }
         }

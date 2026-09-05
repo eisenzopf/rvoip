@@ -17,11 +17,14 @@ use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
 use super::frame_pump::TranscoderSwap;
+use super::resolve_payload_type;
+use crate::capability::CodecInfo;
 use crate::error::{Result, RvoipError};
 use crate::ids::{BridgeId, ConnectionId, MediaRouteId};
 use crate::media_graph::{
     ManagedMediaRoute, MediaGraphHandle, MediaGraphRouteState, MediaGraphRouteStatus,
 };
+use rvoip_media_core::codec::transcoding::Transcoder;
 
 enum CrossBridgeBackend {
     Pumps {
@@ -60,6 +63,36 @@ pub(crate) enum CrossBridgeSwapController {
 }
 
 impl CrossBridgeSwapController {
+    /// Apply complete codec identities to every enabled bridge direction.
+    ///
+    /// Managed media graphs retain dynamic payload assignments and fmtp.
+    /// Legacy frame pumps still consume payload-keyed swap messages, derived
+    /// here from the same transport-reported descriptors.
+    pub(crate) async fn swap_codecs(self, a: CodecInfo, b: CodecInfo) -> Result<()> {
+        match self {
+            Self::MediaGraphs { a_to_b, b_to_a } => {
+                if let Some((graph, route)) = a_to_b {
+                    graph.update_source_codec(a.clone()).await?;
+                    graph.update_sink_codec(route, b.clone()).await?;
+                }
+                if let Some((graph, route)) = b_to_a {
+                    graph.update_source_codec(b.clone()).await?;
+                    graph.update_sink_codec(route, a.clone()).await?;
+                }
+                Ok(())
+            }
+            Self::Pumps { a_to_b, b_to_a } => {
+                let a_pt = resolve_payload_type(&a)
+                    .ok_or_else(|| RvoipError::UnsupportedCodec(a.name.clone()))?;
+                let b_pt = resolve_payload_type(&b)
+                    .ok_or_else(|| RvoipError::UnsupportedCodec(b.name.clone()))?;
+                Self::Pumps { a_to_b, b_to_a }
+                    .swap_transcoders(transcoder_swap(a_pt, b_pt), transcoder_swap(b_pt, a_pt))
+                    .await
+            }
+        }
+    }
+
     pub(crate) async fn swap_transcoders(
         self,
         mut a_to_b_swap: TranscoderSwap,
@@ -102,6 +135,15 @@ impl CrossBridgeSwapController {
                 Ok(())
             }
         }
+    }
+}
+
+fn transcoder_swap(from_pt: u8, to_pt: u8) -> TranscoderSwap {
+    TranscoderSwap {
+        new_transcoder: (from_pt != to_pt).then(Transcoder::new),
+        new_from_pt: from_pt,
+        new_to_pt: to_pt,
+        ack: None,
     }
 }
 
@@ -460,7 +502,7 @@ impl Drop for CrossBridgeHandle {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "opus"))]
 mod tests {
     use super::*;
     use crate::capability::CodecInfo;

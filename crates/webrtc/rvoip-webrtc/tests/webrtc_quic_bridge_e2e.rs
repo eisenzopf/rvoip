@@ -187,7 +187,7 @@ async fn whip_webrtc_bridged_to_real_quic_leg() {
     );
     let router = Arc::new(parking_lot::RwLock::new(vec![Arc::clone(&client_stream)]));
     spawn_datagram_reader(quic_client.connection.clone(), router, None);
-    let mut client_in = client_stream.frames_in();
+    let mut client_in = client_stream.try_frames_in().unwrap();
 
     publisher
         .accept(pub_conn.clone())

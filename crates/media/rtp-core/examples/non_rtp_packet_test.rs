@@ -33,11 +33,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let transport = UdpRtpTransport::new(transport_config).await?;
 
     // Subscribe to events
-    let mut transport_events = transport.subscribe();
+    let transport_events = transport.subscribe();
     println!("Subscribed to transport events");
 
     // Spawn event handler task
     let event_handler = tokio::spawn(async move {
+        let mut transport_events = transport_events;
         println!("Event handler task started");
 
         // Process events with a timeout
@@ -81,6 +82,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "DtmfEvent #{} - digit code {} from {}",
                             event_count, event, source
                         );
+                    }
+                    RtpEvent::StunPacket { source, .. } => {
+                        println!("STUN packet received from {}", source);
                     }
                 },
                 Ok(Err(e)) => {

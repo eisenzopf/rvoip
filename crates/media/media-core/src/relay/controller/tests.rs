@@ -16,6 +16,17 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket};
     use std::sync::Arc;
 
+    #[cfg(feature = "dtls-srtp")]
+    #[test]
+    fn dtls_fingerprint_mismatch_fails_before_context_installation() {
+        let advertised = [0x11; 32];
+        assert!(verify_dtls_fingerprint(advertised, advertised).is_ok());
+
+        let error = verify_dtls_fingerprint([0x22; 32], advertised)
+            .expect_err("a certificate substitution must fail closed");
+        assert!(matches!(error, Error::Config(_)));
+    }
+
     #[tokio::test]
     async fn test_start_stop_session() {
         let controller = MediaSessionController::new();

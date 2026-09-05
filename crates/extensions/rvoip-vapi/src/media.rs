@@ -168,7 +168,21 @@ impl MediaStream for VapiMediaStream {
     }
 
     fn frames_in(&self) -> mpsc::Receiver<MediaFrame> {
-        self.try_frames_in().unwrap_or_else(|_| mpsc::channel(1).1)
+        self.try_frames_in().unwrap_or_else(|_| {
+            // Retained only for source compatibility through the 0.3 line.
+            // A duplicate consumer must never look like a healthy but quiet
+            // peer to an operator.
+            tracing::error!(
+                stream_id = %self.id,
+                "deprecated infallible media receiver acquisition failed; returning a closed receiver"
+            );
+            metrics::counter!(
+                "rvoip_media_receiver_acquisition_failures_total",
+                "transport" => "vapi"
+            )
+            .increment(1);
+            mpsc::channel(1).1
+        })
     }
 
     fn try_frames_in(&self) -> RvoipResult<mpsc::Receiver<MediaFrame>> {

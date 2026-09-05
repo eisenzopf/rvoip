@@ -205,6 +205,30 @@ pub enum OperationalEventKind {
     MediaActivity {
         generation: u64,
     },
+    /// Per-connection media quality, distilled from RTCP receiver reports
+    /// and XR by the media layer.
+    ///
+    /// Carried on the authoritative stream because an application that took
+    /// the operational receiver stopped reading the observational broadcast,
+    /// and quality it never sees is quality it cannot act on — a call
+    /// degrading is exactly the thing worth reacting to while it is still
+    /// in progress.
+    ///
+    /// Scaled to integers rather than carrying the float snapshot directly:
+    /// this enum is `Eq`, floats are not, and exact equality on a telemetry
+    /// float is a poor idea regardless. Hundredths are finer than any of
+    /// these quantities are actually known to.
+    Quality {
+        /// Jitter in hundredths of a millisecond.
+        jitter_centi_ms: u32,
+        /// Packet loss in hundredths of a percent.
+        packet_loss_centi_pct: u32,
+        /// Estimated MOS in hundredths (350 = 3.50), when one was produced.
+        ///
+        /// An estimate derived from loss, jitter, and latency — good for
+        /// trends, not a measurement of perceived quality.
+        mos_centi: Option<u16>,
+    },
     Ended {
         reason: OperationalEndReason,
     },
@@ -247,6 +271,16 @@ impl fmt::Debug for OperationalEventKind {
             Self::MediaActivity { generation } => formatter
                 .debug_struct("MediaActivity")
                 .field("generation", generation)
+                .finish(),
+            Self::Quality {
+                jitter_centi_ms,
+                packet_loss_centi_pct,
+                mos_centi,
+            } => formatter
+                .debug_struct("Quality")
+                .field("jitter_centi_ms", jitter_centi_ms)
+                .field("packet_loss_centi_pct", packet_loss_centi_pct)
+                .field("mos_centi", mos_centi)
                 .finish(),
             Self::Ended { reason } => formatter
                 .debug_struct("Ended")

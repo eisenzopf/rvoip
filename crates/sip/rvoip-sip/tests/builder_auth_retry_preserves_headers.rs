@@ -64,8 +64,14 @@ async fn run_invite_extras_auth_retry(uas_port: u16, uac_port: u16, fail_bye_bef
     let ack_count = Arc::new(AtomicU32::new(0));
     let bye_count = Arc::new(AtomicU32::new(0));
     // For each captured INVITE, record:
-    // (has_x_trace, x_trace_value, has_authorization)
-    let invites_seen = Arc::new(Mutex::new(Vec::<(bool, Option<String>, bool)>::new()));
+    // (has_x_trace, x_trace_value, has_authorization, PAI, PPI)
+    let invites_seen = Arc::new(Mutex::new(Vec::<(
+        bool,
+        Option<String>,
+        bool,
+        Option<String>,
+        Option<String>,
+    )>::new()));
 
     let sock_task = sock.clone();
     let count_task = invite_count.clone();
@@ -108,10 +114,15 @@ async fn run_invite_extras_auth_retry(uas_port: u16, uac_port: u16, fail_bye_bef
             let has_authorization = request
                 .raw_header_value(&HeaderName::Authorization)
                 .is_some();
-            captured_task
-                .lock()
-                .await
-                .push((has_x_trace, x_trace_val, has_authorization));
+            let pai = request.raw_header_value(&HeaderName::PAssertedIdentity);
+            let ppi = request.raw_header_value(&HeaderName::PPreferredIdentity);
+            captured_task.lock().await.push((
+                has_x_trace,
+                x_trace_val,
+                has_authorization,
+                pai,
+                ppi,
+            ));
 
             if count == 0 {
                 // 401 with WWW-Authenticate.
@@ -190,6 +201,8 @@ async fn run_invite_extras_auth_retry(uas_port: u16, uac_port: u16, fail_bye_bef
             format!("sip:bob@127.0.0.1:{uas_port}"),
         )
         .with_credentials(Credentials::new("alice", "password").with_realm("testrealm"))
+        .with_pai("sip:+14085550100@identity.example")
+        .with_ppi("sip:+14085550101@identity.example")
         .with_raw_header(
             HeaderName::Other(TRACE_HEADER_NAME.to_string()),
             TRACE_HEADER_VALUE,
@@ -418,7 +431,7 @@ async fn run_invite_extras_auth_retry(uas_port: u16, uac_port: u16, fail_bye_bef
     );
 
     // INITIAL INVITE: X-Trace present, no Authorization.
-    let (init_has_trace, init_trace, init_has_auth) = &captured[0];
+    let (init_has_trace, init_trace, init_has_auth, init_pai, init_ppi) = &captured[0];
     assert!(
         *init_has_trace,
         "initial INVITE must carry X-Trace; captured: {:?}",
@@ -433,10 +446,16 @@ async fn run_invite_extras_auth_retry(uas_port: u16, uac_port: u16, fail_bye_bef
         !*init_has_auth,
         "initial INVITE must NOT carry Authorization"
     );
+    assert!(init_pai
+        .as_deref()
+        .is_some_and(|value| value.contains("14085550100")));
+    assert!(init_ppi
+        .as_deref()
+        .is_some_and(|value| value.contains("14085550101")));
 
     // RETRY INVITE: X-Trace still present (this is what §10 #21 is about),
     // and Authorization is now stamped.
-    let (retry_has_trace, retry_trace, retry_has_auth) = &captured[1];
+    let (retry_has_trace, retry_trace, retry_has_auth, retry_pai, retry_ppi) = &captured[1];
     assert!(
         *retry_has_trace,
         "auth retry INVITE must still carry X-Trace; captured: {:?}",
@@ -451,6 +470,8 @@ async fn run_invite_extras_auth_retry(uas_port: u16, uac_port: u16, fail_bye_bef
         *retry_has_auth,
         "auth retry INVITE must carry Authorization (credentialed)"
     );
+    assert_eq!(retry_pai, init_pai, "PAI must survive the auth retry");
+    assert_eq!(retry_ppi, init_ppi, "PPI must survive the auth retry");
 
     uas_handle.abort();
 }

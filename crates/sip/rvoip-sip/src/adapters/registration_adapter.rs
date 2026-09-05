@@ -30,6 +30,18 @@ pub struct RegistrationAdapter {
     registrar: Arc<RegistrarService>,
     global_coordinator: Arc<GlobalEventCoordinator>,
     dialog_adapter: OnceLock<Arc<crate::adapters::DialogAdapter>>,
+    require_outbound_tls: bool,
+}
+
+struct IncomingRegisterParts<'a> {
+    transaction_id: String,
+    from_uri: String,
+    request_uri: String,
+    contact_uri: String,
+    expires: u32,
+    authorization: Option<String>,
+    request: Option<&'a rvoip_sip_core::Request>,
+    transport_context: Option<&'a rvoip_infra_common::events::cross_crate::SipTransportContext>,
 }
 
 fn classified_register_response_result(
@@ -134,6 +146,7 @@ impl RegistrationAdapter {
             registrar,
             global_coordinator,
             dialog_adapter: OnceLock::new(),
+            require_outbound_tls: false,
         }
     }
 
@@ -141,6 +154,7 @@ impl RegistrationAdapter {
         registrar: Arc<RegistrarService>,
         global_coordinator: Arc<GlobalEventCoordinator>,
         dialog_adapter: Arc<crate::adapters::DialogAdapter>,
+        require_outbound_tls: bool,
     ) -> Self {
         let response_owner = OnceLock::new();
         assert!(response_owner.set(dialog_adapter).is_ok());
@@ -148,6 +162,7 @@ impl RegistrationAdapter {
             registrar,
             global_coordinator,
             dialog_adapter: response_owner,
+            require_outbound_tls,
         }
     }
 
@@ -195,15 +210,17 @@ impl RegistrationAdapter {
     }
 
     /// Handle incoming REGISTER request from dialog-core
-    async fn handle_incoming_register(
-        &self,
-        transaction_id: String,
-        from_uri: String,
-        request_uri: String,
-        contact_uri: String,
-        expires: u32,
-        authorization: Option<String>,
-    ) -> Result<()> {
+    async fn handle_incoming_register(&self, parts: IncomingRegisterParts<'_>) -> Result<()> {
+        let IncomingRegisterParts {
+            transaction_id,
+            from_uri,
+            request_uri,
+            contact_uri,
+            expires,
+            authorization,
+            request,
+            transport_context,
+        } = parts;
         // Refuse the request before authentication or registrar mutation when
         // no exact transaction response capability is installed. Accepting a
         // binding without being able to author its final SIP response would be
@@ -247,22 +264,44 @@ impl RegistrationAdapter {
                 "REGISTER authentication succeeded"
             );
 
-            // Build ContactInfo
-            let contact = ContactInfo {
-                uri: contact_uri.clone(),
-                instance_id: uuid::Uuid::new_v4().to_string(),
-                transport: Transport::UDP,
-                user_agent: "rvoip-sip".to_string(),
-                expires: chrono::Utc::now()
-                    + chrono::Duration::try_seconds(expires as i64)
-                        .unwrap_or_else(|| chrono::Duration::seconds(3600)),
-                q_value: 1.0,
-                received: None,
-                path: Vec::new(),
-                methods: vec!["INVITE".to_string(), "ACK".to_string(), "BYE".to_string()],
-                reg_id: None,
-                flow_id: None,
-                reachability: ContactReachability::Unknown,
+            if self.require_outbound_tls && !Self::is_remote_endpoint_transport(transport_context) {
+                self.send_remote_endpoint_rejection(transaction_id).await?;
+                return Ok(());
+            }
+
+            let mut contact =
+                Self::contact_from_request(&contact_uri, expires, request, transport_context)?;
+            if self.require_outbound_tls
+                && !Self::is_remote_endpoint_registration(&contact, transport_context)
+            {
+                self.send_remote_endpoint_rejection(transaction_id).await?;
+                return Ok(());
+            }
+            let recovering_registered_flow = if contact.reg_id.is_some() && expires != 0 {
+                self.registrar.lookup_aor(&aor).await.is_ok_and(|contacts| {
+                    contacts.iter().any(|existing| {
+                        existing.instance_id == contact.instance_id
+                            && existing.reg_id == contact.reg_id
+                            && existing.reachability == ContactReachability::Unreachable
+                    })
+                })
+            } else {
+                false
+            };
+            if recovering_registered_flow {
+                // Commit the replacement with the previous degraded posture,
+                // then make the transition authoritative immediately below.
+                // This emits exactly one recovered event and never labels a
+                // first registration as a recovery.
+                contact.reachability = ContactReachability::Unreachable;
+            }
+            let process_local_flow_id = transport_context.and_then(|context| context.flow_id);
+            let staged_flow_token = if contact.reg_id.is_some() && expires != 0 {
+                let token = self.registrar.new_registered_flow_token();
+                contact.flow_id = Some(token.clone());
+                Some(token)
+            } else {
+                None
             };
 
             // Fully validate and serialize the registrar mutation before
@@ -272,16 +311,24 @@ impl RegistrationAdapter {
             // the prior binding, including replacement and removal cases.
             let prepared_registration = self
                 .registrar
-                .prepare_register_aor(&aor, contact, Some(expires))
+                .prepare_register_aor(&aor, contact.clone(), Some(expires))
                 .await
                 .map_err(Self::registrar_storage_failure)?;
+
+            if let (Some(_), Some(flow_id)) = (&staged_flow_token, process_local_flow_id) {
+                self.registrar
+                    .bind_registered_flow(&aor, &contact, flow_id)
+                    .map_err(Self::registrar_storage_failure)?;
+            }
 
             let response = crate::api::respond::register_response::RegisterResponseEventFields {
                 transaction_id,
                 status_code: 200,
                 reason: "OK".to_string(),
                 www_authenticate: None,
-                contact: Some(contact_uri),
+                // Preserve the complete inbound Contact header so RFC 5626
+                // parameters are echoed rather than collapsing it to its URI.
+                contact: None,
                 expires: Some(expires),
                 min_expires: None,
                 service_route: Vec::new(),
@@ -289,8 +336,57 @@ impl RegistrationAdapter {
                 associated_uri: Vec::new(),
                 extra_headers: Vec::new(),
             };
-            self.send_register_response(&response).await?;
+            if let Err(error) = self.send_register_response(&response).await {
+                if let Some(token) = staged_flow_token.as_deref() {
+                    self.registrar.discard_registered_flow_token(token);
+                }
+                return Err(error);
+            }
             prepared_registration.commit().await;
+            let committed_flow_reachable = staged_flow_token
+                .as_ref()
+                .is_some_and(|_| self.registrar.commit_registered_flow(&aor, &contact));
+            if staged_flow_token.is_some() && !committed_flow_reachable {
+                if let Some(token) = staged_flow_token.as_deref() {
+                    if self
+                        .registrar
+                        .set_registered_flow_reachability(
+                            &aor,
+                            token,
+                            ContactReachability::Unreachable,
+                        )
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            stage = "registered-flow-commit",
+                            "closed REGISTER flow could not be committed as unreachable"
+                        );
+                    }
+                }
+            }
+            if recovering_registered_flow && committed_flow_reachable {
+                if let Some(token) = staged_flow_token.as_deref() {
+                    if self
+                        .registrar
+                        .set_registered_flow_reachability(
+                            &aor,
+                            token,
+                            ContactReachability::Reachable,
+                        )
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            stage = "registered-flow-recovery",
+                            "REGISTER flow recovery transition could not be published"
+                        );
+                    }
+                }
+            }
+            if expires == 0 {
+                self.registrar.remove_registered_flow(&aor, &contact);
+            }
 
             info!("REGISTER accepted and response sent");
         } else {
@@ -330,6 +426,7 @@ impl RegistrationAdapter {
             expires,
             authorization,
             raw_request,
+            transport,
             ..
         } = event
         else {
@@ -348,27 +445,170 @@ impl RegistrationAdapter {
         // Digest authentication is bound to the exact Request-URI from the
         // wire. Synthetic compatibility events have no raw request, so retain
         // the historical From-URI fallback for those events only.
-        let request_uri = raw_request
+        let parsed_request = raw_request
             .as_ref()
             .and_then(|bytes| {
                 rvoip_sip_core::parse_message_with_mode(bytes, rvoip_sip_core::ParseMode::Strict)
                     .ok()
             })
             .and_then(|message| match message {
-                rvoip_sip_core::Message::Request(request) => Some(request.uri().to_string()),
+                rvoip_sip_core::Message::Request(request) => Some(request),
                 rvoip_sip_core::Message::Response(_) => None,
-            })
+            });
+        let request_uri = parsed_request
+            .as_ref()
+            .map(|request| request.uri().to_string())
             .unwrap_or_else(|| from_uri.clone());
 
-        self.handle_incoming_register(
-            transaction_id.clone(),
-            from_uri.clone(),
+        self.handle_incoming_register(IncomingRegisterParts {
+            transaction_id: transaction_id.clone(),
+            from_uri: from_uri.clone(),
             request_uri,
-            contact_uri.clone(),
-            *expires,
-            authorization.clone(),
-        )
+            contact_uri: contact_uri.clone(),
+            expires: *expires,
+            authorization: authorization.clone(),
+            request: parsed_request.as_ref(),
+            transport_context: transport.as_ref(),
+        })
         .await
+    }
+
+    pub(crate) async fn handle_registered_flow_closed(&self, process_local_flow_id: u64) {
+        let affected = self
+            .registrar
+            .mark_process_local_flow_unreachable(process_local_flow_id)
+            .await;
+        if affected != 0 {
+            tracing::info!(
+                affected,
+                "Registered SIP flow closed and bindings were degraded"
+            );
+        }
+    }
+
+    fn contact_from_request(
+        contact_uri: &str,
+        expires: u32,
+        request: Option<&rvoip_sip_core::Request>,
+        transport_context: Option<&rvoip_infra_common::events::cross_crate::SipTransportContext>,
+    ) -> Result<ContactInfo> {
+        use rvoip_sip_core::types::headers::HeaderAccess;
+        use rvoip_sip_core::types::{contact::Contact, header::HeaderName, TypedHeader};
+
+        let address = request
+            .and_then(|request| request.typed_header::<Contact>())
+            .and_then(Contact::address);
+        let outbound =
+            address.and_then(rvoip_sip_core::types::outbound::read_outbound_contact_params);
+        let outbound_marker =
+            address.is_some_and(rvoip_sip_core::types::outbound::is_uri_marked_outbound);
+        if outbound_marker != outbound.is_some() {
+            return Err(SessionError::InvalidInput(
+                "invalid RFC 5626 outbound Contact parameters".into(),
+            ));
+        }
+
+        let transport = match transport_context
+            .map(|context| context.transport.trim().to_ascii_uppercase())
+            .as_deref()
+        {
+            Some("TCP") => Transport::TCP,
+            Some("TLS") => Transport::TLS,
+            Some("WS") => Transport::WS,
+            Some("WSS") => Transport::WSS,
+            Some("SCTP") => Transport::SCTP,
+            _ => Transport::UDP,
+        };
+        let stream_transport = matches!(
+            transport,
+            Transport::TCP | Transport::TLS | Transport::WS | Transport::WSS
+        );
+        let local_flow_id = transport_context.and_then(|context| context.flow_id);
+        if outbound.is_some() && (!stream_transport || local_flow_id.is_none()) {
+            return Err(SessionError::InvalidInput(
+                "RFC 5626 outbound registration requires an exact stream transport flow".into(),
+            ));
+        }
+
+        let path = request
+            .into_iter()
+            .flat_map(|request| request.headers.iter())
+            .filter_map(|header| match header {
+                TypedHeader::Path(path) => Some(path.iter().map(ToString::to_string)),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        let user_agent = request
+            .and_then(|request| request.raw_header_value(&HeaderName::UserAgent))
+            .unwrap_or_else(|| "unknown".to_string());
+        let (instance_id, reg_id) = outbound
+            .map(|params| (params.instance_urn, Some(params.reg_id)))
+            .unwrap_or_default();
+        Ok(ContactInfo {
+            uri: contact_uri.to_string(),
+            instance_id,
+            transport,
+            user_agent,
+            expires: chrono::Utc::now()
+                + chrono::Duration::try_seconds(expires as i64)
+                    .unwrap_or_else(|| chrono::Duration::seconds(3600)),
+            q_value: 1.0,
+            received: transport_context.map(|context| context.remote_addr.clone()),
+            path,
+            methods: vec!["INVITE".to_string(), "ACK".to_string(), "BYE".to_string()],
+            reg_id,
+            // The authenticated handler replaces this with an opaque route
+            // capability after the registrar mutation is fully validated.
+            // Numeric process-local flow identities must never enter Contact
+            // state, diagnostics, or externally serialized events.
+            flow_id: None,
+            reachability: if local_flow_id.is_some() {
+                ContactReachability::Reachable
+            } else {
+                ContactReachability::Unknown
+            },
+        })
+    }
+
+    fn is_remote_endpoint_registration(
+        contact: &ContactInfo,
+        transport_context: Option<&rvoip_infra_common::events::cross_crate::SipTransportContext>,
+    ) -> bool {
+        Self::is_remote_endpoint_transport(transport_context)
+            && !contact.instance_id.is_empty()
+            && contact.reg_id.is_some_and(|reg_id| reg_id != 0)
+    }
+
+    fn is_remote_endpoint_transport(
+        transport_context: Option<&rvoip_infra_common::events::cross_crate::SipTransportContext>,
+    ) -> bool {
+        let Some(context) = transport_context else {
+            return false;
+        };
+        context.secure
+            && matches!(
+                context.transport.to_ascii_uppercase().as_str(),
+                "TLS" | "WSS"
+            )
+            && context.flow_id.is_some_and(|flow_id| flow_id != 0)
+    }
+
+    async fn send_remote_endpoint_rejection(&self, transaction_id: String) -> Result<()> {
+        let response = crate::api::respond::register_response::RegisterResponseEventFields {
+            transaction_id,
+            status_code: 439,
+            reason: "First Hop Lacks Outbound Support".to_string(),
+            www_authenticate: None,
+            contact: None,
+            expires: None,
+            min_expires: None,
+            service_route: Vec::new(),
+            path_echo: false,
+            associated_uri: Vec::new(),
+            extra_headers: Vec::new(),
+        };
+        self.send_register_response(&response).await
     }
 
     /// Install this adapter into the one authoritative typed REGISTER route.
@@ -496,6 +736,96 @@ mod diagnostic_tests {
         }
     }
 
+    fn outbound_register_request() -> rvoip_sip_core::Request {
+        let wire = concat!(
+            "REGISTER sip:registrar.example.test SIP/2.0\r\n",
+            "Via: SIP/2.0/TLS 10.0.0.20:5061;branch=z9hG4bK-flow-test;rport\r\n",
+            "From: <sip:alice@example.test>;tag=register-test\r\n",
+            "To: <sip:alice@example.test>\r\n",
+            "Call-ID: flow-test@example.test\r\n",
+            "CSeq: 1 REGISTER\r\n",
+            "Max-Forwards: 70\r\n",
+            "Contact: <sip:alice@10.0.0.20:5061;transport=tls;ob>;+sip.instance=\"<urn:uuid:11111111-2222-4333-8444-555555555555>\";reg-id=2\r\n",
+            "Path: <sip:edge.example.test;lr>\r\n",
+            "User-Agent: independent-test-ua/1.0\r\n",
+            "Content-Length: 0\r\n\r\n"
+        );
+        match rvoip_sip_core::parse_message(wire.as_bytes()).unwrap() {
+            rvoip_sip_core::Message::Request(request) => request,
+            rvoip_sip_core::Message::Response(_) => panic!("expected REGISTER request"),
+        }
+    }
+
+    #[test]
+    fn outbound_contact_retains_authenticated_live_flow_and_path() {
+        let request = outbound_register_request();
+        let transport = rvoip_infra_common::events::cross_crate::SipTransportContext::new(
+            "TLS",
+            "192.0.2.10:5061",
+            "198.51.100.20:41000",
+            true,
+        )
+        .with_flow_id(42);
+
+        let contact = RegistrationAdapter::contact_from_request(
+            "sip:alice@10.0.0.20:5061;transport=tls;ob",
+            600,
+            Some(&request),
+            Some(&transport),
+        )
+        .unwrap();
+
+        assert_eq!(contact.transport, Transport::TLS);
+        assert_eq!(
+            contact.instance_id,
+            "urn:uuid:11111111-2222-4333-8444-555555555555"
+        );
+        assert_eq!(contact.reg_id, Some(2));
+        assert_eq!(contact.flow_id, None);
+        assert_eq!(contact.received.as_deref(), Some("198.51.100.20:41000"));
+        assert_eq!(contact.path, vec!["<sip:edge.example.test;lr>"]);
+        assert_eq!(contact.reachability, ContactReachability::Reachable);
+        assert!(RegistrationAdapter::is_remote_endpoint_registration(
+            &contact,
+            Some(&transport)
+        ));
+
+        let insecure = rvoip_infra_common::events::cross_crate::SipTransportContext::new(
+            "TCP",
+            "192.0.2.10:5060",
+            "198.51.100.20:41000",
+            false,
+        )
+        .with_flow_id(42);
+        assert!(!RegistrationAdapter::is_remote_endpoint_registration(
+            &contact,
+            Some(&insecure)
+        ));
+    }
+
+    #[test]
+    fn outbound_contact_fails_closed_without_exact_stream_flow() {
+        let request = outbound_register_request();
+        let transport = rvoip_infra_common::events::cross_crate::SipTransportContext::new(
+            "TLS",
+            "192.0.2.10:5061",
+            "198.51.100.20:41000",
+            true,
+        );
+
+        let error = RegistrationAdapter::contact_from_request(
+            "sip:alice@10.0.0.20:5061;transport=tls;ob",
+            600,
+            Some(&request),
+            Some(&transport),
+        )
+        .unwrap_err();
+        assert_redacted(
+            error,
+            "RFC 5626 outbound registration requires an exact stream transport flow",
+        );
+    }
+
     #[test]
     fn successful_register_zero_wire_nacks_but_wire_unknown_is_terminal() {
         use rvoip_sip_dialog::FinalResponseCompletionDisposition as Disposition;
@@ -548,6 +878,45 @@ mod diagnostic_tests {
         drop(removal);
         assert_eq!(registrar.lookup_aor(&aor).await.unwrap().len(), 1);
         registrar.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn exact_transport_close_degrades_only_its_registered_flow() {
+        let coordinator = Arc::new(
+            GlobalEventCoordinator::new(EventCoordinatorConfig::monolithic())
+                .await
+                .unwrap(),
+        );
+        let registrar = Arc::new(RegistrarService::new().await.unwrap());
+        let aor = AddressOfRecord::parse("sip:flow-close@example.test").unwrap();
+        let token = registrar.new_registered_flow_token();
+        let contact = ContactInfo {
+            uri: "sip:flow-close@10.0.0.20:5061;transport=tls;ob".into(),
+            instance_id: "urn:uuid:11111111-2222-4333-8444-555555555555".into(),
+            transport: Transport::TLS,
+            user_agent: "independent-test-ua/1.0".into(),
+            expires: chrono::Utc::now() + chrono::Duration::minutes(10),
+            q_value: 1.0,
+            received: Some("198.51.100.20:41000".into()),
+            path: Vec::new(),
+            methods: vec!["INVITE".into()],
+            reg_id: Some(1),
+            flow_id: Some(token),
+            reachability: ContactReachability::Reachable,
+        };
+        registrar.bind_registered_flow(&aor, &contact, 42).unwrap();
+        registrar
+            .register_aor(&aor, contact, Some(600))
+            .await
+            .unwrap();
+        let adapter = RegistrationAdapter::new(Arc::clone(&registrar), Arc::clone(&coordinator));
+
+        adapter.handle_registered_flow_closed(42).await;
+
+        let contacts = registrar.lookup_aor(&aor).await.unwrap();
+        assert_eq!(contacts[0].reachability, ContactReachability::Unreachable);
+        registrar.shutdown().await.unwrap();
+        coordinator.shutdown().await.unwrap();
     }
 
     #[test]
@@ -627,18 +996,29 @@ mod diagnostic_tests {
         let handler = source
             .split("async fn handle_incoming_register(")
             .nth(1)
-            .and_then(|tail| tail.split("/// Handle dialog-to-session").next())
+            .and_then(|tail| {
+                tail.split("/// Handle one authoritative typed REGISTER request")
+                    .next()
+            })
             .expect("REGISTER handler source");
         let prepare = handler
             .find(".prepare_register_aor(")
             .expect("prepared registrar mutation");
         let response = handler
-            .find("self.send_register_response(&response).await?")
+            .find("if let Err(error) = self.send_register_response(&response).await")
             .expect("classified REGISTER response");
         let commit = handler
             .find("prepared_registration.commit().await")
             .expect("prepared registrar commit");
+        let promote = handler
+            .find("self.registrar.commit_registered_flow(&aor, &contact)")
+            .expect("registered flow promotion");
         assert!(prepare < response && response < commit);
+        assert!(commit < promote);
+        let discard = handler
+            .find("self.registrar.discard_registered_flow_token(token)")
+            .expect("zero-wire staged-flow rollback");
+        assert!(response < discard && discard < commit);
         assert!(!handler.contains(".register_aor(&aor, contact"));
     }
 

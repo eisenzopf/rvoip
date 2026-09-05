@@ -288,6 +288,16 @@ def validate_result(
         return True
     if status == "FAIL" and isinstance(exit_code, int) and exit_code != 0:
         return False
+    if status == "PARTIAL" and isinstance(exit_code, int) and exit_code != 0:
+        completed_gates = result.get("completed_gates")
+        if not isinstance(completed_gates, list) or any(
+            not isinstance(gate, str) or gate not in worker["gates"]
+            for gate in completed_gates
+        ):
+            raise FanoutError(f"{shard} partial result has invalid completed_gates")
+        if completed_gates != sorted(set(completed_gates)):
+            raise FanoutError(f"{shard} partial completed_gates must be sorted and unique")
+        return False
     raise FanoutError(
         f"{shard} result has inconsistent status {status!r} and exit code {exit_code!r}"
     )

@@ -231,8 +231,7 @@ impl TransactionManager {
                     .insert(transaction_id.clone(), value);
             }
         }
-        self.pending_inbound_transport.insert(
-            transaction_id.clone(),
+        let mut transport_context =
             rvoip_infra_common::events::cross_crate::SipTransportContext::new(
                 ingress_context.transport_type.to_string(),
                 ingress_context.destination.to_string(),
@@ -241,8 +240,12 @@ impl TransactionManager {
                     ingress_context.transport_type,
                     TransportType::Tls | TransportType::Wss
                 ),
-            ),
-        );
+            );
+        if let Some(flow_id) = ingress_context.flow_id {
+            transport_context = transport_context.with_flow_id(flow_id.as_u64());
+        }
+        self.pending_inbound_transport
+            .insert(transaction_id.clone(), transport_context);
         if matches!(request.method(), Method::Invite | Method::Bye) {
             if let Some(value) = timing {
                 self.pending_inbound_timing
@@ -758,8 +761,7 @@ impl TransactionManager {
                         Message::Response(_) => self.client_transactions.contains_key(key),
                     };
                     if cache_transport {
-                        self.pending_inbound_transport.insert(
-                            key.clone(),
+                        let mut transport_context =
                             rvoip_infra_common::events::cross_crate::SipTransportContext::new(
                                 transport_type.to_string(),
                                 destination.to_string(),
@@ -769,8 +771,12 @@ impl TransactionManager {
                                     rvoip_sip_transport::transport::TransportType::Tls
                                         | rvoip_sip_transport::transport::TransportType::Wss
                                 ),
-                            ),
-                        );
+                            );
+                        if let Some(flow_id) = flow_id {
+                            transport_context = transport_context.with_flow_id(flow_id.as_u64());
+                        }
+                        self.pending_inbound_transport
+                            .insert(key.clone(), transport_context);
                     }
                 }
                 let ingress_context =

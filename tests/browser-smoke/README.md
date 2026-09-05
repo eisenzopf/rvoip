@@ -2,8 +2,8 @@
 
 Playwright-driven smoke for the UCTP browser surface (gap plan §3.2).
 Spawns the `orchestrator_bridge` example, then drives a headless
-Chromium against the WebSocket signaling path and asserts the round-trip
-auth handshake works from real browser code.
+Chromium against the WebSocket and WebTransport signaling paths and asserts
+the round-trip authentication handshake works from real browser code.
 
 ## Prerequisites
 
@@ -43,23 +43,21 @@ session warmup.
   `--ignore-certificate-errors-spki-list` flag. The orchestrator_bridge
   writes the SPKI hash (SHA-256 of the SubjectPublicKeyInfo block,
   base64-encoded) to `/tmp/uctp_demo_cert.spki`; the Playwright config
-  reads it at runtime. Asserts WT session readiness; the full
-  envelope round-trip is best-effort (see below).
+  reads it at runtime. Asserts both WT session readiness and the complete
+  `auth.hello` to `auth.challenge` envelope round trip over finite
+  unidirectional control streams.
 
-  **Opt-in:** set `RVOIP_WT_SMOKE=1` before running `npm test` to
-  include the WT project. Default CI does NOT enable it, preserving
-  current pass-rate while the harness stabilizes.
+  **Local opt-in:** set `RVOIP_WT_SMOKE=1` before running `npm test` to
+  include the WT project. The repository `browser-smoke` release and PR gate
+  sets this variable unconditionally so a WebTransport regression fails CI.
 
 ## What it does NOT cover
 
-- **WT bidi-stream envelope round-trip.** Chromium's
-  `createBidirectionalStream()` and the server-side
-  `web_transport_quinn::Session::accept_bi()` API have a known
-  interop gap today — the browser opens a stream that the server
-  doesn't detect. The smoke currently logs this as a known follow-up
-  rather than failing, because the cert-pinning path (the actual
-  §3.2 deliverable) is already proven. Track resolution upstream as
-  `web_transport_quinn` matures.
+- **Long-lived WT bidirectional control streams.** UCTP deliberately uses one
+  finite unidirectional stream per control envelope. This avoids depending on
+  Chromium's inconsistent delivery of small writes on a long-lived stream and
+  keeps the public UCTP envelope contract independent of the transport crate's
+  bidirectional-stream behavior.
 - **WSS** can be added by pointing the smoke at `wss://...` and
   generating a trusted cert; today's demo binds plain `ws://`.
 

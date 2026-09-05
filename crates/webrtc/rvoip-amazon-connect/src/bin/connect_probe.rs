@@ -217,7 +217,9 @@ async fn run_media(
                 111,
                 remote,
             );
-            let mut frames_in = stream.frames_in();
+            let mut frames_in = stream
+                .try_frames_in()
+                .expect("Amazon Connect media receiver is acquired once");
             let frames_out = stream.frames_out();
 
             let deadline = tokio::time::Instant::now() + Duration::from_secs(audio_secs);

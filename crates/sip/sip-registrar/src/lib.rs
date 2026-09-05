@@ -33,7 +33,8 @@ pub use registrar::{
 };
 pub use types::{
     AddressOfRecord, BasicStatus, ContactInfo, ContactReachability, ExtendedStatus, PresenceState,
-    PresenceStatus, RegistrarConfig, Subscription, SubscriptionState, Transport, UserRegistration,
+    PresenceStatus, RegisteredFlowRoute, RegistrarConfig, Subscription, SubscriptionState,
+    Transport, UserRegistration,
 };
 
 // Version information
@@ -45,6 +46,6 @@ mod tests {
 
     #[test]
     fn test_version() {
-        assert!(!VERSION.is_empty());
+        assert!(VERSION.split('.').count() >= 3);
     }
 }

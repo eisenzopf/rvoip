@@ -469,6 +469,30 @@ impl UserRegistry {
         Ok(())
     }
 
+    pub async fn set_flow_reachability(
+        &self,
+        key: &str,
+        flow_id: &str,
+        reachability: ContactReachability,
+    ) -> Result<(ContactInfo, bool)> {
+        let _lease = self.acquire_mutation_lease(key).await;
+        let mut entry = self
+            .users
+            .get_mut(key)
+            .ok_or_else(|| RegistrarError::UserNotFound(key.to_string()))?;
+        let contact = entry
+            .contacts
+            .iter_mut()
+            .find(|contact| contact.flow_id.as_deref() == Some(flow_id))
+            .ok_or_else(|| RegistrarError::ContactNotFound {
+                user: key.to_string(),
+                uri: "[registered-flow]".to_string(),
+            })?;
+        let changed = contact.reachability != reachability;
+        contact.reachability = reachability;
+        Ok((contact.clone(), changed))
+    }
+
     pub async fn is_registered(&self, key: &str) -> bool {
         self.users.contains_key(key)
     }
@@ -612,6 +636,9 @@ fn contact_preference(a: &ContactInfo, b: &ContactInfo) -> Ordering {
         .cmp(&reachability_rank(a))
         .then_with(|| b.q_value.partial_cmp(&a.q_value).unwrap_or(Ordering::Equal))
         .then_with(|| b.expires.cmp(&a.expires))
+        .then_with(|| a.instance_id.cmp(&b.instance_id))
+        .then_with(|| a.reg_id.cmp(&b.reg_id))
+        .then_with(|| a.flow_id.cmp(&b.flow_id))
         .then_with(|| a.uri.cmp(&b.uri))
 }
 
@@ -620,6 +647,9 @@ fn lowest_preference_first(a: &ContactInfo, b: &ContactInfo) -> Ordering {
         .cmp(&reachability_rank(b))
         .then_with(|| a.q_value.partial_cmp(&b.q_value).unwrap_or(Ordering::Equal))
         .then_with(|| a.expires.cmp(&b.expires))
+        .then_with(|| a.instance_id.cmp(&b.instance_id))
+        .then_with(|| a.reg_id.cmp(&b.reg_id))
+        .then_with(|| a.flow_id.cmp(&b.flow_id))
         .then_with(|| a.uri.cmp(&b.uri))
 }
 

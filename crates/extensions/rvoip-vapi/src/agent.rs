@@ -232,7 +232,7 @@ impl VapiAdapter {
     }
 
     fn ensure_registered(self: &Arc<Self>, orchestrator: &Arc<Orchestrator>) -> RvoipResult<()> {
-        match orchestrator.adapter(Transport::Vapi) {
+        let registration = match orchestrator.adapter(Transport::Vapi) {
             Ok(registered) => {
                 let this: Arc<dyn ConnectionAdapter> =
                     Arc::clone(self) as Arc<dyn ConnectionAdapter>;
@@ -246,7 +246,9 @@ impl VapiAdapter {
                 orchestrator.register(Arc::clone(self) as Arc<dyn ConnectionAdapter>)
             }
             Err(error) => Err(error),
-        }
+        };
+        registration?;
+        self.bind_orchestrator(orchestrator)
     }
 }
 

@@ -37,7 +37,7 @@ use rvoip_core::ids::{ConnectionId, MessageId, ParticipantId, TenantId};
 use rvoip_core::media_graph::{MediaGraphSnapshot, MediaGraphSourceState};
 use rvoip_core::orchestrator::Orchestrator;
 use rvoip_core::session::SessionMedium;
-use rvoip_core::stream::{MediaFrame, MediaStream, StreamKind};
+use rvoip_core::stream::{MediaFrame, MediaStream, StreamKind, StreamSelector};
 use rvoip_core::{DataMessage, DataReliability, DirectionalMediaBridgePlan};
 use rvoip_sip::api::unified::{Config as SipConfig, UnifiedCoordinator};
 use rvoip_sip::{SipAdapter, SipInitialHeaders, SipOriginateContext};
@@ -55,6 +55,7 @@ use rvoip_webrtc::{
 };
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, watch};
+use tokio_util::sync::CancellationToken;
 
 const SIGNALING_TOKEN: &str = "sip-webrtc-acceptance";
 const UAS_TAG: &str = "sip-webrtc-acceptance-uas";
@@ -561,11 +562,23 @@ async fn run_case(index: u16, signaling: SignalingCase, codec: SipCodec, symmetr
         .prepare_outbound_connection(sip_request)
         .await
         .expect("prepare production SIP route");
-    let sip_handle = tokio::time::timeout(TEST_TIMEOUT, sip_prepared.commit())
-        .await
-        .expect("SIP commit deadline")
-        .expect("commit production SIP route");
-    let sip_connection = sip_handle.connection.id.clone();
+    let sip_connection = sip_prepared.connection_id().clone();
+    let (sip_handle, sip_stream) = tokio::time::timeout(TEST_TIMEOUT, async {
+        tokio::join!(
+            sip_prepared.commit(),
+            orchestrator.wait_for_stream(
+                sip_connection.clone(),
+                StreamSelector::new(StreamKind::Audio).with_codec(codec.stream_name()),
+                tokio::time::Instant::now() + TEST_TIMEOUT,
+                CancellationToken::new(),
+            )
+        )
+    })
+    .await
+    .expect("SIP commit and delayed media readiness deadline");
+    let sip_handle = sip_handle.expect("commit production SIP route");
+    let sip_stream = sip_stream.expect("production SIP media readiness");
+    assert_eq!(sip_handle.connection.id, sip_connection);
     let dialog = sip_peer.wait_established().await;
     assert_eq!(dialog.initial_correlation_id, expected_correlation_id);
     assert_eq!(dialog.initial_account_tier, expected_account_tier);
@@ -616,7 +629,6 @@ async fn run_case(index: u16, signaling: SignalingCase, codec: SipCodec, symmetr
     .await
     .expect("WebRTC ICE/DTLS deadline");
 
-    let sip_stream = wait_for_audio_codec(&sip_adapter, &sip_connection, codec.stream_name()).await;
     assert_eq!(sip_stream.codec().clock_rate_hz, 8_000);
     let remote_stream = audio_stream(server_adapter.as_ref(), &remote_connection).await;
     assert_eq!(remote_stream.codec().name.to_ascii_lowercase(), "opus");
@@ -1204,33 +1216,27 @@ async fn wait_for_audio_codec(
     connection: &ConnectionId,
     expected: &str,
 ) -> Arc<dyn MediaStream> {
-    tokio::time::timeout(TEST_TIMEOUT, async {
-        loop {
-            if let Ok(streams) = adapter.streams(connection.clone()).await {
-                if let Some(stream) = streams
-                    .into_iter()
-                    .find(|stream| stream.kind() == StreamKind::Audio)
-                {
-                    if stream.codec().name.eq_ignore_ascii_case(expected) {
-                        return stream;
-                    }
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("SIP negotiated codec {expected} deadline"))
+    adapter
+        .wait_for_stream(
+            connection.clone(),
+            StreamSelector::new(StreamKind::Audio).with_codec(expected),
+            tokio::time::Instant::now() + TEST_TIMEOUT,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("SIP negotiated codec {expected} readiness failed: {error}"))
 }
 
 async fn audio_stream(adapter: &WebRtcAdapter, connection: &ConnectionId) -> Arc<dyn MediaStream> {
     adapter
-        .streams(connection.clone())
+        .wait_for_stream(
+            connection.clone(),
+            StreamSelector::new(StreamKind::Audio),
+            tokio::time::Instant::now() + TEST_TIMEOUT,
+            CancellationToken::new(),
+        )
         .await
-        .expect("WebRTC media streams")
-        .into_iter()
-        .find(|stream| stream.kind() == StreamKind::Audio)
-        .expect("WebRTC audio stream")
+        .expect("WebRTC audio stream readiness")
 }
 
 async fn send_opus_burst(stream: &Arc<dyn MediaStream>, sequence_base: u32) {

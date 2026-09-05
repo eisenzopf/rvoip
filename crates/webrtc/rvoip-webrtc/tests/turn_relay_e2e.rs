@@ -118,7 +118,7 @@ async fn relay_only_two_peer_media_round_trip() {
             .expect("answerer receives offerer track via the relay");
     answerer_stream.attach_remote(remote);
 
-    let mut inbound = answerer_stream.frames_in();
+    let mut inbound = answerer_stream.try_frames_in().unwrap();
 
     for seq in 1..=20u16 {
         let payload = silent_opus_payload();

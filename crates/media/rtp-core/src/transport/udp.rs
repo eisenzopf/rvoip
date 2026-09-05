@@ -13,6 +13,8 @@ use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
 use tokio::net::UdpSocket;
+#[cfg(feature = "dtls-webrtc")]
+use tokio::sync::mpsc;
 use tokio::sync::{broadcast, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, trace, warn};
@@ -403,6 +405,13 @@ pub struct UdpRtpTransport {
     /// peers must each fire independently.
     dtmf_seen: Arc<DashMap<(SocketAddr, u32, u32), Instant>>,
 
+    /// Sender half of the channel a DTLS-SRTP handshake reads from, when
+    /// one is in progress. `None` means datagrams classified as DTLS by
+    /// [`classify_rtp_mux_packet`] are just dropped (the pre-DTLS-SRTP
+    /// behavior). Set by [`Self::dtls_conn_adapter`].
+    #[cfg(feature = "dtls-webrtc")]
+    dtls_tx: Arc<parking_lot::Mutex<Option<mpsc::Sender<Bytes>>>>,
+
     #[cfg(feature = "memory-diagnostics")]
     _memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard,
     #[cfg(feature = "memory-diagnostics")]
@@ -574,6 +583,8 @@ impl UdpRtpTransport {
             srtp_send: Arc::new(parking_lot::Mutex::new(None)),
             srtp_recv: Arc::new(parking_lot::Mutex::new(None)),
             dtmf_seen: Arc::new(DashMap::new()),
+            #[cfg(feature = "dtls-webrtc")]
+            dtls_tx: Arc::new(parking_lot::Mutex::new(None)),
             #[cfg(feature = "memory-diagnostics")]
             _memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
                 "rtp_core.udp_transport",
@@ -619,6 +630,8 @@ impl UdpRtpTransport {
         let remote_rtp_addr = self.remote_rtp_addr.clone();
         let remote_rtcp_addr = self.remote_rtcp_addr.clone();
         let rtcp_mux = self.config.rtcp_mux;
+        #[cfg(feature = "dtls-webrtc")]
+        let dtls_tx = self.dtls_tx.clone();
         let srtp_diagnostics = srtp_diagnostics_enabled();
         let rtp_diagnostics = rtp_diagnostics_enabled();
         let local_rtp_addr = rtp_socket.local_addr().ok();
@@ -650,6 +663,50 @@ impl UdpRtpTransport {
                             trace!("UDP recv_from returned {} bytes from {}", size, addr);
 
                             let packet_class = classify_rtp_mux_packet(&buffer[..size]);
+                            if packet_class == RtpMuxPacketClass::Stun {
+                                // ICE connectivity checks share the media
+                                // port by design. Forward them to whoever
+                                // subscribed (the ICE agent's pump); with no
+                                // subscriber this send fails silently, which
+                                // is exactly the old drop behavior.
+                                let Some(local) = local_rtp_addr else {
+                                    continue;
+                                };
+                                let _ = event_tx.send(RtpEvent::StunPacket {
+                                    local,
+                                    source: addr,
+                                    payload: Bytes::copy_from_slice(&buffer[..size]),
+                                });
+                                continue;
+                            }
+
+                            #[cfg(feature = "dtls-webrtc")]
+                            if packet_class == RtpMuxPacketClass::Dtls {
+                                let forwarded = dtls_tx
+                                    .lock()
+                                    .as_ref()
+                                    .map(|tx| {
+                                        tx.try_send(Bytes::copy_from_slice(&buffer[..size])).is_ok()
+                                    })
+                                    .unwrap_or(false);
+                                if !forwarded {
+                                    // No handshake in flight (or its
+                                    // receiver is backed up) to hand this
+                                    // to; nothing else can use it either.
+                                    non_rtp_drop_count = non_rtp_drop_count.saturating_add(1);
+                                    log_dropped_non_rtp_packet(
+                                        rtp_diagnostics,
+                                        non_rtp_drop_count,
+                                        local_rtp_addr,
+                                        addr,
+                                        size,
+                                        packet_class,
+                                        &buffer[..size],
+                                    );
+                                }
+                                continue;
+                            }
+
                             if !packet_class.is_media() {
                                 non_rtp_drop_count = non_rtp_drop_count.saturating_add(1);
                                 log_dropped_non_rtp_packet(
@@ -1070,6 +1127,42 @@ impl UdpRtpTransport {
         self.remote_rtp_addr.load().as_deref().copied()
     }
 
+    /// Build a [`Conn`](webrtc_util::conn::Conn) adapter for running a
+    /// DTLS-SRTP handshake over this transport's RTP socket, sharing the
+    /// port with RTP/RTCP. [`Self::set_remote_rtp_addr`] must be called
+    /// first — the adapter needs a fixed peer to send handshake bytes to.
+    ///
+    /// From this point on, incoming datagrams the receive loop classifies
+    /// as DTLS (RFC 7983) are routed to the returned adapter instead of
+    /// being dropped. Only one handshake can be in flight at a time per
+    /// transport; calling this again replaces the previous channel.
+    #[cfg(feature = "dtls-webrtc")]
+    pub fn dtls_conn_adapter(
+        &self,
+    ) -> Result<Arc<crate::transport::dtls_bridge::DtlsUdpConnAdapter>> {
+        let remote = self
+            .remote_rtp_addr
+            .load()
+            .as_deref()
+            .copied()
+            .ok_or_else(|| {
+                crate::error::Error::Transport(
+                    "remote RTP address must be set before starting a DTLS handshake".to_string(),
+                )
+            })?;
+
+        let (tx, rx) = mpsc::channel(64);
+        *self.dtls_tx.lock() = Some(tx);
+
+        Ok(Arc::new(
+            crate::transport::dtls_bridge::DtlsUdpConnAdapter::new(
+                self.rtp_socket.clone(),
+                remote,
+                rx,
+            ),
+        ))
+    }
+
     /// Get the remote RTCP address
     pub async fn remote_rtcp_addr(&self) -> Option<SocketAddr> {
         self.remote_rtcp_addr.load().as_deref().copied()
@@ -1228,8 +1321,40 @@ impl UdpRtpTransport {
     }
 
     /// Irreversibly require authenticated RTP and RTCP on this transport.
-    pub(crate) fn require_srtp(&self) {
+    ///
+    /// DTLS-SRTP callers use this before starting the handshake so media
+    /// cannot leak as plaintext while key agreement is still in flight.
+    pub fn require_secure_media(&self) {
         self.secure_media_required.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn require_srtp(&self) {
+        self.require_secure_media();
+    }
+
+    /// Send one STUN datagram on the RTP socket.
+    ///
+    /// ICE checks share the media port and sit *below* SRTP, so this is the
+    /// one legitimate plaintext send on a secured transport. The payload
+    /// must actually classify as STUN — the check is what keeps the
+    /// irreversible secure-media latch meaningful: this door only fits
+    /// packets SRTP was never going to cover.
+    ///
+    /// # Errors
+    ///
+    /// Refuses payloads that do not classify as STUN, and surfaces socket
+    /// errors.
+    pub async fn send_stun_bytes(&self, payload: &[u8], destination: SocketAddr) -> Result<()> {
+        if classify_rtp_mux_packet(payload) != RtpMuxPacketClass::Stun {
+            return Err(Error::InvalidPacket(
+                "send_stun_bytes only accepts STUN datagrams".to_string(),
+            ));
+        }
+        self.rtp_socket
+            .send_to(payload, destination)
+            .await
+            .map_err(|error| Error::Transport(format!("stun send failed: {error}")))?;
+        Ok(())
     }
 
     /// Send bytes that have already passed the transport's SRTP protection
@@ -1337,6 +1462,10 @@ impl UdpRtpTransport {
 
 #[async_trait]
 impl RtpTransport for UdpRtpTransport {
+    async fn send_stun_bytes(&self, payload: &[u8], destination: SocketAddr) -> Result<()> {
+        UdpRtpTransport::send_stun_bytes(self, payload, destination).await
+    }
+
     fn local_rtp_addr(&self) -> Result<SocketAddr> {
         self.rtp_socket
             .local_addr()
@@ -1408,6 +1537,20 @@ impl RtpTransport for UdpRtpTransport {
             match classify_rtp_mux_packet(&buffer[..size]) {
                 RtpMuxPacketClass::Rtcp => context.unprotect_rtcp(&buffer[..size])?,
                 RtpMuxPacketClass::Rtp => context.unprotect(&buffer[..size])?.serialize()?,
+                RtpMuxPacketClass::Stun => {
+                    // ICE sits below SRTP: connectivity checks are never
+                    // SRTP-wrapped, so a STUN datagram on a secured socket
+                    // is forwarded to the agent, not treated as an attack.
+                    drop(guard);
+                    let _ = self.event_tx.send(RtpEvent::StunPacket {
+                        local: self.local_rtp_addr()?,
+                        source: addr,
+                        payload: Bytes::copy_from_slice(&buffer[..size]),
+                    });
+                    return Err(Error::InvalidState(
+                        "stun datagram forwarded; no media packet".to_string(),
+                    ));
+                }
                 class => {
                     return Err(Error::InvalidPacket(format!(
                         "secure media receive rejected {} datagram",

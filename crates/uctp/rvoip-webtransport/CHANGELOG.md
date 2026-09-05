@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Added `UctpWtAdapter::new_with_rtp_ingress_observer`, matching raw QUIC's
+  bounded, non-blocking lossless RTP observation semantics.
+- Added live-WebTransport coverage for marker, CSRCs, parsed extensions,
+  padding, SSRC, authenticated routing, redacted diagnostics, and
+  padding-free codec delivery.
+
 ## 0.2.0 — 2026-07-11
 
 - Moved WebTransport media to one authenticated `PeerMediaRouter` and one

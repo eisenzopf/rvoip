@@ -527,6 +527,13 @@ pub trait ConnectionAdapter: Send + Sync {
     async fn transfer(&self, conn: ConnectionId, target: TransferTarget) -> Result<()>;
 
     async fn streams(&self, conn: ConnectionId) -> Result<Vec<Arc<dyn MediaStream>>>;
+    async fn wait_for_stream(
+        &self,
+        conn: ConnectionId,
+        selector: StreamSelector,
+        deadline: tokio::time::Instant,
+        cancellation: CancellationToken,
+    ) -> Result<Arc<dyn MediaStream>, StreamWaitError>;
     async fn send_message(&self, conn: ConnectionId, message: Message) -> Result<()>;
     async fn send_dtmf(&self, conn: ConnectionId, digits: &str, duration_ms: u32) -> Result<()>;
     async fn renegotiate_media(
@@ -566,6 +573,16 @@ pub enum AdapterKind {
     Interop,      // Gateway to a foreign protocol (SIP, WebRTC)
 }
 ```
+
+`streams` is an instantaneous snapshot. Applications that need usable media
+call `Orchestrator::wait_for_stream`, which captures the exact connection
+lifecycle generation, delegates to the owning adapter, and revalidates before
+returning. `StreamSelector` separates four commonly conflated states:
+signaling connected, stream registered, inbound source ready, and
+bidirectional media ready. Teardown, lifecycle replacement, adapter loss,
+cancellation, and deadline expiry are different typed outcomes. The default
+adapter method is bounded in-future compatibility polling and creates no
+detached task; adapters may replace it with a native watch.
 
 Adapter events are protocol-native (e.g., `SipDialogTerminated`, `WebRtcIceFailed`, `QuicConnectionMigrated`, `CpEnvelopeReceived`). rvoip-core **normalizes** them into the rvoip-core event vocabulary above. Adapter-native events are also exposed via `rvoip::sip::events::*`, `rvoip::webrtc::events::*`, etc., for consumers who want native-vocabulary access.
 
@@ -852,7 +869,19 @@ When a Session adds a Connection (or a Connection re-negotiates):
 
 ### 9.3 Re-negotiation
 
-Triggered by `RenegotiateMedia` command. Adapter handles re-INVITE / renegotiate / `connection.update` protocol-natively. Session's `CapabilityIntersection` is updated; if codecs change, rvoip-media swaps in a new transcoder or removes the existing one.
+Triggered by `RenegotiateMedia`. The adapter handles re-INVITE, WebRTC
+renegotiation, or UCTP `connection.update` protocol-natively and must return
+only after the remote result is committed. A SIP codec request is a one-shot
+offer bound to the exact dialog generation; it never mutates the coordinator's
+global offer policy. Rejection, timeout, or generation replacement leaves the
+stable stream and media graph unchanged.
+
+After a successful result, the adapter updates the existing stream's codec
+generation and the orchestrator supplies the complete negotiated `CodecInfo`
+to every affected media-graph direction. The descriptor's payload type and
+fmtp are authoritative—dynamic payload assignments must not be reconstructed
+from a conventional name table. The graph then swaps or removes transcoders
+before `RenegotiateMedia` returns.
 
 ---
 

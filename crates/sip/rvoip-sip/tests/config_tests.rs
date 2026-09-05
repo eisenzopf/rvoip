@@ -5,7 +5,7 @@
 use rvoip_sip::{
     Config, MediaMode, MediaSessionControllerConfig, PerformanceConfig, RtpSessionBufferConfig,
     RtpTransportBufferConfig, SessionError, SipContactMode, SipNatConfig, SipTlsMode,
-    SymmetricRtpPolicy,
+    SrtpKeyingMode, SymmetricRtpPolicy,
 };
 use rvoip_sip_transport::UdpParseDispatch;
 use std::net::{IpAddr, SocketAddr};
@@ -428,7 +428,7 @@ fn advertised_address_builders_separate_private_bind_and_public_wire_addresses()
         .with_sip_advertised_addr(signaling)
         .with_media_public_addr(media);
 
-    assert_eq!(c.bind_addr, "10.0.0.10:5060".parse().unwrap());
+    assert_eq!(c.bind_addr, "10.0.0.10:5060".parse::<SocketAddr>().unwrap());
     assert_eq!(c.sip_advertised_addr, Some(signaling));
     assert_eq!(c.media_public_addr, Some(media));
     c.validate().expect("valid split bind/advertise config");
@@ -438,6 +438,54 @@ fn advertised_address_builders_separate_private_bind_and_public_wire_addresses()
     assert!(rendered.contains("media_public_address_configured: true"));
     assert!(!rendered.contains("203.0.113.10"));
     assert!(!rendered.contains("10.0.0.10"));
+}
+
+#[test]
+fn srtp_keying_builder_selects_dtls_without_changing_offer_policy() {
+    let config = Config::local("alice", 5060).with_srtp_keying(SrtpKeyingMode::DtlsSrtp);
+    assert_eq!(config.srtp_keying, SrtpKeyingMode::DtlsSrtp);
+    assert!(!config.offer_srtp);
+    assert!(!config.srtp_required);
+}
+
+#[cfg(not(feature = "dtls-srtp"))]
+#[test]
+fn dtls_srtp_selection_fails_closed_when_the_cargo_feature_is_absent() {
+    let mut config = Config::local("alice", 5060).with_srtp_keying(SrtpKeyingMode::DtlsSrtp);
+    config.offer_srtp = true;
+    config.srtp_required = true;
+
+    let error = config
+        .validate()
+        .expect_err("DTLS feature must be required");
+    match error {
+        SessionError::ConfigError(message) => {
+            assert!(message.contains("dtls-srtp Cargo feature"), "{message}")
+        }
+        other => panic!("unexpected validation failure: {other:?}"),
+    }
+}
+
+#[cfg(feature = "dtls-srtp")]
+#[test]
+fn dtls_srtp_selection_rejects_signaling_only_media() {
+    let mut config = Config::local("alice", 5060).with_srtp_keying(SrtpKeyingMode::DtlsSrtp);
+    config.offer_srtp = true;
+    config.srtp_required = true;
+    config.media_mode = MediaMode::SignalingOnly { sdp_rtp_port: 9 };
+
+    let error = config
+        .validate()
+        .expect_err("DTLS requires an owned media transport");
+    match error {
+        SessionError::ConfigError(message) => {
+            assert!(
+                message.contains("DTLS-SRTP requires enabled media"),
+                "{message}"
+            )
+        }
+        other => panic!("unexpected validation failure: {other:?}"),
+    }
 }
 
 #[test]

@@ -1212,14 +1212,28 @@ impl InviteFailoverPlan {
 #[cfg(test)]
 mod retained_invite_payload_tests {
     use super::{
-        CandidateWirePlan, InviteCancelDispatchState, InviteFailoverActivePayload,
-        InviteFailoverAttempt, InviteFailoverAttemptOutcome, InviteFailoverForkCleanup,
-        InviteFailoverPlan, InviteFailoverPlanPhase,
+        transport_route_for_invite_candidate, CandidateWirePlan, InviteCancelDispatchState,
+        InviteFailoverActivePayload, InviteFailoverAttempt, InviteFailoverAttemptOutcome,
+        InviteFailoverForkCleanup, InviteFailoverPlan, InviteFailoverPlanPhase,
     };
     use crate::dialog::DialogId;
     use crate::transaction::TransactionKey;
     use rvoip_sip_core::{builder::SimpleRequestBuilder, Method};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn registered_flow_candidate_retains_exact_transport_identity() {
+        let flow_id = rvoip_sip_transport::TransportFlowId::from_process_local_value(77).unwrap();
+        let mut target = rvoip_sip_transport::ResolvedTarget::immediate(
+            "198.51.100.20:41000".parse().unwrap(),
+            rvoip_sip_transport::transport::TransportType::Tls,
+        );
+        target.flow_id = Some(flow_id);
+        let route = transport_route_for_invite_candidate(&target);
+        assert_eq!(route.destination, target.addr);
+        assert_eq!(route.transport_type, Some(target.transport));
+        assert_eq!(route.flow_id, Some(flow_id));
+    }
 
     fn active_plan() -> InviteFailoverPlan {
         let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
@@ -1321,6 +1335,16 @@ struct InviteCandidateSendLease {
     wire_plan: CandidateWirePlan,
     setup_deadline: Instant,
     remaining_candidate_count: usize,
+}
+
+fn transport_route_for_invite_candidate(
+    target: &rvoip_sip_transport::ResolvedTarget,
+) -> rvoip_sip_transport::TransportRoute {
+    let mut route =
+        rvoip_sip_transport::TransportRoute::new(target.addr).with_transport_type(target.transport);
+    route.authority = target.authority.clone();
+    route.flow_id = target.flow_id;
+    route
 }
 
 struct InviteCandidateCancellationGuard {
@@ -1458,6 +1482,24 @@ fn candidate_transport_token(
         TransportType::Tls => "TLS",
         TransportType::Ws => "WS",
         TransportType::Wss => "WSS",
+    }
+}
+
+/// Retarget a direct dialog to the validated packet source retained at
+/// admission time. An explicit Route set always wins; the override exists
+/// only for peers whose Contact advertised an unspecified/NAT-only address.
+pub(crate) fn apply_observed_source(
+    observed_source: Option<SocketAddr>,
+    route_set_is_empty: bool,
+    candidates: &mut Vec<rvoip_sip_transport::resolver::ResolvedTarget>,
+) {
+    if !route_set_is_empty {
+        return;
+    }
+    if let (Some(observed_source), Some(candidate)) = (observed_source, candidates.first_mut()) {
+        candidate.addr = observed_source;
+        candidate.expires = None;
+        candidates.truncate(1);
     }
 }
 
@@ -1959,7 +2001,12 @@ impl DialogManager {
                         "Outbound request contains an unusable Route header",
                     )
                 })?;
-        let candidates = self.resolve_uri_to_candidates(&next_hop).await;
+        let (observed_source, route_set_is_empty) = {
+            let dialog = self.get_dialog(dialog_id)?;
+            (dialog.last_known_remote_addr, dialog.route_set.is_empty())
+        };
+        let mut candidates = self.resolve_uri_to_candidates(&next_hop).await;
+        apply_observed_source(observed_source, route_set_is_empty, &mut candidates);
         if candidates.is_empty() {
             return Err(crate::errors::DialogError::routing_error(
                 "No address candidates for the exact request next hop",
@@ -2386,15 +2433,11 @@ impl DialogManager {
             // preserve the Contact-derived URI on the wire as Request-URI.
             // Reusing the resolved candidate's transport also preserves UDP,
             // TCP, or TLS selection without inventing transport state here.
-            if template.route_set.is_empty() {
-                if let (Some(observed_source), Some(candidate)) =
-                    (dialog.last_known_remote_addr, candidates.first_mut())
-                {
-                    candidate.addr = observed_source;
-                    candidate.expires = None;
-                    candidates.truncate(1);
-                }
-            }
+            apply_observed_source(
+                dialog.last_known_remote_addr,
+                template.route_set.is_empty(),
+                &mut candidates,
+            );
 
             if candidates.is_empty() {
                 return Err(crate::errors::DialogError::routing_error(
@@ -2815,13 +2858,20 @@ mod outward_error_redaction_tests {
             source,
             "pub async fn send_initial_invite_with_extra_headers(",
         );
+        let registered_flow = function_body(
+            source,
+            "async fn send_initial_invite_with_registered_flow_routes(",
+        );
         let canonical = function_body(source, "async fn send_initial_invite_attempt_with_options(");
 
-        for facade in [auth, timer, initial] {
+        for facade in [auth, timer, registered_flow] {
             assert!(facade.contains(".send_initial_invite_attempt_with_options("));
             assert!(!facade.contains("InviteBuilder::new()"));
             assert!(!facade.contains("send_request_with_candidate_wire_plan("));
         }
+        assert!(initial.contains(".send_initial_invite_with_registered_flow_routes("));
+        assert!(!initial.contains("InviteBuilder::new()"));
+        assert!(!initial.contains("send_request_with_candidate_wire_plan("));
         assert_eq!(canonical.matches("InviteBuilder::new()").count(), 1);
         assert_eq!(
             canonical
@@ -4653,6 +4703,7 @@ impl DialogManager {
                 contact_uri: contact_override,
                 outbound_proxy_uri,
                 supported_100rel,
+                registered_flow_routes: Vec::new(),
             },
             InitialInviteTimerPolicy::Configured,
         )
@@ -4745,6 +4796,7 @@ impl DialogManager {
                 precomputed_authorization: None,
                 outbound_proxy_uri: opts.outbound_proxy_uri.clone(),
                 supported_100rel: opts.supported_100rel,
+                registered_flow_routes: opts.registered_flow_routes.clone(),
                 extra_headers: preview_headers,
             },
         )
@@ -4849,7 +4901,22 @@ impl DialogManager {
                         "Initial INVITE contains an unusable Route header",
                     )
                 })?;
-            let candidates = self.resolve_uri_to_candidates(&next_hop).await;
+            let candidates = if opts.registered_flow_routes.is_empty() {
+                self.resolve_uri_to_candidates(&next_hop).await
+            } else {
+                opts.registered_flow_routes
+                    .iter()
+                    .map(|route| rvoip_sip_transport::ResolvedTarget {
+                        addr: route.destination,
+                        transport: route
+                            .transport_type
+                            .expect("registered-flow route validated before dispatch"),
+                        authority: route.authority.clone(),
+                        flow_id: route.flow_id,
+                        expires: None,
+                    })
+                    .collect()
+            };
 
             if candidates.is_empty() {
                 return Err(crate::errors::DialogError::routing_error(
@@ -4898,6 +4965,31 @@ impl DialogManager {
         outbound_proxy_uri: Option<rvoip_sip_core::types::uri::Uri>,
         supported_100rel: bool,
     ) -> DialogResult<TransactionKey> {
+        self.send_initial_invite_with_registered_flow_routes(
+            dialog_id,
+            body,
+            extra_headers,
+            from_display,
+            contact_override,
+            outbound_proxy_uri,
+            supported_100rel,
+            Vec::new(),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn send_initial_invite_with_registered_flow_routes(
+        &self,
+        dialog_id: &DialogId,
+        body: Option<bytes::Bytes>,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+        from_display: Option<String>,
+        contact_override: Option<String>,
+        outbound_proxy_uri: Option<rvoip_sip_core::types::uri::Uri>,
+        supported_100rel: bool,
+        registered_flow_routes: Vec<rvoip_sip_transport::TransportRoute>,
+    ) -> DialogResult<TransactionKey> {
         self.send_initial_invite_attempt_with_options(
             dialog_id,
             crate::api::unified::InviteAuthRetryOptions {
@@ -4908,6 +5000,7 @@ impl DialogManager {
                 contact_uri: contact_override,
                 outbound_proxy_uri,
                 supported_100rel,
+                registered_flow_routes,
             },
             InitialInviteTimerPolicy::Configured,
         )
@@ -4929,9 +5022,10 @@ impl DialogManager {
         contact_override: Option<String>,
         outbound_proxy_uri: Option<rvoip_sip_core::types::uri::Uri>,
         supported_100rel: bool,
+        registered_flow_routes: Vec<rvoip_sip_transport::TransportRoute>,
     ) -> Result<TransactionKey, InitialInviteSendFailure> {
         match self
-            .send_initial_invite_with_extra_headers(
+            .send_initial_invite_with_registered_flow_routes(
                 dialog_id,
                 body,
                 extra_headers,
@@ -4939,6 +5033,7 @@ impl DialogManager {
                 contact_override,
                 outbound_proxy_uri,
                 supported_100rel,
+                registered_flow_routes,
             )
             .await
         {
@@ -5466,11 +5561,7 @@ impl DialogManager {
 
         let sent_request = request.clone();
         let request_key = crate::manager::core::outbound_request_key(&sent_request);
-        let mut request_route = rvoip_sip_transport::TransportRoute::new(lease.target.addr)
-            .with_transport_type(lease.target.transport);
-        if let Some(authority) = lease.target.authority.clone() {
-            request_route.authority = Some(authority);
-        }
+        let request_route = transport_route_for_invite_candidate(&lease.target);
         let Some(remaining_setup_budget) = lease
             .setup_deadline
             .checked_duration_since(Instant::now())

@@ -272,7 +272,9 @@ async fn loopback_datagram_pump_round_trip() {
 
     // Client → server: 10 frames.
     let client_out = rvoip_core::stream::MediaStream::frames_out(client_stream.as_ref());
-    let mut server_in = rvoip_core::stream::MediaStream::frames_in(server_stream.as_ref());
+    let mut server_in = server_stream
+        .try_frames_in()
+        .expect("server media receiver");
     for i in 0u8..10 {
         let frame = MediaFrame {
             stream_id: client_stream.id(),
@@ -301,7 +303,9 @@ async fn loopback_datagram_pump_round_trip() {
 
     // Server → client: 10 frames.
     let server_out = rvoip_core::stream::MediaStream::frames_out(server_stream.as_ref());
-    let mut client_in = rvoip_core::stream::MediaStream::frames_in(client_stream.as_ref());
+    let mut client_in = client_stream
+        .try_frames_in()
+        .expect("client media receiver");
     for i in 0u8..10 {
         let frame = MediaFrame {
             stream_id: server_stream.id(),
@@ -409,7 +413,9 @@ async fn loopback_amr_datagram_keeps_its_payload_type_and_drops_the_unlabelled()
     rvoip_quic::spawn_datagram_reader(server_conn.clone(), server_router, None);
 
     let client_out = rvoip_core::stream::MediaStream::frames_out(client_stream.as_ref());
-    let mut server_in = rvoip_core::stream::MediaStream::frames_in(server_stream.as_ref());
+    let mut server_in = server_stream
+        .try_frames_in()
+        .expect("server media receiver");
 
     // Payload bytes are markers, not audio: the pump packs and labels, it
     // never decodes, so what is being asserted is the label.

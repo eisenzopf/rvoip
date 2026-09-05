@@ -21,6 +21,8 @@ pub const MAX_INBOUND_METADATA_NAME_BYTES: usize = 128;
 pub const MAX_INBOUND_METADATA_VALUE_BYTES: usize = 4_096;
 /// Maximum aggregate UTF-8 size of inbound metadata names and values.
 pub const MAX_INBOUND_METADATA_BYTES: usize = 16 * 1_024;
+/// Maximum UTF-8 size of a trusted signaling identity assertion.
+pub const MAX_INBOUND_ASSERTED_IDENTITY_BYTES: usize = 4_096;
 /// Maximum number of adapter-owned external identifiers on one activation.
 pub const MAX_EXTERNAL_CONNECTION_REFERENCES: usize = 16;
 /// Maximum UTF-8 size of an external identifier namespace.
@@ -78,6 +80,98 @@ pub enum InboundContextError {
     InvalidMetadataValue,
     #[error("the aggregate inbound metadata is too large")]
     MetadataTooLarge,
+}
+
+/// Trust boundary that authenticated an inbound signaling assertion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum TrustedSignalingProvenance {
+    /// SIP peer admitted by the adapter's explicit trusted-trunk policy.
+    SipTrustedTrunk,
+}
+
+/// A signaling identity accepted only after authenticating its trust domain.
+///
+/// The value is deliberately separate from generic signaling metadata and is
+/// redacted from `Debug`. Consumers must preserve the provenance when using it
+/// for policy, display, or audit decisions.
+#[derive(Eq, PartialEq)]
+pub struct InboundAssertedIdentity {
+    value: String,
+    provenance: TrustedSignalingProvenance,
+}
+
+impl InboundAssertedIdentity {
+    pub fn new(
+        value: impl Into<String>,
+        provenance: TrustedSignalingProvenance,
+    ) -> Result<Self, InboundContextError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(InboundContextError::InvalidMetadataValue);
+        }
+        if value.len() > MAX_INBOUND_ASSERTED_IDENTITY_BYTES {
+            return Err(InboundContextError::MetadataValueTooLarge);
+        }
+        if value.chars().any(char::is_control) {
+            return Err(InboundContextError::InvalidMetadataValue);
+        }
+        Ok(Self { value, provenance })
+    }
+
+    pub fn expose_value(&self) -> &str {
+        &self.value
+    }
+
+    pub const fn provenance(&self) -> TrustedSignalingProvenance {
+        self.provenance
+    }
+}
+
+impl fmt::Debug for InboundAssertedIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InboundAssertedIdentity")
+            .field("provenance", &self.provenance)
+            .field("value", &"[redacted]")
+            .finish()
+    }
+}
+
+impl Drop for InboundAssertedIdentity {
+    fn drop(&mut self) {
+        self.value.zeroize();
+    }
+}
+
+/// Allowlisted private signaling fields accepted at a named trust boundary.
+pub struct TrustedSignalingMetadata {
+    provenance: TrustedSignalingProvenance,
+    fields: InboundSignalingMetadata,
+}
+
+impl TrustedSignalingMetadata {
+    pub fn new(provenance: TrustedSignalingProvenance, fields: InboundSignalingMetadata) -> Self {
+        Self { provenance, fields }
+    }
+
+    pub const fn provenance(&self) -> TrustedSignalingProvenance {
+        self.provenance
+    }
+
+    pub fn fields(&self) -> &InboundSignalingMetadata {
+        &self.fields
+    }
+}
+
+impl fmt::Debug for TrustedSignalingMetadata {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TrustedSignalingMetadata")
+            .field("provenance", &self.provenance)
+            .field("field_count", &self.fields.len())
+            .finish()
+    }
 }
 
 /// Opaque, redacted routing material captured before an inbound adapter
@@ -258,6 +352,8 @@ pub struct InboundConnectionContext {
     owner: PrincipalOwnershipKey,
     routing_hint: Option<InboundRoutingHint>,
     metadata: InboundSignalingMetadata,
+    asserted_identity: Option<InboundAssertedIdentity>,
+    trusted_signaling: Option<TrustedSignalingMetadata>,
 }
 
 impl InboundConnectionContext {
@@ -280,7 +376,21 @@ impl InboundConnectionContext {
             owner: principal.ownership_key(),
             routing_hint,
             metadata,
+            asserted_identity: None,
+            trusted_signaling: None,
         })
+    }
+
+    /// Attach identity and private fields already authenticated by an adapter
+    /// trust boundary. Generic metadata remains untrusted application context.
+    pub fn with_trusted_signaling(
+        mut self,
+        asserted_identity: Option<InboundAssertedIdentity>,
+        trusted_signaling: Option<TrustedSignalingMetadata>,
+    ) -> Self {
+        self.asserted_identity = asserted_identity;
+        self.trusted_signaling = trusted_signaling;
+        self
     }
 
     pub fn connection_id(&self) -> &ConnectionId {
@@ -305,6 +415,14 @@ impl InboundConnectionContext {
         &self.metadata
     }
 
+    pub fn asserted_identity(&self) -> Option<&InboundAssertedIdentity> {
+        self.asserted_identity.as_ref()
+    }
+
+    pub fn trusted_signaling(&self) -> Option<&TrustedSignalingMetadata> {
+        self.trusted_signaling.as_ref()
+    }
+
     pub fn is_bound_to(
         &self,
         connection_id: &ConnectionId,
@@ -327,6 +445,17 @@ impl fmt::Debug for InboundConnectionContext {
             .field("owner", &"[redacted]")
             .field("has_routing_hint", &self.routing_hint.is_some())
             .field("metadata_field_count", &self.metadata.len())
+            .field(
+                "asserted_identity_present",
+                &self.asserted_identity.is_some(),
+            )
+            .field(
+                "trusted_signaling_field_count",
+                &self
+                    .trusted_signaling
+                    .as_ref()
+                    .map_or(0, |signaling| signaling.fields().len()),
+            )
             .finish()
     }
 }
@@ -765,7 +894,52 @@ impl fmt::Debug for TransferStatus {
 /// in-flight playback.
 pub struct PlaybackHandle {
     id: PlaybackId,
-    cancel_tx: oneshot::Sender<()>,
+    cancel_tx: Option<oneshot::Sender<()>>,
+    completion_rx: Option<oneshot::Receiver<PlaybackOutcome>>,
+}
+
+/// Terminal result of a completion-aware playback.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum PlaybackOutcome {
+    /// The source reached its natural end and every frame was accepted by the
+    /// transport-facing stream.
+    Completed,
+    /// The owner explicitly cancelled playback.
+    Cancelled,
+    /// Playback stopped because synthesis, decoding, or media delivery could
+    /// not continue.
+    Failed,
+}
+
+/// Fixed, payload-free failure returned while waiting for playback.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[non_exhaustive]
+pub enum PlaybackWaitError {
+    /// The adapter used the legacy cancellation-only constructor.
+    #[error("playback completion is not tracked by this adapter")]
+    NotTracked,
+    /// The playback task exited without publishing a terminal result.
+    #[error("playback ended without a completion result")]
+    CompletionLost,
+}
+
+/// Adapter-owned sender for one completion-aware playback.
+///
+/// Dropping this without calling [`Self::finish`] makes a waiter fail closed
+/// with [`PlaybackWaitError::CompletionLost`].
+pub struct PlaybackCompletionSender {
+    completion_tx: Option<oneshot::Sender<PlaybackOutcome>>,
+}
+
+impl PlaybackCompletionSender {
+    /// Publish the one terminal result. Later calls are impossible because the
+    /// sender is consumed.
+    pub fn finish(mut self, outcome: PlaybackOutcome) {
+        if let Some(sender) = self.completion_tx.take() {
+            let _ = sender.send(outcome);
+        }
+    }
 }
 
 impl fmt::Debug for PlaybackHandle {
@@ -773,7 +947,14 @@ impl fmt::Debug for PlaybackHandle {
         formatter
             .debug_struct("PlaybackHandle")
             .field("id", &self.id)
-            .field("cancel_closed", &self.cancel_tx.is_closed())
+            .field(
+                "cancel_closed",
+                &self
+                    .cancel_tx
+                    .as_ref()
+                    .is_none_or(oneshot::Sender::is_closed),
+            )
+            .field("completion_tracked", &self.completion_rx.is_some())
             .finish()
     }
 }
@@ -782,7 +963,33 @@ impl PlaybackHandle {
     /// Adapter helper: build a handle + the matching cancel receiver.
     pub fn new(id: PlaybackId) -> (Self, oneshot::Receiver<()>) {
         let (tx, rx) = oneshot::channel();
-        (Self { id, cancel_tx: tx }, rx)
+        (
+            Self {
+                id,
+                cancel_tx: Some(tx),
+                completion_rx: None,
+            },
+            rx,
+        )
+    }
+
+    /// Adapter helper: build a cancellation handle plus a matching completion
+    /// sender. New playback implementations should use this constructor so a
+    /// policy engine can prove an announcement completed before proceeding.
+    pub fn new_tracked(id: PlaybackId) -> (Self, oneshot::Receiver<()>, PlaybackCompletionSender) {
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let (completion_tx, completion_rx) = oneshot::channel();
+        (
+            Self {
+                id,
+                cancel_tx: Some(cancel_tx),
+                completion_rx: Some(completion_rx),
+            },
+            cancel_rx,
+            PlaybackCompletionSender {
+                completion_tx: Some(completion_tx),
+            },
+        )
     }
 
     pub fn id(&self) -> &PlaybackId {
@@ -791,10 +998,27 @@ impl PlaybackHandle {
 
     /// Best-effort cancellation. Returns `Err` only when the adapter's
     /// playback task already exited.
-    pub fn cancel(self) -> std::result::Result<(), &'static str> {
+    pub fn cancel(mut self) -> std::result::Result<(), &'static str> {
         self.cancel_tx
+            .take()
+            .ok_or("playback already ended")?
             .send(())
             .map_err(|_| "playback already ended")
+    }
+
+    /// Wait for natural completion, cancellation, or failure.
+    ///
+    /// Holding `self` while awaiting deliberately keeps the cancellation
+    /// sender alive; waiting cannot accidentally look like cancellation to the
+    /// playback task.
+    pub async fn wait(mut self) -> std::result::Result<PlaybackOutcome, PlaybackWaitError> {
+        let receiver = self
+            .completion_rx
+            .take()
+            .ok_or(PlaybackWaitError::NotTracked)?;
+        receiver
+            .await
+            .map_err(|_| PlaybackWaitError::CompletionLost)
     }
 }
 
@@ -1008,12 +1232,42 @@ mod tests {
             Some(hint),
             metadata,
         )
-        .unwrap();
+        .unwrap()
+        .with_trusted_signaling(
+            Some(
+                InboundAssertedIdentity::new(
+                    "sip:asserted-secret@example.invalid",
+                    TrustedSignalingProvenance::SipTrustedTrunk,
+                )
+                .unwrap(),
+            ),
+            Some(TrustedSignalingMetadata::new(
+                TrustedSignalingProvenance::SipTrustedTrunk,
+                InboundSignalingMetadata::new([(
+                    "P-Charging-Vector",
+                    "icid-value=charging-secret",
+                )])
+                .unwrap(),
+            )),
+        );
 
         assert!(context.is_bound_to(&connection_id, Transport::Sip, &owner));
         assert_eq!(
             context.routing_hint().unwrap().expose_secret(),
             "attachment-secret"
+        );
+        assert_eq!(
+            context.asserted_identity().unwrap().provenance(),
+            TrustedSignalingProvenance::SipTrustedTrunk
+        );
+        assert_eq!(
+            context
+                .trusted_signaling()
+                .unwrap()
+                .fields()
+                .values("p-charging-vector")
+                .count(),
+            1
         );
         assert_eq!(
             context
@@ -1027,6 +1281,8 @@ mod tests {
         assert!(!debug.contains("attachment-secret"));
         assert!(!debug.contains("correlation-secret"));
         assert!(!debug.contains("second-secret"));
+        assert!(!debug.contains("asserted-secret"));
+        assert!(!debug.contains("charging-secret"));
         assert!(debug.contains("[redacted]"));
     }
 
@@ -1254,5 +1510,25 @@ mod tests {
         for debug in values {
             assert!(!debug.contains(CANARY));
         }
+    }
+
+    #[tokio::test]
+    async fn tracked_playback_reports_exact_terminal_outcome() {
+        let (handle, _cancel, completion) = PlaybackHandle::new_tracked(PlaybackId::new());
+        completion.finish(PlaybackOutcome::Completed);
+        assert_eq!(handle.wait().await, Ok(PlaybackOutcome::Completed));
+    }
+
+    #[tokio::test]
+    async fn tracked_playback_fails_closed_when_task_loses_completion() {
+        let (handle, _cancel, completion) = PlaybackHandle::new_tracked(PlaybackId::new());
+        drop(completion);
+        assert_eq!(handle.wait().await, Err(PlaybackWaitError::CompletionLost));
+    }
+
+    #[tokio::test]
+    async fn legacy_playback_is_explicitly_not_completion_aware() {
+        let (handle, _cancel) = PlaybackHandle::new(PlaybackId::new());
+        assert_eq!(handle.wait().await, Err(PlaybackWaitError::NotTracked));
     }
 }

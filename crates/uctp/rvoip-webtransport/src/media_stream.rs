@@ -20,9 +20,11 @@ use rvoip_core::stream::{
     MediaFrame, MediaReceiverReservation, MediaStream, QualitySnapshot, StreamKind,
 };
 use rvoip_uctp::substrate::datagram::{
-    pack_rtp_datagram, unpack_rtp_datagram, RtpDatagram, RtpMediaPayload,
+    observe_rtp_datagram, pack_rtp_datagram, RtpDatagram, RtpMediaPayload,
 };
-use rvoip_uctp::substrate::{PeerMediaRegistration, PeerMediaRouteKey, PeerMediaRouter};
+use rvoip_uctp::substrate::{
+    PeerMediaRegistration, PeerMediaRouteKey, PeerMediaRouter, RtpIngressObservation,
+};
 use rvoip_uctp::CorrelationIdDiagnostic;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -316,6 +318,22 @@ pub fn spawn_datagram_reader_with_cancel(
     orchestrator: Option<Arc<rvoip_core::Orchestrator>>,
     peer_cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
+    spawn_datagram_reader_with_observer(session, router, orchestrator, peer_cancel, None)
+}
+
+/// Spawn the sole WebTransport datagram reader and optionally publish
+/// lossless RTP observations before generic `MediaFrame` normalization.
+///
+/// The observer is bounded and best-effort. Backpressure or receiver shutdown
+/// drops only the observation, never media, so applications can inspect RTP
+/// loss/reorder/SSRC/marker/extension state without owning another reader.
+pub fn spawn_datagram_reader_with_observer(
+    session: web_transport_quinn::Session,
+    router: Arc<PeerMediaRouter>,
+    orchestrator: Option<Arc<rvoip_core::Orchestrator>>,
+    peer_cancel: CancellationToken,
+    ingress_observer: Option<mpsc::Sender<RtpIngressObservation>>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             let received = tokio::select! {
@@ -324,7 +342,7 @@ pub fn spawn_datagram_reader_with_cancel(
             };
             match received {
                 Ok(bytes) => {
-                    let datagram = match unpack_rtp_datagram(&bytes) {
+                    let observed = match observe_rtp_datagram(&bytes) {
                         Ok(d) => d,
                         Err(_) => {
                             metrics::counter!(
@@ -337,7 +355,7 @@ pub fn spawn_datagram_reader_with_cancel(
                             continue;
                         }
                     };
-                    let target = NonZeroU16::new(datagram.stream_local_id)
+                    let target = NonZeroU16::new(observed.stream_local_id)
                         .and_then(|local_id| router.lookup(local_id));
                     match target {
                         Some(binding) => {
@@ -354,6 +372,27 @@ pub fn spawn_datagram_reader_with_cancel(
                                 .increment(1);
                                 continue;
                             }
+                            if let Some(observer) = ingress_observer.as_ref() {
+                                if observer
+                                    .try_send(RtpIngressObservation {
+                                        route: binding.route().clone(),
+                                        datagram: observed.clone(),
+                                    })
+                                    .is_err()
+                                {
+                                    metrics::counter!(
+                                        "uctp_rtp_observations_dropped_total",
+                                        "transport" => "webtransport"
+                                    )
+                                    .increment(1);
+                                }
+                            }
+                            let datagram = RtpDatagram {
+                                flags: observed.flags,
+                                stream_local_id: observed.stream_local_id,
+                                seq: observed.seq,
+                                rtp: observed.rtp.into_media_payload(),
+                            };
                             let frame = {
                                 let _span = trace_span!(
                                     "uctp.stream.frame",

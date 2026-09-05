@@ -12,7 +12,11 @@ pub mod quinn;
 pub mod tls;
 
 pub use correlation::{send_and_wait, Pending};
-pub use datagram::{pack_rtp_datagram, unpack_rtp_datagram, RtpDatagram, RtpMediaPayload};
+pub use datagram::{
+    observe_rtp, observe_rtp_datagram, pack_observed_rtp_datagram, pack_rtp_datagram,
+    unpack_rtp_datagram, ObservedRtpDatagram, ObservedRtpPayload, RtpDatagram,
+    RtpIngressObservation, RtpMediaPayload,
+};
 // Alpha compatibility only: these helpers do not validate the opaque payload.
 #[doc(hidden)]
 pub use datagram::{pack, unpack, MediaDatagram};

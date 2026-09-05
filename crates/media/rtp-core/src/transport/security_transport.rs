@@ -196,6 +196,13 @@ impl SecurityRtpTransport {
 
 #[async_trait]
 impl RtpTransport for SecurityRtpTransport {
+    async fn send_stun_bytes(&self, payload: &[u8], destination: SocketAddr) -> Result<()> {
+        // ICE sits below SRTP: checks go out in plaintext even on a secured
+        // transport. The inner send validates the payload really is STUN,
+        // which is what keeps this from becoming a latch bypass.
+        self.inner.send_stun_bytes(payload, destination).await
+    }
+
     fn local_rtp_addr(&self) -> Result<SocketAddr> {
         self.inner.local_rtp_addr()
     }

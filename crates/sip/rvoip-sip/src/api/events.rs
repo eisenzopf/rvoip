@@ -215,6 +215,8 @@ impl SubscriptionState {
 pub enum MediaSecurityKeying {
     /// SDP Security Descriptions (RFC 4568).
     Sdes,
+    /// DTLS-SRTP key agreement (RFC 5763/5764).
+    DtlsSrtp,
 }
 
 /// RTP profile negotiated for protected media.
@@ -222,6 +224,8 @@ pub enum MediaSecurityKeying {
 pub enum MediaSecurityProfile {
     /// Secure RTP Audio/Video Profile (`RTP/SAVP`).
     RtpSavp,
+    /// DTLS-SRTP transport profile (`UDP/TLS/RTP/SAVP`).
+    UdpTlsRtpSavp,
 }
 
 /// Current negotiated media-security state for a call.
@@ -229,7 +233,7 @@ pub enum MediaSecurityProfile {
 pub struct MediaSecurityState {
     /// Keying mechanism used to derive SRTP contexts.
     pub keying: MediaSecurityKeying,
-    /// Negotiated SDES crypto suite.
+    /// SRTP protection profile represented by the shared crypto-suite API.
     pub suite: CryptoSuite,
     /// RTP profile used by the negotiated media stream.
     pub profile: MediaSecurityProfile,
@@ -785,6 +789,12 @@ pub enum Event {
         packet_loss_percent: u32,
         /// Jitter in milliseconds, rounded to an integer.
         jitter_ms: u32,
+        /// Estimated Mean Opinion Score, when media-core produced one.
+        ///
+        /// Carried as the estimate it is: media-core derives it from loss,
+        /// jitter, and latency rather than measuring perceived quality, so
+        /// it tracks trends well and should not be quoted as a measurement.
+        mos: Option<f32>,
     },
 
     /// SRTP media security was negotiated and installed.
@@ -793,7 +803,7 @@ pub enum Event {
         call_id: CallId,
         /// Keying mechanism used to derive SRTP contexts.
         keying: MediaSecurityKeying,
-        /// Negotiated SDES crypto suite.
+        /// SRTP protection profile represented by the shared crypto-suite API.
         suite: CryptoSuite,
         /// RTP profile used by the negotiated media stream.
         profile: MediaSecurityProfile,

@@ -15,8 +15,8 @@
 //     here are templated through `process.env.RVOIP_DEMO_SPKI` so
 //     the spec's beforeAll can pass the value in.
 //
-// The wt project is gated by `RVOIP_WT_SMOKE=1` so CI can opt in
-// once the SPKI flow is stable (gap plan §3.2 mitigation).
+// The wt project is gated by `RVOIP_WT_SMOKE=1`; the repository CI gate sets
+// it unconditionally while local default runs remain quick.
 
 import { defineConfig } from "@playwright/test";
 import { readFileSync, existsSync } from "node:fs";
@@ -96,8 +96,8 @@ export default defineConfig({
         },
       },
     },
-    // WT smoke is opt-in: gate behind RVOIP_WT_SMOKE so existing CI
-    // doesn't break if Chromium's SPKI pinning regresses.
+    // WT is locally opt-in; scripts/ci/run_checks.py enables it for every
+    // repository browser-smoke gate.
     ...(process.env.RVOIP_WT_SMOKE === "1" ? [wtProject] : []),
     // WebRTC RFC suite: drives rvoip-webrtc's whip-publish / ws-signaling
     // / whep-subscribe pages from a real Chromium against an in-process

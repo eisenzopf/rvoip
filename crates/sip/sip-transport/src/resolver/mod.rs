@@ -49,6 +49,9 @@ pub struct ResolvedTarget {
     /// the input SIP authority instead of reconstructing it from the IP/SRV
     /// result.
     pub authority: Option<TransportAuthority>,
+    /// Exact process-local connection to reuse for an RFC 5626 registered
+    /// flow. DNS-produced targets leave this unset.
+    pub flow_id: Option<crate::TransportFlowId>,
     pub expires: Option<Instant>,
 }
 
@@ -64,6 +67,7 @@ impl ResolvedTarget {
             // authority attach it explicitly with `with_authority`; otherwise
             // the request's top Route/Request-URI authority is retained.
             authority: None,
+            flow_id: None,
             expires: None,
         }
     }

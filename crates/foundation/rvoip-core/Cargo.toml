@@ -19,10 +19,11 @@ bytes.workspace = true
 chrono.workspace = true
 dashmap.workspace = true
 rvoip-infra-common.workspace = true
-# `MediaGraph` provides production G.711 <-> Opus transcoding directly, so
-# Opus cannot depend on a downstream crate accidentally unifying an optional
-# feature. Keep the codec available whenever core's media graph is available.
-rvoip-media-core = { workspace = true, features = ["opus"] }
+# Codec backends are forwarded by this crate's matching public features. This
+# keeps a dependency's advertised feature profile exact instead of allowing an
+# unrelated rvoip-core consumer to turn on a native codec for the whole graph.
+rvoip-media-core.workspace = true
+rvoip-rtp-core.workspace = true
 # V2.A — the pure-type/trait surface that consumer crates depend on.
 # rvoip-core re-exports from it so existing `use rvoip_core::ids::*`
 # and `use rvoip_core::identity::*` call sites keep working unchanged.
@@ -43,6 +44,7 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
@@ -77,10 +79,19 @@ path = "examples/sip_only_orchestrator.rs"
 name = "cross_transport_bridge"
 path = "examples/cross_transport_bridge.rs"
 
+[[example]]
+name = "checked_rtp_boundary"
+path = "examples/checked_rtp_boundary.rs"
+
 [[test]]
 name = "vcon_emission"
 path = "tests/vcon_emission.rs"
 required-features = ["vcon"]
+
+[[test]]
+name = "virtual_publisher"
+path = "tests/virtual_publisher.rs"
+required-features = ["opus"]
 
 [features]
 # P11 — feature flags per INTERFACE_DESIGN.md §2.2. The "shape" flags
@@ -100,13 +111,14 @@ identity = []
 webrtc = []
 aauth-experimental = []
 identity-fingerprint-binding = []
-# AMR in the media graph. Opt-in rather than default, unlike `opus` above:
-# these are full 3GPP speech codecs and most consumers of the graph never
-# carry one. Without them `AudioCodecSpec::build`'s AMR arm is not compiled,
-# so the graph refuses AMR no matter what payload type a transport reports.
+# Optional media-graph codec backends. G.711 remains available through
+# media-core's default features. Other codecs are selected explicitly.
+g729 = ["rvoip-media-core/g729"]
+opus = ["rvoip-media-core/opus"]
 amr-nb = ["rvoip-media-core/amr-nb"]
 amr-wb = ["rvoip-media-core/amr-wb"]
 amr = ["amr-nb", "amr-wb"]
+all-codecs = ["g729", "opus", "amr"]
 # V2.A.8 — Exposes the opt-in vCon JWS signing API. The normal `vcon`
 # feature already pulls the canonical document model used by core's
 # unsigned auto-emission path.
@@ -122,6 +134,7 @@ full = [
     "aauth-experimental",
     "identity-fingerprint-binding",
     "vcon-signing",
+    "all-codecs",
 ]
 
 [lints]

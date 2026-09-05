@@ -112,7 +112,24 @@ for the env-driven PBX account runner.
 `SessionHandle` is the per-call control object shared by the peer surfaces. It
 currently exposes deterministic teardown, answered/progress waits, RFC 4733
 DTMF, hold/resume, blind transfer, REFER/NOTIFY lifecycle events, SDES-SRTP
-state, typed per-call events, and decoded/encoded audio frames.
+state, feature-gated DTLS-SRTP state, typed per-call events, and
+decoded/encoded audio frames.
+
+Applications composing `SipAdapter` through `rvoip-core` may request a
+per-connection codec change with `Orchestrator::renegotiate_media`. The SIP
+adapter translates that request into a one-shot re-INVITE offer for the exact
+dialog generation and returns only after the peer's SDP answer is committed.
+
+Carrier-facing configurations can enable `PlayoutConfig` to place inbound
+audio on a local media clock. The buffer reorders RTP timestamps, emits
+repeat-with-fade PLC for missing G.711 frames, tracks remote clock skew, and
+drains excess depth so burst jitter does not become permanent latency.
+`Config::carrier_sbc` enables the production default; generic/local configs
+remain unbuffered for compatibility and deterministic packet-level labs.
+The call's stable media and stream descriptor remain unchanged on rejection;
+on success the existing stream updates both media pumps without changing its
+identity or application channels. Codec preferences never mutate coordinator-
+wide offer policy and therefore cannot bleed into concurrent calls.
 
 ## Examples
 
@@ -174,9 +191,10 @@ not imply carrier certification or untested peer-version/topology coverage.
   redirect, provisional response, and glare-retry paths covered by examples or
   regression fixtures.
 - UDP and TLS SIP paths in the beta-candidate evidence set.
-- RTP media sessions, bidirectional audio frames, RFC 4733 DTMF, and
-  SDES-SRTP negotiation state. The exact supported and fail-closed boundaries
-  are documented in [Crypto capability boundaries](docs/CRYPTO_CAPABILITIES.md).
+- RTP media sessions, bidirectional audio frames, RFC 4733 DTMF, SDES-SRTP,
+  and feature-gated DTLS-SRTP negotiation state. The exact supported and
+  fail-closed boundaries are documented in
+  [Crypto capability boundaries](docs/CRYPTO_CAPABILITIES.md).
 - Hold/resume, blind transfer, REFER/NOTIFY progress, attended-transfer
   primitives, and transfer outcome events.
 - Builder-shaped outbound requests with custom headers, carry-through reports,
@@ -300,6 +318,7 @@ Operational references:
 | `amr` | Both AMR variants. |
 | `opus` | Optional Opus media support; requires libopus on the build host. |
 | `all-codecs` | `g729` + `opus` + `amr`. |
+| `dtls-srtp` | SIP DTLS-SRTP keying over the call's RTP socket with SHA-256 SDP fingerprint binding. |
 | `perf-tests` | Opt-in performance gate and benchmark support. |
 | `dhat` | Heap profiling support for `examples/profiling/dhat_*.rs`. |
 | `tokio-console` | Tokio console support for profiling examples; requires `RUSTFLAGS="--cfg tokio_unstable"`. |
@@ -315,8 +334,10 @@ Operational references:
   over UDP only — but neither runs TCP or both adjacency orders, and neither is
   bound into the four-peer release attestation. They were explicitly de-scoped
   from the 0.3.2 claim and that has not changed.
-- WebRTC/browser interop, ICE, TURN, DTLS-SRTP, and WSS outbound are outside
-  the SIP beta claim unless separately completed and tested.
+- WebRTC/browser interop, TURN, and WSS outbound remain outside the SIP beta
+  claim unless separately completed and tested. SIP DTLS-SRTP is a distinct
+  feature-gated 0.3.9 candidate capability whose claim depends on fresh
+  protected release evidence.
 - The default full-media performance claim is bounded to the documented
   beta release profiles and artifacts. Higher tuned-profile results need
   their own topology, hardware, configuration, and caveats.

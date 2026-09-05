@@ -82,6 +82,20 @@ impl TransportFlowId {
         self.0
     }
 
+    /// Reconstitute a flow identity received from another layer in the same
+    /// process.
+    ///
+    /// The value is not authenticated and transports still require it to
+    /// match a currently-live connection before sending. Applications must
+    /// not persist it across process restarts or use it for authorization.
+    pub const fn from_process_local_value(value: u64) -> Option<Self> {
+        if value == 0 {
+            None
+        } else {
+            Some(Self(value))
+        }
+    }
+
     #[cfg(test)]
     pub(crate) const fn for_test(value: u64) -> Self {
         Self(value)

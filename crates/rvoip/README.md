@@ -65,6 +65,7 @@ This table mirrors `crates/rvoip/Cargo.toml`.
 | `amr-nb` |  | Developer preview | End-to-end AMR narrowband media with RFC 4867 framing, DTX, and CMR; implies `sip` |
 | `amr-wb` |  | Developer preview | The same for AMR wideband (G.722.2) at 16 kHz; implies `sip` |
 | `amr` |  | Developer preview | Both AMR variants |
+| `dtls-srtp` |  | Developer preview | SIP DTLS-SRTP keying with authenticated SDP fingerprints; implies `sip` |
 | `opus` |  | Developer preview | End-to-end Opus media; requires libopus on the build host; implies `sip` |
 | `all-codecs` |  | Developer preview | `g729` + `amr` + `opus` |
 | `webrtc` |  | Developer preview | WebRTC interop adapter under `rvoip::webrtc` |
@@ -74,7 +75,19 @@ This table mirrors `crates/rvoip/Cargo.toml`.
 | `voip-3` |  | Developer preview | `sip` + `webrtc` + `uctp` + vCon + identity + AI harness |
 | `client` |  | Developer preview | Cross-transport SDK under `rvoip::client` |
 | `app` |  | Developer preview | High-level SIP/WebRTC/UCTP gateway builder under `rvoip::app` |
-| `full` |  | Developer preview | `voip-3` + `vapi` + `sip-stir-shaken` + `client` + `app` + `g729` + `amr`. Excludes `opus`, which needs libopus on the build host — use `all-codecs` for that |
+| `full` |  | Developer preview | `voip-3` + `vapi` + `sip-stir-shaken` + `client` + `app` + `dtls-srtp` + `g729` + `amr`. Excludes `opus`, which needs libopus on the build host — use `all-codecs` for that |
+
+### Deployment bundles
+
+The additive `bundle-*` features group those leaf features into recognizable
+deployment shapes: SIP endpoint, carrier SIP, browser gateway, AI conversation
+gateway, full pure-Rust, and full with native codecs. Every bundle is tested
+independently with default features disabled, and CI verifies that the
+pure-Rust bundle does not resolve the native `opus` crate.
+
+See the machine-checked [feature bundle matrix](../../docs/FEATURE_BUNDLES.md)
+for exact membership, codecs, system dependencies, maturity, and Cargo
+examples. Advanced users can continue composing the leaf features above.
 
 Examples:
 
@@ -85,9 +98,36 @@ rvoip = { version = "0.3.8", features = ["voip-3"] }
 # High-level cross-transport application builder.
 rvoip = { version = "0.3.8", features = ["app"] }
 
-# Every facade-owned feature.
-rvoip = { version = "0.3.8", features = ["full"] }
+# Every pure-Rust facade feature and codec.
+rvoip = { version = "0.3.8", default-features = false, features = ["bundle-full-pure-rust"] }
 ```
+
+The high-level SIP listener exposes the same fail-closed signalling, media,
+and codec posture as the lower SIP runtime. Certificates and keys stay in
+operator-managed files; configuration and debug output never contain their
+contents:
+
+```rust
+use rvoip::app::{SipConfig, SipMediaSecurity};
+
+let sip = SipConfig::bind("0.0.0.0:5060")
+    .advertised_addr("203.0.113.10:5060".parse()?)
+    .tls_listener(
+        "0.0.0.0:5061".parse()?,
+        "/run/secrets/sip-cert.pem",
+        "/run/secrets/sip-key.pem",
+    )
+    .tls_advertised_addr("203.0.113.10:5061".parse()?)
+    .tls_extra_ca("/run/secrets/carrier-ca.pem")
+    .media_security(SipMediaSecurity::Required)
+    .offered_codecs([0, 8, 101]);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+SIP-TLS listener startup refuses an incomplete or unreadable identity, strict
+SRTP cannot be enabled without offering SRTP, and codec offers reject empty,
+duplicate, or unavailable payload types. UDP, TCP, and WebSocket listener
+enablement remains controlled by the lower `rvoip-sip::Config` surface.
 
 `full` means every **facade feature**, not every crate in the rvoip workspace.
 
@@ -191,8 +231,8 @@ example for a complete cross-transport application.
 
 - SIP beta evidence does not qualify WebRTC, UCTP, MoQ, Amazon Connect, or
   extension products.
-- WebRTC includes ICE and DTLS-SRTP; that does not make them SIP beta
-  capabilities.
+- SIP DTLS-SRTP is a separate feature-gated path from WebRTC's DTLS transport;
+  neither broadens the maturity claim of the other surface.
 - Published developer-preview crates are available to build with now, but do
   not carry a blanket production-readiness or API-compatibility guarantee.
 - Product READMEs define exact supported scope, configuration, and non-claims.

@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 import time
+import tomllib
 from typing import Any
 
 
@@ -37,7 +38,7 @@ CODEC_FEATURE_GATES = {
 # accompanying test derives the same set from the manifest and fails if a new
 # feature is added without a decision about this gate.
 NON_PERF_SIP_FEATURES = (
-    "all-codecs,amr,amr-nb,amr-wb,dev-insecure-tls,dhat,event-history,g729,"
+    "all-codecs,amr,amr-nb,amr-wb,dev-insecure-tls,dhat,dtls-srtp,event-history,g729,"
     "generated-validation,opus,opus-sim,persistence,tokio-console"
 )
 
@@ -119,6 +120,17 @@ def policy_commands() -> list[tuple[list[str], Path | None, dict[str, str] | Non
             None,
         ),
     ]
+
+
+def facade_bundle_names(root: Path) -> list[str]:
+    manifest = root / "crates/rvoip/Cargo.toml"
+    with manifest.open("rb") as handle:
+        data = tomllib.load(handle)
+    bundles = data["package"]["metadata"]["rvoip"]["feature-bundles"]
+    names = [bundle["feature"] for bundle in bundles]
+    if not names or any(not GATE.fullmatch(name) for name in names):
+        raise CheckError("invalid or empty rvoip facade feature-bundle catalog")
+    return names
 
 
 def shard_commands(packages_csv: str) -> list[tuple[list[str], Path | None, dict[str, str] | None]]:
@@ -342,6 +354,37 @@ def specialty_commands(
                 None,
             ),
         ]
+    if gate == "facade-feature-bundles":
+        commands: list[tuple[list[str], Path | None, dict[str, str] | None]] = [
+            (
+                [
+                    "python3",
+                    "scripts/ci/check_facade_feature_bundles.py",
+                    "--verify-resolved",
+                ],
+                None,
+                None,
+            )
+        ]
+        for feature in facade_bundle_names(root):
+            commands.append(
+                (
+                    [
+                        "cargo",
+                        "test",
+                        "--locked",
+                        "-p",
+                        "rvoip",
+                        "--lib",
+                        "--no-default-features",
+                        "--features",
+                        feature,
+                    ],
+                    None,
+                    None,
+                )
+            )
+        return commands
     if gate in CODEC_FEATURE_GATES:
         # The shards run `cargo test -p <crate>` with default features only.
         # `rvoip-codec-core` defaults to `["g711"]` and `rvoip-media-core` to
@@ -427,7 +470,75 @@ def specialty_commands(
             ),
         ]
     if gate == "rtp-interop":
-        return [(["bash", "scripts/test_libsrtp_interop.sh"], None, None)]
+        return [
+            (["bash", "scripts/test_libsrtp_interop.sh"], None, None),
+            (
+                [
+                    "cargo",
+                    "test",
+                    "--locked",
+                    "-p",
+                    "rvoip-media-core",
+                    "--features",
+                    "dtls-srtp",
+                    "--lib",
+                    "dtls_fingerprint_mismatch_fails_before_context_installation",
+                ],
+                None,
+                None,
+            ),
+            (
+                [
+                    "cargo",
+                    "test",
+                    "--locked",
+                    "-p",
+                    "rvoip-rtp-core",
+                    "--features",
+                    "dtls-webrtc",
+                    "--test",
+                    "dtls_srtp_handshake_test",
+                    "--test",
+                    "dtls_srtp_transport_bridge_test",
+                    "--test",
+                    "srtp_interop_webrtc_srtp",
+                ],
+                None,
+                None,
+            ),
+            (
+                [
+                    "cargo",
+                    "test",
+                    "--locked",
+                    "-p",
+                    "rvoip-sip",
+                    "--features",
+                    "dtls-srtp",
+                    "--test",
+                    "dtls_srtp_call_integration",
+                ],
+                None,
+                None,
+            ),
+            (
+                [
+                    "cargo",
+                    "clippy",
+                    "--locked",
+                    "-p",
+                    "rvoip-sip",
+                    "--features",
+                    "dtls-srtp",
+                    "--all-targets",
+                    "--",
+                    "-D",
+                    "warnings",
+                ],
+                None,
+                None,
+            ),
+        ]
     if gate == "amazon-connect-aws-control":
         return [
             (
@@ -506,7 +617,15 @@ def specialty_commands(
             ),
             (["npm", "ci"], browser, None),
             (["npx", "playwright", "install", "--with-deps", "chromium"], browser, None),
-            (["npm", "test"], browser, {**os.environ, "RUST_LOG": "warn"}),
+            (
+                ["npm", "test"],
+                browser,
+                {
+                    **os.environ,
+                    "RUST_LOG": "warn",
+                    "RVOIP_WT_SMOKE": "1",
+                },
+            ),
         ]
     if gate == "vcon-postgres":
         env = {

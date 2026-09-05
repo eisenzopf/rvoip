@@ -173,6 +173,7 @@ async fn ttl_expires_optional_is_carried() {
         addr: addr("10.0.0.1:5060"),
         transport: TransportType::Tls,
         authority: None,
+        flow_id: None,
         expires: Some(now + std::time::Duration::from_secs(300)),
     };
     let resolver = MockResolver::default().with("sip:bob@example.com", Ok(vec![target.clone()]));

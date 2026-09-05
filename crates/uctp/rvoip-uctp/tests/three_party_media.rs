@@ -492,8 +492,8 @@ async fn three_party_subscriber_sees_two_publishers_on_distinct_local_ids() {
         None,
     );
 
-    let mut rx_a = rvoip_core::stream::MediaStream::frames_in(sub_stream_a.as_ref());
-    let mut rx_b = rvoip_core::stream::MediaStream::frames_in(sub_stream_b.as_ref());
+    let mut rx_a = sub_stream_a.try_frames_in().expect("subscriber A receiver");
+    let mut rx_b = sub_stream_b.try_frames_in().expect("subscriber B receiver");
 
     // Inject distinctive payloads: A → 0xAA marker, B → 0xBB marker.
     for i in 0u8..5 {

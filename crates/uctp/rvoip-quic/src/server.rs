@@ -57,6 +57,7 @@ impl UctpQuicServer {
         orchestrator: Option<Arc<rvoip_core::Orchestrator>>,
         coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
         sig9421: Option<rvoip_uctp::state::Sig9421Config>,
+        rtp_ingress_observer: Option<mpsc::Sender<rvoip_uctp::substrate::RtpIngressObservation>>,
     ) -> Arc<Self> {
         let admission_cancel = CancellationToken::new();
         let accept_cancel = admission_cancel.clone();
@@ -98,6 +99,7 @@ impl UctpQuicServer {
                 let orchestrator = orchestrator.clone();
                 let caps = coordinator_caps.clone();
                 let sig9421 = sig9421.clone();
+                let rtp_ingress_observer = rtp_ingress_observer.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
                     metrics::gauge!("uctp_active_connections", "transport" => "quic")
@@ -117,6 +119,7 @@ impl UctpQuicServer {
                         orchestrator,
                         caps,
                         sig9421,
+                        rtp_ingress_observer,
                     )
                     .await;
                     metrics::gauge!("uctp_active_connections", "transport" => "quic")
@@ -370,6 +373,7 @@ async fn spawn_peer_session(
     orchestrator: Option<Arc<rvoip_core::Orchestrator>>,
     coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
     sig9421: Option<rvoip_uctp::state::Sig9421Config>,
+    rtp_ingress_observer: Option<mpsc::Sender<rvoip_uctp::substrate::RtpIngressObservation>>,
 ) {
     // Wire Session IDs are peer-controlled and need only be unique within one
     // authenticated substrate peer. Never resolve them through the adapter-
@@ -407,11 +411,12 @@ async fn spawn_peer_session(
     // this physical peer, regardless of how many UCTP Sessions it multiplexes.
     let media_router = PeerMediaRouter::new();
     let media_cancel = CancellationToken::new();
-    let mut media_reader = crate::media_stream::spawn_datagram_reader_with_cancel(
+    let mut media_reader = crate::media_stream::spawn_datagram_reader_with_observer(
         conn.clone(),
         Arc::clone(&media_router),
         orchestrator,
         media_cancel.clone(),
+        rtp_ingress_observer,
     );
 
     // Clone the outbound sender BEFORE handing it to the coordinator so
@@ -434,7 +439,7 @@ async fn spawn_peer_session(
         );
     let drain_grace = coordinator_caps.signaling_send_timeout;
     let coord = if let Some(sig9421) = sig9421 {
-        UctpCoordinator::start_full_with_sig9421(
+        UctpCoordinator::start_full_with_sig9421_context(
             "quic",
             in_rx,
             out_tx,
@@ -442,6 +447,7 @@ async fn spawn_peer_session(
             bearer,
             sig9421.verifier,
             sig9421.policy,
+            sig9421.verification_context,
             Arc::new(rvoip_uctp::state::default_v0_descriptor()),
             subscription_handler,
             coordinator_caps,

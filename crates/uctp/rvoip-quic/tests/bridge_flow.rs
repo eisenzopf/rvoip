@@ -185,7 +185,7 @@ async fn dial_and_invite(
                         "id": wire_stream_id,
                         "kind": "audio",
                         "direction": "sendrecv",
-                        "codec_preferences": ["opus"]
+                        "codec_preferences": ["g.711-mu"]
                     }],
                     "substrate_setup": null
                 }),
@@ -329,11 +329,14 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
     // pattern. Client A injects on its outbound side; client B observes
     // on its inbound side.
     let codec = rvoip_core::capability::CodecInfo {
-        name: "opus".into(),
-        clock_rate_hz: 48000,
+        // This test runs in the default, system-library-free shard. Exercise
+        // the bridge with the default G.711 codec; Opus is qualified by the
+        // native facade bundle and codec feature matrix.
+        name: "g.711-mu".into(),
+        clock_rate_hz: 8_000,
         channels: 1,
         fmtp: None,
-        payload_type: None,
+        payload_type: Some(0),
     };
 
     let client_a_stream = QuicDatagramMediaStream::start(
@@ -361,7 +364,9 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
 
     // --- Inject 10 frames from client A; observe all of them on client B in order. ---
     let client_a_out = rvoip_core::stream::MediaStream::frames_out(client_a_stream.as_ref());
-    let mut client_b_in = rvoip_core::stream::MediaStream::frames_in(client_b_stream.as_ref());
+    let mut client_b_in = client_b_stream
+        .try_frames_in()
+        .expect("client B media receiver");
 
     for i in 0u8..10 {
         let frame = MediaFrame {

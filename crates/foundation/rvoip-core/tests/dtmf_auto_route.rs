@@ -34,6 +34,8 @@ use rvoip_core::stream::{
 use rvoip_core::{Config, Orchestrator, RvoipError};
 use tokio::sync::{mpsc, Barrier};
 
+const DEFAULT_TEST_CODEC: &str = "g.711-mu";
+
 #[derive(Default)]
 struct DtmfRecord {
     calls: AtomicUsize,
@@ -58,7 +60,7 @@ impl StreamHandle {
             id: StreamId::new(),
             codec: CodecInfo {
                 name: codec_name.into(),
-                clock_rate_hz: 48000,
+                clock_rate_hz: 8_000,
                 channels: 1,
                 fmtp: None,
                 payload_type: None,
@@ -304,8 +306,8 @@ async fn dtmf_auto_forwards_across_cross_transport_bridge() {
     let session = SessionId::new();
     let uctp_conn = ConnectionId::new();
     let sip_conn = ConnectionId::new();
-    let uctp_stream = StreamHandle::new("opus");
-    let sip_stream = StreamHandle::new("g.711-mu");
+    let uctp_stream = StreamHandle::new(DEFAULT_TEST_CODEC);
+    let sip_stream = StreamHandle::new(DEFAULT_TEST_CODEC);
 
     uctp_adapter
         .announce(uctp_conn.clone(), Arc::clone(&uctp_stream), session.clone())
@@ -392,12 +394,16 @@ async fn lifecycle_drain_aborts_and_joins_blocked_dtmf_forward() {
     uctp_adapter
         .announce(
             uctp_conn.clone(),
-            StreamHandle::new("opus"),
+            StreamHandle::new(DEFAULT_TEST_CODEC),
             session.clone(),
         )
         .await;
     sip_adapter
-        .announce(sip_conn.clone(), StreamHandle::new("g.711-mu"), session)
+        .announce(
+            sip_conn.clone(),
+            StreamHandle::new(DEFAULT_TEST_CODEC),
+            session,
+        )
         .await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     orchestrator
@@ -444,7 +450,7 @@ async fn dtmf_does_not_forward_when_connection_is_not_bridged() {
 
     let session = SessionId::new();
     let uctp_conn = ConnectionId::new();
-    let uctp_stream = StreamHandle::new("opus");
+    let uctp_stream = StreamHandle::new(DEFAULT_TEST_CODEC);
     uctp_adapter
         .announce(uctp_conn.clone(), Arc::clone(&uctp_stream), session)
         .await;

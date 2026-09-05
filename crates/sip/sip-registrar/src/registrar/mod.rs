@@ -160,6 +160,18 @@ impl Registrar {
             .await
     }
 
+    pub async fn set_flow_reachability(
+        &self,
+        aor: &AddressOfRecord,
+        flow_id: &str,
+        reachability: ContactReachability,
+    ) -> Result<(ContactInfo, bool)> {
+        let aor = self.canonicalize_aor(aor)?;
+        self.registry
+            .set_flow_reachability(aor.as_str(), flow_id, reachability)
+            .await
+    }
+
     /// Compatibility registration using the legacy user id key.
     pub async fn register_user(
         &self,

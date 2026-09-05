@@ -892,7 +892,11 @@ impl fmt::Debug for EndpointCall {
 
 /// Inbound call presented by [`EndpointEvent::IncomingCall`].
 pub struct EndpointIncomingCall {
-    incoming: IncomingCall,
+    // `IncomingCall` retains the exact lifecycle authority and is much
+    // larger than every other EndpointEvent payload. Keep the public event
+    // shape stable while moving that authority behind one allocation so the
+    // hot event enum does not copy a 400-byte discriminated value.
+    incoming: Box<IncomingCall>,
     registrar: Option<String>,
     transport: EndpointTransport,
 }
@@ -904,7 +908,7 @@ impl EndpointIncomingCall {
         transport: EndpointTransport,
     ) -> Self {
         Self {
-            incoming,
+            incoming: Box::new(incoming),
             registrar,
             transport,
         }

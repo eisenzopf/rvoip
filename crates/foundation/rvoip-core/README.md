@@ -50,6 +50,61 @@ rvoip-core = "0.3.8"
   SIP + WebRTC + QUIC adapters registered with a single Orchestrator,
   bridged via `BridgeManager`. (Pre-alpha — WebRTC/QUIC paths are
   pinned to upstream alpha crates.)
+- [`checked_rtp_boundary`](examples/checked_rtp_boundary.rs) — convert between
+  validated RTP packets and payload-only `MediaFrame`s with explicit
+  negotiated codec/PT identity, bounded allocation, exact packet preservation,
+  and deterministic egress packetization. The SIP, WebRTC, and UCTP crates
+  include matching gateway examples rather than rebuilding RTP headers.
+
+## Waiting for media readiness
+
+Signaling completion and usable media are separate states. Applications can
+await the exact state they need without writing a transport-specific polling
+loop:
+
+```rust,no_run
+use std::time::Duration;
+use rvoip_core::{MediaReadiness, StreamKind, StreamSelector};
+use tokio_util::sync::CancellationToken;
+
+# async fn wait(orchestrator: &rvoip_core::Orchestrator, connection_id: rvoip_core::ConnectionId) -> Result<(), rvoip_core::StreamWaitError> {
+let stream = orchestrator
+    .wait_for_stream(
+        connection_id,
+        StreamSelector::new(StreamKind::Audio)
+            .with_codec("opus")
+            .with_readiness(MediaReadiness::Bidirectional),
+        tokio::time::Instant::now() + Duration::from_secs(5),
+        CancellationToken::new(),
+    )
+    .await?;
+# let _ = stream;
+# Ok(())
+# }
+```
+
+The readiness levels are deliberately distinct:
+
+- **Signaling connected** is a connection lifecycle event; it does not prove a
+  media stream exists.
+- **Registered** means the adapter has published a matching stable stream
+  identity.
+- **Source ready** additionally means its negotiated codec and inbound producer
+  are authoritative and ready for a consumer.
+- **Bidirectional** additionally means the stream accepts outbound frames.
+
+Call the orchestrator surface when lifecycle safety matters. It fences the
+wait to the captured connection generation and returns typed errors for
+terminal teardown or replacement. Direct adapter waits are intended for
+adapter-level integration and retain a source-compatible bounded fallback.
+
+## Mid-call codec changes
+
+`Orchestrator::renegotiate_media` waits for the selected adapter's protocol-
+native negotiation to commit before updating a live bridge. Cross-transport
+media graphs receive the complete negotiated `CodecInfo`, including the exact
+dynamic payload type and fmtp, rather than reconstructing codec identity from
+the name. An adapter error leaves the graph on its prior codec generation.
 
 ## License
 

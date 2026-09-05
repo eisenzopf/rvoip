@@ -12,7 +12,8 @@
 //! The combined result maps to
 //! `rvoip_core::identity::IdentityAssurance::UserAuthorized` with the
 //! subject's `sub` claim as `user_id` and the actor's `sub` claim as
-//! `identity`. Scopes union both tokens' `scope` / `scopes` claims.
+//! `identity`. Effective scopes are the least-privilege intersection of the
+//! subject and actor grants; an actor can never expand subject authority.
 //!
 //! v0 ships an [`AAuthValidator`] backed by two [`crate::jwt::JwtValidator`]
 //! instances (one per token type). Production deployments swap in
@@ -195,12 +196,15 @@ impl AAuthValidator {
         };
         authorize_actor_delegation(&subject_principal, &actor_principal)?;
 
-        let mut merged_scopes = subject_principal.scopes.clone();
-        for s in &actor_principal.scopes {
-            if !is_delegation_scope(s, &subject_principal.subject) && !merged_scopes.contains(s) {
-                merged_scopes.push(s.clone());
-            }
-        }
+        let merged_scopes = subject_principal
+            .scopes
+            .iter()
+            .filter(|scope| {
+                !is_delegation_scope(scope, &subject_principal.subject)
+                    && actor_principal.scopes.contains(scope)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
 
         let assurance = IdentityAssurance::UserAuthorized {
             user_id: subject_identity,
@@ -412,11 +416,8 @@ mod tests {
             } => {
                 assert_eq!(user_id.as_str(), "user:alice");
                 assert_eq!(identity.as_str(), "agent:assistant-7");
-                // Scopes union (subject-first ordering).
-                assert_eq!(
-                    scopes,
-                    vec!["calls.write".to_string(), "calls.transfer".to_string()]
-                );
+                // Least-privilege intersection (subject-first ordering).
+                assert_eq!(scopes, vec!["calls.write".to_string()]);
             }
             other => panic!(
                 "expected UserAuthorized; got {:?}",
@@ -501,5 +502,30 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, BearerAuthError::Invalid(_)));
+    }
+
+    #[tokio::test]
+    async fn actor_scope_cannot_expand_subject_authority() {
+        let subject = Arc::new(StaticSubject {
+            user_id: id("user:alice"),
+            scopes: vec!["calls.write".into()],
+            tenant: "tenant-a",
+        });
+        let actor = Arc::new(StaticActor {
+            identity: id("agent:7"),
+            scopes: vec![
+                "aauth:act:user:alice".into(),
+                "calls.write".into(),
+                "admin".into(),
+            ],
+            tenant: "tenant-a",
+        });
+
+        let principal = AAuthValidator::new(subject, actor)
+            .validate_principal("subject", "actor")
+            .await
+            .expect("valid delegated actor");
+        assert_eq!(principal.scopes, vec!["calls.write".to_string()]);
+        assert!(!principal.scopes.iter().any(|scope| scope == "admin"));
     }
 }

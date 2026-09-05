@@ -2,6 +2,357 @@
 
 ## Unreleased
 
+### Production remote SIP endpoint profile
+
+- The built-in registrar can now require authenticated RFC 5626 outbound
+  registrations on exact TLS/WSS flows. It processes `ob`, `+sip.instance`,
+  and `reg-id`, rejects incomplete remote endpoints with `439`, and retains
+  opaque process-local flow capabilities rather than dialing private Contact
+  addresses.
+- Registered-AOR origination carries an ordered set of verified exact routes
+  through the facade, SIP adapter, dialog manager, authentication retries, and
+  transport failover. A failed primary stream can advance to a secondary flow
+  without losing flow identity.
+- Exact connection close, expiry, unregister, replacement, and restart make a
+  route unavailable. Replacement uses prepare/response/commit ordering, so a
+  zero-wire response or a staged-flow close cannot discard or falsely promote
+  the previous live route.
+- `SipConfig::remote_endpoint_profile()` fails startup unless TLS, mandatory
+  SRTP, registrar identity, and a reachable media address are configured. The
+  process-local AOR-affinity and real-NAT qualification boundaries are
+  documented in `docs/sip/REMOTE_ENDPOINT_PROFILE.md`.
+
+### DTLS-SRTP on the SIP media path
+
+- `rvoip-sip` can negotiate `UDP/TLS/RTP/SAVP` with SHA-256 certificate
+  fingerprints and RFC 8842 setup roles when its `dtls-srtp` feature is
+  enabled. `Config::srtp_keying = SrtpKeyingMode::DtlsSrtp` selects the new
+  path; SDES remains the compatible default.
+- DTLS 1.2 shares the call's RTP socket through RFC 7983 demultiplexing. The
+  media transport is latched secure-only before the asynchronous handshake,
+  the certificate fingerprint from DTLS must match authenticated SDP before
+  contexts are installed, and stale call generations cannot receive keys.
+- Release gates now prove a real two-endpoint SIP call, independent
+  `webrtc-srtp` RTP/SRTCP interoperability, shared-socket handshake behavior,
+  strict DTLS-enabled Clippy, and facade feature forwarding. The carrier and
+  full facade bundles include DTLS-SRTP; the minimal SIP endpoint does not.
+- This is a supported dedicated handshake path. The older compatibility
+  constructors under `rvoip-rtp-core::api::{client,server,common}` remain
+  fail-closed and are not silently redirected to it.
+- RTP session, client, and server teardown now send BYE behind a Receiver
+  Report as RFC 3550 compound RTCP. RVoIP no longer emits unnegotiated
+  reduced-size BYE packets that its peer correctly rejects during teardown.
+
+### Deployment-oriented facade feature bundles
+
+- The `rvoip` facade now offers six additive `bundle-*` starting points for a
+  SIP endpoint, carrier SIP, browser gateway, AI conversation gateway, the
+  complete pure-Rust facade, and the complete facade with native codecs.
+  Existing leaf features and the default `sip` selection remain unchanged.
+- The bundle catalog is declared with the facade manifest, rendered into
+  `docs/FEATURE_BUNDLES.md`, checked for documentation drift, tested once per
+  bundle with default features disabled, and inspected at the resolved
+  dependency-graph level.
+- Codec features now propagate through both the SIP adapter and the shared
+  media graph. G.711 is baseline; G.729 and both AMR variants are in the
+  carrier and pure-Rust full bundles; native Opus is explicit in the browser,
+  AI, and native-full bundles. A pure-Rust build can no longer acquire Opus
+  accidentally through `rvoip-core` feature unification.
+- Direct `rvoip-core` consumers that previously relied on its default features
+  for Opus transcoding must enable the crate's `opus` feature (or
+  `all-codecs`) explicitly. The `full` feature continues to select every
+  mainline codec, including Opus.
+
+### Codec feature-matrix hardening
+
+- AMR-NB and AMR-WB capability registration now compiles only when the
+  corresponding codec is enabled, keeping codec-free builds warning-clean
+  without weakening AMR support.
+- Capability inventory tests now cover AMR-only builds explicitly, and the
+  release gate exercises codec-free, AMR, and `all-codecs` configurations so
+  AMR, Opus, PCMU, and PCMA remain first-class negotiated codecs.
+
+### Committed per-session SIP codec renegotiation
+
+- `SipAdapter::renegotiate_media` now renders a one-shot codec offer for the
+  exact call generation, waits for the peer's final re-INVITE result, and
+  returns the codec and payload type actually committed from the SDP answer.
+  It no longer changes the media graph optimistically after request dispatch.
+- Rejected, timed-out, replaced, or unobservable re-INVITEs fail closed and
+  retain the stable negotiated media generation. A rejected transaction can
+  be retried without changing adapter-global codec policy or another call's
+  offer.
+- A live `SipMediaStream` keeps its identity and channels while a committed
+  codec generation rebuilds both media pumps. Managed cross-transport graphs
+  now receive complete codec descriptors, preserving dynamic payload types and
+  fmtp during UCTP/SIP and WebRTC/SIP hot swaps.
+
+### Awaitable media readiness
+
+- `ConnectionAdapter::wait_for_stream` now provides a transport-neutral,
+  cancellation- and deadline-aware alternative to application polling loops.
+  Existing adapters inherit a bounded compatibility implementation and may
+  override it with a native registration watch without changing callers.
+- `Orchestrator::wait_for_stream` captures and revalidates the exact connection
+  lifecycle generation. Missing connections, terminal teardown, replacement,
+  adapter loss, cancellation, deadline expiry, and adapter query failure are
+  distinct outcomes.
+- `StreamSelector` filters by media kind, optional codec and direction, plus
+  explicit registered, source-ready, or bidirectional readiness. SIP, WebRTC,
+  QUIC, and WebTransport production-path tests now consume this public surface.
+
+### Lossless RTP observation on UCTP transports
+
+- `observe_rtp_datagram` and `ObservedRtpDatagram` expose validated RTP
+  sequence, timestamp, SSRC, marker, CSRCs, parsed extensions, padding size,
+  and padding-free codec payload without taking ownership of adapter internals.
+- `UctpQuicAdapter::new_with_rtp_ingress_observer` and
+  `UctpWtAdapter::new_with_rtp_ingress_observer` publish those packets with
+  their authenticated core route before conversion to `MediaFrame`. Delivery
+  is bounded and best-effort, so an unavailable observer never stalls audio.
+- The existing constructors and payload-only media consumers are unchanged.
+  Normal outbound `MediaFrame` forwarding deliberately starts a new RTP hop:
+  marker is false, CSRC/extensions are empty, and padding is omitted. Exact
+  reserialization is available only through `pack_observed_rtp_datagram`.
+
+## 0.3.8-thelve.1 — 2026-08-18 (branch `thelve/rvoip-22-ingress`, unpublished)
+
+A pre-release cut from `0.3.8` that makes two shipped correctness
+primitives reachable from the high-level app, plus one signature-freshness
+fix. Additive: the convenience builder path is unchanged.
+
+### ICE (RFC 8445) on the SIP path
+
+- New crate **`rvoip-ice-core`**: a sans-io ICE agent and RFC 8489 STUN
+  codec. The agent is handed packets and the clock and polled for
+  transmissions, events, and deadlines — no sockets, no runtime — so role
+  conflicts, nomination races, loss, restarts, and wrong-password handling
+  are scripted deterministic tests (19 of them, over a virtual wire with a
+  port-restricted NAT). The codec is verified against the RFC 5769 vectors,
+  which are self-validating: FINGERPRINT covers every byte before it and the
+  HMAC everything before that.
+- `SipConfig::ice(SipIcePolicy::{Disabled, Lite, Full})` on the app builder,
+  `Config::ice` on the coordinator. **Disabled is the default and is
+  today's behavior byte for byte** — SDP without ICE attributes negotiates
+  exactly as before, and a peer that declines ICE retires the runtime and
+  proceeds on the SDP path.
+- Offers and answers carry `a=ice-ufrag`/`a=ice-pwd`/`a=candidate` (and
+  `a=ice-lite` for lite) when enabled; the peer's material is extracted
+  from parsed SDP; RFC 8839 `ice-mismatch` (a middlebox rewrote c=/m=
+  after the peer built its SDP) is detected and stands ICE down for that
+  call rather than fighting the box that owns the path.
+- One pump task per media session shuttles STUN between the agent and the
+  RTP socket: the transport now forwards demuxed STUN datagrams as
+  `RtpEvent::StunPacket` (both plain and SRTP receive paths — ICE sits
+  below SRTP, so checks on a secured socket are forwarded, not rejected),
+  and `RtpTransport::send_stun_bytes` is the one legitimate plaintext send
+  on a secured transport, gated on the payload actually classifying as
+  STUN. Nomination retargets media through the same `establish_media_flow`
+  the SDP path uses.
+- A full peer beside a lite one is controlling regardless of who offered
+  (RFC 8445 §6.1.1); lite refuses to build without a reachable address.
+- Scope honesty: single component (requires rtcp-mux semantics; component
+  ids stay in the model so two-component is an extension), no TURN yet, no
+  trickle over SIP, and the post-nomination re-INVITE (RFC 8839 §4.4) is a
+  recorded follow-up — the media path itself is already correct from the
+  retarget.
+
+### Media quality reaches the application
+
+- **`OperationalEventKind::Quality`** puts per-connection quality on the
+  authoritative stream. An application that took the operational receiver has
+  stopped reading the observational broadcast, so quality it never sees is
+  quality it cannot act on — and a call degrading is worth reacting to while
+  it is still up. Scaled to integers (hundredths) because the enum is `Eq`
+  and floats are not; a negative or non-finite reading clamps to zero rather
+  than wrapping into an enormous unsigned value.
+- **MOS survives the SIP boundary.** `Event::MediaQualityChanged` gained a
+  `mos` field. media-core computed the estimate all along; the adapter was
+  discarding it with a comment saying it would keep doing so "until the
+  ApiEvent grows a `mos` field".
+- **`MediaStream::has_quality_measurement`** (default `true`) lets a
+  transport say it has no measurement. `QualitySnapshot::default()` is all
+  zeros, which reads as *flawless* rather than *unknown*, and the type had no
+  way to distinguish them. `spawn_media_quality_sampler` now skips
+  unmeasured connections instead of averaging a perfect score into the
+  report.
+- **`SipMediaStream` retains its last quality report**, so `quality_snapshot`
+  returns the RTCP-derived measurement the adapter routed to it rather than a
+  default. Before this it always returned zeros, which made the sampler
+  unusable on the SIP path: polling it published flawless quality for every
+  call forever.
+- `RvoipAppBuilder::media_quality_interval` starts the sampler. Off by
+  default.
+
+### STUN-discovered advertised address
+
+- `SipConfig::discover_advertised_addr(stun_server)` learns the reachable
+  address at startup instead of requiring it configured, for a listener
+  behind NAT whose public address is not known ahead of time.
+- **Not ICE, deliberately.** RFC 8445 negotiates candidate pairs with
+  connectivity checks, and a carrier SIP trunk does not offer it — the far
+  end expects one reachable media address. What ICE's server-reflexive step
+  buys on this path is knowing that address, which is a STUN binding request.
+  Browser legs, where ICE genuinely applies, are served by the WebRTC
+  transport.
+- Fails closed: a STUN server that cannot answer fails the build rather than
+  starting a listener that advertises a guess. A call that connects and
+  carries no audio is harder to diagnose than a service that refused to
+  start. A static `advertised_addr` wins over discovery.
+
+### Carrier-grade media on the SIP path
+
+- **`PlayoutBuffer`** (`media-core::processing::audio::playout`) smooths and
+  conceals a decoded audio stream: frames are reordered onto the media clock,
+  a short backlog absorbs burst arrival, and a frame that never arrives is
+  synthesized rather than left as a gap. Concealment is repeat-with-fade —
+  the cheap technique, named as such — which removes the click that dominates
+  the artifact budget; a long burst fades to silence rather than repeating
+  the same 20 ms indefinitely. RTP timestamp wrap is handled, without which a
+  single wrap discards every later frame.
+- Playout is driven by a local media-clock deadline, not by packet arrival.
+  Excess depth opens a bounded drain valve to reconverge latency, while a
+  long-baseline RTP/arrival comparison tracks remote oscillator skew. The
+  release matrix holds depth bounded for one simulated hour at both +50 ppm
+  and -50 ppm and proves G.711 PLC fires on the missing frame's deadline.
+- `Config::playout` on the SIP config, `SipConfig::playout` on the app
+  builder. Generic/local configs retain the compatibility default; the
+  carrier/SBC profile and app listeners admitting a trusted trunk enable the
+  carrier-safe default automatically. Controlled LAN labs may opt out.
+- Note for anyone surveying this area: `media-core`'s
+  `rtp_processing::jitter::JitterBuffer` is a stub — `get_packet` is
+  `pop_first` and `flush_old_packets` clears the whole buffer. It has no
+  callers. The real packet-level buffer is `rtp-core`'s
+  `AdaptiveJitterBuffer`.
+
+### SRTP reachable from the app builder
+
+- `SipConfig::media_security(SipMediaSecurity::{Disabled, Preferred,
+  Required})`. `rvoip-sip::Config` already carried `offer_srtp` and
+  `srtp_required`, but no builder surfaced them, so an application had no way
+  to ask for encrypted media. `Required` refuses plaintext fallback;
+  `Preferred` carries the call in the clear when the peer declines, which is
+  the case an operator most needs to know about.
+
+### Trusted private identity and carrier signaling
+
+- A trusted trunk's `P-Asserted-Identity` now reaches the inbound context as
+  the distinct, redacted `InboundAssertedIdentity` field, with
+  `SipTrustedTrunk` provenance. It is intentionally not generic `X-*`
+  metadata, so an application cannot accidentally treat an untrusted value as
+  carrier-authenticated caller identity.
+- Surfaced **only** when the peer was admitted by trusted-trunk policy. RFC
+  3325 makes PAI meaningful only inside a trust domain; from an unverified
+  peer it is a forgeable header that looks authoritative, which is worse than
+  its absence.
+- Trusted trunks can opt in to a bounded private-header allowlist. The first
+  supported carrier field is `P-Charging-Vector`; the default remains empty,
+  unlisted fields are stripped, and PAI/PPI cannot enter through the raw
+  header path.
+- `OutboundCallBuilder::with_ppi` adds typed `P-Preferred-Identity` alongside
+  typed PAI. Both identities are preflight-validated, redacted from
+  diagnostics, emitted on the first INVITE, and retained byte-for-byte across
+  401/407 authentication retries.
+
+### N-way conferencing
+
+- `Orchestrator::conference_create/join/leave/end/members` plus a
+  `conference` module holding the mixer. Bridging is pairwise and does not
+  generalize: a conference has to *sum* audio, and every participant needs a
+  different sum with their own voice removed, or they hear themselves
+  returned a packet late.
+- One task per conference mixes on a 20 ms tick. The sum is computed once in
+  `i32` and each member receives it minus their own contribution, so the
+  work is linear in members rather than quadratic, and the result saturates
+  rather than wraps — a wrapped sum is an audible click.
+- Members keep their own negotiated codec in both directions and are
+  resampled into and out of the conference rate, so a G.711 carrier leg and
+  an Opus browser leg mix together without either renegotiating. A member's
+  tap is owned by the member, so leaving tears the route down.
+- A member whose transport has closed is removed from the mix rather than
+  retried; one member's undecodable packet is skipped rather than silencing
+  the conference.
+- `conference_set_contribution` silences a member's voice while leaving them
+  hearing the mix — a supervisor monitoring a call. Silencing at the mixer
+  rather than at the member's transport keeps the rest of the conference
+  unable to tell anyone is listening, which is what monitoring means.
+
+### AMR in the codec factory
+
+- `CodecFactory::create_negotiated_codec(payload_type, encoding_name,
+  sample_rate, channels, fmtp)` constructs a codec from its negotiated SDP
+  identity. `create_codec` keys off the payload type alone, which is enough
+  only for statically assigned codecs; AMR is dynamically assigned and its
+  mode set arrives in `fmtp`, neither of which a payload type can express.
+  Non-AMR names delegate to `create_codec`, so existing callers are
+  unaffected.
+
+### Per-recording sink factories
+
+- `RecordingSinkFactory` opens one `RecordingSink` per recording, and
+  `Orchestrator::register_recording_sink_factory` registers one under the
+  same namespace as a plain sink, taking precedence over it.
+- Why: a registered `RecordingSink` is a single shared instance. Two
+  concurrent recordings on one name wrote into the same sink, and the first
+  `stop_recording` closed it — so their audio mixed and the artifact was
+  attributed to whichever stopped first. That is invisible with one call in
+  flight, which is the shape the deterministic harness exercises, and wrong
+  for any deployment recording more than one call at a time.
+- `start_recording` resolves a factory first and falls back to a registered
+  sink, so existing single-sink registrations behave exactly as before. An
+  unregistered name still fails closed before any tap or quota work.
+
+### Authoritative application ingress (RVOIP-22)
+
+- `RvoipAppBuilder::authoritative_ingress(AuthoritativeIngressConfig)`
+  installs the inbound admission gate and the single-consumer operational
+  event stream **before** any adapter is registered — the ordering core
+  requires and the convenience `build` could not express, because it
+  constructed its Orchestrator, registered adapters, and only then returned.
+- `RvoipApp::take_authoritative_ingress` hands both receivers to the owning
+  application exactly once; `ingress_health` reports mode, core's stream
+  health, and whether the runtime still admits new work; `drain(budget)` is
+  a bounded terminal join point that reports honestly whether it finished.
+- In authoritative mode the app no longer admits inbound connections on the
+  application's behalf: every inbound connection is presented as an
+  `InboundAdmission` ticket and the normalized event follows acceptance.
+- A lagged observational receiver is recorded as degraded ingress instead of
+  a warning that keeps serving — `admits_new_work` goes false so a readiness
+  probe can fail. Losing the operational receiver degrades the runtime and
+  stops admission, which core already enforced and the app now surfaces.
+
+### Vapi barge-in reaches the media graph
+
+- User-speech-start now flushes adapter-local audio and the downstream
+  orchestrator media-graph sink queues in the same barge-in operation. The
+  discarded graph frames contribute to `VapiMediaHealth::barge_in_dropped`
+  and `rvoip_vapi_barge_in_frames_dropped_total`.
+- The mock-transport acceptance test backpressures a real bridged caller sink,
+  proves audio is parked in the graph, then verifies the speech event drives
+  queue depth to zero and accounts for every graph frame dropped.
+
+### Checked RTP/media boundary
+
+- `rvoip_core::rtp_boundary` converts validated RTP packets to payload-only
+  `MediaFrame`s with explicit negotiated codec/PT mappings and bounded payload
+  allocation. A packet-preserving handle retains marker, CSRCs, extensions,
+  padding, SSRC, and sequence identity when no transformation occurred.
+- `RtpPacketizer` owns deterministic SSRC, wrapping sequence, and wrapping
+  timestamp state. Mismatched frame kind or payload type fails before state
+  advances; `Bytes` payloads remain immutable and shared for fanout.
+- The provider-neutral `checked_rtp_boundary` example and concrete SIP,
+  WebRTC, and UCTP gateway examples all use the same shared API. A dedicated
+  fuzz target covers malformed packet-to-frame conversion under fixed input
+  and payload bounds.
+
+### Signature freshness
+
+- `Sig9421Verifier` bounds envelope timestamps from above as well as below.
+  A far-future `ts` produced a negative age, passed the `age > ttl` test,
+  and stayed valid for as long as the sender chose. `DEFAULT_SIG_CLOCK_SKEW`
+  (30 s) is the tolerated drift; `with_ttl_and_skew` makes it explicit.
+
+
 ## 0.3.8 — 2026-08-14
 
 This coordinated 44-crate patch release brings AMR-NB and AMR-WB into the

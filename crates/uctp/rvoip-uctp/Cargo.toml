@@ -55,6 +55,9 @@ thiserror.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber.workspace = true
+# Browser and bridge examples negotiate Opus and must exercise the real
+# media-graph backend rather than compiling a signaling-only graph.
+rvoip-core = { workspace = true, features = ["opus"] }
 
 # Phase 4 demo + bridge_smoke test consume the SIP family + adapter crates.
 # Forward dev-deps: path-only (no version) so `cargo publish` strips them from

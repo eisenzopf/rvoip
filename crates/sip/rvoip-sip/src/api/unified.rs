@@ -324,6 +324,17 @@ pub enum SipContactMode {
     RegisteredFlowSymmetric,
 }
 
+/// SRTP key-agreement mechanism used when [`Config::offer_srtp`] is enabled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SrtpKeyingMode {
+    /// SDP Security Descriptions (RFC 4568).
+    #[default]
+    Sdes,
+    /// DTLS-SRTP with SDP fingerprint binding (RFC 5763/5764).
+    DtlsSrtp,
+}
+
 /// Named SRTP suite offer policies for common PBX/carrier interop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SrtpSuitePolicy {
@@ -2192,6 +2203,35 @@ pub struct Config {
     /// See [`Config::srtp_required`] for the strict-mode variant.
     pub offer_srtp: bool,
 
+    /// Select how SRTP keys are established when [`Config::offer_srtp`] is
+    /// enabled. SDES remains the compatibility default. DTLS-SRTP requires
+    /// the `dtls-srtp` Cargo feature and full media mode; configuration fails
+    /// closed when either requirement is missing.
+    pub srtp_keying: SrtpKeyingMode,
+
+    /// Playout smoothing and packet-loss concealment for inbound audio.
+    ///
+    /// `None` forwards frames exactly as they arrive, gaps included — the
+    /// behaviour of every release before this, and the right choice for a LAN
+    /// or a lab where reordering only adds latency. Local and generic configs
+    /// retain that compatibility default; [`Config::carrier_sbc`] enables the
+    /// production playout policy automatically.
+    ///
+    /// Set it on any route crossing the public internet: a carrier trunk
+    /// delivers audio in bursts and loses packets, and without a buffer
+    /// those arrive as clicks and dropouts a listener hears directly.
+    pub playout: Option<crate::PlayoutConfig>,
+
+    /// ICE posture (RFC 8445). `Disabled` is today's behavior exactly.
+    ///
+    /// `Lite` answers connectivity checks on the advertised address — the
+    /// right mode for a server on a public or 1:1-NAT address. `Full` runs
+    /// the whole agent: gathering, checks, nomination — the mode for an
+    /// endpoint behind NAT, and for reaching peers that are. Requires
+    /// rtcp-mux semantics on the media socket (the default single-socket
+    /// layout): ICE v1 traverses one component.
+    pub ice: crate::adapters::ice_adapter::SipIcePolicy,
+
     /// Refuse to fall back to plaintext RTP when SRTP can't be
     /// negotiated.
     ///
@@ -2768,6 +2808,8 @@ impl std::fmt::Debug for Config {
                 &self.tls_server_client_auth.mode,
             )
             .field("offer_srtp", &self.offer_srtp)
+            .field("srtp_keying", &self.srtp_keying)
+            .field("ice", &self.ice)
             .field("srtp_required", &self.srtp_required)
             .field("amr_dtx", &self.amr_dtx)
             .field("amr_auto_cmr", &self.amr_auto_cmr)
@@ -2885,6 +2927,11 @@ impl Config {
             media_port_start: Self::DEFAULT_MEDIA_PORT_START,
             media_port_end: Self::DEFAULT_MEDIA_PORT_END,
             media_port_capacity: None,
+            // Off by default: forwarding frames exactly as they arrive is
+            // what every release before this did, and a caller opting into
+            // smoothing should say so.
+            playout: None,
+            ice: crate::adapters::ice_adapter::SipIcePolicy::Disabled,
             bind_addr: SocketAddr::new(ip, port),
             sip_advertised_addr: None,
             state_table_path: None,
@@ -2925,6 +2972,7 @@ impl Config {
             #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
             offer_srtp: false,
+            srtp_keying: SrtpKeyingMode::Sdes,
             srtp_required: false,
             amr_dtx: false,
             amr_auto_cmr: false,
@@ -2999,6 +3047,11 @@ impl Config {
             media_port_start: Self::DEFAULT_MEDIA_PORT_START,
             media_port_end: Self::DEFAULT_MEDIA_PORT_END,
             media_port_capacity: None,
+            // Off by default: forwarding frames exactly as they arrive is
+            // what every release before this did, and a caller opting into
+            // smoothing should say so.
+            playout: None,
+            ice: crate::adapters::ice_adapter::SipIcePolicy::Disabled,
             bind_addr: SocketAddr::new(ip, port),
             sip_advertised_addr: None,
             state_table_path: None,
@@ -3039,6 +3092,7 @@ impl Config {
             #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
             offer_srtp: false,
+            srtp_keying: SrtpKeyingMode::Sdes,
             srtp_required: false,
             amr_dtx: false,
             amr_auto_cmr: false,
@@ -3236,6 +3290,7 @@ impl Config {
     /// );
     /// assert_eq!(config.sip_contact_mode, SipContactMode::RegisteredFlowRfc5626);
     /// assert!(config.srtp_required);
+    /// assert!(config.playout.is_some());
     /// ```
     pub fn carrier_sbc(
         name: &str,
@@ -3253,6 +3308,7 @@ impl Config {
         config.outbound_proxy_uri = Some(outbound_proxy_uri.into());
         config.offer_srtp = true;
         config.srtp_required = true;
+        config.playout = Some(crate::PlayoutConfig::default());
         config
     }
 
@@ -3303,6 +3359,16 @@ impl Config {
     /// ```
     pub fn with_srtp_suite_policy(mut self, policy: SrtpSuitePolicy) -> Self {
         self.srtp_offered_suites = policy.suites();
+        self
+    }
+
+    /// Select the SRTP key-agreement mechanism.
+    ///
+    /// DTLS-SRTP also requires `offer_srtp = true`, enabled media, and the
+    /// crate's `dtls-srtp` Cargo feature. [`Config::validate`] rejects an
+    /// unavailable or signaling-only combination instead of downgrading.
+    pub fn with_srtp_keying(mut self, keying: SrtpKeyingMode) -> Self {
+        self.srtp_keying = keying;
         self
     }
 
@@ -4560,7 +4626,27 @@ impl Config {
                 "srtp_required=true requires offer_srtp=true".to_string(),
             ));
         }
-        if self.offer_srtp && self.srtp_offered_suites.is_empty() {
+        if self.offer_srtp
+            && self.srtp_keying == SrtpKeyingMode::DtlsSrtp
+            && !cfg!(feature = "dtls-srtp")
+        {
+            return Err(SessionError::ConfigError(
+                "DTLS-SRTP requires the rvoip-sip dtls-srtp Cargo feature".to_string(),
+            ));
+        }
+        if self.offer_srtp
+            && self.srtp_keying == SrtpKeyingMode::DtlsSrtp
+            && matches!(self.media_mode, MediaMode::SignalingOnly { .. })
+        {
+            return Err(SessionError::ConfigError(
+                "DTLS-SRTP requires enabled media so the handshake and fingerprint check remain owned by RVoIP"
+                    .to_string(),
+            ));
+        }
+        if self.offer_srtp
+            && self.srtp_keying == SrtpKeyingMode::Sdes
+            && self.srtp_offered_suites.is_empty()
+        {
             return Err(SessionError::ConfigError(
                 "offer_srtp=true requires at least one srtp_offered_suites entry".to_string(),
             ));
@@ -8788,11 +8874,15 @@ impl UnifiedCoordinator {
             config.media_port_end,
         );
         media_adapter_inner.set_media_mode(config.media_mode);
+        media_adapter_inner.set_ice_policy(config.ice);
         // Apply RFC 4568 SDES-SRTP policy from Config (Step 2B.1).
         media_adapter_inner.set_srtp_policy(
             config.offer_srtp,
             config.srtp_required,
             config.srtp_offered_suites.clone(),
+        );
+        media_adapter_inner.set_dtls_srtp_policy(
+            config.offer_srtp && config.srtp_keying == SrtpKeyingMode::DtlsSrtp,
         );
         media_adapter_inner.set_sdes_base64_mode(sdes_base64_mode);
         // Sprint 3 C1 — propagate Comfort Noise opt-in.
@@ -10101,6 +10191,21 @@ impl UnifiedCoordinator {
         Duration::from_secs(self.config.setup_teardown_timeout_secs)
     }
 
+    pub(crate) fn reinvite_completion_timeout_duration(&self) -> Duration {
+        // The dialog transaction owns Timer B. Waiting less than that interval
+        // would let this adapter report failure while a still-live re-INVITE
+        // later commits. The small grace covers transaction-event projection;
+        // after Timer B there is no request left that can accept a late final.
+        self.dialog_adapter
+            .non_invite_transaction_timeout()
+            .saturating_add(Duration::from_secs(1))
+    }
+
+    /// Playout smoothing and concealment posture for inbound media.
+    pub(crate) const fn playout_policy(&self) -> Option<crate::PlayoutConfig> {
+        self.config.playout
+    }
+
     async fn schedule_setup_teardown_timeout_if_current(
         &self,
         session_id: &SessionId,
@@ -10632,6 +10737,20 @@ impl UnifiedCoordinator {
     /// [`request_peer_codec_mode`](Self::request_peer_codec_mode) took effect.
     pub async fn peer_codec_mode(&self, session: &SessionId) -> Option<u8> {
         self.media_adapter.peer_codec_mode(session).await
+    }
+
+    pub(crate) async fn generate_reinvite_sdp_for_codecs_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        offered_codecs: &[u8],
+    ) -> Result<String> {
+        self.media_adapter
+            .generate_local_sdp_offer_for_codecs_exact(
+                handle,
+                crate::types::MediaDirection::SendRecv,
+                offered_codecs,
+            )
+            .await
     }
 
     /// Send a reliable 183 Session Progress with early-media SDP (RFC 3262).
@@ -11281,6 +11400,20 @@ impl UnifiedCoordinator {
         self.helpers.negotiated_media_config(session_id).await
     }
 
+    pub(crate) async fn negotiated_media_config_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Result<Option<(crate::session_store::state::NegotiatedConfig, u8)>> {
+        self.helpers.negotiated_media_config_exact(handle).await
+    }
+
+    pub(crate) fn subscribe_renegotiation_completions(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::api::lifecycle::RenegotiationCompletion> {
+        self.app_event_publisher
+            .subscribe_renegotiation_completions()
+    }
+
     // ===== Event Subscriptions =====
 
     /// Subscribe a callback to low-level state-machine session events.
@@ -11472,6 +11605,32 @@ impl UnifiedCoordinator {
         realm: &str,
         users: std::collections::HashMap<String, String>,
     ) -> Result<Arc<rvoip_sip_registrar::RegistrarService>> {
+        self.start_registration_server_inner(realm, users, false)
+            .await
+    }
+
+    /// Start a registrar that admits only authenticated RFC 5626 outbound
+    /// registrations received on exact TLS/WSS flows.
+    ///
+    /// This is the server half of the production remote-endpoint profile.
+    /// Plain UDP/TCP registrations and Contacts without `ob`,
+    /// `+sip.instance`, and a nonzero `reg-id` receive `439` and never mutate
+    /// registrar state.
+    pub async fn start_remote_endpoint_registration_server(
+        &self,
+        realm: &str,
+        users: std::collections::HashMap<String, String>,
+    ) -> Result<Arc<rvoip_sip_registrar::RegistrarService>> {
+        self.start_registration_server_inner(realm, users, true)
+            .await
+    }
+
+    async fn start_registration_server_inner(
+        &self,
+        realm: &str,
+        users: std::collections::HashMap<String, String>,
+        require_outbound_tls: bool,
+    ) -> Result<Arc<rvoip_sip_registrar::RegistrarService>> {
         use crate::adapters::RegistrationAdapter;
         use rvoip_sip_registrar::{api::ServiceMode, types::RegistrarConfig, RegistrarService};
 
@@ -11510,6 +11669,7 @@ impl UnifiedCoordinator {
             registrar.clone(),
             global_coordinator,
             Arc::clone(&self.dialog_adapter),
+            require_outbound_tls,
         ));
 
         adapter.start().await.map_err(|e| {

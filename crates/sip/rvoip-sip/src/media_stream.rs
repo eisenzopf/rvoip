@@ -112,7 +112,7 @@ impl SipPayloadCodec {
     }
 }
 
-fn codec_descriptor(
+pub(crate) fn codec_descriptor(
     config: &crate::session_store::state::NegotiatedConfig,
     payload_type: u8,
 ) -> Result<(CodecInfo, u8), &'static str> {
@@ -205,6 +205,24 @@ struct SipMediaStreamInner {
     lifecycle: Arc<SipMediaLifecycleState>,
     outbound_writes_activated: AtomicBool,
     cancel: watch::Sender<bool>,
+    codec_updates: watch::Sender<Option<SipMediaCodecRuntime>>,
+    /// Last quality the media layer reported for this stream's connection.
+    ///
+    /// Retained here because quality arrives by *push* — media-core distills
+    /// RTCP RR/XR and the adapter routes it per connection — while
+    /// `quality_snapshot` is a *pull*. Without somewhere to land, a poller
+    /// would read defaults and report perfect quality for every call, which
+    /// is worse than reporting none because it looks like evidence.
+    ///
+    /// `None` until the first report, so a caller can tell "no measurement
+    /// yet" from "measured, and it is fine".
+    last_quality: Mutex<Option<QualitySnapshot>>,
+}
+
+#[derive(Clone)]
+struct SipMediaCodecRuntime {
+    negotiated: crate::session_store::state::NegotiatedConfig,
+    payload_type: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -328,6 +346,15 @@ pub struct SipMediaStream {
 }
 
 impl SipMediaStream {
+    /// Record the media layer's latest quality report for this stream.
+    pub(crate) fn record_quality(&self, snapshot: QualitySnapshot) {
+        *self
+            .inner
+            .last_quality
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(snapshot);
+    }
+
     /// Allocate a local-only media stream without touching a SIP session.
     ///
     /// This constructor allocates only bounded channels and a stable stream
@@ -358,6 +385,7 @@ impl SipMediaStream {
         let (frames_in_tx, frames_in_rx) = mpsc::channel::<MediaFrame>(FRAME_CHANNEL_CAP);
         let (frames_out_tx, frames_out_rx) = mpsc::channel::<MediaFrame>(FRAME_CHANNEL_CAP);
         let (cancel, _) = watch::channel(false);
+        let (codec_updates, _) = watch::channel(None);
 
         Arc::new(Self {
             inner: Arc::new(SipMediaStreamInner {
@@ -373,7 +401,9 @@ impl SipMediaStream {
                 lifecycle_gate: AsyncMutex::new(()),
                 lifecycle: Arc::new(SipMediaLifecycleState::new()),
                 outbound_writes_activated: AtomicBool::new(outbound_writes_activated),
+                last_quality: Mutex::new(None),
                 cancel,
+                codec_updates,
             }),
         })
     }
@@ -503,6 +533,7 @@ impl SipMediaStream {
                         session_id,
                         self.inner.stream_id.clone(),
                         Arc::clone(&self.inner.codec),
+                        self.inner.codec_updates.clone(),
                         frames_in_tx,
                         frames_out_rx,
                     ));
@@ -560,6 +591,31 @@ impl SipMediaStream {
                 .outbound_writes_activated
                 .store(true, Ordering::Release);
         }
+    }
+
+    /// Commit a signaling-approved codec generation to this stable stream.
+    ///
+    /// The stream object and its application channels stay intact while both
+    /// pumps rebuild their codec state from this watch value. This method is
+    /// called only after a final re-INVITE answer has committed.
+    pub(crate) fn apply_negotiated_media(
+        &self,
+        negotiated: &crate::session_store::state::NegotiatedConfig,
+        payload_type: u8,
+    ) -> Result<CodecInfo, &'static str> {
+        let (descriptor, payload_type) = codec_descriptor(negotiated, payload_type)?;
+        *self
+            .inner
+            .codec
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = descriptor.clone();
+        self.inner
+            .codec_updates
+            .send_replace(Some(SipMediaCodecRuntime {
+                negotiated: negotiated.clone(),
+                payload_type,
+            }));
+        Ok(descriptor)
     }
 
     fn close_local_channels(&self) {
@@ -711,6 +767,22 @@ where
     }
 }
 
+use rvoip_media_core::processing::audio::playout::{PlayoutBuffer, PlayoutConfig};
+use rvoip_media_core::types::AudioFrame;
+
+enum InboundPumpEvent {
+    CodecChanged,
+    Audio(Option<AudioFrame>),
+    PlayoutTick,
+}
+
+async fn wait_for_playout(deadline: Option<std::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_media_driver(
     lifecycle: Arc<SipMediaLifecycleState>,
@@ -720,9 +792,11 @@ async fn run_media_driver(
     session_id: SessionId,
     stream_id: StreamId,
     codec_descriptor_slot: Arc<RwLock<CodecInfo>>,
+    codec_updates: watch::Sender<Option<SipMediaCodecRuntime>>,
     frames_in_tx: mpsc::Sender<MediaFrame>,
     frames_out_rx: mpsc::Receiver<MediaFrame>,
 ) {
+    let playout = coordinator.playout_policy();
     let setup_deadline =
         tokio::time::Instant::now() + coordinator.setup_teardown_timeout_duration();
     // Inbound `IncomingCall` publication may win a narrow race with the
@@ -824,26 +898,14 @@ async fn run_media_driver(
             return;
         }
     };
-    let channels = resolved_descriptor.channels.max(1);
     *codec_descriptor_slot
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = resolved_descriptor;
-    let encoder = match SipPayloadCodec::from_negotiated(&negotiated) {
-        Ok(codec) => codec,
-        Err(reason) => {
-            tracing::warn!(target: "rvoip_sip", reason, "SipMediaStream encoder initialization failed");
-            lifecycle.mark_failed();
-            return;
-        }
+    let runtime = SipMediaCodecRuntime {
+        negotiated,
+        payload_type,
     };
-    let decoder = match SipPayloadCodec::from_negotiated(&negotiated) {
-        Ok(codec) => codec,
-        Err(reason) => {
-            tracing::warn!(target: "rvoip_sip", reason, "SipMediaStream decoder initialization failed");
-            lifecycle.mark_failed();
-            return;
-        }
-    };
+    codec_updates.send_replace(Some(runtime.clone()));
     let subscription = coordinator.subscribe_to_audio(&session_id);
     tokio::pin!(subscription);
     let subscriber = tokio::select! {
@@ -865,13 +927,19 @@ async fn run_media_driver(
         return;
     }
 
-    let inbound = run_inbound_pump(subscriber, encoder, stream_id, payload_type, frames_in_tx);
+    let inbound = run_inbound_pump(
+        subscriber,
+        runtime.clone(),
+        codec_updates.subscribe(),
+        stream_id,
+        frames_in_tx,
+        playout,
+    );
     let outbound = run_outbound_pump(
         Arc::clone(&coordinator),
         session_id.clone(),
-        decoder,
-        payload_type,
-        channels,
+        runtime,
+        codec_updates.subscribe(),
         frames_out_rx,
     );
     tokio::pin!(inbound, outbound);
@@ -890,44 +958,155 @@ async fn run_media_driver(
 
 async fn run_inbound_pump(
     mut subscriber: crate::types::AudioFrameSubscriber,
-    mut encoder: SipPayloadCodec,
+    mut runtime: SipMediaCodecRuntime,
+    mut codec_updates: watch::Receiver<Option<SipMediaCodecRuntime>>,
     stream_id: StreamId,
-    payload_type: u8,
     frames_in_tx: mpsc::Sender<MediaFrame>,
+    playout: Option<PlayoutConfig>,
 ) -> &'static str {
-    while let Some(audio_frame) = subscriber.receiver.recv().await {
-        let encoded = match encoder.encode(&audio_frame) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                tracing::trace!(target: "rvoip_sip", error = %error, "SipMediaStream: audio encode failed");
-                continue;
+    // Without a playout buffer this pump forwards whatever arrives, in
+    // arrival order, with a gap wherever a packet was lost — the behaviour
+    // every release before this had. With one, frames are reordered onto the
+    // media clock and losses are concealed rather than heard as clicks.
+    let playout_policy = playout;
+    let mut playout = playout_policy.map(PlayoutBuffer::new);
+    let mut encoder = match SipPayloadCodec::from_negotiated(&runtime.negotiated) {
+        Ok(codec) => codec,
+        Err(_) => return "sip-codec-reconfigure-failed",
+    };
+    let mut reported = std::time::Instant::now();
+
+    loop {
+        let event = tokio::select! {
+            biased;
+            changed = codec_updates.changed() => {
+                if changed.is_err() {
+                    return "sip-codec-update-channel-closed";
+                }
+                InboundPumpEvent::CodecChanged
+            }
+            frame = subscriber.receiver.recv() => InboundPumpEvent::Audio(frame),
+            () = wait_for_playout(playout.as_ref().and_then(PlayoutBuffer::next_deadline)) => {
+                InboundPumpEvent::PlayoutTick
             }
         };
-        let media_frame = MediaFrame {
-            stream_id: stream_id.clone(),
-            kind: StreamKind::Audio,
-            payload: Bytes::from(encoded),
-            timestamp_rtp: audio_frame.timestamp,
-            captured_at: Utc::now(),
-            payload_type: Some(payload_type),
-        };
-        if frames_in_tx.send(media_frame).await.is_err() {
-            return "inbound-consumer-closed";
+
+        let mut ready = Vec::new();
+        match event {
+            InboundPumpEvent::CodecChanged => {
+                let Some(updated) = codec_updates.borrow_and_update().clone() else {
+                    continue;
+                };
+                encoder = match SipPayloadCodec::from_negotiated(&updated.negotiated) {
+                    Ok(codec) => codec,
+                    Err(_) => return "sip-codec-reconfigure-failed",
+                };
+                runtime = updated;
+                playout = playout_policy.map(PlayoutBuffer::new);
+                continue;
+            }
+            InboundPumpEvent::Audio(Some(audio_frame)) => match playout.as_mut() {
+                Some(buffer) => buffer.push(audio_frame, std::time::Instant::now()),
+                None => ready.push(audio_frame),
+            },
+            InboundPumpEvent::Audio(None) => return "sip-audio-source-closed",
+            InboundPumpEvent::PlayoutTick => {}
+        }
+
+        if let Some(buffer) = playout.as_mut() {
+            // One timer tick emits one ordinary frame. A bounded number of
+            // additional frames may be released only when the queue is above
+            // target or the task woke late, which reconverges latency without
+            // letting a network arrival run the media clock.
+            while let Some(frame) = buffer.pop_due(std::time::Instant::now()) {
+                ready.push(frame);
+                if ready.len() >= 8 {
+                    break;
+                }
+            }
+        }
+
+        if let Some(buffer) = playout.as_ref() {
+            // Periodic, not per frame: this is a hot path and the numbers
+            // are only useful as a trend.
+            if reported.elapsed() >= std::time::Duration::from_secs(10) {
+                reported = std::time::Instant::now();
+                let stats = buffer.stats();
+                if stats.frames_concealed > 0 || stats.frames_late > 0 || stats.frames_catch_up > 0
+                {
+                    tracing::debug!(
+                        target: "rvoip_sip",
+                        emitted = stats.frames_emitted,
+                        concealed = stats.frames_concealed,
+                        late = stats.frames_late,
+                        catch_up = stats.frames_catch_up,
+                        depth = stats.depth,
+                        "SipMediaStream playout quality"
+                    );
+                }
+            }
+        }
+
+        for frame in ready {
+            let timestamp_rtp = frame.timestamp;
+            let encoded = match encoder.encode(&frame) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    tracing::trace!(target: "rvoip_sip", error = %error, "SipMediaStream: audio encode failed");
+                    continue;
+                }
+            };
+            let media_frame = MediaFrame {
+                stream_id: stream_id.clone(),
+                kind: StreamKind::Audio,
+                payload: Bytes::from(encoded),
+                timestamp_rtp,
+                captured_at: Utc::now(),
+                payload_type: Some(runtime.payload_type),
+            };
+            if frames_in_tx.send(media_frame).await.is_err() {
+                return "inbound-consumer-closed";
+            }
         }
     }
-    "sip-audio-source-closed"
 }
 
 async fn run_outbound_pump(
     coordinator: Arc<UnifiedCoordinator>,
     session_id: SessionId,
-    mut decoder: SipPayloadCodec,
-    payload_type: u8,
-    channels: u8,
+    mut runtime: SipMediaCodecRuntime,
+    mut codec_updates: watch::Receiver<Option<SipMediaCodecRuntime>>,
     mut frames_out_rx: mpsc::Receiver<MediaFrame>,
 ) -> &'static str {
+    let mut decoder = match SipPayloadCodec::from_negotiated(&runtime.negotiated) {
+        Ok(codec) => codec,
+        Err(_) => return "sip-codec-reconfigure-failed",
+    };
+    let mut channels = runtime.negotiated.channels.max(1);
     let mut next_timestamp = 0u32;
-    while let Some(media_frame) = frames_out_rx.recv().await {
+    loop {
+        let media_frame = tokio::select! {
+            biased;
+            changed = codec_updates.changed() => {
+                if changed.is_err() {
+                    return "sip-codec-update-channel-closed";
+                }
+                let Some(updated) = codec_updates.borrow_and_update().clone() else {
+                    continue;
+                };
+                decoder = match SipPayloadCodec::from_negotiated(&updated.negotiated) {
+                    Ok(codec) => codec,
+                    Err(_) => return "sip-codec-reconfigure-failed",
+                };
+                channels = updated.negotiated.channels.max(1);
+                runtime = updated;
+                continue;
+            }
+            frame = frames_out_rx.recv() => match frame {
+                Some(frame) => frame,
+                None => return "outbound-producer-closed",
+            }
+        };
         const TELEPHONE_EVENT_PT: u8 = 101;
         if media_frame.payload_type == Some(TELEPHONE_EVENT_PT) {
             if let Some(digit) = parse_rfc4733_digit(&media_frame.payload) {
@@ -939,12 +1118,12 @@ async fn run_outbound_pump(
         }
         if media_frame
             .payload_type
-            .is_some_and(|actual| actual != payload_type)
+            .is_some_and(|actual| actual != runtime.payload_type)
         {
             tracing::trace!(
                 target: "rvoip_sip",
                 actual = ?media_frame.payload_type,
-                expected = payload_type,
+                expected = runtime.payload_type,
                 "SipMediaStream: dropping unnegotiated payload type"
             );
             continue;
@@ -975,7 +1154,6 @@ async fn run_outbound_pump(
             return "sip-audio-send-failed";
         }
     }
-    "outbound-producer-closed"
 }
 
 async fn wait_for_media_cancel(cancel: &mut watch::Receiver<bool>) {
@@ -1070,10 +1248,31 @@ impl MediaStream for SipMediaStream {
     }
 
     fn quality_snapshot(&self) -> QualitySnapshot {
-        // No per-session stats yet — return defaults. Wiring real loss /
-        // jitter metrics from the SIP RTP layer is tracked alongside the
-        // wider observability gap (`GAP_PLAN.md` §2.6 Per-pair RTT).
-        QualitySnapshot::default()
+        // The last report the media layer pushed for this connection.
+        //
+        // Quality originates as RTCP receiver reports and XR, which
+        // media-core distills and the adapter routes here per connection.
+        // Before the first report there is no measurement, and the trait
+        // has no way to say so — `default()` is zeros, which reads as
+        // flawless. `has_quality_measurement` distinguishes the two, and a
+        // poller should consult it rather than averaging in a call that has
+        // not reported yet.
+        self.inner
+            .last_quality
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_default()
+    }
+
+    /// False until the media layer reports quality for this connection, so
+    /// an aggregator does not average in a call it has never measured.
+    fn has_quality_measurement(&self) -> bool {
+        self.inner
+            .last_quality
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
     }
 
     async fn close(self: Arc<Self>) -> RvoipResult<()> {
@@ -1251,6 +1450,105 @@ mod negotiated_codec_tests {
         assert_eq!(pcma.name, "g.711-a");
         assert_eq!(pcma_pt, 8);
         assert_ne!(pcmu, pcma);
+    }
+
+    #[tokio::test]
+    async fn inbound_pump_applies_a_codec_generation_before_the_next_frame() {
+        let session_id = SessionId::new();
+        let (audio_tx, audio_rx) = mpsc::channel(4);
+        let subscriber = crate::types::AudioFrameSubscriber::new(session_id, audio_rx);
+        let (frames_tx, mut frames_rx) = mpsc::channel(4);
+        let pcmu = SipMediaCodecRuntime {
+            negotiated: negotiated("PCMU", 8_000, 1),
+            payload_type: 0,
+        };
+        let pcma = SipMediaCodecRuntime {
+            negotiated: negotiated("PCMA", 8_000, 1),
+            payload_type: 8,
+        };
+        let (codec_tx, codec_rx) = watch::channel(Some(pcmu.clone()));
+        let pump = tokio::spawn(run_inbound_pump(
+            subscriber,
+            pcmu,
+            codec_rx,
+            StreamId::new(),
+            frames_tx,
+            None,
+        ));
+
+        audio_tx
+            .send(AudioFrame::new(vec![1_000; 160], 8_000, 1, 0))
+            .await
+            .expect("PCMU source frame");
+        let first = frames_rx.recv().await.expect("PCMU graph frame");
+        assert_eq!(first.payload_type, Some(0));
+
+        codec_tx.send_replace(Some(pcma));
+        audio_tx
+            .send(AudioFrame::new(vec![1_000; 160], 8_000, 1, 160))
+            .await
+            .expect("PCMA source frame");
+        let second = frames_rx.recv().await.expect("PCMA graph frame");
+        assert_eq!(second.payload_type, Some(8));
+        assert_ne!(first.payload, second.payload);
+
+        drop(audio_tx);
+        assert_eq!(pump.await.expect("pump task"), "sip-audio-source-closed");
+    }
+
+    #[tokio::test]
+    async fn inbound_pump_uses_a_clocked_playout_deadline_and_plc() {
+        let session_id = SessionId::new();
+        let (audio_tx, audio_rx) = mpsc::channel(4);
+        let subscriber = crate::types::AudioFrameSubscriber::new(session_id, audio_rx);
+        let (frames_tx, mut frames_rx) = mpsc::channel(4);
+        let pcmu = SipMediaCodecRuntime {
+            negotiated: negotiated("PCMU", 8_000, 1),
+            payload_type: 0,
+        };
+        let (_codec_tx, codec_rx) = watch::channel(Some(pcmu.clone()));
+        let pump = tokio::spawn(run_inbound_pump(
+            subscriber,
+            pcmu,
+            codec_rx,
+            StreamId::new(),
+            frames_tx,
+            Some(PlayoutConfig {
+                adaptive: false,
+                ..PlayoutConfig::default()
+            }),
+        ));
+
+        audio_tx
+            .send(AudioFrame::new(vec![1_000; 160], 8_000, 1, 0))
+            .await
+            .expect("first source frame");
+        audio_tx
+            .send(AudioFrame::new(vec![1_000; 160], 8_000, 1, 320))
+            .await
+            .expect("post-loss source frame");
+
+        let first = tokio::time::timeout(std::time::Duration::from_millis(100), frames_rx.recv())
+            .await
+            .expect("first playout deadline")
+            .expect("first graph frame");
+        assert_eq!(first.timestamp_rtp, 0);
+
+        let concealed =
+            tokio::time::timeout(std::time::Duration::from_millis(100), frames_rx.recv())
+                .await
+                .expect("loss playout deadline")
+                .expect("concealed graph frame");
+        assert_eq!(concealed.timestamp_rtp, 160);
+
+        let resumed = tokio::time::timeout(std::time::Duration::from_millis(100), frames_rx.recv())
+            .await
+            .expect("resume playout deadline")
+            .expect("resumed graph frame");
+        assert_eq!(resumed.timestamp_rtp, 320);
+
+        drop(audio_tx);
+        assert_eq!(pump.await.expect("pump task"), "sip-audio-source-closed");
     }
 
     #[test]

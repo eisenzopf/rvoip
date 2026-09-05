@@ -6,11 +6,12 @@
 // 1. `beforeAll` spawns `cargo run --example orchestrator_bridge` and
 //    waits for both `wrote demo cert` and `wrote spki hash` log lines
 //    so we know the SPKI fingerprint is on disk at /tmp/uctp_demo_cert.spki.
-// 2. The test opens an inline HTML page over a local http://127.0.0.1
-//    origin, which constructs `new WebTransport("https://127.0.0.1:4433/uctp")`,
-//    awaits `ready`, sends one `auth.hello` envelope on a fresh bidi
-//    stream, and captures the `auth.challenge` reply on the same stream.
-// 3. `afterAll` kills the cargo child gracefully.
+// 2. The test opens two browser WebTransport peers, completes authentication,
+//    sends RFC 8785-canonicalized Ed25519-signed control envelopes, creates and
+//    answers Connections, and sustains bidirectional RTP datagrams.
+// 3. The browser sends DTMF and quality controls, closes both peers, then
+//    reconnects through a two-peer capacity limit to prove cleanup.
+// 4. `afterAll` kills the cargo child gracefully.
 //
 // Cert pinning: the playwright.config.mjs `chromium-wt` project reads
 // /tmp/uctp_demo_cert.spki at config-load time. For first runs (when
@@ -19,103 +20,53 @@
 // has written the file (Playwright `chromium.launch()` plus a fresh
 // context). This makes the spec robust to a cold CI cache.
 //
-// CI gating: enabled when `RVOIP_WT_SMOKE=1`. The default workflow
-// only runs `chromium-ws` to preserve current CI behavior; flipping
-// the env var enables this spec selectively.
+// CI gating: enabled when `RVOIP_WT_SMOKE=1`. The repository's
+// `browser-smoke` gate sets this variable unconditionally; developers can
+// use it locally to select the Chromium WebTransport project.
 
 import { test, expect, chromium } from "@playwright/test";
 import { spawn } from "node:child_process";
+import { generateKeyPairSync } from "node:crypto";
 import { resolve } from "node:path";
 import { createServer } from "node:http";
 import { readFileSync, existsSync } from "node:fs";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..", "..", "..");
-const WT_URL = "https://127.0.0.1:4433/uctp";
 const SPKI_PATH = "/tmp/uctp_demo_cert.spki";
+const ACCEPTANCE_MODULE_PATH = resolve(
+  REPO_ROOT,
+  "tests",
+  "browser-smoke",
+  "fixtures",
+  "uctp_wt_acceptance.mjs",
+);
+const browserSigningKeyPair = generateKeyPairSync("ed25519");
+const browserPrivateKeyPkcs8B64 = browserSigningKeyPair.privateKey
+  .export({ format: "der", type: "pkcs8" })
+  .toString("base64");
+const browserPublicKeySpki = browserSigningKeyPair.publicKey.export({
+  format: "der",
+  type: "spki",
+});
+// Ed25519 SubjectPublicKeyInfo ends with the 32-byte raw public key expected
+// by ring's verifier.
+const browserPublicKeyB64 = browserPublicKeySpki.subarray(-32).toString("base64");
 
-// Framing — UCTP envelopes on WT streams are length-prefixed: a
-// big-endian u32 length followed by the JSON body. Matches the
-// substrate's framing.rs.
 const PAGE_HTML = `<!doctype html><html><body>
 <pre id="log"></pre>
-<script>
+<script type="module">
+  import { runWebTransportAcceptance } from "/uctp_wt_acceptance.mjs";
   window.__smokeResult = null;
   window.__smokeError = null;
-
-  async function run() {
-    try {
-      const wt = new WebTransport(${JSON.stringify(WT_URL)});
-      await wt.ready;
-      console.log("smoke: WT ready");
-
-      const stream = await wt.createBidirectionalStream();
-      const writer = stream.writable.getWriter();
-      const reader = stream.readable.getReader();
-
-      const envId = "env_" + crypto.randomUUID().replaceAll("-", "");
-      const env = {
-        v: 1,
-        type: "auth.hello",
-        id: envId,
-        ts: new Date().toISOString(),
-        payload: {
-          device: { id: "dev_wt_pw", kind: "web", platform: "playwright",
-                    sdk_version: "rvoip-browser-smoke/0.1" },
-          auth_methods: ["bearer"],
-          capabilities: {},
-        },
-      };
-      const body = new TextEncoder().encode(JSON.stringify(env));
-      // Concatenate length prefix + body into a single buffer so the
-      // browser writes one atomic chunk — avoids any partial-flush
-      // surprises on the WT bidi stream.
-      const frame = new Uint8Array(4 + body.length);
-      const dv = new DataView(frame.buffer);
-      dv.setUint32(0, body.length, false); // big-endian
-      frame.set(body, 4);
-      await writer.write(frame);
-      // Force the underlying QUIC stream to flush. Without this,
-      // Chromium may buffer small writes (smaller than MTU) and the
-      // server-side envelope reader sees nothing.
-      try { await writer.ready; } catch (e) {}
-      console.log("smoke: sent auth.hello id=" + envId + " bytes=" + frame.length);
-
-      // Read one length-prefixed envelope back.
-      const lenBytes = await readExact(reader, 4);
-      const replyLen = new DataView(lenBytes.buffer, lenBytes.byteOffset, 4).getUint32(0, false);
-      const replyBody = await readExact(reader, replyLen);
-      const replyJson = new TextDecoder().decode(replyBody);
-      console.log("smoke: recv " + replyJson);
-      window.__smokeResult = JSON.parse(replyJson);
-    } catch (e) {
-      window.__smokeError = String(e);
-      console.log("smoke: error " + e);
-    }
-  }
-
-  async function readExact(reader, n) {
-    const chunks = [];
-    let have = 0;
-    while (have < n) {
-      const { value, done } = await reader.read();
-      if (done) throw new Error("stream closed early");
-      chunks.push(value);
-      have += value.byteLength;
-    }
-    const out = new Uint8Array(n);
-    let off = 0;
-    let remaining = n;
-    for (const c of chunks) {
-      const take = Math.min(c.byteLength, remaining);
-      out.set(c.subarray(0, take), off);
-      off += take;
-      remaining -= take;
-      if (remaining === 0) break;
-    }
-    return out;
-  }
-
-  run();
+  runWebTransportAcceptance(${JSON.stringify(browserPrivateKeyPkcs8B64)})
+    .then((result) => {
+      window.__smokeResult = result;
+      console.log("smoke: full WebTransport acceptance complete");
+    })
+    .catch((error) => {
+      window.__smokeError = String(error);
+      console.log("smoke: error " + error);
+    });
 </script>
 </body></html>`;
 
@@ -123,11 +74,21 @@ let cargoChild;
 let httpServer;
 let pageOrigin;
 let spkiPin = "";
+const observedServerEvents = {
+  bridged: false,
+  dtmf: false,
+  quality: false,
+};
 
 test.beforeAll(async () => {
   // Serve the smoke page from a real http://127.0.0.1 origin so the
   // WT call satisfies Chromium's PNA policy.
-  httpServer = createServer((_req, res) => {
+  httpServer = createServer((req, res) => {
+    if (req.url === "/uctp_wt_acceptance.mjs") {
+      res.writeHead(200, { "content-type": "text/javascript; charset=utf-8" });
+      res.end(readFileSync(ACCEPTANCE_MODULE_PATH));
+      return;
+    }
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(PAGE_HTML);
   });
@@ -148,7 +109,12 @@ test.beforeAll(async () => {
     {
       cwd: REPO_ROOT,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, RUST_LOG: process.env.RUST_LOG || "warn" },
+      env: {
+        ...process.env,
+        RUST_LOG: process.env.RUST_LOG || "warn",
+        RVOIP_WT_BROWSER_SIGNATURES: "1",
+        RVOIP_WT_BROWSER_PUBLIC_KEY_B64: browserPublicKeyB64,
+      },
     }
   );
 
@@ -166,6 +132,9 @@ test.beforeAll(async () => {
     const onLine = (chunk) => {
       const s = chunk.toString();
       process.stdout.write(`[orch] ${s}`);
+      if (s.includes("ConnectionsBridged")) observedServerEvents.bridged = true;
+      if (s.includes("DtmfReceived")) observedServerEvents.dtmf = true;
+      if (s.includes("MediaQuality")) observedServerEvents.quality = true;
       if (s.includes("wrote demo cert")) sawCert = true;
       if (s.includes("wrote spki hash")) sawSpki = true;
       if (s.includes("ws_bind")) sawWsBind = true;
@@ -214,20 +183,10 @@ test.afterAll(async () => {
   });
 });
 
-// Two-stage check:
-//   Stage 1 — *required*: SPKI pinning works (the page reaches
-//             `WT ready`, which means TLS+ALPN+CONNECT all succeeded
-//             against the self-signed cert). This is the actual gap
-//             plan §3.2 goal.
-//   Stage 2 — *aspirational*: the auth.hello → auth.challenge round
-//             trip completes over a bidi stream. Currently fails
-//             because Chromium's WT bidi-stream model and the
-//             `web_transport_quinn::Session::accept_bi()` server-side
-//             API don't interop cleanly today. Reported as a known
-//             follow-up in the test output rather than as a fail —
-//             this lets the smoke catch real Chromium SPKI regressions
-//             while the bidi-stream interop matures upstream.
-test("browser WebTransport smoke: SPKI pinning + WT session readiness", async () => {
+// Every phase is required: TLS/SPKI, auth, signed controls, Connection setup,
+// sustained RTP in both directions, DTMF/quality events, teardown, and
+// capacity-releasing reconnect.
+test("browser WebTransport: signed controls, bidirectional RTP, teardown + reconnect", async () => {
   // If the SPKI wasn't available at config-load time (cold cache),
   // launch our own Chromium with the right flags now. Otherwise the
   // project config already has them and we can use Playwright's
@@ -249,54 +208,31 @@ test("browser WebTransport smoke: SPKI pinning + WT session readiness", async ()
     page.on("console", (msg) => console.log(`[browser:${msg.type()}] ${msg.text()}`));
     page.on("pageerror", (err) => console.log(`[browser:error] ${err}`));
 
-    // Watch the page's console — Stage 1 success looks like the
-    // `smoke: WT ready` log line.
-    let wtReady = false;
-    page.on("console", (msg) => {
-      if (msg.text().includes("smoke: WT ready")) {
-        wtReady = true;
-      }
-    });
-
     await page.goto(pageOrigin);
-
-    // Stage 1 — SPKI pinning works iff `WT ready` fires. Cert errors
-    // would manifest as a `WT failed` / `connection failed` instead.
     await expect
       .poll(
         async () => {
-          if (wtReady) return "ready";
+          const reply = await page.evaluate(() => window.__smokeResult);
+          if (reply?.complete === true) return "complete";
           const err = await page.evaluate(() => window.__smokeError);
           return err || null;
         },
-        { timeout: 15_000, intervals: [100, 250, 500] }
+        { timeout: 30_000, intervals: [100, 250, 500] }
       )
-      .toBe("ready");
-
-    // Stage 2 — best-effort. Try for the auth.challenge reply; if
-    // it doesn't arrive we log and continue (don't fail the test).
-    // The bidi-stream interop between Chromium and the server's
-    // `accept_bi()` API has known gaps; this assertion is informational
-    // until that's resolved.
-    const replyArrived = await page
-      .waitForFunction(
-        () => window.__smokeResult?.type === "auth.challenge",
-        null,
-        { timeout: 10_000 }
-      )
-      .then(() => true)
-      .catch(() => false);
-    if (replyArrived) {
-      const reply = await page.evaluate(() => window.__smokeResult);
-      expect(reply).toMatchObject({ type: "auth.challenge", v: 1 });
-      console.log("[wt_smoke] full round-trip succeeded ✓");
-    } else {
-      console.log(
-        "[wt_smoke] WT session established with SPKI pinning ✓; bidi-stream " +
-          "envelope round-trip did not complete — known follow-up " +
-          "(Chromium ↔ web_transport_quinn::accept_bi compatibility)."
-      );
-    }
+      .toBe("complete");
+    const result = await page.evaluate(() => window.__smokeResult);
+    expect(result).toMatchObject({
+      complete: true,
+      signedControls: true,
+      reconnected: true,
+    });
+    expect(result.aliceReceived).toBeGreaterThanOrEqual(24);
+    expect(result.bobReceived).toBeGreaterThanOrEqual(24);
+    await expect.poll(() => observedServerEvents).toMatchObject({
+      bridged: true,
+      dtmf: true,
+      quality: true,
+    });
   } finally {
     await context.close();
     await browser.close();

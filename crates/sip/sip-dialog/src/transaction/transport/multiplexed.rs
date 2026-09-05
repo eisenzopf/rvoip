@@ -392,6 +392,7 @@ impl MultiplexedTransport {
             if let Some(authority) = &target.authority {
                 route.authority = Some(authority.clone());
             }
+            route.flow_id = target.flow_id;
             match self.send_message_via(message.clone(), route).await {
                 Ok(()) => {
                     if attempt > 1 {

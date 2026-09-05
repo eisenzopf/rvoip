@@ -28,6 +28,20 @@ pub enum RegistrarEvent {
 
     /// Contact removed
     ContactRemoved { user: String, uri: String },
+
+    /// A registered outbound flow is no longer routeable.
+    RegistrationFlowDegraded {
+        user: String,
+        instance_id: String,
+        reg_id: u32,
+    },
+
+    /// A previously degraded outbound flow became routeable again.
+    RegistrationFlowRecovered {
+        user: String,
+        instance_id: String,
+        reg_id: u32,
+    },
 }
 
 impl fmt::Debug for RegistrarEvent {
@@ -50,6 +64,14 @@ impl fmt::Debug for RegistrarEvent {
                 .field("contact_method_count", &contact.methods.len())
                 .finish(),
             Self::ContactRemoved { .. } => formatter.write_str("ContactRemoved"),
+            Self::RegistrationFlowDegraded { reg_id, .. } => formatter
+                .debug_struct("RegistrationFlowDegraded")
+                .field("reg_id", reg_id)
+                .finish(),
+            Self::RegistrationFlowRecovered { reg_id, .. } => formatter
+                .debug_struct("RegistrationFlowRecovered")
+                .field("reg_id", reg_id)
+                .finish(),
         }
     }
 }

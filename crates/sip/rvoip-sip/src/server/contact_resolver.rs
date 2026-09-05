@@ -11,7 +11,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rvoip_sip_registrar::{AddressOfRecord, RegistrarService};
+use rvoip_sip_registrar::{AddressOfRecord, RegisteredFlowRoute, RegistrarService};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use thiserror::Error;
@@ -54,8 +54,12 @@ pub struct ResolvedContact {
     pub instance_id: Option<String>,
     /// Registration flow identifier (`reg-id`, RFC 5626 outbound).
     pub reg_id: Option<u32>,
-    /// Flow identifier for the registered outbound connection (RFC 5626).
+    /// Legacy diagnostic field. Opaque registered-flow tokens are never
+    /// returned through this serializable projection.
     pub flow_id: Option<String>,
+    /// Verified process-local routes used only by the SIP application facade.
+    #[serde(skip)]
+    pub registered_flow_routes: Vec<RegisteredFlowRoute>,
 }
 
 /// Origin of a [`ResolvedContact`].
@@ -128,6 +132,7 @@ impl ContactResolver for StaticContactResolver {
                 instance_id: None,
                 reg_id: None,
                 flow_id: None,
+                registered_flow_routes: Vec::new(),
             }),
             ContactRequest::Registered { aor } => Err(ContactResolverError::Failed(format!(
                 "no registrar-backed resolver configured for AOR {aor}"
@@ -167,6 +172,7 @@ impl ContactResolver for RegistrarContactResolver {
                 instance_id: None,
                 reg_id: None,
                 flow_id: None,
+                registered_flow_routes: Vec::new(),
             }),
             ContactRequest::Registered { aor: aor_str } => {
                 let aor = AddressOfRecord::parse(aor_str).map_err(|error| {
@@ -181,7 +187,33 @@ impl ContactResolver for RegistrarContactResolver {
                     .await
                     .map_err(|error| ContactResolverError::Registrar(error.to_string()))?;
 
-                let Some(contact) = contacts.into_iter().next() else {
+                let mut selected = None;
+                let mut registered_flow_routes = Vec::new();
+                for contact in contacts {
+                    if let Some(flow_token) = contact.flow_id.as_deref() {
+                        match self.registrar.resolve_registered_flow(&aor, &contact).await {
+                            Ok(route) => {
+                                selected.get_or_insert_with(|| contact.clone());
+                                registered_flow_routes.push(route);
+                            }
+                            Err(_) => {
+                                let _ = self
+                                    .registrar
+                                    .set_registered_flow_reachability(
+                                        &aor,
+                                        flow_token,
+                                        rvoip_sip_registrar::ContactReachability::Unreachable,
+                                    )
+                                    .await;
+                            }
+                        }
+                    } else if selected.is_none() {
+                        selected = Some(contact);
+                        break;
+                    }
+                }
+
+                let Some(contact) = selected else {
                     return Err(ContactResolverError::NoLiveContacts(aor_str.clone()));
                 };
 
@@ -198,9 +230,85 @@ impl ContactResolver for RegistrarContactResolver {
                         Some(contact.instance_id)
                     },
                     reg_id: contact.reg_id,
-                    flow_id: contact.flow_id,
+                    flow_id: None,
+                    registered_flow_routes,
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rvoip_sip_registrar::{ContactInfo, ContactReachability, Transport};
+
+    fn outbound_contact(
+        token: String,
+        reg_id: u32,
+        port: u16,
+        q_value: f32,
+        expires: chrono::DateTime<Utc>,
+    ) -> ContactInfo {
+        ContactInfo {
+            uri: format!("sip:alice@10.0.0.20:{port};transport=tls;ob"),
+            instance_id: "urn:uuid:11111111-2222-4333-8444-555555555555".into(),
+            transport: Transport::TLS,
+            user_agent: "independent-test-ua/1.0".into(),
+            expires,
+            q_value,
+            received: Some(format!("198.51.100.20:{port}")),
+            path: Vec::new(),
+            methods: vec!["INVITE".into()],
+            reg_id: Some(reg_id),
+            flow_id: Some(token),
+            reachability: ContactReachability::Reachable,
+        }
+    }
+
+    #[tokio::test]
+    async fn registrar_resolution_returns_ordered_exact_flows_and_skips_degraded_primary() {
+        let registrar = Arc::new(RegistrarService::new().await.unwrap());
+        let aor = AddressOfRecord::parse("sip:alice@example.test").unwrap();
+        let mut tokens = Vec::new();
+        let expires = Utc::now() + chrono::Duration::minutes(10);
+        for (reg_id, flow_id, port, q_value) in [(1, 11, 41001, 1.0), (2, 22, 41002, 0.9)] {
+            let token = registrar.new_registered_flow_token();
+            let contact = outbound_contact(token.clone(), reg_id, port, q_value, expires);
+            registrar
+                .bind_registered_flow(&aor, &contact, flow_id)
+                .unwrap();
+            registrar
+                .register_aor(&aor, contact, Some(600))
+                .await
+                .unwrap();
+            tokens.push(token);
+        }
+
+        let resolver = RegistrarContactResolver::new(Arc::clone(&registrar));
+        let request = ContactRequest::Registered {
+            aor: aor.as_str().to_string(),
+        };
+        let resolved = resolver.resolve_contact(&request).await.unwrap();
+        assert_eq!(
+            resolved
+                .registered_flow_routes
+                .iter()
+                .map(RegisteredFlowRoute::process_local_flow_id)
+                .collect::<Vec<_>>(),
+            vec![11, 22]
+        );
+        let serialized = serde_json::to_string(&resolved).unwrap();
+        assert!(!serialized.contains("rf1_"));
+        assert!(!serialized.contains(&tokens[0]));
+
+        registrar.mark_process_local_flow_unreachable(11).await;
+        let resolved = resolver.resolve_contact(&request).await.unwrap();
+        assert_eq!(resolved.registered_flow_routes.len(), 1);
+        assert_eq!(
+            resolved.registered_flow_routes[0].process_local_flow_id(),
+            22
+        );
+        registrar.shutdown().await.unwrap();
     }
 }

@@ -13,11 +13,9 @@
 use crate::adapter::{
     AdapterEvent, AdapterLifecycleSink, ConnectionAdapter, ConnectionHandle, EndReason,
     InboundConnectionContext, OrchestratorAdapterEvent, OriginateRequest, PlaybackHandle,
-    RejectReason, TransferAttemptId, TransferTarget,
+    PlaybackOutcome, RejectReason, TransferAttemptId, TransferTarget,
 };
-use crate::bridge::{
-    codec_to_pt, frame_pump, BridgeManager, CrossBridgeHandle, DirectionalMediaBridgePlan,
-};
+use crate::bridge::{codec_to_pt, BridgeManager, CrossBridgeHandle, DirectionalMediaBridgePlan};
 use crate::capability::{CapabilityDescriptor, CapabilityIntersection};
 use crate::commands::{AudioSource, InboundAction, MuteDirection};
 use crate::config::Config;
@@ -49,7 +47,7 @@ use crate::participant::{Participant, ParticipantKind, ParticipantRole};
 use crate::session::{ConnectionRef, Session, SessionMedium, SessionState};
 use crate::stream::{
     BridgedDataMessageDecision, DataMessageBridgePolicy, MediaReceiverReservation,
-    PassThroughDataMessageBridgePolicy, StreamKind,
+    PassThroughDataMessageBridgePolicy, StreamKind, StreamSelector, StreamWaitError,
 };
 #[cfg(feature = "vcon")]
 use crate::vcon::VconBuilderHandle;
@@ -59,7 +57,6 @@ use chrono::Utc;
 use dashmap::DashMap;
 use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
 use rvoip_infra_common::events::cross_crate::RvoipCrossCrateEvent;
-use rvoip_media_core::codec::transcoding::Transcoder;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -71,6 +68,7 @@ use tokio::sync::{
     broadcast, mpsc, oneshot, watch, Mutex as TokioMutex, Notify, OwnedSemaphorePermit,
     RwLock as TokioRwLock, Semaphore,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument, warn};
 
 /// Cross-crate observers must not be able to create one Tokio task per event.
@@ -1230,6 +1228,8 @@ pub struct Orchestrator {
     tts_providers: Arc<DashMap<String, Arc<dyn crate::harness::TtsProvider>>>,
     dialog_managers: Arc<DashMap<String, Arc<dyn crate::harness::DialogManager>>>,
     recording_sinks: Arc<DashMap<String, Arc<dyn crate::harness::RecordingSink>>>,
+    recording_sink_factories: Arc<DashMap<String, Arc<dyn crate::harness::RecordingSinkFactory>>>,
+    conferences: Arc<DashMap<crate::conference::ConferenceId, Arc<crate::conference::Conference>>>,
     /// P5 — live recording sessions. Drop the JoinHandle on
     /// `stop_recording` to abort the pump.
     recordings: Arc<DashMap<crate::ids::RecordingId, RecordingHandle>>,
@@ -1566,6 +1566,8 @@ impl Orchestrator {
             tts_providers: Arc::new(DashMap::new()),
             dialog_managers: Arc::new(DashMap::new()),
             recording_sinks: Arc::new(DashMap::new()),
+            recording_sink_factories: Arc::new(DashMap::new()),
+            conferences: Arc::new(DashMap::new()),
             recordings: Arc::new(DashMap::new()),
             transcriptions: Arc::new(DashMap::new()),
             ai_attachments: Arc::new(DashMap::new()),
@@ -1637,6 +1639,8 @@ impl Orchestrator {
             tts_providers: Arc::new(DashMap::new()),
             dialog_managers: Arc::new(DashMap::new()),
             recording_sinks: Arc::new(DashMap::new()),
+            recording_sink_factories: Arc::new(DashMap::new()),
+            conferences: Arc::new(DashMap::new()),
             recordings: Arc::new(DashMap::new()),
             transcriptions: Arc::new(DashMap::new()),
             ai_attachments: Arc::new(DashMap::new()),
@@ -3572,6 +3576,75 @@ impl Orchestrator {
         Ok(tickets)
     }
 
+    fn capture_stream_wait_context(
+        &self,
+        connection_id: &ConnectionId,
+    ) -> std::result::Result<(ConnectionLifecycleTicket, Transport), StreamWaitError> {
+        let _registry = self
+            .connection_registry_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let connection = self
+            .connections
+            .get(connection_id)
+            .ok_or(StreamWaitError::ConnectionNotFound)?;
+        let lifecycle = self
+            .connection_lifecycles
+            .get(connection_id)
+            .ok_or(StreamWaitError::ConnectionNotFound)?;
+        let state = lifecycle
+            .value()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.active || state.retired {
+            return Err(StreamWaitError::ConnectionNotFound);
+        }
+        let ticket = ConnectionLifecycleTicket {
+            connection_id: connection_id.clone(),
+            generation: state.generation,
+            state: Arc::clone(lifecycle.value()),
+        };
+        let transport = connection.transport;
+        drop(state);
+        drop(lifecycle);
+        drop(connection);
+        Ok((ticket, transport))
+    }
+
+    fn validate_stream_wait_lifecycle(
+        &self,
+        lifecycle: &ConnectionLifecycleTicket,
+    ) -> std::result::Result<(), StreamWaitError> {
+        let _registry = self
+            .connection_registry_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(current) = self.connection_lifecycles.get(&lifecycle.connection_id) else {
+            return Err(StreamWaitError::ConnectionTerminated);
+        };
+        if !Arc::ptr_eq(current.value(), &lifecycle.state) {
+            return Err(StreamWaitError::GenerationReplaced);
+        }
+        let state = lifecycle
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.generation != lifecycle.generation {
+            return if state.retired || !state.active {
+                Err(StreamWaitError::ConnectionTerminated)
+            } else {
+                Err(StreamWaitError::GenerationReplaced)
+            };
+        }
+        if !state.active
+            || state.retired
+            || !self.connections.contains_key(&lifecycle.connection_id)
+        {
+            return Err(StreamWaitError::ConnectionTerminated);
+        }
+        Ok(())
+    }
+
     fn lock_connection_lifecycles<'a>(
         &self,
         tickets: &'a [ConnectionLifecycleTicket],
@@ -4740,6 +4813,11 @@ impl Orchestrator {
                     };
                     let mut n = 0usize;
                     for s in streams {
+                        // A stream that has never reported would contribute
+                        // zeros, and zeros read as flawless.
+                        if !s.has_quality_measurement() {
+                            continue;
+                        }
                         let snap = s.quality_snapshot();
                         totaled.jitter_ms += snap.jitter_ms;
                         totaled.packet_loss_pct += snap.packet_loss_pct;
@@ -7184,10 +7262,38 @@ impl Orchestrator {
                 }
                 metrics::gauge!("rvoip_media_jitter_ms").set(snapshot.jitter_ms as f64);
                 metrics::gauge!("rvoip_media_packet_loss_pct").set(snapshot.packet_loss_pct as f64);
+                // Also on the authoritative stream: an application holding
+                // the operational receiver has stopped reading the broadcast
+                // below, and a call degrading is worth acting on while it is
+                // still up.
+                let at = Utc::now();
+                let scale = |value: f32| -> u32 {
+                    // Negative or non-finite readings are treated as zero
+                    // rather than wrapping into an enormous unsigned value.
+                    if value.is_finite() && value > 0.0 {
+                        (value * 100.0).round().min(f64::from(u32::MAX) as f32) as u32
+                    } else {
+                        0
+                    }
+                };
+                self.emit_operational(
+                    connection_id.clone(),
+                    transport,
+                    at,
+                    OperationalEventKind::Quality {
+                        jitter_centi_ms: scale(snapshot.jitter_ms),
+                        packet_loss_centi_pct: scale(snapshot.packet_loss_pct),
+                        mos_centi: snapshot.mos.and_then(|mos| {
+                            (mos.is_finite() && mos > 0.0)
+                                .then(|| (mos * 100.0).round().min(f32::from(u16::MAX)) as u16)
+                        }),
+                    },
+                )
+                .await;
                 self.emit(Event::MediaQuality {
                     connection_id,
                     snapshot,
-                    at: Utc::now(),
+                    at,
                 });
             }
             AdapterEvent::Message {
@@ -8027,6 +8133,43 @@ impl Orchestrator {
         adapter.resume(connection_id).await
     }
 
+    /// Await one matching stream on the exact currently registered Connection
+    /// lifecycle generation.
+    ///
+    /// Signaling can be connected before a stream is registered; registration
+    /// can precede `MediaStream::source_ready`; and bidirectional readiness
+    /// additionally requires a live outbound sender. This method makes those
+    /// states explicit, delegates efficient waiting to the adapter when
+    /// available, and revalidates the captured lifecycle before returning.
+    /// It spawns no detached task and remains safe while the runtime drains.
+    pub async fn wait_for_stream(
+        &self,
+        connection_id: ConnectionId,
+        selector: StreamSelector,
+        deadline: tokio::time::Instant,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<Arc<dyn crate::stream::MediaStream>, StreamWaitError> {
+        let (lifecycle, transport) = self.capture_stream_wait_context(&connection_id)?;
+        let adapter = self
+            .adapter(transport)
+            .map_err(|_| StreamWaitError::AdapterUnavailable)?;
+        if !adapter.is_connection_live(&connection_id) {
+            self.validate_stream_wait_lifecycle(&lifecycle)?;
+            return Err(StreamWaitError::AdapterUnavailable);
+        }
+
+        let result = adapter
+            .wait_for_stream(connection_id.clone(), selector, deadline, cancellation)
+            .await;
+
+        self.validate_stream_wait_lifecycle(&lifecycle)?;
+
+        if !adapter.is_connection_live(&connection_id) {
+            return Err(StreamWaitError::AdapterUnavailable);
+        }
+        result
+    }
+
     /// Submit a transfer command to the owning adapter.
     ///
     /// `Ok(())` confirms command submission, not target completion. Subscribe
@@ -8460,6 +8603,192 @@ impl Orchestrator {
         self.recording_sinks.insert(name.into(), sink);
     }
 
+    // --- conferencing ----------------------------------------------------
+
+    /// Open a conference mixing at `mix_rate_hz`.
+    ///
+    /// The rate is the conference's own; members on other clock rates are
+    /// converted at join. 8 kHz suits an all-telephony conference and costs
+    /// nothing to convert; pick the highest rate a member will use when
+    /// wideband participants are expected, since upsampling after the mix
+    /// cannot restore what downsampling before it discarded.
+    #[must_use]
+    pub fn conference_create(&self, mix_rate_hz: u32) -> crate::conference::ConferenceId {
+        let id = crate::conference::ConferenceId::new();
+        self.conferences.insert(
+            id.clone(),
+            Arc::new(crate::conference::Conference::start(mix_rate_hz)),
+        );
+        id
+    }
+
+    /// Add a live connection to a conference.
+    ///
+    /// The connection's own negotiated codec is used in both directions, so
+    /// a member never has to renegotiate to join. Joining twice is refused
+    /// rather than silently doubling that member's voice in the mix.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the conference or connection is unknown, when
+    /// the connection has no audio stream yet, when the member is already
+    /// present, or when its codec cannot be constructed.
+    pub async fn conference_join(
+        &self,
+        conference_id: &crate::conference::ConferenceId,
+        connection_id: ConnectionId,
+    ) -> Result<()> {
+        let conference = self
+            .conferences
+            .get(conference_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or(RvoipError::AdmissionRejected("conference not found"))?;
+        if conference.members.lock().await.contains_key(&connection_id) {
+            return Err(RvoipError::AdmissionRejected(
+                "connection is already a conference member",
+            ));
+        }
+
+        // Outbound first: a member we cannot speak to is not a member, and
+        // discovering that after installing the inbound tap would leave the
+        // tap to clean up.
+        let adapter = self.adapter_for(&connection_id)?;
+        let streams = adapter.streams(connection_id.clone()).await?;
+        let audio = streams
+            .into_iter()
+            .find(|stream| stream.kind() == crate::stream::StreamKind::Audio)
+            .ok_or(RvoipError::AdmissionRejected(
+                "conference member has no audio stream",
+            ))?;
+        let codec = audio.codec();
+        let outbound = audio.try_frames_out()?;
+
+        let (route, inbound) = self
+            .media_tap_for_connection(
+                connection_id.clone(),
+                crate::conference::MEMBER_TAP_CAPACITY,
+            )
+            .await?;
+        // The member owns its tap, so leaving the conference tears the route
+        // down rather than leaving it feeding a receiver nobody reads.
+        let member = crate::conference::build_member(
+            connection_id.clone(),
+            inbound,
+            outbound,
+            codec,
+            conference.mix_rate_hz,
+            Some(Box::new(route)),
+        )?;
+        conference
+            .members
+            .lock()
+            .await
+            .insert(connection_id, member);
+        Ok(())
+    }
+
+    /// Remove a connection from a conference.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the conference is unknown. Removing a
+    /// connection that is not a member succeeds: absence is the requested
+    /// end state either way.
+    pub async fn conference_leave(
+        &self,
+        conference_id: &crate::conference::ConferenceId,
+        connection_id: &ConnectionId,
+    ) -> Result<()> {
+        let conference = self
+            .conferences
+            .get(conference_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or(RvoipError::AdmissionRejected("conference not found"))?;
+        conference.members.lock().await.remove(connection_id);
+        Ok(())
+    }
+
+    /// End a conference and release every member.
+    ///
+    /// Members' own connections are left alone: leaving a conference is not
+    /// hanging up, and a caller may well be transferred elsewhere next.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the conference is unknown.
+    pub async fn conference_end(
+        &self,
+        conference_id: &crate::conference::ConferenceId,
+    ) -> Result<()> {
+        let (_, conference) = self
+            .conferences
+            .remove(conference_id)
+            .ok_or(RvoipError::AdmissionRejected("conference not found"))?;
+        conference.members.lock().await.clear();
+        Ok(())
+    }
+
+    /// Set whether a member's voice enters the conference mix.
+    ///
+    /// A member who hears without contributing is a supervisor monitoring
+    /// the call. Silencing at the mixer keeps that invisible to the rest of
+    /// the conference, which is what monitoring means.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the conference or the member is unknown.
+    pub async fn conference_set_contribution(
+        &self,
+        conference_id: &crate::conference::ConferenceId,
+        connection_id: &ConnectionId,
+        contributes: bool,
+    ) -> Result<()> {
+        let conference = self
+            .conferences
+            .get(conference_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or(RvoipError::AdmissionRejected("conference not found"))?;
+        let mut members = conference.members.lock().await;
+        let member = members
+            .get_mut(connection_id)
+            .ok_or(RvoipError::AdmissionRejected("connection is not a member"))?;
+        member.contributes = contributes;
+        Ok(())
+    }
+
+    /// The connections currently mixed into a conference.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the conference is unknown.
+    pub async fn conference_members(
+        &self,
+        conference_id: &crate::conference::ConferenceId,
+    ) -> Result<Vec<ConnectionId>> {
+        let conference = self
+            .conferences
+            .get(conference_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or(RvoipError::AdmissionRejected("conference not found"))?;
+        let members = conference.members.lock().await;
+        Ok(members.keys().cloned().collect())
+    }
+
+    /// Register a factory that opens one sink per recording.
+    ///
+    /// Prefer this over [`Self::register_recording_sink`] whenever more than
+    /// one recording can be in flight at a time: a shared sink receives
+    /// every concurrent recording's frames and is closed by whichever one
+    /// stops first. A factory registered under a name takes precedence over
+    /// a plain sink registered under the same name.
+    pub fn register_recording_sink_factory(
+        &self,
+        name: impl Into<String>,
+        factory: Arc<dyn crate::harness::RecordingSinkFactory>,
+    ) {
+        self.recording_sink_factories.insert(name.into(), factory);
+    }
+
     // --- P5 recording / transcription -----------------------------------
 
     /// P5 — start recording the audio MediaStream of a Connection (or
@@ -8472,11 +8801,22 @@ impl Orchestrator {
     ) -> Result<crate::ids::RecordingId> {
         use crate::commands::RecordingTarget;
         let sink_name = sink_name.into();
-        let sink = self
+        // Resolve which source is registered now, so an unregistered name
+        // still fails before any tap or quota work. The sink itself is
+        // opened once this recording has an identity to name it by.
+        let sink_factory = self
+            .recording_sink_factories
+            .get(&sink_name)
+            .map(|e| Arc::clone(e.value()));
+        let shared_sink = self
             .recording_sinks
             .get(&sink_name)
-            .map(|e| Arc::clone(e.value()))
-            .ok_or_else(|| RvoipError::AdmissionRejected("recording sink not registered"))?;
+            .map(|e| Arc::clone(e.value()));
+        if sink_factory.is_none() && shared_sink.is_none() {
+            return Err(RvoipError::AdmissionRejected(
+                "recording sink not registered",
+            ));
+        }
 
         // Resolve target → list of Connections to tap.
         let (conns, tenant_id) = match target {
@@ -8556,6 +8896,13 @@ impl Orchestrator {
         };
 
         let rid = crate::ids::RecordingId::new();
+        // A factory yields a sink owned by this recording alone; a plain
+        // registered sink is shared with every other recording using the
+        // same name, which is why the factory takes precedence.
+        let sink = match sink_factory {
+            Some(factory) => factory.open(&rid).await?,
+            None => shared_sink.expect("a sink or factory was resolved above"),
+        };
         let paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let connection_ids = conns.clone();
         let mut media = MediaTapHandle::default();
@@ -9218,8 +9565,6 @@ impl Orchestrator {
         // touches the direction whose PT actually moved.
         if let Some(peer) = self.bridge_peer_of(&connection_id) {
             if let Some(audio) = negotiated.audio.as_ref() {
-                let new_pt = codec_to_pt(&audio.name)
-                    .ok_or_else(|| RvoipError::UnsupportedCodec(audio.name.clone()))?;
                 // A2 — snapshot the bridge handle's relevant state
                 // (orientation + swap channel availability) WITHOUT
                 // holding the DashMap iterator guard across any
@@ -9243,7 +9588,7 @@ impl Orchestrator {
 
                     // A2 — direct .await for the peer's stream
                     // lookup (was `block_in_place + block_on`).
-                    let peer_pt = if let Ok(adp) = self.adapter_for(&peer) {
+                    let peer_codec = if let Ok(adp) = self.adapter_for(&peer) {
                         adp.streams(peer.clone())
                             .await
                             .ok()
@@ -9251,20 +9596,17 @@ impl Orchestrator {
                                 streams
                                     .into_iter()
                                     .find(|s| s.kind() == StreamKind::Audio)
-                                    .map(|s| s.codec().name)
+                                    .map(|s| s.codec())
                             })
-                            .and_then(|n| codec_to_pt(&n))
-                            .unwrap_or(new_pt)
+                            .unwrap_or_else(|| audio.clone())
                     } else {
-                        new_pt
+                        audio.clone()
                     };
 
-                    // Build per-direction swap messages.
-                    let (a_swap, b_swap) = if orientation_this_is_a {
-                        // a is "this" connection (new_pt), b is peer (peer_pt).
-                        (make_swap(new_pt, peer_pt), make_swap(peer_pt, new_pt))
+                    let (a_codec, b_codec) = if orientation_this_is_a {
+                        (audio.clone(), peer_codec)
                     } else {
-                        (make_swap(peer_pt, new_pt), make_swap(new_pt, peer_pt))
+                        (peer_codec, audio.clone())
                     };
                     // Snapshot only cloneable swap state while the map
                     // entry is guarded. Channel backpressure, pump acks,
@@ -9274,7 +9616,7 @@ impl Orchestrator {
                         .get(&bridge_id)
                         .map(|entry| entry.value().swap_controller());
                     let swap_result = match swap_controller {
-                        Some(Ok(controller)) => controller.swap_transcoders(a_swap, b_swap).await,
+                        Some(Ok(controller)) => controller.swap_codecs(a_codec, b_codec).await,
                         Some(Err(error)) => Err(error),
                         None => Ok(()),
                     };
@@ -9330,7 +9672,71 @@ impl Orchestrator {
         source: AudioSource,
     ) -> Result<PlaybackHandle> {
         let adapter = self.adapter_for(&connection_id)?;
-        adapter.play_audio(connection_id, source).await
+        // Spoken prompts synthesize through the orchestrator's registered
+        // TTS providers and pump into the connection's audio stream — the
+        // same delivery path AI attachments speak through — so any adapter
+        // that exposes streams plays prompts without its own TTS stack.
+        // Other sources (recorded URLs) stay with the adapter, which owns
+        // fetching and decoding for its transport.
+        let AudioSource::TtsRequest {
+            provider_ref,
+            text,
+            voice,
+        } = source
+        else {
+            return adapter.play_audio(connection_id, source).await;
+        };
+        let tts = self
+            .tts_providers
+            .get(&provider_ref)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or(RvoipError::AdmissionRejected(
+                "play_audio: TTS provider not registered",
+            ))?;
+        let streams = adapter.streams(connection_id.clone()).await?;
+        let audio = streams
+            .into_iter()
+            .find(|stream| stream.kind() == StreamKind::Audio)
+            .ok_or(RvoipError::AdmissionRejected(
+                "play_audio: connection has no audio stream",
+            ))?;
+        let frames_out = audio.try_frames_out()?;
+        let playback = tts
+            .synthesize(crate::harness::TtsRequest {
+                voice,
+                text,
+                sample_rate_hz: None,
+            })
+            .await?;
+        let (handle, mut cancel_rx, completion) =
+            PlaybackHandle::new_tracked(crate::ids::PlaybackId::new());
+        tokio::spawn(async move {
+            let mut playback = TtsPlaybackCancelGuard::new(playback);
+            let outcome = loop {
+                tokio::select! {
+                    _ = &mut cancel_rx => break PlaybackOutcome::Cancelled,
+                    frame_opt = playback.playback().next_frame() => {
+                        let Some(frame) = frame_opt else {
+                            break PlaybackOutcome::Completed;
+                        };
+                        if frames_out.send(frame).await.is_err() {
+                            break PlaybackOutcome::Failed;
+                        }
+                    }
+                }
+            };
+            // Every exit other than the provider's natural end-of-stream
+            // must cancel the provider explicitly: `TtsPlayback` has no
+            // Drop-cancels contract, so merely dropping it can leave remote
+            // synthesis work running.
+            if outcome == PlaybackOutcome::Completed {
+                playback.complete();
+            } else {
+                playback.cancel().await;
+            }
+            completion.finish(outcome);
+        });
+        Ok(handle)
     }
 
     /// Bridge two connections — wires a bidirectional frame pump between
@@ -10262,27 +10668,6 @@ async fn await_media_route(graph: &MediaGraphHandle, route_id: &MediaRouteId) ->
     }
 }
 
-/// Gap plan §4.2 v1 punch list — construct a [`TranscoderSwap`] for
-/// one direction of a hot-swap. Builds a fresh `Transcoder` (with a
-/// new per-direction `FormatConverter`) when `from_pt != to_pt`;
-/// otherwise leaves the transcoder slot empty (passthrough).
-fn make_swap(from_pt: u8, to_pt: u8) -> frame_pump::TranscoderSwap {
-    let transcoder = if from_pt != to_pt {
-        Some(Transcoder::new())
-    } else {
-        None
-    };
-    frame_pump::TranscoderSwap {
-        new_transcoder: transcoder,
-        new_from_pt: from_pt,
-        new_to_pt: to_pt,
-        // A3 — ack is wired by `swap_transcoders` itself when it
-        // needs synchronization. `make_swap` leaves it None so the
-        // caller decides.
-        ack: None,
-    }
-}
-
 #[cfg(test)]
 mod cross_crate_publisher_tests {
     use super::*;
@@ -10460,5 +10845,76 @@ mod cross_crate_publisher_tests {
             observed.push(connection_id.to_string());
         }
         assert_eq!(observed, ["one", "two", "three", "four"]);
+    }
+
+    fn install_stream_wait_lifecycle(
+        orchestrator: &Orchestrator,
+        connection_id: &ConnectionId,
+    ) -> ConnectionLifecycleTicket {
+        orchestrator.connections.insert(
+            connection_id.clone(),
+            ConnectionEntry {
+                transport: Transport::Sip,
+                direction: Direction::Inbound,
+                principal: None,
+                inbound_context: None,
+                inbound_context_retired: false,
+                inbound_publication: InboundPublicationState::Unseen,
+                inbound_admission_terminal: None,
+                staged_inbound_data: None,
+                normalized_lifecycle_was_visible: false,
+                deferred_authentication: None,
+                deferred_principal_authentication: None,
+            },
+        );
+        assert!(orchestrator.ensure_connection_lifecycle(connection_id));
+        orchestrator
+            .capture_stream_wait_context(connection_id)
+            .expect("capture active wait lifecycle")
+            .0
+    }
+
+    #[test]
+    fn stream_wait_revalidation_distinguishes_terminal_generation() {
+        let orchestrator = Orchestrator::new(Config::default());
+        let connection_id = ConnectionId::new();
+        let lifecycle = install_stream_wait_lifecycle(&orchestrator, &connection_id);
+        {
+            let mut state = lifecycle
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.generation += 1;
+            state.active = false;
+            state.retired = true;
+        }
+        orchestrator.connections.remove(&connection_id);
+
+        assert_eq!(
+            orchestrator.validate_stream_wait_lifecycle(&lifecycle),
+            Err(StreamWaitError::ConnectionTerminated)
+        );
+    }
+
+    #[test]
+    fn stream_wait_revalidation_distinguishes_replaced_generation() {
+        let orchestrator = Orchestrator::new(Config::default());
+        let connection_id = ConnectionId::new();
+        let lifecycle = install_stream_wait_lifecycle(&orchestrator, &connection_id);
+        orchestrator.connection_lifecycles.insert(
+            connection_id,
+            Arc::new(Mutex::new(ConnectionLifecycleState {
+                generation: lifecycle.generation + 1,
+                active: true,
+                retired: false,
+                admission_outcomes_notified: HashSet::new(),
+                operational_connected_emitted: false,
+            })),
+        );
+
+        assert_eq!(
+            orchestrator.validate_stream_wait_lifecycle(&lifecycle),
+            Err(StreamWaitError::GenerationReplaced)
+        );
     }
 }

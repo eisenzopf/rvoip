@@ -71,6 +71,19 @@ finish() {
   local exit_code=$?
   local ended_at duration archive_sha
   trap - EXIT
+  exec 9>/tmp/rvoip-release-result.lock
+  if ! flock -w 60 9; then
+    sync
+    shutdown -h now || true
+    exit "$exit_code"
+  fi
+  # A GCE shutdown checkpoint may already have committed a PARTIAL result.
+  # Never overwrite that immutable object with a racing local EXIT result.
+  if [[ -f /tmp/result-partial.json ]]; then
+    sync
+    shutdown -h now || true
+    exit "$exit_code"
+  fi
   if [[ -n "$EXTERNAL_MEMORY_SAMPLER_PID" ]]; then
     kill "$EXTERNAL_MEMORY_SAMPLER_PID" >/dev/null 2>&1 || true
     wait "$EXTERNAL_MEMORY_SAMPLER_PID" 2>/dev/null || true

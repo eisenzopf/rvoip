@@ -81,8 +81,11 @@ pub use providers::{
     TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
 };
 pub use sig9421::{
-    EnvelopeSignature, KeyResolver, Sig9421Error, Sig9421Verifier, StaticKeyResolver,
-    DEFAULT_REPLAY_CACHE_CAPACITY, DEFAULT_SIG_REPLAY_TTL,
+    EnvelopeSignature, InMemorySignatureReplayStore, KeyResolver, ReplayConsumeError,
+    ResolvedVerificationKey, Sig9421Error, Sig9421Verifier, SignatureClock, SignatureReplayStore,
+    SignatureVerificationContext, StaticKeyResolver, SystemSignatureClock,
+    DEFAULT_MAX_SIGNED_ENVELOPE_BYTES, DEFAULT_REPLAY_CACHE_CAPACITY, DEFAULT_SIG_CLOCK_SKEW,
+    DEFAULT_SIG_REPLAY_TTL,
 };
 pub use sip_digest::{
     DigestAlgorithm, DigestAuthenticator, DigestChallenge, DigestChallengeDetails, DigestClient,

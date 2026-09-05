@@ -397,7 +397,9 @@ async fn quic_to_wt_bridge_flows_frames_end_to_end() {
 
     // --- Inject 10 frames from QUIC client; observe on WT client ---
     let quic_out = rvoip_core::stream::MediaStream::frames_out(quic_client_stream.as_ref());
-    let mut wt_in = rvoip_core::stream::MediaStream::frames_in(wt_client_stream.as_ref());
+    let mut wt_in = wt_client_stream
+        .try_frames_in()
+        .expect("WebTransport media receiver");
 
     for i in 0u8..10 {
         let frame = MediaFrame {
@@ -575,7 +577,7 @@ async fn wt_to_wt_bridge_flows_frames_end_to_end() {
     wt_spawn_datagram_reader(client_b.session.clone(), router_b, None);
 
     let out_a = rvoip_core::stream::MediaStream::frames_out(stream_a.as_ref());
-    let mut in_b = rvoip_core::stream::MediaStream::frames_in(stream_b.as_ref());
+    let mut in_b = stream_b.try_frames_in().expect("media receiver B");
 
     for i in 0u8..10 {
         let frame = MediaFrame {

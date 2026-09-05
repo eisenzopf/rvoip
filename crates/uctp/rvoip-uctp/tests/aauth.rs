@@ -8,7 +8,7 @@
 //! The coordinator's `start_full_with_aauth` constructor wires an
 //! `AAuthValidator`; the test injects mock subject + actor validators
 //! that yield UserAuthorized / actor claims with known scopes, then
-//! asserts the wire response carries the combined assurance and the
+//! asserts the wire response carries the least-privilege assurance and the
 //! emitted `UctpSessionEvent::Authenticated` carries
 //! `IdentityAssurance::UserAuthorized` with the actor as `identity`
 //! and the subject as `user_id`.
@@ -162,11 +162,11 @@ fn aauth_response(challenge_id: String, subject: &str, actor: Option<&str>) -> U
 async fn aauth_response_yields_user_authorized_assurance() {
     let subject = Arc::new(StaticSubject {
         user_id: id("user:alice"),
-        scopes: vec!["calls.write".into()],
+        scopes: vec!["calls.write".into(), "calls.transfer".into()],
     });
     let actor = Arc::new(StaticActor {
         identity: id("agent:assistant-7"),
-        scopes: vec!["calls.transfer".into()],
+        scopes: vec!["calls.transfer".into(), "admin".into()],
     });
     let aauth = AAuthValidator::new(subject.clone(), actor);
 
@@ -241,8 +241,9 @@ async fn aauth_response_yields_user_authorized_assurance() {
             } => {
                 assert_eq!(user_id.as_str(), "user:alice");
                 assert_eq!(identity.as_str(), "agent:assistant-7");
-                assert!(scopes.contains(&"calls.write".to_string()));
-                assert!(scopes.contains(&"calls.transfer".to_string()));
+                assert_eq!(scopes, vec!["calls.transfer".to_string()]);
+                assert!(!scopes.contains(&"calls.write".to_string()));
+                assert!(!scopes.contains(&"admin".to_string()));
             }
             other => panic!("expected UserAuthorized; got {other:?}"),
         },

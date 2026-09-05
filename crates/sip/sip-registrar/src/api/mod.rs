@@ -16,8 +16,10 @@ use crate::presence::Presence;
 use crate::registrar::Registrar;
 use crate::types::{
     AddressOfRecord, BuddyInfo, ContactInfo, ContactReachability, PresenceState, PresenceStatus,
-    RegistrarConfig,
+    RegisteredFlowRoute, RegistrarConfig, Transport,
 };
+use dashmap::mapref::entry::Entry;
+use dashmap::DashMap;
 
 const REGISTER_DIGEST_NONCE_TTL: Duration = Duration::from_secs(5 * 60);
 const REGISTER_DIGEST_NONCE_RETENTION: Duration = Duration::from_secs(10 * 60);
@@ -114,6 +116,23 @@ pub struct RegistrarService {
 
     /// Optional external credential source.
     credential_provider: Option<Arc<dyn CredentialProvider>>,
+
+    /// Process-local RFC 5626 route capabilities keyed by an opaque random
+    /// token stored on the matching Contact binding.
+    registered_flows: Arc<DashMap<String, RegisteredFlowBinding>>,
+}
+
+#[derive(Clone)]
+struct RegisteredFlowBinding {
+    aor: String,
+    contact_uri: String,
+    instance_id: String,
+    reg_id: u32,
+    remote_addr: std::net::SocketAddr,
+    transport: Transport,
+    process_local_flow_id: u64,
+    expires: chrono::DateTime<chrono::Utc>,
+    reachable: bool,
 }
 
 /// A validated, serialized AOR update that has not yet changed registrar
@@ -209,6 +228,7 @@ impl RegistrarService {
             digest_replay: None,
             identity_provider: None,
             credential_provider: None,
+            registered_flows: Arc::new(DashMap::new()),
         })
     }
 
@@ -260,6 +280,288 @@ impl RegistrarService {
         event_bus: Arc<rvoip_infra_common::events::system::EventSystem>,
     ) {
         self.event_bus = Some(event_bus);
+    }
+
+    /// Mint an opaque process-local token for an authenticated RFC 5626 flow.
+    ///
+    /// The token contains no socket address, tenant, device, or numeric flow
+    /// identity. It becomes routeable only after [`Self::bind_registered_flow`]
+    /// associates it with the committed Contact.
+    #[doc(hidden)]
+    pub fn new_registered_flow_token(&self) -> String {
+        format!("rf1_{}", uuid::Uuid::new_v4().simple())
+    }
+
+    /// Bind a committed outbound Contact to the exact stream transport that
+    /// carried its authenticated REGISTER.
+    #[doc(hidden)]
+    pub fn bind_registered_flow(
+        &self,
+        aor: &AddressOfRecord,
+        contact: &ContactInfo,
+        process_local_flow_id: u64,
+    ) -> Result<()> {
+        let token = contact
+            .flow_id
+            .as_deref()
+            .filter(|token| {
+                token.len() == 36
+                    && token.starts_with("rf1_")
+                    && token[4..].bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+            .ok_or_else(|| {
+                crate::error::RegistrarError::InvalidRegistration(
+                    "registered flow token is absent or invalid".into(),
+                )
+            })?;
+        let reg_id = contact
+            .reg_id
+            .filter(|reg_id| *reg_id != 0)
+            .ok_or_else(|| {
+                crate::error::RegistrarError::InvalidRegistration(
+                    "registered flow reg-id is absent or invalid".into(),
+                )
+            })?;
+        if contact.instance_id.is_empty() || process_local_flow_id == 0 {
+            return Err(crate::error::RegistrarError::InvalidRegistration(
+                "registered flow identity is incomplete".into(),
+            ));
+        }
+        if !matches!(
+            contact.transport,
+            Transport::TCP | Transport::TLS | Transport::WS | Transport::WSS
+        ) {
+            return Err(crate::error::RegistrarError::InvalidRegistration(
+                "registered flow transport is not connection-oriented".into(),
+            ));
+        }
+        let remote_addr = contact
+            .received
+            .as_deref()
+            .ok_or_else(|| {
+                crate::error::RegistrarError::InvalidRegistration(
+                    "registered flow observed address is absent".into(),
+                )
+            })?
+            .parse()
+            .map_err(|_| {
+                crate::error::RegistrarError::InvalidRegistration(
+                    "registered flow observed address is invalid".into(),
+                )
+            })?;
+
+        let binding = RegisteredFlowBinding {
+            aor: aor.as_str().to_string(),
+            contact_uri: contact.uri.clone(),
+            instance_id: contact.instance_id.clone(),
+            reg_id,
+            remote_addr,
+            transport: contact.transport,
+            process_local_flow_id,
+            expires: contact.expires,
+            reachable: true,
+        };
+
+        match self.registered_flows.entry(token.to_string()) {
+            Entry::Vacant(entry) => {
+                entry.insert(binding);
+                Ok(())
+            }
+            Entry::Occupied(_) => Err(crate::error::RegistrarError::InvalidRegistration(
+                "registered flow token is already bound".into(),
+            )),
+        }
+    }
+
+    /// Promote a staged flow after the matching Contact mutation commits.
+    ///
+    /// Replacement bindings for the same AOR, instance, and reg-id remain
+    /// available until this point. That preserves the previous live route
+    /// when the final REGISTER response is proven to have reached zero wire.
+    #[doc(hidden)]
+    pub fn commit_registered_flow(&self, aor: &AddressOfRecord, contact: &ContactInfo) -> bool {
+        let Some(token) = contact.flow_id.as_deref() else {
+            return false;
+        };
+        let Some(reg_id) = contact.reg_id else {
+            return false;
+        };
+        self.registered_flows.retain(|existing_token, existing| {
+            existing_token == token
+                || existing.aor != aor.as_str()
+                || existing.instance_id != contact.instance_id
+                || existing.reg_id != reg_id
+        });
+        self.registered_flows
+            .get(token)
+            .is_some_and(|binding| binding.reachable)
+    }
+
+    /// Remove a flow route after the matching Contact is unregistered.
+    #[doc(hidden)]
+    pub fn remove_registered_flow(&self, aor: &AddressOfRecord, contact: &ContactInfo) {
+        self.registered_flows.retain(|_, binding| {
+            binding.aor != aor.as_str()
+                || (binding.contact_uri != contact.uri
+                    && (binding.instance_id != contact.instance_id
+                        || Some(binding.reg_id) != contact.reg_id))
+        });
+    }
+
+    /// Discard a staged flow token when the final REGISTER response was
+    /// proven not to reach the wire.
+    #[doc(hidden)]
+    pub fn discard_registered_flow_token(&self, flow_token: &str) {
+        self.registered_flows.remove(flow_token);
+    }
+
+    /// Resolve a Contact into a verified, process-local registered-flow route.
+    ///
+    /// Stale tokens, copied tokens for another AOR/device, expired contacts,
+    /// and unreachable contacts all fail closed.
+    pub async fn resolve_registered_flow(
+        &self,
+        aor: &AddressOfRecord,
+        contact: &ContactInfo,
+    ) -> Result<RegisteredFlowRoute> {
+        let token = contact.flow_id.as_deref().ok_or_else(|| {
+            crate::error::RegistrarError::InvalidRegistration(
+                "contact has no registered flow".into(),
+            )
+        })?;
+        let now = chrono::Utc::now();
+        self.registered_flows
+            .retain(|_, binding| binding.expires > now);
+        let binding = self
+            .registered_flows
+            .get(token)
+            .map(|binding| binding.clone())
+            .ok_or_else(|| {
+                crate::error::RegistrarError::RegistrationExpired(
+                    "registered flow token is stale".into(),
+                )
+            })?;
+        if binding.aor != aor.as_str()
+            || binding.contact_uri != contact.uri
+            || binding.instance_id != contact.instance_id
+            || Some(binding.reg_id) != contact.reg_id
+        {
+            return Err(crate::error::RegistrarError::InvalidRegistration(
+                "registered flow does not own this contact".into(),
+            ));
+        }
+        if !binding.reachable {
+            return Err(crate::error::RegistrarError::InvalidRegistration(
+                "registered flow is unreachable".into(),
+            ));
+        }
+
+        let current = self.registrar.lookup_live_contacts(aor, "INVITE").await?;
+        if !current.iter().any(|candidate| {
+            candidate.flow_id.as_deref() == Some(token)
+                && candidate.instance_id == contact.instance_id
+                && candidate.reg_id == contact.reg_id
+                && candidate.uri == contact.uri
+        }) {
+            return Err(crate::error::RegistrarError::RegistrationExpired(
+                "registered flow contact is no longer live".into(),
+            ));
+        }
+
+        Ok(RegisteredFlowRoute {
+            remote_addr: binding.remote_addr,
+            transport: binding.transport,
+            process_local_flow_id: binding.process_local_flow_id,
+            expires: contact.expires,
+        })
+    }
+
+    /// Change one exact flow's reachability and publish the authoritative
+    /// degraded/recovered transition without exposing its token.
+    pub async fn set_registered_flow_reachability(
+        &self,
+        aor: &AddressOfRecord,
+        flow_token: &str,
+        reachability: ContactReachability,
+    ) -> Result<()> {
+        if reachability != ContactReachability::Reachable {
+            if let Some(mut binding) = self.registered_flows.get_mut(flow_token) {
+                binding.reachable = false;
+            }
+        }
+        let (contact, changed) = self
+            .registrar
+            .set_flow_reachability(aor, flow_token, reachability)
+            .await?;
+        if reachability == ContactReachability::Reachable {
+            if let Some(mut binding) = self.registered_flows.get_mut(flow_token) {
+                binding.reachable = true;
+            }
+        }
+        if !changed {
+            return Ok(());
+        }
+        let Some(reg_id) = contact.reg_id else {
+            return Ok(());
+        };
+        let event = match reachability {
+            ContactReachability::Unreachable => RegistrarEvent::RegistrationFlowDegraded {
+                user: aor.user().to_string(),
+                instance_id: contact.instance_id,
+                reg_id,
+            },
+            ContactReachability::Reachable => RegistrarEvent::RegistrationFlowRecovered {
+                user: aor.user().to_string(),
+                instance_id: contact.instance_id,
+                reg_id,
+            },
+            ContactReachability::Unknown => return Ok(()),
+        };
+        self.publish_event(event).await;
+        Ok(())
+    }
+
+    /// Mark every binding owned by one closed process-local transport flow as
+    /// unreachable. The numeric flow identity is never persisted or emitted;
+    /// public observations contain only the registered device identity.
+    #[doc(hidden)]
+    pub async fn mark_process_local_flow_unreachable(&self, process_local_flow_id: u64) -> usize {
+        let bindings = self.stage_process_local_flow_unreachable(process_local_flow_id);
+        let mut changed = 0;
+        for (aor, token) in bindings {
+            let Ok(aor) = AddressOfRecord::parse(&aor) else {
+                continue;
+            };
+            if self
+                .set_registered_flow_reachability(&aor, &token, ContactReachability::Unreachable)
+                .await
+                .is_ok()
+            {
+                changed += 1;
+            }
+        }
+        changed
+    }
+
+    fn stage_process_local_flow_unreachable(
+        &self,
+        process_local_flow_id: u64,
+    ) -> Vec<(String, String)> {
+        if process_local_flow_id == 0 {
+            return Vec::new();
+        }
+        let bindings: Vec<(String, String)> = self
+            .registered_flows
+            .iter()
+            .filter(|binding| binding.process_local_flow_id == process_local_flow_id)
+            .map(|binding| (binding.aor.clone(), binding.key().clone()))
+            .collect();
+        for (_, token) in &bindings {
+            if let Some(mut binding) = self.registered_flows.get_mut(token) {
+                binding.reachable = false;
+            }
+        }
+        bindings
     }
 
     // ========== Registration Methods ==========
@@ -1242,6 +1544,171 @@ mod digest_replay_tests {
             "new-client",
             1,
         ));
+    }
+}
+
+#[cfg(test)]
+mod registered_flow_tests {
+    use super::*;
+
+    fn contact(token: String, reg_id: u32) -> ContactInfo {
+        ContactInfo {
+            uri: "sip:alice@10.0.0.20:5061;transport=tls;ob".into(),
+            instance_id: "urn:uuid:11111111-2222-4333-8444-555555555555".into(),
+            transport: Transport::TLS,
+            user_agent: "independent-test-ua/1.0".into(),
+            expires: chrono::Utc::now() + chrono::Duration::minutes(10),
+            q_value: 1.0,
+            received: Some("198.51.100.20:41000".into()),
+            path: vec!["<sip:edge.example.test;lr>".into()],
+            methods: vec!["INVITE".into()],
+            reg_id: Some(reg_id),
+            flow_id: Some(token),
+            reachability: ContactReachability::Reachable,
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_flow_is_opaque_owned_live_and_fail_closed() {
+        let service = RegistrarService::new().await.unwrap();
+        let aor = AddressOfRecord::parse("sip:alice@example.test").unwrap();
+        let other = AddressOfRecord::parse("sip:bob@example.test").unwrap();
+        let token = service.new_registered_flow_token();
+        assert_eq!(token.len(), 36);
+        assert!(token.starts_with("rf1_"));
+        assert!(!token.contains("198.51.100.20"));
+
+        let contact = contact(token.clone(), 2);
+        let prepared = service
+            .prepare_register_aor(&aor, contact.clone(), Some(600))
+            .await
+            .unwrap();
+        service.bind_registered_flow(&aor, &contact, 42).unwrap();
+        prepared.commit().await;
+
+        let route = service
+            .resolve_registered_flow(&aor, &contact)
+            .await
+            .unwrap();
+        assert_eq!(route.remote_addr().to_string(), "198.51.100.20:41000");
+        assert_eq!(route.process_local_flow_id(), 42);
+        let diagnostic = format!("{route:?}");
+        assert!(!diagnostic.contains("198.51.100.20"));
+        assert!(!diagnostic.contains("42"));
+        assert!(service
+            .resolve_registered_flow(&other, &contact)
+            .await
+            .is_err());
+
+        service
+            .set_registered_flow_reachability(&aor, &token, ContactReachability::Unreachable)
+            .await
+            .unwrap();
+        assert!(service
+            .resolve_registered_flow(&aor, &contact)
+            .await
+            .is_err());
+
+        service.remove_registered_flow(&aor, &contact);
+        assert!(service
+            .resolve_registered_flow(&aor, &contact)
+            .await
+            .is_err());
+        service.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn staged_replacement_preserves_old_flow_until_contact_commit() {
+        let service = RegistrarService::new().await.unwrap();
+        let aor = AddressOfRecord::parse("sip:alice@example.test").unwrap();
+
+        let old_token = service.new_registered_flow_token();
+        let old_contact = contact(old_token.clone(), 2);
+        let old_prepared = service
+            .prepare_register_aor(&aor, old_contact.clone(), Some(600))
+            .await
+            .unwrap();
+        service
+            .bind_registered_flow(&aor, &old_contact, 42)
+            .unwrap();
+        old_prepared.commit().await;
+        assert!(service.commit_registered_flow(&aor, &old_contact));
+
+        let rejected_token = service.new_registered_flow_token();
+        let rejected_contact = contact(rejected_token.clone(), 2);
+        let rejected_prepared = service
+            .prepare_register_aor(&aor, rejected_contact.clone(), Some(600))
+            .await
+            .unwrap();
+        service
+            .bind_registered_flow(&aor, &rejected_contact, 43)
+            .unwrap();
+        service.discard_registered_flow_token(&rejected_token);
+        drop(rejected_prepared);
+
+        let current = service.lookup_aor(&aor).await.unwrap();
+        let current_old = current
+            .iter()
+            .find(|candidate| candidate.flow_id.as_deref() == Some(old_token.as_str()))
+            .unwrap();
+        assert_eq!(
+            service
+                .resolve_registered_flow(&aor, current_old)
+                .await
+                .unwrap()
+                .process_local_flow_id(),
+            42
+        );
+
+        let replacement_token = service.new_registered_flow_token();
+        let replacement_contact = contact(replacement_token.clone(), 2);
+        let replacement_prepared = service
+            .prepare_register_aor(&aor, replacement_contact.clone(), Some(600))
+            .await
+            .unwrap();
+        service
+            .bind_registered_flow(&aor, &replacement_contact, 44)
+            .unwrap();
+        replacement_prepared.commit().await;
+        assert!(service.commit_registered_flow(&aor, &replacement_contact));
+
+        assert!(service
+            .resolve_registered_flow(&aor, &old_contact)
+            .await
+            .is_err());
+        let current = service.lookup_aor(&aor).await.unwrap();
+        assert_eq!(
+            service
+                .resolve_registered_flow(&aor, &current[0])
+                .await
+                .unwrap()
+                .process_local_flow_id(),
+            44
+        );
+
+        let closed_token = service.new_registered_flow_token();
+        let closed_contact = contact(closed_token.clone(), 2);
+        let closed_prepared = service
+            .prepare_register_aor(&aor, closed_contact.clone(), Some(600))
+            .await
+            .unwrap();
+        service
+            .bind_registered_flow(&aor, &closed_contact, 45)
+            .unwrap();
+        assert_eq!(service.stage_process_local_flow_unreachable(45).len(), 1);
+        closed_prepared.commit().await;
+        assert!(!service.commit_registered_flow(&aor, &closed_contact));
+        service
+            .set_registered_flow_reachability(&aor, &closed_token, ContactReachability::Unreachable)
+            .await
+            .unwrap();
+        let current = service.lookup_aor(&aor).await.unwrap();
+        assert_eq!(current[0].reachability, ContactReachability::Unreachable);
+        assert!(service
+            .resolve_registered_flow(&aor, &current[0])
+            .await
+            .is_err());
+        service.shutdown().await.unwrap();
     }
 }
 

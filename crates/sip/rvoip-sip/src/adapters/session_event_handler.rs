@@ -1436,6 +1436,7 @@ fn media_observation_api_event(event: &MediaToSessionEvent) -> Option<crate::api
             call_id: SessionId(session_id.clone()),
             packet_loss_percent: (quality_metrics.packet_loss * 100.0) as u32,
             jitter_ms: quality_metrics.jitter_ms as u32,
+            mos: Some(quality_metrics.mos_score as f32),
         }),
         _ => None,
     }
@@ -1853,6 +1854,7 @@ fn dialog_event_requires_processing_ack(event: &DialogToSessionEvent) -> bool {
         event,
         DialogToSessionEvent::IncomingCall { .. }
             | DialogToSessionEvent::IncomingRegister { .. }
+            | DialogToSessionEvent::RegisteredFlowClosed { .. }
             | DialogToSessionEvent::ByeReceived { .. }
             | DialogToSessionEvent::InfoReceived { .. }
             | DialogToSessionEvent::ReinviteReceived { .. }
@@ -1871,6 +1873,7 @@ fn dialog_to_session_event_kind(event: &DialogToSessionEvent) -> &'static str {
         DialogToSessionEvent::CallTerminated { .. } => "call_terminated",
         DialogToSessionEvent::CallFailed { .. } => "call_failed",
         DialogToSessionEvent::CallCancelled { .. } => "call_cancelled",
+        DialogToSessionEvent::RegisteredFlowClosed { .. } => "registered_flow_closed",
         _ => "dialog_to_session_other",
     }
 }
@@ -1980,12 +1983,25 @@ impl SessionCrossCrateEventHandler {
         method: impl Into<String>,
         reason: impl Into<String>,
     ) {
+        let method = method.into();
+        self.app_event_publisher
+            .publish_renegotiation_completion_exact(
+                handle,
+                if method.eq_ignore_ascii_case("INVITE") {
+                    "INVITE"
+                } else if method.eq_ignore_ascii_case("UPDATE") {
+                    "UPDATE"
+                } else {
+                    "ACK"
+                },
+                crate::api::lifecycle::RenegotiationCompletionOutcome::Failed,
+            );
         self.app_event_publisher.publish_diagnostic_exact(
             handle,
             crate::api::events::DiagnosticEvent::RenegotiationFailed(
                 crate::api::events::RenegotiationFailure {
                     call_id: handle.session_id().clone(),
-                    method: method.into(),
+                    method,
                     reason: reason.into(),
                 },
             ),
@@ -2672,6 +2688,12 @@ impl SessionCrossCrateEventHandler {
             DialogToSessionEvent::OutboundFlowFailed { aor, reason, .. } => {
                 self.handle_outbound_flow_failed_parts(aor.clone(), reason.clone())
                     .await
+            }
+            DialogToSessionEvent::RegisteredFlowClosed { flow_id } => {
+                if let Some(adapter) = self.registration_adapter.get() {
+                    adapter.handle_registered_flow_closed(*flow_id).await;
+                }
+                Ok(())
             }
             // SIP_API_DESIGN_2 Phase E — inbound mid-dialog INFO / MESSAGE / OPTIONS.
             // Each variant reaches session-core with the original
@@ -4542,6 +4564,14 @@ impl SessionCrossCrateEventHandler {
                     "Suppressing CallAnswered for {} because the committed Dialog200OK was not an initial-answer YAML outcome",
                     session_id
                 );
+                if mid_dialog_offer {
+                    self.app_event_publisher
+                        .publish_renegotiation_completion_exact(
+                            handle,
+                            "INVITE",
+                            crate::api::lifecycle::RenegotiationCompletionOutcome::Committed,
+                        );
+                }
             }
         }
 
@@ -7001,10 +7031,14 @@ mod tests {
                     call_id,
                     packet_loss_percent,
                     jitter_ms,
+                    mos,
                 }) => {
                     assert_eq!(call_id, SessionId("media-reporting".to_string()));
                     assert_eq!(packet_loss_percent, 12);
                     assert_eq!(jitter_ms, 17);
+                    // media-core's estimate now survives the projection
+                    // instead of being dropped at this boundary.
+                    assert_eq!(mos, Some(3.8));
                 }
                 other => panic!("unexpected media quality projection: {other:?}"),
             }

@@ -1271,6 +1271,19 @@ only codec payload or otherwise do not parse as a complete RTP packet. In
 the conformance boundary; the opaque raw framing helpers exist only for alpha
 API compatibility.
 
+An implementation MAY expose a bounded pre-normalization observation stream.
+RVoIP's QUIC and WebTransport adapters expose equivalent opt-in streams that
+associate the parsed RTP packet with its authenticated core route. Observer
+backpressure MUST NOT delay media. The observation retains RTP sequence,
+timestamp, SSRC, marker, CSRCs, parsed extensions, and validated padding size;
+the codec payload excludes padding.
+
+When forwarding a generic codec-payload frame, RVoIP treats the egress as a new
+RTP hop: marker defaults false, CSRC and extension lists are empty, and padding
+is omitted. Applications must explicitly choose the lossless observed-packet
+serializer if exact packet identity is required; bridges must not blindly copy
+hop-specific RTP metadata.
+
 This dual-header approach (UCTP datagram header + RTP header) is intentional: the UCTP header makes the datagram self-describing for routing across many Connections on one substrate; the RTP header preserves compatibility with codecs and tooling that expect RTP.
 
 In multi-party Sessions (§7.7), `stream_local_id` names a Stream binding for a

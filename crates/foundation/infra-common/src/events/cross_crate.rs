@@ -234,6 +234,7 @@ impl RoutableEvent for RvoipCrossCrateEvent {
                 DialogToSessionEvent::MessageFailed { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::IncomingRegister { .. } => None, // No session_id yet for incoming REGISTER
                 DialogToSessionEvent::OutboundFlowFailed { .. } => None, // Flow-level, not session-level
+                DialogToSessionEvent::RegisteredFlowClosed { .. } => None, // Flow-level, not session-level
                 DialogToSessionEvent::InfoReceived { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::MessageReceived { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::OptionsReceived { session_id, .. } => {
@@ -438,6 +439,14 @@ pub struct SipTransportContext {
     /// Whether this hop used a credential-protecting transport such as TLS or
     /// WSS.
     pub secure: bool,
+    /// Exact process-local connection flow that carried the message, when the
+    /// transport is connection-oriented.
+    ///
+    /// This value is routing metadata, not an authorization credential and not
+    /// a durable cluster identity. A consumer may return it only to the same
+    /// live transport owner that produced it.
+    #[serde(default)]
+    pub flow_id: Option<u64>,
 }
 
 impl SipTransportContext {
@@ -453,7 +462,14 @@ impl SipTransportContext {
             local_addr: local_addr.into(),
             remote_addr: remote_addr.into(),
             secure,
+            flow_id: None,
         }
+    }
+
+    /// Attach the exact process-local connection flow observed at ingress.
+    pub const fn with_flow_id(mut self, flow_id: u64) -> Self {
+        self.flow_id = Some(flow_id);
+        self
     }
 }
 
@@ -1343,6 +1359,14 @@ pub enum DialogToSessionEvent {
         /// telemetry and log correlation.
         reason: String,
     },
+
+    /// Exact process-local flow closure used by a co-located registrar to
+    /// degrade owned RFC 5626 bindings. The value is never persisted or
+    /// rendered in diagnostics.
+    RegisteredFlowClosed {
+        /// Opaque process-local transport identity.
+        flow_id: u64,
+    },
 }
 
 fn safe_auth_method_debug_label(method: &str) -> &'static str {
@@ -1679,6 +1703,10 @@ impl fmt::Debug for DialogToSessionEvent {
                 instance,
                 reason,
             } => debug_dialog_variant!(f, "OutboundFlowFailed", aor, reg_id, instance, reason,),
+            Self::RegisteredFlowClosed { flow_id: _ } => f
+                .debug_struct("RegisteredFlowClosed")
+                .field("flow_present", &true)
+                .finish(),
         }
     }
 }
