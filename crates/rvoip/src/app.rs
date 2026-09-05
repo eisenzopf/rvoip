@@ -396,12 +396,21 @@ impl SipConfig {
     /// Smooth inbound audio and conceal lost packets.
     ///
     /// A carrier trunk delivers audio in bursts and loses packets; without
-    /// this those are heard directly as clicks and dropouts. It costs the
-    /// buffer's depth in added latency, which is why it is opt-in rather
-    /// than assumed.
+    /// this those are heard directly as clicks and dropouts. Trusted trunks
+    /// enable the default policy automatically; this method customizes it.
     #[must_use]
     pub fn playout(mut self, config: rvoip_sip::PlayoutConfig) -> Self {
         self.playout = Some(config);
+        self
+    }
+
+    /// Disable inbound playout smoothing explicitly.
+    ///
+    /// This is useful for a controlled LAN or packet-perfect lab. Call it
+    /// after [`Self::trusted_trunk`] when overriding that carrier-safe default.
+    #[must_use]
+    pub fn disable_playout(mut self) -> Self {
+        self.playout = None;
         self
     }
 
@@ -473,6 +482,7 @@ impl SipConfig {
     /// than silently trusting nothing.
     pub fn trusted_trunk(mut self, cidr: impl Into<String>, subject: impl Into<String>) -> Self {
         self.trusted_trunks.push((cidr.into(), subject.into()));
+        self.playout.get_or_insert_default();
         self
     }
 
@@ -2220,6 +2230,26 @@ mod tests {
         assert!(plain.playout.is_none());
         assert!(!plain.offer_srtp);
         assert!(!plain.srtp_required);
+
+        let carrier = make_low_sip_config(
+            &SipConfig::bind("0.0.0.0:5060")
+                .tenant("tenant-a")
+                .trusted_trunk("192.0.2.0/24", "carrier-a"),
+            bind,
+        );
+        assert!(
+            carrier.playout.is_some(),
+            "a carrier-admitted trunk must not inherit raw arrival-order audio"
+        );
+
+        let carrier_lab = make_low_sip_config(
+            &SipConfig::bind("127.0.0.1:5060")
+                .tenant("tenant-a")
+                .trusted_trunk("127.0.0.1/32", "carrier-lab")
+                .disable_playout(),
+            bind,
+        );
+        assert!(carrier_lab.playout.is_none());
 
         let smoothed = make_low_sip_config(
             &SipConfig::bind("127.0.0.1:5060").playout(PlayoutConfig {

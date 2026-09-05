@@ -770,6 +770,19 @@ where
 use rvoip_media_core::processing::audio::playout::{PlayoutBuffer, PlayoutConfig};
 use rvoip_media_core::types::AudioFrame;
 
+enum InboundPumpEvent {
+    CodecChanged,
+    Audio(Option<AudioFrame>),
+    PlayoutTick,
+}
+
+async fn wait_for_playout(deadline: Option<std::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_media_driver(
     lifecycle: Arc<SipMediaLifecycleState>,
@@ -964,12 +977,23 @@ async fn run_inbound_pump(
     let mut reported = std::time::Instant::now();
 
     loop {
-        let audio_frame = tokio::select! {
+        let event = tokio::select! {
             biased;
             changed = codec_updates.changed() => {
                 if changed.is_err() {
                     return "sip-codec-update-channel-closed";
                 }
+                InboundPumpEvent::CodecChanged
+            }
+            frame = subscriber.receiver.recv() => InboundPumpEvent::Audio(frame),
+            () = wait_for_playout(playout.as_ref().and_then(PlayoutBuffer::next_deadline)) => {
+                InboundPumpEvent::PlayoutTick
+            }
+        };
+
+        let mut ready = Vec::new();
+        match event {
+            InboundPumpEvent::CodecChanged => {
                 let Some(updated) = codec_updates.borrow_and_update().clone() else {
                     continue;
                 };
@@ -981,29 +1005,26 @@ async fn run_inbound_pump(
                 playout = playout_policy.map(PlayoutBuffer::new);
                 continue;
             }
-            frame = subscriber.receiver.recv() => match frame {
-                Some(frame) => frame,
-                None => return "sip-audio-source-closed",
-            }
-        };
-        let ready: Vec<AudioFrame> = match playout.as_mut() {
-            Some(buffer) => {
-                buffer.push(audio_frame, std::time::Instant::now());
-                // Drain everything now due. One arrival can release several
-                // frames when it fills a hole earlier arrivals left.
-                let mut ready = Vec::new();
-                while let Some(frame) = buffer.pop() {
-                    ready.push(frame);
-                    // A burst this long means the buffer is unloading, not
-                    // pacing; stop rather than spin.
-                    if ready.len() >= 8 {
-                        break;
-                    }
+            InboundPumpEvent::Audio(Some(audio_frame)) => match playout.as_mut() {
+                Some(buffer) => buffer.push(audio_frame, std::time::Instant::now()),
+                None => ready.push(audio_frame),
+            },
+            InboundPumpEvent::Audio(None) => return "sip-audio-source-closed",
+            InboundPumpEvent::PlayoutTick => {}
+        }
+
+        if let Some(buffer) = playout.as_mut() {
+            // One timer tick emits one ordinary frame. A bounded number of
+            // additional frames may be released only when the queue is above
+            // target or the task woke late, which reconverges latency without
+            // letting a network arrival run the media clock.
+            while let Some(frame) = buffer.pop_due(std::time::Instant::now()) {
+                ready.push(frame);
+                if ready.len() >= 8 {
+                    break;
                 }
-                ready
             }
-            None => vec![audio_frame],
-        };
+        }
 
         if let Some(buffer) = playout.as_ref() {
             // Periodic, not per frame: this is a hot path and the numbers
@@ -1011,12 +1032,14 @@ async fn run_inbound_pump(
             if reported.elapsed() >= std::time::Duration::from_secs(10) {
                 reported = std::time::Instant::now();
                 let stats = buffer.stats();
-                if stats.frames_concealed > 0 || stats.frames_late > 0 {
+                if stats.frames_concealed > 0 || stats.frames_late > 0 || stats.frames_catch_up > 0
+                {
                     tracing::debug!(
                         target: "rvoip_sip",
                         emitted = stats.frames_emitted,
                         concealed = stats.frames_concealed,
                         late = stats.frames_late,
+                        catch_up = stats.frames_catch_up,
                         depth = stats.depth,
                         "SipMediaStream playout quality"
                     );
@@ -1468,6 +1491,61 @@ mod negotiated_codec_tests {
         let second = frames_rx.recv().await.expect("PCMA graph frame");
         assert_eq!(second.payload_type, Some(8));
         assert_ne!(first.payload, second.payload);
+
+        drop(audio_tx);
+        assert_eq!(pump.await.expect("pump task"), "sip-audio-source-closed");
+    }
+
+    #[tokio::test]
+    async fn inbound_pump_uses_a_clocked_playout_deadline_and_plc() {
+        let session_id = SessionId::new();
+        let (audio_tx, audio_rx) = mpsc::channel(4);
+        let subscriber = crate::types::AudioFrameSubscriber::new(session_id, audio_rx);
+        let (frames_tx, mut frames_rx) = mpsc::channel(4);
+        let pcmu = SipMediaCodecRuntime {
+            negotiated: negotiated("PCMU", 8_000, 1),
+            payload_type: 0,
+        };
+        let (_codec_tx, codec_rx) = watch::channel(Some(pcmu.clone()));
+        let pump = tokio::spawn(run_inbound_pump(
+            subscriber,
+            pcmu,
+            codec_rx,
+            StreamId::new(),
+            frames_tx,
+            Some(PlayoutConfig {
+                adaptive: false,
+                ..PlayoutConfig::default()
+            }),
+        ));
+
+        audio_tx
+            .send(AudioFrame::new(vec![1_000; 160], 8_000, 1, 0))
+            .await
+            .expect("first source frame");
+        audio_tx
+            .send(AudioFrame::new(vec![1_000; 160], 8_000, 1, 320))
+            .await
+            .expect("post-loss source frame");
+
+        let first = tokio::time::timeout(std::time::Duration::from_millis(100), frames_rx.recv())
+            .await
+            .expect("first playout deadline")
+            .expect("first graph frame");
+        assert_eq!(first.timestamp_rtp, 0);
+
+        let concealed =
+            tokio::time::timeout(std::time::Duration::from_millis(100), frames_rx.recv())
+                .await
+                .expect("loss playout deadline")
+                .expect("concealed graph frame");
+        assert_eq!(concealed.timestamp_rtp, 160);
+
+        let resumed = tokio::time::timeout(std::time::Duration::from_millis(100), frames_rx.recv())
+            .await
+            .expect("resume playout deadline")
+            .expect("resumed graph frame");
+        assert_eq!(resumed.timestamp_rtp, 320);
 
         drop(audio_tx);
         assert_eq!(pump.await.expect("pump task"), "sip-audio-source-closed");

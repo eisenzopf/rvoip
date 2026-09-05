@@ -2194,9 +2194,11 @@ pub struct Config {
 
     /// Playout smoothing and packet-loss concealment for inbound audio.
     ///
-    /// `None` (the default) forwards frames exactly as they arrive, gaps
-    /// included — the behaviour of every release before this, and the right
-    /// choice for a LAN or a lab where reordering only adds latency.
+    /// `None` forwards frames exactly as they arrive, gaps included — the
+    /// behaviour of every release before this, and the right choice for a LAN
+    /// or a lab where reordering only adds latency. Local and generic configs
+    /// retain that compatibility default; [`Config::carrier_sbc`] enables the
+    /// production playout policy automatically.
     ///
     /// Set it on any route crossing the public internet: a carrier trunk
     /// delivers audio in bursts and loses packets, and without a buffer
@@ -3268,6 +3270,7 @@ impl Config {
     /// );
     /// assert_eq!(config.sip_contact_mode, SipContactMode::RegisteredFlowRfc5626);
     /// assert!(config.srtp_required);
+    /// assert!(config.playout.is_some());
     /// ```
     pub fn carrier_sbc(
         name: &str,
@@ -3285,6 +3288,7 @@ impl Config {
         config.outbound_proxy_uri = Some(outbound_proxy_uri.into());
         config.offer_srtp = true;
         config.srtp_required = true;
+        config.playout = Some(crate::PlayoutConfig::default());
         config
     }
 

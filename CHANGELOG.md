@@ -149,9 +149,15 @@ fix. Additive: the convenience builder path is unchanged.
   the artifact budget; a long burst fades to silence rather than repeating
   the same 20 ms indefinitely. RTP timestamp wrap is handled, without which a
   single wrap discards every later frame.
+- Playout is driven by a local media-clock deadline, not by packet arrival.
+  Excess depth opens a bounded drain valve to reconverge latency, while a
+  long-baseline RTP/arrival comparison tracks remote oscillator skew. The
+  release matrix holds depth bounded for one simulated hour at both +50 ppm
+  and -50 ppm and proves G.711 PLC fires on the missing frame's deadline.
 - `Config::playout` on the SIP config, `SipConfig::playout` on the app
-  builder. Off by default: forwarding frames exactly as they arrive is what
-  earlier releases did, and is still right on a LAN.
+  builder. Generic/local configs retain the compatibility default; the
+  carrier/SBC profile and app listeners admitting a trusted trunk enable the
+  carrier-safe default automatically. Controlled LAN labs may opt out.
 - Note for anyone surveying this area: `media-core`'s
   `rtp_processing::jitter::JitterBuffer` is a stub — `get_packet` is
   `pop_first` and `flush_old_packets` clears the whole buffer. It has no

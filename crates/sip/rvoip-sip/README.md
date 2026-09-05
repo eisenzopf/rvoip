@@ -118,6 +118,13 @@ Applications composing `SipAdapter` through `rvoip-core` may request a
 per-connection codec change with `Orchestrator::renegotiate_media`. The SIP
 adapter translates that request into a one-shot re-INVITE offer for the exact
 dialog generation and returns only after the peer's SDP answer is committed.
+
+Carrier-facing configurations can enable `PlayoutConfig` to place inbound
+audio on a local media clock. The buffer reorders RTP timestamps, emits
+repeat-with-fade PLC for missing G.711 frames, tracks remote clock skew, and
+drains excess depth so burst jitter does not become permanent latency.
+`Config::carrier_sbc` enables the production default; generic/local configs
+remain unbuffered for compatibility and deterministic packet-level labs.
 The call's stable media and stream descriptor remain unchanged on rejection;
 on success the existing stream updates both media pumps without changing its
 identity or application channels. Codec preferences never mutate coordinator-

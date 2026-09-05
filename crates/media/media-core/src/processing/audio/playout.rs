@@ -1,7 +1,8 @@
 //! Playout smoothing and packet-loss concealment for a decoded audio stream.
 //!
 //! Packet-level reordering belongs below this, in `rtp-core`'s
-//! [`AdaptiveJitterBuffer`]. What remains once frames are decoded is the part
+//! [`rvoip_rtp_core::buffer::AdaptiveJitterBuffer`]. What remains once frames
+//! are decoded is the part
 //! a listener actually hears: audio arriving in bursts rather than evenly,
 //! and gaps where a packet never arrived at all.
 //!
@@ -69,6 +70,13 @@ pub struct PlayoutStats {
     pub frames_concealed: u64,
     /// Frames arriving with a timestamp already seen.
     pub frames_duplicate: u64,
+    /// Frames emitted ahead of the next ordinary tick to drain excess depth.
+    ///
+    /// This is the latency-reconvergence valve: a faster sender clock or an
+    /// arrival burst cannot grow the queue without bound.
+    pub frames_catch_up: u64,
+    /// Estimated remote media-clock skew in parts per million.
+    pub clock_skew_ppm: i32,
     /// Current depth in frames.
     pub depth: usize,
 }
@@ -79,6 +87,9 @@ pub struct PlayoutBuffer {
     /// Pending frames keyed by RTP timestamp, which is the media clock and
     /// therefore the correct playout order even when arrival order differs.
     pending: BTreeMap<u32, AudioFrame>,
+    /// Timestamp of the first arrival, used as the wrap-safe ordering origin
+    /// until the first frame is emitted.
+    origin_timestamp: Option<u32>,
     /// The timestamp the next emitted frame should carry, once known.
     next_timestamp: Option<u32>,
     /// Samples per frame, learned from the first frame so a gap can be
@@ -87,9 +98,15 @@ pub struct PlayoutBuffer {
     last_emitted: Option<AudioFrame>,
     consecutive_concealed: usize,
     primed: bool,
+    /// Local media-clock deadline for the next ordinary emission.
+    next_playout_at: Option<Instant>,
     /// Inter-arrival jitter estimate, in frames, smoothed like RFC 3550's.
     jitter_frames: f64,
     last_arrival: Option<Instant>,
+    /// Long-baseline arrival/timestamp origin used to distinguish oscillator
+    /// drift from short-lived network jitter.
+    clock_origin: Option<(Instant, u32)>,
+    clock_skew_ppm: f64,
     stats: PlayoutStats,
 }
 
@@ -110,13 +127,17 @@ impl PlayoutBuffer {
         Self {
             config,
             pending: BTreeMap::new(),
+            origin_timestamp: None,
             next_timestamp: None,
             samples_per_frame: None,
             last_emitted: None,
             consecutive_concealed: 0,
             primed: false,
+            next_playout_at: None,
             jitter_frames: 0.0,
             last_arrival: None,
+            clock_origin: None,
+            clock_skew_ppm: 0.0,
             stats: PlayoutStats::default(),
         }
     }
@@ -126,6 +147,8 @@ impl PlayoutBuffer {
     /// `arrived_at` drives the jitter estimate only; ordering comes from the
     /// frame's own RTP timestamp.
     pub fn push(&mut self, frame: AudioFrame, arrived_at: Instant) {
+        self.origin_timestamp.get_or_insert(frame.timestamp);
+        self.update_clock_skew(frame.timestamp, frame.sample_rate, arrived_at);
         let samples = u32::try_from(frame.samples.len()).unwrap_or(0);
         if samples > 0 {
             // The first frame teaches the buffer its frame length, so a gap
@@ -163,10 +186,19 @@ impl PlayoutBuffer {
         // A buffer past its ceiling is a route that is not going to recover
         // by waiting; release the oldest rather than growing latency.
         while self.pending.len() > self.config.max_depth_frames {
-            if let Some((&oldest, _)) = self.pending.iter().next() {
+            if let Some(oldest) = self.oldest_pending_timestamp() {
                 self.pending.remove(&oldest);
                 self.stats.frames_late += 1;
             }
+        }
+
+        if !self.primed && self.pending.len() >= self.target_depth().max(1) {
+            self.primed = true;
+            // Preserve the configured backlog instead of consuming one frame
+            // at the same instant it finishes filling. For two 20 ms frames,
+            // the first sample is played 40 ms after the first arrival.
+            let initial_wait = self.frame_duration().unwrap_or(Duration::from_millis(20));
+            self.next_playout_at = Some(arrived_at + initial_wait);
         }
     }
 
@@ -175,20 +207,62 @@ impl PlayoutBuffer {
     /// Returns `None` while the buffer is still filling to its depth, which
     /// is the only time it deliberately produces nothing.
     pub fn pop(&mut self) -> Option<AudioFrame> {
-        let depth = self.target_depth();
         if !self.primed {
-            if self.pending.len() < depth {
+            if self.pending.len() < self.target_depth().max(1) {
                 return None;
             }
             self.primed = true;
         }
 
+        self.pop_next()
+    }
+
+    /// Local media-clock deadline for the next playout decision.
+    ///
+    /// `None` means the buffer is still filling. Once primed, the caller
+    /// should wake at this deadline even if no packet arrives: a missing RTP
+    /// packet must become PLC on time rather than an audible hole.
+    #[must_use]
+    pub const fn next_deadline(&self) -> Option<Instant> {
+        self.next_playout_at
+    }
+
+    /// Emit one frame only when its media-clock deadline is due, or when the
+    /// queue is above its current target and must drain to reconverge latency.
+    ///
+    /// The ordinary path advances from the previous deadline (not from
+    /// `now`), so task scheduling jitter cannot permanently skew the playout
+    /// clock. The early-drain path deliberately leaves the deadline unchanged:
+    /// it is the equivalent of a jitter buffer's skip-timer valve.
+    pub fn pop_due(&mut self, now: Instant) -> Option<AudioFrame> {
+        if !self.primed {
+            return None;
+        }
+
+        let deadline = self.next_playout_at?;
+        let due = now >= deadline;
+        let drain_down = self.pending.len() > self.target_depth().max(1);
+        if !due && !drain_down {
+            return None;
+        }
+
+        let frame = self.pop_next()?;
+        if due {
+            let nominal = nonzero_frame_duration(&frame)
+                .or_else(|| self.frame_duration())
+                .unwrap_or(Duration::from_millis(20));
+            let duration = scale_duration(nominal, self.clock_skew_ppm);
+            self.next_playout_at = Some(deadline + duration);
+        } else {
+            self.stats.frames_catch_up += 1;
+        }
+        Some(frame)
+    }
+
+    fn pop_next(&mut self) -> Option<AudioFrame> {
         let expected = match self.next_timestamp {
             Some(timestamp) => timestamp,
-            None => {
-                let first = *self.pending.keys().next()?;
-                first
-            }
+            None => self.oldest_pending_timestamp()?,
         };
 
         if let Some(frame) = self.pending.remove(&expected) {
@@ -203,8 +277,17 @@ impl PlayoutBuffer {
         // started cannot wait: the concealment *is* the wait. Bounded by
         // `max_consecutive_concealed`, past which it becomes silence, so a
         // far end that has simply gone quiet does not buzz forever.
-        let _ = depth;
         self.conceal(expected)
+    }
+
+    fn oldest_pending_timestamp(&self) -> Option<u32> {
+        let origin = self.origin_timestamp?;
+        self.pending
+            .keys()
+            .copied()
+            // A signed wrapping delta gives the correct order for the
+            // practical RTP window on either side of 2^32 wrap.
+            .min_by_key(|timestamp| timestamp.wrapping_sub(origin) as i32)
     }
 
     /// Synthesize the frame that should have arrived.
@@ -277,6 +360,36 @@ impl PlayoutBuffer {
             })
     }
 
+    fn update_clock_skew(&mut self, timestamp: u32, sample_rate: u32, arrived_at: Instant) {
+        let Some((origin_arrival, origin_timestamp)) = self.clock_origin else {
+            self.clock_origin = Some((arrived_at, timestamp));
+            return;
+        };
+        if sample_rate == 0 {
+            return;
+        }
+
+        let timestamp_delta = timestamp.wrapping_sub(origin_timestamp);
+        // A signed-negative wrapping delta is an out-of-order packet, not a
+        // clock observation. Wait for one second of media before estimating;
+        // over that baseline ordinary packet jitter contributes little.
+        if timestamp_delta as i32 <= 0 || timestamp_delta < sample_rate {
+            return;
+        }
+        let nominal = f64::from(timestamp_delta) / f64::from(sample_rate);
+        let actual = arrived_at
+            .saturating_duration_since(origin_arrival)
+            .as_secs_f64();
+        let observed_ppm = ((actual / nominal) - 1.0) * 1_000_000.0;
+        if observed_ppm.is_finite() {
+            // Commodity oscillators are normally well inside ±100 ppm. The
+            // wider bound tolerates imperfect clocks while preventing a route
+            // delay step from turning into an unsafe playout-rate change.
+            self.clock_skew_ppm = observed_ppm.clamp(-1_000.0, 1_000.0);
+            self.stats.clock_skew_ppm = self.clock_skew_ppm.round() as i32;
+        }
+    }
+
     #[must_use]
     pub fn stats(&self) -> PlayoutStats {
         PlayoutStats {
@@ -284,6 +397,14 @@ impl PlayoutBuffer {
             ..self.stats
         }
     }
+}
+
+fn nonzero_frame_duration(frame: &AudioFrame) -> Option<Duration> {
+    (!frame.duration.is_zero()).then_some(frame.duration)
+}
+
+fn scale_duration(duration: Duration, skew_ppm: f64) -> Duration {
+    Duration::from_secs_f64(duration.as_secs_f64() * (1.0 + skew_ppm / 1_000_000.0))
 }
 
 /// Whether `a` precedes `b` in RTP timestamp space, which wraps at 2^32.
@@ -344,6 +465,62 @@ mod tests {
             .filter_map(|_| playout.pop().map(|frame| frame.timestamp))
             .collect();
         assert_eq!(order, vec![0, 160, 320]);
+    }
+
+    #[test]
+    fn scheduled_playout_waits_for_the_media_clock_not_packet_arrival() {
+        let mut playout = PlayoutBuffer::new(PlayoutConfig {
+            target_depth_frames: 3,
+            adaptive: false,
+            ..PlayoutConfig::default()
+        });
+        let now = Instant::now();
+        playout.push(frame(0, 1), now);
+        playout.push(frame(160, 2), now);
+
+        assert!(playout.pop_due(now).is_none());
+        playout.push(frame(320, 3), now + Duration::from_millis(1));
+        assert!(
+            playout.pop_due(now + Duration::from_millis(1)).is_none(),
+            "a network arrival must not advance the playout clock"
+        );
+        assert!(playout.pop_due(now + Duration::from_millis(20)).is_none());
+        assert_eq!(
+            playout
+                .pop_due(now + Duration::from_millis(21))
+                .expect("first tick")
+                .timestamp,
+            0
+        );
+        assert!(playout.pop_due(now + Duration::from_millis(22)).is_none());
+    }
+
+    #[test]
+    fn scheduled_playout_conceals_a_missing_packet_on_its_deadline() {
+        let (mut playout, now) = buffer();
+        playout.push(frame(0, 1_000), now);
+        playout.push(frame(320, 1_000), now);
+
+        assert!(playout.pop_due(now).is_none());
+        assert_eq!(
+            playout
+                .pop_due(now + Duration::from_millis(20))
+                .expect("first tick")
+                .timestamp,
+            0
+        );
+        let concealed = playout
+            .pop_due(now + Duration::from_millis(40))
+            .expect("loss deadline");
+        assert_eq!(concealed.timestamp, 160);
+        assert_eq!(playout.stats().frames_concealed, 1);
+        assert_eq!(
+            playout
+                .pop_due(now + Duration::from_millis(60))
+                .expect("real media resumes")
+                .timestamp,
+            320
+        );
     }
 
     #[test]
@@ -433,10 +610,97 @@ mod tests {
     }
 
     #[test]
+    fn a_fast_remote_clock_drains_down_instead_of_accumulating_latency() {
+        let mut playout = PlayoutBuffer::new(PlayoutConfig {
+            adaptive: false,
+            ..PlayoutConfig::default()
+        });
+        let start = Instant::now();
+        let remote_period = Duration::from_nanos(19_999_000); // 50 ppm fast
+
+        for index in 0_u32..180_000 {
+            let arrival = start + remote_period * index;
+            playout.push(frame(index.wrapping_mul(160), 1), arrival);
+            while playout
+                .next_deadline()
+                .is_some_and(|deadline| deadline <= arrival)
+            {
+                playout.pop_due(arrival).expect("due frame");
+            }
+            while playout.pop_due(arrival).is_some() {}
+        }
+
+        let stats = playout.stats();
+        assert!(stats.frames_catch_up > 0, "the drain valve never opened");
+        assert!(
+            stats.depth <= PlayoutConfig::default().target_depth_frames,
+            "a one-hour 50 ppm skew accumulated {} frames",
+            stats.depth
+        );
+    }
+
+    #[test]
+    fn a_slow_remote_clock_uses_bounded_plc_instead_of_drifting() {
+        let mut playout = PlayoutBuffer::new(PlayoutConfig {
+            adaptive: false,
+            ..PlayoutConfig::default()
+        });
+        let start = Instant::now();
+        let remote_period = Duration::from_nanos(20_001_000); // 50 ppm slow
+
+        for index in 0_u32..180_000 {
+            let arrival = start + remote_period * index;
+            while playout
+                .next_deadline()
+                .is_some_and(|deadline| deadline <= arrival)
+            {
+                playout.pop_due(arrival).expect("due frame or PLC");
+            }
+            playout.push(frame(index.wrapping_mul(160), 1), arrival);
+        }
+
+        let stats = playout.stats();
+        assert!(
+            (stats.clock_skew_ppm - 50).abs() <= 1,
+            "remote clock estimate was {} ppm instead of 50 ppm",
+            stats.clock_skew_ppm
+        );
+        assert!(
+            stats.frames_concealed <= 1,
+            "clock tracking should avoid frame-sized PLC corrections, got {}",
+            stats.frames_concealed
+        );
+        assert!(stats.depth <= PlayoutConfig::default().target_depth_frames);
+    }
+
+    #[test]
     fn timestamp_wrap_is_not_mistaken_for_a_leap_backwards() {
         assert!(wrapped_before(u32::MAX - 160, u32::MAX));
         // Across the wrap, the earlier timestamp is the larger number.
         assert!(wrapped_before(u32::MAX, 160));
         assert!(!wrapped_before(160, u32::MAX));
+    }
+
+    #[test]
+    fn startup_order_crosses_timestamp_wrap_correctly() {
+        let (mut playout, now) = buffer();
+        playout.push(frame(u32::MAX - 159, 1), now);
+        playout.push(frame(0, 2), now);
+
+        assert!(playout.pop_due(now).is_none());
+        assert_eq!(
+            playout
+                .pop_due(now + Duration::from_millis(20))
+                .expect("pre-wrap frame")
+                .timestamp,
+            u32::MAX - 159
+        );
+        assert_eq!(
+            playout
+                .pop_due(now + Duration::from_millis(40))
+                .expect("post-wrap frame")
+                .timestamp,
+            0
+        );
     }
 }
