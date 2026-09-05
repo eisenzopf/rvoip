@@ -1673,9 +1673,8 @@ impl MediaAdapter {
     /// `offered_codecs` with comfort-noise (PT 13) inserted in front
     /// of DTMF (PT 101) when enabled, preserving the legacy ordering
     /// the byte-fixture tests pin.
-    fn effective_offered_formats(&self) -> Vec<u8> {
-        let offered: Vec<u8> = self
-            .offered_codecs
+    fn effective_offered_formats_for(&self, requested: &[u8]) -> Vec<u8> {
+        let offered: Vec<u8> = requested
             .iter()
             .copied()
             .filter(|payload_type| payload_codec_available(*payload_type))
@@ -1695,6 +1694,10 @@ impl MediaAdapter {
             out.push(13);
         }
         out
+    }
+
+    fn effective_offered_formats(&self) -> Vec<u8> {
+        self.effective_offered_formats_for(&self.offered_codecs)
     }
 
     /// Commit one negotiated media generation to the media layer.
@@ -1816,6 +1819,29 @@ impl MediaAdapter {
                     session_id.0
                 ))
             })?;
+        let session = snapshot.state().clone();
+        Ok((guard, snapshot, session))
+    }
+
+    async fn lock_and_load_media_session_handle(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Result<(
+        tokio::sync::OwnedMutexGuard<()>,
+        Arc<SessionStateSnapshot>,
+        SessionState,
+    )> {
+        let lane = self.store.state_machine_lane_exact(handle).ok_or_else(|| {
+            SessionError::SessionNotFound(
+                "exact media session lifetime is no longer current".to_string(),
+            )
+        })?;
+        let guard = lane.lock_owned().await;
+        let snapshot = self.store.get_session_snapshot_exact(handle).map_err(|_| {
+            SessionError::SessionNotFound(
+                "exact media session lifetime changed while awaiting its lane".to_string(),
+            )
+        })?;
         let session = snapshot.state().clone();
         Ok((guard, snapshot, session))
     }
@@ -3710,6 +3736,81 @@ impl MediaAdapter {
         session_id: &SessionId,
         direction: crate::types::MediaDirection,
     ) -> Result<String> {
+        self.generate_local_sdp_offer_with_formats(session_id, direction, None)
+            .await
+    }
+
+    /// Generate an offer for one exact session with a one-shot codec list.
+    ///
+    /// The override is carried only through this render operation: it never
+    /// mutates the adapter-wide codec policy and therefore cannot bleed into a
+    /// concurrent call. A rejected re-INVITE leaves the previously negotiated
+    /// media generation untouched because this method only creates the offer.
+    #[cfg(test)]
+    pub(crate) async fn generate_local_sdp_offer_for_codecs(
+        &self,
+        session_id: &SessionId,
+        direction: crate::types::MediaDirection,
+        offered_codecs: &[u8],
+    ) -> Result<String> {
+        if !self
+            .effective_offered_formats_for(offered_codecs)
+            .into_iter()
+            .any(|payload_type| !matches!(payload_type, 13 | 101))
+        {
+            return Err(SessionError::SDPNegotiationFailed(
+                "per-session offer contains no available audio codec".to_string(),
+            ));
+        }
+        self.generate_local_sdp_offer_with_formats(session_id, direction, Some(offered_codecs))
+            .await
+    }
+
+    pub(crate) async fn generate_local_sdp_offer_for_codecs_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        direction: crate::types::MediaDirection,
+        offered_codecs: &[u8],
+    ) -> Result<String> {
+        if !self
+            .effective_offered_formats_for(offered_codecs)
+            .into_iter()
+            .any(|payload_type| !matches!(payload_type, 13 | 101))
+        {
+            return Err(SessionError::SDPNegotiationFailed(
+                "per-session offer contains no available audio codec".to_string(),
+            ));
+        }
+        let (lane, snapshot, mut session) = self.lock_and_load_media_session_handle(handle).await?;
+        let previous_origin = (
+            session.sdp_origin_session_id.clone(),
+            session.sdp_origin_version,
+        );
+        let result = self
+            .generate_local_sdp_offer_lane_owned_with_formats(
+                &mut session,
+                direction,
+                Some(offered_codecs),
+            )
+            .await;
+        if previous_origin
+            != (
+                session.sdp_origin_session_id.clone(),
+                session.sdp_origin_version,
+            )
+        {
+            drop(lane);
+            self.commit_media_lane_state(&snapshot, &session).await?;
+        }
+        result
+    }
+
+    async fn generate_local_sdp_offer_with_formats(
+        &self,
+        session_id: &SessionId,
+        direction: crate::types::MediaDirection,
+        offered_codecs: Option<&[u8]>,
+    ) -> Result<String> {
         let (lane, snapshot, mut session) =
             self.lock_and_load_exact_media_session(session_id).await?;
         let previous_origin = (
@@ -3717,7 +3818,11 @@ impl MediaAdapter {
             session.sdp_origin_version,
         );
         let result = self
-            .generate_local_sdp_offer_lane_owned(&mut session, direction)
+            .generate_local_sdp_offer_lane_owned_with_formats(
+                &mut session,
+                direction,
+                offered_codecs,
+            )
             .await;
         if previous_origin
             != (
@@ -3736,11 +3841,21 @@ impl MediaAdapter {
         session: &mut SessionState,
         direction: crate::types::MediaDirection,
     ) -> Result<String> {
+        self.generate_local_sdp_offer_lane_owned_with_formats(session, direction, None)
+            .await
+    }
+
+    async fn generate_local_sdp_offer_lane_owned_with_formats(
+        &self,
+        session: &mut SessionState,
+        direction: crate::types::MediaDirection,
+        offered_codecs: Option<&[u8]>,
+    ) -> Result<String> {
         let session_id = session.session_id.clone();
         let negotiation_key = Self::media_negotiation_key(session)?;
         if self.signaling_only_local_port().is_some() {
             return self
-                .generate_signaling_only_sdp_offer_lane_owned(session, direction)
+                .generate_signaling_only_sdp_offer_lane_owned(session, direction, offered_codecs)
                 .await;
         }
         // Resolve the exact managed resource once and prime the cached session
@@ -3848,7 +3963,10 @@ impl MediaAdapter {
         // Crypto attrs follow rtpmap/fmtp so ordering matches what
         // carriers expect; sendrecv goes last so the byte-fixture
         // tests stay stable.
-        let format_pts = self.effective_offered_formats();
+        let format_pts = offered_codecs.map_or_else(
+            || self.effective_offered_formats(),
+            |requested| self.effective_offered_formats_for(requested),
+        );
         let format_strings: Vec<String> = format_pts.iter().map(|pt| pt.to_string()).collect();
         let formats_ref: Vec<&str> = format_strings.iter().map(|s| s.as_str()).collect();
         let mut sdp_builder = SdpBuilder::new("Session")
@@ -4712,6 +4830,7 @@ impl MediaAdapter {
         &self,
         session: &mut SessionState,
         direction: crate::types::MediaDirection,
+        offered_codecs: Option<&[u8]>,
     ) -> Result<String> {
         let session_id = session.session_id.clone();
         let negotiation_key = Self::media_negotiation_key(session)?;
@@ -4739,7 +4858,10 @@ impl MediaAdapter {
             ("RTP/AVP", Vec::new())
         };
 
-        let format_pts = self.effective_offered_formats();
+        let format_pts = offered_codecs.map_or_else(
+            || self.effective_offered_formats(),
+            |requested| self.effective_offered_formats_for(requested),
+        );
         let format_strings: Vec<String> = format_pts.iter().map(|pt| pt.to_string()).collect();
         let formats_ref: Vec<&str> = format_strings.iter().map(|s| s.as_str()).collect();
         let mut media_builder = SdpBuilder::new("Session")
@@ -5294,6 +5416,70 @@ mod sdp_format_tests {
         assert!(resume.contains("a=sendrecv"), "{resume}");
         assert!(adapter.media_sessions.is_empty());
         assert!(adapter.media_resources.is_empty());
+    }
+
+    #[tokio::test]
+    async fn per_session_offer_codecs_are_one_shot_and_cannot_bleed() {
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let store = Arc::new(SessionStore::new());
+        let pcmu = SessionId("codec-override-pcmu".to_string());
+        let pcma = SessionId("codec-override-pcma".to_string());
+        let baseline = SessionId("codec-override-baseline".to_string());
+        for session_id in [&pcmu, &pcma, &baseline] {
+            store
+                .create_session(session_id.clone(), Role::UAC, false)
+                .await
+                .expect("create codec-override session");
+        }
+
+        let mut adapter = MediaAdapter::new(
+            Arc::new(MediaSessionController::new()),
+            Arc::clone(&store),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16_000,
+            16_100,
+        );
+        adapter.set_media_mode(MediaMode::SignalingOnly { sdp_rtp_port: 9 });
+
+        let (pcmu_offer, pcma_offer) = tokio::join!(
+            adapter.generate_local_sdp_offer_for_codecs(
+                &pcmu,
+                crate::types::MediaDirection::SendRecv,
+                &[0, 101],
+            ),
+            adapter.generate_local_sdp_offer_for_codecs(
+                &pcma,
+                crate::types::MediaDirection::SendRecv,
+                &[8, 101],
+            ),
+        );
+        let pcmu_offer = pcmu_offer.expect("PCMU one-shot offer");
+        let pcma_offer = pcma_offer.expect("PCMA one-shot offer");
+        assert!(pcmu_offer.contains("m=audio 9 RTP/AVP 0 101\r\n"));
+        assert!(!pcmu_offer.contains("PCMA/8000"));
+        assert!(pcma_offer.contains("m=audio 9 RTP/AVP 8 101\r\n"));
+        assert!(!pcma_offer.contains("PCMU/8000"));
+
+        let baseline_offer = adapter
+            .generate_local_sdp_offer(&baseline, crate::types::MediaDirection::SendRecv)
+            .await
+            .expect("adapter-wide baseline offer");
+        assert!(baseline_offer.contains("m=audio 9 RTP/AVP 0 8 101\r\n"));
+        for session_id in [&pcmu, &pcma] {
+            assert!(
+                store
+                    .get_session(session_id)
+                    .await
+                    .expect("read codec-override session")
+                    .negotiated_config
+                    .is_none(),
+                "rendering a rejected/unanswered offer must not replace stable negotiated media"
+            );
+        }
     }
 
     #[tokio::test]

@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Committed per-session SIP codec renegotiation
+
+- `SipAdapter::renegotiate_media` now renders a one-shot codec offer for the
+  exact call generation, waits for the peer's final re-INVITE result, and
+  returns the codec and payload type actually committed from the SDP answer.
+  It no longer changes the media graph optimistically after request dispatch.
+- Rejected, timed-out, replaced, or unobservable re-INVITEs fail closed and
+  retain the stable negotiated media generation. A rejected transaction can
+  be retried without changing adapter-global codec policy or another call's
+  offer.
+- A live `SipMediaStream` keeps its identity and channels while a committed
+  codec generation rebuilds both media pumps. Managed cross-transport graphs
+  now receive complete codec descriptors, preserving dynamic payload types and
+  fmtp during UCTP/SIP and WebRTC/SIP hot swaps.
+
 ### Awaitable media readiness
 
 - `ConnectionAdapter::wait_for_stream` now provides a transport-neutral,

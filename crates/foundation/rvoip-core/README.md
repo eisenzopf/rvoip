@@ -98,6 +98,14 @@ wait to the captured connection generation and returns typed errors for
 terminal teardown or replacement. Direct adapter waits are intended for
 adapter-level integration and retain a source-compatible bounded fallback.
 
+## Mid-call codec changes
+
+`Orchestrator::renegotiate_media` waits for the selected adapter's protocol-
+native negotiation to commit before updating a live bridge. Cross-transport
+media graphs receive the complete negotiated `CodecInfo`, including the exact
+dynamic payload type and fmtp, rather than reconstructing codec identity from
+the name. An adapter error leaves the graph on its prior codec generation.
+
 ## License
 
 Licensed under the MIT license. See the repository [LICENSE](https://github.com/eisenzopf/rvoip/blob/main/LICENSE).

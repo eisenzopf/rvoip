@@ -15,9 +15,7 @@ use crate::adapter::{
     InboundConnectionContext, OrchestratorAdapterEvent, OriginateRequest, PlaybackHandle,
     PlaybackOutcome, RejectReason, TransferAttemptId, TransferTarget,
 };
-use crate::bridge::{
-    codec_to_pt, frame_pump, BridgeManager, CrossBridgeHandle, DirectionalMediaBridgePlan,
-};
+use crate::bridge::{codec_to_pt, BridgeManager, CrossBridgeHandle, DirectionalMediaBridgePlan};
 use crate::capability::{CapabilityDescriptor, CapabilityIntersection};
 use crate::commands::{AudioSource, InboundAction, MuteDirection};
 use crate::config::Config;
@@ -59,7 +57,6 @@ use chrono::Utc;
 use dashmap::DashMap;
 use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
 use rvoip_infra_common::events::cross_crate::RvoipCrossCrateEvent;
-use rvoip_media_core::codec::transcoding::Transcoder;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -9568,8 +9565,6 @@ impl Orchestrator {
         // touches the direction whose PT actually moved.
         if let Some(peer) = self.bridge_peer_of(&connection_id) {
             if let Some(audio) = negotiated.audio.as_ref() {
-                let new_pt = codec_to_pt(&audio.name)
-                    .ok_or_else(|| RvoipError::UnsupportedCodec(audio.name.clone()))?;
                 // A2 — snapshot the bridge handle's relevant state
                 // (orientation + swap channel availability) WITHOUT
                 // holding the DashMap iterator guard across any
@@ -9593,7 +9588,7 @@ impl Orchestrator {
 
                     // A2 — direct .await for the peer's stream
                     // lookup (was `block_in_place + block_on`).
-                    let peer_pt = if let Ok(adp) = self.adapter_for(&peer) {
+                    let peer_codec = if let Ok(adp) = self.adapter_for(&peer) {
                         adp.streams(peer.clone())
                             .await
                             .ok()
@@ -9601,20 +9596,17 @@ impl Orchestrator {
                                 streams
                                     .into_iter()
                                     .find(|s| s.kind() == StreamKind::Audio)
-                                    .map(|s| s.codec().name)
+                                    .map(|s| s.codec())
                             })
-                            .and_then(|n| codec_to_pt(&n))
-                            .unwrap_or(new_pt)
+                            .unwrap_or_else(|| audio.clone())
                     } else {
-                        new_pt
+                        audio.clone()
                     };
 
-                    // Build per-direction swap messages.
-                    let (a_swap, b_swap) = if orientation_this_is_a {
-                        // a is "this" connection (new_pt), b is peer (peer_pt).
-                        (make_swap(new_pt, peer_pt), make_swap(peer_pt, new_pt))
+                    let (a_codec, b_codec) = if orientation_this_is_a {
+                        (audio.clone(), peer_codec)
                     } else {
-                        (make_swap(peer_pt, new_pt), make_swap(new_pt, peer_pt))
+                        (peer_codec, audio.clone())
                     };
                     // Snapshot only cloneable swap state while the map
                     // entry is guarded. Channel backpressure, pump acks,
@@ -9624,7 +9616,7 @@ impl Orchestrator {
                         .get(&bridge_id)
                         .map(|entry| entry.value().swap_controller());
                     let swap_result = match swap_controller {
-                        Some(Ok(controller)) => controller.swap_transcoders(a_swap, b_swap).await,
+                        Some(Ok(controller)) => controller.swap_codecs(a_codec, b_codec).await,
                         Some(Err(error)) => Err(error),
                         None => Ok(()),
                     };
@@ -10673,27 +10665,6 @@ async fn await_media_route(graph: &MediaGraphHandle, route_id: &MediaRouteId) ->
             ));
         }
         tokio::task::yield_now().await;
-    }
-}
-
-/// Gap plan §4.2 v1 punch list — construct a [`TranscoderSwap`] for
-/// one direction of a hot-swap. Builds a fresh `Transcoder` (with a
-/// new per-direction `FormatConverter`) when `from_pt != to_pt`;
-/// otherwise leaves the transcoder slot empty (passthrough).
-fn make_swap(from_pt: u8, to_pt: u8) -> frame_pump::TranscoderSwap {
-    let transcoder = if from_pt != to_pt {
-        Some(Transcoder::new())
-    } else {
-        None
-    };
-    frame_pump::TranscoderSwap {
-        new_transcoder: transcoder,
-        new_from_pt: from_pt,
-        new_to_pt: to_pt,
-        // A3 — ack is wired by `swap_transcoders` itself when it
-        // needs synchronization. `make_swap` leaves it None so the
-        // caller decides.
-        ack: None,
     }
 }
 

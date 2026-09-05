@@ -4328,40 +4328,124 @@ impl ConnectionAdapter for SipAdapter {
         conn: ConnectionId,
         capabilities: CapabilityDescriptor,
     ) -> CoreResult<NegotiatedCodecs> {
-        // Gap plan §4.2C v1 punch list — fire a re-INVITE via the
-        // existing `UnifiedCoordinator::reinvite(...).send()` builder.
-        // The state machine handles the 200 OK SDP answer through
-        // its `NegotiateSDPAsUAC` action; downstream session state
-        // updates automatically.
-        //
-        // **Codec preference caveat.** This impl does NOT yet inject
-        // the orchestrator-provided `capabilities.audio_codecs` into
-        // the re-INVITE SDP — that would need a per-session
-        // `set_offered_codecs` coordinator method that today only
-        // exists at MediaAdapter construction time. The re-INVITE
-        // still uses the SIP layer's configured `offered_codecs`.
-        // For the cross-bridge use case (which is the v1 driver) this
-        // is acceptable: the peer's answer SDP determines what the
-        // bridged-side codec becomes, and the orchestrator's
-        // transcoder hot-swap reads the post-renegotiation codec
-        // off the negotiated session state.
         if capabilities.audio_codecs.is_empty() {
             return Err(RvoipError::UnsupportedCodec(
                 "SipAdapter::renegotiate_media: empty audio_codecs in new capabilities".into(),
             ));
         }
-        let session_id = self.lookup_session_for_non_terminal_control(&conn)?;
-        self.coordinator
-            .reinvite(&session_id)
-            .send()
+        let mut offered_codecs = Vec::with_capacity(capabilities.audio_codecs.len() + 1);
+        for codec in &capabilities.audio_codecs {
+            // A new SIP offer owns its dynamic payload assignments. Prefer
+            // rvoip's canonical assignment for named codecs; retain an exact
+            // negotiated PT only for codecs (such as AMR variants) that have
+            // no single name-to-PT mapping.
+            let payload_type = rvoip_core::bridge::codec_to_pt(&codec.name)
+                .or(codec.payload_type)
+                .ok_or_else(|| {
+                    RvoipError::UnsupportedCodec(
+                        "SipAdapter::renegotiate_media: codec has no SIP payload identity".into(),
+                    )
+                })?;
+            if !offered_codecs.contains(&payload_type) {
+                offered_codecs.push(payload_type);
+            }
+        }
+        // Keep RFC 4733 available during an audio-only codec change. It is a
+        // media event format, not an alternative primary audio codec.
+        if !offered_codecs.contains(&101) {
+            offered_codecs.push(101);
+        }
+        let epoch = {
+            let _mapping = self
+                .mapping_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.route_epoch_for_connection_locked(&conn)
+        }
+        .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
+        let handle = epoch
+            .admitted_handle()
+            .cloned()
+            .ok_or(RvoipError::InvalidState(
+                "SIP renegotiation requires an admitted route generation",
+            ))?;
+        let session_id = epoch.session_id.clone();
+        let mut completions = self.coordinator.subscribe_renegotiation_completions();
+        let sdp = self
+            .coordinator
+            .generate_reinvite_sdp_for_codecs_exact(&handle, &offered_codecs)
             .await
             .map_err(Self::map_session_err)?;
-        // Optimistic return — the requested top preference. The state
-        // machine's NegotiateSDPAsUAC asynchronously updates
-        // `session.negotiated_config` when the 200 OK arrives; the
-        // orchestrator-level hot-swap then reads the live codec via
-        // `adapter.streams(...)` (see `Orchestrator::renegotiate_media`).
-        let chosen = capabilities.audio_codecs.first().cloned().unwrap();
+        crate::api::send::ReInviteBuilder::new_captured(
+            Arc::clone(&self.coordinator),
+            session_id.clone(),
+            Some(handle.clone()),
+        )
+        .with_sdp(sdp)
+        .send()
+        .await
+        .map_err(Self::map_session_err)?;
+
+        let deadline = tokio::time::sleep(self.coordinator.reinvite_completion_timeout_duration());
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                _ = &mut deadline => {
+                    return Err(RvoipError::AdmissionRejected(
+                        "SIP re-INVITE timed out before a committed media result",
+                    ));
+                }
+                result = completions.recv() => {
+                    let completion = result.map_err(|_| RvoipError::AdmissionRejected(
+                        "SIP re-INVITE completion observation was unavailable",
+                    ))?;
+                    if completion.handle != handle || completion.method != "INVITE" {
+                        continue;
+                    }
+                    if completion.outcome
+                        == crate::api::lifecycle::RenegotiationCompletionOutcome::Failed
+                    {
+                        return Err(RvoipError::AdmissionRejected(
+                            "SIP re-INVITE was not committed by the peer",
+                        ));
+                    }
+                    break;
+                }
+            }
+        }
+
+        let still_current = {
+            let _mapping = self
+                .mapping_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.epoch_is_current_locked(&epoch)
+        };
+        if !still_current {
+            return Err(RvoipError::ConnectionNotFound(conn));
+        }
+        let (config, payload_type) = self
+            .coordinator
+            .negotiated_media_config_exact(&handle)
+            .await
+            .map_err(Self::map_session_err)?
+            .ok_or(RvoipError::InvalidState(
+                "SIP re-INVITE committed without negotiated audio media",
+            ))?;
+        let stream = self
+            .streams_cache
+            .get(&conn)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or(RvoipError::InvalidState(
+                "SIP re-INVITE committed after its media stream disappeared",
+            ))?;
+        let chosen = stream
+            .apply_negotiated_media(&config, payload_type)
+            .map_err(|_| {
+                RvoipError::UnsupportedCodec(
+                    "SIP re-INVITE selected a codec unavailable to the media graph".into(),
+                )
+            })?;
         Ok(NegotiatedCodecs {
             audio: Some(chosen),
             video: None,

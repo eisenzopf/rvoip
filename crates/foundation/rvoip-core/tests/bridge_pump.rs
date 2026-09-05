@@ -1336,6 +1336,40 @@ async fn one_way_bridge_renegotiation_updates_the_enabled_graph_route() {
 }
 
 #[tokio::test]
+async fn bridge_renegotiation_uses_the_transports_negotiated_dynamic_payload_type() {
+    let (orch, _stream_a, _stream_b, conn_a, conn_b, adapter) =
+        setup_two_connection_orchestrator_with_adapter("PCMU", "PCMU").await;
+    orch.bridge_connections_directional(
+        conn_a.clone(),
+        conn_b,
+        DirectionalMediaBridgePlan::new(true, false).expect("one-way plan"),
+    )
+    .await
+    .expect("directional bridge");
+    let graph = orch
+        .media_graph_for_connection(conn_a.clone())
+        .await
+        .expect("source graph");
+    adapter.set_renegotiated_audio(CodecInfo {
+        name: "opus".into(),
+        clock_rate_hz: 48_000,
+        channels: 1,
+        fmtp: None,
+        payload_type: Some(96),
+    });
+
+    orch.renegotiate_media(conn_a, CapabilityDescriptor::default())
+        .await
+        .expect("dynamic payload graph swap");
+    let snapshot = graph.snapshot().await;
+    assert_eq!(
+        snapshot.source_payload_type, 96,
+        "the negotiated dynamic PT must win over Opus's conventional 111"
+    );
+    assert_eq!(snapshot.sinks[0].target_payload_type, 0);
+}
+
+#[tokio::test]
 async fn one_way_bridge_renegotiation_rejects_an_unsupported_codec() {
     let (orch, _stream_a, _stream_b, conn_a, conn_b, adapter) =
         setup_two_connection_orchestrator_with_adapter("PCMU", "opus").await;

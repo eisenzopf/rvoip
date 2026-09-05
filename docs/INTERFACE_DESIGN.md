@@ -869,7 +869,19 @@ When a Session adds a Connection (or a Connection re-negotiates):
 
 ### 9.3 Re-negotiation
 
-Triggered by `RenegotiateMedia` command. Adapter handles re-INVITE / renegotiate / `connection.update` protocol-natively. Session's `CapabilityIntersection` is updated; if codecs change, rvoip-media swaps in a new transcoder or removes the existing one.
+Triggered by `RenegotiateMedia`. The adapter handles re-INVITE, WebRTC
+renegotiation, or UCTP `connection.update` protocol-natively and must return
+only after the remote result is committed. A SIP codec request is a one-shot
+offer bound to the exact dialog generation; it never mutates the coordinator's
+global offer policy. Rejection, timeout, or generation replacement leaves the
+stable stream and media graph unchanged.
+
+After a successful result, the adapter updates the existing stream's codec
+generation and the orchestrator supplies the complete negotiated `CodecInfo`
+to every affected media-graph direction. The descriptor's payload type and
+fmtp are authoritative—dynamic payload assignments must not be reconstructed
+from a conventional name table. The graph then swaps or removes transcoders
+before `RenegotiateMedia` returns.
 
 ---
 

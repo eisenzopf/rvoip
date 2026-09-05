@@ -1981,12 +1981,25 @@ impl SessionCrossCrateEventHandler {
         method: impl Into<String>,
         reason: impl Into<String>,
     ) {
+        let method = method.into();
+        self.app_event_publisher
+            .publish_renegotiation_completion_exact(
+                handle,
+                if method.eq_ignore_ascii_case("INVITE") {
+                    "INVITE"
+                } else if method.eq_ignore_ascii_case("UPDATE") {
+                    "UPDATE"
+                } else {
+                    "ACK"
+                },
+                crate::api::lifecycle::RenegotiationCompletionOutcome::Failed,
+            );
         self.app_event_publisher.publish_diagnostic_exact(
             handle,
             crate::api::events::DiagnosticEvent::RenegotiationFailed(
                 crate::api::events::RenegotiationFailure {
                     call_id: handle.session_id().clone(),
-                    method: method.into(),
+                    method,
                     reason: reason.into(),
                 },
             ),
@@ -4543,6 +4556,14 @@ impl SessionCrossCrateEventHandler {
                     "Suppressing CallAnswered for {} because the committed Dialog200OK was not an initial-answer YAML outcome",
                     session_id
                 );
+                if mid_dialog_offer {
+                    self.app_event_publisher
+                        .publish_renegotiation_completion_exact(
+                            handle,
+                            "INVITE",
+                            crate::api::lifecycle::RenegotiationCompletionOutcome::Committed,
+                        );
+                }
             }
         }
 

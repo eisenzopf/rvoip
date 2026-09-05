@@ -10134,6 +10134,16 @@ impl UnifiedCoordinator {
         Duration::from_secs(self.config.setup_teardown_timeout_secs)
     }
 
+    pub(crate) fn reinvite_completion_timeout_duration(&self) -> Duration {
+        // The dialog transaction owns Timer B. Waiting less than that interval
+        // would let this adapter report failure while a still-live re-INVITE
+        // later commits. The small grace covers transaction-event projection;
+        // after Timer B there is no request left that can accept a late final.
+        self.dialog_adapter
+            .non_invite_transaction_timeout()
+            .saturating_add(Duration::from_secs(1))
+    }
+
     /// Playout smoothing and concealment posture for inbound media.
     pub(crate) const fn playout_policy(&self) -> Option<crate::PlayoutConfig> {
         self.config.playout
@@ -10670,6 +10680,20 @@ impl UnifiedCoordinator {
     /// [`request_peer_codec_mode`](Self::request_peer_codec_mode) took effect.
     pub async fn peer_codec_mode(&self, session: &SessionId) -> Option<u8> {
         self.media_adapter.peer_codec_mode(session).await
+    }
+
+    pub(crate) async fn generate_reinvite_sdp_for_codecs_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        offered_codecs: &[u8],
+    ) -> Result<String> {
+        self.media_adapter
+            .generate_local_sdp_offer_for_codecs_exact(
+                handle,
+                crate::types::MediaDirection::SendRecv,
+                offered_codecs,
+            )
+            .await
     }
 
     /// Send a reliable 183 Session Progress with early-media SDP (RFC 3262).
@@ -11317,6 +11341,20 @@ impl UnifiedCoordinator {
         session_id: &SessionId,
     ) -> Result<Option<(crate::session_store::state::NegotiatedConfig, u8)>> {
         self.helpers.negotiated_media_config(session_id).await
+    }
+
+    pub(crate) async fn negotiated_media_config_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Result<Option<(crate::session_store::state::NegotiatedConfig, u8)>> {
+        self.helpers.negotiated_media_config_exact(handle).await
+    }
+
+    pub(crate) fn subscribe_renegotiation_completions(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::api::lifecycle::RenegotiationCompletion> {
+        self.app_event_publisher
+            .subscribe_renegotiation_completions()
     }
 
     // ===== Event Subscriptions =====

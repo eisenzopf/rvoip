@@ -114,6 +114,15 @@ currently exposes deterministic teardown, answered/progress waits, RFC 4733
 DTMF, hold/resume, blind transfer, REFER/NOTIFY lifecycle events, SDES-SRTP
 state, typed per-call events, and decoded/encoded audio frames.
 
+Applications composing `SipAdapter` through `rvoip-core` may request a
+per-connection codec change with `Orchestrator::renegotiate_media`. The SIP
+adapter translates that request into a one-shot re-INVITE offer for the exact
+dialog generation and returns only after the peer's SDP answer is committed.
+The call's stable media and stream descriptor remain unchanged on rejection;
+on success the existing stream updates both media pumps without changing its
+identity or application channels. Codec preferences never mutate coordinator-
+wide offer policy and therefore cannot bleed into concurrent calls.
+
 ## Examples
 
 The examples are organized by developer surface in

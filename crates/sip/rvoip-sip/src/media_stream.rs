@@ -112,7 +112,7 @@ impl SipPayloadCodec {
     }
 }
 
-fn codec_descriptor(
+pub(crate) fn codec_descriptor(
     config: &crate::session_store::state::NegotiatedConfig,
     payload_type: u8,
 ) -> Result<(CodecInfo, u8), &'static str> {
@@ -205,6 +205,7 @@ struct SipMediaStreamInner {
     lifecycle: Arc<SipMediaLifecycleState>,
     outbound_writes_activated: AtomicBool,
     cancel: watch::Sender<bool>,
+    codec_updates: watch::Sender<Option<SipMediaCodecRuntime>>,
     /// Last quality the media layer reported for this stream's connection.
     ///
     /// Retained here because quality arrives by *push* — media-core distills
@@ -216,6 +217,12 @@ struct SipMediaStreamInner {
     /// `None` until the first report, so a caller can tell "no measurement
     /// yet" from "measured, and it is fine".
     last_quality: Mutex<Option<QualitySnapshot>>,
+}
+
+#[derive(Clone)]
+struct SipMediaCodecRuntime {
+    negotiated: crate::session_store::state::NegotiatedConfig,
+    payload_type: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -378,6 +385,7 @@ impl SipMediaStream {
         let (frames_in_tx, frames_in_rx) = mpsc::channel::<MediaFrame>(FRAME_CHANNEL_CAP);
         let (frames_out_tx, frames_out_rx) = mpsc::channel::<MediaFrame>(FRAME_CHANNEL_CAP);
         let (cancel, _) = watch::channel(false);
+        let (codec_updates, _) = watch::channel(None);
 
         Arc::new(Self {
             inner: Arc::new(SipMediaStreamInner {
@@ -395,6 +403,7 @@ impl SipMediaStream {
                 outbound_writes_activated: AtomicBool::new(outbound_writes_activated),
                 last_quality: Mutex::new(None),
                 cancel,
+                codec_updates,
             }),
         })
     }
@@ -524,6 +533,7 @@ impl SipMediaStream {
                         session_id,
                         self.inner.stream_id.clone(),
                         Arc::clone(&self.inner.codec),
+                        self.inner.codec_updates.clone(),
                         frames_in_tx,
                         frames_out_rx,
                     ));
@@ -581,6 +591,31 @@ impl SipMediaStream {
                 .outbound_writes_activated
                 .store(true, Ordering::Release);
         }
+    }
+
+    /// Commit a signaling-approved codec generation to this stable stream.
+    ///
+    /// The stream object and its application channels stay intact while both
+    /// pumps rebuild their codec state from this watch value. This method is
+    /// called only after a final re-INVITE answer has committed.
+    pub(crate) fn apply_negotiated_media(
+        &self,
+        negotiated: &crate::session_store::state::NegotiatedConfig,
+        payload_type: u8,
+    ) -> Result<CodecInfo, &'static str> {
+        let (descriptor, payload_type) = codec_descriptor(negotiated, payload_type)?;
+        *self
+            .inner
+            .codec
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = descriptor.clone();
+        self.inner
+            .codec_updates
+            .send_replace(Some(SipMediaCodecRuntime {
+                negotiated: negotiated.clone(),
+                payload_type,
+            }));
+        Ok(descriptor)
     }
 
     fn close_local_channels(&self) {
@@ -744,6 +779,7 @@ async fn run_media_driver(
     session_id: SessionId,
     stream_id: StreamId,
     codec_descriptor_slot: Arc<RwLock<CodecInfo>>,
+    codec_updates: watch::Sender<Option<SipMediaCodecRuntime>>,
     frames_in_tx: mpsc::Sender<MediaFrame>,
     frames_out_rx: mpsc::Receiver<MediaFrame>,
 ) {
@@ -849,26 +885,14 @@ async fn run_media_driver(
             return;
         }
     };
-    let channels = resolved_descriptor.channels.max(1);
     *codec_descriptor_slot
         .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = resolved_descriptor;
-    let encoder = match SipPayloadCodec::from_negotiated(&negotiated) {
-        Ok(codec) => codec,
-        Err(reason) => {
-            tracing::warn!(target: "rvoip_sip", reason, "SipMediaStream encoder initialization failed");
-            lifecycle.mark_failed();
-            return;
-        }
+    let runtime = SipMediaCodecRuntime {
+        negotiated,
+        payload_type,
     };
-    let decoder = match SipPayloadCodec::from_negotiated(&negotiated) {
-        Ok(codec) => codec,
-        Err(reason) => {
-            tracing::warn!(target: "rvoip_sip", reason, "SipMediaStream decoder initialization failed");
-            lifecycle.mark_failed();
-            return;
-        }
-    };
+    codec_updates.send_replace(Some(runtime.clone()));
     let subscription = coordinator.subscribe_to_audio(&session_id);
     tokio::pin!(subscription);
     let subscriber = tokio::select! {
@@ -892,18 +916,17 @@ async fn run_media_driver(
 
     let inbound = run_inbound_pump(
         subscriber,
-        encoder,
+        runtime.clone(),
+        codec_updates.subscribe(),
         stream_id,
-        payload_type,
         frames_in_tx,
         playout,
     );
     let outbound = run_outbound_pump(
         Arc::clone(&coordinator),
         session_id.clone(),
-        decoder,
-        payload_type,
-        channels,
+        runtime,
+        codec_updates.subscribe(),
         frames_out_rx,
     );
     tokio::pin!(inbound, outbound);
@@ -922,9 +945,9 @@ async fn run_media_driver(
 
 async fn run_inbound_pump(
     mut subscriber: crate::types::AudioFrameSubscriber,
-    mut encoder: SipPayloadCodec,
+    mut runtime: SipMediaCodecRuntime,
+    mut codec_updates: watch::Receiver<Option<SipMediaCodecRuntime>>,
     stream_id: StreamId,
-    payload_type: u8,
     frames_in_tx: mpsc::Sender<MediaFrame>,
     playout: Option<PlayoutConfig>,
 ) -> &'static str {
@@ -932,10 +955,37 @@ async fn run_inbound_pump(
     // arrival order, with a gap wherever a packet was lost — the behaviour
     // every release before this had. With one, frames are reordered onto the
     // media clock and losses are concealed rather than heard as clicks.
-    let mut playout = playout.map(PlayoutBuffer::new);
+    let playout_policy = playout;
+    let mut playout = playout_policy.map(PlayoutBuffer::new);
+    let mut encoder = match SipPayloadCodec::from_negotiated(&runtime.negotiated) {
+        Ok(codec) => codec,
+        Err(_) => return "sip-codec-reconfigure-failed",
+    };
     let mut reported = std::time::Instant::now();
 
-    while let Some(audio_frame) = subscriber.receiver.recv().await {
+    loop {
+        let audio_frame = tokio::select! {
+            biased;
+            changed = codec_updates.changed() => {
+                if changed.is_err() {
+                    return "sip-codec-update-channel-closed";
+                }
+                let Some(updated) = codec_updates.borrow_and_update().clone() else {
+                    continue;
+                };
+                encoder = match SipPayloadCodec::from_negotiated(&updated.negotiated) {
+                    Ok(codec) => codec,
+                    Err(_) => return "sip-codec-reconfigure-failed",
+                };
+                runtime = updated;
+                playout = playout_policy.map(PlayoutBuffer::new);
+                continue;
+            }
+            frame = subscriber.receiver.recv() => match frame {
+                Some(frame) => frame,
+                None => return "sip-audio-source-closed",
+            }
+        };
         let ready: Vec<AudioFrame> = match playout.as_mut() {
             Some(buffer) => {
                 buffer.push(audio_frame, std::time::Instant::now());
@@ -989,26 +1039,51 @@ async fn run_inbound_pump(
                 payload: Bytes::from(encoded),
                 timestamp_rtp,
                 captured_at: Utc::now(),
-                payload_type: Some(payload_type),
+                payload_type: Some(runtime.payload_type),
             };
             if frames_in_tx.send(media_frame).await.is_err() {
                 return "inbound-consumer-closed";
             }
         }
     }
-    "sip-audio-source-closed"
 }
 
 async fn run_outbound_pump(
     coordinator: Arc<UnifiedCoordinator>,
     session_id: SessionId,
-    mut decoder: SipPayloadCodec,
-    payload_type: u8,
-    channels: u8,
+    mut runtime: SipMediaCodecRuntime,
+    mut codec_updates: watch::Receiver<Option<SipMediaCodecRuntime>>,
     mut frames_out_rx: mpsc::Receiver<MediaFrame>,
 ) -> &'static str {
+    let mut decoder = match SipPayloadCodec::from_negotiated(&runtime.negotiated) {
+        Ok(codec) => codec,
+        Err(_) => return "sip-codec-reconfigure-failed",
+    };
+    let mut channels = runtime.negotiated.channels.max(1);
     let mut next_timestamp = 0u32;
-    while let Some(media_frame) = frames_out_rx.recv().await {
+    loop {
+        let media_frame = tokio::select! {
+            biased;
+            changed = codec_updates.changed() => {
+                if changed.is_err() {
+                    return "sip-codec-update-channel-closed";
+                }
+                let Some(updated) = codec_updates.borrow_and_update().clone() else {
+                    continue;
+                };
+                decoder = match SipPayloadCodec::from_negotiated(&updated.negotiated) {
+                    Ok(codec) => codec,
+                    Err(_) => return "sip-codec-reconfigure-failed",
+                };
+                channels = updated.negotiated.channels.max(1);
+                runtime = updated;
+                continue;
+            }
+            frame = frames_out_rx.recv() => match frame {
+                Some(frame) => frame,
+                None => return "outbound-producer-closed",
+            }
+        };
         const TELEPHONE_EVENT_PT: u8 = 101;
         if media_frame.payload_type == Some(TELEPHONE_EVENT_PT) {
             if let Some(digit) = parse_rfc4733_digit(&media_frame.payload) {
@@ -1020,12 +1095,12 @@ async fn run_outbound_pump(
         }
         if media_frame
             .payload_type
-            .is_some_and(|actual| actual != payload_type)
+            .is_some_and(|actual| actual != runtime.payload_type)
         {
             tracing::trace!(
                 target: "rvoip_sip",
                 actual = ?media_frame.payload_type,
-                expected = payload_type,
+                expected = runtime.payload_type,
                 "SipMediaStream: dropping unnegotiated payload type"
             );
             continue;
@@ -1056,7 +1131,6 @@ async fn run_outbound_pump(
             return "sip-audio-send-failed";
         }
     }
-    "outbound-producer-closed"
 }
 
 async fn wait_for_media_cancel(cancel: &mut watch::Receiver<bool>) {
@@ -1353,6 +1427,50 @@ mod negotiated_codec_tests {
         assert_eq!(pcma.name, "g.711-a");
         assert_eq!(pcma_pt, 8);
         assert_ne!(pcmu, pcma);
+    }
+
+    #[tokio::test]
+    async fn inbound_pump_applies_a_codec_generation_before_the_next_frame() {
+        let session_id = SessionId::new();
+        let (audio_tx, audio_rx) = mpsc::channel(4);
+        let subscriber = crate::types::AudioFrameSubscriber::new(session_id, audio_rx);
+        let (frames_tx, mut frames_rx) = mpsc::channel(4);
+        let pcmu = SipMediaCodecRuntime {
+            negotiated: negotiated("PCMU", 8_000, 1),
+            payload_type: 0,
+        };
+        let pcma = SipMediaCodecRuntime {
+            negotiated: negotiated("PCMA", 8_000, 1),
+            payload_type: 8,
+        };
+        let (codec_tx, codec_rx) = watch::channel(Some(pcmu.clone()));
+        let pump = tokio::spawn(run_inbound_pump(
+            subscriber,
+            pcmu,
+            codec_rx,
+            StreamId::new(),
+            frames_tx,
+            None,
+        ));
+
+        audio_tx
+            .send(AudioFrame::new(vec![1_000; 160], 8_000, 1, 0))
+            .await
+            .expect("PCMU source frame");
+        let first = frames_rx.recv().await.expect("PCMU graph frame");
+        assert_eq!(first.payload_type, Some(0));
+
+        codec_tx.send_replace(Some(pcma));
+        audio_tx
+            .send(AudioFrame::new(vec![1_000; 160], 8_000, 1, 160))
+            .await
+            .expect("PCMA source frame");
+        let second = frames_rx.recv().await.expect("PCMA graph frame");
+        assert_eq!(second.payload_type, Some(8));
+        assert_ne!(first.payload, second.payload);
+
+        drop(audio_tx);
+        assert_eq!(pump.await.expect("pump task"), "sip-audio-source-closed");
     }
 
     #[test]
