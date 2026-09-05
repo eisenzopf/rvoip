@@ -845,6 +845,28 @@ jobs:
           --evidence target/release-evidence
           --output target/release-qualification/aggregate.json
 
+      - name: Render exact-candidate qualification reports
+        if: inputs.profile == 'remote-release'
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          version="$(python3 - <<'PY'
+          import tomllib
+          from pathlib import Path
+          print(tomllib.loads(Path('Cargo.toml').read_text())['workspace']['package']['version'])
+          PY
+          )"
+          python3 scripts/release/render_qualification_reports.py generate \
+            --catalog scripts/release/gates.json \
+            --plan target/release-plan/plan.json \
+            --aggregate target/release-qualification/aggregate.json \
+            --evidence target/release-evidence \
+            --version "$version" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-url "$RUN_URL" \
+            --output-dir target/release-qualification/reports
+
       - name: Attest release qualification bundle
         if: inputs.profile != 'remote-diagnostic'
         uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
@@ -860,6 +882,7 @@ jobs:
             target/release-plan/plan.json
             target/release-evidence/
             target/release-qualification/aggregate.json
+            target/release-qualification/reports/
           retention-days: 90
           if-no-files-found: warn
 

@@ -37,6 +37,7 @@ ACTIVE_RELEASE_METADATA_FILES = (
 VERIFICATION_RECEIPT_SCHEMA = "rvoip-unified-release-verification-v4"
 REMOTE_QUALIFICATION_SCHEMA = "rvoip-release-qualification-v1"
 REMOTE_GATE_CATALOG_SCHEMA = "rvoip-release-gate-catalog-v1"
+REMOTE_REPORT_SUMMARY_SCHEMA = "rvoip-release-qualification-summary-v1"
 TARGETED_DELTA_ATTESTATION_SCHEMA = "rvoip-targeted-delta-attestation-v1"
 TARGETED_POSTGRES_EVIDENCE_SCHEMA = "rvoip-vcon-postgres-live-evidence-v1"
 CARRY_FORWARD_ATTESTATION_SCHEMA = "rvoip-release-carry-forward-attestation-v1"
@@ -1197,6 +1198,54 @@ def verify_beta_reporting(
     crate = root / "crates/sip/rvoip-sip"
     reporter = crate / "scripts/beta_release_report.py"
     docs = crate / "docs"
+    modern_attestation = docs / "QUALIFICATION_REPORT_ATTESTATION.json"
+    modern_summary = docs / "QUALIFICATION_SUMMARY.json"
+    if beta_report_root is None and modern_attestation.is_file():
+        modern_reporter = root / "scripts/release/render_qualification_reports.py"
+        command = [
+            sys.executable,
+            str(modern_reporter),
+            "verify",
+            "--directory",
+            str(docs),
+        ]
+        log.command(command, root)
+        summary = load_json_object(modern_summary, "remote qualification summary")
+        release = summary.get("release")
+        qualification = summary.get("qualification")
+        if not (
+            summary.get("schema") == REMOTE_REPORT_SUMMARY_SCHEMA
+            and isinstance(release, dict)
+            and release.get("version") == version
+            and isinstance(release.get("candidate_sha"), str)
+            and COMMIT_SHA.fullmatch(release["candidate_sha"])
+            and isinstance(qualification, dict)
+            and qualification.get("profile") == "remote-release"
+            and qualification.get("status") == "PASS"
+            and qualification.get("gate_count", 0) > 108
+            and qualification.get("fresh_count", 0)
+            + qualification.get("reused_count", 0)
+            == qualification.get("gate_count")
+            and qualification.get("legacy_required_count") == 108
+            and qualification.get("legacy_covered_count") == 108
+        ):
+            raise ReleaseError(
+                "current protected qualification reports do not qualify this version"
+            )
+        return {
+            "mode": "strict",
+            "format": "protected-remote-report",
+            "disposition": "RELEASE-CANDIDATE",
+            "strict_automated_status": "PASS",
+            "version": version,
+            "git_commit": release["candidate_sha"],
+            "gate_count": qualification["gate_count"],
+            "report_root": "docs-current",
+            "attestation_path": relative_or_absolute(root, modern_attestation),
+            "attestation_sha256": hashlib.sha256(
+                modern_attestation.read_bytes()
+            ).hexdigest(),
+        }
     command = [
         sys.executable,
         str(reporter),

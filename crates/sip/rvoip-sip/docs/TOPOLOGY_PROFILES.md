@@ -1,12 +1,13 @@
 # rvoip-sip Beta Topology Profiles
 
-Date: 2026-07-25
+Date: 2026-09-05
 
 This document defines which deployment shapes beta is allowed to claim and
 which shapes remain post-beta or advanced tuning work.
 
-Current reference: [Beta Release Candidate Report](BETA_RELEASE_REPORT.md),
-run `20260724T231400Z`, generated from clean tested commit `8d44fb35`.
+Current reference: [protected 0.3.9 qualification](BETA_RELEASE_REPORT.md),
+run `33969263241`, generated from clean tested commit
+`8cab44b10f872d21b304c02111d5d203ee8226da`.
 
 ## Beta-Supported Profiles
 

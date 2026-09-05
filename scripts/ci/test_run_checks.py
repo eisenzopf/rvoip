@@ -237,6 +237,7 @@ class RunChecksTests(unittest.TestCase):
     def test_release_tooling_gate_owns_proxy_harness_tests(self) -> None:
         commands = run_checks.specialty_commands("release-tooling", Path("/workspace"))
         argv = [item[0] for item in commands]
+        self.assertIn("scripts/test_render_qualification_reports.py", argv[0])
         self.assertIn(
             [
                 "python3",

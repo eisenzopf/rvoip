@@ -1,0 +1,39 @@
+{
+  "files": {
+    "BETA_GATE_REPORT.md": {
+      "bytes": 99732,
+      "sha256": "2e674311acd8f09a7eff5e5f4b50fecc55aa7e51706c892db566ab29ecc1bd35"
+    },
+    "BETA_PERFORMANCE_REPORT.md": {
+      "bytes": 12342,
+      "sha256": "a87d05281626f23c47e09a13e741b9e38a85777e053119c48e944777bdaa51f6"
+    },
+    "BETA_RELEASE_REPORT.md": {
+      "bytes": 2425,
+      "sha256": "b31ea69ac1f0fd724b42fee841ab31ecc379ab5643d3e2fe577ea7ed0ad45fd4"
+    },
+    "QUALIFICATION_SUMMARY.json": {
+      "bytes": 179713,
+      "sha256": "b5875f52f39028d65731e9efd99c9fbb6df7cac2a95cfd1fda094a2a9852deaa"
+    }
+  },
+  "generated_at": "2026-09-05T15:27:32+00:00",
+  "generator": {
+    "path": "scripts/release/render_qualification_reports.py",
+    "sha256": "e313cb1e46a9bfe30ec090fc73e00ba60ec26a733ba9f6c206604d9d47c1a3ac"
+  },
+  "qualification": {
+    "aggregate_sha256": "ca0c1331d6b06064a14452c0bf3f5a56bee931fc6ac53e80d89e32995684873c",
+    "artifact_digest": "sha256:0b5dd80b42be87b0823bba9224a983db4be855712e2f463d6849fb2d4f21b051",
+    "artifact_id": "9972005366",
+    "catalog_sha256": "c71e60d8d900e45ba52dd7ab4d85a08d0ac9cbccd7977c8e13e55978659d80bb",
+    "plan_sha256": "0263177edeb7b0c95e81a1bbcdf85b3cceeb4896971aa7588d047da5aed95671",
+    "run_id": "33969263241",
+    "run_url": "https://github.com/eisenzopf/rvoip/actions/runs/33969263241"
+  },
+  "release": {
+    "candidate_sha": "8cab44b10f872d21b304c02111d5d203ee8226da",
+    "version": "0.3.9"
+  },
+  "schema": "rvoip-release-qualification-report-attestation-v1"
+}

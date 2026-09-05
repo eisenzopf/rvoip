@@ -335,23 +335,24 @@ product's implementation:
   and [performance evidence](crates/sip/rvoip-sip/docs/BETA_PERFORMANCE_EXCEPTION.md)
   — the complete owner-approved disposition, strict 106/108 result, and the
   accepted high-density burst deviation.
-- [Last strict beta candidate](crates/sip/rvoip-sip/docs/BETA_RELEASE_REPORT.md)
-  — the most recent candidate that passed all 108 automated gates without an
-  exception.
+- [0.3.9 protected qualification](crates/sip/rvoip-sip/docs/BETA_RELEASE_REPORT.md)
+  — the exact 208-gate PASS record, including all 108 inherited strict-beta
+  requirements without an exception.
 - [RFC evidence matrix](crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md) —
   exact supported, partial, and unsupported standards claims.
 - [Security posture](crates/sip/rvoip-sip/docs/SECURITY_POSTURE.md) —
   qualified security behavior and explicit non-claims.
-- [Next release notes](crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md) —
+- [0.3.9 release notes](crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md) —
   unified release identity, source compatibility notes, and attestation
   provenance.
 
-The `0.3.9` release requires a fresh strict full-beta report bound to one clean,
-unchanged release source fingerprint. The gate admits no skipped checks and
-includes the workspace, SIP/media, public API, security, PBX, SIPp, strict-UA,
-proxy interoperability, performance, resiliency, and long-soak scopes. The
-historical `0.3.4` carry-forward receipt remains immutable release history; it
-does not qualify `0.3.9`.
+The `0.3.9` release passed a fresh protected report bound to one clean,
+unchanged release source fingerprint. Its 208-gate profile admitted no skipped
+checks and covered the workspace, all 45 crates, deployment feature bundles,
+SIP/media, public API, security, PBX, SIPp, strict-UA, proxy interoperability,
+performance, resiliency, and long-soak scopes. The historical `0.3.4`
+carry-forward receipt remains immutable release history; it did not qualify
+`0.3.9`.
 
 ### SIP interoperability attestation
 

@@ -1,11 +1,11 @@
-# rvoip 0.3.9 Release Candidate Notes
+# rvoip 0.3.9 Release Notes
 
 Date: 2026-09-05
 
-These notes describe the coordinated 45-crate `0.3.9` release candidate.
-Publication requires a fresh protected `remote-release` qualification bound to
-the exact release commit and current gate catalog. Earlier qualification
-evidence does not qualify this release.
+These notes describe the coordinated 45-crate `0.3.9` release. Protected
+`remote-release` qualification passed 208/208 exact-candidate gates at
+`8cab44b10f872d21b304c02111d5d203ee8226da`; publication then completed for
+all 45 crates. Earlier qualification evidence did not qualify this release.
 
 ## Headline
 
@@ -108,10 +108,11 @@ General-user 10,000 CPS full-media capability is not claimed. The strict SIP
 beta envelope remains bounded by its recorded 2,000-CPS real-media profile,
 exact host configuration, peer matrix, workloads, and soak durations.
 
-## Qualification
+## Qualification record
 
-The release candidate must first pass the normal PR Gate, then a complete
-`remote-preflight`, followed by `remote-release` with `first_candidate=true`.
-The full profile runs the structured 108-gate coverage ledger on hosted and
-ephemeral GCP workers and includes a continuous one-hour soak. Publication
-accepts only the signed aggregate for the exact clean `main` candidate.
+The release passed the normal PR Gate, a complete `remote-preflight`, and
+`remote-release` with `first_candidate=true`. The full profile ran the
+structured 108-gate compatibility ledger plus 100 expanded current gates on
+hosted and ephemeral GCP workers, including continuous one-hour soaks.
+Publication accepted only the signed aggregate for the exact clean `main`
+candidate. See the [qualification report](BETA_RELEASE_REPORT.md).

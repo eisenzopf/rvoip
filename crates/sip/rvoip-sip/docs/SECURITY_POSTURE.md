@@ -1,12 +1,12 @@
 # rvoip-sip Beta Security Posture
 
-Date: 2026-07-25
+Date: 2026-09-05
 
 This document records the security claims that may be made for the beta line
 and the evidence required before release notes are cut. The current clean
-candidate is run `20260724T231400Z`, tested commit `8d44fb35`, documented by
-the [Beta Release Candidate Report](BETA_RELEASE_REPORT.md) and
-[complete gate report](BETA_GATE_REPORT.md).
+release is `0.3.9` at `8cab44b10f872d21b304c02111d5d203ee8226da`,
+documented by the [protected qualification report](BETA_RELEASE_REPORT.md) and
+[complete 208-gate ledger](BETA_GATE_REPORT.md).
 
 ## Beta Claims
 
@@ -24,7 +24,7 @@ Developer-facing auth API and crate-boundary guidance is in
 | mTLS | Partial | `Config::validate` cert/key pairing checks in `crates/sip/rvoip-sip/src/api/unified.rs`; TLS transport tests cover TLS basics | Do not market broad mTLS interop until external peer-verification matrices are archived. |
 | Trace redaction | Supported | `crates/foundation/infra-common/src/events/cross_crate.rs`, `crates/sip/rvoip-sip/tests/trace_redaction.rs` | Default tracing redacts auth/proxy-auth, cookies, token-like headers, identity headers, SDES `a=crypto`, and ICE password lines. Wire bytes are unaffected. |
 | SDES-SRTP | Partial | `crates/sip/rvoip-sip/tests/srtp_call_integration.rs`, SRTP negotiation tests in `crates/sip/rvoip-sip/src/adapters/media_adapter.rs`, config validation in `crates/sip/rvoip-sip/tests/config_channel_capacity_integration.rs`, PBX SRTP rows where present | Beta claims are limited to tested SDES suites. DTLS-SRTP is not included. |
-| DTLS-SRTP | Candidate, feature-gated | `crates/sip/rvoip-sip/tests/dtls_srtp_call_integration.rs`, `crates/media/rtp-core/tests/dtls_srtp_handshake_test.rs`, `crates/media/rtp-core/tests/dtls_srtp_transport_bridge_test.rs`, and `crates/media/rtp-core/tests/srtp_interop_webrtc_srtp.rs` | SHA-256 SDP fingerprint binding, RFC 8842 setup roles, shared-socket RFC 7983 demux, and AES-CM RTP/SRTCP contexts are implemented behind `dtls-srtp`. A release claim requires fresh protected 0.3.9 gate evidence; legacy rtp-core DTLS constructors remain unsupported. |
+| DTLS-SRTP | Supported, feature-gated (bounded) | `crates/sip/rvoip-sip/tests/dtls_srtp_call_integration.rs`, `crates/media/rtp-core/tests/dtls_srtp_handshake_test.rs`, `crates/media/rtp-core/tests/dtls_srtp_transport_bridge_test.rs`, `crates/media/rtp-core/tests/srtp_interop_webrtc_srtp.rs`, and the protected `interop.remote-libsrtp` gate | SHA-256 SDP fingerprint binding, RFC 8842 setup roles, shared-socket RFC 7983 demux, and AES-CM RTP/SRTCP contexts are qualified behind `dtls-srtp`; legacy rtp-core DTLS constructors remain unsupported. |
 | STIR/SHAKEN | Partial | `crates/extensions/rvoip-stir-shaken/tests/sign_verify_round_trip.rs`, `crates/extensions/rvoip-stir-shaken/tests/chain_validation.rs`, `crates/sip/rvoip-sip-dialog/tests/identity_sign_outbound.rs`, `crates/sip/rvoip-sip-dialog/tests/identity_verify_inbound.rs`, byte-preservation tests in `rvoip-sip-transport` | Library support and SIP `Identity` preservation only. No carrier certification claim. |
 
 ## Release Security Gates
@@ -76,7 +76,7 @@ Current security evidence:
 
 | Check | Status |
 |-------|--------|
-| Dependency advisory audit archived with no unaccepted advisories | Complete in candidate `20260724T231400Z`. |
-| Ten parser fuzz-smoke logs archived | Complete in candidate `20260724T231400Z`. |
-| Final full beta gate run from clean commit | Complete: `8d44fb35`, `108` passed, `0` failed, `0` skipped. |
+| Dependency advisory audit archived with no unaccepted advisories | Complete in protected 0.3.9 run `33969263241`. |
+| Parser fuzz-smoke logs archived | Complete in protected 0.3.9 run, including the expanded AMR and remote fuzz scopes. |
+| Final remote-release gate from clean commit | Complete: `8cab44b10f872d21b304c02111d5d203ee8226da`, `208` passed, `0` failed. |
 | Long-duration evidence | The policy accepts the recorded one-hour monolithic and split soak configurations; this is not a 24-hour claim. |

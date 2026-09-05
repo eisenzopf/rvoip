@@ -1,15 +1,22 @@
 # rvoip 0.3.9 release plan
 
-Status: release candidate preparation, 2026-09-05.
+Status: released and fully qualified, 2026-09-05.
 
-Implementation is complete for 18 of the 20 issues assigned to the milestone.
 PR #213 merged the complete implementation and passed 32/32 PR jobs plus all
-five CodeQL analyses. Issue #182 remains open until the protected
-`remote-release` run regenerates the evidence documents. Issue #102 remains
-open until the production remote-endpoint profile has its required live
-two-UA NAT/TLS/SDES evidence; its product code and deterministic tests are in
-the candidate. These qualification-bound items must not be closed from unit or
-hosted CI evidence alone.
+five CodeQL analyses. The protected `remote-release` run then passed 208/208
+exact-candidate gates, covering every one of the 108 inherited strict-beta
+requirements, and the coordinated 45-crate release was published as `v0.3.9`.
+Issue #182 is satisfied by the generated, checksummed qualification reports
+linked below. Issue #102 remains open until the production remote-endpoint
+profile has its required live two-UA NAT/TLS/SDES evidence; its product code
+and deterministic tests shipped in this release. That bounded production claim
+must not be upgraded from hosted or in-process evidence alone.
+
+Authoritative evidence:
+
+- [protected qualification run](https://github.com/eisenzopf/rvoip/actions/runs/33969263241);
+- [published release](https://github.com/eisenzopf/rvoip/releases/tag/v0.3.9); and
+- [committed qualification report](../crates/sip/rvoip-sip/docs/BETA_RELEASE_REPORT.md).
 
 The release exposes six manifest-derived deployment bundles and tests each
 with default features disabled: SIP endpoint, carrier SIP, browser gateway,

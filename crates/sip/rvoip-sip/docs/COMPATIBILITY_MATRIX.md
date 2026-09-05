@@ -1,6 +1,6 @@
 # rvoip-sip Beta Compatibility Matrix
 
-Date: 2026-07-25
+Date: 2026-09-05
 
 This matrix is the beta release contract. `Supported` and `Interop tested`
 entries have repeatable in-repo or external-peer evidence. `Partial`,
@@ -8,9 +8,10 @@ entries have repeatable in-repo or external-peer evidence. `Partial`,
 as general beta capabilities.
 
 The current full reference is the
-[Beta Release Candidate Report](BETA_RELEASE_REPORT.md), with exact executed
-coverage in the [108-gate report](BETA_GATE_REPORT.md). It describes run
-`20260724T231400Z` from clean tested commit `8d44fb35`.
+[protected 0.3.9 qualification](BETA_RELEASE_REPORT.md), with exact executed
+coverage in the [208-gate report](BETA_GATE_REPORT.md). It describes run
+`33969263241` from clean tested commit
+`8cab44b10f872d21b304c02111d5d203ee8226da`.
 
 ## Support Levels
 
