@@ -47,7 +47,7 @@ use rvoip_sip::server::contact_resolver::{
 };
 use rvoip_sip::{
     Config as LowSipConfig, IpNet, ProfiledSipAdapter, SipAdapter, SipEgressProfileRegistration,
-    SipInboundContextPolicy, SipListenerAuthPolicy, SipNatConfig, SipProfileRevision,
+    SipInboundContextPolicy, SipListenerAuthPolicy, SipNatConfig, SipProfileRevision, SipTlsMode,
     UnifiedCoordinator,
 };
 use rvoip_webrtc::{
@@ -255,7 +255,7 @@ impl WebRtcConfig {
 }
 
 /// SIP server and registrar configuration for the app layer.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SipConfig {
     bind: String,
     domain: String,
@@ -276,11 +276,78 @@ pub struct SipConfig {
     stun_server: Option<SocketAddr>,
     /// SRTP posture: whether to offer it, and whether to insist on it.
     srtp: SipMediaSecurity,
+    /// Optional SIP-TLS listener address and identity.
+    tls_listener: Option<SipTlsListenerConfig>,
+    /// Optional public address advertised by the SIP-TLS listener.
+    tls_advertised_addr: Option<SocketAddr>,
+    /// Optional additional client trust root for outbound SIP-TLS.
+    tls_extra_ca_path: Option<PathBuf>,
+    /// Explicit RTP payload types offered by the SIP media leg.
+    offered_codecs: Option<Vec<u8>>,
     /// ICE posture (RFC 8445).
     ice: rvoip_sip::SipIcePolicy,
     /// Independently configured outbound children selected by an immutable
     /// profile revision on each originate request.
     egress_profiles: Vec<SipEgressProfileConfig>,
+}
+
+impl std::fmt::Debug for SipConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SipConfig")
+            .field("bind", &self.bind)
+            .field("domain_present", &!self.domain.is_empty())
+            .field(
+                "sip_advertised_configured",
+                &self.sip_advertised_addr.is_some(),
+            )
+            .field("media_public_configured", &self.media_public_addr.is_some())
+            .field("media_port_range", &self.media_port_range)
+            .field("role_capabilities", &self.role_capabilities)
+            .field("registrar_user_count", &self.registrar_users.len())
+            .field("tenant_present", &self.tenant.is_some())
+            .field("trusted_trunk_count", &self.trusted_trunks.len())
+            .field("captured_header_count", &self.captured_headers.len())
+            .field("playout_configured", &self.playout.is_some())
+            .field("stun_configured", &self.stun_server.is_some())
+            .field("srtp", &self.srtp)
+            .field("ice", &self.ice)
+            .field("tls_listener", &self.tls_listener)
+            .field(
+                "tls_advertised_configured",
+                &self.tls_advertised_addr.is_some(),
+            )
+            .field("tls_extra_ca_configured", &self.tls_extra_ca_path.is_some())
+            .field(
+                "offered_codec_count",
+                &self.offered_codecs.as_ref().map_or(0, Vec::len),
+            )
+            .field("egress_profile_count", &self.egress_profiles.len())
+            .finish()
+    }
+}
+
+/// SIP-TLS listener identity used by the high-level application facade.
+///
+/// Paths name operator-managed files and are passed directly to the lower
+/// SIP runtime. Debug output reports only whether each item is configured so
+/// secret-bearing deployment paths do not leak into routine diagnostics.
+#[derive(Clone)]
+struct SipTlsListenerConfig {
+    bind: SocketAddr,
+    cert_path: PathBuf,
+    key_path: PathBuf,
+}
+
+impl std::fmt::Debug for SipTlsListenerConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SipTlsListenerConfig")
+            .field("bind", &self.bind)
+            .field("cert_configured", &true)
+            .field("key_configured", &true)
+            .finish()
+    }
 }
 
 /// One provider-neutral outbound SIP child installed beside the listener.
@@ -421,6 +488,53 @@ impl SipConfig {
         self
     }
 
+    /// Enable a SIP-TLS listener with the certificate and private key it
+    /// presents to peers.
+    ///
+    /// The lower SIP runtime validates and loads both files before startup;
+    /// a missing, unreadable, or mismatched identity therefore fails the app
+    /// build instead of silently falling back to plaintext signalling.
+    pub fn tls_listener(
+        mut self,
+        bind: SocketAddr,
+        cert_path: impl Into<PathBuf>,
+        key_path: impl Into<PathBuf>,
+    ) -> Self {
+        self.tls_listener = Some(SipTlsListenerConfig {
+            bind,
+            cert_path: cert_path.into(),
+            key_path: key_path.into(),
+        });
+        self
+    }
+
+    /// Override the public address advertised by the SIP-TLS listener.
+    ///
+    /// App construction fails when an advertised TLS address is supplied
+    /// without a listener identity. Builder call order does not matter.
+    pub fn tls_advertised_addr(mut self, advertised: SocketAddr) -> Self {
+        self.tls_advertised_addr = Some(advertised);
+        self
+    }
+
+    /// Add a PEM CA bundle to the system roots used for outbound SIP-TLS.
+    pub fn tls_extra_ca(mut self, ca_path: impl Into<PathBuf>) -> Self {
+        self.tls_extra_ca_path = Some(ca_path.into());
+        self
+    }
+
+    /// Set the ordered RTP payload types offered by SIP media negotiation.
+    ///
+    /// The lower runtime rejects an empty list, duplicates, unavailable
+    /// feature-gated codecs, and offers with no supported audio codec.
+    pub fn offered_codecs<I>(mut self, payload_types: I) -> Self
+    where
+        I: IntoIterator<Item = u8>,
+    {
+        self.offered_codecs = Some(payload_types.into_iter().collect());
+        self
+    }
+
     /// Set the ICE posture (RFC 8445).
     ///
     /// `Lite` answers connectivity checks on this listener's reachable
@@ -456,6 +570,10 @@ impl SipConfig {
             // says so rather than inheriting it.
             playout: None,
             srtp: SipMediaSecurity::Disabled,
+            tls_listener: None,
+            tls_advertised_addr: None,
+            tls_extra_ca_path: None,
+            offered_codecs: None,
             egress_profiles: Vec::new(),
         }
     }
@@ -1150,6 +1268,12 @@ impl RvoipAppBuilder {
                 return Err(AppError::Policy(
                     "a concrete SIP advertised address is required for an unspecified bind: \
                      set advertised_addr, or discover_advertised_addr with a STUN server"
+                        .into(),
+                ));
+            }
+            if sip.tls_advertised_addr.is_some() && sip.tls_listener.is_none() {
+                return Err(AppError::Policy(
+                    "a SIP-TLS advertised address requires tls_listener with a certificate and key"
                         .into(),
                 ));
             }
@@ -2117,6 +2241,17 @@ fn make_low_sip_config(config: &SipConfig, bind: SocketAddr) -> LowSipConfig {
             low.srtp_required = true;
         }
     }
+    if let Some(listener) = &config.tls_listener {
+        low.sip_tls_mode = SipTlsMode::ClientAndServer;
+        low.tls_bind_addr = Some(listener.bind);
+        low.tls_advertised_addr = config.tls_advertised_addr;
+        low.tls_cert_path = Some(listener.cert_path.clone());
+        low.tls_key_path = Some(listener.key_path.clone());
+    }
+    low.tls_extra_ca_path = config.tls_extra_ca_path.clone();
+    if let Some(offered_codecs) = &config.offered_codecs {
+        low.offered_codecs = offered_codecs.clone();
+    }
     if let Some(advertised) = config.sip_advertised_addr {
         low = low
             .with_sip_advertised_addr(advertised)
@@ -2282,6 +2417,86 @@ mod tests {
             bind,
         );
         assert!(required.offer_srtp && required.srtp_required);
+    }
+
+    #[cfg(feature = "sip")]
+    #[test]
+    fn tls_identity_and_codec_offer_reach_the_low_level_config() {
+        let udp_bind: SocketAddr = "127.0.0.1:5060".parse().expect("UDP bind");
+        let tls_bind: SocketAddr = "0.0.0.0:5061".parse().expect("TLS bind");
+        let tls_advertised: SocketAddr = "192.0.2.10:5061".parse().expect("TLS advertised");
+        let config = SipConfig::bind(udp_bind.to_string())
+            .tls_advertised_addr(tls_advertised)
+            .tls_listener(
+                tls_bind,
+                "/run/secrets/sip-cert.pem",
+                "/run/secrets/sip-key.pem",
+            )
+            .tls_extra_ca("/run/secrets/carrier-ca.pem")
+            .media_security(SipMediaSecurity::Required)
+            .offered_codecs([0, 8, 101]);
+
+        let low = make_low_sip_config(&config, udp_bind);
+        assert_eq!(low.sip_tls_mode, SipTlsMode::ClientAndServer);
+        assert_eq!(low.tls_bind_addr, Some(tls_bind));
+        assert_eq!(low.tls_advertised_addr, Some(tls_advertised));
+        assert_eq!(
+            low.tls_cert_path.as_deref(),
+            Some(std::path::Path::new("/run/secrets/sip-cert.pem"))
+        );
+        assert_eq!(
+            low.tls_key_path.as_deref(),
+            Some(std::path::Path::new("/run/secrets/sip-key.pem"))
+        );
+        assert_eq!(
+            low.tls_extra_ca_path.as_deref(),
+            Some(std::path::Path::new("/run/secrets/carrier-ca.pem"))
+        );
+        assert_eq!(low.offered_codecs, vec![0, 8, 101]);
+        assert!(low.offer_srtp && low.srtp_required);
+        low.validate().expect("complete TLS/SRTP policy validates");
+
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("sip-key.pem"));
+        assert!(!debug.contains("carrier-ca.pem"));
+    }
+
+    #[cfg(feature = "sip")]
+    #[tokio::test]
+    async fn tls_advertisement_without_identity_fails_closed() {
+        let result = RvoipApp::builder()
+            .customers(CustomerPolicy::sip_only())
+            .employees(EmployeePolicy::named(["operator"]))
+            .assignment(AssignmentPolicy::fixed("operator"))
+            .sip(
+                SipConfig::bind("127.0.0.1:0")
+                    .tls_advertised_addr("192.0.2.10:5061".parse().expect("TLS address"))
+                    .allow(Role::Customer, [Capability::Voice]),
+            )
+            .build()
+            .await;
+        assert!(
+            matches!(result, Err(AppError::Policy(detail)) if detail.contains("requires tls_listener")),
+            "TLS advertisement without a certificate-bearing listener must fail startup"
+        );
+    }
+
+    #[cfg(feature = "sip")]
+    #[test]
+    fn sip_config_debug_redacts_registrar_credentials_and_tls_paths() {
+        let config = SipConfig::bind("127.0.0.1:5060")
+            .registrar_users([("alice", "super-secret-password")])
+            .tls_listener(
+                "127.0.0.1:5061".parse().expect("TLS bind"),
+                "/run/secrets/private-cert.pem",
+                "/run/secrets/private-key.pem",
+            );
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("alice"));
+        assert!(!debug.contains("super-secret-password"));
+        assert!(!debug.contains("private-cert.pem"));
+        assert!(!debug.contains("private-key.pem"));
+        assert!(debug.contains("registrar_user_count: 1"));
     }
 
     #[cfg(feature = "sip")]

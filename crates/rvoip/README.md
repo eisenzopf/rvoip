@@ -102,6 +102,33 @@ rvoip = { version = "0.3.8", features = ["app"] }
 rvoip = { version = "0.3.8", default-features = false, features = ["bundle-full-pure-rust"] }
 ```
 
+The high-level SIP listener exposes the same fail-closed signalling, media,
+and codec posture as the lower SIP runtime. Certificates and keys stay in
+operator-managed files; configuration and debug output never contain their
+contents:
+
+```rust
+use rvoip::app::{SipConfig, SipMediaSecurity};
+
+let sip = SipConfig::bind("0.0.0.0:5060")
+    .advertised_addr("203.0.113.10:5060".parse()?)
+    .tls_listener(
+        "0.0.0.0:5061".parse()?,
+        "/run/secrets/sip-cert.pem",
+        "/run/secrets/sip-key.pem",
+    )
+    .tls_advertised_addr("203.0.113.10:5061".parse()?)
+    .tls_extra_ca("/run/secrets/carrier-ca.pem")
+    .media_security(SipMediaSecurity::Required)
+    .offered_codecs([0, 8, 101]);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+SIP-TLS listener startup refuses an incomplete or unreadable identity, strict
+SRTP cannot be enabled without offering SRTP, and codec offers reject empty,
+duplicate, or unavailable payload types. UDP, TCP, and WebSocket listener
+enablement remains controlled by the lower `rvoip-sip::Config` surface.
+
 `full` means every **facade feature**, not every crate in the rvoip workspace.
 
 ## Module layout
