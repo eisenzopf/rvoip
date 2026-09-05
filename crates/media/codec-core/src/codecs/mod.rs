@@ -329,8 +329,7 @@ pub struct CodecCapabilities {
 ///
 /// Split out of [`CodecCapabilities::get_all`] to keep that function within the
 /// workspace line limit as codecs accumulate.
-// Both parameters go unused in a build with neither AMR feature enabled.
-#[allow(unused_variables)]
+#[cfg(any(feature = "amr-nb", feature = "amr-wb"))]
 fn add_amr_capabilities(
     codec_types: &mut Vec<CodecType>,
     codec_info: &mut HashMap<CodecType, CodecInfo>,
@@ -425,6 +424,7 @@ impl CodecCapabilities {
             );
         }
 
+        #[cfg(any(feature = "amr-nb", feature = "amr-wb"))]
         add_amr_capabilities(&mut codec_types, &mut codec_info);
 
         #[cfg(feature = "g729")]
@@ -495,10 +495,22 @@ mod tests {
     fn test_codec_factory_supported_codecs() {
         let supported = CodecFactory::supported_codecs();
 
-        #[cfg(any(feature = "g711", feature = "g729", feature = "opus"))]
+        #[cfg(any(
+            feature = "g711",
+            feature = "g729",
+            feature = "opus",
+            feature = "amr-nb",
+            feature = "amr-wb"
+        ))]
         assert!(!supported.is_empty());
 
-        #[cfg(not(any(feature = "g711", feature = "g729", feature = "opus")))]
+        #[cfg(not(any(
+            feature = "g711",
+            feature = "g729",
+            feature = "opus",
+            feature = "amr-nb",
+            feature = "amr-wb"
+        )))]
         assert!(supported.is_empty());
 
         #[cfg(feature = "g711")]
@@ -506,6 +518,12 @@ mod tests {
             assert!(supported.contains(&"PCMU"));
             assert!(supported.contains(&"PCMA"));
         }
+
+        #[cfg(feature = "amr-nb")]
+        assert!(supported.contains(&"AMR"));
+
+        #[cfg(feature = "amr-wb")]
+        assert!(supported.contains(&"AMR-WB"));
     }
 
     #[test]
@@ -555,13 +573,25 @@ mod tests {
     fn test_codec_capabilities() {
         let caps = CodecCapabilities::get_all();
 
-        #[cfg(any(feature = "g711", feature = "g729", feature = "opus"))]
+        #[cfg(any(
+            feature = "g711",
+            feature = "g729",
+            feature = "opus",
+            feature = "amr-nb",
+            feature = "amr-wb"
+        ))]
         {
             assert!(!caps.codec_types.is_empty());
             assert!(!caps.codec_info.is_empty());
         }
 
-        #[cfg(not(any(feature = "g711", feature = "g729", feature = "opus")))]
+        #[cfg(not(any(
+            feature = "g711",
+            feature = "g729",
+            feature = "opus",
+            feature = "amr-nb",
+            feature = "amr-wb"
+        )))]
         {
             assert!(caps.codec_types.is_empty());
             assert!(caps.codec_info.is_empty());
@@ -571,6 +601,18 @@ mod tests {
         {
             assert!(caps.is_supported(CodecType::G711Pcmu));
             assert!(caps.get_info(CodecType::G711Pcmu).is_some());
+        }
+
+        #[cfg(feature = "amr-nb")]
+        {
+            assert!(caps.is_supported(CodecType::AmrNb));
+            assert_eq!(caps.get_info(CodecType::AmrNb).unwrap().name, "AMR");
+        }
+
+        #[cfg(feature = "amr-wb")]
+        {
+            assert!(caps.is_supported(CodecType::AmrWb));
+            assert_eq!(caps.get_info(CodecType::AmrWb).unwrap().name, "AMR-WB");
         }
     }
 

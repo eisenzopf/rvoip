@@ -283,22 +283,46 @@ mod tests {
         let info = info();
         assert_eq!(info.version, VERSION);
 
-        #[cfg(any(feature = "g711", feature = "g729", feature = "opus"))]
+        #[cfg(any(
+            feature = "g711",
+            feature = "g729",
+            feature = "opus",
+            feature = "amr-nb",
+            feature = "amr-wb"
+        ))]
         assert!(!info.supported_codecs.is_empty());
 
-        #[cfg(not(any(feature = "g711", feature = "g729", feature = "opus")))]
-        assert!(info.supported_codecs.is_empty());
+        #[cfg(not(any(
+            feature = "g711",
+            feature = "g729",
+            feature = "opus",
+            feature = "amr-nb",
+            feature = "amr-wb"
+        )))]
+        assert_eq!(info.supported_codecs, Vec::<&str>::new());
     }
 
     #[test]
     fn test_supported_codecs() {
-        #[cfg(any(feature = "g711", feature = "g729", feature = "opus"))]
+        #[cfg(any(
+            feature = "g711",
+            feature = "g729",
+            feature = "opus",
+            feature = "amr-nb",
+            feature = "amr-wb"
+        ))]
         const {
-            assert!(!SUPPORTED_CODECS.is_empty())
+            assert!(!SUPPORTED_CODECS.is_empty());
         };
 
-        #[cfg(not(any(feature = "g711", feature = "g729", feature = "opus")))]
-        assert!(SUPPORTED_CODECS.is_empty());
+        #[cfg(not(any(
+            feature = "g711",
+            feature = "g729",
+            feature = "opus",
+            feature = "amr-nb",
+            feature = "amr-wb"
+        )))]
+        assert_eq!(SUPPORTED_CODECS, &[] as &[&str]);
 
         #[cfg(feature = "g711")]
         {
@@ -315,5 +339,11 @@ mod tests {
 
         #[cfg(feature = "opus")]
         assert!(SUPPORTED_CODECS.contains(&"opus"));
+
+        #[cfg(feature = "amr-nb")]
+        assert!(SUPPORTED_CODECS.contains(&"AMR"));
+
+        #[cfg(feature = "amr-wb")]
+        assert!(SUPPORTED_CODECS.contains(&"AMR-WB"));
     }
 }

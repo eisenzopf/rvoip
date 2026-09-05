@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Codec feature-matrix hardening
+
+- AMR-NB and AMR-WB capability registration now compiles only when the
+  corresponding codec is enabled, keeping codec-free builds warning-clean
+  without weakening AMR support.
+- Capability inventory tests now cover AMR-only builds explicitly, and the
+  release gate exercises codec-free, AMR, and `all-codecs` configurations so
+  AMR, Opus, PCMU, and PCMA remain first-class negotiated codecs.
+
 ### Committed per-session SIP codec renegotiation
 
 - `SipAdapter::renegotiate_media` now renders a one-shot codec offer for the
