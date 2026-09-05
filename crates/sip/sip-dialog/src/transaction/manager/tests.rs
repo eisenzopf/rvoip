@@ -694,6 +694,19 @@ mod tests {
         }
     }
 
+    fn dispatch_udp_event_from(message: Message, source: SocketAddr) -> TransportEvent {
+        TransportEvent::MessageReceived {
+            message,
+            source,
+            destination: "127.0.0.1:5061".parse().unwrap(),
+            transport_type: TransportType::Udp,
+            flow_id: None,
+            raw_bytes: None,
+            timing: None,
+            connection_metadata: None,
+        }
+    }
+
     fn dispatch_stream_event_from(
         message: Message,
         source: SocketAddr,
@@ -1841,7 +1854,7 @@ mod tests {
         let invite = create_dispatch_request(Method::Invite, branch, 300)
             .map_err(|error| Error::Other(error.to_string()))?;
         manager
-            .handle_transport_event(dispatch_event_from(
+            .handle_transport_event(dispatch_udp_event_from(
                 Message::Request(invite.clone()),
                 source,
             ))
@@ -1855,7 +1868,7 @@ mod tests {
         let cancel = create_dispatch_request(Method::Cancel, branch, 300)
             .map_err(|error| Error::Other(error.to_string()))?;
         manager
-            .handle_transport_event(dispatch_event_from(
+            .handle_transport_event(dispatch_udp_event_from(
                 Message::Request(cancel.clone()),
                 source,
             ))
@@ -1881,7 +1894,7 @@ mod tests {
                 {
                     break;
                 }
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(1)).await;
             }
         })
         .await
@@ -1900,7 +1913,7 @@ mod tests {
         let ack = create_dispatch_request(Method::Ack, branch, 300)
             .map_err(|error| Error::Other(error.to_string()))?;
         manager
-            .handle_transport_event(dispatch_event_from(Message::Request(ack), source))
+            .handle_transport_event(dispatch_udp_event_from(Message::Request(ack), source))
             .await?;
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
@@ -1911,7 +1924,7 @@ mod tests {
                 {
                     break;
                 }
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(1)).await;
             }
         })
         .await
@@ -1936,7 +1949,7 @@ mod tests {
 
         let writes_before_retransmission = transport.raw_send_count();
         manager
-            .handle_transport_event(dispatch_event_from(Message::Request(cancel), source))
+            .handle_transport_event(dispatch_udp_event_from(Message::Request(cancel), source))
             .await?;
         assert_eq!(
             transport.raw_send_count(),
@@ -4296,7 +4309,7 @@ mod tests {
                 .build();
         let response_event = match (transport_type, flow_id) {
             (TransportType::Udp, None) => {
-                dispatch_event_from(Message::Response(response), prepared_destination)
+                dispatch_udp_event_from(Message::Response(response), prepared_destination)
             }
             (TransportType::Tcp, Some(flow_id)) => dispatch_stream_event_from(
                 Message::Response(response),
@@ -4400,7 +4413,7 @@ mod tests {
                 .to("Bob", "sip:bob@example.com", Some("retirement-race-tag"))
                 .build();
         manager
-            .handle_transport_event(dispatch_event_from(
+            .handle_transport_event(dispatch_udp_event_from(
                 Message::Response(response.clone()),
                 destination,
             ))
@@ -5197,7 +5210,7 @@ mod tests {
         let source: SocketAddr = "192.0.2.21:5060".parse().unwrap();
 
         manager
-            .handle_transport_event(dispatch_event_from(Message::Request(request), source))
+            .handle_transport_event(dispatch_udp_event_from(Message::Request(request), source))
             .await?;
 
         assert!(manager.server_transactions.is_empty());
@@ -5857,7 +5870,7 @@ mod tests {
                 .build();
 
         manager
-            .handle_transport_event(dispatch_event_from(
+            .handle_transport_event(dispatch_udp_event_from(
                 Message::Response(response.clone()),
                 "192.0.2.99:5060".parse().unwrap(),
             ))
@@ -5881,7 +5894,7 @@ mod tests {
         }
 
         manager
-            .handle_transport_event(dispatch_event_from(
+            .handle_transport_event(dispatch_udp_event_from(
                 Message::Response(response.clone()),
                 destination,
             ))
@@ -5970,7 +5983,7 @@ mod tests {
                 .to("Bob", "sip:bob@example.com", Some("lazy-auth-tag"))
                 .build();
         manager
-            .handle_transport_event(dispatch_event_from(
+            .handle_transport_event(dispatch_udp_event_from(
                 Message::Response(response.clone()),
                 destination,
             ))

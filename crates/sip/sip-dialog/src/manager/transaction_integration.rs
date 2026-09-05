@@ -2858,13 +2858,20 @@ mod outward_error_redaction_tests {
             source,
             "pub async fn send_initial_invite_with_extra_headers(",
         );
+        let registered_flow = function_body(
+            source,
+            "async fn send_initial_invite_with_registered_flow_routes(",
+        );
         let canonical = function_body(source, "async fn send_initial_invite_attempt_with_options(");
 
-        for facade in [auth, timer, initial] {
+        for facade in [auth, timer, registered_flow] {
             assert!(facade.contains(".send_initial_invite_attempt_with_options("));
             assert!(!facade.contains("InviteBuilder::new()"));
             assert!(!facade.contains("send_request_with_candidate_wire_plan("));
         }
+        assert!(initial.contains(".send_initial_invite_with_registered_flow_routes("));
+        assert!(!initial.contains("InviteBuilder::new()"));
+        assert!(!initial.contains("send_request_with_candidate_wire_plan("));
         assert_eq!(canonical.matches("InviteBuilder::new()").count(), 1);
         assert_eq!(
             canonical
