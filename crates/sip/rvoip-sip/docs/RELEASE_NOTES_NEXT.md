@@ -1,115 +1,113 @@
 # rvoip 0.3.9 Release Candidate Notes
 
-Date: 2026-08-14
+Date: 2026-09-05
 
-These notes describe the coordinated 44-crate `0.3.9` release candidate.
-Publication requires a fresh `remote-release` qualification bound to the exact
-clean release source and to the current gate catalog. Prior `0.3.6` and
-`0.3.7` qualification evidence does not qualify this release.
+These notes describe the coordinated 45-crate `0.3.9` release candidate.
+Publication requires a fresh protected `remote-release` qualification bound to
+the exact release commit and current gate catalog. Earlier qualification
+evidence does not qualify this release.
 
 ## Headline
 
-`0.3.9` is a codec and interop release. AMR-NB and AMR-WB ship end to end —
-both interface formats, DTX, redundancy, interleaving, and a negotiated
-mode-set — and every rate is proved in a live call through a record-routing
-proxy rather than only in unit vectors. Kamailio and OpenSIPS join the
-qualification matrix over TLS with SRTP through rtpengine.
+`0.3.9` is the carrier-grade honesty release. SIP media behavior that existed
+only as disconnected primitives is now reachable through production paths and
+the public facade: playout and loss concealment, measured MOS and RTCP XR,
+trusted carrier identity, ICE, DTLS-SRTP, per-session codec renegotiation,
+remote endpoint registration, browser media, and lossless RTP observation.
 
-Two SIP correctness repairs ride with it: secure dialogs now answer with a
-`sips:` fallback Contact, and a UAC learns its route set from the
-dialog-forming 2xx, so in-dialog requests follow the proxy path instead of
-bypassing it.
+The release also introduces six deployment-oriented facade bundles. G.711 is
+the portable baseline; G.729, AMR-NB, and AMR-WB are first-class pure-Rust
+carrier codecs; Opus remains first-class and explicit in native browser/AI
+bundles because its current backend links `libopus`.
 
-The media-reliability, backpressure, and inbound-auth work from `0.3.7`
-remains in force.
+## Carrier SIP and remote endpoints
 
-## AMR
+- The carrier profile enables deadline-driven playout, bounded reorder,
+  G.711 packet-loss concealment, clock-drift handling, measured quality, and
+  RTCP XR reporting. Unknown quality is no longer reported as a perfect MOS.
+- Trusted-trunk policy gates inbound P-Asserted-Identity and an allowlist of
+  private carrier headers. Typed PAI/PPI origination survives Digest retries
+  without allowing arbitrary custom headers to impersonate those fields.
+- Response Contacts honor the dialog transport, and observed-source routing
+  applies consistently to BYE-with-reason, INFO, and NOTIFY.
+- The production remote-endpoint profile uses authenticated RFC 5626 outbound
+  registrations on exact TLS/WSS flows, rejects incomplete registrations,
+  retains opaque flow capabilities, supports ordered failover, and removes
+  stale routes on close, expiry, unregister, replacement, or restart.
+- Awaitable connection and media readiness replaces application polling while
+  preserving exact lifecycle generation, cancellation, and deadline outcomes.
 
-- Both variants at both interface formats (IF1 and IF2), bit-exact against
-  3GPP's own reference material for TS 26.073, TS 26.101 and TS 26.201. No
-  3GPP source is vendored into this repository; the oracles fetch it.
-- VAD1 and VAD2, DTX reaching the wire, receive-side interleaving reassembly,
-  max-red redundancy with dedup, and CMR damping.
-- The SDP `mode-set` is negotiated and obeyed, and each negotiated rate is
-  attested in the release evidence rather than assumed from the top mode.
-- The media graph admits a codec by the payload type a transport reports, so
-  a peer's own dynamic numbering is honored — including the two numbers an
-  AMR session commonly negotiates at once, which no name-keyed table could
-  express. Packet times AMR cannot accept are re-framed (10 ms joined,
-  30 ms split with the remainder carried).
+## Secure media and NAT traversal
 
-## Proxy and PBX interop
+- SIP can negotiate `UDP/TLS/RTP/SAVP` with DTLS 1.2, SHA-256 fingerprints,
+  RFC 8842 setup roles, RFC 7983 shared-socket demultiplexing, and secure-only
+  latching before keys are installed. SDES remains available for compatible
+  deployments.
+- The sans-I/O RFC 8445 ICE agent and RFC 8489 STUN codec support full/lite
+  roles, role conflicts, nomination, restarts, authenticated checks, and
+  server-reflexive address discovery. SIP scope is one component with no TURN
+  or trickle ICE in this release.
+- RTP/RTCP teardown emits a standards-compliant compound Receiver Report plus
+  BYE rather than unnegotiated reduced-size RTCP.
 
-- Kamailio and OpenSIPS registrar-proxy labs, TLS to the proxy and SRTP
-  through rtpengine, with opt-in AMR-NB transcoding. The AMR-WB transcode
-  failure is attributed to rtpengine and recorded as such.
-- A per-rate AMR sweep bound to the gate catalog, and proxy-PBX matrix rows
-  verified in the release report.
-- New gates in the catalog: the AMR per-rate sweep family, the proxy-PBX
-  media family, and AMR decode/encode/unpack fuzz targets.
+## Media, codecs, and application control
 
-## SIP correctness
+- Per-session re-INVITE codec changes commit only after the final negotiated
+  answer. Rejection, timeout, replacement, or lost observation leaves the
+  stable generation unchanged and retryable.
+- Checked RTP packetization and observation preserve marker, CSRC, extension,
+  padding, sequence, timestamp, SSRC, and negotiated payload identity when the
+  caller requests a packet-preserving boundary.
+- N-way mix-minus conferencing handles G.711 carrier and Opus browser members
+  on one canonical mono mix bus, converts channel layouts at each boundary,
+  and advances stereo RTP timestamps by sample frames. Supervisor monitoring
+  can hear without contributing.
+- Recording sink factories isolate concurrent recordings, and Vapi barge-in
+  flushes both adapter audio and downstream graph queues with drop accounting.
+- Authoritative ingress exposes admission tickets, a single-consumer durable
+  operational stream, fail-closed health, and bounded drain behavior before
+  adapters begin accepting work.
+- Production AAuth delegation uses least-privilege scope intersection;
+  signature freshness rejects far-future timestamps and replay handling is
+  consume-once at the configured authority boundary.
 
-- RFC 3261 §12.1.1: a secure fallback Contact is generated for every trigger
-  — SIPS Request-URI, SIPS topmost Record-Route, or SIPS Contact when no
-  Record-Route is present — at the TLS-advertised address. Explicit Contact
-  and plain-SIP behavior are unchanged. This also repairs rvoip-to-rvoip
-  SIPS setup, since `Dialog::from_2xx_response` refuses a secure dialog whose
-  Contact is not `sips:` (issue #176). Bounded claim: the fallback still
-  requires a routable TLS advertisement — a wildcard TLS bind with no
-  `tls_advertised_addr` or `contact_uri` emits a syntactically correct but
-  unroutable Contact, exactly as the plain-SIP fallback always has.
-- RFC 3261 §12.1.2: the UAC learns its route set from the dialog-forming
-  2xx's Record-Route, reversed, preserving every URI parameter. Without it,
-  in-dialog requests bypassed every record-routing proxy in the path.
-- The profiled egress registration exposes its coordinator for
-  observation-only subscriptions, so an application can install security
-  evidence monitors before registration. The composite adapter remains the
-  sole signaling and lifecycle owner.
+## Deployment bundles
 
-## Architecture and compatibility
+- `bundle-sip-endpoint`: provider-neutral SIP with G.711.
+- `bundle-carrier-sip`: SIP, DTLS-SRTP, STIR/SHAKEN, G.711, G.729, AMR-NB,
+  and AMR-WB.
+- `bundle-browser-gateway`: high-level SIP/WebRTC/UCTP gateway with G.711 and
+  Opus.
+- `bundle-ai-conversation`: browser/AI conversation surface with G.711 and
+  Opus.
+- `bundle-full-pure-rust`: every facade surface and pure-Rust codec.
+- `bundle-full-native`: every facade surface and all mainline codecs,
+  including Opus.
 
-- `Config` gains `with_amr_dtx`, `with_amr_auto_cmr`, and
-  `with_amr_mode_set` builders with matching getters. The fields are
-  private: `Config`'s constructible shape is unchanged from `0.3.7`, and
-  functional-record-update construction keeps working against it.
-- `CodecInfo` (rvoip-core-traits, re-exported by rvoip-core) carries the
-  payload type a transport negotiated: `payload_type: Option<u8>`, where
-  `None` preserves the historical name-table resolution.
+The bundle catalog is manifest-derived, documented in `docs/FEATURE_BUNDLES.md`,
+tested with default features disabled, and checked at the resolved dependency
+graph. Release gates separately exercise codec-free, G.711, G.729, AMR,
+Opus, and all-codec configurations.
 
-### Upgrading from 0.3.7
+## Compatibility and bounded claims
 
-The one source-level change for downstream code: any `CodecInfo { .. }`
-struct literal must add `payload_type: None` (or the negotiated number).
-Everything else in this release is additive — `Config` construction,
-`MediaFrame`, `SymmetricRtpPolicy`, `SipTraceConfig`, and `MediaMode` are
-shape-identical to `0.3.7`.
-- An opus↔opus bridge stays passthrough when its two legs numbered opus
-  differently. The payload type is a per-leg SDP artifact, not a property of
-  the encoded audio, so the bypass compares name, clock rate and channels,
-  and passthrough restamps the sink's payload type on egress.
-- A barge-in flush empties the re-framing accumulator as well as the sink
-  queues, so no pre-interruption audio and no dead-timeline timestamp
-  survives into the first frame after the flush.
-- The AMR claim is bounded by what was measured: the recorded lab matrix,
-  its peer versions, and the rates actually swept. It does not extend to
-  untested handsets, carriers, or transcoding gateways.
-- General-user 10,000 CPS full-media capability is not claimed. The strict
-  SIP beta envelope remains bounded by its recorded 2,000-CPS real-media
-  profile, exact host configuration, peer matrix, workloads, and soak
-  durations.
-- Browser/WebRTC edge qualification remains separate from the SIP beta
-  claim; the AMR and proxy-interop work does not broaden it to untested
-  browsers, ICE/TURN deployments, or network topologies.
+The changes are additive at the facade. Direct `rvoip-core` consumers that
+previously acquired Opus through feature unification must now enable `opus` or
+`all-codecs` explicitly; this prevents a purported pure-Rust graph from
+silently linking a native codec. Applications should select a `bundle-*`
+feature with `default-features = false` when deployment shape matters.
+
+The remote endpoint profile is not declared fully qualified until the
+protected run records its live two-UA NAT/TLS/SDES evidence. Browser/WebRTC,
+ICE, DTLS-SRTP, codec, proxy, performance, and soak claims are bounded to the
+peers, versions, machine shapes, workloads, and thresholds captured by the
+signed qualification aggregate. TURN, SIP trickle ICE, TLS-SRTP, campaigns,
+and unmeasured carrier networks are not implied.
 
 ## Qualification
 
-The candidate must pass a fresh `remote-release` qualification from a clean,
-committed `0.3.9` source tree. The aggregate is bound to the exact candidate
-commit and to the catalog hash, and this release changes the catalog — it adds
-the AMR per-rate sweep, proxy-PBX media, and AMR fuzz families — so no earlier
-run's evidence can be reused for any gate.
-
-Historical `0.3.2` exception, `0.3.4` carry-forward, and prior `0.3.6` and
-`0.3.7` attestations remain unchanged release history. They are not presented
-as current `0.3.9` evidence.
+The release candidate must first pass the normal PR Gate, then a complete
+`remote-preflight`, followed by `remote-release` with `first_candidate=true`.
+The full profile runs the structured 108-gate coverage ledger on hosted and
+ephemeral GCP workers and includes a continuous one-hour soak. Publication
+accepts only the signed aggregate for the exact clean `main` candidate.

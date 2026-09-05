@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.3.9 — 2026-09-05
+
+This coordinated 45-crate release makes the carrier media and remote-endpoint
+paths reachable through the public facade, adds deployment-oriented feature
+bundles, and hardens security, codec negotiation, browser interoperability,
+and protected release evidence. It incorporates the previously unpublished
+`0.3.8-thelve.1` candidate described below into the stable release.
+
 ### Production remote SIP endpoint profile
 
 - The built-in registrar can now require authenticated RFC 5626 outbound
@@ -114,12 +122,6 @@
   Normal outbound `MediaFrame` forwarding deliberately starts a new RTP hop:
   marker is false, CSRC/extensions are empty, and padding is omitted. Exact
   reserialization is available only through `pack_observed_rtp_datagram`.
-
-## 0.3.8-thelve.1 — 2026-08-18 (branch `thelve/rvoip-22-ingress`, unpublished)
-
-A pre-release cut from `0.3.8` that makes two shipped correctness
-primitives reachable from the high-level app, plus one signature-freshness
-fix. Additive: the convenience builder path is unchanged.
 
 ### ICE (RFC 8445) on the SIP path
 
@@ -269,6 +271,10 @@ fix. Additive: the convenience builder path is unchanged.
   resampled into and out of the conference rate, so a G.711 carrier leg and
   an Opus browser leg mix together without either renegotiating. A member's
   tap is owned by the member, so leaving tears the route down.
+- The internal mix bus is canonical mono. Stereo members are downmixed before
+  resampling and expanded to their negotiated interleaved layout before
+  encoding; RTP timestamps advance by sample frames rather than scalar
+  samples. A real stereo-Opus regression protects the ordinary browser leg.
 - A member whose transport has closed is removed from the mix rather than
   retried; one member's undecodable packet is skipped rather than silencing
   the conference.

@@ -1,7 +1,21 @@
 # rvoip 0.3.9 release plan
 
-Status: consolidated draft, 2026-08-16, immediately after 0.3.8 published
-(44/44 crates, qualification run 31926586835, 206/206 gates PASS).
+Status: release candidate preparation, 2026-09-05.
+
+Implementation is complete for 18 of the 20 issues assigned to the milestone.
+PR #213 merged the complete implementation and passed 32/32 PR jobs plus all
+five CodeQL analyses. Issue #182 remains open until the protected
+`remote-release` run regenerates the evidence documents. Issue #102 remains
+open until the production remote-endpoint profile has its required live
+two-UA NAT/TLS/SDES evidence; its product code and deterministic tests are in
+the candidate. These qualification-bound items must not be closed from unit or
+hosted CI evidence alone.
+
+The release exposes six manifest-derived deployment bundles and tests each
+with default features disabled: SIP endpoint, carrier SIP, browser gateway,
+AI conversation gateway, full pure-Rust, and full native. The original
+planning baseline below is retained as the decision record; statements about
+what was absent or open describe the 2026-08-16 baseline, not current status.
 
 This is one plan built from two verified sweeps: the full open-issue triage
 (all 47 issues) and the complete Thelve backlog audit (all 40 partner issues,
