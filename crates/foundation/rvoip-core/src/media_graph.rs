@@ -7,21 +7,16 @@
 //!
 //! # Which codecs the graph carries
 //!
-//! PCMU, PCMA, G.729, Opus, and the internal `pcm_s16le`. Every codec entering
-//! the graph is identified by a key derived from its *name*, via
-//! [`crate::bridge::codec_to_pt`]; a name outside that table is refused with
-//! [`RvoipError::UnsupportedCodec`] before any receiver ownership transfers.
+//! PCMU and PCMA are always available. G.729, Opus, AMR-NB, and AMR-WB are
+//! available through their matching crate features; `pcm_s16le` is the
+//! internal linear format. Static codecs may resolve through
+//! [`crate::bridge::codec_to_pt`]. Dynamic codecs use the payload type reported
+//! by the transport, because that negotiated number is per call and is stamped
+//! onto the frames the graph emits. AMR without a reported payload type is
+//! therefore refused rather than mislabeled.
 //!
-//! **AMR-NB and AMR-WB are not among them.** They are fully implemented in
-//! `rvoip-codec-core` and carried end to end on the SIP media path, but they
-//! cannot flow through this graph — so an AMR call cannot be published over
-//! UCTP, recorded through the graph, or fanned out to MOQT. The boundary is
-//! deliberate: AMR's payload type is negotiated per call and one session
-//! routinely uses two of them at once, so a name-derived key cannot describe
-//! it, and this graph stamps that key onto the frames it emits.
-//!
-//! The decision, its evidence, and the six things wiring AMR in would require
-//! are recorded in `docs/MEDIA_GRAPH_CODECS.md`.
+//! The codec boundary and AMR payload-type decision are recorded in
+//! `docs/MEDIA_GRAPH_CODECS.md`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -30,9 +25,9 @@ use std::sync::{Arc, Mutex, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use rvoip_media_core::codec::audio::{
-    payload_type::PCM_S16LE, AudioCodec, OpusApplication, OpusCodec, OpusConfig, PcmS16LeCodec,
-};
+use rvoip_media_core::codec::audio::{payload_type::PCM_S16LE, AudioCodec, PcmS16LeCodec};
+#[cfg(feature = "opus")]
+use rvoip_media_core::codec::audio::{OpusApplication, OpusCodec, OpusConfig};
 use rvoip_media_core::codec::factory::CodecFactory;
 use rvoip_media_core::error::CodecError;
 use rvoip_media_core::processing::format::{ConversionParams, FormatConverter};
@@ -1347,36 +1342,42 @@ fn create_configured_codec(
             Some(codec.channels.into()),
         ),
         111 => {
-            let sample_rate = SampleRate::from_hz(codec.clock_rate_hz).ok_or_else(|| {
-                CodecError::InvalidParameters {
-                    details: format!("unsupported Opus clock rate {}", codec.clock_rate_hz),
-                }
-            })?;
-            let mut config = OpusConfig {
-                application: OpusApplication::Voip,
-                ..OpusConfig::default()
-            };
-            for parameter in normalize_fmtp(codec.fmtp.as_deref())
-                .as_deref()
-                .unwrap_or_default()
-                .split(';')
+            #[cfg(not(feature = "opus"))]
+            return Err(CodecError::UnsupportedPayloadType { payload_type }.into());
+
+            #[cfg(feature = "opus")]
             {
-                if let Some(("maxaveragebitrate", value)) = parameter.split_once('=') {
-                    if let Ok(bitrate) = value.parse::<u32>() {
-                        if (6_000..=510_000).contains(&bitrate) {
-                            config.bitrate = bitrate;
+                let sample_rate = SampleRate::from_hz(codec.clock_rate_hz).ok_or_else(|| {
+                    CodecError::InvalidParameters {
+                        details: format!("unsupported Opus clock rate {}", codec.clock_rate_hz),
+                    }
+                })?;
+                let mut config = OpusConfig {
+                    application: OpusApplication::Voip,
+                    ..OpusConfig::default()
+                };
+                for parameter in normalize_fmtp(codec.fmtp.as_deref())
+                    .as_deref()
+                    .unwrap_or_default()
+                    .split(';')
+                {
+                    if let Some(("maxaveragebitrate", value)) = parameter.split_once('=') {
+                        if let Ok(bitrate) = value.parse::<u32>() {
+                            if (6_000..=510_000).contains(&bitrate) {
+                                config.bitrate = bitrate;
+                            }
                         }
                     }
+                    if parameter == "cbr=1" {
+                        config.vbr = false;
+                    }
                 }
-                if parameter == "cbr=1" {
-                    config.vbr = false;
-                }
+                Ok(Box::new(OpusCodec::new(
+                    sample_rate,
+                    codec.channels,
+                    config,
+                )?))
             }
-            Ok(Box::new(OpusCodec::new(
-                sample_rate,
-                codec.channels,
-                config,
-            )?))
         }
         PCM_S16LE => Ok(Box::new(PcmS16LeCodec::new(
             codec.clock_rate_hz,
@@ -3790,6 +3791,7 @@ mod tests {
         assert_eq!(b.await.unwrap(), MediaGraphSourceState::Shutdown);
     }
 
+    #[cfg(feature = "opus")]
     #[tokio::test]
     async fn source_and_sink_codec_updates_are_independent() {
         let (_source_tx, source_rx) = mpsc::channel(1);
@@ -3849,6 +3851,7 @@ mod tests {
         assert_eq!(downsampled[2].wrapping_sub(downsampled[1]), 160);
     }
 
+    #[cfg(feature = "opus")]
     #[tokio::test]
     async fn each_codec_group_uses_its_own_rtp_clock() {
         let (source_tx, source_rx) = mpsc::channel(4);
@@ -3880,6 +3883,7 @@ mod tests {
         graph.shutdown();
     }
 
+    #[cfg(feature = "opus")]
     #[tokio::test]
     async fn sink_rekey_preserves_timestamp_epoch_across_8k_and_48k_targets() {
         let (source_tx, source_rx) = mpsc::channel(8);
@@ -3924,6 +3928,7 @@ mod tests {
         graph.shutdown_and_wait().await.unwrap();
     }
 
+    #[cfg(feature = "opus")]
     #[tokio::test]
     async fn source_reconfiguration_preserves_target_clock_across_8k_48k_8k() {
         let (source_tx, source_rx) = mpsc::channel(8);
@@ -3969,6 +3974,7 @@ mod tests {
         graph.shutdown_and_wait().await.unwrap();
     }
 
+    #[cfg(feature = "opus")]
     #[tokio::test]
     async fn normalized_codec_identity_controls_grouping() {
         let (_source_tx, source_rx) = mpsc::channel(1);
@@ -3998,6 +4004,7 @@ mod tests {
         graph.shutdown();
     }
 
+    #[cfg(feature = "opus")]
     #[tokio::test]
     async fn opus_fmtp_asymmetry_preserves_the_encoded_payload_without_transcoding() {
         let (source_tx, source_rx) = mpsc::channel(1);
@@ -4026,6 +4033,7 @@ mod tests {
     /// numbers differ, the encoded audio does not: the bridge must stay
     /// passthrough and restamp the sink's PT on egress, not fall back to a
     /// full decode/re-encode because the per-leg numbering disagrees.
+    #[cfg(feature = "opus")]
     #[tokio::test]
     async fn opus_negotiated_payload_type_mismatch_stays_passthrough_and_restamps() {
         let (source_tx, source_rx) = mpsc::channel(1);
@@ -4049,6 +4057,7 @@ mod tests {
         graph.shutdown_and_wait().await.unwrap();
     }
 
+    #[cfg(feature = "opus")]
     #[test]
     fn configured_transcoder_honors_canonical_opus_mono() {
         let source = codec("pcmu", 8_000);
@@ -4091,6 +4100,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "opus")]
     #[test]
     fn configured_transcoder_preserves_pcm_wideband_path_through_opus() {
         let pcm = codec("pcm_s16le", 16_000);

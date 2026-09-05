@@ -76,6 +76,18 @@ This table mirrors `crates/rvoip/Cargo.toml`.
 | `app` |  | Developer preview | High-level SIP/WebRTC/UCTP gateway builder under `rvoip::app` |
 | `full` |  | Developer preview | `voip-3` + `vapi` + `sip-stir-shaken` + `client` + `app` + `g729` + `amr`. Excludes `opus`, which needs libopus on the build host — use `all-codecs` for that |
 
+### Deployment bundles
+
+The additive `bundle-*` features group those leaf features into recognizable
+deployment shapes: SIP endpoint, carrier SIP, browser gateway, AI conversation
+gateway, full pure-Rust, and full with native codecs. Every bundle is tested
+independently with default features disabled, and CI verifies that the
+pure-Rust bundle does not resolve the native `opus` crate.
+
+See the machine-checked [feature bundle matrix](../../docs/FEATURE_BUNDLES.md)
+for exact membership, codecs, system dependencies, maturity, and Cargo
+examples. Advanced users can continue composing the leaf features above.
+
 Examples:
 
 ```toml
@@ -85,8 +97,8 @@ rvoip = { version = "0.3.8", features = ["voip-3"] }
 # High-level cross-transport application builder.
 rvoip = { version = "0.3.8", features = ["app"] }
 
-# Every facade-owned feature.
-rvoip = { version = "0.3.8", features = ["full"] }
+# Every pure-Rust facade feature and codec.
+rvoip = { version = "0.3.8", default-features = false, features = ["bundle-full-pure-rust"] }
 ```
 
 `full` means every **facade feature**, not every crate in the rvoip workspace.

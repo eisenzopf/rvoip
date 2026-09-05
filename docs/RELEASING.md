@@ -1,6 +1,6 @@
 # Unified Workspace Release
 
-All 44 publishable workspace crates use `[workspace.package].version` and ship
+All 45 publishable workspace crates use `[workspace.package].version` and ship
 together. `scripts/release.sh` is the only release authority; it discovers the
 package graph from Cargo metadata and publishes normal/build dependencies
 before their dependents.
@@ -19,7 +19,7 @@ must pass the normal `PR Gate`; it is never pushed directly to `main`.
 The underlying `scripts/release.sh prepare` command rejects unstable SemVer
 strings, version downgrades, versions already present on crates.io, dirty
 trees, missing internal dependency versions, and a workspace inventory other
-than the expected 44 publishable packages. It updates package inheritance and
+than the expected 45 publishable packages. It updates package inheritance and
 the lockfile transactionally.
 
 ## Verify
@@ -81,7 +81,7 @@ scripts/release.sh verify --version X.Y.Z \
   --remote-qualification /path/to/aggregate.json
 ```
 
-Verification still validates the unified workspace metadata, exact 44-crate
+Verification still validates the unified workspace metadata, exact 45-crate
 package inventory, package file manifests, and registry-resolvable archive
 hashes. Before first publication, Cargo cannot build a dependent `.crate`
 archive until that crate's new internal dependency version is visible on
@@ -166,7 +166,7 @@ performance audit, cleanup convergence, source binding, executable hash, and
 evidence-tree hash are independently rechecked.
 
 This mode still runs the normal current workspace compile, library, target,
-integration, example, doctest, and 44-package verification. Its receipt says
+integration, example, doctest, and 45-package verification. Its receipt says
 `OWNER-APPROVED-CARRY-FORWARD` and `NOT-RERUN`; it cannot label the inherited
 `0.3.2` evidence as a current beta PASS. The `0.3.4` full beta,
 interoperability matrix, and long soaks remain explicitly `NOT-RERUN`.
@@ -269,7 +269,7 @@ An interrupted run is resumable. A version already on crates.io is skipped
 only when its registry checksum matches the locally verified `.crate` artifact;
 any mismatch fails closed.
 
-After all 44 versions are visible, the workflow creates the protected
+After all 45 versions are visible, the workflow creates the protected
 annotated tag and GitHub release with generated notes listing merged PRs by
 release-note label. It refuses to tag or release a partial crates.io
 publication. An interrupted publication is resumable; an existing version is

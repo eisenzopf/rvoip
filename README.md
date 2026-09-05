@@ -19,7 +19,7 @@
 ---
 
 > [!IMPORTANT]
-> **Unified `0.3.8` release train.** All 44 publishable workspace crates ship on
+> **Unified `0.3.8` release train.** All 45 publishable workspace crates ship on
 > the same version. Publication requires a fresh, strict full-beta run bound to
 > the exact release source: no skipped gates, no carry-forward qualification,
 > and passing workspace, security, four-peer interoperability, performance,
@@ -113,6 +113,12 @@ WebRTC callers.
 | SIP or WebRTC calls connected to Vapi voice agents | [`rvoip-vapi`](crates/extensions/rvoip-vapi) | Native bidirectional raw-audio Vapi WebSocket transport integrated with the shared orchestrator and media bridge |
 | Microphone and speaker audio for a SIP app | [`rvoip-audio-device`](crates/media/rvoip-audio-device) | CPAL device I/O, pacing, resampling, jitter buffering, mute, and metering |
 | Authentication, provisioning, AI, vCon, or audit integrations | [Extensions](#extensions) | Optional provider crates keep protocol cores independent of deployment backends |
+
+The `rvoip` facade also provides machine-checked
+[deployment feature bundles](docs/FEATURE_BUNDLES.md) for SIP endpoints,
+carrier SIP, browser gateways, AI conversation gateways, and full builds with
+or without native codecs. Existing leaf features remain available for exact
+composition.
 
 ## Quick start
 
@@ -305,13 +311,13 @@ without coupling them to each other.
 
 ## Workspace crate map
 
-The unified release contains 44 publishable crates:
+The unified release contains 45 publishable crates:
 
 | Family | Crates |
 | --- | --- |
 | Front doors | [`rvoip`](crates/rvoip), [`rvoip-client`](crates/rvoip-client) |
 | Foundation | [`rvoip-core`](crates/foundation/rvoip-core), [`rvoip-core-traits`](crates/foundation/rvoip-core-traits), [`rvoip-infra-common`](crates/foundation/infra-common) |
-| Media | [`rvoip-media-core`](crates/media/media-core), [`rvoip-codec-core`](crates/media/codec-core), [`rvoip-rtp-core`](crates/media/rtp-core), [`rvoip-audio-device`](crates/media/rvoip-audio-device) |
+| Media | [`rvoip-media-core`](crates/media/media-core), [`rvoip-codec-core`](crates/media/codec-core), [`rvoip-rtp-core`](crates/media/rtp-core), [`rvoip-ice-core`](crates/media/ice-core), [`rvoip-audio-device`](crates/media/rvoip-audio-device) |
 | SIP | [`rvoip-sip`](crates/sip/rvoip-sip), [`rvoip-sip-core`](crates/sip/sip-core), [`rvoip-sip-transport`](crates/sip/sip-transport), [`rvoip-sip-dialog`](crates/sip/sip-dialog), [`rvoip-sip-proxy`](crates/sip/sip-proxy), [`rvoip-sip-registrar`](crates/sip/sip-registrar) |
 | WebRTC and Connect | [`rvoip-rtc`](crates/webrtc/rvoip-rtc), [`rvoip-webrtc-stack`](crates/webrtc/rvoip-webrtc-stack), [`rvoip-webrtc`](crates/webrtc/rvoip-webrtc), [`rvoip-amazon-connect`](crates/webrtc/rvoip-amazon-connect) |
 | UCTP | [`rvoip-uctp`](crates/uctp/rvoip-uctp), [`rvoip-quic`](crates/uctp/rvoip-quic), [`rvoip-webtransport`](crates/uctp/rvoip-webtransport), [`rvoip-websocket`](crates/uctp/rvoip-websocket) |

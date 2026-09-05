@@ -220,6 +220,18 @@
       ]
     },
     {
+      "gate": "facade-feature-bundles",
+      "patterns": [
+        "Cargo.lock",
+        "crates/rvoip/Cargo.toml",
+        "crates/rvoip/README.md",
+        "crates/foundation/rvoip-core/Cargo.toml",
+        "crates/foundation/rvoip-core/src/media_graph.rs",
+        "docs/FEATURE_BUNDLES.md",
+        "scripts/ci/check_facade_feature_bundles.py"
+      ]
+    },
+    {
       "gate": "infra-otel",
       "patterns": [
         "Cargo.lock",

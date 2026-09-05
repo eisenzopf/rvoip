@@ -190,8 +190,8 @@ def validate_catalog(root: Path, catalog: dict[str, Any]) -> None:
     ):
         raise GateError("remote-release legacy coverage ledger is inconsistent")
     core = [gate for gate in gates if gate["id"].startswith("core.")]
-    if len(core) != catalog.get("workspace_package_count") or len(core) != 44:
-        raise GateError("catalog must contain one core gate for each of 44 workspace crates")
+    if len(core) != catalog.get("workspace_package_count") or len(core) != 45:
+        raise GateError("catalog must contain one core gate for each of 45 workspace crates")
 
 
 def tracked_files(root: Path) -> list[str]:
@@ -1316,7 +1316,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "validate":
             print(
                 f"catalog valid: {len(catalog['gates'])} gates, "
-                "108 legacy mappings, 44 crate gates"
+                "108 legacy mappings, 45 crate gates"
             )
             return 0
         if args.command == "plan":

@@ -8,7 +8,7 @@
 //!
 //! ## Maturity tiers
 //!
-//! All workspace crates are aligned at **`0.3.3`**. Maturity is
+//! All workspace crates are aligned on one release version. Maturity is
 //! product-specific rather than encoded in the version number: the `sip`
 //! surface is beta-qualified, while `webrtc`, `uctp`, the `voip-3`
 //! extensions, and `client` are available as developer previews.
@@ -49,6 +49,10 @@
 //! | `client` | | Cross-transport client SDK (`rvoip::client`) — developer preview |
 //! | `app` | | High-level gateway builder (`rvoip::app`) — developer preview |
 //! | `full` | | `voip-3` + `vapi` + `sip-stir-shaken` + `client` + `app` |
+//!
+//! Deployment-oriented `bundle-*` features group these flags into tested
+//! starting points. See the repository's `docs/FEATURE_BUNDLES.md` for the
+//! exact machine-checked matrix and native dependency boundaries.
 //!
 //! The `vcon`, `identity`, and `harness` conversation-model extensions are
 //! transport-agnostic and reachable **only** through the `voip-3` feature.
@@ -198,3 +202,65 @@ pub mod app;
 
 /// The version of the rvoip facade crate.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[cfg(test)]
+mod feature_bundle_contract_tests {
+    #[cfg(feature = "bundle-sip-endpoint")]
+    #[test]
+    fn sip_endpoint_bundle_enables_only_its_declared_facade_surface() {
+        assert!(cfg!(feature = "sip"));
+        assert!(!cfg!(feature = "webrtc"));
+        assert!(!cfg!(feature = "uctp"));
+        assert!(!cfg!(feature = "opus"));
+    }
+
+    #[cfg(feature = "bundle-carrier-sip")]
+    #[test]
+    fn carrier_bundle_enables_identity_and_pure_rust_telephony_codecs() {
+        assert!(cfg!(feature = "sip"));
+        assert!(cfg!(feature = "sip-stir-shaken"));
+        assert!(cfg!(feature = "g729"));
+        assert!(cfg!(feature = "amr-nb"));
+        assert!(cfg!(feature = "amr-wb"));
+        assert!(!cfg!(feature = "opus"));
+    }
+
+    #[cfg(feature = "bundle-browser-gateway")]
+    #[test]
+    fn browser_gateway_bundle_enables_app_transports_and_opus() {
+        assert!(cfg!(feature = "app"));
+        assert!(cfg!(feature = "sip"));
+        assert!(cfg!(feature = "webrtc"));
+        assert!(cfg!(feature = "uctp"));
+        assert!(cfg!(feature = "opus"));
+    }
+
+    #[cfg(feature = "bundle-ai-conversation")]
+    #[test]
+    fn ai_conversation_bundle_enables_app_conversation_and_agent_surfaces() {
+        assert!(cfg!(feature = "app"));
+        assert!(cfg!(feature = "voip-3"));
+        assert!(cfg!(feature = "vapi"));
+        assert!(cfg!(feature = "opus"));
+    }
+
+    #[cfg(feature = "bundle-full-pure-rust")]
+    #[test]
+    fn pure_rust_full_bundle_keeps_native_opus_off() {
+        assert!(cfg!(feature = "full"));
+        assert!(cfg!(feature = "g729"));
+        assert!(cfg!(feature = "amr-nb"));
+        assert!(cfg!(feature = "amr-wb"));
+        assert!(!cfg!(feature = "opus"));
+    }
+
+    #[cfg(feature = "bundle-full-native")]
+    #[test]
+    fn native_full_bundle_enables_every_mainline_codec() {
+        assert!(cfg!(feature = "full"));
+        assert!(cfg!(feature = "g729"));
+        assert!(cfg!(feature = "amr-nb"));
+        assert!(cfg!(feature = "amr-wb"));
+        assert!(cfg!(feature = "opus"));
+    }
+}

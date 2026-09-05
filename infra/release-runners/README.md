@@ -9,7 +9,7 @@ The pilot intentionally accepts no arbitrary command. Fork pull requests
 cannot invoke it, and the workload identity provider restricts authentication
 to the exact repository, workflow, and protected ref configured in GCP.
 
-`workspace` runs the 44-package audit, automation tests, workspace unit and
+`workspace` runs the 45-package audit, automation tests, workspace unit and
 integration tests, binaries, examples, doctests, and Clippy. `smoke` substitutes
 an all-target WebRTC dependency check for the full workspace suite. Neither
 profile publishes crates, creates a tag, or creates a GitHub release.

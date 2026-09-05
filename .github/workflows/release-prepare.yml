@@ -74,7 +74,7 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           branch="release/v$VERSION"
-          body="Automated preparation of all 44 workspace crates for v$VERSION."$'\n\n'"The required PR Gate remains authoritative. After merge, run the protected release qualification workflow for this exact commit; publication will reject any other commit or incomplete aggregate."
+          body="Automated preparation of all 45 workspace crates for v$VERSION."$'\n\n'"The required PR Gate remains authoritative. After merge, run the protected release qualification workflow for this exact commit; publication will reject any other commit or incomplete aggregate."
           gh pr create \
             --base main \
             --head "$branch" \

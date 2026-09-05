@@ -88,6 +88,19 @@ class WorkflowPolicyTests(unittest.TestCase):
         # narrow what any one change verifies.
         self.assertEqual(len({frozenset(rules[gate]) for gate in gates}), 1)
 
+    def test_facade_feature_bundles_are_owned_by_a_gate_and_forced_on_main(self) -> None:
+        policy = json.loads((ROOT / "scripts/ci/policy.json").read_text())
+        rules = {
+            rule["gate"]: set(rule["patterns"])
+            for rule in policy["specialty_rules"]
+        }
+        gate = "facade-feature-bundles"
+        self.assertIn(gate, rules)
+        self.assertIn("crates/rvoip/Cargo.toml", rules[gate])
+        self.assertIn("docs/FEATURE_BUNDLES.md", rules[gate])
+        main = (ROOT / ".github/workflows/main-ci.yml").read_text()
+        self.assertIn(f"--specialty-gate {gate}", main)
+
     def test_every_sip_process_fixture_is_prebuilt_by_the_dedicated_lane(self) -> None:
         policy = json.loads((ROOT / "scripts/ci/policy.json").read_text())
         mapping = policy["pr_sip_fixture_examples"]
@@ -404,7 +417,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertEqual(workflow.count('--min-cpu-platform "$MIN_CPU_PLATFORM"'), 2)
         self.assertIn("MIN_CPU_PLATFORM: Intel Cascade Lake", workflow)
         self.assertIn("n2-cascade-lake", workflow)
-        self.assertIn("expected 44 publishable workspace packages", probe)
+        self.assertIn("expected 45 publishable workspace packages", probe)
         self.assertIn("gcp-performance|gcp-performance-soak-long", probe)
         self.assertIn("gcp-proxy-interop", probe)
         self.assertIn("for _ in range(4096)", probe)

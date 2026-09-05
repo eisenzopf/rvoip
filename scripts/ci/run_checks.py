@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 import time
+import tomllib
 from typing import Any
 
 
@@ -119,6 +120,17 @@ def policy_commands() -> list[tuple[list[str], Path | None, dict[str, str] | Non
             None,
         ),
     ]
+
+
+def facade_bundle_names(root: Path) -> list[str]:
+    manifest = root / "crates/rvoip/Cargo.toml"
+    with manifest.open("rb") as handle:
+        data = tomllib.load(handle)
+    bundles = data["package"]["metadata"]["rvoip"]["feature-bundles"]
+    names = [bundle["feature"] for bundle in bundles]
+    if not names or any(not GATE.fullmatch(name) for name in names):
+        raise CheckError("invalid or empty rvoip facade feature-bundle catalog")
+    return names
 
 
 def shard_commands(packages_csv: str) -> list[tuple[list[str], Path | None, dict[str, str] | None]]:
@@ -342,6 +354,37 @@ def specialty_commands(
                 None,
             ),
         ]
+    if gate == "facade-feature-bundles":
+        commands: list[tuple[list[str], Path | None, dict[str, str] | None]] = [
+            (
+                [
+                    "python3",
+                    "scripts/ci/check_facade_feature_bundles.py",
+                    "--verify-resolved",
+                ],
+                None,
+                None,
+            )
+        ]
+        for feature in facade_bundle_names(root):
+            commands.append(
+                (
+                    [
+                        "cargo",
+                        "test",
+                        "--locked",
+                        "-p",
+                        "rvoip",
+                        "--lib",
+                        "--no-default-features",
+                        "--features",
+                        feature,
+                    ],
+                    None,
+                    None,
+                )
+            )
+        return commands
     if gate in CODEC_FEATURE_GATES:
         # The shards run `cargo test -p <crate>` with default features only.
         # `rvoip-codec-core` defaults to `["g711"]` and `rvoip-media-core` to

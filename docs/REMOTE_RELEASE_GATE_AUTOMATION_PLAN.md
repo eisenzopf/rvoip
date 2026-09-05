@@ -3,7 +3,7 @@
 Status: Proposed for owner review  
 Target migration: rvoip 0.3.5  
 Prepared: 2026-07-31  
-Scope: the complete 44-crate rvoip workspace and every gate required for a
+Scope: the complete 45-crate rvoip workspace and every gate required for a
 coordinated full release
 
 ## Executive decision
@@ -13,7 +13,7 @@ ephemeral Google Cloud Compute Engine VMs as remote workers.
 
 The release process will:
 
-1. Qualify the entire 44-crate workspace, not only rvoip-sip.
+1. Qualify the entire 45-crate workspace, not only rvoip-sip.
 2. Give every gate a permanent number, description, command, dependency set,
    runner contract, and independent attestation.
 3. Run the mandatory workspace and package gates freshly for every candidate
@@ -36,7 +36,7 @@ coordinated release requirement.
 
 ## The retest policy
 
-All 44 publishable crates move to one version. That does require fresh
+All 45 publishable crates move to one version. That does require fresh
 release-surface verification for every crate on the final candidate commit. It
 does not mean that a mechanical version change must automatically rerun every
 hour-long soak or every external peer matrix.
@@ -46,17 +46,17 @@ The recommended conservative rule is:
 ### Always fresh after any candidate code change
 
 - clean source and candidate identity;
-- the complete 44-crate metadata and dependency graph;
+- the complete 45-crate metadata and dependency graph;
 - formatting and strict lint gates;
 - default workspace tests;
 - workspace target and integration tests;
 - workspace doctests;
 - required all-feature and feature-matrix tests;
-- per-crate compile/test result for all 44 crates;
+- per-crate compile/test result for all 45 crates;
 - Tokio-only and forbidden-runtime checks;
 - release tooling tests;
-- package manifest validation for all 44 crates;
-- cargo package or equivalent registry-resolution validation for all 44
+- package manifest validation for all 45 crates;
+- cargo package or equivalent registry-resolution validation for all 45
   crates; and
 - final aggregate/source verification.
 
@@ -91,7 +91,7 @@ remain valid only when:
 - semantic source and runtime configuration digests are identical;
 - a dedicated version-surface gate verifies every location that exposes
   CARGO_PKG_VERSION or another package version at runtime;
-- package manifests and lockfile resolution are valid for all 44 crates; and
+- package manifests and lockfile resolution are valid for all 45 crates; and
 - no feature, dependency source, dependency version other than the coordinated
   internal release number, build script, generated code, protocol identity, or
   runtime behavior changed.
@@ -116,7 +116,7 @@ from skipping coverage.
 
 ## Current workspace
 
-The release authority currently requires exactly 44 publishable packages.
+The release authority currently requires exactly 45 publishable packages.
 
 | Number | Package | Family |
 | --- | --- | --- |
@@ -163,7 +163,8 @@ The release authority currently requires exactly 44 publishable packages.
 | C41 | rvoip-scim | extension/network |
 | C42 | rvoip-saml | extension/security |
 | C43 | rvoip-webauthn | extension/security |
-| C44 | rvoip-ims-aka | extension/security |
+| C45 | rvoip-ims-aka | extension/security |
+| C45 | rvoip-ice-core | media/NAT traversal |
 
 The catalog generator verifies this list against cargo metadata and
 scripts/release.py. An added, removed, renamed, or newly non-publishable crate
@@ -192,7 +193,7 @@ SIP policy.
 
 ### Per-crate mandatory gates
 
-Every C01-C44 package has these stable sub-gates:
+Every C01-C45 package has these stable sub-gates:
 
 | Suffix | Meaning |
 | --- | --- |
@@ -219,7 +220,7 @@ The initial root catalog must include at least:
 #### Source and policy
 
 - RG001 candidate commit and clean source;
-- RG002 44-crate inventory;
+- RG002 45-crate inventory;
 - RG003 dependency DAG and unified version;
 - RG004 gate policy validation;
 - RG005 toolchain and target identity;
@@ -342,8 +343,8 @@ The initial root catalog must include at least:
 
 - RG801 release audit;
 - RG802 coordinated prepare dry run;
-- RG803 all 44 package manifests;
-- RG804 all 44 package archives;
+- RG803 all 45 package manifests;
+- RG804 all 45 package archives;
 - RG805 crates.io registry-only dependency graph simulation;
 - RG806 publication topological order;
 - RG807 crates.io publish dry run;
@@ -548,7 +549,7 @@ The planner:
 
 1. resolves the exact target commit;
 2. verifies a clean tracked tree;
-3. validates the 44-crate graph;
+3. validates the 45-crate graph;
 4. captures toolchain and release configuration;
 5. selects all required release gates;
 6. loads prior verified attestations;
@@ -562,10 +563,10 @@ The plan is uploaded before any worker starts.
 
 ### Parallel core workspace phase
 
-All 44 crates are always represented in a fresh core phase after a candidate
+All 45 crates are always represented in a fresh core phase after a candidate
 code change.
 
-The scheduler uses dependency-aware shards rather than launching 44 completely
+The scheduler uses dependency-aware shards rather than launching 45 completely
 independent compilations. This preserves per-crate results while sharing build
 work.
 
@@ -646,7 +647,7 @@ The collector:
 - validates dependency attestations;
 - rejects duplicates and conflicts;
 - selects exactly one VALID_PASS per selected leaf gate;
-- proves fresh 44-crate core/package coverage for the target commit;
+- proves fresh 45-crate core/package coverage for the target commit;
 - proves any specialty reuse against the target inputs;
 - produces human and machine reports; and
 - writes the aggregate release attestation.
@@ -720,21 +721,21 @@ The target aggregate verifies the proof itself.
 
 | Change | Fresh core/package | Specialty impact |
 | --- | --- | --- |
-| Any Rust source change | all 44 core/package gates | invalidate declared crate/dependency closure |
-| Version-only coordinated prepare | all 44 core/package plus version surface | reuse specialties only after allowlisted-delta proof |
-| Root Cargo.lock dependency change | all 44 core/package | invalidate every specialty using changed dependency |
-| Workspace feature change | all 44 core/package | invalidate gates using affected feature |
-| RTP/SRTP change | all 44 core/package | RTP, media, SIP media, WebRTC media, interop, relevant performance |
-| SIP-only change | all 44 core/package | SIP unit/call-flow/provider and relevant performance |
-| WebRTC/RTC change | all 44 core/package | WebRTC, Chromium, TURN/NAT, Amazon Connect, relevant performance |
-| UCTP/transport change | all 44 core/package | UCTP, QUIC, WebTransport, WebSocket, network integration |
-| MOQT change | all 44 core/package | MOQT network/lease and BridgeFu-facing compatibility |
-| Identity/extension change | all 44 core/package | relevant protocol and live-service matrices |
-| Test harness change | all 44 tooling/core as selected | invalidate gates driven by changed harness |
+| Any Rust source change | all 45 core/package gates | invalidate declared crate/dependency closure |
+| Version-only coordinated prepare | all 45 core/package plus version surface | reuse specialties only after allowlisted-delta proof |
+| Root Cargo.lock dependency change | all 45 core/package | invalidate every specialty using changed dependency |
+| Workspace feature change | all 45 core/package | invalidate gates using affected feature |
+| RTP/SRTP change | all 45 core/package | RTP, media, SIP media, WebRTC media, interop, relevant performance |
+| SIP-only change | all 45 core/package | SIP unit/call-flow/provider and relevant performance |
+| WebRTC/RTC change | all 45 core/package | WebRTC, Chromium, TURN/NAT, Amazon Connect, relevant performance |
+| UCTP/transport change | all 45 core/package | UCTP, QUIC, WebTransport, WebSocket, network integration |
+| MOQT change | all 45 core/package | MOQT network/lease and BridgeFu-facing compatibility |
+| Identity/extension change | all 45 core/package | relevant protocol and live-service matrices |
+| Test harness change | all 45 tooling/core as selected | invalidate gates driven by changed harness |
 | Peer/browser image change | core as policy requires | invalidate that peer/browser gate |
 | Performance recipe/threshold change | core tooling | invalidate corresponding performance and reports |
 | Release script or documentation only | fresh tooling/package validation | no runtime specialty invalidation unless behavior/input changes |
-| Toolchain/runner image change | all 44 core/package | invalidate environment-sensitive gates and baseline if necessary |
+| Toolchain/runner image change | all 45 core/package | invalidate environment-sensitive gates and baseline if necessary |
 | Unknown/unmapped path | fail planning | no reuse until mapped or conservatively invalidated |
 
 The impact engine is intentionally conservative. It optimizes expensive
@@ -809,7 +810,7 @@ The workflow:
 - continues unrelated work;
 - blocks only true dependents;
 - does not retry automatically; and
-- after a fix, schedules the fresh 44-crate core phase plus the invalidated
+- after a fix, schedules the fresh 45-crate core phase plus the invalidated
   specialty closure.
 
 ### Infrastructure failure
@@ -888,8 +889,8 @@ release-evidence.tar.zst
 
 The GitHub summary includes:
 
-- 44/44 crate core status;
-- 44/44 package status;
+- 45/45 crate core status;
+- 45/45 package status;
 - selected/valid/stale/missing/failed gate counts;
 - gate number and description;
 - why a gate ran or was reused;
@@ -974,7 +975,7 @@ Only missing, expired, cancelled, or infrastructure-failed gates execute.
 
 Push the reviewed fix. The workflow creates a new candidate:
 
-- all 44 core/package gates run fresh;
+- all 45 core/package gates run fresh;
 - unaffected specialty gates are verified and reused;
 - affected specialty gates run remotely; and
 - the collector creates a new aggregate.
@@ -1002,7 +1003,7 @@ Publication remains a separate manually approved workflow.
 ### PR 1: Root release gate policy and catalog
 
 - Add config/release-gates.yaml.
-- Inventory all 44 crates.
+- Inventory all 45 crates.
 - Add stable gate and crate numbers.
 - Compose the existing SIP beta catalog.
 - Add dependency, runner, evidence, timeout, freshness, and reuse fields.
@@ -1030,20 +1031,20 @@ Publication remains a separate manually approved workflow.
 - Perform plan-only review before any apply.
 - Apply only after separate owner authorization.
 
-### PR 4: Fresh 44-crate remote core
+### PR 4: Fresh 45-crate remote core
 
 - Add dependency-balanced cargo-heavy shards.
 - Add live-service containers for extension tests.
 - Add feature matrices.
 - Add strict Clippy, MSRV, stable, Tokio-only, and no-Smol gates.
 - Add per-crate result bundles.
-- Prove 44/44 fresh coverage after a test commit.
+- Prove 45/45 fresh coverage after a test commit.
 - Prove cancellation/resume.
 
 ### PR 5: Packaging and registry gates
 
 - Run release audit and prepare simulation.
-- Produce all 44 package manifests and archives.
+- Produce all 45 package manifests and archives.
 - Validate internal version requirements and topological order.
 - Verify crates.io-only dependency resolution.
 - Add partial-publication resume simulation and tag prohibition.
@@ -1070,9 +1071,9 @@ Publication remains a separate manually approved workflow.
 - Add release-publish.yml.
 - Require a verified aggregate and protected approval.
 - Use crates.io credentials only in the publication environment.
-- Record all 44 package checksums.
+- Record all 45 package checksums.
 - Resume partial publication at the same version.
-- Tag and create the GitHub release only after all 44 are visible.
+- Tag and create the GitHub release only after all 45 are visible.
 
 ### PR 9: rvoip 0.3.5 qualification
 
@@ -1090,7 +1091,7 @@ Publication remains a separate manually approved workflow.
 
 The framework must test:
 
-- exact 44-crate inventory;
+- exact 45-crate inventory;
 - deterministic candidate IDs;
 - deterministic gate definitions and input digests;
 - dependency-graph closure;
@@ -1104,7 +1105,7 @@ The framework must test:
 - forged PASS rejection;
 - wrong commit/input/runner rejection;
 - version-only delta acceptance and rejection cases;
-- fresh 44-crate core after any code change;
+- fresh 45-crate core after any code change;
 - selective specialty reuse;
 - security freshness expiration;
 - duplicate/conflicting result rejection;
@@ -1121,7 +1122,7 @@ The framework must test:
 - interop teardown;
 - aggregate completeness;
 - final prepared-commit verification;
-- 44 package archives and checksums;
+- 45 package archives and checksums;
 - registry-only resolution;
 - partial-publication resume; and
 - tag refusal before complete publication.
@@ -1131,7 +1132,7 @@ The framework must test:
 The migration is complete only when:
 
 1. The full release qualification runs with no developer computer online.
-2. The target candidate has fresh core/package evidence for all 44 crates.
+2. The target candidate has fresh core/package evidence for all 45 crates.
 3. Every selected specialty gate is freshly run or has a verified exact-input
    reuse proof.
 4. Every selected leaf gate independently verifies as VALID_PASS.
@@ -1159,7 +1160,7 @@ Initial targets after caches and images are established:
 
 | Phase | Target wall time |
 | --- | ---: |
-| fresh 44-crate core and feature matrix | 45-90 minutes |
+| fresh 45-crate core and feature matrix | 45-90 minutes |
 | package/archive/registry matrix | 30-60 minutes |
 | external/browser/live-service gates | 60-120 minutes in parallel |
 | performance excluding soaks | 60-120 minutes |
@@ -1218,7 +1219,7 @@ runners for the heavy work:
   performance and soaks; and
 - durable GCS evidence so interruptions never erase completed gates.
 
-For every changed candidate, run all 44 crate core/package gates freshly and in
+For every changed candidate, run all 45 crate core/package gates freshly and in
 parallel. Reuse only expensive specialty evidence that independently proves
 its exact inputs and environment are unchanged. Run the first 0.3.5 remote
 qualification completely fresh, then use the resume and impact model for any

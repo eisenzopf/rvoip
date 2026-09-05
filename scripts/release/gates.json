@@ -415,6 +415,7 @@
         "rvoip-core",
         "rvoip-core-traits",
         "rvoip-harness",
+        "rvoip-ice-core",
         "rvoip-identity",
         "rvoip-ims-aka",
         "rvoip-infra-common",
@@ -501,6 +502,7 @@
         "rvoip-core",
         "rvoip-core-traits",
         "rvoip-harness",
+        "rvoip-ice-core",
         "rvoip-identity",
         "rvoip-ims-aka",
         "rvoip-infra-common",
@@ -589,6 +591,7 @@
         "rvoip-core",
         "rvoip-core-traits",
         "rvoip-harness",
+        "rvoip-ice-core",
         "rvoip-identity",
         "rvoip-ims-aka",
         "rvoip-infra-common",
@@ -5412,7 +5415,7 @@
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
-      "name": "44-package release inventory audit",
+      "name": "45-package release inventory audit",
       "resource_class": "github-evidence",
       "retry_on_exit_codes": [
         75
@@ -5448,6 +5451,53 @@
       "max_infrastructure_retries": 1,
       "name": "pinned libSRTP bidirectional interoperability",
       "resource_class": "gcp-interop",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        "Cargo.lock",
+        "crates/rvoip/Cargo.toml",
+        "crates/foundation/rvoip-core/Cargo.toml",
+        "crates/foundation/rvoip-core/src/media_graph.rs",
+        "docs/FEATURE_BUNDLES.md",
+        "scripts/ci/check_facade_feature_bundles.py",
+        "scripts/ci/run_checks.py"
+      ],
+      "always_fresh": false,
+      "category": "Remote release framework",
+      "command": [
+        "python3",
+        "scripts/ci/run_checks.py",
+        "specialty",
+        "--name",
+        "release-facade-feature-bundles",
+        "--gate",
+        "facade-feature-bundles",
+        "--output",
+        "{artifact_dir}/nested-ci-receipt.json"
+      ],
+      "dependencies": [
+        "source.remote-clean"
+      ],
+      "display_command": "python3 scripts/ci/run_checks.py specialty --name release-facade-feature-bundles --gate facade-feature-bundles --output {artifact_dir}/nested-ci-receipt.json",
+      "estimated_seconds": 600,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log",
+        "nested-ci-receipt.json"
+      ],
+      "id": "build.facade-feature-bundles",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "rvoip facade deployment bundle matrix",
+      "resource_class": "github-standard",
       "retry_on_exit_codes": [
         75
       ],
@@ -7714,7 +7764,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -7758,7 +7808,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -7802,7 +7852,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -7846,7 +7896,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -7890,7 +7940,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -7934,7 +7984,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -7978,7 +8028,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8022,7 +8072,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8066,7 +8116,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8110,7 +8160,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8147,6 +8197,50 @@
     },
     {
       "affected_crates": [
+        "rvoip-ice-core"
+      ],
+      "affected_paths": [
+        "crates/media/ice-core/**",
+        "scripts/ci/run_checks.py"
+      ],
+      "always_fresh": false,
+      "category": "Parallel 45-crate core",
+      "command": [
+        "python3",
+        "scripts/ci/run_checks.py",
+        "shard",
+        "--name",
+        "release-rvoip-ice-core",
+        "--packages",
+        "rvoip-ice-core",
+        "--output",
+        "{artifact_dir}/nested-ci-receipt.json"
+      ],
+      "dependencies": [
+        "source.remote-clean"
+      ],
+      "display_command": "test and lint rvoip-ice-core",
+      "estimated_seconds": 120,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log",
+        "nested-ci-receipt.json"
+      ],
+      "id": "core.rvoip-ice-core",
+      "kind": "cargo",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "rvoip-ice-core unit, integration, example, and Clippy checks",
+      "resource_class": "github-standard",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [
         "rvoip-identity"
       ],
       "affected_paths": [
@@ -8154,7 +8248,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8198,7 +8292,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8242,7 +8336,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8286,7 +8380,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8330,7 +8424,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8374,7 +8468,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8418,7 +8512,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8462,7 +8556,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8506,7 +8600,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8550,7 +8644,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8594,7 +8688,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8638,7 +8732,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8682,7 +8776,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8726,7 +8820,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8770,7 +8864,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8814,7 +8908,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8858,7 +8952,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8902,7 +8996,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8946,7 +9040,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8990,7 +9084,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9034,7 +9128,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9078,7 +9172,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9122,7 +9216,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9166,7 +9260,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9210,7 +9304,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9254,7 +9348,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9298,7 +9392,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9342,7 +9436,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9386,7 +9480,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9430,7 +9524,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9474,7 +9568,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9518,7 +9612,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9562,7 +9656,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9606,7 +9700,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 44-crate core",
+      "category": "Parallel 45-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -10130,6 +10224,7 @@
       "category": "Remote release framework",
       "command": null,
       "dependencies": [
+        "build.facade-feature-bundles",
         "core.rvoip",
         "core.rvoip-amazon-connect",
         "core.rvoip-audio-device",
@@ -10140,6 +10235,7 @@
         "core.rvoip-core",
         "core.rvoip-core-traits",
         "core.rvoip-harness",
+        "core.rvoip-ice-core",
         "core.rvoip-identity",
         "core.rvoip-ims-aka",
         "core.rvoip-infra-common",
@@ -10445,6 +10541,7 @@
       "core.rvoip-core",
       "core.rvoip-core-traits",
       "core.rvoip-harness",
+      "core.rvoip-ice-core",
       "core.rvoip-identity",
       "core.rvoip-ims-aka",
       "core.rvoip-infra-common",
@@ -10555,6 +10652,7 @@
       "build.downstream-websocket",
       "build.downstream-webtransport",
       "build.evidence-helper-tests",
+      "build.facade-feature-bundles",
       "build.format",
       "build.public-api",
       "build.rustdoc",
@@ -10570,6 +10668,7 @@
       "core.rvoip-core",
       "core.rvoip-core-traits",
       "core.rvoip-harness",
+      "core.rvoip-ice-core",
       "core.rvoip-identity",
       "core.rvoip-ims-aka",
       "core.rvoip-infra-common",
@@ -10755,5 +10854,5 @@
     "unautomated_legacy_ids": []
   },
   "schema": "rvoip-release-gate-catalog-v1",
-  "workspace_package_count": 44
+  "workspace_package_count": 45
 }

@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import sys
 import tempfile
+import tomllib
 import unittest
 
 
@@ -25,6 +26,7 @@ gates = load_module("release_gates", ROOT / "scripts/release/gates.py")
 builder = load_module(
     "build_gate_catalog", ROOT / "scripts/release/build_gate_catalog.py"
 )
+run_checks = load_module("ci_run_checks", ROOT / "scripts/ci/run_checks.py")
 
 
 class GateFrameworkTests(unittest.TestCase):
@@ -32,14 +34,14 @@ class GateFrameworkTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.catalog = json.loads((ROOT / "scripts/release/gates.json").read_text())
 
-    def test_catalog_maps_108_legacy_and_44_core_gates(self) -> None:
+    def test_catalog_maps_108_legacy_and_45_core_gates(self) -> None:
         gates.validate_catalog(ROOT, self.catalog)
         self.assertEqual(
             sum(bool(gate.get("legacy")) for gate in self.catalog["gates"]), 108
         )
         self.assertEqual(
             sum(gate["id"].startswith("core.") for gate in self.catalog["gates"]),
-            44,
+            45,
         )
         self.assertEqual(
             self.catalog["remote_release_legacy_coverage"]["required_legacy_count"],
@@ -72,6 +74,41 @@ class GateFrameworkTests(unittest.TestCase):
                         if set(by_id[gate_id]["dependencies"]) - selected_ids
                     }
                 )
+
+    def test_release_qualification_compiles_every_facade_feature_bundle(self) -> None:
+        gate = next(
+            gate
+            for gate in self.catalog["gates"]
+            if gate["id"] == "build.facade-feature-bundles"
+        )
+        self.assertIn(gate["id"], self.catalog["profiles"]["remote-release"])
+        self.assertEqual(gate["dependencies"], ["source.remote-clean"])
+        self.assertIn("nested-ci-receipt.json", gate["expected_outputs"])
+        self.assertEqual(
+            gate["command"],
+            [
+                "python3",
+                "scripts/ci/run_checks.py",
+                "specialty",
+                "--name",
+                "release-facade-feature-bundles",
+                "--gate",
+                "facade-feature-bundles",
+                "--output",
+                "{artifact_dir}/nested-ci-receipt.json",
+            ],
+        )
+
+        bundle_commands = run_checks.specialty_commands("facade-feature-bundles", ROOT)
+        with (ROOT / "crates/rvoip/Cargo.toml").open("rb") as handle:
+            manifest = tomllib.load(handle)
+        expected = [
+            row["feature"]
+            for row in manifest["package"]["metadata"]["rvoip"]["feature-bundles"]
+        ]
+        cargo_commands = [command[0] for command in bundle_commands[1:]]
+        self.assertEqual([command[-1] for command in cargo_commands], expected)
+        self.assertTrue(all("--no-default-features" in command for command in cargo_commands))
 
     def test_fuzz_gates_select_their_fuzz_crate_explicitly(self) -> None:
         fuzz_gates = [
@@ -270,7 +307,9 @@ class GateFrameworkTests(unittest.TestCase):
         # Twelve standard, five nightly, one evidence, and one GCP controller
         # stay below the twenty-job repository concurrency ceiling.
         self.assertLessEqual(len(hosted) + 1, 19)
-        self.assertLessEqual(max(shard["estimated_seconds"] for shard in standard), 1260)
+        # The 45th crate (rvoip-ice-core) adds one bounded core gate while the
+        # twelve-shard cap preserves room below repository concurrency limits.
+        self.assertLessEqual(max(shard["estimated_seconds"] for shard in standard), 1325)
 
     def test_remote_diagnostic_runs_only_exact_gcp_gates_and_dependencies(self) -> None:
         requested = ["interop.remote-proxies", "perf.monolithic-soak"]

@@ -502,7 +502,7 @@ impl Drop for CrossBridgeHandle {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "opus"))]
 mod tests {
     use super::*;
     use crate::capability::CodecInfo;

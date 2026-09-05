@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Deployment-oriented facade feature bundles
+
+- The `rvoip` facade now offers six additive `bundle-*` starting points for a
+  SIP endpoint, carrier SIP, browser gateway, AI conversation gateway, the
+  complete pure-Rust facade, and the complete facade with native codecs.
+  Existing leaf features and the default `sip` selection remain unchanged.
+- The bundle catalog is declared with the facade manifest, rendered into
+  `docs/FEATURE_BUNDLES.md`, checked for documentation drift, tested once per
+  bundle with default features disabled, and inspected at the resolved
+  dependency-graph level.
+- Codec features now propagate through both the SIP adapter and the shared
+  media graph. G.711 is baseline; G.729 and both AMR variants are in the
+  carrier and pure-Rust full bundles; native Opus is explicit in the browser,
+  AI, and native-full bundles. A pure-Rust build can no longer acquire Opus
+  accidentally through `rvoip-core` feature unification.
+- Direct `rvoip-core` consumers that previously relied on its default features
+  for Opus transcoding must enable the crate's `opus` feature (or
+  `all-codecs`) explicitly. The `full` feature continues to select every
+  mainline codec, including Opus.
+
 ### Codec feature-matrix hardening
 
 - AMR-NB and AMR-WB capability registration now compiles only when the

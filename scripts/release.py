@@ -22,7 +22,7 @@ import urllib.error
 import urllib.request
 
 
-EXPECTED_PACKAGE_COUNT = 44
+EXPECTED_PACKAGE_COUNT = 45
 RELEASE_LOCK_MANIFESTS = (Path("Cargo.toml"), Path("examples/Cargo.toml"))
 SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")

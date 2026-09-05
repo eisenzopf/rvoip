@@ -426,7 +426,7 @@ def core_gate(package: dict[str, Any], root: Path, weights: dict[str, int]) -> d
     return {
         "id": f"core.{slug}",
         "name": f"{name} unit, integration, example, and Clippy checks",
-        "category": "Parallel 44-crate core",
+        "category": "Parallel 45-crate core",
         "kind": "cargo",
         "executor": "argv",
         "command": [
@@ -871,6 +871,42 @@ def burst_scenario_gates() -> list[dict[str, Any]]:
     return result
 
 
+def facade_feature_bundle_gate() -> dict[str, Any]:
+    """Compile every public facade bundle as part of exact-candidate qualification."""
+    gate = synthetic_gate(
+        "build.facade-feature-bundles",
+        "rvoip facade deployment bundle matrix",
+        executor="argv",
+        command=[
+            "python3",
+            "scripts/ci/run_checks.py",
+            "specialty",
+            "--name",
+            "release-facade-feature-bundles",
+            "--gate",
+            "facade-feature-bundles",
+            "--output",
+            "{artifact_dir}/nested-ci-receipt.json",
+        ],
+        resource="github-standard",
+        dependencies=["source.remote-clean"],
+        paths=[
+            "Cargo.lock",
+            "crates/rvoip/Cargo.toml",
+            "crates/foundation/rvoip-core/Cargo.toml",
+            "crates/foundation/rvoip-core/src/media_graph.rs",
+            "docs/FEATURE_BUNDLES.md",
+            "scripts/ci/check_facade_feature_bundles.py",
+            "scripts/ci/run_checks.py",
+        ],
+    )
+    gate["expected_outputs"].append("nested-ci-receipt.json")
+    # The six checks share one target directory and heavily reuse compilation;
+    # this is the observed warm-run cost used by the hosted shard packer.
+    gate["estimated_seconds"] = 600
+    return gate
+
+
 def build_catalog(root: Path, source: Path) -> dict[str, Any]:
     source_payload = json.loads(source.read_text())
     records = source_payload["records"]
@@ -884,8 +920,8 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
         (package for package in metadata["packages"] if package["id"] in members),
         key=lambda package: package["name"],
     )
-    if len(package_rows) != 44:
-        raise RuntimeError(f"expected 44 workspace packages, found {len(package_rows)}")
+    if len(package_rows) != 45:
+        raise RuntimeError(f"expected 45 workspace packages, found {len(package_rows)}")
     package_names = [package["name"] for package in package_rows]
     weights = json.loads((root / "scripts/ci/policy.json").read_text()).get("package_weights", {})
 
@@ -898,7 +934,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
         ),
         synthetic_gate(
             "package.inventory",
-            "44-package release inventory audit",
+            "45-package release inventory audit",
             executor="argv",
             command=["python3", "scripts/release.py", "audit"],
             dependencies=["source.remote-clean"],
@@ -914,6 +950,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
             dependencies=["source.remote-clean"],
             paths=["scripts/test_libsrtp_interop.sh", "crates/media/rtp-core/**"],
         ),
+        facade_feature_bundle_gate(),
         *proxy_interop_gates(),
         *proxy_pbx_gates(),
         *amr_rate_sweep_gates(),
@@ -1007,6 +1044,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
                 *AMR_RATE_SWEEP_GATE_IDS,
                 *[f"security.fuzz-{suffix}" for suffix in AMR_FUZZ_TARGETS],
                 "interop.browser-dtmf",
+                "build.facade-feature-bundles",
                 "report.remote-aggregate",
                 "source.remote-final",
             ]
