@@ -144,11 +144,14 @@ fn beta_release_docs_exist_and_archived_docs_are_out_of_active_set() {
 fn current_beta_reports_are_complete_and_match_immutable_snapshot() {
     let crate_dir = manifest_dir();
     let docs = crate_dir.join("docs");
-    let snapshot = docs.join("releases/beta/20260724T231400Z/reporting-r2");
+    let snapshot = docs.join("releases/qualification/20260905T133559Z-33969263241");
     let reports = [
         "BETA_RELEASE_REPORT.md",
         "BETA_GATE_REPORT.md",
         "BETA_PERFORMANCE_REPORT.md",
+        "QUALIFICATION_SUMMARY.json",
+        "QUALIFICATION_REPORT_ATTESTATION.json",
+        "QUALIFICATION_REPORT_ATTESTATION.json.sha256",
     ];
 
     for report in reports {
@@ -168,25 +171,28 @@ fn current_beta_reports_are_complete_and_match_immutable_snapshot() {
     let release = read(docs.join("BETA_RELEASE_REPORT.md"));
     let gates = read(docs.join("BETA_GATE_REPORT.md"));
     let performance = read(docs.join("BETA_PERFORMANCE_REPORT.md"));
+    let summary = read(docs.join("QUALIFICATION_SUMMARY.json"));
+    let attestation = read(docs.join("QUALIFICATION_REPORT_ATTESTATION.json"));
     let policy = read(crate_dir.join("config/beta-release-policy.yaml"));
-    let index = read(docs.join("releases/beta/README.md"));
+    let index = read(docs.join("releases/qualification/README.md"));
 
-    assert!(release.contains("108/108 passed, 0 failed, 0 skipped"));
-    assert!(release.contains("8d44fb3574e40f62526aa68f19833e95274cd06b"));
-    assert!(gates.contains("All 108 recorded entries are required"));
+    assert!(release.contains("208/208 passed"));
+    assert!(release.contains("108/108 covered"));
+    assert!(release.contains("8cab44b10f872d21b304c02111d5d203ee8226da"));
+    assert!(gates.contains("PASS — 208/208 remote-release gates passed; 0 failed"));
     assert!(gates.contains("workspace unit tests"));
     assert!(gates.contains("SIPp standalone target start"));
-    assert!(performance.contains("All **59** JSON files"));
-    assert!(performance.contains("### Canonical 2K latency acceptance"));
-    assert!(performance.contains("p50 observed"));
-    assert!(performance.contains("p95 limit"));
-    assert!(performance.contains("p99 observed"));
-    assert!(performance.contains("Baseline ms | Limit ms | Observed ms"));
-    assert!(performance
-        .to_ascii_lowercase()
-        .contains("full application audio-frame delivery"));
+    assert!(performance.contains("perf_call_setup_cps_pbx-media-server"));
+    assert!(performance.contains("up to 2,000 CPS with media enabled"));
+    assert!(performance.contains("not public-network latency or carrier capacity"));
+    assert!(summary.contains("\"gate_count\": 208"));
+    assert!(summary.contains("\"legacy_covered_count\": 108"));
+    assert!(attestation.contains("rvoip-release-qualification-report-attestation-v1"));
+    assert!(attestation
+        .contains("sha256:0b5dd80b42be87b0823bba9224a983db4be855712e2f463d6849fb2d4f21b051"));
     assert!(policy.contains("\"expected_selected_gate_count\": 108"));
-    assert!(index.contains("Current candidate: `20260724T231400Z`."));
+    assert!(index.contains("33969263241"));
+    assert!(index.contains("8cab44b10f872d21b304c02111d5d203ee8226da"));
 }
 
 #[test]

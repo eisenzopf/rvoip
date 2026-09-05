@@ -5,8 +5,8 @@
       "sha256": "2e674311acd8f09a7eff5e5f4b50fecc55aa7e51706c892db566ab29ecc1bd35"
     },
     "BETA_PERFORMANCE_REPORT.md": {
-      "bytes": 12129,
-      "sha256": "ffabd3e98df2be1a7d126f9a9207785eddd52de71e131ef711d0893184a966a8"
+      "bytes": 12342,
+      "sha256": "a87d05281626f23c47e09a13e741b9e38a85777e053119c48e944777bdaa51f6"
     },
     "BETA_RELEASE_REPORT.md": {
       "bytes": 2425,
@@ -20,7 +20,7 @@
   "generated_at": "2026-09-05T15:27:32+00:00",
   "generator": {
     "path": "scripts/release/render_qualification_reports.py",
-    "sha256": "269eede09b82eb27b062da19d3c4443ebe7b5ca33522fe1804461c8033bfd5c4"
+    "sha256": "c429e4430efa9782439f381d867ee955f4eb5eb1cd06b4ab6f765b66cd6572bd"
   },
   "qualification": {
     "aggregate_sha256": "ca0c1331d6b06064a14452c0bf3f5a56bee931fc6ac53e80d89e32995684873c",

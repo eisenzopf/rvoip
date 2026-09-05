@@ -442,6 +442,7 @@ def render_performance(summary: dict[str, Any], rows: list[dict[str, Any]], prov
             "## Interpretation",
             "",
             "- The rows are observations, not individually invented PASS verdicts. Their governing performance, soak, regression, cleanup, and evidence-integrity gates are PASS in the complete gate report.",
+            "- The supported general full-media beta claim remains up to 2,000 CPS with media enabled. Results above 2,000 CPS remain tuned or experimental and require their own topology, hardware, and qualification evidence.",
             "- Call-setup sweeps use loopback networking on the recorded GCP qualification host. They establish repeatable release regression evidence, not public-network latency or carrier capacity.",
             "- Full JSON, resource windows, diagnostics, and scenario-specific counters remain in the GitHub evidence artifact; this report intentionally avoids flattening non-equivalent metrics into one score.",
             "",
