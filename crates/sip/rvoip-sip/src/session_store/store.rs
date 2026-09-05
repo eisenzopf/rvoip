@@ -789,18 +789,19 @@ impl SessionStore {
         self.update_session_exact_with(handle, Some(snapshot.revision()), update)
     }
 
-    /// Synchronously clear a builder staging field only when the caller's
-    /// pointer-qualified value is still installed on this exact lifetime.
+    /// Synchronously mutate a generation-qualified session cell.
     ///
-    /// The supplied closure performs the field-specific `Arc::ptr_eq` check.
-    /// Keeping the cell mutation synchronous lets an ownership guard call it
-    /// from `Drop`, including after the Tokio runtime has shut down.
-    pub(crate) fn clear_staged_options_exact(
+    /// This is the single synchronous compatibility boundary for callers that
+    /// already hold the session execution lane and for ownership guards that
+    /// must run from `Drop` after the Tokio runtime has shut down. Callers are
+    /// still fenced by the exact lifecycle handle and the cell's internal
+    /// update lock.
+    pub(crate) fn update_session_exact_now<R>(
         &self,
         handle: &SessionRegistryHandle,
-        clear_if_exact: impl FnOnce(&mut SessionState) -> bool,
-    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-        self.update_session_exact_with(handle, None, clear_if_exact)
+        update: impl FnOnce(&mut SessionState) -> R,
+    ) -> Result<R, Box<dyn std::error::Error + Send + Sync>> {
+        self.update_session_exact_with(handle, None, update)
     }
 
     /// Synchronously mutate one generation-qualified session cell.

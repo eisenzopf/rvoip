@@ -1384,7 +1384,7 @@ impl PendingOptionsStageGuard {
             self.dispatch_claim.cancel_before_claim();
             let _ = self
                 .store
-                .clear_staged_options_exact(&self.handle, |session| {
+                .update_session_exact_now(&self.handle, |session| {
                     self.slot.clear_if_exact(session)
                 });
             self.armed = false;
@@ -1408,7 +1408,7 @@ impl Drop for PendingOptionsStageGuard {
         }
         let _ = self
             .store
-            .clear_staged_options_exact(&self.handle, |session| self.slot.clear_if_exact(session));
+            .update_session_exact_now(&self.handle, |session| self.slot.clear_if_exact(session));
     }
 }
 

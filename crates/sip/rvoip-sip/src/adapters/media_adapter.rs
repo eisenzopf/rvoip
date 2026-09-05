@@ -3037,7 +3037,7 @@ impl MediaAdapter {
             contexts_installed: true,
         };
         self.store
-            .update_session_exact_with(handle, None, |session| {
+            .update_session_exact_now(handle, |session| {
                 session.media_security = Some(state.clone());
             })
             .map_err(|_| {
@@ -4153,8 +4153,25 @@ impl MediaAdapter {
         session_id: &SessionId,
         direction: crate::types::MediaDirection,
     ) -> Result<String> {
-        self.generate_local_sdp_offer_with_formats(session_id, direction, None)
-            .await
+        let (lane, snapshot, mut session) =
+            self.lock_and_load_exact_media_session(session_id).await?;
+        let previous_origin = (
+            session.sdp_origin_session_id.clone(),
+            session.sdp_origin_version,
+        );
+        let result = self
+            .generate_local_sdp_offer_lane_owned_with_formats(&mut session, direction, None)
+            .await;
+        if previous_origin
+            != (
+                session.sdp_origin_session_id.clone(),
+                session.sdp_origin_version,
+            )
+        {
+            drop(lane);
+            self.commit_media_lane_state(&snapshot, &session).await?;
+        }
+        result
     }
 
     /// Generate an offer for one exact session with a one-shot codec list.
@@ -4222,6 +4239,7 @@ impl MediaAdapter {
         result
     }
 
+    #[cfg(test)]
     async fn generate_local_sdp_offer_with_formats(
         &self,
         session_id: &SessionId,

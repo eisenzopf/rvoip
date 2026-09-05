@@ -4913,7 +4913,7 @@ Signal=5\r\nDuration=160\r\n";
         assert!(context.initial_headers().is_empty());
         assert_eq!(
             format!("{context:?}"),
-            "SipOriginateContext { has_profile_revision: false, has_from_uri: false, has_outbound_proxy: false, has_auth: false, initial_header_count: 0 }"
+            "SipOriginateContext { has_profile_revision: false, has_from_uri: false, has_outbound_proxy: false, has_auth: false, initial_header_count: 0, registered_flow_route_count: 0 }"
         );
     }
 

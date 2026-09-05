@@ -88,7 +88,8 @@ async fn combined_principal_uses_subject_ownership_and_earliest_expiry() {
     );
     assert_eq!(
         principal.scopes,
-        vec!["calls:read", "calls:write", "calls:transfer"]
+        vec!["calls:write"],
+        "AAuth authority must be the least-privilege intersection of subject and actor scopes"
     );
     match &principal.assurance {
         IdentityAssurance::UserAuthorized {

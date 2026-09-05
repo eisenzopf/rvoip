@@ -71,10 +71,11 @@ pub fn has_simd_support() -> bool {
     support.sse2 || support.avx2 || support.neon
 }
 
-/// SIMD-optimized μ-law encoding (x86_64 SSE2)
+/// SIMD-optimized μ-law encoding (`x86_64` SSE2).
 #[cfg(target_arch = "x86_64")]
+#[allow(clippy::cast_ptr_alignment)] // `_mm_loadu_si128` explicitly supports unaligned input.
 pub fn encode_mulaw_simd_sse2(samples: &[i16], output: &mut [u8]) {
-    use std::arch::x86_64::*;
+    use std::arch::x86_64::{__m128i, _mm_extract_epi16, _mm_loadu_si128};
 
     if !get_simd_support().sse2 {
         return encode_mulaw_scalar(samples, output);
@@ -135,10 +136,11 @@ pub fn encode_mulaw_scalar(samples: &[i16], output: &mut [u8]) {
     }
 }
 
-/// SIMD-optimized A-law encoding (x86_64 SSE2)
+/// SIMD-optimized A-law encoding (`x86_64` SSE2).
 #[cfg(target_arch = "x86_64")]
+#[allow(clippy::cast_ptr_alignment)] // `_mm_loadu_si128` explicitly supports unaligned input.
 pub fn encode_alaw_simd_sse2(samples: &[i16], output: &mut [u8]) {
-    use std::arch::x86_64::*;
+    use std::arch::x86_64::{__m128i, _mm_extract_epi16, _mm_loadu_si128};
 
     if !get_simd_support().sse2 {
         return encode_alaw_scalar(samples, output);
