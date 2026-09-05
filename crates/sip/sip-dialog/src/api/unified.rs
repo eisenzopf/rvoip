@@ -414,6 +414,13 @@ pub struct InviteRequestOptions {
     /// Advertise RFC 3262 support for this call even when the manager-wide
     /// policy is `NotSupported`.
     pub supported_100rel: bool,
+    /// Pre-validated exact stream routes for an RFC 5626 registered flow.
+    ///
+    /// This is an internal application-facade handoff. Each route must carry
+    /// a concrete stream transport and process-local flow identity; ordinary
+    /// callers should leave it empty and use normal RFC 3263 resolution.
+    #[doc(hidden)]
+    pub registered_flow_routes: Vec<rvoip_sip_transport::TransportRoute>,
     /// Headers appended after the stack stamps Call-ID/CSeq/Via/Max-Forwards.
     pub extra_headers: Vec<TypedHeader>,
 }
@@ -432,6 +439,9 @@ pub struct InviteAuthRetryOptions {
     pub contact_uri: Option<String>,
     pub outbound_proxy_uri: Option<Uri>,
     pub supported_100rel: bool,
+    /// Exact registered-flow routes retained across 401/407 and 422 retries.
+    #[doc(hidden)]
+    pub registered_flow_routes: Vec<rvoip_sip_transport::TransportRoute>,
 }
 
 fn is_stack_owned_initial_invite_header(header: &TypedHeader) -> bool {
@@ -464,6 +474,26 @@ fn is_stack_owned_initial_invite_header(header: &TypedHeader) -> bool {
 /// be silently reduced from a richer header representation.
 pub fn validate_initial_invite_options(opts: &InviteRequestOptions) -> ApiResult<()> {
     use crate::transaction::client::builders::InviteBuilder;
+
+    if opts.registered_flow_routes.len() > 16
+        || opts.registered_flow_routes.iter().any(|route| {
+            route.destination.port() == 0
+                || route.flow_id.is_none()
+                || !matches!(
+                    route.transport_type,
+                    Some(
+                        rvoip_sip_transport::transport::TransportType::Tcp
+                            | rvoip_sip_transport::transport::TransportType::Tls
+                            | rvoip_sip_transport::transport::TransportType::Ws
+                            | rvoip_sip_transport::transport::TransportType::Wss
+                    )
+                )
+        })
+    {
+        return Err(ApiError::protocol(
+            "initial INVITE registered-flow routes are invalid",
+        ));
+    }
 
     if opts
         .extra_headers
@@ -703,6 +733,10 @@ impl fmt::Debug for InviteAuthRetryOptions {
                 &self.outbound_proxy_uri.is_some(),
             )
             .field("supported_100rel", &self.supported_100rel)
+            .field(
+                "registered_flow_route_count",
+                &self.registered_flow_routes.len(),
+            )
             .finish()
     }
 }
@@ -726,6 +760,10 @@ impl fmt::Debug for InviteRequestOptions {
                 &self.outbound_proxy_uri.is_some(),
             )
             .field("supported_100rel", &self.supported_100rel)
+            .field(
+                "registered_flow_route_count",
+                &self.registered_flow_routes.len(),
+            )
             .field("extra_header_count", &self.extra_headers.len())
             .finish()
     }
@@ -918,6 +956,7 @@ mod retained_request_debug_tests {
             precomputed_authorization: Some(format!("Bearer {SECRET}")),
             outbound_proxy_uri: Some(format!("sip:{SECRET}@proxy.invalid").parse().unwrap()),
             supported_100rel: true,
+            registered_flow_routes: Vec::new(),
             extra_headers: vec![secret_header()],
         };
         let subscribe = SubscribeRequestOptions {
@@ -1031,6 +1070,25 @@ mod retained_request_debug_tests {
         validate_initial_invite_options(&options).expect("valid structural INVITE options");
 
         options.contact_uri = Some("sip:alice@example.test\r\nX-Injected: yes".into());
+        assert!(validate_initial_invite_options(&options).is_err());
+    }
+
+    #[test]
+    fn invite_preflight_requires_exact_stream_registered_flow_routes() {
+        use rvoip_sip_transport::transport::{TransportFlowId, TransportRoute, TransportType};
+
+        let mut options = valid_invite_options();
+        let flow_id = TransportFlowId::from_process_local_value(7).unwrap();
+        options.registered_flow_routes =
+            vec![TransportRoute::new("198.51.100.20:41000".parse().unwrap())
+                .with_transport_type(TransportType::Tls)
+                .with_flow_id(flow_id)];
+        validate_initial_invite_options(&options).expect("exact TLS flow is valid");
+
+        options.registered_flow_routes[0].flow_id = None;
+        assert!(validate_initial_invite_options(&options).is_err());
+        options.registered_flow_routes[0].flow_id = Some(flow_id);
+        options.registered_flow_routes[0].transport_type = Some(TransportType::Udp);
         assert!(validate_initial_invite_options(&options).is_err());
     }
 }

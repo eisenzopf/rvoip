@@ -307,6 +307,13 @@ pub enum SessionCoordinationEvent {
         /// Underlying cause of the failure (for telemetry + debouncing).
         reason: FlowFailureReason,
     },
+    /// An accepted connection-oriented flow closed. Registrar-backed server
+    /// applications use the process-local identity to degrade every binding
+    /// owned by that exact flow; it is never persisted or logged.
+    RegisteredFlowClosed {
+        /// Opaque process-local transport identity.
+        flow_id: rvoip_sip_transport::TransportFlowId,
+    },
 }
 
 fn safe_method_label(method: &Method) -> &'static str {
@@ -586,6 +593,10 @@ impl fmt::Debug for SessionCoordinationEvent {
                 .field("instance", &"[redacted]")
                 .field("instance_len", &instance.len())
                 .field("reason", reason)
+                .finish(),
+            Self::RegisteredFlowClosed { flow_id: _ } => formatter
+                .debug_struct("RegisteredFlowClosed")
+                .field("flow_present", &true)
                 .finish(),
         }
     }

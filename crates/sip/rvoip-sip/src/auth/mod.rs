@@ -758,7 +758,7 @@ mod auth_container_diagnostic_tests {
         let transport_debug = format!("{transport:?}");
         assert_eq!(
             transport_debug,
-            "SipTransportSecurityContext { transport_present: true, local_addr_present: true, remote_addr_present: true, secure: false }"
+            "SipTransportSecurityContext { transport_present: true, local_addr_present: true, remote_addr_present: true, secure: false, flow_id_present: false }"
         );
         assert_no_auth_canaries(&transport_debug);
     }
@@ -1094,6 +1094,9 @@ pub struct SipTransportSecurityContext {
     /// Whether the transport is protected for sending credentials such as
     /// Basic passwords or Bearer tokens.
     pub secure: bool,
+    /// Exact process-local connection flow observed at the transport boundary.
+    /// This is routing metadata, not an authorization credential.
+    pub flow_id: Option<u64>,
 }
 
 impl fmt::Debug for SipTransportSecurityContext {
@@ -1104,6 +1107,7 @@ impl fmt::Debug for SipTransportSecurityContext {
             .field("local_addr_present", &self.local_addr.is_some())
             .field("remote_addr_present", &self.remote_addr.is_some())
             .field("secure", &self.secure)
+            .field("flow_id_present", &self.flow_id.is_some())
             .finish()
     }
 }
@@ -1133,6 +1137,7 @@ impl SipTransportSecurityContext {
             local_addr: None,
             remote_addr: None,
             secure,
+            flow_id: None,
         }
     }
 
@@ -1145,6 +1150,7 @@ impl SipTransportSecurityContext {
             local_addr: Some(context.local_addr.clone()),
             remote_addr: Some(context.remote_addr.clone()),
             secure: context.secure,
+            flow_id: context.flow_id,
         }
     }
 
@@ -1180,6 +1186,7 @@ impl SipTransportSecurityContext {
             local_addr: None,
             remote_addr: None,
             secure: true,
+            flow_id: None,
         }
     }
 

@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Production remote SIP endpoint profile
+
+- The built-in registrar can now require authenticated RFC 5626 outbound
+  registrations on exact TLS/WSS flows. It processes `ob`, `+sip.instance`,
+  and `reg-id`, rejects incomplete remote endpoints with `439`, and retains
+  opaque process-local flow capabilities rather than dialing private Contact
+  addresses.
+- Registered-AOR origination carries an ordered set of verified exact routes
+  through the facade, SIP adapter, dialog manager, authentication retries, and
+  transport failover. A failed primary stream can advance to a secondary flow
+  without losing flow identity.
+- Exact connection close, expiry, unregister, replacement, and restart make a
+  route unavailable. Replacement uses prepare/response/commit ordering, so a
+  zero-wire response or a staged-flow close cannot discard or falsely promote
+  the previous live route.
+- `SipConfig::remote_endpoint_profile()` fails startup unless TLS, mandatory
+  SRTP, registrar identity, and a reachable media address are configured. The
+  process-local AOR-affinity and real-NAT qualification boundaries are
+  documented in `docs/sip/REMOTE_ENDPOINT_PROFILE.md`.
+
 ### DTLS-SRTP on the SIP media path
 
 - `rvoip-sip` can negotiate `UDP/TLS/RTP/SAVP` with SHA-256 certificate

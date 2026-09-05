@@ -3008,6 +3008,7 @@ impl DialogAdapter {
             precomputed_authorization: None,
             outbound_proxy_uri,
             supported_100rel: false,
+            registered_flow_routes: Vec::new(),
             extra_headers,
         };
         self.send_initial_invite_staged(

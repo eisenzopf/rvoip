@@ -3548,6 +3548,40 @@ async fn activate_outbound_route(
     if let Some(outbound_proxy_uri) = route.context.outbound_proxy_uri() {
         builder = builder.with_outbound_proxy(outbound_proxy_uri.to_owned());
     }
+    if !route.context.registered_flow_routes().is_empty() {
+        let exact_routes = route
+            .context
+            .registered_flow_routes()
+            .iter()
+            .map(|registered| {
+                let transport = match registered.transport() {
+                    rvoip_sip_registrar::Transport::TCP => {
+                        rvoip_sip_transport::transport::TransportType::Tcp
+                    }
+                    rvoip_sip_registrar::Transport::TLS => {
+                        rvoip_sip_transport::transport::TransportType::Tls
+                    }
+                    rvoip_sip_registrar::Transport::WS => {
+                        rvoip_sip_transport::transport::TransportType::Ws
+                    }
+                    rvoip_sip_registrar::Transport::WSS => {
+                        rvoip_sip_transport::transport::TransportType::Wss
+                    }
+                    _ => return Err(SipActivationFailure::InvalidPlan),
+                };
+                let flow_id = rvoip_sip_transport::TransportFlowId::from_process_local_value(
+                    registered.process_local_flow_id(),
+                )
+                .ok_or(SipActivationFailure::InvalidPlan)?;
+                Ok(
+                    rvoip_sip_transport::TransportRoute::new(registered.remote_addr())
+                        .with_transport_type(transport)
+                        .with_flow_id(flow_id),
+                )
+            })
+            .collect::<Result<Vec<_>, SipActivationFailure>>()?;
+        builder = builder.with_registered_flow_routes(exact_routes);
+    }
     let headers = route
         .context
         .initial_headers()

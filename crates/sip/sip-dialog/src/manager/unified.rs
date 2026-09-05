@@ -1403,6 +1403,7 @@ impl UnifiedDialogManager {
                 options.contact_uri,
                 options.outbound_proxy_uri,
                 options.supported_100rel,
+                options.registered_flow_routes,
             )
             .await;
 
@@ -1906,6 +1907,7 @@ impl UnifiedDialogManager {
             None,
             None,
             false,
+            Vec::new(),
         )
         .await
     }
@@ -1928,6 +1930,7 @@ impl UnifiedDialogManager {
             None,
             None,
             false,
+            Vec::new(),
         )
         .await
     }
@@ -2251,6 +2254,7 @@ impl UnifiedDialogManager {
             None,
             None,
             false,
+            Vec::new(),
         )
         .await
     }
@@ -2278,6 +2282,7 @@ impl UnifiedDialogManager {
             None,
             None,
             false,
+            Vec::new(),
         )
         .await
     }
@@ -2322,6 +2327,7 @@ impl UnifiedDialogManager {
             opts.contact_uri,
             opts.outbound_proxy_uri,
             opts.supported_100rel,
+            opts.registered_flow_routes,
         )
         .await
     }
@@ -2339,6 +2345,7 @@ impl UnifiedDialogManager {
         contact_override: Option<String>,
         outbound_proxy_uri: Option<Uri>,
         supported_100rel: bool,
+        registered_flow_routes: Vec<rvoip_sip_transport::TransportRoute>,
     ) -> ApiResult<CallHandle> {
         info!("Making outgoing call with caller and target URIs present");
         let plan = self
@@ -2354,6 +2361,7 @@ impl UnifiedDialogManager {
                     precomputed_authorization: None,
                     outbound_proxy_uri,
                     supported_100rel,
+                    registered_flow_routes,
                     extra_headers,
                 },
             )

@@ -47,8 +47,8 @@ use rvoip_sip::server::contact_resolver::{
 };
 use rvoip_sip::{
     Config as LowSipConfig, IpNet, ProfiledSipAdapter, SipAdapter, SipEgressProfileRegistration,
-    SipInboundContextPolicy, SipListenerAuthPolicy, SipNatConfig, SipProfileRevision, SipTlsMode,
-    UnifiedCoordinator,
+    SipInboundContextPolicy, SipListenerAuthPolicy, SipNatConfig, SipOriginateContext,
+    SipProfileRevision, SipTlsMode, UnifiedCoordinator,
 };
 use rvoip_webrtc::{
     Nat1To1CandidateType, UdpPortRangeConfig, WebRtcAdapter, WebRtcConfig as LowWebRtcConfig,
@@ -289,6 +289,8 @@ pub struct SipConfig {
     /// Independently configured outbound children selected by an immutable
     /// profile revision on each originate request.
     egress_profiles: Vec<SipEgressProfileConfig>,
+    /// Fail-closed production posture for remote registered SIP endpoints.
+    remote_endpoint_profile: bool,
 }
 
 impl std::fmt::Debug for SipConfig {
@@ -323,6 +325,7 @@ impl std::fmt::Debug for SipConfig {
                 &self.offered_codecs.as_ref().map_or(0, Vec::len),
             )
             .field("egress_profile_count", &self.egress_profiles.len())
+            .field("remote_endpoint_profile", &self.remote_endpoint_profile)
             .finish()
     }
 }
@@ -575,6 +578,7 @@ impl SipConfig {
             tls_extra_ca_path: None,
             offered_codecs: None,
             egress_profiles: Vec::new(),
+            remote_endpoint_profile: false,
         }
     }
 
@@ -688,6 +692,19 @@ impl SipConfig {
     /// transport owner in the orchestrator.
     pub fn egress_profile(mut self, profile: SipEgressProfileConfig) -> Self {
         self.egress_profiles.push(profile);
+        self
+    }
+
+    /// Require the qualified remote-endpoint posture: SIP Outbound over an
+    /// exact TLS flow, required SRTP, and a reachable public media address.
+    ///
+    /// Flow routes are process-local by design. A multi-replica deployment
+    /// must keep calls for an AOR on the registrar process that accepted its
+    /// REGISTER; after restart the stale capability fails closed and the UA
+    /// must re-register.
+    #[must_use]
+    pub const fn remote_endpoint_profile(mut self) -> Self {
+        self.remote_endpoint_profile = true;
         self
     }
 }
@@ -1277,6 +1294,7 @@ impl RvoipAppBuilder {
                         .into(),
                 ));
             }
+            validate_remote_endpoint_profile(&sip)?;
             let sip_addr = resolve_udp_bind_addr(sip_addr)?;
             let low_sip = make_low_sip_config(&sip, sip_addr);
 
@@ -1310,10 +1328,16 @@ impl RvoipAppBuilder {
             }
             .map_err(|error| AppError::Sip(error.to_string()))?;
 
-            let registrar = coordinator
-                .start_registration_server(&sip.domain, sip.registrar_users)
-                .await
-                .map_err(|error| AppError::Sip(error.to_string()))?;
+            let registrar = if sip.remote_endpoint_profile {
+                coordinator
+                    .start_remote_endpoint_registration_server(&sip.domain, sip.registrar_users)
+                    .await
+            } else {
+                coordinator
+                    .start_registration_server(&sip.domain, sip.registrar_users)
+                    .await
+            }
+            .map_err(|error| AppError::Sip(error.to_string()))?;
 
             // The default context policy captures no headers at all, so the
             // allowlist has to be installed explicitly or `metadata()` is
@@ -1875,17 +1899,27 @@ impl AppState {
         contact: ResolvedContact,
     ) -> AppResult<BridgeEvidence> {
         let mut connected_events = self.orchestrator.subscribe_events();
+        let sip_context = if contact.registered_flow_routes.is_empty() {
+            SipOriginateContext::new()
+        } else {
+            SipOriginateContext::new()
+                .with_registered_flow_routes(contact.registered_flow_routes.clone())
+                .map_err(|_| AppError::Sip("registered SIP flow failed validation".into()))?
+        };
         let handle = self
             .orchestrator
-            .originate_connection(OriginateRequest {
-                session_id: self.session_id.clone(),
-                participant_id: self.employee_participant.clone(),
-                target: contact.uri.clone(),
-                direction: Direction::Outbound,
-                capabilities: CapabilityDescriptor::default(),
-                transport: Some(CoreTransport::Sip),
-                context: Default::default(),
-            })
+            .originate_connection(
+                OriginateRequest {
+                    session_id: self.session_id.clone(),
+                    participant_id: self.employee_participant.clone(),
+                    target: contact.uri.clone(),
+                    direction: Direction::Outbound,
+                    capabilities: CapabilityDescriptor::default(),
+                    transport: Some(CoreTransport::Sip),
+                    context: Default::default(),
+                }
+                .with_context(sip_context),
+            )
             .await?;
         let employee_connection = handle.connection.id.clone();
         wait_for_core_connection_connected(
@@ -2224,6 +2258,22 @@ async fn discover_advertised_addr(
     Ok(SocketAddr::new(mapped.ip(), sip_addr.port()))
 }
 
+fn validate_remote_endpoint_profile(config: &SipConfig) -> AppResult<()> {
+    if config.remote_endpoint_profile
+        && (config.tls_listener.is_none()
+            || config.srtp != SipMediaSecurity::Required
+            || (config.media_public_addr.is_none() && config.sip_advertised_addr.is_none())
+            || config.registrar_users.is_empty())
+    {
+        return Err(AppError::Policy(
+            "remote SIP endpoint profile requires a TLS listener, required SRTP, \
+             at least one registrar identity, and a reachable advertised media address"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn make_low_sip_config(config: &SipConfig, bind: SocketAddr) -> LowSipConfig {
     let mut low = LowSipConfig::on("rvoip-gateway", bind.ip(), bind.port());
     if let Some((start, end)) = config.media_port_range {
@@ -2497,6 +2547,28 @@ mod tests {
         assert!(!debug.contains("private-cert.pem"));
         assert!(!debug.contains("private-key.pem"));
         assert!(debug.contains("registrar_user_count: 1"));
+    }
+
+    #[cfg(feature = "sip")]
+    #[test]
+    fn remote_endpoint_profile_fails_closed_until_tls_srtp_identity_and_media_are_complete() {
+        let incomplete = SipConfig::bind("127.0.0.1:5060").remote_endpoint_profile();
+        assert!(matches!(
+            validate_remote_endpoint_profile(&incomplete),
+            Err(AppError::Policy(detail)) if detail.contains("remote SIP endpoint profile requires")
+        ));
+
+        let complete = SipConfig::bind("127.0.0.1:5060")
+            .remote_endpoint_profile()
+            .registrar_users([("alice", "secret")])
+            .tls_listener(
+                "0.0.0.0:5061".parse().unwrap(),
+                "/run/secrets/sip-cert.pem",
+                "/run/secrets/sip-key.pem",
+            )
+            .media_security(SipMediaSecurity::Required)
+            .media_public_addr("192.0.2.10:20000".parse().unwrap());
+        validate_remote_endpoint_profile(&complete).expect("complete profile passes preflight");
     }
 
     #[cfg(feature = "sip")]

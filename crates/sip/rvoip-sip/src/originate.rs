@@ -317,6 +317,10 @@ pub enum SipOriginateContextError {
     /// Retained initial headers failed defensive adapter-boundary validation.
     #[error("the SIP originate initial headers are invalid")]
     InvalidInitialHeaders,
+    /// Registered-flow routes were empty, expired, or exceeded the failover
+    /// admission bound.
+    #[error("the SIP originate registered-flow routes are invalid")]
+    InvalidRegisteredFlowRoutes,
 }
 
 /// SIP-specific options carried opaquely by an outbound originate request.
@@ -331,6 +335,7 @@ pub struct SipOriginateContext {
     outbound_proxy_uri: Option<String>,
     auth: Option<SipClientAuth>,
     initial_headers: SipInitialHeaders,
+    registered_flow_routes: Vec<rvoip_sip_registrar::RegisteredFlowRoute>,
 }
 
 impl SipOriginateContext {
@@ -429,6 +434,27 @@ impl SipOriginateContext {
         self
     }
 
+    /// Route the INVITE over one or more registrar-verified RFC 5626 flows.
+    ///
+    /// Routes are ordered by registrar policy and remain opaque to callers.
+    /// A failed primary transport can therefore advance to the next live flow
+    /// without resolving or dialing the private Contact address.
+    pub fn with_registered_flow_routes(
+        mut self,
+        routes: Vec<rvoip_sip_registrar::RegisteredFlowRoute>,
+    ) -> Result<Self, SipOriginateContextError> {
+        if routes.is_empty()
+            || routes.len() > 16
+            || routes
+                .iter()
+                .any(|route| route.expires() <= chrono::Utc::now())
+        {
+            return Err(SipOriginateContextError::InvalidRegisteredFlowRoutes);
+        }
+        self.registered_flow_routes = routes;
+        Ok(self)
+    }
+
     /// Optional per-call From URI. Treat it as sensitive routing data.
     pub fn from_uri(&self) -> Option<&str> {
         self.from_uri.as_deref()
@@ -447,6 +473,12 @@ impl SipOriginateContext {
     /// Validated first-INVITE application headers.
     pub fn initial_headers(&self) -> &SipInitialHeaders {
         &self.initial_headers
+    }
+
+    /// Registrar-verified process-local routes, in deterministic failover
+    /// order. Empty means ordinary DNS routing.
+    pub fn registered_flow_routes(&self) -> &[rvoip_sip_registrar::RegisteredFlowRoute] {
+        &self.registered_flow_routes
     }
 
     /// Exact installed profile revision requested for this call.
@@ -471,6 +503,14 @@ impl SipOriginateContext {
         self.initial_headers
             .validate()
             .map_err(|_| SipOriginateContextError::InvalidInitialHeaders)?;
+        if self.registered_flow_routes.len() > 16
+            || self
+                .registered_flow_routes
+                .iter()
+                .any(|route| route.expires() <= chrono::Utc::now())
+        {
+            return Err(SipOriginateContextError::InvalidRegisteredFlowRoutes);
+        }
         Ok(())
     }
 
@@ -485,6 +525,7 @@ impl SipOriginateContext {
             from_uri,
             outbound_proxy_uri: None,
             auth,
+            registered_flow_routes: Vec::new(),
             initial_headers: SipInitialHeaders {
                 entries: initial_headers
                     .into_iter()
@@ -504,6 +545,10 @@ impl fmt::Debug for SipOriginateContext {
             .field("has_outbound_proxy", &self.outbound_proxy_uri.is_some())
             .field("has_auth", &self.auth.is_some())
             .field("initial_header_count", &self.initial_headers.len())
+            .field(
+                "registered_flow_route_count",
+                &self.registered_flow_routes.len(),
+            )
             .finish()
     }
 }

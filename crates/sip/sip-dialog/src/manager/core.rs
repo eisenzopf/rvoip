@@ -1647,6 +1647,12 @@ impl DialogManager {
         remote_addr: SocketAddr,
         flow_id: Option<rvoip_sip_transport::TransportFlowId>,
     ) {
+        if let Some(flow_id) = flow_id {
+            self.emit_session_coordination_event(SessionCoordinationEvent::RegisteredFlowClosed {
+                flow_id,
+            })
+            .await;
+        }
         let keys: Vec<(String, u32, String)> = match self.flow_by_destination.get(&remote_addr) {
             Some(entry) => entry.value().clone(),
             None => return,
@@ -8763,6 +8769,30 @@ mod outbound_flow_handler_tests {
                 .await
                 .is_err(),
             "no additional event after second close"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_connection_close_emits_redacted_registered_flow_event() {
+        let (manager, mut rx) = make_manager().await;
+        let flow_id = rvoip_sip_transport::TransportFlowId::from_process_local_value(91).unwrap();
+
+        manager
+            .on_connection_closed_on_flow(dest_addr(5091), Some(flow_id))
+            .await;
+
+        let event = tokio::time::timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .expect("event must arrive")
+            .expect("channel open");
+        assert!(matches!(
+            &event,
+            SessionCoordinationEvent::RegisteredFlowClosed { flow_id: closed }
+                if *closed == flow_id
+        ));
+        assert_eq!(
+            format!("{event:?}"),
+            "RegisteredFlowClosed { flow_present: true }"
         );
     }
 

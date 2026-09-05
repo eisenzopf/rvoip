@@ -1854,6 +1854,7 @@ fn dialog_event_requires_processing_ack(event: &DialogToSessionEvent) -> bool {
         event,
         DialogToSessionEvent::IncomingCall { .. }
             | DialogToSessionEvent::IncomingRegister { .. }
+            | DialogToSessionEvent::RegisteredFlowClosed { .. }
             | DialogToSessionEvent::ByeReceived { .. }
             | DialogToSessionEvent::InfoReceived { .. }
             | DialogToSessionEvent::ReinviteReceived { .. }
@@ -1872,6 +1873,7 @@ fn dialog_to_session_event_kind(event: &DialogToSessionEvent) -> &'static str {
         DialogToSessionEvent::CallTerminated { .. } => "call_terminated",
         DialogToSessionEvent::CallFailed { .. } => "call_failed",
         DialogToSessionEvent::CallCancelled { .. } => "call_cancelled",
+        DialogToSessionEvent::RegisteredFlowClosed { .. } => "registered_flow_closed",
         _ => "dialog_to_session_other",
     }
 }
@@ -2686,6 +2688,12 @@ impl SessionCrossCrateEventHandler {
             DialogToSessionEvent::OutboundFlowFailed { aor, reason, .. } => {
                 self.handle_outbound_flow_failed_parts(aor.clone(), reason.clone())
                     .await
+            }
+            DialogToSessionEvent::RegisteredFlowClosed { flow_id } => {
+                if let Some(adapter) = self.registration_adapter.get() {
+                    adapter.handle_registered_flow_closed(*flow_id).await;
+                }
+                Ok(())
             }
             // SIP_API_DESIGN_2 Phase E — inbound mid-dialog INFO / MESSAGE / OPTIONS.
             // Each variant reaches session-core with the original

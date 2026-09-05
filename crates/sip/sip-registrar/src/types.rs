@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use std::net::SocketAddr;
 use std::str::FromStr;
 
 // ============ Registration Types ============
@@ -181,11 +182,62 @@ pub struct ContactInfo {
     /// RFC 5626 reg-id for a specific outbound flow.
     pub reg_id: Option<u32>,
 
-    /// Stable flow identifier for transport-level routing.
+    /// Opaque process-local flow capability for transport-level routing.
+    /// It is deliberately excluded from serialized registrar records and
+    /// must be re-established by an authenticated REGISTER after restart.
+    #[serde(skip)]
     pub flow_id: Option<String>,
 
     /// Current reachability/qualify state for this binding.
     pub reachability: ContactReachability,
+}
+
+/// A currently-live RFC 5626 registration flow resolved by its registrar.
+///
+/// Construction is intentionally private. A caller can obtain this value only
+/// by asking the registrar to verify that the Contact is still current,
+/// reachable, scoped to the requested AOR, and owned by this process
+/// generation. It is routing capability, never an authentication identity.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RegisteredFlowRoute {
+    pub(crate) remote_addr: SocketAddr,
+    pub(crate) transport: Transport,
+    pub(crate) process_local_flow_id: u64,
+    pub(crate) expires: DateTime<Utc>,
+}
+
+impl RegisteredFlowRoute {
+    /// Peer socket reached through this registered flow.
+    pub const fn remote_addr(&self) -> SocketAddr {
+        self.remote_addr
+    }
+
+    /// Connection-oriented SIP transport that owns the flow.
+    pub const fn transport(&self) -> Transport {
+        self.transport
+    }
+
+    /// Process-local transport identity. It must be returned only to the same
+    /// live transport owner and must never be persisted or authorized against.
+    pub const fn process_local_flow_id(&self) -> u64 {
+        self.process_local_flow_id
+    }
+
+    /// Registrar expiry attached to the verified route.
+    pub const fn expires(&self) -> DateTime<Utc> {
+        self.expires
+    }
+}
+
+impl fmt::Debug for RegisteredFlowRoute {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RegisteredFlowRoute")
+            .field("transport", &self.transport)
+            .field("expires", &self.expires)
+            .field("flow_present", &true)
+            .finish()
+    }
 }
 
 impl fmt::Debug for ContactInfo {

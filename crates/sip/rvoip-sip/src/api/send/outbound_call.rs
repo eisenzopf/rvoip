@@ -112,6 +112,10 @@ pub struct OutboundCallOptionsSnapshot {
     /// want B2BUA-style hiding turn this on per call via
     /// [`OutboundCallBuilder::with_topology_hiding`].
     pub topology_hiding: bool,
+    /// Exact process-local RFC 5626 routes selected by a registrar-backed
+    /// application facade. Empty uses normal RFC 3263 routing.
+    #[doc(hidden)]
+    pub registered_flow_routes: Vec<rvoip_sip_transport::TransportRoute>,
 }
 
 impl fmt::Debug for OutboundCallOptionsSnapshot {
@@ -144,6 +148,10 @@ impl fmt::Debug for OutboundCallOptionsSnapshot {
             .field("supported_100rel", &self.supported_100rel)
             .field("extra_header_count", &self.extra_headers.len())
             .field("topology_hiding", &self.topology_hiding)
+            .field(
+                "registered_flow_route_count",
+                &self.registered_flow_routes.len(),
+            )
             .finish()
     }
 }
@@ -167,6 +175,7 @@ pub struct OutboundCallBuilder {
     supported_100rel: bool,
     state: BuilderHeaderState,
     topology_hiding: bool,
+    registered_flow_routes: Vec<rvoip_sip_transport::TransportRoute>,
     session_id: Option<CallId>,
 }
 
@@ -194,6 +203,7 @@ impl OutboundCallBuilder {
             supported_100rel: false,
             state: BuilderHeaderState::default(),
             topology_hiding: false,
+            registered_flow_routes: Vec::new(),
             session_id: None,
         }
     }
@@ -352,6 +362,16 @@ impl OutboundCallBuilder {
         self
     }
 
+    /// Retain verified process-local registered-flow routes through the
+    /// state-machine snapshot and every initial-INVITE retry.
+    pub(crate) fn with_registered_flow_routes(
+        mut self,
+        routes: Vec<rvoip_sip_transport::TransportRoute>,
+    ) -> Self {
+        self.registered_flow_routes = routes;
+        self
+    }
+
     /// Send the INVITE.
     ///
     /// Routes through the unified state-machine path: creates the
@@ -425,6 +445,7 @@ impl OutboundCallBuilder {
             supported_100rel: self.supported_100rel,
             extra_headers,
             topology_hiding: self.topology_hiding,
+            registered_flow_routes: self.registered_flow_routes,
         });
 
         // Validate the complete wire-facing option set before allocating a
@@ -548,6 +569,7 @@ mod tests {
                 HeaderValue::Raw(SECRET.as_bytes().to_vec()),
             )],
             topology_hiding: true,
+            registered_flow_routes: Vec::new(),
         };
 
         let debug = format!("{snapshot:?}");

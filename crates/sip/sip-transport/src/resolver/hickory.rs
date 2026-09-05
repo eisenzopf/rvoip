@@ -243,6 +243,7 @@ impl HickoryResolver {
                     addr: SocketAddr::new(ip, port),
                     transport,
                     authority: None,
+                    flow_id: None,
                     expires,
                 })
                 .collect());
@@ -343,6 +344,7 @@ impl HickoryResolver {
                 addr: SocketAddr::new(ip, port),
                 transport,
                 authority: None,
+                flow_id: None,
                 expires,
             })
             .collect())
@@ -369,6 +371,7 @@ impl HickoryResolver {
                     addr: SocketAddr::new(ip, port),
                     transport,
                     authority: None,
+                    flow_id: None,
                     expires,
                 });
             }

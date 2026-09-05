@@ -1660,6 +1660,7 @@ mod tests {
             supported_100rel: true,
             extra_headers: vec![secret_header()],
             topology_hiding: true,
+            registered_flow_routes: Vec::new(),
         }));
         session.pending_register_options = Some(Arc::new(
             rvoip_sip_dialog::api::unified::RegisterRequestOptions {

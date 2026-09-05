@@ -1561,6 +1561,7 @@ pub(crate) fn materialize_invite_options(
         precomputed_authorization: snapshot.precomputed_auth.clone(),
         outbound_proxy_uri,
         supported_100rel: snapshot.supported_100rel,
+        registered_flow_routes: snapshot.registered_flow_routes.clone(),
         extra_headers: extras,
     };
     Ok((opts, suppress_global_proxy))
@@ -3670,6 +3671,7 @@ pub(crate) async fn execute_action(
                             contact_uri: invite_opts.contact_uri,
                             outbound_proxy_uri: invite_opts.outbound_proxy_uri,
                             supported_100rel: invite_opts.supported_100rel,
+                            registered_flow_routes: invite_opts.registered_flow_routes,
                         },
                         apply_global_proxy,
                     )
@@ -4260,6 +4262,7 @@ pub(crate) async fn execute_action(
                         contact_uri: invite_opts.contact_uri,
                         outbound_proxy_uri: invite_opts.outbound_proxy_uri,
                         supported_100rel: invite_opts.supported_100rel,
+                        registered_flow_routes: invite_opts.registered_flow_routes,
                     },
                     apply_global_proxy,
                     min_se,

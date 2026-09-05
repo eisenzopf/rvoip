@@ -686,7 +686,7 @@ mod tests {
             message,
             source,
             destination: "127.0.0.1:5061".parse().unwrap(),
-            transport_type: TransportType::Udp,
+            transport_type: TransportType::Tcp,
             flow_id: None,
             raw_bytes: None,
             timing: None,
@@ -1763,22 +1763,30 @@ mod tests {
             "UDP",
         )
         .map_err(|error| Error::Other(error.to_string()))?;
-        let event = |source, raw_bytes| TransportEvent::MessageReceived {
+        let event = |source, flow_id, raw_bytes| TransportEvent::MessageReceived {
             message: Message::Request(request.clone()),
             source,
             destination: "127.0.0.1:5061".parse().unwrap(),
-            transport_type: TransportType::Udp,
-            flow_id: None,
+            transport_type: TransportType::Tcp,
+            flow_id: Some(
+                rvoip_sip_transport::TransportFlowId::from_process_local_value(flow_id).unwrap(),
+            ),
             raw_bytes: Some(raw_bytes),
             timing: None,
             connection_metadata: None,
         };
 
         let (left, right) = tokio::join!(
-            manager
-                .handle_transport_event(event(peer_a, bytes::Bytes::from_static(b"peer-a-wire"))),
-            manager
-                .handle_transport_event(event(peer_b, bytes::Bytes::from_static(b"peer-b-wire")))
+            manager.handle_transport_event(event(
+                peer_a,
+                7001,
+                bytes::Bytes::from_static(b"peer-a-wire")
+            )),
+            manager.handle_transport_event(event(
+                peer_b,
+                7002,
+                bytes::Bytes::from_static(b"peer-b-wire")
+            ))
         );
         left?;
         right?;
@@ -1798,8 +1806,14 @@ mod tests {
                 .peek_inbound_bytes(&transaction_id)
                 .expect("exact raw request");
             match context.remote_addr.as_str() {
-                "192.0.2.75:5060" => assert_eq!(raw.as_ref(), b"peer-a-wire"),
-                "192.0.2.76:5060" => assert_eq!(raw.as_ref(), b"peer-b-wire"),
+                "192.0.2.75:5060" => {
+                    assert_eq!(raw.as_ref(), b"peer-a-wire");
+                    assert_eq!(context.flow_id, Some(7001));
+                }
+                "192.0.2.76:5060" => {
+                    assert_eq!(raw.as_ref(), b"peer-b-wire");
+                    assert_eq!(context.flow_id, Some(7002));
+                }
                 other => panic!("unexpected retained peer {other}"),
             }
             ids.push(transaction_id);

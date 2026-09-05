@@ -1,6 +1,6 @@
 # rvoip-sip Beta Standards Evidence Matrix
 
-Date: 2026-07-25
+Date: 2026-09-05
 
 This document maps each retained beta-profile claim to exact, non-ignored
 executable test sources. It is a claim boundary, not a declaration that the
@@ -46,7 +46,7 @@ candidate `20260724T231400Z`: see the
 | SIP-3891-REPLACES | RFC 3891 | Call replacement using `Replaces`. | Unsupported | `T-3891-C1`, `T-3891-U1` | The listed tests only construct/carry a Replaces parameter; they do not execute replacement semantics and therefore do not elevate the status. |
 | SIP-4028-TIMER | RFC 4028 | Successful session refresh event delivery and refresh-failure event delivery. | Partial | `T-4028-W1`, `T-4028-W2` | Negotiation roles, `422`/Min-SE, proxy behavior, and the complete expiration/race matrix are not claimed. |
 | SIP-4475-TORTURE | RFC 4475 | Fixture-driven acceptance of included well-formed messages and rejection of included malformed messages. | Supported with exclusions | `T-4475-U1`, `T-4475-U2` | Well-formed fixtures `3.1.1.2_intmeth.sip`, `4.10_ipv6-bug-abnf-3-colons.sip`, and `3.1.1.1_wsinv.sip` are excluded. The malformed exclusion list is empty. |
-| SIP-5626-OUTBOUND | RFC 5626 | Outbound Contact construction with `ob`, `+sip.instance`, and `reg-id`, plus registered-flow configuration validation. | Partial | `T-5626-C1`, `T-5626-U1`, `T-5626-U2` | Flow-token processing, multiple simultaneous flows, keepalive/recovery, failover, and registrar-side behavior are not claimed. Ignored flow-recovery tests are not evidence. |
+| SIP-5626-OUTBOUND | RFC 5626 | Outbound Contact construction plus registrar-side opaque exact-flow ownership, ordered multi-flow selection, replacement rollback, close degradation, and recoverable exact-flow failover. | Partial | `T-5626-C1`, `T-5626-U1`–`T-5626-U7` | Protected evidence from two independent UAs behind real NAT, including rebinding and restart recovery, is still required before this becomes a supported release claim. See `docs/sip/REMOTE_ENDPOINT_PROFILE.md`. |
 | SIP-6086-INFO | RFC 6086 | Generic in-dialog INFO transmission and preservation across `401`/`407` authentication retry. | Partial | `T-6086-W1`, `T-6086-W2`, `T-6086-W3` | No Info-Package registry, `Recv-Info` negotiation, or package-specific standards profile is claimed. |
 | SIP-6665-SUBSCRIBE | RFC 6665 | Subscription dialog creation/termination primitives, successful NOTIFY handling, subscription-id routing, and authenticated SUBSCRIBE retry. | Partial | `T-6665-U1`, `T-6665-U2`, `T-6665-U3`, `T-6665-W1`, `T-6665-W2` | Full notifier/subscriber state machines, refresh/expiry recovery, forked subscriptions, and independent-peer interoperability are not established. |
 | SIP-7118-WS | RFC 7118 | Plain SIP-over-WebSocket client/server round trip delivering REGISTER. | Partial | `T-7118-W1` | WSS release evidence, browser/WebRTC behavior, reconnect, proxy traversal, and complete framing/error matrices are not claimed. |
@@ -93,6 +93,11 @@ these named tests has an adjacent `#[ignore]` attribute as of this matrix.
 | `T-5626-C1` | construction | `crates/sip/sip-dialog/tests/generated_sip_compliance.rs::generated_sip_compliance_dialog_client_builders_generate_valid_requests` | Outbound REGISTER Contact contains `ob`, `+sip.instance`, and `reg-id`. |
 | `T-5626-U1` | unit | `crates/sip/rvoip-sip/tests/unified_api_tests.rs::rfc5626_registered_flow_requires_outbound_and_instance` | Registered-flow mode requires outbound and instance settings. |
 | `T-5626-U2` | unit | `crates/sip/rvoip-sip/tests/unified_api_tests.rs::rfc5626_registered_flow_helper_sets_outbound_params` | Registered-flow helper sets and validates outbound parameters. |
+| `T-5626-U3` | unit | `crates/sip/sip-registrar/src/api/mod.rs::registered_flow_is_opaque_owned_live_and_fail_closed` | Opaque flow ownership rejects wrong AOR, unreachable, and removed bindings without exposing route identity. |
+| `T-5626-U4` | unit | `crates/sip/sip-registrar/src/api/mod.rs::staged_replacement_preserves_old_flow_until_contact_commit` | Zero-wire replacement rollback retains the old route and a staged connection close cannot become reachable at commit. |
+| `T-5626-U5` | unit | `crates/sip/rvoip-sip/src/server/contact_resolver.rs::registrar_resolution_returns_ordered_exact_flows_and_skips_degraded_primary` | Registrar lookup returns ordered exact routes, skips a degraded primary, and omits the token from serialization. |
+| `T-5626-U6` | unit | `crates/sip/sip-dialog/tests/rfc3263_failover.rs::failed_primary_registered_flow_uses_secondary_exact_flow` | Recoverable primary failure advances to the secondary exact TLS flow without losing flow identity. |
+| `T-5626-U7` | unit | `crates/rvoip/src/app.rs::remote_endpoint_profile_fails_closed_until_tls_srtp_identity_and_media_are_complete` | The facade refuses an incomplete remote-endpoint deployment posture. |
 | `T-6086-W1` | wire | `crates/sip/rvoip-sip/tests/outbound_request_builders_integration.rs::info_builder_extras_reach_the_wire` | INFO request fields reach the peer. |
 | `T-6086-W2` | wire | `crates/sip/rvoip-sip/tests/info_auth_retry.rs::info_extras_survive_401_driven_auth_retry` | INFO fields survive `401` authentication retry. |
 | `T-6086-W3` | wire | `crates/sip/rvoip-sip/tests/info_auth_retry.rs::info_407_retry_uses_proxy_authorization` | INFO retries `407` with Proxy-Authorization. |

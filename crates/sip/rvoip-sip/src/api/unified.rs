@@ -11605,6 +11605,32 @@ impl UnifiedCoordinator {
         realm: &str,
         users: std::collections::HashMap<String, String>,
     ) -> Result<Arc<rvoip_sip_registrar::RegistrarService>> {
+        self.start_registration_server_inner(realm, users, false)
+            .await
+    }
+
+    /// Start a registrar that admits only authenticated RFC 5626 outbound
+    /// registrations received on exact TLS/WSS flows.
+    ///
+    /// This is the server half of the production remote-endpoint profile.
+    /// Plain UDP/TCP registrations and Contacts without `ob`,
+    /// `+sip.instance`, and a nonzero `reg-id` receive `439` and never mutate
+    /// registrar state.
+    pub async fn start_remote_endpoint_registration_server(
+        &self,
+        realm: &str,
+        users: std::collections::HashMap<String, String>,
+    ) -> Result<Arc<rvoip_sip_registrar::RegistrarService>> {
+        self.start_registration_server_inner(realm, users, true)
+            .await
+    }
+
+    async fn start_registration_server_inner(
+        &self,
+        realm: &str,
+        users: std::collections::HashMap<String, String>,
+        require_outbound_tls: bool,
+    ) -> Result<Arc<rvoip_sip_registrar::RegistrarService>> {
         use crate::adapters::RegistrationAdapter;
         use rvoip_sip_registrar::{api::ServiceMode, types::RegistrarConfig, RegistrarService};
 
@@ -11643,6 +11669,7 @@ impl UnifiedCoordinator {
             registrar.clone(),
             global_coordinator,
             Arc::clone(&self.dialog_adapter),
+            require_outbound_tls,
         ));
 
         adapter.start().await.map_err(|e| {
