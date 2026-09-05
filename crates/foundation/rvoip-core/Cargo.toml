@@ -88,6 +88,11 @@ name = "vcon_emission"
 path = "tests/vcon_emission.rs"
 required-features = ["vcon"]
 
+[[test]]
+name = "virtual_publisher"
+path = "tests/virtual_publisher.rs"
+required-features = ["opus"]
+
 [features]
 # P11 — feature flags per INTERFACE_DESIGN.md §2.2. The "shape" flags
 # (`uctp`/`sip`/`rtp`/`media`) are advisory today — they signal what
