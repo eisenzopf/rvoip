@@ -136,7 +136,7 @@ def main() -> int:
     parser.add_argument("--repository", required=True)
     parser.add_argument("--candidate", required=True)
     parser.add_argument("--receipt", type=Path, required=True)
-    parser.add_argument("--timeout-seconds", type=int, default=1_200)
+    parser.add_argument("--timeout-seconds", type=int, default=3_600)
     parser.add_argument("--poll-seconds", type=int, default=20)
     parser.add_argument("--api-url", default=os.environ.get("GITHUB_API_URL", "https://api.github.com"))
     args = parser.parse_args()
