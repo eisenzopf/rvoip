@@ -672,6 +672,231 @@ def monolithic_metrics(
     }
 
 
+def split_soak_metrics(
+    perf_root: pathlib.Path,
+    expected_duration: int,
+    expected_active_calls: int,
+    expected_rss_limit: float,
+    required: bool,
+) -> dict[str, Any]:
+    caller_path = perf_root / "perf_soak_caller.json"
+    receiver_path = perf_root / "perf_soak_receiver.json"
+    if not caller_path.is_file() or not receiver_path.is_file():
+        if required:
+            raise MetricsError("required split-soak caller/receiver artifacts are missing")
+        return {"enabled": False, "required": False, "passed": True}
+
+    caller = load_json(caller_path)
+    receiver = load_json(receiver_path)
+    caller_results = caller.get("results", {})
+    receiver_results = receiver.get("results", {})
+    caller_gate = caller_results.get("rss_gate", {})
+    receiver_gate = receiver_results.get("rss_gate", {})
+    caller_limit = (
+        caller_gate.get("effective_mb_per_hr")
+        if isinstance(caller_gate, dict)
+        else None
+    )
+    receiver_limit = (
+        receiver_gate.get("effective_mb_per_hr")
+        if isinstance(receiver_gate, dict)
+        else None
+    )
+    caller_duration = caller_results.get("duration_secs")
+    receiver_duration = receiver_results.get(
+        "duration_secs", receiver_results.get("configured_duration_secs")
+    )
+    caller_offered = caller_results.get("calls_offered")
+    caller_succeeded = caller_results.get("calls_succeeded")
+    receiver_completed = receiver_results.get("bob_completed_audio_receivers")
+    caller_skip = (
+        caller.get("diagnostics", {})
+        .get("media_receive", {})
+        .get("skip_audio_frame_delivery")
+    )
+    receiver_skip = (
+        receiver.get("diagnostics", {})
+        .get("media_receive", {})
+        .get("skip_audio_frame_delivery")
+    )
+    checks: list[dict[str, Any]] = []
+    for metric, requirement, observed, passed in (
+        (
+            "duration_secs",
+            f"exactly {expected_duration} for caller and receiver",
+            {"caller": caller_duration, "receiver": receiver_duration},
+            caller_duration == expected_duration
+            and receiver_duration == expected_duration,
+        ),
+        (
+            "active_calls_target",
+            f"exactly {expected_active_calls} for caller and receiver",
+            {
+                "caller": caller_results.get("active_calls_target"),
+                "receiver": receiver_results.get("active_calls_target"),
+            },
+            caller_results.get("active_calls_target") == expected_active_calls
+            and receiver_results.get("active_calls_target") == expected_active_calls,
+        ),
+        (
+            "rss_limit_mb_per_hr",
+            f"exactly {expected_rss_limit:g} for caller and receiver",
+            {"caller": caller_limit, "receiver": receiver_limit},
+            finite_number(caller_limit) == expected_rss_limit
+            and finite_number(receiver_limit) == expected_rss_limit,
+        ),
+        (
+            "full_audio_frame_delivery",
+            "enabled for caller and receiver",
+            {"caller_skip": caller_skip, "receiver_skip": receiver_skip},
+            caller_skip is False and receiver_skip is False,
+        ),
+        (
+            "call_completion",
+            "every offered call succeeds and completes at the receiver",
+            {
+                "offered": caller_offered,
+                "succeeded": caller_succeeded,
+                "receiver_completed": receiver_completed,
+            },
+            isinstance(caller_offered, int)
+            and caller_offered > 0
+            and caller_succeeded == caller_offered
+            and receiver_completed == caller_offered,
+        ),
+        (
+            "errors",
+            "0",
+            caller_results.get("errors"),
+            all_numeric_errors_are_zero(caller_results.get("errors")),
+        ),
+        (
+            "retained_after_drain",
+            "0 for caller and receiver",
+            {
+                "caller": caller_results.get("retained_objects_after_drain"),
+                "receiver": receiver_results.get("retained_objects_after_drain"),
+            },
+            caller_results.get("retained_objects_after_drain") == 0
+            and receiver_results.get("retained_objects_after_drain") == 0,
+        ),
+        (
+            "receiver_active_audio_receivers_after_drain",
+            "0",
+            receiver_results.get("bob_active_audio_receivers"),
+            receiver_results.get("bob_active_audio_receivers") == 0,
+        ),
+        (
+            "transaction_managers_after_drain",
+            "0 for caller and receiver",
+            {
+                "caller": caller_results.get("transaction_manager_active_after_drain"),
+                "receiver": receiver_results.get(
+                    "transaction_manager_active_after_drain"
+                ),
+            },
+            caller_results.get("transaction_manager_active_after_drain") == 0
+            and receiver_results.get("transaction_manager_active_after_drain") == 0,
+        ),
+        (
+            "transaction_runners_after_drain",
+            "0 for caller and receiver",
+            {
+                "caller": caller_results.get("transaction_runner_active_after_drain"),
+                "receiver": receiver_results.get(
+                    "transaction_runner_active_after_drain"
+                ),
+            },
+            caller_results.get("transaction_runner_active_after_drain") == 0
+            and receiver_results.get("transaction_runner_active_after_drain") == 0,
+        ),
+        (
+            "receiver_stop_seen",
+            "true",
+            receiver_results.get("stop_seen"),
+            receiver_results.get("stop_seen") is True,
+        ),
+        (
+            "rss_gate_window",
+            "active_tail_1200s for caller and receiver",
+            {
+                "caller": caller_results.get("rss_gate_window"),
+                "receiver": receiver_results.get("rss_gate_window"),
+            },
+            caller_results.get("rss_gate_window") == "active_tail_1200s"
+            and receiver_results.get("rss_gate_window") == "active_tail_1200s",
+        ),
+        (
+            "rss_active_tail_window_complete",
+            "true for caller and receiver",
+            {
+                "caller": caller_results.get("rss_active_tail_window_complete"),
+                "receiver": receiver_results.get("rss_active_tail_window_complete"),
+            },
+            caller_results.get("rss_active_tail_window_complete") is True
+            and receiver_results.get("rss_active_tail_window_complete") is True,
+        ),
+    ):
+        add_check(checks, metric, requirement, observed, passed)
+
+    frames = receiver_results.get("bob_received_frames")
+    add_check(
+        checks,
+        "delivered_audio_frames",
+        "> 0",
+        frames,
+        isinstance(frames, int) and frames > 0,
+    )
+    for role, results in (("caller", caller_results), ("receiver", receiver_results)):
+        tail_window = finite_number(results.get("rss_active_tail_window_secs"))
+        add_check(
+            checks,
+            f"{role}_rss_active_tail_window_secs",
+            ">= 1190",
+            tail_window,
+            tail_window is not None and tail_window >= 1190.0,
+        )
+        growth = finite_number(results.get("rss_gate_growth_mb_per_hr"))
+        add_check(
+            checks,
+            f"{role}_rss_gate_growth_mb_per_hr",
+            f"<= {expected_rss_limit:g}",
+            growth,
+            growth is not None and growth <= expected_rss_limit,
+        )
+
+    return {
+        "enabled": True,
+        "required": required,
+        "passed": all(check["passed"] for check in checks),
+        "evidence": {
+            "caller": caller_path.relative_to(perf_root).as_posix(),
+            "receiver": receiver_path.relative_to(perf_root).as_posix(),
+        },
+        "policy": {
+            "duration_secs": expected_duration,
+            "active_calls_target": expected_active_calls,
+            "rss_limit_mb_per_hr": expected_rss_limit,
+            "full_audio_frame_delivery": True,
+        },
+        "observed": {
+            "calls_offered": caller_offered,
+            "calls_succeeded": caller_succeeded,
+            "receiver_completed_audio_receivers": receiver_completed,
+            "asr": caller_results.get("asr"),
+            "errors": caller_results.get("errors"),
+            "delivered_audio_frames": frames,
+            "caller_rss_gate_mb_per_hr": caller_results.get(
+                "rss_gate_growth_mb_per_hr"
+            ),
+            "receiver_rss_gate_mb_per_hr": receiver_results.get(
+                "rss_gate_growth_mb_per_hr"
+            ),
+        },
+        "checks": checks,
+    }
+
+
 def markdown(metrics: dict[str, Any]) -> str:
     lines = [
         "## Performance Gate Metrics",
@@ -684,6 +909,7 @@ def markdown(metrics: dict[str, Any]) -> str:
         ("canonical_2k", "Canonical 2,000-CPS evaluation"),
         ("high_density_media_burst", "High-density media burst"),
         ("monolithic_soak", "Monolithic soak"),
+        ("split_soak", "Split soak"),
     ):
         section = metrics[key]
         lines.extend([f"### {title}", ""])
@@ -728,8 +954,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--rss-limit-mb-per-hr", type=float, default=15.0)
     result.add_argument("--monolithic-duration-secs", type=int, default=3600)
     result.add_argument("--monolithic-active-calls", type=int, default=30)
+    result.add_argument("--split-duration-secs", type=int, default=3600)
+    result.add_argument("--split-active-calls", type=int, default=500)
     result.add_argument("--require-high-density", action="store_true")
     result.add_argument("--require-monolithic", action="store_true")
+    result.add_argument("--require-split", action="store_true")
     result.add_argument("--require-canonical", action="store_true")
     return result
 
@@ -761,6 +990,13 @@ def main() -> int:
                 args.rss_limit_mb_per_hr,
                 args.require_monolithic,
             ),
+            "split_soak": split_soak_metrics(
+                root,
+                args.split_duration_secs,
+                args.split_active_calls,
+                args.rss_limit_mb_per_hr,
+                args.require_split,
+            ),
         }
         metrics["passed"] = all(
             metrics[key]["passed"]
@@ -768,6 +1004,7 @@ def main() -> int:
                 "canonical_2k",
                 "high_density_media_burst",
                 "monolithic_soak",
+                "split_soak",
             )
         )
         output_json = pathlib.Path(args.output_json)

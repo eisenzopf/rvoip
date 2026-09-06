@@ -1046,10 +1046,18 @@ def reconcile_performance_regression(root: Path, evidence_root: Path, artifact: 
     for value in comparison_paths:
         if not isinstance(value, str) or Path(value).is_absolute() or ".." in Path(value).parts:
             raise GateError(f"unsafe performance comparison path: {value!r}")
+        # Worker result collection has one authoritative root per shard:
+        # `_perf-results/<shard>/<comparison-path>`.  Some gates also retain
+        # complete nested provenance packages (for example, each canonical
+        # run's output tree and reviewed baseline).  Those copies are evidence
+        # to index, but they are not independent current measurements and must
+        # never participate in regression-result selection.
         matches = sorted(
             path
-            for path in (evidence_root / "_perf-results").rglob(Path(value).name)
-            if path.as_posix().endswith("/" + value)
+            for shard_root in (evidence_root / "_perf-results").iterdir()
+            if shard_root.is_dir()
+            for path in (shard_root / value,)
+            if path.is_file()
         )
         if len(matches) != 1:
             raise GateError(
@@ -1117,12 +1125,43 @@ def reconcile_performance_metrics(
                     raise GateError(
                         f"conflicting exact-candidate performance artifact: {key}"
                     )
-                continue
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(path, destination)
+            else:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, destination)
             indexed[f"performance-results/{key}"] = digest
     if not indexed:
         raise GateError("exact-candidate performance artifact set is empty")
+
+    # The split media-burst gates write their structured result tree directly
+    # into the gate artifact directory rather than `target/perf-results`.
+    # Stage the one release-required high-density profile into the canonical
+    # metrics layout while retaining the original gate evidence unchanged.
+    high_density_gate = evidence_root / "perf.media-burst.high-density-media-burst"
+    high_density_runs = sorted(
+        path
+        for path in high_density_gate.glob(
+            "perf_burst_matrix/burst_*/high-density-media-burst"
+        )
+        if path.is_dir()
+    )
+    if len(high_density_runs) != 1:
+        raise GateError(
+            "current performance evaluation requires exactly one high-density "
+            f"media-burst result, found {len(high_density_runs)}"
+        )
+    high_density_run = high_density_runs[0]
+    for filename in (
+        "perf_burst_caller_high-density-media-burst.json",
+        "perf_burst_receiver_high-density-media-burst.json",
+    ):
+        source_path = high_density_run / filename
+        if not source_path.is_file():
+            raise GateError(f"required high-density performance artifact is missing: {filename}")
+        relative = source_path.relative_to(high_density_gate)
+        destination = combined / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, destination)
+        indexed[f"performance-results/{relative.as_posix()}"] = file_sha256(source_path)
 
     canonical_index = (
         evidence_root
@@ -1212,8 +1251,13 @@ def reconcile_performance_metrics(
             "3600",
             "--monolithic-active-calls",
             "30",
+            "--split-duration-secs",
+            "3600",
+            "--split-active-calls",
+            "500",
             "--require-high-density",
             "--require-monolithic",
+            "--require-split",
             "--require-canonical",
         ],
         root=root,

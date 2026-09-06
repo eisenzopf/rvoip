@@ -24,6 +24,10 @@
 - Pinned the canonical performance client's app-session dispatcher shape so
   exact-candidate results cannot change with the release worker's detected CPU
   count.
+- Reconciled current performance results from authoritative per-worker output
+  instead of nested provenance copies, staged the required high-density burst
+  evidence into the generated evaluation, and made the one-hour 500-call split
+  soak an explicit machine-validated release result.
 
 ### Interoperability and release evidence
 

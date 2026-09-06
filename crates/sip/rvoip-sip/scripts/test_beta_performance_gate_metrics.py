@@ -100,6 +100,54 @@ class BetaPerformanceGateMetricsTests(unittest.TestCase):
         (self.root / "perf_soak_30min.json").write_text(
             json.dumps(monolithic), encoding="utf-8"
         )
+        split_caller = {
+            "diagnostics": {"media_receive": {"skip_audio_frame_delivery": False}},
+            "results": {
+                "duration_secs": 3600,
+                "active_calls_target": 500,
+                "calls_offered": 9904,
+                "calls_succeeded": 9904,
+                "asr": 1.0,
+                "errors": {
+                    "call_failed": 0,
+                    "media_setup_failed": 0,
+                    "teardown_failed": 0,
+                },
+                "rss_gate": {"effective_mb_per_hr": 15.0},
+                "rss_gate_window": "active_tail_1200s",
+                "rss_active_tail_window_secs": 1200.0,
+                "rss_active_tail_window_complete": True,
+                "rss_gate_growth_mb_per_hr": 5.0,
+                "retained_objects_after_drain": 0,
+                "transaction_manager_active_after_drain": 0,
+                "transaction_runner_active_after_drain": 0,
+            },
+        }
+        split_receiver = {
+            "diagnostics": {"media_receive": {"skip_audio_frame_delivery": False}},
+            "results": {
+                "configured_duration_secs": 3600,
+                "active_calls_target": 500,
+                "bob_completed_audio_receivers": 9904,
+                "bob_received_frames": 80_000_000,
+                "bob_active_audio_receivers": 0,
+                "rss_gate": {"effective_mb_per_hr": 15.0},
+                "rss_gate_window": "active_tail_1200s",
+                "rss_active_tail_window_secs": 1200.0,
+                "rss_active_tail_window_complete": True,
+                "rss_gate_growth_mb_per_hr": 9.0,
+                "retained_objects_after_drain": 0,
+                "transaction_manager_active_after_drain": 0,
+                "transaction_runner_active_after_drain": 0,
+                "stop_seen": True,
+            },
+        }
+        (self.root / "perf_soak_caller.json").write_text(
+            json.dumps(split_caller), encoding="utf-8"
+        )
+        (self.root / "perf_soak_receiver.json").write_text(
+            json.dumps(split_receiver), encoding="utf-8"
+        )
         canonical = self.root / "canonical-2k"
         canonical.mkdir()
         self.candidate_sha = "c" * 40
@@ -166,9 +214,11 @@ class BetaPerformanceGateMetricsTests(unittest.TestCase):
         )
         burst = metrics.high_density_metrics(self.root, 160.0, 0.995, 15.0, True)
         soak = metrics.monolithic_metrics(self.root, 3600, 30, 15.0, True)
+        split = metrics.split_soak_metrics(self.root, 3600, 500, 15.0, True)
         self.assertTrue(canonical["passed"])
         self.assertTrue(burst["passed"])
         self.assertTrue(soak["passed"])
+        self.assertTrue(split["passed"])
         self.assertIn(
             "full_audio_frame_delivery",
             metrics.markdown(
@@ -176,6 +226,7 @@ class BetaPerformanceGateMetricsTests(unittest.TestCase):
                     "canonical_2k": canonical,
                     "high_density_media_burst": burst,
                     "monolithic_soak": soak,
+                    "split_soak": split,
                 }
             ),
         )
@@ -186,6 +237,7 @@ class BetaPerformanceGateMetricsTests(unittest.TestCase):
                     "canonical_2k": canonical,
                     "high_density_media_burst": burst,
                     "monolithic_soak": soak,
+                    "split_soak": split,
                 }
             ),
         )
@@ -250,6 +302,15 @@ class BetaPerformanceGateMetricsTests(unittest.TestCase):
         value["results"]["errors"]["timeout"] = 100
         path.write_text(json.dumps(value), encoding="utf-8")
         result = metrics.high_density_metrics(self.root, 160.0, 0.995, 15.0, True)
+        self.assertFalse(result["passed"])
+
+    def test_split_soak_requires_cross_role_completion_and_drain(self):
+        path = self.root / "perf_soak_receiver.json"
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["results"]["bob_completed_audio_receivers"] = 9903
+        value["results"]["retained_objects_after_drain"] = 1
+        path.write_text(json.dumps(value), encoding="utf-8")
+        result = metrics.split_soak_metrics(self.root, 3600, 500, 15.0, True)
         self.assertFalse(result["passed"])
 
 
