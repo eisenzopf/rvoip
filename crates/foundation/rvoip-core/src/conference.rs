@@ -1,6 +1,7 @@
 //! N-way audio conferencing.
 //!
-//! [`Orchestrator::bridge_connections`] joins exactly two connections by
+//! [`Orchestrator::bridge_connections`](crate::Orchestrator::bridge_connections)
+//! joins exactly two connections by
 //! pumping frames between them. That shape does not extend to three: a
 //! conference has to *sum* audio, and every participant needs a different
 //! sum — their own voice removed, or they hear themselves echoed a packet

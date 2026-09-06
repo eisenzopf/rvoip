@@ -1,17 +1,19 @@
 //! Unified PBX interop harness shared by the `pbx_endpoint`, `pbx_stream_peer`,
 //! `pbx_callback_builder`, and `pbx_analyze` Cargo examples in this directory.
 //!
-//! The same scenario suite — registration/unregistration, basic call,
-//! G.729, hold/resume, ring/cancel, DTMF, reject/busy, and blind transfer — is
-//! exercised against both Asterisk and FreeSWITCH and through all three
-//! public API surfaces ([`Endpoint`](rvoip_sip::Endpoint),
+//! The same scenario implementations — registration/unregistration, basic
+//! call, hold/resume, ring/cancel, DTMF, reject/busy, and blind transfer — are
+//! exercised against Asterisk, FreeSWITCH, and Jambonz through all three public
+//! API surfaces ([`Endpoint`](rvoip_sip::Endpoint),
 //! [`StreamPeer`](rvoip_sip::StreamPeer), and
 //! [`CallbackPeer::builder`](rvoip_sip::CallbackPeerBuilder)) so provider
 //! behaviour and surface ergonomics are validated in the same matrix.
+//! Asterisk and FreeSWITCH additionally cover G.729 and AMR; each provider
+//! runs only its explicitly qualified codec profile.
 //!
 //! The runner (`examples/pbx/run.sh`) controls behaviour via these env vars:
 //!
-//! - `PBX_PROVIDER` (`asterisk`|`freeswitch`) — selects PBX defaults and SRTP
+//! - `PBX_PROVIDER` (`asterisk`|`freeswitch`|`jambonz`) — selects peer defaults and SRTP
 //!   policy
 //! - `PBX_SCENARIO` (e.g. `registration`, `basic_call`, `g729_call`,
 //!   `hold_resume`, `ring_cancel`, `dtmf`, `reject`, `blind_transfer`) —
@@ -21,7 +23,8 @@
 //!
 //! Per-provider tunables (`SIP_PORT`, `SIP_TLS_PORT`, `SIP_PASSWORD`,
 //! `ASTERISK_TLS_CONTACT_MODE`, `FREESWITCH_UDP_ADDR`, etc.) come from the
-//! `env/asterisk.env` and `env/freeswitch.env` files loaded by `run.sh`.
+//! `env/asterisk.env`, `env/freeswitch.env`, and `env/jambonz.env` files loaded
+//! by `run.sh`.
 //!
 //! See `examples/pbx/README.md` for the full scenario matrix, evidence layout,
 //! and provider differences.
@@ -41,11 +44,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use rvoip_media_core::types::AudioFrame;
 use rvoip_sip::{
     AudioSender, CallHandlerDecision, CallId, CallState, CallbackPeer, CallbackPeerControl, Config,
-    Endpoint, EndpointAccount, EndpointProfile, Event, EventReceiver, MediaSecurityKeying,
-    MediaSecurityProfile, MediaSecurityState, Registration, RegistrationHandle, SessionHandle,
-    SessionId, SipAccount, SipContactMode, SrtpSuitePolicy, StreamPeer, TransferOutcome,
-    TransferWaitMode, UnifiedCoordinator,
+    Endpoint, EndpointAccount, EndpointCall, EndpointProfile, Event, EventReceiver, HeaderName,
+    MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState, Registration,
+    RegistrationHandle, SessionHandle, SessionId, SipAccount, SipContactMode, SipRequestOptions,
+    SrtpSuitePolicy, StreamPeer, TransferOutcome, TransferWaitMode, TypedHeader,
+    UnifiedCoordinator,
 };
+use rvoip_sip_core::types::headers::HeaderValue;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
@@ -74,7 +79,8 @@ pub const fn amr_sample_rate(profile: CodecProfile) -> u32 {
         | CodecProfile::G729AB
         | CodecProfile::AmrNb
         | CodecProfile::AmrNbBe
-        | CodecProfile::Pcmu => 8_000,
+        | CodecProfile::Pcmu
+        | CodecProfile::Pcma => 8_000,
     }
 }
 
@@ -89,7 +95,8 @@ pub const fn amr_top_mode_index(profile: CodecProfile) -> u8 {
         | CodecProfile::G729AB
         | CodecProfile::AmrNb
         | CodecProfile::AmrNbBe
-        | CodecProfile::Pcmu => 7,
+        | CodecProfile::Pcmu
+        | CodecProfile::Pcma => 7,
     }
 }
 
@@ -143,7 +150,8 @@ pub const fn amr_frame_size(profile: CodecProfile) -> usize {
         | CodecProfile::G729AB
         | CodecProfile::AmrNb
         | CodecProfile::AmrNbBe
-        | CodecProfile::Pcmu => 160,
+        | CodecProfile::Pcmu
+        | CodecProfile::Pcma => 160,
     }
 }
 pub const TONE_FRAMES: usize = 150;
@@ -222,6 +230,9 @@ pub const DOMINANCE_RATIO: f32 = 5.0;
 pub enum PbxProvider {
     Asterisk,
     FreeSwitch,
+    /// Open-source Jambonz SBC/B2BUA with its registrar and RTPengine media
+    /// anchor. The release lab pins both inbound and outbound SBC revisions.
+    Jambonz,
     /// Kamailio registrar-proxy with rtpengine relaying media
     /// (infra/release-runners/pbx/kamailio). A proxy, not a B2BUA: it routes
     /// by registered contact and rtpengine forwards payloads verbatim.
@@ -246,11 +257,16 @@ impl PbxProvider {
                 _ => {}
             }
         }
+        Self::parse(&value)
+    }
+
+    pub fn parse(value: &str) -> ExampleResult<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "asterisk" | "ast" => Ok(Self::Asterisk),
             "kamailio" | "kam" => Ok(Self::Kamailio),
             "opensips" | "open-sips" | "osips" => Ok(Self::OpenSips),
             "freeswitch" | "free-switch" | "fs" => Ok(Self::FreeSwitch),
+            "jambonz" | "jambones" | "jb" => Ok(Self::Jambonz),
             other => Err(format!("unknown PBX provider '{}'", other).into()),
         }
     }
@@ -259,6 +275,7 @@ impl PbxProvider {
         match self {
             Self::Asterisk => "asterisk",
             Self::FreeSwitch => "freeswitch",
+            Self::Jambonz => "jambonz",
             Self::Kamailio => "kamailio",
             Self::OpenSips => "opensips",
         }
@@ -268,6 +285,7 @@ impl PbxProvider {
         match self {
             Self::Asterisk => "Asterisk",
             Self::FreeSwitch => "FreeSWITCH",
+            Self::Jambonz => "Jambonz",
             Self::Kamailio => "Kamailio",
             Self::OpenSips => "OpenSIPS",
         }
@@ -277,6 +295,7 @@ impl PbxProvider {
         match self {
             Self::Asterisk => 5,
             Self::FreeSwitch => 2,
+            Self::Jambonz => 2,
             // usrloc writes are synchronous and in-memory; nothing to settle.
             Self::Kamailio | Self::OpenSips => 1,
         }
@@ -286,6 +305,7 @@ impl PbxProvider {
         match self {
             Self::Asterisk => 8,
             Self::FreeSwitch => 4,
+            Self::Jambonz => 4,
             Self::Kamailio | Self::OpenSips => 4,
         }
     }
@@ -294,6 +314,7 @@ impl PbxProvider {
         match self {
             Self::Asterisk => env_bool("ASTERISK_EXPECT_TARGET_CANCEL", false).unwrap_or(false),
             Self::FreeSwitch => true,
+            Self::Jambonz => true,
             // A proxy relays CANCEL verbatim.
             Self::Kamailio | Self::OpenSips => true,
         }
@@ -435,6 +456,10 @@ pub enum CodecProfile {
     /// for the same reason the AMR profiles offer one framing each: the
     /// negotiated codec must be provable from the profile name.
     Pcmu,
+    /// PCMA alone — used beside [`Self::Pcmu`] when an interoperability gate
+    /// must prove both mandatory G.711 encodings instead of accepting
+    /// whichever codec wins a combined default offer.
+    Pcma,
 }
 
 impl CodecProfile {
@@ -471,6 +496,7 @@ impl CodecProfile {
             "amrnb_be" | "amr_nb_be" | "amrnbbe" => Ok(Self::AmrNbBe),
             "amrwb_be" | "amr_wb_be" | "amrwbbe" => Ok(Self::AmrWbBe),
             "pcmu" | "ulaw" => Ok(Self::Pcmu),
+            "pcma" | "alaw" => Ok(Self::Pcma),
             other => Err(format!("unknown PBX codec profile '{}'", other).into()),
         }
     }
@@ -495,6 +521,7 @@ impl CodecProfile {
             Self::AmrNbBe => Some(vec![106, 101]),
             Self::AmrWbBe => Some(vec![104, 101]),
             Self::Pcmu => Some(vec![0, 101]),
+            Self::Pcma => Some(vec![8, 101]),
         }
     }
 
@@ -519,6 +546,7 @@ impl CodecProfile {
             Self::AmrNbBe => "amrnb_be",
             Self::AmrWbBe => "amrwb_be",
             Self::Pcmu => "pcmu",
+            Self::Pcma => "pcma",
         }
     }
 }
@@ -709,6 +737,7 @@ impl TlsContactMode {
         let key = match provider {
             PbxProvider::Asterisk => "ASTERISK_TLS_CONTACT_MODE",
             PbxProvider::FreeSwitch => "FREESWITCH_TLS_CONTACT_MODE",
+            PbxProvider::Jambonz => "JAMBONZ_TLS_CONTACT_MODE",
             // TLS is not wired for the proxy labs yet; the arms exist so the
             // match stays exhaustive and the key is ready when it is.
             PbxProvider::Kamailio => "KAMAILIO_TLS_CONTACT_MODE",
@@ -753,6 +782,10 @@ pub struct EndpointConfig {
     pub auth_username: String,
     pub password: String,
     pub sip_server: String,
+    /// Logical SIP identity domain used in registrar, AoR, and Request-URIs.
+    /// This can differ from `sip_server` when a host-side proxy or SBC is the
+    /// reachable first hop (for example, a Colima UDP port forward).
+    pub sip_domain: String,
     pub sip_port: u16,
     pub transport: TransportMode,
     pub local_ip: IpAddr,
@@ -810,6 +843,9 @@ impl EndpointConfig {
                 };
                 split_host_port(&env_string(addr_key, default_addr))?
             }
+            PbxProvider::Jambonz => {
+                split_host_port(&env_string("JAMBONZ_UDP_ADDR", "172.39.0.10:5060"))?
+            }
             PbxProvider::Kamailio => {
                 let addr_key = if transport.is_tls() {
                     "KAMAILIO_TLS_ADDR"
@@ -837,34 +873,23 @@ impl EndpointConfig {
                 split_host_port(&env_string(addr_key, default_addr))?
             }
         };
-        let auth_username = auth_username_for(&prefix, username);
-        let password = match provider {
-            PbxProvider::Asterisk => std::env::var(format!("{}_PASSWORD", prefix))
-                .or_else(|_| std::env::var("SIP_PASSWORD"))
-                .unwrap_or_else(|_| "password123".to_string()),
-            PbxProvider::FreeSwitch => std::env::var(format!("{}_PASSWORD", prefix))
-                .or_else(|_| std::env::var("FREESWITCH_PASSWORD"))
-                .or_else(|_| std::env::var("SIP_PASSWORD"))
-                .unwrap_or_else(|_| "1234".to_string()),
-            // The proxy labs run an accept-all registrar; the password is
-            // carried but never challenged for.
-            PbxProvider::Kamailio => std::env::var(format!("{}_PASSWORD", prefix))
-                .or_else(|_| std::env::var("KAMAILIO_PASSWORD"))
-                .or_else(|_| std::env::var("SIP_PASSWORD"))
-                .unwrap_or_else(|_| "password123".to_string()),
-            PbxProvider::OpenSips => std::env::var(format!("{}_PASSWORD", prefix))
-                .or_else(|_| std::env::var("OPENSIPS_PASSWORD"))
-                .or_else(|_| std::env::var("SIP_PASSWORD"))
-                .unwrap_or_else(|_| "password123".to_string()),
+        let sip_domain = match provider {
+            PbxProvider::Jambonz => {
+                non_empty_env("JAMBONZ_SIP_DOMAIN").unwrap_or_else(|| "sip.rvoip.test".into())
+            }
+            _ => sip_server.clone(),
         };
+        let auth_username = auth_username_for(&prefix, username);
+        let password = required_password(provider, &prefix)?;
         let local_ip: IpAddr = match provider {
             PbxProvider::Asterisk => env_string("LOCAL_IP", "0.0.0.0").parse()?,
-            PbxProvider::FreeSwitch | PbxProvider::Kamailio | PbxProvider::OpenSips => {
-                std::env::var("RVOIP_LOCAL_IP")
-                    .or_else(|_| std::env::var("LOCAL_IP"))
-                    .unwrap_or_else(|_| "127.0.0.1".to_string())
-                    .parse()?
-            }
+            PbxProvider::FreeSwitch
+            | PbxProvider::Jambonz
+            | PbxProvider::Kamailio
+            | PbxProvider::OpenSips => std::env::var("RVOIP_LOCAL_IP")
+                .or_else(|_| std::env::var("LOCAL_IP"))
+                .unwrap_or_else(|_| "127.0.0.1".to_string())
+                .parse()?,
         };
         let advertised_ip = advertised_ip(provider, local_ip)?;
         let media_advertised_ip = media_advertised_ip(provider, advertised_ip)?;
@@ -903,6 +928,7 @@ impl EndpointConfig {
             auth_username,
             password,
             sip_server,
+            sip_domain,
             sip_port,
             transport,
             local_ip,
@@ -918,11 +944,36 @@ impl EndpointConfig {
         })
     }
 
+    #[cfg(test)]
+    fn new_for_test(
+        provider: PbxProvider,
+        username: &str,
+        transport: TransportMode,
+    ) -> ExampleResult<Self> {
+        static PASSWORD_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = PASSWORD_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("test password environment lock");
+        let key = format!("ENDPOINT_{username}_PASSWORD");
+        let previous = std::env::var_os(&key);
+        std::env::set_var(&key, uuid::Uuid::new_v4().to_string());
+        let result = Self::new(provider, username, transport);
+        match previous {
+            Some(value) => std::env::set_var(&key, value),
+            None => std::env::remove_var(&key),
+        }
+        result
+    }
+
     pub fn registrar_uri(&self) -> String {
+        if self.uses_outbound_proxy() {
+            return format!("{}:{}", self.uri_scheme(), self.sip_domain);
+        }
         format!(
             "{}:{}:{}{}",
             self.uri_scheme(),
-            self.sip_server,
+            self.sip_domain,
             self.sip_port,
             transport_suffix(self.transport)
         )
@@ -933,7 +984,7 @@ impl EndpointConfig {
             "{}:{}@{}",
             self.uri_scheme(),
             self.username,
-            self.sip_server
+            self.sip_domain
         )
     }
 
@@ -949,18 +1000,73 @@ impl EndpointConfig {
     }
 
     pub fn call_uri(&self, target: &str) -> String {
-        if self.transport.is_tls() || self.sip_port != default_pbx_port(self.transport) {
+        if !self.uses_outbound_proxy()
+            && (self.transport.is_tls() || self.sip_port != default_pbx_port(self.transport))
+        {
             format!(
                 "{}:{}@{}:{}{}",
                 self.uri_scheme(),
                 target,
-                self.sip_server,
+                self.sip_domain,
                 self.sip_port,
                 transport_suffix(self.transport)
             )
         } else {
-            format!("sip:{}@{}", target, self.sip_server)
+            format!("{}:{}@{}", self.uri_scheme(), target, self.sip_domain)
         }
+    }
+
+    /// First-hop route used when the reachable transport endpoint is not the
+    /// logical SIP domain. RVoIP keeps the registrar or callee in the
+    /// Request-URI and applies this as a standard loose Route for REGISTER and
+    /// INVITE, so authentication realms and dialog identities remain stable.
+    pub fn outbound_proxy_uri(&self) -> Option<String> {
+        self.uses_outbound_proxy().then(|| {
+            format!(
+                "{}:{}:{}{};lr",
+                self.uri_scheme(),
+                self.sip_server,
+                self.sip_port,
+                transport_suffix(self.transport)
+            )
+        })
+    }
+
+    /// Provider-required application headers for the initial INVITE.
+    ///
+    /// These are deliberately returned to the normal request builder rather
+    /// than treated as transport or dialog configuration. That keeps the
+    /// shared scenarios on RVoIP's validated custom-header API and preserves
+    /// the headers across any authenticated INVITE retry.
+    pub fn outbound_invite_headers(&self) -> Vec<TypedHeader> {
+        let mut headers = self.jambonz_dialog_headers();
+        if self.provider == PbxProvider::Jambonz {
+            // Jambonz uses this identifier in its CDR lifecycle. It must be a
+            // real per-call UUID: omitting it leaves `call_sid=undefined` in
+            // the pinned SBC's Influx line protocol and terminates that
+            // process after the first completed call.
+            headers.push(TypedHeader::Other(
+                HeaderName::Other("X-Call-Sid".into()),
+                HeaderValue::Raw(uuid::Uuid::new_v4().to_string().into_bytes()),
+            ));
+        }
+        headers
+    }
+
+    fn jambonz_dialog_headers(&self) -> Vec<TypedHeader> {
+        if self.provider != PbxProvider::Jambonz {
+            return Vec::new();
+        }
+        vec![
+            TypedHeader::Other(
+                HeaderName::Other("X-Account-Sid".into()),
+                HeaderValue::Raw(b"ed649e33-e771-403a-8c99-1780eabbc803".to_vec()),
+            ),
+            TypedHeader::Other(
+                HeaderName::Other("X-Jambonz-Routing".into()),
+                HeaderValue::Raw(b"user".to_vec()),
+            ),
+        ]
     }
 
     pub fn outbound_call_uri(&self, target: &str) -> String {
@@ -1000,6 +1106,7 @@ impl EndpointConfig {
                 &self.username,
                 SocketAddr::new(self.local_ip, self.local_port),
             ),
+            PbxProvider::Jambonz => Config::on(&self.username, self.local_ip, self.local_port),
             // Plain config: the proxies impose no FreeSWITCH-shaped quirks.
             PbxProvider::Kamailio | PbxProvider::OpenSips => {
                 Config::on(&self.username, self.local_ip, self.local_port)
@@ -1007,6 +1114,7 @@ impl EndpointConfig {
         };
         config.local_uri = self.aor_uri();
         config.contact_uri = Some(self.contact_uri());
+        config.outbound_proxy_uri = self.outbound_proxy_uri();
         config.sip_advertised_addr = Some(SocketAddr::new(self.advertised_ip, self.local_port));
         if self.transport.is_tls() {
             config.tls_advertised_addr =
@@ -1018,6 +1126,14 @@ impl EndpointConfig {
             SipContactMode::ReachableContact
         };
         config.credentials = Some(self.sip_account().credentials());
+        if self.provider == PbxProvider::Jambonz {
+            // Keep provider admission context on stack-generated follow-up
+            // messages too. Application-initiated INVITEs stage the same
+            // account/routing values explicitly through
+            // `SipRequestOptions::with_headers`. X-Call-Sid stays per INVITE;
+            // generating a second value here would mis-correlate a dialog.
+            config.auto_emit_extra_headers = self.jambonz_dialog_headers();
+        }
         config.media_port_start = self.media_port_start;
         config.media_port_end = self.media_port_end;
         config.media_public_addr = Some(SocketAddr::new(self.media_advertised_ip, 0));
@@ -1075,6 +1191,7 @@ impl EndpointConfig {
         config.srtp_required = match self.provider {
             PbxProvider::Asterisk => env_bool("ASTERISK_TLS_SRTP_REQUIRED", true)?,
             PbxProvider::FreeSwitch => env_bool("FREESWITCH_TLS_SRTP_REQUIRED", true)?,
+            PbxProvider::Jambonz => env_bool("JAMBONZ_TLS_SRTP_REQUIRED", false)?,
             PbxProvider::Kamailio => env_bool("KAMAILIO_TLS_SRTP_REQUIRED", true)?,
             PbxProvider::OpenSips => env_bool("OPENSIPS_TLS_SRTP_REQUIRED", true)?,
         };
@@ -1105,6 +1222,10 @@ impl EndpointConfig {
         } else {
             "sip"
         }
+    }
+
+    fn uses_outbound_proxy(&self) -> bool {
+        self.sip_domain != self.sip_server
     }
 
     fn contact_port(&self) -> u16 {
@@ -1294,6 +1415,15 @@ pub enum CallbackEvent {
     RemoteResume {
         call_id: CallId,
     },
+    ReferReceived {
+        call_id: CallId,
+        refer_to: String,
+        referred_by: Option<Box<TypedHeader>>,
+    },
+    ReferAccepted {
+        call_id: CallId,
+        refer_to: String,
+    },
     TransferAccepted {
         call_id: CallId,
         refer_to: String,
@@ -1357,6 +1487,14 @@ pub fn load_env(provider: PbxProvider) {
                         .join("Developer")
                         .join("freeswitch")
                         .join("freeswitch-local.env"),
+                );
+            }
+            PbxProvider::Jambonz => {
+                let _ = dotenvy::from_filename(
+                    Path::new(&home)
+                        .join("Developer")
+                        .join("jambonz")
+                        .join("jambonz-local.env"),
                 );
             }
             PbxProvider::Kamailio => {
@@ -1549,6 +1687,9 @@ pub async fn callback_runtime(
     let local_resume_tx = tx.clone();
     let remote_hold_tx = tx.clone();
     let remote_resume_tx = tx.clone();
+    let refer_received_tx = tx.clone();
+    let refer_provider = provider;
+    let refer_accepted_tx = tx.clone();
     let transfer_accepted_tx = tx.clone();
     let refer_progress_tx = tx.clone();
     let refer_completed_tx = tx.clone();
@@ -1644,13 +1785,48 @@ pub async fn callback_runtime(
                 Ok(())
             }
         })
-        .on_refer_received(|handle, request| async move {
-            println!(
-                "[callback-transfer] accepting REFER on call {} (method={:?})",
-                handle.id(),
-                request.method
-            );
-            Ok(true)
+        .on_refer_received(move |handle, request| {
+            let tx = refer_received_tx.clone();
+            async move {
+                let refer_to = typed_refer_to_uri(&request);
+                let Some(refer_to) = refer_to else {
+                    eprintln!(
+                        "[callback-transfer] rejecting REFER without a typed Refer-To on call {}",
+                        handle.id()
+                    );
+                    return Ok(false);
+                };
+                println!(
+                    "[callback-transfer] accepting REFER on call {} (method={:?})",
+                    handle.id(),
+                    request.method
+                );
+                let referred_by = typed_referred_by_header(&request);
+                let _ = tx.send(CallbackEvent::ReferReceived {
+                    call_id: handle.id().clone(),
+                    refer_to,
+                    referred_by: referred_by.clone().map(Box::new),
+                });
+                if refer_provider == PbxProvider::Jambonz && referred_by.is_none() {
+                    eprintln!(
+                        "[callback-transfer] rejecting Jambonz REFER without Referred-By on call {}",
+                        handle.id()
+                    );
+                    Ok(false)
+                } else {
+                    Ok(true)
+                }
+            }
+        })
+        .on_refer_accepted(move |handle, refer_to| {
+            let tx = refer_accepted_tx.clone();
+            async move {
+                let _ = tx.send(CallbackEvent::ReferAccepted {
+                    call_id: handle.id().clone(),
+                    refer_to,
+                });
+                Ok(())
+            }
         })
         .on_local_hold(move |handle| {
             let tx = local_hold_tx.clone();
@@ -1998,7 +2174,7 @@ async fn run_stream_peer_two_party(
             settle_after_register(provider).await;
             let target = cfg.outbound_call_uri(target_user_for(transport));
             let handle =
-                call_with_answer_retry(peer, &target, remote_test_timeout(provider)?).await?;
+                call_with_answer_retry(peer, cfg, &target, remote_test_timeout(provider)?).await?;
             run_basic_caller(cfg, &handle, transport).await?;
         }
         (Scenario::BasicCall, Role::Callee) => {
@@ -2011,7 +2187,7 @@ async fn run_stream_peer_two_party(
             settle_after_register(provider).await;
             let target = cfg.outbound_call_uri(target_user_for(transport));
             let handle =
-                call_with_answer_retry(peer, &target, remote_test_timeout(provider)?).await?;
+                call_with_answer_retry(peer, cfg, &target, remote_test_timeout(provider)?).await?;
             run_g729_caller(cfg, &handle, transport).await?;
         }
         (Scenario::G729Call, Role::Callee) => {
@@ -2024,7 +2200,7 @@ async fn run_stream_peer_two_party(
             settle_after_register(provider).await;
             let target = cfg.outbound_call_uri(target_user_for(transport));
             let handle =
-                call_with_answer_retry(peer, &target, remote_test_timeout(provider)?).await?;
+                call_with_answer_retry(peer, cfg, &target, remote_test_timeout(provider)?).await?;
             run_amr_caller(cfg, &handle, transport, amr_caller_wav(transport)).await?;
         }
         (Scenario::AmrCall, Role::Callee) => {
@@ -2037,7 +2213,7 @@ async fn run_stream_peer_two_party(
             settle_after_register(provider).await;
             let target = cfg.outbound_call_uri(target_user_for(transport));
             let handle =
-                call_with_answer_retry(peer, &target, remote_test_timeout(provider)?).await?;
+                call_with_answer_retry(peer, cfg, &target, remote_test_timeout(provider)?).await?;
             let wav = amr_transcode_wav(cfg);
             run_amr_caller(cfg, &handle, transport, &wav).await?;
         }
@@ -2052,7 +2228,7 @@ async fn run_stream_peer_two_party(
             settle_after_register(provider).await;
             let target = cfg.outbound_call_uri(target_user_for(transport));
             let handle =
-                call_with_answer_retry(peer, &target, remote_test_timeout(provider)?).await?;
+                call_with_answer_retry(peer, cfg, &target, remote_test_timeout(provider)?).await?;
             run_hold_on_handle(provider, cfg, &handle, transport).await?;
         }
         (Scenario::HoldResume, Role::Callee) => {
@@ -2072,6 +2248,7 @@ async fn run_stream_peer_two_party(
             settle_after_register(provider).await;
             let handle = call_with_ringing_retry(
                 peer,
+                cfg,
                 &cfg.remote_call_uri(),
                 remote_test_timeout(provider)?,
             )
@@ -2090,6 +2267,7 @@ async fn run_stream_peer_two_party(
             let target = target_user_for(transport);
             let handle = call_with_answer_retry(
                 peer,
+                cfg,
                 &cfg.outbound_call_uri(target),
                 remote_test_timeout(provider)?,
             )
@@ -2105,7 +2283,11 @@ async fn run_stream_peer_two_party(
         (Scenario::Reject, Role::Caller) => {
             settle_after_register(provider).await;
             let target = target_user_for(transport);
-            let call_id = peer.invite(cfg.outbound_call_uri(target)).send().await?;
+            let call_id = peer
+                .invite(cfg.outbound_call_uri(target))
+                .with_headers(cfg.outbound_invite_headers())?
+                .send()
+                .await?;
             let handle = peer.coordinator().session(&call_id);
             let mut events = handle.events().await?;
             let (status, _) =
@@ -2140,12 +2322,13 @@ async fn run_endpoint_two_party(
     match (scenario, role) {
         (Scenario::BasicCall, Role::Caller) => {
             settle_after_register(provider).await;
-            let handle = endpoint
-                .call_and_wait(
-                    target_user_for(transport),
-                    Some(remote_test_timeout(provider)?),
-                )
-                .await?;
+            let handle = endpoint_call_and_wait(
+                endpoint,
+                cfg,
+                target_user_for(transport),
+                remote_test_timeout(provider)?,
+            )
+            .await?;
             run_basic_caller(cfg, handle.as_session_handle(), transport).await?;
         }
         (Scenario::BasicCall, Role::Callee) => {
@@ -2156,12 +2339,13 @@ async fn run_endpoint_two_party(
         }
         (Scenario::G729Call, Role::Caller) => {
             settle_after_register(provider).await;
-            let handle = endpoint
-                .call_and_wait(
-                    target_user_for(transport),
-                    Some(remote_test_timeout(provider)?),
-                )
-                .await?;
+            let handle = endpoint_call_and_wait(
+                endpoint,
+                cfg,
+                target_user_for(transport),
+                remote_test_timeout(provider)?,
+            )
+            .await?;
             run_g729_caller(cfg, handle.as_session_handle(), transport).await?;
         }
         (Scenario::G729Call, Role::Callee) => {
@@ -2172,12 +2356,13 @@ async fn run_endpoint_two_party(
         }
         (Scenario::AmrCall, Role::Caller) => {
             settle_after_register(provider).await;
-            let handle = endpoint
-                .call_and_wait(
-                    target_user_for(transport),
-                    Some(remote_test_timeout(provider)?),
-                )
-                .await?;
+            let handle = endpoint_call_and_wait(
+                endpoint,
+                cfg,
+                target_user_for(transport),
+                remote_test_timeout(provider)?,
+            )
+            .await?;
             run_amr_caller_toned(
                 cfg,
                 handle.as_session_handle(),
@@ -2204,12 +2389,13 @@ async fn run_endpoint_two_party(
         }
         (Scenario::AmrTranscodeCall, Role::Caller) => {
             settle_after_register(provider).await;
-            let handle = endpoint
-                .call_and_wait(
-                    target_user_for(transport),
-                    Some(remote_test_timeout(provider)?),
-                )
-                .await?;
+            let handle = endpoint_call_and_wait(
+                endpoint,
+                cfg,
+                target_user_for(transport),
+                remote_test_timeout(provider)?,
+            )
+            .await?;
             let wav = amr_transcode_wav(cfg);
             run_amr_caller(cfg, handle.as_session_handle(), transport, &wav).await?;
         }
@@ -2223,7 +2409,11 @@ async fn run_endpoint_two_party(
         (Scenario::HoldResume, Role::Caller) => {
             settle_after_register(provider).await;
             let target = cfg.outbound_call_uri(target_user_for(transport));
-            let call_id = endpoint.invite(&target)?.send().await?;
+            let call_id = endpoint
+                .invite(&target)?
+                .with_headers(cfg.outbound_invite_headers())?
+                .send()
+                .await?;
             let handle = endpoint
                 .wrap_call(call_id)
                 .wait_for_answered(Some(remote_test_timeout(provider)?))
@@ -2245,7 +2435,11 @@ async fn run_endpoint_two_party(
         }
         (Scenario::RingCancel, Role::Caller) => {
             settle_after_register(provider).await;
-            let call_id = endpoint.invite(&cfg.remote_call_uri())?.send().await?;
+            let call_id = endpoint
+                .invite(&cfg.remote_call_uri())?
+                .with_headers(cfg.outbound_invite_headers())?
+                .send()
+                .await?;
             let handle = endpoint.wrap_call(call_id);
             handle
                 .as_session_handle()
@@ -2283,12 +2477,13 @@ async fn run_endpoint_two_party(
         }
         (Scenario::Dtmf, Role::Caller) => {
             settle_after_register(provider).await;
-            let handle = endpoint
-                .call_and_wait(
-                    target_user_for(transport),
-                    Some(remote_test_timeout(provider)?),
-                )
-                .await?;
+            let handle = endpoint_call_and_wait(
+                endpoint,
+                cfg,
+                target_user_for(transport),
+                remote_test_timeout(provider)?,
+            )
+            .await?;
             run_dtmf_caller(cfg, handle.as_session_handle(), transport).await?;
         }
         (Scenario::Dtmf, Role::Callee) => {
@@ -2299,7 +2494,11 @@ async fn run_endpoint_two_party(
         }
         (Scenario::Reject, Role::Caller) => {
             settle_after_register(provider).await;
-            let call_id = endpoint.invite(target_user_for(transport))?.send().await?;
+            let call_id = endpoint
+                .invite(target_user_for(transport))?
+                .with_headers(cfg.outbound_invite_headers())?
+                .send()
+                .await?;
             let handle = endpoint.wrap_call(call_id);
             let mut events = handle.as_session_handle().events().await?;
             let (status, _) =
@@ -2419,6 +2618,7 @@ async fn run_callback_two_party(
             let call_id = runtime
                 .control
                 .invite(runtime.cfg.remote_call_uri())
+                .with_headers(runtime.cfg.outbound_invite_headers())?
                 .send()
                 .await?;
             let handle = runtime.control.coordinator().session(&call_id);
@@ -2482,7 +2682,12 @@ async fn run_callback_two_party(
         (Scenario::Reject, Role::Caller) => {
             settle_after_register(provider).await;
             let target = runtime.cfg.outbound_call_uri(target_user_for(transport));
-            let call_id = runtime.control.invite(target).send().await?;
+            let call_id = runtime
+                .control
+                .invite(target)
+                .with_headers(runtime.cfg.outbound_invite_headers())?
+                .send()
+                .await?;
             let handle = runtime.control.coordinator().session(&call_id);
             wait_for_call_failed(
                 &mut runtime.events,
@@ -2515,6 +2720,7 @@ async fn run_stream_peer_transfer(
             settle_after_register(provider).await;
             let handle = call_with_answer_retry(
                 peer,
+                cfg,
                 &cfg.outbound_call_uri(target_user_for(transport)),
                 remote_test_timeout(provider)?,
             )
@@ -2525,7 +2731,25 @@ async fn run_stream_peer_transfer(
             let incoming =
                 timeout(remote_test_timeout(provider)?, peer.wait_for_incoming()).await??;
             let handle = incoming.accept().await?;
-            run_transfer_answering_role(cfg, &handle, transport, true).await?;
+            let replacement = if provider == PbxProvider::Jambonz {
+                let refer_to =
+                    wait_for_jambonz_refer_and_accept(&handle, remote_test_timeout(provider)?)
+                        .await?;
+                Some(
+                    originate_jambonz_transfer_leg(cfg, peer.coordinator(), &handle, refer_to)
+                        .await?,
+                )
+            } else {
+                None
+            };
+            let role_result = run_transfer_answering_role(cfg, &handle, transport, true).await;
+            if let Some(replacement) = replacement {
+                replacement
+                    .hangup_and_wait(Some(Duration::from_secs(8)))
+                    .await
+                    .ok();
+            }
+            role_result?;
         }
         Role::Target => {
             let incoming = timeout(Duration::from_secs(90), peer.wait_for_incoming()).await??;
@@ -2547,19 +2771,46 @@ async fn run_endpoint_transfer(
     match role {
         Role::Transferor => {
             settle_after_register(provider).await;
-            let handle = endpoint
-                .call_and_wait(
-                    target_user_for(transport),
-                    Some(remote_test_timeout(provider)?),
-                )
-                .await?;
+            let handle = endpoint_call_and_wait(
+                endpoint,
+                cfg,
+                target_user_for(transport),
+                remote_test_timeout(provider)?,
+            )
+            .await?;
             run_transferor(provider, cfg, handle.as_session_handle(), transport).await?;
         }
         Role::Transferee => {
             let incoming =
                 timeout(remote_test_timeout(provider)?, endpoint.wait_for_incoming()).await??;
             let handle = incoming.accept().await?;
-            run_transfer_answering_role(cfg, handle.as_session_handle(), transport, true).await?;
+            let replacement = if provider == PbxProvider::Jambonz {
+                let refer_to = wait_for_jambonz_refer_and_accept(
+                    handle.as_session_handle(),
+                    remote_test_timeout(provider)?,
+                )
+                .await?;
+                Some(
+                    originate_jambonz_transfer_leg(
+                        cfg,
+                        endpoint.control().coordinator(),
+                        handle.as_session_handle(),
+                        refer_to,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
+            let role_result =
+                run_transfer_answering_role(cfg, handle.as_session_handle(), transport, true).await;
+            if let Some(replacement) = replacement {
+                replacement
+                    .hangup_and_wait(Some(Duration::from_secs(8)))
+                    .await
+                    .ok();
+            }
+            role_result?;
         }
         Role::Target => {
             let incoming = timeout(Duration::from_secs(90), endpoint.wait_for_incoming()).await??;
@@ -2594,7 +2845,41 @@ async fn run_callback_transfer(
                 remote_test_timeout(runtime.cfg.provider)?,
             )
             .await?;
-            run_transfer_answering_role(&runtime.cfg, &handle, transport, true).await?;
+            let replacement = if runtime.cfg.provider == PbxProvider::Jambonz {
+                let timeout_duration = remote_test_timeout(runtime.cfg.provider)?;
+                let refer_to = wait_for_callback_jambonz_refer(
+                    &mut runtime.events,
+                    handle.id(),
+                    timeout_duration,
+                )
+                .await?;
+                wait_for_callback_refer_accepted(
+                    &mut runtime.events,
+                    handle.id(),
+                    timeout_duration,
+                )
+                .await?;
+                Some(
+                    originate_jambonz_transfer_leg(
+                        &runtime.cfg,
+                        runtime.control.coordinator(),
+                        &handle,
+                        refer_to,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
+            let role_result =
+                run_transfer_answering_role(&runtime.cfg, &handle, transport, true).await;
+            if let Some(replacement) = replacement {
+                replacement
+                    .hangup_and_wait(Some(Duration::from_secs(8)))
+                    .await
+                    .ok();
+            }
+            role_result?;
         }
         Role::Target => {
             let handle =
@@ -3052,6 +3337,7 @@ async fn run_b2bua_bridge_role(
     // Originate the outbound leg to the target (2003/1003) through the PBX.
     let outbound_id = coordinator
         .invite(Some(cfg.aor_uri()), cfg.remote_call_uri())
+        .with_headers(cfg.outbound_invite_headers())?
         .send()
         .await?;
     println!(
@@ -3134,12 +3420,13 @@ async fn run_endpoint_b2bua(
     match role {
         Role::Caller => {
             settle_after_register(provider).await;
-            let handle = endpoint
-                .call_and_wait(
-                    target_user_for(transport),
-                    Some(remote_test_timeout(provider)?),
-                )
-                .await?;
+            let handle = endpoint_call_and_wait(
+                endpoint,
+                cfg,
+                target_user_for(transport),
+                remote_test_timeout(provider)?,
+            )
+            .await?;
             run_amr_caller_toned(
                 cfg,
                 handle.as_session_handle(),
@@ -3362,13 +3649,17 @@ async fn run_transferor(
             "refer_to": cfg.remote_call_uri()
         }),
     );
-    let transfer_outcome = handle
-        .transfer_blind_and_wait_for_outcome(
-            &cfg.remote_call_uri(),
-            TransferWaitMode::NotifyFinal,
-            Some(remote_test_timeout(provider)?),
-        )
-        .await?;
+    let transfer_outcome = if provider == PbxProvider::Jambonz {
+        send_jambonz_refer_and_wait(cfg, handle, remote_test_timeout(provider)?).await?
+    } else {
+        handle
+            .transfer_blind_and_wait_for_outcome(
+                &cfg.remote_call_uri(),
+                TransferWaitMode::NotifyFinal,
+                Some(remote_test_timeout(provider)?),
+            )
+            .await?
+    };
     match transfer_outcome {
         TransferOutcome::ReferCompleted {
             status_code,
@@ -3454,6 +3745,249 @@ async fn run_transferor(
         serde_json::json!({ "call_id": diag_call_id(handle) }),
     );
     Ok(())
+}
+
+/// Send the same standards-based blind REFER as the shared scenarios while
+/// supplying RFC 3892 attribution required by the Jambonz feature-server
+/// profile. This intentionally uses RVoIP's existing in-dialog request
+/// builder; Jambonz does not get a provider-specific signaling path.
+async fn send_jambonz_refer_and_wait(
+    cfg: &EndpointConfig,
+    handle: &SessionHandle,
+    timeout_duration: Duration,
+) -> ExampleResult<TransferOutcome> {
+    let mut events = handle.events().await?;
+    handle
+        .refer(cfg.remote_call_uri())
+        .with_referred_by(cfg.aor_uri())
+        .with_headers(cfg.jambonz_dialog_headers())?
+        .send()
+        .await?;
+
+    let terminal = timeout(timeout_duration, async {
+        loop {
+            match events.next().await {
+                Some(event @ Event::ReferCompleted { .. })
+                | Some(event @ Event::TransferFailed { .. }) => {
+                    return Ok::<Event, Box<dyn std::error::Error + Send + Sync>>(event)
+                }
+                Some(_) => {}
+                None => return Err("event stream closed while waiting for REFER completion".into()),
+            }
+        }
+    })
+    .await
+    .map_err(|_| {
+        format!(
+            "timed out after {:?} waiting for REFER completion",
+            timeout_duration
+        )
+    })??;
+
+    Ok(TransferOutcome::try_from(terminal)?)
+}
+
+fn typed_refer_to_uri(request: &rvoip_sip::IncomingRequest) -> Option<String> {
+    request
+        .headers_named_iter(&HeaderName::ReferTo)
+        .find_map(|header| match header {
+            TypedHeader::ReferTo(value) => Some(value.uri().to_string()),
+            _ => None,
+        })
+}
+
+fn typed_referred_by_header(request: &rvoip_sip::IncomingRequest) -> Option<TypedHeader> {
+    request
+        .headers_named_iter(&HeaderName::ReferredBy)
+        .next()
+        .cloned()
+}
+
+struct AcceptedRefer {
+    refer_to: String,
+    referred_by: TypedHeader,
+}
+
+async fn wait_for_jambonz_refer_and_accept(
+    handle: &SessionHandle,
+    timeout_duration: Duration,
+) -> ExampleResult<AcceptedRefer> {
+    let mut events = handle.events().await?;
+    timeout(timeout_duration, async {
+        loop {
+            match events.next().await {
+                Some(Event::ReferReceived {
+                    call_id,
+                    refer_to,
+                    request,
+                    referred_by,
+                    ..
+                }) if &call_id == handle.id() => {
+                    let typed_refer_to = request
+                        .as_ref()
+                        .and_then(typed_refer_to_uri)
+                        .unwrap_or(refer_to);
+                    let typed_referred_by = request.as_ref().and_then(typed_referred_by_header);
+                    let typed_referred_by = typed_referred_by.ok_or_else(|| {
+                        if referred_by.is_some() {
+                            "inbound REFER exposed Referred-By text without a typed header"
+                        } else {
+                            "Jambonz forwarded REFER without required Referred-By attribution"
+                        }
+                    })?;
+                    handle.accept_refer().await?;
+                    return Ok(AcceptedRefer {
+                        refer_to: typed_refer_to,
+                        referred_by: typed_referred_by,
+                    });
+                }
+                Some(Event::CallEnded { .. }) => {
+                    return Err("original call ended before REFER arrived".into())
+                }
+                Some(_) => {}
+                None => return Err("event stream closed while waiting for inbound REFER".into()),
+            }
+        }
+    })
+    .await
+    .map_err(|_| {
+        format!(
+            "timed out after {:?} waiting for inbound REFER",
+            timeout_duration
+        )
+    })?
+}
+
+async fn wait_for_callback_jambonz_refer(
+    events: &mut mpsc::UnboundedReceiver<CallbackEvent>,
+    call_id: &CallId,
+    timeout_duration: Duration,
+) -> ExampleResult<AcceptedRefer> {
+    timeout(timeout_duration, async {
+        loop {
+            match events.recv().await {
+                Some(CallbackEvent::ReferReceived {
+                    call_id: refer_call_id,
+                    refer_to,
+                    referred_by,
+                }) if &refer_call_id == call_id => {
+                    let referred_by = *referred_by
+                        .ok_or("Jambonz callback REFER did not preserve Referred-By attribution")?;
+                    return Ok(AcceptedRefer {
+                        refer_to,
+                        referred_by,
+                    });
+                }
+                Some(CallbackEvent::Ended {
+                    call_id: ended_call_id,
+                    ..
+                }) if &ended_call_id == call_id => {
+                    return Err("original call ended before REFER arrived".into())
+                }
+                Some(_) => {}
+                None => return Err("callback event channel closed while waiting for REFER".into()),
+            }
+        }
+    })
+    .await
+    .map_err(|_| {
+        format!(
+            "timed out after {:?} waiting for callback REFER",
+            timeout_duration
+        )
+    })?
+}
+
+async fn wait_for_callback_refer_accepted(
+    events: &mut mpsc::UnboundedReceiver<CallbackEvent>,
+    call_id: &CallId,
+    timeout_duration: Duration,
+) -> ExampleResult<()> {
+    timeout(timeout_duration, async {
+        loop {
+            match events.recv().await {
+                Some(CallbackEvent::ReferAccepted {
+                    call_id: accepted_call_id,
+                    ..
+                }) if &accepted_call_id == call_id => return Ok(()),
+                Some(CallbackEvent::TransferFailed {
+                    call_id: failed_call_id,
+                    status_code,
+                    reason,
+                }) if &failed_call_id == call_id => {
+                    return Err(format!(
+                        "inbound REFER failed before local acceptance completed: {} {}",
+                        status_code, reason
+                    )
+                    .into())
+                }
+                Some(CallbackEvent::Ended {
+                    call_id: ended_call_id,
+                    ..
+                }) if &ended_call_id == call_id => {
+                    return Err("original call ended before REFER acceptance completed".into())
+                }
+                Some(_) => {}
+                None => {
+                    return Err(
+                        "callback event channel closed while waiting for REFER acceptance".into(),
+                    )
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|_| {
+        format!(
+            "timed out after {:?} waiting for callback inbound REFER acceptance",
+            timeout_duration
+        )
+    })?
+}
+
+/// Follow an accepted inbound REFER by placing the replacement INVITE through
+/// the same account, Digest credentials, outbound proxy, and custom-header
+/// builder used by every other call in the shared harness. `as_transfer_leg`
+/// establishes the progress-NOTIFY relationship before the INVITE can reach
+/// the wire, avoiding the documented post-send linkage race.
+async fn originate_jambonz_transfer_leg(
+    cfg: &EndpointConfig,
+    coordinator: &Arc<UnifiedCoordinator>,
+    original: &SessionHandle,
+    refer: AcceptedRefer,
+) -> ExampleResult<SessionHandle> {
+    let mut invite_headers = cfg.outbound_invite_headers();
+    // RFC 3892 section 2.2: a referee accepting a SIP REFER must
+    // propagate any Referred-By value into the referenced request.
+    invite_headers.push(refer.referred_by);
+    diag_event(
+        &cfg.output_dir,
+        "replacement_invite_start",
+        serde_json::json!({
+            "call_id": diag_call_id(original),
+            "refer_to": refer.refer_to.as_str()
+        }),
+    );
+    let replacement_id = coordinator
+        .invite(Some(cfg.aor_uri()), refer.refer_to)
+        .with_credentials(cfg.sip_account().credentials())
+        .as_transfer_leg(original.id())
+        .with_headers(invite_headers)?
+        .send()
+        .await?;
+    let replacement = coordinator.session(&replacement_id);
+    replacement
+        .wait_for_answered(Some(remote_test_timeout(cfg.provider)?))
+        .await?;
+    diag_event(
+        &cfg.output_dir,
+        "replacement_invite_answered",
+        serde_json::json!({
+            "call_id": diag_call_id(original),
+            "replacement_call_id": diag_call_id(&replacement)
+        }),
+    );
+    Ok(replacement)
 }
 
 async fn run_transfer_answering_role(
@@ -4556,17 +5090,37 @@ impl ToneRecorder {
     }
 }
 
+async fn endpoint_call_and_wait(
+    endpoint: &Endpoint,
+    cfg: &EndpointConfig,
+    target: &str,
+    timeout_duration: Duration,
+) -> ExampleResult<EndpointCall> {
+    let call_id = endpoint
+        .invite(target)?
+        .with_headers(cfg.outbound_invite_headers())?
+        .send()
+        .await?;
+    Ok(endpoint
+        .wrap_call(call_id)
+        .wait_for_answered(Some(timeout_duration))
+        .await?)
+}
+
 pub async fn call_with_answer_retry(
     peer: &mut StreamPeer,
+    cfg: &EndpointConfig,
     target: &str,
     timeout_duration: Duration,
 ) -> ExampleResult<SessionHandle> {
-    let attempts =
-        call_retry_attempts(PbxProvider::from_env_or_args().unwrap_or(PbxProvider::Asterisk))
-            .max(1);
+    let attempts = call_retry_attempts(cfg.provider).max(1);
     let mut last_error: Option<Box<dyn std::error::Error + Send + Sync>> = None;
     for attempt in 1..=attempts {
-        let call_id = peer.invite(target).send().await?;
+        let call_id = peer
+            .invite(target)
+            .with_headers(cfg.outbound_invite_headers())?
+            .send()
+            .await?;
         let handle = peer.coordinator().session(&call_id);
         match handle.wait_for_answered(Some(timeout_duration)).await {
             Ok(answered) => return Ok(answered),
@@ -4587,15 +5141,18 @@ pub async fn call_with_answer_retry(
 
 pub async fn call_with_ringing_retry(
     peer: &mut StreamPeer,
+    cfg: &EndpointConfig,
     target: &str,
     timeout_duration: Duration,
 ) -> ExampleResult<SessionHandle> {
-    let attempts =
-        call_retry_attempts(PbxProvider::from_env_or_args().unwrap_or(PbxProvider::Asterisk))
-            .max(1);
+    let attempts = call_retry_attempts(cfg.provider).max(1);
     let mut last_error: Option<Box<dyn std::error::Error + Send + Sync>> = None;
     for attempt in 1..=attempts {
-        let call_id = peer.invite(target).send().await?;
+        let call_id = peer
+            .invite(target)
+            .with_headers(cfg.outbound_invite_headers())?
+            .send()
+            .await?;
         let handle = peer.coordinator().session(&call_id);
         match handle
             .wait_for_progress(
@@ -4636,7 +5193,12 @@ pub async fn callback_call_with_answer_retry(
     let attempts = call_retry_attempts(runtime.cfg.provider).max(1);
     let mut last_error: Option<String> = None;
     for attempt in 1..=attempts {
-        let call_id = runtime.control.invite(target).send().await?;
+        let call_id = runtime
+            .control
+            .invite(target)
+            .with_headers(runtime.cfg.outbound_invite_headers())?
+            .send()
+            .await?;
         let handle = runtime.control.coordinator().session(&call_id);
         match wait_for_established(&mut runtime.events, handle.id(), timeout_duration).await {
             Ok(answered) => return Ok(answered),
@@ -5659,6 +6221,10 @@ fn endpoint_defaults(
         // was moved to 5090/5091; see `infra/release-runners/pbx/kamailio/up.sh`.
         PbxProvider::Asterisk => 0,
         PbxProvider::FreeSwitch => 10_000,
+        // Keep Jambonz clear of both the sip-proxy suite's 25xxx ports and
+        // the proxy-provider blocks above. Its release lab is serialized,
+        // but developers commonly leave other local labs running.
+        PbxProvider::Jambonz => 50_000,
         // 30k/40k, not 20k: 5070+20_000 = 25070 is the sip-proxy interop
         // suite's peer port, and its 25xxx block must stay clear so both
         // suites can run side by side (pinned by a unit test below).
@@ -5733,6 +6299,7 @@ async fn settle_after_register(provider: PbxProvider) {
     let secs = std::env::var(match provider {
         PbxProvider::Asterisk => "ASTERISK_POST_REGISTER_SETTLE_SECS",
         PbxProvider::FreeSwitch => "FREESWITCH_POST_REGISTER_SETTLE_SECS",
+        PbxProvider::Jambonz => "JAMBONZ_POST_REGISTER_SETTLE_SECS",
         PbxProvider::Kamailio => "KAMAILIO_POST_REGISTER_SETTLE_SECS",
         PbxProvider::OpenSips => "OPENSIPS_POST_REGISTER_SETTLE_SECS",
     })
@@ -5753,6 +6320,7 @@ fn remote_test_timeout(provider: PbxProvider) -> ExampleResult<Duration> {
     let key = match provider {
         PbxProvider::Asterisk => "ASTERISK_TEST_TIMEOUT_SECS",
         PbxProvider::FreeSwitch => "FREESWITCH_TEST_TIMEOUT_SECS",
+        PbxProvider::Jambonz => "JAMBONZ_TEST_TIMEOUT_SECS",
         PbxProvider::Kamailio => "KAMAILIO_TEST_TIMEOUT_SECS",
         PbxProvider::OpenSips => "OPENSIPS_TEST_TIMEOUT_SECS",
     };
@@ -5767,12 +6335,14 @@ fn transfer_settle_duration(provider: PbxProvider, transport: TransportMode) -> 
     let key = match provider {
         PbxProvider::Asterisk => "ASTERISK_TRANSFER_SETTLE_SECS",
         PbxProvider::FreeSwitch => "FREESWITCH_TRANSFER_SETTLE_SECS",
+        PbxProvider::Jambonz => "JAMBONZ_TRANSFER_SETTLE_SECS",
         PbxProvider::Kamailio => "KAMAILIO_TRANSFER_SETTLE_SECS",
         PbxProvider::OpenSips => "OPENSIPS_TRANSFER_SETTLE_SECS",
     };
     let tls_key = match provider {
         PbxProvider::Asterisk => "ASTERISK_TLS_TRANSFER_SETTLE_SECS",
         PbxProvider::FreeSwitch => "FREESWITCH_TLS_TRANSFER_SETTLE_SECS",
+        PbxProvider::Jambonz => "JAMBONZ_TLS_TRANSFER_SETTLE_SECS",
         PbxProvider::Kamailio => "KAMAILIO_TLS_TRANSFER_SETTLE_SECS",
         PbxProvider::OpenSips => "OPENSIPS_TLS_TRANSFER_SETTLE_SECS",
     };
@@ -5792,6 +6362,7 @@ fn call_retry_attempts(provider: PbxProvider) -> usize {
     let key = match provider {
         PbxProvider::Asterisk => "ASTERISK_CALL_RETRY_ATTEMPTS",
         PbxProvider::FreeSwitch => "FREESWITCH_CALL_RETRY_ATTEMPTS",
+        PbxProvider::Jambonz => "JAMBONZ_CALL_RETRY_ATTEMPTS",
         PbxProvider::Kamailio => "KAMAILIO_CALL_RETRY_ATTEMPTS",
         PbxProvider::OpenSips => "OPENSIPS_CALL_RETRY_ATTEMPTS",
     };
@@ -5805,6 +6376,7 @@ fn remote_test_digits(provider: PbxProvider) -> Vec<char> {
     let key = match provider {
         PbxProvider::Asterisk => "ASTERISK_TEST_DIGITS",
         PbxProvider::FreeSwitch => "FREESWITCH_TEST_DIGITS",
+        PbxProvider::Jambonz => "JAMBONZ_TEST_DIGITS",
         PbxProvider::Kamailio => "KAMAILIO_TEST_DIGITS",
         PbxProvider::OpenSips => "OPENSIPS_TEST_DIGITS",
     };
@@ -6017,7 +6589,10 @@ async fn stop_recv_task(task: JoinHandle<()>) {
 fn advertised_ip(provider: PbxProvider, local_ip: IpAddr) -> ExampleResult<IpAddr> {
     let value = match provider {
         PbxProvider::Asterisk => std::env::var("ADVERTISED_IP"),
-        PbxProvider::FreeSwitch | PbxProvider::Kamailio | PbxProvider::OpenSips => {
+        PbxProvider::FreeSwitch
+        | PbxProvider::Jambonz
+        | PbxProvider::Kamailio
+        | PbxProvider::OpenSips => {
             std::env::var("RVOIP_ADVERTISED_IP").or_else(|_| std::env::var("ADVERTISED_IP"))
         }
     };
@@ -6031,10 +6606,11 @@ fn advertised_ip(provider: PbxProvider, local_ip: IpAddr) -> ExampleResult<IpAdd
 fn media_advertised_ip(provider: PbxProvider, advertised_ip: IpAddr) -> ExampleResult<IpAddr> {
     let value = match provider {
         PbxProvider::Asterisk => std::env::var("MEDIA_ADVERTISED_IP"),
-        PbxProvider::FreeSwitch | PbxProvider::Kamailio | PbxProvider::OpenSips => {
-            std::env::var("RVOIP_MEDIA_ADVERTISED_IP")
-                .or_else(|_| std::env::var("MEDIA_ADVERTISED_IP"))
-        }
+        PbxProvider::FreeSwitch
+        | PbxProvider::Jambonz
+        | PbxProvider::Kamailio
+        | PbxProvider::OpenSips => std::env::var("RVOIP_MEDIA_ADVERTISED_IP")
+            .or_else(|_| std::env::var("MEDIA_ADVERTISED_IP")),
     };
     match value {
         Ok(value) if !value.trim().is_empty() => Ok(value.parse()?),
@@ -6077,6 +6653,35 @@ fn non_empty_env(key: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn required_password(provider: PbxProvider, prefix: &str) -> ExampleResult<String> {
+    let provider_key = match provider {
+        PbxProvider::Asterisk => None,
+        PbxProvider::FreeSwitch => Some("FREESWITCH_PASSWORD"),
+        PbxProvider::Jambonz => Some("JAMBONZ_PASSWORD"),
+        PbxProvider::Kamailio => Some("KAMAILIO_PASSWORD"),
+        PbxProvider::OpenSips => Some("OPENSIPS_PASSWORD"),
+    };
+    let endpoint_key = format!("{prefix}_PASSWORD");
+    for key in [
+        Some(endpoint_key.as_str()),
+        provider_key,
+        Some("SIP_PASSWORD"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(value) = non_empty_env(key) {
+            return Ok(value);
+        }
+    }
+    Err(format!(
+        "{} PBX interoperability requires an explicit {}, provider-specific, or SIP_PASSWORD environment variable",
+        provider.label(),
+        endpoint_key
+    )
+    .into())
 }
 
 fn env_string(key: &str, default: &str) -> String {
@@ -6239,6 +6844,79 @@ mod tests {
         let tls = endpoint_defaults(PbxProvider::FreeSwitch, "1001", TransportMode::TlsSrtp);
         assert_eq!(tls.local_port, 15070);
         assert_eq!(tls.tls_local_port, Some(15071));
+    }
+
+    #[test]
+    fn jambonz_is_a_distinct_provider_with_an_isolated_port_block() {
+        assert_eq!(PbxProvider::parse("jambonz").unwrap(), PbxProvider::Jambonz);
+        assert_eq!(PbxProvider::parse("jb").unwrap(), PbxProvider::Jambonz);
+
+        let udp = endpoint_defaults(PbxProvider::Jambonz, "2001", TransportMode::Udp);
+        assert_eq!(udp.local_port, 55080);
+        assert!(!(25_000..26_000).contains(&udp.local_port));
+        assert_eq!(PbxProvider::Jambonz.env_name(), "jambonz");
+        assert_eq!(PbxProvider::Jambonz.label(), "Jambonz");
+    }
+
+    #[test]
+    fn jambonz_uses_shared_scenarios_with_required_sbc_admission_headers() {
+        let cfg = EndpointConfig::new_for_test(PbxProvider::Jambonz, "2001", TransportMode::Udp)
+            .expect("Jambonz endpoint config");
+        let config = cfg.stream_config();
+        let automatic_names = config
+            .auto_emit_extra_headers
+            .iter()
+            .map(TypedHeader::name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(automatic_names.len(), 2);
+        assert!(automatic_names.contains(&HeaderName::Other("X-Account-Sid".into())));
+        assert!(automatic_names.contains(&HeaderName::Other("X-Jambonz-Routing".into())));
+
+        let invite_headers = cfg.outbound_invite_headers();
+        let invite_names = invite_headers
+            .iter()
+            .map(TypedHeader::name)
+            .collect::<Vec<_>>();
+        assert_eq!(invite_names.len(), 3);
+        assert!(invite_names.contains(&HeaderName::Other("X-Account-Sid".into())));
+        assert!(invite_names.contains(&HeaderName::Other("X-Jambonz-Routing".into())));
+        assert!(invite_names.contains(&HeaderName::Other("X-Call-Sid".into())));
+
+        let call_sid = invite_headers
+            .iter()
+            .find_map(|header| match header {
+                TypedHeader::Other(HeaderName::Other(name), HeaderValue::Raw(value))
+                    if name.eq_ignore_ascii_case("X-Call-Sid") =>
+                {
+                    std::str::from_utf8(value).ok()
+                }
+                _ => None,
+            })
+            .expect("a raw X-Call-Sid value");
+        uuid::Uuid::parse_str(call_sid).expect("X-Call-Sid is a UUID");
+    }
+
+    #[test]
+    fn jambonz_keeps_logical_sip_identity_when_routed_through_a_host_proxy() {
+        let mut cfg =
+            EndpointConfig::new_for_test(PbxProvider::Jambonz, "2001", TransportMode::Udp)
+                .expect("Jambonz endpoint config");
+        cfg.sip_domain = "sip.rvoip.test".into();
+        cfg.sip_server = "127.0.0.1".into();
+        cfg.sip_port = 55_060;
+
+        assert_eq!(cfg.registrar_uri(), "sip:sip.rvoip.test");
+        assert_eq!(cfg.aor_uri(), "sip:2001@sip.rvoip.test");
+        assert_eq!(cfg.call_uri("2002"), "sip:2002@sip.rvoip.test");
+        assert_eq!(
+            cfg.outbound_proxy_uri().as_deref(),
+            Some("sip:127.0.0.1:55060;lr")
+        );
+        assert_eq!(
+            cfg.stream_config().outbound_proxy_uri.as_deref(),
+            Some("sip:127.0.0.1:55060;lr")
+        );
     }
 
     /// The proxy providers' port bases must clear the sip-proxy interop
@@ -6839,8 +7517,9 @@ mod tests {
     }
 
     #[test]
-    fn pcmu_profile_offers_pcmu_alone() {
+    fn g711_profiles_offer_one_encoding_each() {
         assert_eq!(CodecProfile::Pcmu.offered_codecs(), Some(vec![0, 101]));
+        assert_eq!(CodecProfile::Pcma.offered_codecs(), Some(vec![8, 101]));
     }
 
     #[test]

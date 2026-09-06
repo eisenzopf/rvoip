@@ -12,7 +12,7 @@ elif [[ -n "${HOME:-}" ]]; then
 else
   LOCAL_ENV_ROOT="$STATE/local-env"
 fi
-mkdir -p "$STATE" "$LOCAL_ENV_ROOT/asterisk" "$LOCAL_ENV_ROOT/freeswitch"
+mkdir -p "$STATE" "$LOCAL_ENV_ROOT/asterisk" "$LOCAL_ENV_ROOT/freeswitch" "$LOCAL_ENV_ROOT/jambonz"
 
 wait_udp_port() {
   local container="$1"
@@ -238,11 +238,23 @@ proxy_down() {
   sh "$PBX_SNAPSHOT/$1/down.sh"
 }
 
+jambonz_up() {
+  RVOIP_PBX_LOCAL_ENV_ROOT="$LOCAL_ENV_ROOT" \
+    JAMBONZ_RECEIPT_DIR="${JAMBONZ_RECEIPT_DIR:-$STATE/jambonz/evidence}" \
+    bash "$PBX_SNAPSHOT/jambonz/up.sh"
+}
+
+jambonz_down() {
+  bash "$PBX_SNAPSHOT/jambonz/down.sh"
+}
+
 case "$ACTION" in
   asterisk-up) asterisk_up ;;
   asterisk-down|restore-asterisk-down) down rvoip-release-asterisk ;;
   freeswitch-up) freeswitch_up ;;
   freeswitch-down|restore-freeswitch-down) down rvoip-freeswitch ;;
+  jambonz-up) jambonz_up ;;
+  jambonz-down|restore-jambonz-down) jambonz_down ;;
   kamailio-up) proxy_up kamailio ;;
   kamailio-down|restore-kamailio-down) proxy_down kamailio ;;
   opensips-up) proxy_up opensips ;;

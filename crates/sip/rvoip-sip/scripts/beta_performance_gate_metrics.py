@@ -11,6 +11,13 @@ from typing import Any
 
 
 SCHEMA = "rvoip-sip-beta-performance-gate-metrics-v1"
+CANONICAL_SCHEMA = "rvoip-canonical-2k-evidence-v2"
+CANONICAL_SCENARIO = "perf_call_setup_cps_pbx-media-server"
+CANONICAL_RUNS = 3
+CANONICAL_CALLS = 65_000
+CANONICAL_TARGET_CPS = 2_000.0
+CANONICAL_MIN_ACHIEVED_CPS = 1_578.53
+CANONICAL_MIN_ASR = 0.999
 
 
 class MetricsError(RuntimeError):
@@ -67,6 +74,209 @@ def error_total(errors: Any, names: tuple[str, ...]) -> int | None:
     if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
         return None
     return sum(values)
+
+
+def all_numeric_errors_are_zero(errors: Any) -> bool:
+    if not isinstance(errors, dict) or not errors:
+        return False
+    stack = list(errors.values())
+    found = False
+    while stack:
+        value = stack.pop()
+        if isinstance(value, dict):
+            stack.extend(value.values())
+        elif isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        else:
+            found = True
+            if value != 0:
+                return False
+    return found
+
+
+def canonical_2k_metrics(
+    index_path: pathlib.Path | None, required: bool, candidate_sha: str | None = None
+) -> dict[str, Any]:
+    if index_path is None or not index_path.is_file():
+        if required:
+            raise MetricsError("required canonical 2,000-CPS evidence index is missing")
+        return {"enabled": False, "required": False, "passed": True}
+
+    index = load_json(index_path)
+    canonical_root = index_path.parent.resolve()
+    runs = index.get("runs")
+    source = index.get("source_at_beta_start")
+    common_fingerprint = index.get("common_source_fingerprint_sha256")
+    common_executable = index.get("common_executable_sha256")
+    checks: list[dict[str, Any]] = []
+    for metric, requirement, observed, passed in (
+        (
+            "schema",
+            CANONICAL_SCHEMA,
+            index.get("schema"),
+            index.get("schema") == CANONICAL_SCHEMA,
+        ),
+        ("status", "PASS", index.get("status"), index.get("status") == "PASS"),
+        (
+            "scenario",
+            CANONICAL_SCENARIO,
+            index.get("scenario"),
+            index.get("scenario") == CANONICAL_SCENARIO,
+        ),
+        (
+            "run_count",
+            str(CANONICAL_RUNS),
+            index.get("run_count"),
+            index.get("run_count") == CANONICAL_RUNS,
+        ),
+        (
+            "indexed_runs",
+            str(CANONICAL_RUNS),
+            len(runs) if isinstance(runs, list) else None,
+            isinstance(runs, list) and len(runs) == CANONICAL_RUNS,
+        ),
+        (
+            "candidate_commit",
+            candidate_sha or "recorded clean candidate",
+            source.get("git_commit") if isinstance(source, dict) else None,
+            isinstance(source, dict)
+            and source.get("git_dirty") is False
+            and (candidate_sha is None or source.get("git_commit") == candidate_sha),
+        ),
+        (
+            "source_fingerprint",
+            "one 64-character SHA-256 shared by source and every run",
+            common_fingerprint,
+            isinstance(common_fingerprint, str)
+            and len(common_fingerprint) == 64
+            and all(character in "0123456789abcdef" for character in common_fingerprint)
+            and isinstance(source, dict)
+            and source.get("source_fingerprint_sha256") == common_fingerprint,
+        ),
+        (
+            "executable_identity",
+            "one 64-character SHA-256 shared by every run",
+            common_executable,
+            isinstance(common_executable, str)
+            and len(common_executable) == 64
+            and all(character in "0123456789abcdef" for character in common_executable),
+        ),
+    ):
+        add_check(checks, metric, requirement, observed, passed)
+
+    observations: list[dict[str, Any]] = []
+    evidence = ["canonical-2k/index.json"]
+    if isinstance(runs, list):
+        for expected_sequence, run in enumerate(runs, start=1):
+            report = None
+            report_relative = None
+            if isinstance(run, dict):
+                packaged = run.get("packaged_run_dir")
+                if isinstance(packaged, str):
+                    packaged_path = pathlib.Path(packaged)
+                    if (
+                        not packaged_path.is_absolute()
+                        and ".." not in packaged_path.parts
+                    ):
+                        # Current packages retain the report both at report.json and
+                        # below perf-results/. Prefer the explicit run copy.
+                        candidates = [
+                            canonical_root / packaged_path / "report.json",
+                            canonical_root
+                            / packaged_path
+                            / "perf-results"
+                            / CANONICAL_SCENARIO
+                            / "2000.json",
+                        ]
+                        matches = [path for path in candidates if path.is_file()]
+                        if matches and all(
+                            path.read_bytes() == matches[0].read_bytes()
+                            for path in matches[1:]
+                        ):
+                            report = load_json(matches[0])
+                            report_relative = matches[0].relative_to(canonical_root)
+            results = report.get("results", {}) if isinstance(report, dict) else {}
+            load = report.get("load", {}) if isinstance(report, dict) else {}
+            observed = {
+                "sequence": run.get("sequence") if isinstance(run, dict) else None,
+                "target_cps": (
+                    load.get("target_cps") if isinstance(load, dict) else None
+                ),
+                "achieved_cps": (
+                    results.get("achieved_cps")
+                    if isinstance(results, dict)
+                    else None
+                ),
+                "calls_offered": (
+                    results.get("calls_offered")
+                    if isinstance(results, dict)
+                    else None
+                ),
+                "calls_succeeded": (
+                    results.get("calls_succeeded")
+                    if isinstance(results, dict)
+                    else None
+                ),
+                "asr": results.get("asr") if isinstance(results, dict) else None,
+                "setup_latency_p50_ns": (
+                    report.get("latency_ns", {}).get("setup_latency", {}).get("p50")
+                    if isinstance(report, dict)
+                    else None
+                ),
+                "setup_latency_p95_ns": (
+                    report.get("latency_ns", {}).get("setup_latency", {}).get("p95")
+                    if isinstance(report, dict)
+                    else None
+                ),
+                "setup_latency_p99_ns": (
+                    report.get("latency_ns", {}).get("setup_latency", {}).get("p99")
+                    if isinstance(report, dict)
+                    else None
+                ),
+            }
+            observations.append(observed)
+            passed = (
+                isinstance(run, dict)
+                and run.get("sequence") == expected_sequence
+                and run.get("source_fingerprint_sha256") == common_fingerprint
+                and run.get("executable_sha256") == common_executable
+                and isinstance(report, dict)
+                and report.get("scenario") == CANONICAL_SCENARIO
+                and finite_number(observed["target_cps"]) == CANONICAL_TARGET_CPS
+                and finite_number(observed["achieved_cps"]) is not None
+                and finite_number(observed["achieved_cps"])
+                >= CANONICAL_MIN_ACHIEVED_CPS
+                and observed["calls_offered"] == CANONICAL_CALLS
+                and observed["calls_succeeded"] == CANONICAL_CALLS
+                and finite_number(observed["asr"]) is not None
+                and finite_number(observed["asr"]) >= CANONICAL_MIN_ASR
+                and all_numeric_errors_are_zero(results.get("errors"))
+            )
+            add_check(
+                checks,
+                f"canonical_run_{expected_sequence}",
+                "clean accepted 2,000-CPS / 65,000-call PASS",
+                observed,
+                passed,
+            )
+            if report_relative is not None:
+                evidence.append(f"canonical-2k/{report_relative.as_posix()}")
+
+    return {
+        "enabled": True,
+        "required": required,
+        "passed": all(check["passed"] for check in checks),
+        "evidence": evidence,
+        "policy": {
+            "run_count": CANONICAL_RUNS,
+            "target_cps": CANONICAL_TARGET_CPS,
+            "calls_per_run": CANONICAL_CALLS,
+            "minimum_achieved_cps": CANONICAL_MIN_ACHIEVED_CPS,
+            "minimum_asr": CANONICAL_MIN_ASR,
+        },
+        "observed": {"runs": observations},
+        "checks": checks,
+    }
 
 
 def high_density_metrics(
@@ -471,6 +681,7 @@ def markdown(metrics: dict[str, Any]) -> str:
         "",
     ]
     for key, title in (
+        ("canonical_2k", "Canonical 2,000-CPS evaluation"),
         ("high_density_media_burst", "High-density media burst"),
         ("monolithic_soak", "Monolithic soak"),
     ):
@@ -482,6 +693,8 @@ def markdown(metrics: dict[str, Any]) -> str:
         evidence = section["evidence"]
         if isinstance(evidence, dict):
             evidence_text = ", ".join(f"`{value}`" for value in evidence.values())
+        elif isinstance(evidence, list):
+            evidence_text = ", ".join(f"`{value}`" for value in evidence)
         else:
             evidence_text = f"`{evidence}`"
         lines.extend(
@@ -508,6 +721,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--perf-root", required=True)
     result.add_argument("--output-json", required=True)
     result.add_argument("--output-markdown", required=True)
+    result.add_argument("--canonical-index")
+    result.add_argument("--candidate-sha")
     result.add_argument("--high-density-cps", type=float, default=160.0)
     result.add_argument("--high-density-min-asr", type=float, default=0.995)
     result.add_argument("--rss-limit-mb-per-hr", type=float, default=15.0)
@@ -515,6 +730,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--monolithic-active-calls", type=int, default=30)
     result.add_argument("--require-high-density", action="store_true")
     result.add_argument("--require-monolithic", action="store_true")
+    result.add_argument("--require-canonical", action="store_true")
     return result
 
 
@@ -523,6 +739,13 @@ def main() -> int:
     try:
         root = pathlib.Path(args.perf_root).resolve()
         metrics = {
+            "canonical_2k": canonical_2k_metrics(
+                pathlib.Path(args.canonical_index).resolve()
+                if args.canonical_index
+                else None,
+                args.require_canonical,
+                args.candidate_sha,
+            ),
             "schema": SCHEMA,
             "high_density_media_burst": high_density_metrics(
                 root,
@@ -541,7 +764,11 @@ def main() -> int:
         }
         metrics["passed"] = all(
             metrics[key]["passed"]
-            for key in ("high_density_media_burst", "monolithic_soak")
+            for key in (
+                "canonical_2k",
+                "high_density_media_burst",
+                "monolithic_soak",
+            )
         )
         output_json = pathlib.Path(args.output_json)
         output_markdown = pathlib.Path(args.output_markdown)

@@ -1093,6 +1093,149 @@ def reconcile_performance_regression(root: Path, evidence_root: Path, artifact: 
     }
 
 
+def reconcile_performance_metrics(
+    root: Path, evidence_root: Path, artifact: Path, candidate: str
+) -> dict[str, Any]:
+    """Build one fail-closed evaluation from this candidate's perf artifacts."""
+    source = evidence_root / "_perf-results"
+    if not source.is_dir():
+        raise GateError("exact-candidate performance artifacts are missing")
+    combined = artifact / "current-performance"
+    combined.mkdir(parents=True, exist_ok=True)
+    indexed: dict[str, str] = {}
+    shard_roots = sorted(path for path in source.iterdir() if path.is_dir())
+    if not shard_roots:
+        raise GateError("exact-candidate performance artifact shards are missing")
+    for shard_root in shard_roots:
+        for path in sorted(item for item in shard_root.rglob("*") if item.is_file()):
+            relative = path.relative_to(shard_root)
+            destination = combined / relative
+            digest = file_sha256(path)
+            key = relative.as_posix()
+            if destination.exists():
+                if file_sha256(destination) != digest:
+                    raise GateError(
+                        f"conflicting exact-candidate performance artifact: {key}"
+                    )
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, destination)
+            indexed[f"performance-results/{key}"] = digest
+    if not indexed:
+        raise GateError("exact-candidate performance artifact set is empty")
+
+    canonical_index = (
+        evidence_root
+        / "perf.canonical-2k-current"
+        / "canonical-2k"
+        / "index.json"
+    )
+    if not canonical_index.is_file():
+        raise GateError(
+            "current performance evaluation requires the exact-candidate "
+            "canonical 2,000-CPS evidence index"
+        )
+    canonical_payload = load_json(canonical_index, "canonical 2,000-CPS evidence")
+    canonical_source = canonical_payload.get("source_at_beta_start")
+    source_tree = git(root, "rev-parse", "HEAD^{tree}")
+    common_fingerprint = canonical_payload.get("common_source_fingerprint_sha256")
+    common_executable = canonical_payload.get("common_executable_sha256")
+    canonical_runs = canonical_payload.get("runs")
+    if (
+        canonical_payload.get("status") != "PASS"
+        or not isinstance(canonical_source, dict)
+        or canonical_source.get("git_commit") != candidate
+        or canonical_source.get("git_tree") != source_tree
+        or canonical_source.get("git_dirty") is not False
+        or canonical_source.get("source_fingerprint_sha256") != common_fingerprint
+        or not isinstance(common_fingerprint, str)
+        or re.fullmatch(r"[0-9a-f]{64}", common_fingerprint) is None
+        or not isinstance(common_executable, str)
+        or re.fullmatch(r"[0-9a-f]{64}", common_executable) is None
+        or not isinstance(canonical_runs, list)
+        or len(canonical_runs) != 3
+        or any(
+            not isinstance(run, dict)
+            or run.get("source_fingerprint_sha256") != common_fingerprint
+            or run.get("executable_sha256") != common_executable
+            for run in canonical_runs
+        )
+    ):
+        raise GateError(
+            "canonical 2,000-CPS evidence is not bound to the exact clean candidate"
+        )
+    canonical_root = canonical_index.parent
+    canonical_files = sorted(
+        path for path in canonical_root.rglob("*") if path.is_file()
+    )
+    if not canonical_files:
+        raise GateError("canonical 2,000-CPS evidence package is empty")
+    for path in canonical_files:
+        key = f"canonical-2k/{path.relative_to(canonical_root).as_posix()}"
+        if key in indexed:
+            raise GateError(f"duplicate current performance artifact index key: {key}")
+        indexed[key] = file_sha256(path)
+
+    index_path = artifact / "current-performance-artifact-index.json"
+    index_path.write_bytes(
+        canonical_bytes(
+            {
+                "schema": "rvoip-current-performance-artifact-index-v1",
+                "file_count": len(indexed),
+                "files": indexed,
+            }
+        )
+    )
+    output_json = artifact / "current-performance-evaluation.json"
+    output_markdown = artifact / "current-performance-evaluation.md"
+    completed = run(
+        [
+            "python3",
+            "crates/sip/rvoip-sip/scripts/beta_performance_gate_metrics.py",
+            "--perf-root",
+            str(combined),
+            "--output-json",
+            str(output_json),
+            "--output-markdown",
+            str(output_markdown),
+            "--canonical-index",
+            str(canonical_index),
+            "--candidate-sha",
+            candidate,
+            "--high-density-cps",
+            "160",
+            "--high-density-min-asr",
+            "0.995",
+            "--rss-limit-mb-per-hr",
+            "15",
+            "--monolithic-duration-secs",
+            "3600",
+            "--monolithic-active-calls",
+            "30",
+            "--require-high-density",
+            "--require-monolithic",
+            "--require-canonical",
+        ],
+        root=root,
+        check=False,
+    )
+    if completed.returncode:
+        raise GateError(
+            "current performance evaluation failed:\n"
+            + ((completed.stdout or "") + (completed.stderr or "")).strip()
+        )
+    metrics = load_json(output_json, "current performance evaluation")
+    if metrics.get("passed") is not True:
+        raise GateError("current performance evaluation is not PASS")
+    return {
+        "artifact_count": len(indexed),
+        "artifact_index_sha256": file_sha256(index_path),
+        "evaluation_json_sha256": file_sha256(output_json),
+        "evaluation_markdown_sha256": file_sha256(output_markdown),
+        "passed": True,
+    }
+
+
 def collect(
     *,
     plan: dict[str, Any],
@@ -1191,6 +1334,17 @@ def collect(
                 continue
             try:
                 specialized = reconcile_performance_regression(root, evidence_root, artifact)
+            except GateError as error:
+                failures.append(f"{gate_id}: {error}")
+                continue
+        elif gate_id == "report.performance-metrics":
+            if root is None:
+                failures.append(f"{gate_id}: collector workspace is unavailable")
+                continue
+            try:
+                specialized = reconcile_performance_metrics(
+                    root, evidence_root, artifact, plan["candidate_sha"]
+                )
             except GateError as error:
                 failures.append(f"{gate_id}: {error}")
                 continue

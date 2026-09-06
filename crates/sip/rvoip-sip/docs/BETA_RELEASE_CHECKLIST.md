@@ -4,6 +4,7 @@ This document defines the promotion procedure. It does not duplicate a
 candidate's results. The versioned reporting and selection authority is
 `config/beta-release-policy.yaml`; current outcomes are generated from evidence:
 
+Current workspace runtime crate version: `0.3.9`.
 Current qualified runtime crate version: `0.3.9`.
 Its protected remote-release run passed 208/208 gates and covered all 108
 requirements in the strict legacy ledger. The historical `0.3.2` exception
@@ -39,6 +40,9 @@ A beta release candidate requires a `full` run that:
   commands, timestamps, validators, evidence paths, and SHA-256 hashes;
 - passes the packaged strict attestation verifier with clean-source,
   unchanged-source, no-skip, pass, and mode-eligibility requirements;
+- contains three fresh canonical 2,000-CPS passes produced from the exact
+  candidate, plus the current performance evaluation JSON, Markdown report,
+  and SHA-256 artifact index; and
 - generates and verifies the evidence-complete release reports before a
   successful full-run pointer can update.
 
@@ -112,6 +116,11 @@ conditions. The beta profile additionally fixes these release-critical values:
 
 Changing a threshold or workload requires a reviewed policy change before the
 run. Reporting may not reinterpret or silently relax recorded policy.
+
+The July 2026 performance artifacts are regression baselines and historical
+release evidence only. They cannot qualify a later candidate. Every promotion
+must generate the three canonical passes and the complete performance matrix
+from the exact source candidate being released.
 
 ## One-command full local invocation
 
@@ -205,6 +214,12 @@ audit. Relevant gates require:
 - RSS slope no greater than 15 MB/hour in the gate's defined measurement
   window;
 - result/configuration/source/executable reconciliation.
+
+The current-candidate reconciliation must emit
+`current-performance-evaluation.json`,
+`current-performance-evaluation.md`, and
+`current-performance-artifact-index.json`. Missing, conflicting, inherited, or
+unindexed performance artifacts fail the release.
 
 PASS is bounded by the tested source, executable, host, topology, workload,
 duration, peer versions, transports, codecs, and configuration. It is not a

@@ -20,7 +20,7 @@
 //!
 //! The search itself is the same shape as the speech refinement stages —
 //! exhaustive, ascending, ties to the lower index — so it reuses
-//! [`nearest_entry`] rather than restating it.
+//! the private `nearest_entry` helper rather than restating it.
 
 use super::enc::isf_quant::{enforce_min_spacing, nearest_entry, ISF_GAP};
 use super::isf_noise_tables::{DICO1_NS, DICO2_NS, DICO3_NS, DICO4_NS, DICO5_NS, MEAN_ISF_NOISE};

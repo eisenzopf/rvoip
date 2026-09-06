@@ -82,6 +82,13 @@ AMR_RATE_SWEEP_GATE_IDS = [
     *AMR_RATE_SWEEP_CELL_IDS,
     "interop.amr-rate-sweep.down",
 ]
+JAMBONZ_GATE_IDS = [
+    "interop.jambonz-latest",
+    "interop.jambonz-up",
+    "interop.jambonz-matrix",
+    "interop.jambonz-down",
+]
+CURRENT_PERFORMANCE_EVALUATION_GATE_IDS = ["perf.canonical-2k-current"]
 COMMAND_OVERRIDES = {
     "security.advisory-audit": [
         "cargo",
@@ -100,11 +107,9 @@ COMMAND_OVERRIDES = {
         "cargo",
         "doc",
         "--locked",
-        "-p",
-        "rvoip-sip",
+        "--workspace",
+        "--all-features",
         "--no-deps",
-        "--features",
-        "generated-validation,dev-insecure-tls",
     ],
     "interop.asterisk-matrix": [
         "env",
@@ -340,12 +345,7 @@ def dependencies(record: dict[str, Any], records: list[dict[str, Any]]) -> list[
     if gate_id == "source.clean-start":
         return []
     if gate_id == "source.canonical-2k":
-        return [
-            "source.clean-start",
-            "perf.concurrent-calls",
-            "perf.sipp-parity",
-            "perf.media-burst-matrix",
-        ]
+        return ["source.clean-start", *CURRENT_PERFORMANCE_EVALUATION_GATE_IDS]
     if gate_id == "source.final-capture":
         return [item["id"] for item in records if item["id"] != gate_id and not item["id"].startswith("source.canonical-2k-unchanged")]
     if gate_id == "source.canonical-2k-unchanged":
@@ -356,6 +356,8 @@ def dependencies(record: dict[str, Any], records: list[dict[str, Any]]) -> list[
         return [f"perf.media-burst.{scenario}" for scenario in BURST_SCENARIOS]
     if gate_id.startswith("report."):
         perf = [item["id"] for item in records if item["id"].startswith("perf.")]
+        if gate_id in {"report.perf-evidence-capture", "report.performance-metrics"}:
+            perf.extend(CURRENT_PERFORMANCE_EVALUATION_GATE_IDS)
         prior_reports = [
             item["id"]
             for item in records
@@ -391,6 +393,15 @@ def legacy_gate(record: dict[str, Any], records: list[dict[str, Any]], packages:
         # GCP workers start without a warm target directory. Preserve enough
         # headroom for the first release build as well as the measured gate.
         timeout_minutes = max(timeout_minutes, 20)
+    expected_outputs = ["receipt.json", "command.log"]
+    if record["id"] == "report.performance-metrics":
+        expected_outputs.extend(
+            [
+                "current-performance-evaluation.json",
+                "current-performance-evaluation.md",
+                "current-performance-artifact-index.json",
+            ]
+        )
     return {
         "id": record["id"],
         "name": record["name"],
@@ -407,7 +418,7 @@ def legacy_gate(record: dict[str, Any], records: list[dict[str, Any]], packages:
         "max_infrastructure_retries": 1,
         "affected_crates": affected_crates(command, packages),
         "affected_paths": affected_paths(record, command),
-        "expected_outputs": ["receipt.json", "command.log"],
+        "expected_outputs": expected_outputs,
         "estimated_seconds": max(1, duration),
         "always_fresh": record["kind"] in {"source", "reporting"},
         "legacy": {
@@ -466,6 +477,8 @@ def synthetic_gate(
     dependencies: list[str] | None = None,
     paths: list[str] | None = None,
     always_fresh: bool = False,
+    timeout_minutes: int = 60,
+    estimated_seconds: int = 1,
 ) -> dict[str, Any]:
     return {
         "id": gate_id,
@@ -478,13 +491,13 @@ def synthetic_gate(
         "working_directory": ".",
         "dependencies": dependencies or [],
         "resource_class": resource,
-        "timeout_minutes": 60,
+        "timeout_minutes": timeout_minutes,
         "retry_on_exit_codes": [75],
         "max_infrastructure_retries": 1,
         "affected_crates": [],
         "affected_paths": paths or ["**"],
         "expected_outputs": ["receipt.json", "command.log"],
-        "estimated_seconds": 1,
+        "estimated_seconds": estimated_seconds,
         "always_fresh": always_fresh,
         "legacy": None,
     }
@@ -698,6 +711,93 @@ def amr_rate_sweep_gates() -> list[dict[str, Any]]:
         paths=paths,
     )
     return [up, *cells, down, aggregate]
+
+
+def jambonz_interop_gates() -> list[dict[str, Any]]:
+    """Latest stable OSS Jambonz as a first-class release B2BUA peer."""
+    paths = [
+        "crates/sip/rvoip-sip/examples/pbx/**",
+        "crates/media/**",
+        "infra/release-runners/interop-lifecycle.sh",
+        "infra/release-runners/pbx/jambonz/**",
+    ]
+    latest = synthetic_gate(
+        "interop.jambonz-latest",
+        "Jambonz latest stable open-source release pin",
+        executor="argv",
+        command=[
+            "python3",
+            "infra/release-runners/pbx/jambonz/verify-latest.py",
+            "--receipt",
+            "{artifact_dir}/latest.json",
+        ],
+        resource="gcp-interop",
+        dependencies=["source.remote-clean", "interop.freeswitch-down-after"],
+        paths=paths,
+        always_fresh=True,
+    )
+    up = synthetic_gate(
+        "interop.jambonz-up",
+        "latest pinned Jambonz OSS lab up",
+        executor="argv",
+        command=[
+            "env",
+            "JAMBONZ_RECEIPT_DIR={artifact_dir}",
+            "bash",
+            "infra/release-runners/interop-lifecycle.sh",
+            "jambonz-up",
+        ],
+        resource="gcp-interop",
+        dependencies=["interop.jambonz-latest"],
+        paths=paths,
+    )
+    up["estimated_seconds"] = 240
+    up["timeout_minutes"] = 30
+    matrix = synthetic_gate(
+        "interop.jambonz-matrix",
+        "Jambonz OSS PBX/B2BUA matrix",
+        executor="argv",
+        command=[
+            "env",
+            "PBX_OUT_ROOT={artifact_dir}",
+            "PBX_REPORT_APPEND=1",
+            # The pinned Jambonz profile admits the two mandatory G.711
+            # encodings. Sweep them separately so a combined offer cannot
+            # satisfy both assertions by selecting PCMU twice.
+            "PBX_G711_PROFILES=pcmu pcma",
+            "{workspace}/crates/sip/rvoip-sip/examples/pbx/run.sh",
+            "--pbx",
+            "jambonz",
+            "--api",
+            "all",
+            "--scenario",
+            "all",
+            "--transport",
+            "UDP",
+        ],
+        resource="gcp-interop",
+        dependencies=["interop.jambonz-up"],
+        paths=paths,
+    )
+    matrix["estimated_seconds"] = 600
+    matrix["timeout_minutes"] = 45
+    down = synthetic_gate(
+        "interop.jambonz-down",
+        "Jambonz OSS lab teardown and residue proof",
+        executor="argv",
+        command=[
+            "env",
+            "JAMBONZ_RECEIPT_DIR={artifact_dir}",
+            "bash",
+            "infra/release-runners/interop-lifecycle.sh",
+            "jambonz-down",
+        ],
+        resource="gcp-interop",
+        dependencies=["interop.jambonz-matrix"],
+        paths=paths,
+        always_fresh=True,
+    )
+    return [latest, up, matrix, down]
 
 
 def proxy_interop_gates() -> list[dict[str, Any]]:
@@ -973,8 +1073,32 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
             ],
         ),
         facade_feature_bundle_gate(),
+        synthetic_gate(
+            "perf.canonical-2k-current",
+            "three-pass exact-candidate 2,000-CPS performance evaluation",
+            executor="argv",
+            command=[
+                "env",
+                "RVOIP_CANONICAL_EVAL_OUTPUT={artifact_dir}",
+                "{workspace}/crates/sip/rvoip-sip/scripts/canonical_2k_release_eval.sh",
+            ],
+            resource="gcp-performance-soak-long",
+            dependencies=["source.remote-clean"],
+            paths=[
+                "Cargo.lock",
+                "Cargo.toml",
+                "crates/foundation/**",
+                "crates/media/**",
+                "crates/sip/rvoip-sip/**",
+                "scripts/release/**",
+            ],
+            always_fresh=True,
+            timeout_minutes=120,
+            estimated_seconds=4_500,
+        ),
         *proxy_interop_gates(),
         *proxy_pbx_gates(),
+        *jambonz_interop_gates(),
         *amr_rate_sweep_gates(),
         *amr_fuzz_gates(),
         synthetic_gate(
@@ -1062,6 +1186,8 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
                 *PROXY_INTEROP_GATE_IDS,
                 "interop.proxy-pbx",
                 *PROXY_PBX_GATE_IDS,
+                *JAMBONZ_GATE_IDS,
+                *CURRENT_PERFORMANCE_EVALUATION_GATE_IDS,
                 "interop.amr-rate-sweep",
                 *AMR_RATE_SWEEP_GATE_IDS,
                 *[f"security.fuzz-{suffix}" for suffix in AMR_FUZZ_TARGETS],
@@ -1091,6 +1217,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
                 set(
                     [record["id"] for record in records]
                     + ["source.remote-clean", "interop.remote-proxies"]
+                    + CURRENT_PERFORMANCE_EVALUATION_GATE_IDS
                     + PROXY_INTEROP_GATE_IDS
                     + [f"perf.media-burst.{scenario}" for scenario in BURST_SCENARIOS]
                 )

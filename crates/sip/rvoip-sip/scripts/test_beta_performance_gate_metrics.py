@@ -100,24 +100,114 @@ class BetaPerformanceGateMetricsTests(unittest.TestCase):
         (self.root / "perf_soak_30min.json").write_text(
             json.dumps(monolithic), encoding="utf-8"
         )
+        canonical = self.root / "canonical-2k"
+        canonical.mkdir()
+        self.candidate_sha = "c" * 40
+        self.source_fingerprint = "f" * 64
+        self.executable_sha = "e" * 64
+        runs = []
+        for sequence in range(1, 4):
+            run = canonical / f"run-{sequence}"
+            run.mkdir()
+            report = {
+                "scenario": metrics.CANONICAL_SCENARIO,
+                "load": {"target_cps": 2000.0},
+                "latency_ns": {
+                    "setup_latency": {
+                        "p50": 11_000_000,
+                        "p95": 12_000_000,
+                        "p99": 13_000_000,
+                    }
+                },
+                "results": {
+                    "achieved_cps": 1850.0 + sequence,
+                    "calls_offered": 65_000,
+                    "calls_succeeded": 65_000,
+                    "asr": 1.0,
+                    "errors": {"timeout": 0, "invite_send_failed": 0},
+                },
+            }
+            (run / "report.json").write_text(json.dumps(report), encoding="utf-8")
+            runs.append(
+                {
+                    "sequence": sequence,
+                    "packaged_run_dir": f"run-{sequence}",
+                    "source_fingerprint_sha256": self.source_fingerprint,
+                    "executable_sha256": self.executable_sha,
+                }
+            )
+        self.canonical_index = canonical / "index.json"
+        self.canonical_index.write_text(
+            json.dumps(
+                {
+                    "schema": metrics.CANONICAL_SCHEMA,
+                    "status": "PASS",
+                    "scenario": metrics.CANONICAL_SCENARIO,
+                    "run_count": 3,
+                    "source_at_beta_start": {
+                        "git_commit": self.candidate_sha,
+                        "git_dirty": False,
+                        "source_fingerprint_sha256": self.source_fingerprint,
+                    },
+                    "common_source_fingerprint_sha256": self.source_fingerprint,
+                    "common_executable_sha256": self.executable_sha,
+                    "runs": runs,
+                }
+            ),
+            encoding="utf-8",
+        )
 
     def tearDown(self):
         self.temp.cleanup()
 
     def test_release_metrics_pass(self):
+        canonical = metrics.canonical_2k_metrics(
+            self.canonical_index, True, self.candidate_sha
+        )
         burst = metrics.high_density_metrics(self.root, 160.0, 0.995, 15.0, True)
         soak = metrics.monolithic_metrics(self.root, 3600, 30, 15.0, True)
+        self.assertTrue(canonical["passed"])
         self.assertTrue(burst["passed"])
         self.assertTrue(soak["passed"])
         self.assertIn(
             "full_audio_frame_delivery",
             metrics.markdown(
                 {
+                    "canonical_2k": canonical,
                     "high_density_media_burst": burst,
                     "monolithic_soak": soak,
                 }
             ),
         )
+        self.assertIn(
+            "Canonical 2,000-CPS evaluation",
+            metrics.markdown(
+                {
+                    "canonical_2k": canonical,
+                    "high_density_media_burst": burst,
+                    "monolithic_soak": soak,
+                }
+            ),
+        )
+
+    def test_canonical_requires_three_passing_exact_candidate_runs(self):
+        index = json.loads(self.canonical_index.read_text(encoding="utf-8"))
+        index["runs"].pop()
+        self.canonical_index.write_text(json.dumps(index), encoding="utf-8")
+        result = metrics.canonical_2k_metrics(
+            self.canonical_index, True, self.candidate_sha
+        )
+        self.assertFalse(result["passed"])
+
+    def test_canonical_rejects_evidence_from_another_candidate(self):
+        result = metrics.canonical_2k_metrics(
+            self.canonical_index, True, "d" * 40
+        )
+        self.assertFalse(result["passed"])
+
+    def test_missing_required_canonical_evidence_fails(self):
+        with self.assertRaisesRegex(metrics.MetricsError, "canonical"):
+            metrics.canonical_2k_metrics(self.root / "missing.json", True)
 
     def test_skipped_audio_delivery_fails(self):
         path = next(

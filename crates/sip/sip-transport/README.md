@@ -169,7 +169,7 @@ The 0.3 API removes the unsafe `WebSocketListener::accept` escape hatch in
 favor of `Arc<WebSocketListener>::serve_concurrent`, which retains ownership of
 handshake/session admission and shutdown. See the complete before/after example
 and release guidance in [MIGRATING-0.3.md](./MIGRATING-0.3.md). The transport
-crate now carries the required 0.3.8 package version.
+crate now carries the required 0.3.9 package version.
 
 SIPS never falls back to a plaintext transport: `sips:...;transport=tcp` means
 TLS-over-TCP, `transport=wss` means secure WebSocket, and explicit `udp` or

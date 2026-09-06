@@ -33,7 +33,7 @@ implementing your own adapter and want only the trait surface:
 
 ```toml
 [dependencies]
-rvoip-core-traits = "0.3.8"
+rvoip-core-traits = "0.3.9"
 ```
 
 ## License

@@ -31,9 +31,61 @@ DEFAULT_POLL_SECONDS = 15
 DEFAULT_TIMEOUT_SECONDS = 900
 ACTIVE_RELEASE_METADATA_FILES = (
     Path("README.md"),
+    Path("crates/rvoip/README.md"),
+    Path("crates/extensions/rvoip-vcon/README.md"),
+    Path("crates/foundation/rvoip-core/README.md"),
+    Path("crates/foundation/rvoip-core-traits/README.md"),
+    Path("crates/identity/auth-core/README.md"),
+    Path("crates/media/codec-core/README.md"),
+    Path("crates/media/rtp-core/README.md"),
+    Path("crates/media/rtp-core/TODO.md"),
+    Path("crates/media/rtp-core/examples/README.md"),
+    Path("crates/media/rtp-core/examples/TODO.md"),
+    Path("crates/media/rtp-core/src/api/SRTP_TRANSPORT_FIX.md"),
+    Path("crates/media/rtp-core/src/api/TODO.md"),
+    Path("crates/sip/rvoip-sip/README.md"),
     Path("crates/sip/rvoip-sip/docs/BETA_RELEASE_CHECKLIST.md"),
+    Path("crates/sip/rvoip-sip/docs/INTEROP_CI_PLAN.md"),
     Path("crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md"),
+    Path("crates/sip/rvoip-sip/docs/TOPOLOGY_PROFILES.md"),
+    Path("crates/sip/sip-core/DEVELOPER_GUIDE.md"),
+    Path("crates/sip/sip-core/README.md"),
+    Path("crates/sip/sip-proxy/README.md"),
+    Path("crates/sip/sip-transport/README.md"),
+    Path("docs/PRODUCTION_HARDENING_ROADMAP.md"),
+    Path("docs/FEATURE_BUNDLES.md"),
+    Path("examples/README.md"),
+    Path("examples/01-quickstart-p2p/Cargo.toml"),
+    Path("examples/02-softphone-audio/Cargo.toml"),
+    Path("examples/03-register-to-pbx/Cargo.toml"),
+    Path("examples/04-call-control/Cargo.toml"),
+    Path("examples/05-blind-transfer/Cargo.toml"),
+    Path("examples/06-attended-transfer/Cargo.toml"),
+    Path("examples/07-secure-call-srtp/Cargo.toml"),
+    Path("examples/08-tls-transport/Cargo.toml"),
+    Path("examples/09-ivr-server/Cargo.toml"),
+    Path("examples/10-call-center-b2bua/Cargo.toml"),
+    Path("examples/11-ai-harness-demo/Cargo.toml"),
+    Path("examples/12-customer-escalation-sip-webrtc/Cargo.toml"),
+    Path("examples/13-sip-to-amazon-connect/Cargo.toml"),
+    Path("examples/14-vapi-agent/Cargo.toml"),
+    Path("crates/sip/rvoip-sip/scripts/full_beta_release.sh"),
 )
+# These locations are immutable release history and are deliberately excluded
+# from version preparation. A current policy/status document must be listed in
+# ACTIVE_RELEASE_METADATA_FILES instead of being placed under one of these.
+HISTORICAL_RELEASE_METADATA_PREFIXES = (
+    Path("crates/sip/rvoip-sip/docs/releases"),
+    Path("docs/RELEASE_0_3_9_PLAN.md"),
+    Path("docs/RELEASE_0_3_9_THELVE_ASSESSMENT.md"),
+)
+DEPENDENCY_EXAMPLE_VERSION = re.compile(
+    r'(?m)^\s*rvoip(?:-[A-Za-z0-9_-]+)?\s*=\s*'
+    r'(?:"(?P<plain>[0-9]+\.[0-9]+\.[0-9]+)"|'
+    r'\{[^\n}]*\bversion\s*=\s*"(?P<table>[0-9]+\.[0-9]+\.[0-9]+)"[^\n}]*\})'
+)
+LIVE_DEPENDENCY_SCAN_SUFFIXES = frozenset({".toml"})
+LIVE_DEPENDENCY_SCAN_IGNORED_DIRS = frozenset({".git", "target"})
 VERIFICATION_RECEIPT_SCHEMA = "rvoip-unified-release-verification-v4"
 REMOTE_QUALIFICATION_SCHEMA = "rvoip-release-qualification-v1"
 REMOTE_GATE_CATALOG_SCHEMA = "rvoip-release-gate-catalog-v1"
@@ -540,6 +592,7 @@ def planned_release_metadata_edits(
     root: Path, current_version: str, version: str
 ) -> dict[Path, bytes]:
     """Update current-version references in the active release documents."""
+    validate_active_release_metadata(root, current_version)
     changes: dict[Path, bytes] = {}
     for relative_path in ACTIVE_RELEASE_METADATA_FILES:
         path = root / relative_path
@@ -553,6 +606,98 @@ def planned_release_metadata_edits(
         updated = text.replace(current_version, version)
         changes[path] = updated.encode()
     return changes
+
+
+def validate_active_release_metadata(root: Path, version: str) -> None:
+    """Fail closed when active release metadata drifts from the workspace."""
+    if len(ACTIVE_RELEASE_METADATA_FILES) != len(set(ACTIVE_RELEASE_METADATA_FILES)):
+        raise ReleaseError("active release metadata contains duplicate paths")
+
+    for relative_path in ACTIVE_RELEASE_METADATA_FILES:
+        if any(
+            relative_path == prefix or prefix in relative_path.parents
+            for prefix in HISTORICAL_RELEASE_METADATA_PREFIXES
+        ):
+            raise ReleaseError(
+                f"active release metadata {relative_path} is inside immutable history"
+            )
+        path = root / relative_path
+        if not path.is_file():
+            raise ReleaseError(f"active release metadata is missing: {relative_path}")
+        text = path.read_text(encoding="utf-8")
+        if version not in text:
+            raise ReleaseError(
+                f"active release metadata in {relative_path} does not reference "
+                f"workspace version {version}"
+            )
+        stale_examples = sorted(
+            {
+                match.group("plain") or match.group("table")
+                for match in DEPENDENCY_EXAMPLE_VERSION.finditer(text)
+                if (match.group("plain") or match.group("table")) != version
+            }
+        )
+        if stale_examples:
+            raise ReleaseError(
+                f"active release metadata in {relative_path} has stale rvoip "
+                f"dependency example versions: {stale_examples}; expected {version}"
+            )
+
+    validate_live_dependency_examples(root, version)
+
+
+def validate_live_dependency_examples(root: Path, version: str) -> None:
+    """Reject stale RVoIP dependency pins in every live Cargo manifest."""
+    stale: list[str] = []
+    for directory, names, files in os.walk(root):
+        names[:] = [
+            name for name in names if name not in LIVE_DEPENDENCY_SCAN_IGNORED_DIRS
+        ]
+        base = Path(directory)
+        for filename in files:
+            path = base / filename
+            if path.suffix not in LIVE_DEPENDENCY_SCAN_SUFFIXES:
+                continue
+            relative_path = path.relative_to(root)
+            if relative_path == Path("CHANGELOG.md") or any(
+                relative_path == prefix or prefix in relative_path.parents
+                for prefix in HISTORICAL_RELEASE_METADATA_PREFIXES
+            ):
+                continue
+            text = path.read_text(encoding="utf-8")
+            for match in DEPENDENCY_EXAMPLE_VERSION.finditer(text):
+                found = match.group("plain") or match.group("table")
+                if found != version:
+                    line = text.count("\n", 0, match.start()) + 1
+                    stale.append(f"{relative_path}:{line}={found}")
+    if stale:
+        raise ReleaseError(
+            "live Cargo manifests contain stale rvoip dependency versions; "
+            f"expected {version}: {stale}"
+        )
+
+
+def validate_release_notes_final(root: Path, version: str) -> None:
+    """Reject publication while candidate-only documentation is unresolved."""
+    path = root / "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md"
+    text = path.read_text(encoding="utf-8")
+    required = (
+        version,
+        "Jambonz OSS",
+        "Performance evaluation",
+        "Qualification record",
+        "protected",
+    )
+    missing = [value for value in required if value not in text]
+    if missing:
+        raise ReleaseError(f"release notes lack required final evidence: {missing}")
+    forbidden = ("Candidate Release Notes", "**Pending.**", "result pending")
+    present = [value for value in forbidden if value in text]
+    if present:
+        raise ReleaseError(
+            "release notes still contain candidate-only qualification markers: "
+            f"{present}"
+        )
 
 
 def write_atomic(path: Path, payload: bytes) -> None:
@@ -1891,6 +2036,8 @@ def publish(
         qualified_head=qualified_head,
     )
     packages, ordered = validate_workspace(root, version, locked=True)
+    if execute:
+        validate_release_notes_final(root, version)
     receipt = read_verification_receipt(root, version, head, ordered)
     if qualified_head is not None:
         qualification = receipt.get("beta_qualification")

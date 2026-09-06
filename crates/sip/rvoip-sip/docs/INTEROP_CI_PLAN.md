@@ -27,15 +27,17 @@ failure rather than a skip.
 | SIPp | Deterministic UAC/UAS and load generator | Required release gate. |
 | Asterisk `res_pjsip` | PBX interop | Required release gate. |
 | FreeSWITCH Sofia | PBX/B2BUA interop | Required release gate. |
+| Latest stable Jambonz OSS | SBC/B2BUA, registrar, and anchored-media interop | Required 0.3.10 release gate; currently component line 0.9.9. |
 | PJSIP or baresip | Strict SIP user agent | Required release gate. |
-| Kamailio | Transaction-stateful proxy interoperability peer | Required for the `0.3.8` proxy release gate. |
-| OpenSIPS | Independent transaction-stateful proxy interoperability peer | Required for the `0.3.8` proxy release gate. |
+| Kamailio | Transaction-stateful proxy interoperability peer | Required for the `0.3.9` proxy release gate. |
+| OpenSIPS | Independent transaction-stateful proxy interoperability peer | Required for the `0.3.9` proxy release gate. |
 
 ## Current Automation Status
 
 | Gate | Current status | Command |
 |------|----------------|---------|
 | Local Asterisk/FreeSWITCH matrix | Scripted; manages `~/Developer/asterisk` and `~/Developer/freeswitch` sequentially | `BETA_RUN_LOCAL_PBX=1 crates/sip/rvoip-sip/scripts/beta_gate.sh --interop` |
+| Jambonz OSS matrix | Mandatory remote-release lifecycle with latest-version check and immutable run pins | `bash infra/release-runners/interop-lifecycle.sh jambonz-up`, then `examples/pbx/run.sh --pbx jambonz --api all --scenario all --transport UDP` |
 | Already-running PBX matrix | Scripted; requires PBX containers already running | `BETA_RUN_PBX=1 crates/sip/rvoip-sip/scripts/beta_gate.sh --interop` |
 | SIPp standalone | Scripted; requires SIPp and target host/port | `BETA_RUN_SIPP=1 BETA_SIPP_TARGET_HOST=<host> BETA_SIPP_TARGET_PORT=<port> crates/sip/rvoip-sip/scripts/beta_gate.sh --interop` |
 | PJSIP/baresip | Scripted; final gate archived baresip strict-UA evidence | `BETA_RUN_STRICT_UA=1 crates/sip/rvoip-sip/scripts/beta_gate.sh --interop` or the final full gate. |
@@ -124,6 +126,30 @@ both Asterisk and FreeSWITCH. The G.711 baseline remains the analyzer-enforced
 `basic_call` scenario. Override `BETA_PBX_G729_PROFILES` only for targeted
 reruns.
 
+## Jambonz Matrix
+
+Jambonz is a first-class external B2BUA release peer, not a proxy alias and
+not an application-verb API test. At the start of qualification the harness
+must prove that its reviewed `sbc-inbound` and `sbc-outbound` pins are still
+the latest stable open-source component line. It then freezes the exact
+revisions, tarball hashes, and container digests for the run.
+
+The shared RVoIP PBX matrix covers all three public SIP APIs over the
+Jambonz 0.3.10 profile's UDP/plain-RTP boundary: authenticated registration,
+INVITE/provisional/answer/ACK, PCMU/PCMA and optional codec negotiation,
+bidirectional audio, RFC 4733, CANCEL/487, rejection, hold/resume,
+REFER/NOTIFY transfer, BYE from either side, and allocation cleanup. Dedicated
+carrier-orientation cells cover the inbound and outbound SBC paths, known and
+unknown IP admission, P-Asserted-Identity/Diversion policy, and RTPengine
+anchoring. Any unsupported scenario is a documented profile exclusion; it may
+not become a successful skip inside the mandatory matrix.
+
+The gate stores the upstream release line and commits, resolved image IDs,
+rendered topology, redacted logs, packet capture, audio analysis, matrix, and
+post-down proof that no Jambonz container, network, volume, dialog, or media
+allocation remains. Commercial Jambonz 10.x, hosted jambonz.cloud, application
+verbs, TLS/SRTP, WebRTC, PSTN, HA, recording, and load are separate profiles.
+
 ## Stateful Proxy Matrix
 
 Run the same packet-level scenarios independently against real, pinned
@@ -132,7 +158,7 @@ Asterisk/FreeSWITCH lifecycle pattern: it owns startup, readiness, isolated
 configuration, packet capture, logs, exact version/image provenance, teardown,
 and restoration of any process that was running before the gate.
 
-| Scenario | Required for `0.3.8` |
+| Scenario | Required for `0.3.9` |
 |----------|----------------------|
 | UDP, TCP, and TLS/SIPS forwarding | Yes |
 | Matched and unmatched CANCEL | Yes |
@@ -164,8 +190,8 @@ Each interop run should store:
 
 ## Release-Gate Policy
 
-- A failure in SIPp, Asterisk, FreeSWITCH, Kamailio, or OpenSIPS blocks the
-  `0.3.8` proxy release candidate.
+- A failure in SIPp, Asterisk, FreeSWITCH, Jambonz, Kamailio, or OpenSIPS
+  blocks the applicable release. Jambonz becomes mandatory in 0.3.10.
 - The proxy matrix must contain exactly both pinned peers, both adjacency
   orders, and UDP/TCP/verified-TLS rows. Its global scenario inventory and
   per-row core scenario set are validated independently while generating the

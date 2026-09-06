@@ -11,11 +11,11 @@ transport adapters. It always provides the transport-independent
 applications opt into WebRTC, UCTP, Vapi voice agents, client,
 application-builder, and conversation-extension surfaces.
 
-> **Unified `0.3.8` release train.** The `sip` feature is the release-gated beta
+> **Unified `0.3.9` release train.** The `sip` feature is the release-gated beta
 > surface. Other facade features are available today as developer previews:
 > they are implemented and published, but API-unstable or outside the SIP beta
 > attestation. Publication requires fresh strict full-beta evidence bound to
-> the exact clean `0.3.8` release source; historical exception and
+> the exact clean `0.3.9` release source; historical exception and
 > carry-forward reports do not qualify this train.
 > Breaking changes remain possible before `1.0`.
 
@@ -25,7 +25,7 @@ The default feature is `sip`:
 
 ```toml
 [dependencies]
-rvoip = "0.3.8"
+rvoip = "0.3.9"
 ```
 
 The shared orchestrator is available with every feature combination:
@@ -93,13 +93,13 @@ Examples:
 
 ```toml
 # Shared conversation model plus SIP, WebRTC, UCTP, vCon, identity, and AI.
-rvoip = { version = "0.3.8", features = ["voip-3"] }
+rvoip = { version = "0.3.9", features = ["voip-3"] }
 
 # High-level cross-transport application builder.
-rvoip = { version = "0.3.8", features = ["app"] }
+rvoip = { version = "0.3.9", features = ["app"] }
 
 # Every pure-Rust facade feature and codec.
-rvoip = { version = "0.3.8", default-features = false, features = ["bundle-full-pure-rust"] }
+rvoip = { version = "0.3.9", default-features = false, features = ["bundle-full-pure-rust"] }
 ```
 
 The high-level SIP listener exposes the same fail-closed signalling, media,
@@ -167,15 +167,15 @@ For example:
 
 ```toml
 [dependencies]
-rvoip = { version = "0.3.8", features = ["sip"] }
-rvoip-keycloak = "0.3.8"
-rvoip-redis = "0.3.8"
-rvoip-audit = "0.3.8"
+rvoip = { version = "0.3.9", features = ["sip"] }
+rvoip-keycloak = "0.3.9"
+rvoip-redis = "0.3.9"
+rvoip-audit = "0.3.9"
 ```
 
 ## Specialized workspace products
 
-These products ship in the unified `0.3.8` train but are intentionally not
+These products ship in the unified `0.3.9` train but are intentionally not
 facade feature flags:
 
 | Product | Crate | Why it stays separate |
@@ -191,7 +191,7 @@ Enable `app` to declare transports, roles, assignment, and callbacks through
 one builder:
 
 ```toml
-rvoip = { version = "0.3.8", features = ["app"] }
+rvoip = { version = "0.3.9", features = ["app"] }
 ```
 
 ```rust,no_run

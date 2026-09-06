@@ -44,9 +44,7 @@
       "command": null,
       "dependencies": [
         "source.clean-start",
-        "perf.concurrent-calls",
-        "perf.sipp-parity",
-        "perf.media-burst-matrix"
+        "perf.canonical-2k-current"
       ],
       "display_command": "python3 <workspace>/crates/sip/rvoip-sip/scripts/canonical_2k_evidence.py import --workspace-root <workspace> --beta-start <source-report> --artifact-dir <source-report> --run-dir <workspace>/target/perf-results/profiles/20260724T221956Z_clean_KRwxGm --run-dir <workspace>/target/perf-results/profiles/20260724T224300Z_clean_GbSiae --run-dir <workspace>/target/perf-results/profiles/20260724T225757Z_clean_p5XNXK",
       "estimated_seconds": 1,
@@ -1947,7 +1945,51 @@
     },
     {
       "affected_crates": [
-        "rvoip-sip"
+        "rvoip",
+        "rvoip-amazon-connect",
+        "rvoip-audio-device",
+        "rvoip-audit",
+        "rvoip-auth-core",
+        "rvoip-client",
+        "rvoip-codec-core",
+        "rvoip-core",
+        "rvoip-core-traits",
+        "rvoip-harness",
+        "rvoip-ice-core",
+        "rvoip-identity",
+        "rvoip-ims-aka",
+        "rvoip-infra-common",
+        "rvoip-keycloak",
+        "rvoip-ldap",
+        "rvoip-media-core",
+        "rvoip-moq",
+        "rvoip-moq-native",
+        "rvoip-moq-relay",
+        "rvoip-moq-transport",
+        "rvoip-oidc",
+        "rvoip-quic",
+        "rvoip-redis",
+        "rvoip-rtc",
+        "rvoip-rtp-core",
+        "rvoip-saml",
+        "rvoip-scim",
+        "rvoip-sip",
+        "rvoip-sip-core",
+        "rvoip-sip-dialog",
+        "rvoip-sip-proxy",
+        "rvoip-sip-registrar",
+        "rvoip-sip-transport",
+        "rvoip-stir-shaken",
+        "rvoip-uctp",
+        "rvoip-users-core",
+        "rvoip-vapi",
+        "rvoip-vcon",
+        "rvoip-vcon-postgres",
+        "rvoip-webauthn",
+        "rvoip-webrtc",
+        "rvoip-webrtc-stack",
+        "rvoip-websocket",
+        "rvoip-webtransport"
       ],
       "affected_paths": [],
       "always_fresh": false,
@@ -1958,11 +2000,9 @@
         "cargo",
         "doc",
         "--locked",
-        "-p",
-        "rvoip-sip",
-        "--no-deps",
-        "--features",
-        "generated-validation,dev-insecure-tls"
+        "--workspace",
+        "--all-features",
+        "--no-deps"
       ],
       "dependencies": [
         "source.clean-start"
@@ -5066,6 +5106,7 @@
         "perf.call-setup-endpoint",
         "perf.call-setup-pbx",
         "perf.call-setup-signaling",
+        "perf.canonical-2k-current",
         "perf.capture-boundary",
         "perf.concurrent-calls",
         "perf.contact-center",
@@ -5131,6 +5172,7 @@
         "perf.call-setup-endpoint",
         "perf.call-setup-pbx",
         "perf.call-setup-signaling",
+        "perf.canonical-2k-current",
         "perf.capture-boundary",
         "perf.concurrent-calls",
         "perf.contact-center",
@@ -5163,7 +5205,10 @@
       "executor": "aggregate",
       "expected_outputs": [
         "receipt.json",
-        "command.log"
+        "command.log",
+        "current-performance-evaluation.json",
+        "current-performance-evaluation.md",
+        "current-performance-artifact-index.json"
       ],
       "id": "report.performance-metrics",
       "kind": "reporting",
@@ -5518,6 +5563,45 @@
         75
       ],
       "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        "Cargo.lock",
+        "Cargo.toml",
+        "crates/foundation/**",
+        "crates/media/**",
+        "crates/sip/rvoip-sip/**",
+        "scripts/release/**"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "env",
+        "RVOIP_CANONICAL_EVAL_OUTPUT={artifact_dir}",
+        "{workspace}/crates/sip/rvoip-sip/scripts/canonical_2k_release_eval.sh"
+      ],
+      "dependencies": [
+        "source.remote-clean"
+      ],
+      "display_command": "env RVOIP_CANONICAL_EVAL_OUTPUT={artifact_dir} {workspace}/crates/sip/rvoip-sip/scripts/canonical_2k_release_eval.sh",
+      "estimated_seconds": 4500,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "perf.canonical-2k-current",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "three-pass exact-candidate 2,000-CPS performance evaluation",
+      "resource_class": "gcp-performance-soak-long",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 120,
       "working_directory": "."
     },
     {
@@ -6320,6 +6404,170 @@
       "max_infrastructure_retries": 1,
       "name": "complete registrar-proxy media matrix (Kamailio and OpenSIPS + rtpengine)",
       "resource_class": "github-evidence",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        "crates/sip/rvoip-sip/examples/pbx/**",
+        "crates/media/**",
+        "infra/release-runners/interop-lifecycle.sh",
+        "infra/release-runners/pbx/jambonz/**"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "python3",
+        "infra/release-runners/pbx/jambonz/verify-latest.py",
+        "--receipt",
+        "{artifact_dir}/latest.json"
+      ],
+      "dependencies": [
+        "source.remote-clean",
+        "interop.freeswitch-down-after"
+      ],
+      "display_command": "python3 infra/release-runners/pbx/jambonz/verify-latest.py --receipt {artifact_dir}/latest.json",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "interop.jambonz-latest",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "Jambonz latest stable open-source release pin",
+      "resource_class": "gcp-interop",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        "crates/sip/rvoip-sip/examples/pbx/**",
+        "crates/media/**",
+        "infra/release-runners/interop-lifecycle.sh",
+        "infra/release-runners/pbx/jambonz/**"
+      ],
+      "always_fresh": false,
+      "category": "Remote release framework",
+      "command": [
+        "env",
+        "JAMBONZ_RECEIPT_DIR={artifact_dir}",
+        "bash",
+        "infra/release-runners/interop-lifecycle.sh",
+        "jambonz-up"
+      ],
+      "dependencies": [
+        "interop.jambonz-latest"
+      ],
+      "display_command": "env JAMBONZ_RECEIPT_DIR={artifact_dir} bash infra/release-runners/interop-lifecycle.sh jambonz-up",
+      "estimated_seconds": 240,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "interop.jambonz-up",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "latest pinned Jambonz OSS lab up",
+      "resource_class": "gcp-interop",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 30,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        "crates/sip/rvoip-sip/examples/pbx/**",
+        "crates/media/**",
+        "infra/release-runners/interop-lifecycle.sh",
+        "infra/release-runners/pbx/jambonz/**"
+      ],
+      "always_fresh": false,
+      "category": "Remote release framework",
+      "command": [
+        "env",
+        "PBX_OUT_ROOT={artifact_dir}",
+        "PBX_REPORT_APPEND=1",
+        "PBX_G711_PROFILES=pcmu pcma",
+        "{workspace}/crates/sip/rvoip-sip/examples/pbx/run.sh",
+        "--pbx",
+        "jambonz",
+        "--api",
+        "all",
+        "--scenario",
+        "all",
+        "--transport",
+        "UDP"
+      ],
+      "dependencies": [
+        "interop.jambonz-up"
+      ],
+      "display_command": "env PBX_OUT_ROOT={artifact_dir} PBX_REPORT_APPEND=1 PBX_G711_PROFILES=pcmu pcma {workspace}/crates/sip/rvoip-sip/examples/pbx/run.sh --pbx jambonz --api all --scenario all --transport UDP",
+      "estimated_seconds": 600,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "interop.jambonz-matrix",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "Jambonz OSS PBX/B2BUA matrix",
+      "resource_class": "gcp-interop",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 45,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        "crates/sip/rvoip-sip/examples/pbx/**",
+        "crates/media/**",
+        "infra/release-runners/interop-lifecycle.sh",
+        "infra/release-runners/pbx/jambonz/**"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "env",
+        "JAMBONZ_RECEIPT_DIR={artifact_dir}",
+        "bash",
+        "infra/release-runners/interop-lifecycle.sh",
+        "jambonz-down"
+      ],
+      "dependencies": [
+        "interop.jambonz-matrix"
+      ],
+      "display_command": "env JAMBONZ_RECEIPT_DIR={artifact_dir} bash infra/release-runners/interop-lifecycle.sh jambonz-down",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "interop.jambonz-down",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "Jambonz OSS lab teardown and residue proof",
+      "resource_class": "gcp-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -10294,6 +10542,10 @@
         "interop.amr-rate-sweep.down",
         "interop.amr-rate-sweep.up",
         "interop.browser-dtmf",
+        "interop.jambonz-down",
+        "interop.jambonz-latest",
+        "interop.jambonz-matrix",
+        "interop.jambonz-up",
         "interop.proxy-pbx",
         "interop.proxy-pbx.kamailio.down",
         "interop.proxy-pbx.kamailio.matrix",
@@ -10316,6 +10568,7 @@
         "interop.remote-proxies.opensips.rvoip-first.tls",
         "interop.remote-proxies.opensips.rvoip-first.udp",
         "package.inventory",
+        "perf.canonical-2k-current",
         "perf.media-burst.access-edge-microburst",
         "perf.media-burst.buffer-ab-legacy",
         "perf.media-burst.carrier-smoke",
@@ -10451,6 +10704,7 @@
       "perf.call-setup-endpoint",
       "perf.call-setup-pbx",
       "perf.call-setup-signaling",
+      "perf.canonical-2k-current",
       "perf.capture-boundary",
       "perf.concurrent-calls",
       "perf.contact-center",
@@ -10735,6 +10989,10 @@
       "interop.freeswitch-down-before-asterisk",
       "interop.freeswitch-matrix",
       "interop.freeswitch-up",
+      "interop.jambonz-down",
+      "interop.jambonz-latest",
+      "interop.jambonz-matrix",
+      "interop.jambonz-up",
       "interop.proxy-descope",
       "interop.proxy-pbx",
       "interop.proxy-pbx.kamailio.down",
@@ -10771,6 +11029,7 @@
       "perf.call-setup-endpoint",
       "perf.call-setup-pbx",
       "perf.call-setup-signaling",
+      "perf.canonical-2k-current",
       "perf.capture-boundary",
       "perf.concurrent-calls",
       "perf.contact-center",

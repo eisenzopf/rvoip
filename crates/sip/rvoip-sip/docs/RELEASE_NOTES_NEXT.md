@@ -1,118 +1,114 @@
-# rvoip 0.3.9 Release Notes
+# rvoip 0.3.10 Candidate Release Notes
 
-Date: 2026-09-05
+Target date: 2026-09-05
 
-These notes describe the coordinated 45-crate `0.3.9` release. Protected
-`remote-release` qualification passed 208/208 exact-candidate gates at
-`8cab44b10f872d21b304c02111d5d203ee8226da`; publication then completed for
-all 45 crates. Earlier qualification evidence did not qualify this release.
+These notes describe the coordinated 45-crate `0.3.10` candidate. They are
+the active notes for qualification, not a claim that `0.3.10` has already
+been published. The qualification record below must be replaced with the
+exact protected-run evidence before publication.
 
 ## Headline
 
-`0.3.9` is the carrier-grade honesty release. SIP media behavior that existed
-only as disconnected primitives is now reachable through production paths and
-the public facade: playout and loss concealment, measured MOS and RTCP XR,
-trusted carrier identity, ICE, DTLS-SRTP, per-session codec renegotiation,
-remote endpoint registration, browser media, and lossless RTP observation.
+`0.3.10` is a patch release that hardens the `0.3.9` feature set and adds
+Jambonz OSS as a mandatory external SIP interoperability peer. It corrects
+REFER/NOTIFY ordering under concurrent transfer progress, preserves an
+optional `Referred-By` header across a Jambonz-mediated transfer, closes
+security-diagnostic leaks, and strengthens release metadata and feature-bundle
+gates. It does not expand the supported deployment boundary beyond the
+documented SIP, SDP, RTP, codec, and facade profiles.
 
-The release also introduces six deployment-oriented facade bundles. G.711 is
-the portable baseline; G.729, AMR-NB, and AMR-WB are first-class pure-Rust
-carrier codecs; Opus remains first-class and explicit in native browser/AI
-bundles because its current backend links `libopus`.
+## Jambonz interoperability
 
-## Carrier SIP and remote endpoints
+- Jambonz is tested as an independent SBC/B2BUA, registrar, and RTPengine
+  media anchor using the same PBX runner and the same `Endpoint`, `StreamPeer`,
+  and `CallbackPeer` APIs used for Asterisk and FreeSWITCH.
+- The release profile pins the latest reviewed open-source component line,
+  currently Jambonz OSS `0.9.9`: `sbc-inbound` commit
+  `b7b707cc2e2a1025623076f16446ea61bae429e0` and `sbc-outbound` commit
+  `fec25d5d1539cdcb80ef8e8b8fc0bc090319dd27`. Source archives and every
+  container are digest-verified, and qualification fails if those component
+  pins are no longer the selected upstream heads.
+- The mandatory UDP/plain-RTP matrix covers authenticated registration,
+  separate PCMU and PCMA calls with bidirectional audio, provisional and final
+  call signaling, hold/resume, RFC 4733 DTMF, CANCEL/487, rejection,
+  REFER/NOTIFY blind transfer, replacement INVITE, BYE from either side, and
+  resource cleanup.
+- G.729, AMR, TLS/SRTP, the RVoIP-as-B2BUA scenario, WebRTC, PSTN,
+  application verbs, recording, high availability, and load are explicit
+  exclusions from this Jambonz profile. Codec and transport support elsewhere
+  in RVoIP is not reduced by those peer-specific exclusions.
+- The local Colima rehearsal passed every applicable Jambonz matrix cell. That
+  rehearsal is diagnostic evidence only; the release claim remains pending
+  until the protected exact-candidate run records the same result.
 
-- The carrier profile enables deadline-driven playout, bounded reorder,
-  G.711 packet-loss concealment, clock-drift handling, measured quality, and
-  RTCP XR reporting. Unknown quality is no longer reported as a perfect MOS.
-- Trusted-trunk policy gates inbound P-Asserted-Identity and an allowlist of
-  private carrier headers. Typed PAI/PPI origination survives Digest retries
-  without allowing arbitrary custom headers to impersonate those fields.
-- Response Contacts honor the dialog transport, and observed-source routing
-  applies consistently to BYE-with-reason, INFO, and NOTIFY.
-- The production remote-endpoint profile uses authenticated RFC 5626 outbound
-  registrations on exact TLS/WSS flows, rejects incomplete registrations,
-  retains opaque flow capabilities, supports ordered failover, and removes
-  stale routes on close, expiry, unregister, replacement, or restart.
-- Awaitable connection and media readiness replaces application polling while
-  preserving exact lifecycle generation, cancellation, and deadline outcomes.
+## Transfer correctness
 
-## Secure media and NAT traversal
+- RFC 3515 blind transfer now serializes the implicit subscription's initial
+  `100 Trying`, progress, and terminal NOTIFY requests on the exact REFER
+  lifecycle. A later status cannot overtake an earlier NOTIFY transaction,
+  and stale, duplicate, or regressive statuses are suppressed.
+- `Refer-To` remains mandatory for REFER. RFC 3892 `Referred-By` remains
+  optional; when a peer supplies it, RVoIP preserves the typed header unchanged
+  into the referenced request. Jambonz qualification verifies that behavior
+  without incorrectly making `Referred-By` a universal requirement.
+- `CallbackPeerBuilder::on_refer_accepted` reports successful local acceptance
+  of an inbound REFER. It is intentionally distinct from
+  `on_transfer_accepted`, which continues to report a remote peer accepting a
+  REFER originated by the application.
+- Attended transfer and RFC 3891 call-replacement semantics remain outside the
+  bounded release claim.
 
-- SIP can negotiate `UDP/TLS/RTP/SAVP` with DTLS 1.2, SHA-256 fingerprints,
-  RFC 8842 setup roles, RFC 7983 shared-socket demultiplexing, and secure-only
-  latching before keys are installed. SDES remains available for compatible
-  deployments.
-- The sans-I/O RFC 8445 ICE agent and RFC 8489 STUN codec support full/lite
-  roles, role conflicts, nomination, restarts, authenticated checks, and
-  server-reflexive address discovery. SIP scope is one component with no TURN
-  or trickle ICE in this release.
-- RTP/RTCP teardown emits a standards-compliant compound Receiver Report plus
-  BYE rather than unnegotiated reduced-size RTCP.
+## Security and release hardening
 
-## Media, codecs, and application control
+- Sensitive authentication and key material is redacted from diagnostics and
+  logging paths exercised by the release gates.
+- Certificate validation, path handling, GitHub Actions cache use, and
+  CodeQL release policy are fail-closed. Publication requires current analysis
+  and zero unreviewed open alerts; reviewed fixture-only findings must carry an
+  individual, auditable disposition.
+- Facade feature-bundle tests run with default features disabled and inspect
+  the resolved dependency graph. The carrier and full bundles continue to
+  include G.711, G.729, AMR-NB, and AMR-WB as documented; Opus remains
+  explicit in the browser, AI, and native-full bundles.
+- Active version-bearing documentation is checked against the workspace
+  version. The release gate also verifies that the Jambonz version, scope,
+  exclusions, and qualification status remain aligned across the public
+  README, SIP README, interop plan, topology profile, compatibility matrix,
+  RFC matrix, changelog, and these notes.
 
-- Per-session re-INVITE codec changes commit only after the final negotiated
-  answer. Rejection, timeout, replacement, or lost observation leaves the
-  stable generation unchanged and retryable.
-- Checked RTP packetization and observation preserve marker, CSRC, extension,
-  padding, sequence, timestamp, SSRC, and negotiated payload identity when the
-  caller requests a packet-preserving boundary.
-- N-way mix-minus conferencing handles G.711 carrier and Opus browser members
-  on one canonical mono mix bus, converts channel layouts at each boundary,
-  and advances stereo RTP timestamps by sample frames. Supervisor monitoring
-  can hear without contributing.
-- Recording sink factories isolate concurrent recordings, and Vapi barge-in
-  flushes both adapter audio and downstream graph queues with drop accounting.
-- Authoritative ingress exposes admission tickets, a single-consumer durable
-  operational stream, fail-closed health, and bounded drain behavior before
-  adapters begin accepting work.
-- Production AAuth delegation uses least-privilege scope intersection;
-  signature freshness rejects far-future timestamps and replay handling is
-  consume-once at the configured authority boundary.
+## Performance evaluation
 
-## Deployment bundles
+`0.3.10` requires a new exact-candidate performance evaluation. The protected
+run executes three clean canonical 2,000-CPS passes, the full performance and
+resiliency matrix, the 160-CPS high-density full-media burst, a one-hour
+30-call monolithic soak, a one-hour 500-call split soak, teardown/churn tests,
+and regression comparison. It publishes structured JSON and Markdown metrics
+plus a SHA-256 index of all current-run performance artifacts. July results
+remain historical baselines; they cannot qualify this candidate.
 
-- `bundle-sip-endpoint`: provider-neutral SIP with G.711.
-- `bundle-carrier-sip`: SIP, DTLS-SRTP, STIR/SHAKEN, G.711, G.729, AMR-NB,
-  and AMR-WB.
-- `bundle-browser-gateway`: high-level SIP/WebRTC/UCTP gateway with G.711 and
-  Opus.
-- `bundle-ai-conversation`: browser/AI conversation surface with G.711 and
-  Opus.
-- `bundle-full-pure-rust`: every facade surface and pure-Rust codec.
-- `bundle-full-native`: every facade surface and all mainline codecs,
-  including Opus.
+General-user 10,000 CPS full-media capability is not claimed. The supported
+envelope remains bounded by the new 2,000-CPS real-media evidence, exact host
+configuration, workloads, and soak durations recorded for this candidate.
 
-The bundle catalog is manifest-derived, documented in `docs/FEATURE_BUNDLES.md`,
-tested with default features disabled, and checked at the resolved dependency
-graph. Release gates separately exercise codec-free, G.711, G.729, AMR,
-Opus, and all-codec configurations.
+The measured host shape, source commit, workload configuration, ASR and error
+counts, setup-latency percentiles, CPU/RSS behavior, media delivery, cleanup,
+and artifact links remain pending until the protected exact-candidate run.
 
-## Compatibility and bounded claims
+## Compatibility
 
-The changes are additive at the facade. Direct `rvoip-core` consumers that
-previously acquired Opus through feature unification must now enable `opus` or
-`all-codecs` explicitly; this prevents a purported pure-Rust graph from
-silently linking a native codec. Applications should select a `bundle-*`
-feature with `default-features = false` when deployment shape matters.
+The changes are additive for public application APIs. Existing
+`on_transfer_accepted` behavior is unchanged; applications may adopt the new
+local inbound-REFER hook when they need that distinct lifecycle point. There
+is no Telnyx- or Jambonz-specific runtime dependency in RVoIP and no provider
+REST API in the SIP stack.
 
-The remote endpoint profile is not declared fully qualified until the
-protected run records its live two-UA NAT/TLS/SDES evidence. Browser/WebRTC,
-ICE, DTLS-SRTP, codec, proxy, performance, and soak claims are bounded to the
-peers, versions, machine shapes, workloads, and thresholds captured by the
-signed qualification aggregate. TURN, SIP trickle ICE, TLS-SRTP, campaigns,
-and unmeasured carrier networks are not implied.
-
-General-user 10,000 CPS full-media capability is not claimed. The strict SIP
-beta envelope remains bounded by its recorded 2,000-CPS real-media profile,
-exact host configuration, peer matrix, workloads, and soak durations.
+`0.3.9` remains the latest published release until this candidate completes
+the normal protected qualification and coordinated publication workflow.
 
 ## Qualification record
 
-The release passed the normal PR Gate, a complete `remote-preflight`, and
-`remote-release` with `first_candidate=true`. The full profile ran the
-structured 108-gate compatibility ledger plus 100 expanded current gates on
-hosted and ephemeral GCP workers, including continuous one-hour soaks.
-Publication accepted only the signed aggregate for the exact clean `main`
-candidate. See the [qualification report](BETA_RELEASE_REPORT.md).
+**Pending.** Before publication this section must identify the clean `main`
+candidate commit, protected workflow run, complete gate count, Jambonz matrix,
+current performance evaluation, signed qualification aggregate, and publication
+result. The release tool must reject notes that still contain this pending marker
+at publish time.

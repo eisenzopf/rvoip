@@ -1,4 +1,4 @@
-# SRTP transport status in 0.3.8
+# SRTP transport status in 0.3.9
 
 The direct pre-shared-key media path installs SRTP before reporting a connected
 client as secure. An SRTP-enabled transport never falls back to plaintext when

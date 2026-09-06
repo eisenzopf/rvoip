@@ -18,7 +18,8 @@
 //! the bit layout of every payload this produces, so it comes from the
 //! negotiated fmtp and never from a default — guessing it produces a stream
 //! the peer cannot parse at all, which is the failure mode
-//! [`AmrPayloadFormat::from_negotiated`] exists to prevent.
+//! [`AmrPayloadFormat::from_negotiated`](crate::rtp_processing::payload::AmrPayloadFormat::from_negotiated)
+//! exists to prevent.
 //!
 //! # Why encoding must not fail on a well-formed frame
 //!
@@ -211,7 +212,7 @@ impl AmrAdapter {
     /// Let this session ask its peer to change rate on its own.
     ///
     /// Off unless a deployment asks for it — see
-    /// [`AMR_AUTO_CMR_PARAMETER`](crate::relay::controller::AMR_AUTO_CMR_PARAMETER).
+    /// [`AMR_AUTO_CMR_PARAMETER`](crate::relay::controller::types::AMR_AUTO_CMR_PARAMETER).
     /// The damper observes the modes the peer actually sends and, once per
     /// interval, requests at most one step toward a mode it is not using;
     /// the request rides out on the next payload through the same field an

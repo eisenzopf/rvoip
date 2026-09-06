@@ -294,6 +294,29 @@ async fn run_deferred_transfer_notify(
             .await;
     };
 
+    // RFC 6665 §4.1.2 requires NOTIFY requests for one subscription to be
+    // sent in order. Keep this exact-subscription owner through transaction
+    // completion, but never keep the session state-machine lane while waiting
+    // for the response: a 401/407 retry and teardown both need that lane.
+    let notify_dispatch_lane = dialog_adapter.transfer_notify_dispatch_lane(&effect.transferor);
+    let mut notify_sequence = tokio::select! {
+        sequence = notify_dispatch_lane.lock_owned() => sequence,
+        () = wait_for_owned_reinvite_retry_cancellation(&mut cancellation) => {
+            return rollback_owned_transfer_notify(
+                operation,
+                DeferredTransferNotifyResult::Cancelled,
+            ).await;
+        }
+    };
+    if notify_sequence.terminal_issued
+        || notify_sequence
+            .last_status_code
+            .is_some_and(|status| effect.status_code <= status)
+    {
+        return rollback_owned_transfer_notify(operation, DeferredTransferNotifyResult::Stale)
+            .await;
+    }
+
     let Some(lane) = store.state_machine_lane_exact(&effect.transferor) else {
         return rollback_owned_transfer_notify(operation, DeferredTransferNotifyResult::Stale)
             .await;
@@ -333,7 +356,7 @@ async fn run_deferred_transfer_notify(
         }
     };
 
-    let result = match dialog_adapter
+    let transaction = match dialog_adapter
         .send_refer_notify_lane_owned(
             &effect.transferor,
             current.state(),
@@ -342,7 +365,7 @@ async fn run_deferred_transfer_notify(
         )
         .await
     {
-        Ok(()) => DeferredTransferNotifyResult::Dispatched,
+        Ok(transaction) => transaction,
         Err(error) => {
             debug!(
                 transferor = %effect.transferor.session_id(),
@@ -350,9 +373,14 @@ async fn run_deferred_transfer_notify(
                 %error,
                 "deferred REFER NOTIFY dispatch failed"
             );
-            DeferredTransferNotifyResult::DispatchFailed
+            drop(lane_guard);
+            return committed.complete(DeferredTransferNotifyResult::DispatchFailed);
         }
     };
+    notify_sequence.last_status_code = Some(effect.status_code);
+    if effect.status_code >= 200 {
+        notify_sequence.terminal_issued = true;
+    }
     drop(lane_guard);
 
     // These are observational projections of the already committed target-leg
@@ -364,6 +392,27 @@ async fn run_deferred_transfer_notify(
         });
     }
 
+    // The lower transaction event removes this exact tracker entry on any
+    // final response, timeout, or transport failure. Holding only the NOTIFY
+    // sequence owner here makes a later progress/terminal task wait without
+    // blocking authentication, state transitions, or cleanup.
+    let result = tokio::select! {
+        () = dialog_adapter.outbound_request_tracker.wait_until_vacant(
+            &effect.transferor,
+            crate::adapters::outbound_request_tracker::TrackedInDialogMethod::Notify,
+        ) => DeferredTransferNotifyResult::Dispatched,
+        () = wait_for_owned_reinvite_retry_cancellation(&mut cancellation) => {
+            DeferredTransferNotifyResult::Cancelled
+        }
+    };
+    debug!(
+        transferor = %effect.transferor.session_id(),
+        status_code = effect.status_code,
+        transaction = %transaction,
+        ?result,
+        "deferred REFER NOTIFY sequence completed"
+    );
+    drop(notify_sequence);
     committed.complete(result)
 }
 

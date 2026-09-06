@@ -1589,6 +1589,50 @@ async fn commit_owned_invite<T>(
 }
 
 /// Minimal dialog adapter - just translates between dialog-core and state machine
+#[derive(Default)]
+pub(crate) struct TransferNotifyDispatchState {
+    /// Highest sipfrag status already emitted for this subscription. Automatic
+    /// transfer progress is monotonic (100 -> 18x -> terminal), so a task that
+    /// reaches the FIFO late cannot put stale progress behind a newer result.
+    pub(crate) last_status_code: Option<u16>,
+    /// Once a terminal sipfrag has been put on the wire, later provisional or
+    /// duplicate terminal projections for this exact REFER subscription are
+    /// stale and must not reopen it.
+    pub(crate) terminal_issued: bool,
+}
+
+/// One FIFO owner for automatic REFER-progress NOTIFYs on an exact session.
+///
+/// SIP's per-dialog CSeq ordering and the request tracker's one-request-per-
+/// method invariant both require progress and terminal NOTIFYs to be emitted
+/// sequentially. The exact lifecycle handle prevents a reused raw call ID
+/// from inheriting an earlier subscription's queue.
+#[derive(Default)]
+struct TransferNotifyDispatchLanes {
+    lanes: DashMap<SessionRegistryHandle, Arc<tokio::sync::Mutex<TransferNotifyDispatchState>>>,
+}
+
+impl TransferNotifyDispatchLanes {
+    fn lane(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Arc<tokio::sync::Mutex<TransferNotifyDispatchState>> {
+        self.lanes
+            .entry(handle.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(Default::default())))
+            .clone()
+    }
+
+    fn remove_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        lane: &Arc<tokio::sync::Mutex<TransferNotifyDispatchState>>,
+    ) {
+        self.lanes
+            .remove_if(handle, |_, current| Arc::ptr_eq(current, lane));
+    }
+}
+
 pub struct DialogAdapter {
     /// Dialog-core unified API
     pub(crate) dialog_api: Arc<UnifiedDialogApi>,
@@ -1621,6 +1665,11 @@ pub struct DialogAdapter {
     /// return after first transport write while authentication/final response
     /// arrives asynchronously.
     pub(crate) outbound_request_tracker: OutboundInDialogRequestTracker,
+
+    /// FIFO serialization for automatic REFER subscription NOTIFYs. A lane is
+    /// scoped to the exact transferor lifetime and retained until exact dialog
+    /// cleanup, so a final NOTIFY cannot race a still-pending progress NOTIFY.
+    transfer_notify_dispatch_lanes: Arc<TransferNotifyDispatchLanes>,
 
     /// Exact owner for each staged outbound initial INVITE.
     outbound_initial_invites: Arc<DashMap<SessionId, OutboundInitialInviteBinding>>,
@@ -1740,6 +1789,7 @@ impl DialogAdapter {
             outbound_request_tracker: OutboundInDialogRequestTracker::new(
                 non_invite_transaction_timeout,
             ),
+            transfer_notify_dispatch_lanes: Arc::new(TransferNotifyDispatchLanes::default()),
             outbound_initial_invites: Arc::new(DashMap::new()),
             data_message_dispatch_lanes: Arc::new(SipDataMessageDispatchLanes::default()),
             auto_emit_extra_headers,
@@ -3903,6 +3953,13 @@ impl DialogAdapter {
         self.non_invite_transaction_timeout
     }
 
+    pub(crate) fn transfer_notify_dispatch_lane(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Arc<tokio::sync::Mutex<TransferNotifyDispatchState>> {
+        self.transfer_notify_dispatch_lanes.lane(handle)
+    }
+
     /// Return whether this exact session retained a BYE after `generation`.
     /// This is side-effect evidence, not an error-string classification: the
     /// coordinator uses it only to join the already-required final-response
@@ -4846,6 +4903,9 @@ impl DialogAdapter {
         self.outgoing_bye_wait_intents.remove(handle);
         self.outgoing_bye_generation_watch.remove(handle);
         self.outbound_request_tracker.clear_exact(handle);
+        let transfer_notify_lane = self.transfer_notify_dispatch_lanes.lane(handle);
+        self.transfer_notify_dispatch_lanes
+            .remove_exact(handle, &transfer_notify_lane);
 
         if let Some(dialog_id) = dialog_id.as_ref() {
             let lane = self.data_message_dispatch_lanes.lane(dialog_id);
@@ -5037,6 +5097,9 @@ impl DialogAdapter {
                 .fetch_add(1, Ordering::Relaxed);
         }
         self.outbound_request_tracker.clear_exact(handle);
+        let transfer_notify_lane = self.transfer_notify_dispatch_lanes.lane(handle);
+        self.transfer_notify_dispatch_lanes
+            .remove_exact(handle, &transfer_notify_lane);
 
         tracing::debug!(
             "Cleaned up dialog adapter mappings for session {}",
@@ -5414,6 +5477,7 @@ impl DialogAdapter {
 
         self.send_refer_notify_lane_owned(&handle, &session, status_code, reason)
             .await
+            .map(|_| ())
     }
 
     /// Send one REFER progress NOTIFY while the caller owns the exact
@@ -5429,7 +5493,7 @@ impl DialogAdapter {
         session: &SessionState,
         status_code: u16,
         reason: &str,
-    ) -> Result<()> {
+    ) -> Result<TransactionKey> {
         if session.lifecycle_handle.as_ref() != Some(handle)
             || &session.session_id != handle.session_id()
         {
@@ -5468,13 +5532,13 @@ impl DialogAdapter {
             .await
             .map_err(|error| redacted_dialog_operation_error("REFER NOTIFY", error))?;
         self.outbound_request_tracker
-            .activate(lease, transaction_id)?;
+            .activate(lease, transaction_id.clone())?;
 
         tracing::info!(
             "REFER NOTIFY sent successfully for session {}",
             handle.session_id().0
         );
-        Ok(())
+        Ok(transaction_id)
     }
 
     // ===== MESSAGE Methods =====
@@ -5963,6 +6027,7 @@ impl Clone for DialogAdapter {
             next_outgoing_bye_generation: self.next_outgoing_bye_generation.clone(),
             non_invite_transaction_timeout: self.non_invite_transaction_timeout,
             outbound_request_tracker: self.outbound_request_tracker.clone(),
+            transfer_notify_dispatch_lanes: self.transfer_notify_dispatch_lanes.clone(),
             outbound_initial_invites: self.outbound_initial_invites.clone(),
             data_message_dispatch_lanes: self.data_message_dispatch_lanes.clone(),
             auto_emit_extra_headers: self.auto_emit_extra_headers.clone(),

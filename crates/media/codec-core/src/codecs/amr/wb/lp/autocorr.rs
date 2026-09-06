@@ -11,7 +11,7 @@
 //! Autocorrelations do not fit in 16 bits with enough precision for
 //! Levinson-Durbin, so the reference carries each as a `(high, low)` pair —
 //! "DPF" — where the value is `high · 2¹⁵ + low`, both `Word16`.
-//! [`crate::fixed_point::oper32`] provides the split and multiply.
+//! The private `crate::fixed_point::oper32` module provides the split and multiply.
 //!
 //! # Scaling
 //!

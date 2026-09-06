@@ -1,5 +1,6 @@
 //! `AudioSource` / `AudioSink` traits for plugging real microphone / speaker
-//! backends (e.g. `cpal`, `AVFoundation`, `WASAPI`) into a [`SessionHandle`].
+//! backends (e.g. `cpal`, `AVFoundation`, `WASAPI`) into a
+//! [`SessionHandle`](crate::client::SessionHandle).
 //!
 //! Production callers implement [`AudioSource::next_packet`] to feed Opus RTP
 //! packets into the outbound `frames_out` channel of a `WebRtcMediaStream`.

@@ -11,6 +11,7 @@ import tomllib
 
 
 ROOT = Path(__file__).resolve().parents[2]
+WORKSPACE_MANIFEST = ROOT / "Cargo.toml"
 MANIFEST = ROOT / "crates/rvoip/Cargo.toml"
 DOCUMENT = ROOT / "docs/FEATURE_BUNDLES.md"
 BUNDLE_PREFIX = "bundle-"
@@ -20,12 +21,14 @@ class BundleError(RuntimeError):
     """The public bundle contract is internally inconsistent."""
 
 
-def load_contract() -> tuple[dict[str, list[str]], list[dict[str, object]]]:
+def load_contract() -> tuple[str, dict[str, list[str]], list[dict[str, object]]]:
+    with WORKSPACE_MANIFEST.open("rb") as handle:
+        workspace = tomllib.load(handle)
     with MANIFEST.open("rb") as handle:
         manifest = tomllib.load(handle)
     features = manifest["features"]
     bundles = manifest["package"]["metadata"]["rvoip"]["feature-bundles"]
-    return features, bundles
+    return workspace["workspace"]["package"]["version"], features, bundles
 
 
 def feature_closure(name: str, features: dict[str, list[str]]) -> set[str]:
@@ -105,7 +108,7 @@ def validate(features: dict[str, list[str]], bundles: list[dict[str, object]]) -
             raise BundleError(f"carrier bundle lost mainline codec feature {codec}")
 
 
-def render(bundles: list[dict[str, object]]) -> str:
+def render(version: str, bundles: list[dict[str, object]]) -> str:
     rows = []
     for bundle in bundles:
         members = ", ".join(f"`{item}`" for item in bundle["members"])
@@ -147,13 +150,13 @@ include it say so explicitly.
 
 ```toml
 # Small provider-neutral SIP service.
-rvoip = {{ version = "0.3.9", default-features = false, features = ["bundle-sip-endpoint"] }}
+rvoip = {{ version = "{version}", default-features = false, features = ["bundle-sip-endpoint"] }}
 
 # Carrier-facing service with the pure-Rust telephony codec set.
-rvoip = {{ version = "0.3.9", default-features = false, features = ["bundle-carrier-sip"] }}
+rvoip = {{ version = "{version}", default-features = false, features = ["bundle-carrier-sip"] }}
 
 # Browser-to-SIP application gateway; install libopus on the build host.
-rvoip = {{ version = "0.3.9", default-features = false, features = ["bundle-browser-gateway"] }}
+rvoip = {{ version = "{version}", default-features = false, features = ["bundle-browser-gateway"] }}
 ```
 
 Advanced users may continue selecting leaf features directly. Start from
@@ -203,9 +206,9 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        features, bundles = load_contract()
+        version, features, bundles = load_contract()
         validate(features, bundles)
-        expected = render(bundles)
+        expected = render(version, bundles)
         if args.write:
             DOCUMENT.write_text(expected, encoding="utf-8")
         elif not DOCUMENT.is_file() or DOCUMENT.read_text(encoding="utf-8") != expected:

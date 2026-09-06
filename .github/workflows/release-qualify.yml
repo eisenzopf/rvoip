@@ -39,6 +39,7 @@ on:
 permissions:
   contents: read
   actions: read
+  security-events: read
 
 concurrency:
   # Supersede the same qualification request, but allow disjoint diagnostic
@@ -95,6 +96,11 @@ jobs:
                 echo "diagnostic candidates must be the exact head of a branch in this repository" >&2
                 exit 1
               }
+          elif [[ "$PROFILE" == remote-release ]]; then
+            test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" || {
+              echo "remote-release must qualify the current protected main head" >&2
+              exit 1
+            }
           else
             git merge-base --is-ancestor HEAD origin/main || {
               echo "release candidates must be commits on origin/main" >&2
@@ -114,6 +120,16 @@ jobs:
               print('remote-release is fail-closed until every legacy gate has a structured replacement:', *missing, sep='\n- ')
               raise SystemExit(1)
           PY
+
+      - name: Require exact-candidate CodeQL with zero open alerts
+        if: inputs.profile == 'remote-release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 scripts/ci/check_codeql_release_policy.py
+          --repository "${{ github.repository }}"
+          --candidate "$(git rev-parse HEAD)"
+          --receipt target/release-plan/codeql-policy.json
 
       - name: Download prior qualification evidence
         if: inputs.profile != 'remote-preflight' && inputs.profile != 'remote-diagnostic' && inputs.prior_run_id != ''
@@ -196,7 +212,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-gate-plan
-          path: target/release-plan/plan.json
+          path: target/release-plan/
           retention-days: 90
           if-no-files-found: error
 
@@ -238,12 +254,6 @@ jobs:
         uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2
         with:
           tool: cargo-deny@0.20.2
-
-      - name: Restore content-addressed Rust cache
-        if: matrix.hosted
-        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
-        with:
-          shared-key: release-${{ matrix.id }}
 
       - name: Install hosted-runner native dependencies
         if: matrix.hosted
@@ -879,7 +889,7 @@ jobs:
         with:
           name: release-gate-evidence
           path: |
-            target/release-plan/plan.json
+            target/release-plan/
             target/release-evidence/
             target/release-qualification/aggregate.json
             target/release-qualification/reports/
@@ -892,7 +902,7 @@ jobs:
         with:
           name: diagnostic-gate-evidence
           path: |
-            target/release-plan/plan.json
+            target/release-plan/
             target/release-evidence/
             target/release-qualification/aggregate.json
           retention-days: 30
