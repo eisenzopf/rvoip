@@ -432,6 +432,13 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('test -z "${CRATES_IO_TOKEN:-}"', probe)
         self.assertIn('"publishing_credentials_present": False', probe)
 
+    def test_release_planner_outlives_exact_candidate_codeql_poll(self) -> None:
+        workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
+        plan = workflow.split("  plan:\n", maxsplit=1)[1].split("\n  gate-hosted:\n", maxsplit=1)[0]
+
+        self.assertIn("timeout-minutes: 30", plan)
+        self.assertIn("--timeout-seconds 1200", plan)
+
     def test_remote_diagnostics_are_exact_gate_fresh_and_non_publishing(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
         publication = (ROOT / ".github/workflows/release-publish.yml").read_text()
