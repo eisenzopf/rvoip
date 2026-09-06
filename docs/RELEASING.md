@@ -113,6 +113,11 @@ auto-delete disk. A separate cleanup job sweeps interrupted runs. The workers
 never receive the crates.io token and no release worker remains provisioned
 between qualifications.
 
+Hosted qualification, release preparation, and publication runners install the
+native ALSA, Opus, OpenSSL, libvpx, and Protobuf development packages before
+building. `libvpx-dev` is required by the WebRTC VP8/VP9 dependency graph when
+the release rustdoc gate compiles the complete workspace with `--all-features`.
+
 The current full profile is balanced across six `n2-standard-8` short-performance
 workers, two `n2-standard-8` one-hour-soak workers, seven `n2-standard-4`
 burst/soak workers, one `n2-standard-4` stateful interoperability worker, and

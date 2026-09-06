@@ -189,12 +189,25 @@ class WorkflowPolicyTests(unittest.TestCase):
             "libasound2-dev",
             "libopus-dev",
             "libssl-dev",
+            "libvpx-dev",
             "protobuf-compiler",
             "pkg-config",
             "cmake",
         ):
             with self.subTest(package=package):
                 self.assertIn(package, text[dependency_step:validation_step])
+
+    def test_release_all_features_paths_install_libvpx(self) -> None:
+        workflows = (
+            ("release-qualify.yml", "Install hosted-runner native dependencies", "Run gate shard"),
+            ("release-publish.yml", "Install package build dependencies", "Establish exact local main"),
+        )
+        for filename, dependency_name, next_step_name in workflows:
+            with self.subTest(workflow=filename):
+                text = (ROOT / ".github/workflows" / filename).read_text()
+                dependency_step = text.index(dependency_name)
+                next_step = text.index(next_step_name, dependency_step)
+                self.assertIn("libvpx-dev", text[dependency_step:next_step])
 
     def test_parallel_gcp_workspace_is_ephemeral_and_fail_closed(self) -> None:
         workflow = (ROOT / ".github/workflows/gcp-qualification-pilot.yml").read_text()
