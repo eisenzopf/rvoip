@@ -255,6 +255,9 @@ class GateFrameworkTests(unittest.TestCase):
         self.assertIn("CARGO_HOME", script)
         self.assertIn("RUSTUP_HOME", script)
         self.assertIn("RUSTC_WRAPPER", script)
+        self.assertIn("RVOIP_PERF_PREBUILT_MANIFEST", script)
+        self.assertIn("RVOIP_RELEASE_CANDIDATE", script)
+        self.assertIn("RVOIP_RELEASE_ENVIRONMENT_ID", script)
 
     def test_media_burst_scenarios_run_on_independent_workers(self) -> None:
         scenario_ids = {
