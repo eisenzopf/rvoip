@@ -1120,9 +1120,28 @@ def reconcile_performance_metrics(
                 continue
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, destination)
-            indexed[key] = digest
+            indexed[f"performance-results/{key}"] = digest
     if not indexed:
         raise GateError("exact-candidate performance artifact set is empty")
+
+    canonical_indexes = sorted(evidence_root.rglob("canonical-2k/index.json"))
+    if len(canonical_indexes) != 1:
+        raise GateError(
+            "current performance evaluation requires exactly one canonical "
+            f"2,000-CPS evidence index, found {len(canonical_indexes)}"
+        )
+    canonical_index = canonical_indexes[0]
+    canonical_root = canonical_index.parent
+    canonical_files = sorted(
+        path for path in canonical_root.rglob("*") if path.is_file()
+    )
+    if not canonical_files:
+        raise GateError("canonical 2,000-CPS evidence package is empty")
+    for path in canonical_files:
+        key = f"canonical-2k/{path.relative_to(canonical_root).as_posix()}"
+        if key in indexed:
+            raise GateError(f"duplicate current performance artifact index key: {key}")
+        indexed[key] = file_sha256(path)
 
     index_path = artifact / "current-performance-artifact-index.json"
     index_path.write_bytes(
@@ -1146,6 +1165,8 @@ def reconcile_performance_metrics(
             str(output_json),
             "--output-markdown",
             str(output_markdown),
+            "--canonical-index",
+            str(canonical_index),
             "--high-density-cps",
             "160",
             "--high-density-min-asr",
@@ -1158,6 +1179,7 @@ def reconcile_performance_metrics(
             "30",
             "--require-high-density",
             "--require-monolithic",
+            "--require-canonical",
         ],
         root=root,
         check=False,

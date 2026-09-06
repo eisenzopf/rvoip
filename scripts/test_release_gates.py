@@ -996,6 +996,19 @@ class GateFrameworkTests(unittest.TestCase):
             ):
                 gates.reconcile_performance_metrics(ROOT, root, root / "artifact")
 
+    def test_current_performance_reconciliation_requires_canonical_package(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shard = root / "_perf-results/shard"
+            shard.mkdir(parents=True)
+            (shard / "result.json").write_text("{}\n")
+            with self.assertRaisesRegex(
+                gates.GateError, "exactly one canonical 2,000-CPS evidence index"
+            ):
+                gates.reconcile_performance_metrics(ROOT, root, root / "artifact")
+
 
 if __name__ == "__main__":
     unittest.main()

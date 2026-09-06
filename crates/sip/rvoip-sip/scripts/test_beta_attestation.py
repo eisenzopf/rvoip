@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import pathlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -1399,15 +1400,22 @@ class BetaAttestationTests(unittest.TestCase):
             crate_manifest,
             r"(?m)^version\.workspace\s*=\s*true(?:\s*(?:#.*)?)?$",
         )
-        marker = f"Current candidate and runtime crate version: `{self.workspace_version}`"
+        marker = f"Current workspace runtime crate version: `{self.workspace_version}`"
         self.assertIn(marker, checklist)
-        self.assertIn(
-            f"{self.workspace_version} Release Candidate Notes", release_notes
+        candidate = re.search(
+            r"(?m)^# rvoip (\d+)\.(\d+)\.(\d+) Candidate Release Notes$",
+            release_notes,
         )
+        self.assertIsNotNone(candidate)
+        workspace = tuple(int(value) for value in self.workspace_version.split("."))
+        candidate_version = tuple(int(value) for value in candidate.groups())
         self.assertIn(
-            f"**Unified `{self.workspace_version}` release train.**",
-            (WORKSPACE_ROOT / "README.md").read_text(encoding="utf-8"),
+            candidate_version,
+            {workspace, (workspace[0], workspace[1], workspace[2] + 1)},
         )
+        readme = (WORKSPACE_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("](CHANGELOG.md)", readme)
+        self.assertNotIn("**Unified `", readme)
 
 
 if __name__ == "__main__":

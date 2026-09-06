@@ -1291,6 +1291,12 @@ write_performance_gate_metrics() {
   if [ "${BETA_RUN_PERF_ALL:-0}" = "1" ]; then
     arguments+=(--require-monolithic)
   fi
+  if [ "${BETA_REQUIRE_CANONICAL_2K_EVIDENCE:-0}" = "1" ]; then
+    arguments+=(
+      --canonical-index "$ARTIFACT_DIR/canonical-2k/index.json"
+      --require-canonical
+    )
+  fi
   python3 "$SCRIPT_DIR/beta_performance_gate_metrics.py" "${arguments[@]}"
 }
 
