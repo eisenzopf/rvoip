@@ -337,7 +337,7 @@ Operational references:
   from the 0.3.2 claim and that has not changed.
 - WebRTC/browser interop, TURN, and WSS outbound remain outside the SIP beta
   claim unless separately completed and tested. SIP DTLS-SRTP is a distinct
-  feature-gated 0.3.9 candidate capability whose claim depends on fresh
+  feature-gated 0.3.10 candidate capability whose claim depends on fresh
   protected release evidence.
 - The default full-media performance claim is bounded to the documented
   beta release profiles and artifacts. Higher tuned-profile results need

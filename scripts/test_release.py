@@ -421,6 +421,35 @@ rvoip-rtc = { path = "../rvoip-rtc" }
                         root, "0.3.5", "0.3.6"
                     )
 
+    def test_candidate_aware_metadata_preserves_historical_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "README.md"
+            path.write_text(
+                "# 0.3.10 candidate\n"
+                "Current workspace runtime crate version: `0.3.9`.\n"
+                "Current qualified runtime crate version: `0.3.9`.\n"
+                "0.3.9 remains the latest published release.\n"
+                'rvoip = { version = "0.3.9", features = ["sip"] }\n',
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                release, "ACTIVE_RELEASE_METADATA_FILES", (Path("README.md"),)
+            ):
+                edits = release.planned_release_metadata_edits(
+                    root, "0.3.9", "0.3.10"
+                )
+
+            updated = edits[path].decode()
+            self.assertIn(
+                "Current workspace runtime crate version: `0.3.10`", updated
+            )
+            self.assertIn(
+                "Current qualified runtime crate version: `0.3.9`", updated
+            )
+            self.assertIn("0.3.9 remains the latest published release", updated)
+            self.assertIn('rvoip = { version = "0.3.10"', updated)
+
     def test_active_release_metadata_rejects_stale_dependency_example(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -29,8 +29,8 @@ failure rather than a skip.
 | FreeSWITCH Sofia | PBX/B2BUA interop | Required release gate. |
 | Latest stable Jambonz OSS | SBC/B2BUA, registrar, and anchored-media interop | Required 0.3.10 release gate; currently component line 0.9.9. |
 | PJSIP or baresip | Strict SIP user agent | Required release gate. |
-| Kamailio | Transaction-stateful proxy interoperability peer | Required for the `0.3.9` proxy release gate. |
-| OpenSIPS | Independent transaction-stateful proxy interoperability peer | Required for the `0.3.9` proxy release gate. |
+| Kamailio | Transaction-stateful proxy interoperability peer | Required for the `0.3.10` proxy release gate. |
+| OpenSIPS | Independent transaction-stateful proxy interoperability peer | Required for the `0.3.10` proxy release gate. |
 
 ## Current Automation Status
 
@@ -158,7 +158,7 @@ Asterisk/FreeSWITCH lifecycle pattern: it owns startup, readiness, isolated
 configuration, packet capture, logs, exact version/image provenance, teardown,
 and restoration of any process that was running before the gate.
 
-| Scenario | Required for `0.3.9` |
+| Scenario | Required for `0.3.10` |
 |----------|----------------------|
 | UDP, TCP, and TLS/SIPS forwarding | Yes |
 | Matched and unmatched CANCEL | Yes |
@@ -191,7 +191,8 @@ Each interop run should store:
 ## Release-Gate Policy
 
 - A failure in SIPp, Asterisk, FreeSWITCH, Jambonz, Kamailio, or OpenSIPS
-  blocks the applicable release. Jambonz becomes mandatory in 0.3.10.
+  blocks the applicable release. Jambonz was not part of the mandatory 0.3.9
+  matrix and becomes mandatory in 0.3.10.
 - The proxy matrix must contain exactly both pinned peers, both adjacency
   orders, and UDP/TCP/verified-TLS rows. Its global scenario inventory and
   per-row core scenario set are validated independently while generating the

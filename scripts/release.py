@@ -84,6 +84,10 @@ DEPENDENCY_EXAMPLE_VERSION = re.compile(
     r'(?:"(?P<plain>[0-9]+\.[0-9]+\.[0-9]+)"|'
     r'\{[^\n}]*\bversion\s*=\s*"(?P<table>[0-9]+\.[0-9]+\.[0-9]+)"[^\n}]*\})'
 )
+CURRENT_WORKSPACE_RELEASE_VERSION = re.compile(
+    r"(?m)^(?P<prefix>Current workspace runtime crate version:\s*`)"
+    r"[0-9]+\.[0-9]+\.[0-9]+(?P<suffix>`\.)$"
+)
 LIVE_DEPENDENCY_SCAN_SUFFIXES = frozenset({".toml"})
 LIVE_DEPENDENCY_SCAN_IGNORED_DIRS = frozenset({".git", "target"})
 VERIFICATION_RECEIPT_SCHEMA = "rvoip-unified-release-verification-v4"
@@ -591,7 +595,14 @@ def planned_version_edits(
 def planned_release_metadata_edits(
     root: Path, current_version: str, version: str
 ) -> dict[Path, bytes]:
-    """Update current-version references in the active release documents."""
+    """Update active release references without rewriting historical evidence.
+
+    Candidate-aware documents can intentionally mention both the published
+    version and the next version.  In those files, only live dependency
+    examples are mechanical release metadata; the remaining version prose is
+    author-owned history or qualification context.  Documents that do not yet
+    mention the target retain the legacy all-marker update.
+    """
     validate_active_release_metadata(root, current_version)
     changes: dict[Path, bytes] = {}
     for relative_path in ACTIVE_RELEASE_METADATA_FILES:
@@ -603,7 +614,17 @@ def planned_release_metadata_edits(
                 f"active release metadata in {relative_path} does not reference "
                 f"workspace version {current_version}"
             )
-        updated = text.replace(current_version, version)
+        if version in text:
+            updated = DEPENDENCY_EXAMPLE_VERSION.sub(
+                lambda match: match.group(0).replace(current_version, version),
+                text,
+            )
+            updated = CURRENT_WORKSPACE_RELEASE_VERSION.sub(
+                lambda match: f"{match.group('prefix')}{version}{match.group('suffix')}",
+                updated,
+            )
+        else:
+            updated = text.replace(current_version, version)
         changes[path] = updated.encode()
     return changes
 

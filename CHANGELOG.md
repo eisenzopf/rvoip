@@ -24,6 +24,15 @@
 - Pinned the canonical performance client's app-session dispatcher shape so
   exact-candidate results cannot change with the release worker's detected CPU
   count.
+- Reconciled current performance results from authoritative per-worker output
+  instead of nested provenance copies, staged the required high-density burst
+  evidence into the generated evaluation, and made the one-hour 500-call split
+  soak an explicit machine-validated release result. A missing authoritative
+  result tree now fails through the structured gate path rather than an
+  uncaught filesystem exception.
+- Preserved intentional prior-release and qualification references when
+  preparing candidate-aware documentation, while still advancing live crate
+  dependency examples and the current workspace runtime marker.
 
 ### Interoperability and release evidence
 
