@@ -1418,7 +1418,7 @@ pub enum CallbackEvent {
     ReferReceived {
         call_id: CallId,
         refer_to: String,
-        referred_by: Option<TypedHeader>,
+        referred_by: Option<Box<TypedHeader>>,
     },
     ReferAccepted {
         call_id: CallId,
@@ -1805,7 +1805,7 @@ pub async fn callback_runtime(
                 let _ = tx.send(CallbackEvent::ReferReceived {
                     call_id: handle.id().clone(),
                     refer_to,
-                    referred_by: referred_by.clone(),
+                    referred_by: referred_by.clone().map(Box::new),
                 });
                 if refer_provider == PbxProvider::Jambonz && referred_by.is_none() {
                     eprintln!(
@@ -3871,7 +3871,7 @@ async fn wait_for_callback_jambonz_refer(
                     refer_to,
                     referred_by,
                 }) if &refer_call_id == call_id => {
-                    let referred_by = referred_by
+                    let referred_by = *referred_by
                         .ok_or("Jambonz callback REFER did not preserve Referred-By attribution")?;
                     return Ok(AcceptedRefer {
                         refer_to,
