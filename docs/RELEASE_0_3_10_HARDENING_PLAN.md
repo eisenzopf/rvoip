@@ -216,7 +216,10 @@ profile or silently broaden its claim.
    qualification with
    `first_candidate=true`. Evidence reuse from 0.3.9 is not accepted for this
    hardening release, and the new current-candidate performance evaluation is
-   mandatory.
+   mandatory. The qualification planner waits up to one hour for the exact
+   merged commit's Rust CodeQL analysis; a cold hosted analysis can approach
+   30 minutes and must not be mistaken for stale evidence while it is still
+   running.
 7. Run protected publication dry-run and live publication against that same
    qualified SHA and qualification run ID.
 8. Verify all 45 crates and docs on crates.io plus the protected tag and

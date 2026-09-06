@@ -449,8 +449,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
         plan = workflow.split("  plan:\n", maxsplit=1)[1].split("\n  gate-hosted:\n", maxsplit=1)[0]
 
-        self.assertIn("timeout-minutes: 30", plan)
-        self.assertIn("--timeout-seconds 1200", plan)
+        self.assertIn("timeout-minutes: 75", plan)
+        self.assertIn("--timeout-seconds 3600", plan)
 
     def test_remote_diagnostics_are_exact_gate_fresh_and_non_publishing(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
