@@ -205,6 +205,15 @@ class CanonicalEvidenceTests(unittest.TestCase):
         self.assertIn('HOME="${RVOIP_CANONICAL_LOGIN_HOME}"', wrapper)
         self.assertNotIn('HOME="${HOME}"', wrapper)
 
+    def test_profile_pins_the_historical_alice_dispatcher_shape(self):
+        profile = (SCRIPT_DIR / "perf_call_setup_2k_profile.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'export RVOIP_PERF_ALICE_SESSION_EVENT_DISPATCHER_WORKERS="16"',
+            profile,
+        )
+
     def test_nonpass_manifest_is_rejected(self):
         self.rewrite_manifest(
             self.runs[1], lambda manifest: manifest.update(overall_status="FAIL")

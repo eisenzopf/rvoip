@@ -21,6 +21,9 @@
   target header.
 - Hardened sensitive diagnostics, certificate and path handling, CI cache use,
   release feature-bundle checks, and CodeQL publication policy.
+- Pinned the canonical performance client's app-session dispatcher shape so
+  exact-candidate results cannot change with the release worker's detected CPU
+  count.
 
 ### Interoperability and release evidence
 

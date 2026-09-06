@@ -44,7 +44,10 @@ After the measured calls drain, it allows 95 seconds for the structural
 anti-reuse fence and allocator settling, then measures a separate 600-second
 RSS gate window. The clean artifact embeds the raw resource samples needed to
 audit that window, without endpoint diagnostic scans in the active or RSS gate
-windows. `clean` also verifies the exact workload/configuration, runs
+windows. It explicitly assigns 16 app-session event dispatcher workers to
+each of the four Alice shards so the canonical configuration does not depend
+on the runner's detected CPU count. `clean` also verifies the exact
+workload/configuration, runs
 `scripts/perf_2k_acceptance.py` against the absolute beta limits, and gates
 `perf_audit.py --fail-on-regression` against the reviewed `20260706T181609Z`
 baseline tracked under `perf-baselines/`. The runner snapshots that input into

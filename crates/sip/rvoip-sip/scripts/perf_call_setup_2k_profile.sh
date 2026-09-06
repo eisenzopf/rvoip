@@ -51,9 +51,11 @@ Usage: perf_call_setup_2k_profile.sh <clean|cpu|timing|memory|boundary>
 The clean workload conditions shared peers at 30, 100, 300, and 1,000 CPS,
 then measures 2,000 CPS with a 5s ramp, 30s steady, 5s cooldown, and a
 95-second post-drain structural/allocator settle followed by a 600-second RSS
-gate sample with raw resource samples embedded. It uses eight Tokio workers,
-four Alice endpoint shards, and the pbx-media-server recipe. Only clean is
-acceptance.
+gate sample with raw resource samples embedded. It uses eight Tokio workers
+and four Alice endpoint shards with 16 app-session event dispatcher workers
+each. The explicit Alice worker count keeps the configuration identical when
+the runner's available CPU count differs from the reviewed baseline host. Only
+clean is acceptance.
 
 Useful profiler-only overrides:
   RVOIP_PERF_PROFILE_SAMPLY_RATE       samply Hz (default 1000)
@@ -237,6 +239,7 @@ export RVOIP_PERF_WORKER_THREADS="8"
 export RVOIP_PERF_PROFILE="pbx-media-server"
 export RVOIP_PERF_CLIENT_PROFILE="endpoint"
 export RVOIP_PERF_ALICE_SHARDS="4"
+export RVOIP_PERF_ALICE_SESSION_EVENT_DISPATCHER_WORKERS="16"
 export RVOIP_PERF_SCHED_TICK_MS="1"
 export RVOIP_PERF_REPORT_SCENARIO="${SCENARIO}"
 export RVOIP_PERF_MIN_ASR="${MIN_ASR}"
