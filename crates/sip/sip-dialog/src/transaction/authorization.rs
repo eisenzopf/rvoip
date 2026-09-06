@@ -205,6 +205,16 @@ pub enum SipRequestAuthorization {
     },
     /// The request must be answered locally and not dispatched upward.
     Rejected(SipRequestRejection),
+    /// The request is discarded without any response.
+    ///
+    /// This is the answer to a flood: a source that has exhausted its request
+    /// budget is not told so, because every response costs the listener as
+    /// much as the request did and tells the sender it is being heard. The
+    /// reason is local diagnostic detail and is never sent on the wire.
+    Dropped {
+        /// Credential-free diagnostic detail.
+        reason: Option<String>,
+    },
 }
 
 impl fmt::Debug for SipRequestAuthorization {
@@ -212,6 +222,10 @@ impl fmt::Debug for SipRequestAuthorization {
         match self {
             Self::Authorized { .. } => f.write_str("Authorized { principal: <redacted> }"),
             Self::Rejected(rejection) => f.debug_tuple("Rejected").field(rejection).finish(),
+            Self::Dropped { reason } => f
+                .debug_struct("Dropped")
+                .field("has_reason", &reason.is_some())
+                .finish(),
         }
     }
 }

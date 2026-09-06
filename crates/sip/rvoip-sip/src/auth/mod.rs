@@ -217,7 +217,10 @@
 
 mod listener;
 
-pub use listener::SipListenerAuthPolicy;
+pub use listener::{
+    SipIngressEvent, SipIngressObserver, SipIngressOutcome, SipListenerAuthPolicy,
+    SipSourceRateLimit,
+};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;

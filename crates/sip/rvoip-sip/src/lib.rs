@@ -582,7 +582,8 @@ pub use auth::{
     JwksJwtValidator, JwtValidator, OAuth2IntrospectionValidator, PasswordVerifier,
     SipAuthChallenge, SipAuthContext, SipAuthDecision, SipAuthPolicy, SipAuthScheme,
     SipAuthService, SipAuthSource, SipClientAuth, SipDigestAuthService, SipIncomingAuthenticator,
-    SipListenerAuthPolicy, SipPrincipalAuthDecision, SipTransportSecurityContext,
+    SipIngressEvent, SipIngressObserver, SipIngressOutcome, SipListenerAuthPolicy,
+    SipPrincipalAuthDecision, SipSourceRateLimit, SipTransportSecurityContext,
     TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
 };
 pub use rvoip_media_core::performance::pool::PoolConfig as MediaPoolConfig;

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### SIP ingress budget and admission observer
+
+- `SipListenerAuthPolicy::with_source_rate_limit` drops requests from any
+  source address over its token budget before any other admission check,
+  trusted trunks included, and answers nothing: a flood is not told it is
+  heard. `SipRequestAuthorization::Dropped` carries that outcome through the
+  transaction layer without a response.
+- `SipListenerAuthPolicy::with_ingress_observer` reports every admission
+  decision (`SipIngressEvent`: source, method, admitted/rejected/dropped) to
+  a caller-supplied `SipIngressObserver`, so an edge can count what it
+  refuses instead of reading it back out of logs.
+- `rvoip::app::SipConfig::source_rate_limit` and `ingress_observer` expose
+  both through the facade; they take effect with the trusted-trunk policy.
+
 ## 0.3.9 — 2026-09-05
 
 This coordinated 45-crate release makes the carrier media and remote-endpoint
