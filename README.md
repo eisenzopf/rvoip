@@ -108,7 +108,7 @@ Add the SIP product:
 
 ```toml
 [dependencies]
-rvoip-sip = "0.3.9"
+rvoip-sip = "0.3.10"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -214,7 +214,7 @@ RTP-over-QUIC has shipped.
 
 ## Extensions
 
-All 14 extension crates ship at `0.3.9`. They are first-class workspace
+All 14 extension crates ship at `0.3.10`. They are first-class workspace
 capabilities, but remain optional so protocol crates depend on provider
 contracts rather than deployment-specific services.
 
@@ -236,22 +236,22 @@ The supporting contracts live in
 The facade exposes the conversation-model extensions together:
 
 ```toml
-rvoip = { version = "0.3.9", features = ["voip-3"] }
+rvoip = { version = "0.3.10", features = ["voip-3"] }
 ```
 
 `voip-3` enables SIP, WebRTC, UCTP, vCon, the identity provider surface, and
 the AI harness. Vapi and STIR/SHAKEN have separate facade features:
 
 ```toml
-rvoip = { version = "0.3.9", features = ["sip", "vapi", "sip-stir-shaken"] }
+rvoip = { version = "0.3.10", features = ["sip", "vapi", "sip-stir-shaken"] }
 ```
 
 Deployment-specific extensions are direct dependencies:
 
 ```toml
-rvoip-keycloak = "0.3.9"
-rvoip-redis = "0.3.9"
-rvoip-audit = "0.3.9"
+rvoip-keycloak = "0.3.10"
+rvoip-redis = "0.3.10"
+rvoip-audit = "0.3.10"
 ```
 
 The facade's `full` feature does **not** enable every workspace extension,
@@ -316,7 +316,7 @@ matrix](crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md), [compatibility
 matrix](crates/sip/rvoip-sip/docs/COMPATIBILITY_MATRIX.md), and [security
 posture](crates/sip/rvoip-sip/docs/SECURITY_POSTURE.md) for exact boundaries.
 Release-specific changes and qualification provenance are in the
-[changelog](CHANGELOG.md) and [candidate release
+[changelog](CHANGELOG.md) and [release
 notes](crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md).
 
 ### SIP interoperability attestation

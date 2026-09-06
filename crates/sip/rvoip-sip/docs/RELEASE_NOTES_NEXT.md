@@ -1,11 +1,12 @@
-# rvoip 0.3.10 Candidate Release Notes
+# rvoip 0.3.10 Release Notes
 
-Target date: 2026-09-05
-
-These notes describe the coordinated 45-crate `0.3.10` candidate. They are
-the active notes for qualification, not a claim that `0.3.10` has already
-been published. The qualification record below must be replaced with the
-exact protected-run evidence before publication.
+These notes describe the coordinated 45-crate `0.3.10` release. Publication is
+authorized only for the exact source commit accepted by the protected release
+qualification and publication workflows. The signed qualification artifact
+and GitHub release identify that immutable commit, workflow run, complete gate
+inventory, measured performance, and publication result. A follow-up
+evidence-only pull request copies the generated reports into the repository
+without changing the released tag.
 
 ## Headline
 
@@ -38,8 +39,8 @@ documented SIP, SDP, RTP, codec, and facade profiles.
   exclusions from this Jambonz profile. Codec and transport support elsewhere
   in RVoIP is not reduced by those peer-specific exclusions.
 - The local Colima rehearsal passed every applicable Jambonz matrix cell. That
-  rehearsal is diagnostic evidence only; the release claim remains pending
-  until the protected exact-candidate run records the same result.
+  rehearsal is diagnostic evidence only. Protected publication independently
+  requires the exact release commit to record the complete matrix as PASS.
 
 ## Transfer correctness
 
@@ -78,21 +79,23 @@ documented SIP, SDP, RTP, codec, and facade profiles.
 
 ## Performance evaluation
 
-`0.3.10` requires a new exact-candidate performance evaluation. The protected
-run executes three clean canonical 2,000-CPS passes, the full performance and
-resiliency matrix, the 160-CPS high-density full-media burst, a one-hour
+The protected `0.3.10` qualification executes three clean canonical 2,000-CPS
+passes, the full performance and resiliency matrix, the 160-CPS high-density
+full-media burst, a one-hour
 30-call monolithic soak, a one-hour 500-call split soak, teardown/churn tests,
 and regression comparison. It publishes structured JSON and Markdown metrics
 plus a SHA-256 index of all current-run performance artifacts. July results
-remain historical baselines; they cannot qualify this candidate.
+remain historical baselines; they cannot qualify this release.
 
 General-user 10,000 CPS full-media capability is not claimed. The supported
 envelope remains bounded by the new 2,000-CPS real-media evidence, exact host
-configuration, workloads, and soak durations recorded for this candidate.
+configuration, workloads, and soak durations recorded for this release.
 
-The measured host shape, source commit, workload configuration, ASR and error
-counts, setup-latency percentiles, CPU/RSS behavior, media delivery, cleanup,
-and artifact links remain pending until the protected exact-candidate run.
+The signed qualification artifact is the authority for the measured host
+shape, source commit, workload configuration, ASR and error counts,
+setup-latency percentiles, CPU/RSS behavior, media delivery, cleanup, and
+artifact hashes. The GitHub release links that artifact and its workflow run;
+the repository's generated qualification history mirrors it after publication.
 
 ## Compatibility
 
@@ -102,13 +105,21 @@ local inbound-REFER hook when they need that distinct lifecycle point. There
 is no Telnyx- or Jambonz-specific runtime dependency in RVoIP and no provider
 REST API in the SIP stack.
 
-`0.3.9` remains the latest published release until this candidate completes
-the normal protected qualification and coordinated publication workflow.
+The `0.3.9` tag, crates, and qualification evidence remain immutable release
+history; none of that evidence is reused to qualify `0.3.10`.
 
 ## Qualification record
 
-**Pending.** Before publication this section must identify the clean `main`
-candidate commit, protected workflow run, complete gate count, Jambonz matrix,
-current performance evaluation, signed qualification aggregate, and publication
-result. The release tool must reject notes that still contain this pending marker
-at publish time.
+The protected Release Qualification workflow must run from a clean `main`
+commit and record every selected gate exactly once as PASS, including the full
+45-crate matrix, feature bundles, CodeQL policy, Asterisk, FreeSWITCH, Jambonz,
+Kamailio, OpenSIPS, SIPp, strict-UA, security, performance, resiliency, soak,
+regression, source-fence, and cleanup gates. It produces a signed aggregate
+bound to the exact source SHA and immutable artifact hashes.
+
+The protected Release Publish workflow accepts that aggregate only when its
+source SHA is still `main`, its version is exactly `0.3.10`, its evidence is
+fresh and complete, and the dry-run and live publication inputs resolve to the
+same commit. The resulting GitHub release is the durable link to the exact
+qualification run and measured reports; the protected `v0.3.10` tag identifies
+the source without a self-referential documentation commit.

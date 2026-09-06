@@ -52,14 +52,14 @@ re-exports the codec surface. If you need the codecs in isolation:
 
 ```toml
 [dependencies]
-rvoip-codec-core = "0.3.9"
+rvoip-codec-core = "0.3.10"
 ```
 
 With AMR:
 
 ```toml
 [dependencies]
-rvoip-codec-core = { version = "0.3.9", features = ["amr"] }
+rvoip-codec-core = { version = "0.3.10", features = ["amr"] }
 ```
 
 ## License

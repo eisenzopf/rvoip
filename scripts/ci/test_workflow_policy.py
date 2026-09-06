@@ -496,6 +496,26 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('--qualified-head "$QUALIFIED_CANDIDATE"', publication)
         self.assertIn('python3 "$RELEASE_TOOL" "${args[@]}"', publication)
 
+    def test_release_publish_retains_qualification_reports_as_release_assets(self) -> None:
+        publication = (ROOT / ".github/workflows/release-publish.yml").read_text()
+        release = publication.split(
+            "      - name: Create immutable tag and generated GitHub release\n",
+            maxsplit=1,
+        )[1]
+
+        self.assertIn("QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}", release)
+        self.assertIn('test -s "$asset"', release)
+        self.assertIn('"$reports/BETA_RELEASE_REPORT.md"', release)
+        self.assertIn('"$reports/BETA_GATE_REPORT.md"', release)
+        self.assertIn('"$reports/BETA_PERFORMANCE_REPORT.md"', release)
+        self.assertIn('"$reports/QUALIFICATION_SUMMARY.json"', release)
+        self.assertIn('"$reports/QUALIFICATION_REPORT_ATTESTATION.json"', release)
+        self.assertIn('"$performance/current-performance-evaluation.json"', release)
+        self.assertIn('"$performance/current-performance-artifact-index.json"', release)
+        self.assertIn('gh release create "$tag" "${assets[@]}"', release)
+        self.assertIn("Protected qualification run and full evidence", release)
+        self.assertIn('--notes "$release_notes"', release)
+
     def test_release_gcp_workers_do_not_consume_one_github_job_each(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
         controller = workflow.split("\n  gate-gcp:\n", maxsplit=1)[1].split(

@@ -1,6 +1,7 @@
 # rvoip 0.3.10 release hardening plan
 
-Status: in progress, 2026-09-05.
+Status: implementation complete; release qualification in progress,
+2026-09-06.
 
 ## Purpose
 
@@ -194,26 +195,34 @@ profile or silently broaden its claim.
 - Record the worker shape, source commit, environment identity, effective
   workload, setup-latency percentiles, completion/error counts, CPU/RSS,
   delivered-media counts, drain state, and artifact hashes in the protected
-  qualification bundle. The release notes must link the resulting run and
-  summarize the measured values before publication.
+  qualification bundle. The source release notes define this immutable
+  qualification contract without embedding a self-referential run identity.
+  The GitHub release links the resulting run and signed reports, and a
+  follow-up evidence-only pull request mirrors the measured values into the
+  repository without changing the released tag.
 
 ## Verification sequence
 
 1. Run formatting, release-tooling unit tests, metadata-drift tests, redaction
    tests, and targeted security tests locally.
 2. Run the Jambonz profile alone and preserve its teardown receipt.
-3. Open the implementation pull request and require PR Gate plus CodeQL.
-4. Merge normally; do not use an administrative bypass.
-5. Run remote preflight for the changed worker topology.
-6. Run a fresh complete `remote-release` qualification with
+3. Merge the implementation pull request only after PR Gate and CodeQL pass;
+   do not use an administrative bypass.
+4. Prepare the coordinated 45-crate `0.3.10` version pull request, review the
+   generated metadata and final release notes, require PR Gate plus CodeQL,
+   and merge normally.
+5. Run remote preflight when the release-worker topology changed.
+6. From the final versioned `main`, run one fresh complete `remote-release`
+   qualification with
    `first_candidate=true`. Evidence reuse from 0.3.9 is not accepted for this
    hardening release, and the new current-candidate performance evaluation is
    mandatory.
-7. Prepare and merge the coordinated 0.3.10 version PR if it was not already
-   the exact qualified candidate, then rerun qualification on the final SHA.
-8. Run protected publication dry-run, then live publication.
-9. Verify all 45 crates and docs on crates.io, create the protected tag and
-   GitHub release, and merge the generated evidence-only PR.
+7. Run protected publication dry-run and live publication against that same
+   qualified SHA and qualification run ID.
+8. Verify all 45 crates and docs on crates.io plus the protected tag and
+   GitHub release.
+9. Merge the generated evidence-only pull request after verifying it matches
+   the signed publication artifact byte for byte.
 
 ## Non-goals
 

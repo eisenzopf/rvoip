@@ -142,17 +142,44 @@ jobs:
         if: inputs.execute
         env:
           GH_TOKEN: ${{ github.token }}
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
           VERSION: ${{ inputs.version }}
           REPOSITORY: ${{ github.repository }}
         run: |
+          set -euo pipefail
           tag="v$VERSION"
+          aggregate=target/downloaded-qualification/release-qualification/aggregate.json
+          reports=target/downloaded-qualification/release-qualification/reports
+          performance=target/downloaded-qualification/release-evidence/collect-report.performance-metrics
+          assets=(
+            "$aggregate"
+            "$reports/BETA_RELEASE_REPORT.md"
+            "$reports/BETA_GATE_REPORT.md"
+            "$reports/BETA_PERFORMANCE_REPORT.md"
+            "$reports/QUALIFICATION_SUMMARY.json"
+            "$reports/QUALIFICATION_REPORT_ATTESTATION.json"
+            "$reports/QUALIFICATION_REPORT_ATTESTATION.json.sha256"
+            "$performance/current-performance-evaluation.json"
+            "$performance/current-performance-evaluation.md"
+            "$performance/current-performance-artifact-index.json"
+          )
+          for asset in "${assets[@]}"; do
+            test -s "$asset" || {
+              echo "required immutable release asset is missing or empty: $asset" >&2
+              exit 1
+            }
+          done
+          printf -v release_notes \
+            'Detailed release notes: https://github.com/%s/blob/%s/crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md\n\nProtected qualification run and full evidence: https://github.com/%s/actions/runs/%s\n' \
+            "$REPOSITORY" "$tag" "$REPOSITORY" "$QUALIFICATION_RUN_ID"
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git tag -a "$tag" -m "rvoip $VERSION"
           git push origin "$tag"
-          gh release create "$tag" \
+          gh release create "$tag" "${assets[@]}" \
             --repo "$REPOSITORY" \
             --target "$(git rev-parse HEAD)" \
             --title "rvoip $VERSION" \
             --generate-notes \
+            --notes "$release_notes" \
             --verify-tag
