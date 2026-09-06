@@ -818,16 +818,6 @@ impl EndpointConfig {
         transport: TransportMode,
         role: Option<Role>,
     ) -> ExampleResult<Self> {
-        Self::build(provider, username, transport, role, None)
-    }
-
-    fn build(
-        provider: PbxProvider,
-        username: &str,
-        transport: TransportMode,
-        role: Option<Role>,
-        password_override: Option<String>,
-    ) -> ExampleResult<Self> {
         let defaults = endpoint_defaults(provider, username, transport);
         let prefix = format!("ENDPOINT_{}", username);
         let (sip_server, sip_port) = match provider {
@@ -890,10 +880,7 @@ impl EndpointConfig {
             _ => sip_server.clone(),
         };
         let auth_username = auth_username_for(&prefix, username);
-        let password = match password_override {
-            Some(password) => password,
-            None => required_password(provider, &prefix)?,
-        };
+        let password = required_password(provider, &prefix)?;
         let local_ip: IpAddr = match provider {
             PbxProvider::Asterisk => env_string("LOCAL_IP", "0.0.0.0").parse()?,
             PbxProvider::FreeSwitch
@@ -963,13 +950,20 @@ impl EndpointConfig {
         username: &str,
         transport: TransportMode,
     ) -> ExampleResult<Self> {
-        Self::build(
-            provider,
-            username,
-            transport,
-            None,
-            Some(format!("test-{}", uuid::Uuid::new_v4())),
-        )
+        static PASSWORD_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = PASSWORD_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("test password environment lock");
+        let key = format!("ENDPOINT_{username}_PASSWORD");
+        let previous = std::env::var_os(&key);
+        std::env::set_var(&key, uuid::Uuid::new_v4().to_string());
+        let result = Self::new(provider, username, transport);
+        match previous {
+            Some(value) => std::env::set_var(&key, value),
+            None => std::env::remove_var(&key),
+        }
+        result
     }
 
     pub fn registrar_uri(&self) -> String {
