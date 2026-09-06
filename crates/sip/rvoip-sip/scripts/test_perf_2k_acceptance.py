@@ -302,6 +302,15 @@ class AcceptanceTests(unittest.TestCase):
             ("diagnostics.cleanup_convergence.converged", False),
             ("diagnostics.effective_config.bob.server_retained_lifecycle_capacity", 8000),
             ("diagnostics.effective_config.bob.effective_sip_transaction_dispatch_priority_burst_max", 16),
+            (
+                "diagnostics.effective_config.alice_session_event_dispatcher_workers_override",
+                8,
+            ),
+            (
+                "diagnostics.effective_config.runtime_switches.environment."
+                "RVOIP_PERF_ALICE_SESSION_EVENT_DISPATCHER_WORKERS",
+                "8",
+            ),
             ("diagnostics.effective_config.runtime_switches.environment.RVOIP_TEST", "1"),
             ("diagnostics.effective_config.runtime_switches.environment.RVOIP_PERF_OUTPUT_ROOT", "relative"),
         )

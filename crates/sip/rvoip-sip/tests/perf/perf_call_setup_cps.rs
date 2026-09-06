@@ -29,6 +29,8 @@
 //! - `RVOIP_PERF_PROFILE`          (Bob/server YAML recipe; default `pbx-media-server`)
 //! - `RVOIP_PERF_CLIENT_PROFILE`   (Alice/client YAML recipe; default `endpoint`)
 //! - `RVOIP_PERF_ALICE_SHARDS`     (client endpoint instances; default 4 for server profiles)
+//! - `RVOIP_PERF_ALICE_SESSION_EVENT_DISPATCHER_WORKERS` (optional explicit
+//!   Alice app-session dispatcher count; otherwise the selected recipe/default applies)
 //! - `RVOIP_PERF_RECIPE_FILE`      (optional YAML recipe book path)
 //! - `RVOIP_PERF_MAX_IN_FLIGHT`    (optional emergency harness safety cap)
 //! - `RVOIP_PERF_RETENTION_SNAPSHOT` (default 0; append endpoint retention counts
@@ -1173,6 +1175,14 @@ async fn perf_call_setup_cps_inner() {
     let first_point = points.first().copied().unwrap_or(0.0);
     let max_in_flight_override = env_usize_opt("RVOIP_PERF_MAX_IN_FLIGHT");
     let alice_shards = env_usize("RVOIP_PERF_ALICE_SHARDS", default_alice_shards(&profile)).max(1);
+    let alice_session_event_dispatcher_workers =
+        env_usize_opt("RVOIP_PERF_ALICE_SESSION_EVENT_DISPATCHER_WORKERS");
+    if let Some(workers) = alice_session_event_dispatcher_workers {
+        assert!(
+            workers > 0,
+            "RVOIP_PERF_ALICE_SESSION_EVENT_DISPATCHER_WORKERS must be at least 1"
+        );
+    }
     assert!(
         alice_shards
             <= media_port_range_capacity(SAME_HOST_ALICE_MEDIA_START, SAME_HOST_ALICE_MEDIA_END),
@@ -1208,7 +1218,7 @@ async fn perf_call_setup_cps_inner() {
         let alice_port = support::ports::next_sip_port();
         let (media_start, media_end) = alice_media_subrange(shard, alice_shards);
         let alice_name = format!("perf-alice-{shard}");
-        let config = apply_same_host_media_carveout(
+        let mut config = apply_same_host_media_carveout(
             perf_config(
                 Config::local(&alice_name, alice_port),
                 alice_capacity,
@@ -1219,6 +1229,9 @@ async fn perf_call_setup_cps_inner() {
             media_end,
             alice_capacity,
         );
+        if let Some(workers) = alice_session_event_dispatcher_workers {
+            config = config.with_session_event_dispatcher_workers(workers);
+        }
         let from = format!("sip:alice{shard}@127.0.0.1:{alice_port}");
         alice_configs.push((config, from));
     }
@@ -1237,6 +1250,7 @@ async fn perf_call_setup_cps_inner() {
             "churn_headroom_percent": RETAINED_LIFECYCLE_CHURN_HEADROOM_PERCENT,
         },
         "alice_channel_capacity_per_shard": alice_capacity,
+        "alice_session_event_dispatcher_workers_override": alice_session_event_dispatcher_workers,
         "max_in_flight_override": max_in_flight_override,
         "same_host_media_carveout": {
             "bob": {
@@ -1681,6 +1695,7 @@ fn runtime_switch_snapshot() -> Value {
         "RVOIP_PERF_PROFILE",
         "RVOIP_PERF_CLIENT_PROFILE",
         "RVOIP_PERF_ALICE_SHARDS",
+        "RVOIP_PERF_ALICE_SESSION_EVENT_DISPATCHER_WORKERS",
         "RVOIP_PERF_RECIPE_FILE",
         "RVOIP_PERF_MAX_IN_FLIGHT",
         "RVOIP_PERF_SCHED_TICK_MS",

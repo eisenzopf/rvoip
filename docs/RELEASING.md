@@ -135,6 +135,10 @@ measurement workers start. Every performance worker verifies the bundle and
 each executable by SHA-256 and records both bundle and manifest digests in its
 gate receipt. Compilation therefore cannot perturb performance measurements or
 be repeated independently on every worker.
+The canonical 2,000-CPS driver also pins each of its four Alice endpoint
+shards to 16 app-session event dispatcher workers. That preserves the reviewed
+configuration on the standardized eight-vCPU worker instead of allowing the
+library's host-CPU-derived endpoint default to change the experiment.
 The `remote-preflight` profile recreates that complete capacity shape, including
 all 18 concurrent VM creations, but its short probes never substitute for the
 real performance, interoperability, and soak commands in `remote-release`.
