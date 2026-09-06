@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use std::{collections::HashMap, num::NonZeroU16};
+use std::{collections::HashMap, collections::HashSet, num::NonZeroU16};
 
 use chrono::Utc;
 use dashmap::DashMap;
@@ -40,6 +40,7 @@ impl UctpWtServer {
         routes: Arc<DashMap<ConnectionId, Route>>,
         max_concurrent: usize,
         mount_path: String,
+        allowed_origins: Option<Arc<HashSet<String>>>,
         quinn_stats_interval: Duration,
         subscription_handler: Option<Arc<dyn rvoip_uctp::state::SubscriptionHandler>>,
         session_binding_resolver: Option<Arc<dyn rvoip_uctp::state::SessionBindingResolver>>,
@@ -71,6 +72,7 @@ impl UctpWtServer {
                 let events_tx = events_tx.clone();
                 let lifecycle_sink = lifecycle_sink.clone();
                 let mount_path = mount_path.clone();
+                let allowed_origins = allowed_origins.clone();
                 let by_connection = Arc::clone(&by_connection);
                 let by_uctp_sid = Arc::clone(&by_uctp_sid);
                 let routes = Arc::clone(&routes);
@@ -93,6 +95,7 @@ impl UctpWtServer {
                         by_uctp_sid,
                         routes,
                         mount_path,
+                        allowed_origins,
                         quinn_stats_interval,
                         subscription_handler,
                         session_binding_resolver,
@@ -324,6 +327,7 @@ async fn spawn_peer_session(
     by_uctp_sid: Arc<DashMap<String, ConnectionId>>,
     routes: Arc<DashMap<ConnectionId, Route>>,
     mount_path: String,
+    allowed_origins: Option<Arc<HashSet<String>>>,
     quinn_stats_interval: Duration,
     subscription_handler: Option<Arc<dyn rvoip_uctp::state::SubscriptionHandler>>,
     session_binding_resolver: Option<Arc<dyn rvoip_uctp::state::SessionBindingResolver>>,
@@ -359,15 +363,20 @@ async fn spawn_peer_session(
     };
 
     // web-transport-quinn 0.11+: `url` is a field, not a method.
-    // The graceful `close(StatusCode)` API was removed; for now we
-    // drop the request on path mismatch, which manifests as a
-    // closed CONNECT stream on the client side.
     if !request.url.path().eq(&mount_path) {
         warn!(
             requested = %request.url.path(),
             expected = %mount_path,
             "rvoip-webtransport: mount path mismatch; closing"
         );
+        return;
+    }
+
+    if !request_origin_allowed(&request.headers, allowed_origins.as_deref()) {
+        warn!(%peer_addr, "rvoip-webtransport: origin rejected");
+        if let Err(error) = request.reject(http::StatusCode::FORBIDDEN).await {
+            warn!(%peer_addr, %error, "rvoip-webtransport: failed to reject origin");
+        }
         return;
     }
 
@@ -1104,4 +1113,56 @@ async fn spawn_peer_session(
     stats_pump.abort();
 
     info!(%peer_addr, "rvoip-webtransport: connection closed");
+}
+
+fn request_origin_allowed(
+    headers: &http::HeaderMap,
+    allowed_origins: Option<&HashSet<String>>,
+) -> bool {
+    let Some(allowed_origins) = allowed_origins else {
+        return true;
+    };
+    let mut origins = headers.get_all(http::header::ORIGIN).iter();
+    let Some(origin) = origins.next() else {
+        return false;
+    };
+    if origins.next().is_some() {
+        return false;
+    }
+    origin
+        .to_str()
+        .ok()
+        .is_some_and(|origin| allowed_origins.contains(origin))
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::*;
+
+    fn allowed() -> HashSet<String> {
+        HashSet::from(["https://app.example.com".to_owned()])
+    }
+
+    #[test]
+    fn configured_origin_policy_requires_one_exact_match() {
+        let mut headers = http::HeaderMap::new();
+        assert!(!request_origin_allowed(&headers, Some(&allowed())));
+
+        headers.insert(
+            http::header::ORIGIN,
+            http::HeaderValue::from_static("https://app.example.com"),
+        );
+        assert!(request_origin_allowed(&headers, Some(&allowed())));
+
+        headers.insert(
+            http::header::ORIGIN,
+            http::HeaderValue::from_static("https://other.example.com"),
+        );
+        assert!(!request_origin_allowed(&headers, Some(&allowed())));
+    }
+
+    #[test]
+    fn absent_policy_preserves_legacy_clients() {
+        assert!(request_origin_allowed(&http::HeaderMap::new(), None));
+    }
 }
