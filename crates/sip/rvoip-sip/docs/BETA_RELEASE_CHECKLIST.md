@@ -5,11 +5,14 @@ candidate's results. The versioned reporting and selection authority is
 `config/beta-release-policy.yaml`; current outcomes are generated from evidence:
 
 Current workspace runtime crate version: `0.3.10`.
-Current qualified runtime crate version: `0.3.9`.
+Previous published qualified runtime crate version: `0.3.9`.
 Release candidate runtime crate version: `0.3.10`.
-Its protected remote-release run passed 208/208 gates and covered all 108
-requirements in the strict legacy ledger. The historical `0.3.2` exception
-path did not qualify it.
+The previous published `0.3.9` protected remote-release run passed 208/208
+gates and covered all 108 requirements in the strict legacy ledger. That
+evidence and the historical `0.3.2` exception path do not qualify `0.3.10`.
+The signed exact-source qualification artifact is authoritative for the
+release candidate until its generated reports are promoted by an evidence-only
+pull request.
 
 - [Beta Release Candidate Report](BETA_RELEASE_REPORT.md)
 - [Complete Beta Gate Report](BETA_GATE_REPORT.md)

@@ -316,7 +316,7 @@ matrix](crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md), [compatibility
 matrix](crates/sip/rvoip-sip/docs/COMPATIBILITY_MATRIX.md), and [security
 posture](crates/sip/rvoip-sip/docs/SECURITY_POSTURE.md) for exact boundaries.
 Release-specific changes and qualification provenance are in the
-[changelog](CHANGELOG.md) and [candidate release
+[changelog](CHANGELOG.md) and [release
 notes](crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md).
 
 ### SIP interoperability attestation

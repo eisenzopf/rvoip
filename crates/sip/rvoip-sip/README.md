@@ -13,12 +13,14 @@ DTMF, hold/resume, custom SIP headers, and app-visible events so Rust
 applications can behave like programmable SIP endpoints without owning SIP
 transaction or RTP details directly.
 
-The workspace released `0.3.9` from a strict, exact-source qualification. The
-generated
+The previous published `0.3.9` release came from a strict, exact-source
+qualification. Its generated
 [beta release report](docs/BETA_RELEASE_REPORT.md) is authoritative for the
 tested PBX, proxy, SIPp, strict-UA, security, performance, and soak boundaries.
 Historical exception and carry-forward reports remain immutable history and
-do not qualify a later release.
+do not qualify `0.3.10`. The protected `0.3.10` qualification artifact and
+GitHub release are authoritative until their generated reports are copied into
+the repository by the evidence-only pull request.
 
 ## At a glance
 
@@ -173,7 +175,7 @@ release claim, and it does not meet the four-peer attestation boundary.
 | --- | --- | --- |
 | **Asterisk** | **0.3.2 interop matrix passed** | `Endpoint`, `StreamPeer`, and `CallbackPeer` across registration, basic call, G.729A/G.729AB, hold/resume, ring-cancel, RFC 4733 DTMF, rejection, and blind transfer over UDP and TLS |
 | **FreeSWITCH** | **0.3.2 interop matrix passed** | The same API, scenario, codec, and UDP/TLS matrix as Asterisk |
-| **Jambonz OSS 0.9.9** | **0.3.10 qualification gate added; result pending exact-candidate run** | The same registered-user `Endpoint`, `StreamPeer`, and `CallbackPeer` scenario runner used for Asterisk and FreeSWITCH, across the applicable UDP SIP/SDP/RTP B2BUA matrix |
+| **Jambonz OSS 0.9.9** | **Mandatory 0.3.10 release gate** | The same registered-user `Endpoint`, `StreamPeer`, and `CallbackPeer` scenario runner used for Asterisk and FreeSWITCH, across the applicable UDP SIP/SDP/RTP B2BUA matrix; publication requires a protected exact-source PASS |
 | **SIPp** | **0.3.2 standalone matrix passed** | 30, 100, 300, 1,000, and 2,000 CPS with 100% configured call completion |
 | **baresip** | **0.3.2 strict-UA check passed** | External user-agent call against the rvoip SIP listener |
 | **Kamailio** | **Lab-tested; not release-gated** | Registrar-proxy with an rtpengine media relay: registration, calls, AMR in all four framings relayed verbatim, DTMF, and SDES-SRTP, over UDP and TLS. No TCP, no second adjacency order, not bound into the release attestation |
@@ -337,8 +339,8 @@ Operational references:
   from the 0.3.2 claim and that has not changed.
 - WebRTC/browser interop, TURN, and WSS outbound remain outside the SIP beta
   claim unless separately completed and tested. SIP DTLS-SRTP is a distinct
-  feature-gated 0.3.10 candidate capability whose claim depends on fresh
-  protected release evidence.
+  feature-gated 0.3.10 capability whose claim is bounded by fresh protected
+  release evidence.
 - The default full-media performance claim is bounded to the documented
   beta release profiles and artifacts. Higher tuned-profile results need
   their own topology, hardware, configuration, and caveats.
