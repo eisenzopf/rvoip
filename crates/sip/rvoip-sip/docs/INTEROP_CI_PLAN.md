@@ -191,7 +191,8 @@ Each interop run should store:
 ## Release-Gate Policy
 
 - A failure in SIPp, Asterisk, FreeSWITCH, Jambonz, Kamailio, or OpenSIPS
-  blocks the applicable release. Jambonz becomes mandatory in 0.3.10.
+  blocks the applicable release. Jambonz was not part of the mandatory 0.3.9
+  matrix and becomes mandatory in 0.3.10.
 - The proxy matrix must contain exactly both pinned peers, both adjacency
   orders, and UDP/TCP/verified-TLS rows. Its global scenario inventory and
   per-row core scenario set are validated independently while generating the
