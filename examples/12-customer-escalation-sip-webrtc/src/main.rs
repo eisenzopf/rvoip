@@ -45,7 +45,7 @@ struct Args {
     #[arg(long, default_value = "callcenter.local")]
     domain: String,
     /// Password accepted for sip:alice@<domain>.
-    #[arg(long, default_value = "password123")]
+    #[arg(long)]
     alice_password: String,
     /// Start in-process SIP/WebRTC clients and run bidirectional media proof.
     #[arg(long)]

@@ -102,6 +102,9 @@ class BetaPerformanceGateMetricsTests(unittest.TestCase):
         )
         canonical = self.root / "canonical-2k"
         canonical.mkdir()
+        self.candidate_sha = "c" * 40
+        self.source_fingerprint = "f" * 64
+        self.executable_sha = "e" * 64
         runs = []
         for sequence in range(1, 4):
             run = canonical / f"run-{sequence}"
@@ -126,7 +129,12 @@ class BetaPerformanceGateMetricsTests(unittest.TestCase):
             }
             (run / "report.json").write_text(json.dumps(report), encoding="utf-8")
             runs.append(
-                {"sequence": sequence, "packaged_run_dir": f"run-{sequence}"}
+                {
+                    "sequence": sequence,
+                    "packaged_run_dir": f"run-{sequence}",
+                    "source_fingerprint_sha256": self.source_fingerprint,
+                    "executable_sha256": self.executable_sha,
+                }
             )
         self.canonical_index = canonical / "index.json"
         self.canonical_index.write_text(
@@ -136,6 +144,13 @@ class BetaPerformanceGateMetricsTests(unittest.TestCase):
                     "status": "PASS",
                     "scenario": metrics.CANONICAL_SCENARIO,
                     "run_count": 3,
+                    "source_at_beta_start": {
+                        "git_commit": self.candidate_sha,
+                        "git_dirty": False,
+                        "source_fingerprint_sha256": self.source_fingerprint,
+                    },
+                    "common_source_fingerprint_sha256": self.source_fingerprint,
+                    "common_executable_sha256": self.executable_sha,
                     "runs": runs,
                 }
             ),
@@ -146,7 +161,9 @@ class BetaPerformanceGateMetricsTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_release_metrics_pass(self):
-        canonical = metrics.canonical_2k_metrics(self.canonical_index, True)
+        canonical = metrics.canonical_2k_metrics(
+            self.canonical_index, True, self.candidate_sha
+        )
         burst = metrics.high_density_metrics(self.root, 160.0, 0.995, 15.0, True)
         soak = metrics.monolithic_metrics(self.root, 3600, 30, 15.0, True)
         self.assertTrue(canonical["passed"])
@@ -177,7 +194,15 @@ class BetaPerformanceGateMetricsTests(unittest.TestCase):
         index = json.loads(self.canonical_index.read_text(encoding="utf-8"))
         index["runs"].pop()
         self.canonical_index.write_text(json.dumps(index), encoding="utf-8")
-        result = metrics.canonical_2k_metrics(self.canonical_index, True)
+        result = metrics.canonical_2k_metrics(
+            self.canonical_index, True, self.candidate_sha
+        )
+        self.assertFalse(result["passed"])
+
+    def test_canonical_rejects_evidence_from_another_candidate(self):
+        result = metrics.canonical_2k_metrics(
+            self.canonical_index, True, "d" * 40
+        )
         self.assertFalse(result["passed"])
 
     def test_missing_required_canonical_evidence_fails(self):

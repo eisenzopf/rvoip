@@ -233,6 +233,8 @@ class GateFrameworkTests(unittest.TestCase):
         self.assertIn(gate["id"], self.catalog["profiles"]["remote-release"])
         self.assertTrue(gate["always_fresh"])
         self.assertEqual(gate["resource_class"], "gcp-performance-soak-long")
+        self.assertEqual(gate["timeout_minutes"], 120)
+        self.assertEqual(gate["estimated_seconds"], 4_500)
         self.assertIn("canonical_2k_release_eval.sh", " ".join(gate["command"]))
         self.assertEqual(
             by_id["source.canonical-2k"]["dependencies"],
@@ -250,6 +252,9 @@ class GateFrameworkTests(unittest.TestCase):
         self.assertIn("for pass in 1 2 3", script)
         self.assertIn("env -i", script)
         self.assertIn('${EVIDENCE_TOOL}" import', script)
+        self.assertIn("CARGO_HOME", script)
+        self.assertIn("RUSTUP_HOME", script)
+        self.assertIn("RUSTC_WRAPPER", script)
 
     def test_media_burst_scenarios_run_on_independent_workers(self) -> None:
         scenario_ids = {
@@ -994,7 +999,9 @@ class GateFrameworkTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 gates.GateError, "exact-candidate performance artifacts are missing"
             ):
-                gates.reconcile_performance_metrics(ROOT, root, root / "artifact")
+                gates.reconcile_performance_metrics(
+                    ROOT, root, root / "artifact", "c" * 40
+                )
 
     def test_current_performance_reconciliation_requires_canonical_package(
         self,
@@ -1005,9 +1012,11 @@ class GateFrameworkTests(unittest.TestCase):
             shard.mkdir(parents=True)
             (shard / "result.json").write_text("{}\n")
             with self.assertRaisesRegex(
-                gates.GateError, "exactly one canonical 2,000-CPS evidence index"
+                gates.GateError, "exact-candidate canonical 2,000-CPS evidence index"
             ):
-                gates.reconcile_performance_metrics(ROOT, root, root / "artifact")
+                gates.reconcile_performance_metrics(
+                    ROOT, root, root / "artifact", "c" * 40
+                )
 
 
 if __name__ == "__main__":

@@ -880,29 +880,7 @@ impl EndpointConfig {
             _ => sip_server.clone(),
         };
         let auth_username = auth_username_for(&prefix, username);
-        let password = match provider {
-            PbxProvider::Asterisk => std::env::var(format!("{}_PASSWORD", prefix))
-                .or_else(|_| std::env::var("SIP_PASSWORD"))
-                .unwrap_or_else(|_| "password123".to_string()),
-            PbxProvider::FreeSwitch => std::env::var(format!("{}_PASSWORD", prefix))
-                .or_else(|_| std::env::var("FREESWITCH_PASSWORD"))
-                .or_else(|_| std::env::var("SIP_PASSWORD"))
-                .unwrap_or_else(|_| "1234".to_string()),
-            PbxProvider::Jambonz => std::env::var(format!("{}_PASSWORD", prefix))
-                .or_else(|_| std::env::var("JAMBONZ_PASSWORD"))
-                .or_else(|_| std::env::var("SIP_PASSWORD"))
-                .unwrap_or_else(|_| "1234".to_string()),
-            // The proxy labs run an accept-all registrar; the password is
-            // carried but never challenged for.
-            PbxProvider::Kamailio => std::env::var(format!("{}_PASSWORD", prefix))
-                .or_else(|_| std::env::var("KAMAILIO_PASSWORD"))
-                .or_else(|_| std::env::var("SIP_PASSWORD"))
-                .unwrap_or_else(|_| "password123".to_string()),
-            PbxProvider::OpenSips => std::env::var(format!("{}_PASSWORD", prefix))
-                .or_else(|_| std::env::var("OPENSIPS_PASSWORD"))
-                .or_else(|_| std::env::var("SIP_PASSWORD"))
-                .unwrap_or_else(|_| "password123".to_string()),
-        };
+        let password = required_password(provider, &prefix)?;
         let local_ip: IpAddr = match provider {
             PbxProvider::Asterisk => env_string("LOCAL_IP", "0.0.0.0").parse()?,
             PbxProvider::FreeSwitch
@@ -6653,6 +6631,35 @@ fn non_empty_env(key: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn required_password(provider: PbxProvider, prefix: &str) -> ExampleResult<String> {
+    let provider_key = match provider {
+        PbxProvider::Asterisk => None,
+        PbxProvider::FreeSwitch => Some("FREESWITCH_PASSWORD"),
+        PbxProvider::Jambonz => Some("JAMBONZ_PASSWORD"),
+        PbxProvider::Kamailio => Some("KAMAILIO_PASSWORD"),
+        PbxProvider::OpenSips => Some("OPENSIPS_PASSWORD"),
+    };
+    let endpoint_key = format!("{prefix}_PASSWORD");
+    for key in [
+        Some(endpoint_key.as_str()),
+        provider_key,
+        Some("SIP_PASSWORD"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(value) = non_empty_env(key) {
+            return Ok(value);
+        }
+    }
+    Err(format!(
+        "{} PBX interoperability requires an explicit {}, provider-specific, or SIP_PASSWORD environment variable",
+        provider.label(),
+        endpoint_key
+    )
+    .into())
 }
 
 fn env_string(key: &str, default: &str) -> String {

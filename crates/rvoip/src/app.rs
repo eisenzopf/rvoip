@@ -17,7 +17,7 @@ use std::time::Duration;
 use axum::{
     extract::State,
     http::{HeaderMap, HeaderValue, StatusCode},
-    response::{Html, IntoResponse, Redirect},
+    response::{IntoResponse, Redirect},
     routing::get,
     Router,
 };
@@ -2157,7 +2157,7 @@ async fn wait_for_core_connection_connected(
 
 #[derive(Clone)]
 struct StaticState {
-    customer_html: PathBuf,
+    customer_html: String,
     ws_url: String,
 }
 
@@ -2167,7 +2167,7 @@ async fn spawn_static_server(
 ) -> AppResult<(SocketAddr, tokio::task::JoinHandle<()>)> {
     let bind = config.bind;
     let root = config.static_root.unwrap_or_else(|| PathBuf::from("."));
-    let customer_html = resolve_customer_html(root).await?;
+    let customer_html = load_customer_html(root).await?;
     let state = StaticState {
         customer_html,
         ws_url,
@@ -2186,7 +2186,7 @@ async fn spawn_static_server(
     Ok((addr, task))
 }
 
-async fn resolve_customer_html(root: PathBuf) -> AppResult<PathBuf> {
+async fn load_customer_html(root: PathBuf) -> AppResult<String> {
     let canonical_root = tokio::fs::canonicalize(root).await?;
     let customer_html = tokio::fs::canonicalize(canonical_root.join("customer.html")).await?;
     if !customer_html.starts_with(&canonical_root) {
@@ -2199,29 +2199,19 @@ async fn resolve_customer_html(root: PathBuf) -> AppResult<PathBuf> {
             "the configured customer page is not a regular file".to_string(),
         ));
     }
-    Ok(customer_html)
+    Ok(tokio::fs::read_to_string(customer_html).await?)
 }
 
 async fn serve_customer_html(State(state): State<StaticState>) -> impl IntoResponse {
-    match tokio::fs::read_to_string(&state.customer_html).await {
-        Ok(template) => {
-            let body = template.replace("__RVOIP_WS_URL__", &state.ws_url);
-            let mut headers = HeaderMap::new();
-            headers.insert(
-                "content-type",
-                HeaderValue::from_static("text/html; charset=utf-8"),
-            );
-            (StatusCode::OK, headers, body).into_response()
-        }
-        Err(error) => {
-            tracing::warn!(error_kind = ?error.kind(), "failed to read configured customer page");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Html("failed to read customer page"),
-            )
-                .into_response()
-        }
-    }
+    let body = state
+        .customer_html
+        .replace("__RVOIP_WS_URL__", &state.ws_url);
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "content-type",
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    (StatusCode::OK, headers, body).into_response()
 }
 
 /// The identity a call arriving from a trusted trunk is admitted with.
@@ -2368,15 +2358,10 @@ mod tests {
             .await
             .expect("write page");
 
-        let resolved = resolve_customer_html(root.clone())
+        let resolved = load_customer_html(root.clone())
             .await
-            .expect("page under the configured root should resolve");
-        assert_eq!(
-            resolved,
-            tokio::fs::canonicalize(root.join("customer.html"))
-                .await
-                .expect("canonical page")
-        );
+            .expect("page under the configured root should load");
+        assert_eq!(resolved, "safe");
 
         tokio::fs::remove_dir_all(root).await.expect("clean root");
     }
@@ -2402,7 +2387,7 @@ mod tests {
             .expect("write outside page");
         symlink(&outside, root.join("customer.html")).expect("create symlink");
 
-        let error = resolve_customer_html(root.clone())
+        let error = load_customer_html(root.clone())
             .await
             .expect_err("a customer page outside the configured root must be refused");
         assert!(matches!(error, AppError::Policy(message) if message.contains("outside")));
@@ -2971,12 +2956,20 @@ mod tests {
 
     #[tokio::test]
     async fn unregistered_sip_employee_fails_contact_resolution() {
+        let test_password = format!(
+            "test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
         let app = RvoipApp::builder()
             .sip(
                 SipConfig::bind("127.0.0.1:0")
                     .domain("callcenter.local")
                     .allow(Role::Employee, [Capability::Voice])
-                    .registrar_users([("alice", "password123")]),
+                    .registrar_users([("alice", test_password.as_str())]),
             )
             .employees(EmployeePolicy::named(["alice"]))
             .assignment(AssignmentPolicy::fixed("alice"))

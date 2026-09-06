@@ -44,7 +44,7 @@ The source of truth is
 | 09 | [ivr-server](09-ivr-server/) | Reactive inbound server | `CallbackPeer` | `./run_demo.sh` |
 | 10 | [call-center-b2bua](10-call-center-b2bua/) | B2BUA bridge + routing | `UnifiedCoordinator` + `server::b2bua` | `./run_demo.sh` |
 | 11 | [ai-harness-demo](11-ai-harness-demo/) | Fake ASR/TTS/dialog + vCon evidence | `rvoip-harness` | `cargo run` |
-| 12 | [customer-escalation-sip-webrtc](12-customer-escalation-sip-webrtc/) | Browser WebRTC chat escalates to Alice's SIP phone | `rvoip::app` gateway API | `cargo run -- --auto-proof` |
+| 12 | [customer-escalation-sip-webrtc](12-customer-escalation-sip-webrtc/) | Browser WebRTC chat escalates to Alice's SIP phone | `rvoip::app` gateway API | `cargo run -- --alice-password "$RVOIP_DEMO_SIP_PASSWORD" --auto-proof` |
 | 13 | [sip-to-amazon-connect](13-sip-to-amazon-connect/) | SIP headers become Amazon Connect attributes with a live audio bridge | `rvoip-amazon-connect` | `cargo run` |
 | 14 | [vapi-agent](14-vapi-agent/) | One server accepts SIP or WebRTC callers and attaches a Vapi voice agent | `rvoip::app` + `rvoip::vapi` | `cargo run -- --transport sip\|webrtc` |
 

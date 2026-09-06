@@ -5586,7 +5586,7 @@
         "source.remote-clean"
       ],
       "display_command": "env RVOIP_CANONICAL_EVAL_OUTPUT={artifact_dir} {workspace}/crates/sip/rvoip-sip/scripts/canonical_2k_release_eval.sh",
-      "estimated_seconds": 1,
+      "estimated_seconds": 4500,
       "executor": "argv",
       "expected_outputs": [
         "receipt.json",
@@ -5601,7 +5601,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 60,
+      "timeout_minutes": 120,
       "working_directory": "."
     },
     {

@@ -17,15 +17,33 @@ python3 "${EVIDENCE_TOOL}" fingerprint \
 run_dirs=()
 for pass in 1 2 3; do
   log="${OUTPUT}/run-logs/pass-${pass}.log"
-  env -i \
-    HOME="${HOME}" \
-    USER="${USER:-}" \
-    LOGNAME="${LOGNAME:-${USER:-}}" \
-    PATH="${PATH}" \
-    TMPDIR=/tmp \
-    LANG=C.UTF-8 \
-    SHELL=/bin/bash \
-    RVOIP_PERF_PROFILE_BUILD_ONLY=0 \
+  worker_env=(
+    HOME="${HOME}"
+    USER="${USER:-}"
+    LOGNAME="${LOGNAME:-${USER:-}}"
+    PATH="${PATH}"
+    TMPDIR=/tmp
+    LANG=C.UTF-8
+    SHELL=/bin/bash
+    RVOIP_PERF_PROFILE_BUILD_ONLY=0
+  )
+  # Preserve only the pinned toolchain and compiler-cache plumbing supplied by
+  # the release worker. Workload, compiler-profile, allocator, and performance
+  # overrides remain absent so the canonical runner can enforce its clean
+  # recipe. None of these allow-listed values contains a registry credential.
+  for name in \
+    CARGO_HOME RUSTUP_HOME RUSTC_WRAPPER \
+    SCCACHE_BASEDIRS SCCACHE_CACHE_SIZE SCCACHE_DIR SCCACHE_GCS_BUCKET \
+    SCCACHE_GCS_KEY_PREFIX SCCACHE_GCS_RW_MODE SCCACHE_GCS_SERVICE_ACCOUNT \
+    SCCACHE_IDLE_TIMEOUT SCCACHE_MULTILEVEL_CHAIN \
+    SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY RVOIP_SCCACHE_ACTIVE \
+    LD_LIBRARY_PATH LIBRARY_PATH PKG_CONFIG_PATH
+  do
+    if [[ -n "${!name:-}" ]]; then
+      worker_env+=("${name}=${!name}")
+    fi
+  done
+  env -i "${worker_env[@]}" \
     "${RUNNER}" clean 2>&1 | tee "${log}"
   run_dir="$(python3 - "${log}" <<'PY'
 import json

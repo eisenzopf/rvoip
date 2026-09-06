@@ -1294,6 +1294,7 @@ write_performance_gate_metrics() {
   if [ "${BETA_REQUIRE_CANONICAL_2K_EVIDENCE:-0}" = "1" ]; then
     arguments+=(
       --canonical-index "$ARTIFACT_DIR/canonical-2k/index.json"
+      --candidate-sha "$(git -C "$WORKSPACE_ROOT" rev-parse HEAD)"
       --require-canonical
     )
   fi

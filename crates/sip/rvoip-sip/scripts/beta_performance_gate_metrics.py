@@ -95,7 +95,7 @@ def all_numeric_errors_are_zero(errors: Any) -> bool:
 
 
 def canonical_2k_metrics(
-    index_path: pathlib.Path | None, required: bool
+    index_path: pathlib.Path | None, required: bool, candidate_sha: str | None = None
 ) -> dict[str, Any]:
     if index_path is None or not index_path.is_file():
         if required:
@@ -105,6 +105,9 @@ def canonical_2k_metrics(
     index = load_json(index_path)
     canonical_root = index_path.parent.resolve()
     runs = index.get("runs")
+    source = index.get("source_at_beta_start")
+    common_fingerprint = index.get("common_source_fingerprint_sha256")
+    common_executable = index.get("common_executable_sha256")
     checks: list[dict[str, Any]] = []
     for metric, requirement, observed, passed in (
         (
@@ -131,6 +134,32 @@ def canonical_2k_metrics(
             str(CANONICAL_RUNS),
             len(runs) if isinstance(runs, list) else None,
             isinstance(runs, list) and len(runs) == CANONICAL_RUNS,
+        ),
+        (
+            "candidate_commit",
+            candidate_sha or "recorded clean candidate",
+            source.get("git_commit") if isinstance(source, dict) else None,
+            isinstance(source, dict)
+            and source.get("git_dirty") is False
+            and (candidate_sha is None or source.get("git_commit") == candidate_sha),
+        ),
+        (
+            "source_fingerprint",
+            "one 64-character SHA-256 shared by source and every run",
+            common_fingerprint,
+            isinstance(common_fingerprint, str)
+            and len(common_fingerprint) == 64
+            and all(character in "0123456789abcdef" for character in common_fingerprint)
+            and isinstance(source, dict)
+            and source.get("source_fingerprint_sha256") == common_fingerprint,
+        ),
+        (
+            "executable_identity",
+            "one 64-character SHA-256 shared by every run",
+            common_executable,
+            isinstance(common_executable, str)
+            and len(common_executable) == 64
+            and all(character in "0123456789abcdef" for character in common_executable),
         ),
     ):
         add_check(checks, metric, requirement, observed, passed)
@@ -209,6 +238,8 @@ def canonical_2k_metrics(
             passed = (
                 isinstance(run, dict)
                 and run.get("sequence") == expected_sequence
+                and run.get("source_fingerprint_sha256") == common_fingerprint
+                and run.get("executable_sha256") == common_executable
                 and isinstance(report, dict)
                 and report.get("scenario") == CANONICAL_SCENARIO
                 and finite_number(observed["target_cps"]) == CANONICAL_TARGET_CPS
@@ -691,6 +722,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--output-json", required=True)
     result.add_argument("--output-markdown", required=True)
     result.add_argument("--canonical-index")
+    result.add_argument("--candidate-sha")
     result.add_argument("--high-density-cps", type=float, default=160.0)
     result.add_argument("--high-density-min-asr", type=float, default=0.995)
     result.add_argument("--rss-limit-mb-per-hr", type=float, default=15.0)
@@ -712,6 +744,7 @@ def main() -> int:
                 if args.canonical_index
                 else None,
                 args.require_canonical,
+                args.candidate_sha,
             ),
             "schema": SCHEMA,
             "high_density_media_burst": high_density_metrics(

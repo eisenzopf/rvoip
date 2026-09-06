@@ -477,6 +477,8 @@ def synthetic_gate(
     dependencies: list[str] | None = None,
     paths: list[str] | None = None,
     always_fresh: bool = False,
+    timeout_minutes: int = 60,
+    estimated_seconds: int = 1,
 ) -> dict[str, Any]:
     return {
         "id": gate_id,
@@ -489,13 +491,13 @@ def synthetic_gate(
         "working_directory": ".",
         "dependencies": dependencies or [],
         "resource_class": resource,
-        "timeout_minutes": 60,
+        "timeout_minutes": timeout_minutes,
         "retry_on_exit_codes": [75],
         "max_infrastructure_retries": 1,
         "affected_crates": [],
         "affected_paths": paths or ["**"],
         "expected_outputs": ["receipt.json", "command.log"],
-        "estimated_seconds": 1,
+        "estimated_seconds": estimated_seconds,
         "always_fresh": always_fresh,
         "legacy": None,
     }
@@ -1091,6 +1093,8 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
                 "scripts/release/**",
             ],
             always_fresh=True,
+            timeout_minutes=120,
+            estimated_seconds=4_500,
         ),
         *proxy_interop_gates(),
         *proxy_pbx_gates(),
