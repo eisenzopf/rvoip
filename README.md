@@ -74,6 +74,7 @@ does not meet the four-peer attestation boundary described
 | --- | --- | --- |
 | **Asterisk** | **0.3.2 interop matrix passed** | `Endpoint`, `StreamPeer`, and `CallbackPeer`; registration, basic call, G.729A/G.729AB, hold/resume, ring-cancel, RFC 4733 DTMF, rejection, and blind transfer over UDP and TLS |
 | **FreeSWITCH** | **0.3.2 interop matrix passed** | The same API, scenario, codec, and UDP/TLS matrix as Asterisk |
+| **Jambonz OSS 0.9.9** | **0.3.10 qualification gate added; result pending exact-candidate run** | Latest-version-checked, revision- and digest-pinned Jambonz SBC/registrar/RTPengine profile across the applicable Endpoint, StreamPeer, and CallbackPeer UDP matrix |
 | **SIPp** | **0.3.2 standalone matrix passed** | 30, 100, 300, 1,000, and 2,000 CPS; every configured call completed |
 | **baresip** | **0.3.2 strict-UA check passed** | External user-agent call against the rvoip SIP listener |
 | **Kamailio** | **Lab-tested; not release-gated** | Registrar-proxy with an rtpengine media relay: registration, calls, AMR in all four framings relayed verbatim, DTMF, and SDES-SRTP, over UDP and TLS. No TCP, no second adjacency order, and not bound into the release attestation |

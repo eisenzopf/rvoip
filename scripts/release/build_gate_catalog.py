@@ -82,6 +82,12 @@ AMR_RATE_SWEEP_GATE_IDS = [
     *AMR_RATE_SWEEP_CELL_IDS,
     "interop.amr-rate-sweep.down",
 ]
+JAMBONZ_GATE_IDS = [
+    "interop.jambonz-latest",
+    "interop.jambonz-up",
+    "interop.jambonz-matrix",
+    "interop.jambonz-down",
+]
 COMMAND_OVERRIDES = {
     "security.advisory-audit": [
         "cargo",
@@ -700,6 +706,93 @@ def amr_rate_sweep_gates() -> list[dict[str, Any]]:
     return [up, *cells, down, aggregate]
 
 
+def jambonz_interop_gates() -> list[dict[str, Any]]:
+    """Latest stable OSS Jambonz as a first-class release B2BUA peer."""
+    paths = [
+        "crates/sip/rvoip-sip/examples/pbx/**",
+        "crates/media/**",
+        "infra/release-runners/interop-lifecycle.sh",
+        "infra/release-runners/pbx/jambonz/**",
+    ]
+    latest = synthetic_gate(
+        "interop.jambonz-latest",
+        "Jambonz latest stable open-source release pin",
+        executor="argv",
+        command=[
+            "python3",
+            "infra/release-runners/pbx/jambonz/verify-latest.py",
+            "--receipt",
+            "{artifact_dir}/latest.json",
+        ],
+        resource="gcp-interop",
+        dependencies=["source.remote-clean", "interop.freeswitch-down-after"],
+        paths=paths,
+        always_fresh=True,
+    )
+    up = synthetic_gate(
+        "interop.jambonz-up",
+        "latest pinned Jambonz OSS lab up",
+        executor="argv",
+        command=[
+            "env",
+            "JAMBONZ_RECEIPT_DIR={artifact_dir}",
+            "bash",
+            "infra/release-runners/interop-lifecycle.sh",
+            "jambonz-up",
+        ],
+        resource="gcp-interop",
+        dependencies=["interop.jambonz-latest"],
+        paths=paths,
+    )
+    up["estimated_seconds"] = 240
+    up["timeout_minutes"] = 30
+    matrix = synthetic_gate(
+        "interop.jambonz-matrix",
+        "Jambonz OSS PBX/B2BUA matrix",
+        executor="argv",
+        command=[
+            "env",
+            "PBX_OUT_ROOT={artifact_dir}",
+            "PBX_REPORT_APPEND=1",
+            # The pinned Jambonz profile admits the two mandatory G.711
+            # encodings. Sweep them separately so a combined offer cannot
+            # satisfy both assertions by selecting PCMU twice.
+            "PBX_G711_PROFILES=pcmu pcma",
+            "{workspace}/crates/sip/rvoip-sip/examples/pbx/run.sh",
+            "--pbx",
+            "jambonz",
+            "--api",
+            "all",
+            "--scenario",
+            "all",
+            "--transport",
+            "UDP",
+        ],
+        resource="gcp-interop",
+        dependencies=["interop.jambonz-up"],
+        paths=paths,
+    )
+    matrix["estimated_seconds"] = 600
+    matrix["timeout_minutes"] = 45
+    down = synthetic_gate(
+        "interop.jambonz-down",
+        "Jambonz OSS lab teardown and residue proof",
+        executor="argv",
+        command=[
+            "env",
+            "JAMBONZ_RECEIPT_DIR={artifact_dir}",
+            "bash",
+            "infra/release-runners/interop-lifecycle.sh",
+            "jambonz-down",
+        ],
+        resource="gcp-interop",
+        dependencies=["interop.jambonz-matrix"],
+        paths=paths,
+        always_fresh=True,
+    )
+    return [latest, up, matrix, down]
+
+
 def proxy_interop_gates() -> list[dict[str, Any]]:
     paths = [
         "crates/sip/sip-proxy/**",
@@ -975,6 +1068,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
         facade_feature_bundle_gate(),
         *proxy_interop_gates(),
         *proxy_pbx_gates(),
+        *jambonz_interop_gates(),
         *amr_rate_sweep_gates(),
         *amr_fuzz_gates(),
         synthetic_gate(
@@ -1062,6 +1156,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
                 *PROXY_INTEROP_GATE_IDS,
                 "interop.proxy-pbx",
                 *PROXY_PBX_GATE_IDS,
+                *JAMBONZ_GATE_IDS,
                 "interop.amr-rate-sweep",
                 *AMR_RATE_SWEEP_GATE_IDS,
                 *[f"security.fuzz-{suffix}" for suffix in AMR_FUZZ_TARGETS],

@@ -4420,13 +4420,14 @@ pub(crate) async fn execute_action(
                     "REFER acceptance NOTIFY requires exact session authority".to_string(),
                 )
             })?;
-            if dialog_adapter
-                .send_refer_notify_lane_owned(&handle, session, 100, "Trying")
-                .await
-                .is_err()
-            {
-                warn!(session = %session.session_id, "Failed to send 100 Trying NOTIFY");
-            }
+            return Ok(ActionOutcome::with_deferred_effect(
+                DeferredActionEffect::TransferNotify(TransferNotifyEffect {
+                    transferor: handle,
+                    status_code: 100,
+                    reason: "Trying".to_string(),
+                    observations: Vec::new(),
+                }),
+            ));
         }
 
         Action::SendTransferNotifyRinging => {

@@ -393,9 +393,12 @@ rvoip-rtc = { path = "../rvoip-rtc" }
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(body, encoding="utf-8")
 
-            edits = release.planned_release_metadata_edits(
-                root, "0.3.5", "0.3.6"
-            )
+            with mock.patch.object(
+                release, "ACTIVE_RELEASE_METADATA_FILES", tuple(active_files)
+            ):
+                edits = release.planned_release_metadata_edits(
+                    root, "0.3.5", "0.3.6"
+                )
 
             self.assertEqual(set(edits), {root / path for path in active_files})
             for payload in edits.values():
@@ -408,12 +411,42 @@ rvoip-rtc = { path = "../rvoip-rtc" }
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "README.md").write_text("no active marker\n", encoding="utf-8")
-            with self.assertRaisesRegex(
-                release.ReleaseError, "does not reference workspace version"
+            with mock.patch.object(
+                release, "ACTIVE_RELEASE_METADATA_FILES", (Path("README.md"),)
             ):
-                release.planned_release_metadata_edits(
-                    root, "0.3.5", "0.3.6"
-                )
+                with self.assertRaisesRegex(
+                    release.ReleaseError, "does not reference workspace version"
+                ):
+                    release.planned_release_metadata_edits(
+                        root, "0.3.5", "0.3.6"
+                    )
+
+    def test_active_release_metadata_rejects_stale_dependency_example(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "README.md").write_text(
+                "Current version 0.3.9\n"
+                'rvoip = { version = "0.3.8", features = ["sip"] }\n',
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                release, "ACTIVE_RELEASE_METADATA_FILES", (Path("README.md"),)
+            ):
+                with self.assertRaisesRegex(
+                    release.ReleaseError, "stale rvoip dependency example"
+                ):
+                    release.validate_active_release_metadata(root, "0.3.9")
+
+    def test_active_release_metadata_rejects_duplicate_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(
+                release,
+                "ACTIVE_RELEASE_METADATA_FILES",
+                (Path("README.md"), Path("README.md")),
+            ):
+                with self.assertRaisesRegex(release.ReleaseError, "duplicate paths"):
+                    release.validate_active_release_metadata(root, "0.3.9")
 
     def test_member_dependency_versions_reject_stale_renamed_requirement(
         self,

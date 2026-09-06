@@ -13,7 +13,7 @@ and Via handling consumed by the
 ## Status
 
 **Bounded RFC 3261 transaction-stateful proxy profile, updated by RFC 4320 and
-RFC 6026.** The coordinated `0.3.8` candidate includes
+RFC 6026.** The coordinated `0.3.9` release includes
 transaction-stateful forwarding, parallel/sequential forking, Via and
 Max-Forwards processing, response aggregation, CANCEL propagation, and
 Timer C. The claim is limited to the behaviors and real-peer matrix named in
@@ -36,7 +36,7 @@ you want the raw transaction-layer primitives:
 
 ```toml
 [dependencies]
-rvoip-sip-proxy = "0.3.8"
+rvoip-sip-proxy = "0.3.9"
 ```
 
 ## License

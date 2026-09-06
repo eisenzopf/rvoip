@@ -164,7 +164,7 @@ fn print_startup_banner(gateway: &Gateway) {
     println!("SIP registrar:       sip:{}", gateway.sip_addr);
     println!("Alice AOR:           {}", gateway.alice_aor);
     println!("Alice auth user:     {ALICE_USER}");
-    println!("Alice password:      {}", gateway.alice_password);
+    println!("Alice password:      <redacted; use the configured demo secret>");
     println!();
     println!("Human demo:");
     println!(
@@ -470,7 +470,7 @@ async fn verify_sip_to_webrtc(
         .await
         .ok_or("customer WebRTC peer did not receive remote SIP track")?;
     customer_stream.attach_remote(remote_track);
-    let mut input = MediaStream::frames_in(customer_stream.as_ref());
+    let mut input = customer_stream.try_frames_in()?;
     while input.try_recv().is_ok() {}
 
     let tone = pcm_sine(TONE_HZ, 8000, 160 * 100, 12000);

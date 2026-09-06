@@ -1,4 +1,4 @@
-# RTP Core API Security Status for 0.3.8
+# RTP Core API Security Status for 0.3.9
 
 The previous status report claimed incomplete security prototypes were
 production-ready. That report is superseded by this fail-closed status.

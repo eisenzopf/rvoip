@@ -11,7 +11,7 @@
 //! supervisors and handler-owned tasks can place outbound calls, register,
 //! inspect registration metadata through the coordinator, and shut down the
 //! running peer. Outbound calls flow through `control.invite(to)` and chain
-//! `.with_extra_headers(...)` to attach caller-supplied typed headers to the
+//! `.with_headers(...)` to attach caller-supplied typed headers to the
 //! very first INVITE for PBX/SBC integrations that require non-standard or
 //! vendor headers.
 //!
@@ -52,6 +52,7 @@
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
+use rvoip_sip_core::types::{HeaderName, TypedHeader};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
@@ -220,6 +221,8 @@ type ReferReceivedHook = Arc<
         + Send
         + Sync,
 >;
+type ReferAcceptedHook =
+    Arc<dyn Fn(SessionHandle, String) -> CallbackFuture<Result<()>> + Send + Sync>;
 type TransferAcceptedHook =
     Arc<dyn Fn(SessionHandle, String) -> CallbackFuture<Result<()>> + Send + Sync>;
 type ReferProgressHook =
@@ -257,6 +260,7 @@ pub struct CallbackPeerBuilder {
     remote_hold: Option<HoldHook>,
     remote_resume: Option<HoldHook>,
     refer_received: Option<ReferReceivedHook>,
+    refer_accepted: Option<ReferAcceptedHook>,
     transfer_accepted: Option<TransferAcceptedHook>,
     refer_progress: Option<ReferProgressHook>,
     refer_completed: Option<ReferCompletedHook>,
@@ -287,6 +291,7 @@ impl CallbackPeerBuilder {
             remote_hold: None,
             remote_resume: None,
             refer_received: None,
+            refer_accepted: None,
             transfer_accepted: None,
             refer_progress: None,
             refer_completed: None,
@@ -690,6 +695,25 @@ impl CallbackPeerBuilder {
         self
     }
 
+    /// Observe successful local acceptance of an inbound REFER.
+    ///
+    /// This hook runs only after the configured [`Self::on_refer_received`]
+    /// decision has been applied and the RFC 3515 acceptance transition has
+    /// completed. It is therefore the safe point for an application-managed
+    /// referee to start the referenced request. This is distinct from
+    /// [`Self::on_transfer_accepted`], which observes a remote peer accepting
+    /// an outbound REFER.
+    pub fn on_refer_accepted<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(SessionHandle, String) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.refer_accepted = Some(Arc::new(move |handle, refer_to| {
+            Box::pin(f(handle, refer_to))
+        }));
+        self
+    }
+
     /// Handle an accepted outbound REFER.
     pub fn on_transfer_accepted<F, Fut>(mut self, f: F) -> Self
     where
@@ -817,6 +841,7 @@ impl CallbackPeerBuilder {
                 remote_hold: self.remote_hold,
                 remote_resume: self.remote_resume,
                 refer_received: self.refer_received,
+                refer_accepted: self.refer_accepted,
                 transfer_accepted: self.transfer_accepted,
                 refer_progress: self.refer_progress,
                 refer_completed: self.refer_completed,
@@ -850,6 +875,7 @@ pub struct CallbackBuilderHandler {
     remote_hold: Option<HoldHook>,
     remote_resume: Option<HoldHook>,
     refer_received: Option<ReferReceivedHook>,
+    refer_accepted: Option<ReferAcceptedHook>,
     transfer_accepted: Option<TransferAcceptedHook>,
     refer_progress: Option<ReferProgressHook>,
     refer_completed: Option<ReferCompletedHook>,
@@ -984,6 +1010,12 @@ impl CallHandler for CallbackBuilderHandler {
                 return;
             }
         };
+        let refer_to = request
+            .headers_named_iter(&HeaderName::ReferTo)
+            .find_map(|header| match header {
+                TypedHeader::ReferTo(value) => Some(value.uri().to_string()),
+                _ => None,
+            });
         let accepted = match hook(handle.clone(), request).await {
             Ok(b) => b,
             Err(_error) => {
@@ -1004,6 +1036,15 @@ impl CallHandler for CallbackBuilderHandler {
                 callback = "on_refer_received_decision",
                 "CallbackPeer REFER decision failed"
             );
+        } else if accepted {
+            if let (Some(hook), Some(refer_to)) = (&self.refer_accepted, refer_to) {
+                if let Err(_error) = hook(handle, refer_to).await {
+                    tracing::warn!(
+                        callback = "on_refer_accepted",
+                        "CallbackPeer inbound REFER accepted hook failed"
+                    );
+                }
+            }
         }
     }
 

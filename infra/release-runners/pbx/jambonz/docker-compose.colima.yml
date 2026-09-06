@@ -1,0 +1,30 @@
+services:
+  drachtio:
+    # Docker's Linux bridge is not routed into macOS by Colima. Publish only
+    # the Jambonz UDP listener on loopback. Drachtio must also advertise that
+    # exact reachable address and port in its Contact/Via state; advertising
+    # the container-only 172.39.0.10:5060 address makes 2xx ACKs and subsequent
+    # in-dialog requests disappear into an unroutable bridge address. Keep the
+    # external and internal ports identical so its supported --external-ip
+    # mapping remains truthful.
+    command:
+      - drachtio
+      - --contact
+      - "sip:*:55060;transport=udp"
+      - --external-ip
+      - "127.0.0.1"
+      - --dns-name
+      - sip.rvoip.test
+      - --loglevel
+      - info
+      - --sofia-loglevel
+      - "3"
+    ports:
+      - "${JAMBONZ_HOST_SIP_BIND:-127.0.0.1}:${JAMBONZ_HOST_SIP_PORT:-55060}:55060/udp"
+
+  rtpengine:
+    # RVoIP sees loopback in Jambonz's rewritten SDP and reaches this bounded
+    # published range. RTPengine reaches RVoIP in the opposite direction at
+    # the host-gateway address written by up.sh.
+    ports:
+      - "${JAMBONZ_HOST_RTP_BIND:-127.0.0.1}:${JAMBONZ_RTP_PORT_START:-10000}-${JAMBONZ_RTP_PORT_END:-10199}:${JAMBONZ_RTP_PORT_START:-10000}-${JAMBONZ_RTP_PORT_END:-10199}/udp"

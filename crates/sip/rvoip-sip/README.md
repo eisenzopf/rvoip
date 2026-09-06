@@ -13,13 +13,12 @@ DTMF, hold/resume, custom SIP headers, and app-visible events so Rust
 applications can behave like programmable SIP endpoints without owning SIP
 transaction or RTP details directly.
 
-The workspace is preparing the strict-gate `0.3.8` release candidate. It can
-publish only after a fresh full-beta run passes without skipped gates and is
-bound to the exact clean release source. The generated
+The workspace released `0.3.9` from a strict, exact-source qualification. The
+generated
 [beta release report](docs/BETA_RELEASE_REPORT.md) is authoritative for the
 tested PBX, proxy, SIPp, strict-UA, security, performance, and soak boundaries.
 Historical exception and carry-forward reports remain immutable history and
-do not qualify `0.3.8`.
+do not qualify a later release.
 
 ## At a glance
 
@@ -30,7 +29,7 @@ do not qualify `0.3.8`.
 | Build a reactive server, IVR, router, or queue | [`CallbackPeer`](https://docs.rs/rvoip-sip/latest/rvoip_sip/struct.CallbackPeer.html) |
 | Compose multiple call legs or a B2BUA | [`UnifiedCoordinator`](https://docs.rs/rvoip-sip/latest/rvoip_sip/struct.UnifiedCoordinator.html) |
 | Control an active call | [`SessionHandle`](https://docs.rs/rvoip-sip/latest/rvoip_sip/struct.SessionHandle.html) |
-| Check Asterisk, FreeSWITCH, Kamailio, or OpenSIPS status | [Interoperability status](#interoperability-status) |
+| Check Asterisk, FreeSWITCH, Jambonz, Kamailio, or OpenSIPS status | [Interoperability status](#interoperability-status) |
 | Bridge a SIP caller to a native Vapi WebSocket agent | [`rvoip-vapi`](#extensions-and-native-vapi-websocket-agents) |
 
 Start with `Endpoint` unless you already know you need event-stream ownership,
@@ -45,7 +44,7 @@ is **Rust 1.91**.
 
 ```toml
 [dependencies]
-rvoip-sip = "0.3.8"
+rvoip-sip = "0.3.9"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -148,6 +147,7 @@ The examples are organized by developer surface in
 | Terminal softphone | `cargo run -p rvoip-sip --example sip_client` |
 | Asterisk interop matrix | `./crates/sip/rvoip-sip/examples/pbx/run.sh --pbx asterisk --api all --scenario all` |
 | FreeSWITCH interop matrix | `./crates/sip/rvoip-sip/examples/pbx/run.sh --pbx freeswitch --api all --scenario all` |
+| Jambonz interop matrix | `./crates/sip/rvoip-sip/examples/pbx/run.sh --pbx jambonz --api all --scenario all --transport UDP` |
 
 PBX interop setup, environment variables, and scenario coverage are documented
 in [`examples/pbx/README.md`](examples/pbx/README.md). The terminal softphone
@@ -155,7 +155,7 @@ is documented in [`examples/sip_client/README.md`](examples/sip_client/README.md
 
 ## Interoperability status
 
-The `0.3.8` candidate requires revision-bound PASS evidence for Asterisk,
+The `0.3.9` release recorded revision-bound PASS evidence for Asterisk,
 FreeSWITCH, Kamailio, and OpenSIPS. Kamailio and OpenSIPS must each pass both
 adjacency orders over UDP, TCP, and verified TLS. Publication remains blocked
 unless the generated report records the complete required matrix as PASS.
@@ -173,6 +173,7 @@ release claim, and it does not meet the four-peer attestation boundary.
 | --- | --- | --- |
 | **Asterisk** | **0.3.2 interop matrix passed** | `Endpoint`, `StreamPeer`, and `CallbackPeer` across registration, basic call, G.729A/G.729AB, hold/resume, ring-cancel, RFC 4733 DTMF, rejection, and blind transfer over UDP and TLS |
 | **FreeSWITCH** | **0.3.2 interop matrix passed** | The same API, scenario, codec, and UDP/TLS matrix as Asterisk |
+| **Jambonz OSS 0.9.9** | **0.3.10 qualification gate added; result pending exact-candidate run** | The same registered-user `Endpoint`, `StreamPeer`, and `CallbackPeer` scenario runner used for Asterisk and FreeSWITCH, across the applicable UDP SIP/SDP/RTP B2BUA matrix |
 | **SIPp** | **0.3.2 standalone matrix passed** | 30, 100, 300, 1,000, and 2,000 CPS with 100% configured call completion |
 | **baresip** | **0.3.2 strict-UA check passed** | External user-agent call against the rvoip SIP listener |
 | **Kamailio** | **Lab-tested; not release-gated** | Registrar-proxy with an rtpengine media relay: registration, calls, AMR in all four framings relayed verbatim, DTMF, and SDES-SRTP, over UDP and TLS. No TCP, no second adjacency order, not bound into the release attestation |
@@ -260,7 +261,7 @@ third-party telephony intermediary is required between rvoip and Vapi.
 Enable the facade integration with:
 
 ```toml
-rvoip = { version = "0.3.8", features = ["sip", "vapi"] }
+rvoip = { version = "0.3.9", features = ["sip", "vapi"] }
 ```
 
 See the complete [`rvoip-vapi` README](../../extensions/rvoip-vapi/README.md),

@@ -278,7 +278,7 @@ cargo run --example dtls_test
 
 #### [`direct_dtls_media_streaming.rs`](direct_dtls_media_streaming.rs)
 Availability check only: asserts that direct DTLS media streaming is rejected
-before opening a media path. It is not a streaming example in 0.3.8.
+before opening a media path. It is not a streaming example in 0.3.9.
 ```bash
 cargo run --example direct_dtls_media_streaming
 ```

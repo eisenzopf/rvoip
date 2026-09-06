@@ -6,7 +6,7 @@
 //! usually need first.
 //!
 //! For PBX or SBC integrations that require non-standard or vendor INVITE
-//! headers, call `endpoint.invite(to).with_extra_headers(...).send()` to
+//! headers, call `endpoint.invite(to)?.with_headers(...)?.send()` to
 //! attach a caller-supplied `Vec<TypedHeader>` to the first INVITE.
 
 #![deny(missing_docs)]

@@ -18,7 +18,8 @@
 //! Outbound calls flow through one builder, [`UnifiedCoordinator::invite`],
 //! with chainable modifiers — `.with_credentials(...)` for per-call digest
 //! auth, `.with_pai(...)` for per-call `P-Asserted-Identity`, and
-//! `.with_extra_headers(...)` for caller-supplied typed headers on the
+//! `.with_headers(...)` through [`crate::api::headers::SipRequestOptions`]
+//! for caller-supplied typed headers on the
 //! first INVITE. Terminate the chain with `.send()`.
 //!
 //! # Example
@@ -8490,7 +8491,7 @@ impl UnifiedCoordinator {
     /// Canonical REGISTER verb-builder per SIP_API_DESIGN_2.md §3.3. The
     /// legacy 6-arg `register(uri, from, contact, user, pw, exp)` method
     /// was deleted in Phase 12; use this builder entry with
-    /// `.with_expires(...)`, `.with_extra_headers(...)`, etc. before
+    /// `.with_expires(...)`, `.with_headers(...)`, etc. before
     /// terminating with `.send()`.
     pub fn register(
         self: &Arc<Self>,

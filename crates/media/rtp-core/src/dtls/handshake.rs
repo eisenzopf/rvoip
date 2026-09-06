@@ -586,12 +586,6 @@ impl HandshakeState {
                                 // Store pre-master secret
                                 self.pre_master_secret = Some(pre_master_secret.to_vec());
 
-                                // Print first bytes of pre-master secret for debugging
-                                println!(
-                                    "Client pre-master secret first bytes: {:02X?}",
-                                    &pre_master_secret[..std::cmp::min(pre_master_secret.len(), 8)]
-                                );
-
                                 // Calculate master secret
                                 if let (Some(client_random), Some(server_random)) =
                                     (&self.client_random, &self.server_random)
@@ -606,12 +600,6 @@ impl HandshakeState {
 
                                     // Store master secret
                                     self.master_secret = Some(master_secret.to_vec());
-
-                                    // Print first bytes of master secret for debugging
-                                    println!(
-                                        "Client master secret first bytes: {:02X?}",
-                                        &master_secret[..std::cmp::min(master_secret.len(), 8)]
-                                    );
                                 }
                             }
                         }
@@ -1013,12 +1001,6 @@ impl HandshakeState {
                                 // Store pre-master secret
                                 self.pre_master_secret = Some(pre_master_secret.to_vec());
 
-                                // Print first bytes of pre-master secret for debugging
-                                println!(
-                                    "Server pre-master secret first bytes: {:02X?}",
-                                    &pre_master_secret[..std::cmp::min(pre_master_secret.len(), 8)]
-                                );
-
                                 // Calculate master secret
                                 if let (Some(client_random), Some(server_random)) =
                                     (&self.client_random, &self.server_random)
@@ -1033,12 +1015,6 @@ impl HandshakeState {
 
                                     // Store master secret
                                     self.master_secret = Some(master_secret.to_vec());
-
-                                    // Print first bytes of master secret for debugging
-                                    println!(
-                                        "Server master secret first bytes: {:02X?}",
-                                        &master_secret[..std::cmp::min(master_secret.len(), 8)]
-                                    );
                                 }
                             }
                         }

@@ -1,0 +1,149 @@
+services:
+  mysql:
+    container_name: rvoip-jambonz-mysql
+    image: ${JAMBONZ_MYSQL_FIXTURE_IMAGE}
+    platform: linux/amd64
+    environment:
+      MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+      MYSQL_DATABASE: jambones_test
+      MYSQL_USER: jambones_test
+      MYSQL_PASSWORD: jambones_test
+    healthcheck:
+      # TCP is unavailable while the MySQL entrypoint is running its temporary
+      # initialization server, so dependents cannot observe a premature healthy
+      # state and race the final database restart.
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--protocol", "tcp"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    networks:
+      jambonz:
+        ipv4_address: 172.39.0.2
+
+  drachtio:
+    container_name: rvoip-jambonz-drachtio
+    image: ${JAMBONZ_DRACHTIO_IMAGE}
+    platform: linux/amd64
+    command: ["drachtio", "--contact", "sip:*;transport=udp", "--loglevel", "info", "--sofia-loglevel", "3"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      jambonz:
+        ipv4_address: 172.39.0.10
+
+  redis:
+    container_name: rvoip-jambonz-redis
+    image: ${JAMBONZ_REDIS_IMAGE}
+    networks:
+      jambonz:
+        ipv4_address: 172.39.0.11
+
+  rtpengine:
+    container_name: rvoip-jambonz-rtpengine
+    image: ${JAMBONZ_RTPENGINE_IMAGE}
+    platform: linux/amd64
+    command:
+      - rtpengine
+      - --interface
+      - private/172.39.0.12
+      - --interface
+      - public/172.39.0.12!${JAMBONZ_RTP_ADVERTISED_IP:-172.39.0.12}
+      - --port-min
+      - ${JAMBONZ_RTP_PORT_START:-10000}
+      - --port-max
+      - ${JAMBONZ_RTP_PORT_END:-10199}
+    networks:
+      jambonz:
+        ipv4_address: 172.39.0.12
+
+  registrar:
+    container_name: rvoip-jambonz-registrar
+    image: ${JAMBONZ_REGISTRAR_IMAGE}
+    platform: linux/amd64
+    command: ["npm", "start"]
+    environment:
+      NODE_CONFIG: >-
+        {"drachtio":{"host":"drachtio","port":9022,"secret":"cymru"},"redis":{"port":6379,"host":"172.39.0.11","prefix":"jb"},"authCallback":{"uri":"http://auth-server:4000/auth","auth":{"username":"fixture-user","password":"fixture-pass"}},"logging":{"level":"info"}}
+      DRACHTIO_HOST: drachtio
+      DRACHTIO_PORT: "9022"
+      DRACHTIO_SECRET: cymru
+      JAMBONES_REDIS_HOST: 172.39.0.11
+      JAMBONES_REDIS_PORT: "6379"
+      JAMBONES_LOGLEVEL: info
+      JAMBONES_MYSQL_HOST: 172.39.0.2
+      JAMBONES_MYSQL_USER: jambones_test
+      JAMBONES_MYSQL_PASSWORD: jambones_test
+      JAMBONES_MYSQL_DATABASE: jambones_test
+      JAMBONES_TIME_SERIES_HOST: 172.39.0.90
+    depends_on:
+      - drachtio
+      - redis
+      - auth-server
+    networks:
+      jambonz:
+        ipv4_address: 172.39.0.13
+
+  auth-server:
+    container_name: rvoip-jambonz-auth
+    image: ${JAMBONZ_AUTH_IMAGE}
+    platform: linux/amd64
+    command: ["npm", "start"]
+    environment:
+      NODE_CONFIG: >-
+        {"server":{"port":4000,"path":"/auth","auth":{"users":{"fixture-user":"fixture-pass"}}},"credentials":{"sip.rvoip.test":[{"username":"1001","password":"1234"},{"username":"1002","password":"1234"},{"username":"1003","password":"1234"},{"username":"2001","password":"1234"},{"username":"2002","password":"1234"},{"username":"2003","password":"1234"}]}}
+    networks:
+      jambonz:
+        ipv4_address: 172.39.0.14
+
+  sbc-outbound:
+    container_name: rvoip-jambonz-sbc-outbound
+    image: ${JAMBONZ_OUTBOUND_APP_IMAGE}
+    platform: linux/amd64
+    environment:
+      NODE_ENV: test
+      HTTP_PORT: "3050"
+      JAMBONES_HOSTING: "1"
+      JAMBONES_NETWORK_CIDR: 172.39.0.0/16
+      JAMBONES_MYSQL_HOST: 172.39.0.2
+      JAMBONES_MYSQL_USER: jambones_test
+      JAMBONES_MYSQL_PASSWORD: jambones_test
+      JAMBONES_MYSQL_DATABASE: jambones_test
+      JAMBONES_REDIS_HOST: 172.39.0.11
+      JAMBONES_REDIS_PORT: "6379"
+      JAMBONES_TIME_SERIES_HOST: 172.39.0.90
+      JAMBONES_LOGLEVEL: info
+      DRACHTIO_SECRET: cymru
+      DRACHTIO_HOST: drachtio
+      DRACHTIO_PORT: "9022"
+      JAMBONES_RTPENGINES: 172.39.0.12:22222
+      SBC_ACCOUNT_SID: ed649e33-e771-403a-8c99-1780eabbc803
+    depends_on:
+      mysql:
+        condition: service_healthy
+      drachtio:
+        condition: service_started
+      redis:
+        condition: service_started
+      rtpengine:
+        condition: service_started
+      influxdb:
+        condition: service_started
+    networks:
+      jambonz:
+        ipv4_address: 172.39.0.15
+
+  influxdb:
+    container_name: rvoip-jambonz-influxdb
+    image: ${JAMBONZ_INFLUXDB_IMAGE}
+    networks:
+      jambonz:
+        ipv4_address: 172.39.0.90
+
+networks:
+  jambonz:
+    name: rvoip-jambonz
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.39.0.0/16

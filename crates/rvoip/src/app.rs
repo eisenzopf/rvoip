@@ -2157,7 +2157,7 @@ async fn wait_for_core_connection_connected(
 
 #[derive(Clone)]
 struct StaticState {
-    root: PathBuf,
+    customer_html: PathBuf,
     ws_url: String,
 }
 
@@ -2167,7 +2167,11 @@ async fn spawn_static_server(
 ) -> AppResult<(SocketAddr, tokio::task::JoinHandle<()>)> {
     let bind = config.bind;
     let root = config.static_root.unwrap_or_else(|| PathBuf::from("."));
-    let state = StaticState { root, ws_url };
+    let customer_html = resolve_customer_html(root).await?;
+    let state = StaticState {
+        customer_html,
+        ws_url,
+    };
     let app = Router::new()
         .route("/", get(|| async { Redirect::temporary("/customer.html") }))
         .route("/customer.html", get(serve_customer_html))
@@ -2182,9 +2186,24 @@ async fn spawn_static_server(
     Ok((addr, task))
 }
 
+async fn resolve_customer_html(root: PathBuf) -> AppResult<PathBuf> {
+    let canonical_root = tokio::fs::canonicalize(root).await?;
+    let customer_html = tokio::fs::canonicalize(canonical_root.join("customer.html")).await?;
+    if !customer_html.starts_with(&canonical_root) {
+        return Err(AppError::Policy(
+            "the configured customer page resolves outside its static root".to_string(),
+        ));
+    }
+    if !tokio::fs::metadata(&customer_html).await?.is_file() {
+        return Err(AppError::Policy(
+            "the configured customer page is not a regular file".to_string(),
+        ));
+    }
+    Ok(customer_html)
+}
+
 async fn serve_customer_html(State(state): State<StaticState>) -> impl IntoResponse {
-    let path = state.root.join("customer.html");
-    match tokio::fs::read_to_string(&path).await {
+    match tokio::fs::read_to_string(&state.customer_html).await {
         Ok(template) => {
             let body = template.replace("__RVOIP_WS_URL__", &state.ws_url);
             let mut headers = HeaderMap::new();
@@ -2194,11 +2213,14 @@ async fn serve_customer_html(State(state): State<StaticState>) -> impl IntoRespo
             );
             (StatusCode::OK, headers, body).into_response()
         }
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Html(format!("failed to read customer page: {error}")),
-        )
-            .into_response(),
+        Err(error) => {
+            tracing::warn!(error_kind = ?error.kind(), "failed to read configured customer page");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Html("failed to read customer page"),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -2330,6 +2352,66 @@ fn resolve_udp_bind_addr(addr: SocketAddr) -> AppResult<SocketAddr> {
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn static_customer_page_is_resolved_to_an_exact_file() {
+        let root = std::env::temp_dir().join(format!(
+            "rvoip-static-page-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        tokio::fs::create_dir(&root).await.expect("create root");
+        tokio::fs::write(root.join("customer.html"), "safe")
+            .await
+            .expect("write page");
+
+        let resolved = resolve_customer_html(root.clone())
+            .await
+            .expect("page under the configured root should resolve");
+        assert_eq!(
+            resolved,
+            tokio::fs::canonicalize(root.join("customer.html"))
+                .await
+                .expect("canonical page")
+        );
+
+        tokio::fs::remove_dir_all(root).await.expect("clean root");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn static_customer_page_refuses_a_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let nonce = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(format!("rvoip-static-root-{nonce}"));
+        let outside = std::env::temp_dir().join(format!("rvoip-static-outside-{nonce}.html"));
+        tokio::fs::create_dir(&root).await.expect("create root");
+        tokio::fs::write(&outside, "outside")
+            .await
+            .expect("write outside page");
+        symlink(&outside, root.join("customer.html")).expect("create symlink");
+
+        let error = resolve_customer_html(root.clone())
+            .await
+            .expect_err("a customer page outside the configured root must be refused");
+        assert!(matches!(error, AppError::Policy(message) if message.contains("outside")));
+
+        tokio::fs::remove_dir_all(root).await.expect("clean root");
+        tokio::fs::remove_file(outside)
+            .await
+            .expect("clean outside page");
+    }
 
     /// ICE policy set on the builder must reach the coordinator, and a lite
     /// listener with no reachable address must refuse to build — lite

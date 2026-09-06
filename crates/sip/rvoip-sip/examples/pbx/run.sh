@@ -36,6 +36,7 @@ PBX_RUN_WITH_CARGO=${PBX_RUN_WITH_CARGO:-0}
 # scenario it advertises: without it an amr_call build compiles the AMR arms
 # out and the scenario fails for a reason that has nothing to do with interop.
 PBX_CARGO_FEATURES=${PBX_CARGO_FEATURES:-dev-insecure-tls,g729,amr}
+PBX_G711_PROFILES="${PBX_G711_PROFILES:-default}"
 PBX_G729_PROFILES="${PBX_G729_PROFILES:-g729a g729ab}"
 PBX_TLS_PREWARM=${PBX_TLS_PREWARM:-1}
 if [ "${PBX_DIAG:-0}" = "1" ]; then
@@ -75,7 +76,7 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --help|-h)
-      echo "Usage: $0 [--pbx asterisk|freeswitch|kamailio|opensips|proxies|both] [--api endpoint|stream_peer|callback|all] [--scenario registration|basic_call|g729_call|amr_call|amr_transcode_call|b2bua_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all] [--transport UDP|TLS|all] [--repeat N] [--stop-on-fail 0|1]"
+      echo "Usage: $0 [--pbx asterisk|freeswitch|jambonz|kamailio|opensips|proxies|both] [--api endpoint|stream_peer|callback|all] [--scenario registration|basic_call|g729_call|amr_call|amr_transcode_call|b2bua_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all] [--transport UDP|TLS|all] [--repeat N] [--stop-on-fail 0|1]"
       exit 0
       ;;
     *)
@@ -143,7 +144,7 @@ cleanup() {
 
 redacted_env() {
   env | LC_ALL=C sort | awk -F= '
-    /^(PBX_|SIP_|TLS_|ASTERISK_|FREESWITCH_|KAMAILIO_|OPENSIPS_|RVOIP_|AUDIO_|IDLE_)/ {
+    /^(PBX_|SIP_|TLS_|ASTERISK_|FREESWITCH_|JAMBONZ_|KAMAILIO_|OPENSIPS_|RVOIP_|AUDIO_|IDLE_)/ {
       key=$1
       value=substr($0, length($1) + 2)
       upper=toupper(key)
@@ -184,6 +185,7 @@ write_run_environment() {
     echo "- pbx_tls_prewarm: $PBX_TLS_PREWARM"
     echo "- pbx_run_with_cargo: $PBX_RUN_WITH_CARGO"
     echo "- pbx_cargo_features: $PBX_CARGO_FEATURES"
+    echo "- pbx_g711_profiles: $PBX_G711_PROFILES"
     echo "- pbx_g729_profiles: $PBX_G729_PROFILES"
     echo "- pbx_assume_amr: ${PBX_ASSUME_AMR:-unset}"
     echo "- pbx_require_amr: ${PBX_REQUIRE_AMR:-unset}"
@@ -312,6 +314,7 @@ pbx_list() {
     both|all) printf '%s\n' asterisk freeswitch ;;
     asterisk|ast) printf '%s\n' asterisk ;;
     freeswitch|free-switch|fs) printf '%s\n' freeswitch ;;
+    jambonz|jambones|jb) printf '%s\n' jambonz ;;
     kamailio|kam) printf '%s\n' kamailio ;;
     opensips|open-sips|osips) printf '%s\n' opensips ;;
     proxies) printf '%s\n' kamailio opensips ;;
@@ -331,7 +334,7 @@ provider_supports_tls() {
     # Kamailio's lab has a TLS listener (tls.so plus a per-run self-signed
     # certificate); OpenSIPS's stock image has no TLS modules, so its lab is
     # UDP-only until it is rebuilt on the pinned-deb TLS image.
-    opensips) return 1 ;;
+    opensips|jambonz) return 1 ;;
     kamailio) [ -n "${KAMAILIO_TLS_ADDR:-}" ] ;;
     *) return 0 ;;
   esac
@@ -375,6 +378,18 @@ provider_scenario_supported() {
             *) return 1 ;;
           esac
           ;;
+      esac
+      ;;
+    jambonz)
+      # The pinned OSS SBC profile explicitly admits PCMU, PCMA, and
+      # telephone-event. Optional/licensed RTPengine codecs are outside this
+      # release claim; asking the old image to transcode G.729 or AMR can
+      # block inside its codec engine instead of returning a useful SIP
+      # failure. RVoIP's own G.729/AMR release coverage remains mandatory in
+      # the Asterisk and FreeSWITCH profiles.
+      case "$pss_scenario" in
+        g729_call|amr_call|amr_transcode_call|b2bua_call) return 1 ;;
+        *) return 0 ;;
       esac
       ;;
     *) return 0 ;;
@@ -426,6 +441,14 @@ load_provider_env() {
       unset SIP_SERVER SIP_PORT SIP_TLS_PORT SIP_PASSWORD TLS_CA_PATH
       unset ASTERISK_TLS_CONTACT_MODE ASTERISK_TLS_FLOW_REUSE ASTERISK_TLS_SRTP_REQUIRED
       unset KAMAILIO_UDP_ADDR KAMAILIO_PASSWORD OPENSIPS_UDP_ADDR OPENSIPS_PASSWORD
+      unset JAMBONZ_UDP_ADDR JAMBONZ_SIP_DOMAIN JAMBONZ_PASSWORD
+      ;;
+    jambonz)
+      unset SIP_SERVER SIP_PORT SIP_TLS_PORT SIP_PASSWORD TLS_CA_PATH
+      unset ASTERISK_TLS_CONTACT_MODE ASTERISK_TLS_FLOW_REUSE ASTERISK_TLS_SRTP_REQUIRED
+      unset FREESWITCH_UDP_ADDR FREESWITCH_TLS_ADDR FREESWITCH_PASSWORD FREESWITCH_TRANSPORT
+      unset FREESWITCH_TLS_CONTACT_MODE FREESWITCH_TLS_FLOW_REUSE FREESWITCH_TLS_SRTP_REQUIRED
+      unset KAMAILIO_UDP_ADDR KAMAILIO_PASSWORD OPENSIPS_UDP_ADDR OPENSIPS_PASSWORD
       ;;
     kamailio)
       unset SIP_SERVER SIP_PORT SIP_TLS_PORT SIP_PASSWORD TLS_CA_PATH
@@ -433,6 +456,7 @@ load_provider_env() {
       unset FREESWITCH_UDP_ADDR FREESWITCH_TLS_ADDR FREESWITCH_PASSWORD FREESWITCH_TRANSPORT
       unset FREESWITCH_TLS_CONTACT_MODE FREESWITCH_TLS_FLOW_REUSE FREESWITCH_TLS_SRTP_REQUIRED
       unset OPENSIPS_UDP_ADDR OPENSIPS_PASSWORD
+      unset JAMBONZ_UDP_ADDR JAMBONZ_SIP_DOMAIN JAMBONZ_PASSWORD
       ;;
     opensips)
       unset SIP_SERVER SIP_PORT SIP_TLS_PORT SIP_PASSWORD TLS_CA_PATH
@@ -440,11 +464,13 @@ load_provider_env() {
       unset FREESWITCH_UDP_ADDR FREESWITCH_TLS_ADDR FREESWITCH_PASSWORD FREESWITCH_TRANSPORT
       unset FREESWITCH_TLS_CONTACT_MODE FREESWITCH_TLS_FLOW_REUSE FREESWITCH_TLS_SRTP_REQUIRED
       unset KAMAILIO_UDP_ADDR KAMAILIO_PASSWORD
+      unset JAMBONZ_UDP_ADDR JAMBONZ_SIP_DOMAIN JAMBONZ_PASSWORD
       ;;
     *)
       unset FREESWITCH_UDP_ADDR FREESWITCH_TLS_ADDR FREESWITCH_PASSWORD FREESWITCH_TRANSPORT
       unset FREESWITCH_TLS_CONTACT_MODE FREESWITCH_TLS_FLOW_REUSE FREESWITCH_TLS_SRTP_REQUIRED
       unset KAMAILIO_UDP_ADDR KAMAILIO_PASSWORD OPENSIPS_UDP_ADDR OPENSIPS_PASSWORD
+      unset JAMBONZ_UDP_ADDR JAMBONZ_SIP_DOMAIN JAMBONZ_PASSWORD
       ;;
   esac
   if [ "$provider" = "asterisk" ] && [ -f "$LOCAL_ENV_ROOT/asterisk/rvoip-local.env" ]; then
@@ -457,6 +483,12 @@ load_provider_env() {
     set -a
     # shellcheck disable=SC1091
     . "$LOCAL_ENV_ROOT/freeswitch/freeswitch-local.env"
+    set +a
+  fi
+  if [ "$provider" = "jambonz" ] && [ -f "$LOCAL_ENV_ROOT/jambonz/jambonz-local.env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . "$LOCAL_ENV_ROOT/jambonz/jambonz-local.env"
     set +a
   fi
   if [ "$provider" = "kamailio" ] && [ -f "$LOCAL_ENV_ROOT/kamailio/kamailio-local.env" ]; then
@@ -608,7 +640,7 @@ amr_cell_supported() {
   acs_transport=$3
   acs_label=$4
   case "$acs_provider" in
-    kamailio|opensips)
+    jambonz|kamailio|opensips)
       # rtpengine relays payloads without touching them; there is no codec
       # module whose absence could make an AMR cell unrunnable.
       return 0
@@ -727,6 +759,16 @@ g729_profile_list() {
   done
 }
 
+g711_profile_list() {
+  if [ -n "${PBX_CODEC_PROFILE:-}" ]; then
+    printf '%s\n' "$PBX_CODEC_PROFILE"
+    return
+  fi
+  for profile in $PBX_G711_PROFILES; do
+    printf '%s\n' "$profile"
+  done
+}
+
 truthy() {
   case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
     1|true|yes|on) return 0 ;;
@@ -796,6 +838,7 @@ pbx_host_for_diag() {
     kamailio:TLS) printf '%s\n' "${KAMAILIO_TLS_ADDR%%:*}" ;;
     kamailio:*) printf '%s\n' "${KAMAILIO_UDP_ADDR%%:*}" ;;
     opensips:*) printf '%s\n' "${OPENSIPS_UDP_ADDR%%:*}" ;;
+    jambonz:*) printf '%s\n' "${JAMBONZ_UDP_ADDR%%:*}" ;;
     *) printf '%s\n' "${SIP_SERVER:-127.0.0.1}" ;;
   esac
 }
@@ -809,6 +852,7 @@ pbx_port_for_diag() {
     kamailio:TLS) printf '%s\n' "${KAMAILIO_TLS_ADDR##*:}" ;;
     kamailio:*) printf '%s\n' "${KAMAILIO_UDP_ADDR##*:}" ;;
     opensips:*) printf '%s\n' "${OPENSIPS_UDP_ADDR##*:}" ;;
+    jambonz:*) printf '%s\n' "${JAMBONZ_UDP_ADDR##*:}" ;;
     *:TLS) printf '%s\n' "${SIP_TLS_PORT:-5061}" ;;
     *) printf '%s\n' "${SIP_PORT:-5060}" ;;
   esac
@@ -988,6 +1032,10 @@ diag_start_pcap() {
     opensips)
       rtp_start=${OPENSIPS_RTP_START:-23300}
       rtp_end=${OPENSIPS_RTP_END:-23500}
+      ;;
+    jambonz)
+      rtp_start=${JAMBONZ_RTP_START:-10000}
+      rtp_end=${JAMBONZ_RTP_END:-20000}
       ;;
     *)
       rtp_start=${FREESWITCH_RTP_START:-${ASTERISK_RTP_START:-16000}}
@@ -1523,7 +1571,12 @@ run_two_party() {
   transport=$4
   api_label=$(example_label "$example")
   codec_label=$(codec_label_for_scenario "$provider" "$scenario")
-  if [ "$scenario" = "g729_call" ] || [ "$scenario" = "amr_call" ] || [ "$scenario" = "amr_transcode_call" ]; then
+  codec_subdir=0
+  case "$scenario" in
+    g729_call|amr_call|amr_transcode_call) codec_subdir=1 ;;
+    basic_call) [ "$codec_label" != "default" ] && codec_subdir=1 ;;
+  esac
+  if [ "$codec_subdir" = "1" ]; then
     out_dir="$OUT_ROOT/$provider/$api_label/$scenario/$codec_label/$transport"
   else
     out_dir="$OUT_ROOT/$provider/$api_label/$scenario/$transport"
@@ -1678,7 +1731,7 @@ run_matrix_cell() {
   scenario=$3
   rc=0
   if ! provider_scenario_supported "$provider" "$scenario"; then
-    echo "[$provider] skipping $scenario: unsupported for this provider (PBX_PROXY_ALL_SCENARIOS=1 to force)"
+    echo "[$provider] skipping $scenario: outside this provider's qualified profile"
     return 0
   fi
   case "$scenario" in
@@ -1686,15 +1739,34 @@ run_matrix_cell() {
       run_registration "$provider" "$example" || rc=$?
       ;;
     basic_call)
-      if transport_selected UDP; then
-        run_two_party "$provider" "$example" basic_call UDP || rc=$?
-        if [ "$rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then return "$rc"; fi
+      old_g711_profile_set=0
+      old_g711_profile=""
+      if [ "${PBX_CODEC_PROFILE+x}" = "x" ]; then
+        old_g711_profile_set=1
+        old_g711_profile=$PBX_CODEC_PROFILE
       fi
-      if cell_transport_enabled "$provider" TLS; then
-        run_two_party "$provider" "$example" basic_call TLS || {
-          tls_rc=$?
-          if [ "$rc" -eq 0 ]; then rc=$tls_rc; fi
-        }
+      for profile in $(g711_profile_list); do
+        export PBX_CODEC_PROFILE="$profile"
+        profile_rc=0
+        if transport_selected UDP; then
+          run_two_party "$provider" "$example" basic_call UDP || {
+            profile_rc=$?
+            if [ "$rc" -eq 0 ]; then rc=$profile_rc; fi
+          }
+          if [ "$profile_rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then break; fi
+        fi
+        if cell_transport_enabled "$provider" TLS; then
+          run_two_party "$provider" "$example" basic_call TLS || {
+            profile_rc=$?
+            if [ "$rc" -eq 0 ]; then rc=$profile_rc; fi
+          }
+        fi
+        if [ "$profile_rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then break; fi
+      done
+      if [ "$old_g711_profile_set" = "1" ]; then
+        export PBX_CODEC_PROFILE="$old_g711_profile"
+      else
+        unset PBX_CODEC_PROFILE
       fi
       ;;
     amr_call)
