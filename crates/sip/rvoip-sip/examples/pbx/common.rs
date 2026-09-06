@@ -818,6 +818,16 @@ impl EndpointConfig {
         transport: TransportMode,
         role: Option<Role>,
     ) -> ExampleResult<Self> {
+        Self::build(provider, username, transport, role, None)
+    }
+
+    fn build(
+        provider: PbxProvider,
+        username: &str,
+        transport: TransportMode,
+        role: Option<Role>,
+        password_override: Option<String>,
+    ) -> ExampleResult<Self> {
         let defaults = endpoint_defaults(provider, username, transport);
         let prefix = format!("ENDPOINT_{}", username);
         let (sip_server, sip_port) = match provider {
@@ -880,7 +890,10 @@ impl EndpointConfig {
             _ => sip_server.clone(),
         };
         let auth_username = auth_username_for(&prefix, username);
-        let password = required_password(provider, &prefix)?;
+        let password = match password_override {
+            Some(password) => password,
+            None => required_password(provider, &prefix)?,
+        };
         let local_ip: IpAddr = match provider {
             PbxProvider::Asterisk => env_string("LOCAL_IP", "0.0.0.0").parse()?,
             PbxProvider::FreeSwitch
@@ -942,6 +955,21 @@ impl EndpointConfig {
             codec_profile,
             output_dir,
         })
+    }
+
+    #[cfg(test)]
+    fn new_for_test(
+        provider: PbxProvider,
+        username: &str,
+        transport: TransportMode,
+    ) -> ExampleResult<Self> {
+        Self::build(
+            provider,
+            username,
+            transport,
+            None,
+            Some(format!("test-{}", uuid::Uuid::new_v4())),
+        )
     }
 
     pub fn registrar_uri(&self) -> String {
@@ -6838,7 +6866,7 @@ mod tests {
 
     #[test]
     fn jambonz_uses_shared_scenarios_with_required_sbc_admission_headers() {
-        let cfg = EndpointConfig::new(PbxProvider::Jambonz, "2001", TransportMode::Udp)
+        let cfg = EndpointConfig::new_for_test(PbxProvider::Jambonz, "2001", TransportMode::Udp)
             .expect("Jambonz endpoint config");
         let config = cfg.stream_config();
         let automatic_names = config
@@ -6877,8 +6905,9 @@ mod tests {
 
     #[test]
     fn jambonz_keeps_logical_sip_identity_when_routed_through_a_host_proxy() {
-        let mut cfg = EndpointConfig::new(PbxProvider::Jambonz, "2001", TransportMode::Udp)
-            .expect("Jambonz endpoint config");
+        let mut cfg =
+            EndpointConfig::new_for_test(PbxProvider::Jambonz, "2001", TransportMode::Udp)
+                .expect("Jambonz endpoint config");
         cfg.sip_domain = "sip.rvoip.test".into();
         cfg.sip_server = "127.0.0.1".into();
         cfg.sip_port = 55_060;
