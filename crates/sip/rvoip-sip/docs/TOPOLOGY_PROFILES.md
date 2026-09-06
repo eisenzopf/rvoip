@@ -19,8 +19,8 @@ run `33969263241`, generated from clean tested commit
 | Asterisk PBX | Interop tested | UDP/TLS registration and calls, digest auth, SDES-SRTP where claimed. |
 | FreeSWITCH PBX | Interop tested | Mirrors the Asterisk matrix where feasible. |
 | Jambonz OSS SBC/B2BUA | Required for 0.3.10 | Latest stable OSS line (currently 0.9.9), pinned per run; authenticated registration, SIP dialog/control, anchored RTP/audio, carrier admission, and cleanup evidence over UDP. |
-| Kamailio transaction-stateful proxy | `0.3.9` release gate | Real-process UDP/TCP/TLS, routing, CANCEL, forking, ACK, response, and cleanup matrix. |
-| OpenSIPS transaction-stateful proxy | `0.3.9` release gate | Independent real-process execution of the same proxy matrix. |
+| Kamailio transaction-stateful proxy | `0.3.10` release gate | Real-process UDP/TCP/TLS, routing, CANCEL, forking, ACK, response, and cleanup matrix. |
+| OpenSIPS transaction-stateful proxy | `0.3.10` release gate | Independent real-process execution of the same proxy matrix. |
 | SIPp UAC/UAS | Release gate | Standalone load matrix at 30, 100, 300, 1,000, and 2,000 CPS. |
 | baresip strict-UA | Interop tested | Strict-UA INVITE, 200 OK, ACK, established call, BYE, and rvoip accept checks. |
 | Signaling-only B2BUA/gateway | Supported with limits | Multi-leg signaling tests and clear media relay caveats. |
@@ -31,7 +31,7 @@ run `33969263241`, generated from clean tested commit
 | Profile | Status | Reason |
 |---------|--------|--------|
 | Tuned high-CPS above 2,000 CPS | Advanced | Requires explicit tuning, hardware notes, and topology caveats. |
-| RTPengine media relay | Investigation | Media-relay integration is separate from the `0.3.9` signaling-proxy conformance claim. |
+| RTPengine media relay | Investigation | Media-relay integration is separate from the `0.3.10` signaling-proxy conformance claim. |
 | Carrier SBC certification | Post-beta | Requires carrier-specific certification and security audit. |
 | Browser/WebRTC edge | Post-beta | DTLS-SRTP, ICE, TURN, and browser interop are outside beta. |
 | ICE/TURN NAT traversal | Post-beta | Current STUN support is limited address discovery, not ICE. |

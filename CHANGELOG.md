@@ -28,6 +28,9 @@
   instead of nested provenance copies, staged the required high-density burst
   evidence into the generated evaluation, and made the one-hour 500-call split
   soak an explicit machine-validated release result.
+- Preserved intentional prior-release and qualification references when
+  preparing candidate-aware documentation, while still advancing live crate
+  dependency examples and the current workspace runtime marker.
 
 ### Interoperability and release evidence
 
