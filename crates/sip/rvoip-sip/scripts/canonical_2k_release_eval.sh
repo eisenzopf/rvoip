@@ -8,6 +8,11 @@ WORKSPACE_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 RUNNER="${SCRIPT_DIR}/perf_call_setup_2k_profile.sh"
 EVIDENCE_TOOL="${SCRIPT_DIR}/canonical_2k_evidence.py"
 OUTPUT="${RVOIP_CANONICAL_EVAL_OUTPUT:?RVOIP_CANONICAL_EVAL_OUTPUT is required}"
+RVOIP_CANONICAL_LOGIN_HOME="$(python3 -c 'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')"
+if [[ -z "${RVOIP_CANONICAL_LOGIN_HOME}" || ! -d "${RVOIP_CANONICAL_LOGIN_HOME}" ]]; then
+  echo "unable to resolve the current account's home directory" >&2
+  exit 1
+fi
 
 mkdir -p "${OUTPUT}/run-logs"
 python3 "${EVIDENCE_TOOL}" fingerprint \
@@ -18,7 +23,7 @@ run_dirs=()
 for pass in 1 2 3; do
   log="${OUTPUT}/run-logs/pass-${pass}.log"
   worker_env=(
-    HOME="${HOME}"
+    HOME="${RVOIP_CANONICAL_LOGIN_HOME}"
     USER="${USER:-}"
     LOGNAME="${LOGNAME:-${USER:-}}"
     PATH="${PATH}"
