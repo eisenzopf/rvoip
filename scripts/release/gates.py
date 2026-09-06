@@ -1040,6 +1040,9 @@ def reconcile_performance_regression(root: Path, evidence_root: Path, artifact: 
     comparison_paths = payload.get("comparison_paths")
     if not isinstance(comparison_paths, list) or not comparison_paths:
         raise GateError("packaged performance baseline has no comparison paths")
+    results_root = evidence_root / "_perf-results"
+    if not results_root.is_dir():
+        raise GateError("exact-candidate performance results directory is missing")
     current = artifact / "current-performance"
     current.mkdir(parents=True, exist_ok=True)
     selected = {}
@@ -1054,7 +1057,7 @@ def reconcile_performance_regression(root: Path, evidence_root: Path, artifact: 
         # never participate in regression-result selection.
         matches = sorted(
             path
-            for shard_root in (evidence_root / "_perf-results").iterdir()
+            for shard_root in results_root.iterdir()
             if shard_root.is_dir()
             for path in (shard_root / value,)
             if path.is_file()

@@ -1073,6 +1073,25 @@ class GateFrameworkTests(unittest.TestCase):
             ):
                 gates.reconcile_performance_regression(ROOT, evidence, artifact)
 
+    def test_performance_reconciliation_rejects_missing_results_directory(
+        self,
+    ) -> None:
+        baseline_root = (
+            ROOT / "crates/sip/rvoip-sip/perf-baselines/20260706T181609Z"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = Path(directory) / "evidence"
+            packaged = evidence / "baseline-gate/perf-regression-baseline"
+            packaged.mkdir(parents=True)
+            shutil.copy2(baseline_root / "manifest.json", packaged / "manifest.json")
+            artifact = evidence / "collect-report.regression-audit"
+
+            with self.assertRaisesRegex(
+                gates.GateError,
+                "exact-candidate performance results directory is missing",
+            ):
+                gates.reconcile_performance_regression(ROOT, evidence, artifact)
+
     def test_current_performance_reconciliation_fails_without_candidate_artifacts(
         self,
     ) -> None:
