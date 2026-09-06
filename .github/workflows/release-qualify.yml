@@ -58,7 +58,10 @@ jobs:
   plan:
     name: Plan exact-candidate gates
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Exact-main Rust CodeQL normally takes about 24 minutes. Keep the job
+    # deadline above the policy poll window so a post-merge dispatch cannot be
+    # cancelled by the runner before the policy emits its own receipt.
+    timeout-minutes: 30
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       hosted_matrix: ${{ steps.plan.outputs.hosted_matrix }}
@@ -129,6 +132,7 @@ jobs:
           python3 scripts/ci/check_codeql_release_policy.py
           --repository "${{ github.repository }}"
           --candidate "$(git rev-parse HEAD)"
+          --timeout-seconds 1200
           --receipt target/release-plan/codeql-policy.json
 
       - name: Download prior qualification evidence

@@ -33,6 +33,12 @@ limits, tool installation, repository checkout, GCS evidence transfer,
 controller reconciliation, and cleanup fail within a target of 15 minutes.
 The preflight is deliberately non-publishing and is not release evidence.
 
+For `remote-release`, the planner waits up to 20 minutes for all five CodeQL
+categories to bind to the exact protected-main commit. Its 30-minute job
+deadline intentionally outlives that poll window, so a qualification started
+immediately after merge fails with a policy receipt rather than being cancelled
+while the Rust analysis is still running.
+
 Use `remote-core` for a hosted-runner dry run and `remote-release` for the
 complete release profile. Do not start the full profile unless the exact
 release machinery has a recent successful preflight. The first candidate
