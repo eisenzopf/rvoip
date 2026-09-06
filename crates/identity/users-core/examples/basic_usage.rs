@@ -50,18 +50,12 @@ async fn main() -> Result<()> {
         .await?;
 
     println!("✅ Authentication successful!");
-    println!(
-        "   Access token (first 50 chars): {}...",
-        &auth_result.access_token[..50]
-    );
+    println!("   Access token issued (value redacted)");
     println!(
         "   Token expires in: {} seconds",
         auth_result.expires_in.as_secs()
     );
-    println!(
-        "   Refresh token (first 50 chars): {}...",
-        &auth_result.refresh_token[..50]
-    );
+    println!("   Refresh token issued (value redacted)");
 
     // Simulate token expiration and refresh
     println!("\n🔄 Refreshing access token...");
@@ -72,10 +66,7 @@ async fn main() -> Result<()> {
         .await?;
 
     println!("✅ Token refreshed!");
-    println!(
-        "   New access token (first 50 chars): {}...",
-        &refreshed.access_token[..50]
-    );
+    println!("   New access token issued (value redacted)");
     println!(
         "   Token is different: {}",
         refreshed.access_token != auth_result.access_token
