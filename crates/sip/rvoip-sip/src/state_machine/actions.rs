@@ -6055,7 +6055,18 @@ mod lane_owned_action_state_tests {
             .nth(1)
             .and_then(|tail| tail.split("Action::SendTransferNotifyRinging =>").next())
             .expect("100 Trying action source");
-        assert!(trying.contains("send_refer_notify_lane_owned"));
+        assert_eq!(
+            trying
+                .matches("DeferredActionEffect::TransferNotify")
+                .count(),
+            1,
+            "100 Trying must admit one exact deferred transfer operation"
+        );
+        assert!(trying.contains("transferor: handle"));
+        assert!(trying.contains("status_code: 100"));
+        assert!(trying.contains("observations: Vec::new()"));
+        assert!(!trying.contains("publish_api_event"));
+        assert!(!trying.contains("publish_observational"));
         assert!(!trying.contains(".send_refer_notify("));
     }
 

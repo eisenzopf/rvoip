@@ -86,6 +86,10 @@ and regression comparison. It publishes structured JSON and Markdown metrics
 plus a SHA-256 index of all current-run performance artifacts. July results
 remain historical baselines; they cannot qualify this candidate.
 
+General-user 10,000 CPS full-media capability is not claimed. The supported
+envelope remains bounded by the new 2,000-CPS real-media evidence, exact host
+configuration, workloads, and soak durations recorded for this candidate.
+
 The measured host shape, source commit, workload configuration, ASR and error
 counts, setup-latency percentiles, CPU/RSS behavior, media delivery, cleanup,
 and artifact links remain pending until the protected exact-candidate run.
