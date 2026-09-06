@@ -51,10 +51,6 @@ async fn main() -> Result<()> {
 
     println!("✅ Authentication successful!");
     println!("   Access token issued (value redacted)");
-    println!(
-        "   Token expires in: {} seconds",
-        auth_result.expires_in.as_secs()
-    );
     println!("   Refresh token issued (value redacted)");
 
     // Simulate token expiration and refresh
