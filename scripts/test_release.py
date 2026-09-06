@@ -448,6 +448,37 @@ rvoip-rtc = { path = "../rvoip-rtc" }
                 with self.assertRaisesRegex(release.ReleaseError, "duplicate paths"):
                     release.validate_active_release_metadata(root, "0.3.9")
 
+    def test_release_notes_reject_candidate_only_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                "# rvoip 0.3.10 Candidate Release Notes\n"
+                "Jambonz OSS\n## Performance evaluation\nmetrics\n"
+                "## Qualification record\n"
+                "**Pending.** protected run\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                release.ReleaseError, "candidate-only qualification markers"
+            ):
+                release.validate_release_notes_final(root, "0.3.10")
+
+    def test_release_notes_accept_final_protected_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                "# rvoip 0.3.10 Release Notes\n"
+                "Jambonz OSS\n## Performance evaluation\nmetrics\n"
+                "## Qualification record\n"
+                "The protected exact-candidate run passed.\n",
+                encoding="utf-8",
+            )
+            release.validate_release_notes_final(root, "0.3.10")
+
     def test_member_dependency_versions_reject_stale_renamed_requirement(
         self,
     ) -> None:

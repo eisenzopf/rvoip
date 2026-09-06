@@ -44,9 +44,7 @@
       "command": null,
       "dependencies": [
         "source.clean-start",
-        "perf.concurrent-calls",
-        "perf.sipp-parity",
-        "perf.media-burst-matrix"
+        "perf.canonical-2k-current"
       ],
       "display_command": "python3 <workspace>/crates/sip/rvoip-sip/scripts/canonical_2k_evidence.py import --workspace-root <workspace> --beta-start <source-report> --artifact-dir <source-report> --run-dir <workspace>/target/perf-results/profiles/20260724T221956Z_clean_KRwxGm --run-dir <workspace>/target/perf-results/profiles/20260724T224300Z_clean_GbSiae --run-dir <workspace>/target/perf-results/profiles/20260724T225757Z_clean_p5XNXK",
       "estimated_seconds": 1,
@@ -1947,7 +1945,51 @@
     },
     {
       "affected_crates": [
-        "rvoip-sip"
+        "rvoip",
+        "rvoip-amazon-connect",
+        "rvoip-audio-device",
+        "rvoip-audit",
+        "rvoip-auth-core",
+        "rvoip-client",
+        "rvoip-codec-core",
+        "rvoip-core",
+        "rvoip-core-traits",
+        "rvoip-harness",
+        "rvoip-ice-core",
+        "rvoip-identity",
+        "rvoip-ims-aka",
+        "rvoip-infra-common",
+        "rvoip-keycloak",
+        "rvoip-ldap",
+        "rvoip-media-core",
+        "rvoip-moq",
+        "rvoip-moq-native",
+        "rvoip-moq-relay",
+        "rvoip-moq-transport",
+        "rvoip-oidc",
+        "rvoip-quic",
+        "rvoip-redis",
+        "rvoip-rtc",
+        "rvoip-rtp-core",
+        "rvoip-saml",
+        "rvoip-scim",
+        "rvoip-sip",
+        "rvoip-sip-core",
+        "rvoip-sip-dialog",
+        "rvoip-sip-proxy",
+        "rvoip-sip-registrar",
+        "rvoip-sip-transport",
+        "rvoip-stir-shaken",
+        "rvoip-uctp",
+        "rvoip-users-core",
+        "rvoip-vapi",
+        "rvoip-vcon",
+        "rvoip-vcon-postgres",
+        "rvoip-webauthn",
+        "rvoip-webrtc",
+        "rvoip-webrtc-stack",
+        "rvoip-websocket",
+        "rvoip-webtransport"
       ],
       "affected_paths": [],
       "always_fresh": false,
@@ -1958,11 +2000,9 @@
         "cargo",
         "doc",
         "--locked",
-        "-p",
-        "rvoip-sip",
-        "--no-deps",
-        "--features",
-        "generated-validation,dev-insecure-tls"
+        "--workspace",
+        "--all-features",
+        "--no-deps"
       ],
       "dependencies": [
         "source.clean-start"
@@ -5066,6 +5106,7 @@
         "perf.call-setup-endpoint",
         "perf.call-setup-pbx",
         "perf.call-setup-signaling",
+        "perf.canonical-2k-current",
         "perf.capture-boundary",
         "perf.concurrent-calls",
         "perf.contact-center",
@@ -5131,6 +5172,7 @@
         "perf.call-setup-endpoint",
         "perf.call-setup-pbx",
         "perf.call-setup-signaling",
+        "perf.canonical-2k-current",
         "perf.capture-boundary",
         "perf.concurrent-calls",
         "perf.contact-center",
@@ -5163,7 +5205,10 @@
       "executor": "aggregate",
       "expected_outputs": [
         "receipt.json",
-        "command.log"
+        "command.log",
+        "current-performance-evaluation.json",
+        "current-performance-evaluation.md",
+        "current-performance-artifact-index.json"
       ],
       "id": "report.performance-metrics",
       "kind": "reporting",
@@ -5514,6 +5559,45 @@
       "max_infrastructure_retries": 1,
       "name": "rvoip facade deployment bundle matrix",
       "resource_class": "github-standard",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        "Cargo.lock",
+        "Cargo.toml",
+        "crates/foundation/**",
+        "crates/media/**",
+        "crates/sip/rvoip-sip/**",
+        "scripts/release/**"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "env",
+        "RVOIP_CANONICAL_EVAL_OUTPUT={artifact_dir}",
+        "{workspace}/crates/sip/rvoip-sip/scripts/canonical_2k_release_eval.sh"
+      ],
+      "dependencies": [
+        "source.remote-clean"
+      ],
+      "display_command": "env RVOIP_CANONICAL_EVAL_OUTPUT={artifact_dir} {workspace}/crates/sip/rvoip-sip/scripts/canonical_2k_release_eval.sh",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "perf.canonical-2k-current",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "three-pass exact-candidate 2,000-CPS performance evaluation",
+      "resource_class": "gcp-performance-soak-long",
       "retry_on_exit_codes": [
         75
       ],
@@ -10484,6 +10568,7 @@
         "interop.remote-proxies.opensips.rvoip-first.tls",
         "interop.remote-proxies.opensips.rvoip-first.udp",
         "package.inventory",
+        "perf.canonical-2k-current",
         "perf.media-burst.access-edge-microburst",
         "perf.media-burst.buffer-ab-legacy",
         "perf.media-burst.carrier-smoke",
@@ -10619,6 +10704,7 @@
       "perf.call-setup-endpoint",
       "perf.call-setup-pbx",
       "perf.call-setup-signaling",
+      "perf.canonical-2k-current",
       "perf.capture-boundary",
       "perf.concurrent-calls",
       "perf.contact-center",
@@ -10943,6 +11029,7 @@
       "perf.call-setup-endpoint",
       "perf.call-setup-pbx",
       "perf.call-setup-signaling",
+      "perf.canonical-2k-current",
       "perf.capture-boundary",
       "perf.concurrent-calls",
       "perf.contact-center",

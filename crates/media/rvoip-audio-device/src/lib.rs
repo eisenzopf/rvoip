@@ -1,7 +1,7 @@
 //! OS audio-device bridge for [`rvoip-sip`](rvoip_sip).
 //!
 //! rvoip-sip exposes a call's audio as a frame-based
-//! [`AudioStream`](rvoip_sip::AudioStream) and intentionally does **not** own OS
+//! [`AudioStream`] and intentionally does **not** own OS
 //! devices. This crate is the missing other half: an optional [`cpal`] bridge
 //! that captures the microphone and plays back the speaker against that stream,
 //! so a softphone author doesn't have to re-derive real-time audio.
@@ -34,7 +34,7 @@
 //!
 //! cpal `Stream`s are `!Send`, so the whole bridge runs on a dedicated OS thread
 //! with its own current-thread tokio runtime. Only the `Send`
-//! [`AudioSender`](rvoip_sip::AudioSender)/`AudioReceiver` halves and the
+//! [`AudioSender`]/`AudioReceiver` halves and the
 //! optional level callback cross the thread boundary.
 
 #![deny(missing_docs)]

@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+### Added
+
+- Added Jambonz OSS 0.9.9 as a mandatory external SIP interoperability peer,
+  using the shared Endpoint, StreamPeer, and CallbackPeer PBX runner against
+  the real SBC/B2BUA, registrar, Drachtio, Redis, MySQL, and RTPengine topology.
+- Added `CallbackPeerBuilder::on_refer_accepted` for successful local
+  acceptance of an inbound REFER, distinct from the existing callback for a
+  remote peer accepting an application-originated transfer.
+
+### Fixed
+
+- Serialized RFC 3515 implicit-subscription NOTIFY requests for an exact REFER
+  lifecycle so `100 Trying`, progress, and terminal status cannot race or
+  overtake one another.
+- Preserved an optional RFC 3892 `Referred-By` header unchanged into the
+  referenced INVITE while retaining `Refer-To` as the only required transfer
+  target header.
+- Hardened sensitive diagnostics, certificate and path handling, CI cache use,
+  release feature-bundle checks, and CodeQL publication policy.
+
+### Interoperability and release evidence
+
+- The Jambonz UDP/plain-RTP profile covers authenticated registration,
+  PCMU/PCMA bidirectional calls, provisional/final signaling, hold/resume,
+  RFC 4733 DTMF, CANCEL/487, rejection, blind transfer with ordered NOTIFY,
+  replacement INVITE, either-side BYE, and cleanup across all three public SIP
+  APIs.
+- Jambonz-specific exclusions are G.729, AMR, TLS/SRTP, the
+  RVoIP-as-B2BUA scenario, WebRTC, PSTN, application verbs, recording, HA, and
+  load. These exclusions do not reduce the separately qualified RVoIP codec or
+  transport features.
+- Publication now requires synchronized release notes, changelog,
+  interoperability, compatibility, and RFC documentation with the protected
+  exact-candidate qualification receipt.
+- Publication requires a fresh exact-candidate performance evaluation with
+  three clean canonical 2,000-CPS passes, the complete performance/resiliency
+  matrix, high-density media and one-hour soak evidence, regression comparison,
+  and a machine-readable artifact index; July measurements are baseline history
+  rather than 0.3.10 qualification evidence.
+
 ## 0.3.9 — 2026-09-05
 
 This coordinated 45-crate release makes the carrier media and remote-endpoint

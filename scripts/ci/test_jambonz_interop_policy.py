@@ -16,6 +16,13 @@ LAB = ROOT / "infra/release-runners/pbx/jambonz"
 
 
 class JambonzInteropPolicyTests(unittest.TestCase):
+    def pin_values(self) -> dict[str, str]:
+        return dict(
+            line.split("=", 1)
+            for line in PINS.read_text(encoding="utf-8").splitlines()
+            if line and not line.startswith("#")
+        )
+
     def test_sources_and_images_are_immutable(self) -> None:
         text = PINS.read_text(encoding="utf-8")
         values = dict(
@@ -151,6 +158,61 @@ class JambonzInteropPolicyTests(unittest.TestCase):
         ):
             self.assertIn(f"rvoip-jambonz-{component}", up)
         self.assertIn("Required Jambonz container is not running", up)
+
+    def test_public_and_release_docs_define_the_same_jambonz_profile(self) -> None:
+        release_line = self.pin_values()["JAMBONZ_RELEASE_LINE"]
+        documents = {
+            "README.md": ROOT / "README.md",
+            "SIP README": ROOT / "crates/sip/rvoip-sip/README.md",
+            "release notes": ROOT
+            / "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md",
+            "compatibility matrix": ROOT
+            / "crates/sip/rvoip-sip/docs/COMPATIBILITY_MATRIX.md",
+            "interop plan": ROOT / "crates/sip/rvoip-sip/docs/INTEROP_CI_PLAN.md",
+            "topology profiles": ROOT
+            / "crates/sip/rvoip-sip/docs/TOPOLOGY_PROFILES.md",
+            "changelog": ROOT / "CHANGELOG.md",
+        }
+        for label, path in documents.items():
+            with self.subTest(document=label):
+                text = path.read_text(encoding="utf-8")
+                self.assertIn("Jambonz", text)
+                self.assertIn(release_line, text)
+
+        required_scope = (
+            "Endpoint",
+            "StreamPeer",
+            "CallbackPeer",
+            "UDP",
+            "PCMU",
+            "PCMA",
+            "DTMF",
+            "CANCEL",
+            "transfer",
+        )
+        for label in ("release notes", "compatibility matrix"):
+            text = documents[label].read_text(encoding="utf-8")
+            with self.subTest(scope_document=label):
+                for term in required_scope:
+                    self.assertIn(term, text)
+                for exclusion in ("G.729", "AMR", "TLS/SRTP", "WebRTC", "PSTN"):
+                    self.assertIn(exclusion, text)
+
+    def test_transfer_documentation_keeps_referred_by_optional(self) -> None:
+        documents = (
+            ROOT / "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md",
+            ROOT / "crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md",
+            ROOT / "docs/sip/SIP_RFC_COMPLIANCE.md",
+        )
+        for path in documents:
+            text = path.read_text(encoding="utf-8")
+            normalized = " ".join(text.split())
+            with self.subTest(document=str(path.relative_to(ROOT))):
+                self.assertIn("Referred-By", text)
+                self.assertRegex(
+                    normalized,
+                    r"(?i)Referred-By.{0,160}optional|optional.{0,160}Referred-By",
+                )
 
 
 if __name__ == "__main__":

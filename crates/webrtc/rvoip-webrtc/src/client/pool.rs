@@ -7,7 +7,7 @@
 //! adapter originations instead retain one private persistent socket for the
 //! complete route lifecycle.
 //!
-//! Caller still owns the [`Signaler`] handle the pool returns — multiple
+//! Caller still owns the [`Signaler`](crate::client::Signaler) handle the pool returns — multiple
 //! callers can hold the same `Arc<dyn Signaler>` concurrently (the
 //! underlying compatibility signaler opens a socket for each operation).
 //!

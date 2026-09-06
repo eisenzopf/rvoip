@@ -172,7 +172,7 @@ impl Erasure {
     ///
     /// On a good frame this returns what was received. Otherwise the fraction
     /// is dropped — a quarter-sample position is far more precision than a
-    /// guess deserves — and the lag is passed through [`LagHistory::substitute`].
+    /// guess deserves — and the lag is passed through the private `LagHistory::substitute` helper.
     pub fn pitch_lag(
         &mut self,
         ctx: &mut DspContext,

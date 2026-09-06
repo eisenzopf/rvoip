@@ -139,7 +139,7 @@ pub struct DtmfTransmitter {
 impl DtmfTransmitter {
     /// A transmitter on a session whose clock rate is not known.
     ///
-    /// Assumes [`DEFAULT_CLOCK_RATE`]. Prefer
+    /// Assumes the private `DEFAULT_CLOCK_RATE` constant. Prefer
     /// [`with_clock_rate`](Self::with_clock_rate) wherever the negotiated
     /// codec is in hand — for AMR-WB the assumption is wrong.
     pub fn new(rtp_session: Arc<Mutex<RtpSession>>) -> Self {

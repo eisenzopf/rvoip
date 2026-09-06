@@ -88,6 +88,7 @@ JAMBONZ_GATE_IDS = [
     "interop.jambonz-matrix",
     "interop.jambonz-down",
 ]
+CURRENT_PERFORMANCE_EVALUATION_GATE_IDS = ["perf.canonical-2k-current"]
 COMMAND_OVERRIDES = {
     "security.advisory-audit": [
         "cargo",
@@ -106,11 +107,9 @@ COMMAND_OVERRIDES = {
         "cargo",
         "doc",
         "--locked",
-        "-p",
-        "rvoip-sip",
+        "--workspace",
+        "--all-features",
         "--no-deps",
-        "--features",
-        "generated-validation,dev-insecure-tls",
     ],
     "interop.asterisk-matrix": [
         "env",
@@ -346,12 +345,7 @@ def dependencies(record: dict[str, Any], records: list[dict[str, Any]]) -> list[
     if gate_id == "source.clean-start":
         return []
     if gate_id == "source.canonical-2k":
-        return [
-            "source.clean-start",
-            "perf.concurrent-calls",
-            "perf.sipp-parity",
-            "perf.media-burst-matrix",
-        ]
+        return ["source.clean-start", *CURRENT_PERFORMANCE_EVALUATION_GATE_IDS]
     if gate_id == "source.final-capture":
         return [item["id"] for item in records if item["id"] != gate_id and not item["id"].startswith("source.canonical-2k-unchanged")]
     if gate_id == "source.canonical-2k-unchanged":
@@ -362,6 +356,8 @@ def dependencies(record: dict[str, Any], records: list[dict[str, Any]]) -> list[
         return [f"perf.media-burst.{scenario}" for scenario in BURST_SCENARIOS]
     if gate_id.startswith("report."):
         perf = [item["id"] for item in records if item["id"].startswith("perf.")]
+        if gate_id in {"report.perf-evidence-capture", "report.performance-metrics"}:
+            perf.extend(CURRENT_PERFORMANCE_EVALUATION_GATE_IDS)
         prior_reports = [
             item["id"]
             for item in records
@@ -397,6 +393,15 @@ def legacy_gate(record: dict[str, Any], records: list[dict[str, Any]], packages:
         # GCP workers start without a warm target directory. Preserve enough
         # headroom for the first release build as well as the measured gate.
         timeout_minutes = max(timeout_minutes, 20)
+    expected_outputs = ["receipt.json", "command.log"]
+    if record["id"] == "report.performance-metrics":
+        expected_outputs.extend(
+            [
+                "current-performance-evaluation.json",
+                "current-performance-evaluation.md",
+                "current-performance-artifact-index.json",
+            ]
+        )
     return {
         "id": record["id"],
         "name": record["name"],
@@ -413,7 +418,7 @@ def legacy_gate(record: dict[str, Any], records: list[dict[str, Any]], packages:
         "max_infrastructure_retries": 1,
         "affected_crates": affected_crates(command, packages),
         "affected_paths": affected_paths(record, command),
-        "expected_outputs": ["receipt.json", "command.log"],
+        "expected_outputs": expected_outputs,
         "estimated_seconds": max(1, duration),
         "always_fresh": record["kind"] in {"source", "reporting"},
         "legacy": {
@@ -1066,6 +1071,27 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
             ],
         ),
         facade_feature_bundle_gate(),
+        synthetic_gate(
+            "perf.canonical-2k-current",
+            "three-pass exact-candidate 2,000-CPS performance evaluation",
+            executor="argv",
+            command=[
+                "env",
+                "RVOIP_CANONICAL_EVAL_OUTPUT={artifact_dir}",
+                "{workspace}/crates/sip/rvoip-sip/scripts/canonical_2k_release_eval.sh",
+            ],
+            resource="gcp-performance-soak-long",
+            dependencies=["source.remote-clean"],
+            paths=[
+                "Cargo.lock",
+                "Cargo.toml",
+                "crates/foundation/**",
+                "crates/media/**",
+                "crates/sip/rvoip-sip/**",
+                "scripts/release/**",
+            ],
+            always_fresh=True,
+        ),
         *proxy_interop_gates(),
         *proxy_pbx_gates(),
         *jambonz_interop_gates(),
@@ -1157,6 +1183,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
                 "interop.proxy-pbx",
                 *PROXY_PBX_GATE_IDS,
                 *JAMBONZ_GATE_IDS,
+                *CURRENT_PERFORMANCE_EVALUATION_GATE_IDS,
                 "interop.amr-rate-sweep",
                 *AMR_RATE_SWEEP_GATE_IDS,
                 *[f"security.fuzz-{suffix}" for suffix in AMR_FUZZ_TARGETS],
@@ -1186,6 +1213,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
                 set(
                     [record["id"] for record in records]
                     + ["source.remote-clean", "interop.remote-proxies"]
+                    + CURRENT_PERFORMANCE_EVALUATION_GATE_IDS
                     + PROXY_INTEROP_GATE_IDS
                     + [f"perf.media-burst.{scenario}" for scenario in BURST_SCENARIOS]
                 )

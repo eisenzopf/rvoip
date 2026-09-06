@@ -4,7 +4,7 @@
 //! mono PCM in 20 ms frames (960 samples), encodes each frame with the
 //! `opus` crate (matching the engine's registered Opus codec at PT 111),
 //! and yields RTP-ready [`MediaFrame`]s through the
-//! [`AudioSource`](crate::client::AudioSource) trait.
+//! [`AudioSource`] trait.
 //!
 //! [`CpalSpeakerSink`] is the inbound mirror — it receives RTP-encoded
 //! Opus packets, decodes them, and plays the PCM on the default output

@@ -1093,6 +1093,92 @@ def reconcile_performance_regression(root: Path, evidence_root: Path, artifact: 
     }
 
 
+def reconcile_performance_metrics(
+    root: Path, evidence_root: Path, artifact: Path
+) -> dict[str, Any]:
+    """Build one fail-closed evaluation from this candidate's perf artifacts."""
+    source = evidence_root / "_perf-results"
+    if not source.is_dir():
+        raise GateError("exact-candidate performance artifacts are missing")
+    combined = artifact / "current-performance"
+    combined.mkdir(parents=True, exist_ok=True)
+    indexed: dict[str, str] = {}
+    shard_roots = sorted(path for path in source.iterdir() if path.is_dir())
+    if not shard_roots:
+        raise GateError("exact-candidate performance artifact shards are missing")
+    for shard_root in shard_roots:
+        for path in sorted(item for item in shard_root.rglob("*") if item.is_file()):
+            relative = path.relative_to(shard_root)
+            destination = combined / relative
+            digest = file_sha256(path)
+            key = relative.as_posix()
+            if destination.exists():
+                if file_sha256(destination) != digest:
+                    raise GateError(
+                        f"conflicting exact-candidate performance artifact: {key}"
+                    )
+                continue
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, destination)
+            indexed[key] = digest
+    if not indexed:
+        raise GateError("exact-candidate performance artifact set is empty")
+
+    index_path = artifact / "current-performance-artifact-index.json"
+    index_path.write_bytes(
+        canonical_bytes(
+            {
+                "schema": "rvoip-current-performance-artifact-index-v1",
+                "file_count": len(indexed),
+                "files": indexed,
+            }
+        )
+    )
+    output_json = artifact / "current-performance-evaluation.json"
+    output_markdown = artifact / "current-performance-evaluation.md"
+    completed = run(
+        [
+            "python3",
+            "crates/sip/rvoip-sip/scripts/beta_performance_gate_metrics.py",
+            "--perf-root",
+            str(combined),
+            "--output-json",
+            str(output_json),
+            "--output-markdown",
+            str(output_markdown),
+            "--high-density-cps",
+            "160",
+            "--high-density-min-asr",
+            "0.995",
+            "--rss-limit-mb-per-hr",
+            "15",
+            "--monolithic-duration-secs",
+            "3600",
+            "--monolithic-active-calls",
+            "30",
+            "--require-high-density",
+            "--require-monolithic",
+        ],
+        root=root,
+        check=False,
+    )
+    if completed.returncode:
+        raise GateError(
+            "current performance evaluation failed:\n"
+            + ((completed.stdout or "") + (completed.stderr or "")).strip()
+        )
+    metrics = load_json(output_json, "current performance evaluation")
+    if metrics.get("passed") is not True:
+        raise GateError("current performance evaluation is not PASS")
+    return {
+        "artifact_count": len(indexed),
+        "artifact_index_sha256": file_sha256(index_path),
+        "evaluation_json_sha256": file_sha256(output_json),
+        "evaluation_markdown_sha256": file_sha256(output_markdown),
+        "passed": True,
+    }
+
+
 def collect(
     *,
     plan: dict[str, Any],
@@ -1191,6 +1277,17 @@ def collect(
                 continue
             try:
                 specialized = reconcile_performance_regression(root, evidence_root, artifact)
+            except GateError as error:
+                failures.append(f"{gate_id}: {error}")
+                continue
+        elif gate_id == "report.performance-metrics":
+            if root is None:
+                failures.append(f"{gate_id}: collector workspace is unavailable")
+                continue
+            try:
+                specialized = reconcile_performance_metrics(
+                    root, evidence_root, artifact
+                )
             except GateError as error:
                 failures.append(f"{gate_id}: {error}")
                 continue

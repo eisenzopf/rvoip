@@ -32,6 +32,12 @@ must be qualified from a fresh exact candidate after the changes below land.
 7. The coordinated 45-crate dry run and protected publication operate on the
    same qualified commit. Generated evidence is committed in a follow-up
    evidence-only pull request.
+8. A new performance evaluation runs against the exact 0.3.10 candidate. It
+   includes three fresh canonical 2,000-CPS passes, the full performance and
+   resiliency matrix, high-density media burst, monolithic and split one-hour
+   soaks, regression comparison, and a machine-readable current-result index.
+   July artifacts remain historical baselines and cannot substitute for this
+   release's measurements.
 
 ## Workstream A: release metadata integrity
 
@@ -170,6 +176,27 @@ profile or silently broaden its claim.
   artifact-attested. Cryptographically signed tags are a separate supply-chain
   enhancement until explicitly required.
 
+## Workstream E: current performance evaluation
+
+- Run three chronological clean 2,000-CPS PBX/media-server passes on the exact
+  candidate and require a byte-identical executable, source fingerprint, full
+  audio delivery, at least 99.9% ASR, zero non-timeout errors, and complete
+  post-drain cleanup.
+- Run the existing call-setup, registration, concurrency, RTP, backpressure,
+  recovery, mid-call signaling, TLS/SRTP overhead, PDD, long-call, registrar,
+  mixed, B2BUA, AI-agent, contact-center, SIPp-parity, churn, teardown, burst,
+  and soak gates as fresh 0.3.10 measurements.
+- Generate a current-candidate performance evaluation in JSON and Markdown,
+  plus a SHA-256 index of every packaged performance artifact. Require the
+  160-CPS high-density media burst, 99.5% minimum ASR, 15 MB/hour RSS-slope
+  ceiling, 3,600-second 30-call monolithic soak, 3,600-second 500-call split
+  soak, and regression audit to pass without threshold reinterpretation.
+- Record the worker shape, source commit, environment identity, effective
+  workload, setup-latency percentiles, completion/error counts, CPU/RSS,
+  delivered-media counts, drain state, and artifact hashes in the protected
+  qualification bundle. The release notes must link the resulting run and
+  summarize the measured values before publication.
+
 ## Verification sequence
 
 1. Run formatting, release-tooling unit tests, metadata-drift tests, redaction
@@ -178,8 +205,10 @@ profile or silently broaden its claim.
 3. Open the implementation pull request and require PR Gate plus CodeQL.
 4. Merge normally; do not use an administrative bypass.
 5. Run remote preflight for the changed worker topology.
-6. Run a fresh complete `remote-release` qualification. Evidence reuse from
-   0.3.9 is not accepted for this hardening release.
+6. Run a fresh complete `remote-release` qualification with
+   `first_candidate=true`. Evidence reuse from 0.3.9 is not accepted for this
+   hardening release, and the new current-candidate performance evaluation is
+   mandatory.
 7. Prepare and merge the coordinated 0.3.10 version PR if it was not already
    the exact qualified candidate, then rerun qualification on the final SHA.
 8. Run protected publication dry-run, then live publication.

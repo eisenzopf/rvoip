@@ -225,6 +225,32 @@ class GateFrameworkTests(unittest.TestCase):
             {gate for shard in soak_shards for gate in shard["gates"]},
         )
 
+    def test_release_requires_a_fresh_current_candidate_performance_evaluation(
+        self,
+    ) -> None:
+        by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
+        gate = by_id["perf.canonical-2k-current"]
+        self.assertIn(gate["id"], self.catalog["profiles"]["remote-release"])
+        self.assertTrue(gate["always_fresh"])
+        self.assertEqual(gate["resource_class"], "gcp-performance-soak-long")
+        self.assertIn("canonical_2k_release_eval.sh", " ".join(gate["command"]))
+        self.assertEqual(
+            by_id["source.canonical-2k"]["dependencies"],
+            ["source.clean-start", "perf.canonical-2k-current"],
+        )
+        metrics = by_id["report.performance-metrics"]
+        self.assertIn("perf.canonical-2k-current", metrics["dependencies"])
+        self.assertIn(
+            "current-performance-evaluation.md", metrics["expected_outputs"]
+        )
+
+        script = (
+            ROOT / "crates/sip/rvoip-sip/scripts/canonical_2k_release_eval.sh"
+        ).read_text()
+        self.assertIn("for pass in 1 2 3", script)
+        self.assertIn("env -i", script)
+        self.assertIn('${EVIDENCE_TOOL}" import', script)
+
     def test_media_burst_scenarios_run_on_independent_workers(self) -> None:
         scenario_ids = {
             gate["id"]
@@ -437,6 +463,11 @@ class GateFrameworkTests(unittest.TestCase):
             gate["command"][:3], ["env", "RUSTDOCFLAGS=-D warnings", "cargo"]
         )
         self.assertNotIn("warnings", gate["command"])
+        self.assertIn("--workspace", gate["command"])
+        self.assertIn("--all-features", gate["command"])
+        self.assertIn("--no-deps", gate["command"])
+        self.assertIn("--locked", gate["command"])
+        self.assertNotIn("-p", gate["command"])
 
     def test_format_gate_does_not_receive_unsupported_locked_flag(self) -> None:
         gate = next(
@@ -954,6 +985,16 @@ class GateFrameworkTests(unittest.TestCase):
             self.assertEqual(
                 set(result["selected_results"]), set(manifest["comparison_paths"])
             )
+
+    def test_current_performance_reconciliation_fails_without_candidate_artifacts(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(
+                gates.GateError, "exact-candidate performance artifacts are missing"
+            ):
+                gates.reconcile_performance_metrics(ROOT, root, root / "artifact")
 
 
 if __name__ == "__main__":

@@ -137,6 +137,11 @@ dividing the continuous soak requirement. Any missing object or cache-key,
 manifest, bundle, or executable digest mismatch fails closed. Gates
 whose exact source, dependency, definition, environment, and threshold digests
 remain unchanged may reuse successful prior evidence on a later candidate.
+The canonical 2,000-CPS release evaluation is an explicit exception: it is
+always fresh and runs three clean passes from the exact candidate. The release
+report also requires a current performance evaluation in JSON and Markdown and
+a SHA-256 index covering the packaged performance artifacts. July 2026 results
+remain historical baselines and cannot qualify a later release.
 The GCS lifecycle expires only `release-cache/` objects after 14 days; it does
 not apply to the durable run-scoped qualification receipts and logs.
 Each proxy row has its own stable gate ID, so a later diagnostic can rerun only

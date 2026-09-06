@@ -28,7 +28,7 @@
 //! reproduce, because the recovery touches the excitation *history*, which this
 //! module does not own:
 //!
-//! 1. Clear [`DspContext::overflow`] **immediately** before the call. Anything
+//! 1. Clear `DspContext::overflow` **immediately** before the call. Anything
 //!    the preceding phase dispersion, excitation control or `agc2` raised is
 //!    deliberately discarded.
 //! 2. Call [`synthesis_filter`] with the current memory, keeping the returned

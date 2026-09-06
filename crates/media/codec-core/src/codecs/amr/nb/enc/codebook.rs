@@ -41,7 +41,7 @@
 //!
 //! - **The `sq = -1, alp = 1` sentinel does not force the first candidate in.**
 //!   The test reduces to `sq1 + alp_16 > 0`, and `alp_16` can be negative
-//!   because [`correlate_impulse`] folds the pulse signs into `rr`'s
+//!   because the private `correlate_impulse` helper folds the pulse signs into `rr`'s
 //!   off-diagonal. A stage can genuinely finish with its index still at the
 //!   reset value, and a whole sweep can finish with `codvec` still at its
 //!   `codvec[i] = i` default.

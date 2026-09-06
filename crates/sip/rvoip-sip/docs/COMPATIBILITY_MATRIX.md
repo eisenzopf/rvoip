@@ -35,6 +35,21 @@ coverage in the [208-gate report](BETA_GATE_REPORT.md). It describes run
 | `UnifiedCoordinator` | Supported | `rvoip-sip integration tests`, B2BUA/bridge examples, generated validation | Lower-level orchestration surface. |
 | `SessionHandle` | Supported | Call-control, media, DTMF, hold/resume, transfer, and NOTIFY tests | Per-call control surface. |
 
+## External SIP Peers
+
+The published `0.3.9` qualification remains the current release authority.
+The following `0.3.10` candidate row records new scope and must not be read as
+published-release evidence until the protected exact-candidate report replaces
+its pending status.
+
+| Peer | Profile | APIs | Covered scenarios | Status and limits |
+|---|---|---|---|---|
+| Jambonz OSS 0.9.9 | Real inbound/outbound SBC, registrar, Drachtio, Redis, MySQL, and RTPengine; source revisions and images are digest-pinned and latest-version checked | `Endpoint`, `StreamPeer`, `CallbackPeer` | Authenticated registration; PCMU/PCMA bidirectional calls; provisional/final signaling; hold/resume; RFC 4733 DTMF; CANCEL/487; rejection; RFC 3515 blind transfer with ordered NOTIFY; optional RFC 3892 Referred-By propagation; replacement INVITE; either-side BYE; cleanup | Local Colima rehearsal passed; protected `0.3.10` exact-candidate result pending. UDP/plain RTP only. G.729, AMR, TLS/SRTP, RVoIP-as-B2BUA, WebRTC, PSTN, application verbs, recording, HA, and load are excluded from this peer profile. |
+
+This is a SIP/SDP/RTP interoperability claim about the exact open-source
+profile above. It is not a claim about commercial Jambonz 10.x, hosted
+jambonz.cloud, or the Jambonz application API.
+
 ## SIP Methods
 
 | Method | Parser | Transaction/dialog | Public API | Beta status | Evidence |
@@ -48,7 +63,7 @@ coverage in the [208-gate report](BETA_GATE_REPORT.md). It describes run
 | re-INVITE | Supported | Supported | Supported | Supported | Hold/resume PBX rows, glare retry tests. |
 | UPDATE | Supported | Supported | Supported | Supported | Update send and session-timer coverage; outbound 491 completes the exact UPDATE attempt and does not emit `ReinviteGlare`. |
 | PRACK | Supported | Partial | Stack managed | Partial | PRACK integration and dialog tests; broader PBX 100rel matrix pending. |
-| REFER | Supported | Supported | Supported | Interop tested | Blind-transfer PBX rows, REFER/NOTIFY progress tests. |
+| REFER | Supported | Supported | Supported | Interop tested | Blind-transfer PBX rows, REFER/NOTIFY progress tests, and the Jambonz candidate transfer profile. |
 | NOTIFY | Supported | Supported | Supported | Supported | REFER progress, subscription, and notify-send tests. |
 | INFO | Supported | Supported | Supported | Supported | INFO auth retry and DTMF tests. |
 | SUBSCRIBE | Supported | Partial | Supported | Partial | Subscription dialog tests and credentialed OOB auth retry test; event-package matrix incomplete. |
@@ -79,7 +94,7 @@ Developer-facing auth API and crate-boundary guidance is in
 
 | Feature | Beta status | Evidence | Notes |
 |---------|-------------|----------|-------|
-| UDP | Interop tested | SIPp, Asterisk, FreeSWITCH matrices | Primary beta transport. |
+| UDP | Interop tested | SIPp, Asterisk, FreeSWITCH, and the Jambonz candidate matrix | Primary beta transport. |
 | TCP | Supported | Transport/dialog tests | Include in external matrix where peers support it. |
 | TLS client | Supported | TLS transport tests, TLS call integration, PBX TLS rows | Server validation and SNI are tested. |
 | TLS server | Supported | TLS listener/call tests, PBX TLS rows | Requires cert/key configuration. |

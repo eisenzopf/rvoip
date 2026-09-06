@@ -19,7 +19,7 @@
 //!   6.60 kbit/s there are only two pulses in 64 samples, which the ear hears
 //!   as clicks rather than speech; smearing them trades peakiness for a more
 //!   noise-like excitation.
-//! - [`pitch_enhance`] high-pass filters the innovation on voiced frames,
+//! - The private `pitch_enhance` helper high-pass filters the innovation on voiced frames,
 //!   because the adaptive contribution already supplies the low-frequency
 //!   periodic energy and doubling it up sounds boomy.
 

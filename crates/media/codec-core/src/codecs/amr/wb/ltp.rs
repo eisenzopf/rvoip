@@ -19,7 +19,7 @@
 //! Pitch periods are not whole numbers of samples, and rounding one to the
 //! nearest sample is audible as roughness on sustained vowels. The lag is
 //! coded to a quarter sample and realised by interpolating with a 4×
-//! upsampling FIR — [`INTER4_2`], read with a stride of four at an offset the
+//! upsampling FIR — `INTER4_2`, read with a stride of four at an offset the
 //! fraction selects.
 
 use super::codebook::L_SUBFR;

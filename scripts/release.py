@@ -48,6 +48,7 @@ ACTIVE_RELEASE_METADATA_FILES = (
     Path("crates/sip/rvoip-sip/docs/INTEROP_CI_PLAN.md"),
     Path("crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md"),
     Path("crates/sip/rvoip-sip/docs/TOPOLOGY_PROFILES.md"),
+    Path("crates/sip/sip-core/DEVELOPER_GUIDE.md"),
     Path("crates/sip/sip-core/README.md"),
     Path("crates/sip/sip-proxy/README.md"),
     Path("crates/sip/sip-transport/README.md"),
@@ -83,6 +84,8 @@ DEPENDENCY_EXAMPLE_VERSION = re.compile(
     r'(?:"(?P<plain>[0-9]+\.[0-9]+\.[0-9]+)"|'
     r'\{[^\n}]*\bversion\s*=\s*"(?P<table>[0-9]+\.[0-9]+\.[0-9]+)"[^\n}]*\})'
 )
+LIVE_DEPENDENCY_SCAN_SUFFIXES = frozenset({".toml"})
+LIVE_DEPENDENCY_SCAN_IGNORED_DIRS = frozenset({".git", "target"})
 VERIFICATION_RECEIPT_SCHEMA = "rvoip-unified-release-verification-v4"
 REMOTE_QUALIFICATION_SCHEMA = "rvoip-release-qualification-v1"
 REMOTE_GATE_CATALOG_SCHEMA = "rvoip-release-gate-catalog-v1"
@@ -639,6 +642,62 @@ def validate_active_release_metadata(root: Path, version: str) -> None:
                 f"active release metadata in {relative_path} has stale rvoip "
                 f"dependency example versions: {stale_examples}; expected {version}"
             )
+
+    validate_live_dependency_examples(root, version)
+
+
+def validate_live_dependency_examples(root: Path, version: str) -> None:
+    """Reject stale RVoIP dependency pins in every live Cargo manifest."""
+    stale: list[str] = []
+    for directory, names, files in os.walk(root):
+        names[:] = [
+            name for name in names if name not in LIVE_DEPENDENCY_SCAN_IGNORED_DIRS
+        ]
+        base = Path(directory)
+        for filename in files:
+            path = base / filename
+            if path.suffix not in LIVE_DEPENDENCY_SCAN_SUFFIXES:
+                continue
+            relative_path = path.relative_to(root)
+            if relative_path == Path("CHANGELOG.md") or any(
+                relative_path == prefix or prefix in relative_path.parents
+                for prefix in HISTORICAL_RELEASE_METADATA_PREFIXES
+            ):
+                continue
+            text = path.read_text(encoding="utf-8")
+            for match in DEPENDENCY_EXAMPLE_VERSION.finditer(text):
+                found = match.group("plain") or match.group("table")
+                if found != version:
+                    line = text.count("\n", 0, match.start()) + 1
+                    stale.append(f"{relative_path}:{line}={found}")
+    if stale:
+        raise ReleaseError(
+            "live Cargo manifests contain stale rvoip dependency versions; "
+            f"expected {version}: {stale}"
+        )
+
+
+def validate_release_notes_final(root: Path, version: str) -> None:
+    """Reject publication while candidate-only documentation is unresolved."""
+    path = root / "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md"
+    text = path.read_text(encoding="utf-8")
+    required = (
+        version,
+        "Jambonz OSS",
+        "Performance evaluation",
+        "Qualification record",
+        "protected",
+    )
+    missing = [value for value in required if value not in text]
+    if missing:
+        raise ReleaseError(f"release notes lack required final evidence: {missing}")
+    forbidden = ("Candidate Release Notes", "**Pending.**", "result pending")
+    present = [value for value in forbidden if value in text]
+    if present:
+        raise ReleaseError(
+            "release notes still contain candidate-only qualification markers: "
+            f"{present}"
+        )
 
 
 def write_atomic(path: Path, payload: bytes) -> None:
@@ -1977,6 +2036,8 @@ def publish(
         qualified_head=qualified_head,
     )
     packages, ordered = validate_workspace(root, version, locked=True)
+    if execute:
+        validate_release_notes_final(root, version)
     receipt = read_verification_receipt(root, version, head, ordered)
     if qualified_head is not None:
         qualification = receipt.get("beta_qualification")

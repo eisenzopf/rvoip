@@ -18,7 +18,7 @@
 //! - `packed_size` in the two references uses different conventions: the
 //!   narrowband table includes the `ToC` byte, the wideband one does not.
 //!
-//! Anything genuinely shared lives in [`crate::fixed_point`] or in the
+//! Anything genuinely shared lives in the private `crate::fixed_point` module or in the
 //! variant-agnostic modules one level up ([`super::payload`],
 //! [`super::storage`], [`super::mode`]).
 

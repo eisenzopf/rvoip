@@ -24,6 +24,5 @@ class ActiveReleaseMetadataTests(unittest.TestCase):
             version = tomllib.load(handle)["workspace"]["package"]["version"]
         RELEASE.validate_active_release_metadata(ROOT, version)
 
-
 if __name__ == "__main__":
     unittest.main()

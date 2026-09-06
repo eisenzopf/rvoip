@@ -368,7 +368,7 @@ pub fn autocorrelate(
 /// `r[0]` is deliberately untouched — the off-by-one in the table index is the
 /// reference's, and shifting it by one would expand the wrong bandwidth.
 ///
-/// Needs no [`DspContext`]: `Mpy_32` and `L_Extract` are the only operators
+/// Needs no `DspContext`: `Mpy_32` and `L_Extract` are the only operators
 /// involved and neither can set the overflow flag.
 pub fn lag_window(r: &mut Autocorrelation) {
     for i in 1..=M {

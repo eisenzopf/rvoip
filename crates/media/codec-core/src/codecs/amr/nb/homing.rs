@@ -74,7 +74,7 @@ pub fn is_decoder_homing_frame(payload: &[u8], mode_index: u8) -> bool {
 
 /// Whether a payload's LPC and *first subframe* match the homing pattern.
 ///
-/// What a decoder that has already homed checks; see [`PRMNOFSF`].
+/// What a decoder that has already homed checks; see the private `PRMNOFSF` table.
 ///
 /// # Panics
 /// If `mode_index` is not a speech mode, 0..=7.
