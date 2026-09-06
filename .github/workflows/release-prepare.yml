@@ -13,6 +13,9 @@ permissions:
   pull-requests: write
   actions: write
 
+env:
+  RUSTUP_MAX_RETRIES: "10"
+
 concurrency:
   group: release-prepare
   cancel-in-progress: false
@@ -49,14 +52,25 @@ jobs:
         run: python3 scripts/release.py prepare --version "$VERSION"
 
       - name: Validate release tooling
-        run: >-
-          python3 -m unittest
-          scripts/test_release.py
-          scripts/test_release_gcp_fanout.py
-          scripts/test_release_gates.py
-          scripts/test_release_carry_forward_attestation.py
-          scripts/test_release_exception_attestation.py
-          scripts/test_render_qualification_reports.py
+        run: |
+          python3 -m unittest \
+            scripts/test_release.py \
+            scripts/test_release_gcp_fanout.py \
+            scripts/test_release_gates.py \
+            scripts/test_release_carry_forward_attestation.py \
+            scripts/test_release_exception_attestation.py \
+            scripts/test_render_qualification_reports.py
+          python3 -m unittest \
+            crates/sip/rvoip-sip/scripts/test_beta_attestation.py \
+            crates/sip/rvoip-sip/scripts/test_beta_performance_gate_metrics.py \
+            crates/sip/rvoip-sip/scripts/test_beta_gate_source.py \
+            crates/sip/rvoip-sip/scripts/test_perf_audit.py \
+            crates/sip/rvoip-sip/scripts/test_canonical_2k_evidence.py \
+            crates/sip/rvoip-sip/scripts/test_perf_2k_acceptance.py \
+            crates/sip/rvoip-sip/scripts/test_perf_2k_baseline.py \
+            crates/sip/rvoip-sip/scripts/test_perf_regression_baseline.py \
+            crates/sip/rvoip-sip/scripts/test_perf_cargo_artifact.py \
+            crates/sip/rvoip-sip/scripts/test_docker_peer_snapshot.py
 
       - name: Commit release preparation
         env:

@@ -197,6 +197,40 @@ class WorkflowPolicyTests(unittest.TestCase):
             with self.subTest(package=package):
                 self.assertIn(package, text[dependency_step:validation_step])
 
+    def test_release_prepare_runs_evidence_helpers_before_commit(self) -> None:
+        text = (ROOT / ".github/workflows/release-prepare.yml").read_text()
+        prepare_step = text.index("Prepare all workspace versions")
+        helper_test = text.index(
+            "crates/sip/rvoip-sip/scripts/test_beta_attestation.py", prepare_step
+        )
+        commit_step = text.index("Commit release preparation")
+
+        self.assertLess(prepare_step, helper_test)
+        self.assertLess(helper_test, commit_step)
+
+        policy = json.loads((ROOT / "scripts/ci/policy.json").read_text())
+        release_tooling = next(
+            rule
+            for rule in policy["specialty_rules"]
+            if rule["gate"] == "release-tooling"
+        )
+        for path in (
+            "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md",
+            "crates/sip/rvoip-sip/scripts/full_beta_release.sh",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(path, release_tooling["patterns"])
+
+    def test_release_workflows_raise_rustup_download_retries(self) -> None:
+        for filename in (
+            "release-prepare.yml",
+            "release-qualify.yml",
+            "release-publish.yml",
+        ):
+            with self.subTest(workflow=filename):
+                text = (ROOT / ".github/workflows" / filename).read_text()
+                self.assertIn('RUSTUP_MAX_RETRIES: "10"', text)
+
     def test_release_all_features_paths_install_libvpx(self) -> None:
         workflows = (
             ("release-qualify.yml", "Install hosted-runner native dependencies", "Run gate shard"),

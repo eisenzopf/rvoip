@@ -108,7 +108,26 @@ class GateFrameworkTests(unittest.TestCase):
         ]
         cargo_commands = [command[0] for command in bundle_commands[1:]]
         self.assertEqual([command[-1] for command in cargo_commands], expected)
-        self.assertTrue(all("--no-default-features" in command for command in cargo_commands))
+        self.assertTrue(
+            all("--no-default-features" in command for command in cargo_commands)
+        )
+
+    def test_evidence_helpers_are_bound_to_preparation_inputs(self) -> None:
+        gate = next(
+            gate
+            for gate in self.catalog["gates"]
+            if gate["id"] == "build.evidence-helper-tests"
+        )
+        for path in (
+            ".github/workflows/release-prepare.yml",
+            "crates/sip/rvoip-sip/docs/BETA_RELEASE_CHECKLIST.md",
+            "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md",
+            "crates/sip/rvoip-sip/scripts/full_beta_release.sh",
+            "scripts/release.py",
+            "scripts/test_release.py",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(path, gate["affected_paths"])
 
     def test_release_srtp_interop_gate_exercises_dtls_srtp_end_to_end(self) -> None:
         gate = next(

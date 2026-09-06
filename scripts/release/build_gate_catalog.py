@@ -159,6 +159,21 @@ COMMAND_OVERRIDES = {
     ],
 }
 
+# Gate commands identify their test modules, but some tests also inspect
+# release metadata and preparation tooling. Keep those implicit inputs in the
+# evidence fingerprint so a candidate cannot reuse a receipt across a change
+# that could alter the prepared tree.
+AFFECTED_PATH_ADDITIONS = {
+    "build.evidence-helper-tests": [
+        ".github/workflows/release-prepare.yml",
+        "crates/sip/rvoip-sip/docs/BETA_RELEASE_CHECKLIST.md",
+        "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md",
+        "crates/sip/rvoip-sip/scripts/full_beta_release.sh",
+        "scripts/release.py",
+        "scripts/test_release.py",
+    ],
+}
+
 for _gate_id, _action in {
     "interop.freeswitch-down-before-asterisk": "freeswitch-down",
     "interop.asterisk-up": "asterisk-up",
@@ -309,6 +324,7 @@ def affected_paths(record: dict[str, Any], command: list[str] | None) -> list[st
         elif expanded.startswith(("scripts/", "crates/", "examples/", "infra/")):
             path = expanded.split("=", 1)[-1]
             paths.append(path if "*" in path else path)
+    paths.extend(AFFECTED_PATH_ADDITIONS.get(gate_id, []))
     return sorted(set(paths))
 
 
