@@ -44,7 +44,7 @@ is **Rust 1.91**.
 
 ```toml
 [dependencies]
-rvoip-sip = "0.3.9"
+rvoip-sip = "0.3.10"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -261,7 +261,7 @@ third-party telephony intermediary is required between rvoip and Vapi.
 Enable the facade integration with:
 
 ```toml
-rvoip = { version = "0.3.9", features = ["sip", "vapi"] }
+rvoip = { version = "0.3.10", features = ["sip", "vapi"] }
 ```
 
 See the complete [`rvoip-vapi` README](../../extensions/rvoip-vapi/README.md),
