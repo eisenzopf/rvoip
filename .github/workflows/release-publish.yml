@@ -23,6 +23,9 @@ permissions:
   id-token: write
   attestations: write
 
+env:
+  RUSTUP_MAX_RETRIES: "10"
+
 concurrency:
   group: release-publish
   cancel-in-progress: false

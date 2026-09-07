@@ -1,7 +1,7 @@
 # rvoip 0.3.10 release hardening plan
 
-Status: implementation complete; release qualification in progress,
-2026-09-06.
+Status: release qualification found a preparation-invariant defect; durable
+remediation and requalification are in progress, 2026-09-06.
 
 ## Purpose
 
@@ -39,6 +39,10 @@ must be qualified from a fresh exact candidate after the changes below land.
    soaks, regression comparison, and a machine-readable current-result index.
    July artifacts remain historical baselines and cannot substitute for this
    release's measurements.
+9. The release-preparation workflow runs the evidence-helper suite against
+   the generated tree before committing it, preserves executable modes during
+   atomic metadata edits, and accepts both candidate and finalized release-note
+   headings according to the phase being validated.
 
 ## Workstream A: release metadata integrity
 
@@ -53,6 +57,8 @@ must be qualified from a fresh exact candidate after the changes below land.
   - the manifest contains no missing or duplicate path; and
   - historical files are explicit rather than silently excluded.
 - Test preparation from 0.3.9 to 0.3.10 and a deliberately stale README.
+- Preserve the permission mode of every existing file replaced atomically and
+  run the evidence-helper suite after preparation, before the generated commit.
 
 ## Workstream B: CodeQL and secret diagnostics
 
@@ -209,8 +215,9 @@ profile or silently broaden its claim.
 3. Merge the implementation pull request only after PR Gate and CodeQL pass;
    do not use an administrative bypass.
 4. Prepare the coordinated 45-crate `0.3.10` version pull request, review the
-   generated metadata and final release notes, require PR Gate plus CodeQL,
-   and merge normally.
+   generated metadata and final release notes, run the release evidence-helper
+   tests on that generated tree, require PR Gate plus CodeQL, and merge
+   normally.
 5. Run remote preflight when the release-worker topology changed.
 6. From the final versioned `main`, run one fresh complete `remote-release`
    qualification with

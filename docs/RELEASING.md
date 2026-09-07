@@ -13,8 +13,11 @@ remain experimental.
 
 Use the **Prepare release PR** workflow with the next version, for example
 `0.3.10`. It checks out the current `main`, runs the unified preparation and
-release-tooling tests, and opens a draft release pull request. The release PR
-must pass the normal `PR Gate`; it is never pushed directly to `main`.
+release-tooling tests, runs the evidence-helper suite against the generated
+tree, and opens a draft release pull request. Atomic preparation preserves
+existing file permission modes, including executable release wrappers. The
+release PR must pass the normal `PR Gate`; it is never pushed directly to
+`main`.
 
 The underlying `scripts/release.sh prepare` command rejects unstable SemVer
 strings, version downgrades, versions already present on crates.io, dirty
@@ -33,11 +36,13 @@ limits, tool installation, repository checkout, GCS evidence transfer,
 controller reconciliation, and cleanup fail within a target of 15 minutes.
 The preflight is deliberately non-publishing and is not release evidence.
 
-For `remote-release`, the planner waits up to 20 minutes for all five CodeQL
-categories to bind to the exact protected-main commit. Its 30-minute job
+For `remote-release`, the planner waits up to one hour for all five CodeQL
+categories to bind to the exact protected-main commit. Its 75-minute job
 deadline intentionally outlives that poll window, so a qualification started
 immediately after merge fails with a policy receipt rather than being cancelled
-while the Rust analysis is still running.
+while the Rust analysis is still running. Release workflows also raise
+rustup's bounded download retry count to tolerate transient distribution-network
+resets without weakening any test or evidence requirement.
 
 Use `remote-core` for a hosted-runner dry run and `remote-release` for the
 complete release profile. Do not start the full profile unless the exact

@@ -50,6 +50,7 @@ concurrency:
 env:
   RELEASE_ENVIRONMENT_ID: rvoip-release-v5-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-n2-cascade-lake
   MIN_CPU_PLATFORM: Intel Cascade Lake
+  RUSTUP_MAX_RETRIES: "10"
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"

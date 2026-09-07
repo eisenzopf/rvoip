@@ -8,6 +8,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import stat
 import subprocess
 import tempfile
 import tomllib
@@ -404,6 +405,17 @@ rvoip-rtc = { path = "../rvoip-rtc" }
             for payload in edits.values():
                 self.assertIn("0.3.6", payload.decode())
                 self.assertNotIn("0.3.5", payload.decode())
+
+    def test_write_atomic_preserves_existing_executable_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "release-helper.sh"
+            path.write_bytes(b"#!/bin/sh\nexit 1\n")
+            path.chmod(0o755)
+
+            release.write_atomic(path, b"#!/bin/sh\nexit 0\n")
+
+            self.assertEqual(path.read_bytes(), b"#!/bin/sh\nexit 0\n")
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o755)
 
     def test_planned_release_metadata_edits_fail_closed_on_missing_marker(
         self,

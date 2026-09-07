@@ -722,12 +722,15 @@ def validate_release_notes_final(root: Path, version: str) -> None:
 
 
 def write_atomic(path: Path, payload: bytes) -> None:
+    existing_mode = path.stat().st_mode & 0o7777 if path.exists() else None
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as temporary:
         temporary.write(payload)
         temporary.flush()
         os.fsync(temporary.fileno())
         temp_path = Path(temporary.name)
+    if existing_mode is not None:
+        os.chmod(temp_path, existing_mode)
     os.replace(temp_path, path)
 
 

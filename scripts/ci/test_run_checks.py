@@ -239,6 +239,12 @@ class RunChecksTests(unittest.TestCase):
         argv = [item[0] for item in commands]
         self.assertIn("scripts/test_render_qualification_reports.py", argv[0])
         self.assertIn(
+            "crates/sip/rvoip-sip/scripts/test_beta_attestation.py", argv[1]
+        )
+        self.assertIn(
+            "crates/sip/rvoip-sip/scripts/test_beta_gate_source.py", argv[1]
+        )
+        self.assertIn(
             [
                 "python3",
                 "-m",

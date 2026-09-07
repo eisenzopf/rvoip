@@ -1403,7 +1403,7 @@ class BetaAttestationTests(unittest.TestCase):
         marker = f"Current workspace runtime crate version: `{self.workspace_version}`"
         self.assertIn(marker, checklist)
         candidate = re.search(
-            r"(?m)^# rvoip (\d+)\.(\d+)\.(\d+) Candidate Release Notes$",
+            r"(?m)^# rvoip (\d+)\.(\d+)\.(\d+) (?:Candidate )?Release Notes$",
             release_notes,
         )
         self.assertIsNotNone(candidate)
