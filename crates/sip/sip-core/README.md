@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/rvoip-sip-core.svg)](https://crates.io/crates/sip/rvoip-sip-core)
 [![Documentation](https://docs.rs/rvoip-sip-core/badge.svg)](https://docs.rs/rvoip-sip-core)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../../LICENSE)
 
 ## Overview
 
@@ -953,34 +953,11 @@ use rvoip_sip_core::sdp_prelude::*;
 
 ## 📚 **Examples**
 
-### **Available Examples**
-
-1. **[Parsing Examples](examples/parsing/)** - Message and header parsing with different modes
-2. **[Builder Examples](examples/builders/)** - Fluent API for message construction
-3. **[SDP Examples](examples/sdp/)** - Session Description Protocol usage
-4. **[Authentication Examples](examples/auth/)** - Digest authentication handling
-5. **[URI Examples](examples/uri/)** - URI parsing and manipulation
-
-### **Running Examples**
-
-```bash
-# Parse a SIP message
-cargo run --example parse_invite
-
-# Create SIP messages with builders
-cargo run --example builder_request
-cargo run --example builder_response
-
-# SDP creation and parsing
-cargo run --example sdp_builder
-cargo run --example sdp_macro
-
-# Authentication examples
-cargo run --example digest_auth
-
-# URI manipulation
-cargo run --example uri_parsing
-```
+The parser, builder, SDP, authentication, and URI behavior is exercised by the
+checked-in [`tests`](tests/) suite. For runnable end-to-end programs, use the
+[`rvoip-sip` examples](../rvoip-sip/examples/README.md); the
+[`tutorial parsing example`](../../../tutorial/examples/tutorial_02_parsing.rs)
+is the smallest standalone parsing walkthrough.
 
 ## API Documentation
 
@@ -993,10 +970,8 @@ cargo run --example uri_parsing
 
 ### 🔧 Developer Resources
 
-- **[SIP Message Patterns](docs/MESSAGE_PATTERNS.md)** - Common SIP message construction patterns
-- **[Header Reference](docs/HEADER_REFERENCE.md)** - Complete header type reference  
-- **[SDP Cookbook](docs/SDP_COOKBOOK.md)** - SDP creation recipes for common scenarios
-- **[Authentication Guide](docs/AUTH_GUIDE.md)** - Complete authentication handling
+- **[Test-suite guide](tests/README.md)** - Parser, header, RFC-compliance, and validation coverage
+- **[API reference](https://docs.rs/rvoip-sip-core/0.3.10/rvoip_sip_core/)** - Published types and methods for this release
 
 ## Quality and Testing
 
@@ -1150,7 +1125,7 @@ match parse_message(&data) {
 
 ## Contributing
 
-Contributions are welcome! Please see the main [rvoip contributing guidelines](../../../README.md#contributing) for details.
+Contributions are welcome! Please see the main [rvoip contributing guidelines](../../../CONTRIBUTING.md) for details.
 
 For sip-core specific contributions:
 - Ensure all new headers have complete type definitions
@@ -1205,7 +1180,7 @@ For sip-core specific contributions:
 
 ## License
 
-This project is licensed under the [MIT license](LICENSE).
+This project is licensed under the [MIT license](../../../LICENSE).
 
 ---
 

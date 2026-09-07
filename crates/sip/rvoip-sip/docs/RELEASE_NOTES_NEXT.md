@@ -1,12 +1,12 @@
 # rvoip 0.3.10 Release Notes
 
-These notes describe the coordinated 45-crate `0.3.10` release. Publication is
-authorized only for the exact source commit accepted by the protected release
+These notes describe the coordinated 45-crate `0.3.10` release. It was
+published from the exact source commit accepted by the protected release
 qualification and publication workflows. The signed qualification artifact
 and GitHub release identify that immutable commit, workflow run, complete gate
-inventory, measured performance, and publication result. A follow-up
-evidence-only pull request copies the generated reports into the repository
-without changing the released tag.
+inventory, measured performance, and publication result. This evidence-only
+follow-up copies those generated reports into the repository without changing
+the released tag.
 
 ## Headline
 
@@ -79,7 +79,7 @@ documented SIP, SDP, RTP, codec, and facade profiles.
 
 ## Performance evaluation
 
-The protected `0.3.10` qualification executes three clean canonical 2,000-CPS
+The protected `0.3.10` qualification executed three clean canonical 2,000-CPS
 passes, the full performance and resiliency matrix, the 160-CPS high-density
 full-media burst, a one-hour
 30-call monolithic soak, a one-hour 500-call split soak, teardown/churn tests,
@@ -110,16 +110,16 @@ history; none of that evidence is reused to qualify `0.3.10`.
 
 ## Qualification record
 
-The protected Release Qualification workflow must run from a clean `main`
-commit and record every selected gate exactly once as PASS, including the full
+The protected Release Qualification workflow ran from a clean `main` commit
+and recorded every selected gate exactly once as PASS, including the full
 45-crate matrix, feature bundles, CodeQL policy, Asterisk, FreeSWITCH, Jambonz,
 Kamailio, OpenSIPS, SIPp, strict-UA, security, performance, resiliency, soak,
 regression, source-fence, and cleanup gates. It produces a signed aggregate
 bound to the exact source SHA and immutable artifact hashes.
 
-The protected Release Publish workflow accepts that aggregate only when its
-source SHA is still `main`, its version is exactly `0.3.10`, its evidence is
-fresh and complete, and the dry-run and live publication inputs resolve to the
-same commit. The resulting GitHub release is the durable link to the exact
-qualification run and measured reports; the protected `v0.3.10` tag identifies
-the source without a self-referential documentation commit.
+The protected Release Publish workflow accepted that aggregate after verifying
+that its source SHA was still `main`, its version was exactly `0.3.10`, its
+evidence was fresh and complete, and the dry-run and live publication inputs
+resolved to the same commit. The resulting GitHub release is the durable link
+to the exact qualification run and measured reports; the protected `v0.3.10`
+tag identifies the source without a self-referential documentation commit.

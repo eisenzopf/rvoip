@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/rvoip-media-core.svg)](https://crates.io/crates/rvoip-media-core)
 [![Documentation](https://docs.rs/rvoip-media-core/badge.svg)](https://docs.rs/rvoip-media-core)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../../LICENSE)
 
 > **Beta scope notice:** for the `rvoip-sip` beta, full-media claims are
 > limited to the paths that are wired and tested end to end through SIP:
@@ -661,4 +661,4 @@ For media-core specific contributions:
 
 ## License
 
-This project is licensed under the [MIT license](LICENSE).
+This project is licensed under the [MIT license](../../../LICENSE).

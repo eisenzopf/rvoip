@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/rvoip-rtp-core.svg)](https://crates.io/crates/rvoip-rtp-core)
 [![Documentation](https://docs.rs/rvoip-rtp-core/badge.svg)](https://docs.rs/rvoip-rtp-core)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../../LICENSE)
 
 > **rvoip 0.3.10 security notice:** direct AES-CM SRTP and SDES remain
 > available. The `dtls-webrtc` feature adds the reviewed
@@ -491,4 +491,4 @@ For rtp-core specific contributions:
 
 ## License
 
-This project is licensed under the [MIT license](LICENSE).
+This project is licensed under the [MIT license](../../../LICENSE).

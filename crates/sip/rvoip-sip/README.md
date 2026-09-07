@@ -1,7 +1,7 @@
 # rvoip-sip
 
-[![Crates.io](https://img.shields.io/crates/v/rvoip-sip.svg)](https://crates.io/crates/rvoip-sip)
-[![docs.rs](https://docs.rs/rvoip-sip/badge.svg)](https://docs.rs/rvoip-sip)
+[![Crates.io](https://img.shields.io/crates/v/rvoip-sip.svg?release=0.3.10)](https://crates.io/crates/rvoip-sip/0.3.10)
+[![docs.rs](https://img.shields.io/docsrs/rvoip-sip/0.3.10?label=docs)](https://docs.rs/rvoip-sip/0.3.10/rvoip_sip/)
 [![Rust 1.91+](https://img.shields.io/badge/rust-1.91%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/eisenzopf/rvoip/blob/main/LICENSE)
 [![Repository](https://img.shields.io/badge/github-eisenzopf%2Frvoip-24292f.svg)](https://github.com/eisenzopf/rvoip)
@@ -13,24 +13,23 @@ DTMF, hold/resume, custom SIP headers, and app-visible events so Rust
 applications can behave like programmable SIP endpoints without owning SIP
 transaction or RTP details directly.
 
-The previous published `0.3.9` release came from a strict, exact-source
-qualification. Its generated
-[beta release report](docs/BETA_RELEASE_REPORT.md) is authoritative for the
-tested PBX, proxy, SIPp, strict-UA, security, performance, and soak boundaries.
-Historical exception and carry-forward reports remain immutable history and
-do not qualify `0.3.10`. The protected `0.3.10` qualification artifact and
-GitHub release are authoritative until their generated reports are copied into
-the repository by the evidence-only pull request.
+The published `0.3.10` release came from a strict, exact-source qualification.
+Its generated [release report](docs/BETA_RELEASE_REPORT.md), [gate
+ledger](docs/BETA_GATE_REPORT.md), and [performance
+report](docs/BETA_PERFORMANCE_REPORT.md) are authoritative for the tested PBX,
+proxy, SIPp, strict-UA, security, performance, and soak boundaries. The
+[immutable qualification history](docs/releases/qualification/README.md)
+retains prior releases and the detailed 0.3.10 performance evaluation.
 
 ## At a glance
 
 | Need | Start with |
 | --- | --- |
-| Make calls from a softphone or PBX account | [`Endpoint`](https://docs.rs/rvoip-sip/latest/rvoip_sip/struct.Endpoint.html) |
-| Write a sequential client, script, or test | [`StreamPeer`](https://docs.rs/rvoip-sip/latest/rvoip_sip/struct.StreamPeer.html) |
-| Build a reactive server, IVR, router, or queue | [`CallbackPeer`](https://docs.rs/rvoip-sip/latest/rvoip_sip/struct.CallbackPeer.html) |
-| Compose multiple call legs or a B2BUA | [`UnifiedCoordinator`](https://docs.rs/rvoip-sip/latest/rvoip_sip/struct.UnifiedCoordinator.html) |
-| Control an active call | [`SessionHandle`](https://docs.rs/rvoip-sip/latest/rvoip_sip/struct.SessionHandle.html) |
+| Make calls from a softphone or PBX account | [`Endpoint`](https://docs.rs/rvoip-sip/0.3.10/rvoip_sip/api/endpoint/struct.Endpoint.html) |
+| Write a sequential client, script, or test | [`StreamPeer`](https://docs.rs/rvoip-sip/0.3.10/rvoip_sip/api/stream_peer/struct.StreamPeer.html) |
+| Build a reactive server, IVR, router, or queue | [`CallbackPeer`](https://docs.rs/rvoip-sip/0.3.10/rvoip_sip/api/callback_peer/struct.CallbackPeer.html) |
+| Compose multiple call legs or a B2BUA | [`UnifiedCoordinator`](https://docs.rs/rvoip-sip/0.3.10/rvoip_sip/api/unified/struct.UnifiedCoordinator.html) |
+| Control an active call | [`SessionHandle`](https://docs.rs/rvoip-sip/0.3.10/rvoip_sip/api/handle/struct.SessionHandle.html) |
 | Check Asterisk, FreeSWITCH, Jambonz, Kamailio, or OpenSIPS status | [Interoperability status](#interoperability-status) |
 | Bridge a SIP caller to a native Vapi WebSocket agent | [`rvoip-vapi`](#extensions-and-native-vapi-websocket-agents) |
 
@@ -207,7 +206,33 @@ not imply carrier certification or untested peer-version/topology coverage.
 - Performance recipes and tuning hooks for local labs, PBX media server
   profiles, and signaling-heavy test profiles.
 
-## 0.3.2 release evidence
+## Current 0.3.10 release evidence
+
+Protected run
+[`34074372543`](https://github.com/eisenzopf/rvoip/actions/runs/34074372543)
+qualified the exact published commit
+`77a99cd38a07641294cf7dc547146b115b135dc7`: **213/213 gates passed**, all
+213 were fresh, and all 108 legacy release requirements were covered.
+
+| Evidence | Current record |
+| --- | --- |
+| Release disposition and provenance | [`docs/BETA_RELEASE_REPORT.md`](docs/BETA_RELEASE_REPORT.md) |
+| Complete accepted-gate ledger | [`docs/BETA_GATE_REPORT.md`](docs/BETA_GATE_REPORT.md) |
+| Performance observations | [`docs/BETA_PERFORMANCE_REPORT.md`](docs/BETA_PERFORMANCE_REPORT.md) |
+| Detailed performance gate evaluation | [`current-performance-evaluation.md`](docs/releases/qualification/20260907T042726Z-34074372543/current-performance-evaluation.md) |
+| Machine-readable performance evaluation | [`current-performance-evaluation.json`](docs/releases/qualification/20260907T042726Z-34074372543/current-performance-evaluation.json) |
+| Evidence artifact index | [`current-performance-artifact-index.json`](docs/releases/qualification/20260907T042726Z-34074372543/current-performance-artifact-index.json) |
+| Signed report manifest | [`QUALIFICATION_REPORT_ATTESTATION.json`](docs/QUALIFICATION_REPORT_ATTESTATION.json) |
+| Immutable release archive | [`20260907T042726Z-34074372543`](docs/releases/qualification/20260907T042726Z-34074372543) |
+
+The detailed evaluation records three clean 65,000-call canonical runs, a
+high-density media burst with full audio delivery, a 60-minute monolithic
+soak, and a 60-minute split 500-call soak. All recorded performance policies
+passed. The exact measurements and claim boundaries are in the linked reports;
+they are evidence for the tested candidate and environment, not a performance
+SLA.
+
+## Historical 0.3.2 exception evidence
 
 The clean, unchanged full run recorded 106 PASS, 2 FAIL, and 0 SKIP results.
 The project owner accepted one root policy deviation: high-density full-media
