@@ -508,6 +508,28 @@ class WorkflowPolicyTests(unittest.TestCase):
             publication,
         )
 
+    def test_release_resume_only_finishes_a_proven_post_gate_failure(self) -> None:
+        resume = (ROOT / ".github/workflows/release-resume.yml").read_text()
+
+        self.assertIn('"workflowName": "Release qualification"', resume)
+        self.assertIn('"conclusion": "failure"', resume)
+        self.assertIn('release_gate.get("name") != "Release Gate"', resume)
+        self.assertIn(
+            '["Render exact-candidate qualification reports"]', resume
+        )
+        self.assertIn('"status": "PASS"', resume)
+        self.assertIn('"gate_count": 213', resume)
+        self.assertIn('"fresh_count": 213', resume)
+        self.assertIn('"reused_count": 0', resume)
+        self.assertIn('len(aggregate.get("accepted_gates", [])) != 213', resume)
+        self.assertIn("git merge-base --is-ancestor", resume)
+        self.assertIn("render_qualification_reports.py generate", resume)
+        self.assertIn('"test_execution_repeated": False', resume)
+        self.assertIn("actions/attest-build-provenance@", resume)
+        self.assertIn("name: release-gate-evidence", resume)
+        self.assertNotIn("scripts/release/gates.py run", resume)
+        self.assertNotIn("cargo test", resume)
+
     def test_release_publish_consumes_exact_attested_candidate(self) -> None:
         publication = (ROOT / ".github/workflows/release-publish.yml").read_text()
         preflight = publication.split(
