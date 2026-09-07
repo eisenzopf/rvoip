@@ -101,6 +101,12 @@ def milliseconds(value: Any) -> str:
     return number(value / 1_000_000, 3)
 
 
+def is_reviewed_performance_baseline(path: Path, perf_root: Path) -> bool:
+    """Return whether *path* is a historical comparison-baseline artifact."""
+    relative = path.relative_to(perf_root)
+    return "reviewed-baseline" in relative.parts[:-1]
+
+
 def load_bundle(
     *,
     catalog_path: Path,
@@ -263,6 +269,12 @@ def load_bundle(
     if not perf_root.is_dir() and fresh_performance_gates > 0:
         raise ReportError("qualification bundle has no archived performance results")
     for path in sorted(perf_root.rglob("*.json")) if perf_root.is_dir() else ():
+        # Canonical performance gates retain their historical comparison input
+        # beside the current output so the audit is reproducible.  Those
+        # reviewed-baseline files remain part of the qualification evidence,
+        # but they are neither current measurements nor exact-candidate output.
+        if is_reviewed_performance_baseline(path, perf_root):
+            continue
         payload = read_object(path, "performance result")
         scenario = payload.get("scenario")
         environment = payload.get("environment")
