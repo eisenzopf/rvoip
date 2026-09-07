@@ -1,0 +1,216 @@
+name: Resume passed release qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      qualification_run_id:
+        description: Failed qualification run whose gates all passed before report rendering
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-resume
+  cancel-in-progress: false
+
+jobs:
+  resume:
+    name: Resume report and attestation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out trusted resume tooling
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Download source qualification evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_RUN_ID: ${{ inputs.qualification_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
+          mkdir -p target/release-resume/evidence
+          gh run view "$SOURCE_RUN_ID" \
+            --repo "$REPOSITORY" \
+            --json workflowName,event,headSha,status,conclusion,jobs \
+            > target/release-resume/source-run.json
+          gh run download "$SOURCE_RUN_ID" \
+            --repo "$REPOSITORY" \
+            --name release-gate-evidence \
+            --dir target/release-resume/evidence
+
+      - name: Prove the source stopped only after all gates passed
+        env:
+          SOURCE_RUN_ID: ${{ inputs.qualification_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("target/release-resume")
+          metadata = json.loads((root / "source-run.json").read_text())
+          evidence = root / "evidence"
+          aggregate_path = evidence / "release-qualification" / "aggregate.json"
+          plan_path = evidence / "release-plan" / "plan.json"
+          aggregate = json.loads(aggregate_path.read_text())
+          plan = json.loads(plan_path.read_text())
+
+          expected_metadata = {
+              "workflowName": "Release qualification",
+              "event": "workflow_dispatch",
+              "status": "completed",
+              "conclusion": "failure",
+          }
+          for key, expected in expected_metadata.items():
+              if metadata.get(key) != expected:
+                  raise SystemExit(
+                      f"source run {key} is {metadata.get(key)!r}, expected {expected!r}"
+                  )
+
+          non_success = [
+              job for job in metadata.get("jobs", [])
+              if job.get("conclusion") != "success"
+          ]
+          if len(non_success) != 1:
+              raise SystemExit(
+                  f"source run has {len(non_success)} non-success jobs, expected one"
+              )
+          release_gate = non_success[0]
+          if release_gate.get("name") != "Release Gate" or release_gate.get("conclusion") != "failure":
+              raise SystemExit("the sole failed job is not Release Gate")
+          failed_steps = [
+              step.get("name") for step in release_gate.get("steps", [])
+              if step.get("conclusion") == "failure"
+          ]
+          if failed_steps != ["Render exact-candidate qualification reports"]:
+              raise SystemExit(f"unexpected failed steps: {failed_steps!r}")
+
+          expected_aggregate = {
+              "schema": "rvoip-release-qualification-v1",
+              "status": "PASS",
+              "profile": "remote-release",
+              "gate_count": 213,
+              "fresh_count": 213,
+              "reused_count": 0,
+          }
+          for key, expected in expected_aggregate.items():
+              if aggregate.get(key) != expected:
+                  raise SystemExit(
+                      f"aggregate {key} is {aggregate.get(key)!r}, expected {expected!r}"
+                  )
+          if aggregate.get("failures") != []:
+              raise SystemExit("the qualification aggregate contains failures")
+          if len(aggregate.get("accepted_gates", [])) != 213:
+              raise SystemExit("the qualification aggregate does not accept all 213 gates")
+          candidate = aggregate.get("candidate_sha")
+          if candidate != metadata.get("headSha") or candidate != plan.get("candidate_sha"):
+              raise SystemExit("source run, plan, and aggregate candidate identities differ")
+          if os.environ["SOURCE_RUN_ID"] == "":
+              raise SystemExit("source run ID is empty")
+          PY
+
+      - name: Prove current changes are report-only
+        shell: bash
+        run: |
+          set -euo pipefail
+          aggregate=target/release-resume/evidence/release-qualification/aggregate.json
+          candidate="$(jq -r .candidate_sha "$aggregate")"
+          [[ "$candidate" =~ ^[0-9a-f]{40}$ ]]
+          git cat-file -e "$candidate^{commit}"
+          git merge-base --is-ancestor "$candidate" origin/main
+          mapfile -t changed < <(git diff --name-only "$candidate"..origin/main)
+          allowed='^(\.github/workflows/release-resume\.yml|scripts/ci/test_workflow_policy\.py|scripts/release/render_qualification_reports\.py|scripts/test_render_qualification_reports\.py)$'
+          for path in "${changed[@]}"; do
+            [[ "$path" =~ $allowed ]] || {
+              echo "candidate-to-main delta is not report-only: $path" >&2
+              exit 1
+            }
+          done
+          printf '%s\n' "${changed[@]}" > target/release-resume/allowed-delta.txt
+
+      - name: Test repaired reporting and resume policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest scripts/test_render_qualification_reports.py
+          python3 scripts/ci/test_workflow_policy.py
+
+      - name: Render exact-candidate qualification reports
+        env:
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_RUN_ID: ${{ inputs.qualification_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence=target/release-resume/evidence
+          python3 scripts/release/render_qualification_reports.py generate \
+            --catalog scripts/release/gates.json \
+            --plan "$evidence/release-plan/plan.json" \
+            --aggregate "$evidence/release-qualification/aggregate.json" \
+            --evidence "$evidence/release-evidence" \
+            --version 0.3.10 \
+            --run-id "$SOURCE_RUN_ID" \
+            --run-url "https://github.com/${REPOSITORY}/actions/runs/${SOURCE_RUN_ID}" \
+            --output-dir "$evidence/release-qualification/reports"
+
+      - name: Record bounded resume receipt
+        env:
+          REPOSITORY: ${{ github.repository }}
+          RESUME_RUN_ID: ${{ github.run_id }}
+          SOURCE_RUN_ID: ${{ inputs.qualification_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          root = Path("target/release-resume")
+          aggregate = root / "evidence/release-qualification/aggregate.json"
+          payload = json.loads(aggregate.read_text())
+          receipt = {
+              "schema": "rvoip-release-qualification-resume-v1",
+              "created_at": datetime.now(timezone.utc).isoformat(),
+              "repository": os.environ["REPOSITORY"],
+              "source_qualification_run_id": os.environ["SOURCE_RUN_ID"],
+              "resume_run_id": os.environ["RESUME_RUN_ID"],
+              "candidate_sha": payload["candidate_sha"],
+              "aggregate_sha256": hashlib.sha256(aggregate.read_bytes()).hexdigest(),
+              "resume_tooling_sha": os.popen("git rev-parse HEAD").read().strip(),
+              "allowed_candidate_delta": (root / "allowed-delta.txt").read_text().splitlines(),
+              "test_execution_repeated": False,
+              "resumed_operations": ["report-rendering", "aggregate-attestation"],
+          }
+          (root / "evidence/release-qualification/resume-receipt.json").write_text(
+              json.dumps(receipt, indent=2, sort_keys=True) + "\n"
+          )
+          PY
+
+      - name: Attest the existing passing aggregate
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: target/release-resume/evidence/release-qualification/aggregate.json
+
+      - name: Upload resumed release evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-gate-evidence
+          path: target/release-resume/evidence/
+          if-no-files-found: error
+          retention-days: 90
