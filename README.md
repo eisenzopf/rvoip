@@ -7,10 +7,10 @@
 
 [![Rust 1.91+](https://img.shields.io/badge/rust-1.91%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#license)
-[![rvoip](https://img.shields.io/crates/v/rvoip.svg?label=rvoip)](https://crates.io/crates/rvoip)
-[![rvoip-sip](https://img.shields.io/crates/v/rvoip-sip.svg?label=rvoip-sip)](https://crates.io/crates/rvoip-sip)
-[![Facade API](https://docs.rs/rvoip/badge.svg)](https://docs.rs/rvoip)
-[![SIP API](https://docs.rs/rvoip-sip/badge.svg)](https://docs.rs/rvoip-sip)
+[![rvoip](https://img.shields.io/crates/v/rvoip.svg?label=rvoip&release=0.3.10)](https://crates.io/crates/rvoip/0.3.10)
+[![rvoip-sip](https://img.shields.io/crates/v/rvoip-sip.svg?label=rvoip-sip&release=0.3.10)](https://crates.io/crates/rvoip-sip/0.3.10)
+[![Facade API](https://img.shields.io/docsrs/rvoip/0.3.10?label=Facade%20API)](https://docs.rs/rvoip/0.3.10/rvoip/)
+[![SIP API](https://img.shields.io/docsrs/rvoip-sip/0.3.10?label=SIP%20API)](https://docs.rs/rvoip-sip/0.3.10/rvoip_sip/)
 
 [**What ships**](#what-ships-today) · [**SIP interop**](#sip-interoperability) · [**Choose a crate**](#choose-your-entry-point) · [**Quick start**](#quick-start) · [**Capabilities**](#capability-matrix) · [**Extensions**](#extensions) · [**Architecture**](#architecture) · [**Evidence**](#release-evidence) · [**Changes**](CHANGELOG.md) · [**Roadmap**](#roadmap)
 
@@ -310,8 +310,9 @@ The unified release contains 45 publishable crates:
 ## Release evidence
 
 SIP beta claims are bounded by checked-in evidence rather than inferred from
-parser types or low-level primitives. Use the [qualification
-report](crates/sip/rvoip-sip/docs/BETA_RELEASE_REPORT.md), [RFC evidence
+parser types or low-level primitives. Use the current 0.3.10 [qualification
+report](crates/sip/rvoip-sip/docs/BETA_RELEASE_REPORT.md), [performance
+report](crates/sip/rvoip-sip/docs/BETA_PERFORMANCE_REPORT.md), [RFC evidence
 matrix](crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md), [compatibility
 matrix](crates/sip/rvoip-sip/docs/COMPATIBILITY_MATRIX.md), and [security
 posture](crates/sip/rvoip-sip/docs/SECURITY_POSTURE.md) for exact boundaries.
@@ -411,6 +412,6 @@ Licensed under the [MIT License](LICENSE).
 
 ---
 
-**Built in Rust** · [Facade API](https://docs.rs/rvoip) · [SIP API](https://docs.rs/rvoip-sip) · [Examples](examples/) · [Issues](https://github.com/eisenzopf/rvoip/issues) · [Discussions](https://github.com/eisenzopf/rvoip/discussions)
+**Built in Rust** · [Facade API](https://docs.rs/rvoip/0.3.10/rvoip/) · [SIP API](https://docs.rs/rvoip-sip/0.3.10/rvoip_sip/) · [Examples](examples/) · [Issues](https://github.com/eisenzopf/rvoip/issues) · [Discussions](https://github.com/eisenzopf/rvoip/discussions)
 
 </div>

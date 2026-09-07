@@ -58,8 +58,8 @@ alt="Recall.ai">
 
 - [Overview](#overview)
 - [Features](#features)
-- [Building](#building)
-- [Open Source License](#open-source-license)
+- [Building](#building-and-testing)
+- [Open Source License](#license)
 - [Contributing](#contributing)
 
 </details>

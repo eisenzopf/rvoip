@@ -1,7 +1,7 @@
 # rvoip — universal real-time gateway facade
 
-[![Crates.io](https://img.shields.io/crates/v/rvoip.svg)](https://crates.io/crates/rvoip)
-[![Documentation](https://docs.rs/rvoip/badge.svg)](https://docs.rs/rvoip)
+[![Crates.io](https://img.shields.io/crates/v/rvoip.svg?release=0.3.10)](https://crates.io/crates/rvoip/0.3.10)
+[![Documentation](https://img.shields.io/docsrs/rvoip/0.3.10?label=docs)](https://docs.rs/rvoip/0.3.10/rvoip/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../LICENSE)
 
 `rvoip` is the facade for the workspace's shared conversation model and
@@ -240,8 +240,8 @@ example for a complete cross-transport application.
 ## Documentation
 
 - [Workspace overview and complete extension catalog](../../README.md)
-- [Facade API](https://docs.rs/rvoip)
-- [SIP API](https://docs.rs/rvoip-sip)
+- [Facade API](https://docs.rs/rvoip/0.3.10/rvoip/)
+- [SIP API](https://docs.rs/rvoip-sip/0.3.10/rvoip_sip/)
 - [SIP beta evidence](../sip/rvoip-sip/docs/)
 - [Architecture and protocol design](../../docs/)
 

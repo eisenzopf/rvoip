@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/rvoip-sip-transport.svg)](https://crates.io/crates/sip/rvoip-sip-transport)
 [![Documentation](https://docs.rs/rvoip-sip-transport/badge.svg)](https://docs.rs/rvoip-sip-transport)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../../LICENSE)
 
 > **Beta scope notice:** for the `rvoip-sip` beta, transport claims are limited
 > to the paths covered by the beta compatibility matrix. UDP is the primary
@@ -371,4 +371,4 @@ Contributions are welcome! Please see the main [rvoip contributing guidelines](.
 
 ## License
 
-This project is licensed under the [MIT license](LICENSE).
+This project is licensed under the [MIT license](../../../LICENSE).

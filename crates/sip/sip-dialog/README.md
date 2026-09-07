@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/rvoip-dialog-core.svg)](https://crates.io/crates/rvoip-dialog-core)
 [![Documentation](https://docs.rs/rvoip-dialog-core/badge.svg)](https://docs.rs/rvoip-dialog-core)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../../LICENSE)
 
 > **Beta scope notice:** this README still contains older package names and
 > broad completion language. For the `rvoip-sip` beta, dialog-layer claims are
@@ -576,4 +576,4 @@ When contributing to dialog-core:
 
 ## License
 
-This project is licensed under the [MIT license](LICENSE).
+This project is licensed under the [MIT license](../../../LICENSE).

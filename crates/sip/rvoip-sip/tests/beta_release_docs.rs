@@ -144,7 +144,27 @@ fn beta_release_docs_exist_and_archived_docs_are_out_of_active_set() {
 fn current_beta_reports_are_complete_and_match_immutable_snapshot() {
     let crate_dir = manifest_dir();
     let docs = crate_dir.join("docs");
-    let snapshot = docs.join("releases/qualification/20260905T133559Z-33969263241");
+    let release_version = env!("CARGO_PKG_VERSION");
+    let history = docs.join("releases/qualification");
+    let snapshots: Vec<_> = fs::read_dir(&history)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .filter(|path| {
+            let report = path.join("BETA_RELEASE_REPORT.md");
+            report.is_file()
+                && read(report).contains(&format!(
+                    "# RVoIP {release_version} Release Qualification Report"
+                ))
+        })
+        .collect();
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "expected exactly one immutable qualification snapshot for {release_version}"
+    );
+    let snapshot = &snapshots[0];
     let reports = [
         "BETA_RELEASE_REPORT.md",
         "BETA_GATE_REPORT.md",
@@ -175,24 +195,41 @@ fn current_beta_reports_are_complete_and_match_immutable_snapshot() {
     let attestation = read(docs.join("QUALIFICATION_REPORT_ATTESTATION.json"));
     let policy = read(crate_dir.join("config/beta-release-policy.yaml"));
     let index = read(docs.join("releases/qualification/README.md"));
+    let summary_json: serde_json::Value = serde_json::from_str(&summary).unwrap();
+    let attestation_json: serde_json::Value = serde_json::from_str(&attestation).unwrap();
+    let gate_count = summary_json["qualification"]["gate_count"]
+        .as_u64()
+        .unwrap();
+    let legacy_count = summary_json["qualification"]["legacy_covered_count"]
+        .as_u64()
+        .unwrap();
+    let candidate = summary_json["release"]["candidate_sha"].as_str().unwrap();
+    let run_id = attestation_json["qualification"]["run_id"]
+        .as_str()
+        .unwrap();
 
-    assert!(release.contains("208/208 passed"));
-    assert!(release.contains("108/108 covered"));
-    assert!(release.contains("8cab44b10f872d21b304c02111d5d203ee8226da"));
-    assert!(gates.contains("PASS — 208/208 remote-release gates passed; 0 failed"));
+    assert_eq!(summary_json["release"]["version"], release_version);
+    assert_eq!(summary_json["qualification"]["status"], "PASS");
+    assert_eq!(attestation_json["release"]["version"], release_version);
+    assert_eq!(attestation_json["release"]["candidate_sha"], candidate);
+    assert!(release.contains(&format!("{gate_count}/{gate_count} passed")));
+    assert!(release.contains(&format!("{legacy_count}/{legacy_count} covered")));
+    assert!(release.contains(candidate));
+    assert!(gates.contains(&format!(
+        "PASS — {gate_count}/{gate_count} remote-release gates passed; 0 failed"
+    )));
     assert!(gates.contains("workspace unit tests"));
     assert!(gates.contains("SIPp standalone target start"));
     assert!(performance.contains("perf_call_setup_cps_pbx-media-server"));
     assert!(performance.contains("up to 2,000 CPS with media enabled"));
     assert!(performance.contains("not public-network latency or carrier capacity"));
-    assert!(summary.contains("\"gate_count\": 208"));
-    assert!(summary.contains("\"legacy_covered_count\": 108"));
-    assert!(attestation.contains("rvoip-release-qualification-report-attestation-v1"));
-    assert!(attestation
-        .contains("sha256:0b5dd80b42be87b0823bba9224a983db4be855712e2f463d6849fb2d4f21b051"));
+    assert_eq!(
+        attestation_json["schema"],
+        "rvoip-release-qualification-report-attestation-v1"
+    );
     assert!(policy.contains("\"expected_selected_gate_count\": 108"));
-    assert!(index.contains("33969263241"));
-    assert!(index.contains("8cab44b10f872d21b304c02111d5d203ee8226da"));
+    assert!(index.contains(run_id));
+    assert!(index.contains(candidate));
 }
 
 #[test]
