@@ -51,7 +51,7 @@ thiserror = "2.0.17"
 # The metrics-prometheus feature adds the optional Prometheus exporter and
 # therefore also enables the relay runtime.
 metrics = { version = "0.24", optional = true }
-metrics-exporter-prometheus = { version = "0.16", optional = true }
+metrics-exporter-prometheus = { version = "0.18", optional = true }
 
 [features]
 default = []
@@ -70,7 +70,7 @@ relay-runtime = [
 metrics-prometheus = ["relay-runtime", "dep:metrics-exporter-prometheus"]
 
 [dev-dependencies]
-rcgen = { version = "0.13", features = ["pem"] }
+rcgen = { version = "0.14", features = ["pem"] }
 tempfile = "3"
 time = "0.3"
 
