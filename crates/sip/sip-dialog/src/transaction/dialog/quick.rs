@@ -318,13 +318,51 @@ pub fn refer_for_dialog_with_extras(
     extra_headers: Option<Vec<TypedHeader>>,
 ) -> Result<Request> {
     let to_uri_string = to_uri.into();
+    refer_for_dialog_with_request_uri(
+        call_id,
+        from_uri,
+        from_tag,
+        to_uri_string.clone(),
+        to_tag,
+        to_uri_string,
+        target_uri,
+        cseq,
+        local_address,
+        route_set,
+        contact_uri,
+        extra_headers,
+    )
+}
+
+/// REFER builder with a distinct Request-URI.
+///
+/// RFC 3261 §12.2.1.1 sends in-dialog requests to the dialog remote target,
+/// which is the peer Contact, while `To:` keeps the remote URI. A UAS whose
+/// caller uses an address-of-record in `From` must pass the Contact here or
+/// the request is routed to that address-of-record.
+#[allow(clippy::too_many_arguments)]
+pub fn refer_for_dialog_with_request_uri(
+    call_id: impl Into<String>,
+    from_uri: impl Into<String>,
+    from_tag: impl Into<String>,
+    to_uri: impl Into<String>,
+    to_tag: impl Into<String>,
+    request_uri: impl Into<String>,
+    target_uri: impl Into<String>,
+    cseq: u32,
+    local_address: SocketAddr,
+    route_set: Option<Vec<Uri>>,
+    contact_uri: Option<String>,
+    extra_headers: Option<Vec<TypedHeader>>,
+) -> Result<Request> {
     let from_uri_string = from_uri.into();
+    let request_uri_string = request_uri.into();
     let target_uri_str = target_uri.into();
     let route_set = route_set.unwrap_or_default();
     let contact_uri = contact_for_target_refresh(
         contact_uri,
         &from_uri_string,
-        &to_uri_string,
+        &request_uri_string,
         &route_set,
         local_address,
     );
@@ -333,9 +371,9 @@ pub fn refer_for_dialog_with_extras(
         call_id: call_id.into(),
         from_uri: from_uri_string,
         from_tag: from_tag.into(),
-        to_uri: to_uri_string.clone(),
+        to_uri: to_uri.into(),
         to_tag: to_tag.into(),
-        request_uri: to_uri_string,
+        request_uri: request_uri_string,
         cseq,
         local_address,
         route_set,
@@ -492,12 +530,45 @@ pub fn update_for_dialog_with_extras(
     extra_headers: Option<Vec<TypedHeader>>,
 ) -> Result<Request> {
     let to_uri_string = to_uri.into();
+    update_for_dialog_with_request_uri(
+        call_id,
+        from_uri,
+        from_tag,
+        to_uri_string.clone(),
+        to_tag,
+        to_uri_string,
+        sdp_content,
+        cseq,
+        local_address,
+        route_set,
+        contact_uri,
+        extra_headers,
+    )
+}
+
+/// UPDATE builder with a distinct Request-URI (the dialog remote target).
+#[allow(clippy::too_many_arguments)]
+pub fn update_for_dialog_with_request_uri(
+    call_id: impl Into<String>,
+    from_uri: impl Into<String>,
+    from_tag: impl Into<String>,
+    to_uri: impl Into<String>,
+    to_tag: impl Into<String>,
+    request_uri: impl Into<String>,
+    sdp_content: Option<String>,
+    cseq: u32,
+    local_address: SocketAddr,
+    route_set: Option<Vec<Uri>>,
+    contact_uri: Option<String>,
+    extra_headers: Option<Vec<TypedHeader>>,
+) -> Result<Request> {
     let from_uri_string = from_uri.into();
+    let request_uri_string = request_uri.into();
     let route_set = route_set.unwrap_or_default();
     let contact_uri = contact_uri.unwrap_or_else(|| {
         default_target_refresh_contact(
             &from_uri_string,
-            &to_uri_string,
+            &request_uri_string,
             Some(&route_set),
             local_address,
         )
@@ -507,9 +578,9 @@ pub fn update_for_dialog_with_extras(
         call_id: call_id.into(),
         from_uri: from_uri_string,
         from_tag: from_tag.into(),
-        to_uri: to_uri_string.clone(),
+        to_uri: to_uri.into(),
         to_tag: to_tag.into(),
-        request_uri: to_uri_string,
+        request_uri: request_uri_string,
         cseq,
         local_address,
         route_set,
@@ -615,13 +686,45 @@ pub fn info_for_dialog_with_extras(
     extra_headers: Option<Vec<TypedHeader>>,
 ) -> Result<Request> {
     let to_uri_string = to_uri.into();
+    info_for_dialog_with_request_uri(
+        call_id,
+        from_uri,
+        from_tag,
+        to_uri_string.clone(),
+        to_tag,
+        to_uri_string,
+        content,
+        content_type,
+        cseq,
+        local_address,
+        route_set,
+        extra_headers,
+    )
+}
+
+/// INFO builder with a distinct Request-URI (the dialog remote target).
+#[allow(clippy::too_many_arguments)]
+pub fn info_for_dialog_with_request_uri(
+    call_id: impl Into<String>,
+    from_uri: impl Into<String>,
+    from_tag: impl Into<String>,
+    to_uri: impl Into<String>,
+    to_tag: impl Into<String>,
+    request_uri: impl Into<String>,
+    content: impl Into<String>,
+    content_type: Option<String>,
+    cseq: u32,
+    local_address: SocketAddr,
+    route_set: Option<Vec<Uri>>,
+    extra_headers: Option<Vec<TypedHeader>>,
+) -> Result<Request> {
     let template = DialogRequestTemplate {
         call_id: call_id.into(),
         from_uri: from_uri.into(),
         from_tag: from_tag.into(),
-        to_uri: to_uri_string.clone(),
+        to_uri: to_uri.into(),
         to_tag: to_tag.into(),
-        request_uri: to_uri_string,
+        request_uri: request_uri.into(),
         cseq,
         local_address,
         route_set: route_set.unwrap_or_default(),
@@ -732,18 +835,54 @@ pub fn notify_for_dialog_with_extras(
     route_set: Option<Vec<Uri>>,
     extra_headers: Option<Vec<TypedHeader>>,
 ) -> Result<Request> {
+    let to_uri_string = to_uri.into();
+    notify_for_dialog_with_request_uri(
+        call_id,
+        from_uri,
+        from_tag,
+        to_uri_string.clone(),
+        to_tag,
+        to_uri_string,
+        event_type,
+        notification_body,
+        subscription_state,
+        content_type,
+        cseq,
+        local_address,
+        route_set,
+        extra_headers,
+    )
+}
+
+/// NOTIFY builder with a distinct Request-URI (the dialog remote target).
+#[allow(clippy::too_many_arguments)]
+pub fn notify_for_dialog_with_request_uri(
+    call_id: impl Into<String>,
+    from_uri: impl Into<String>,
+    from_tag: impl Into<String>,
+    to_uri: impl Into<String>,
+    to_tag: impl Into<String>,
+    request_uri: impl Into<String>,
+    event_type: impl Into<String>,
+    notification_body: Option<String>,
+    subscription_state: Option<String>,
+    content_type: Option<String>,
+    cseq: u32,
+    local_address: SocketAddr,
+    route_set: Option<Vec<Uri>>,
+    extra_headers: Option<Vec<TypedHeader>>,
+) -> Result<Request> {
     use crate::transaction::client::builders::InDialogRequestBuilder;
 
-    let to_uri_string = to_uri.into();
-    let from_uri_string = from_uri.into();
+    let request_uri_string = request_uri.into();
     let route_set = route_set.unwrap_or_default();
     let template = DialogRequestTemplate {
         call_id: call_id.into(),
-        from_uri: from_uri_string,
+        from_uri: from_uri.into(),
         from_tag: from_tag.into(),
-        to_uri: to_uri_string.clone(),
+        to_uri: to_uri.into(),
         to_tag: to_tag.into(),
-        request_uri: to_uri_string.clone(),
+        request_uri: request_uri_string,
         cseq,
         local_address,
         route_set,
@@ -771,7 +910,7 @@ pub fn notify_for_dialog_with_extras(
         &template.from_tag,
         &template.to_uri,
         &template.to_tag,
-        &to_uri_string,
+        &template.request_uri,
         template.cseq,
         template.local_address,
         template.route_set,
@@ -872,13 +1011,46 @@ pub fn message_for_dialog_with_extras(
     extra_headers: Option<Vec<TypedHeader>>,
 ) -> Result<Request> {
     let to_uri_string = to_uri.into();
+    message_for_dialog_with_request_uri(
+        call_id,
+        from_uri,
+        from_tag,
+        to_uri_string.clone(),
+        to_tag,
+        to_uri_string,
+        message_content,
+        content_type,
+        cseq,
+        local_address,
+        route_set,
+        extra_headers,
+    )
+}
+
+/// In-dialog MESSAGE builder with a distinct Request-URI (the dialog remote
+/// target).
+#[allow(clippy::too_many_arguments)]
+pub fn message_for_dialog_with_request_uri(
+    call_id: impl Into<String>,
+    from_uri: impl Into<String>,
+    from_tag: impl Into<String>,
+    to_uri: impl Into<String>,
+    to_tag: impl Into<String>,
+    request_uri: impl Into<String>,
+    message_content: impl Into<String>,
+    content_type: Option<String>,
+    cseq: u32,
+    local_address: SocketAddr,
+    route_set: Option<Vec<Uri>>,
+    extra_headers: Option<Vec<TypedHeader>>,
+) -> Result<Request> {
     let template = DialogRequestTemplate {
         call_id: call_id.into(),
         from_uri: from_uri.into(),
         from_tag: from_tag.into(),
-        to_uri: to_uri_string.clone(),
+        to_uri: to_uri.into(),
         to_tag: to_tag.into(),
-        request_uri: to_uri_string,
+        request_uri: request_uri.into(),
         cseq,
         local_address,
         route_set: route_set.unwrap_or_default(),
@@ -979,13 +1151,45 @@ pub fn reinvite_for_dialog_with_extras(
     extra_headers: Option<Vec<TypedHeader>>,
 ) -> Result<Request> {
     let to_uri_string = to_uri.into();
+    reinvite_for_dialog_with_request_uri(
+        call_id,
+        from_uri,
+        from_tag,
+        to_uri_string.clone(),
+        to_tag,
+        to_uri_string,
+        sdp_offer,
+        cseq,
+        local_address,
+        route_set,
+        contact,
+        extra_headers,
+    )
+}
+
+/// re-INVITE builder with a distinct Request-URI (the dialog remote target).
+#[allow(clippy::too_many_arguments)]
+pub fn reinvite_for_dialog_with_request_uri(
+    call_id: impl Into<String>,
+    from_uri: impl Into<String>,
+    from_tag: impl Into<String>,
+    to_uri: impl Into<String>,
+    to_tag: impl Into<String>,
+    request_uri: impl Into<String>,
+    sdp_offer: impl Into<String>,
+    cseq: u32,
+    local_address: SocketAddr,
+    route_set: Option<Vec<Uri>>,
+    contact: Option<String>,
+    extra_headers: Option<Vec<TypedHeader>>,
+) -> Result<Request> {
     let template = DialogRequestTemplate {
         call_id: call_id.into(),
         from_uri: from_uri.into(),
         from_tag: from_tag.into(),
-        to_uri: to_uri_string.clone(),
+        to_uri: to_uri.into(),
         to_tag: to_tag.into(),
-        request_uri: to_uri_string,
+        request_uri: request_uri.into(),
         cseq,
         local_address,
         route_set: route_set.unwrap_or_default(),
@@ -1031,13 +1235,44 @@ pub fn prack_for_dialog(
     route_set: Option<Vec<Uri>>,
 ) -> Result<Request> {
     let to_uri_string = to_uri.into();
+    prack_for_dialog_with_request_uri(
+        call_id,
+        from_uri,
+        from_tag,
+        to_uri_string.clone(),
+        to_tag,
+        to_uri_string,
+        rseq,
+        invite_cseq,
+        prack_cseq,
+        local_address,
+        route_set,
+    )
+}
+
+/// PRACK builder with a distinct Request-URI (the early dialog remote target
+/// learned from the reliable provisional response Contact).
+#[allow(clippy::too_many_arguments)]
+pub fn prack_for_dialog_with_request_uri(
+    call_id: impl Into<String>,
+    from_uri: impl Into<String>,
+    from_tag: impl Into<String>,
+    to_uri: impl Into<String>,
+    to_tag: impl Into<String>,
+    request_uri: impl Into<String>,
+    rseq: u32,
+    invite_cseq: u32,
+    prack_cseq: u32,
+    local_address: SocketAddr,
+    route_set: Option<Vec<Uri>>,
+) -> Result<Request> {
     let template = DialogRequestTemplate {
         call_id: call_id.into(),
         from_uri: from_uri.into(),
         from_tag: from_tag.into(),
-        to_uri: to_uri_string.clone(),
+        to_uri: to_uri.into(),
         to_tag: to_tag.into(),
-        request_uri: to_uri_string,
+        request_uri: request_uri.into(),
         cseq: prack_cseq,
         local_address,
         route_set: route_set.unwrap_or_default(),
@@ -1496,6 +1731,133 @@ mod tests {
             bye_request.to().unwrap().uri().to_string(),
             "sip:bob@example.com"
         );
+    }
+
+    #[test]
+    fn in_dialog_builders_use_remote_target_request_uri() {
+        let local_addr: SocketAddr = "127.0.0.1:5060".parse().unwrap();
+        let to_uri = "sip:bob@carrier.invalid";
+        let target = "sip:bob@192.0.2.10:5070;transport=tcp";
+
+        let requests = vec![
+            refer_for_dialog_with_request_uri(
+                "call-1",
+                "sip:alice@example.com",
+                "alice-tag",
+                to_uri,
+                "bob-tag",
+                target,
+                "sip:carol@example.com",
+                2,
+                local_addr,
+                None,
+                None,
+                None,
+            )
+            .expect("REFER"),
+            update_for_dialog_with_request_uri(
+                "call-1",
+                "sip:alice@example.com",
+                "alice-tag",
+                to_uri,
+                "bob-tag",
+                target,
+                None,
+                3,
+                local_addr,
+                None,
+                None,
+                None,
+            )
+            .expect("UPDATE"),
+            info_for_dialog_with_request_uri(
+                "call-1",
+                "sip:alice@example.com",
+                "alice-tag",
+                to_uri,
+                "bob-tag",
+                target,
+                "Signal=1\r\n",
+                Some("application/dtmf-relay".to_string()),
+                4,
+                local_addr,
+                None,
+                None,
+            )
+            .expect("INFO"),
+            notify_for_dialog_with_request_uri(
+                "call-1",
+                "sip:alice@example.com",
+                "alice-tag",
+                to_uri,
+                "bob-tag",
+                target,
+                "refer",
+                Some("SIP/2.0 200 OK\r\n".to_string()),
+                Some("active".to_string()),
+                None,
+                5,
+                local_addr,
+                None,
+                None,
+            )
+            .expect("NOTIFY"),
+            message_for_dialog_with_request_uri(
+                "call-1",
+                "sip:alice@example.com",
+                "alice-tag",
+                to_uri,
+                "bob-tag",
+                target,
+                "hello",
+                None,
+                6,
+                local_addr,
+                None,
+                None,
+            )
+            .expect("MESSAGE"),
+            reinvite_for_dialog_with_request_uri(
+                "call-1",
+                "sip:alice@example.com",
+                "alice-tag",
+                to_uri,
+                "bob-tag",
+                target,
+                "v=0\r\n",
+                7,
+                local_addr,
+                None,
+                None,
+                None,
+            )
+            .expect("re-INVITE"),
+            prack_for_dialog_with_request_uri(
+                "call-1",
+                "sip:alice@example.com",
+                "alice-tag",
+                to_uri,
+                "bob-tag",
+                target,
+                1,
+                1,
+                8,
+                local_addr,
+                None,
+            )
+            .expect("PRACK"),
+        ];
+
+        for request in requests {
+            let method = request.method();
+            assert_eq!(request.uri().to_string(), target, "{method} Request-URI");
+            assert_eq!(
+                request.to().unwrap().uri().to_string(),
+                to_uri,
+                "{method} To URI"
+            );
+            assert_eq!(request.first_via_transport(), Some("TCP"), "{method} Via");
+        }
     }
 
     #[tokio::test]

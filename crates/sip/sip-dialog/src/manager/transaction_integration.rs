@@ -175,6 +175,7 @@ struct InDialogRequestMaterializationContext {
     local_uri: String,
     local_tag: String,
     remote_uri: String,
+    remote_target: String,
     remote_tag: String,
     cseq: u32,
     local_address: SocketAddr,
@@ -186,12 +187,13 @@ fn materialize_info_request_snapshot(
     snapshot: &InfoRequestSnapshot,
 ) -> DialogResult<Request> {
     let body_projection = String::from_utf8_lossy(&snapshot.body).into_owned();
-    let request = dialog_quick::info_for_dialog_with_extras(
+    let request = dialog_quick::info_for_dialog_with_request_uri(
         &context.call_id,
         &context.local_uri,
         &context.local_tag,
         &context.remote_uri,
         &context.remote_tag,
+        &context.remote_target,
         &body_projection,
         Some(snapshot.content_type.clone()),
         context.cseq,
@@ -229,12 +231,13 @@ fn materialize_notify_request_snapshot(
         .body
         .as_ref()
         .map(|body| String::from_utf8_lossy(body).into_owned());
-    let request = dialog_quick::notify_for_dialog_with_extras(
+    let request = dialog_quick::notify_for_dialog_with_request_uri(
         context.call_id.clone(),
         context.local_uri.clone(),
         context.local_tag.clone(),
         context.remote_uri.clone(),
         context.remote_tag.clone(),
+        context.remote_target.clone(),
         event,
         body_projection,
         subscription_state,
@@ -1989,6 +1992,7 @@ impl DialogManager {
                 local_uri: template.local_uri.to_string(),
                 local_tag,
                 remote_uri: template.remote_uri.to_string(),
+                remote_target: template.target_uri.to_string(),
                 remote_tag,
                 cseq: template.cseq_number,
                 local_address: self
@@ -2070,6 +2074,7 @@ impl DialogManager {
                 local_uri: template.local_uri.to_string(),
                 local_tag,
                 remote_uri: template.remote_uri.to_string(),
+                remote_target: template.target_uri.to_string(),
                 remote_tag,
                 cseq: template.cseq_number,
                 local_address: self
@@ -2288,12 +2293,13 @@ impl DialogManager {
                                 crate::errors::DialogError::protocol_error("re-INVITE request requires SDP content for session modification")
                             })?;
 
-                            dialog_quick::reinvite_for_dialog_with_extras(
+                            dialog_quick::reinvite_for_dialog_with_request_uri(
                                 &template.call_id,
                                 &template.local_uri.to_string(),
                                 &local_tag,
                                 &template.remote_uri.to_string(),
                                 &remote_tag,
+                                &template.target_uri.to_string(),
                                 &sdp_content,
                                 template.cseq_number,
                                 local_address,
@@ -2386,12 +2392,13 @@ impl DialogManager {
                         "sip:unknown".to_string()
                     };
 
-                    dialog_quick::refer_for_dialog_with_extras(
+                    dialog_quick::refer_for_dialog_with_request_uri(
                         &template.call_id,
                         &template.local_uri.to_string(),
                         &local_tag,
                         &template.remote_uri.to_string(),
                         &remote_tag,
+                        &template.target_uri.to_string(),
                         &target_uri,
                         template.cseq_number,
                         local_address,
@@ -2407,12 +2414,13 @@ impl DialogManager {
                         crate::errors::DialogError::protocol_error("UPDATE request requires remote tag in established dialog")
                     })?;
 
-                    dialog_quick::update_for_dialog_with_extras(
+                    dialog_quick::update_for_dialog_with_request_uri(
                         &template.call_id,
                         &template.local_uri.to_string(),
                         &local_tag,
                         &template.remote_uri.to_string(),
                         &remote_tag,
+                        &template.target_uri.to_string(),
                         body_string.clone(),
                         template.cseq_number,
                         local_address,
@@ -2433,12 +2441,13 @@ impl DialogManager {
                     })?;
 
                     let content = body_string.unwrap_or_else(|| "".to_string());
-                    dialog_quick::message_for_dialog_with_extras(
+                    dialog_quick::message_for_dialog_with_request_uri(
                         &template.call_id,
                         &template.local_uri.to_string(),
                         &local_tag,
                         &template.remote_uri.to_string(),
                         &remote_tag,
+                        &template.target_uri.to_string(),
                         &content,
                         Some("text/plain".to_string()),
                         template.cseq_number,
@@ -2964,6 +2973,7 @@ mod outward_error_redaction_tests {
             local_uri: "sip:alice@example.test".to_string(),
             local_tag: "alice-tag".to_string(),
             remote_uri: "sip:bob@example.test".to_string(),
+            remote_target: "sip:bob@192.0.2.20:5070".to_string(),
             remote_tag: "bob-tag".to_string(),
             cseq: 42,
             local_address: "127.0.0.1:5060".parse().unwrap(),
@@ -2988,6 +2998,7 @@ mod outward_error_redaction_tests {
         )
         .unwrap();
         assert_eq!(info.method(), Method::Info);
+        assert_eq!(info.uri().to_string(), "sip:bob@192.0.2.20:5070");
         assert_eq!(info.body(), info_body.as_ref());
         assert!(info
             .header(&HeaderName::ContentType)
@@ -3021,6 +3032,7 @@ mod outward_error_redaction_tests {
         )
         .unwrap();
         assert_eq!(notify.method(), Method::Notify);
+        assert_eq!(notify.uri().to_string(), "sip:bob@192.0.2.20:5070");
         assert_eq!(notify.body(), notify_body.as_ref());
         assert!(notify
             .header(&HeaderName::Event)
@@ -3081,14 +3093,14 @@ mod outward_error_redaction_tests {
             .expect("production request materializers");
         assert_eq!(
             materializers
-                .matches("dialog_quick::info_for_dialog_with_extras(")
+                .matches("dialog_quick::info_for_dialog_with_request_uri(")
                 .count(),
             1,
             "INFO has one request materializer"
         );
         assert_eq!(
             materializers
-                .matches("dialog_quick::notify_for_dialog_with_extras(")
+                .matches("dialog_quick::notify_for_dialog_with_request_uri(")
                 .count(),
             1,
             "NOTIFY has one request materializer"
@@ -7635,16 +7647,17 @@ impl DialogManager {
             let route_set = dialog.route_set.clone();
             let call_id = dialog.call_id.clone();
             let local_uri = dialog.local_uri.to_string();
-            let target_uri = dialog.remote_uri.clone();
+            let target_uri = dialog.remote_target.clone();
             let remote_uri = dialog.remote_uri.to_string();
             let local_address = self.local_address_for_target_and_routes(&target_uri, &route_set);
 
-            let request = crate::transaction::dialog::prack_for_dialog(
+            let request = crate::transaction::dialog::prack_for_dialog_with_request_uri(
                 call_id,
                 local_uri,
                 local_tag,
                 remote_uri,
                 remote_tag,
+                target_uri.to_string(),
                 rseq,
                 invite_cseq,
                 prack_cseq,
