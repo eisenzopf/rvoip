@@ -1265,6 +1265,16 @@ fn redacted_dialog_operation_error<E>(operation: &'static str, _source: E) -> Se
     SessionError::DialogError(format!("{operation} failed (class=dialog-dispatch)"))
 }
 
+/// REFER keeps the fixed operation prefix and adds the dialog API's own
+/// payload-free class, so an application can tell a rejected target from a
+/// routing or transport failure without seeing any SIP content.
+fn redacted_refer_dispatch_error(source: &rvoip_sip_dialog::api::ApiError) -> SessionError {
+    SessionError::DialogError(format!(
+        "REFER failed (class=dialog-dispatch, cause={})",
+        source.diagnostic_class()
+    ))
+}
+
 fn register_auth_scheme_class(scheme: &crate::auth::SipAuthScheme) -> &'static str {
     match scheme {
         crate::auth::SipAuthScheme::Digest => "digest",
@@ -3559,7 +3569,7 @@ impl DialogAdapter {
         self.dialog_api
             .send_refer_with_options(&dialog_id, opts)
             .await
-            .map_err(|error| redacted_dialog_operation_error("REFER", error))
+            .map_err(|error| redacted_refer_dispatch_error(&error))
     }
 
     /// SIP_API_DESIGN_2 Phase C — INFO dispatch through the new
@@ -7825,6 +7835,45 @@ mod tests {
             };
             assert!(detail.contains("class="));
             assert!(detail.contains(failure.diagnostic()));
+        }
+    }
+
+    #[test]
+    fn refer_dispatch_errors_carry_only_the_api_class() {
+        use rvoip_sip_dialog::api::ApiError;
+
+        const SECRET: &str = "lower-refer-secret-canary";
+        for (source, cause) in [
+            (
+                ApiError::Configuration {
+                    message: format!("Refer-To sip:{SECRET}@target.invalid"),
+                },
+                "configuration",
+            ),
+            (
+                ApiError::Protocol {
+                    message: format!("no candidates for sip:{SECRET}@contact.invalid"),
+                },
+                "protocol",
+            ),
+            (
+                ApiError::Internal {
+                    message: format!("transport refused {SECRET}"),
+                },
+                "internal",
+            ),
+        ] {
+            let error = redacted_refer_dispatch_error(&source);
+            let SessionError::DialogError(detail) = &error else {
+                panic!("unexpected REFER error class: {error:?}");
+            };
+            assert_eq!(
+                detail,
+                &format!("REFER failed (class=dialog-dispatch, cause={cause})")
+            );
+            for rendered in [error.to_string(), format!("{error:?}")] {
+                assert!(!rendered.contains(SECRET), "source leaked: {rendered}");
+            }
         }
     }
 

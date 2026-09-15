@@ -282,6 +282,31 @@ pub struct RegisterRequestOptions {
 // and body values are never formatted.
 // ─────────────────────────────────────────────────────────────────────────
 
+/// Reduce an application-supplied REFER target to the bare URI carried in
+/// `Refer-To`.
+///
+/// Applications commonly hold transfer targets in name-addr form
+/// (`"Carol" <sip:carol@example.com>` or `<sip:carol@example.com>`), which is
+/// what the header itself looks like on the wire. The request builder only
+/// accepts a bare URI, so accept both forms here, drop surrounding
+/// whitespace, and refuse anything else as a configuration error instead of
+/// letting it fail later as an opaque request build error.
+fn normalize_refer_to_target(value: &str) -> ApiResult<String> {
+    use rvoip_sip_core::types::address::Address;
+    use std::str::FromStr;
+
+    let trimmed = value.trim();
+    if let Ok(uri) = Uri::from_str(trimmed) {
+        return Ok(uri.to_string());
+    }
+    if let Ok(address) = Address::from_str(trimmed) {
+        return Ok(address.uri.to_string());
+    }
+    Err(ApiError::Configuration {
+        message: "Refer-To target must be a URI or a name-addr".to_string(),
+    })
+}
+
 use bytes::Bytes;
 use rvoip_sip_core::types::{uri::Uri, HeaderName, TypedHeader};
 use std::time::Duration;
@@ -2758,6 +2783,7 @@ impl UnifiedDialogApi {
         //
         // Parsing the caller's value first means a malformed one is refused
         // here rather than travelling as an unusable URI parameter.
+        let refer_to_uri = normalize_refer_to_target(&opts.refer_to)?;
         let refer_to = match &opts.replaces {
             Some(value) => {
                 let replaces = value
@@ -2767,9 +2793,9 @@ impl UnifiedDialogApi {
                             "Replaces must be `call-id;to-tag=<tag>;from-tag=<tag>` (RFC 3891 §6.1)"
                                 .to_string(),
                     })?;
-                replaces.append_to_refer_to_uri(&opts.refer_to)
+                replaces.append_to_refer_to_uri(&refer_to_uri)
             }
-            None => opts.refer_to.clone(),
+            None => refer_to_uri,
         };
         let body = format!("Refer-To: {}\r\n", refer_to);
 
@@ -3465,6 +3491,50 @@ impl UnifiedDialogApi {
             response.status_code()
         );
         Ok((response, route))
+    }
+}
+
+#[cfg(test)]
+mod refer_target_tests {
+    use super::{normalize_refer_to_target, ApiError};
+
+    #[test]
+    fn refer_target_accepts_bare_uri_and_name_addr_forms() {
+        for (input, expected) in [
+            ("sip:carol@example.com", "sip:carol@example.com"),
+            ("  sip:carol@example.com\r\n", "sip:carol@example.com"),
+            ("<sip:carol@example.com>", "sip:carol@example.com"),
+            ("\"Carol\" <sip:carol@example.com>", "sip:carol@example.com"),
+            (
+                "Carol <sip:+5511999990000@192.0.2.1;user=phone>",
+                "sip:+5511999990000@192.0.2.1;user=phone",
+            ),
+            ("<tel:+5511999990000>", "tel:+5511999990000"),
+        ] {
+            assert_eq!(
+                normalize_refer_to_target(input).expect("valid REFER target"),
+                expected,
+                "input {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn refer_target_rejects_non_uri_values_as_configuration() {
+        for input in [
+            "",
+            "carol",
+            "<sip:carol@example.com",
+            "sip:carol@exa mple.com",
+        ] {
+            assert!(
+                matches!(
+                    normalize_refer_to_target(input),
+                    Err(ApiError::Configuration { .. })
+                ),
+                "input {input:?}"
+            );
+        }
     }
 }
 

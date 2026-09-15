@@ -146,7 +146,11 @@ async fn uas_refer_targets_caller_contact_not_from_aor() {
 
     tokio::time::timeout(
         Duration::from_secs(5),
-        coordinator.refer(&call_id, "sip:carol@127.0.0.1").send(),
+        // Transfer targets are often held in name-addr form, as they appear
+        // in the Refer-To header itself.
+        coordinator
+            .refer(&call_id, "\"Carol\" <sip:carol@127.0.0.1>")
+            .send(),
     )
     .await
     .expect("REFER dispatch timed out")
@@ -162,6 +166,7 @@ async fn uas_refer_targets_caller_contact_not_from_aor() {
         header(&refer, "To").contains(CALLER_AOR),
         "To must keep the caller address-of-record"
     );
+    assert_eq!(header(&refer, "Refer-To"), "<sip:carol@127.0.0.1>");
 
     coordinator
         .hangup(&call_id)
