@@ -29,6 +29,7 @@ use rvoip_core::identity::IdentityAssurance;
 use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId, StreamId, TenantId};
 use rvoip_core::message::Message;
 use rvoip_core::orchestrator::Orchestrator;
+use rvoip_core::participant::{ParticipantKind, ParticipantRole};
 use rvoip_core::session::SessionMedium;
 use rvoip_core::stream::{
     MediaFrame, MediaReceiverReservation, MediaStream, QualitySnapshot, StreamKind,
@@ -1456,5 +1457,98 @@ async fn cancellation_during_post_is_reconciled_with_end_call() {
         saw_end_call,
         "the detached activation owner must reconcile a post-cancel remote call"
     );
+    server.abort();
+}
+
+#[tokio::test]
+async fn attach_agent_attributes_vapi_to_distinct_ai_participant() {
+    let (api_base, _state, _observed, server) =
+        start_mock_with_behavior(Duration::ZERO, SocketBehavior::Interactive, Vec::new()).await;
+    let mut config = VapiConfig::new(VapiApiKey::new("mock-api-key").expect("mock key"))
+        .with_api_base(api_base)
+        .with_loopback_test_transport();
+    config.heartbeat_interval = Duration::from_secs(60);
+    let adapter = VapiAdapter::new(config).expect("adapter");
+    let (orchestrator, caller_connection_id) = setup_caller().await;
+    let call = adapter
+        .attach_agent(
+            &orchestrator,
+            caller_connection_id.clone(),
+            VapiCallOptions::new(VapiAssistant::saved("assistant-mock")),
+        )
+        .await
+        .expect("attach Vapi agent");
+
+    let session_id = orchestrator
+        .session_of(call.caller_connection_id())
+        .expect("caller session");
+    let session = orchestrator.session(&session_id).expect("session handle");
+    let session = session.read().expect("session lock");
+    let caller_participant = session
+        .connections
+        .get(call.caller_connection_id())
+        .expect("caller connection")
+        .participant_id
+        .clone();
+    let vapi_participant = session
+        .connections
+        .get(call.vapi_connection_id())
+        .expect("vapi connection")
+        .participant_id
+        .clone();
+    assert_ne!(
+        caller_participant, vapi_participant,
+        "Vapi Connection must not reuse the caller's participant_id"
+    );
+    assert_eq!(&vapi_participant, call.ai_participant_id());
+
+    let conversation = orchestrator
+        .conversation(&session.conversation_id)
+        .expect("conversation");
+    let conversation = conversation.read().expect("conversation lock");
+    let ai = conversation
+        .participants
+        .iter()
+        .find(|participant| participant.id == vapi_participant)
+        .expect("AI participant on conversation");
+    assert_eq!(ai.kind, ParticipantKind::Ai);
+    assert_eq!(ai.role, ParticipantRole::Agent);
+    server.abort();
+}
+
+#[tokio::test]
+async fn attach_agent_for_participant_rejects_existing_human() {
+    let (api_base, _state, _observed, server) =
+        start_mock_with_behavior(Duration::ZERO, SocketBehavior::Interactive, Vec::new()).await;
+    let mut config = VapiConfig::new(VapiApiKey::new("mock-api-key").expect("mock key"))
+        .with_api_base(api_base)
+        .with_loopback_test_transport();
+    config.heartbeat_interval = Duration::from_secs(60);
+    let adapter = VapiAdapter::new(config).expect("adapter");
+    let (orchestrator, caller_connection_id) = setup_caller().await;
+    let session_id = orchestrator
+        .session_of(&caller_connection_id)
+        .expect("caller session");
+    let human = ParticipantId::new();
+    orchestrator
+        .join_session(
+            session_id,
+            human.clone(),
+            ParticipantKind::Human,
+            ParticipantRole::Customer,
+        )
+        .await
+        .expect("join human");
+
+    let error = adapter
+        .attach_agent_for_participant(
+            &orchestrator,
+            caller_connection_id,
+            human,
+            VapiCallOptions::new(VapiAssistant::saved("assistant-mock")),
+        )
+        .await
+        .expect_err("human cannot be the AI participant");
+    assert!(matches!(error, RvoipError::InvalidState(_)));
     server.abort();
 }

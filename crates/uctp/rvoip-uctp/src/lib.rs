@@ -22,6 +22,7 @@
 
 pub mod adapter_helpers;
 pub mod compatibility;
+pub mod conversation_ops;
 pub mod envelope;
 pub mod errors;
 pub mod ids;

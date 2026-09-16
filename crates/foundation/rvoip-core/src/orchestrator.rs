@@ -4651,7 +4651,28 @@ impl Orchestrator {
         policy: ConversationPolicy,
         metadata: HashMap<String, String>,
     ) -> Result<ConversationId> {
-        let id = ConversationId::new();
+        self.open_conversation_with_id(ConversationId::new(), tenant_id, policy, metadata)
+            .await
+    }
+
+    /// Open a Conversation with a caller-supplied id, or return that id when
+    /// an Open Conversation already exists (idempotent `conversation.create`).
+    pub async fn open_conversation_with_id(
+        &self,
+        id: ConversationId,
+        tenant_id: TenantId,
+        policy: ConversationPolicy,
+        metadata: HashMap<String, String>,
+    ) -> Result<ConversationId> {
+        if let Some(existing) = self.conversations.get(&id).map(|e| Arc::clone(e.value())) {
+            let conv = existing.read().expect("conversation lock poisoned");
+            if conv.state == ConversationState::Open {
+                return Ok(id);
+            }
+            return Err(RvoipError::InvalidState(
+                "open_conversation: conversation is closed",
+            ));
+        }
         let now = Utc::now();
         let conv = Conversation {
             id: id.clone(),
@@ -4668,8 +4689,6 @@ impl Orchestrator {
         };
         self.conversations
             .insert(id.clone(), Arc::new(RwLock::new(conv)));
-        // P6 — index by tenant for `list_for_tenant` and isolation
-        // enforcement.
         self.conversations_by_tenant
             .entry(tenant_id_for_index(&self.conversations, &id))
             .or_default()
@@ -4679,6 +4698,11 @@ impl Orchestrator {
             at: now,
         });
         Ok(id)
+    }
+
+    /// Snapshot of live Conversation ids. Used by UCTP `conversation.list`.
+    pub fn live_conversation_ids(&self) -> Vec<ConversationId> {
+        self.conversations.iter().map(|e| e.key().clone()).collect()
     }
 
     /// P6 — install/replace per-tenant quotas. V2.B provisions the
@@ -5013,6 +5037,31 @@ impl Orchestrator {
         Ok(())
     }
 
+    /// Re-open a Closed Conversation so Parley identity match can continue
+    /// the same `cid` inside the reopen window. No-op if already Open.
+    pub async fn reopen_conversation(&self, id: ConversationId) -> Result<()> {
+        let conv_arc = self
+            .conversations
+            .get(&id)
+            .map(|e| Arc::clone(e.value()))
+            .ok_or_else(|| RvoipError::ConversationNotFound(id.clone()))?;
+        let now = Utc::now();
+        {
+            let mut conv = conv_arc.write().expect("conversation lock poisoned");
+            if conv.state == ConversationState::Open {
+                return Ok(());
+            }
+            conv.state = ConversationState::Open;
+            conv.closed_at = None;
+            conv.last_activity_at = now;
+        }
+        self.emit(Event::ConversationOpened {
+            conversation_id: id,
+            at: now,
+        });
+        Ok(())
+    }
+
     /// Start a new Session within an Open Conversation. Emits
     /// `Event::SessionStarted`. `invitees` populates the
     /// `Session::participants` set immediately; matching `Participant`
@@ -5336,6 +5385,184 @@ impl Orchestrator {
             at: now,
         });
         Ok(())
+    }
+
+    /// Change a Conversation Participant's voip-3 role. No-op (no event)
+    /// when the requested role already matches. Does not move Connections
+    /// or bridges.
+    pub async fn set_participant_role(
+        &self,
+        participant_id: ParticipantId,
+        role: ParticipantRole,
+    ) -> Result<()> {
+        let (conversation_id, conv_arc) =
+            self.conversation_containing_participant(&participant_id)?;
+        let now = Utc::now();
+        let from = {
+            let mut conv = conv_arc.write().expect("conversation lock poisoned");
+            let participant = conv
+                .participants
+                .iter_mut()
+                .find(|participant| participant.id == participant_id)
+                .ok_or_else(|| RvoipError::ParticipantNotFound(participant_id.clone()))?;
+            let from = participant.role.clone();
+            if from == role {
+                return Ok(());
+            }
+            participant.role = role.clone();
+            conv.last_activity_at = now;
+            from
+        };
+        self.emit(Event::ParticipantRoleChanged {
+            conversation_id,
+            session_id: self.unique_active_session_for_participant(&participant_id),
+            participant_id,
+            from,
+            to: role,
+            at: now,
+        });
+        Ok(())
+    }
+
+    /// Promote `to` to `Agent` in `session_id`. Every other `Agent` in that
+    /// Session becomes `Observer`. Joins `to` if they are not already in
+    /// the Session. Does not move Connections or bridges.
+    pub async fn take_over(
+        &self,
+        session_id: SessionId,
+        to: ParticipantId,
+        to_kind: ParticipantKind,
+    ) -> Result<()> {
+        let (participants_in_session, conversation_id) =
+            self.live_session_participants(&session_id)?;
+        let agents = self.session_agents(&conversation_id, &participants_in_session);
+        for agent_id in agents.into_iter().filter(|id| *id != to) {
+            self.set_participant_role(agent_id, ParticipantRole::Observer)
+                .await?;
+        }
+        if !participants_in_session.contains(&to) {
+            self.join_session(session_id, to.clone(), to_kind, ParticipantRole::Agent)
+                .await?;
+        }
+        self.set_participant_role(to, ParticipantRole::Agent).await
+    }
+
+    /// `from` must currently be `Agent` in `session_id`. Then the same
+    /// demote/promote as [`Self::take_over`]: `from` (and any other Agents
+    /// in the Session) become `Observer`, `to` becomes `Agent`.
+    pub async fn hand_off(
+        &self,
+        session_id: SessionId,
+        from: ParticipantId,
+        to: ParticipantId,
+        to_kind: ParticipantKind,
+    ) -> Result<()> {
+        let (participants_in_session, conversation_id) =
+            self.live_session_participants(&session_id)?;
+        if !participants_in_session.contains(&from) {
+            return Err(RvoipError::InvalidState(
+                "hand_off: from is not in the session",
+            ));
+        }
+        let from_is_agent = self
+            .conversations
+            .get(&conversation_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or_else(|| RvoipError::ConversationNotFound(conversation_id.clone()))?
+            .read()
+            .expect("conversation lock poisoned")
+            .participants
+            .iter()
+            .find(|participant| participant.id == from)
+            .map(|participant| participant.role == ParticipantRole::Agent)
+            .ok_or_else(|| RvoipError::ParticipantNotFound(from.clone()))?;
+        if !from_is_agent {
+            return Err(RvoipError::InvalidState("hand_off: from is not an agent"));
+        }
+        self.take_over(session_id, to, to_kind).await
+    }
+
+    fn conversation_containing_participant(
+        &self,
+        participant_id: &ParticipantId,
+    ) -> Result<(ConversationId, Arc<RwLock<Conversation>>)> {
+        for entry in self.conversations.iter() {
+            let conv = entry.value().read().expect("conversation lock poisoned");
+            if conv
+                .participants
+                .iter()
+                .any(|participant| participant.id == *participant_id)
+            {
+                return Ok((entry.key().clone(), Arc::clone(entry.value())));
+            }
+        }
+        Err(RvoipError::ParticipantNotFound(participant_id.clone()))
+    }
+
+    fn unique_active_session_for_participant(
+        &self,
+        participant_id: &ParticipantId,
+    ) -> Option<SessionId> {
+        let mut found = None;
+        for entry in self.sessions.iter() {
+            let session = entry.value().read().expect("session lock poisoned");
+            if session.state == SessionState::Active
+                && session.participants.contains(participant_id)
+            {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(entry.key().clone());
+            }
+        }
+        found
+    }
+
+    fn live_session_participants(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(HashSet<ParticipantId>, ConversationId)> {
+        let session = self
+            .sessions
+            .get(session_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or_else(|| RvoipError::SessionNotFound(session_id.clone()))?;
+        let session = session.read().expect("session lock poisoned");
+        if matches!(
+            session.state,
+            SessionState::Ending | SessionState::Ended | SessionState::Failed
+        ) {
+            return Err(RvoipError::InvalidState(
+                "take_over: session is ending or ended",
+            ));
+        }
+        Ok((
+            session.participants.clone(),
+            session.conversation_id.clone(),
+        ))
+    }
+
+    fn session_agents(
+        &self,
+        conversation_id: &ConversationId,
+        participants_in_session: &HashSet<ParticipantId>,
+    ) -> Vec<ParticipantId> {
+        let Some(conv_arc) = self
+            .conversations
+            .get(conversation_id)
+            .map(|entry| Arc::clone(entry.value()))
+        else {
+            return Vec::new();
+        };
+        let conv = conv_arc.read().expect("conversation lock poisoned");
+        conv.participants
+            .iter()
+            .filter(|participant| {
+                participants_in_session.contains(&participant.id)
+                    && participant.role == ParticipantRole::Agent
+            })
+            .map(|participant| participant.id.clone())
+            .collect()
     }
 
     /// P1.12 — reverse lookup `ConnectionId → SessionId`. Populated by

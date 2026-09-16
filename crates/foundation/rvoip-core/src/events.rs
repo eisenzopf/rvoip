@@ -4,6 +4,7 @@ use crate::ids::{
     AiAttachmentId, BridgeId, ConnectionId, ConversationId, IdentityId, ListenerId, MessageId,
     ParticipantId, RecordingId, SessionId, StreamId, TenantId,
 };
+use crate::participant::ParticipantRole;
 use crate::store::VconHandle;
 use crate::stream::QualitySnapshot;
 use crate::vcon::VconRef;
@@ -144,6 +145,16 @@ pub enum Event {
     ParticipantLeft {
         session_id: SessionId,
         participant_id: ParticipantId,
+        at: DateTime<Utc>,
+    },
+    /// A Participant's voip-3 role changed. `session_id` is set when the
+    /// Participant is in exactly one Active Session; otherwise `None`.
+    ParticipantRoleChanged {
+        conversation_id: ConversationId,
+        session_id: Option<SessionId>,
+        participant_id: ParticipantId,
+        from: ParticipantRole,
+        to: ParticipantRole,
         at: DateTime<Utc>,
     },
 
@@ -371,6 +382,11 @@ impl fmt::Debug for Event {
                 .finish(),
             Self::ParticipantJoined { .. } => formatter.write_str("ParticipantJoined"),
             Self::ParticipantLeft { .. } => formatter.write_str("ParticipantLeft"),
+            Self::ParticipantRoleChanged { from, to, .. } => formatter
+                .debug_struct("ParticipantRoleChanged")
+                .field("from", from)
+                .field("to", to)
+                .finish(),
             Self::AiAttached { provider_ref, .. } => formatter
                 .debug_struct("AiAttached")
                 .field("provider_ref_present", &!provider_ref.is_empty())
@@ -677,6 +693,20 @@ impl Event {
             } => RvoipCoreCrossCrateEvent::ParticipantLeft {
                 session_id: session_id.to_string(),
                 participant_id: participant_id.to_string(),
+            },
+            ParticipantRoleChanged {
+                conversation_id,
+                session_id,
+                participant_id,
+                from,
+                to,
+                ..
+            } => RvoipCoreCrossCrateEvent::ParticipantRoleChanged {
+                conversation_id: conversation_id.to_string(),
+                session_id: session_id.as_ref().map(ToString::to_string),
+                participant_id: participant_id.to_string(),
+                from: format!("{from:?}"),
+                to: format!("{to:?}"),
             },
             AiAttached {
                 connection_id,
