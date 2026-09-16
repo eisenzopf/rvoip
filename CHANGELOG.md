@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Cloudflare Tunnel (Parley demo)
+
+- `deploy/cloudflare/config.yml` and `scripts/run-cloudflare-tunnel.sh` front a
+  localhost Parley process through `parley.rudeless.ai` (HTTP `/v1`, widget,
+  desk, webhooks) and `parley-uctp.rudeless.ai` (UCTP WebSocket). SIP/UDP is
+  not in the ingress. Requires a named tunnel or `CLOUDFLARE_TUNNEL_TOKEN`.
+
 ### UCTP conversation dispatch
 
 - The UCTP coordinator dispatches `conversation.create`, `conversation.list`,

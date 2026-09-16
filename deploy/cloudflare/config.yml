@@ -1,0 +1,40 @@
+# Named Cloudflare Tunnel for a laptop Parley demo on rudeless.ai.
+#
+# One-time (from a machine already logged into the rudeless.ai Cloudflare
+# account):
+#
+#   cloudflared tunnel login
+#   cloudflared tunnel create parley
+#   cloudflared tunnel route dns parley parley.rudeless.ai
+#   cloudflared tunnel route dns parley parley-uctp.rudeless.ai
+#
+# Fill in the tunnel UUID below (also the credentials filename). Then:
+#
+#   ./scripts/run-cloudflare-tunnel.sh
+#
+# Or paste a Zero Trust tunnel token and skip this file:
+#
+#   CLOUDFLARE_TUNNEL_TOKEN=... ./scripts/run-cloudflare-tunnel.sh
+#
+# SIP/UDP is not in this ingress. Widget Talk and Telnyx/Vapi HTTPS webhooks
+# are. Do not point the apex rudeless.ai at this tunnel.
+
+tunnel: PARLEY_TUNNEL_UUID
+credentials-file: ~/.cloudflared/PARLEY_TUNNEL_UUID.json
+
+ingress:
+  # UCTP WebSocket (Parley bind_uctp_ws). Widget/desk use
+  # wss://parley-uctp.rudeless.ai
+  - hostname: parley-uctp.rudeless.ai
+    service: http://127.0.0.1:7443
+    originRequest:
+      connectTimeout: 10s
+      keepAliveTimeout: 90s
+      noHappyEyeballs: true
+  # HTTP: /v1, /widget, /desk, /healthz, Telnyx SMS + Vapi tools webhooks
+  - hostname: parley.rudeless.ai
+    service: http://127.0.0.1:8080
+    originRequest:
+      connectTimeout: 10s
+      keepAliveTimeout: 90s
+  - service: http_status:404
