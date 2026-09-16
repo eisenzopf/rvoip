@@ -11,8 +11,13 @@ use uuid::Uuid;
 pub fn create_response(request: &Request, status: StatusCode) -> Response {
     let mut builder = ResponseBuilder::new(status, None);
 
-    // Copy needed headers from request to response using the header method
-    if let Some(header) = request.header(&HeaderName::Via) {
+    // RFC 3261 §8.2.6.2: every Via of the request, in order. A proxy adds
+    // its own Via line, so copying only the first one drops the client's.
+    for header in request
+        .headers
+        .iter()
+        .filter(|header| matches!(header, TypedHeader::Via(_)))
+    {
         builder = builder.header(header.clone());
     }
     // RFC 3261 §12.1.1: echo Record-Route so a dialog-forming response
@@ -325,4 +330,121 @@ pub fn create_ringing_response_with_dialog_info(
     response.headers.push(TypedHeader::Contact(contact));
 
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_request(wire: &str) -> Request {
+        match rvoip_sip_core::parse_message(wire.as_bytes()).expect("request parses") {
+            Message::Request(request) => request,
+            Message::Response(_) => panic!("expected a request"),
+        }
+    }
+
+    fn via_lines(response: &Response) -> Vec<String> {
+        Message::Response(response.clone())
+            .to_string()
+            .lines()
+            .filter(|line| line.to_ascii_lowercase().starts_with("via:"))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn bye_with_vias(via_block: &str) -> Request {
+        parse_request(&format!(
+            "BYE sip:edge@10.244.5.46:5060 SIP/2.0\r\n\
+             {via_block}\
+             Max-Forwards: 69\r\n\
+             From: <sip:load@10.244.5.82>;tag=0\r\n\
+             To: <sip:edge@10.244.5.46>;tag=23fe5d34\r\n\
+             Call-ID: rust-load-0-0-21360\r\n\
+             CSeq: 2 BYE\r\n\
+             Content-Length: 0\r\n\r\n"
+        ))
+    }
+
+    const PROXY_VIA: &str = "SIP/2.0/TCP 10.244.4.137:15070;branch=z9hG4bK0acd.5180fb6621701fc84f1af91379feb36c.0;received=10.244.4.137";
+    const CLIENT_VIA: &str = "SIP/2.0/UDP 10.244.5.82:5090;branch=z9hG4bK-bye-rust-load-0-0-21360";
+
+    #[test]
+    fn response_keeps_every_separate_via_line_in_order() {
+        let request = bye_with_vias(&format!("Via: {PROXY_VIA}\r\nVia: {CLIENT_VIA}\r\n"));
+        let response = create_response(&request, StatusCode::Ok);
+
+        let vias = via_lines(&response);
+        assert_eq!(vias.len(), 2, "{vias:?}");
+        assert!(
+            vias[0].contains("SIP/2.0/TCP 10.244.4.137:15070"),
+            "{vias:?}"
+        );
+        assert!(vias[0].contains("received=10.244.4.137"), "{vias:?}");
+        assert!(vias[1].contains("SIP/2.0/UDP 10.244.5.82:5090"), "{vias:?}");
+        assert!(
+            vias[1].contains("branch=z9hG4bK-bye-rust-load-0-0-21360"),
+            "{vias:?}"
+        );
+    }
+
+    #[test]
+    fn response_keeps_a_single_via() {
+        let request = bye_with_vias(&format!("Via: {CLIENT_VIA}\r\n"));
+        let vias = via_lines(&create_response(&request, StatusCode::Ok));
+        assert_eq!(vias.len(), 1, "{vias:?}");
+        assert!(vias[0].contains("10.244.5.82:5090"), "{vias:?}");
+    }
+
+    #[test]
+    fn response_keeps_three_vias_mixing_lines_and_commas() {
+        let request = bye_with_vias(&format!(
+            "Via: SIP/2.0/UDP 192.0.2.1:5060;branch=z9hG4bK-first;rport=5060;received=192.0.2.1\r\n\
+             Via: {PROXY_VIA}, {CLIENT_VIA}\r\n"
+        ));
+        let response = create_response(&request, StatusCode::Ok);
+        let wire = Message::Response(response.clone()).to_string();
+
+        let order = [
+            wire.find("z9hG4bK-first"),
+            wire.find("z9hG4bK0acd.5180fb6621701fc84f1af91379feb36c.0"),
+            wire.find("z9hG4bK-bye-rust-load-0-0-21360"),
+        ];
+        assert!(order.iter().all(Option::is_some), "{wire}");
+        assert!(order[0] < order[1] && order[1] < order[2], "{wire}");
+        assert!(wire.contains("rport=5060"), "{wire}");
+
+        let reparsed = match rvoip_sip_core::parse_message(wire.as_bytes()).expect("reparse") {
+            Message::Response(response) => response,
+            Message::Request(_) => panic!("expected a response"),
+        };
+        let branches: Vec<String> = reparsed
+            .via_headers()
+            .iter()
+            .flat_map(|via| via.headers().iter().cloned().collect::<Vec<_>>())
+            .filter_map(|entry| entry.branch().map(str::to_owned))
+            .collect();
+        assert_eq!(
+            branches,
+            vec![
+                "z9hG4bK-first",
+                "z9hG4bK0acd.5180fb6621701fc84f1af91379feb36c.0",
+                "z9hG4bK-bye-rust-load-0-0-21360",
+            ]
+        );
+    }
+
+    #[test]
+    fn response_keeps_dialog_identity() {
+        let request = bye_with_vias(&format!("Via: {PROXY_VIA}\r\nVia: {CLIENT_VIA}\r\n"));
+        let response = create_response(&request, StatusCode::Ok);
+
+        assert_eq!(
+            response.call_id().map(|id| id.to_string()),
+            Some("rust-load-0-0-21360".to_string())
+        );
+        let cseq = response.cseq().expect("CSeq");
+        assert_eq!((cseq.seq, cseq.method.clone()), (2, Method::Bye));
+        assert_eq!(response.from().and_then(|from| from.tag()), Some("0"));
+        assert_eq!(response.to().and_then(|to| to.tag()), Some("23fe5d34"));
+    }
 }
