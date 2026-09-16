@@ -218,6 +218,24 @@ pub async fn resolve_uri_to_candidates(
     }
 }
 
+/// Resolve with an installed resolver when present, otherwise with the
+/// process-wide default of [`resolve_uri_to_candidates`].
+pub async fn resolve_uri_to_candidates_with(
+    resolver: Option<&dyn rvoip_sip_transport::resolver::Resolver>,
+    uri: &Uri,
+) -> Vec<rvoip_sip_transport::resolver::ResolvedTarget> {
+    let Some(resolver) = resolver else {
+        return resolve_uri_to_candidates(uri).await;
+    };
+    match resolver.resolve(uri).await {
+        Ok(candidates) => candidates,
+        Err(_error) => {
+            tracing::debug!("Configured resolver returned an error");
+            Vec::new()
+        }
+    }
+}
+
 /// Loopback short-circuit for the special `localhost` name.
 ///
 /// `localhost` is loopback by convention, so resolving it through the system

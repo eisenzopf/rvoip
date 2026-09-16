@@ -4215,7 +4215,7 @@ impl DialogManager {
     ) {
         if let Err(error) = self
             .transaction_manager
-            .send_ack_for_2xx(transaction_id, response)
+            .send_ack_for_2xx_with_resolver(transaction_id, response, self.resolver())
             .await
         {
             warn!(
@@ -4404,7 +4404,7 @@ impl DialogManager {
                     }
                     if let Err(error) = self
                         .transaction_manager
-                        .send_ack_for_2xx(transaction_id, response)
+                        .send_ack_for_2xx_with_resolver(transaction_id, response, self.resolver())
                         .await
                     {
                         warn!(
@@ -4436,7 +4436,7 @@ impl DialogManager {
                     // likewise re-ACKed without a compensating BYE.
                     if let Err(error) = self
                         .transaction_manager
-                        .send_ack_for_2xx(transaction_id, response)
+                        .send_ack_for_2xx_with_resolver(transaction_id, response, self.resolver())
                         .await
                     {
                         warn!(
@@ -6678,7 +6678,7 @@ impl DialogManager {
                     }
                     match self
                         .transaction_manager
-                        .send_ack_for_2xx(transaction_id, &response)
+                        .send_ack_for_2xx_with_resolver(transaction_id, &response, self.resolver())
                         .await
                     {
                         Ok(_) => {

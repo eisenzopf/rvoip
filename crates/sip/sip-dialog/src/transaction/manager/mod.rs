@@ -1092,7 +1092,11 @@ fn transaction_dispatch_queue_capacity(capacity: Option<usize>, default_capacity
 }
 
 fn transport_token_for_request(request: &Request) -> &'static str {
-    match select_transport_for_request(request) {
+    via_transport_token(select_transport_for_request(request))
+}
+
+fn via_transport_token(transport: TransportType) -> &'static str {
+    match transport {
         TransportType::Udp => "UDP",
         TransportType::Tcp => "TCP",
         TransportType::Tls => "TLS",
@@ -6382,11 +6386,7 @@ impl TransactionManager {
         }
         if request.method() != Method::Cancel {
             let via_transport = match request_route.transport_type {
-                Some(TransportType::Udp) => "UDP",
-                Some(TransportType::Tcp) => "TCP",
-                Some(TransportType::Tls) => "TLS",
-                Some(TransportType::Ws) => "WS",
-                Some(TransportType::Wss) => "WSS",
+                Some(transport) => via_transport_token(transport),
                 None => transport_token_for_request(&modified_request),
             };
             apply_client_via_transport(&mut modified_request, via_transport);
@@ -6580,10 +6580,25 @@ impl TransactionManager {
     }
 
     /// Creates and sends an ACK request for a 2xx response to an INVITE.
+    ///
+    /// A top Route that needs DNS is resolved with the process-wide default
+    /// resolver.
     pub async fn send_ack_for_2xx(
         &self,
         invite_tx_id: &TransactionKey,
         response: &Response,
+    ) -> Result<()> {
+        self.send_ack_for_2xx_with_resolver(invite_tx_id, response, None)
+            .await
+    }
+
+    /// Same as [`Self::send_ack_for_2xx`], resolving a top Route host with
+    /// `resolver` when one is supplied.
+    pub async fn send_ack_for_2xx_with_resolver(
+        &self,
+        invite_tx_id: &TransactionKey,
+        response: &Response,
+        resolver: Option<Arc<dyn rvoip_sip_transport::resolver::Resolver>>,
     ) -> Result<()> {
         let _operation = self
             .admission_lifecycle
@@ -6594,7 +6609,11 @@ impl TransactionManager {
             _ = self.operation_cancellation.cancelled() => {
                 Err(Error::Other("transaction manager stopped ACK send".into()))
             }
-            result = self.send_ack_for_2xx_within_operation(invite_tx_id, response) => result,
+            result = self.send_ack_for_2xx_within_operation(
+                invite_tx_id,
+                response,
+                resolver.as_deref(),
+            ) => result,
         }
     }
 
@@ -6602,6 +6621,7 @@ impl TransactionManager {
         &self,
         invite_tx_id: &TransactionKey,
         response: &Response,
+        resolver: Option<&dyn rvoip_sip_transport::resolver::Resolver>,
     ) -> Result<()> {
         let original_route = self
             .transaction_route(invite_tx_id)
@@ -6614,22 +6634,76 @@ impl TransactionManager {
             .create_ack_for_2xx(invite_tx_id, response)
             .await
             .map_err(|error| Error::ack_2xx(Ack2xxFailureStage::Composition, error))?;
-        let ack_route = ack_route::route_for_2xx_ack(&ack_request, &original_route)
+        let ack_routes = self
+            .candidate_routes_for_2xx_ack(&ack_request, &original_route, resolver)
+            .await
             .map_err(|error| Error::ack_2xx(Ack2xxFailureStage::RouteSelection, error))?;
 
         // Send the ACK directly without creating a transaction, while
         // preserving the authenticated transport/authority/flow selected by
         // the original INVITE whenever its route remains the next hop.
-        rvoip_sip_core::validation::validate_wire_request(&ack_request)
-            .map_err(Error::from)
-            .map_err(|error| Error::ack_2xx(Ack2xxFailureStage::Composition, error))?;
-        self.transport
-            .send_message_via(Message::Request(ack_request), ack_route)
-            .await
-            .map_err(|error| Error::transport_error(error, "Failed to send ACK"))
-            .map_err(|error| Error::ack_2xx(Ack2xxFailureStage::Transport, error))?;
+        // Candidates are tried in RFC 3263 order on recoverable failures.
+        let mut last_error = None;
+        for ack_route in ack_routes {
+            let mut ack = ack_request.clone();
+            if let Some(transport) = ack_route.transport_type {
+                crate::transaction::utils::set_top_via_protocol(
+                    &mut ack,
+                    via_transport_token(transport),
+                );
+            }
+            rvoip_sip_core::validation::validate_wire_request(&ack)
+                .map_err(Error::from)
+                .map_err(|error| Error::ack_2xx(Ack2xxFailureStage::Composition, error))?;
+            match self
+                .transport
+                .send_message_via(Message::Request(ack), ack_route)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    let recoverable = error.is_recoverable();
+                    last_error = Some(error);
+                    if !recoverable {
+                        break;
+                    }
+                }
+            }
+        }
 
-        Ok(())
+        let Some(error) = last_error else {
+            return Err(Error::ack_2xx(
+                Ack2xxFailureStage::RouteSelection,
+                Error::Other("ACK has no route candidates".into()),
+            ));
+        };
+        Err(Error::ack_2xx(
+            Ack2xxFailureStage::Transport,
+            Error::transport_error(error, "Failed to send ACK"),
+        ))
+    }
+
+    async fn candidate_routes_for_2xx_ack(
+        &self,
+        ack: &Request,
+        original_route: &TransportRoute,
+        resolver: Option<&dyn rvoip_sip_transport::resolver::Resolver>,
+    ) -> Result<Vec<TransportRoute>> {
+        let uri = match ack_route::route_for_2xx_ack(ack, original_route)? {
+            ack_route::AckNextHop::Route(route) => return Ok(vec![route]),
+            ack_route::AckNextHop::Resolve(uri) => uri,
+        };
+        let targets =
+            crate::dialog::dialog_utils::resolve_uri_to_candidates_with(resolver, &uri).await;
+        if targets.is_empty() {
+            return Err(Error::Other(
+                "ACK top Route has no address candidates".into(),
+            ));
+        }
+        targets
+            .iter()
+            .map(|target| ack_route::route_for_resolved_ack_target(ack, original_route, target))
+            .collect()
     }
 
     /// Find transaction by message.

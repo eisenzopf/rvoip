@@ -1334,16 +1334,8 @@ impl DialogManager {
         &self,
         uri: &rvoip_sip_core::Uri,
     ) -> Vec<rvoip_sip_transport::resolver::ResolvedTarget> {
-        if let Some(resolver) = self.resolver() {
-            match resolver.resolve(uri).await {
-                Ok(candidates) => return candidates,
-                Err(_error) => {
-                    tracing::debug!("Configured resolver returned an error");
-                    return Vec::new();
-                }
-            }
-        }
-        crate::dialog::dialog_utils::resolve_uri_to_candidates(uri).await
+        crate::dialog::dialog_utils::resolve_uri_to_candidates_with(self.resolver().as_deref(), uri)
+            .await
     }
 
     /// Decision returned by [`Self::run_identity_verification`].
