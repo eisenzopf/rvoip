@@ -401,6 +401,16 @@ impl ClientTransactionData {
         }
     }
 
+    /// Whether the retained request route uses an unreliable transport, which
+    /// is what enables the RFC 3261 retransmission and absorption timers.
+    pub(crate) async fn uses_unreliable_request_route(&self) -> bool {
+        let route = self.request_route.lock().await;
+        crate::transaction::timer_utils::uses_unreliable_transport(
+            &route,
+            self.transport.default_transport_type(),
+        )
+    }
+
     /// Send on the retained route and atomically retain the concrete selected
     /// flow before the transaction reports the send as successful.
     pub async fn send_on_request_route(&self, message: Message) -> rvoip_sip_transport::Result<()> {

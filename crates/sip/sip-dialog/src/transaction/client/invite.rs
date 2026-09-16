@@ -284,10 +284,13 @@ impl ClientInviteLogic {
         data.complete_initial_send(true);
         // `request_guard` is a plain `&Request`, no lock to release.
 
-        // Start timers for Calling state
-        timer_handles.current_timer_a_interval = Some(data.timer_config.t1);
-        self.start_timer_a(data, timer_handles, command_tx.clone())
-            .await;
+        // RFC 3261 section 17.1.1.2: Timer A only runs over an unreliable
+        // transport. Timer B bounds the transaction on every transport.
+        if data.uses_unreliable_request_route().await {
+            timer_handles.current_timer_a_interval = Some(data.timer_config.t1);
+            self.start_timer_a(data, timer_handles, command_tx.clone())
+                .await;
+        }
         self.start_timer_b(data, timer_handles, command_tx).await;
 
         Ok(())
@@ -1190,6 +1193,13 @@ mod tests {
     }
 
     async fn setup_test_environment(target_uri_str: &str) -> TestSetup {
+        setup_test_environment_with_transport(target_uri_str, None).await
+    }
+
+    async fn setup_test_environment_with_transport(
+        target_uri_str: &str,
+        transport_type: Option<rvoip_sip_transport::transport::TransportType>,
+    ) -> TestSetup {
         let local_addr = "127.0.0.1:5090";
         let mock_transport = Arc::new(UnitTestMockTransport::new(local_addr));
         let (tu_events_tx, tu_events_rx) = mpsc::channel(100);
@@ -1222,15 +1232,29 @@ mod tests {
             ..Default::default()
         };
 
-        let transaction = ClientInviteTransaction::new(
-            tx_key,
-            request,
-            remote_addr,
-            mock_transport.clone() as Arc<dyn Transport>,
-            tu_events_tx,
-            Some(settings),
-        )
-        .unwrap();
+        let transaction = match transport_type {
+            Some(transport_type) => {
+                ClientInviteTransaction::new_with_route_and_command_channel_capacity(
+                    tx_key,
+                    request,
+                    TransportRoute::new(remote_addr).with_transport_type(transport_type),
+                    mock_transport.clone() as Arc<dyn Transport>,
+                    tu_events_tx,
+                    Some(settings),
+                    DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
+                )
+                .unwrap()
+            }
+            None => ClientInviteTransaction::new(
+                tx_key,
+                request,
+                remote_addr,
+                mock_transport.clone() as Arc<dyn Transport>,
+                tu_events_tx,
+                Some(settings),
+            )
+            .unwrap(),
+        };
 
         TestSetup {
             transaction,
@@ -1735,6 +1759,80 @@ mod tests {
             assert!(msg.is_request());
             assert_eq!(msg.method(), Some(Method::Invite));
         }
+    }
+
+    #[tokio::test]
+    async fn reliable_transport_does_not_retransmit_with_timer_a() {
+        let setup = setup_test_environment_with_transport(
+            "sip:bob@target.com",
+            Some(rvoip_sip_transport::transport::TransportType::Tcp),
+        )
+        .await;
+        setup.transaction.initiate().await.expect("initiate failed");
+        setup
+            .mock_transport
+            .wait_for_message_sent(Duration::from_millis(100))
+            .await
+            .unwrap();
+        assert!(setup.mock_transport.get_sent_message().await.is_some());
+
+        // With T1 at 50 ms an unreliable route retransmits at 50 ms and 150 ms.
+        assert!(
+            setup
+                .mock_transport
+                .wait_for_message_sent(Duration::from_millis(180))
+                .await
+                .is_err(),
+            "a reliable route must not retransmit the INVITE"
+        );
+        assert!(setup.mock_transport.get_sent_message().await.is_none());
+        assert_eq!(setup.transaction.state(), TransactionState::Calling);
+    }
+
+    #[tokio::test]
+    async fn reliable_transport_still_times_out_with_timer_b() {
+        let mut setup = setup_test_environment_with_transport(
+            "sip:bob@target.com",
+            Some(rvoip_sip_transport::transport::TransportType::Tcp),
+        )
+        .await;
+        setup.transaction.initiate().await.expect("initiate failed");
+
+        let timed_out = TokioTimeout(Duration::from_secs(2), async {
+            while let Some(event) = setup.tu_events_rx.recv().await {
+                if matches!(event, TransactionEvent::TransactionTimeout { .. }) {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .unwrap_or(false);
+        assert!(timed_out, "Timer B must still bound a reliable INVITE");
+        assert_eq!(setup.mock_transport.sent_messages.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn explicit_udp_route_retransmits_with_timer_a() {
+        let setup = setup_test_environment_with_transport(
+            "sip:bob@target.com",
+            Some(rvoip_sip_transport::transport::TransportType::Udp),
+        )
+        .await;
+        setup.transaction.initiate().await.expect("initiate failed");
+        setup
+            .mock_transport
+            .wait_for_message_sent(Duration::from_millis(100))
+            .await
+            .unwrap();
+        setup.mock_transport.get_sent_message().await;
+
+        setup
+            .mock_transport
+            .wait_for_message_sent(Duration::from_millis(200))
+            .await
+            .expect("an unreliable route must retransmit with Timer A");
+        assert!(setup.mock_transport.get_sent_message().await.is_some());
     }
 
     #[tokio::test]

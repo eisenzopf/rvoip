@@ -252,9 +252,12 @@ impl ClientNonInviteLogic {
         data.complete_initial_send(true);
         // `request_guard` is a plain `&Request`, no lock to release.
 
-        // Start timers for Trying state
-        self.start_timer_e(data, timer_handles, command_tx.clone())
-            .await;
+        // RFC 3261 section 17.1.2.2: Timer E only runs over an unreliable
+        // transport. Timer F bounds the transaction on every transport.
+        if data.uses_unreliable_request_route().await {
+            self.start_timer_e(data, timer_handles, command_tx.clone())
+                .await;
+        }
         self.start_timer_f(data, timer_handles, command_tx).await;
 
         Ok(())
@@ -528,14 +531,7 @@ impl TransactionLogic<ClientTransactionData, ClientNonInviteTimerHandles> for Cl
                 // RFC 3261 section 17.1.2.2: Timer K is T4 for an
                 // unreliable transport and zero for a reliable transport.
                 // Avoid a timer task entirely for TCP/TLS/WS/WSS.
-                let unreliable = {
-                    let route = data.request_route.lock().await;
-                    timer_utils::uses_unreliable_transport(
-                        &route,
-                        data.transport.default_transport_type(),
-                    )
-                };
-                if unreliable {
+                if data.uses_unreliable_request_route().await {
                     if !data
                         .clone()
                         .schedule_compact_timer_k(data.timer_config.wait_time_k)
@@ -1535,6 +1531,83 @@ mod tests {
         })
         .await
         .expect("reliable client transaction should not wait for Timer K");
+    }
+
+    #[tokio::test]
+    async fn reliable_transport_does_not_retransmit_with_timer_e() {
+        let setup = setup_test_environment_with_transport(
+            Method::Options,
+            "sip:bob@target.com",
+            Some(rvoip_sip_transport::transport::TransportType::Tcp),
+        )
+        .await;
+        setup.transaction.initiate().await.expect("initiate failed");
+        setup
+            .mock_transport
+            .wait_for_message_sent(Duration::from_millis(100))
+            .await
+            .unwrap();
+        assert!(setup.mock_transport.get_sent_message().await.is_some());
+
+        // With T1 at 50 ms an unreliable route retransmits at 50 ms and 150 ms.
+        assert!(
+            setup
+                .mock_transport
+                .wait_for_message_sent(Duration::from_millis(180))
+                .await
+                .is_err(),
+            "a reliable route must not retransmit the request"
+        );
+        assert!(setup.mock_transport.get_sent_message().await.is_none());
+        assert_eq!(setup.transaction.state(), TransactionState::Trying);
+    }
+
+    #[tokio::test]
+    async fn reliable_transport_still_times_out_with_timer_f() {
+        let mut setup = setup_test_environment_with_transport(
+            Method::Options,
+            "sip:bob@target.com",
+            Some(rvoip_sip_transport::transport::TransportType::Tcp),
+        )
+        .await;
+        setup.transaction.initiate().await.expect("initiate failed");
+
+        let timed_out = TokioTimeout(Duration::from_secs(2), async {
+            while let Some(event) = setup.tu_events_rx.recv().await {
+                if matches!(event, TransactionEvent::TransactionTimeout { .. }) {
+                    return true;
+                }
+            }
+            false
+        })
+        .await
+        .unwrap_or(false);
+        assert!(timed_out, "Timer F must still bound a reliable transaction");
+        assert_eq!(setup.mock_transport.sent_messages.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn explicit_udp_route_retransmits_with_timer_e() {
+        let setup = setup_test_environment_with_transport(
+            Method::Options,
+            "sip:bob@target.com",
+            Some(rvoip_sip_transport::transport::TransportType::Udp),
+        )
+        .await;
+        setup.transaction.initiate().await.expect("initiate failed");
+        setup
+            .mock_transport
+            .wait_for_message_sent(Duration::from_millis(100))
+            .await
+            .unwrap();
+        setup.mock_transport.get_sent_message().await;
+
+        setup
+            .mock_transport
+            .wait_for_message_sent(Duration::from_millis(200))
+            .await
+            .expect("an unreliable route must retransmit with Timer E");
+        assert!(setup.mock_transport.get_sent_message().await.is_some());
     }
 
     #[tokio::test]
