@@ -7,7 +7,8 @@ use rvoip_core::adapter::{ConnectionAdapter, EndReason, OriginateRequest};
 use rvoip_core::connection::{Direction, Transport};
 use rvoip_core::error::{Result as RvoipResult, RvoipError};
 use rvoip_core::events::Event;
-use rvoip_core::ids::{BridgeId, ConnectionId};
+use rvoip_core::ids::{BridgeId, ConnectionId, ParticipantId};
+use rvoip_core::participant::{ParticipantKind, ParticipantRole};
 use rvoip_core::Orchestrator;
 use tokio::sync::{broadcast, watch};
 
@@ -33,6 +34,7 @@ pub struct VapiAgentCall {
     adapter: Arc<VapiAdapter>,
     caller_connection_id: ConnectionId,
     vapi_connection_id: ConnectionId,
+    ai_participant_id: ParticipantId,
     bridge_id: BridgeId,
     events: broadcast::Sender<VapiEvent>,
     initial_events: StdMutex<Option<broadcast::Receiver<VapiEvent>>>,
@@ -46,6 +48,10 @@ impl VapiAgentCall {
 
     pub fn vapi_connection_id(&self) -> &ConnectionId {
         &self.vapi_connection_id
+    }
+
+    pub fn ai_participant_id(&self) -> &ParticipantId {
+        &self.ai_participant_id
     }
 
     pub fn bridge_id(&self) -> &BridgeId {
@@ -129,6 +135,7 @@ impl fmt::Debug for VapiAgentCall {
             .debug_struct("VapiAgentCall")
             .field("caller_connection_id", &self.caller_connection_id)
             .field("vapi_connection_id", &self.vapi_connection_id)
+            .field("ai_participant_id", &self.ai_participant_id)
             .field("bridge_id", &self.bridge_id)
             .finish()
     }
@@ -137,13 +144,34 @@ impl fmt::Debug for VapiAgentCall {
 impl VapiAdapter {
     /// Originate a Vapi WebSocket call and bridge it to an existing caller.
     ///
-    /// The adapter registers itself when no Vapi adapter is registered. A
-    /// different pre-existing Vapi adapter is rejected to keep route ownership
-    /// exact.
+    /// Creates a distinct AI Participant (`kind=Ai`, `role=Agent`) rather than
+    /// attributing the Vapi Connection to the caller. The adapter registers
+    /// itself when no Vapi adapter is registered. A different pre-existing
+    /// Vapi adapter is rejected to keep route ownership exact.
     pub async fn attach_agent(
         self: &Arc<Self>,
         orchestrator: &Arc<Orchestrator>,
         caller_connection_id: ConnectionId,
+        options: VapiCallOptions,
+    ) -> RvoipResult<VapiAgentCall> {
+        self.attach_agent_for_participant(
+            orchestrator,
+            caller_connection_id,
+            ParticipantId::new(),
+            options,
+        )
+        .await
+    }
+
+    /// Attach Vapi as `ai_participant_id` in the caller's Session.
+    ///
+    /// Rejects if that Participant already exists as `Human`. Joins the
+    /// Session as `Ai`/`Agent` when the Participant is not already present.
+    pub async fn attach_agent_for_participant(
+        self: &Arc<Self>,
+        orchestrator: &Arc<Orchestrator>,
+        caller_connection_id: ConnectionId,
+        ai_participant_id: ParticipantId,
         options: VapiCallOptions,
     ) -> RvoipResult<VapiAgentCall> {
         options.validate().map_err(RvoipError::from)?;
@@ -152,24 +180,50 @@ impl VapiAdapter {
         let session_id = orchestrator
             .session_of(&caller_connection_id)
             .ok_or_else(|| RvoipError::ConnectionNotFound(caller_connection_id.clone()))?;
-        let participant_id = {
+        let (conversation_id, already_in_session) = {
             let session = orchestrator
                 .session(&session_id)
                 .ok_or_else(|| RvoipError::SessionNotFound(session_id.clone()))?;
             let session = session
                 .read()
                 .map_err(|_| RvoipError::InvalidState("session lock is poisoned"))?;
-            session
-                .connections
-                .get(&caller_connection_id)
-                .map(|connection| connection.participant_id.clone())
-                .ok_or_else(|| RvoipError::ConnectionNotFound(caller_connection_id.clone()))?
+            if !session.connections.contains_key(&caller_connection_id) {
+                return Err(RvoipError::ConnectionNotFound(caller_connection_id.clone()));
+            }
+            (
+                session.conversation_id.clone(),
+                session.participants.contains(&ai_participant_id),
+            )
         };
+
+        if let Some(conversation) = orchestrator.conversation(&conversation_id) {
+            let conversation = conversation
+                .read()
+                .map_err(|_| RvoipError::InvalidState("conversation lock is poisoned"))?;
+            if conversation.participants.iter().any(|participant| {
+                participant.id == ai_participant_id && participant.kind == ParticipantKind::Human
+            }) {
+                return Err(RvoipError::InvalidState(
+                    "attach_agent: participant is already Human",
+                ));
+            }
+        }
+
+        if !already_in_session {
+            orchestrator
+                .join_session(
+                    session_id.clone(),
+                    ai_participant_id.clone(),
+                    ParticipantKind::Ai,
+                    ParticipantRole::Agent,
+                )
+                .await?;
+        }
 
         let mut core_events = orchestrator.subscribe_events();
         let request = OriginateRequest::new(
             session_id,
-            participant_id,
+            ai_participant_id.clone(),
             "vapi.websocket",
             Direction::Outbound,
             options.audio_format.capabilities(),
@@ -224,6 +278,7 @@ impl VapiAdapter {
             adapter: Arc::clone(self),
             caller_connection_id,
             vapi_connection_id,
+            ai_participant_id,
             bridge_id,
             events: call_events,
             initial_events: StdMutex::new(Some(initial_events)),

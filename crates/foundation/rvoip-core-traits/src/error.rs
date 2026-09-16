@@ -9,6 +9,7 @@ pub enum RvoipError {
     ConnectionNotFound(crate::ids::ConnectionId),
     SessionNotFound(crate::ids::SessionId),
     ConversationNotFound(crate::ids::ConversationId),
+    ParticipantNotFound(crate::ids::ParticipantId),
     BridgeNotFound(crate::ids::BridgeId),
     AdmissionRejected(&'static str),
 
@@ -36,6 +37,7 @@ impl RvoipError {
             Self::ConnectionNotFound(_) => "connection-not-found",
             Self::SessionNotFound(_) => "session-not-found",
             Self::ConversationNotFound(_) => "conversation-not-found",
+            Self::ParticipantNotFound(_) => "participant-not-found",
             Self::BridgeNotFound(_) => "bridge-not-found",
             Self::AdmissionRejected(_) => "admission-rejected",
             Self::InvalidState(_) => "invalid-state",

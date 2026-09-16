@@ -2797,6 +2797,13 @@ pub enum RvoipCoreCrossCrateEvent {
         session_id: String,
         participant_id: String,
     },
+    ParticipantRoleChanged {
+        conversation_id: String,
+        session_id: Option<String>,
+        participant_id: String,
+        from: String,
+        to: String,
+    },
 
     // --- AI / listener attach ---
     AiAttached {
@@ -2966,6 +2973,7 @@ impl RvoipCoreCrossCrateEvent {
             Self::ConnectionTransferStatus { .. } => "rvoip_core.connection_transfer_status",
             Self::ParticipantJoined { .. } => "rvoip_core.participant_joined",
             Self::ParticipantLeft { .. } => "rvoip_core.participant_left",
+            Self::ParticipantRoleChanged { .. } => "rvoip_core.participant_role_changed",
             Self::AiAttached { .. } => "rvoip_core.ai_attached",
             Self::AiDetached { .. } => "rvoip_core.ai_detached",
             Self::ListenerAttached { .. } => "rvoip_core.listener_attached",
@@ -3020,6 +3028,7 @@ impl RvoipCoreCrossCrateEvent {
         "rvoip_core.connection_transfer_status",
         "rvoip_core.participant_joined",
         "rvoip_core.participant_left",
+        "rvoip_core.participant_role_changed",
         "rvoip_core.ai_attached",
         "rvoip_core.ai_detached",
         "rvoip_core.listener_attached",
@@ -3116,6 +3125,13 @@ mod tests {
                 session_id: "session-1".into(),
                 connection_id: "conn-speaker".into(),
                 audio_level_dbov: -24,
+            },
+            RvoipCoreCrossCrateEvent::ParticipantRoleChanged {
+                conversation_id: "conv-1".into(),
+                session_id: Some("session-1".into()),
+                participant_id: "part-1".into(),
+                from: "Agent".into(),
+                to: "Observer".into(),
             },
         ];
 

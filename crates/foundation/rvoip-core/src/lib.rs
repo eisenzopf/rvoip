@@ -73,7 +73,10 @@
 //! Conversation/Session/Participant state. See
 //! [`Orchestrator::open_conversation`], [`Orchestrator::start_session`],
 //! [`Orchestrator::join_session`], [`Orchestrator::leave_session`],
-//! [`Orchestrator::end_session`], [`Orchestrator::close_conversation`]
+//! [`Orchestrator::set_participant_role`], [`Orchestrator::take_over`],
+//! [`Orchestrator::hand_off`],
+//! [`Orchestrator::end_session`], [`Orchestrator::close_conversation`],
+//! [`Orchestrator::reopen_conversation`]
 //! and the cross-substrate messaging methods
 //! [`Orchestrator::send_message_to_conversation`] +
 //! [`Orchestrator::list_messages`] + [`Orchestrator::mark_message_read`].

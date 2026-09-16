@@ -26,7 +26,9 @@ pub mod errors;
 pub mod media_bridge;
 pub mod server;
 
-pub use adapter::{UctpWsAdapter, UctpWsConfig, ADAPTER_EVENT_CAP};
+pub use adapter::{
+    ConversationCreateHook, UctpWsAdapter, UctpWsConfig, ADAPTER_EVENT_CAP,
+};
 pub use client::UctpWsClient;
 pub use errors::{Result, UctpWsError};
 pub use media_bridge::{BridgeRole, WebRtcMediaBridge};

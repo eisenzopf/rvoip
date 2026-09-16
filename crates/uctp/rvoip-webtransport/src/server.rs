@@ -537,6 +537,7 @@ async fn spawn_peer_session(
         let resource_bindings = Arc::clone(&resource_bindings);
         let coord_for_translator = Arc::clone(&coord);
         let lifecycle_for_translator = lifecycle_sink.clone();
+        let conversation_orchestrator = orchestrator.clone();
         tokio::spawn(async move {
             // Per-peer auth state; consumed by the InboundInvite arm to
             // emit a synthetic `AdapterEvent::Authenticated` carrying
@@ -552,6 +553,14 @@ async fn spawn_peer_session(
                 HashMap::<(SessionId, ConnectionId), Vec<NonZeroU16>>::new();
 
             while let Some(event) = coord_events_rx.recv().await {
+                let Some(event) = rvoip_uctp::conversation_ops::consume_conversation_event(
+                    conversation_orchestrator.as_ref(),
+                    event,
+                )
+                .await
+                else {
+                    continue;
+                };
                 let adapter_event: Option<AdapterEvent> = match event {
                     UctpSessionEvent::Authenticated {
                         identity_id,

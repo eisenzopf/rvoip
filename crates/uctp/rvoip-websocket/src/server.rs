@@ -37,6 +37,8 @@ impl UctpWsServer {
         max_concurrent: usize,
         coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
         sig9421: Option<rvoip_uctp::state::Sig9421Config>,
+        orchestrator: Option<Arc<rvoip_core::Orchestrator>>,
+        conversation_create_hook: Option<Arc<dyn crate::adapter::ConversationCreateHook>>,
         #[cfg(feature = "wss")] tls: Option<Arc<rustls::ServerConfig>>,
     ) -> Arc<Self> {
         #[cfg(feature = "wss")]
@@ -73,6 +75,8 @@ impl UctpWsServer {
                 let routes = Arc::clone(&routes);
                 let caps = coordinator_caps.clone();
                 let sig9421 = sig9421.clone();
+                let orchestrator = orchestrator.clone();
+                let conversation_create_hook = conversation_create_hook.clone();
                 #[cfg(feature = "wss")]
                 let tls_acceptor = tls_acceptor.clone();
                 tokio::spawn(async move {
@@ -126,6 +130,8 @@ impl UctpWsServer {
                                 routes,
                                 caps,
                                 sig9421.clone(),
+                                orchestrator.clone(),
+                                conversation_create_hook.clone(),
                             )
                             .await;
                             info!(%peer_addr, "rvoip-websocket: peer disconnected (wss)");
@@ -164,6 +170,8 @@ impl UctpWsServer {
                         routes,
                         caps,
                         sig9421,
+                        orchestrator,
+                        conversation_create_hook,
                     )
                     .await;
                     info!(%peer_addr, "rvoip-websocket: peer disconnected");
@@ -210,6 +218,8 @@ async fn spawn_peer_session<S>(
     routes: Arc<DashMap<ConnectionId, Route>>,
     coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
     sig9421: Option<rvoip_uctp::state::Sig9421Config>,
+    orchestrator: Option<Arc<rvoip_core::Orchestrator>>,
+    conversation_create_hook: Option<Arc<dyn crate::adapter::ConversationCreateHook>>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -378,7 +388,47 @@ async fn spawn_peer_session<S>(
             )> = None;
             let mut wire_to_core = std::collections::HashMap::<ConnectionId, ConnectionId>::new();
 
+            let orchestrator = orchestrator.clone();
+            let conversation_create_hook = conversation_create_hook.clone();
             while let Some(event) = coord_events_rx.recv().await {
+                let event = match (conversation_create_hook.as_ref(), event) {
+                    (
+                        Some(hook),
+                        rvoip_uctp::state::UctpSessionEvent::ConversationCreate {
+                            env_id,
+                            cid,
+                            tenant_id,
+                            policy,
+                            idle_close_secs,
+                            metadata,
+                            initial_participants,
+                            reply,
+                        },
+                    ) => {
+                        let resolved = hook
+                            .resolve_cid(cid.clone(), tenant_id.clone(), metadata.clone())
+                            .await;
+                        rvoip_uctp::state::UctpSessionEvent::ConversationCreate {
+                            env_id,
+                            cid: resolved.or(cid),
+                            tenant_id,
+                            policy,
+                            idle_close_secs,
+                            metadata,
+                            initial_participants,
+                            reply,
+                        }
+                    }
+                    (_, event) => event,
+                };
+                let Some(event) = rvoip_uctp::conversation_ops::consume_conversation_event(
+                    orchestrator.as_ref(),
+                    event,
+                )
+                .await
+                else {
+                    continue;
+                };
                 let adapter_event: Option<AdapterEvent> = match event {
                     UctpSessionEvent::Authenticated {
                         identity_id,

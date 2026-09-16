@@ -41,6 +41,18 @@ use crate::server::UctpWsServer;
 
 pub const ADAPTER_EVENT_CAP: usize = 256;
 
+/// Parley (and other apps) intercept `conversation.create` so identity match
+/// can reuse a Conversation id before the adapter opens one.
+#[async_trait]
+pub trait ConversationCreateHook: Send + Sync {
+    async fn resolve_cid(
+        &self,
+        requested_cid: Option<String>,
+        tenant_id: String,
+        metadata: serde_json::Value,
+    ) -> Option<String>;
+}
+
 /// Per-Connection routing entry; populated by the server's event-pump on
 /// `UctpSessionEvent::InboundInvite`. Adapter methods (`accept`, `end`,
 /// `send_message`, …) look up the matching `out_tx` to dispatch envelopes
@@ -90,6 +102,12 @@ pub struct UctpWsConfig {
     /// by default for compatibility; see
     /// [`rvoip_uctp::state::Sig9421Config`].
     pub sig9421: Option<rvoip_uctp::state::Sig9421Config>,
+    /// Orchestrator used to fulfill `conversation.*` envelopes. When
+    /// `None`, those commands reply `503 conversation-handler-unavailable`.
+    pub orchestrator: Option<Arc<rvoip_core::Orchestrator>>,
+    /// Optional identity-match hook run before `conversation.create` is
+    /// fulfilled. Returning `Some(cid)` forces `open_conversation_with_id`.
+    pub conversation_create_hook: Option<Arc<dyn ConversationCreateHook>>,
     /// Optional `rustls::ServerConfig` for TLS-terminating WSS. When
     /// `Some`, the accept loop wraps each `TcpStream` in
     /// `tokio_rustls::TlsAcceptor::accept(...)` before running the
@@ -108,6 +126,8 @@ impl UctpWsConfig {
             client_url: None,
             coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps::default(),
             sig9421: None,
+            orchestrator: None,
+            conversation_create_hook: None,
             #[cfg(feature = "wss")]
             tls: None,
         }
@@ -129,6 +149,23 @@ impl UctpWsConfig {
     /// the adapter ingress boundary.
     pub fn with_sig9421(mut self, config: rvoip_uctp::state::Sig9421Config) -> Self {
         self.sig9421 = Some(config);
+        self
+    }
+
+    /// Bind the Orchestrator that fulfills `conversation.create` / `list` /
+    /// `close`. Call before [`UctpWsAdapter::new`].
+    pub fn with_orchestrator(mut self, orchestrator: Arc<rvoip_core::Orchestrator>) -> Self {
+        self.orchestrator = Some(orchestrator);
+        self
+    }
+
+    /// Intercept `conversation.create` so the product can identity-match
+    /// before a new Orchestrator Conversation is allocated.
+    pub fn with_conversation_create_hook(
+        mut self,
+        hook: Arc<dyn ConversationCreateHook>,
+    ) -> Self {
+        self.conversation_create_hook = Some(hook);
         self
     }
 
@@ -185,6 +222,8 @@ impl UctpWsAdapter {
             config.max_concurrent_connections,
             config.coordinator_caps,
             config.sig9421,
+            config.orchestrator,
+            config.conversation_create_hook,
             #[cfg(feature = "wss")]
             config.tls,
         );

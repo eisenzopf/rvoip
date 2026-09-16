@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+### Cloudflare Tunnel (Parley demo)
+
+- `deploy/cloudflare/config.yml` and `scripts/run-cloudflare-tunnel.sh` front a
+  localhost Parley process through `parley.rudeless.ai` (HTTP `/v1`, widget,
+  desk, webhooks) and `parley-uctp.rudeless.ai` (UCTP WebSocket). SIP/UDP is
+  not in the ingress. Requires a named tunnel or `CLOUDFLARE_TUNNEL_TOKEN`.
+
+### UCTP conversation dispatch
+
+- The UCTP coordinator dispatches `conversation.create`, `conversation.list`,
+  and `conversation.close` to the substrate adapter (oneshot + Orchestrator)
+  instead of dropping them. WebSocket, QUIC, and WebTransport adapters fulfill
+  those envelopes when configured with an Orchestrator. `conversation.close`
+  is a new C→S type; `conversation.opened` / `conversation.closed` remain the
+  server replies. `session.invite` with an Open `cid` can attach to that
+  Conversation via `start_session`.
+
+### Vapi AI Participant (breaking)
+
+- `VapiAdapter::attach_agent` no longer copies the caller's `participant_id`
+  onto the Vapi Connection. It joins a distinct `Ai`/`Agent` Participant and
+  originates under that id. `attach_agent_for_participant` accepts an existing
+  AI Participant (rejected if that id is already `Human`).
+- `VapiAgentCall::ai_participant_id()` returns the AI Participant.
+
+### Orchestrator Participant role verbs
+
+- `Orchestrator::set_participant_role`, `take_over`, and `hand_off` change
+  voip-3 roles without moving Connections. `take_over` / `hand_off` leave at
+  most one `Agent` in the Session; extra agents become `Observer`.
+- `Event::ParticipantRoleChanged` (and `rvoip_core.participant_role_changed`
+  on the cross-crate bus) fires when the role actually changes.
+
 ### SIP ingress budget and admission observer
 
 - `SipListenerAuthPolicy::with_source_rate_limit` drops requests from any
