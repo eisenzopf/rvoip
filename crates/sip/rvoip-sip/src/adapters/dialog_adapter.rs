@@ -3426,21 +3426,21 @@ impl DialogAdapter {
         mut opts: UpdateRequestOptions,
         auth_header: Option<(&str, String)>,
     ) -> Result<TransactionKey> {
+        let dialog_id = resolve_dialog_for_lane_owned_session(self.store.as_ref(), session)?;
         opts.extra_headers = match auth_header {
             Some((name, value)) => apply_outbound_extras_policy_with_auth(
                 rvoip_sip_core::types::Method::Update,
                 opts.extra_headers,
-                self.outbound_proxy_uri.as_ref(),
+                self.outbound_proxy_for_dialog(&dialog_id),
                 name,
                 value,
             )?,
             None => apply_outbound_extras_policy(
                 rvoip_sip_core::types::Method::Update,
                 opts.extra_headers,
-                self.outbound_proxy_uri.as_ref(),
+                self.outbound_proxy_for_dialog(&dialog_id),
             )?,
         };
-        let dialog_id = resolve_dialog_for_lane_owned_session(self.store.as_ref(), session)?;
         self.dialog_api
             .send_update_with_options(&dialog_id, opts)
             .await
@@ -3491,6 +3491,7 @@ impl DialogAdapter {
         mut opts: rvoip_sip_dialog::api::unified::ReInviteRequestOptions,
         auth_header: Option<(&str, String)>,
     ) -> Result<TransactionKey> {
+        let dialog_id = resolve_dialog_for_lane_owned_session(self.store.as_ref(), session)?;
         // A challenged precomputed credential is replaced, not appended.
         // Keeping it would cause dialog-core to materialize a second
         // Authorization field beside the exact retry header below.
@@ -3501,17 +3502,16 @@ impl DialogAdapter {
             Some((name, value)) => apply_outbound_extras_policy_with_auth(
                 rvoip_sip_core::types::Method::Invite,
                 opts.extra_headers,
-                self.outbound_proxy_uri.as_ref(),
+                self.outbound_proxy_for_dialog(&dialog_id),
                 name,
                 value,
             )?,
             None => apply_outbound_extras_policy(
                 rvoip_sip_core::types::Method::Invite,
                 opts.extra_headers,
-                self.outbound_proxy_uri.as_ref(),
+                self.outbound_proxy_for_dialog(&dialog_id),
             )?,
         };
-        let dialog_id = resolve_dialog_for_lane_owned_session(self.store.as_ref(), session)?;
         self.dialog_api
             .send_reinvite_with_options(&dialog_id, opts)
             .await
@@ -3551,21 +3551,21 @@ impl DialogAdapter {
         mut opts: ReferRequestOptions,
         auth_header: Option<(&str, String)>,
     ) -> Result<TransactionKey> {
+        let dialog_id = resolve_dialog_for_lane_owned_session(self.store.as_ref(), session)?;
         opts.extra_headers = match auth_header {
             Some((name, value)) => apply_outbound_extras_policy_with_auth(
                 rvoip_sip_core::types::Method::Refer,
                 opts.extra_headers,
-                self.outbound_proxy_uri.as_ref(),
+                self.outbound_proxy_for_dialog(&dialog_id),
                 name,
                 value,
             )?,
             None => apply_outbound_extras_policy(
                 rvoip_sip_core::types::Method::Refer,
                 opts.extra_headers,
-                self.outbound_proxy_uri.as_ref(),
+                self.outbound_proxy_for_dialog(&dialog_id),
             )?,
         };
-        let dialog_id = resolve_dialog_for_lane_owned_session(self.store.as_ref(), session)?;
         self.dialog_api
             .send_refer_with_options(&dialog_id, opts)
             .await
@@ -3602,25 +3602,45 @@ impl DialogAdapter {
         mut opts: InfoRequestOptions,
         auth_header: Option<(&str, String)>,
     ) -> Result<TransactionKey> {
+        let dialog_id = resolve_dialog_for_lane_owned_session(self.store.as_ref(), session)?;
         opts.extra_headers = match auth_header {
             Some((name, value)) => apply_outbound_extras_policy_with_auth(
                 rvoip_sip_core::types::Method::Info,
                 opts.extra_headers,
-                self.outbound_proxy_uri.as_ref(),
+                self.outbound_proxy_for_dialog(&dialog_id),
                 name,
                 value,
             )?,
             None => apply_outbound_extras_policy(
                 rvoip_sip_core::types::Method::Info,
                 opts.extra_headers,
-                self.outbound_proxy_uri.as_ref(),
+                self.outbound_proxy_for_dialog(&dialog_id),
             )?,
         };
-        let dialog_id = resolve_dialog_for_lane_owned_session(self.store.as_ref(), session)?;
         self.dialog_api
             .send_info_with_options(&dialog_id, opts)
             .await
             .map_err(|e| SessionError::DialogError(format!("Failed to send INFO: {}", e)))
+    }
+
+    /// Outbound proxy to preload on a request inside `dialog_id`. In-dialog
+    /// requests follow the dialog route set (RFC 3261 section 12.2.1.1), so
+    /// the configured proxy is only used when the dialog has no route set.
+    fn outbound_proxy_for_dialog(
+        &self,
+        dialog_id: &RvoipDialogId,
+    ) -> Option<&rvoip_sip_core::types::uri::Uri> {
+        let has_route_set = self
+            .dialog_api
+            .dialog_manager()
+            .core()
+            .get_dialog(dialog_id)
+            .is_ok_and(|dialog| !dialog.route_set.is_empty());
+        if has_route_set {
+            None
+        } else {
+            self.outbound_proxy_uri.as_ref()
+        }
     }
 
     /// Preserve the adapter's established options signature while routing the
@@ -3651,13 +3671,13 @@ impl DialogAdapter {
         session: &mut SessionState,
         mut opts: ByeRequestOptions,
     ) -> Result<()> {
+        let dialog_id = resolve_dialog_for_lane_owned_session(self.store.as_ref(), session)
+            .map_err(|_| SessionError::SessionNotFound(session.session_id.0.clone()))?;
         opts.extra_headers = apply_outbound_extras_policy(
             rvoip_sip_core::types::Method::Bye,
             opts.extra_headers,
-            self.outbound_proxy_uri.as_ref(),
+            self.outbound_proxy_for_dialog(&dialog_id),
         )?;
-        let dialog_id = resolve_dialog_for_lane_owned_session(self.store.as_ref(), session)
-            .map_err(|_| SessionError::SessionNotFound(session.session_id.0.clone()))?;
         let dialog = self
             .dialog_api
             .dialog_manager()
@@ -4100,21 +4120,21 @@ impl DialogAdapter {
         mut opts: NotifyRequestOptions,
         auth_header: Option<(&str, String)>,
     ) -> Result<TransactionKey> {
+        let dialog_id = resolve_dialog_for_lane_owned_session(self.store.as_ref(), session)?;
         opts.extra_headers = match auth_header {
             Some((name, value)) => apply_outbound_extras_policy_with_auth(
                 rvoip_sip_core::types::Method::Notify,
                 opts.extra_headers,
-                self.outbound_proxy_uri.as_ref(),
+                self.outbound_proxy_for_dialog(&dialog_id),
                 name,
                 value,
             )?,
             None => apply_outbound_extras_policy(
                 rvoip_sip_core::types::Method::Notify,
                 opts.extra_headers,
-                self.outbound_proxy_uri.as_ref(),
+                self.outbound_proxy_for_dialog(&dialog_id),
             )?,
         };
-        let dialog_id = resolve_dialog_for_lane_owned_session(self.store.as_ref(), session)?;
         self.dialog_api
             .send_notify_with_options(&dialog_id, opts)
             .await
@@ -4299,14 +4319,14 @@ impl DialogAdapter {
         auth_header_name: &str,
         auth_header_value: String,
     ) -> Result<()> {
+        let dialog_id = resolve_dialog_for_lane_owned_session(self.store.as_ref(), session)?;
         opts.extra_headers = apply_outbound_extras_policy_with_auth(
             rvoip_sip_core::types::Method::Bye,
             opts.extra_headers,
-            self.outbound_proxy_uri.as_ref(),
+            self.outbound_proxy_for_dialog(&dialog_id),
             auth_header_name,
             auth_header_value,
         )?;
-        let dialog_id = resolve_dialog_for_lane_owned_session(self.store.as_ref(), session)?;
         // Authentication retries must sign and retain the challenged
         // generation's exact Request-URI.
         let handle = session.lifecycle_handle.as_ref().ok_or_else(|| {
