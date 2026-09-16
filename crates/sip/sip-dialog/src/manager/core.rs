@@ -1053,6 +1053,27 @@ async fn dispatch_dialog_transaction_event(
     }
 }
 
+/// Stack-generated Contact URI that advertises the transport the dialog uses,
+/// so the peer sends subsequent requests (including the 2xx ACK) back over
+/// the same kind of transport (RFC 3263 section 4.1).
+pub(crate) fn stack_default_contact_uri(
+    user: &str,
+    local_address: SocketAddr,
+    transport: TransportType,
+) -> String {
+    let (scheme, transport_parameter) = match transport {
+        TransportType::Udp => ("sip", None),
+        TransportType::Tcp => ("sip", Some("tcp")),
+        TransportType::Tls => ("sips", Some("tls")),
+        TransportType::Ws => ("sip", Some("ws")),
+        TransportType::Wss => ("sips", Some("wss")),
+    };
+    let suffix = transport_parameter
+        .map(|transport| format!(";transport={transport}"))
+        .unwrap_or_default();
+    format!("{scheme}:{user}@{local_address}{suffix}")
+}
+
 impl DialogManager {
     pub(crate) fn lifecycle(&self) -> DialogManagerLifecycle {
         DialogManagerLifecycle::from_u8(self.lifecycle.load(Ordering::Acquire))
@@ -2883,7 +2904,16 @@ impl DialogManager {
     /// TLS bind address, then the base bind address. Other transports prefer
     /// the configured SIP advertised address, then the base bind address.
     pub fn local_address_for_uri(&self, uri: &Uri) -> SocketAddr {
-        match select_transport_for_uri(uri) {
+        self.advertised_local_address_for_transport(select_transport_for_uri(uri))
+    }
+
+    /// Advertised local address for a transport, using the WS and WSS
+    /// specific addresses when they are configured.
+    pub(crate) fn advertised_local_address_for_transport(
+        &self,
+        transport: TransportType,
+    ) -> SocketAddr {
+        match transport {
             TransportType::Tls => self
                 .tls_advertised_local_address()
                 .or_else(|| self.tls_local_address())

@@ -38,6 +38,7 @@
 //! ```
 
 use rvoip_sip_core::{HeaderName, Method, Request, Response, StatusCode, TypedHeader, Uri};
+use rvoip_sip_transport::resolver::select_transport_for_uri;
 use tracing::{debug, info};
 
 use crate::diagnostics::safe_log::method_class;
@@ -348,8 +349,18 @@ impl DialogManager {
             add_contact_header(&mut response, contact_uri)?;
         } else if is_initial_invite && (200..300).contains(&status_code) {
             let contact_uri = self.local_contact_uri().unwrap_or_else(|| {
-                let local = self.local_address_for_uri(original_request.uri());
-                format!("sip:server@{local}")
+                // Advertise the transport the INVITE arrived on so the ACK
+                // and later requests come back over the same kind of flow.
+                let transport = self
+                    .transaction_manager()
+                    .server_transaction_route(transaction_id)
+                    .and_then(|route| route.transport_type)
+                    .unwrap_or_else(|| select_transport_for_uri(original_request.uri()));
+                crate::manager::core::stack_default_contact_uri(
+                    "server",
+                    self.advertised_local_address_for_transport(transport),
+                    transport,
+                )
             });
             add_contact_header(&mut response, &contact_uri)?;
         }
@@ -674,6 +685,7 @@ mod tests {
     use rvoip_sip_core::builder::SimpleRequestBuilder;
     use rvoip_sip_core::StatusCode;
     use rvoip_sip_transport::error::{Error as TransportError, Result as TransportResult};
+    use rvoip_sip_transport::transport::TransportType;
     use rvoip_sip_transport::{Transport, TransportEvent};
     use std::net::SocketAddr;
     use std::str::FromStr;
@@ -896,6 +908,195 @@ mod tests {
         assert_eq!(
             manager.get_dialog_state(&dialog_id).unwrap(),
             DialogState::Confirmed
+        );
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingTransport {
+        sent: std::sync::Mutex<Vec<rvoip_sip_core::Message>>,
+    }
+
+    #[async_trait]
+    impl Transport for RecordingTransport {
+        fn local_addr(&self) -> TransportResult<SocketAddr> {
+            Ok(SocketAddr::from_str("127.0.0.1:5060").unwrap())
+        }
+
+        async fn send_message(
+            &self,
+            message: rvoip_sip_core::Message,
+            _destination: SocketAddr,
+        ) -> TransportResult<()> {
+            self.sent.lock().unwrap().push(message);
+            Ok(())
+        }
+
+        async fn close(&self) -> TransportResult<()> {
+            Ok(())
+        }
+
+        fn is_closed(&self) -> bool {
+            false
+        }
+    }
+
+    fn initial_invite_over(via_transport: &str) -> Request {
+        SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("alice-tag"))
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5061", None)
+            .call_id("uas-contact-transport-test")
+            .cseq(1)
+            .via("127.0.0.1:5061", via_transport, Some("z9hG4bK-uas-contact"))
+            .max_forwards(70)
+            .build()
+    }
+
+    async fn initial_invite_2xx_contact(
+        manager: &DialogManager,
+        transport: &RecordingTransport,
+        ingress: TransportType,
+    ) -> String {
+        let via_transport = match ingress {
+            TransportType::Udp => "UDP",
+            TransportType::Tcp => "TCP",
+            TransportType::Tls => "TLS",
+            TransportType::Ws => "WS",
+            TransportType::Wss => "WSS",
+        };
+        let request = initial_invite_over(via_transport);
+        let dialog_id = manager
+            .create_early_dialog_from_invite(&request)
+            .await
+            .expect("create early dialog");
+        let route = rvoip_sip_transport::TransportRoute::new(
+            SocketAddr::from_str("127.0.0.1:5061").unwrap(),
+        )
+        .with_transport_type(ingress)
+        .with_authority(rvoip_sip_transport::TransportAuthority::ip(
+            "127.0.0.1".parse().unwrap(),
+        ));
+        let transaction = manager
+            .transaction_manager()
+            .create_server_transaction_on_route(request, route)
+            .await
+            .expect("create server transaction");
+        let transaction_id = transaction.id().clone();
+        manager.associate_transaction_with_dialog(&transaction_id, &dialog_id);
+        manager
+            .pending_response_transaction_by_dialog
+            .insert(dialog_id.clone(), transaction_id.clone());
+
+        manager
+            .send_known_transaction_response(
+                &dialog_id,
+                &transaction_id,
+                StatusCode::Ok.as_u16(),
+                None,
+                None,
+                &[],
+                None,
+            )
+            .await
+            .expect("send 2xx");
+
+        let sent = transport.sent.lock().unwrap();
+        let response = sent
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                rvoip_sip_core::Message::Response(response) if response.status_code() == 200 => {
+                    Some(response.clone())
+                }
+                _ => None,
+            })
+            .expect("2xx on the wire");
+        match response.header(&HeaderName::Contact) {
+            Some(TypedHeader::Contact(contact)) => contact
+                .addresses()
+                .next()
+                .expect("Contact address")
+                .uri
+                .to_string(),
+            _ => panic!("2xx must carry a Contact"),
+        }
+    }
+
+    #[tokio::test]
+    async fn initial_invite_2xx_contact_advertises_the_ingress_transport() {
+        for (ingress, expected) in [
+            (TransportType::Udp, "sip:server@127.0.0.1:5060"),
+            (
+                TransportType::Tcp,
+                "sip:server@127.0.0.1:5060;transport=tcp",
+            ),
+            (
+                TransportType::Tls,
+                "sips:server@127.0.0.1:5060;transport=tls",
+            ),
+            (TransportType::Ws, "sip:server@127.0.0.1:5060;transport=ws"),
+            (
+                TransportType::Wss,
+                "sips:server@127.0.0.1:5060;transport=wss",
+            ),
+        ] {
+            let transport = Arc::new(RecordingTransport::default());
+            let manager = make_manager_with_transport(transport.clone()).await;
+            let contact = initial_invite_2xx_contact(&manager, &transport, ingress).await;
+            assert_eq!(contact, expected, "Contact for {ingress:?} ingress");
+        }
+    }
+
+    #[tokio::test]
+    async fn initial_invite_2xx_contact_keeps_an_explicit_contact() {
+        let transport = Arc::new(RecordingTransport::default());
+        let manager = make_manager_with_transport(transport.clone()).await;
+        let request = initial_invite_over("TCP");
+        let dialog_id = manager
+            .create_early_dialog_from_invite(&request)
+            .await
+            .expect("create early dialog");
+        let route = rvoip_sip_transport::TransportRoute::new(
+            SocketAddr::from_str("127.0.0.1:5061").unwrap(),
+        )
+        .with_transport_type(TransportType::Tcp)
+        .with_authority(rvoip_sip_transport::TransportAuthority::ip(
+            "127.0.0.1".parse().unwrap(),
+        ));
+        let transaction = manager
+            .transaction_manager()
+            .create_server_transaction_on_route(request, route)
+            .await
+            .expect("create server transaction");
+        let transaction_id = transaction.id().clone();
+        manager.associate_transaction_with_dialog(&transaction_id, &dialog_id);
+        manager
+            .pending_response_transaction_by_dialog
+            .insert(dialog_id.clone(), transaction_id.clone());
+
+        manager
+            .send_known_transaction_response(
+                &dialog_id,
+                &transaction_id,
+                StatusCode::Ok.as_u16(),
+                None,
+                None,
+                &[],
+                Some("sip:app@192.0.2.10:5070"),
+            )
+            .await
+            .expect("send 2xx");
+
+        let sent = transport.sent.lock().unwrap();
+        let wire = sent
+            .iter()
+            .map(|message| message.to_string())
+            .find(|wire| wire.starts_with("SIP/2.0 200"))
+            .expect("2xx on the wire");
+        assert!(
+            wire.contains("Contact: <sip:app@192.0.2.10:5070>"),
+            "{wire}"
         );
     }
 

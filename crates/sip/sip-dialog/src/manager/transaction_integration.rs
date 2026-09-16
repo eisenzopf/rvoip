@@ -1479,23 +1479,14 @@ fn finalize_request_for_candidate(
         .map(ToString::to_string)
         .filter(|user| !user.is_empty())
         .unwrap_or_else(|| "user".to_string());
-    let (scheme, transport_parameter) = match target.transport {
-        rvoip_sip_transport::transport::TransportType::Udp => ("sip", None),
-        rvoip_sip_transport::transport::TransportType::Tcp => ("sip", Some("tcp")),
-        rvoip_sip_transport::transport::TransportType::Tls => ("sips", Some("tls")),
-        rvoip_sip_transport::transport::TransportType::Ws => ("sip", Some("ws")),
-        rvoip_sip_transport::transport::TransportType::Wss => ("sips", Some("wss")),
-    };
-    let suffix = transport_parameter
-        .map(|transport| format!(";transport={transport}"))
-        .unwrap_or_default();
-    let contact_uri: rvoip_sip_core::Uri = format!("{scheme}:{user}@{local_address}{suffix}")
-        .parse()
-        .map_err(|_| {
-            crate::errors::DialogError::protocol_error(
-                "failed to plan the stack-default Contact for a candidate",
-            )
-        })?;
+    let contact_uri: rvoip_sip_core::Uri =
+        crate::manager::core::stack_default_contact_uri(&user, local_address, target.transport)
+            .parse()
+            .map_err(|_| {
+                crate::errors::DialogError::protocol_error(
+                    "failed to plan the stack-default Contact for a candidate",
+                )
+            })?;
     if matches!(request.uri().scheme(), Scheme::Sips)
         && !matches!(contact_uri.scheme(), Scheme::Sips)
     {

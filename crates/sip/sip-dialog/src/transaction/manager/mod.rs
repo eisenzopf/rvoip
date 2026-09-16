@@ -4818,6 +4818,16 @@ impl TransactionManager {
         self.with_client_response_route_state(transaction_id, |state| state.route().destination)
     }
 
+    /// Return the exact ingress route a live server transaction responds on.
+    pub fn server_transaction_route(
+        &self,
+        transaction_id: &TransactionKey,
+    ) -> Option<TransportRoute> {
+        self.server_transactions
+            .get(transaction_id)
+            .map(|transaction| transaction.value().data().response_route.clone())
+    }
+
     /// Return the authority- and flow-bearing route used by a client transaction.
     pub async fn transaction_route(
         &self,
