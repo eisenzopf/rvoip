@@ -4418,7 +4418,7 @@ impl DialogManager {
 
         debug!("Sending BYE with Reason header for dialog {}", dialog_id);
 
-        let (candidates, request) = {
+        let (next_hop, request) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
 
             let template = dialog.create_request_template(Method::Bye);
@@ -4465,15 +4465,16 @@ impl DialogManager {
                     &request,
                 )
                 .map_err(|_| DialogError::routing_error("BYE contains an unusable Route header"))?;
-            let candidates = self.resolve_uri_to_candidates(&next_hop).await;
-            if candidates.is_empty() {
-                return Err(DialogError::routing_error(
-                    "No address candidates for the exact BYE next hop",
-                ));
-            }
-
-            (candidates, request)
+            (next_hop, request)
         };
+        // The dialog guard holds a map shard lock; resolve only after it is
+        // released so a slow lookup cannot stall other dialogs on that shard.
+        let candidates = self.resolve_uri_to_candidates(&next_hop).await;
+        if candidates.is_empty() {
+            return Err(DialogError::routing_error(
+                "No address candidates for the exact BYE next hop",
+            ));
+        }
 
         let (transaction_id, _) = self
             .send_request_with_candidate_failover(request, candidates, Some(dialog_id))

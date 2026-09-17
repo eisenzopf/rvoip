@@ -2214,7 +2214,7 @@ impl DialogManager {
 
         // Get dialog context and build the request. Destination is resolved
         // from the final request next hop after Route headers are present.
-        let (candidates, request, wire_plan) = {
+        let (next_hop, request) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
 
             // Convert body to String if provided
@@ -2530,18 +2530,19 @@ impl DialogManager {
                         "Outbound request contains an unusable Route header",
                     )
                 })?;
-            let candidates = self.resolve_uri_to_candidates(&next_hop).await;
-
-            if candidates.is_empty() {
-                return Err(crate::errors::DialogError::routing_error(
-                    "No address candidates for the exact request next hop",
-                ));
-            }
-            let wire_plan = CandidateWirePlan {
-                regenerate_stack_default_contact: request.header(&HeaderName::Contact).is_some()
-                    && self.local_contact_uri().is_none(),
-            };
-            (candidates, request, wire_plan)
+            (next_hop, request)
+        };
+        // The dialog guard holds a map shard lock; resolve only after it is
+        // released so a slow lookup cannot stall other dialogs on that shard.
+        let candidates = self.resolve_uri_to_candidates(&next_hop).await;
+        if candidates.is_empty() {
+            return Err(crate::errors::DialogError::routing_error(
+                "No address candidates for the exact request next hop",
+            ));
+        }
+        let wire_plan = CandidateWirePlan {
+            regenerate_stack_default_contact: request.header(&HeaderName::Contact).is_some()
+                && self.local_contact_uri().is_none(),
         };
 
         // RFC 3263 §4.3 multi-candidate failover. STIR/SHAKEN signing
@@ -4902,7 +4903,7 @@ impl DialogManager {
 
         debug!(dialog=%dialog_id, ?timer_policy, "Sending initial INVITE through canonical path");
 
-        let (candidates, request) = {
+        let (next_hop, request) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
 
             let template = dialog.create_request_template(Method::Invite);
@@ -4992,15 +4993,16 @@ impl DialogManager {
                         "Initial INVITE contains an unusable Route header",
                     )
                 })?;
-            let candidates = self.resolve_uri_to_candidates(&next_hop).await;
-
-            if candidates.is_empty() {
-                return Err(crate::errors::DialogError::routing_error(
-                    "No address candidates for the exact initial-INVITE next hop",
-                ));
-            }
-            (candidates, request)
+            (next_hop, request)
         };
+        // The dialog guard holds a map shard lock; resolve only after it is
+        // released so a slow lookup cannot stall other dialogs on that shard.
+        let candidates = self.resolve_uri_to_candidates(&next_hop).await;
+        if candidates.is_empty() {
+            return Err(crate::errors::DialogError::routing_error(
+                "No address candidates for the exact initial-INVITE next hop",
+            ));
+        }
 
         // RFC 3263 §4.3 multi-candidate failover. STIR/SHAKEN re-signs per
         // attempt inside the helper because every attempt carries a new CSeq.
@@ -7638,7 +7640,7 @@ impl DialogManager {
             dialog_id, rseq
         );
 
-        let (candidates, request) = {
+        let (next_hop, request) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
 
             let invite_cseq = dialog.invite_cseq.ok_or_else(|| {
@@ -7698,15 +7700,16 @@ impl DialogManager {
                         "PRACK contains an unusable Route header",
                     )
                 })?;
-            let candidates = self.resolve_uri_to_candidates(&next_hop).await;
-            if candidates.is_empty() {
-                return Err(crate::errors::DialogError::routing_error(
-                    "No address candidates for the exact PRACK next hop",
-                ));
-            }
-
-            (candidates, request)
+            (next_hop, request)
         };
+        // The dialog guard holds a map shard lock; resolve only after it is
+        // released so a slow lookup cannot stall other dialogs on that shard.
+        let candidates = self.resolve_uri_to_candidates(&next_hop).await;
+        if candidates.is_empty() {
+            return Err(crate::errors::DialogError::routing_error(
+                "No address candidates for the exact PRACK next hop",
+            ));
+        }
 
         let (transaction_id, _) = self
             .send_request_with_candidate_failover(request, candidates, Some(dialog_id))

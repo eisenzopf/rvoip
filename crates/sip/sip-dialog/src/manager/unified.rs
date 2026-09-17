@@ -544,7 +544,7 @@ pub struct UnifiedDialogManager {
     /// Manager-owned retained dispatch tasks. Callers only observe a result
     /// receiver, so dropping a public handle cannot detach work from shutdown.
     initial_invite_dispatch_tasks: Arc<dashmap::DashMap<DialogId, InitialInviteDispatchTaskRecord>>,
-    initial_invite_dispatch_gate: Arc<std::sync::Mutex<bool>>,
+    initial_invite_dispatch_gate: Arc<std::sync::RwLock<bool>>,
 
     /// One owned protocol-cleanup driver per legacy wrapper failure. The map
     /// bounds task count by installed dialogs and gives shutdown an exact
@@ -671,7 +671,7 @@ impl UnifiedDialogManager {
                 initial_invite_install_capacity,
             )),
             initial_invite_dispatch_tasks: Arc::new(dashmap::DashMap::new()),
-            initial_invite_dispatch_gate: Arc::new(std::sync::Mutex::new(true)),
+            initial_invite_dispatch_gate: Arc::new(std::sync::RwLock::new(true)),
             initial_invite_cleanup_tasks: Arc::new(dashmap::DashMap::new()),
             initial_invite_cleanup_gate: Arc::new(std::sync::Mutex::new(true)),
             #[cfg(test)]
@@ -731,7 +731,7 @@ impl UnifiedDialogManager {
                 initial_invite_install_capacity,
             )),
             initial_invite_dispatch_tasks: Arc::new(dashmap::DashMap::new()),
-            initial_invite_dispatch_gate: Arc::new(std::sync::Mutex::new(true)),
+            initial_invite_dispatch_gate: Arc::new(std::sync::RwLock::new(true)),
             initial_invite_cleanup_tasks: Arc::new(dashmap::DashMap::new()),
             initial_invite_cleanup_gate: Arc::new(std::sync::Mutex::new(true)),
             #[cfg(test)]
@@ -781,7 +781,7 @@ impl UnifiedDialogManager {
                 initial_invite_install_capacity,
             )),
             initial_invite_dispatch_tasks: Arc::new(dashmap::DashMap::new()),
-            initial_invite_dispatch_gate: Arc::new(std::sync::Mutex::new(true)),
+            initial_invite_dispatch_gate: Arc::new(std::sync::RwLock::new(true)),
             initial_invite_cleanup_tasks: Arc::new(dashmap::DashMap::new()),
             initial_invite_cleanup_gate: Arc::new(std::sync::Mutex::new(true)),
             #[cfg(test)]
@@ -868,7 +868,7 @@ impl UnifiedDialogManager {
         {
             let mut accepting = self
                 .initial_invite_dispatch_gate
-                .lock()
+                .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             *accepting = false;
         }
@@ -1147,9 +1147,11 @@ impl UnifiedDialogManager {
     {
         use dashmap::mapref::entry::Entry;
 
+        // Installs share the gate; only `stop` takes it exclusively, so an
+        // install waiting on a map shard never holds up the others.
         let accepting = self
             .initial_invite_dispatch_gate
-            .lock()
+            .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !*accepting || !self.core.is_accepting_work() {
             return Err(ApiError::Dialog {
@@ -1274,7 +1276,7 @@ impl UnifiedDialogManager {
             Ok(runtime) => {
                 let accepting = self
                     .initial_invite_dispatch_gate
-                    .lock()
+                    .read()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 if !*accepting
                     || self
@@ -4408,5 +4410,280 @@ mod staged_initial_invite_tests {
         );
         assert!(manager.core.has_dialog(&replacement_id));
         manager.core.cleanup_dialog_storage(&replacement_id);
+    }
+}
+
+#[cfg(test)]
+mod concurrent_dns_admission_tests {
+    use super::*;
+    use crate::transaction::TransactionManager;
+    use rvoip_sip_core::Uri;
+    use rvoip_sip_transport::resolver::{ResolvedTarget, Resolver, ResolverError};
+    use rvoip_sip_transport::transport::TransportType;
+    use rvoip_sip_transport::{Transport, TransportEvent};
+    use std::net::SocketAddr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    use tokio::sync::{mpsc, Notify};
+
+    #[derive(Debug)]
+    struct SinkTransport(SocketAddr);
+
+    #[async_trait::async_trait]
+    impl Transport for SinkTransport {
+        fn local_addr(&self) -> rvoip_sip_transport::error::Result<SocketAddr> {
+            Ok(self.0)
+        }
+        async fn send_message(
+            &self,
+            _message: rvoip_sip_core::Message,
+            _destination: SocketAddr,
+        ) -> rvoip_sip_transport::error::Result<()> {
+            Ok(())
+        }
+        async fn close(&self) -> rvoip_sip_transport::error::Result<()> {
+            Ok(())
+        }
+        fn is_closed(&self) -> bool {
+            false
+        }
+    }
+
+    /// Resolver that parks every lookup until released, like a slow DNS.
+    struct GatedResolver {
+        entered: AtomicUsize,
+        release: Notify,
+        released: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl Resolver for GatedResolver {
+        async fn resolve(
+            &self,
+            _uri: &Uri,
+        ) -> std::result::Result<Vec<ResolvedTarget>, ResolverError> {
+            self.entered.fetch_add(1, Ordering::SeqCst);
+            while !self.released.load(Ordering::SeqCst) {
+                let notified = self.release.notified();
+                if self.released.load(Ordering::SeqCst) {
+                    break;
+                }
+                notified.await;
+            }
+            Ok(vec![ResolvedTarget::immediate(
+                "127.0.0.1:5099".parse().unwrap(),
+                TransportType::Udp,
+            )])
+        }
+    }
+
+    impl GatedResolver {
+        fn open(&self) {
+            self.released.store(true, Ordering::SeqCst);
+            self.release.notify_waiters();
+        }
+    }
+
+    async fn manager_with_resolver(resolver: Arc<GatedResolver>) -> UnifiedDialogManager {
+        let transport = Arc::new(SinkTransport("127.0.0.1:5098".parse().unwrap()));
+        let (_tx, rx) = mpsc::channel::<TransportEvent>(16);
+        let (transaction_manager, mut transaction_events) =
+            TransactionManager::new(transport.clone(), rx, Some(256))
+                .await
+                .expect("transaction manager");
+        tokio::spawn(async move { while transaction_events.recv().await.is_some() {} });
+        let config = DialogManagerConfig::client(transport.0)
+            .with_from_uri("sip:alice@example.com")
+            .build();
+        let manager = UnifiedDialogManager::new(Arc::new(transaction_manager), config)
+            .await
+            .expect("dialog manager");
+        manager.core.set_resolver(Some(resolver));
+        manager
+    }
+
+    fn proxied_options(call_id: String) -> crate::api::unified::InviteRequestOptions {
+        crate::api::unified::InviteRequestOptions {
+            from_uri: "sip:alice@example.com".to_string(),
+            to_uri: "sip:bob@127.0.0.1:5099".to_string(),
+            call_id: Some(call_id),
+            outbound_proxy_uri: Some("sip:proxy.dns-gate.test;lr".parse().unwrap()),
+            ..Default::default()
+        }
+    }
+
+    /// Runs `scenario` on its own small runtime and fails if it has not
+    /// finished in time. The deadline is enforced from a plain OS thread,
+    /// because a runtime whose workers are all blocked cannot time itself out.
+    fn run_with_native_watchdog<F, Fut>(label: &str, scenario: F)
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                runtime.block_on(scenario())
+            }));
+            let _ = done_tx.send(result.is_ok());
+            std::mem::forget(runtime);
+        });
+        match done_rx.recv_timeout(Duration::from_secs(20)) {
+            Ok(true) => {}
+            Ok(false) => panic!("{label}: scenario panicked"),
+            Err(_) => panic!("{label}: runtime stalled; native watchdog expired"),
+        }
+    }
+
+    #[test]
+    fn dialog_is_not_locked_while_its_invite_waits_on_dns() {
+        run_with_native_watchdog("dialog lock during DNS", || async {
+            let resolver = Arc::new(GatedResolver {
+                entered: AtomicUsize::new(0),
+                release: Notify::new(),
+                released: std::sync::atomic::AtomicBool::new(false),
+            });
+            let manager = manager_with_resolver(resolver.clone()).await;
+            let plan = manager
+                .plan_initial_invite(None, proxied_options("dns-gate-lock".into()))
+                .await
+                .expect("plan");
+            let installed = manager.install_initial_invite(plan).expect("install");
+            let dialog_id = installed.owner().dialog_id().clone();
+            let dispatch = manager.dispatch_initial_invite(installed);
+
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while resolver.entered.load(Ordering::SeqCst) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("dispatch reaches the resolver");
+
+            assert!(
+                matches!(
+                    manager.core.dialogs.try_get_mut(&dialog_id),
+                    dashmap::try_result::TryResult::Present(_)
+                ),
+                "the dialog shard must not stay locked across the DNS lookup"
+            );
+
+            resolver.open();
+            let completion = dispatch.wait().await;
+            assert_eq!(completion.wire_outcome(), InitialInviteWireOutcome::Sent);
+            let _ = manager.stop().await;
+        });
+    }
+
+    #[test]
+    fn many_installs_complete_while_dispatches_wait_on_dns() {
+        run_with_native_watchdog("concurrent installs during DNS", || async {
+            let resolver = Arc::new(GatedResolver {
+                entered: AtomicUsize::new(0),
+                release: Notify::new(),
+                released: std::sync::atomic::AtomicBool::new(false),
+            });
+            let manager = manager_with_resolver(resolver.clone()).await;
+
+            let mut dispatches = Vec::new();
+            for index in 0..32 {
+                let plan = manager
+                    .plan_initial_invite(None, proxied_options(format!("dns-gate-first-{index}")))
+                    .await
+                    .expect("plan");
+                let installed = manager.install_initial_invite(plan).expect("install");
+                dispatches.push(manager.dispatch_initial_invite(installed));
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while resolver.entered.load(Ordering::SeqCst) < 32 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("every dispatch parks in the resolver");
+
+            // Every dialog shard is now covered by a parked dispatch. More
+            // installs, spread over all shards, must still go through.
+            let mut installers = tokio::task::JoinSet::new();
+            for index in 0..128 {
+                let manager = manager.clone();
+                installers.spawn(async move {
+                    let plan = manager
+                        .plan_initial_invite(
+                            None,
+                            proxied_options(format!("dns-gate-next-{index}")),
+                        )
+                        .await
+                        .expect("plan");
+                    let installed = manager.install_initial_invite(plan).expect("install");
+                    drop(installed);
+                });
+            }
+            while let Some(result) = installers.join_next().await {
+                result.expect("installer");
+            }
+
+            resolver.open();
+            for dispatch in dispatches {
+                assert_eq!(
+                    dispatch.wait().await.wire_outcome(),
+                    InitialInviteWireOutcome::Sent
+                );
+            }
+            let _ = manager.stop().await;
+        });
+    }
+
+    #[test]
+    fn stop_while_dispatch_waits_on_dns_rolls_back_and_releases_the_dialog() {
+        run_with_native_watchdog("stop during DNS", || async {
+            let resolver = Arc::new(GatedResolver {
+                entered: AtomicUsize::new(0),
+                release: Notify::new(),
+                released: std::sync::atomic::AtomicBool::new(false),
+            });
+            let manager = manager_with_resolver(resolver.clone()).await;
+            let plan = manager
+                .plan_initial_invite(None, proxied_options("dns-gate-stop".into()))
+                .await
+                .expect("plan");
+            let installed = manager.install_initial_invite(plan).expect("install");
+            let dispatch = manager.dispatch_initial_invite(installed);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while resolver.entered.load(Ordering::SeqCst) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("dispatch reaches the resolver");
+
+            tokio::time::timeout(Duration::from_secs(5), manager.stop())
+                .await
+                .expect("stop is not blocked by the parked lookup")
+                .ok();
+            // An aborted dispatch keeps its conservative outcome; what matters
+            // is that it finishes and never left its dialog locked.
+            let completion = tokio::time::timeout(Duration::from_secs(5), dispatch.wait())
+                .await
+                .expect("dispatch completes after stop");
+            assert_ne!(completion.wire_outcome(), InitialInviteWireOutcome::Sent);
+            let dialog_id = completion.owner().dialog_id().clone();
+            assert!(!matches!(
+                manager.core.dialogs.try_get_mut(&dialog_id),
+                dashmap::try_result::TryResult::Locked
+            ));
+
+            let plan = manager
+                .plan_initial_invite(None, proxied_options("dns-gate-after-stop".into()))
+                .await;
+            if let Ok(plan) = plan {
+                assert!(manager.install_initial_invite(plan).is_err());
+            }
+        });
     }
 }
