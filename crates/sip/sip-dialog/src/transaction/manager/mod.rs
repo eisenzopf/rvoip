@@ -7502,6 +7502,35 @@ impl TransactionManager {
                 .invite_2xx_response_due_queue
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // An acknowledged entry is final: a later refresh (for example the
+            // Terminated observation) must not bring retransmissions back.
+            if self
+                .invite_2xx_response_cache
+                .get(&transaction_id)
+                .is_some_and(|existing| existing.acked_at.is_some())
+            {
+                return;
+            }
+            // The ACK may have been matched between the 2xx write and this
+            // insertion. The marker is read under the scheduler lock, the same
+            // lock the ACK path takes, so neither order can lose it.
+            if self
+                .server_transactions
+                .get(&transaction_id)
+                .is_some_and(|tx| {
+                    tx.value()
+                        .data()
+                        .invite_2xx_acked
+                        .load(std::sync::atomic::Ordering::Acquire)
+                })
+            {
+                let now = Instant::now();
+                let retained_until =
+                    (now + INVITE_2XX_ACKED_RESPONSE_RETENTION).min(entry.expires_at);
+                entry.acked_at = Some(now);
+                entry.expires_at = retained_until;
+                entry.next_retransmit_at = retained_until;
+            }
             entry.deadline_generation = scheduler.schedule(
                 transaction_id.clone(),
                 entry.next_retransmit_at,
@@ -7965,6 +7994,15 @@ impl TransactionManager {
                 entry.next_retransmit_at = retained_until;
                 entry.deadline_generation =
                     scheduler.schedule(transaction_id.clone(), retained_until, retained_until);
+            }
+        } else if let Some(tx) = self.server_transactions.get(transaction_id) {
+            if !tx
+                .value()
+                .data()
+                .invite_2xx_acked
+                .swap(true, std::sync::atomic::Ordering::AcqRel)
+            {
+                diagnostics::record_invite_2xx_ack_before_cache();
             }
         }
     }

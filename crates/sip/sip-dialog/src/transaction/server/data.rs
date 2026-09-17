@@ -127,6 +127,10 @@ pub struct ServerTransactionData {
     /// wire-written response that still requires its natural Timer J owner.
     pub(crate) final_response_wire_written: std::sync::atomic::AtomicBool,
 
+    /// Set when the 2xx ACK for this INVITE arrives before its 2xx replay
+    /// cache entry exists, so the entry is created already acknowledged.
+    pub(crate) invite_2xx_acked: std::sync::atomic::AtomicBool,
+
     /// A final response accepted by the manager is owned by the existing
     /// transaction runner until the transport result and replay fence are
     /// exact. Cancellation of the API waiter cannot cancel that runner work.

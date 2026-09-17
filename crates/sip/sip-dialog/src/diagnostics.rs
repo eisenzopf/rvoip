@@ -54,6 +54,7 @@ static INVITE_2XX_CACHE_INSERT: AtomicU64 = AtomicU64::new(0);
 static INVITE_2XX_CACHE_EXPIRED: AtomicU64 = AtomicU64::new(0);
 static INVITE_2XX_PROACTIVE_RETRANSMIT: AtomicU64 = AtomicU64::new(0);
 static INVITE_2XX_ACK_REMOVED: AtomicU64 = AtomicU64::new(0);
+static INVITE_2XX_ACK_BEFORE_CACHE: AtomicU64 = AtomicU64::new(0);
 static INVITE_2XX_ACK_LATENCY_NS: AtomicU64 = AtomicU64::new(0);
 
 static DUP_BYE_EXISTING_TX: AtomicU64 = AtomicU64::new(0);
@@ -437,6 +438,7 @@ pub struct Snapshot {
     pub invite_2xx_cache_expired: u64,
     pub invite_2xx_proactive_retransmit: u64,
     pub invite_2xx_ack_removed: u64,
+    pub invite_2xx_ack_before_cache: u64,
     pub invite_2xx_ack_latency_ns: u64,
     pub duplicate_bye_existing_transaction: u64,
     pub duplicate_bye_tombstone_hit: u64,
@@ -933,6 +935,7 @@ pub fn snapshot() -> Snapshot {
         invite_2xx_cache_expired: INVITE_2XX_CACHE_EXPIRED.load(Ordering::Relaxed),
         invite_2xx_proactive_retransmit: INVITE_2XX_PROACTIVE_RETRANSMIT.load(Ordering::Relaxed),
         invite_2xx_ack_removed: INVITE_2XX_ACK_REMOVED.load(Ordering::Relaxed),
+        invite_2xx_ack_before_cache: INVITE_2XX_ACK_BEFORE_CACHE.load(Ordering::Relaxed),
         invite_2xx_ack_latency_ns: INVITE_2XX_ACK_LATENCY_NS.load(Ordering::Relaxed),
         duplicate_bye_existing_transaction: DUP_BYE_EXISTING_TX.load(Ordering::Relaxed),
         duplicate_bye_tombstone_hit: DUP_BYE_TOMBSTONE_HIT.load(Ordering::Relaxed),
@@ -1400,6 +1403,10 @@ pub(crate) fn record_invite_2xx_ack_removed(latency: Duration) {
         INVITE_2XX_ACK_REMOVED.fetch_add(1, Ordering::Relaxed);
         INVITE_2XX_ACK_LATENCY_NS.fetch_add(ns(latency), Ordering::Relaxed);
     }
+}
+
+pub(crate) fn record_invite_2xx_ack_before_cache() {
+    increment(&INVITE_2XX_ACK_BEFORE_CACHE);
 }
 
 pub(crate) fn record_duplicate_bye_existing_transaction() {
@@ -2232,6 +2239,7 @@ fn all_counters() -> Vec<&'static AtomicU64> {
         &INVITE_2XX_CACHE_EXPIRED,
         &INVITE_2XX_PROACTIVE_RETRANSMIT,
         &INVITE_2XX_ACK_REMOVED,
+        &INVITE_2XX_ACK_BEFORE_CACHE,
         &INVITE_2XX_ACK_LATENCY_NS,
         &DUP_BYE_EXISTING_TX,
         &DUP_BYE_TOMBSTONE_HIT,

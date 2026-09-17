@@ -4811,6 +4811,183 @@ mod tests {
         Ok(())
     }
 
+    async fn count_sent_200(transport: &MockTransport) -> usize {
+        transport
+            .get_sent_messages()
+            .await
+            .iter()
+            .filter(|(message, _)| {
+                matches!(message, Message::Response(response) if response.status_code() == 200)
+            })
+            .count()
+    }
+
+    #[tokio::test]
+    async fn ack_matched_before_the_2xx_cache_entry_exists_still_stops_retransmission() -> Result<()>
+    {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(16);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(16)).await?;
+
+        let invite = create_test_invite().map_err(|e| Error::Other(e.to_string()))?;
+        let source: SocketAddr = "192.0.2.100:5060".parse().unwrap();
+        let transaction = manager
+            .create_server_transaction(invite.clone(), source)
+            .await?;
+        let tx_id = transaction.id().clone();
+
+        // The 2xx reaches the wire, but its cache entry is not created yet:
+        // this is the window between the transport write and the insertion.
+        transaction
+            .send_response(create_test_response(&invite, StatusCode::Ok, Some("OK")))
+            .await?;
+
+        let ack = create_test_ack().map_err(|e| Error::Other(e.to_string()))?;
+        assert_eq!(
+            manager.find_server_invite_for_ack(&ack),
+            Some(tx_id.clone())
+        );
+
+        manager.cache_invite_2xx_response_for(&tx_id).await;
+        assert!(
+            manager
+                .invite_2xx_response_cache
+                .get(&tx_id)
+                .is_some_and(|entry| entry.acked_at.is_some()),
+            "an ACK matched before the cache entry must not be forgotten"
+        );
+
+        let sent = count_sent_200(&transport).await;
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert_eq!(
+            count_sent_200(&transport).await,
+            sent,
+            "no proactive 2xx retransmission after the ACK"
+        );
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn refreshing_an_acked_2xx_cache_entry_keeps_it_acknowledged() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(16);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(16)).await?;
+
+        let invite = create_test_invite().map_err(|e| Error::Other(e.to_string()))?;
+        let source: SocketAddr = "192.0.2.100:5060".parse().unwrap();
+        let transaction = manager
+            .create_server_transaction(invite.clone(), source)
+            .await?;
+        let tx_id = transaction.id().clone();
+
+        manager
+            .send_response(
+                &tx_id,
+                create_test_response(&invite, StatusCode::Ok, Some("OK")),
+            )
+            .await?;
+        let ack = create_test_ack().map_err(|e| Error::Other(e.to_string()))?;
+        assert_eq!(
+            manager.find_server_invite_for_ack(&ack),
+            Some(tx_id.clone())
+        );
+        assert!(manager
+            .invite_2xx_response_cache
+            .get(&tx_id)
+            .is_some_and(|entry| entry.acked_at.is_some()));
+
+        // Same call the Terminated observation makes.
+        manager.cache_invite_2xx_response_for(&tx_id).await;
+        assert!(
+            manager
+                .invite_2xx_response_cache
+                .get(&tx_id)
+                .is_some_and(|entry| entry.acked_at.is_some()),
+            "a later refresh must not clear the ACK"
+        );
+
+        let sent = count_sent_200(&transport).await;
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert_eq!(count_sent_200(&transport).await, sent);
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    fn stress_ack(call_id: &str) -> Request {
+        SimpleRequestBuilder::new(Method::Ack, "sip:bob@example.com")
+            .expect("ACK builder")
+            .from("Alice", "sip:alice@example.com", Some("alice-tag"))
+            .to("Bob", "sip:bob@example.com", Some("bob-tag-resp"))
+            .call_id(call_id)
+            .cseq(101)
+            .via("127.0.0.1:5060", "UDP", Some("z9hG4bK.stress-ack"))
+            .max_forwards(70)
+            .build()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_2xx_with_immediate_ack_never_retransmit() -> Result<()> {
+        const CALLS: usize = 100;
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(16);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(1024)).await?;
+        let manager = Arc::new(manager);
+        let source: SocketAddr = "192.0.2.100:5060".parse().unwrap();
+
+        let mut calls = tokio::task::JoinSet::new();
+        for index in 0..CALLS {
+            let manager = manager.clone();
+            calls.spawn(async move {
+                let call_id = format!("stress-call-{index}");
+                let invite = create_test_invite_with_identity(
+                    &call_id,
+                    &format!("z9hG4bK.stress-{index}"),
+                    "UDP",
+                )
+                .expect("invite");
+                let transaction = manager
+                    .create_server_transaction(invite.clone(), source)
+                    .await
+                    .expect("server transaction");
+                let tx_id = transaction.id().clone();
+                let ack = stress_ack(&call_id);
+                let response = create_test_response(&invite, StatusCode::Ok, Some("OK"));
+                let ack_manager = manager.clone();
+                let acker = tokio::spawn(async move {
+                    tokio::task::yield_now().await;
+                    ack_manager.find_server_invite_for_ack(&ack)
+                });
+                manager.send_response(&tx_id, response).await.expect("2xx");
+                let matched = acker.await.expect("ack task");
+                if matched.is_none() {
+                    let ack = stress_ack(&call_id);
+                    assert!(manager.find_server_invite_for_ack(&ack).is_some());
+                }
+            });
+        }
+        while let Some(result) = calls.join_next().await {
+            result.expect("call task");
+        }
+
+        let sent = count_sent_200(&transport).await;
+        assert_eq!(sent, CALLS);
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert_eq!(
+            count_sent_200(&transport).await,
+            CALLS,
+            "no 2xx may be retransmitted once its ACK was matched"
+        );
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn acked_invite_2xx_cache_stops_proactive_retransmit_but_serves_duplicates() -> Result<()>
     {

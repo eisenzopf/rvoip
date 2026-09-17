@@ -399,6 +399,7 @@ impl ServerNonInviteTransaction {
             request: Arc::new(request.clone()),
             last_response: Arc::new(Mutex::new(None)),
             final_response_wire_written: std::sync::atomic::AtomicBool::new(false),
+            invite_2xx_acked: std::sync::atomic::AtomicBool::new(false),
             final_response_supervision_state: std::sync::atomic::AtomicU64::new(0),
             final_response_supervision_notify: tokio::sync::Notify::new(),
             remote_addr,
