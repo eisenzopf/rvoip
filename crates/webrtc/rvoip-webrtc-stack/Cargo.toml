@@ -232,7 +232,7 @@ version = "3.5.2"
 workspace = true
 
 [dev-dependencies.hyper]
-version = "0.14.32"
+version = "1.11.0"
 features = ["full"]
 
 [dev-dependencies.rand]

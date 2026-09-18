@@ -192,7 +192,7 @@ version = "=0.20.0-alpha.1"
 package = "rtc-media"
 
 [dependencies.pem]
-version = "3"
+version = "4"
 optional = true
 
 [dependencies.rand]
@@ -280,4 +280,4 @@ version = "1.49.0"
 features = ["full"]
 
 [dev-dependencies.webrtc]
-version = "0.14.0"
+version = "0.17.2"
