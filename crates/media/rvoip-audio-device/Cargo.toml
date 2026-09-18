@@ -23,4 +23,4 @@ rvoip-sip = { workspace = true }
 tokio     = { workspace = true }
 log       = { workspace = true }
 anyhow    = { workspace = true }
-cpal      = "0.15"
+cpal      = "0.18"
