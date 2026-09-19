@@ -10253,13 +10253,33 @@ impl Orchestrator {
         });
         self.supervise_cross_bridge_routes(bridge_id.clone(), media_statuses, data_terminal);
 
-        let (media_result, ()) = tokio::join!(old_handle.stop(), old_data_route.stop());
-        if let Err(error) = media_result {
+        // There must be no suspension point between publishing the committed
+        // generation and returning its receipt. A caller may cancel any
+        // future at an `.await`; if retired-route cleanup were awaited here,
+        // cancellation could hide a successful cutover and invite the caller
+        // to roll domain state back to a bridge that is already retired.
+        // Retired resources converge under the bounded lifecycle supervisor.
+        let previous_bridge_id = expected_bridge_id.clone();
+        let replacement_bridge_id = bridge_id.clone();
+        let cleanup_spawned = self.connection_lifecycle_tasks.spawn(async move {
+            let (media_result, ()) = tokio::join!(old_handle.stop(), old_data_route.stop());
+            if let Err(error) = media_result {
+                warn!(
+                    previous_bridge_id = %previous_bridge_id,
+                    new_bridge_id = %replacement_bridge_id,
+                    %error,
+                    "replacement committed but the retired bridge did not converge cleanly"
+                );
+            }
+        });
+        if !cleanup_spawned {
+            // Dropping the rejected cleanup future synchronously drops both
+            // owners. Their Drop implementations disable/remove media routes
+            // and abort data workers as the fail-closed fallback.
             warn!(
                 previous_bridge_id = %expected_bridge_id,
                 new_bridge_id = %bridge_id,
-                %error,
-                "replacement committed but the retired bridge did not converge cleanly"
+                "replacement committed while retired bridge cleanup admission was closed"
             );
         }
 

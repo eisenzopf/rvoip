@@ -21,9 +21,13 @@ media work. `InProcessAiAdapter::echo` is a deterministic smoke-test factory.
 bounded acknowledgement. Holding does not cancel or recreate the provider
 session, so provider and dialogue state remain attached to the stable AI
 connection. Media observed while held is discarded as real-time data instead
-of being replayed after resume. `end` is idempotent for a bounded history of
-completed connection IDs. `resource_snapshot` exposes only aggregate live
-route, active/held session, and running task counts for leak checks.
+of being replayed after resume. Providers can use
+`InProcessAiMedia::subscribe_lifecycle` to cooperatively pause or cancel an
+in-flight ASR, LLM, or TTS operation; the adapter cannot preempt opaque vendor
+futures, but their media remains fenced. `end` is idempotent for a bounded
+history of completed connection IDs. `resource_snapshot` exposes only
+aggregate live route, active/held session, session-task, and media-task counts
+for leak checks.
 
 ```rust,no_run
 use std::sync::Arc;

@@ -953,6 +953,70 @@ async fn bridge_destination_replacement_cuts_media_over_and_fences_stale_generat
         .expect("remove replacement bridge");
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn committed_bridge_replacement_returns_before_retired_cleanup_can_be_cancelled() {
+    let (
+        orch,
+        ingress_stream,
+        _current_stream,
+        replacement_stream,
+        ingress,
+        current_destination,
+        replacement_destination,
+    ) = setup_cross_transport_replacement_orchestrator().await;
+    let mut replacement_out = replacement_stream.take_external_out();
+    let original_bridge = orch
+        .bridge_connections(ingress.clone(), current_destination.clone())
+        .await
+        .expect("initial bridge");
+    // Subscribe after the initial generation so the first relevant event is
+    // produced by replacement itself.
+    let mut events = orch.subscribe_events();
+    let replacement = orch.replace_bridge_destination(
+        original_bridge.clone(),
+        ingress.clone(),
+        current_destination,
+        replacement_destination,
+    );
+    tokio::pin!(replacement);
+
+    let receipt = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut replacement => break result.expect("replacement"),
+                event = events.recv() => {
+                    if matches!(
+                        event.expect("core event bus"),
+                        Event::ConnectionsUnbridged { bridge_id, .. }
+                            if bridge_id == original_bridge
+                    ) {
+                        panic!(
+                            "a committed replacement yielded before returning its generation receipt"
+                        );
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .expect("replacement did not return its commit receipt");
+
+    ingress_stream
+        .inject(mk_frame(ingress_stream.id(), 9))
+        .await;
+    let forwarded = tokio::time::timeout(Duration::from_secs(2), replacement_out.recv())
+        .await
+        .expect("replacement did not receive media")
+        .expect("replacement output closed");
+    assert_eq!(forwarded.payload[0], 9);
+
+    orch.unbridge_connections(receipt.bridge_id)
+        .await
+        .expect("remove replacement bridge");
+    orch.drain_connection_lifecycle_tasks().await;
+}
+
 #[tokio::test]
 async fn failed_bridge_destination_replacement_rolls_back_and_can_retry() {
     let (
