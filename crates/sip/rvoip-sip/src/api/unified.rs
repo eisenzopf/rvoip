@@ -10009,7 +10009,10 @@ impl UnifiedCoordinator {
         self.release_after_observed_terminal_exact(&handle).await;
     }
 
-    async fn release_after_observed_terminal_exact(&self, handle: &SessionRegistryHandle) {
+    pub(crate) async fn release_after_observed_terminal_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) {
         let session_id = handle.session_id();
         let release_guard = crate::cleanup_diag::stage_guard(
             crate::cleanup_diag::CleanupStage::TerminalRelease,
