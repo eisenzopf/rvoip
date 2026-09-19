@@ -23,6 +23,20 @@ pub mod frame_pump;
 
 pub use cross_handle::CrossBridgeHandle;
 
+/// Result of atomically replacing one bridge endpoint.
+///
+/// A fresh `bridge_id` is the committed destination generation. Callers must
+/// use it for any later replacement; replaying `previous_bridge_id` fails
+/// closed and cannot alter the newer bridge.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BridgeDestinationReplacement {
+    pub previous_bridge_id: BridgeId,
+    pub bridge_id: BridgeId,
+    pub ingress: ConnectionId,
+    pub previous_destination: ConnectionId,
+    pub destination: ConnectionId,
+}
+
 /// Enabled media directions for one two-Connection bridge.
 ///
 /// The names are relative to the exact `a` and `b` Connection arguments. A

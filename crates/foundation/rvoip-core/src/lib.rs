@@ -151,7 +151,10 @@ pub use adapter::{
     MAX_EXTERNAL_REFERENCE_KIND_BYTES, MAX_EXTERNAL_REFERENCE_VALUE_BYTES,
     MAX_INBOUND_ASSERTED_IDENTITY_BYTES, MAX_INBOUND_ROUTING_HINT_BYTES,
 };
-pub use bridge::{BridgeError, BridgeHandle, BridgeManager, DirectionalMediaBridgePlan};
+pub use bridge::{
+    BridgeDestinationReplacement, BridgeError, BridgeHandle, BridgeManager,
+    DirectionalMediaBridgePlan,
+};
 pub use broadcast::{
     BroadcastDescriptor, BroadcastDrainDescriptor, BroadcastDrainReason, BroadcastDrainRequest,
     BroadcastDrainState, BroadcastEndpoint, BroadcastHealthDescriptor, BroadcastHealthIssue,

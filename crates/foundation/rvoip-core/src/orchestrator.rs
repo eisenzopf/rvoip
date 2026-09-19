@@ -15,7 +15,10 @@ use crate::adapter::{
     InboundConnectionContext, OrchestratorAdapterEvent, OriginateRequest, PlaybackHandle,
     PlaybackOutcome, RejectReason, TransferAttemptId, TransferTarget,
 };
-use crate::bridge::{codec_to_pt, BridgeManager, CrossBridgeHandle, DirectionalMediaBridgePlan};
+use crate::bridge::{
+    codec_to_pt, BridgeDestinationReplacement, BridgeManager, CrossBridgeHandle,
+    DirectionalMediaBridgePlan,
+};
 use crate::capability::{CapabilityDescriptor, CapabilityIntersection};
 use crate::commands::{AudioSource, InboundAction, MuteDirection};
 use crate::config::Config;
@@ -901,6 +904,42 @@ impl Drop for BridgeReservation {
     }
 }
 
+/// Reserves only the pending destination while an existing bridge retains
+/// the ingress and current destination. The row is already the next bridge
+/// generation, so a competing bridge cannot attach the pending Connection.
+struct ReplacementDestinationReservation {
+    bridge_id: BridgeId,
+    destination: ConnectionId,
+    owners: Arc<DashMap<ConnectionId, BridgeId>>,
+    lock: Arc<Mutex<()>>,
+    committed: bool,
+}
+
+impl ReplacementDestinationReservation {
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for ReplacementDestinationReservation {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let owned_by_reservation = self
+            .owners
+            .get(&self.destination)
+            .is_some_and(|owner| owner.value() == &self.bridge_id);
+        if owned_by_reservation {
+            self.owners.remove(&self.destination);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BridgedDataTerminalReason {
     PolicyPanicked,
@@ -918,6 +957,7 @@ struct BridgedDataEnvelope {
 struct CrossBridgeDataRoute {
     a: ConnectionId,
     b: ConnectionId,
+    policy: Arc<dyn DataMessageBridgePolicy>,
     a_to_b: mpsc::Sender<BridgedDataEnvelope>,
     b_to_a: mpsc::Sender<BridgedDataEnvelope>,
     workers: Vec<tokio::task::JoinHandle<()>>,
@@ -944,12 +984,13 @@ impl CrossBridgeDataRoute {
         let b_to_a_worker = tokio::spawn(run_bridged_data_worker(
             b_to_a_rx,
             a_adapter,
-            policy,
+            Arc::clone(&policy),
             terminal_tx,
         ));
         Self {
             a,
             b,
+            policy,
             a_to_b,
             b_to_a,
             workers: vec![a_to_b_worker, b_to_a_worker],
@@ -959,6 +1000,10 @@ impl CrossBridgeDataRoute {
 
     fn terminal_status(&self) -> tokio::sync::watch::Receiver<Option<BridgedDataTerminalReason>> {
         self.terminal.clone()
+    }
+
+    fn policy(&self) -> Arc<dyn DataMessageBridgePolicy> {
+        Arc::clone(&self.policy)
     }
 
     fn try_forward(&self, source: &ConnectionId, message: DataMessage) {
@@ -1013,6 +1058,19 @@ impl Drop for CrossBridgeDataRoute {
         for worker in &self.workers {
             worker.abort();
         }
+    }
+}
+
+struct PreparedCrossBridge {
+    handle: CrossBridgeHandle,
+    data_route: CrossBridgeDataRoute,
+    media_statuses: Vec<MediaGraphRouteStatus>,
+    data_terminal: tokio::sync::watch::Receiver<Option<BridgedDataTerminalReason>>,
+}
+
+impl PreparedCrossBridge {
+    async fn stop(mut self) {
+        let (_media, ()) = tokio::join!(self.handle.stop(), self.data_route.stop());
     }
 }
 
@@ -4081,6 +4139,10 @@ impl Orchestrator {
     /// the bridged peer needs to inject the corresponding RFC 4733
     /// telephone-event packets onto its outbound RTP.
     fn bridge_peer_of(&self, conn: &ConnectionId) -> Option<ConnectionId> {
+        let _guard = self
+            .bridge_ownership_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let bridge_id = self
             .cross_bridge_owners
             .get(conn)
@@ -4101,6 +4163,10 @@ impl Orchestrator {
     /// bridge route that owns its source connection. This path performs no
     /// await and never invokes an application policy on adapter-event ingest.
     fn forward_bridged_data_message(&self, source: &ConnectionId, message: DataMessage) {
+        let _guard = self
+            .bridge_ownership_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(bridge_id) = self
             .cross_bridge_owners
             .get(source)
@@ -4141,6 +4207,57 @@ impl Orchestrator {
         })
     }
 
+    fn reserve_cross_bridge_replacement_destination(
+        &self,
+        expected_bridge_id: &BridgeId,
+        ingress: &ConnectionId,
+        expected_destination: &ConnectionId,
+        replacement_destination: ConnectionId,
+        replacement_bridge_id: BridgeId,
+    ) -> Result<ReplacementDestinationReservation> {
+        let _guard = self
+            .bridge_ownership_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let endpoints_match = self
+            .cross_bridges
+            .get(expected_bridge_id)
+            .is_some_and(|bridge| {
+                (&bridge.a == ingress && &bridge.b == expected_destination)
+                    || (&bridge.b == ingress && &bridge.a == expected_destination)
+            });
+        let ingress_owner_matches = self
+            .cross_bridge_owners
+            .get(ingress)
+            .is_some_and(|owner| owner.value() == expected_bridge_id);
+        let destination_owner_matches = self
+            .cross_bridge_owners
+            .get(expected_destination)
+            .is_some_and(|owner| owner.value() == expected_bridge_id);
+        if !endpoints_match || !ingress_owner_matches || !destination_owner_matches {
+            return Err(RvoipError::BridgeNotFound(expected_bridge_id.clone()));
+        }
+        if self
+            .cross_bridge_owners
+            .contains_key(&replacement_destination)
+        {
+            return Err(RvoipError::AdmissionRejected(
+                "replacement destination is already bridged",
+            ));
+        }
+        self.cross_bridge_owners.insert(
+            replacement_destination.clone(),
+            replacement_bridge_id.clone(),
+        );
+        Ok(ReplacementDestinationReservation {
+            bridge_id: replacement_bridge_id,
+            destination: replacement_destination,
+            owners: Arc::clone(&self.cross_bridge_owners),
+            lock: Arc::clone(&self.bridge_ownership_lock),
+            committed: false,
+        })
+    }
+
     fn release_cross_bridge_ownership(
         &self,
         bridge_id: &BridgeId,
@@ -4163,17 +4280,30 @@ impl Orchestrator {
     }
 
     async fn remove_cross_bridge_internal(&self, bridge_id: &BridgeId) -> Result<bool> {
-        let Some((_, mut handle)) = self.cross_bridges.remove(bridge_id) else {
-            if let Some((_, mut data_route)) = self.cross_bridge_data_routes.remove(bridge_id) {
+        let (handle, data_route) = {
+            let _guard = self
+                .bridge_ownership_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (
+                self.cross_bridges
+                    .remove(bridge_id)
+                    .map(|(_, handle)| handle),
+                self.cross_bridge_data_routes
+                    .remove(bridge_id)
+                    .map(|(_, route)| route),
+            )
+        };
+        let Some(mut handle) = handle else {
+            if let Some(mut data_route) = data_route {
                 data_route.stop().await;
             }
             return Ok(false);
         };
         let a = handle.a.clone();
         let b = handle.b.clone();
-        let data_route = self.cross_bridge_data_routes.remove(bridge_id);
         let (result, ()) = tokio::join!(handle.stop(), async move {
-            if let Some((_, mut data_route)) = data_route {
+            if let Some(mut data_route) = data_route {
                 data_route.stop().await;
             }
         });
@@ -4195,14 +4325,22 @@ impl Orchestrator {
             if !terminal.await {
                 return;
             }
-            let Some((_, mut handle)) = cross_bridges.remove(&bridge_id) else {
+            let (handle, data_route) = {
+                let _guard = ownership_lock
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                (
+                    cross_bridges.remove(&bridge_id).map(|(_, handle)| handle),
+                    data_routes.remove(&bridge_id).map(|(_, route)| route),
+                )
+            };
+            let Some(mut handle) = handle else {
                 return;
             };
             let a = handle.a.clone();
             let b = handle.b.clone();
-            let data_route = data_routes.remove(&bridge_id);
             let (result, ()) = tokio::join!(handle.stop(), async move {
-                if let Some((_, mut data_route)) = data_route {
+                if let Some(mut data_route) = data_route {
                     data_route.stop().await;
                 }
             });
@@ -9827,155 +9965,23 @@ impl Orchestrator {
                 "cannot bridge a connection to itself",
             ));
         }
-        let a_adapter = self.adapter_for(&a)?;
-        let b_adapter = self.adapter_for(&b)?;
         let lifecycle_tickets = self.capture_connection_lifecycles(&[a.clone(), b.clone()])?;
         let id = BridgeId::new();
         let reservation = self.reserve_cross_bridge(id.clone(), a.clone(), b.clone())?;
-
-        // Poll both adapters for an audio stream up to the configured
-        // deadline. Adapters create streams on connection.ready, so a
-        // bridge requested from Event::ConnectionInbound usually has to
-        // wait a handful of ms. 50ms polling interval is small enough
-        // to be inaudible at the call setup level and large enough not
-        // to spin.
-        let deadline = self.config.bridge_stream_deadline;
-        let poll_interval = std::time::Duration::from_millis(50);
-        let start = std::time::Instant::now();
-        let (a_audio, b_audio) = loop {
-            let a_streams = a_adapter.streams(a.clone()).await?;
-            let b_streams = b_adapter.streams(b.clone()).await?;
-            let a_audio = a_streams
-                .into_iter()
-                .find(|s| s.kind() == StreamKind::Audio);
-            let b_audio = b_streams
-                .into_iter()
-                .find(|s| s.kind() == StreamKind::Audio);
-            match (a_audio, b_audio) {
-                (Some(a_s), Some(b_s)) => break (a_s, b_s),
-                _ if start.elapsed() >= deadline => {
-                    return Err(RvoipError::AdmissionRejected(
-                        "no audio stream on one or both connections within deadline",
-                    ));
-                }
-                _ => {
-                    tokio::time::sleep(poll_interval).await;
-                }
-            }
-        };
-
-        // Resolve and validate the complete directional plan before either
-        // graph consumes a single-take source. Even a one-way route needs the
-        // source and destination codec identities, but it must validate only
-        // (and later acquire only) the sink/source halves that are enabled.
-        let a_codec = a_audio.codec();
-        let b_codec = b_audio.codec();
-        codec_to_pt(&a_codec.name)
-            .ok_or_else(|| RvoipError::UnsupportedCodec(a_codec.name.clone()))?;
-        codec_to_pt(&b_codec.name)
-            .ok_or_else(|| RvoipError::UnsupportedCodec(b_codec.name.clone()))?;
-
-        // Deferred transports such as SIP return a typed activation error
-        // here instead of consuming a source and later discovering that its
-        // peer sink cannot accept media.
-        let a_out = if media_plan.b_to_a() {
-            Some(a_audio.try_frames_out()?)
-        } else {
-            None
-        };
-        let b_out = if media_plan.a_to_b() {
-            Some(b_audio.try_frames_out()?)
-        } else {
-            None
-        };
-        if [a_out.as_ref(), b_out.as_ref()]
-            .into_iter()
-            .flatten()
-            .any(tokio::sync::mpsc::Sender::is_closed)
-        {
-            return Err(RvoipError::InvalidState(
-                "bridge media target is already closed",
-            ));
-        }
-
-        // A bidirectional bridge may need to create both source graphs. Take
-        // their per-connection initialization locks in stable ID order and
-        // reserve every missing receiver before committing either one. If the
-        // second source is unavailable, dropping the first reservation puts
-        // its receiver back instead of leaving a half-created graph behind.
-        let (a_source_graph, b_source_graph) = self
-            .media_graphs_for_directional_bridge(
+        let PreparedCrossBridge {
+            mut handle,
+            mut data_route,
+            media_statuses: statuses,
+            data_terminal,
+        } = self
+            .prepare_cross_bridge_for_commit(
+                id.clone(),
                 a.clone(),
-                Arc::clone(&a_audio),
                 b.clone(),
-                Arc::clone(&b_audio),
                 media_plan,
+                data_policy,
             )
             .await?;
-
-        let mut a_to_b = None;
-        if let Some(b_out) = b_out {
-            let a_graph =
-                a_source_graph.expect("validated A-to-B plan initializes the A source graph");
-            let route = a_graph.add_managed_sink(b_codec.clone(), b_out)?;
-            if route.wait_active().await.is_err() {
-                let _ = route.remove().await;
-                return Err(RvoipError::InvalidState(
-                    "A-to-B bridge route terminated during setup",
-                ));
-            }
-            a_to_b = Some((a_graph, route));
-        }
-
-        let mut b_to_a = None;
-        if let Some(a_out) = a_out {
-            let b_graph =
-                b_source_graph.expect("validated B-to-A plan initializes the B source graph");
-            let route = match b_graph.add_managed_sink(a_codec, a_out) {
-                Ok(route) => route,
-                Err(error) => {
-                    if let Some((_, route)) = a_to_b.take() {
-                        let _ = route.remove().await;
-                    }
-                    return Err(error);
-                }
-            };
-            if route.wait_active().await.is_err() {
-                let a_route = a_to_b.take().map(|(_, route)| route);
-                let (a_result, b_result) = tokio::join!(
-                    async move {
-                        match a_route {
-                            Some(route) => route.remove().await,
-                            None => Ok(false),
-                        }
-                    },
-                    route.remove()
-                );
-                let _ = (a_result, b_result);
-                return Err(RvoipError::InvalidState(
-                    "B-to-A bridge route terminated during setup",
-                ));
-            }
-            b_to_a = Some((b_graph, route));
-        }
-
-        let mut handle = CrossBridgeHandle::with_directional_managed_media_graphs(
-            id.clone(),
-            a.clone(),
-            b.clone(),
-            a_to_b,
-            b_to_a,
-        );
-        let statuses = handle.managed_media_route_statuses();
-        debug_assert!(!statuses.is_empty(), "validated bridge has a media route");
-        let mut data_route = CrossBridgeDataRoute::new(
-            a.clone(),
-            b.clone(),
-            Arc::clone(&a_adapter),
-            Arc::clone(&b_adapter),
-            data_policy,
-        );
-        let data_terminal = data_route.terminal_status();
         if let Err(error) = self.validate_connection_lifecycles(&lifecycle_tickets) {
             let (_media, ()) = tokio::join!(handle.stop(), data_route.stop());
             return Err(error);
@@ -10006,6 +10012,388 @@ impl Orchestrator {
         }
         self.supervise_cross_bridge_routes(id.clone(), statuses, data_terminal);
         Ok(id)
+    }
+
+    /// Replace one exact bridge destination while preserving the ingress
+    /// Connection and Session.
+    ///
+    /// The expected bridge ID is a generation fence. Core prepares and waits
+    /// for every new media route before one synchronous ownership commit
+    /// replaces the old bridge. The returned bridge ID is freshly minted and
+    /// must be supplied to a later replacement; replaying the old ID cannot
+    /// modify the new generation. The caller remains responsible for ending
+    /// the retired destination Connection after this method succeeds.
+    #[instrument(
+        skip(self),
+        fields(
+            expected_bridge_id = %expected_bridge_id,
+            ingress = %ingress,
+            expected_destination = %expected_destination,
+            replacement_destination = %replacement_destination
+        )
+    )]
+    pub async fn replace_bridge_destination(
+        &self,
+        expected_bridge_id: BridgeId,
+        ingress: ConnectionId,
+        expected_destination: ConnectionId,
+        replacement_destination: ConnectionId,
+    ) -> Result<BridgeDestinationReplacement> {
+        if ingress == expected_destination
+            || ingress == replacement_destination
+            || expected_destination == replacement_destination
+        {
+            return Err(RvoipError::AdmissionRejected(
+                "bridge replacement connections must be distinct",
+            ));
+        }
+
+        let (old_a, old_b, media_plan) = self
+            .cross_bridges
+            .get(&expected_bridge_id)
+            .map(|entry| -> Result<_> {
+                let handle = entry.value();
+                Ok((
+                    handle.a.clone(),
+                    handle.b.clone(),
+                    handle.directional_media_plan()?,
+                ))
+            })
+            .transpose()?
+            .ok_or_else(|| RvoipError::BridgeNotFound(expected_bridge_id.clone()))?;
+        let ingress_is_a = if old_a == ingress && old_b == expected_destination {
+            true
+        } else if old_b == ingress && old_a == expected_destination {
+            false
+        } else {
+            return Err(RvoipError::AdmissionRejected(
+                "bridge replacement endpoints do not match the expected generation",
+            ));
+        };
+        let data_policy = self
+            .cross_bridge_data_routes
+            .get(&expected_bridge_id)
+            .map(|route| route.policy())
+            .ok_or(RvoipError::InvalidState(
+                "bridge replacement requires its data route",
+            ))?;
+
+        match (
+            self.session_of(&ingress),
+            self.session_of(&expected_destination),
+            self.session_of(&replacement_destination),
+        ) {
+            (Some(ingress_session), Some(old_session), Some(replacement_session))
+                if ingress_session == old_session && ingress_session == replacement_session => {}
+            // Core has always allowed bridges between registry-only
+            // Connections. Preserve that low-level test/embedding surface,
+            // while rejecting any partial or cross-Session replacement.
+            (None, None, None) => {}
+            _ => {
+                return Err(RvoipError::AdmissionRejected(
+                    "bridge replacement connections must belong to one session",
+                ));
+            }
+        }
+        let lifecycle_tickets = self.capture_connection_lifecycles(&[
+            ingress.clone(),
+            expected_destination.clone(),
+            replacement_destination.clone(),
+        ])?;
+        let bridge_id = BridgeId::new();
+        let mut replacement_reservation = Some(self.reserve_cross_bridge_replacement_destination(
+            &expected_bridge_id,
+            &ingress,
+            &expected_destination,
+            replacement_destination.clone(),
+            bridge_id.clone(),
+        )?);
+        let (new_a, new_b) = if ingress_is_a {
+            (ingress.clone(), replacement_destination.clone())
+        } else {
+            (replacement_destination.clone(), ingress.clone())
+        };
+        let prepared = self
+            .prepare_cross_bridge_for_commit(
+                bridge_id.clone(),
+                new_a.clone(),
+                new_b.clone(),
+                media_plan,
+                data_policy,
+            )
+            .await?;
+
+        if let Err(error) = self.validate_connection_lifecycles(&lifecycle_tickets) {
+            prepared.stop().await;
+            return Err(error);
+        }
+
+        let PreparedCrossBridge {
+            handle,
+            data_route,
+            media_statuses,
+            data_terminal,
+        } = prepared;
+        let mut new_handle = Some(handle);
+        let mut new_data_route = Some(data_route);
+        let commit = match self.lock_connection_lifecycles(&lifecycle_tickets) {
+            Ok(lifecycle_guards) => {
+                let result = (|| -> Result<(CrossBridgeHandle, CrossBridgeDataRoute)> {
+                    let _ownership_guard = self
+                        .bridge_ownership_lock
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let generation_matches = self
+                        .cross_bridges
+                        .get(&expected_bridge_id)
+                        .is_some_and(|current| current.a == old_a && current.b == old_b);
+                    let ingress_owner_matches = self
+                        .cross_bridge_owners
+                        .get(&ingress)
+                        .is_some_and(|owner| owner.value() == &expected_bridge_id);
+                    let destination_owner_matches = self
+                        .cross_bridge_owners
+                        .get(&expected_destination)
+                        .is_some_and(|owner| owner.value() == &expected_bridge_id);
+                    if !generation_matches || !ingress_owner_matches || !destination_owner_matches {
+                        return Err(RvoipError::BridgeNotFound(expected_bridge_id.clone()));
+                    }
+                    let replacement_owner_matches = self
+                        .cross_bridge_owners
+                        .get(&replacement_destination)
+                        .is_some_and(|owner| owner.value() == &bridge_id);
+                    if !replacement_owner_matches {
+                        return Err(RvoipError::BridgeNotFound(expected_bridge_id.clone()));
+                    }
+                    if !self
+                        .cross_bridge_data_routes
+                        .contains_key(&expected_bridge_id)
+                    {
+                        return Err(RvoipError::InvalidState(
+                            "bridge data route ended during replacement",
+                        ));
+                    }
+
+                    let (_, old_handle) = self
+                        .cross_bridges
+                        .remove(&expected_bridge_id)
+                        .expect("bridge generation was checked under ownership lock");
+                    let (_, old_data_route) = self
+                        .cross_bridge_data_routes
+                        .remove(&expected_bridge_id)
+                        .expect("bridge data route was checked under ownership lock");
+                    self.cross_bridges.insert(
+                        bridge_id.clone(),
+                        new_handle
+                            .take()
+                            .expect("prepared bridge is consumed exactly once"),
+                    );
+                    self.cross_bridge_data_routes.insert(
+                        bridge_id.clone(),
+                        new_data_route
+                            .take()
+                            .expect("prepared data route is consumed exactly once"),
+                    );
+                    self.cross_bridge_owners
+                        .insert(ingress.clone(), bridge_id.clone());
+                    self.cross_bridge_owners.remove(&expected_destination);
+                    Ok((old_handle, old_data_route))
+                })();
+                drop(lifecycle_guards);
+                result
+            }
+            Err(error) => Err(error),
+        };
+
+        let (mut old_handle, mut old_data_route) = match commit {
+            Ok(old) => old,
+            Err(error) => {
+                if let (Some(mut handle), Some(mut data_route)) =
+                    (new_handle.take(), new_data_route.take())
+                {
+                    let (_media, ()) = tokio::join!(handle.stop(), data_route.stop());
+                }
+                return Err(error);
+            }
+        };
+        replacement_reservation
+            .take()
+            .expect("replacement destination reservation exists until commit")
+            .commit();
+
+        self.emit(Event::ConnectionsUnbridged {
+            bridge_id: expected_bridge_id.clone(),
+            at: Utc::now(),
+        });
+        self.emit(Event::ConnectionsBridged {
+            bridge_id: bridge_id.clone(),
+            a: new_a,
+            b: new_b,
+            at: Utc::now(),
+        });
+        self.supervise_cross_bridge_routes(bridge_id.clone(), media_statuses, data_terminal);
+
+        let (media_result, ()) = tokio::join!(old_handle.stop(), old_data_route.stop());
+        if let Err(error) = media_result {
+            warn!(
+                previous_bridge_id = %expected_bridge_id,
+                new_bridge_id = %bridge_id,
+                %error,
+                "replacement committed but the retired bridge did not converge cleanly"
+            );
+        }
+
+        Ok(BridgeDestinationReplacement {
+            previous_bridge_id: expected_bridge_id,
+            bridge_id,
+            ingress,
+            previous_destination: expected_destination,
+            destination: replacement_destination,
+        })
+    }
+
+    /// Prepare active media and bounded data routes without publishing them
+    /// into the bridge registry. Callers must lifecycle-check and commit the
+    /// returned bundle or stop it on every error path.
+    async fn prepare_cross_bridge_for_commit(
+        &self,
+        id: BridgeId,
+        a: ConnectionId,
+        b: ConnectionId,
+        media_plan: DirectionalMediaBridgePlan,
+        data_policy: Arc<dyn DataMessageBridgePolicy>,
+    ) -> Result<PreparedCrossBridge> {
+        let a_adapter = self.adapter_for(&a)?;
+        let b_adapter = self.adapter_for(&b)?;
+        let deadline = self.config.bridge_stream_deadline;
+        let poll_interval = std::time::Duration::from_millis(50);
+        let start = std::time::Instant::now();
+        let (a_audio, b_audio) = loop {
+            let a_streams = a_adapter.streams(a.clone()).await?;
+            let b_streams = b_adapter.streams(b.clone()).await?;
+            let a_audio = a_streams
+                .into_iter()
+                .find(|stream| stream.kind() == StreamKind::Audio);
+            let b_audio = b_streams
+                .into_iter()
+                .find(|stream| stream.kind() == StreamKind::Audio);
+            match (a_audio, b_audio) {
+                (Some(a_stream), Some(b_stream)) => break (a_stream, b_stream),
+                _ if start.elapsed() >= deadline => {
+                    return Err(RvoipError::AdmissionRejected(
+                        "no audio stream on one or both connections within deadline",
+                    ));
+                }
+                _ => tokio::time::sleep(poll_interval).await,
+            }
+        };
+
+        let a_codec = a_audio.codec();
+        let b_codec = b_audio.codec();
+        codec_to_pt(&a_codec.name)
+            .ok_or_else(|| RvoipError::UnsupportedCodec(a_codec.name.clone()))?;
+        codec_to_pt(&b_codec.name)
+            .ok_or_else(|| RvoipError::UnsupportedCodec(b_codec.name.clone()))?;
+        let a_out = if media_plan.b_to_a() {
+            Some(a_audio.try_frames_out()?)
+        } else {
+            None
+        };
+        let b_out = if media_plan.a_to_b() {
+            Some(b_audio.try_frames_out()?)
+        } else {
+            None
+        };
+        if [a_out.as_ref(), b_out.as_ref()]
+            .into_iter()
+            .flatten()
+            .any(tokio::sync::mpsc::Sender::is_closed)
+        {
+            return Err(RvoipError::InvalidState(
+                "bridge media target is already closed",
+            ));
+        }
+
+        let (a_source_graph, b_source_graph) = self
+            .media_graphs_for_directional_bridge(
+                a.clone(),
+                Arc::clone(&a_audio),
+                b.clone(),
+                Arc::clone(&b_audio),
+                media_plan,
+            )
+            .await?;
+        let mut a_to_b = None;
+        if let Some(b_out) = b_out {
+            let graph =
+                a_source_graph.expect("validated A-to-B plan initializes the A source graph");
+            let route = graph.add_managed_sink(b_codec.clone(), b_out)?;
+            if route.wait_active().await.is_err() {
+                let _ = route.remove().await;
+                return Err(RvoipError::InvalidState(
+                    "A-to-B bridge route terminated during setup",
+                ));
+            }
+            a_to_b = Some((graph, route));
+        }
+        let mut b_to_a = None;
+        if let Some(a_out) = a_out {
+            let graph =
+                b_source_graph.expect("validated B-to-A plan initializes the B source graph");
+            let route = match graph.add_managed_sink(a_codec, a_out) {
+                Ok(route) => route,
+                Err(error) => {
+                    if let Some((_, route)) = a_to_b.take() {
+                        let _ = route.remove().await;
+                    }
+                    return Err(error);
+                }
+            };
+            if route.wait_active().await.is_err() {
+                let a_route = a_to_b.take().map(|(_, route)| route);
+                let (a_result, b_result) = tokio::join!(
+                    async move {
+                        match a_route {
+                            Some(route) => route.remove().await,
+                            None => Ok(false),
+                        }
+                    },
+                    route.remove()
+                );
+                let _ = (a_result, b_result);
+                return Err(RvoipError::InvalidState(
+                    "B-to-A bridge route terminated during setup",
+                ));
+            }
+            b_to_a = Some((graph, route));
+        }
+
+        let handle = CrossBridgeHandle::with_directional_managed_media_graphs(
+            id,
+            a.clone(),
+            b.clone(),
+            a_to_b,
+            b_to_a,
+        );
+        let media_statuses = handle.managed_media_route_statuses();
+        debug_assert!(
+            !media_statuses.is_empty(),
+            "validated bridge has a media route"
+        );
+        let data_route = CrossBridgeDataRoute::new(
+            a,
+            b,
+            Arc::clone(&a_adapter),
+            Arc::clone(&b_adapter),
+            data_policy,
+        );
+        let data_terminal = data_route.terminal_status();
+        Ok(PreparedCrossBridge {
+            handle,
+            data_route,
+            media_statuses,
+            data_terminal,
+        })
     }
 
     async fn media_graphs_for_directional_bridge(

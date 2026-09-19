@@ -1,8 +1,7 @@
 [package]
 name = "rvoip-harness"
-# Alpha-tier but DOES publish — rvoip-core lists rvoip-harness as an
-# optional runtime dep (harness feature), so cargo verifies this version
-# exists on crates.io even when the feature isn't activated.
+# Alpha-tier but DOES publish. Provider traits remain in rvoip-core-traits;
+# this concrete adapter crate may depend on rvoip-core without a cycle.
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,16 +12,17 @@ authors.workspace = true
 rust-version.workspace = true
 categories.workspace = true
 keywords.workspace = true
-description = "Pluggable provider trait surfaces for ASR, TTS, DialogManager, RecordingSink — consumed by rvoip-core for the AI / recording harness."
+description = "In-process AI ConnectionAdapter and pluggable voice-provider traits for rvoip"
 
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true
-# V2.A — depend on the trait-only crate so rvoip-core can take an
-# optional `rvoip-harness` dep behind the `harness` feature without
-# cycling.
+chrono.workspace = true
+dashmap.workspace = true
+rvoip-core.workspace = true
 rvoip-core-traits.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 
 [lints]
 workspace = true

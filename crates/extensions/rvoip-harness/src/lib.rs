@@ -1,9 +1,10 @@
 //! # rvoip-harness
 //!
 //! Re-exports the provider trait surface defined in
-//! [`rvoip_core_traits::harness`] (post-V2.A) and supplies no-op
-//! default implementations useful for tests + harness-disabled
-//! builds.
+//! [`rvoip_core_traits::harness`], supplies no-op defaults, and provides the
+//! [`InProcessAiAdapter`]. The adapter makes an AI runtime a normal
+//! `Transport::InProcessAi` Connection, so SIP, WebRTC, and other ingress
+//! transports all reach it through the same rvoip-core MediaGraph bridge.
 //!
 //! Per `rvoip-core/INTERFACE_DESIGN.md` §2.1 the trait shapes live in
 //! `rvoip-core-traits` (so both the Orchestrator and external
@@ -11,6 +12,13 @@
 //! provider crates depend on this re-export crate.
 
 pub use rvoip_core_traits::harness::*;
+
+mod in_process;
+
+pub use in_process::{
+    EchoAiSessionFactory, InProcessAiAdapter, InProcessAiConfig, InProcessAiMedia,
+    InProcessAiSession, InProcessAiSessionFactory, InProcessAiSessionRequest,
+};
 
 use async_trait::async_trait;
 use rvoip_core_traits::error::Result;

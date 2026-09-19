@@ -688,6 +688,67 @@ async fn setup_amazon_connect_bridge_orchestrator() -> (
     )
 }
 
+/// Build one Session whose ingress, current service destination, and
+/// replacement service destination are owned by three different adapters.
+/// This mirrors the SIP -> WebRTC -> in-process-AI handoff that exercises
+/// destination replacement in production without requiring live transports.
+async fn setup_cross_transport_replacement_orchestrator() -> (
+    Arc<Orchestrator>,
+    Arc<MockMediaStream>,
+    Arc<MockMediaStream>,
+    Arc<MockMediaStream>,
+    ConnectionId,
+    ConnectionId,
+    ConnectionId,
+) {
+    let sip_adapter = MockAdapter::new(Transport::Sip);
+    let webrtc_adapter = MockAdapter::new(Transport::WebRtc);
+    let ai_adapter = MockAdapter::new(Transport::InProcessAi);
+    let ingress = ConnectionId::new();
+    let current_destination = ConnectionId::new();
+    let replacement_destination = ConnectionId::new();
+    let ingress_stream = MockMediaStream::new(DEFAULT_TEST_CODEC);
+    let current_stream = MockMediaStream::new(DEFAULT_TEST_CODEC);
+    let replacement_stream = MockMediaStream::new(DEFAULT_TEST_CODEC);
+    sip_adapter.register_connection(ingress.clone(), Arc::clone(&ingress_stream));
+    webrtc_adapter.register_connection(current_destination.clone(), Arc::clone(&current_stream));
+    ai_adapter.register_connection(
+        replacement_destination.clone(),
+        Arc::clone(&replacement_stream),
+    );
+
+    let orchestrator = Orchestrator::new(Config::default());
+    orchestrator
+        .register(sip_adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .expect("register SIP adapter");
+    orchestrator
+        .register(webrtc_adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .expect("register WebRTC adapter");
+    orchestrator
+        .register(ai_adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .expect("register in-process AI adapter");
+
+    let session = SessionId::new();
+    sip_adapter.announce(ingress.clone(), session.clone()).await;
+    webrtc_adapter
+        .announce(current_destination.clone(), session.clone())
+        .await;
+    ai_adapter
+        .announce(replacement_destination.clone(), session)
+        .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    (
+        orchestrator,
+        ingress_stream,
+        current_stream,
+        replacement_stream,
+        ingress,
+        current_destination,
+        replacement_destination,
+    )
+}
+
 async fn wait_for_data_message_count(adapter: &MockAdapter, expected: usize) {
     tokio::time::timeout(Duration::from_secs(2), async {
         while adapter.sent_data_messages().len() < expected {
@@ -798,6 +859,153 @@ async fn bridge_passes_frames_through_when_codecs_match() {
         received.push(frame.payload[0]);
     }
     assert_eq!(received, (0u8..5).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn bridge_destination_replacement_cuts_media_over_and_fences_stale_generation() {
+    let (
+        orch,
+        ingress_stream,
+        current_stream,
+        replacement_stream,
+        ingress,
+        current_destination,
+        replacement_destination,
+    ) = setup_cross_transport_replacement_orchestrator().await;
+    let mut ingress_out = ingress_stream.take_external_out();
+    let mut current_out = current_stream.take_external_out();
+    let mut replacement_out = replacement_stream.take_external_out();
+    let original_bridge = orch
+        .bridge_connections(ingress.clone(), current_destination.clone())
+        .await
+        .expect("initial SIP-to-WebRTC bridge");
+
+    ingress_stream
+        .inject(mk_frame(ingress_stream.id(), 1))
+        .await;
+    let before_cutover = tokio::time::timeout(Duration::from_secs(2), current_out.recv())
+        .await
+        .expect("current destination did not receive pre-cutover media")
+        .expect("current destination output closed");
+    assert_eq!(before_cutover.payload[0], 1);
+
+    let replacement = orch
+        .replace_bridge_destination(
+            original_bridge.clone(),
+            ingress.clone(),
+            current_destination.clone(),
+            replacement_destination.clone(),
+        )
+        .await
+        .expect("replace WebRTC destination with in-process AI");
+    assert_ne!(replacement.bridge_id, original_bridge);
+    assert_eq!(replacement.previous_bridge_id, original_bridge);
+    assert_eq!(replacement.ingress, ingress);
+    assert_eq!(replacement.previous_destination, current_destination);
+    assert_eq!(replacement.destination, replacement_destination);
+
+    ingress_stream
+        .inject(mk_frame(ingress_stream.id(), 2))
+        .await;
+    let after_cutover = tokio::time::timeout(Duration::from_secs(2), replacement_out.recv())
+        .await
+        .expect("replacement destination did not receive post-cutover media")
+        .expect("replacement destination output closed");
+    assert_eq!(after_cutover.payload[0], 2);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), current_out.recv())
+            .await
+            .is_err(),
+        "retired destination continued receiving ingress media"
+    );
+
+    replacement_stream
+        .inject(mk_frame(replacement_stream.id(), 3))
+        .await;
+    let reverse = tokio::time::timeout(Duration::from_secs(2), ingress_out.recv())
+        .await
+        .expect("ingress did not receive replacement return media")
+        .expect("ingress output closed");
+    assert_eq!(reverse.payload[0], 3);
+
+    assert!(matches!(
+        orch.replace_bridge_destination(
+            original_bridge.clone(),
+            ingress.clone(),
+            current_destination,
+            replacement_destination.clone(),
+        )
+        .await,
+        Err(RvoipError::BridgeNotFound(id)) if id == original_bridge
+    ));
+
+    ingress_stream
+        .inject(mk_frame(ingress_stream.id(), 4))
+        .await;
+    let after_stale_attempt = tokio::time::timeout(Duration::from_secs(2), replacement_out.recv())
+        .await
+        .expect("stale replacement disturbed the committed bridge")
+        .expect("replacement destination output closed");
+    assert_eq!(after_stale_attempt.payload[0], 4);
+
+    orch.unbridge_connections(replacement.bridge_id)
+        .await
+        .expect("remove replacement bridge");
+}
+
+#[tokio::test]
+async fn failed_bridge_destination_replacement_rolls_back_and_can_retry() {
+    let (
+        orch,
+        ingress_stream,
+        current_stream,
+        replacement_stream,
+        ingress,
+        current_destination,
+        replacement_destination,
+    ) = setup_cross_transport_replacement_orchestrator().await;
+    let mut current_out = current_stream.take_external_out();
+    replacement_stream.set_writable(false);
+    let original_bridge = orch
+        .bridge_connections(ingress.clone(), current_destination.clone())
+        .await
+        .expect("initial bridge");
+
+    assert!(matches!(
+        orch.replace_bridge_destination(
+            original_bridge.clone(),
+            ingress.clone(),
+            current_destination.clone(),
+            replacement_destination.clone(),
+        )
+        .await,
+        Err(RvoipError::InvalidState(
+            "mock media stream is not activated"
+        ))
+    ));
+
+    ingress_stream
+        .inject(mk_frame(ingress_stream.id(), 5))
+        .await;
+    let retained = tokio::time::timeout(Duration::from_secs(2), current_out.recv())
+        .await
+        .expect("failed replacement disturbed the original bridge")
+        .expect("current destination output closed");
+    assert_eq!(retained.payload[0], 5);
+
+    replacement_stream.set_writable(true);
+    let replacement = orch
+        .replace_bridge_destination(
+            original_bridge,
+            ingress,
+            current_destination,
+            replacement_destination,
+        )
+        .await
+        .expect("failed preflight must release replacement reservation");
+    orch.unbridge_connections(replacement.bridge_id)
+        .await
+        .expect("remove retried replacement bridge");
 }
 
 #[cfg(feature = "opus")]

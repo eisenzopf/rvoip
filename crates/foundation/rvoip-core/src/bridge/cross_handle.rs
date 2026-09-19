@@ -18,6 +18,7 @@ use tokio::task::AbortHandle;
 
 use super::frame_pump::TranscoderSwap;
 use super::resolve_payload_type;
+use super::DirectionalMediaBridgePlan;
 use crate::capability::CodecInfo;
 use crate::error::{Result, RvoipError};
 use crate::ids::{BridgeId, ConnectionId, MediaRouteId};
@@ -303,6 +304,17 @@ impl CrossBridgeHandle {
             .into_iter()
             .filter_map(|route| route.as_ref().map(ManagedMediaRoute::status))
             .collect()
+    }
+
+    /// Recover the exact directional plan for a managed graph bridge so a
+    /// destination replacement preserves which side is allowed to send.
+    pub(crate) fn directional_media_plan(&self) -> Result<DirectionalMediaBridgePlan> {
+        let CrossBridgeBackend::ManagedMediaGraphs { a_to_b, b_to_a, .. } = &self.backend else {
+            return Err(RvoipError::NotImplemented(
+                "bridge destination replacement requires a managed media-graph bridge",
+            ));
+        };
+        DirectionalMediaBridgePlan::new(a_to_b.is_some(), b_to_a.is_some())
     }
 
     /// Capture the swap channels or graph route IDs without retaining a
