@@ -604,6 +604,29 @@ pub struct MediaGraphHandle {
     sink_admission: Arc<SinkAdmissionState>,
 }
 
+struct MediaGraphShutdownGuard {
+    actor: AbortHandle,
+    armed: bool,
+}
+
+impl MediaGraphShutdownGuard {
+    fn new(actor: AbortHandle) -> Self {
+        Self { actor, armed: true }
+    }
+
+    fn complete(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for MediaGraphShutdownGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.actor.abort();
+        }
+    }
+}
+
 impl MediaGraphHandle {
     pub fn id(&self) -> &MediaGraphId {
         &self.graph_id
@@ -870,31 +893,75 @@ impl MediaGraphHandle {
     /// Request graceful shutdown and wait for both the graph actor and every
     /// sink-forwarding task to converge on a terminal state.
     pub async fn shutdown_and_wait(&self) -> Result<MediaGraphSourceState> {
+        self.shutdown_and_wait_with_timeout(SHUTDOWN_TIMEOUT).await
+    }
+
+    async fn shutdown_and_wait_with_timeout(
+        &self,
+        graceful_timeout: Duration,
+    ) -> Result<MediaGraphSourceState> {
         self.shutdown();
-        self.wait_closed().await
+        // If teardown itself is cancelled, the removed graph must not keep
+        // running without an owner. The terminal guard inside the actor
+        // publishes Aborted state and cancels every sink task.
+        let mut shutdown_guard = MediaGraphShutdownGuard::new(self.abort.clone());
+        match tokio::time::timeout(graceful_timeout, self.wait_closed_unbounded()).await {
+            Ok(result) => {
+                shutdown_guard.complete();
+                result
+            }
+            Err(_) => {
+                // The graph has already been removed from its orchestrator
+                // registry by teardown. Retaining a live actor here would
+                // orphan its source receiver and sink tasks, so force abort
+                // and own convergence before surfacing the failed graceful
+                // shutdown to the caller.
+                self.abort.abort();
+                let result = match tokio::time::timeout(
+                    SNAPSHOT_TIMEOUT,
+                    self.wait_closed_unbounded(),
+                )
+                .await
+                {
+                    Ok(Ok(_)) => Err(RvoipError::InvalidState(
+                        "media graph shutdown timed out; actor was aborted",
+                    )),
+                    Ok(Err(_)) => Err(RvoipError::InvalidState(
+                        "media graph shutdown timed out; abort completion was dropped",
+                    )),
+                    Err(_) => Err(RvoipError::InvalidState(
+                        "media graph shutdown timed out; actor abort did not converge",
+                    )),
+                };
+                shutdown_guard.complete();
+                result
+            }
+        }
     }
 
     /// Wait for graph and sink-task convergence without initiating shutdown.
     pub async fn wait_closed(&self) -> Result<MediaGraphSourceState> {
+        tokio::time::timeout(SHUTDOWN_TIMEOUT, self.wait_closed_unbounded())
+            .await
+            .map_err(|_| RvoipError::InvalidState("media graph shutdown timed out"))?
+    }
+
+    async fn wait_closed_unbounded(&self) -> Result<MediaGraphSourceState> {
         let mut completion = self.completion.clone();
         let actor = self.abort.clone();
-        tokio::time::timeout(SHUTDOWN_TIMEOUT, async move {
-            let state = loop {
-                if let Some(state) = *completion.borrow() {
-                    break state;
-                }
-                completion
-                    .changed()
-                    .await
-                    .map_err(|_| RvoipError::InvalidState("media graph completion was dropped"))?;
-            };
-            while !actor.is_finished() {
-                tokio::task::yield_now().await;
+        let state = loop {
+            if let Some(state) = *completion.borrow() {
+                break state;
             }
-            Ok(state)
-        })
-        .await
-        .map_err(|_| RvoipError::InvalidState("media graph shutdown timed out"))?
+            completion
+                .changed()
+                .await
+                .map_err(|_| RvoipError::InvalidState("media graph completion was dropped"))?;
+        };
+        while !actor.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        Ok(state)
     }
 
     pub fn abort_handle(&self) -> AbortHandle {
@@ -3958,6 +4025,29 @@ mod tests {
         assert_eq!(snapshot.source_state, MediaGraphSourceState::Aborted);
         assert!(snapshot.sinks.is_empty());
         assert!(snapshot.codec_groups.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn graceful_shutdown_timeout_force_aborts_and_owns_actor_completion() {
+        let (_source_tx, source_rx) = mpsc::channel(1);
+        let graph = start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap();
+        let (target_tx, mut target_rx) = mpsc::channel(1);
+        graph.add_sink(codec("pcmu", 8_000), target_tx).unwrap();
+
+        let error = graph
+            .shutdown_and_wait_with_timeout(Duration::ZERO)
+            .await
+            .expect_err("zero graceful deadline must force the abort fallback");
+        assert!(matches!(
+            error,
+            RvoipError::InvalidState("media graph shutdown timed out; actor was aborted")
+        ));
+        assert!(graph.abort_handle().is_finished());
+        assert!(target_rx.recv().await.is_none());
+        assert_eq!(
+            graph.latest_snapshot().source_state,
+            MediaGraphSourceState::Aborted
+        );
     }
 
     #[tokio::test]

@@ -4,8 +4,10 @@
 //! Uses an inline `MockAdapter` + `MockMediaStream` so the test is
 //! self-contained — no SIP / QUIC / WebSocket setup needed.
 
+use std::future::{poll_fn, Future};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::task::Poll;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -1997,6 +1999,38 @@ async fn unbridge_aborts_pumps_and_emits_event() {
     assert!(saw, "expected Event::ConnectionsUnbridged within 3s");
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn cancelled_unbridge_releases_ownership_before_cleanup_awaits() {
+    let (orch, _stream_a, _stream_b, conn_a, conn_b) =
+        setup_two_connection_orchestrator(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC).await;
+    let first = orch
+        .bridge_connections(conn_a.clone(), conn_b.clone())
+        .await
+        .expect("first bridge");
+    let mut unbridge = Box::pin(orch.unbridge_connections(first));
+
+    // Poll exactly once. Managed route removal has queued actor work and is
+    // pending on its acknowledgement, so dropping here models cancellation at
+    // the first cleanup await after the synchronous detach commit.
+    poll_fn(|context| {
+        assert!(
+            unbridge.as_mut().poll(context).is_pending(),
+            "managed bridge cleanup unexpectedly completed in one poll"
+        );
+        Poll::Ready(())
+    })
+    .await;
+    drop(unbridge);
+
+    let second = orch
+        .bridge_connections(conn_a, conn_b)
+        .await
+        .expect("cancelled cleanup must not strand endpoint ownership");
+    orch.unbridge_connections(second)
+        .await
+        .expect("remove replacement bridge");
+}
+
 #[tokio::test]
 async fn full_media_target_is_bounded_and_never_backpressures_the_source() {
     let (orch, stream_a, stream_b, conn_a, conn_b) =
@@ -2083,6 +2117,73 @@ async fn terminal_bridge_route_removes_owner_and_allows_rebridge() {
     orch.unbridge_connections(second)
         .await
         .expect("remove replacement bridge");
+}
+
+#[tokio::test]
+async fn lifecycle_drain_aborts_and_joins_cross_bridge_terminal_supervisor() {
+    let (orch, _stream_a, _stream_b, conn_a, conn_b) =
+        setup_two_connection_orchestrator(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC).await;
+    let baseline = orch.connection_lifecycle_task_count();
+    let bridge = orch
+        .bridge_connections(conn_a.clone(), conn_b.clone())
+        .await
+        .expect("bridge");
+    assert_eq!(
+        orch.connection_lifecycle_task_count(),
+        baseline + 1,
+        "one combined terminal supervisor must be owned per bridge"
+    );
+
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        orch.drain_connection_lifecycle_tasks(),
+    )
+    .await
+    .expect("lifecycle supervisor drain");
+    assert_eq!(orch.connection_lifecycle_task_count(), 0);
+    assert!(matches!(
+        orch.bridge_connections(conn_a, conn_b).await,
+        Err(RvoipError::InvalidState(
+            "connection lifecycle supervisor is draining"
+        ))
+    ));
+    orch.unbridge_connections(bridge)
+        .await
+        .expect("explicitly remove bridge after terminal watcher drain");
+}
+
+#[tokio::test]
+async fn lifecycle_drain_rejects_bridge_destination_replacement() {
+    let (
+        orch,
+        _ingress_stream,
+        _current_stream,
+        _replacement_stream,
+        ingress,
+        current_destination,
+        replacement_destination,
+    ) = setup_cross_transport_replacement_orchestrator().await;
+    let bridge = orch
+        .bridge_connections(ingress.clone(), current_destination.clone())
+        .await
+        .expect("initial bridge");
+
+    orch.drain_connection_lifecycle_tasks().await;
+    assert!(matches!(
+        orch.replace_bridge_destination(
+            bridge.clone(),
+            ingress,
+            current_destination,
+            replacement_destination,
+        )
+        .await,
+        Err(RvoipError::InvalidState(
+            "connection lifecycle supervisor is draining"
+        ))
+    ));
+    orch.unbridge_connections(bridge)
+        .await
+        .expect("explicitly remove bridge after rejected replacement");
 }
 
 #[tokio::test]
