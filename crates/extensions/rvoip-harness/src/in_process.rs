@@ -465,7 +465,10 @@ impl ConnectionAdapter for InProcessAiAdapter {
     fn lifecycle_capabilities(&self) -> AdapterLifecycleCapabilities {
         AdapterLifecycleCapabilities {
             authoritative_liveness: true,
-            atomic_inbound_handoff: false,
+            // This adapter is outbound-only. It can never publish an inbound
+            // connection, so the atomic inbound contract is satisfied
+            // vacuously and it is safe to compose with a fail-closed gate.
+            atomic_inbound_handoff: true,
             terminal_fallback: true,
             staged_outbound_activation: true,
         }
@@ -824,6 +827,23 @@ mod tests {
             config.capabilities(),
         )
         .with_transport(Transport::InProcessAi)
+    }
+
+    #[tokio::test]
+    async fn outbound_only_adapter_composes_with_fail_closed_ingress() {
+        let orchestrator = Orchestrator::new(Config::default());
+        let _admissions = orchestrator
+            .install_inbound_admission_gate(1, Duration::from_secs(1))
+            .expect("install gate before adapters");
+        let adapter =
+            InProcessAiAdapter::echo(InProcessAiConfig::default()).expect("valid AI adapter");
+        assert!(adapter
+            .lifecycle_capabilities()
+            .supports_fail_closed_inbound());
+        orchestrator
+            .register(adapter as Arc<dyn ConnectionAdapter>)
+            .expect("outbound-only AI adapter should coexist with gated ingress");
+        orchestrator.drain_connection_lifecycle_tasks().await;
     }
 
     #[tokio::test]
