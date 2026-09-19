@@ -9980,6 +9980,7 @@ impl Orchestrator {
                 b.clone(),
                 media_plan,
                 data_policy,
+                true,
             )
             .await?;
         if let Err(error) = self.validate_connection_lifecycles(&lifecycle_tickets) {
@@ -10124,6 +10125,7 @@ impl Orchestrator {
                 new_b.clone(),
                 media_plan,
                 data_policy,
+                false,
             )
             .await?;
 
@@ -10281,6 +10283,7 @@ impl Orchestrator {
         b: ConnectionId,
         media_plan: DirectionalMediaBridgePlan,
         data_policy: Arc<dyn DataMessageBridgePolicy>,
+        buffer_before_commit: bool,
     ) -> Result<PreparedCrossBridge> {
         let a_adapter = self.adapter_for(&a)?;
         let b_adapter = self.adapter_for(&b)?;
@@ -10346,7 +10349,11 @@ impl Orchestrator {
         if let Some(b_out) = b_out {
             let graph =
                 a_source_graph.expect("validated A-to-B plan initializes the A source graph");
-            let route = graph.add_dormant_managed_sink(b_codec.clone(), b_out)?;
+            let route = if buffer_before_commit {
+                graph.add_buffering_dormant_managed_sink(b_codec.clone(), b_out)?
+            } else {
+                graph.add_dormant_managed_sink(b_codec.clone(), b_out)?
+            };
             if route.wait_active().await.is_err() {
                 let _ = route.remove().await;
                 return Err(RvoipError::InvalidState(
@@ -10359,7 +10366,11 @@ impl Orchestrator {
         if let Some(a_out) = a_out {
             let graph =
                 b_source_graph.expect("validated B-to-A plan initializes the B source graph");
-            let route = match graph.add_dormant_managed_sink(a_codec, a_out) {
+            let route = match if buffer_before_commit {
+                graph.add_buffering_dormant_managed_sink(a_codec, a_out)
+            } else {
+                graph.add_dormant_managed_sink(a_codec, a_out)
+            } {
                 Ok(route) => route,
                 Err(error) => {
                     if let Some((_, route)) = a_to_b.take() {

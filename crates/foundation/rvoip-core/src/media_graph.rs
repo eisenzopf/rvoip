@@ -498,14 +498,19 @@ impl RouteOwnerLiveness {
 /// replacement is promoted.
 struct RouteForwardingGate {
     enabled: AtomicBool,
+    buffer_while_disabled: bool,
     cutover: Mutex<()>,
+    activation: watch::Sender<bool>,
 }
 
 impl RouteForwardingGate {
-    fn new(enabled: bool) -> Self {
+    fn new(enabled: bool, buffer_while_disabled: bool) -> Self {
+        let (activation, _) = watch::channel(enabled);
         Self {
             enabled: AtomicBool::new(enabled),
+            buffer_while_disabled,
             cutover: Mutex::new(()),
+            activation,
         }
     }
 
@@ -519,6 +524,23 @@ impl RouteForwardingGate {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.enabled.store(enabled, Ordering::Release);
+        self.activation.send_replace(enabled);
+    }
+
+    fn accepts_while_disabled(&self) -> bool {
+        self.buffer_while_disabled
+    }
+
+    async fn wait_until_enabled(&self) {
+        if self.is_enabled() {
+            return;
+        }
+        let mut activation = self.activation.subscribe();
+        while !*activation.borrow_and_update() {
+            if activation.changed().await.is_err() {
+                return;
+            }
+        }
     }
 }
 
@@ -612,7 +634,7 @@ impl MediaGraphHandle {
         codec: CodecInfo,
         target: mpsc::Sender<MediaFrame>,
     ) -> Result<ManagedMediaRoute> {
-        self.add_managed_sink_with_forwarding(codec, target, true)
+        self.add_managed_sink_with_forwarding(codec, target, true, false)
     }
 
     /// Install and validate a managed sink while keeping it silent.
@@ -624,7 +646,24 @@ impl MediaGraphHandle {
         codec: CodecInfo,
         target: mpsc::Sender<MediaFrame>,
     ) -> Result<ManagedMediaRoute> {
-        self.add_managed_sink_with_forwarding(codec, target, false)
+        self.add_managed_sink_with_forwarding(codec, target, false, false)
+    }
+
+    /// Install a silent route that retains a bounded setup window until its
+    /// first activation.
+    ///
+    /// Initial bridges use this variant because a freshly activated source
+    /// may produce immediately after outbound connection activation. The
+    /// graph's existing bounded sink queue holds those frames until the bridge
+    /// ownership commit enables forwarding. Replacement candidates use
+    /// [`Self::add_dormant_managed_sink`] instead so pre-promotion media is
+    /// discarded and can never be replayed to the candidate.
+    pub(crate) fn add_buffering_dormant_managed_sink(
+        &self,
+        codec: CodecInfo,
+        target: mpsc::Sender<MediaFrame>,
+    ) -> Result<ManagedMediaRoute> {
+        self.add_managed_sink_with_forwarding(codec, target, false, true)
     }
 
     fn add_managed_sink_with_forwarding(
@@ -632,6 +671,7 @@ impl MediaGraphHandle {
         codec: CodecInfo,
         target: mpsc::Sender<MediaFrame>,
         forwarding_enabled: bool,
+        buffer_while_disabled: bool,
     ) -> Result<ManagedMediaRoute> {
         admit_codec(&codec)?;
         let Some(admission) = self.sink_admission.try_acquire() else {
@@ -647,7 +687,10 @@ impl MediaGraphHandle {
         let route_id = MediaRouteId::new();
         let (status_tx, status_rx) = watch::channel(MediaGraphRouteState::Pending);
         let owner_liveness = Arc::new(RouteOwnerLiveness::default());
-        let forwarding = Arc::new(RouteForwardingGate::new(forwarding_enabled));
+        let forwarding = Arc::new(RouteForwardingGate::new(
+            forwarding_enabled,
+            buffer_while_disabled,
+        ));
         self.route_statuses
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1868,6 +1911,9 @@ fn start_media_graph_with_activity_interval(
                             let event_tx = sink_event_tx.clone();
                             let task = tokio::spawn(async move {
                                 while let Some(frame) = queue_for_task.receive().await {
+                                    if forwarding_for_task.accepts_while_disabled() {
+                                        forwarding_for_task.wait_until_enabled().await;
+                                    }
                                     let permit = match target.reserve().await {
                                         Ok(permit) => permit,
                                         Err(_) => {
@@ -2497,7 +2543,7 @@ fn route_source_frame(
             let Some(sink) = sinks.get_mut(route_id) else {
                 continue;
             };
-            if !sink.forwarding.is_enabled() {
+            if !sink.forwarding.is_enabled() && !sink.forwarding.accepts_while_disabled() {
                 continue;
             }
             for produced in &grouped {
@@ -2976,6 +3022,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn initial_bridge_route_buffers_setup_media_until_commit() {
+        let (source_tx, source_rx) = mpsc::channel(4);
+        let graph = start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap();
+        let (target_tx, mut target_rx) = mpsc::channel(4);
+        let route = graph
+            .add_buffering_dormant_managed_sink(codec("pcmu", 8_000), target_tx)
+            .unwrap();
+        route.wait_active().await.unwrap();
+
+        source_tx.send(frame(1)).await.unwrap();
+        wait_until(|| graph.latest_snapshot().source_frames >= 1).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), target_rx.recv())
+                .await
+                .is_err(),
+            "an initial route forwarded before its bridge commit"
+        );
+
+        route.enable_forwarding();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), target_rx.recv())
+                .await
+                .expect("setup media was not released after bridge commit")
+                .expect("initial route closed")
+                .payload[0],
+            1
+        );
+        graph.shutdown_and_wait().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn quiesce_fences_worker_waiting_for_target_capacity() {
         let (source_tx, source_rx) = mpsc::channel(4);
         let graph = start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap();
@@ -3394,7 +3471,7 @@ mod tests {
             target_codec,
             target_pt: 0,
             owner_liveness: Arc::new(RouteOwnerLiveness::default()),
-            forwarding: Arc::new(RouteForwardingGate::new(true)),
+            forwarding: Arc::new(RouteForwardingGate::new(true, false)),
             _admission: Arc::new(SinkAdmissionState::new(1)).try_acquire().unwrap(),
             clock: RtpClockTranslator::new(8_000, 8_000),
             queue: Arc::new(SinkQueue::new(1)),
@@ -3442,7 +3519,7 @@ mod tests {
             target_codec,
             target_pt: 0,
             owner_liveness: Arc::new(RouteOwnerLiveness::default()),
-            forwarding: Arc::new(RouteForwardingGate::new(true)),
+            forwarding: Arc::new(RouteForwardingGate::new(true, false)),
             _admission: Arc::new(SinkAdmissionState::new(1)).try_acquire().unwrap(),
             clock: RtpClockTranslator::new(8_000, 8_000),
             queue: Arc::new(SinkQueue::new(policy_queue_frames)),
