@@ -1019,6 +1019,96 @@ async fn committed_bridge_replacement_returns_before_retired_cleanup_can_be_canc
     orch.drain_connection_lifecycle_tasks().await;
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn bridge_replacement_fences_blocked_data_for_the_retired_destination() {
+    let adapter = MockAdapter::new(Transport::Quic);
+    let ingress = ConnectionId::new();
+    let retired_destination = ConnectionId::new();
+    let replacement_destination = ConnectionId::new();
+    for connection_id in [
+        ingress.clone(),
+        retired_destination.clone(),
+        replacement_destination.clone(),
+    ] {
+        adapter.register_connection(connection_id, MockMediaStream::new(DEFAULT_TEST_CODEC));
+    }
+
+    let orch = Orchestrator::new(Config::default());
+    orch.register(adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .expect("register adapter");
+    let session = SessionId::new();
+    adapter.announce(ingress.clone(), session.clone()).await;
+    adapter
+        .announce(retired_destination.clone(), session.clone())
+        .await;
+    adapter
+        .announce(replacement_destination.clone(), session)
+        .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let original_bridge = orch
+        .bridge_connections(ingress.clone(), retired_destination.clone())
+        .await
+        .expect("initial bridge");
+    let blocked_send = adapter.gate_data_send(retired_destination.clone());
+    let entered = blocked_send.entered.notified();
+    tokio::pin!(entered);
+    entered.as_mut().enable();
+    let stale = DataMessage::reliable("stale", "text/plain", "old generation");
+    adapter
+        .events_tx
+        .send(AdapterEvent::DataMessage {
+            connection_id: ingress.clone(),
+            message: stale,
+        })
+        .await
+        .expect("queue data for retired destination");
+    tokio::time::timeout(Duration::from_secs(2), &mut entered)
+        .await
+        .expect("old data worker did not enter blocked send");
+
+    let replacement = orch
+        .replace_bridge_destination(
+            original_bridge,
+            ingress.clone(),
+            retired_destination.clone(),
+            replacement_destination.clone(),
+        )
+        .await
+        .expect("replace destination");
+
+    // Releasing the adapter-side send after the replacement receipt must not
+    // allow work retained by the old generation to reach its former peer.
+    blocked_send.release();
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        adapter.sent_data_messages().is_empty(),
+        "retired bridge data crossed the replacement boundary"
+    );
+
+    let fresh = DataMessage::reliable("fresh", "text/plain", "new generation");
+    adapter
+        .events_tx
+        .send(AdapterEvent::DataMessage {
+            connection_id: ingress,
+            message: fresh.clone(),
+        })
+        .await
+        .expect("queue data for replacement destination");
+    wait_for_data_message_count(&adapter, 1).await;
+    assert_eq!(
+        adapter.sent_data_messages(),
+        vec![(replacement_destination, fresh)]
+    );
+
+    orch.unbridge_connections(replacement.bridge_id)
+        .await
+        .expect("remove replacement bridge");
+    orch.drain_connection_lifecycle_tasks().await;
+}
+
 #[tokio::test]
 async fn failed_bridge_destination_replacement_rolls_back_and_can_retry() {
     let (

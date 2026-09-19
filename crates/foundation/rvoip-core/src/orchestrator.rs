@@ -377,7 +377,7 @@ struct PreparedOutboundShared {
     decision: AtomicU8,
     published: AtomicBool,
     cleanup_started: AtomicBool,
-    cleanup_complete: Notify,
+    cleanup_complete: CancellationToken,
     abort_detail: Mutex<Option<&'static str>>,
     binding: Mutex<Option<ConnectionSessionBinding>>,
     permit: Mutex<Option<OwnedSemaphorePermit>>,
@@ -389,7 +389,7 @@ impl PreparedOutboundShared {
             decision: AtomicU8::new(PREPARED_OUTBOUND_PENDING),
             published: AtomicBool::new(false),
             cleanup_started: AtomicBool::new(false),
-            cleanup_complete: Notify::new(),
+            cleanup_complete: CancellationToken::new(),
             abort_detail: Mutex::new(None),
             binding: Mutex::new(None),
             permit: Mutex::new(Some(permit)),
@@ -429,6 +429,13 @@ impl PreparedOutboundShared {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
+    }
+
+    async fn wait_for_cleanup(&self) {
+        // CancellationToken is a sticky, multi-waiter completion latch. A
+        // waiter that starts after cleanup cannot miss the transition, unlike
+        // an edge-triggered `Notify::notify_waiters` notification.
+        self.cleanup_complete.cancelled().await;
     }
 }
 
@@ -801,13 +808,7 @@ impl PreparedOutboundConnection {
     }
 
     async fn wait_for_abort(&self) {
-        loop {
-            let notified = self.cleanup.shared.cleanup_complete.notified();
-            if self.cleanup.shared.decision.load(Ordering::Acquire) == PREPARED_OUTBOUND_ABORTED {
-                return;
-            }
-            notified.await;
-        }
+        self.cleanup.shared.wait_for_cleanup().await;
     }
 
     async fn abort_committed_work(&mut self) {
@@ -2122,14 +2123,7 @@ impl Orchestrator {
     ) {
         if cleanup.shared.cleanup_started.swap(true, Ordering::AcqRel) {
             cleanups.spawn(async move {
-                loop {
-                    let notified = cleanup.shared.cleanup_complete.notified();
-                    if cleanup.shared.decision.load(Ordering::Acquire) == PREPARED_OUTBOUND_ABORTED
-                    {
-                        break;
-                    }
-                    notified.await;
-                }
+                cleanup.shared.wait_for_cleanup().await;
             });
             return;
         }
@@ -2188,7 +2182,7 @@ impl Orchestrator {
             .decision
             .store(PREPARED_OUTBOUND_ABORTED, Ordering::Release);
         cleanup.shared.release_capacity();
-        cleanup.shared.cleanup_complete.notify_waiters();
+        cleanup.shared.cleanup_complete.cancel();
     }
 
     async fn abort_unregistered_prepared_outbound(
@@ -2208,13 +2202,7 @@ impl Orchestrator {
             Self::execute_prepared_outbound_cleanup(owner, cleanup, detail).await;
             return;
         }
-        loop {
-            let notified = cleanup.shared.cleanup_complete.notified();
-            if cleanup.shared.decision.load(Ordering::Acquire) == PREPARED_OUTBOUND_ABORTED {
-                return;
-            }
-            notified.await;
-        }
+        cleanup.shared.wait_for_cleanup().await;
     }
 
     fn retire_prepared_outbound_core(
@@ -8100,13 +8088,7 @@ impl Orchestrator {
                 "outbound preparation supervisor is draining",
             );
             self.prepared_outbound_supervisor.state_changed.notify_one();
-            loop {
-                let notified = cleanup.shared.cleanup_complete.notified();
-                if cleanup.shared.decision.load(Ordering::Acquire) == PREPARED_OUTBOUND_ABORTED {
-                    break;
-                }
-                notified.await;
-            }
+            cleanup.shared.wait_for_cleanup().await;
             return Err(RvoipError::AdmissionRejected(
                 "outbound preparation supervisor is draining",
             ));
@@ -10313,6 +10295,17 @@ impl Orchestrator {
                             ));
                         }
 
+                        // Fence queued and in-flight application-data work in
+                        // the same synchronous generation commit as media.
+                        // Removing the route from the registry prevents new
+                        // enqueue operations; aborting its workers here keeps
+                        // retained messages from reaching the retired peer
+                        // after the replacement generation is published.
+                        self.cross_bridge_data_routes
+                            .get(&expected_bridge_id)
+                            .expect("bridge data route was checked under ownership lock")
+                            .abort_workers();
+
                         // Every slow/fallible preparation and every generation
                         // check has completed. Forwarding gates are synchronous
                         // and infallible, so old-off/new-on is the linearization
@@ -11244,6 +11237,39 @@ mod cross_crate_publisher_tests {
     use rvoip_infra_common::events::cross_crate::RvoipCoreCrossCrateEvent;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::Semaphore as TokioSemaphore;
+
+    #[tokio::test]
+    async fn prepared_outbound_cleanup_completion_is_sticky_for_all_waiters() {
+        let capacity = Arc::new(Semaphore::new(1));
+        let permit = capacity.try_acquire_owned().expect("test cleanup capacity");
+        let shared = Arc::new(PreparedOutboundShared::new(permit));
+
+        let first = {
+            let shared = Arc::clone(&shared);
+            tokio::spawn(async move { shared.wait_for_cleanup().await })
+        };
+        let second = {
+            let shared = Arc::clone(&shared);
+            tokio::spawn(async move { shared.wait_for_cleanup().await })
+        };
+        tokio::task::yield_now().await;
+
+        shared
+            .decision
+            .store(PREPARED_OUTBOUND_ABORTED, Ordering::Release);
+        shared.cleanup_complete.cancel();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            first.await.expect("first cleanup waiter");
+            second.await.expect("second cleanup waiter");
+        })
+        .await
+        .expect("registered cleanup waiters must wake");
+
+        tokio::time::timeout(Duration::from_millis(25), shared.wait_for_cleanup())
+            .await
+            .expect("a waiter created after completion must not miss it");
+    }
 
     #[test]
     fn amazon_connect_directional_bridges_tolerate_startup_backpressure() {
