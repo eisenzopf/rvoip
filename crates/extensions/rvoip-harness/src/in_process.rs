@@ -1,6 +1,8 @@
+use std::collections::{HashSet, VecDeque};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use rvoip_core::adapter::{
@@ -20,7 +22,7 @@ use rvoip_core::stream::{
     StreamKind,
 };
 use rvoip_core::DataMessage;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch, RwLock};
 use tokio_util::sync::CancellationToken;
 
 const PCM_S16LE_PAYLOAD_TYPE: u8 = 120;
@@ -35,6 +37,14 @@ pub struct InProcessAiConfig {
     pub media_queue_capacity: usize,
     /// Transport-neutral lifecycle events retained for core.
     pub event_queue_capacity: usize,
+    /// Maximum time an adapter lifecycle call waits for all in-flight media
+    /// operations to cross the session gate. Media operations never hold the
+    /// gate across channel I/O, so this is an operational fail-safe rather
+    /// than a normal source of latency.
+    pub lifecycle_ack_timeout: Duration,
+    /// Recently completed connection IDs retained to make repeated stop
+    /// requests idempotent without retaining session resources indefinitely.
+    pub terminal_history_capacity: usize,
 }
 
 impl Default for InProcessAiConfig {
@@ -49,6 +59,8 @@ impl Default for InProcessAiConfig {
             },
             media_queue_capacity: 64,
             event_queue_capacity: 256,
+            lifecycle_ack_timeout: Duration::from_secs(1),
+            terminal_history_capacity: 1_024,
         }
     }
 }
@@ -60,15 +72,21 @@ impl fmt::Debug for InProcessAiConfig {
             .field("codec", &self.codec)
             .field("media_queue_capacity", &self.media_queue_capacity)
             .field("event_queue_capacity", &self.event_queue_capacity)
+            .field("lifecycle_ack_timeout", &self.lifecycle_ack_timeout)
+            .field("terminal_history_capacity", &self.terminal_history_capacity)
             .finish()
     }
 }
 
 impl InProcessAiConfig {
     fn validate(&self) -> Result<()> {
-        if self.media_queue_capacity == 0 || self.event_queue_capacity == 0 {
+        if self.media_queue_capacity == 0
+            || self.event_queue_capacity == 0
+            || self.lifecycle_ack_timeout.is_zero()
+            || self.terminal_history_capacity == 0
+        {
             return Err(RvoipError::InvalidState(
-                "in-process AI queue capacities must be non-zero",
+                "in-process AI capacities and lifecycle timeout must be non-zero",
             ));
         }
         if !self.codec.name.eq_ignore_ascii_case("pcm_s16le")
@@ -89,6 +107,103 @@ impl InProcessAiConfig {
             max_streams_per_connection: 1,
             ..CapabilityDescriptor::default()
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum MediaGateState {
+    Running = 0,
+    Paused = 1,
+    Stopped = 2,
+}
+
+impl MediaGateState {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Paused,
+            2 => Self::Stopped,
+            _ => Self::Running,
+        }
+    }
+}
+
+/// Per-session fence shared by the adapter and provider media boundary.
+///
+/// A lifecycle transition takes the write side of `transition`; a frame may
+/// cross only while holding its read side and only after rechecking state.
+/// No media operation holds the lock across channel I/O. Therefore a
+/// successful pause acknowledgement proves that subsequent media cannot
+/// cross until resume, while the provider-owned session task remains alive.
+struct InProcessAiMediaGate {
+    state: AtomicU8,
+    transition: RwLock<()>,
+    updates: watch::Sender<MediaGateState>,
+}
+
+impl InProcessAiMediaGate {
+    fn new() -> Arc<Self> {
+        let (updates, _) = watch::channel(MediaGateState::Running);
+        Arc::new(Self {
+            state: AtomicU8::new(MediaGateState::Running as u8),
+            transition: RwLock::new(()),
+            updates,
+        })
+    }
+
+    fn state(&self) -> MediaGateState {
+        MediaGateState::from_u8(self.state.load(Ordering::Acquire))
+    }
+
+    async fn pause(&self) -> Result<()> {
+        let _transition = self.transition.write().await;
+        match self.state() {
+            MediaGateState::Stopped => Err(RvoipError::InvalidState(
+                "in-process AI media gate is stopped",
+            )),
+            MediaGateState::Paused => Ok(()),
+            MediaGateState::Running => {
+                self.state
+                    .store(MediaGateState::Paused as u8, Ordering::Release);
+                self.updates.send_replace(MediaGateState::Paused);
+                Ok(())
+            }
+        }
+    }
+
+    async fn resume(&self) -> Result<()> {
+        let _transition = self.transition.write().await;
+        match self.state() {
+            MediaGateState::Stopped => Err(RvoipError::InvalidState(
+                "in-process AI media gate is stopped",
+            )),
+            MediaGateState::Running => Ok(()),
+            MediaGateState::Paused => {
+                self.state
+                    .store(MediaGateState::Running as u8, Ordering::Release);
+                self.updates.send_replace(MediaGateState::Running);
+                Ok(())
+            }
+        }
+    }
+
+    async fn stop(&self) {
+        let _transition = self.transition.write().await;
+        if self.state() != MediaGateState::Stopped {
+            self.state
+                .store(MediaGateState::Stopped as u8, Ordering::Release);
+            self.updates.send_replace(MediaGateState::Stopped);
+        }
+    }
+
+    fn stop_now(&self) {
+        self.state
+            .store(MediaGateState::Stopped as u8, Ordering::Release);
+        self.updates.send_replace(MediaGateState::Stopped);
+    }
+
+    fn subscribe(&self) -> watch::Receiver<MediaGateState> {
+        self.updates.subscribe()
     }
 }
 
@@ -123,6 +238,7 @@ impl fmt::Debug for InProcessAiSessionRequest {
 pub struct InProcessAiMedia {
     caller_audio: mpsc::Receiver<MediaFrame>,
     agent_audio: mpsc::Sender<MediaFrame>,
+    gate: Arc<InProcessAiMediaGate>,
 }
 
 impl fmt::Debug for InProcessAiMedia {
@@ -137,14 +253,93 @@ impl fmt::Debug for InProcessAiMedia {
 
 impl InProcessAiMedia {
     pub async fn recv(&mut self) -> Option<MediaFrame> {
-        self.caller_audio.recv().await
+        let mut updates = self.gate.subscribe();
+        loop {
+            match self.gate.state() {
+                MediaGateState::Stopped => return None,
+                MediaGateState::Paused => {
+                    tokio::select! {
+                        biased;
+                        changed = updates.changed() => {
+                            if changed.is_err() {
+                                return None;
+                            }
+                        }
+                        frame = self.caller_audio.recv() => {
+                            // Held media is real-time data, so consume and
+                            // discard it instead of replaying stale audio on
+                            // resume. A closed source still terminates recv.
+                            frame.as_ref()?;
+                        }
+                    }
+                }
+                MediaGateState::Running => {
+                    let frame = tokio::select! {
+                        biased;
+                        changed = updates.changed() => {
+                            if changed.is_err() {
+                                return None;
+                            }
+                            continue;
+                        }
+                        frame = self.caller_audio.recv() => frame?,
+                    };
+                    let _transition = self.gate.transition.read().await;
+                    if self.gate.state() == MediaGateState::Running {
+                        return Some(frame);
+                    }
+                    // A pause won the fence after channel receipt. Drop this
+                    // frame rather than delivering it after acknowledgement.
+                }
+            }
+        }
     }
 
     pub async fn send(&self, frame: MediaFrame) -> Result<()> {
-        self.agent_audio
-            .send(frame)
-            .await
-            .map_err(|_| RvoipError::InvalidState("in-process AI media route is closed"))
+        let mut updates = self.gate.subscribe();
+        loop {
+            match self.gate.state() {
+                MediaGateState::Stopped => {
+                    return Err(RvoipError::InvalidState(
+                        "in-process AI media route is closed",
+                    ));
+                }
+                MediaGateState::Paused => {
+                    // Provider output is real-time media. Advancing provider
+                    // playback while held is valid, but stale audio must not
+                    // burst across the boundary after resume.
+                    return Ok(());
+                }
+                MediaGateState::Running => {}
+            }
+            let permit = tokio::select! {
+                biased;
+                changed = updates.changed() => {
+                    if changed.is_err() {
+                        return Err(RvoipError::InvalidState(
+                            "in-process AI media route is closed",
+                        ));
+                    }
+                    continue;
+                }
+                permit = self.agent_audio.reserve() => permit.map_err(|_| {
+                    RvoipError::InvalidState("in-process AI media route is closed")
+                })?,
+            };
+            let _transition = self.gate.transition.read().await;
+            match self.gate.state() {
+                MediaGateState::Running => {
+                    permit.send(frame);
+                    return Ok(());
+                }
+                MediaGateState::Paused => return Ok(()),
+                MediaGateState::Stopped => {
+                    return Err(RvoipError::InvalidState(
+                        "in-process AI media route is closed",
+                    ));
+                }
+            }
+        }
     }
 }
 
@@ -214,7 +409,11 @@ struct InProcessAiMediaStream {
 }
 
 impl InProcessAiMediaStream {
-    fn new(codec: CodecInfo, capacity: usize) -> (Arc<Self>, InProcessAiMedia) {
+    fn new(
+        codec: CodecInfo,
+        capacity: usize,
+        gate: Arc<InProcessAiMediaGate>,
+    ) -> (Arc<Self>, InProcessAiMedia) {
         let (agent_audio, agent_audio_rx) = mpsc::channel(capacity);
         let (caller_audio, caller_audio_rx) = mpsc::channel(capacity);
         (
@@ -229,6 +428,7 @@ impl InProcessAiMediaStream {
             InProcessAiMedia {
                 caller_audio: caller_audio_rx,
                 agent_audio,
+                gate,
             },
         )
     }
@@ -351,6 +551,7 @@ struct Route {
     live: AtomicBool,
     active: AtomicBool,
     terminal: AtomicBool,
+    gate: Arc<InProcessAiMediaGate>,
 }
 
 impl Route {
@@ -360,7 +561,8 @@ impl Route {
         capacity: usize,
         session: Box<dyn InProcessAiSession>,
     ) -> Arc<Self> {
-        let (stream, media) = InProcessAiMediaStream::new(codec, capacity);
+        let gate = InProcessAiMediaGate::new();
+        let (stream, media) = InProcessAiMediaStream::new(codec, capacity, Arc::clone(&gate));
         Arc::new(Self {
             connection_id,
             stream,
@@ -372,8 +574,50 @@ impl Route {
             live: AtomicBool::new(true),
             active: AtomicBool::new(false),
             terminal: AtomicBool::new(false),
+            gate,
         })
     }
+}
+
+struct TerminalHistory {
+    capacity: usize,
+    order: VecDeque<ConnectionId>,
+    ids: HashSet<ConnectionId>,
+}
+
+impl TerminalHistory {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            order: VecDeque::with_capacity(capacity),
+            ids: HashSet::with_capacity(capacity),
+        }
+    }
+
+    fn insert(&mut self, id: ConnectionId) {
+        if !self.ids.insert(id.clone()) {
+            return;
+        }
+        self.order.push_back(id);
+        if self.order.len() > self.capacity {
+            if let Some(expired) = self.order.pop_front() {
+                self.ids.remove(&expired);
+            }
+        }
+    }
+
+    fn contains(&self, id: &ConnectionId) -> bool {
+        self.ids.contains(id)
+    }
+}
+
+/// Sanitized adapter-owned resource counts for readiness and leak checks.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct InProcessAiResourceSnapshot {
+    pub live_routes: usize,
+    pub active_sessions: usize,
+    pub held_sessions: usize,
+    pub running_session_tasks: usize,
 }
 
 /// First-party outbound adapter for transport-neutral in-process AI workers.
@@ -384,6 +628,7 @@ pub struct InProcessAiAdapter {
     events: mpsc::Sender<AdapterEvent>,
     event_receiver: Mutex<Option<mpsc::Receiver<AdapterEvent>>>,
     lifecycle: AdapterLifecycleSinkSlot,
+    terminal_history: Arc<Mutex<TerminalHistory>>,
 }
 
 impl Drop for InProcessAiAdapter {
@@ -392,6 +637,7 @@ impl Drop for InProcessAiAdapter {
             route.live.store(false, Ordering::Release);
             route.active.store(false, Ordering::Release);
             route.cancellation.cancel();
+            route.gate.stop_now();
             route.stream.deactivate();
             if let Some(task) = route
                 .task
@@ -414,6 +660,9 @@ impl InProcessAiAdapter {
         config.validate()?;
         let (events, event_receiver) = mpsc::channel(config.event_queue_capacity);
         Ok(Arc::new(Self {
+            terminal_history: Arc::new(Mutex::new(TerminalHistory::new(
+                config.terminal_history_capacity,
+            ))),
             config,
             factory,
             routes: Arc::new(dashmap::DashMap::new()),
@@ -427,8 +676,43 @@ impl InProcessAiAdapter {
         Self::new(config, Arc::new(EchoAiSessionFactory))
     }
 
+    pub fn resource_snapshot(&self) -> InProcessAiResourceSnapshot {
+        let mut snapshot = InProcessAiResourceSnapshot::default();
+        for route in self.routes.iter() {
+            if !route.live.load(Ordering::Acquire) {
+                continue;
+            }
+            snapshot.live_routes += 1;
+            if route.active.load(Ordering::Acquire) {
+                snapshot.active_sessions += 1;
+            }
+            if route.gate.state() == MediaGateState::Paused {
+                snapshot.held_sessions += 1;
+            }
+            if route
+                .task
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+                .is_some_and(|task| !task.is_finished())
+            {
+                snapshot.running_session_tasks += 1;
+            }
+        }
+        snapshot
+    }
+
     async fn finish_route(&self, route: Arc<Route>, event: AdapterEvent) {
-        finish_route(&self.routes, &self.events, &self.lifecycle, route, event).await;
+        finish_route(
+            &self.routes,
+            &self.events,
+            &self.lifecycle,
+            &self.terminal_history,
+            self.config.lifecycle_ack_timeout,
+            route,
+            event,
+        )
+        .await;
     }
 }
 
@@ -436,6 +720,8 @@ async fn finish_route(
     routes: &dashmap::DashMap<ConnectionId, Arc<Route>>,
     events: &mpsc::Sender<AdapterEvent>,
     lifecycle: &AdapterLifecycleSinkSlot,
+    terminal_history: &Mutex<TerminalHistory>,
+    lifecycle_ack_timeout: Duration,
     route: Arc<Route>,
     event: AdapterEvent,
 ) {
@@ -445,10 +731,20 @@ async fn finish_route(
     route.live.store(false, Ordering::Release);
     route.active.store(false, Ordering::Release);
     route.cancellation.cancel();
+    if tokio::time::timeout(lifecycle_ack_timeout, route.gate.stop())
+        .await
+        .is_err()
+    {
+        route.gate.stop_now();
+    }
     route.stream.deactivate();
     routes.remove_if(&route.connection_id, |_, current| {
         Arc::ptr_eq(current, &route)
     });
+    terminal_history
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(route.connection_id.clone());
     let _ = lifecycle.queue_or_deliver_terminal(events, event).await;
 }
 
@@ -598,6 +894,8 @@ impl ConnectionAdapter for InProcessAiAdapter {
         let routes = Arc::clone(&self.routes);
         let events = self.events.clone();
         let lifecycle = self.lifecycle.clone();
+        let terminal_history = Arc::clone(&self.terminal_history);
+        let lifecycle_ack_timeout = self.config.lifecycle_ack_timeout;
         let task_route = Arc::clone(&route);
         let cancellation = route.cancellation.clone();
         let task = tokio::spawn(async move {
@@ -623,7 +921,16 @@ impl ConnectionAdapter for InProcessAiAdapter {
                     detail: "in-process AI session failed".into(),
                 }
             };
-            finish_route(&routes, &events, &lifecycle, task_route, event).await;
+            finish_route(
+                &routes,
+                &events,
+                &lifecycle,
+                &terminal_history,
+                lifecycle_ack_timeout,
+                task_route,
+                event,
+            )
+            .await;
         });
         *route
             .task
@@ -645,11 +952,22 @@ impl ConnectionAdapter for InProcessAiAdapter {
     }
 
     async fn end(&self, connection_id: ConnectionId, reason: EndReason) -> Result<()> {
-        let route = self
+        let Some(route) = self
             .routes
             .get(&connection_id)
             .map(|entry| Arc::clone(entry.value()))
-            .ok_or_else(|| RvoipError::ConnectionNotFound(connection_id.clone()))?;
+        else {
+            return if self
+                .terminal_history
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains(&connection_id)
+            {
+                Ok(())
+            } else {
+                Err(RvoipError::ConnectionNotFound(connection_id))
+            };
+        };
         *route
             .requested_end
             .lock()
@@ -674,12 +992,40 @@ impl ConnectionAdapter for InProcessAiAdapter {
         Ok(())
     }
 
-    async fn hold(&self, _connection_id: ConnectionId) -> Result<()> {
-        Err(RvoipError::NotImplemented("in-process AI hold"))
+    async fn hold(&self, connection_id: ConnectionId) -> Result<()> {
+        let route = self
+            .routes
+            .get(&connection_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or_else(|| RvoipError::ConnectionNotFound(connection_id))?;
+        if !route.live.load(Ordering::Acquire) {
+            return Err(RvoipError::InvalidState(
+                "in-process AI session is not live",
+            ));
+        }
+        tokio::time::timeout(self.config.lifecycle_ack_timeout, route.gate.pause())
+            .await
+            .map_err(|_| {
+                RvoipError::Adapter("in-process AI hold acknowledgement timed out".into())
+            })?
     }
 
-    async fn resume(&self, _connection_id: ConnectionId) -> Result<()> {
-        Err(RvoipError::NotImplemented("in-process AI resume"))
+    async fn resume(&self, connection_id: ConnectionId) -> Result<()> {
+        let route = self
+            .routes
+            .get(&connection_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or_else(|| RvoipError::ConnectionNotFound(connection_id))?;
+        if !route.live.load(Ordering::Acquire) {
+            return Err(RvoipError::InvalidState(
+                "in-process AI session is not live",
+            ));
+        }
+        tokio::time::timeout(self.config.lifecycle_ack_timeout, route.gate.resume())
+            .await
+            .map_err(|_| {
+                RvoipError::Adapter("in-process AI resume acknowledgement timed out".into())
+            })?
     }
 
     async fn transfer(&self, _connection_id: ConnectionId, _target: TransferTarget) -> Result<()> {
@@ -962,6 +1308,150 @@ mod tests {
             .end(connection_id, EndReason::Normal)
             .await
             .expect("end echo connection");
+    }
+
+    #[tokio::test]
+    async fn hold_fences_media_without_restarting_session_and_stop_is_idempotent() {
+        let config = InProcessAiConfig {
+            lifecycle_ack_timeout: Duration::from_millis(250),
+            ..InProcessAiConfig::default()
+        };
+        let adapter = InProcessAiAdapter::echo(config.clone()).expect("valid echo adapter");
+        let mut events = adapter.subscribe_events();
+        let handle = adapter
+            .originate(originate_request(&config))
+            .await
+            .expect("prepare echo connection");
+        let connection_id = handle.connection.id;
+        assert_eq!(
+            adapter.resource_snapshot(),
+            InProcessAiResourceSnapshot {
+                live_routes: 1,
+                ..InProcessAiResourceSnapshot::default()
+            }
+        );
+        adapter
+            .activate_outbound(connection_id.clone())
+            .await
+            .expect("activate echo connection");
+        assert!(matches!(
+            events.recv().await,
+            Some(AdapterEvent::Connected { .. })
+        ));
+
+        let stream = adapter
+            .streams(connection_id.clone())
+            .await
+            .expect("query active stream")
+            .into_iter()
+            .next()
+            .expect("one audio stream");
+        let mut agent_output = stream
+            .reserve_frames_in()
+            .expect("reserve AI output receiver")
+            .commit();
+        let caller_input = stream.try_frames_out().expect("caller input sender");
+        let frame = |payload: &'static [u8], timestamp_rtp| MediaFrame {
+            stream_id: stream.id(),
+            kind: StreamKind::Audio,
+            payload: Bytes::from_static(payload),
+            timestamp_rtp,
+            captured_at: Utc::now(),
+            payload_type: Some(PCM_S16LE_PAYLOAD_TYPE),
+        };
+
+        caller_input
+            .send(frame(b"before-hold", 320))
+            .await
+            .expect("send pre-hold media");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), agent_output.recv())
+                .await
+                .expect("pre-hold echo deadline")
+                .expect("pre-hold echo")
+                .payload,
+            Bytes::from_static(b"before-hold")
+        );
+
+        tokio::time::timeout(
+            config.lifecycle_ack_timeout,
+            adapter.hold(connection_id.clone()),
+        )
+        .await
+        .expect("bounded hold acknowledgement")
+        .expect("hold");
+        adapter
+            .hold(connection_id.clone())
+            .await
+            .expect("repeated hold is idempotent");
+        assert_eq!(
+            adapter.resource_snapshot(),
+            InProcessAiResourceSnapshot {
+                live_routes: 1,
+                active_sessions: 1,
+                held_sessions: 1,
+                running_session_tasks: 1,
+            }
+        );
+
+        caller_input
+            .send(frame(b"during-hold", 640))
+            .await
+            .expect("held input remains a live bounded route");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(75), agent_output.recv())
+                .await
+                .is_err(),
+            "no provider media may cross after the hold acknowledgement"
+        );
+
+        tokio::time::timeout(
+            config.lifecycle_ack_timeout,
+            adapter.resume(connection_id.clone()),
+        )
+        .await
+        .expect("bounded resume acknowledgement")
+        .expect("resume");
+        adapter
+            .resume(connection_id.clone())
+            .await
+            .expect("repeated resume is idempotent");
+        caller_input
+            .send(frame(b"after-resume", 960))
+            .await
+            .expect("send resumed media");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), agent_output.recv())
+                .await
+                .expect("resumed echo deadline")
+                .expect("resumed echo")
+                .payload,
+            Bytes::from_static(b"after-resume")
+        );
+
+        adapter
+            .end(connection_id.clone(), EndReason::Normal)
+            .await
+            .expect("stop session");
+        adapter
+            .end(connection_id.clone(), EndReason::Normal)
+            .await
+            .expect("repeated stop is idempotent");
+        assert_eq!(
+            adapter.resource_snapshot(),
+            InProcessAiResourceSnapshot::default()
+        );
+        assert!(matches!(
+            events.recv().await,
+            Some(AdapterEvent::Ended { connection_id: observed, reason: EndReason::Normal })
+                if observed == connection_id
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), events.recv())
+                .await
+                .is_err(),
+            "idempotent stop must not emit a duplicate terminal event"
+        );
     }
 
     #[tokio::test]

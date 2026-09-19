@@ -17,7 +17,8 @@ mod in_process;
 
 pub use in_process::{
     EchoAiSessionFactory, InProcessAiAdapter, InProcessAiConfig, InProcessAiMedia,
-    InProcessAiSession, InProcessAiSessionFactory, InProcessAiSessionRequest,
+    InProcessAiResourceSnapshot, InProcessAiSession, InProcessAiSessionFactory,
+    InProcessAiSessionRequest,
 };
 
 use async_trait::async_trait;

@@ -17,6 +17,14 @@ work starts only after the orchestrator commits the outbound connection; a
 prepared route remains dormant and can be cancelled without provider-visible
 media work. `InProcessAiAdapter::echo` is a deterministic smoke-test factory.
 
+`ConnectionAdapter::hold` and `resume` fence both media directions with a
+bounded acknowledgement. Holding does not cancel or recreate the provider
+session, so provider and dialogue state remain attached to the stable AI
+connection. Media observed while held is discarded as real-time data instead
+of being replayed after resume. `end` is idempotent for a bounded history of
+completed connection IDs. `resource_snapshot` exposes only aggregate live
+route, active/held session, and running task counts for leak checks.
+
 ```rust,no_run
 use std::sync::Arc;
 
@@ -37,6 +45,12 @@ not implement SIP REFER, WebRTC signaling, routing policy, or account policy.
 Callers use the generation-fenced `Orchestrator::replace_bridge_destination`
 primitive to replace an AI connection with a prepared SIP/WebRTC connection,
 or the reverse, while the candidate media route stays silent until promotion.
+For a reusable AI session, detach and rebind are expressed by core topology:
+hold the AI connection, `unbridge_connections`, later bridge that same live
+connection to a new peer, then resume it. The harness deliberately does not
+create a second provider-level rebind API or carry transport identifiers into
+provider code. The replacement primitive retires its old destination, so use
+explicit unbridge/rebridge when the old AI session must survive detachment.
 
 Part of the [**rvoip**](https://github.com/eisenzopf/rvoip) workspace (the "rvoip 3"
 unified real-time-communications stack). Published so the
