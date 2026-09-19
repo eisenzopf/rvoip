@@ -1736,11 +1736,21 @@ impl SipAdapter {
 
     /// Drain the adapter and then stop the underlying SIP coordinator.
     pub async fn shutdown(&self) -> CoreResult<()> {
-        self.drain().await?;
-        self.coordinator
+        let drain = self.drain().await;
+        let coordinator = self
+            .coordinator
             .shutdown_gracefully(Some(SIP_ADAPTER_DRAIN_TIMEOUT))
             .await
-            .map_err(|error| RvoipError::Adapter(format!("SIP shutdown failed: {error}")))
+            .map_err(|error| RvoipError::Adapter(format!("SIP shutdown failed: {error}")));
+
+        match (drain, coordinator) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(drain), Ok(())) => Err(drain),
+            (Ok(()), Err(coordinator)) => Err(coordinator),
+            (Err(drain), Err(coordinator)) => Err(RvoipError::Adapter(format!(
+                "SIP adapter drain and coordinator shutdown both failed: drain={drain}; shutdown={coordinator}"
+            ))),
+        }
     }
 
     fn take_atomic_events(&self) -> CoreResult<mpsc::Receiver<OrchestratorAdapterEvent>> {
@@ -3672,6 +3682,30 @@ async fn activate_outbound_route(
     }
 
     wait_for_outbound_session_active(&coordinator, &route).await?;
+
+    // A final SIP answer and an Active dialog do not imply that the retained
+    // media driver has finished binding its negotiated RTP session.  The
+    // adapter activation receipt is the public hand-off point used by core to
+    // attach bridge sinks, so returning while this exact stream is still
+    // `Binding` creates a race where a successfully committed connection is
+    // immediately unusable.  Preserve early-media setup above, then make the
+    // final receipt wait for the same retained driver to publish `Bound`.
+    let mut cancel = route.cancel.subscribe();
+    let bind = route
+        .stream
+        .bind(Arc::clone(&coordinator), route.session_id.clone());
+    tokio::pin!(bind);
+    tokio::select! {
+        biased;
+        _ = wait_for_route_cancel(&mut cancel) => {
+            return Err(SipActivationFailure::RouteEnded);
+        }
+        result = tokio::time::timeout(SIP_RETAINED_TASK_TIMEOUT, &mut bind) => {
+            result
+                .map_err(|_| SipActivationFailure::MediaFailed)?
+                .map_err(|_| SipActivationFailure::MediaFailed)?
+        },
+    }
 
     Ok(receipt)
 }
@@ -5783,6 +5817,36 @@ Signal=5\r\nDuration=160\r\n";
     }
 
     #[tokio::test]
+    async fn shutdown_releases_listener_even_when_adapter_drain_fails() {
+        let probe = std::net::UdpSocket::bind("127.0.0.1:0").expect("probe SIP port");
+        let port = probe.local_addr().expect("probe address").port();
+        drop(probe);
+
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("shutdown-release", port))
+            .await
+            .expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        adapter
+            .force_drain_compensation_failure
+            .store(true, Ordering::Release);
+
+        adapter
+            .shutdown()
+            .await
+            .expect_err("forced drain failure remains observable");
+
+        let replacement = UnifiedCoordinator::new(ApiConfig::local("shutdown-rebind", port))
+            .await
+            .expect("coordinator shutdown must release its UDP listener");
+        replacement
+            .shutdown_gracefully(Some(Duration::ZERO))
+            .await
+            .expect("replacement shutdown");
+    }
+
+    #[tokio::test]
     async fn concurrent_activation_sends_one_invite_and_receipt_matches_wire_call_id() {
         use rvoip_sip_core::{parse_message, Message as SipMessage, Method, StatusCode};
         use rvoip_sip_dialog::transaction::utils::response_builders::create_response;
@@ -6071,24 +6135,11 @@ Signal=5\r\nDuration=160\r\n";
                 .expose_secret(),
             invite_call_id
         );
-
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                match *media.borrow_and_update() {
-                    crate::media_stream::SipMediaLifecycle::Bound => break,
-                    state @ (crate::media_stream::SipMediaLifecycle::Failed
-                    | crate::media_stream::SipMediaLifecycle::Closing
-                    | crate::media_stream::SipMediaLifecycle::Closed) => {
-                        panic!("media bind terminated before negotiation completed: {state:?}")
-                    }
-                    crate::media_stream::SipMediaLifecycle::Dormant
-                    | crate::media_stream::SipMediaLifecycle::Binding => {}
-                }
-                media.changed().await.expect("media lifecycle remains live");
-            }
-        })
-        .await
-        .expect("media bind deadline");
+        assert_eq!(
+            *media.borrow_and_update(),
+            crate::media_stream::SipMediaLifecycle::Bound,
+            "a successful activation receipt must expose an already-bound media stream"
+        );
         assert_eq!(route.stream.codec().name, "g.711-a");
         assert!(route.stream.try_frames_out().is_ok());
 
