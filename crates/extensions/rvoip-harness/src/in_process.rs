@@ -124,6 +124,88 @@ pub enum InProcessAiLifecycleState {
     Stopped = 2,
 }
 
+/// One adapter-requested provider lifecycle transition.
+///
+/// A provider must acknowledge [`Self::state`] only after work from the prior
+/// state is quiescent. In particular, a `Paused` acknowledgement proves that
+/// no ASR/model/tool result can still commit dialogue state and no TTS
+/// playback can advance until a later `Running` request is acknowledged.
+/// Dropping a request rejects the transition.
+pub struct InProcessAiLifecycleRequest {
+    state: InProcessAiLifecycleState,
+    acknowledgement: Option<oneshot::Sender<()>>,
+}
+
+impl fmt::Debug for InProcessAiLifecycleRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InProcessAiLifecycleRequest")
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
+}
+
+impl InProcessAiLifecycleRequest {
+    #[must_use]
+    pub fn state(&self) -> InProcessAiLifecycleState {
+        self.state
+    }
+
+    /// Acknowledge that the requested lifecycle state is fully in effect.
+    pub fn acknowledge(mut self) {
+        let _ = self
+            .acknowledgement
+            .take()
+            .expect("lifecycle acknowledgement is consumed once")
+            .send(());
+    }
+}
+
+/// Provider-owned receiver for bounded pause and resume requests.
+///
+/// Session implementations should include [`Self::recv`] in every select that
+/// waits on ASR, model, tool, TTS, or playback work. When a pause wins, dropping
+/// the competing future cancels that attempt; providers acknowledge only after
+/// preserving enough state to retry or continue it after resume.
+pub struct InProcessAiSessionLifecycle {
+    requests: mpsc::Receiver<InProcessAiLifecycleRequest>,
+}
+
+impl fmt::Debug for InProcessAiSessionLifecycle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("InProcessAiSessionLifecycle")
+            .finish_non_exhaustive()
+    }
+}
+
+impl InProcessAiSessionLifecycle {
+    pub async fn recv(&mut self) -> Option<InProcessAiLifecycleRequest> {
+        self.requests.recv().await
+    }
+}
+
+#[derive(Clone)]
+struct InProcessAiLifecycleControl {
+    requests: mpsc::Sender<InProcessAiLifecycleRequest>,
+}
+
+impl InProcessAiLifecycleControl {
+    async fn transition(&self, state: InProcessAiLifecycleState) -> Result<()> {
+        let (acknowledgement, completed) = oneshot::channel();
+        self.requests
+            .send(InProcessAiLifecycleRequest {
+                state,
+                acknowledgement: Some(acknowledgement),
+            })
+            .await
+            .map_err(|_| RvoipError::InvalidState("in-process AI lifecycle receiver is closed"))?;
+        completed.await.map_err(|_| {
+            RvoipError::InvalidState("in-process AI lifecycle request was not acknowledged")
+        })
+    }
+}
+
 impl InProcessAiLifecycleState {
     fn from_u8(value: u8) -> Self {
         match value {
@@ -260,8 +342,9 @@ impl fmt::Debug for InProcessAiMedia {
 }
 
 impl InProcessAiMedia {
-    /// Subscribe to pause/resume/stop transitions for cooperative provider
-    /// cancellation. The current state is available through `borrow()`.
+    /// Observe media-gate pause/resume/stop transitions. This watch is useful
+    /// for diagnostics, but it does not acknowledge provider quiescence; session
+    /// implementations must service the lifecycle receiver passed to `run`.
     pub fn subscribe_lifecycle(&self) -> watch::Receiver<InProcessAiLifecycleState> {
         self.gate.subscribe()
     }
@@ -310,10 +393,12 @@ impl InProcessAiMedia {
                     ));
                 }
                 InProcessAiLifecycleState::Paused => {
-                    // Provider output is real-time media. Advancing provider
-                    // playback while held is valid, but stale audio must not
-                    // burst across the boundary after resume.
-                    return Ok(());
+                    if updates.changed().await.is_err() {
+                        return Err(RvoipError::InvalidState(
+                            "in-process AI media route is closed",
+                        ));
+                    }
+                    continue;
                 }
                 InProcessAiLifecycleState::Running => {}
             }
@@ -337,7 +422,7 @@ impl InProcessAiMedia {
                     permit.send(frame);
                     return Ok(());
                 }
-                InProcessAiLifecycleState::Paused => return Ok(()),
+                InProcessAiLifecycleState::Paused => continue,
                 InProcessAiLifecycleState::Stopped => {
                     return Err(RvoipError::InvalidState(
                         "in-process AI media route is closed",
@@ -349,12 +434,15 @@ impl InProcessAiMedia {
 }
 
 /// One provider-owned AI session. `run` begins only after core has durably
-/// bound and activated the outbound Connection.
+/// bound and activated the outbound Connection. Implementations must service
+/// the lifecycle receiver while provider or playback futures are in flight and
+/// acknowledge pause only after those futures can no longer commit state.
 #[async_trait]
 pub trait InProcessAiSession: Send + 'static {
     async fn run(
         self: Box<Self>,
         media: InProcessAiMedia,
+        lifecycle: InProcessAiSessionLifecycle,
         cancellation: CancellationToken,
     ) -> Result<()>;
 }
@@ -390,14 +478,42 @@ impl InProcessAiSession for EchoAiSession {
     async fn run(
         self: Box<Self>,
         mut media: InProcessAiMedia,
+        mut lifecycle: InProcessAiSessionLifecycle,
         cancellation: CancellationToken,
     ) -> Result<()> {
+        let mut pending: Option<MediaFrame> = None;
         loop {
-            tokio::select! {
-                _ = cancellation.cancelled() => return Ok(()),
-                frame = media.recv() => {
-                    let Some(frame) = frame else { return Ok(()); };
-                    media.send(frame).await?;
+            if let Some(frame) = pending.take() {
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return Ok(()),
+                    request = lifecycle.recv() => {
+                        let Some(request) = request else {
+                            return Err(RvoipError::InvalidState(
+                                "in-process AI lifecycle receiver is closed",
+                            ));
+                        };
+                        request.acknowledge();
+                        pending = Some(frame);
+                    }
+                    result = media.send(frame.clone()) => result?,
+                }
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return Ok(()),
+                    request = lifecycle.recv() => {
+                        let Some(request) = request else {
+                            return Err(RvoipError::InvalidState(
+                                "in-process AI lifecycle receiver is closed",
+                            ));
+                        };
+                        request.acknowledge();
+                    }
+                    frame = media.recv() => {
+                        let Some(frame) = frame else { return Ok(()); };
+                        pending = Some(frame);
+                    },
                 }
             }
         }
@@ -643,11 +759,22 @@ impl fmt::Debug for InProcessAiTransportHandle {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActivationState {
+    Dormant,
+    Active,
+    Failed(&'static str),
+}
+
 struct Route {
     connection_id: ConnectionId,
     stream: Arc<InProcessAiMediaStream>,
     session: Mutex<Option<Box<dyn InProcessAiSession>>>,
     media: Mutex<Option<InProcessAiMedia>>,
+    session_lifecycle: Mutex<Option<InProcessAiSessionLifecycle>>,
+    lifecycle_control: InProcessAiLifecycleControl,
+    lifecycle_operation: TokioMutex<()>,
+    activation: TokioMutex<ActivationState>,
     pending_input_gate: Mutex<Option<PendingInputGate>>,
     input_gate_control: InputGateControl,
     provider_input: Arc<TokioMutex<mpsc::Receiver<MediaFrame>>>,
@@ -673,12 +800,21 @@ impl Route {
         let gate = InProcessAiMediaGate::new();
         let (stream, media, pending_input_gate, input_gate_control) =
             InProcessAiMediaStream::new(codec, capacity, Arc::clone(&gate));
+        let (lifecycle_requests, session_lifecycle) = mpsc::channel(2);
         let provider_input = Arc::clone(&media.caller_audio);
         Arc::new(Self {
             connection_id,
             stream,
             session: Mutex::new(Some(session)),
             media: Mutex::new(Some(media)),
+            session_lifecycle: Mutex::new(Some(InProcessAiSessionLifecycle {
+                requests: session_lifecycle,
+            })),
+            lifecycle_control: InProcessAiLifecycleControl {
+                requests: lifecycle_requests,
+            },
+            lifecycle_operation: TokioMutex::new(()),
+            activation: TokioMutex::new(ActivationState::Dormant),
             pending_input_gate: Mutex::new(Some(pending_input_gate)),
             input_gate_control,
             provider_input,
@@ -1031,31 +1167,70 @@ impl ConnectionAdapter for InProcessAiAdapter {
     }
 
     async fn activate_outbound(&self, connection_id: ConnectionId) -> Result<()> {
+        const ACTIVATION_STATE_ERROR: &str = "in-process AI activation state is incomplete";
+        const EVENT_RECEIVER_ERROR: &str = "in-process AI event receiver is unavailable";
+
         let route = self
             .routes
             .get(&connection_id)
             .map(|entry| Arc::clone(entry.value()))
             .ok_or_else(|| RvoipError::ConnectionNotFound(connection_id.clone()))?;
-        if route
-            .active
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return if route.live.load(Ordering::Acquire) {
-                Ok(())
-            } else {
-                Err(RvoipError::ConnectionNotFound(connection_id))
-            };
+        // Hold this lock through activation so exact concurrent retries await
+        // one authoritative result instead of observing the early `active`
+        // publication while setup can still fail.
+        let mut activation = route.activation.lock().await;
+        match *activation {
+            ActivationState::Active => {
+                return if route.live.load(Ordering::Acquire) {
+                    Ok(())
+                } else {
+                    Err(RvoipError::ConnectionNotFound(connection_id))
+                };
+            }
+            ActivationState::Failed(detail) => {
+                return Err(RvoipError::InvalidState(detail));
+            }
+            ActivationState::Dormant => {}
         }
-        route.stream.activate();
+
         let pending_input_gate = route
             .pending_input_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-            .ok_or(RvoipError::InvalidState(
-                "in-process AI input gate was already activated",
-            ))?;
+            .take();
+        let session = route
+            .session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        let media = route
+            .media
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        let session_lifecycle = route
+            .session_lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        let (Some(pending_input_gate), Some(session), Some(media), Some(session_lifecycle)) =
+            (pending_input_gate, session, media, session_lifecycle)
+        else {
+            *activation = ActivationState::Failed(ACTIVATION_STATE_ERROR);
+            drop(activation);
+            let _ = self
+                .finish_route(
+                    route,
+                    AdapterEvent::Failed {
+                        connection_id,
+                        detail: ACTIVATION_STATE_ERROR.into(),
+                    },
+                )
+                .await;
+            return Err(RvoipError::InvalidState(ACTIVATION_STATE_ERROR));
+        };
+
+        route.stream.activate();
         let input_gate = Arc::clone(&route.gate);
         let input_cancellation = route.cancellation.clone();
         let input_task = tokio::spawn(async move {
@@ -1065,6 +1240,7 @@ impl ConnectionAdapter for InProcessAiAdapter {
             .input_task
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(input_task.abort_handle());
+        route.active.store(true, Ordering::Release);
         if self
             .events
             .send(AdapterEvent::Connected {
@@ -1073,35 +1249,19 @@ impl ConnectionAdapter for InProcessAiAdapter {
             .await
             .is_err()
         {
+            *activation = ActivationState::Failed(EVENT_RECEIVER_ERROR);
+            drop(activation);
             let _ = self
                 .finish_route(
                     route,
                     AdapterEvent::Failed {
                         connection_id,
-                        detail: "in-process AI event receiver is unavailable".into(),
+                        detail: EVENT_RECEIVER_ERROR.into(),
                     },
                 )
                 .await;
-            return Err(RvoipError::InvalidState(
-                "in-process AI event receiver is unavailable",
-            ));
+            return Err(RvoipError::InvalidState(EVENT_RECEIVER_ERROR));
         }
-        let session = route
-            .session
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-            .ok_or(RvoipError::InvalidState(
-                "in-process AI session was already activated",
-            ))?;
-        let media = route
-            .media
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-            .ok_or(RvoipError::InvalidState(
-                "in-process AI media was already activated",
-            ))?;
         let routes = Arc::clone(&self.routes);
         let events = self.events.clone();
         let lifecycle = self.lifecycle.clone();
@@ -1110,7 +1270,7 @@ impl ConnectionAdapter for InProcessAiAdapter {
         let task_route = Arc::clone(&route);
         let cancellation = route.cancellation.clone();
         let task = tokio::spawn(async move {
-            let result = session.run(media, cancellation).await;
+            let result = session.run(media, session_lifecycle, cancellation).await;
             let event = if let Some(reason) = task_route
                 .requested_end
                 .lock()
@@ -1147,6 +1307,7 @@ impl ConnectionAdapter for InProcessAiAdapter {
             .task
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(task.abort_handle());
+        *activation = ActivationState::Active;
         Ok(())
     }
 
@@ -1232,18 +1393,63 @@ impl ConnectionAdapter for InProcessAiAdapter {
             .routes
             .get(&connection_id)
             .map(|entry| Arc::clone(entry.value()))
-            .ok_or_else(|| RvoipError::ConnectionNotFound(connection_id))?;
+            .ok_or_else(|| RvoipError::ConnectionNotFound(connection_id.clone()))?;
         if !route.live.load(Ordering::Acquire) || !route.active.load(Ordering::Acquire) {
             return Err(RvoipError::InvalidState(
                 "in-process AI session is not active",
             ));
         }
-        tokio::time::timeout(self.config.lifecycle_ack_timeout, async {
+        let operation = route.lifecycle_operation.lock().await;
+        if route.gate.state() == InProcessAiLifecycleState::Paused {
+            return Ok(());
+        }
+        let hold_result = tokio::time::timeout(self.config.lifecycle_ack_timeout, async {
             route.gate.pause().await?;
-            route.flush_caller_input().await
+            route.flush_caller_input().await?;
+            route
+                .lifecycle_control
+                .transition(InProcessAiLifecycleState::Paused)
+                .await
         })
         .await
-        .map_err(|_| RvoipError::Adapter("in-process AI hold acknowledgement timed out".into()))?
+        .map_err(|_| RvoipError::Adapter("in-process AI hold acknowledgement timed out".into()))
+        .and_then(|result| result);
+        let Err(hold_error) = hold_result else {
+            return Ok(());
+        };
+
+        // A failed hold may have crossed the media fence or reached the
+        // provider. Restore both sides before returning an error. If the
+        // provider cannot prove the rollback, end the route rather than leave
+        // an apparently active but permanently silent AI service.
+        if route.gate.state() == InProcessAiLifecycleState::Paused {
+            let rollback_result = tokio::time::timeout(self.config.lifecycle_ack_timeout, async {
+                route.flush_caller_input().await?;
+                route.gate.resume().await?;
+                route
+                    .lifecycle_control
+                    .transition(InProcessAiLifecycleState::Running)
+                    .await
+            })
+            .await
+            .map_err(|_| RvoipError::Adapter("in-process AI hold rollback timed out".into()))
+            .and_then(|result| result);
+            if rollback_result.is_err() {
+                drop(operation);
+                let _ = self
+                    .end(
+                        connection_id,
+                        EndReason::Failed {
+                            detail: "in-process AI hold rollback failed".into(),
+                        },
+                    )
+                    .await;
+                return Err(RvoipError::Adapter(
+                    "in-process AI hold failed and rollback could not be acknowledged".into(),
+                ));
+            }
+        }
+        Err(hold_error)
     }
 
     async fn resume(&self, connection_id: ConnectionId) -> Result<()> {
@@ -1251,20 +1457,40 @@ impl ConnectionAdapter for InProcessAiAdapter {
             .routes
             .get(&connection_id)
             .map(|entry| Arc::clone(entry.value()))
-            .ok_or_else(|| RvoipError::ConnectionNotFound(connection_id))?;
+            .ok_or_else(|| RvoipError::ConnectionNotFound(connection_id.clone()))?;
         if !route.live.load(Ordering::Acquire) || !route.active.load(Ordering::Acquire) {
             return Err(RvoipError::InvalidState(
                 "in-process AI session is not active",
             ));
         }
-        tokio::time::timeout(self.config.lifecycle_ack_timeout, async {
-            if route.gate.state() == InProcessAiLifecycleState::Paused {
-                route.flush_caller_input().await?;
-            }
-            route.gate.resume().await
+        let operation = route.lifecycle_operation.lock().await;
+        if route.gate.state() == InProcessAiLifecycleState::Running {
+            return Ok(());
+        }
+        let resume_result = tokio::time::timeout(self.config.lifecycle_ack_timeout, async {
+            route.flush_caller_input().await?;
+            route.gate.resume().await?;
+            route
+                .lifecycle_control
+                .transition(InProcessAiLifecycleState::Running)
+                .await
         })
         .await
-        .map_err(|_| RvoipError::Adapter("in-process AI resume acknowledgement timed out".into()))?
+        .map_err(|_| RvoipError::Adapter("in-process AI resume acknowledgement timed out".into()))
+        .and_then(|result| result);
+        if let Err(resume_error) = resume_result {
+            drop(operation);
+            let _ = self
+                .end(
+                    connection_id,
+                    EndReason::Failed {
+                        detail: "in-process AI resume failed".into(),
+                    },
+                )
+                .await;
+            return Err(resume_error);
+        }
+        Ok(())
     }
 
     async fn transfer(&self, _connection_id: ConnectionId, _target: TransferTarget) -> Result<()> {
@@ -1411,13 +1637,21 @@ mod tests {
         async fn run(
             self: Box<Self>,
             mut media: InProcessAiMedia,
+            mut session_lifecycle: InProcessAiSessionLifecycle,
             cancellation: CancellationToken,
         ) -> Result<()> {
             let _ = self.lifecycle.send(media.subscribe_lifecycle());
             self.started.notify_one();
-            tokio::select! {
-                _ = cancellation.cancelled() => return Ok(()),
-                _ = self.release.notified() => {}
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return Ok(()),
+                    request = session_lifecycle.recv() => {
+                        let Some(request) = request else { return Ok(()) };
+                        request.acknowledge();
+                    }
+                    _ = self.release.notified() => break,
+                }
             }
             if let Some(frame) = media.recv().await {
                 let _ = self.observed.send(frame.payload);
@@ -1435,6 +1669,164 @@ mod tests {
     struct CompletingSession {
         started: Arc<Notify>,
         release: Arc<Notify>,
+    }
+
+    struct RejectPauseFactory;
+
+    struct RejectPauseSession;
+
+    #[async_trait]
+    impl InProcessAiSessionFactory for RejectPauseFactory {
+        async fn create(
+            &self,
+            _request: InProcessAiSessionRequest,
+        ) -> Result<Box<dyn InProcessAiSession>> {
+            Ok(Box::new(RejectPauseSession))
+        }
+    }
+
+    #[async_trait]
+    impl InProcessAiSession for RejectPauseSession {
+        async fn run(
+            self: Box<Self>,
+            mut media: InProcessAiMedia,
+            mut lifecycle: InProcessAiSessionLifecycle,
+            cancellation: CancellationToken,
+        ) -> Result<()> {
+            let mut pending: Option<MediaFrame> = None;
+            loop {
+                if let Some(frame) = pending.take() {
+                    tokio::select! {
+                        biased;
+                        _ = cancellation.cancelled() => return Ok(()),
+                        request = lifecycle.recv() => {
+                            let Some(request) = request else { return Ok(()) };
+                            if request.state() == InProcessAiLifecycleState::Paused {
+                                drop(request);
+                            } else {
+                                request.acknowledge();
+                            }
+                            pending = Some(frame);
+                        }
+                        result = media.send(frame.clone()) => result?,
+                    }
+                } else {
+                    tokio::select! {
+                        biased;
+                        _ = cancellation.cancelled() => return Ok(()),
+                        request = lifecycle.recv() => {
+                            let Some(request) = request else { return Ok(()) };
+                            if request.state() == InProcessAiLifecycleState::Paused {
+                                drop(request);
+                            } else {
+                                request.acknowledge();
+                            }
+                        }
+                        frame = media.recv() => {
+                            let Some(frame) = frame else { return Ok(()) };
+                            pending = Some(frame);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    struct QuiescingFactory {
+        provider_started: Arc<Notify>,
+        pause_received: Arc<Notify>,
+        allow_quiescence: Arc<Notify>,
+        provider_cancelled: Arc<AtomicBool>,
+    }
+
+    struct QuiescingSession {
+        provider_started: Arc<Notify>,
+        pause_received: Arc<Notify>,
+        allow_quiescence: Arc<Notify>,
+        provider_cancelled: Arc<AtomicBool>,
+    }
+
+    struct ProviderAttemptGuard(Arc<AtomicBool>);
+
+    impl Drop for ProviderAttemptGuard {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[async_trait]
+    impl InProcessAiSessionFactory for QuiescingFactory {
+        async fn create(
+            &self,
+            _request: InProcessAiSessionRequest,
+        ) -> Result<Box<dyn InProcessAiSession>> {
+            Ok(Box::new(QuiescingSession {
+                provider_started: Arc::clone(&self.provider_started),
+                pause_received: Arc::clone(&self.pause_received),
+                allow_quiescence: Arc::clone(&self.allow_quiescence),
+                provider_cancelled: Arc::clone(&self.provider_cancelled),
+            }))
+        }
+    }
+
+    #[async_trait]
+    impl InProcessAiSession for QuiescingSession {
+        async fn run(
+            self: Box<Self>,
+            mut media: InProcessAiMedia,
+            mut lifecycle: InProcessAiSessionLifecycle,
+            cancellation: CancellationToken,
+        ) -> Result<()> {
+            let Some(frame) = media.recv().await else {
+                return Ok(());
+            };
+            let provider_started = Arc::clone(&self.provider_started);
+            let provider_cancelled = Arc::clone(&self.provider_cancelled);
+            let mut provider_attempt = Box::pin(async move {
+                let _guard = ProviderAttemptGuard(provider_cancelled);
+                provider_started.notify_one();
+                std::future::pending::<()>().await;
+            });
+            let request = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Ok(()),
+                request = lifecycle.recv() => request,
+                _ = &mut provider_attempt => unreachable!("provider attempt is deliberately pending"),
+            };
+            drop(provider_attempt);
+            let Some(request) = request else {
+                return Ok(());
+            };
+            if request.state() != InProcessAiLifecycleState::Paused {
+                return Err(RvoipError::InvalidState(
+                    "quiescing session expected a pause",
+                ));
+            }
+            self.pause_received.notify_one();
+            tokio::select! {
+                _ = cancellation.cancelled() => return Ok(()),
+                _ = self.allow_quiescence.notified() => {}
+            }
+            request.acknowledge();
+            loop {
+                let request = tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return Ok(()),
+                    request = lifecycle.recv() => request,
+                };
+                let Some(request) = request else {
+                    return Ok(());
+                };
+                let running = request.state() == InProcessAiLifecycleState::Running;
+                request.acknowledge();
+                if running {
+                    break;
+                }
+            }
+            media.send(frame).await?;
+            cancellation.cancelled().await;
+            Ok(())
+        }
     }
 
     #[async_trait]
@@ -1455,6 +1847,7 @@ mod tests {
         async fn run(
             self: Box<Self>,
             _media: InProcessAiMedia,
+            _lifecycle: InProcessAiSessionLifecycle,
             cancellation: CancellationToken,
         ) -> Result<()> {
             self.started.notify_one();
@@ -1484,6 +1877,7 @@ mod tests {
         async fn run(
             self: Box<Self>,
             _media: InProcessAiMedia,
+            _lifecycle: InProcessAiSessionLifecycle,
             cancellation: CancellationToken,
         ) -> Result<()> {
             self.running.store(true, Ordering::Release);
@@ -1575,6 +1969,204 @@ mod tests {
                 if observed == connection_id
         ));
         assert!(!adapter.is_connection_live(&connection_id));
+    }
+
+    #[tokio::test]
+    async fn concurrent_activation_retries_await_the_same_failure() {
+        let config = InProcessAiConfig::default();
+        let adapter = InProcessAiAdapter::echo(config.clone()).expect("valid AI adapter");
+        drop(adapter.subscribe_events());
+        let handle = adapter
+            .originate(originate_request(&config))
+            .await
+            .expect("prepare AI connection");
+        let connection_id = handle.connection.id;
+        let route = adapter
+            .routes
+            .get(&connection_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .expect("prepared route");
+        let activation_guard = route.activation.lock().await;
+        let first_adapter = Arc::clone(&adapter);
+        let first_id = connection_id.clone();
+        let first = tokio::spawn(async move { first_adapter.activate_outbound(first_id).await });
+        let second_adapter = Arc::clone(&adapter);
+        let second_id = connection_id.clone();
+        let second = tokio::spawn(async move { second_adapter.activate_outbound(second_id).await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while Arc::strong_count(&route) < 4 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both activation retries reached the shared state");
+        drop(activation_guard);
+
+        for result in [first.await.unwrap(), second.await.unwrap()] {
+            assert!(matches!(
+                result,
+                Err(RvoipError::InvalidState(
+                    "in-process AI event receiver is unavailable"
+                ))
+            ));
+        }
+        assert!(!adapter.is_connection_live(&connection_id));
+    }
+
+    #[tokio::test]
+    async fn hold_waits_for_provider_quiescence_and_resume_reuses_pending_work() {
+        let provider_started = Arc::new(Notify::new());
+        let pause_received = Arc::new(Notify::new());
+        let allow_quiescence = Arc::new(Notify::new());
+        let provider_cancelled = Arc::new(AtomicBool::new(false));
+        let config = InProcessAiConfig::default();
+        let adapter = InProcessAiAdapter::new(
+            config.clone(),
+            Arc::new(QuiescingFactory {
+                provider_started: Arc::clone(&provider_started),
+                pause_received: Arc::clone(&pause_received),
+                allow_quiescence: Arc::clone(&allow_quiescence),
+                provider_cancelled: Arc::clone(&provider_cancelled),
+            }),
+        )
+        .expect("valid adapter");
+        let mut events = adapter.subscribe_events();
+        let handle = adapter
+            .originate(originate_request(&config))
+            .await
+            .expect("prepare AI connection");
+        let connection_id = handle.connection.id;
+        adapter
+            .activate_outbound(connection_id.clone())
+            .await
+            .expect("activate AI connection");
+        assert!(matches!(
+            events.recv().await,
+            Some(AdapterEvent::Connected { .. })
+        ));
+        let stream = adapter
+            .streams(connection_id.clone())
+            .await
+            .expect("query stream")
+            .into_iter()
+            .next()
+            .expect("one AI stream");
+        let mut output = stream
+            .reserve_frames_in()
+            .expect("reserve provider output")
+            .commit();
+        let input = stream.try_frames_out().expect("caller input");
+        let frame = MediaFrame {
+            stream_id: stream.id(),
+            kind: StreamKind::Audio,
+            payload: Bytes::from_static(b"pending-provider-turn"),
+            timestamp_rtp: 320,
+            captured_at: Utc::now(),
+            payload_type: Some(PCM_S16LE_PAYLOAD_TYPE),
+        };
+        input
+            .send(frame.clone())
+            .await
+            .expect("send provider input");
+        provider_started.notified().await;
+
+        let held_adapter = Arc::clone(&adapter);
+        let held_id = connection_id.clone();
+        let hold = tokio::spawn(async move { held_adapter.hold(held_id).await });
+        pause_received.notified().await;
+        assert!(provider_cancelled.load(Ordering::Acquire));
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(
+            !hold.is_finished(),
+            "hold acknowledged before provider quiescence"
+        );
+        allow_quiescence.notify_one();
+        hold.await.unwrap().expect("provider acknowledged hold");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), output.recv())
+                .await
+                .is_err(),
+            "held provider output crossed the media fence"
+        );
+
+        adapter
+            .resume(connection_id.clone())
+            .await
+            .expect("resume quiesced provider");
+        let resumed = tokio::time::timeout(Duration::from_secs(1), output.recv())
+            .await
+            .expect("resumed output deadline")
+            .expect("resumed provider output");
+        assert_eq!(resumed.payload, frame.payload);
+        adapter
+            .end(connection_id, EndReason::Normal)
+            .await
+            .expect("end quiescence test");
+    }
+
+    #[tokio::test]
+    async fn rejected_hold_rolls_media_and_provider_back_to_running() {
+        let config = InProcessAiConfig::default();
+        let adapter = InProcessAiAdapter::new(config.clone(), Arc::new(RejectPauseFactory))
+            .expect("valid adapter");
+        let mut events = adapter.subscribe_events();
+        let handle = adapter
+            .originate(originate_request(&config))
+            .await
+            .expect("prepare AI connection");
+        let connection_id = handle.connection.id;
+        adapter
+            .activate_outbound(connection_id.clone())
+            .await
+            .expect("activate AI connection");
+        assert!(matches!(
+            events.recv().await,
+            Some(AdapterEvent::Connected { .. })
+        ));
+        let stream = adapter
+            .streams(connection_id.clone())
+            .await
+            .expect("query stream")
+            .into_iter()
+            .next()
+            .expect("one AI stream");
+        let mut output = stream
+            .reserve_frames_in()
+            .expect("reserve provider output")
+            .commit();
+        let input = stream.try_frames_out().expect("caller input");
+
+        assert!(adapter.hold(connection_id.clone()).await.is_err());
+        assert_eq!(
+            adapter
+                .routes
+                .get(&connection_id)
+                .expect("live route after rollback")
+                .gate
+                .state(),
+            InProcessAiLifecycleState::Running
+        );
+        let frame = MediaFrame {
+            stream_id: stream.id(),
+            kind: StreamKind::Audio,
+            payload: Bytes::from_static(b"after-hold-rollback"),
+            timestamp_rtp: 640,
+            captured_at: Utc::now(),
+            payload_type: Some(PCM_S16LE_PAYLOAD_TYPE),
+        };
+        input
+            .send(frame.clone())
+            .await
+            .expect("send after rollback");
+        let echoed = tokio::time::timeout(Duration::from_secs(1), output.recv())
+            .await
+            .expect("rollback output deadline")
+            .expect("rollback provider output");
+        assert_eq!(echoed.payload, frame.payload);
+        adapter
+            .end(connection_id, EndReason::Normal)
+            .await
+            .expect("end rollback test");
     }
 
     #[tokio::test]

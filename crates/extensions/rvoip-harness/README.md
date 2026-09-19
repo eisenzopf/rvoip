@@ -12,22 +12,26 @@ the same AI implementation composes with SIP PCMU/PCMA, WebRTC Opus, and any
 future transport that exposes a normal rvoip media stream.
 
 Implement `InProcessAiSessionFactory` to allocate per-call state and
-`InProcessAiSession` to consume caller frames and emit agent frames. Session
-work starts only after the orchestrator commits the outbound connection; a
-prepared route remains dormant and can be cancelled without provider-visible
-media work. `InProcessAiAdapter::echo` is a deterministic smoke-test factory.
+`InProcessAiSession` to consume caller frames, emit agent frames, and service
+the supplied `InProcessAiSessionLifecycle` receiver. Session work starts only
+after the orchestrator commits the outbound connection; a prepared route
+remains dormant and can be cancelled without provider-visible media work.
+`InProcessAiAdapter::echo` is a deterministic smoke-test factory.
 
-`ConnectionAdapter::hold` and `resume` fence both media directions with a
-bounded acknowledgement. Holding does not cancel or recreate the provider
-session, so provider and dialogue state remain attached to the stable AI
-connection. Media observed while held is discarded as real-time data instead
-of being replayed after resume. Providers can use
-`InProcessAiMedia::subscribe_lifecycle` to cooperatively pause or cancel an
-in-flight ASR, LLM, or TTS operation; the adapter cannot preempt opaque vendor
-futures, but their media remains fenced. `end` is idempotent for a bounded
-history of completed connection IDs. `resource_snapshot` exposes only
-aggregate live route, active/held session, session-task, and media-task counts
-for leak checks.
+`ConnectionAdapter::hold` and `resume` fence both media directions and require
+a bounded provider acknowledgement. A session must select lifecycle requests
+alongside every ASR, model, tool, TTS, and playback future. It acknowledges
+`Paused` only after the competing future has been cancelled or drained and its
+uncommitted turn state is safe to retry. It acknowledges `Running` when that
+retained state can continue. A failed hold restores both provider and media to
+running; if that rollback cannot be acknowledged, the adapter ends the route
+instead of leaving a live silent session. Holding never recreates the provider,
+so committed dialogue state remains attached to the stable AI connection.
+`InProcessAiMedia::subscribe_lifecycle` remains an observation-only media-gate
+signal; it does not satisfy the provider acknowledgement contract. `end` is
+idempotent for a bounded history of completed connection IDs.
+`resource_snapshot` exposes only aggregate live route, active/held session,
+session-task, and media-task counts for leak checks.
 
 ```rust,no_run
 use std::sync::Arc;

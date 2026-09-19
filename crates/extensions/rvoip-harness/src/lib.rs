@@ -16,9 +16,9 @@ pub use rvoip_core_traits::harness::*;
 mod in_process;
 
 pub use in_process::{
-    EchoAiSessionFactory, InProcessAiAdapter, InProcessAiConfig, InProcessAiLifecycleState,
-    InProcessAiMedia, InProcessAiResourceSnapshot, InProcessAiSession, InProcessAiSessionFactory,
-    InProcessAiSessionRequest,
+    EchoAiSessionFactory, InProcessAiAdapter, InProcessAiConfig, InProcessAiLifecycleRequest,
+    InProcessAiLifecycleState, InProcessAiMedia, InProcessAiResourceSnapshot, InProcessAiSession,
+    InProcessAiSessionFactory, InProcessAiSessionLifecycle, InProcessAiSessionRequest,
 };
 
 use async_trait::async_trait;
