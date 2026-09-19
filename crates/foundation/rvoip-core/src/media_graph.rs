@@ -279,6 +279,7 @@ pub struct ManagedMediaRoute {
     status: MediaGraphRouteStatus,
     commands: mpsc::Sender<Command>,
     owner_liveness: Arc<RouteOwnerLiveness>,
+    forwarding: Arc<RouteForwardingGate>,
     remove_on_drop: bool,
 }
 
@@ -301,6 +302,26 @@ impl ManagedMediaRoute {
 
     pub async fn wait_terminal(&self) -> MediaGraphRouteTerminalReason {
         self.status.wait_terminal().await
+    }
+
+    /// Enable delivery for an installed route.
+    ///
+    /// Installation and forwarding are separate so an orchestrator can fully
+    /// validate a replacement route before making it audible. The gate is
+    /// deliberately synchronous and infallible: bridge ownership can switch
+    /// old-off/new-on inside one generation-checked commit section.
+    pub(crate) fn enable_forwarding(&self) {
+        self.forwarding.set_enabled(true);
+    }
+
+    /// Stop all future delivery before returning.
+    ///
+    /// A sink worker takes the same cutover lock immediately before publishing
+    /// to the adapter channel, so a worker that was waiting for capacity either
+    /// publishes before this boundary or observes the disabled state and drops
+    /// its frame afterward.
+    pub(crate) fn disable_forwarding(&self) {
+        self.forwarding.set_enabled(false);
     }
 
     /// Remove this route with actor acknowledgement. Clone [`Self::status`]
@@ -414,6 +435,7 @@ enum Command {
         codec: CodecInfo,
         target: mpsc::Sender<MediaFrame>,
         owner_liveness: Arc<RouteOwnerLiveness>,
+        forwarding: Arc<RouteForwardingGate>,
         admission: SinkAdmissionPermit,
     },
     Remove {
@@ -465,6 +487,38 @@ impl RouteOwnerLiveness {
 
     fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
+    }
+}
+
+/// Linearization gate for media-route cutover.
+///
+/// The atomic is the cheap source hot-path check. The mutex is taken only by
+/// bridge cutover and by a sink worker after it has reserved target capacity;
+/// it closes the race where an old worker is blocked in `send().await` while a
+/// replacement is promoted.
+struct RouteForwardingGate {
+    enabled: AtomicBool,
+    cutover: Mutex<()>,
+}
+
+impl RouteForwardingGate {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled: AtomicBool::new(enabled),
+            cutover: Mutex::new(()),
+        }
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
+    }
+
+    fn set_enabled(&self, enabled: bool) {
+        let _guard = self
+            .cutover
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.enabled.store(enabled, Ordering::Release);
     }
 }
 
@@ -558,6 +612,27 @@ impl MediaGraphHandle {
         codec: CodecInfo,
         target: mpsc::Sender<MediaFrame>,
     ) -> Result<ManagedMediaRoute> {
+        self.add_managed_sink_with_forwarding(codec, target, true)
+    }
+
+    /// Install and validate a managed sink while keeping it silent.
+    ///
+    /// This is crate-private because dormant routes are a bridge transaction
+    /// primitive. Callers must retain the lease and explicitly promote it.
+    pub(crate) fn add_dormant_managed_sink(
+        &self,
+        codec: CodecInfo,
+        target: mpsc::Sender<MediaFrame>,
+    ) -> Result<ManagedMediaRoute> {
+        self.add_managed_sink_with_forwarding(codec, target, false)
+    }
+
+    fn add_managed_sink_with_forwarding(
+        &self,
+        codec: CodecInfo,
+        target: mpsc::Sender<MediaFrame>,
+        forwarding_enabled: bool,
+    ) -> Result<ManagedMediaRoute> {
         admit_codec(&codec)?;
         let Some(admission) = self.sink_admission.try_acquire() else {
             metrics::counter!(
@@ -572,6 +647,7 @@ impl MediaGraphHandle {
         let route_id = MediaRouteId::new();
         let (status_tx, status_rx) = watch::channel(MediaGraphRouteState::Pending);
         let owner_liveness = Arc::new(RouteOwnerLiveness::default());
+        let forwarding = Arc::new(RouteForwardingGate::new(forwarding_enabled));
         self.route_statuses
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -581,6 +657,7 @@ impl MediaGraphHandle {
             codec,
             target,
             owner_liveness: Arc::clone(&owner_liveness),
+            forwarding: Arc::clone(&forwarding),
             admission,
         }) {
             self.route_statuses
@@ -596,6 +673,7 @@ impl MediaGraphHandle {
             },
             commands: self.commands.clone(),
             owner_liveness,
+            forwarding,
             remove_on_drop: true,
         })
     }
@@ -957,6 +1035,7 @@ struct SinkRuntime {
     target_pt: u8,
     group_key: CodecGroupKey,
     owner_liveness: Arc<RouteOwnerLiveness>,
+    forwarding: Arc<RouteForwardingGate>,
     /// Releasing the runtime route returns one slot to the graph-wide
     /// admission budget. Pending add commands hold the same kind of permit.
     _admission: SinkAdmissionPermit,
@@ -1755,6 +1834,7 @@ fn start_media_graph_with_activity_interval(
                             codec,
                             target,
                             owner_liveness,
+                            forwarding,
                             admission,
                         } => {
                             if owner_liveness.is_cancelled() {
@@ -1783,14 +1863,26 @@ fn start_media_graph_with_activity_interval(
                             let status_route_id = route_id.clone();
                             let queue = Arc::new(SinkQueue::new(policy.sink_queue_frames));
                             let queue_for_task = Arc::clone(&queue);
+                            let forwarding_for_task = Arc::clone(&forwarding);
                             let route_for_task = route_id.clone();
                             let event_tx = sink_event_tx.clone();
                             let task = tokio::spawn(async move {
                                 while let Some(frame) = queue_for_task.receive().await {
-                                    if target.send(frame).await.is_err() {
-                                        let _ = event_tx.send(route_for_task.clone()).await;
-                                        return;
+                                    let permit = match target.reserve().await {
+                                        Ok(permit) => permit,
+                                        Err(_) => {
+                                            let _ = event_tx.send(route_for_task.clone()).await;
+                                            return;
+                                        }
+                                    };
+                                    let cutover = forwarding_for_task
+                                        .cutover
+                                        .lock()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                    if forwarding_for_task.is_enabled() {
+                                        permit.send(frame);
                                     }
+                                    drop(cutover);
                                 }
                             });
                             prune_sink_tasks(&sink_tasks_for_actor);
@@ -1812,6 +1904,7 @@ fn start_media_graph_with_activity_interval(
                                 target_pt,
                                 group_key,
                                 owner_liveness,
+                                forwarding,
                                 _admission: admission,
                                 clock: RtpClockTranslator::new(
                                     source_codec.clock_rate_hz,
@@ -2404,6 +2497,9 @@ fn route_source_frame(
             let Some(sink) = sinks.get_mut(route_id) else {
                 continue;
             };
+            if !sink.forwarding.is_enabled() {
+                continue;
+            }
             for produced in &grouped {
                 let mut routed = produced.clone();
                 if !is_telephone_event {
@@ -2837,6 +2933,82 @@ mod tests {
         graph.shutdown_and_wait().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn dormant_managed_route_is_silent_until_promoted_and_after_quiesce() {
+        let (source_tx, source_rx) = mpsc::channel(4);
+        let graph = start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap();
+        let (target_tx, mut target_rx) = mpsc::channel(4);
+        let route = graph
+            .add_dormant_managed_sink(codec("pcmu", 8_000), target_tx)
+            .unwrap();
+        route.wait_active().await.unwrap();
+
+        source_tx.send(frame(1)).await.unwrap();
+        wait_until(|| graph.latest_snapshot().source_frames >= 1).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), target_rx.recv())
+                .await
+                .is_err(),
+            "a prepared route forwarded before promotion"
+        );
+
+        route.enable_forwarding();
+        source_tx.send(frame(2)).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), target_rx.recv())
+                .await
+                .expect("promoted route did not forward")
+                .expect("promoted route closed")
+                .payload[0],
+            2
+        );
+
+        route.disable_forwarding();
+        source_tx.send(frame(3)).await.unwrap();
+        wait_until(|| graph.latest_snapshot().source_frames >= 3).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), target_rx.recv())
+                .await
+                .is_err(),
+            "a quiesced route forwarded after cutover"
+        );
+        graph.shutdown_and_wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn quiesce_fences_worker_waiting_for_target_capacity() {
+        let (source_tx, source_rx) = mpsc::channel(4);
+        let graph = start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap();
+        let (target_tx, mut target_rx) = mpsc::channel(1);
+        target_tx.send(frame(99)).await.unwrap();
+        let route = graph
+            .add_managed_sink(codec("pcmu", 8_000), target_tx)
+            .unwrap();
+        route.wait_active().await.unwrap();
+
+        source_tx.send(frame(7)).await.unwrap();
+        wait_until(|| {
+            graph
+                .latest_snapshot()
+                .sinks
+                .first()
+                .is_some_and(|sink| sink.offered_frames >= 1)
+        })
+        .await;
+
+        // The sink worker has taken the graph frame and is waiting for room in
+        // the adapter channel. Quiesce must win before that pending publish.
+        route.disable_forwarding();
+        assert_eq!(target_rx.recv().await.unwrap().payload[0], 99);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), target_rx.recv())
+                .await
+                .is_err(),
+            "a worker published its reserved frame after quiesce"
+        );
+        graph.shutdown_and_wait().await.unwrap();
+    }
+
     #[test]
     fn zero_activity_observation_interval_is_rejected() {
         let (_source_tx, source_rx) = mpsc::channel(1);
@@ -3222,6 +3394,7 @@ mod tests {
             target_codec,
             target_pt: 0,
             owner_liveness: Arc::new(RouteOwnerLiveness::default()),
+            forwarding: Arc::new(RouteForwardingGate::new(true)),
             _admission: Arc::new(SinkAdmissionState::new(1)).try_acquire().unwrap(),
             clock: RtpClockTranslator::new(8_000, 8_000),
             queue: Arc::new(SinkQueue::new(1)),
@@ -3269,6 +3442,7 @@ mod tests {
             target_codec,
             target_pt: 0,
             owner_liveness: Arc::new(RouteOwnerLiveness::default()),
+            forwarding: Arc::new(RouteForwardingGate::new(true)),
             _admission: Arc::new(SinkAdmissionState::new(1)).try_acquire().unwrap(),
             clock: RtpClockTranslator::new(8_000, 8_000),
             queue: Arc::new(SinkQueue::new(policy_queue_frames)),

@@ -9995,6 +9995,10 @@ impl Orchestrator {
                 self.cross_bridges.insert(id.clone(), handle);
                 self.cross_bridge_data_routes.insert(id.clone(), data_route);
                 reservation.commit();
+                self.cross_bridges
+                    .get(&id)
+                    .expect("new bridge exists during commit")
+                    .activate_media();
                 self.emit(Event::ConnectionsBridged {
                     bridge_id: id.clone(),
                     a,
@@ -10174,6 +10178,20 @@ impl Orchestrator {
                         ));
                     }
 
+                    // Every slow/fallible preparation and every generation
+                    // check has completed. Forwarding gates are synchronous
+                    // and infallible, so old-off/new-on is the linearization
+                    // boundary: the candidate was silent before this point
+                    // and the retired generation cannot publish afterward.
+                    self.cross_bridges
+                        .get(&expected_bridge_id)
+                        .expect("bridge generation was checked under ownership lock")
+                        .deactivate_media();
+                    new_handle
+                        .as_ref()
+                        .expect("prepared bridge exists until commit")
+                        .activate_media();
+
                     let (_, old_handle) = self
                         .cross_bridges
                         .remove(&expected_bridge_id)
@@ -10252,9 +10270,10 @@ impl Orchestrator {
         })
     }
 
-    /// Prepare active media and bounded data routes without publishing them
-    /// into the bridge registry. Callers must lifecycle-check and commit the
-    /// returned bundle or stop it on every error path.
+    /// Prepare installed but silent media routes and bounded data workers
+    /// without publishing them into the bridge registry. Callers must
+    /// lifecycle-check and activate+commit the returned bundle or stop it on
+    /// every error path.
     async fn prepare_cross_bridge_for_commit(
         &self,
         id: BridgeId,
@@ -10327,7 +10346,7 @@ impl Orchestrator {
         if let Some(b_out) = b_out {
             let graph =
                 a_source_graph.expect("validated A-to-B plan initializes the A source graph");
-            let route = graph.add_managed_sink(b_codec.clone(), b_out)?;
+            let route = graph.add_dormant_managed_sink(b_codec.clone(), b_out)?;
             if route.wait_active().await.is_err() {
                 let _ = route.remove().await;
                 return Err(RvoipError::InvalidState(
@@ -10340,7 +10359,7 @@ impl Orchestrator {
         if let Some(a_out) = a_out {
             let graph =
                 b_source_graph.expect("validated B-to-A plan initializes the B source graph");
-            let route = match graph.add_managed_sink(a_codec, a_out) {
+            let route = match graph.add_dormant_managed_sink(a_codec, a_out) {
                 Ok(route) => route,
                 Err(error) => {
                     if let Some((_, route)) = a_to_b.take() {

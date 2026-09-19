@@ -306,6 +306,31 @@ impl CrossBridgeHandle {
             .collect()
     }
 
+    /// Promote every installed managed route to live forwarding.
+    ///
+    /// Route installation and activation are intentionally separate for
+    /// transactional bridge setup and destination replacement. Gate flips are
+    /// synchronous and infallible so callers can perform them while holding
+    /// the bridge generation/ownership commit guard.
+    pub(crate) fn activate_media(&self) {
+        let CrossBridgeBackend::ManagedMediaGraphs { a_to_b, b_to_a, .. } = &self.backend else {
+            return;
+        };
+        for route in [a_to_b, b_to_a].into_iter().flatten() {
+            route.enable_forwarding();
+        }
+    }
+
+    /// Quiesce every managed route before retiring a bridge generation.
+    pub(crate) fn deactivate_media(&self) {
+        let CrossBridgeBackend::ManagedMediaGraphs { a_to_b, b_to_a, .. } = &self.backend else {
+            return;
+        };
+        for route in [a_to_b, b_to_a].into_iter().flatten() {
+            route.disable_forwarding();
+        }
+    }
+
     /// Recover the exact directional plan for a managed graph bridge so a
     /// destination replacement preserves which side is allowed to send.
     pub(crate) fn directional_media_plan(&self) -> Result<DirectionalMediaBridgePlan> {

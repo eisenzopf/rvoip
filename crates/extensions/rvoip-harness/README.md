@@ -2,7 +2,41 @@
 
 > ⚠️ **Experimental surface** (unified `0.3.x` release) — API-unstable; expect breaking changes before `1.0`.
 
-Pluggable provider trait surfaces for ASR, TTS, DialogManager, RecordingSink — consumed by rvoip-core for the AI / recording harness.
+Pluggable provider trait surfaces for ASR, TTS, `DialogManager`, and
+`RecordingSink`, plus a first-party in-process AI connection adapter.
+
+`InProcessAiAdapter` turns an AI runtime into an ordinary outbound
+`Transport::InProcessAi` connection. Its audio boundary is bounded PCM16,
+16 kHz, mono. rvoip-core's MediaGraph performs the transport conversion, so
+the same AI implementation composes with SIP PCMU/PCMA, WebRTC Opus, and any
+future transport that exposes a normal rvoip media stream.
+
+Implement `InProcessAiSessionFactory` to allocate per-call state and
+`InProcessAiSession` to consume caller frames and emit agent frames. Session
+work starts only after the orchestrator commits the outbound connection; a
+prepared route remains dormant and can be cancelled without provider-visible
+media work. `InProcessAiAdapter::echo` is a deterministic smoke-test factory.
+
+```rust,no_run
+use std::sync::Arc;
+
+use rvoip_harness::{
+    InProcessAiAdapter, InProcessAiConfig, InProcessAiSessionFactory,
+};
+
+fn adapter(factory: Arc<dyn InProcessAiSessionFactory>) {
+    let adapter = InProcessAiAdapter::new(InProcessAiConfig::default(), factory)
+        .expect("valid bounded AI adapter configuration");
+    // Register `adapter` with rvoip-core before opening ingress.
+    drop(adapter);
+}
+```
+
+Transport handoff remains an rvoip-core topology operation. The harness does
+not implement SIP REFER, WebRTC signaling, routing policy, or account policy.
+Callers use the generation-fenced `Orchestrator::replace_bridge_destination`
+primitive to replace an AI connection with a prepared SIP/WebRTC connection,
+or the reverse, while the candidate media route stays silent until promotion.
 
 Part of the [**rvoip**](https://github.com/eisenzopf/rvoip) workspace (the "rvoip 3"
 unified real-time-communications stack). Published so the
