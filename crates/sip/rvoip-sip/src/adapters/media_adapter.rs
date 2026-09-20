@@ -1440,6 +1440,10 @@ pub struct MediaAdapter {
 }
 
 impl MediaAdapter {
+    pub(crate) async fn allocated_port_count(&self) -> usize {
+        self.controller.allocated_port_count().await
+    }
+
     fn media_negotiation_key(session: &SessionState) -> Result<MediaNegotiationKey> {
         if let Some(handle) = session.lifecycle_handle.clone() {
             return Ok(MediaNegotiationKey::Exact(handle));

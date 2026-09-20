@@ -9,3 +9,10 @@ artifacts
 *.pcapng
 .env
 .env.*
+certs
+**/certs
+*.crt
+*.key
+*.pem
+*.p12
+*.pfx

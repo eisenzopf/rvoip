@@ -371,6 +371,15 @@ pub struct MediaSessionController {
 }
 
 impl MediaSessionController {
+    /// Exact number of RTP/RTCP UDP ports currently leased by this controller.
+    /// Controllers without a configured allocator own no range-backed ports.
+    pub async fn allocated_port_count(&self) -> usize {
+        match &self.port_allocator {
+            Some(allocator) => allocator.allocated_count().await,
+            None => 0,
+        }
+    }
+
     /// Create a new media session controller
     pub fn new() -> Self {
         Self::new_with_capacity_hint(0)

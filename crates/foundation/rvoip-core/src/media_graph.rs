@@ -20,7 +20,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
@@ -281,6 +281,7 @@ pub struct ManagedMediaRoute {
     status: MediaGraphRouteStatus,
     commands: mpsc::Sender<Command>,
     owner_liveness: Arc<RouteOwnerLiveness>,
+    delivery: Arc<RouteDeliveryProgress>,
     forwarding: Arc<RouteForwardingGate>,
     remove_on_drop: bool,
 }
@@ -304,6 +305,38 @@ impl ManagedMediaRoute {
 
     pub async fn wait_terminal(&self) -> MediaGraphRouteTerminalReason {
         self.status.wait_terminal().await
+    }
+
+    /// Return the number of frames accepted by this route's target channel.
+    ///
+    /// The counter advances only after the cutover fence permits the frame and
+    /// the target channel has reserved capacity. It therefore observes the
+    /// graph-to-adapter delivery boundary rather than only a graph offer.
+    pub fn delivered_frames(&self) -> u64 {
+        self.delivery.delivered_frames.load(Ordering::Acquire)
+    }
+
+    /// Wait until the target channel has accepted this route's first frame.
+    ///
+    /// If graph or target teardown wins first, return the retained terminal
+    /// reason instead of leaving the caller blocked.
+    pub async fn wait_for_first_delivery(
+        &self,
+    ) -> std::result::Result<(), MediaGraphRouteTerminalReason> {
+        let mut delivery = self.delivery.changed.subscribe();
+        loop {
+            if self.delivered_frames() > 0 {
+                return Ok(());
+            }
+            tokio::select! {
+                changed = delivery.changed() => {
+                    if changed.is_err() {
+                        return Err(MediaGraphRouteTerminalReason::OwnerRemoved);
+                    }
+                }
+                reason = self.status.wait_terminal() => return Err(reason),
+            }
+        }
     }
 
     /// Enable delivery for an installed route.
@@ -437,6 +470,7 @@ enum Command {
         codec: CodecInfo,
         target: mpsc::Sender<MediaFrame>,
         owner_liveness: Arc<RouteOwnerLiveness>,
+        delivery: Arc<RouteDeliveryProgress>,
         forwarding: Arc<RouteForwardingGate>,
         admission: SinkAdmissionPermit,
     },
@@ -489,6 +523,31 @@ impl RouteOwnerLiveness {
 
     fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
+    }
+}
+
+struct RouteDeliveryProgress {
+    delivered_frames: AtomicU64,
+    changed: watch::Sender<u64>,
+}
+
+impl Default for RouteDeliveryProgress {
+    fn default() -> Self {
+        let (changed, _) = watch::channel(0);
+        Self {
+            delivered_frames: AtomicU64::new(0),
+            changed,
+        }
+    }
+}
+
+impl RouteDeliveryProgress {
+    fn record_delivery(&self) {
+        let delivered = self
+            .delivered_frames
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1);
+        self.changed.send_replace(delivered);
     }
 }
 
@@ -712,6 +771,7 @@ impl MediaGraphHandle {
         let route_id = MediaRouteId::new();
         let (status_tx, status_rx) = watch::channel(MediaGraphRouteState::Pending);
         let owner_liveness = Arc::new(RouteOwnerLiveness::default());
+        let delivery = Arc::new(RouteDeliveryProgress::default());
         let forwarding = Arc::new(RouteForwardingGate::new(
             forwarding_enabled,
             buffer_while_disabled,
@@ -725,6 +785,7 @@ impl MediaGraphHandle {
             codec,
             target,
             owner_liveness: Arc::clone(&owner_liveness),
+            delivery: Arc::clone(&delivery),
             forwarding: Arc::clone(&forwarding),
             admission,
         }) {
@@ -741,6 +802,7 @@ impl MediaGraphHandle {
             },
             commands: self.commands.clone(),
             owner_liveness,
+            delivery,
             forwarding,
             remove_on_drop: true,
         })
@@ -2085,6 +2147,7 @@ fn start_media_graph_with_activity_interval(
                             codec,
                             target,
                             owner_liveness,
+                            delivery,
                             forwarding,
                             admission,
                         } => {
@@ -2115,6 +2178,7 @@ fn start_media_graph_with_activity_interval(
                             let queue = Arc::new(SinkQueue::new(policy.sink_queue_frames));
                             let queue_for_task = Arc::clone(&queue);
                             let forwarding_for_task = Arc::clone(&forwarding);
+                            let delivery_for_task = Arc::clone(&delivery);
                             let route_for_task = route_id.clone();
                             let event_tx = sink_event_tx.clone();
                             let task = tokio::spawn(async move {
@@ -2135,6 +2199,7 @@ fn start_media_graph_with_activity_interval(
                                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                                     if forwarding_for_task.is_enabled() {
                                         permit.send(frame);
+                                        delivery_for_task.record_delivery();
                                     }
                                     drop(cutover);
                                 }

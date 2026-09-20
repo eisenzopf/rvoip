@@ -15,10 +15,21 @@ pub use rvoip_core_traits::harness::*;
 
 mod in_process;
 
+#[cfg(any(test, feature = "test-reference"))]
+mod reference;
+
 pub use in_process::{
-    EchoAiSessionFactory, InProcessAiAdapter, InProcessAiConfig, InProcessAiLifecycleRequest,
-    InProcessAiLifecycleState, InProcessAiMedia, InProcessAiResourceSnapshot, InProcessAiSession,
-    InProcessAiSessionFactory, InProcessAiSessionLifecycle, InProcessAiSessionRequest,
+    AiMediaBinding, AiOriginateContext, AiProviderReferences, AiResumePolicy, AiTraceContext,
+    EchoAiSessionFactory, InProcessAiAdapter, InProcessAiConfig, InProcessAiEvent,
+    InProcessAiEventKind, InProcessAiLifecycleRequest, InProcessAiLifecycleState, InProcessAiMedia,
+    InProcessAiResourceSnapshot, InProcessAiSession, InProcessAiSessionFactory,
+    InProcessAiSessionLifecycle, InProcessAiSessionRequest,
+};
+
+#[cfg(any(test, feature = "test-reference"))]
+pub use reference::{
+    ReferenceAsrProvider, ReferenceDialogManager, ReferenceProviderControl,
+    ReferenceProviderSnapshot, ReferenceStage, ReferenceTtsProvider,
 };
 
 use async_trait::async_trait;

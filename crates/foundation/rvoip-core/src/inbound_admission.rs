@@ -20,7 +20,7 @@ use crate::connection::Transport;
 use crate::error::{Result, RvoipError};
 use crate::identity::AuthenticatedPrincipal;
 use crate::ids::ConnectionId;
-use crate::media_graph::ManagedMediaRoute;
+use crate::media_graph::{ManagedMediaRoute, MediaGraphRouteTerminalReason};
 use crate::orchestrator::Orchestrator;
 use crate::{DataMessage, MAX_DATA_LABEL_BYTES};
 
@@ -522,6 +522,26 @@ impl ProvisionalMediaRoute {
 
     pub fn target_connection_id(&self) -> &ConnectionId {
         &self.target_connection_id
+    }
+
+    /// Return how many provisional frames the target channel has accepted.
+    pub fn delivered_frames(&self) -> u64 {
+        self.route
+            .as_ref()
+            .map_or(0, ManagedMediaRoute::delivered_frames)
+    }
+
+    /// Wait for the first acknowledged provisional media delivery.
+    ///
+    /// This lets an admission policy prove that media crossed the graph-to-
+    /// adapter boundary before it publishes a final answer.
+    pub async fn wait_for_first_delivery(
+        &self,
+    ) -> std::result::Result<(), MediaGraphRouteTerminalReason> {
+        match self.route.as_ref() {
+            Some(route) => route.wait_for_first_delivery().await,
+            None => Err(MediaGraphRouteTerminalReason::OwnerRemoved),
+        }
     }
 
     /// Remove the sink and wait for the media graph to acknowledge it.

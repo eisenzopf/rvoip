@@ -14,6 +14,7 @@ description = "rvoip-core WebRTC interop adapter built on webrtc-rs 0.20.0-alpha
 
 [features]
 default = []
+test-hooks = []
 signaling-whip = ["dep:axum", "dep:hyper", "dep:tower", "dep:tower-http", "dep:serde_json", "dep:rvoip-auth-core", "dep:reqwest"]
 signaling-ws = ["dep:tokio-tungstenite", "dep:serde_json", "dep:rvoip-auth-core"]
 client = ["dep:serde_json"]
@@ -60,7 +61,7 @@ bridge-quic = [
 ]
 
 [dependencies]
-rvoip-core.workspace = true
+rvoip-core = { workspace = true, features = ["opus"] }
 rvoip-sip-core.workspace = true
 webrtc = { workspace = true, features = ["runtime-tokio"] }
 rtc.workspace = true
@@ -135,6 +136,7 @@ rcgen.workspace = true
 # Forward dev-dep: path-only (no version) so `cargo publish` strips it from the
 # published manifest rather than requiring rvoip-sip on crates.io. See rvoip-core.
 rvoip-sip = { path = "../../sip/rvoip-sip" }
+rvoip-harness = { workspace = true }
 rvoip-rtp-core.workspace = true
 rand = { workspace = true }
 tokio-util.workspace = true

@@ -125,6 +125,9 @@ vcon-signing = ["vcon"]
 # can supply the first-party InProcessAi ConnectionAdapter.
 harness = []
 client = []
+# Deterministic, bounded orchestration gates used only by integration tests.
+# Default and release builds do not compile these seams.
+test-hooks = []
 full = [
     "webrtc",
     "harness",

@@ -15,14 +15,14 @@ use rvoip_core::commands::MuteDirection;
 use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
 use rvoip_core::error::{Result, RvoipError};
 use rvoip_core::identity::IdentityAssurance;
-use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId, StreamId};
+use rvoip_core::ids::{AiSessionId, ConnectionId, ParticipantId, SessionId, StreamId};
 use rvoip_core::message::Message;
 use rvoip_core::stream::{
     MediaFrame, MediaReceiverReservation, MediaStream, MediaStreamHandle, QualitySnapshot,
     StreamKind,
 };
 use rvoip_core::DataMessage;
-use tokio::sync::{mpsc, oneshot, watch, Mutex as TokioMutex, Notify, RwLock};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex as TokioMutex, Notify, RwLock};
 use tokio_util::sync::CancellationToken;
 
 const PCM_S16LE_PAYLOAD_TYPE: u8 = 120;
@@ -33,7 +33,9 @@ pub struct InProcessAiConfig {
     /// Canonical codec exposed at the AI boundary. MediaGraph transcodes SIP
     /// PCMU/PCMA and WebRTC Opus to this format.
     pub codec: CodecInfo,
-    /// Frames buffered in each direction for one AI session.
+    /// Frames buffered in each direction for one AI session. Full queues apply
+    /// bounded backpressure to their producer; the adapter never drops or
+    /// overwrites an audio frame silently.
     pub media_queue_capacity: usize,
     /// Transport-neutral lifecycle events retained for core.
     pub event_queue_capacity: usize,
@@ -110,6 +112,176 @@ impl InProcessAiConfig {
     }
 }
 
+/// Provider identities selected by application-owned policy before an AI
+/// connection reaches the transport adapter. Values are bounded opaque names;
+/// credentials and arbitrary configuration do not cross this boundary.
+#[derive(Clone, Default, Eq, PartialEq)]
+pub struct AiProviderReferences {
+    pub asr: Option<String>,
+    pub dialogue: Option<String>,
+    pub tts: Option<String>,
+    pub tools: Option<String>,
+}
+
+impl fmt::Debug for AiProviderReferences {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AiProviderReferences")
+            .field("asr_present", &self.asr.is_some())
+            .field("dialogue_present", &self.dialogue.is_some())
+            .field("tts_present", &self.tts.is_some())
+            .field("tools_present", &self.tools.is_some())
+            .finish()
+    }
+}
+
+impl AiProviderReferences {
+    fn validate(&self) -> Result<()> {
+        for value in [&self.asr, &self.dialogue, &self.tts, &self.tools]
+            .into_iter()
+            .flatten()
+        {
+            if value.is_empty()
+                || value.len() > 128
+                || !value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':' | b'/')
+                })
+            {
+                return Err(RvoipError::AdmissionRejected(
+                    "in-process AI provider references must be bounded identifiers",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Whether an externally named AI session may resume retained provider state.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum AiResumePolicy {
+    #[default]
+    ResumeRetained,
+    StartFresh,
+}
+
+/// Bounded, credential-free correlation supplied by the application. Core and
+/// the adapter treat these as opaque trace identities; provider implementations
+/// may copy them into sanitized request logs without conflating them with the
+/// stable AI session identity.
+#[derive(Clone, Default, Eq, PartialEq)]
+pub struct AiTraceContext {
+    pub application_call_id: Option<String>,
+}
+
+impl fmt::Debug for AiTraceContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AiTraceContext")
+            .field(
+                "application_call_id_present",
+                &self.application_call_id.is_some(),
+            )
+            .finish()
+    }
+}
+
+impl AiTraceContext {
+    fn validate(&self) -> Result<()> {
+        for value in [&self.application_call_id].into_iter().flatten() {
+            if value.is_empty()
+                || value.len() > 128
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            {
+                return Err(RvoipError::AdmissionRejected(
+                    "in-process AI trace identities must be bounded identifiers",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Typed adapter context for one AI originate operation.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AiOriginateContext {
+    pub ai_session_id: Option<AiSessionId>,
+    pub providers: AiProviderReferences,
+    pub resume_policy: AiResumePolicy,
+    pub trace: AiTraceContext,
+}
+
+impl AiOriginateContext {
+    fn validate(&self) -> Result<()> {
+        if let Some(session_id) = self.ai_session_id.as_ref() {
+            if session_id.as_str().is_empty()
+                || session_id.as_str().len() > 128
+                || !session_id
+                    .as_str()
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            {
+                return Err(RvoipError::AdmissionRejected(
+                    "in-process AI session ID must be a bounded identifier",
+                ));
+            }
+        }
+        self.providers.validate()?;
+        self.trace.validate()
+    }
+}
+
+/// Generation-qualified provider/media ownership for one stable AI session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AiMediaBinding {
+    pub connection_id: ConnectionId,
+    pub binding_generation: u64,
+}
+
+impl AiMediaBinding {
+    fn validate(&self) -> Result<()> {
+        let connection_id = self.connection_id.as_str();
+        if self.binding_generation == 0
+            || connection_id.is_empty()
+            || connection_id.len() > 128
+            || !connection_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return Err(RvoipError::InvalidState(
+                "in-process AI media binding is invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Typed AI lifecycle events. Reasons remain bounded and never contain
+/// transcript, audio, provider credentials, or application configuration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InProcessAiEventKind {
+    Created,
+    Activated,
+    Paused,
+    Resumed,
+    Rebound,
+    Stopped,
+    Failed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InProcessAiEvent {
+    pub ai_session_id: AiSessionId,
+    /// Adapter connection that owns the provider session.
+    pub connection_id: ConnectionId,
+    /// Current caller/media binding, which may name a different connection.
+    pub media_binding: AiMediaBinding,
+    pub binding_generation: u64,
+    pub kind: InProcessAiEventKind,
+    pub reason: Option<String>,
+}
+
 /// Cooperative lifecycle visible to a provider-owned AI session.
 ///
 /// Providers should stop or suspend in-flight ASR/LLM/TTS work when this
@@ -133,6 +305,7 @@ pub enum InProcessAiLifecycleState {
 /// Dropping a request rejects the transition.
 pub struct InProcessAiLifecycleRequest {
     state: InProcessAiLifecycleState,
+    binding: Option<AiMediaBinding>,
     acknowledgement: Option<oneshot::Sender<()>>,
 }
 
@@ -141,6 +314,7 @@ impl fmt::Debug for InProcessAiLifecycleRequest {
         formatter
             .debug_struct("InProcessAiLifecycleRequest")
             .field("state", &self.state)
+            .field("binding", &self.binding)
             .finish_non_exhaustive()
     }
 }
@@ -149,6 +323,12 @@ impl InProcessAiLifecycleRequest {
     #[must_use]
     pub fn state(&self) -> InProcessAiLifecycleState {
         self.state
+    }
+
+    /// Generation-qualified media identity supplied by a typed rebind.
+    #[must_use]
+    pub fn binding(&self) -> Option<&AiMediaBinding> {
+        self.binding.as_ref()
     }
 
     /// Acknowledge that the requested lifecycle state is fully in effect.
@@ -196,12 +376,32 @@ impl InProcessAiLifecycleControl {
         self.requests
             .send(InProcessAiLifecycleRequest {
                 state,
+                binding: None,
                 acknowledgement: Some(acknowledgement),
             })
             .await
             .map_err(|_| RvoipError::InvalidState("in-process AI lifecycle receiver is closed"))?;
         completed.await.map_err(|_| {
             RvoipError::InvalidState("in-process AI lifecycle request was not acknowledged")
+        })
+    }
+
+    async fn rebind(
+        &self,
+        state: InProcessAiLifecycleState,
+        binding: AiMediaBinding,
+    ) -> Result<()> {
+        let (acknowledgement, completed) = oneshot::channel();
+        self.requests
+            .send(InProcessAiLifecycleRequest {
+                state,
+                binding: Some(binding),
+                acknowledgement: Some(acknowledgement),
+            })
+            .await
+            .map_err(|_| RvoipError::InvalidState("in-process AI lifecycle receiver is closed"))?;
+        completed.await.map_err(|_| {
+            RvoipError::InvalidState("in-process AI rebind request was not acknowledged")
         })
     }
 }
@@ -303,21 +503,30 @@ impl InProcessAiMediaGate {
 /// redacted from diagnostics.
 #[derive(Clone)]
 pub struct InProcessAiSessionRequest {
+    pub ai_session_id: AiSessionId,
+    /// Core conversation/session identity retained for source compatibility.
     pub session_id: SessionId,
     pub participant_id: ParticipantId,
     pub target: String,
     pub codec: CodecInfo,
+    pub providers: AiProviderReferences,
+    pub resume_policy: AiResumePolicy,
+    pub trace: AiTraceContext,
 }
 
 impl fmt::Debug for InProcessAiSessionRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("InProcessAiSessionRequest")
+            .field("ai_session_id", &self.ai_session_id)
             .field("session_id", &self.session_id)
             .field("participant_id", &self.participant_id)
             .field("target", &"[redacted]")
             .field("target_bytes", &self.target.len())
             .field("codec", &self.codec)
+            .field("providers", &self.providers)
+            .field("resume_policy", &self.resume_policy)
+            .field("trace", &self.trace)
             .finish()
     }
 }
@@ -767,7 +976,9 @@ enum ActivationState {
 }
 
 struct Route {
+    ai_session_id: AiSessionId,
     connection_id: ConnectionId,
+    media_binding: Mutex<AiMediaBinding>,
     stream: Arc<InProcessAiMediaStream>,
     session: Mutex<Option<Box<dyn InProcessAiSession>>>,
     media: Mutex<Option<InProcessAiMedia>>,
@@ -788,14 +999,17 @@ struct Route {
     cleanup_complete: AtomicBool,
     cleanup_notify: Notify,
     gate: Arc<InProcessAiMediaGate>,
+    ai_events: broadcast::Sender<InProcessAiEvent>,
 }
 
 impl Route {
     fn new(
+        ai_session_id: AiSessionId,
         connection_id: ConnectionId,
         codec: CodecInfo,
         capacity: usize,
         session: Box<dyn InProcessAiSession>,
+        ai_events: broadcast::Sender<InProcessAiEvent>,
     ) -> Arc<Self> {
         let gate = InProcessAiMediaGate::new();
         let (stream, media, pending_input_gate, input_gate_control) =
@@ -803,6 +1017,11 @@ impl Route {
         let (lifecycle_requests, session_lifecycle) = mpsc::channel(2);
         let provider_input = Arc::clone(&media.caller_audio);
         Arc::new(Self {
+            ai_session_id,
+            media_binding: Mutex::new(AiMediaBinding {
+                connection_id: connection_id.clone(),
+                binding_generation: 1,
+            }),
             connection_id,
             stream,
             session: Mutex::new(Some(session)),
@@ -828,7 +1047,25 @@ impl Route {
             cleanup_complete: AtomicBool::new(false),
             cleanup_notify: Notify::new(),
             gate,
+            ai_events,
         })
+    }
+
+    fn emit_ai_event(&self, kind: InProcessAiEventKind, reason: Option<&str>) {
+        let reason = reason.map(|value| value.chars().take(256).collect());
+        let media_binding = self
+            .media_binding
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let _ = self.ai_events.send(InProcessAiEvent {
+            ai_session_id: self.ai_session_id.clone(),
+            connection_id: self.connection_id.clone(),
+            binding_generation: media_binding.binding_generation,
+            media_binding,
+            kind,
+            reason,
+        });
     }
 
     async fn flush_caller_input(&self) -> Result<()> {
@@ -900,10 +1137,14 @@ pub struct InProcessAiResourceSnapshot {
 pub struct InProcessAiAdapter {
     config: InProcessAiConfig,
     factory: Arc<dyn InProcessAiSessionFactory>,
+    draining: AtomicBool,
+    admission_gate: Mutex<()>,
     routes: Arc<dashmap::DashMap<ConnectionId, Arc<Route>>>,
+    session_routes: Arc<dashmap::DashMap<AiSessionId, ConnectionId>>,
     events: mpsc::Sender<AdapterEvent>,
     event_receiver: Mutex<Option<mpsc::Receiver<AdapterEvent>>>,
     lifecycle: AdapterLifecycleSinkSlot,
+    ai_events: broadcast::Sender<InProcessAiEvent>,
     terminal_history: Arc<Mutex<TerminalHistory>>,
 }
 
@@ -933,6 +1174,7 @@ impl Drop for InProcessAiAdapter {
             }
         }
         self.routes.clear();
+        self.session_routes.clear();
     }
 }
 
@@ -943,21 +1185,83 @@ impl InProcessAiAdapter {
     ) -> Result<Arc<Self>> {
         config.validate()?;
         let (events, event_receiver) = mpsc::channel(config.event_queue_capacity);
+        let (ai_events, _) = broadcast::channel(config.event_queue_capacity);
         Ok(Arc::new(Self {
             terminal_history: Arc::new(Mutex::new(TerminalHistory::new(
                 config.terminal_history_capacity,
             ))),
             config,
             factory,
+            draining: AtomicBool::new(false),
+            admission_gate: Mutex::new(()),
             routes: Arc::new(dashmap::DashMap::new()),
+            session_routes: Arc::new(dashmap::DashMap::new()),
             events,
             event_receiver: Mutex::new(Some(event_receiver)),
             lifecycle: AdapterLifecycleSinkSlot::default(),
+            ai_events,
         }))
     }
 
     pub fn echo(config: InProcessAiConfig) -> Result<Arc<Self>> {
         Self::new(config, Arc::new(EchoAiSessionFactory))
+    }
+
+    /// Close admission synchronously before enumerating retained sessions.
+    /// An originate operation that already created its dormant provider state
+    /// must cross the same gate before publication, so it either linearizes
+    /// before this call and is included in the drain or fails closed.
+    pub fn begin_drain(&self) -> bool {
+        let _admission = self
+            .admission_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        !self.draining.swap(true, Ordering::AcqRel)
+    }
+
+    #[must_use]
+    pub fn is_draining(&self) -> bool {
+        self.draining.load(Ordering::Acquire)
+    }
+
+    /// Reject new sessions and end every retained dormant or active route
+    /// within one caller-supplied budget.
+    pub async fn drain(self: &Arc<Self>, timeout: Duration) -> Result<()> {
+        self.begin_drain();
+        let connection_ids = self
+            .routes
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        let mut tasks = tokio::task::JoinSet::new();
+        for connection_id in connection_ids {
+            let adapter = Arc::clone(self);
+            tasks.spawn(async move { adapter.end(connection_id, EndReason::Cancelled).await });
+        }
+        let completed = tokio::time::timeout(timeout, async {
+            while let Some(result) = tasks.join_next().await {
+                result.map_err(|error| {
+                    RvoipError::Adapter(format!("in-process AI drain task failed: {error}"))
+                })??;
+            }
+            Result::<()>::Ok(())
+        })
+        .await;
+        match completed {
+            Ok(result) => result?,
+            Err(_) => {
+                tasks.abort_all();
+                return Err(RvoipError::Adapter(
+                    "in-process AI drain deadline expired".into(),
+                ));
+            }
+        }
+        if self.resource_snapshot() != InProcessAiResourceSnapshot::default() {
+            return Err(RvoipError::InvalidState(
+                "in-process AI drain retained session resources",
+            ));
+        }
+        Ok(())
     }
 
     pub fn resource_snapshot(&self) -> InProcessAiResourceSnapshot {
@@ -995,9 +1299,112 @@ impl InProcessAiAdapter {
         snapshot
     }
 
+    /// Subscribe to typed, bounded AI lifecycle events.
+    pub fn subscribe_ai_events(&self) -> broadcast::Receiver<InProcessAiEvent> {
+        self.ai_events.subscribe()
+    }
+
+    /// Resolve the current generation-qualified media identity without
+    /// exposing provider state.
+    pub fn session_binding(&self, ai_session_id: &AiSessionId) -> Option<AiMediaBinding> {
+        let connection_id = self
+            .session_routes
+            .get(ai_session_id)
+            .map(|entry| entry.value().clone())?;
+        let route = self
+            .routes
+            .get(&connection_id)
+            .map(|entry| Arc::clone(entry.value()))?;
+        if !route.live.load(Ordering::Acquire) {
+            return None;
+        }
+        let binding = route
+            .media_binding
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        Some(binding)
+    }
+
+    /// Rebind retained provider state to the next authoritative core binding
+    /// generation. The provider acknowledges the typed request before the new
+    /// generation becomes visible; stale and skipped generations fail closed.
+    pub async fn rebind_session(
+        &self,
+        ai_session_id: &AiSessionId,
+        expected: AiMediaBinding,
+        next: AiMediaBinding,
+    ) -> Result<AiMediaBinding> {
+        let ai_connection_id = self
+            .session_routes
+            .get(ai_session_id)
+            .map(|entry| entry.value().clone())
+            .ok_or(RvoipError::InvalidState(
+                "in-process AI session is not live",
+            ))?;
+        expected.validate()?;
+        next.validate()?;
+        let route = self
+            .routes
+            .get(&ai_connection_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or_else(|| RvoipError::ConnectionNotFound(ai_connection_id.clone()))?;
+        if !route.live.load(Ordering::Acquire) || !route.active.load(Ordering::Acquire) {
+            return Err(RvoipError::InvalidState(
+                "in-process AI session is not active",
+            ));
+        }
+        let _operation = route.lifecycle_operation.lock().await;
+        if !route.live.load(Ordering::Acquire) || !route.active.load(Ordering::Acquire) {
+            return Err(RvoipError::InvalidState(
+                "in-process AI session is not active",
+            ));
+        }
+        let current = route
+            .media_binding
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if current != expected
+            || next.binding_generation
+                != current
+                    .binding_generation
+                    .checked_add(1)
+                    .ok_or(RvoipError::InvalidState(
+                        "in-process AI binding generation exhausted",
+                    ))?
+        {
+            return Err(RvoipError::InvalidState(
+                "in-process AI rebind generation is stale or non-monotonic",
+            ));
+        }
+        tokio::time::timeout(
+            self.config.lifecycle_ack_timeout,
+            route
+                .lifecycle_control
+                .rebind(route.gate.state(), next.clone()),
+        )
+        .await
+        .map_err(|_| {
+            RvoipError::Adapter("in-process AI rebind acknowledgement timed out".into())
+        })??;
+        if !route.live.load(Ordering::Acquire) || !route.active.load(Ordering::Acquire) {
+            return Err(RvoipError::InvalidState(
+                "in-process AI session ended during rebind",
+            ));
+        }
+        *route
+            .media_binding
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = next.clone();
+        route.emit_ai_event(InProcessAiEventKind::Rebound, None);
+        Ok(next)
+    }
+
     async fn finish_route(&self, route: Arc<Route>, event: AdapterEvent) -> Result<()> {
         finish_route(
             &self.routes,
+            &self.session_routes,
             &self.events,
             &self.lifecycle,
             &self.terminal_history,
@@ -1011,6 +1418,7 @@ impl InProcessAiAdapter {
 
 async fn finish_route(
     routes: &dashmap::DashMap<ConnectionId, Arc<Route>>,
+    session_routes: &dashmap::DashMap<AiSessionId, ConnectionId>,
     events: &mpsc::Sender<AdapterEvent>,
     lifecycle: &AdapterLifecycleSinkSlot,
     terminal_history: &Mutex<TerminalHistory>,
@@ -1027,6 +1435,7 @@ async fn finish_route(
     }
     finish_claimed_route(
         routes,
+        session_routes,
         events,
         lifecycle,
         terminal_history,
@@ -1040,6 +1449,7 @@ async fn finish_route(
 
 async fn finish_claimed_route(
     routes: &dashmap::DashMap<ConnectionId, Arc<Route>>,
+    session_routes: &dashmap::DashMap<AiSessionId, ConnectionId>,
     events: &mpsc::Sender<AdapterEvent>,
     lifecycle: &AdapterLifecycleSinkSlot,
     terminal_history: &Mutex<TerminalHistory>,
@@ -1068,12 +1478,21 @@ async fn finish_claimed_route(
     routes.remove_if(&route.connection_id, |_, current| {
         Arc::ptr_eq(current, &route)
     });
+    session_routes.remove_if(&route.ai_session_id, |_, connection_id| {
+        connection_id == &route.connection_id
+    });
     terminal_history
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .insert(route.connection_id.clone());
     route.cleanup_complete.store(true, Ordering::Release);
     route.cleanup_notify.notify_waiters();
+    match &event {
+        AdapterEvent::Failed { .. } => {
+            route.emit_ai_event(InProcessAiEventKind::Failed, Some("session_failed"));
+        }
+        _ => route.emit_ai_event(InProcessAiEventKind::Stopped, Some("session_stopped")),
+    }
     let _ = lifecycle.queue_or_deliver_terminal(events, event).await;
 }
 
@@ -1112,6 +1531,11 @@ impl ConnectionAdapter for InProcessAiAdapter {
     }
 
     async fn originate(&self, request: OriginateRequest) -> Result<ConnectionHandle> {
+        if self.is_draining() {
+            return Err(RvoipError::AdmissionRejected(
+                "in-process AI adapter is draining",
+            ));
+        }
         if request.direction != Direction::Outbound {
             return Err(RvoipError::AdmissionRejected(
                 "in-process AI originate requires outbound direction",
@@ -1122,19 +1546,49 @@ impl ConnectionAdapter for InProcessAiAdapter {
                 "in-process AI originate requires InProcessAi transport",
             ));
         }
+        let context = if request.context.is_empty() {
+            AiOriginateContext::default()
+        } else {
+            request
+                .context
+                .downcast_arc::<AiOriginateContext>()
+                .map(|context| (*context).clone())
+                .ok_or(RvoipError::AdmissionRejected(
+                    "in-process AI originate context type mismatch",
+                ))?
+        };
+        context.validate()?;
+        let ai_session_id = context.ai_session_id.clone().unwrap_or_else(|| {
+            AiSessionId::from_string(format!("aisess_{}", request.session_id.as_str()))
+        });
         let session_request = InProcessAiSessionRequest {
+            ai_session_id: ai_session_id.clone(),
             session_id: request.session_id.clone(),
             participant_id: request.participant_id.clone(),
             target: request.target,
             codec: self.config.codec.clone(),
+            providers: context.providers,
+            resume_policy: context.resume_policy,
+            trace: context.trace,
         };
         let session = self.factory.create(session_request).await?;
+        let _admission = self
+            .admission_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.is_draining() {
+            return Err(RvoipError::AdmissionRejected(
+                "in-process AI adapter is draining",
+            ));
+        }
         let connection_id = ConnectionId::new();
         let route = Route::new(
+            ai_session_id.clone(),
             connection_id.clone(),
             self.config.codec.clone(),
             self.config.media_queue_capacity,
             session,
+            self.ai_events.clone(),
         );
         let connection = Connection {
             id: connection_id.clone(),
@@ -1158,11 +1612,28 @@ impl ConnectionAdapter for InProcessAiAdapter {
             opened_at: chrono::Utc::now(),
             closed_at: None,
         };
-        if self.routes.insert(connection_id, route).is_some() {
+        match self.session_routes.entry(ai_session_id) {
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(connection_id.clone());
+            }
+            dashmap::mapref::entry::Entry::Occupied(_) => {
+                return Err(RvoipError::AdmissionRejected(
+                    "in-process AI session ID is already live",
+                ));
+            }
+        }
+        if self
+            .routes
+            .insert(connection_id.clone(), Arc::clone(&route))
+            .is_some()
+        {
+            self.session_routes
+                .remove_if(&route.ai_session_id, |_, current| current == &connection_id);
             return Err(RvoipError::AdmissionRejected(
                 "in-process AI connection ID collided",
             ));
         }
+        route.emit_ai_event(InProcessAiEventKind::Created, None);
         Ok(ConnectionHandle::new(connection))
     }
 
@@ -1262,7 +1733,9 @@ impl ConnectionAdapter for InProcessAiAdapter {
                 .await;
             return Err(RvoipError::InvalidState(EVENT_RECEIVER_ERROR));
         }
+        route.emit_ai_event(InProcessAiEventKind::Activated, None);
         let routes = Arc::clone(&self.routes);
+        let session_routes = Arc::clone(&self.session_routes);
         let events = self.events.clone();
         let lifecycle = self.lifecycle.clone();
         let terminal_history = Arc::clone(&self.terminal_history);
@@ -1294,6 +1767,7 @@ impl ConnectionAdapter for InProcessAiAdapter {
             };
             let _ = finish_route(
                 &routes,
+                &session_routes,
                 &events,
                 &lifecycle,
                 &terminal_history,
@@ -1362,6 +1836,7 @@ impl ConnectionAdapter for InProcessAiAdapter {
                 task.abort();
             }
             let routes = Arc::clone(&self.routes);
+            let session_routes = Arc::clone(&self.session_routes);
             let events = self.events.clone();
             let lifecycle = self.lifecycle.clone();
             let terminal_history = Arc::clone(&self.terminal_history);
@@ -1370,6 +1845,7 @@ impl ConnectionAdapter for InProcessAiAdapter {
             tokio::spawn(async move {
                 finish_claimed_route(
                     &routes,
+                    &session_routes,
                     &events,
                     &lifecycle,
                     &terminal_history,
@@ -1415,6 +1891,7 @@ impl ConnectionAdapter for InProcessAiAdapter {
         .map_err(|_| RvoipError::Adapter("in-process AI hold acknowledgement timed out".into()))
         .and_then(|result| result);
         let Err(hold_error) = hold_result else {
+            route.emit_ai_event(InProcessAiEventKind::Paused, None);
             return Ok(());
         };
 
@@ -1490,6 +1967,7 @@ impl ConnectionAdapter for InProcessAiAdapter {
                 .await;
             return Err(resume_error);
         }
+        route.emit_ai_event(InProcessAiEventKind::Resumed, None);
         Ok(())
     }
 
@@ -1601,6 +2079,59 @@ mod tests {
 
     struct RecordingSession {
         running: Arc<AtomicBool>,
+    }
+
+    struct RequestCapturingFactory {
+        request: Mutex<Option<oneshot::Sender<InProcessAiSessionRequest>>>,
+        bindings: mpsc::UnboundedSender<AiMediaBinding>,
+    }
+
+    struct RebindRecordingSession {
+        bindings: mpsc::UnboundedSender<AiMediaBinding>,
+    }
+
+    #[async_trait]
+    impl InProcessAiSessionFactory for RequestCapturingFactory {
+        async fn create(
+            &self,
+            request: InProcessAiSessionRequest,
+        ) -> Result<Box<dyn InProcessAiSession>> {
+            if let Some(sender) = self
+                .request
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                let _ = sender.send(request);
+            }
+            Ok(Box::new(RebindRecordingSession {
+                bindings: self.bindings.clone(),
+            }))
+        }
+    }
+
+    #[async_trait]
+    impl InProcessAiSession for RebindRecordingSession {
+        async fn run(
+            self: Box<Self>,
+            _media: InProcessAiMedia,
+            mut lifecycle: InProcessAiSessionLifecycle,
+            cancellation: CancellationToken,
+        ) -> Result<()> {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return Ok(()),
+                    request = lifecycle.recv() => {
+                        let Some(request) = request else { return Ok(()) };
+                        if let Some(binding) = request.binding() {
+                            let _ = self.bindings.send(binding.clone());
+                        }
+                        request.acknowledge();
+                    }
+                }
+            }
+        }
     }
 
     struct BusyInputFactory {
@@ -1886,6 +2417,56 @@ mod tests {
         }
     }
 
+    struct TranscriptFactory;
+
+    struct TranscriptSession {
+        session_label: String,
+    }
+
+    #[async_trait]
+    impl InProcessAiSessionFactory for TranscriptFactory {
+        async fn create(
+            &self,
+            request: InProcessAiSessionRequest,
+        ) -> Result<Box<dyn InProcessAiSession>> {
+            Ok(Box::new(TranscriptSession {
+                session_label: request.ai_session_id.to_string(),
+            }))
+        }
+    }
+
+    #[async_trait]
+    impl InProcessAiSession for TranscriptSession {
+        async fn run(
+            self: Box<Self>,
+            mut media: InProcessAiMedia,
+            mut lifecycle: InProcessAiSessionLifecycle,
+            cancellation: CancellationToken,
+        ) -> Result<()> {
+            let mut turn = 0_u64;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return Ok(()),
+                    request = lifecycle.recv() => {
+                        let Some(request) = request else { return Ok(()) };
+                        request.acknowledge();
+                    }
+                    frame = media.recv() => {
+                        let Some(mut frame) = frame else { return Ok(()) };
+                        turn += 1;
+                        frame.payload = Bytes::from(format!(
+                            "{}:{turn}:{}",
+                            self.session_label,
+                            String::from_utf8_lossy(&frame.payload),
+                        ));
+                        media.send(frame).await?;
+                    }
+                }
+            }
+        }
+    }
+
     fn originate_request(config: &InProcessAiConfig) -> OriginateRequest {
         OriginateRequest::new(
             SessionId::new(),
@@ -1895,6 +2476,310 @@ mod tests {
             config.capabilities(),
         )
         .with_transport(Transport::InProcessAi)
+    }
+
+    fn test_frame(stream_id: StreamId, payload: &'static [u8], timestamp_rtp: u32) -> MediaFrame {
+        MediaFrame {
+            stream_id,
+            kind: StreamKind::Audio,
+            payload: Bytes::from_static(payload),
+            timestamp_rtp,
+            captured_at: Utc::now(),
+            payload_type: Some(PCM_S16LE_PAYLOAD_TYPE),
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_provider_output_queue_backpressures_without_dropping() {
+        let gate = InProcessAiMediaGate::new();
+        let (stream, media, _input_gate, _input_control) =
+            InProcessAiMediaStream::new(InProcessAiConfig::default().codec, 1, Arc::clone(&gate));
+        stream.activate();
+        let mut output = stream
+            .reserve_frames_in()
+            .expect("reserve bounded provider output")
+            .commit();
+        let media = Arc::new(media);
+        let first = test_frame(stream.id(), b"first", 320);
+        let second = test_frame(stream.id(), b"second", 640);
+
+        media
+            .send(first.clone())
+            .await
+            .expect("fill one-frame provider output queue");
+        let blocked = {
+            let media = Arc::clone(&media);
+            let second = second.clone();
+            tokio::spawn(async move { media.send(second).await })
+        };
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(
+            !blocked.is_finished(),
+            "a full bounded provider queue must apply backpressure"
+        );
+        assert_eq!(
+            output.recv().await.expect("first queued frame").payload,
+            first.payload
+        );
+        blocked
+            .await
+            .expect("backpressured send task")
+            .expect("second send resumes after capacity is released");
+        assert_eq!(
+            output.recv().await.expect("second queued frame").payload,
+            second.payload,
+            "backpressure must preserve FIFO data without dropping"
+        );
+        assert!(output.try_recv().is_err(), "queue emitted an extra frame");
+    }
+
+    #[tokio::test]
+    async fn end_and_reject_before_activation_release_every_resource() {
+        let config = InProcessAiConfig::default();
+        let adapter = InProcessAiAdapter::echo(config.clone()).expect("valid echo adapter");
+        let mut events = adapter.subscribe_events();
+
+        for reject in [false, true] {
+            let handle = adapter
+                .originate(originate_request(&config))
+                .await
+                .expect("prepare dormant AI route");
+            let connection_id = handle.connection.id;
+            assert_eq!(
+                adapter.resource_snapshot(),
+                InProcessAiResourceSnapshot {
+                    live_routes: 1,
+                    ..InProcessAiResourceSnapshot::default()
+                }
+            );
+            if reject {
+                adapter
+                    .reject(connection_id.clone(), RejectReason::Decline)
+                    .await
+                    .expect("reject dormant route");
+            } else {
+                adapter
+                    .end(connection_id.clone(), EndReason::Cancelled)
+                    .await
+                    .expect("end dormant route");
+            }
+            assert_eq!(
+                adapter.resource_snapshot(),
+                InProcessAiResourceSnapshot::default()
+            );
+            assert!(!adapter.is_connection_live(&connection_id));
+            assert!(matches!(
+                events.recv().await,
+                Some(AdapterEvent::Ended { connection_id: observed, reason: EndReason::Cancelled })
+                    if observed == connection_id
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn two_sessions_isolate_queues_transcripts_and_lifecycle() {
+        let config = InProcessAiConfig {
+            media_queue_capacity: 2,
+            ..InProcessAiConfig::default()
+        };
+        let adapter = InProcessAiAdapter::new(config.clone(), Arc::new(TranscriptFactory))
+            .expect("valid transcript adapter");
+        let mut events = adapter.subscribe_events();
+        let first_session = AiSessionId::from_string("aisess_isolation_first");
+        let second_session = AiSessionId::from_string("aisess_isolation_second");
+        let first = adapter
+            .originate(originate_request(&config).with_context(AiOriginateContext {
+                ai_session_id: Some(first_session.clone()),
+                ..AiOriginateContext::default()
+            }))
+            .await
+            .expect("prepare first transcript session")
+            .connection
+            .id;
+        let second = adapter
+            .originate(originate_request(&config).with_context(AiOriginateContext {
+                ai_session_id: Some(second_session.clone()),
+                ..AiOriginateContext::default()
+            }))
+            .await
+            .expect("prepare second transcript session")
+            .connection
+            .id;
+        adapter
+            .activate_outbound(first.clone())
+            .await
+            .expect("activate first session");
+        adapter
+            .activate_outbound(second.clone())
+            .await
+            .expect("activate second session");
+        for expected in [&first, &second] {
+            assert!(matches!(
+                events.recv().await,
+                Some(AdapterEvent::Connected { connection_id }) if &connection_id == expected
+            ));
+        }
+        assert_eq!(
+            adapter.resource_snapshot(),
+            InProcessAiResourceSnapshot {
+                live_routes: 2,
+                active_sessions: 2,
+                held_sessions: 0,
+                running_session_tasks: 2,
+                running_media_tasks: 2,
+            }
+        );
+
+        let first_stream = adapter
+            .streams(first.clone())
+            .await
+            .expect("first streams")
+            .pop()
+            .expect("first audio stream");
+        let second_stream = adapter
+            .streams(second.clone())
+            .await
+            .expect("second streams")
+            .pop()
+            .expect("second audio stream");
+        let first_input = first_stream.try_frames_out().expect("first input");
+        let second_input = second_stream.try_frames_out().expect("second input");
+        let mut first_output = first_stream
+            .reserve_frames_in()
+            .expect("first output")
+            .commit();
+        let mut second_output = second_stream
+            .reserve_frames_in()
+            .expect("second output")
+            .commit();
+
+        first_input
+            .send(test_frame(first_stream.id(), b"alpha", 320))
+            .await
+            .expect("first turn one");
+        second_input
+            .send(test_frame(second_stream.id(), b"beta", 320))
+            .await
+            .expect("second turn one");
+        first_input
+            .send(test_frame(first_stream.id(), b"gamma", 640))
+            .await
+            .expect("first turn two");
+        assert_eq!(
+            first_output
+                .recv()
+                .await
+                .expect("first response one")
+                .payload,
+            Bytes::from_static(b"aisess_isolation_first:1:alpha")
+        );
+        assert_eq!(
+            second_output
+                .recv()
+                .await
+                .expect("second response one")
+                .payload,
+            Bytes::from_static(b"aisess_isolation_second:1:beta")
+        );
+        assert_eq!(
+            first_output
+                .recv()
+                .await
+                .expect("first response two")
+                .payload,
+            Bytes::from_static(b"aisess_isolation_first:2:gamma")
+        );
+
+        adapter
+            .hold(first.clone())
+            .await
+            .expect("hold only first session");
+        second_input
+            .send(test_frame(second_stream.id(), b"delta", 640))
+            .await
+            .expect("second session remains writable");
+        assert_eq!(
+            second_output
+                .recv()
+                .await
+                .expect("second response two")
+                .payload,
+            Bytes::from_static(b"aisess_isolation_second:2:delta")
+        );
+        assert_eq!(adapter.resource_snapshot().held_sessions, 1);
+        adapter
+            .end(first, EndReason::Normal)
+            .await
+            .expect("end first session");
+        assert_eq!(adapter.resource_snapshot().live_routes, 1);
+        second_input
+            .send(test_frame(second_stream.id(), b"epsilon", 960))
+            .await
+            .expect("surviving session turn");
+        assert_eq!(
+            second_output
+                .recv()
+                .await
+                .expect("surviving session response")
+                .payload,
+            Bytes::from_static(b"aisess_isolation_second:3:epsilon")
+        );
+        adapter
+            .end(second, EndReason::Normal)
+            .await
+            .expect("end second session");
+        assert_eq!(
+            adapter.resource_snapshot(),
+            InProcessAiResourceSnapshot::default()
+        );
+        assert!(adapter.session_binding(&first_session).is_none());
+        assert!(adapter.session_binding(&second_session).is_none());
+    }
+
+    #[tokio::test]
+    async fn drain_rejects_admission_and_converges_dormant_and_active_routes() {
+        let config = InProcessAiConfig::default();
+        let adapter = InProcessAiAdapter::echo(config.clone()).expect("valid echo adapter");
+        let _events = adapter.subscribe_events();
+        let dormant = adapter
+            .originate(originate_request(&config))
+            .await
+            .expect("prepare dormant route")
+            .connection
+            .id;
+        let active = adapter
+            .originate(originate_request(&config))
+            .await
+            .expect("prepare active route")
+            .connection
+            .id;
+        adapter
+            .activate_outbound(active.clone())
+            .await
+            .expect("activate route before drain");
+        assert_eq!(adapter.resource_snapshot().live_routes, 2);
+
+        adapter
+            .drain(Duration::from_secs(1))
+            .await
+            .expect("drain all retained routes");
+        assert!(adapter.is_draining());
+        assert_eq!(
+            adapter.resource_snapshot(),
+            InProcessAiResourceSnapshot::default()
+        );
+        assert!(!adapter.is_connection_live(&dormant));
+        assert!(!adapter.is_connection_live(&active));
+        assert!(matches!(
+            adapter.originate(originate_request(&config)).await,
+            Err(RvoipError::AdmissionRejected(
+                "in-process AI adapter is draining"
+            ))
+        ));
+        adapter
+            .drain(Duration::from_secs(1))
+            .await
+            .expect("repeated drain is idempotent");
     }
 
     #[tokio::test]
@@ -2614,17 +3499,442 @@ mod tests {
         .expect("core consumes AI terminal lifecycle");
     }
 
+    #[tokio::test]
+    async fn typed_session_context_rebind_and_events_fail_closed() {
+        let config = InProcessAiConfig::default();
+        let (request_tx, request_rx) = oneshot::channel();
+        let (binding_tx, mut binding_rx) = mpsc::unbounded_channel();
+        let adapter = InProcessAiAdapter::new(
+            config.clone(),
+            Arc::new(RequestCapturingFactory {
+                request: Mutex::new(Some(request_tx)),
+                bindings: binding_tx,
+            }),
+        )
+        .expect("valid AI adapter");
+        let mut adapter_events = adapter.subscribe_events();
+        let mut ai_events = adapter.subscribe_ai_events();
+        let ai_session_id = AiSessionId::from_string("aisess_external-1");
+        let context = AiOriginateContext {
+            ai_session_id: Some(ai_session_id.clone()),
+            providers: AiProviderReferences {
+                asr: Some("asr:fixture-v1".into()),
+                dialogue: Some("dialogue:fixture-v1".into()),
+                tts: Some("tts:fixture-v1".into()),
+                tools: Some("tools:fixture-v1".into()),
+            },
+            resume_policy: AiResumePolicy::ResumeRetained,
+            trace: AiTraceContext {
+                application_call_id: Some("call_external-1".into()),
+            },
+        };
+        let handle = adapter
+            .originate(originate_request(&config).with_context(context.clone()))
+            .await
+            .expect("prepare typed AI session");
+        let connection_id = handle.connection.id;
+        let captured = request_rx.await.expect("factory receives typed request");
+        assert_eq!(captured.ai_session_id, ai_session_id);
+        assert_eq!(captured.providers, context.providers);
+        assert_eq!(captured.resume_policy, AiResumePolicy::ResumeRetained);
+        assert_eq!(captured.trace, context.trace);
+        assert_eq!(
+            ai_events.recv().await.expect("created event").kind,
+            InProcessAiEventKind::Created
+        );
+
+        assert!(matches!(
+            adapter
+                .originate(originate_request(&config).with_context(context.clone()))
+                .await,
+            Err(RvoipError::AdmissionRejected(
+                "in-process AI session ID is already live"
+            ))
+        ));
+        assert!(matches!(
+            adapter
+                .originate(originate_request(&config).with_context(AiOriginateContext {
+                    providers: AiProviderReferences {
+                        asr: Some("invalid provider value".into()),
+                        ..AiProviderReferences::default()
+                    },
+                    ..AiOriginateContext::default()
+                }))
+                .await,
+            Err(RvoipError::AdmissionRejected(
+                "in-process AI provider references must be bounded identifiers"
+            ))
+        ));
+        assert!(matches!(
+            adapter
+                .originate(originate_request(&config).with_context("application-value"))
+                .await,
+            Err(RvoipError::AdmissionRejected(
+                "in-process AI originate context type mismatch"
+            ))
+        ));
+
+        adapter
+            .activate_outbound(connection_id.clone())
+            .await
+            .expect("activate typed AI session");
+        assert!(matches!(
+            adapter_events.recv().await,
+            Some(AdapterEvent::Connected { connection_id: observed }) if observed == connection_id
+        ));
+        assert_eq!(
+            ai_events.recv().await.expect("activated event").kind,
+            InProcessAiEventKind::Activated
+        );
+        adapter
+            .hold(connection_id.clone())
+            .await
+            .expect("pause typed AI session");
+        assert_eq!(
+            ai_events.recv().await.expect("paused event").kind,
+            InProcessAiEventKind::Paused
+        );
+
+        let initial = adapter
+            .session_binding(&ai_session_id)
+            .expect("stable session binding");
+        assert_eq!(initial.binding_generation, 1);
+        let next = AiMediaBinding {
+            connection_id: ConnectionId::new(),
+            binding_generation: 2,
+        };
+        assert!(matches!(
+            adapter
+                .rebind_session(&AiSessionId::new(), initial.clone(), next.clone())
+                .await,
+            Err(RvoipError::InvalidState(
+                "in-process AI session is not live"
+            ))
+        ));
+        assert!(matches!(
+            adapter
+                .rebind_session(
+                    &ai_session_id,
+                    initial.clone(),
+                    AiMediaBinding {
+                        connection_id: ConnectionId::from_string(""),
+                        binding_generation: 2,
+                    },
+                )
+                .await,
+            Err(RvoipError::InvalidState(
+                "in-process AI media binding is invalid"
+            ))
+        ));
+        assert!(matches!(
+            adapter
+                .rebind_session(
+                    &ai_session_id,
+                    initial.clone(),
+                    AiMediaBinding {
+                        connection_id: next.connection_id.clone(),
+                        binding_generation: 3,
+                    },
+                )
+                .await,
+            Err(RvoipError::InvalidState(
+                "in-process AI rebind generation is stale or non-monotonic"
+            ))
+        ));
+        let rebound = adapter
+            .rebind_session(&ai_session_id, initial.clone(), next.clone())
+            .await
+            .expect("provider acknowledges exact next binding");
+        assert_eq!(
+            binding_rx.recv().await.expect("provider observed rebind"),
+            next
+        );
+        assert_eq!(rebound, next);
+        assert_ne!(rebound.connection_id, connection_id);
+        assert_eq!(adapter.session_binding(&ai_session_id), Some(next.clone()));
+        let rebound_event = ai_events.recv().await.expect("rebound event");
+        assert_eq!(rebound_event.kind, InProcessAiEventKind::Rebound);
+        assert_eq!(rebound_event.binding_generation, 2);
+        assert_eq!(rebound_event.media_binding, next);
+        assert!(matches!(
+            adapter.rebind_session(&ai_session_id, initial, next).await,
+            Err(RvoipError::InvalidState(
+                "in-process AI rebind generation is stale or non-monotonic"
+            ))
+        ));
+
+        adapter
+            .resume(connection_id.clone())
+            .await
+            .expect("resume rebound AI session");
+        assert_eq!(
+            ai_events.recv().await.expect("resumed event").kind,
+            InProcessAiEventKind::Resumed
+        );
+        adapter
+            .end(connection_id.clone(), EndReason::Normal)
+            .await
+            .expect("stop rebound AI session");
+        let stopped = ai_events.recv().await.expect("stopped event");
+        assert_eq!(stopped.kind, InProcessAiEventKind::Stopped);
+        assert_eq!(stopped.ai_session_id, ai_session_id);
+        assert_eq!(stopped.connection_id, connection_id);
+        assert_eq!(stopped.binding_generation, 2);
+        assert_eq!(stopped.media_binding.binding_generation, 2);
+        assert!(adapter.session_binding(&ai_session_id).is_none());
+    }
+
+    const MUTATION_STRESS_SEEDS: u64 = 256;
+
+    fn stress_delay(seed: u64, lane: u64) -> u8 {
+        let mut value = seed ^ lane.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        ((value ^ (value >> 31)) & 0x0f) as u8
+    }
+
+    async fn yield_for_seed(seed: u64, lane: u64) {
+        for _ in 0..stress_delay(seed, lane) {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn record_high_water(
+        high_water: &mut InProcessAiResourceSnapshot,
+        snapshot: InProcessAiResourceSnapshot,
+    ) {
+        high_water.live_routes = high_water.live_routes.max(snapshot.live_routes);
+        high_water.active_sessions = high_water.active_sessions.max(snapshot.active_sessions);
+        high_water.held_sessions = high_water.held_sessions.max(snapshot.held_sessions);
+        high_water.running_session_tasks = high_water
+            .running_session_tasks
+            .max(snapshot.running_session_tasks);
+        high_water.running_media_tasks = high_water
+            .running_media_tasks
+            .max(snapshot.running_media_tasks);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn seeded_lifecycle_rebind_races_are_fenced_and_converge() {
+        let mut high_water = InProcessAiResourceSnapshot::default();
+
+        for seed in 1..=MUTATION_STRESS_SEEDS {
+            let config = InProcessAiConfig::default();
+            let adapter = InProcessAiAdapter::echo(config.clone()).expect("valid echo adapter");
+            let mut events = adapter.subscribe_events();
+            let ai_session_id = AiSessionId::from_string(format!("aisess_stress_{seed}"));
+            let handle = adapter
+                .originate(originate_request(&config).with_context(AiOriginateContext {
+                    ai_session_id: Some(ai_session_id.clone()),
+                    ..AiOriginateContext::default()
+                }))
+                .await
+                .unwrap_or_else(|error| panic!("seed {seed}: originate failed: {error}"));
+            let connection_id = handle.connection.id;
+            adapter
+                .activate_outbound(connection_id.clone())
+                .await
+                .unwrap_or_else(|error| panic!("seed {seed}: activation failed: {error}"));
+            assert!(matches!(
+                events.recv().await,
+                Some(AdapterEvent::Connected { connection_id: observed }) if observed == connection_id
+            ));
+
+            let active = adapter.resource_snapshot();
+            assert_eq!(
+                active,
+                InProcessAiResourceSnapshot {
+                    live_routes: 1,
+                    active_sessions: 1,
+                    held_sessions: 0,
+                    running_session_tasks: 1,
+                    running_media_tasks: 1,
+                },
+                "seed {seed}: active resource baseline"
+            );
+            record_high_water(&mut high_water, active);
+
+            let initial = adapter
+                .session_binding(&ai_session_id)
+                .unwrap_or_else(|| panic!("seed {seed}: initial binding missing"));
+            let next_a = AiMediaBinding {
+                connection_id: ConnectionId::from_string(format!("stress_a_{seed}")),
+                binding_generation: 2,
+            };
+            let next_b = AiMediaBinding {
+                connection_id: ConnectionId::from_string(format!("stress_b_{seed}")),
+                binding_generation: 2,
+            };
+            let race_with_end = seed % 4 == 0;
+            let barrier = Arc::new(tokio::sync::Barrier::new(if race_with_end { 5 } else { 4 }));
+
+            let hold = {
+                let adapter = Arc::clone(&adapter);
+                let connection_id = connection_id.clone();
+                let barrier = Arc::clone(&barrier);
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    yield_for_seed(seed, 1).await;
+                    adapter.hold(connection_id).await
+                })
+            };
+            let resume = {
+                let adapter = Arc::clone(&adapter);
+                let connection_id = connection_id.clone();
+                let barrier = Arc::clone(&barrier);
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    yield_for_seed(seed, 2).await;
+                    adapter.resume(connection_id).await
+                })
+            };
+            let rebind_a = {
+                let adapter = Arc::clone(&adapter);
+                let ai_session_id = ai_session_id.clone();
+                let initial = initial.clone();
+                let next = next_a.clone();
+                let barrier = Arc::clone(&barrier);
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    yield_for_seed(seed, 3).await;
+                    adapter.rebind_session(&ai_session_id, initial, next).await
+                })
+            };
+            let rebind_b = {
+                let adapter = Arc::clone(&adapter);
+                let ai_session_id = ai_session_id.clone();
+                let initial = initial.clone();
+                let next = next_b.clone();
+                let barrier = Arc::clone(&barrier);
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    yield_for_seed(seed, 4).await;
+                    adapter.rebind_session(&ai_session_id, initial, next).await
+                })
+            };
+            let ending = if race_with_end {
+                let adapter = Arc::clone(&adapter);
+                let connection_id = connection_id.clone();
+                let barrier = Arc::clone(&barrier);
+                Some(tokio::spawn(async move {
+                    barrier.wait().await;
+                    yield_for_seed(seed, 5).await;
+                    adapter.end(connection_id, EndReason::Cancelled).await
+                }))
+            } else {
+                None
+            };
+
+            let hold_result = hold
+                .await
+                .unwrap_or_else(|error| panic!("seed {seed}: hold task panicked: {error}"));
+            let resume_result = resume
+                .await
+                .unwrap_or_else(|error| panic!("seed {seed}: resume task panicked: {error}"));
+            let rebind_results = [
+                rebind_a
+                    .await
+                    .unwrap_or_else(|error| panic!("seed {seed}: rebind A panicked: {error}")),
+                rebind_b
+                    .await
+                    .unwrap_or_else(|error| panic!("seed {seed}: rebind B panicked: {error}")),
+            ];
+            let successful_rebinds = rebind_results
+                .iter()
+                .filter(|result| result.is_ok())
+                .count();
+
+            if let Some(ending) = ending {
+                ending
+                    .await
+                    .unwrap_or_else(|error| panic!("seed {seed}: end task panicked: {error}"))
+                    .unwrap_or_else(|error| panic!("seed {seed}: end failed: {error}"));
+                assert!(
+                    successful_rebinds <= 1,
+                    "seed {seed}: competing generation-2 rebinds both committed"
+                );
+            } else {
+                hold_result.unwrap_or_else(|error| panic!("seed {seed}: hold failed: {error}"));
+                resume_result.unwrap_or_else(|error| panic!("seed {seed}: resume failed: {error}"));
+                assert_eq!(
+                    successful_rebinds, 1,
+                    "seed {seed}: exactly one competing generation-2 rebind must commit: {rebind_results:?}"
+                );
+                let current = adapter
+                    .session_binding(&ai_session_id)
+                    .unwrap_or_else(|| panic!("seed {seed}: live binding disappeared"));
+                assert_eq!(current.binding_generation, 2, "seed {seed}");
+                assert!(
+                    current.connection_id == next_a.connection_id
+                        || current.connection_id == next_b.connection_id,
+                    "seed {seed}: unexpected committed binding {current:?}"
+                );
+                adapter
+                    .hold(connection_id.clone())
+                    .await
+                    .unwrap_or_else(|error| panic!("seed {seed}: final hold failed: {error}"));
+                record_high_water(&mut high_water, adapter.resource_snapshot());
+                adapter
+                    .resume(connection_id.clone())
+                    .await
+                    .unwrap_or_else(|error| panic!("seed {seed}: final resume failed: {error}"));
+            }
+
+            record_high_water(&mut high_water, adapter.resource_snapshot());
+            adapter
+                .end(connection_id.clone(), EndReason::Normal)
+                .await
+                .unwrap_or_else(|error| panic!("seed {seed}: final end failed: {error}"));
+            assert_eq!(
+                adapter.resource_snapshot(),
+                InProcessAiResourceSnapshot::default(),
+                "seed {seed}: adapter resources did not converge"
+            );
+            assert!(
+                adapter.session_binding(&ai_session_id).is_none(),
+                "seed {seed}: terminal session retained a media binding"
+            );
+        }
+
+        assert_eq!(
+            high_water,
+            InProcessAiResourceSnapshot {
+                live_routes: 1,
+                active_sessions: 1,
+                held_sessions: 1,
+                running_session_tasks: 1,
+                running_media_tasks: 1,
+            }
+        );
+        println!(
+            "{{\"kind\":\"seeded_rvoip_lifecycle_rebind_stress\",\"seeds\":{MUTATION_STRESS_SEEDS},\"endRaceEvery\":4,\"resourceHighWater\":{{\"liveRoutes\":{},\"activeSessions\":{},\"heldSessions\":{},\"runningSessionTasks\":{},\"runningMediaTasks\":{}}}}}",
+            high_water.live_routes,
+            high_water.active_sessions,
+            high_water.held_sessions,
+            high_water.running_session_tasks,
+            high_water.running_media_tasks,
+        );
+    }
+
     #[test]
     fn session_request_debug_redacts_target() {
         let request = InProcessAiSessionRequest {
+            ai_session_id: AiSessionId::new(),
             session_id: SessionId::new(),
             participant_id: ParticipantId::new(),
             target: "secret-assistant-and-provider-token".into(),
             codec: InProcessAiConfig::default().codec,
+            providers: AiProviderReferences {
+                asr: Some("secret-provider-reference".into()),
+                ..AiProviderReferences::default()
+            },
+            resume_policy: AiResumePolicy::ResumeRetained,
+            trace: AiTraceContext::default(),
         };
         let debug = format!("{request:?}");
         assert!(debug.contains("[redacted]"));
         assert!(!debug.contains("secret-assistant"));
         assert!(!debug.contains("provider-token"));
+        assert!(!debug.contains("secret-provider-reference"));
     }
 }

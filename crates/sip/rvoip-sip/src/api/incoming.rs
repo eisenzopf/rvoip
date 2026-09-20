@@ -3068,15 +3068,20 @@ mod tests {
             })
             .expect("mark generation A ringing");
 
+        // MESSAGE and OPTIONS callbacks are post-response observations, so
+        // they intentionally reject a second response before consulting the
+        // captured lifetime. Use an application-owned method here so this
+        // regression reaches the exact generation fence it is meant to test.
+        let method = rvoip_sip_core::types::Method::Publish;
         let request = Request::new(
-            rvoip_sip_core::types::Method::Options,
+            method.clone(),
             rvoip_sip_core::types::Uri::sip("callee.example.test"),
         );
         let mut incoming = IncomingRequest::from_bus_request(
             call_id.clone(),
             "sip:caller@example.test".to_string(),
             "sip:callee@example.test".to_string(),
-            rvoip_sip_core::types::Method::Options,
+            method,
             Arc::new(request),
         );
         assert!(matches!(
@@ -3121,25 +3126,27 @@ mod tests {
                 .is_err(),
             "the request-derived session handle must not re-resolve generation B"
         );
+        let generic_error = incoming
+            .respond_builder(486)
+            .expect("application-owned generic response builder")
+            .send()
+            .await
+            .expect_err("a delayed generic response must fail against retired generation A");
         assert!(
-            incoming
-                .respond_builder(486)
-                .expect("exact generic response builder")
-                .send()
-                .await
-                .is_err(),
-            "a delayed generic response must fail against retired generation A"
+            matches!(generic_error, SessionError::SessionNotFound(_)),
+            "the generic response must be rejected by the retired exact lifetime: {generic_error:?}"
         );
+        let challenge_error = incoming
+            .challenge_builder(crate::api::respond::AuthScheme::Digest)
+            .expect("exact challenge builder")
+            .with_realm("example.test")
+            .with_nonce("generation-a-nonce")
+            .send()
+            .await
+            .expect_err("a delayed auth challenge must fail against retired generation A");
         assert!(
-            incoming
-                .challenge_builder(crate::api::respond::AuthScheme::Digest)
-                .expect("exact challenge builder")
-                .with_realm("example.test")
-                .with_nonce("generation-a-nonce")
-                .send()
-                .await
-                .is_err(),
-            "a delayed auth challenge must fail against retired generation A"
+            matches!(challenge_error, SessionError::SessionNotFound(_)),
+            "the challenge must be rejected by the retired exact lifetime: {challenge_error:?}"
         );
         assert_eq!(
             store

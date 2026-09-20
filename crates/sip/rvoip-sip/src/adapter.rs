@@ -679,7 +679,11 @@ impl SipOutboundRoute {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.phase = SipOutboundRoutePhase::Terminated;
-        state.terminal.take().or_else(|| state.cleanup_event.take())
+        // Once local cleanup has started with an explicit cause, subsequent
+        // signaling teardown is an effect of that cause. Preserve the local
+        // failure/end classification instead of allowing the resulting BYE or
+        // CANCEL callback to overwrite it with a generic remote terminal.
+        state.cleanup_event.take().or_else(|| state.terminal.take())
     }
 
     fn complete_cleanup(&self, success: bool) {
@@ -1344,6 +1348,23 @@ pub struct SipAdapter {
 }
 
 impl SipAdapter {
+    /// Trigger the production media-driver failure monitor for a live route.
+    /// This hook is absent from ordinary builds.
+    #[cfg(feature = "test-hooks")]
+    pub fn inject_media_failure_for_test(&self, connection_id: &ConnectionId) -> CoreResult<()> {
+        let stream = self
+            .streams_cache
+            .get(connection_id)
+            .ok_or_else(|| RvoipError::ConnectionNotFound(connection_id.clone()))?;
+        if stream.inject_failure_for_test() {
+            Ok(())
+        } else {
+            Err(RvoipError::InvalidState(
+                "SIP media stream is already terminal",
+            ))
+        }
+    }
+
     fn outbound_originate_context(
         request: &OriginateRequest,
     ) -> CoreResult<Arc<SipOriginateContext>> {
@@ -1540,6 +1561,12 @@ impl SipAdapter {
     /// This is intended for shutdown diagnostics and leak assertions.
     pub fn retained_task_count(&self) -> usize {
         self.retained_tasks.count()
+    }
+
+    /// Exact number of RTP/RTCP ports currently leased by this adapter's
+    /// coordinator-owned SIP media controller.
+    pub async fn allocated_media_port_count(&self) -> usize {
+        self.coordinator.allocated_media_port_count().await
     }
 
     fn prior_drain_failure(&self) -> Option<RvoipError> {
@@ -8054,6 +8081,36 @@ Signal=5\r\nDuration=160\r\n";
             .shutdown_gracefully(Some(Duration::from_secs(1)))
             .await
             .expect("shutdown");
+    }
+
+    #[test]
+    fn explicit_outbound_cleanup_cause_wins_resulting_signaling_terminal() {
+        let connection_id = ConnectionId::new();
+        let route = SipOutboundRoute::new(
+            connection_id.clone(),
+            SessionId::new(),
+            "sip:target@example.test".to_string(),
+            Arc::new(SipOriginateContext::default()),
+            crate::media_stream::SipMediaStream::dormant_deferred(Direction::Outbound),
+        );
+        assert!(route.request_cleanup(Some(AdapterEvent::Failed {
+            connection_id: connection_id.clone(),
+            detail: "media driver failed".to_string(),
+        })));
+        assert_eq!(
+            route.stage_event(AdapterEvent::Ended {
+                connection_id: connection_id.clone(),
+                reason: EndReason::Normal,
+            }),
+            SipRouteStageDisposition::Retained
+        );
+        assert!(matches!(
+            route.seal_cleanup_event(),
+            Some(AdapterEvent::Failed {
+                connection_id: observed,
+                ..
+            }) if observed == connection_id
+        ));
     }
 
     #[tokio::test]

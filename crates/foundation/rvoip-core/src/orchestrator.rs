@@ -978,6 +978,83 @@ impl Drop for ReplacementDestinationReservation {
     }
 }
 
+/// A suspension point in replacement media preparation that is otherwise too
+/// brief for an integration test to hit deterministically.
+///
+/// This surface is compiled only for explicit test-hook builds. Each variant
+/// names the real production operation immediately following the gate.
+#[cfg(feature = "test-hooks")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReplacementPreparationBoundary {
+    StreamAvailabilityRetryDelay,
+    SourceMediaGraphInitLock,
+    PendingMediaGraphInitLock,
+    SourceToPendingRouteActivation,
+    PendingToSourceRouteActivation,
+}
+
+/// One-shot bounded gate for a replacement preparation boundary.
+#[cfg(feature = "test-hooks")]
+pub struct ReplacementPreparationTestGate {
+    boundary: ReplacementPreparationBoundary,
+    entered: watch::Sender<bool>,
+    released: CancellationToken,
+    max_wait: Duration,
+}
+
+#[cfg(feature = "test-hooks")]
+impl ReplacementPreparationTestGate {
+    fn new(boundary: ReplacementPreparationBoundary, max_wait: Duration) -> Self {
+        let (entered, _) = watch::channel(false);
+        Self {
+            boundary,
+            entered,
+            released: CancellationToken::new(),
+            max_wait,
+        }
+    }
+
+    /// Wait until replacement preparation reaches the selected production
+    /// suspension point.
+    pub async fn wait_until_blocked(&self) -> Result<()> {
+        let mut entered = self.entered.subscribe();
+        tokio::time::timeout(self.max_wait, async {
+            while !*entered.borrow_and_update() {
+                entered.changed().await.map_err(|_| {
+                    RvoipError::InvalidState("replacement preparation test gate closed")
+                })?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| RvoipError::InvalidState("replacement preparation did not reach test gate"))?
+    }
+
+    /// Release the paused replacement operation.
+    pub fn release(&self) {
+        self.released.cancel();
+    }
+
+    #[must_use]
+    pub const fn boundary(&self) -> ReplacementPreparationBoundary {
+        self.boundary
+    }
+
+    async fn pause(&self) -> Result<()> {
+        self.entered.send_replace(true);
+        tokio::time::timeout(self.max_wait, self.released.cancelled())
+            .await
+            .map_err(|_| {
+                RvoipError::InvalidState("replacement preparation test gate was not released")
+            })
+    }
+}
+
+struct ReplacementPreparationContext {
+    source: ConnectionId,
+    pending_destination: ConnectionId,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BridgedDataTerminalReason {
     PolicyPanicked,
@@ -1219,6 +1296,8 @@ pub struct Orchestrator {
     /// the tracked Connection, so slow initialization on one call never
     /// blocks independent calls and the lock table remains bounded.
     media_graph_inits: Arc<DashMap<ConnectionId, Arc<tokio::sync::Mutex<()>>>>,
+    #[cfg(feature = "test-hooks")]
+    replacement_preparation_test_gate: OnceLock<Arc<ReplacementPreparationTestGate>>,
     pub admission: Arc<Semaphore>,
     /// Bounds the number of provisional outbound routes that may await a
     /// durable application bind at once.
@@ -1630,6 +1709,8 @@ impl Orchestrator {
             bridge_ownership_lock: Arc::new(Mutex::new(())),
             media_graphs: Arc::new(DashMap::new()),
             media_graph_inits: Arc::new(DashMap::new()),
+            #[cfg(feature = "test-hooks")]
+            replacement_preparation_test_gate: OnceLock::new(),
             admission,
             prepared_outbound_capacity: Arc::new(Semaphore::new(setup_capacity)),
             prepared_outbound_supervisor: PreparedOutboundSupervisor::new(setup_capacity),
@@ -1703,6 +1784,8 @@ impl Orchestrator {
             bridge_ownership_lock: Arc::new(Mutex::new(())),
             media_graphs: Arc::new(DashMap::new()),
             media_graph_inits: Arc::new(DashMap::new()),
+            #[cfg(feature = "test-hooks")]
+            replacement_preparation_test_gate: OnceLock::new(),
             admission,
             prepared_outbound_capacity: Arc::new(Semaphore::new(setup_capacity)),
             prepared_outbound_supervisor: PreparedOutboundSupervisor::new(setup_capacity),
@@ -1757,6 +1840,42 @@ impl Orchestrator {
             .set(Arc::downgrade(&orchestrator))
             .expect("new orchestrator self reference must be vacant");
         orchestrator
+    }
+
+    /// Install one bounded gate at a real replacement media-preparation
+    /// suspension point. This API is absent from default builds.
+    #[cfg(feature = "test-hooks")]
+    pub fn install_replacement_preparation_test_gate(
+        &self,
+        boundary: ReplacementPreparationBoundary,
+        max_wait: Duration,
+    ) -> Result<Arc<ReplacementPreparationTestGate>> {
+        if max_wait.is_zero() || max_wait > Duration::from_secs(30) {
+            return Err(RvoipError::AdmissionRejected(
+                "replacement preparation test-gate wait must be between 1 ns and 30 seconds",
+            ));
+        }
+        let gate = Arc::new(ReplacementPreparationTestGate::new(boundary, max_wait));
+        self.replacement_preparation_test_gate
+            .set(Arc::clone(&gate))
+            .map_err(|_| {
+                RvoipError::InvalidState("replacement preparation test gate is already installed")
+            })?;
+        Ok(gate)
+    }
+
+    #[cfg(feature = "test-hooks")]
+    async fn wait_at_replacement_preparation_test_gate(
+        &self,
+        boundary: ReplacementPreparationBoundary,
+    ) -> Result<()> {
+        let Some(gate) = self.replacement_preparation_test_gate.get() else {
+            return Ok(());
+        };
+        if gate.boundary() != boundary {
+            return Ok(());
+        }
+        gate.pause().await
     }
 
     /// Register a transport adapter. Spawns a background task that pulls
@@ -10052,6 +10171,7 @@ impl Orchestrator {
                 media_plan,
                 data_policy,
                 true,
+                None,
             )
             .await?;
         if let Err(error) = self.validate_connection_lifecycles(&lifecycle_tickets) {
@@ -10226,6 +10346,10 @@ impl Orchestrator {
         } else {
             (replacement_destination.clone(), ingress.clone())
         };
+        let replacement_context = ReplacementPreparationContext {
+            source: ingress.clone(),
+            pending_destination: replacement_destination.clone(),
+        };
         let prepared = self
             .prepare_cross_bridge_for_commit(
                 bridge_id.clone(),
@@ -10234,6 +10358,7 @@ impl Orchestrator {
                 media_plan,
                 data_policy,
                 false,
+                Some(&replacement_context),
             )
             .await?;
 
@@ -10429,6 +10554,7 @@ impl Orchestrator {
         media_plan: DirectionalMediaBridgePlan,
         data_policy: Arc<dyn DataMessageBridgePolicy>,
         buffer_before_commit: bool,
+        replacement_context: Option<&ReplacementPreparationContext>,
     ) -> Result<PreparedCrossBridge> {
         let a_adapter = self.adapter_for(&a)?;
         let b_adapter = self.adapter_for(&b)?;
@@ -10451,7 +10577,16 @@ impl Orchestrator {
                         "no audio stream on one or both connections within deadline",
                     ));
                 }
-                _ => tokio::time::sleep(poll_interval).await,
+                _ => {
+                    #[cfg(feature = "test-hooks")]
+                    if replacement_context.is_some() {
+                        self.wait_at_replacement_preparation_test_gate(
+                            ReplacementPreparationBoundary::StreamAvailabilityRetryDelay,
+                        )
+                        .await?;
+                    }
+                    tokio::time::sleep(poll_interval).await;
+                }
             }
         };
 
@@ -10486,6 +10621,7 @@ impl Orchestrator {
                 b.clone(),
                 Arc::clone(&b_audio),
                 media_plan,
+                replacement_context,
             )
             .await?;
         let mut a_to_b = None;
@@ -10497,6 +10633,20 @@ impl Orchestrator {
             } else {
                 graph.add_dormant_managed_sink(b_codec.clone(), b_out)?
             };
+            if let Some(context) = replacement_context {
+                debug_assert!(
+                    (a == context.source && b == context.pending_destination)
+                        || (a == context.pending_destination && b == context.source),
+                    "replacement preparation endpoints must match bridge endpoints"
+                );
+                #[cfg(feature = "test-hooks")]
+                self.wait_at_replacement_preparation_test_gate(if a == context.source {
+                    ReplacementPreparationBoundary::SourceToPendingRouteActivation
+                } else {
+                    ReplacementPreparationBoundary::PendingToSourceRouteActivation
+                })
+                .await?;
+            }
             if route.wait_active().await.is_err() {
                 let _ = route.remove().await;
                 return Err(RvoipError::InvalidState(
@@ -10522,6 +10672,20 @@ impl Orchestrator {
                     return Err(error);
                 }
             };
+            if let Some(context) = replacement_context {
+                debug_assert!(
+                    (a == context.source && b == context.pending_destination)
+                        || (a == context.pending_destination && b == context.source),
+                    "replacement preparation endpoints must match bridge endpoints"
+                );
+                #[cfg(feature = "test-hooks")]
+                self.wait_at_replacement_preparation_test_gate(if b == context.source {
+                    ReplacementPreparationBoundary::SourceToPendingRouteActivation
+                } else {
+                    ReplacementPreparationBoundary::PendingToSourceRouteActivation
+                })
+                .await?;
+            }
             if route.wait_active().await.is_err() {
                 let a_route = a_to_b.take().map(|(_, route)| route);
                 let (a_result, b_result) = tokio::join!(
@@ -10576,6 +10740,7 @@ impl Orchestrator {
         b: ConnectionId,
         b_stream: Arc<dyn crate::stream::MediaStream>,
         media_plan: DirectionalMediaBridgePlan,
+        replacement_context: Option<&ReplacementPreparationContext>,
     ) -> Result<(Option<MediaGraphHandle>, Option<MediaGraphHandle>)> {
         let bridge_policy = directional_bridge_media_graph_policy(
             self.connection_transport(&a)?,
@@ -10607,14 +10772,32 @@ impl Orchestrator {
         let init_locks = sources
             .iter()
             .map(|source| {
-                self.media_graph_inits
-                    .entry(source.connection_id.clone())
-                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                    .clone()
+                (
+                    source.connection_id.clone(),
+                    self.media_graph_inits
+                        .entry(source.connection_id.clone())
+                        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                        .clone(),
+                )
             })
             .collect::<Vec<_>>();
         let mut _init_guards = Vec::with_capacity(init_locks.len());
-        for lock in init_locks {
+        for (connection_id, lock) in init_locks {
+            if let Some(context) = replacement_context {
+                debug_assert!(
+                    connection_id == context.source || connection_id == context.pending_destination,
+                    "replacement graph source must be source or pending destination"
+                );
+                #[cfg(feature = "test-hooks")]
+                self.wait_at_replacement_preparation_test_gate(
+                    if connection_id == context.source {
+                        ReplacementPreparationBoundary::SourceMediaGraphInitLock
+                    } else {
+                        ReplacementPreparationBoundary::PendingMediaGraphInitLock
+                    },
+                )
+                .await?;
+            }
             _init_guards.push(lock.lock_owned().await);
         }
 

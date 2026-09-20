@@ -452,6 +452,7 @@ harness = false
 
 [features]
 default = []
+test-hooks = []
 event-history = []
 persistence = []
 generated-validation = [

@@ -32,6 +32,10 @@ signal; it does not satisfy the provider acknowledgement contract. `end` is
 idempotent for a bounded history of completed connection IDs.
 `resource_snapshot` exposes only aggregate live route, active/held session,
 session-task, and media-task counts for leak checks.
+Each media queue uses bounded backpressure: a full queue suspends its producer
+and never silently drops or overwrites audio. `begin_drain` closes admission
+atomically with route publication, and `drain` ends dormant and active sessions
+within a caller-supplied budget.
 
 ```rust,no_run
 use std::sync::Arc;
@@ -53,12 +57,16 @@ not implement SIP REFER, WebRTC signaling, routing policy, or account policy.
 Callers use the generation-fenced `Orchestrator::replace_bridge_destination`
 primitive to replace an AI connection with a prepared SIP/WebRTC connection,
 or the reverse, while the candidate media route stays silent until promotion.
-For a reusable AI session, detach and rebind are expressed by core topology:
-hold the AI connection, `unbridge_connections`, later bridge that same live
-connection to a new peer, then resume it. The harness deliberately does not
-create a second provider-level rebind API or carry transport identifiers into
-provider code. The replacement primitive retires its old destination, so use
-explicit unbridge/rebridge when the old AI session must survive detachment.
+Reusable provider state is keyed by `AiSessionId`, independently of the AI
+adapter's `ConnectionId`. `AiOriginateContext` carries bounded provider
+references and a resume policy. `rebind_session` sends a typed,
+generation-qualified `AiMediaBinding` to the provider and publishes the new
+binding only after the provider acknowledges it; stale, skipped, wrong-session,
+and post-terminal requests fail closed. Core topology still owns the actual
+media route: hold the AI connection, change the bridge, rebind the provider to
+the authoritative peer generation, then resume it. The replacement primitive
+retires its old destination, so use explicit unbridge/rebridge when the old AI
+session must survive detachment.
 
 Part of the [**rvoip**](https://github.com/eisenzopf/rvoip) workspace (the "rvoip 3"
 unified real-time-communications stack). Published so the

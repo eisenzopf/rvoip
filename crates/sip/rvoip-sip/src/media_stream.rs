@@ -569,6 +569,11 @@ pub struct SipMediaStream {
 }
 
 impl SipMediaStream {
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn inject_failure_for_test(&self) -> bool {
+        self.inner.lifecycle.mark_failed()
+    }
+
     /// Record the media layer's latest quality report for this stream.
     pub(crate) fn record_quality(&self, snapshot: QualitySnapshot) {
         *self

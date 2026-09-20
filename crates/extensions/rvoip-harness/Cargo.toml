@@ -14,6 +14,10 @@ categories.workspace = true
 keywords.workspace = true
 description = "In-process AI ConnectionAdapter and pluggable voice-provider traits for rvoip"
 
+[features]
+default = []
+test-reference = []
+
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true

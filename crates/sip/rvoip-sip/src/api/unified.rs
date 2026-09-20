@@ -11516,6 +11516,12 @@ impl UnifiedCoordinator {
         self.helpers.negotiated_media_config_exact(handle).await
     }
 
+    /// Exact number of range-backed RTP/RTCP ports currently leased by SIP
+    /// media sessions owned by this coordinator.
+    pub async fn allocated_media_port_count(&self) -> usize {
+        self.media_adapter.allocated_port_count().await
+    }
+
     pub(crate) fn subscribe_renegotiation_completions(
         &self,
     ) -> tokio::sync::broadcast::Receiver<crate::api::lifecycle::RenegotiationCompletion> {
