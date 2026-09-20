@@ -92,20 +92,20 @@ impl DirectionalMediaBridgePlan {
 /// arbitrary dynamic PT (e.g. `96`) and getting a generic transcoder
 /// error several layers down.
 ///
-/// # AMR is absent by decision, not by oversight
+/// # AMR has no name-only fallback
 ///
 /// AMR-NB and AMR-WB are implemented in `rvoip-codec-core`, reachable through
-/// media-core, and carried end to end on the SIP media path — and they are
-/// deliberately not in this table, so the media graph refuses them.
+/// media-core, and carried end to end on the SIP media path. They are
+/// deliberately absent from this conventional-payload table.
 ///
 /// A name-to-key function cannot express AMR. One session routinely negotiates
 /// the same AMR variant under two payload types that differ only in
 /// `octet-align` (the SIP integration test uses 106 and 107), so there is no
 /// single key to return; and the key this function produces is stamped onto
 /// outgoing frames, so inventing one puts a wrong payload type on the wire.
-/// AMR must key on its negotiated payload type instead, which means reaching
-/// the graph through a payload-type-carrying entry point that does not exist
-/// yet.
+/// AMR reaches the graph through [`crate::capability::CodecInfo::payload_type`];
+/// [`resolve_payload_type`] prefers that negotiated value and refuses AMR when
+/// it is absent.
 ///
 /// See `docs/MEDIA_GRAPH_CODECS.md` for the full decision and what wiring AMR
 /// in would require. Do not add AMR here without reading it.
@@ -113,7 +113,7 @@ pub fn codec_to_pt(name: &str) -> Option<u8> {
     match name.to_ascii_lowercase().as_str() {
         "pcmu" | "g.711-mu" | "g711-mu" | "g711-u" => Some(0),
         "pcma" | "g.711-a" | "g711-a" => Some(8),
-        "g729" | "g.729" => Some(18),
+        "g729" | "g.729" | "g729a" | "g.729a" | "g729ab" | "g729ba" => Some(18),
         "opus" => Some(111),
         "pcm_s16le" | "pcm-s16le" => Some(rvoip_media_core::codec::audio::payload_type::PCM_S16LE),
         _ => None,
@@ -158,8 +158,8 @@ mod codec_mapping_tests {
     /// stamped onto emitted frames, and AMR's payload type is negotiated per
     /// call — one session commonly carries the same variant at two payload
     /// types that differ only in `octet-align`. If AMR is ever wired into the
-    /// media graph it must arrive with its negotiated payload type, which
-    /// means a new entry point rather than a new row here.
+    /// media graph it must arrive with its negotiated payload type rather than
+    /// through this table.
     ///
     /// See `docs/MEDIA_GRAPH_CODECS.md` before changing this.
     #[test]
@@ -168,9 +168,16 @@ mod codec_mapping_tests {
             assert_eq!(
                 codec_to_pt(name),
                 None,
-                "{name} must stay absent so the graph refuses it loudly \
-                 rather than stamping a fabricated payload type on the wire"
+                "{name} must stay absent so a missing negotiated payload is \
+                 refused rather than fabricated"
             );
+        }
+    }
+
+    #[test]
+    fn g729_profile_aliases_share_the_static_payload_type() {
+        for name in ["G729", "G.729", "G729A", "G.729A", "G729AB", "G729BA"] {
+            assert_eq!(super::codec_to_pt(name), Some(18), "{name}");
         }
     }
 

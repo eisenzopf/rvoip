@@ -159,7 +159,7 @@ impl MediaSessionController {
         payload: Vec<u8>,
         timestamp: u32,
     ) -> Result<()> {
-        self.send_rtp_packet_inner(dialog_id, payload, timestamp, None)
+        self.send_rtp_packet_inner(dialog_id, payload, timestamp, None, false)
             .await
     }
 
@@ -176,7 +176,19 @@ impl MediaSessionController {
         timestamp: u32,
         payload_type: u8,
     ) -> Result<()> {
-        self.send_rtp_packet_inner(dialog_id, payload, timestamp, Some(payload_type))
+        self.send_rtp_packet_inner(dialog_id, payload, timestamp, Some(payload_type), false)
+            .await
+    }
+
+    async fn send_rtp_packet_with_payload_type_and_marker(
+        &self,
+        dialog_id: &DialogId,
+        payload: Vec<u8>,
+        timestamp: u32,
+        payload_type: u8,
+        marker: bool,
+    ) -> Result<()> {
+        self.send_rtp_packet_inner(dialog_id, payload, timestamp, Some(payload_type), marker)
             .await
     }
 
@@ -186,6 +198,7 @@ impl MediaSessionController {
         payload: Vec<u8>,
         timestamp: u32,
         payload_type: Option<u8>,
+        marker: bool,
     ) -> Result<()> {
         let rtp_session = self
             .get_rtp_session(dialog_id)
@@ -202,10 +215,10 @@ impl MediaSessionController {
         if let Some(handle) = send_handle {
             let result = if let Some(payload_type) = payload_type {
                 handle
-                    .send_packet_with_pt(timestamp, payload_bytes, false, payload_type)
+                    .send_packet_with_pt(timestamp, payload_bytes, marker, payload_type)
                     .await
             } else {
-                handle.send_packet(timestamp, payload_bytes, false).await
+                handle.send_packet(timestamp, payload_bytes, marker).await
             };
             result.map_err(|e| Error::config(format!("Failed to send RTP packet: {}", e)))?;
         } else {
@@ -215,10 +228,10 @@ impl MediaSessionController {
             let session = rtp_session.lock().await;
             let result = if let Some(payload_type) = payload_type {
                 session
-                    .send_packet_with_pt(timestamp, payload_bytes, false, payload_type)
+                    .send_packet_with_pt(timestamp, payload_bytes, marker, payload_type)
                     .await
             } else {
-                session.send_packet(timestamp, payload_bytes, false).await
+                session.send_packet(timestamp, payload_bytes, marker).await
             };
             result.map_err(|e| Error::config(format!("Failed to send RTP packet: {}", e)))?;
         }
@@ -924,28 +937,35 @@ impl MediaSessionController {
             }
         }
 
-        let timestamp = audio_frame.timestamp;
         let codec_payload_type = codec_runtime.format.payload_type;
-        let encoded_payload = codec_runtime.encode(&audio_frame).await?;
+        let encoded_packets = codec_runtime.encode_packets(&audio_frame).await?;
 
-        // Send the encoded packet via RTP
-        info!(
-            "📡 About to send RTP packet for dialog: {} with {} bytes payload",
-            dialog_id,
-            encoded_payload.len()
-        );
-        self.send_rtp_packet_with_payload_type(
-            dialog_id,
-            encoded_payload,
-            timestamp,
-            codec_payload_type,
-        )
-        .await?;
+        // G.729 Annex-B may suppress no-data intervals or split one PCM block
+        // at a SID/talkspurt boundary. Each emitted packet already carries the
+        // timestamp of its oldest codec frame; an empty list means DTX and
+        // intentionally sends no empty RTP payload.
+        for packet in encoded_packets {
+            let marker = packet.marker;
+            let timestamp = packet.timestamp;
+            info!(
+                "📡 About to send RTP packet for dialog: {} with {} bytes payload",
+                dialog_id,
+                packet.payload.len()
+            );
+            self.send_rtp_packet_with_payload_type_and_marker(
+                dialog_id,
+                packet.payload,
+                timestamp,
+                codec_payload_type,
+                marker,
+            )
+            .await?;
 
-        info!(
-            "✅ Encoded and sent audio frame for dialog: {} (codec PT: {}, timestamp: {})",
-            dialog_id, codec_payload_type, timestamp
-        );
+            info!(
+                "✅ Encoded and sent audio frame for dialog: {} (codec PT: {}, timestamp: {})",
+                dialog_id, codec_payload_type, timestamp
+            );
+        }
         Ok(())
     }
 }

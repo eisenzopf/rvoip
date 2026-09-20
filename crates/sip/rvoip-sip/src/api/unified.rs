@@ -2413,13 +2413,17 @@ pub struct Config {
     /// answers. Default `[0, 8, 101]` (PCMU + PCMA + telephone-event)
     /// preserves the established beta media profile.
     ///
-    /// Beta validation intentionally rejects audio payload types that
-    /// media-core cannot encode/decode end to end. The advertised full-media
-    /// set is limited to PCMU (`0`), PCMA (`8`), telephone-event (`101`),
+    /// Beta validation limits this SIP coordinator's negotiable payloads to
+    /// PCMU (`0`), PCMA (`8`), telephone-event (`101`),
     /// comfort noise (`13`) when `comfort_noise_enabled = true`, G.729 (`18`)
-    /// when the `g729` feature is enabled, and Opus (`111`) when the `opus`
-    /// feature is enabled. G.722 (`9`) retains wire metadata support but is
-    /// rejected because no working encoder/decoder is implemented.
+    /// when the `g729` feature is enabled, Opus (`111`) when the `opus`
+    /// feature is enabled, AMR-WB (`104` bandwidth-efficient, `105`
+    /// octet-aligned) when `amr-wb` is enabled. G.722 (`9`) retains wire
+    /// metadata support but is rejected because no working encoder/decoder is
+    /// implemented. AMR-NB payload types `106` and `107` remain available to
+    /// the coordinator-only media path when `amr-nb` is enabled; they are not
+    /// supported by the core-facing `SipMediaStream` and are not an end-to-end
+    /// codec claim for this API.
     ///
     /// Default: `vec![0, 8, 101]`.
     pub offered_codecs: Vec<u8>,

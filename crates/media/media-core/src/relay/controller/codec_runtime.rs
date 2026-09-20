@@ -242,6 +242,13 @@ enum StatefulCodec {
     Amr(Box<AmrAdapter>),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct EncodedAudioPacket {
+    pub(super) payload: Vec<u8>,
+    pub(super) timestamp: u32,
+    pub(super) marker: bool,
+}
+
 impl StatefulCodec {
     fn new(codec: &NegotiatedAudioCodec) -> Result<Self> {
         if codec.name.eq_ignore_ascii_case("PCMU") {
@@ -305,6 +312,7 @@ impl StatefulCodec {
         Err(Error::unsupported_codec(&codec.name))
     }
 
+    #[cfg(test)]
     fn encode(&mut self, frame: &AudioFrame) -> Result<Vec<u8>> {
         match self {
             Self::Pcmu(codec) | Self::Pcma(codec) => codec.encode(frame),
@@ -314,6 +322,45 @@ impl StatefulCodec {
             Self::Opus(codec) => codec.encode(frame),
             #[cfg(any(feature = "amr-nb", feature = "amr-wb"))]
             Self::Amr(codec) => codec.encode(frame),
+        }
+    }
+
+    fn encode_packets(&mut self, frame: &AudioFrame) -> Result<Vec<EncodedAudioPacket>> {
+        match self {
+            #[cfg(feature = "g729")]
+            Self::G729(codec) => codec.encode_rtp_packets(frame).map(|packets| {
+                packets
+                    .into_iter()
+                    .map(|packet| EncodedAudioPacket {
+                        payload: packet.payload,
+                        timestamp: packet.timestamp,
+                        marker: packet.marker,
+                    })
+                    .collect()
+            }),
+            Self::Pcmu(codec) | Self::Pcma(codec) => codec.encode(frame).map(|payload| {
+                vec![EncodedAudioPacket {
+                    payload,
+                    timestamp: frame.timestamp,
+                    marker: false,
+                }]
+            }),
+            #[cfg(feature = "opus")]
+            Self::Opus(codec) => codec.encode(frame).map(|payload| {
+                vec![EncodedAudioPacket {
+                    payload,
+                    timestamp: frame.timestamp,
+                    marker: false,
+                }]
+            }),
+            #[cfg(any(feature = "amr-nb", feature = "amr-wb"))]
+            Self::Amr(codec) => codec.encode(frame).map(|payload| {
+                vec![EncodedAudioPacket {
+                    payload,
+                    timestamp: frame.timestamp,
+                    marker: false,
+                }]
+            }),
         }
     }
 
@@ -408,38 +455,24 @@ impl StatefulCodec {
 }
 
 #[cfg(feature = "g729")]
+#[cfg(test)]
 fn encode_g729(codec: &mut G729Codec, frame: &AudioFrame) -> Result<Vec<u8>> {
-    const SAMPLES_PER_FRAME: usize = 80;
-    if frame.samples.len() % SAMPLES_PER_FRAME != 0 {
-        return Err(CodecError::InvalidFrameSize {
-            expected: SAMPLES_PER_FRAME,
-            actual: frame.samples.len(),
+    let mut packets = codec.encode_rtp_packets(frame)?;
+    if packets.len() != 1 || packets[0].timestamp != frame.timestamp {
+        return Err(CodecError::EncodingFailed {
+            reason: format!(
+                "G.729 frame requires {} RTP packets; use the packet-aware encoder",
+                packets.len()
+            ),
         }
         .into());
     }
-    let mut encoded = Vec::with_capacity(frame.samples.len() / SAMPLES_PER_FRAME * 10);
-    for samples in frame.samples.chunks_exact(SAMPLES_PER_FRAME) {
-        encoded.extend(codec.encode(&AudioFrame::new(
-            samples.to_vec(),
-            frame.sample_rate,
-            frame.channels,
-            frame.timestamp,
-        ))?);
-    }
-    Ok(encoded)
+    Ok(packets.remove(0).payload)
 }
 
 #[cfg(feature = "g729")]
 fn decode_g729(codec: &mut G729Codec, payload: &[u8]) -> Result<AudioFrame> {
-    const SPEECH_FRAME_BYTES: usize = 10;
-    if payload.is_empty() || payload.len() == 2 || payload.len() % SPEECH_FRAME_BYTES != 0 {
-        return codec.decode(payload);
-    }
-    let mut samples = Vec::with_capacity(payload.len() / SPEECH_FRAME_BYTES * 80);
-    for chunk in payload.chunks_exact(SPEECH_FRAME_BYTES) {
-        samples.extend(codec.decode(chunk)?.samples);
-    }
-    Ok(AudioFrame::new(samples, 8_000, 1, 0))
+    codec.decode_rtp_payload(payload)
 }
 
 /// Encoder and decoder state for one exact negotiated codec generation.
@@ -489,6 +522,7 @@ impl DialogCodecRuntime {
         })
     }
 
+    #[cfg(test)]
     pub(super) async fn encode(&self, frame: &AudioFrame) -> Result<Vec<u8>> {
         if frame.sample_rate != self.format.clock_rate || frame.channels != self.format.channels {
             return Err(CodecError::InvalidParameters {
@@ -504,6 +538,29 @@ impl DialogCodecRuntime {
             .into());
         }
         self.encoder.lock().await.encode(frame)
+    }
+
+    /// Encode PCM into one or more non-empty RTP payloads with timestamps in
+    /// the negotiated clock. G.729 Annex-B may suppress no-data intervals or
+    /// split at SID/talkspurt boundaries; other codecs produce one packet.
+    pub(super) async fn encode_packets(
+        &self,
+        frame: &AudioFrame,
+    ) -> Result<Vec<EncodedAudioPacket>> {
+        if frame.sample_rate != self.format.clock_rate || frame.channels != self.format.channels {
+            return Err(CodecError::InvalidParameters {
+                details: format!(
+                    "{} frame is {}Hz/{}ch, negotiated format is {}Hz/{}ch",
+                    self.format.name,
+                    frame.sample_rate,
+                    frame.channels,
+                    self.format.clock_rate,
+                    self.format.channels
+                ),
+            }
+            .into());
+        }
+        self.encoder.lock().await.encode_packets(frame)
     }
 
     pub(super) async fn decode(&self, payload: &[u8], timestamp: u32) -> Result<AudioFrame> {
@@ -939,6 +996,113 @@ mod tests {
             *with.iter().next().expect("at least one") < speech,
             "nothing shorter than a speech frame was emitted: {with:?} vs {speech}"
         );
+    }
+
+    #[cfg(feature = "g729")]
+    fn g729_speech_payload(frame_count: usize) -> Vec<u8> {
+        let mut encoder = G729Codec::new(
+            SampleRate::Rate8000,
+            1,
+            G729Config {
+                annexes: G729Annexes {
+                    annex_a: true,
+                    annex_b: false,
+                },
+                frame_size_ms: 10.0,
+                enable_vad: false,
+                enable_cng: false,
+            },
+        )
+        .expect("G.729A encoder");
+        let mut payload = Vec::with_capacity(frame_count * 10);
+        for frame_index in 0..frame_count {
+            let samples = (0..80)
+                .map(|sample_index| {
+                    let index = frame_index * 80 + sample_index;
+                    let phase = index as f64 * 2.0 * std::f64::consts::PI * 440.0 / 8_000.0;
+                    (phase.sin() * 6_000.0) as i16
+                })
+                .collect();
+            payload.extend(
+                encoder
+                    .encode(&AudioFrame::new(samples, 8_000, 1, 0))
+                    .expect("G.729 speech frame"),
+            );
+        }
+        payload
+    }
+
+    #[cfg(feature = "g729")]
+    #[tokio::test]
+    async fn g729_runtime_decodes_bundled_annex_b_and_rejects_invalid_shapes() {
+        for (speech_frames, expected_samples) in [(1, 160), (2, 240)] {
+            let runtime =
+                DialogCodecRuntime::new(resolve_codec(&config("G729BA")).unwrap()).unwrap();
+            let mut payload = g729_speech_payload(speech_frames);
+            payload.extend([0, 0]);
+            let decoded = runtime.decode(&payload, 9_000).await.expect("decodes");
+            assert_eq!(decoded.timestamp, 9_000);
+            assert_eq!(decoded.samples.len(), expected_samples);
+        }
+
+        for payload_len in [1, 3, 4, 8, 11, 13, 21, 23] {
+            let runtime =
+                DialogCodecRuntime::new(resolve_codec(&config("G729BA")).unwrap()).unwrap();
+            assert!(
+                runtime.decode(&vec![0; payload_len], 0).await.is_err(),
+                "{payload_len}-byte payload must be rejected"
+            );
+        }
+
+        let annex_a = DialogCodecRuntime::new(resolve_codec(&config("G729A")).unwrap()).unwrap();
+        assert!(annex_a.decode(&[0, 0], 0).await.is_err());
+        let mut speech_and_sid = g729_speech_payload(1);
+        speech_and_sid.extend([0, 0]);
+        assert!(annex_a.decode(&speech_and_sid, 0).await.is_err());
+    }
+
+    #[cfg(feature = "g729")]
+    #[tokio::test]
+    async fn g729_runtime_packet_encoder_suppresses_no_data_without_losing_timestamps() {
+        let runtime = DialogCodecRuntime::new(resolve_codec(&config("G729BA")).unwrap()).unwrap();
+        let mut saw_suppressed_interval = false;
+        for index in 0..200u32 {
+            let timestamp = index * 160;
+            let packets = runtime
+                .encode_packets(&AudioFrame::new(vec![0; 160], 8_000, 1, timestamp))
+                .await
+                .expect("silence packetization");
+            saw_suppressed_interval |= packets.is_empty();
+            for packet in packets {
+                assert!(!packet.payload.is_empty());
+                assert!(packet.timestamp >= timestamp);
+                assert!(packet.timestamp < timestamp + 160);
+                assert!(matches!(packet.payload.len() % 10, 0 | 2));
+            }
+        }
+        assert!(
+            saw_suppressed_interval,
+            "Annex-B silence never reached a no-data interval"
+        );
+
+        let timestamp = 40_000;
+        let speech = (0..160)
+            .map(|index| {
+                let phase = f64::from(index) * 2.0 * std::f64::consts::PI * 440.0 / 8_000.0;
+                (phase.sin() * 6_000.0) as i16
+            })
+            .collect();
+        let packets = runtime
+            .encode_packets(&AudioFrame::new(speech, 8_000, 1, timestamp))
+            .await
+            .expect("speech after DTX");
+        assert!(!packets.is_empty());
+        assert_eq!(packets[0].timestamp, timestamp);
+        assert!(
+            packets[0].marker,
+            "first speech packet after Annex-B no-data must start a talkspurt"
+        );
+        assert!(packets.iter().all(|packet| !packet.payload.is_empty()));
     }
 
     #[test]

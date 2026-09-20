@@ -94,9 +94,10 @@ impl AudioCodecSpec {
     /// when it accepts whatever length it is handed.
     ///
     /// The distinction is not cosmetic. G.711 encodes any buffer sample by
-    /// sample. The media-core Opus adapter and both AMR variants are
-    /// instantiated for exactly one 20 ms frame, and their `encode` methods
-    /// reject anything else outright rather than truncating or padding it.
+    /// sample. The media-core G.729 adapter accepts exactly one 10 ms frame.
+    /// Opus and both AMR variants are instantiated for exactly one 20 ms
+    /// frame. Their `encode` methods reject anything else outright rather
+    /// than truncating or padding it.
     /// Libopus supports several frame durations, but that capability does not
     /// make one configured adapter accept an arbitrary sample count.
     ///
@@ -104,12 +105,20 @@ impl AudioCodecSpec {
     /// different packet time — need to know which of those two worlds a
     /// target codec lives in before they buffer anything.
     ///
-    /// G.729 is deliberately absent: its own 10 ms framing is handled inside
-    /// `G729Codec`, which accepts whole multiples and is fed 20 ms buffers
-    /// today, so declaring a requirement here would change working behaviour
-    /// to no benefit.
     #[must_use]
     pub fn required_frame_samples(&self) -> Option<usize> {
+        let normalized_name = self
+            .name
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .flat_map(char::to_uppercase)
+            .collect::<String>();
+        if matches!(
+            normalized_name.as_str(),
+            "G729" | "G729A" | "G729AB" | "G729BA"
+        ) {
+            return Some(80 * usize::from(self.channels));
+        }
         if self.name.eq_ignore_ascii_case("opus")
             || self.name.eq_ignore_ascii_case("AMR")
             || self.name.eq_ignore_ascii_case("AMR-WB")
@@ -227,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_frame_encoders_report_their_twenty_millisecond_boundary() {
+    fn exact_frame_encoders_report_their_required_boundary() {
         assert_eq!(
             AudioCodecSpec::new("opus", 111, 48_000, 1).required_frame_samples(),
             Some(960)
@@ -244,6 +253,17 @@ mod tests {
             AudioCodecSpec::new("AMR-WB", 105, 16_000, 1).required_frame_samples(),
             Some(320)
         );
+        assert_eq!(
+            AudioCodecSpec::new("G729", 18, 8_000, 1).required_frame_samples(),
+            Some(80)
+        );
+        for alias in ["G.729", "G729A", "G.729A", "G729AB", "G729BA"] {
+            assert_eq!(
+                AudioCodecSpec::new(alias, 18, 8_000, 1).required_frame_samples(),
+                Some(80),
+                "{alias}"
+            );
+        }
         assert_eq!(
             AudioCodecSpec::new("PCMU", 0, 8_000, 1).required_frame_samples(),
             None

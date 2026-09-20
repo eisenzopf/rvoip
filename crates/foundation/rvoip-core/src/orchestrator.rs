@@ -16,10 +16,10 @@ use crate::adapter::{
     PlaybackOutcome, RejectReason, TransferAttemptId, TransferTarget,
 };
 use crate::bridge::{
-    codec_to_pt, BridgeDestinationReplacement, BridgeManager, CrossBridgeHandle,
+    resolve_payload_type, BridgeDestinationReplacement, BridgeManager, CrossBridgeHandle,
     DirectionalMediaBridgePlan,
 };
-use crate::capability::{CapabilityDescriptor, CapabilityIntersection};
+use crate::capability::{CapabilityDescriptor, CapabilityIntersection, CodecInfo};
 use crate::commands::{AudioSource, InboundAction, MuteDirection};
 use crate::config::Config;
 use crate::connection::{Direction, Transport};
@@ -10457,10 +10457,8 @@ impl Orchestrator {
 
         let a_codec = a_audio.codec();
         let b_codec = b_audio.codec();
-        codec_to_pt(&a_codec.name)
-            .ok_or_else(|| RvoipError::UnsupportedCodec(a_codec.name.clone()))?;
-        codec_to_pt(&b_codec.name)
-            .ok_or_else(|| RvoipError::UnsupportedCodec(b_codec.name.clone()))?;
+        validate_bridge_codec_admission(&a_codec)?;
+        validate_bridge_codec_admission(&b_codec)?;
         let a_out = if media_plan.b_to_a() {
             Some(a_audio.try_frames_out()?)
         } else {
@@ -11162,6 +11160,15 @@ impl Orchestrator {
     }
 }
 
+/// Prove that a negotiated stream has both an RTP payload label and a codec
+/// implementation before the bridge acquires either stream's single-consumer
+/// receiver. Dynamic codecs such as AMR-WB have no conventional payload type,
+/// so their negotiated value must be considered here.
+fn validate_bridge_codec_admission(codec: &CodecInfo) -> Result<()> {
+    resolve_payload_type(codec).ok_or_else(|| RvoipError::UnsupportedCodec(codec.name.clone()))?;
+    validate_media_graph_codec(codec)
+}
+
 fn principal_has_complete_owner(principal: &AuthenticatedPrincipal) -> bool {
     !principal.subject.trim().is_empty()
         && principal
@@ -11307,6 +11314,38 @@ mod cross_crate_publisher_tests {
             policy.pre_sink_buffer_frames,
             default.pre_sink_buffer_frames
         );
+    }
+
+    #[cfg(feature = "amr-wb")]
+    #[test]
+    fn bridge_codec_admission_accepts_negotiated_amr_wb_and_rejects_incomplete_metadata() {
+        let valid = CodecInfo {
+            name: "AMR-WB".into(),
+            clock_rate_hz: 16_000,
+            channels: 1,
+            fmtp: Some("octet-align=1".into()),
+            payload_type: Some(105),
+        };
+        validate_bridge_codec_admission(&valid)
+            .expect("negotiated AMR-WB payload type 105 must be bridgeable");
+
+        let missing_payload = CodecInfo {
+            payload_type: None,
+            ..valid.clone()
+        };
+        assert!(matches!(
+            validate_bridge_codec_admission(&missing_payload),
+            Err(RvoipError::UnsupportedCodec(codec)) if codec == "AMR-WB"
+        ));
+
+        let malformed_fmtp = CodecInfo {
+            fmtp: Some("octet-align=invalid".into()),
+            ..valid
+        };
+        assert!(matches!(
+            validate_bridge_codec_admission(&malformed_fmtp),
+            Err(RvoipError::UnsupportedCodec(codec)) if codec == "AMR-WB"
+        ));
     }
 
     struct RecordingSink {
