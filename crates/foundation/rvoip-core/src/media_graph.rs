@@ -4463,6 +4463,62 @@ mod tests {
         assert_eq!(back[0].payload.len(), 640);
     }
 
+    /// WebRTC PCM delivery is allowed to split one audio interval across
+    /// uneven callbacks. The Opus adapter is configured for 20 ms frames, so
+    /// passing each callback directly to it used to produce errors such as
+    /// `expected 960, got 24` and `expected 960, got 924`. The graph must
+    /// retain those samples until it has one complete encoder frame.
+    #[cfg(feature = "opus")]
+    #[test]
+    fn opus_target_reframes_short_pcm_chunks_before_encoding() {
+        let pcm = codec("pcm_s16le", 16_000);
+        let opus = codec("opus", 48_000);
+        let samples = (0..320)
+            .map(|sample| {
+                let phase = sample as f32 * 440.0 * std::f32::consts::TAU / 16_000.0;
+                (phase.sin() * 8_000.0) as i16
+            })
+            .collect::<Vec<_>>();
+        let mut session = ConfiguredTranscodingSession::new(&pcm, PCM_S16LE, &opus, 111).unwrap();
+
+        assert_eq!(session.required_samples, Some(960));
+
+        let encode_pcm = |samples: &[i16]| {
+            samples
+                .iter()
+                .flat_map(|sample| sample.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+
+        let first = session
+            .transcode(&encode_pcm(&samples[..8]), 10_000)
+            .expect("a callback resampled to 24 samples is buffered");
+        assert!(first.is_empty());
+        assert_eq!(session.pending.len(), 24);
+
+        let second = session
+            .transcode(&encode_pcm(&samples[8..316]), 10_008)
+            .expect("a callback resampled to 924 samples joins the first callback");
+        assert!(second.is_empty());
+        assert_eq!(session.pending.len(), 948);
+
+        let complete = session
+            .transcode(&encode_pcm(&samples[316..]), 10_316)
+            .expect("the final callback resamples to the 12 samples needed for one Opus frame");
+        assert_eq!(complete.len(), 1);
+        assert_eq!(complete[0].timestamp_rtp, 10_000);
+        assert!(session.pending.is_empty());
+
+        let mut decoder =
+            rvoip_media_core::codec::spec::AudioCodecSpec::new("opus", 111, 48_000, 1)
+                .build()
+                .expect("the Opus decoder builds");
+        let decoded = decoder
+            .decode(&complete[0].payload)
+            .expect("the re-framed payload is valid Opus");
+        assert_eq!(decoded.samples.len(), 960);
+    }
+
     /// The AMR boundary, asserted rather than only documented.
     ///
     /// AMR codes correctly everywhere else in this workspace, so the failure

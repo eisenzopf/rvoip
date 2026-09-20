@@ -94,11 +94,11 @@ impl AudioCodecSpec {
     /// when it accepts whatever length it is handed.
     ///
     /// The distinction is not cosmetic. G.711 encodes any buffer sample by
-    /// sample and Opus accepts several frame durations, so a caller can pass
-    /// a 10 ms or 30 ms buffer and get sensible output. AMR cannot: both
-    /// variants are defined on exactly one 20 ms frame, and
-    /// `AmrAdapter::encode` rejects anything else outright rather than
-    /// truncating or padding it.
+    /// sample. The media-core Opus adapter and both AMR variants are
+    /// instantiated for exactly one 20 ms frame, and their `encode` methods
+    /// reject anything else outright rather than truncating or padding it.
+    /// Libopus supports several frame durations, but that capability does not
+    /// make one configured adapter accept an arbitrary sample count.
     ///
     /// Callers that re-frame — a transcoding graph fed by a source with a
     /// different packet time — need to know which of those two worlds a
@@ -110,7 +110,10 @@ impl AudioCodecSpec {
     /// to no benefit.
     #[must_use]
     pub fn required_frame_samples(&self) -> Option<usize> {
-        if self.name.eq_ignore_ascii_case("AMR") || self.name.eq_ignore_ascii_case("AMR-WB") {
+        if self.name.eq_ignore_ascii_case("opus")
+            || self.name.eq_ignore_ascii_case("AMR")
+            || self.name.eq_ignore_ascii_case("AMR-WB")
+        {
             return Some(self.frame_samples_20ms());
         }
         None
@@ -220,6 +223,30 @@ mod tests {
         assert_eq!(
             AudioCodecSpec::new("opus", 111, 48_000, 2).frame_samples_20ms(),
             1920
+        );
+    }
+
+    #[test]
+    fn exact_frame_encoders_report_their_twenty_millisecond_boundary() {
+        assert_eq!(
+            AudioCodecSpec::new("opus", 111, 48_000, 1).required_frame_samples(),
+            Some(960)
+        );
+        assert_eq!(
+            AudioCodecSpec::new("Opus", 96, 48_000, 2).required_frame_samples(),
+            Some(1_920)
+        );
+        assert_eq!(
+            AudioCodecSpec::new("AMR", 107, 8_000, 1).required_frame_samples(),
+            Some(160)
+        );
+        assert_eq!(
+            AudioCodecSpec::new("AMR-WB", 105, 16_000, 1).required_frame_samples(),
+            Some(320)
+        );
+        assert_eq!(
+            AudioCodecSpec::new("PCMU", 0, 8_000, 1).required_frame_samples(),
+            None
         );
     }
 
