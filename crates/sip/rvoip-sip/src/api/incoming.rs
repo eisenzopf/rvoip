@@ -85,6 +85,7 @@ fn spawn_exact_incoming_reject(
     };
     let authority = Arc::clone(coordinator.helpers.state_machine.store.authority());
     let state_machine = Arc::clone(&coordinator.helpers.state_machine);
+    let finalizer = Arc::clone(&coordinator);
     let operation_key = lifecycle_handle.key().clone();
     let log_call_id = lifecycle_handle.session_id().clone();
     let scheduled = authority.spawn_owned_exact(
@@ -98,17 +99,31 @@ fn spawn_exact_incoming_reject(
                     return rollback_owned_incoming_guard(failure.into_operation(), ()).await;
                 }
             };
-            if let Err(error) = state_machine
+            let terminal_reason = reason.clone();
+            let dispatch = state_machine
                 .process_event_exact(&lifecycle_handle, EventType::RejectCall { status, reason })
-                .await
-            {
+                .await;
+            if let Err(error) = &dispatch {
                 tracing::debug!(
                     session_id = %lifecycle_handle.session_id(),
                     %error,
                     "exact incoming-call rejection did not dispatch"
                 );
             }
-            committed.complete(())
+            let completion = committed.complete(());
+            if dispatch.is_ok()
+                && !finalizer.spawn_local_rejection_finalization(
+                    lifecycle_handle.clone(),
+                    status,
+                    terminal_reason,
+                )
+            {
+                tracing::debug!(
+                    session_id = %lifecycle_handle.session_id(),
+                    "exact incoming-call rejection finalization was not admitted"
+                );
+            }
+            completion
         },
     );
     if let Err(error) = scheduled {
@@ -825,6 +840,7 @@ impl IncomingCallGuard {
         let state_machine = Arc::clone(&coordinator.helpers.state_machine);
         if let Some(lifecycle_handle) = lifecycle_handle.clone() {
             let authority = Arc::clone(state_machine.store.authority());
+            let finalizer = Arc::clone(&coordinator);
             let operation_key = lifecycle_handle.key().clone();
             let watchdog_resolved = Arc::clone(&resolved);
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -865,7 +881,18 @@ impl IncomingCallGuard {
                         );
                         return rollback_owned_incoming_guard(operation, ()).await;
                     }
-                    commit_owned_incoming_guard(operation, ()).await
+                    let completion = commit_owned_incoming_guard(operation, ()).await;
+                    if !finalizer.spawn_local_rejection_finalization(
+                        lifecycle_handle.clone(),
+                        503,
+                        "Service Unavailable".to_string(),
+                    ) {
+                        tracing::debug!(
+                            session_id = %lifecycle_handle.session_id(),
+                            "incoming-call guard timeout finalization was not admitted"
+                        );
+                    }
+                    completion
                 },
             );
             if let Err(error) = scheduled {
@@ -1049,8 +1076,7 @@ impl IncomingCallGuard {
             ))
         })?;
         self.coordinator
-            .helpers
-            .reject_call_exact(lifecycle_handle, status, reason)
+            .reject_incoming_exact(lifecycle_handle, status, reason)
             .await?;
 
         let fut = async {

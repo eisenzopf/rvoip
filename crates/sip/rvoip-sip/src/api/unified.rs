@@ -10450,6 +10450,107 @@ impl UnifiedCoordinator {
         self.finalize_local_terminal_exact(handle, api_event).await
     }
 
+    /// Commit an application-authored non-2xx final response and release the
+    /// exact inbound call lifetime after its terminal observation is retained.
+    ///
+    /// `RejectCall` and `RedirectCall` both finish in `Terminated` after their
+    /// wire response and lower-layer cleanup succeed. They do not have a later
+    /// dialog event to drive the session event handler's ordinary terminal
+    /// release path, so the API operation that authored the final response
+    /// must own that release explicitly.
+    pub(crate) async fn reject_incoming_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        status: u16,
+        reason: &str,
+    ) -> Result<()> {
+        self.helpers
+            .reject_call_exact(handle, status, reason)
+            .await?;
+        self.finalize_local_rejection_exact(handle, status, reason)
+            .await
+    }
+
+    pub(crate) async fn reject_incoming_with_extras_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        status: u16,
+        reason: &str,
+        extras: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> Result<()> {
+        self.helpers
+            .reject_call_with_extras_exact(handle, status, reason, extras)
+            .await?;
+        self.finalize_local_rejection_exact(handle, status, reason)
+            .await
+    }
+
+    pub(crate) async fn redirect_incoming_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        status: u16,
+        contacts: Vec<String>,
+    ) -> Result<()> {
+        self.helpers
+            .redirect_call_exact(handle, status, contacts)
+            .await?;
+        self.finalize_local_rejection_exact(handle, status, "Redirected")
+            .await
+    }
+
+    pub(crate) async fn redirect_incoming_with_extras_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        status: u16,
+        contacts: Vec<String>,
+        extras: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> Result<()> {
+        self.helpers
+            .redirect_call_with_extras_exact(handle, status, contacts, extras)
+            .await?;
+        self.finalize_local_rejection_exact(handle, status, "Redirected")
+            .await
+    }
+
+    pub(crate) async fn finalize_local_rejection_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        status: u16,
+        reason: impl Into<String>,
+    ) -> Result<()> {
+        let api_event = crate::api::events::Event::CallFailed {
+            call_id: handle.session_id().clone(),
+            status_code: status,
+            reason: reason.into(),
+        };
+        self.finalize_local_terminal_exact(handle, api_event).await
+    }
+
+    /// Retain local-rejection finalization outside an exact lifecycle-owned
+    /// operation. Quiescing waits for those operations, so awaiting release
+    /// inside one would make the operation wait on itself.
+    pub(crate) fn spawn_local_rejection_finalization(
+        self: &Arc<Self>,
+        handle: SessionRegistryHandle,
+        status: u16,
+        reason: String,
+    ) -> bool {
+        let coordinator = Arc::clone(self);
+        self.setup_teardown_scheduler
+            .spawn_lifecycle_task(async move {
+                if let Err(error) = coordinator
+                    .finalize_local_rejection_exact(&handle, status, reason)
+                    .await
+                {
+                    tracing::debug!(
+                        session_id = %handle.session_id(),
+                        %error,
+                        "exact incoming-call rejection did not release local ownership"
+                    );
+                }
+            })
+    }
+
     async fn finalize_local_terminal_exact(
         &self,
         handle: &SessionRegistryHandle,
