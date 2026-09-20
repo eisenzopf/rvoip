@@ -1261,6 +1261,14 @@ impl Drop for IncomingCallGuard {
 /// An in-dialog received SIP request (REFER / NOTIFY / INFO /
 /// OPTIONS / UPDATE / MESSAGE).
 ///
+/// Response authority depends on the method. INFO and other
+/// application-owned requests carry their exact inbound server transaction
+/// and can use [`IncomingRequest::respond`] or
+/// [`IncomingRequest::respond_builder`]. MESSAGE and OPTIONS callbacks are
+/// post-response observations: dialog-core has already authored their one
+/// final response before publishing the request, so applications must not
+/// attempt a second response.
+///
 /// Implements [`SipHeaderView`] for uniform header inspection.
 #[derive(Clone)]
 pub struct IncomingRequest {
@@ -1566,6 +1574,9 @@ impl IncomingRequest {
                 self.exact_response_obligation()?,
             );
         }
+        if let Some(error) = self.dialog_owned_response_error() {
+            return Err(error);
+        }
         if matches!(
             self.method,
             rvoip_sip_core::Method::Info
@@ -1605,7 +1616,10 @@ impl IncomingRequest {
     /// This does not run INVITE accept/reject call-state transitions. It is
     /// therefore the response API for inbound INFO and similar application
     /// requests. Legacy events that lack exact transaction correlation return
-    /// `InvalidInput` rather than guessing from dialog state.
+    /// `InvalidInput` rather than guessing from dialog state. MESSAGE and
+    /// OPTIONS are published only after dialog-core has sent their final
+    /// response, so this method also returns `InvalidInput` for those
+    /// observation-only requests.
     pub fn respond(&self, status: u16) -> Result<crate::api::respond::InDialogResponseBuilder> {
         let transaction_id = self.exact_response_transaction()?;
         let coord = self.coordinator.clone().ok_or_else(|| {
@@ -1633,9 +1647,12 @@ impl IncomingRequest {
 
     fn exact_response_transaction(&self) -> Result<rvoip_sip_dialog::transaction::TransactionKey> {
         let transaction = self.response_transaction.clone().ok_or_else(|| {
-            SessionError::InvalidInput(
-                "IncomingRequest response requires an exact inbound server transaction".to_string(),
-            )
+            self.dialog_owned_response_error().unwrap_or_else(|| {
+                SessionError::InvalidInput(
+                    "IncomingRequest response requires an exact inbound server transaction"
+                        .to_string(),
+                )
+            })
         })?;
         let wire_transaction = self
             .request
@@ -1655,6 +1672,20 @@ impl IncomingRequest {
             ));
         }
         Ok(transaction)
+    }
+
+    fn dialog_owned_response_error(&self) -> Option<SessionError> {
+        if self.response_transaction.is_some() {
+            return None;
+        }
+        let method = match self.method {
+            rvoip_sip_core::Method::Message => "MESSAGE",
+            rvoip_sip_core::Method::Options => "OPTIONS",
+            _ => return None,
+        };
+        Some(SessionError::InvalidInput(format!(
+            "Inbound {method} is a post-response observation; dialog-core already authored its final response"
+        )))
     }
 
     /// Begin an `AuthChallengeBuilder` for 401/407 on the inbound request.
@@ -2625,6 +2656,54 @@ mod tests {
             Err(SessionError::InvalidInput(message))
                 if message.contains("does not match the wire request")
         ));
+    }
+
+    #[test]
+    fn dialog_owned_observations_reject_second_response_builders() {
+        for method in [
+            rvoip_sip_core::types::Method::Message,
+            rvoip_sip_core::types::Method::Options,
+        ] {
+            let raw = format!(
+                "{method} sip:bob@example.test SIP/2.0\r\n\
+                 Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-observation\r\n\
+                 From: <sip:alice@example.test>;tag=from-tag\r\n\
+                 To: <sip:bob@example.test>;tag=to-tag\r\n\
+                 Call-ID: observation-only\r\n\
+                 CSeq: 2 {method}\r\n\
+                 Content-Length: 0\r\n\r\n"
+            );
+            let request = match rvoip_sip_core::parse_message(raw.as_bytes())
+                .expect("parse observation-only request")
+            {
+                rvoip_sip_core::Message::Request(request) => request,
+                other => panic!("expected request, got {other:?}"),
+            };
+            let incoming = IncomingRequest::from_bus_request(
+                crate::state_table::types::SessionId("observation-only".into()),
+                "sip:alice@example.test".into(),
+                "sip:bob@example.test".into(),
+                method.clone(),
+                Arc::new(request),
+            );
+
+            let direct_error = match incoming.respond(200) {
+                Ok(_) => panic!("observation-only request gained direct response authority"),
+                Err(error) => error,
+            };
+            let generic_error = match incoming.respond_builder(486) {
+                Ok(_) => panic!("observation-only request gained generic response authority"),
+                Err(error) => error,
+            };
+            for error in [direct_error, generic_error] {
+                assert!(matches!(
+                    error,
+                    SessionError::InvalidInput(message)
+                        if message.contains("post-response observation")
+                            && message.contains("dialog-core already authored")
+                ));
+            }
+        }
     }
 
     #[test]

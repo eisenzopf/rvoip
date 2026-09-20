@@ -1366,6 +1366,12 @@ pub trait CallHandler: Send + Sync + 'static {
     }
 
     /// SIP_API_DESIGN_2 Phase E — typed inbound MESSAGE hook (RFC 3428).
+    ///
+    /// This callback observes a MESSAGE only after dialog-core has accepted
+    /// its application delivery and authored the one final SIP response. The
+    /// request retains headers and body for application processing, but it
+    /// intentionally has no response authority; do not call `respond()` or
+    /// `respond_builder()` from this hook.
     #[allow(unused_variables)]
     async fn on_message_received(&self, request: crate::api::incoming::IncomingRequest) {}
 
