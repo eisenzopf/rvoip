@@ -5,13 +5,14 @@
 
 #[cfg(feature = "dtls-srtp")]
 use crate::adapters::dtls_negotiator::parse_dtls_offer;
+#[cfg(feature = "dtls-srtp")]
 use crate::adapters::dtls_negotiator::SetupRole;
 use crate::adapters::srtp_negotiator::{
     into_public_negotiation_error, SrtpDetailedResult, SrtpNegotiator, SrtpPair,
 };
 use crate::api::events::{Event, MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState};
 use crate::api::lifecycle::{LifecycleIndex, SessionEventPublisher};
-use crate::api::unified::{MediaMode, SdesBase64Mode};
+use crate::api::unified::{DtlsSetupRole, MediaMode, SdesBase64Mode};
 use crate::cleanup_diag::{self, CleanupStage};
 use crate::errors::{Result, SessionError};
 use crate::session_lifecycle::{
@@ -315,6 +316,28 @@ fn dtls_profile_to_crypto_suite(
             "DTLS selected an unsupported SRTP protection profile".to_string(),
         )),
     }
+}
+
+#[cfg(feature = "dtls-srtp")]
+fn dtls_protection_profiles(
+    suites: &[CryptoSuite],
+) -> Result<Vec<rvoip_rtp_core::dtls_srtp::SrtpProtectionProfile>> {
+    use rvoip_rtp_core::dtls_srtp::SrtpProtectionProfile;
+
+    suites
+        .iter()
+        .map(|suite| match suite {
+            CryptoSuite::AesCm128HmacSha1_80 => {
+                Ok(SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80)
+            }
+            CryptoSuite::AesCm128HmacSha1_32 => {
+                Ok(SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_32)
+            }
+            unsupported => Err(SessionError::ConfigError(format!(
+                "DTLS-SRTP profile {unsupported:?} is not supported"
+            ))),
+        })
+        .collect()
 }
 
 /// NEXT_STEPS C2 — lookup helper from RTP payload type to the
@@ -1360,6 +1383,9 @@ pub struct MediaAdapter {
     /// RFC 4568 SDES when SRTP policy is enabled.
     offer_dtls_srtp: bool,
 
+    /// Role advertised in outgoing DTLS-SRTP offers.
+    dtls_setup_role: DtlsSetupRole,
+
     /// Per-negotiation certificate identity retained until the exact SIP
     /// answer/ACK commit boundary starts the handshake.
     #[cfg(feature = "dtls-srtp")]
@@ -1518,6 +1544,7 @@ impl MediaAdapter {
             pending_srtp_offerers: Arc::new(DashMap::new()),
             negotiated_srtp: Arc::new(DashMap::new()),
             offer_dtls_srtp: false,
+            dtls_setup_role: DtlsSetupRole::Actpass,
             #[cfg(feature = "dtls-srtp")]
             pending_dtls_identities: Arc::new(DashMap::new()),
             staged_media_negotiations: Arc::new(DashMap::new()),
@@ -1998,6 +2025,11 @@ impl MediaAdapter {
     /// Select DTLS-SRTP rather than SDES for secure media negotiation.
     pub fn set_dtls_srtp_policy(&mut self, enabled: bool) {
         self.offer_dtls_srtp = enabled;
+    }
+
+    /// Select the role advertised in outgoing DTLS-SRTP offers.
+    pub fn set_dtls_setup_role(&mut self, setup_role: DtlsSetupRole) {
+        self.dtls_setup_role = setup_role;
     }
 
     #[cfg(feature = "dtls-srtp")]
@@ -2994,7 +3026,7 @@ impl MediaAdapter {
                 role,
                 remote_addr,
                 plan.expected_remote_fingerprint_sha256,
-                rvoip_rtp_core::dtls_srtp::default_srtp_profiles(),
+                dtls_protection_profiles(&self.srtp_offered_suites)?,
                 Duration::from_secs(10),
             )
             .await
@@ -4408,7 +4440,7 @@ impl MediaAdapter {
             .media_audio(port, transport)
             .formats(&formats_ref);
         if dtls_offer_attrs.is_some() {
-            media_builder = media_builder.setup(SetupRole::Actpass.as_str());
+            media_builder = media_builder.setup(self.dtls_setup_role.as_str());
         }
         if let Some(material) = &ice_material {
             media_builder = media_builder
@@ -5516,6 +5548,7 @@ impl Clone for MediaAdapter {
             pending_srtp_offerers: self.pending_srtp_offerers.clone(),
             negotiated_srtp: self.negotiated_srtp.clone(),
             offer_dtls_srtp: self.offer_dtls_srtp,
+            dtls_setup_role: self.dtls_setup_role,
             #[cfg(feature = "dtls-srtp")]
             pending_dtls_identities: self.pending_dtls_identities.clone(),
             staged_media_negotiations: self.staged_media_negotiations.clone(),
@@ -5722,6 +5755,26 @@ mod sdp_format_tests {
             tag_length: 10,
         };
         assert!(dtls_profile_to_crypto_suite(&unsupported).is_err());
+    }
+
+    #[cfg(feature = "dtls-srtp")]
+    #[test]
+    fn dtls_profile_offer_uses_the_configured_suites_in_order() {
+        use rvoip_rtp_core::dtls_srtp::SrtpProtectionProfile;
+
+        let profiles = dtls_protection_profiles(&[
+            CryptoSuite::AesCm128HmacSha1_32,
+            CryptoSuite::AesCm128HmacSha1_80,
+        ])
+        .expect("supported DTLS-SRTP profiles");
+
+        assert_eq!(
+            profiles,
+            vec![
+                SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_32,
+                SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80,
+            ]
+        );
     }
 
     fn build_srtp_answer(attr: Option<CryptoAttribute>) -> String {

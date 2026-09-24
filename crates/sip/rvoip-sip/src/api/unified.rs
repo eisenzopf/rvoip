@@ -336,6 +336,34 @@ pub enum SrtpKeyingMode {
     DtlsSrtp,
 }
 
+/// DTLS connection role advertised in an outgoing SIP SDP offer.
+///
+/// [`DtlsSetupRole::Actpass`] is the standards-oriented default. Endpoints
+/// behind NAT can select [`DtlsSetupRole::Active`] so they initiate the DTLS
+/// handshake after the answer arrives instead of waiting for an inbound
+/// ClientHello that may not reach their private media address.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DtlsSetupRole {
+    /// Let the answerer choose which endpoint initiates DTLS.
+    #[default]
+    Actpass,
+    /// Advertise `a=setup:active` and initiate DTLS as the client.
+    Active,
+    /// Advertise `a=setup:passive` and wait for the peer to initiate DTLS.
+    Passive,
+}
+
+impl DtlsSetupRole {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Actpass => "actpass",
+            Self::Active => "active",
+            Self::Passive => "passive",
+        }
+    }
+}
+
 /// Named SRTP suite offer policies for common PBX/carrier interop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SrtpSuitePolicy {
@@ -2210,6 +2238,14 @@ pub struct Config {
     /// closed when either requirement is missing.
     pub srtp_keying: SrtpKeyingMode,
 
+    /// DTLS role to advertise on outgoing offers when
+    /// [`Config::srtp_keying`] is [`SrtpKeyingMode::DtlsSrtp`].
+    ///
+    /// The default is [`DtlsSetupRole::Actpass`]. Choose
+    /// [`DtlsSetupRole::Active`] for a client behind NAT that must open the
+    /// media path by sending the first DTLS packet.
+    pub dtls_setup_role: DtlsSetupRole,
+
     /// Playout smoothing and packet-loss concealment for inbound audio.
     ///
     /// `None` forwards frames exactly as they arrive, gaps included — the
@@ -2251,16 +2287,17 @@ pub struct Config {
     /// Default: `false` — soft-prefer SRTP but accept plaintext.
     pub srtp_required: bool,
 
-    /// SRTP crypto suites to advertise on outgoing offers, in
-    /// preference order. The answerer picks the first suite it
-    /// supports.
+    /// SRTP crypto suites to advertise on outgoing offers, in preference
+    /// order. For SDES these become `a=crypto:` attributes; for DTLS-SRTP
+    /// they become `use_srtp` protection profiles in the DTLS ClientHello.
+    /// The answerer picks the first suite it supports.
     ///
     /// Default:
     /// `[AesCm128HmacSha1_80, AesCm128HmacSha1_32]` —
     /// RFC 4568 §6.2.1 MTI suite first (`_80`, ubiquitous), then
     /// `_32` (smaller auth tag for bandwidth-conscious carriers).
-    /// Modify when a specific carrier requires a non-default
-    /// preference.
+    /// Modify when a specific carrier requires a non-default preference.
+    /// DTLS-SRTP currently supports only the two AES-128 suites.
     pub srtp_offered_suites: Vec<CryptoSuite>,
 
     /// Override the RTP-side public address advertised in SDP `c=` /
@@ -2810,6 +2847,7 @@ impl std::fmt::Debug for Config {
             )
             .field("offer_srtp", &self.offer_srtp)
             .field("srtp_keying", &self.srtp_keying)
+            .field("dtls_setup_role", &self.dtls_setup_role)
             .field("ice", &self.ice)
             .field("srtp_required", &self.srtp_required)
             .field("amr_dtx", &self.amr_dtx)
@@ -2974,6 +3012,7 @@ impl Config {
             tls_insecure_skip_verify: false,
             offer_srtp: false,
             srtp_keying: SrtpKeyingMode::Sdes,
+            dtls_setup_role: DtlsSetupRole::Actpass,
             srtp_required: false,
             amr_dtx: false,
             amr_auto_cmr: false,
@@ -3094,6 +3133,7 @@ impl Config {
             tls_insecure_skip_verify: false,
             offer_srtp: false,
             srtp_keying: SrtpKeyingMode::Sdes,
+            dtls_setup_role: DtlsSetupRole::Actpass,
             srtp_required: false,
             amr_dtx: false,
             amr_auto_cmr: false,
@@ -3370,6 +3410,12 @@ impl Config {
     /// unavailable or signaling-only combination instead of downgrading.
     pub fn with_srtp_keying(mut self, keying: SrtpKeyingMode) -> Self {
         self.srtp_keying = keying;
+        self
+    }
+
+    /// Select the DTLS role advertised by outgoing SIP SDP offers.
+    pub fn with_dtls_setup_role(mut self, role: DtlsSetupRole) -> Self {
+        self.dtls_setup_role = role;
         self
     }
 
@@ -4644,12 +4690,23 @@ impl Config {
                     .to_string(),
             ));
         }
-        if self.offer_srtp
-            && self.srtp_keying == SrtpKeyingMode::Sdes
-            && self.srtp_offered_suites.is_empty()
-        {
+        if self.offer_srtp && self.srtp_offered_suites.is_empty() {
             return Err(SessionError::ConfigError(
                 "offer_srtp=true requires at least one srtp_offered_suites entry".to_string(),
+            ));
+        }
+        if self.offer_srtp
+            && self.srtp_keying == SrtpKeyingMode::DtlsSrtp
+            && self.srtp_offered_suites.iter().any(|suite| {
+                !matches!(
+                    suite,
+                    CryptoSuite::AesCm128HmacSha1_80 | CryptoSuite::AesCm128HmacSha1_32
+                )
+            })
+        {
+            return Err(SessionError::ConfigError(
+                "DTLS-SRTP supports only AES_CM_128_HMAC_SHA1_80 and AES_CM_128_HMAC_SHA1_32"
+                    .to_string(),
             ));
         }
         if matches!(
@@ -8885,6 +8942,7 @@ impl UnifiedCoordinator {
         media_adapter_inner.set_dtls_srtp_policy(
             config.offer_srtp && config.srtp_keying == SrtpKeyingMode::DtlsSrtp,
         );
+        media_adapter_inner.set_dtls_setup_role(config.dtls_setup_role);
         media_adapter_inner.set_sdes_base64_mode(sdes_base64_mode);
         // Sprint 3 C1 — propagate Comfort Noise opt-in.
         media_adapter_inner.set_comfort_noise(config.comfort_noise_enabled);

@@ -3,10 +3,12 @@
 //! Tests Config constructors, defaults, and field values.
 
 use rvoip_sip::{
-    Config, MediaMode, MediaSessionControllerConfig, PerformanceConfig, RtpSessionBufferConfig,
-    RtpTransportBufferConfig, SessionError, SipContactMode, SipNatConfig, SipTlsMode,
-    SrtpKeyingMode, SymmetricRtpPolicy,
+    Config, DtlsSetupRole, MediaMode, MediaSessionControllerConfig, PerformanceConfig,
+    RtpSessionBufferConfig, RtpTransportBufferConfig, SessionError, SipContactMode, SipNatConfig,
+    SipTlsMode, SrtpKeyingMode, SymmetricRtpPolicy,
 };
+#[cfg(feature = "dtls-srtp")]
+use rvoip_sip_core::types::sdp::CryptoSuite;
 use rvoip_sip_transport::UdpParseDispatch;
 use std::net::{IpAddr, SocketAddr};
 
@@ -446,6 +448,44 @@ fn srtp_keying_builder_selects_dtls_without_changing_offer_policy() {
     assert_eq!(config.srtp_keying, SrtpKeyingMode::DtlsSrtp);
     assert!(!config.offer_srtp);
     assert!(!config.srtp_required);
+}
+
+#[test]
+fn dtls_setup_role_builder_selects_active() {
+    let config = Config::local("alice", 5060).with_dtls_setup_role(DtlsSetupRole::Active);
+    assert_eq!(config.dtls_setup_role, DtlsSetupRole::Active);
+}
+
+#[cfg(feature = "dtls-srtp")]
+#[test]
+fn dtls_srtp_accepts_a_single_supported_profile() {
+    let mut config = Config::local("alice", 5060)
+        .with_srtp_keying(SrtpKeyingMode::DtlsSrtp)
+        .with_dtls_setup_role(DtlsSetupRole::Active);
+    config.offer_srtp = true;
+    config.srtp_required = true;
+    config.srtp_offered_suites = vec![CryptoSuite::AesCm128HmacSha1_32];
+
+    config.validate().expect("valid DTLS-SRTP profile policy");
+}
+
+#[cfg(feature = "dtls-srtp")]
+#[test]
+fn dtls_srtp_rejects_sdes_only_profiles() {
+    let mut config = Config::local("alice", 5060).with_srtp_keying(SrtpKeyingMode::DtlsSrtp);
+    config.offer_srtp = true;
+    config.srtp_required = true;
+    config.srtp_offered_suites = vec![CryptoSuite::AesCm256HmacSha1_80];
+
+    let error = config
+        .validate()
+        .expect_err("AES-256 has no DTLS-SRTP protection profile mapping");
+    match error {
+        SessionError::ConfigError(message) => {
+            assert!(message.contains("supports only AES_CM_128"), "{message}")
+        }
+        other => panic!("unexpected validation failure: {other:?}"),
+    }
 }
 
 #[cfg(not(feature = "dtls-srtp"))]
