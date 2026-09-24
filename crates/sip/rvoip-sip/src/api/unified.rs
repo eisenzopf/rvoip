@@ -2398,20 +2398,16 @@ pub struct Config {
     /// Media-core controller pool and capacity tuning for SIP media calls.
     pub media_session_controller_config: MediaSessionControllerConfig,
 
-    /// STUN server (RFC 8489 §14) to probe for the RTP-side public
-    /// mapping at coordinator boot. Format: `"host:port"` or `"host"`
+    /// STUN server (RFC 8489 §14) used to discover each RTP socket's exact
+    /// public mapping before its SDP is rendered. Format: `"host:port"` or `"host"`
     /// (default port 3478). Common public servers:
     /// `stun.l.google.com:19302`, `stun.cloudflare.com:3478`.
     ///
-    /// The probe runs once at startup using a fresh UDP socket bound to
-    /// [`Config::local_ip`]. This is best-effort address discovery: it is
-    /// useful for simple cone-NAT labs, but it does not guarantee the exact
-    /// mapping of a later per-call RTP socket. Symmetric NATs and production
-    /// Internet edges should use a static [`Config::media_public_addr`] today
-    /// or ICE in a future WebRTC/edge layer. Failure mode: probe timeout /
-    /// unreachable / unparseable response → log a warning and fall back to
-    /// the local interface address. STUN is intentionally soft-fail — the
-    /// call path is never blocked on it.
+    /// The probe uses the allocated per-call RTP socket, so its mapped IP and
+    /// port match the media path. SDP generation waits up to 1.5 seconds for
+    /// discovery. Failure is soft: timeout, resolution, or parse errors log a
+    /// warning and fall back to the local interface address. Use a static
+    /// [`Config::media_public_addr`] when the mapping is already known.
     ///
     /// Default: `None` — no probe runs (today's behaviour).
     pub stun_server: Option<String>,
@@ -8956,28 +8952,23 @@ impl UnifiedCoordinator {
         // NEXT_STEPS C2 — propagate the configured offered codec list.
         media_adapter_inner.set_offered_codecs(config.offered_codecs.clone());
         media_adapter_inner.set_g729_annex_b(config.g729_annex_b);
-        let media_adapter = Arc::new(media_adapter_inner);
-
-        // Sprint 3 A6 — resolve the public RTP address. Static
-        // override wins over STUN; STUN failure is soft (warn + use
-        // local IP). Probe runs once, here, before any session is
-        // created.
-        let pending_stun_probe = if let Some(static_addr) = config.media_public_addr {
+        // A static media override wins over per-session STUN discovery.
+        if let Some(static_addr) = config.media_public_addr {
             if config.stun_server.is_some() {
                 tracing::warn!(
                     "Both Config::media_public_addr and Config::stun_server are set; \
-                     using the static override and skipping the STUN probe"
+                     using the static override and skipping STUN discovery"
                 );
             }
             tracing::info!(
                 "RTP public addr: {} (static override from Config::media_public_addr)",
                 static_addr
             );
-            media_adapter.set_public_rtp_addr(Some(static_addr));
-            None
+            media_adapter_inner.set_public_rtp_addr(Some(static_addr));
         } else {
-            config.stun_server.clone()
-        };
+            media_adapter_inner.set_stun_server(config.stun_server.clone());
+        }
+        let media_adapter = Arc::new(media_adapter_inner);
         // RFC 4733 DTMF bridge: adapter publishes `Event::DtmfReceived`
         // onto the API bus whenever media-core signals a DTMF event.
         media_adapter
@@ -9081,25 +9072,6 @@ impl UnifiedCoordinator {
                 exact_response_shutdown_rx,
             ));
         debug_assert!(exact_response_runner_started);
-        if let Some(stun_target) = pending_stun_probe {
-            // Keep boot nonblocking while making constructor cancellation and
-            // graceful shutdown join the probe before media dependencies drop.
-            let adapter_for_probe = media_adapter.clone();
-            let probe_started =
-                coordinator
-                    .setup_teardown_scheduler
-                    .spawn_lifecycle_task(async move {
-                        if let Err(e) = run_stun_probe(adapter_for_probe, &stun_target).await {
-                            tracing::warn!(
-                                "STUN probe failed against '{}': {} — falling back to local IP",
-                                stun_target,
-                                e
-                            );
-                        }
-                    });
-            debug_assert!(probe_started);
-        }
-
         // Start the dialog adapter. The scheduler runner is already retained;
         // join it explicitly on constructor failure rather than relying on a
         // later last-owner drop to wake and detach it.
@@ -12968,65 +12940,4 @@ impl Registration {
         self.contact_uri = Some(uri.into());
         self
     }
-}
-
-/// Sprint 3 A6 — best-effort STUN probe for the RTP-side public
-/// mapping.
-///
-/// **Caveat.** The probe binds a fresh ephemeral UDP socket on the
-/// configured `local_ip` and asks the STUN server what mapping it
-/// sees. For typical cone NATs (most consumer routers, AWS / GCP
-/// NAT gateways) the mapping is keyed by source IP only, so the
-/// discovered address matches what the actual RTP path will see
-/// later. For symmetric NATs the mapping is per-(source IP, source
-/// port) and the result will be wrong — those deployments need ICE
-/// (Sprint 4 D3). For Sprint 3 the simple shape is the right
-/// trade-off; a deployment that breaks here can fall back to
-/// `Config::media_public_addr` (static override).
-async fn run_stun_probe(adapter: Arc<MediaAdapter>, stun_target: &str) -> Result<()> {
-    use std::sync::Arc as StdArc;
-    use tokio::net::UdpSocket as TokioUdpSocket;
-
-    // Normalise "host" → "host:3478"; "host:port" passes through.
-    let target_str = if stun_target.contains(':') {
-        stun_target.to_string()
-    } else {
-        format!("{}:3478", stun_target)
-    };
-
-    // Resolve via tokio's DNS — STUN servers are typically fronted by
-    // SRV in production but the public ones (Google, Cloudflare) all
-    // expose plain A records.
-    let server_addr = tokio::net::lookup_host(&target_str)
-        .await
-        .map_err(|e| {
-            SessionError::ConfigError(format!("STUN resolve '{}' failed: {}", target_str, e))
-        })?
-        .next()
-        .ok_or_else(|| {
-            SessionError::ConfigError(format!("STUN '{}' resolved to nothing", target_str))
-        })?;
-
-    // Bind a probe socket on the same interface as the SIP/media
-    // bind. Random ephemeral port; the cone-NAT-mapping caveat above
-    // applies.
-    let bind_local = std::net::SocketAddr::new(adapter.local_ip(), 0);
-    let probe_sock = TokioUdpSocket::bind(bind_local).await.map_err(|e| {
-        SessionError::ConfigError(format!("STUN probe bind {} failed: {}", bind_local, e))
-    })?;
-    let probe_sock = StdArc::new(probe_sock);
-
-    let client = rvoip_rtp_core::network::stun::StunClient::new(probe_sock, server_addr);
-    let discovered = client
-        .discover()
-        .await
-        .map_err(|e| SessionError::ConfigError(format!("STUN probe failed: {}", e)))?;
-
-    tracing::info!(
-        "RTP public addr: {} (STUN-discovered via {})",
-        discovered,
-        target_str
-    );
-    adapter.set_public_rtp_addr(Some(discovered));
-    Ok(())
 }
