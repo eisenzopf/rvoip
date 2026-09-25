@@ -54,13 +54,13 @@ Every facade surface and every mainline audio codec, including native Opus.
 
 ```toml
 # Small provider-neutral SIP service.
-rvoip = { version = "0.3.9", default-features = false, features = ["bundle-sip-endpoint"] }
+rvoip = { version = "0.3.10", default-features = false, features = ["bundle-sip-endpoint"] }
 
 # Carrier-facing service with the pure-Rust telephony codec set.
-rvoip = { version = "0.3.9", default-features = false, features = ["bundle-carrier-sip"] }
+rvoip = { version = "0.3.10", default-features = false, features = ["bundle-carrier-sip"] }
 
 # Browser-to-SIP application gateway; install libopus on the build host.
-rvoip = { version = "0.3.9", default-features = false, features = ["bundle-browser-gateway"] }
+rvoip = { version = "0.3.10", default-features = false, features = ["bundle-browser-gateway"] }
 ```
 
 Advanced users may continue selecting leaf features directly. Start from

@@ -31,3 +31,25 @@ key disclosure, unsafe media/security negotiation, memory-safety issues,
 protocol parsing vulnerabilities, denial of service, and release-pipeline
 compromise. General support questions and already-public dependency advisories
 belong in normal issues unless there is rvoip-specific exploitability.
+
+## Code scanning and release policy
+
+GitHub CodeQL is run for Actions, C/C++, JavaScript/TypeScript, Python, and
+Rust. Every alert is reviewed at its repository alert number. A dismissal is
+the durable per-alert adjudication record and must state whether the location
+is test-only, a false positive, or an accepted standards-compatibility risk;
+bulk rule suppression is not accepted as review.
+
+The protected release workflow then runs
+`scripts/ci/check_codeql_release_policy.py`. It waits for all five CodeQL
+categories to analyze the exact current `main` commit and fails if even a low
+severity alert remains open. Its machine-readable receipt is retained with
+the release qualification evidence. Thus scanner completion alone is not a
+release pass, and a stale clean analysis cannot qualify a newer candidate.
+
+SIP Digest MD5 and MD5-sess are retained solely for RFC interoperability with
+legacy peers. They implement the SIP challenge-response algorithm, not login
+password storage. SHA-256, SHA-256-sess, SHA-512-256, and
+SHA-512-256-sess are supported; deployments should select the strongest
+algorithm their peer accepts. A CodeQL weak-hash alert at the explicit SIP
+Digest implementation is adjudicated on that narrow basis only.

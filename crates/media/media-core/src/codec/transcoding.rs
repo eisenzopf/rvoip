@@ -91,7 +91,7 @@ impl Transcoder {
     ///
     /// This used to take an `Arc<RwLock<FormatConverter>>`. Every caller built
     /// a fresh one to hand in, and sharing one across sessions was wrong
-    /// anyway -- see [`TranscodingSession::format_converter`]. Each session now
+    /// anyway -- see the private `TranscodingSession::format_converter` field. Each session now
     /// builds its own.
     pub fn new() -> Self {
         debug!("Creating Transcoder");

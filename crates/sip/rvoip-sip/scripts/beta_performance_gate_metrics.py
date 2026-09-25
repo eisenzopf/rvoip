@@ -11,6 +11,13 @@ from typing import Any
 
 
 SCHEMA = "rvoip-sip-beta-performance-gate-metrics-v1"
+CANONICAL_SCHEMA = "rvoip-canonical-2k-evidence-v2"
+CANONICAL_SCENARIO = "perf_call_setup_cps_pbx-media-server"
+CANONICAL_RUNS = 3
+CANONICAL_CALLS = 65_000
+CANONICAL_TARGET_CPS = 2_000.0
+CANONICAL_MIN_ACHIEVED_CPS = 1_578.53
+CANONICAL_MIN_ASR = 0.999
 
 
 class MetricsError(RuntimeError):
@@ -67,6 +74,209 @@ def error_total(errors: Any, names: tuple[str, ...]) -> int | None:
     if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
         return None
     return sum(values)
+
+
+def all_numeric_errors_are_zero(errors: Any) -> bool:
+    if not isinstance(errors, dict) or not errors:
+        return False
+    stack = list(errors.values())
+    found = False
+    while stack:
+        value = stack.pop()
+        if isinstance(value, dict):
+            stack.extend(value.values())
+        elif isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        else:
+            found = True
+            if value != 0:
+                return False
+    return found
+
+
+def canonical_2k_metrics(
+    index_path: pathlib.Path | None, required: bool, candidate_sha: str | None = None
+) -> dict[str, Any]:
+    if index_path is None or not index_path.is_file():
+        if required:
+            raise MetricsError("required canonical 2,000-CPS evidence index is missing")
+        return {"enabled": False, "required": False, "passed": True}
+
+    index = load_json(index_path)
+    canonical_root = index_path.parent.resolve()
+    runs = index.get("runs")
+    source = index.get("source_at_beta_start")
+    common_fingerprint = index.get("common_source_fingerprint_sha256")
+    common_executable = index.get("common_executable_sha256")
+    checks: list[dict[str, Any]] = []
+    for metric, requirement, observed, passed in (
+        (
+            "schema",
+            CANONICAL_SCHEMA,
+            index.get("schema"),
+            index.get("schema") == CANONICAL_SCHEMA,
+        ),
+        ("status", "PASS", index.get("status"), index.get("status") == "PASS"),
+        (
+            "scenario",
+            CANONICAL_SCENARIO,
+            index.get("scenario"),
+            index.get("scenario") == CANONICAL_SCENARIO,
+        ),
+        (
+            "run_count",
+            str(CANONICAL_RUNS),
+            index.get("run_count"),
+            index.get("run_count") == CANONICAL_RUNS,
+        ),
+        (
+            "indexed_runs",
+            str(CANONICAL_RUNS),
+            len(runs) if isinstance(runs, list) else None,
+            isinstance(runs, list) and len(runs) == CANONICAL_RUNS,
+        ),
+        (
+            "candidate_commit",
+            candidate_sha or "recorded clean candidate",
+            source.get("git_commit") if isinstance(source, dict) else None,
+            isinstance(source, dict)
+            and source.get("git_dirty") is False
+            and (candidate_sha is None or source.get("git_commit") == candidate_sha),
+        ),
+        (
+            "source_fingerprint",
+            "one 64-character SHA-256 shared by source and every run",
+            common_fingerprint,
+            isinstance(common_fingerprint, str)
+            and len(common_fingerprint) == 64
+            and all(character in "0123456789abcdef" for character in common_fingerprint)
+            and isinstance(source, dict)
+            and source.get("source_fingerprint_sha256") == common_fingerprint,
+        ),
+        (
+            "executable_identity",
+            "one 64-character SHA-256 shared by every run",
+            common_executable,
+            isinstance(common_executable, str)
+            and len(common_executable) == 64
+            and all(character in "0123456789abcdef" for character in common_executable),
+        ),
+    ):
+        add_check(checks, metric, requirement, observed, passed)
+
+    observations: list[dict[str, Any]] = []
+    evidence = ["canonical-2k/index.json"]
+    if isinstance(runs, list):
+        for expected_sequence, run in enumerate(runs, start=1):
+            report = None
+            report_relative = None
+            if isinstance(run, dict):
+                packaged = run.get("packaged_run_dir")
+                if isinstance(packaged, str):
+                    packaged_path = pathlib.Path(packaged)
+                    if (
+                        not packaged_path.is_absolute()
+                        and ".." not in packaged_path.parts
+                    ):
+                        # Current packages retain the report both at report.json and
+                        # below perf-results/. Prefer the explicit run copy.
+                        candidates = [
+                            canonical_root / packaged_path / "report.json",
+                            canonical_root
+                            / packaged_path
+                            / "perf-results"
+                            / CANONICAL_SCENARIO
+                            / "2000.json",
+                        ]
+                        matches = [path for path in candidates if path.is_file()]
+                        if matches and all(
+                            path.read_bytes() == matches[0].read_bytes()
+                            for path in matches[1:]
+                        ):
+                            report = load_json(matches[0])
+                            report_relative = matches[0].relative_to(canonical_root)
+            results = report.get("results", {}) if isinstance(report, dict) else {}
+            load = report.get("load", {}) if isinstance(report, dict) else {}
+            observed = {
+                "sequence": run.get("sequence") if isinstance(run, dict) else None,
+                "target_cps": (
+                    load.get("target_cps") if isinstance(load, dict) else None
+                ),
+                "achieved_cps": (
+                    results.get("achieved_cps")
+                    if isinstance(results, dict)
+                    else None
+                ),
+                "calls_offered": (
+                    results.get("calls_offered")
+                    if isinstance(results, dict)
+                    else None
+                ),
+                "calls_succeeded": (
+                    results.get("calls_succeeded")
+                    if isinstance(results, dict)
+                    else None
+                ),
+                "asr": results.get("asr") if isinstance(results, dict) else None,
+                "setup_latency_p50_ns": (
+                    report.get("latency_ns", {}).get("setup_latency", {}).get("p50")
+                    if isinstance(report, dict)
+                    else None
+                ),
+                "setup_latency_p95_ns": (
+                    report.get("latency_ns", {}).get("setup_latency", {}).get("p95")
+                    if isinstance(report, dict)
+                    else None
+                ),
+                "setup_latency_p99_ns": (
+                    report.get("latency_ns", {}).get("setup_latency", {}).get("p99")
+                    if isinstance(report, dict)
+                    else None
+                ),
+            }
+            observations.append(observed)
+            passed = (
+                isinstance(run, dict)
+                and run.get("sequence") == expected_sequence
+                and run.get("source_fingerprint_sha256") == common_fingerprint
+                and run.get("executable_sha256") == common_executable
+                and isinstance(report, dict)
+                and report.get("scenario") == CANONICAL_SCENARIO
+                and finite_number(observed["target_cps"]) == CANONICAL_TARGET_CPS
+                and finite_number(observed["achieved_cps"]) is not None
+                and finite_number(observed["achieved_cps"])
+                >= CANONICAL_MIN_ACHIEVED_CPS
+                and observed["calls_offered"] == CANONICAL_CALLS
+                and observed["calls_succeeded"] == CANONICAL_CALLS
+                and finite_number(observed["asr"]) is not None
+                and finite_number(observed["asr"]) >= CANONICAL_MIN_ASR
+                and all_numeric_errors_are_zero(results.get("errors"))
+            )
+            add_check(
+                checks,
+                f"canonical_run_{expected_sequence}",
+                "clean accepted 2,000-CPS / 65,000-call PASS",
+                observed,
+                passed,
+            )
+            if report_relative is not None:
+                evidence.append(f"canonical-2k/{report_relative.as_posix()}")
+
+    return {
+        "enabled": True,
+        "required": required,
+        "passed": all(check["passed"] for check in checks),
+        "evidence": evidence,
+        "policy": {
+            "run_count": CANONICAL_RUNS,
+            "target_cps": CANONICAL_TARGET_CPS,
+            "calls_per_run": CANONICAL_CALLS,
+            "minimum_achieved_cps": CANONICAL_MIN_ACHIEVED_CPS,
+            "minimum_asr": CANONICAL_MIN_ASR,
+        },
+        "observed": {"runs": observations},
+        "checks": checks,
+    }
 
 
 def high_density_metrics(
@@ -462,6 +672,231 @@ def monolithic_metrics(
     }
 
 
+def split_soak_metrics(
+    perf_root: pathlib.Path,
+    expected_duration: int,
+    expected_active_calls: int,
+    expected_rss_limit: float,
+    required: bool,
+) -> dict[str, Any]:
+    caller_path = perf_root / "perf_soak_caller.json"
+    receiver_path = perf_root / "perf_soak_receiver.json"
+    if not caller_path.is_file() or not receiver_path.is_file():
+        if required:
+            raise MetricsError("required split-soak caller/receiver artifacts are missing")
+        return {"enabled": False, "required": False, "passed": True}
+
+    caller = load_json(caller_path)
+    receiver = load_json(receiver_path)
+    caller_results = caller.get("results", {})
+    receiver_results = receiver.get("results", {})
+    caller_gate = caller_results.get("rss_gate", {})
+    receiver_gate = receiver_results.get("rss_gate", {})
+    caller_limit = (
+        caller_gate.get("effective_mb_per_hr")
+        if isinstance(caller_gate, dict)
+        else None
+    )
+    receiver_limit = (
+        receiver_gate.get("effective_mb_per_hr")
+        if isinstance(receiver_gate, dict)
+        else None
+    )
+    caller_duration = caller_results.get("duration_secs")
+    receiver_duration = receiver_results.get(
+        "duration_secs", receiver_results.get("configured_duration_secs")
+    )
+    caller_offered = caller_results.get("calls_offered")
+    caller_succeeded = caller_results.get("calls_succeeded")
+    receiver_completed = receiver_results.get("bob_completed_audio_receivers")
+    caller_skip = (
+        caller.get("diagnostics", {})
+        .get("media_receive", {})
+        .get("skip_audio_frame_delivery")
+    )
+    receiver_skip = (
+        receiver.get("diagnostics", {})
+        .get("media_receive", {})
+        .get("skip_audio_frame_delivery")
+    )
+    checks: list[dict[str, Any]] = []
+    for metric, requirement, observed, passed in (
+        (
+            "duration_secs",
+            f"exactly {expected_duration} for caller and receiver",
+            {"caller": caller_duration, "receiver": receiver_duration},
+            caller_duration == expected_duration
+            and receiver_duration == expected_duration,
+        ),
+        (
+            "active_calls_target",
+            f"exactly {expected_active_calls} for caller and receiver",
+            {
+                "caller": caller_results.get("active_calls_target"),
+                "receiver": receiver_results.get("active_calls_target"),
+            },
+            caller_results.get("active_calls_target") == expected_active_calls
+            and receiver_results.get("active_calls_target") == expected_active_calls,
+        ),
+        (
+            "rss_limit_mb_per_hr",
+            f"exactly {expected_rss_limit:g} for caller and receiver",
+            {"caller": caller_limit, "receiver": receiver_limit},
+            finite_number(caller_limit) == expected_rss_limit
+            and finite_number(receiver_limit) == expected_rss_limit,
+        ),
+        (
+            "full_audio_frame_delivery",
+            "enabled for caller and receiver",
+            {"caller_skip": caller_skip, "receiver_skip": receiver_skip},
+            caller_skip is False and receiver_skip is False,
+        ),
+        (
+            "call_completion",
+            "every offered call succeeds and completes at the receiver",
+            {
+                "offered": caller_offered,
+                "succeeded": caller_succeeded,
+                "receiver_completed": receiver_completed,
+            },
+            isinstance(caller_offered, int)
+            and caller_offered > 0
+            and caller_succeeded == caller_offered
+            and receiver_completed == caller_offered,
+        ),
+        (
+            "errors",
+            "0",
+            caller_results.get("errors"),
+            all_numeric_errors_are_zero(caller_results.get("errors")),
+        ),
+        (
+            "retained_after_drain",
+            "0 for caller and receiver",
+            {
+                "caller": caller_results.get("retained_objects_after_drain"),
+                "receiver": receiver_results.get("retained_objects_after_drain"),
+            },
+            caller_results.get("retained_objects_after_drain") == 0
+            and receiver_results.get("retained_objects_after_drain") == 0,
+        ),
+        (
+            "receiver_active_audio_receivers_after_drain",
+            "0",
+            receiver_results.get("bob_active_audio_receivers"),
+            receiver_results.get("bob_active_audio_receivers") == 0,
+        ),
+        (
+            "transaction_managers_after_drain",
+            "0 for caller and receiver",
+            {
+                "caller": caller_results.get("transaction_manager_active_after_drain"),
+                "receiver": receiver_results.get(
+                    "transaction_manager_active_after_drain"
+                ),
+            },
+            caller_results.get("transaction_manager_active_after_drain") == 0
+            and receiver_results.get("transaction_manager_active_after_drain") == 0,
+        ),
+        (
+            "transaction_runners_after_drain",
+            "0 for caller and receiver",
+            {
+                "caller": caller_results.get("transaction_runner_active_after_drain"),
+                "receiver": receiver_results.get(
+                    "transaction_runner_active_after_drain"
+                ),
+            },
+            caller_results.get("transaction_runner_active_after_drain") == 0
+            and receiver_results.get("transaction_runner_active_after_drain") == 0,
+        ),
+        (
+            "receiver_stop_seen",
+            "true",
+            receiver_results.get("stop_seen"),
+            receiver_results.get("stop_seen") is True,
+        ),
+        (
+            "rss_gate_window",
+            "active_tail_1200s for caller and receiver",
+            {
+                "caller": caller_results.get("rss_gate_window"),
+                "receiver": receiver_results.get("rss_gate_window"),
+            },
+            caller_results.get("rss_gate_window") == "active_tail_1200s"
+            and receiver_results.get("rss_gate_window") == "active_tail_1200s",
+        ),
+        (
+            "rss_active_tail_window_complete",
+            "true for caller and receiver",
+            {
+                "caller": caller_results.get("rss_active_tail_window_complete"),
+                "receiver": receiver_results.get("rss_active_tail_window_complete"),
+            },
+            caller_results.get("rss_active_tail_window_complete") is True
+            and receiver_results.get("rss_active_tail_window_complete") is True,
+        ),
+    ):
+        add_check(checks, metric, requirement, observed, passed)
+
+    frames = receiver_results.get("bob_received_frames")
+    add_check(
+        checks,
+        "delivered_audio_frames",
+        "> 0",
+        frames,
+        isinstance(frames, int) and frames > 0,
+    )
+    for role, results in (("caller", caller_results), ("receiver", receiver_results)):
+        tail_window = finite_number(results.get("rss_active_tail_window_secs"))
+        add_check(
+            checks,
+            f"{role}_rss_active_tail_window_secs",
+            ">= 1190",
+            tail_window,
+            tail_window is not None and tail_window >= 1190.0,
+        )
+        growth = finite_number(results.get("rss_gate_growth_mb_per_hr"))
+        add_check(
+            checks,
+            f"{role}_rss_gate_growth_mb_per_hr",
+            f"<= {expected_rss_limit:g}",
+            growth,
+            growth is not None and growth <= expected_rss_limit,
+        )
+
+    return {
+        "enabled": True,
+        "required": required,
+        "passed": all(check["passed"] for check in checks),
+        "evidence": {
+            "caller": caller_path.relative_to(perf_root).as_posix(),
+            "receiver": receiver_path.relative_to(perf_root).as_posix(),
+        },
+        "policy": {
+            "duration_secs": expected_duration,
+            "active_calls_target": expected_active_calls,
+            "rss_limit_mb_per_hr": expected_rss_limit,
+            "full_audio_frame_delivery": True,
+        },
+        "observed": {
+            "calls_offered": caller_offered,
+            "calls_succeeded": caller_succeeded,
+            "receiver_completed_audio_receivers": receiver_completed,
+            "asr": caller_results.get("asr"),
+            "errors": caller_results.get("errors"),
+            "delivered_audio_frames": frames,
+            "caller_rss_gate_mb_per_hr": caller_results.get(
+                "rss_gate_growth_mb_per_hr"
+            ),
+            "receiver_rss_gate_mb_per_hr": receiver_results.get(
+                "rss_gate_growth_mb_per_hr"
+            ),
+        },
+        "checks": checks,
+    }
+
+
 def markdown(metrics: dict[str, Any]) -> str:
     lines = [
         "## Performance Gate Metrics",
@@ -471,8 +906,10 @@ def markdown(metrics: dict[str, Any]) -> str:
         "",
     ]
     for key, title in (
+        ("canonical_2k", "Canonical 2,000-CPS evaluation"),
         ("high_density_media_burst", "High-density media burst"),
         ("monolithic_soak", "Monolithic soak"),
+        ("split_soak", "Split soak"),
     ):
         section = metrics[key]
         lines.extend([f"### {title}", ""])
@@ -482,6 +919,8 @@ def markdown(metrics: dict[str, Any]) -> str:
         evidence = section["evidence"]
         if isinstance(evidence, dict):
             evidence_text = ", ".join(f"`{value}`" for value in evidence.values())
+        elif isinstance(evidence, list):
+            evidence_text = ", ".join(f"`{value}`" for value in evidence)
         else:
             evidence_text = f"`{evidence}`"
         lines.extend(
@@ -508,13 +947,19 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--perf-root", required=True)
     result.add_argument("--output-json", required=True)
     result.add_argument("--output-markdown", required=True)
+    result.add_argument("--canonical-index")
+    result.add_argument("--candidate-sha")
     result.add_argument("--high-density-cps", type=float, default=160.0)
     result.add_argument("--high-density-min-asr", type=float, default=0.995)
     result.add_argument("--rss-limit-mb-per-hr", type=float, default=15.0)
     result.add_argument("--monolithic-duration-secs", type=int, default=3600)
     result.add_argument("--monolithic-active-calls", type=int, default=30)
+    result.add_argument("--split-duration-secs", type=int, default=3600)
+    result.add_argument("--split-active-calls", type=int, default=500)
     result.add_argument("--require-high-density", action="store_true")
     result.add_argument("--require-monolithic", action="store_true")
+    result.add_argument("--require-split", action="store_true")
+    result.add_argument("--require-canonical", action="store_true")
     return result
 
 
@@ -523,6 +968,13 @@ def main() -> int:
     try:
         root = pathlib.Path(args.perf_root).resolve()
         metrics = {
+            "canonical_2k": canonical_2k_metrics(
+                pathlib.Path(args.canonical_index).resolve()
+                if args.canonical_index
+                else None,
+                args.require_canonical,
+                args.candidate_sha,
+            ),
             "schema": SCHEMA,
             "high_density_media_burst": high_density_metrics(
                 root,
@@ -538,10 +990,22 @@ def main() -> int:
                 args.rss_limit_mb_per_hr,
                 args.require_monolithic,
             ),
+            "split_soak": split_soak_metrics(
+                root,
+                args.split_duration_secs,
+                args.split_active_calls,
+                args.rss_limit_mb_per_hr,
+                args.require_split,
+            ),
         }
         metrics["passed"] = all(
             metrics[key]["passed"]
-            for key in ("high_density_media_burst", "monolithic_soak")
+            for key in (
+                "canonical_2k",
+                "high_density_media_burst",
+                "monolithic_soak",
+                "split_soak",
+            )
         )
         output_json = pathlib.Path(args.output_json)
         output_markdown = pathlib.Path(args.output_markdown)

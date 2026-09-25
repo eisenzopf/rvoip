@@ -320,9 +320,12 @@ impl OutboundCallBuilder {
         self
     }
 
-    /// Mark this INVITE as the B leg of a `transferor`-initiated
-    /// attended transfer (used for media bridging + REFER-completion
-    /// NOTIFY).
+    /// Mark this INVITE as the replacement leg for an accepted inbound REFER.
+    ///
+    /// The transfer relationship is committed before the INVITE reaches the
+    /// state machine, so provisional, final, and failure progress can drive
+    /// RFC 3515 NOTIFY without the race inherent in post-send linkage. This is
+    /// valid for blind and attended-transfer application orchestration.
     pub fn as_transfer_leg(mut self, transferor: &CallId) -> Self {
         self.transfer_leg = Some(transferor.clone());
         self

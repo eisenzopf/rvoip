@@ -359,7 +359,7 @@ pub fn arbitrate_sections(
 /// steer it. Three hooks fire, in this order and nowhere else: the tone
 /// register shifts once on entry, each of the three sections reports its raw
 /// peak, and the *second* half-frame of the frame additionally computes
-/// [`high_pass_correlation`] for the complex-background detector.
+/// the private `high_pass_correlation` helper for the complex-background detector.
 ///
 /// `second_half` is the reference's `idx`, and at 4.75 and 5.15 kbit/s — where
 /// one search covers the whole frame — it is true for that single call.

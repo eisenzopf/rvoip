@@ -26,7 +26,10 @@ bridge paths as the human demo.
 ## Run The Automated Proof
 
 ```bash
-cargo run --manifest-path examples/12-customer-escalation-sip-webrtc/Cargo.toml -- --auto-proof
+read -rsp "Demo SIP password: " RVOIP_DEMO_SIP_PASSWORD; echo
+cargo run --manifest-path examples/12-customer-escalation-sip-webrtc/Cargo.toml -- \
+  --alice-password "$RVOIP_DEMO_SIP_PASSWORD" \
+  --auto-proof
 ```
 
 Expected final line:
@@ -52,14 +55,16 @@ The proof verifies:
 cargo run --manifest-path examples/12-customer-escalation-sip-webrtc/Cargo.toml -- \
   --http-bind 127.0.0.1:8080 \
   --ws-bind 127.0.0.1:8081 \
-  --sip-bind 127.0.0.1:5060
+  --sip-bind 127.0.0.1:5060 \
+  --alice-password "$RVOIP_DEMO_SIP_PASSWORD"
 ```
 
 Then:
 
 1. Register a SIP softphone as `alice`.
 2. Use registrar/server `sip:127.0.0.1:5060`.
-3. Use auth user `alice` and password `password123`.
+3. Use auth user `alice` and the password supplied in
+   `RVOIP_DEMO_SIP_PASSWORD`.
 4. Use AOR `sip:alice@callcenter.local` if the softphone asks for an identity.
 5. Open `http://127.0.0.1:8080`.
 6. Send a chat message.

@@ -212,6 +212,45 @@ class QualificationReportTests(unittest.TestCase):
                 version="0.3.9",
             )
 
+    def test_ignores_reviewed_baseline_but_validates_nested_current_output(
+        self,
+    ) -> None:
+        profile = self.evidence / "_perf-results/gcp-soak/profiles/run-1"
+        current = profile / "output-target/perf-results/perf_call_setup/100.json"
+        baseline = profile / "reviewed-baseline/perf_call_setup/100.json"
+        current.parent.mkdir(parents=True)
+        baseline.parent.mkdir(parents=True)
+        source = self.evidence / "_perf-results/host/perf_call_setup.json"
+        current.write_bytes(source.read_bytes())
+        historical = json.loads(source.read_text())
+        historical["environment"]["git_commit"] = "b" * 40
+        historical["environment"]["rvoip_sip_version"] = "0.3.8"
+        baseline.write_text(json.dumps(historical))
+
+        _, _, measurements = reports.load_bundle(
+            catalog_path=self.catalog_path,
+            plan_path=self.plan_path,
+            aggregate_path=self.aggregate_path,
+            evidence_root=self.evidence,
+            version="0.3.9",
+        )
+
+        paths = {measurement["path"] for measurement in measurements}
+        self.assertIn(current.relative_to(self.evidence).as_posix(), paths)
+        self.assertNotIn(baseline.relative_to(self.evidence).as_posix(), paths)
+
+        current_payload = json.loads(current.read_text())
+        current_payload["environment"]["git_commit"] = "c" * 40
+        current.write_text(json.dumps(current_payload))
+        with self.assertRaisesRegex(reports.ReportError, "not exact-candidate"):
+            reports.load_bundle(
+                catalog_path=self.catalog_path,
+                plan_path=self.plan_path,
+                aggregate_path=self.aggregate_path,
+                evidence_root=self.evidence,
+                version="0.3.9",
+            )
+
     def test_rejects_missing_gate_receipt(self) -> None:
         (self.evidence / "source.clean/receipt.json").unlink()
         with self.assertRaisesRegex(reports.ReportError, "exactly one exact-candidate receipt"):

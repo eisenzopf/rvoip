@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/rvoip-sip-transport.svg)](https://crates.io/crates/sip/rvoip-sip-transport)
 [![Documentation](https://docs.rs/rvoip-sip-transport/badge.svg)](https://docs.rs/rvoip-sip-transport)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../../LICENSE)
 
 > **Beta scope notice:** for the `rvoip-sip` beta, transport claims are limited
 > to the paths covered by the beta compatibility matrix. UDP is the primary
@@ -169,7 +169,7 @@ The 0.3 API removes the unsafe `WebSocketListener::accept` escape hatch in
 favor of `Arc<WebSocketListener>::serve_concurrent`, which retains ownership of
 handshake/session admission and shutdown. See the complete before/after example
 and release guidance in [MIGRATING-0.3.md](./MIGRATING-0.3.md). The transport
-crate now carries the required 0.3.8 package version.
+crate now carries the required 0.3.10 package version.
 
 SIPS never falls back to a plaintext transport: `sips:...;transport=tcp` means
 TLS-over-TCP, `transport=wss` means secure WebSocket, and explicit `udp` or
@@ -371,4 +371,4 @@ Contributions are welcome! Please see the main [rvoip contributing guidelines](.
 
 ## License
 
-This project is licensed under the [MIT license](LICENSE).
+This project is licensed under the [MIT license](../../../LICENSE).

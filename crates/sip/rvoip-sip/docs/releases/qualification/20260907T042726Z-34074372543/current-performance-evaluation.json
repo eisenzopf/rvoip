@@ -1,0 +1,596 @@
+{
+  "canonical_2k": {
+    "checks": [
+      {
+        "metric": "schema",
+        "observed": "rvoip-canonical-2k-evidence-v2",
+        "passed": true,
+        "requirement": "rvoip-canonical-2k-evidence-v2"
+      },
+      {
+        "metric": "status",
+        "observed": "PASS",
+        "passed": true,
+        "requirement": "PASS"
+      },
+      {
+        "metric": "scenario",
+        "observed": "perf_call_setup_cps_pbx-media-server",
+        "passed": true,
+        "requirement": "perf_call_setup_cps_pbx-media-server"
+      },
+      {
+        "metric": "run_count",
+        "observed": 3,
+        "passed": true,
+        "requirement": "3"
+      },
+      {
+        "metric": "indexed_runs",
+        "observed": 3,
+        "passed": true,
+        "requirement": "3"
+      },
+      {
+        "metric": "candidate_commit",
+        "observed": "77a99cd38a07641294cf7dc547146b115b135dc7",
+        "passed": true,
+        "requirement": "77a99cd38a07641294cf7dc547146b115b135dc7"
+      },
+      {
+        "metric": "source_fingerprint",
+        "observed": "05dfa2bfe9596669a5a3692d902b945680daa7bc4bd00b154474338e171df114",
+        "passed": true,
+        "requirement": "one 64-character SHA-256 shared by source and every run"
+      },
+      {
+        "metric": "executable_identity",
+        "observed": "6ea2e0da48a41f3fe6b4502ce1fa10745c48ea32e1b2685aa040b0f77b4575cc",
+        "passed": true,
+        "requirement": "one 64-character SHA-256 shared by every run"
+      },
+      {
+        "metric": "canonical_run_1",
+        "observed": {
+          "achieved_cps": 1857.13,
+          "asr": 1.0,
+          "calls_offered": 65000,
+          "calls_succeeded": 65000,
+          "sequence": 1,
+          "setup_latency_p50_ns": 1569791,
+          "setup_latency_p95_ns": 2387967,
+          "setup_latency_p99_ns": 4009983,
+          "target_cps": 2000.0
+        },
+        "passed": true,
+        "requirement": "clean accepted 2,000-CPS / 65,000-call PASS"
+      },
+      {
+        "metric": "canonical_run_2",
+        "observed": {
+          "achieved_cps": 1857.12,
+          "asr": 1.0,
+          "calls_offered": 65000,
+          "calls_succeeded": 65000,
+          "sequence": 2,
+          "setup_latency_p50_ns": 1553407,
+          "setup_latency_p95_ns": 2394111,
+          "setup_latency_p99_ns": 3463167,
+          "target_cps": 2000.0
+        },
+        "passed": true,
+        "requirement": "clean accepted 2,000-CPS / 65,000-call PASS"
+      },
+      {
+        "metric": "canonical_run_3",
+        "observed": {
+          "achieved_cps": 1857.13,
+          "asr": 1.0,
+          "calls_offered": 65000,
+          "calls_succeeded": 65000,
+          "sequence": 3,
+          "setup_latency_p50_ns": 1603583,
+          "setup_latency_p95_ns": 2437119,
+          "setup_latency_p99_ns": 3860479,
+          "target_cps": 2000.0
+        },
+        "passed": true,
+        "requirement": "clean accepted 2,000-CPS / 65,000-call PASS"
+      }
+    ],
+    "enabled": true,
+    "evidence": [
+      "canonical-2k/index.json",
+      "canonical-2k/run-1/report.json",
+      "canonical-2k/run-2/report.json",
+      "canonical-2k/run-3/report.json"
+    ],
+    "observed": {
+      "runs": [
+        {
+          "achieved_cps": 1857.13,
+          "asr": 1.0,
+          "calls_offered": 65000,
+          "calls_succeeded": 65000,
+          "sequence": 1,
+          "setup_latency_p50_ns": 1569791,
+          "setup_latency_p95_ns": 2387967,
+          "setup_latency_p99_ns": 4009983,
+          "target_cps": 2000.0
+        },
+        {
+          "achieved_cps": 1857.12,
+          "asr": 1.0,
+          "calls_offered": 65000,
+          "calls_succeeded": 65000,
+          "sequence": 2,
+          "setup_latency_p50_ns": 1553407,
+          "setup_latency_p95_ns": 2394111,
+          "setup_latency_p99_ns": 3463167,
+          "target_cps": 2000.0
+        },
+        {
+          "achieved_cps": 1857.13,
+          "asr": 1.0,
+          "calls_offered": 65000,
+          "calls_succeeded": 65000,
+          "sequence": 3,
+          "setup_latency_p50_ns": 1603583,
+          "setup_latency_p95_ns": 2437119,
+          "setup_latency_p99_ns": 3860479,
+          "target_cps": 2000.0
+        }
+      ]
+    },
+    "passed": true,
+    "policy": {
+      "calls_per_run": 65000,
+      "minimum_achieved_cps": 1578.53,
+      "minimum_asr": 0.999,
+      "run_count": 3,
+      "target_cps": 2000.0
+    },
+    "required": true
+  },
+  "high_density_media_burst": {
+    "checks": [
+      {
+        "metric": "media_burst_cps",
+        "observed": 160.0,
+        "passed": true,
+        "requirement": "exactly 160"
+      },
+      {
+        "metric": "minimum_asr",
+        "observed": 0.995,
+        "passed": true,
+        "requirement": "exactly 0.995"
+      },
+      {
+        "metric": "rss_limit_mb_per_hr",
+        "observed": 15.0,
+        "passed": true,
+        "requirement": "exactly 15"
+      },
+      {
+        "metric": "full_audio_frame_delivery",
+        "observed": {
+          "caller_skip": false,
+          "receiver_skip": false
+        },
+        "passed": true,
+        "requirement": "enabled for caller and receiver"
+      },
+      {
+        "metric": "asr",
+        "observed": 1.0,
+        "passed": true,
+        "requirement": ">= 0.995"
+      },
+      {
+        "metric": "timeout_failures",
+        "observed": {
+          "count": 0,
+          "percent": 0.0
+        },
+        "passed": true,
+        "requirement": "<= 0.5% and exactly reconciled"
+      },
+      {
+        "metric": "non_timeout_errors",
+        "observed": 0,
+        "passed": true,
+        "requirement": "0"
+      },
+      {
+        "metric": "caller_retained_after_drain",
+        "observed": 0,
+        "passed": true,
+        "requirement": "0"
+      },
+      {
+        "metric": "receiver_retained_after_drain",
+        "observed": 0,
+        "passed": true,
+        "requirement": "0"
+      },
+      {
+        "metric": "receiver_active_audio_receivers_after_drain",
+        "observed": 0,
+        "passed": true,
+        "requirement": "0"
+      },
+      {
+        "metric": "caller_transaction_manager_after_drain",
+        "observed": 0,
+        "passed": true,
+        "requirement": "0"
+      },
+      {
+        "metric": "receiver_transaction_manager_after_drain",
+        "observed": 0,
+        "passed": true,
+        "requirement": "0"
+      },
+      {
+        "metric": "delivered_audio_frames",
+        "observed": 11940902,
+        "passed": true,
+        "requirement": "> 0"
+      },
+      {
+        "metric": "caller_rss_gate_mb_per_hr",
+        "observed": 0.0,
+        "passed": true,
+        "requirement": "<= 15"
+      },
+      {
+        "metric": "receiver_rss_gate_mb_per_hr",
+        "observed": 0.0,
+        "passed": true,
+        "requirement": "<= 15"
+      }
+    ],
+    "enabled": true,
+    "evidence": {
+      "caller": "perf_burst_matrix/burst_20260907_021757_2633/high-density-media-burst/perf_burst_caller_high-density-media-burst.json",
+      "receiver": "perf_burst_matrix/burst_20260907_021757_2633/high-density-media-burst/perf_burst_receiver_high-density-media-burst.json"
+    },
+    "observed": {
+      "asr": 1.0,
+      "caller_rss_gate_mb_per_hr": 0.0,
+      "calls_failed": 0,
+      "calls_offered": 18000,
+      "calls_succeeded": 18000,
+      "completed_audio_receivers": 18000,
+      "delivered_audio_frames": 11940902,
+      "errors": {
+        "answer_failed": 0,
+        "invite_send_failed": 0,
+        "media_setup_failed": 0,
+        "overload_rejected": 0,
+        "teardown_failed": 0,
+        "timeout": 0
+      },
+      "peak_active_calls": 9574,
+      "peak_pending_setups": 2,
+      "receiver_rss_gate_mb_per_hr": 0.0
+    },
+    "passed": true,
+    "policy": {
+      "full_audio_frame_delivery": true,
+      "media_burst_cps": 160.0,
+      "minimum_asr": 0.995,
+      "rss_limit_mb_per_hr": 15.0
+    },
+    "required": true
+  },
+  "monolithic_soak": {
+    "checks": [
+      {
+        "metric": "duration_secs",
+        "observed": 3600,
+        "passed": true,
+        "requirement": "exactly 3600"
+      },
+      {
+        "metric": "active_calls_target",
+        "observed": 30,
+        "passed": true,
+        "requirement": "exactly 30"
+      },
+      {
+        "metric": "rss_limit_mb_per_hr",
+        "observed": 15.0,
+        "passed": true,
+        "requirement": "exactly 15"
+      },
+      {
+        "metric": "errors",
+        "observed": 0,
+        "passed": true,
+        "requirement": "0"
+      },
+      {
+        "metric": "retained_after_drain",
+        "observed": 0,
+        "passed": true,
+        "requirement": "0"
+      },
+      {
+        "metric": "active_audio_receivers_after_drain",
+        "observed": 0,
+        "passed": true,
+        "requirement": "0"
+      },
+      {
+        "metric": "transaction_manager_after_drain",
+        "observed": 0,
+        "passed": true,
+        "requirement": "0"
+      },
+      {
+        "metric": "transaction_runner_after_drain",
+        "observed": 0,
+        "passed": true,
+        "requirement": "0"
+      },
+      {
+        "metric": "controlled_drain_failed",
+        "observed": 0,
+        "passed": true,
+        "requirement": "0"
+      },
+      {
+        "metric": "rss_gate_window",
+        "observed": "active_tail_1200s",
+        "passed": true,
+        "requirement": "active_tail_1200s"
+      },
+      {
+        "metric": "rss_active_tail_window_complete",
+        "observed": true,
+        "passed": true,
+        "requirement": "true"
+      },
+      {
+        "metric": "rss_active_tail_estimator",
+        "observed": "theil_sen_pairwise_slopes",
+        "passed": true,
+        "requirement": "theil_sen_pairwise_slopes"
+      },
+      {
+        "metric": "rss_active_tail_window_secs",
+        "observed": 1195.04,
+        "passed": true,
+        "requirement": ">= 1190"
+      },
+      {
+        "metric": "call_completion",
+        "observed": {
+          "offered": 587,
+          "succeeded": 587
+        },
+        "passed": true,
+        "requirement": "all offered calls succeed"
+      },
+      {
+        "metric": "delivered_audio_frames",
+        "observed": 5380613,
+        "passed": true,
+        "requirement": "> 0"
+      },
+      {
+        "metric": "rss_gate_growth_mb_per_hr",
+        "observed": 11.83,
+        "passed": true,
+        "requirement": "<= 15"
+      }
+    ],
+    "enabled": true,
+    "evidence": "perf_soak_30min.json",
+    "observed": {
+      "asr": 1.0,
+      "calls_offered": 587,
+      "calls_succeeded": 587,
+      "delivered_audio_frames": 5380613,
+      "errors": {
+        "answer_failed": 0,
+        "answer_timeout": 0,
+        "call_failed": 0,
+        "invite_send_failed": 0,
+        "media_setup_failed": 0,
+        "teardown_failed": 0
+      },
+      "media_calls_held": 30,
+      "rss_active_tail_window_secs": 1195.04,
+      "rss_gate_growth_mb_per_hr": 11.83,
+      "rss_gate_window": "active_tail_1200s",
+      "rss_post_drain_growth_mb_per_hr": -51.88
+    },
+    "passed": true,
+    "policy": {
+      "active_calls_target": 30,
+      "duration_secs": 3600,
+      "full_audio_frame_delivery": true,
+      "rss_limit_mb_per_hr": 15.0
+    },
+    "required": true
+  },
+  "passed": true,
+  "schema": "rvoip-sip-beta-performance-gate-metrics-v1",
+  "split_soak": {
+    "checks": [
+      {
+        "metric": "duration_secs",
+        "observed": {
+          "caller": 3600,
+          "receiver": 3600
+        },
+        "passed": true,
+        "requirement": "exactly 3600 for caller and receiver"
+      },
+      {
+        "metric": "active_calls_target",
+        "observed": {
+          "caller": 500,
+          "receiver": 500
+        },
+        "passed": true,
+        "requirement": "exactly 500 for caller and receiver"
+      },
+      {
+        "metric": "rss_limit_mb_per_hr",
+        "observed": {
+          "caller": 15.0,
+          "receiver": 15.0
+        },
+        "passed": true,
+        "requirement": "exactly 15 for caller and receiver"
+      },
+      {
+        "metric": "full_audio_frame_delivery",
+        "observed": {
+          "caller_skip": false,
+          "receiver_skip": false
+        },
+        "passed": true,
+        "requirement": "enabled for caller and receiver"
+      },
+      {
+        "metric": "call_completion",
+        "observed": {
+          "offered": 9904,
+          "receiver_completed": 9904,
+          "succeeded": 9904
+        },
+        "passed": true,
+        "requirement": "every offered call succeeds and completes at the receiver"
+      },
+      {
+        "metric": "errors",
+        "observed": {
+          "call_failed": 0,
+          "media_setup_failed": 0,
+          "teardown_failed": 0
+        },
+        "passed": true,
+        "requirement": "0"
+      },
+      {
+        "metric": "retained_after_drain",
+        "observed": {
+          "caller": 0,
+          "receiver": 0
+        },
+        "passed": true,
+        "requirement": "0 for caller and receiver"
+      },
+      {
+        "metric": "receiver_active_audio_receivers_after_drain",
+        "observed": 0,
+        "passed": true,
+        "requirement": "0"
+      },
+      {
+        "metric": "transaction_managers_after_drain",
+        "observed": {
+          "caller": 0,
+          "receiver": 0
+        },
+        "passed": true,
+        "requirement": "0 for caller and receiver"
+      },
+      {
+        "metric": "transaction_runners_after_drain",
+        "observed": {
+          "caller": 0,
+          "receiver": 0
+        },
+        "passed": true,
+        "requirement": "0 for caller and receiver"
+      },
+      {
+        "metric": "receiver_stop_seen",
+        "observed": true,
+        "passed": true,
+        "requirement": "true"
+      },
+      {
+        "metric": "rss_gate_window",
+        "observed": {
+          "caller": "active_tail_1200s",
+          "receiver": "active_tail_1200s"
+        },
+        "passed": true,
+        "requirement": "active_tail_1200s for caller and receiver"
+      },
+      {
+        "metric": "rss_active_tail_window_complete",
+        "observed": {
+          "caller": true,
+          "receiver": true
+        },
+        "passed": true,
+        "requirement": "true for caller and receiver"
+      },
+      {
+        "metric": "delivered_audio_frames",
+        "observed": 89709275,
+        "passed": true,
+        "requirement": "> 0"
+      },
+      {
+        "metric": "caller_rss_active_tail_window_secs",
+        "observed": 1195.04,
+        "passed": true,
+        "requirement": ">= 1190"
+      },
+      {
+        "metric": "caller_rss_gate_growth_mb_per_hr",
+        "observed": -1.77,
+        "passed": true,
+        "requirement": "<= 15"
+      },
+      {
+        "metric": "receiver_rss_active_tail_window_secs",
+        "observed": 1195.04,
+        "passed": true,
+        "requirement": ">= 1190"
+      },
+      {
+        "metric": "receiver_rss_gate_growth_mb_per_hr",
+        "observed": 8.3,
+        "passed": true,
+        "requirement": "<= 15"
+      }
+    ],
+    "enabled": true,
+    "evidence": {
+      "caller": "perf_soak_caller.json",
+      "receiver": "perf_soak_receiver.json"
+    },
+    "observed": {
+      "asr": 1.0,
+      "caller_rss_gate_mb_per_hr": -1.77,
+      "calls_offered": 9904,
+      "calls_succeeded": 9904,
+      "delivered_audio_frames": 89709275,
+      "errors": {
+        "call_failed": 0,
+        "media_setup_failed": 0,
+        "teardown_failed": 0
+      },
+      "receiver_completed_audio_receivers": 9904,
+      "receiver_rss_gate_mb_per_hr": 8.3
+    },
+    "passed": true,
+    "policy": {
+      "active_calls_target": 500,
+      "duration_secs": 3600,
+      "full_audio_frame_delivery": true,
+      "rss_limit_mb_per_hr": 15.0
+    },
+    "required": true
+  }
+}

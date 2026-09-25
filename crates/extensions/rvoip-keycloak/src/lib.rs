@@ -4,6 +4,7 @@
 //! `rvoip-auth-core` traits, while applications that use Keycloak can use this
 //! extension to build validators and test clients from Keycloak realm settings.
 
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,7 +19,7 @@ use thiserror::Error;
 use url::Url;
 
 /// Keycloak realm/client configuration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct KeycloakConfig {
     pub base_url: Url,
     pub realm: String,
@@ -26,6 +27,20 @@ pub struct KeycloakConfig {
     pub client_secret: Option<String>,
     pub audience: Option<String>,
     pub jwks_cache_ttl: Option<Duration>,
+}
+
+impl fmt::Debug for KeycloakConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("KeycloakConfig")
+            .field("base_url", &self.base_url)
+            .field("realm", &self.realm)
+            .field("client_id", &self.client_id)
+            .field("client_secret_present", &self.client_secret.is_some())
+            .field("audience", &self.audience)
+            .field("jwks_cache_ttl", &self.jwks_cache_ttl)
+            .finish()
+    }
 }
 
 impl KeycloakConfig {
@@ -87,8 +102,47 @@ impl KeycloakConfig {
             format!("{base_path}/realms/{}/{suffix}", self.realm)
         };
         url.set_path(&path);
+        require_secure_endpoint(&url, "Keycloak realm")?;
         Ok(url)
     }
+}
+
+fn require_secure_endpoint(url: &Url, purpose: &str) -> Result<(), KeycloakError> {
+    if url.scheme() == "https" {
+        return Ok(());
+    }
+
+    let is_loopback_http = url.scheme() == "http"
+        && match url.host() {
+            Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+            Some(url::Host::Ipv4(address)) => address.is_loopback(),
+            Some(url::Host::Ipv6(address)) => address.is_loopback(),
+            None => false,
+        };
+    if is_loopback_http {
+        return Ok(());
+    }
+
+    Err(KeycloakError::Config(format!(
+        "{purpose} endpoint must use HTTPS; plain HTTP is allowed only for loopback development endpoints"
+    )))
+}
+
+fn validate_provider_metadata(metadata: &OidcProviderMetadata) -> Result<(), KeycloakError> {
+    let issuer = Url::parse(&metadata.issuer)?;
+    require_secure_endpoint(&issuer, "OIDC issuer")?;
+    require_secure_endpoint(&metadata.jwks_uri, "OIDC JWKS")?;
+    require_secure_endpoint(&metadata.token_endpoint, "OIDC token")?;
+    if let Some(endpoint) = metadata.authorization_endpoint.as_ref() {
+        require_secure_endpoint(endpoint, "OIDC authorization")?;
+    }
+    if let Some(endpoint) = metadata.introspection_endpoint.as_ref() {
+        require_secure_endpoint(endpoint, "OIDC introspection")?;
+    }
+    if let Some(endpoint) = metadata.revocation_endpoint.as_ref() {
+        require_secure_endpoint(endpoint, "OIDC revocation")?;
+    }
+    Ok(())
 }
 
 /// OIDC discovery metadata used by RVoIP validators.
@@ -124,6 +178,7 @@ impl KeycloakOidcProvider {
             .error_for_status()?
             .json::<OidcProviderMetadata>()
             .await?;
+        validate_provider_metadata(&metadata)?;
 
         Ok(Self {
             config,
@@ -158,6 +213,7 @@ impl KeycloakOidcProvider {
                     "OIDC provider metadata does not include introspection_endpoint".to_string(),
                 )
             })?;
+        require_secure_endpoint(&endpoint, "OIDC introspection")?;
         let mut validator = OAuth2IntrospectionValidator::new(endpoint)
             .with_issuer([self.metadata.issuer.as_str()]);
         if let Some(audience) = self.config.audience.as_ref() {
@@ -223,6 +279,7 @@ impl KeycloakBearerValidator {
         config: &KeycloakConfig,
         metadata: &OidcProviderMetadata,
     ) -> Result<Self, KeycloakError> {
+        validate_provider_metadata(metadata)?;
         let mut validator = JwksJwtValidator::new(metadata.jwks_uri.clone())
             .with_issuer([metadata.issuer.as_str()]);
         if let Some(ttl) = config.jwks_cache_ttl {
@@ -407,6 +464,34 @@ mod tests {
             config.issuer_url().unwrap().as_str(),
             "http://127.0.0.1:18080/realms/rvoip"
         );
+    }
+
+    #[test]
+    fn keycloak_config_debug_redacts_client_secret() {
+        let config = KeycloakConfig::new(
+            Url::parse("https://identity.example.com").unwrap(),
+            "rvoip",
+            "rvoip-sip",
+        )
+        .with_client_secret("never-print-this-value");
+
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains("never-print-this-value"));
+        assert!(rendered.contains("client_secret_present: true"));
+    }
+
+    #[test]
+    fn keycloak_rejects_plain_http_non_loopback_endpoints() {
+        let config = KeycloakConfig::new(
+            Url::parse("http://identity.example.com").unwrap(),
+            "rvoip",
+            "rvoip-sip",
+        );
+
+        let error = config
+            .token_url()
+            .expect_err("credentials must not be sent over remote plain HTTP");
+        assert!(matches!(error, KeycloakError::Config(message) if message.contains("HTTPS")));
     }
 
     fn test_provider(introspection: Option<Url>) -> KeycloakOidcProvider {

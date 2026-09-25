@@ -218,6 +218,7 @@ def shell_build_definition(command: list[str]) -> dict[str, Any] | None:
             for token in argv
             if token.endswith("perf_burst_matrix.sh")
             or token.endswith("perf_soak_split.sh")
+            or token.endswith("canonical_2k_release_eval.sh")
         ),
         None,
     )
@@ -227,13 +228,14 @@ def shell_build_definition(command: list[str]) -> dict[str, Any] | None:
     targets = {
         "perf_burst_matrix.sh": ["perf_burst_receiver", "perf_burst_caller"],
         "perf_soak_split.sh": ["perf_soak_receiver", "perf_soak_caller"],
+        "canonical_2k_release_eval.sh": ["perf_call_setup_cps"],
     }[script]
     return {
         "environment": environment,
         "features": features,
         "targets": targets,
         "runner_args": [],
-        "default_features": True,
+        "default_features": script != "canonical_2k_release_eval.sh",
     }
 
 
@@ -274,13 +276,13 @@ def expand_targets(patterns: list[str], available: list[str]) -> list[str]:
 
 def selected_builds(
     root: Path, catalog: dict[str, Any], gate_ids: list[str]
-) -> tuple[dict[tuple[str, ...], set[str]], dict[str, dict[str, Any]]]:
+) -> tuple[dict[tuple[tuple[str, ...], bool], set[str]], dict[str, dict[str, Any]]]:
     by_id = {gate.get("id"): gate for gate in catalog.get("gates", [])}
     unknown = sorted(set(gate_ids) - set(by_id))
     if unknown:
         raise PrebuiltError(f"unknown release gate IDs: {unknown}")
     available = available_test_targets(root)
-    groups: dict[tuple[str, ...], set[str]] = {}
+    groups: dict[tuple[tuple[str, ...], bool], set[str]] = {}
     definitions: dict[str, dict[str, Any]] = {}
     for gate_id in sorted(set(gate_ids)):
         definition = gate_definition(by_id[gate_id])
@@ -289,7 +291,8 @@ def selected_builds(
         targets = expand_targets(definition["targets"], available)
         definition = {**definition, "resolved_targets": targets}
         definitions[gate_id] = definition
-        groups.setdefault(definition["features"], set()).update(targets)
+        build_key = (definition["features"], definition["default_features"])
+        groups.setdefault(build_key, set()).update(targets)
     if not groups:
         raise PrebuiltError(
             "selected performance gates require no prebuilt executables"
@@ -350,7 +353,9 @@ def build_bundle(
     entries: list[dict[str, Any]] = []
     build_commands: list[dict[str, Any]] = []
 
-    for group_index, (features, targets) in enumerate(sorted(groups.items()), start=1):
+    for group_index, ((features, default_features), targets) in enumerate(
+        sorted(groups.items()), start=1
+    ):
         messages = evidence / f"cargo-{group_index}.jsonl"
         command = [
             "cargo",
@@ -362,6 +367,8 @@ def build_bundle(
             "--features",
             ",".join(features),
         ]
+        if not default_features:
+            command.append("--no-default-features")
         for target in sorted(targets):
             command.extend(("--test", target))
         command.extend(("--no-run", "--message-format=json-render-diagnostics"))
@@ -379,6 +386,7 @@ def build_bundle(
             {
                 "argv": command,
                 "features": list(features),
+                "default_features": default_features,
                 "targets": sorted(targets),
                 "duration_seconds": round(duration, 3),
                 "exit_code": completed.returncode,
@@ -401,6 +409,7 @@ def build_bundle(
                 {
                     "target": target,
                     "features": list(features),
+                    "default_features": default_features,
                     "path": destination.relative_to(output).as_posix(),
                     "sha256": executable_sha,
                     "bytes": destination.stat().st_size,
@@ -426,6 +435,7 @@ def build_bundle(
             gate_id: {
                 "kind": definition["kind"],
                 "features": list(definition["features"]),
+                "default_features": definition["default_features"],
                 "targets": definition["resolved_targets"],
                 "runner_args": definition["runner_args"],
             }
@@ -447,7 +457,12 @@ def build_bundle(
         ).stdout.strip(),
         "build_commands": build_commands,
         "executables": sorted(
-            entries, key=lambda item: (item["features"], item["target"])
+            entries,
+            key=lambda item: (
+                item["features"],
+                item["default_features"],
+                item["target"],
+            ),
         ),
     }
     (output / "manifest.json").write_bytes(canonical_bytes(manifest))
@@ -551,18 +566,20 @@ def validate_manifest(
     if not isinstance(entries, list) or not entries:
         mismatches.append("executables must be a non-empty list")
         entries = []
-    seen: set[tuple[tuple[str, ...], str]] = set()
+    seen: set[tuple[tuple[str, ...], bool, str]] = set()
     for entry in entries:
         if not isinstance(entry, dict):
             mismatches.append("executable entry is not an object")
             continue
         features = entry.get("features")
+        default_features = entry.get("default_features")
         target = entry.get("target")
         relative = entry.get("path")
         expected_sha = entry.get("sha256")
         if not (
             isinstance(features, list)
             and all(isinstance(item, str) and item for item in features)
+            and isinstance(default_features, bool)
             and isinstance(target, str)
             and target
             and isinstance(relative, str)
@@ -572,7 +589,7 @@ def validate_manifest(
         ):
             mismatches.append(f"invalid executable entry: {entry!r}")
             continue
-        key = (tuple(features), target)
+        key = (tuple(features), default_features, target)
         if key in seen:
             mismatches.append(f"duplicate executable entry: {key}")
             continue
@@ -609,6 +626,7 @@ def resolve_entry(
     candidate: str,
     environment_id: str,
     features: tuple[str, ...],
+    default_features: bool,
     target: str,
 ) -> tuple[Path, dict[str, Any], dict[str, Any]]:
     bundle_root = manifest_path.resolve().parent
@@ -625,10 +643,12 @@ def resolve_entry(
         for entry in manifest["executables"]
         if entry.get("target") == target
         and tuple(entry.get("features", [])) == features
+        and entry.get("default_features") is default_features
     ]
     if len(entries) != 1:
         raise PrebuiltError(
-            f"expected one prebuilt {target} executable with features {features}, found {len(entries)}"
+            f"expected one prebuilt {target} executable with features {features} "
+            f"and default_features={default_features}, found {len(entries)}"
         )
     entry = entries[0]
     executable = bundle_root / entry["path"]
@@ -644,6 +664,7 @@ def write_runtime_artifact_manifest(
     manifest: dict[str, Any],
     source_at_build: Path,
     build_targets: list[str],
+    default_features: bool,
 ) -> None:
     source = load_json(source_at_build, "runtime source provenance")
     payload = {
@@ -657,7 +678,7 @@ def write_runtime_artifact_manifest(
             "profile": "release",
             "test_targets": build_targets,
             "features_requested": entry["features"],
-            "default_features": True,
+            "default_features": default_features,
             "environment": {},
         },
         "cargo_artifact": entry.get("cargo_artifact"),
@@ -736,6 +757,7 @@ def run_gate(
             candidate=candidate,
             environment_id=environment_id,
             features=definition["features"],
+            default_features=definition["default_features"],
             target=target,
         )
         argv = [str(executable), *definition["runner_args"]]
@@ -847,6 +869,9 @@ def parser() -> argparse.ArgumentParser:
     resolve.add_argument("--candidate", required=True)
     resolve.add_argument("--environment-id", required=True)
     resolve.add_argument("--features", required=True)
+    resolve.add_argument(
+        "--default-features", choices=("enabled", "disabled"), default="enabled"
+    )
     resolve.add_argument("--target", required=True)
     resolve.add_argument("--artifact-manifest", type=Path)
     resolve.add_argument("--source-at-build", type=Path)
@@ -932,6 +957,7 @@ def main(argv: list[str] | None = None) -> int:
                 candidate=args.candidate,
                 environment_id=args.environment_id,
                 features=features,
+                default_features=args.default_features == "enabled",
                 target=args.target,
             )
             if bool(args.artifact_manifest) != bool(args.source_at_build):
@@ -947,6 +973,7 @@ def main(argv: list[str] | None = None) -> int:
                     manifest=manifest,
                     source_at_build=args.source_at_build,
                     build_targets=args.build_target or [args.target],
+                    default_features=args.default_features == "enabled",
                 )
             print(executable)
         elif args.command == "run-gate":

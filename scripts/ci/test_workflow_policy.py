@@ -189,12 +189,59 @@ class WorkflowPolicyTests(unittest.TestCase):
             "libasound2-dev",
             "libopus-dev",
             "libssl-dev",
+            "libvpx-dev",
             "protobuf-compiler",
             "pkg-config",
             "cmake",
         ):
             with self.subTest(package=package):
                 self.assertIn(package, text[dependency_step:validation_step])
+
+    def test_release_prepare_runs_evidence_helpers_before_commit(self) -> None:
+        text = (ROOT / ".github/workflows/release-prepare.yml").read_text()
+        prepare_step = text.index("Prepare all workspace versions")
+        helper_test = text.index(
+            "crates/sip/rvoip-sip/scripts/test_beta_attestation.py", prepare_step
+        )
+        commit_step = text.index("Commit release preparation")
+
+        self.assertLess(prepare_step, helper_test)
+        self.assertLess(helper_test, commit_step)
+
+        policy = json.loads((ROOT / "scripts/ci/policy.json").read_text())
+        release_tooling = next(
+            rule
+            for rule in policy["specialty_rules"]
+            if rule["gate"] == "release-tooling"
+        )
+        for path in (
+            "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md",
+            "crates/sip/rvoip-sip/scripts/full_beta_release.sh",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(path, release_tooling["patterns"])
+
+    def test_release_workflows_raise_rustup_download_retries(self) -> None:
+        for filename in (
+            "release-prepare.yml",
+            "release-qualify.yml",
+            "release-publish.yml",
+        ):
+            with self.subTest(workflow=filename):
+                text = (ROOT / ".github/workflows" / filename).read_text()
+                self.assertIn('RUSTUP_MAX_RETRIES: "10"', text)
+
+    def test_release_all_features_paths_install_libvpx(self) -> None:
+        workflows = (
+            ("release-qualify.yml", "Install hosted-runner native dependencies", "Run gate shard"),
+            ("release-publish.yml", "Install package build dependencies", "Establish exact local main"),
+        )
+        for filename, dependency_name, next_step_name in workflows:
+            with self.subTest(workflow=filename):
+                text = (ROOT / ".github/workflows" / filename).read_text()
+                dependency_step = text.index(dependency_name)
+                next_step = text.index(next_step_name, dependency_step)
+                self.assertIn("libvpx-dev", text[dependency_step:next_step])
 
     def test_parallel_gcp_workspace_is_ephemeral_and_fail_closed(self) -> None:
         workflow = (ROOT / ".github/workflows/gcp-qualification-pilot.yml").read_text()
@@ -432,6 +479,13 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('test -z "${CRATES_IO_TOKEN:-}"', probe)
         self.assertIn('"publishing_credentials_present": False', probe)
 
+    def test_release_planner_outlives_exact_candidate_codeql_poll(self) -> None:
+        workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
+        plan = workflow.split("  plan:\n", maxsplit=1)[1].split("\n  gate-hosted:\n", maxsplit=1)[0]
+
+        self.assertIn("timeout-minutes: 75", plan)
+        self.assertIn("--timeout-seconds 3600", plan)
+
     def test_remote_diagnostics_are_exact_gate_fresh_and_non_publishing(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
         publication = (ROOT / ".github/workflows/release-publish.yml").read_text()
@@ -454,6 +508,28 @@ class WorkflowPolicyTests(unittest.TestCase):
             publication,
         )
 
+    def test_release_resume_only_finishes_a_proven_post_gate_failure(self) -> None:
+        resume = (ROOT / ".github/workflows/release-resume.yml").read_text()
+
+        self.assertIn('"workflowName": "Release qualification"', resume)
+        self.assertIn('"conclusion": "failure"', resume)
+        self.assertIn('release_gate.get("name") != "Release Gate"', resume)
+        self.assertIn(
+            '["Render exact-candidate qualification reports"]', resume
+        )
+        self.assertIn('"status": "PASS"', resume)
+        self.assertIn('"gate_count": 213', resume)
+        self.assertIn('"fresh_count": 213', resume)
+        self.assertIn('"reused_count": 0', resume)
+        self.assertIn('len(aggregate.get("accepted_gates", [])) != 213', resume)
+        self.assertIn("git merge-base --is-ancestor", resume)
+        self.assertIn("render_qualification_reports.py generate", resume)
+        self.assertIn('"test_execution_repeated": False', resume)
+        self.assertIn("actions/attest-build-provenance@", resume)
+        self.assertIn("name: release-gate-evidence", resume)
+        self.assertNotIn("scripts/release/gates.py run", resume)
+        self.assertNotIn("cargo test", resume)
+
     def test_release_publish_consumes_exact_attested_candidate(self) -> None:
         publication = (ROOT / ".github/workflows/release-publish.yml").read_text()
         preflight = publication.split(
@@ -475,6 +551,26 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('python3 "$RELEASE_TOOL" verify', publication)
         self.assertIn('--qualified-head "$QUALIFIED_CANDIDATE"', publication)
         self.assertIn('python3 "$RELEASE_TOOL" "${args[@]}"', publication)
+
+    def test_release_publish_retains_qualification_reports_as_release_assets(self) -> None:
+        publication = (ROOT / ".github/workflows/release-publish.yml").read_text()
+        release = publication.split(
+            "      - name: Create immutable tag and generated GitHub release\n",
+            maxsplit=1,
+        )[1]
+
+        self.assertIn("QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}", release)
+        self.assertIn('test -s "$asset"', release)
+        self.assertIn('"$reports/BETA_RELEASE_REPORT.md"', release)
+        self.assertIn('"$reports/BETA_GATE_REPORT.md"', release)
+        self.assertIn('"$reports/BETA_PERFORMANCE_REPORT.md"', release)
+        self.assertIn('"$reports/QUALIFICATION_SUMMARY.json"', release)
+        self.assertIn('"$reports/QUALIFICATION_REPORT_ATTESTATION.json"', release)
+        self.assertIn('"$performance/current-performance-evaluation.json"', release)
+        self.assertIn('"$performance/current-performance-artifact-index.json"', release)
+        self.assertIn('gh release create "$tag" "${assets[@]}"', release)
+        self.assertIn("Protected qualification run and full evidence", release)
+        self.assertIn('--notes "$release_notes"', release)
 
     def test_release_gcp_workers_do_not_consume_one_github_job_each(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()

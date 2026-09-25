@@ -24,7 +24,9 @@ For `clean`, it fixes the experiment at:
 - five-second ramp, 30-second steady state, five-second cooldown at every
   point, then a 95-second post-drain structural/allocator settle and a separate
   600-second RSS gate sample at 2,000 CPS, with raw resource samples embedded;
-- eight Tokio workers and four Alice endpoint shards;
+- eight Tokio workers and four Alice endpoint shards, each explicitly pinned
+  to 16 app-session event dispatcher workers so host CPU discovery cannot
+  change the canonical configuration;
 - Bob's `pbx-media-server` recipe with capacity 8,000;
 - four round-robin UDP parse workers, two transaction workers, four dialog
   workers, four session-event workers, and transaction command capacity 128;

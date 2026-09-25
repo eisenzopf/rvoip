@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
 use crate::errors::{Result, SessionError};
 use crate::session_registry::SessionRegistryHandle;
@@ -109,6 +109,13 @@ struct TrackedRequestEntry {
 struct TrackerInner {
     entries: DashMap<TrackedRequestKey, Arc<TrackedRequestEntry>>,
     next_generation: AtomicU64,
+    /// Wakes ordered automatic-request dispatchers when an exact method slot
+    /// becomes vacant.  The request tracker deliberately permits only one
+    /// outstanding request of a method on a dialog; REFER progress NOTIFYs
+    /// therefore wait here instead of losing a later terminal notification to
+    /// a transient `Conflict` while the prior NOTIFY response is being
+    /// correlated.
+    vacancy_changed: Notify,
     deferred_replay_tx: mpsc::Sender<DeferredTrackedRequestEvent>,
     deferred_replay_rx: Mutex<Option<mpsc::Receiver<DeferredTrackedRequestEvent>>>,
     deferred_event_count: AtomicUsize,
@@ -232,6 +239,7 @@ impl OutboundInDialogRequestTracker {
             inner: Arc::new(TrackerInner {
                 entries: DashMap::new(),
                 next_generation: AtomicU64::new(1),
+                vacancy_changed: Notify::new(),
                 deferred_replay_tx,
                 deferred_replay_rx: Mutex::new(Some(deferred_replay_rx)),
                 deferred_event_count: AtomicUsize::new(0),
@@ -566,6 +574,7 @@ impl OutboundInDialogRequestTracker {
                 std::mem::take(&mut lifecycle.deferred)
             };
             self.release_deferred_count(discarded.len());
+            self.inner.vacancy_changed.notify_waiters();
             true
         } else {
             false
@@ -687,7 +696,29 @@ impl OutboundInDialogRequestTracker {
         self.inner.entries.contains_key(&key)
     }
 
+    /// Wait until an exact dialog no longer owns a request of `method`.
+    ///
+    /// The notification future is enabled before checking the map, closing
+    /// the check/sleep lost-wakeup race. Callers retain their own lifecycle
+    /// cancellation and deadline authority around this future.
+    pub(crate) async fn wait_until_vacant(
+        &self,
+        handle: &SessionRegistryHandle,
+        method: TrackedInDialogMethod,
+    ) {
+        loop {
+            let notified = self.inner.vacancy_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !self.has_request(handle, method) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
     pub(crate) fn clear_exact(&self, handle: &SessionRegistryHandle) {
+        let mut removed_any = false;
         for method in [
             TrackedInDialogMethod::Refer,
             TrackedInDialogMethod::Notify,
@@ -700,6 +731,7 @@ impl OutboundInDialogRequestTracker {
                 method,
             };
             if let Some((_, entry)) = self.inner.entries.remove(&key) {
+                removed_any = true;
                 let discarded = {
                     let mut lifecycle = entry
                         .lifecycle
@@ -710,6 +742,9 @@ impl OutboundInDialogRequestTracker {
                 };
                 self.release_deferred_count(discarded.len());
             }
+        }
+        if removed_any {
+            self.inner.vacancy_changed.notify_waiters();
         }
     }
 
@@ -907,6 +942,7 @@ fn abort_exact(inner: &TrackerInner, key: &TrackedRequestKey, generation: u64) -
         inner
             .deferred_event_count
             .fetch_sub(discarded, Ordering::AcqRel);
+        inner.vacancy_changed.notify_waiters();
         true
     } else {
         false
@@ -1071,6 +1107,25 @@ mod tests {
         assert!(tracker.has_request(&handle, TrackedInDialogMethod::Info));
         drop(lease);
         assert!(!tracker.has_request(&handle, TrackedInDialogMethod::Info));
+    }
+
+    #[tokio::test]
+    async fn method_vacancy_waiter_wakes_after_exact_owner_releases() {
+        let tracker = OutboundInDialogRequestTracker::default();
+        let session = SessionId("tracker-vacancy".to_string());
+        let handle = test_handle(&session).await;
+        let lease = tracker.prepare(&handle, notify_options()).unwrap();
+
+        let waiter = tracker.wait_until_vacant(&handle, TrackedInDialogMethod::Notify);
+        tokio::pin!(waiter);
+        assert!(tokio::time::timeout(Duration::from_millis(10), &mut waiter)
+            .await
+            .is_err());
+
+        drop(lease);
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("vacancy waiter did not observe exact lease release");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

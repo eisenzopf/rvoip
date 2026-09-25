@@ -2,7 +2,7 @@
 //!
 //! The network server registers each authorized subscriber's outbound media
 //! queue with this publisher. The publisher itself is deliberately transport
-//! neutral enough to be attached directly to an rvoip [`MediaGraph`].
+//! neutral enough to be attached directly to an RVoIP `MediaGraph`.
 
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;

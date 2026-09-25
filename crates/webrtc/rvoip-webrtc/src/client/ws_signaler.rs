@@ -1,5 +1,6 @@
 //! Legacy per-operation WebSocket JSON signaler for
-//! [`WebRtcClient`] → [`WebRtcServer`](crate::server::WebRtcServer).
+//! [`WebRtcClient`](crate::client::WebRtcClient) →
+//! [`WebRtcServer`](crate::server::WebRtcServer).
 //!
 //! Supports both directions:
 //! - **Offerer flow**: `send_offer` connects, ships the offer, awaits the

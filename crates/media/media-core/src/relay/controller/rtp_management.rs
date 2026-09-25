@@ -134,7 +134,8 @@ impl MediaSessionController {
 
     /// The transport beneath a dialog's RTP session, for an ICE pump:
     /// STUN datagrams arrive on its event bus and checks leave through
-    /// [`RtpTransport::send_stun_bytes`]. Snapshotted under a brief lock so
+    /// [`RtpTransport::send_stun_bytes`](rvoip_rtp_core::RtpTransport::send_stun_bytes).
+    /// Snapshotted under a brief lock so
     /// the pump never holds the session mutex.
     pub async fn ice_transport(
         &self,

@@ -90,7 +90,8 @@ cargo test -p rvoip-sip --test beta_release_docs
 | **3262** | Reliability of Provisional Responses (PRACK / 100rel) | PRACK construction, a reliable `183`/PRACK exchange, and unsupported-policy rejection with `420`. | 🟡 **Partial** — forking, loss/retransmission matrices, and independent-PBX reliable-provisional evidence are not established | `T-3262-C1`, `T-3262-W1`, `T-3262-W2`; ignored resilience stubs are excluded |
 | **3311** | The SIP UPDATE Method | In-dialog UPDATE transmission plus `401` and `407` digest retry on the same method. | 🟡 **Partial** — no complete UPDATE offer/answer, glare, Retry-After, or independent-peer matrix | `T-3311-W1`, `T-3311-W2`, `T-3311-W3`; ignored resilience stubs are excluded |
 | **3428** | SIP Extension for Instant Messaging (MESSAGE) | Pager-mode MESSAGE request construction for in-dialog and out-of-dialog use. | 🟡 **Partial** — construction/auth flows do not establish a complete messaging interoperability profile | `sip-dialog/tests/generated_sip_compliance.rs`, `T-AUTH-W2`, `T-AUTH-W3` |
-| **3515** | The SIP REFER Method | Blind REFER construction, end-to-end blind transfer, and typed NOTIFY progress/final status on the wire. | ✅ **Verified** (bounded blind-transfer behavior; attended transfer and RFC 3891 replacement are excluded) | `T-3515-W1`, `T-3515-W2`, `T-3515-W3` |
+| **3515** | The SIP REFER Method | Blind REFER construction, end-to-end blind transfer, and ordered typed NOTIFY progress/final status on the wire. | ✅ **Verified** (bounded blind-transfer behavior; `Refer-To` is required; attended transfer and RFC 3891 replacement are excluded) | `T-3515-W1`, `T-3515-W2`, `T-3515-W3`; candidate Jambonz `J-3515-I1` |
+| **3892** | The SIP Referred-By Mechanism | Typed `Referred-By` inspection and unchanged propagation into a referenced INVITE when a peer supplies the optional header. | 🟡 **Partial** — RFC 3892 does not make the header universally required; identity signing, privacy behavior, and attended transfer are not claimed | `T-3892-W1`; candidate Jambonz `J-3892-I1` |
 | **4488** | Suppression of REFER Implicit Subscription | `Refer-Sub: false` to suppress the implicit subscription. | 🔵 **Types only** | REFER header handling in `sip-core` |
 | **6086** | SIP INFO Method and Package Framework | Generic in-dialog INFO transmission and preservation across `401`/`407` authentication retry. | 🟡 **Partial** — no Info-Package registry, `Recv-Info` negotiation, or package-specific standards profile | `T-6086-W1`, `T-6086-W2`, `T-6086-W3` |
 | **2976** | The SIP INFO Method | Original INFO method. | 📕 Historical — obsoleted by 6086 | n/a |
@@ -314,8 +315,9 @@ milestones, grouped by how far they are from "done".
 **🔵 Types only → wire behaviour**
 - RFC 3903 PUBLISH state machine (ETag/If-Match types exist).
 - RFC 4235 / 3856 event-package publication & subscription completeness.
-- RFC 3323 Privacy enforcement; RFC 3891 Replaces / RFC 3892 Referred-By
-  end-to-end attended transfer.
+- RFC 3323 Privacy enforcement and RFC 3891 Replaces end-to-end attended
+  transfer. RFC 3892 identity signing and privacy behavior remain open; typed
+  inspection and optional-header propagation are covered separately above.
 
 **🟠 Planned / Post-beta (explicit non-claims today)**
 - RFC 8445 ICE, RFC 8656 TURN, RFC 5763/5764/8842 DTLS-SRTP (security non-claims).

@@ -39,6 +39,7 @@ on:
 permissions:
   contents: read
   actions: read
+  security-events: read
 
 concurrency:
   # Supersede the same qualification request, but allow disjoint diagnostic
@@ -49,6 +50,7 @@ concurrency:
 env:
   RELEASE_ENVIRONMENT_ID: rvoip-release-v5-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-n2-cascade-lake
   MIN_CPU_PLATFORM: Intel Cascade Lake
+  RUSTUP_MAX_RETRIES: "10"
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
@@ -57,7 +59,11 @@ jobs:
   plan:
     name: Plan exact-candidate gates
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Exact-main Rust CodeQL has exceeded 20 minutes and approached 30 on a
+    # hosted runner. Keep the job deadline above the one-hour policy poll
+    # window so a post-merge dispatch cannot fail while the authoritative
+    # analysis is still making progress.
+    timeout-minutes: 75
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       hosted_matrix: ${{ steps.plan.outputs.hosted_matrix }}
@@ -95,6 +101,11 @@ jobs:
                 echo "diagnostic candidates must be the exact head of a branch in this repository" >&2
                 exit 1
               }
+          elif [[ "$PROFILE" == remote-release ]]; then
+            test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" || {
+              echo "remote-release must qualify the current protected main head" >&2
+              exit 1
+            }
           else
             git merge-base --is-ancestor HEAD origin/main || {
               echo "release candidates must be commits on origin/main" >&2
@@ -114,6 +125,17 @@ jobs:
               print('remote-release is fail-closed until every legacy gate has a structured replacement:', *missing, sep='\n- ')
               raise SystemExit(1)
           PY
+
+      - name: Require exact-candidate CodeQL with zero open alerts
+        if: inputs.profile == 'remote-release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 scripts/ci/check_codeql_release_policy.py
+          --repository "${{ github.repository }}"
+          --candidate "$(git rev-parse HEAD)"
+          --timeout-seconds 3600
+          --receipt target/release-plan/codeql-policy.json
 
       - name: Download prior qualification evidence
         if: inputs.profile != 'remote-preflight' && inputs.profile != 'remote-diagnostic' && inputs.prior_run_id != ''
@@ -196,7 +218,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-gate-plan
-          path: target/release-plan/plan.json
+          path: target/release-plan/
           retention-days: 90
           if-no-files-found: error
 
@@ -239,17 +261,12 @@ jobs:
         with:
           tool: cargo-deny@0.20.2
 
-      - name: Restore content-addressed Rust cache
-        if: matrix.hosted
-        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
-        with:
-          shared-key: release-${{ matrix.id }}
-
       - name: Install hosted-runner native dependencies
         if: matrix.hosted
         run: >-
           sudo apt-get update && sudo apt-get install -y
-          libasound2-dev libopus-dev libssl-dev protobuf-compiler pkg-config cmake
+          libasound2-dev libopus-dev libssl-dev libvpx-dev
+          protobuf-compiler pkg-config cmake
 
       - name: Install Chromium for the BridgeFu DTMF regression
         if: matrix.needs_chromium
@@ -879,7 +896,7 @@ jobs:
         with:
           name: release-gate-evidence
           path: |
-            target/release-plan/plan.json
+            target/release-plan/
             target/release-evidence/
             target/release-qualification/aggregate.json
             target/release-qualification/reports/
@@ -892,7 +909,7 @@ jobs:
         with:
           name: diagnostic-gate-evidence
           path: |
-            target/release-plan/plan.json
+            target/release-plan/
             target/release-evidence/
             target/release-qualification/aggregate.json
           retention-days: 30

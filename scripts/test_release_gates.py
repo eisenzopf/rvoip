@@ -108,7 +108,26 @@ class GateFrameworkTests(unittest.TestCase):
         ]
         cargo_commands = [command[0] for command in bundle_commands[1:]]
         self.assertEqual([command[-1] for command in cargo_commands], expected)
-        self.assertTrue(all("--no-default-features" in command for command in cargo_commands))
+        self.assertTrue(
+            all("--no-default-features" in command for command in cargo_commands)
+        )
+
+    def test_evidence_helpers_are_bound_to_preparation_inputs(self) -> None:
+        gate = next(
+            gate
+            for gate in self.catalog["gates"]
+            if gate["id"] == "build.evidence-helper-tests"
+        )
+        for path in (
+            ".github/workflows/release-prepare.yml",
+            "crates/sip/rvoip-sip/docs/BETA_RELEASE_CHECKLIST.md",
+            "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md",
+            "crates/sip/rvoip-sip/scripts/full_beta_release.sh",
+            "scripts/release.py",
+            "scripts/test_release.py",
+        ):
+            with self.subTest(path=path):
+                self.assertIn(path, gate["affected_paths"])
 
     def test_release_srtp_interop_gate_exercises_dtls_srtp_end_to_end(self) -> None:
         gate = next(
@@ -224,6 +243,40 @@ class GateFrameworkTests(unittest.TestCase):
             "perf.media-burst-matrix",
             {gate for shard in soak_shards for gate in shard["gates"]},
         )
+
+    def test_release_requires_a_fresh_current_candidate_performance_evaluation(
+        self,
+    ) -> None:
+        by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
+        gate = by_id["perf.canonical-2k-current"]
+        self.assertIn(gate["id"], self.catalog["profiles"]["remote-release"])
+        self.assertTrue(gate["always_fresh"])
+        self.assertEqual(gate["resource_class"], "gcp-performance-soak-long")
+        self.assertEqual(gate["timeout_minutes"], 120)
+        self.assertEqual(gate["estimated_seconds"], 4_500)
+        self.assertIn("canonical_2k_release_eval.sh", " ".join(gate["command"]))
+        self.assertEqual(
+            by_id["source.canonical-2k"]["dependencies"],
+            ["source.clean-start", "perf.canonical-2k-current"],
+        )
+        metrics = by_id["report.performance-metrics"]
+        self.assertIn("perf.canonical-2k-current", metrics["dependencies"])
+        self.assertIn(
+            "current-performance-evaluation.md", metrics["expected_outputs"]
+        )
+
+        script = (
+            ROOT / "crates/sip/rvoip-sip/scripts/canonical_2k_release_eval.sh"
+        ).read_text()
+        self.assertIn("for pass in 1 2 3", script)
+        self.assertIn("env -i", script)
+        self.assertIn('${EVIDENCE_TOOL}" import', script)
+        self.assertIn("CARGO_HOME", script)
+        self.assertIn("RUSTUP_HOME", script)
+        self.assertIn("RUSTC_WRAPPER", script)
+        self.assertIn("RVOIP_PERF_PREBUILT_MANIFEST", script)
+        self.assertIn("RVOIP_RELEASE_CANDIDATE", script)
+        self.assertIn("RVOIP_RELEASE_ENVIRONMENT_ID", script)
 
     def test_media_burst_scenarios_run_on_independent_workers(self) -> None:
         scenario_ids = {
@@ -437,6 +490,11 @@ class GateFrameworkTests(unittest.TestCase):
             gate["command"][:3], ["env", "RUSTDOCFLAGS=-D warnings", "cargo"]
         )
         self.assertNotIn("warnings", gate["command"])
+        self.assertIn("--workspace", gate["command"])
+        self.assertIn("--all-features", gate["command"])
+        self.assertIn("--no-deps", gate["command"])
+        self.assertIn("--locked", gate["command"])
+        self.assertNotIn("-p", gate["command"])
 
     def test_format_gate_does_not_receive_unsupported_locked_flag(self) -> None:
         gate = next(
@@ -954,6 +1012,156 @@ class GateFrameworkTests(unittest.TestCase):
             self.assertEqual(
                 set(result["selected_results"]), set(manifest["comparison_paths"])
             )
+
+    def test_performance_reconciliation_ignores_nested_provenance_copies(
+        self,
+    ) -> None:
+        baseline_root = (
+            ROOT / "crates/sip/rvoip-sip/perf-baselines/20260706T181609Z"
+        )
+        manifest = json.loads((baseline_root / "manifest.json").read_text())
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = Path(directory) / "evidence"
+            packaged = evidence / "baseline-gate/perf-regression-baseline"
+            packaged.mkdir(parents=True)
+            shutil.copy2(baseline_root / "manifest.json", packaged / "manifest.json")
+            for relative in manifest["comparison_paths"]:
+                source = baseline_root / relative
+                baseline_target = packaged / "perf-results" / relative
+                current_target = evidence / "_perf-results/matrix-shard" / relative
+                provenance_current = (
+                    evidence
+                    / "_perf-results/canonical-shard/profiles/run-1/output-target/perf-results"
+                    / relative
+                )
+                provenance_baseline = (
+                    evidence
+                    / "_perf-results/canonical-shard/profiles/run-1/reviewed-baseline"
+                    / relative
+                )
+                for target in (
+                    baseline_target,
+                    current_target,
+                    provenance_current,
+                    provenance_baseline,
+                ):
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, target)
+            artifact = evidence / "collect-report.regression-audit"
+            artifact.mkdir()
+            result = gates.reconcile_performance_regression(
+                ROOT, evidence, artifact
+            )
+            self.assertEqual(
+                set(result["selected_results"]), set(manifest["comparison_paths"])
+            )
+
+    def test_performance_reconciliation_rejects_duplicate_authoritative_results(
+        self,
+    ) -> None:
+        baseline_root = (
+            ROOT / "crates/sip/rvoip-sip/perf-baselines/20260706T181609Z"
+        )
+        manifest = json.loads((baseline_root / "manifest.json").read_text())
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = Path(directory) / "evidence"
+            packaged = evidence / "baseline-gate/perf-regression-baseline"
+            packaged.mkdir(parents=True)
+            shutil.copy2(baseline_root / "manifest.json", packaged / "manifest.json")
+            for relative in manifest["comparison_paths"]:
+                source = baseline_root / relative
+                baseline_target = packaged / "perf-results" / relative
+                current_target = evidence / "_perf-results/matrix-shard" / relative
+                baseline_target.parent.mkdir(parents=True, exist_ok=True)
+                current_target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, baseline_target)
+                shutil.copy2(source, current_target)
+            duplicate = (
+                evidence
+                / "_perf-results/duplicate-shard"
+                / manifest["comparison_paths"][0]
+            )
+            duplicate.parent.mkdir(parents=True)
+            shutil.copy2(
+                baseline_root / manifest["comparison_paths"][0], duplicate
+            )
+            artifact = evidence / "collect-report.regression-audit"
+            artifact.mkdir()
+            with self.assertRaisesRegex(
+                gates.GateError, "has 2 exact-candidate results"
+            ):
+                gates.reconcile_performance_regression(ROOT, evidence, artifact)
+
+    def test_performance_reconciliation_rejects_missing_results_directory(
+        self,
+    ) -> None:
+        baseline_root = (
+            ROOT / "crates/sip/rvoip-sip/perf-baselines/20260706T181609Z"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = Path(directory) / "evidence"
+            packaged = evidence / "baseline-gate/perf-regression-baseline"
+            packaged.mkdir(parents=True)
+            shutil.copy2(baseline_root / "manifest.json", packaged / "manifest.json")
+            artifact = evidence / "collect-report.regression-audit"
+
+            with self.assertRaisesRegex(
+                gates.GateError,
+                "exact-candidate performance results directory is missing",
+            ):
+                gates.reconcile_performance_regression(ROOT, evidence, artifact)
+
+    def test_current_performance_reconciliation_fails_without_candidate_artifacts(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(
+                gates.GateError, "exact-candidate performance artifacts are missing"
+            ):
+                gates.reconcile_performance_metrics(
+                    ROOT, root, root / "artifact", "c" * 40
+                )
+
+    def test_current_performance_reconciliation_requires_one_high_density_run(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shard = root / "_perf-results/shard"
+            shard.mkdir(parents=True)
+            (shard / "result.json").write_text("{}\n")
+            with self.assertRaisesRegex(
+                gates.GateError, "exactly one high-density media-burst result"
+            ):
+                gates.reconcile_performance_metrics(
+                    ROOT, root, root / "artifact", "c" * 40
+                )
+
+    def test_current_performance_reconciliation_requires_canonical_package(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shard = root / "_perf-results/shard"
+            shard.mkdir(parents=True)
+            (shard / "result.json").write_text("{}\n")
+            burst = (
+                root
+                / "perf.media-burst.high-density-media-burst"
+                / "perf_burst_matrix/burst_fixture/high-density-media-burst"
+            )
+            burst.mkdir(parents=True)
+            for role in ("caller", "receiver"):
+                (burst / f"perf_burst_{role}_high-density-media-burst.json").write_text(
+                    "{}\n"
+                )
+            with self.assertRaisesRegex(
+                gates.GateError, "exact-candidate canonical 2,000-CPS evidence index"
+            ):
+                gates.reconcile_performance_metrics(
+                    ROOT, root, root / "artifact", "c" * 40
+                )
 
 
 if __name__ == "__main__":

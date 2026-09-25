@@ -313,7 +313,8 @@
 //! ## Custom INVITE headers
 //!
 //! All API surfaces share one builder: call `invite(from, to)` (or the
-//! peer-scoped `invite(to)`), then attach `.with_extra_headers(...)` to
+//! peer-scoped `invite(to)`), then attach `.with_headers(...)` through
+//! [`SipRequestOptions`] to
 //! ship a `Vec<`[`TypedHeader`]`>` with the outgoing INVITE. Use this for
 //! headers RFC 3261 leaves outside the request line — `Diversion`,
 //! `History-Info`, `Call-Info`, `User-to-User`, or vendor `X-*` headers

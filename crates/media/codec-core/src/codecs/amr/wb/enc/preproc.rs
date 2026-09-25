@@ -388,7 +388,7 @@ impl Default for Preprocessor {
 impl Preprocessor {
     /// A cold-start preprocessor, matching `Reset_encoder(st, 1)`.
     ///
-    /// `Q_old` and both `Q_max` slots start at 15 even though [`Q_MAX`] is 8:
+    /// `Q_old` and both `Q_max` slots start at 15 even though `Q_MAX` is 8:
     /// the reset values sit deliberately *above* the ceiling so the first
     /// frame's `Q_new` is unconstrained by history. The resulting first `exp`
     /// is a large right shift applied to all-zero buffers, which is harmless.

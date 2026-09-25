@@ -384,7 +384,7 @@ impl DtxDecoder {
     ///
     /// `parm` is the SID frame's five parameters and is read only when this
     /// frame is a `SID_UPDATE`; the other paths interpolate from what is
-    /// already stored. `mode` indexes [`DTX_LOG_EN_ADJUST`] — for a SID it is
+    /// already stored. `mode` indexes `DTX_LOG_EN_ADJUST` — for a SID it is
     /// 8, the SID's own entry.
     ///
     /// The caller must have reset the speech decoder first, the way

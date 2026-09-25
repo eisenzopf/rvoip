@@ -1,7 +1,7 @@
 # rvoip-sip
 
-[![Crates.io](https://img.shields.io/crates/v/rvoip-sip.svg)](https://crates.io/crates/rvoip-sip)
-[![docs.rs](https://docs.rs/rvoip-sip/badge.svg)](https://docs.rs/rvoip-sip)
+[![Crates.io](https://img.shields.io/crates/v/rvoip-sip.svg?release=0.3.10)](https://crates.io/crates/rvoip-sip/0.3.10)
+[![docs.rs](https://img.shields.io/docsrs/rvoip-sip/0.3.10?label=docs)](https://docs.rs/rvoip-sip/0.3.10/rvoip_sip/)
 [![Rust 1.91+](https://img.shields.io/badge/rust-1.91%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/eisenzopf/rvoip/blob/main/LICENSE)
 [![Repository](https://img.shields.io/badge/github-eisenzopf%2Frvoip-24292f.svg)](https://github.com/eisenzopf/rvoip)
@@ -13,24 +13,24 @@ DTMF, hold/resume, custom SIP headers, and app-visible events so Rust
 applications can behave like programmable SIP endpoints without owning SIP
 transaction or RTP details directly.
 
-The workspace is preparing the strict-gate `0.3.8` release candidate. It can
-publish only after a fresh full-beta run passes without skipped gates and is
-bound to the exact clean release source. The generated
-[beta release report](docs/BETA_RELEASE_REPORT.md) is authoritative for the
-tested PBX, proxy, SIPp, strict-UA, security, performance, and soak boundaries.
-Historical exception and carry-forward reports remain immutable history and
-do not qualify `0.3.8`.
+The published `0.3.10` release came from a strict, exact-source qualification.
+Its generated [release report](docs/BETA_RELEASE_REPORT.md), [gate
+ledger](docs/BETA_GATE_REPORT.md), and [performance
+report](docs/BETA_PERFORMANCE_REPORT.md) are authoritative for the tested PBX,
+proxy, SIPp, strict-UA, security, performance, and soak boundaries. The
+[immutable qualification history](docs/releases/qualification/README.md)
+retains prior releases and the detailed 0.3.10 performance evaluation.
 
 ## At a glance
 
 | Need | Start with |
 | --- | --- |
-| Make calls from a softphone or PBX account | [`Endpoint`](https://docs.rs/rvoip-sip/latest/rvoip_sip/struct.Endpoint.html) |
-| Write a sequential client, script, or test | [`StreamPeer`](https://docs.rs/rvoip-sip/latest/rvoip_sip/struct.StreamPeer.html) |
-| Build a reactive server, IVR, router, or queue | [`CallbackPeer`](https://docs.rs/rvoip-sip/latest/rvoip_sip/struct.CallbackPeer.html) |
-| Compose multiple call legs or a B2BUA | [`UnifiedCoordinator`](https://docs.rs/rvoip-sip/latest/rvoip_sip/struct.UnifiedCoordinator.html) |
-| Control an active call | [`SessionHandle`](https://docs.rs/rvoip-sip/latest/rvoip_sip/struct.SessionHandle.html) |
-| Check Asterisk, FreeSWITCH, Kamailio, or OpenSIPS status | [Interoperability status](#interoperability-status) |
+| Make calls from a softphone or PBX account | [`Endpoint`](https://docs.rs/rvoip-sip/0.3.10/rvoip_sip/api/endpoint/struct.Endpoint.html) |
+| Write a sequential client, script, or test | [`StreamPeer`](https://docs.rs/rvoip-sip/0.3.10/rvoip_sip/api/stream_peer/struct.StreamPeer.html) |
+| Build a reactive server, IVR, router, or queue | [`CallbackPeer`](https://docs.rs/rvoip-sip/0.3.10/rvoip_sip/api/callback_peer/struct.CallbackPeer.html) |
+| Compose multiple call legs or a B2BUA | [`UnifiedCoordinator`](https://docs.rs/rvoip-sip/0.3.10/rvoip_sip/api/unified/struct.UnifiedCoordinator.html) |
+| Control an active call | [`SessionHandle`](https://docs.rs/rvoip-sip/0.3.10/rvoip_sip/api/handle/struct.SessionHandle.html) |
+| Check Asterisk, FreeSWITCH, Jambonz, Kamailio, or OpenSIPS status | [Interoperability status](#interoperability-status) |
 | Bridge a SIP caller to a native Vapi WebSocket agent | [`rvoip-vapi`](#extensions-and-native-vapi-websocket-agents) |
 
 Start with `Endpoint` unless you already know you need event-stream ownership,
@@ -45,7 +45,7 @@ is **Rust 1.91**.
 
 ```toml
 [dependencies]
-rvoip-sip = "0.3.8"
+rvoip-sip = "0.3.10"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -148,6 +148,7 @@ The examples are organized by developer surface in
 | Terminal softphone | `cargo run -p rvoip-sip --example sip_client` |
 | Asterisk interop matrix | `./crates/sip/rvoip-sip/examples/pbx/run.sh --pbx asterisk --api all --scenario all` |
 | FreeSWITCH interop matrix | `./crates/sip/rvoip-sip/examples/pbx/run.sh --pbx freeswitch --api all --scenario all` |
+| Jambonz interop matrix | `./crates/sip/rvoip-sip/examples/pbx/run.sh --pbx jambonz --api all --scenario all --transport UDP` |
 
 PBX interop setup, environment variables, and scenario coverage are documented
 in [`examples/pbx/README.md`](examples/pbx/README.md). The terminal softphone
@@ -155,7 +156,7 @@ is documented in [`examples/sip_client/README.md`](examples/sip_client/README.md
 
 ## Interoperability status
 
-The `0.3.8` candidate requires revision-bound PASS evidence for Asterisk,
+The `0.3.9` release recorded revision-bound PASS evidence for Asterisk,
 FreeSWITCH, Kamailio, and OpenSIPS. Kamailio and OpenSIPS must each pass both
 adjacency orders over UDP, TCP, and verified TLS. Publication remains blocked
 unless the generated report records the complete required matrix as PASS.
@@ -173,6 +174,7 @@ release claim, and it does not meet the four-peer attestation boundary.
 | --- | --- | --- |
 | **Asterisk** | **0.3.2 interop matrix passed** | `Endpoint`, `StreamPeer`, and `CallbackPeer` across registration, basic call, G.729A/G.729AB, hold/resume, ring-cancel, RFC 4733 DTMF, rejection, and blind transfer over UDP and TLS |
 | **FreeSWITCH** | **0.3.2 interop matrix passed** | The same API, scenario, codec, and UDP/TLS matrix as Asterisk |
+| **Jambonz OSS 0.9.9** | **Mandatory 0.3.10 release gate** | The same registered-user `Endpoint`, `StreamPeer`, and `CallbackPeer` scenario runner used for Asterisk and FreeSWITCH, across the applicable UDP SIP/SDP/RTP B2BUA matrix; publication requires a protected exact-source PASS |
 | **SIPp** | **0.3.2 standalone matrix passed** | 30, 100, 300, 1,000, and 2,000 CPS with 100% configured call completion |
 | **baresip** | **0.3.2 strict-UA check passed** | External user-agent call against the rvoip SIP listener |
 | **Kamailio** | **Lab-tested; not release-gated** | Registrar-proxy with an rtpengine media relay: registration, calls, AMR in all four framings relayed verbatim, DTMF, and SDES-SRTP, over UDP and TLS. No TCP, no second adjacency order, not bound into the release attestation |
@@ -204,7 +206,33 @@ not imply carrier certification or untested peer-version/topology coverage.
 - Performance recipes and tuning hooks for local labs, PBX media server
   profiles, and signaling-heavy test profiles.
 
-## 0.3.2 release evidence
+## Current 0.3.10 release evidence
+
+Protected run
+[`34074372543`](https://github.com/eisenzopf/rvoip/actions/runs/34074372543)
+qualified the exact published commit
+`77a99cd38a07641294cf7dc547146b115b135dc7`: **213/213 gates passed**, all
+213 were fresh, and all 108 legacy release requirements were covered.
+
+| Evidence | Current record |
+| --- | --- |
+| Release disposition and provenance | [`docs/BETA_RELEASE_REPORT.md`](docs/BETA_RELEASE_REPORT.md) |
+| Complete accepted-gate ledger | [`docs/BETA_GATE_REPORT.md`](docs/BETA_GATE_REPORT.md) |
+| Performance observations | [`docs/BETA_PERFORMANCE_REPORT.md`](docs/BETA_PERFORMANCE_REPORT.md) |
+| Detailed performance gate evaluation | [`current-performance-evaluation.md`](docs/releases/qualification/20260907T042726Z-34074372543/current-performance-evaluation.md) |
+| Machine-readable performance evaluation | [`current-performance-evaluation.json`](docs/releases/qualification/20260907T042726Z-34074372543/current-performance-evaluation.json) |
+| Evidence artifact index | [`current-performance-artifact-index.json`](docs/releases/qualification/20260907T042726Z-34074372543/current-performance-artifact-index.json) |
+| Signed report manifest | [`QUALIFICATION_REPORT_ATTESTATION.json`](docs/QUALIFICATION_REPORT_ATTESTATION.json) |
+| Immutable release archive | [`20260907T042726Z-34074372543`](docs/releases/qualification/20260907T042726Z-34074372543) |
+
+The detailed evaluation records three clean 65,000-call canonical runs, a
+high-density media burst with full audio delivery, a 60-minute monolithic
+soak, and a 60-minute split 500-call soak. All recorded performance policies
+passed. The exact measurements and claim boundaries are in the linked reports;
+they are evidence for the tested candidate and environment, not a performance
+SLA.
+
+## Historical 0.3.2 exception evidence
 
 The clean, unchanged full run recorded 106 PASS, 2 FAIL, and 0 SKIP results.
 The project owner accepted one root policy deviation: high-density full-media
@@ -260,7 +288,7 @@ third-party telephony intermediary is required between rvoip and Vapi.
 Enable the facade integration with:
 
 ```toml
-rvoip = { version = "0.3.8", features = ["sip", "vapi"] }
+rvoip = { version = "0.3.10", features = ["sip", "vapi"] }
 ```
 
 See the complete [`rvoip-vapi` README](../../extensions/rvoip-vapi/README.md),
@@ -336,8 +364,8 @@ Operational references:
   from the 0.3.2 claim and that has not changed.
 - WebRTC/browser interop, TURN, and WSS outbound remain outside the SIP beta
   claim unless separately completed and tested. SIP DTLS-SRTP is a distinct
-  feature-gated 0.3.9 candidate capability whose claim depends on fresh
-  protected release evidence.
+  feature-gated 0.3.10 capability whose claim is bounded by fresh protected
+  release evidence.
 - The default full-media performance claim is bounded to the documented
   beta release profiles and artifacts. Higher tuned-profile results need
   their own topology, hardware, configuration, and caveats.

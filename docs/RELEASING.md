@@ -12,9 +12,12 @@ remain experimental.
 ## Prepare
 
 Use the **Prepare release PR** workflow with the next version, for example
-`0.3.8`. It checks out the current `main`, runs the unified preparation and
-release-tooling tests, and opens a draft release pull request. The release PR
-must pass the normal `PR Gate`; it is never pushed directly to `main`.
+`0.3.10`. It checks out the current `main`, runs the unified preparation and
+release-tooling tests, runs the evidence-helper suite against the generated
+tree, and opens a draft release pull request. Atomic preparation preserves
+existing file permission modes, including executable release wrappers. The
+release PR must pass the normal `PR Gate`; it is never pushed directly to
+`main`.
 
 The underlying `scripts/release.sh prepare` command rejects unstable SemVer
 strings, version downgrades, versions already present on crates.io, dirty
@@ -32,6 +35,14 @@ executes short infrastructure probes so credentials, quota, VM startup, OS
 limits, tool installation, repository checkout, GCS evidence transfer,
 controller reconciliation, and cleanup fail within a target of 15 minutes.
 The preflight is deliberately non-publishing and is not release evidence.
+
+For `remote-release`, the planner waits up to one hour for all five CodeQL
+categories to bind to the exact protected-main commit. Its 75-minute job
+deadline intentionally outlives that poll window, so a qualification started
+immediately after merge fails with a policy receipt rather than being cancelled
+while the Rust analysis is still running. Release workflows also raise
+rustup's bounded download retry count to tolerate transient distribution-network
+resets without weakening any test or evidence requirement.
 
 Use `remote-core` for a hosted-runner dry run and `remote-release` for the
 complete release profile. Do not start the full profile unless the exact
@@ -107,6 +118,11 @@ auto-delete disk. A separate cleanup job sweeps interrupted runs. The workers
 never receive the crates.io token and no release worker remains provisioned
 between qualifications.
 
+Hosted qualification, release preparation, and publication runners install the
+native ALSA, Opus, OpenSSL, libvpx, and Protobuf development packages before
+building. `libvpx-dev` is required by the WebRTC VP8/VP9 dependency graph when
+the release rustdoc gate compiles the complete workspace with `--all-features`.
+
 The current full profile is balanced across six `n2-standard-8` short-performance
 workers, two `n2-standard-8` one-hour-soak workers, seven `n2-standard-4`
 burst/soak workers, one `n2-standard-4` stateful interoperability worker, and
@@ -124,6 +140,10 @@ measurement workers start. Every performance worker verifies the bundle and
 each executable by SHA-256 and records both bundle and manifest digests in its
 gate receipt. Compilation therefore cannot perturb performance measurements or
 be repeated independently on every worker.
+The canonical 2,000-CPS driver also pins each of its four Alice endpoint
+shards to 16 app-session event dispatcher workers. That preserves the reviewed
+configuration on the standardized eight-vCPU worker instead of allowing the
+library's host-CPU-derived endpoint default to change the experiment.
 The `remote-preflight` profile recreates that complete capacity shape, including
 all 18 concurrent VM creations, but its short probes never substitute for the
 real performance, interoperability, and soak commands in `remote-release`.
@@ -137,6 +157,11 @@ dividing the continuous soak requirement. Any missing object or cache-key,
 manifest, bundle, or executable digest mismatch fails closed. Gates
 whose exact source, dependency, definition, environment, and threshold digests
 remain unchanged may reuse successful prior evidence on a later candidate.
+The canonical 2,000-CPS release evaluation is an explicit exception: it is
+always fresh and runs three clean passes from the exact candidate. The release
+report also requires a current performance evaluation in JSON and Markdown and
+a SHA-256 index covering the packaged performance artifacts. July 2026 results
+remain historical baselines and cannot qualify a later release.
 The GCS lifecycle expires only `release-cache/` objects after 14 days; it does
 not apply to the durable run-scoped qualification receipts and logs.
 Each proxy row has its own stable gate ID, so a later diagnostic can rerun only

@@ -1021,7 +1021,7 @@ impl TimerManager {
     /// `Ok(JoinHandle<()>)` for API compatibility. This lightweight proxy can
     /// be awaited for deadline completion or aborted to cancel the exact queued
     /// generation; it owns no sleep or timer-wheel entry. Core transaction paths
-    /// use [`ManagedTimerHandle`] and avoid even this proxy task.
+    /// use the private `ManagedTimerHandle` and avoid even this proxy task.
     /// Returns `crate::error::Error` if the underlying transaction channel is not found *immediately*
     /// (the current implementation checks delivery when the deadline becomes due).
     ///

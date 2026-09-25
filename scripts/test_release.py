@@ -8,6 +8,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import stat
 import subprocess
 import tempfile
 import tomllib
@@ -393,14 +394,28 @@ rvoip-rtc = { path = "../rvoip-rtc" }
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(body, encoding="utf-8")
 
-            edits = release.planned_release_metadata_edits(
-                root, "0.3.5", "0.3.6"
-            )
+            with mock.patch.object(
+                release, "ACTIVE_RELEASE_METADATA_FILES", tuple(active_files)
+            ):
+                edits = release.planned_release_metadata_edits(
+                    root, "0.3.5", "0.3.6"
+                )
 
             self.assertEqual(set(edits), {root / path for path in active_files})
             for payload in edits.values():
                 self.assertIn("0.3.6", payload.decode())
                 self.assertNotIn("0.3.5", payload.decode())
+
+    def test_write_atomic_preserves_existing_executable_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "release-helper.sh"
+            path.write_bytes(b"#!/bin/sh\nexit 1\n")
+            path.chmod(0o755)
+
+            release.write_atomic(path, b"#!/bin/sh\nexit 0\n")
+
+            self.assertEqual(path.read_bytes(), b"#!/bin/sh\nexit 0\n")
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o755)
 
     def test_planned_release_metadata_edits_fail_closed_on_missing_marker(
         self,
@@ -408,12 +423,102 @@ rvoip-rtc = { path = "../rvoip-rtc" }
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "README.md").write_text("no active marker\n", encoding="utf-8")
-            with self.assertRaisesRegex(
-                release.ReleaseError, "does not reference workspace version"
+            with mock.patch.object(
+                release, "ACTIVE_RELEASE_METADATA_FILES", (Path("README.md"),)
             ):
-                release.planned_release_metadata_edits(
-                    root, "0.3.5", "0.3.6"
+                with self.assertRaisesRegex(
+                    release.ReleaseError, "does not reference workspace version"
+                ):
+                    release.planned_release_metadata_edits(
+                        root, "0.3.5", "0.3.6"
+                    )
+
+    def test_candidate_aware_metadata_preserves_historical_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "README.md"
+            path.write_text(
+                "# 0.3.10 candidate\n"
+                "Current workspace runtime crate version: `0.3.9`.\n"
+                "Current qualified runtime crate version: `0.3.9`.\n"
+                "0.3.9 remains the latest published release.\n"
+                'rvoip = { version = "0.3.9", features = ["sip"] }\n',
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                release, "ACTIVE_RELEASE_METADATA_FILES", (Path("README.md"),)
+            ):
+                edits = release.planned_release_metadata_edits(
+                    root, "0.3.9", "0.3.10"
                 )
+
+            updated = edits[path].decode()
+            self.assertIn(
+                "Current workspace runtime crate version: `0.3.10`", updated
+            )
+            self.assertIn(
+                "Current qualified runtime crate version: `0.3.9`", updated
+            )
+            self.assertIn("0.3.9 remains the latest published release", updated)
+            self.assertIn('rvoip = { version = "0.3.10"', updated)
+
+    def test_active_release_metadata_rejects_stale_dependency_example(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "README.md").write_text(
+                "Current version 0.3.9\n"
+                'rvoip = { version = "0.3.8", features = ["sip"] }\n',
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                release, "ACTIVE_RELEASE_METADATA_FILES", (Path("README.md"),)
+            ):
+                with self.assertRaisesRegex(
+                    release.ReleaseError, "stale rvoip dependency example"
+                ):
+                    release.validate_active_release_metadata(root, "0.3.9")
+
+    def test_active_release_metadata_rejects_duplicate_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(
+                release,
+                "ACTIVE_RELEASE_METADATA_FILES",
+                (Path("README.md"), Path("README.md")),
+            ):
+                with self.assertRaisesRegex(release.ReleaseError, "duplicate paths"):
+                    release.validate_active_release_metadata(root, "0.3.9")
+
+    def test_release_notes_reject_candidate_only_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                "# rvoip 0.3.10 Candidate Release Notes\n"
+                "Jambonz OSS\n## Performance evaluation\nmetrics\n"
+                "## Qualification record\n"
+                "**Pending.** protected run\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                release.ReleaseError, "candidate-only qualification markers"
+            ):
+                release.validate_release_notes_final(root, "0.3.10")
+
+    def test_release_notes_accept_final_protected_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                "# rvoip 0.3.10 Release Notes\n"
+                "Jambonz OSS\n## Performance evaluation\nmetrics\n"
+                "## Qualification record\n"
+                "The protected exact-candidate run passed.\n",
+                encoding="utf-8",
+            )
+            release.validate_release_notes_final(root, "0.3.10")
 
     def test_member_dependency_versions_reject_stale_renamed_requirement(
         self,

@@ -447,12 +447,12 @@ impl OpenLoopPitch {
 
     /// Search one frame of decimated weighted speech for its open-loop lags.
     ///
-    /// `weighted` is `wsp[]` after decimation and scaling: [`WSP_FRAME`]
+    /// `weighted` is `wsp[]` after decimation and scaling: `WSP_FRAME`
     /// samples at 6.4 kHz.
     ///
     /// # Panics
     ///
-    /// If `weighted` is not exactly [`WSP_FRAME`] long.
+    /// If `weighted` is not exactly `WSP_FRAME` long.
     pub fn analyse(
         &mut self,
         ctx: &mut DspContext,

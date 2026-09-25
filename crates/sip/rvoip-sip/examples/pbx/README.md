@@ -1,7 +1,7 @@
 # Unified PBX Interop Examples
 
 This directory is the source of truth for `rvoip-sip` PBX interop examples.
-The same scenario code can run against Asterisk, FreeSWITCH, or the
+The same scenario code can run against Asterisk, FreeSWITCH, Jambonz, or the
 registrar-proxy labs (Kamailio and OpenSIPS, each fronting an rtpengine media
 relay) and through three public API surfaces:
 
@@ -16,13 +16,15 @@ Copy the provider template you need and edit local addresses and credentials:
 ```sh
 cp env/asterisk.env.example env/asterisk.env
 cp env/freeswitch.env.example env/freeswitch.env
+cp env/jambonz.env.example env/jambonz.env        # optional; up.sh writes the live values
 cp env/kamailio.env.example env/kamailio.env      # optional; up.sh writes the live values
 cp env/opensips.env.example env/opensips.env
 ```
 
 `run.sh` also loads `examples/pbx/.env.local` when present. FreeSWITCH runs
 also load `$HOME/Developer/freeswitch/freeswitch-local.env` when present, and
-the proxy providers load `$HOME/Developer/{kamailio,opensips}/*-local.env`,
+the Jambonz and proxy providers load
+`$HOME/Developer/{jambonz,kamailio,opensips}/*-local.env`,
 which their lab `up.sh` scripts write.
 
 ## Runner
@@ -30,12 +32,13 @@ which their lab `up.sh` scripts write.
 ```sh
 ./run.sh --pbx asterisk --api all --scenario registration
 ./run.sh --pbx freeswitch --api all --scenario hold_resume
+./run.sh --pbx jambonz --api all --scenario all --transport UDP
 ./run.sh --pbx both --api all --scenario all
 ```
 
 Options:
 
-- `--pbx asterisk|freeswitch|both|kamailio|opensips|proxies|all`
+- `--pbx asterisk|freeswitch|jambonz|both|kamailio|opensips|proxies|all`
   (`both` deliberately stays Asterisk+FreeSWITCH so existing release matrices
   are unchanged; `proxies` is the two registrar-proxy labs; `all` is every
   provider)
@@ -130,6 +133,61 @@ surfaces:
 Asterisk registered-flow TLS/SRTP is provider-gated: set
 `ASTERISK_TLS_CONTACT_MODE=registered-flow-symmetric` or
 `ASTERISK_TLS_FLOW_REUSE=1` and run the TLS scenarios.
+
+## Jambonz B2BUA Lab
+
+`infra/release-runners/pbx/jambonz` runs Jambonz as a first-class release
+peer, at the same policy level as Asterisk and FreeSWITCH. The 0.3.10 profile
+selects the latest stable open-source component line (currently 0.9.9), checks
+that both SBC pins are still upstream HEAD, verifies source tarball hashes,
+and runs only digest-pinned containers. The test target is the actual Jambonz
+outbound SBC, registrar, Drachtio server, database, Redis, and RTPengine—not a
+mock that merely copies Jambonz responses.
+
+The mandatory profile uses the same `rvoip-sip/examples/pbx` runner and
+scenario implementations as Asterisk and FreeSWITCH. It runs all three RVoIP
+public SIP APIs over UDP and covers authenticated registration, separate PCMU
+and PCMA calls, DTMF, cancellation, rejection, hold/resume, transfer, and
+teardown, with RVoIP in both caller and callee roles. The pinned Jambonz OSS
+profile explicitly admits only PCMU, PCMA, and telephone-event, so its gate
+does not claim G.729, AMR, TLS/SRTP, or the separate RVoIP-as-B2BUA scenario;
+those codecs remain covered by the Asterisk and FreeSWITCH release profiles.
+Every run records the selected component version/revisions, image identities,
+rendered topology, redacted logs, matrix, media assertions, and a cleanup
+receipt. Diagnostic runs can additionally capture packets. A passing matrix
+is a claim about SIP/SDP/RTP
+interoperability with that exact open-source Jambonz profile; it is not a
+claim about the commercial Jambonz verb API or hosted jambonz.cloud.
+
+Bring the release lab up or down with:
+
+```sh
+bash infra/release-runners/interop-lifecycle.sh jambonz-up
+bash infra/release-runners/interop-lifecycle.sh jambonz-down
+```
+
+The pinned Jambonz and MySQL images require an amd64 Docker engine. The
+mandatory release gate uses the repository's x86 GCP interop worker. On Apple
+Silicon, run this lab with a dedicated x86_64 Colima profile using the gRPC
+port forwarder (Colima's default SSH forwarder does not carry UDP):
+
+```sh
+brew install qemu lima-additional-guestagents
+colima start --profile rvoip-release-x86 --arch x86_64 \
+  --cpu 6 --memory 12 --disk 30 --port-forwarder grpc
+docker context use colima-rvoip-release-x86
+```
+
+`up.sh` fails early on the wrong architecture or when a live UDP echo probe
+cannot traverse the selected Colima forwarder. The Colima profile publishes
+Drachtio's SIP listener and a bounded RTPengine range only on macOS loopback,
+while advertising `host.docker.internal` for the return signaling and media
+path into RVoIP. It does not assume that macOS can route directly to Docker's
+private bridge. Linux release workers use the isolated bridge directly.
+
+Jambonz TLS/SRTP, WebRTC, CPaaS application verbs, hosted service, PSTN, HA,
+recording, and load are outside the 0.3.10 Jambonz profile and must not be
+inferred from this gate.
 
 ## Registrar-Proxy Labs (Kamailio, OpenSIPS + rtpengine)
 
@@ -232,10 +290,11 @@ operations belong on the per-call handle.
 Provider-specific differences are encoded in config defaults and capability
 flags, not duplicated scenario code:
 
-- Asterisk defaults to `SIP_PORT=5060`, `SIP_TLS_PORT=5061`,
-  `SIP_PASSWORD=password123`, longer registration settle/retry windows, and
-  optional registered-flow operation. Asterisk TLS blind-transfer tests use a
-  longer default REFER settle window; override with
+- Asterisk defaults to `SIP_PORT=5060` and `SIP_TLS_PORT=5061`, with longer
+  registration settle/retry windows and optional registered-flow operation.
+  The lab launcher supplies its generated account password explicitly; direct
+  invocation must set `ENDPOINT_<user>_PASSWORD` or `SIP_PASSWORD`. Asterisk TLS
+  blind-transfer tests use a longer default REFER settle window; override with
   `ASTERISK_TLS_TRANSFER_SETTLE_SECS` when needed.
 - FreeSWITCH defaults to `FREESWITCH_UDP_ADDR=127.0.0.1:5062`,
   `FREESWITCH_TLS_ADDR=127.0.0.1:5063`, `FREESWITCH_PASSWORD=1234`,

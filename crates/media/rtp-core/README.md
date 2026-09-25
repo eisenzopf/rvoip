@@ -2,9 +2,9 @@
 
 [![Crates.io](https://img.shields.io/crates/v/rvoip-rtp-core.svg)](https://crates.io/crates/rvoip-rtp-core)
 [![Documentation](https://docs.rs/rvoip-rtp-core/badge.svg)](https://docs.rs/rvoip-rtp-core)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../../LICENSE)
 
-> **rvoip 0.3.9 candidate security notice:** direct AES-CM SRTP and SDES remain
+> **rvoip 0.3.10 security notice:** direct AES-CM SRTP and SDES remain
 > available. The `dtls-webrtc` feature adds the reviewed
 > `rvoip_rtp_core::dtls_srtp` DTLS 1.2 handshake path used by `rvoip-sip`.
 > Legacy DTLS constructors under `api::{client,server,common}`, every MIKEY
@@ -46,7 +46,7 @@ The RTP Core sits at the foundation of the media transport stack, providing reli
 ### Security Architecture
 
 The library retains types for multiple security protocols. Only the paths shown
-as available below may be selected in 0.3.8.
+as available below may be selected in 0.3.10.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -254,7 +254,7 @@ async fn main() -> Result<()> {
 }
 ```
 
-## SRTP availability in the 0.3.9 candidate
+## SRTP availability in 0.3.10
 
 The reviewed low-level RTP protection path supports four exact AES-CM/HMAC
 suite identities. The dedicated DTLS-SRTP path derives those contexts after a
@@ -491,4 +491,4 @@ For rtp-core specific contributions:
 
 ## License
 
-This project is licensed under the [MIT license](LICENSE).
+This project is licensed under the [MIT license](../../../LICENSE).

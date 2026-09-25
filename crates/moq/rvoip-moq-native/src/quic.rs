@@ -268,7 +268,7 @@ fn build_transport_config() -> quinn::TransportConfig {
 pub struct Args {
     /// Listen for UDP packets on the given address.
     ///
-    /// Defaults to [::]:0 (IPv6 with dual-stack). If the default IPv6 bind
+    /// Defaults to `[::]:0` (IPv6 with dual-stack). If the default IPv6 bind
     /// fails, automatically falls back to 0.0.0.0 (IPv4-only) with a warning.
     /// Explicitly provided IPv6 addresses will not fall back.
     #[arg(long, default_value = Args::DEFAULT_BIND)]

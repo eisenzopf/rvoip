@@ -80,8 +80,8 @@ fn print_frame(dir: &str, f: &SdkSignalFrame, byte_len: usize) {
 
     if let Some(j) = &f.join {
         println!(
-            "      JOIN: protocol_version={:?} flags={:?} wants_compressed_sdp={:?} audio_session_id={:?}",
-            j.protocol_version, j.flags, j.wants_compressed_sdp, j.audio_session_id
+            "      JOIN: protocol_version={:?} flags={:?} wants_compressed_sdp={:?}",
+            j.protocol_version, j.flags, j.wants_compressed_sdp
         );
         if let Some(cd) = &j.client_details {
             println!(

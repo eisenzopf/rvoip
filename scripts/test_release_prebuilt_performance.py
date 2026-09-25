@@ -32,7 +32,7 @@ class PrebuiltPerformanceTests(unittest.TestCase):
         self.assertEqual(
             groups,
             {
-                ("perf-tests",): {
+                (("perf-tests",), True): {
                     "perf_burst_caller",
                     "perf_burst_receiver",
                 }
@@ -78,6 +78,17 @@ class PrebuiltPerformanceTests(unittest.TestCase):
             definition["runner_args"],
             ["perf_mass_teardown_stress", "--exact", "--ignored", "--nocapture"],
         )
+        self.assertTrue(definition["default_features"])
+
+    def test_canonical_2k_gate_prebuilds_no_default_features_binary(self) -> None:
+        catalog = json.loads((ROOT / "scripts/release/gates.json").read_text())
+        groups, definitions = prebuilt.selected_builds(
+            ROOT, catalog, ["perf.canonical-2k-current"]
+        )
+        self.assertEqual(groups, {(("perf-tests",), False): {"perf_call_setup_cps"}})
+        definition = definitions["perf.canonical-2k-current"]
+        self.assertFalse(definition["default_features"])
+        self.assertEqual(definition["resolved_targets"], ["perf_call_setup_cps"])
 
     def test_wildcard_targets_expand_from_real_workspace(self) -> None:
         matches = prebuilt.expand_targets(

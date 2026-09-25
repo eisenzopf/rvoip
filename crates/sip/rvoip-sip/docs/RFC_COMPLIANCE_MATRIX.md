@@ -42,9 +42,10 @@ diagnostic-only. Current execution evidence is the clean, source-matched
 | SIP-3264-OA | RFC 3264 | Audio offer/answer codec intersection, direction propagation, and an established-dialog re-INVITE carrying SDP on the wire. | Partial | `T-3264-U1`, `T-3264-U2`, `T-3264-W1` | Complex multi-stream renegotiation, all glare permutations, and WebRTC negotiation are outside this claim. |
 | SIP-3311-UPDATE | RFC 3311 | In-dialog UPDATE transmission plus `401` and `407` digest retry on the same method. | Partial | `T-3311-W1`, `T-3311-W2`, `T-3311-W3` | No complete UPDATE offer/answer, glare, retry-after, or independent-peer matrix is claimed. Ignored resilience skeletons are not evidence. |
 | SIP-3325-PAI | RFC 3325 | Configured and per-call `P-Asserted-Identity` reach the receiving endpoint, with per-call override behavior. | Partial | `T-3325-W1`, `T-3325-W2` | Trusted-domain policy, privacy interactions, and carrier certification are not claimed. |
-| SIP-3515-REFER | RFC 3515 | Blind REFER request construction, end-to-end blind transfer, and typed NOTIFY progress/final status on the wire. | Supported (bounded) | `T-3515-W1`, `T-3515-W2`, `T-3515-W3` | Attended transfer and RFC 3891 call replacement are excluded. |
+| SIP-3515-REFER | RFC 3515 | Blind REFER request construction, end-to-end blind transfer, and ordered typed NOTIFY progress/final status on the wire. | Supported (bounded) | `T-3515-W1`, `T-3515-W2`, `T-3515-W3`, `J-3515-I1` | `Refer-To` is required. Attended transfer and RFC 3891 call replacement are excluded. The Jambonz evidence remains candidate-only until protected qualification. |
 | SIP-3581-RPORT | RFC 3581 | Top Via `received`/`rport` response restamping when the inbound request carries the `rport` flag. | Partial | `T-3581-U1`, `T-3581-U2` | No live NAT, multi-hop interoperability, keepalive, ICE, or TURN claim follows from these tests. |
 | SIP-3891-REPLACES | RFC 3891 | Call replacement using `Replaces`. | Unsupported | `T-3891-C1`, `T-3891-U1` | The listed tests only construct/carry a Replaces parameter; they do not execute replacement semantics and therefore do not elevate the status. |
+| SIP-3892-REFERRED-BY | RFC 3892 | Parse and expose a typed `Referred-By` header and, when supplied during a blind transfer, copy it unchanged into the referenced INVITE. | Partial | `T-3892-W1`, `J-3892-I1` | RFC 3892 makes `Referred-By` optional; RVoIP does not require it generally. The propagation result is candidate Jambonz interop evidence until protected `0.3.10` qualification. Identity signing, privacy behavior, and attended transfer are not claimed. |
 | SIP-4028-TIMER | RFC 4028 | Successful session refresh event delivery and refresh-failure event delivery. | Partial | `T-4028-W1`, `T-4028-W2` | Negotiation roles, `422`/Min-SE, proxy behavior, and the complete expiration/race matrix are not claimed. |
 | SIP-4475-TORTURE | RFC 4475 | Fixture-driven acceptance of included well-formed messages and rejection of included malformed messages. | Supported with exclusions | `T-4475-U1`, `T-4475-U2` | Well-formed fixtures `3.1.1.2_intmeth.sip`, `4.10_ipv6-bug-abnf-3-colons.sip`, and `3.1.1.1_wsinv.sip` are excluded. The malformed exclusion list is empty. |
 | SIP-5626-OUTBOUND | RFC 5626 | Outbound Contact construction plus registrar-side opaque exact-flow ownership, ordered multi-flow selection, replacement rollback, close degradation, and recoverable exact-flow failover. | Partial | `T-5626-C1`, `T-5626-U1`–`T-5626-U7` | Protected evidence from two independent UAs behind real NAT, including rebinding and restart recovery, is still required before this becomes a supported release claim. See `docs/sip/REMOTE_ENDPOINT_PROFILE.md`. |
@@ -87,6 +88,7 @@ these named tests has an adjacent `#[ignore]` attribute as of this matrix.
 | `T-3581-U2` | unit | `crates/sip/sip-dialog/tests/rport_restamp_response.rs::second_via_in_chain_is_not_modified` | Only the top Via is restamped. |
 | `T-3891-C1` | construction | `crates/sip/sip-dialog/tests/refer_handling_test.rs::test_refer_with_replaces_header` | A REFER target can contain a Replaces parameter; no replacement executes. |
 | `T-3891-U1` | unit | `crates/sip/sip-dialog/tests/refer_transfer_tests.rs::test_transfer_request_with_replaces` | A transfer request carries Replaces data; no replacement executes. |
+| `T-3892-W1` | wire | `crates/sip/rvoip-sip/tests/header_inspection_integration.rs::inbound_invite_wire_carries_application_routing_headers` | An application-supplied `Referred-By` reaches the peer on the wire and remains available through inbound header inspection. |
 | `T-4028-W1` | wire | `crates/sip/rvoip-sip/tests/session_timer_integration.rs::session_timer_refresh_emits_event` | A session refresh produces the success event. |
 | `T-4028-W2` | wire | `crates/sip/rvoip-sip/tests/session_timer_failure_integration.rs::session_timer_refresh_failure_emits_event` | Refresh failure produces the failure event. |
 | `T-4475-U1` | unit | `crates/sip/sip-core/tests/rfc_compliance/torture_test.rs::test_wellformed_messages` | Included well-formed fixtures parse. |
@@ -124,6 +126,17 @@ these named tests has an adjacent `#[ignore]` attribute as of this matrix.
 | `T-SRTP-W1` | wire | `crates/sip/rvoip-sip/tests/srtp_call_integration.rs::srtp_call_negotiates_and_establishes_end_to_end` | SDES-SRTP negotiation and end-to-end protected media. |
 | `T-SRTP-U1` | unit | `crates/media/rtp-core/tests/malformed_input.rs::srtp_suite_with_oversized_tag_length_is_rejected` | Invalid SRTP authentication-tag size is rejected. |
 | `T-SRTP-W2` | wire | `crates/sip/rvoip-sip/tests/perf/perf_srtp_overhead.rs::perf_srtp_overhead` | Executable SRTP/RTP overhead comparison on the media path. |
+
+## Candidate external interoperability evidence
+
+These gates execute against independently implemented peers. A local run is
+diagnostic; only a protected exact-candidate artifact promotes the result into
+published-release evidence.
+
+| Evidence ID | Strength | Executable gate | What it demonstrates |
+|---|---|---|---|
+| `J-3515-I1` | interop | `examples/pbx/run.sh --pbx jambonz --api all --scenario blind_transfer --transport UDP` | Across all three public SIP APIs, Jambonz forwards REFER, RVoIP accepts it, the implicit subscription emits ordered `100`/progress/terminal NOTIFY requests, a referenced call is established, and both dialogs clean up. |
+| `J-3892-I1` | interop | `examples/pbx/run.sh --pbx jambonz --api all --scenario blind_transfer --transport UDP` | A supplied typed `Referred-By` survives Jambonz forwarding and is copied unchanged into the referenced INVITE. |
 
 ## July 20 historical run evidence
 

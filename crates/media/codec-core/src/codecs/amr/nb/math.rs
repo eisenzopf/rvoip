@@ -5,11 +5,11 @@
 //!
 //! Every fixed-point speech codec in this crate needs `log2`, `2^x` and a
 //! square root, and every one of them tabulates those functions over its own
-//! points. G.729's live in [`crate::codecs::g729::impls::math`]; AMR-WB's in
+//! points. G.729's live in its private `impls::math` module; AMR-WB's in
 //! `wb::math`; these are AMR-NB's. Sharing any pair would give a codec that
 //! sounds nearly right and fails conformance, so the tables — and therefore the
 //! code that interpolates them — stay with their codec. Only the genuinely
-//! table-free arithmetic is shared, in [`crate::fixed_point`].
+//! table-free arithmetic is shared in the private `crate::fixed_point` module.
 //!
 //! # The common shape
 //!

@@ -99,11 +99,11 @@ async fn main() -> Result<()> {
 
     println!("✅ PBX API Key created:");
     println!("   Name: {}", pbx_key.name);
-    println!("   Key: {}", pbx_raw);
+    println!("   Key: <redacted; store this value in a secret manager>");
     println!("   Permissions: {:?}", pbx_key.permissions);
 
     // Monitoring API Key - read only, expires
-    let (monitor_key, monitor_raw) = api_key_store
+    let (monitor_key, _monitor_raw) = api_key_store
         .create_api_key(CreateApiKeyRequest {
             user_id: monitor_account.id.clone(),
             name: "Monitoring Read-Only Key".to_string(),
@@ -114,12 +114,12 @@ async fn main() -> Result<()> {
 
     println!("\n✅ Monitoring API Key created:");
     println!("   Name: {}", monitor_key.name);
-    println!("   Key: {}", monitor_raw);
+    println!("   Key: <redacted; store this value in a secret manager>");
     println!("   Permissions: {:?}", monitor_key.permissions);
     println!("   Expires: {:?}", monitor_key.expires_at);
 
     // Bot API Key - limited scope
-    let (bot_key, bot_raw) = api_key_store
+    let (bot_key, _bot_raw) = api_key_store
         .create_api_key(CreateApiKeyRequest {
             user_id: bot_account.id.clone(),
             name: "Bot Automation Key".to_string(),
@@ -130,7 +130,7 @@ async fn main() -> Result<()> {
 
     println!("\n✅ Bot API Key created:");
     println!("   Name: {}", bot_key.name);
-    println!("   Key: {}", bot_raw);
+    println!("   Key: <redacted; store this value in a secret manager>");
     println!("   Permissions: {:?}", bot_key.permissions);
     println!("   Expires: {:?}", bot_key.expires_at);
 
@@ -159,7 +159,7 @@ async fn main() -> Result<()> {
     println!("\n🔄 API Key rotation example...");
 
     // Create new key before revoking old one
-    let (_new_pbx_key, new_pbx_raw) = api_key_store
+    let (_new_pbx_key, _new_pbx_raw) = api_key_store
         .create_api_key(CreateApiKeyRequest {
             user_id: pbx_account.id.clone(),
             name: "PBX Master Key v2".to_string(),
@@ -168,7 +168,7 @@ async fn main() -> Result<()> {
         })
         .await?;
 
-    println!("✅ New API key created: {}", new_pbx_raw);
+    println!("✅ New API key created: <redacted; rotate the stored secret>");
 
     // Revoke old key
     api_key_store.revoke_api_key(&pbx_key.id).await?;
@@ -190,14 +190,14 @@ async fn main() -> Result<()> {
     println!("\n   REST API Request:");
     println!("   ```");
     println!("   POST /api/v1/calls");
-    println!("   X-API-Key: {}", &new_pbx_raw[..20]);
+    println!("   X-API-Key: $RVOIP_API_KEY");
     println!("   Content-Type: application/json");
     println!("   ```");
 
     println!("\n   SIP with API Key (custom header):");
     println!("   ```");
     println!("   REGISTER sip:pbx@voip.example.com SIP/2.0");
-    println!("   X-API-Key: {}", &new_pbx_raw[..20]);
+    println!("   X-API-Key: $RVOIP_API_KEY");
     println!("   ```");
 
     // Security best practices

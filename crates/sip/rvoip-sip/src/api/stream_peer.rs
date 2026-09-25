@@ -4,7 +4,7 @@
 //! with two ergonomic pieces:
 //!
 //! - [`PeerControl`] for commands such as `invite`, `accept`, registration, and
-//!   early media. Chain `.with_extra_headers(...)` on the `invite` builder to
+//!   early media. Chain `.with_headers(...)` on the `invite` builder to
 //!   attach caller-supplied typed headers to the very first INVITE for PBX/SBC
 //!   integrations that require non-standard or vendor headers.
 //! - [`EventReceiver`] for typed application events.
