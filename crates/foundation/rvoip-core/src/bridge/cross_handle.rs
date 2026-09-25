@@ -154,9 +154,17 @@ pub struct CrossBridgeHandle {
     pub b: ConnectionId,
     pub created_at: DateTime<Utc>,
     backend: CrossBridgeBackend,
+    pub(crate) peer_ticket: Option<super::peer_switch::PeerRouteTicket>,
+    pub(crate) peer_transport_fenced: bool,
 }
 
 impl CrossBridgeHandle {
+    /// Shared speaking-route ticket, when this handle was constructed by the
+    /// peer-gated orchestrator path. Legacy constructors have no such boundary.
+    pub fn peer_route_ticket(&self) -> Option<super::peer_switch::PeerRouteTicket> {
+        self.peer_ticket.clone()
+    }
+
     pub fn new(
         id: BridgeId,
         a: ConnectionId,
@@ -169,6 +177,8 @@ impl CrossBridgeHandle {
             a,
             b,
             created_at: Utc::now(),
+            peer_ticket: None,
+            peer_transport_fenced: false,
             backend: CrossBridgeBackend::Pumps {
                 a_to_b,
                 b_to_a,
@@ -195,6 +205,8 @@ impl CrossBridgeHandle {
             a,
             b,
             created_at: Utc::now(),
+            peer_ticket: None,
+            peer_transport_fenced: false,
             backend: CrossBridgeBackend::Pumps {
                 a_to_b,
                 b_to_a,
@@ -221,6 +233,8 @@ impl CrossBridgeHandle {
             a,
             b,
             created_at: Utc::now(),
+            peer_ticket: None,
+            peer_transport_fenced: false,
             backend: CrossBridgeBackend::LegacyMediaGraphs {
                 a_graph,
                 b_graph,
@@ -247,6 +261,8 @@ impl CrossBridgeHandle {
             a,
             b,
             created_at: Utc::now(),
+            peer_ticket: None,
+            peer_transport_fenced: false,
             backend: CrossBridgeBackend::ManagedMediaGraphs {
                 a_graph: Some(a_graph),
                 b_graph: Some(b_graph),
@@ -280,6 +296,8 @@ impl CrossBridgeHandle {
             a,
             b,
             created_at: Utc::now(),
+            peer_ticket: None,
+            peer_transport_fenced: false,
             backend: CrossBridgeBackend::ManagedMediaGraphs {
                 a_graph,
                 b_graph,
@@ -413,6 +431,9 @@ impl CrossBridgeHandle {
     /// Converge both media directions before the orchestrator reports the
     /// bridge removed. Drop remains a best-effort fallback for cancellation.
     pub async fn stop(&mut self) -> Result<()> {
+        if let Some(ticket) = &self.peer_ticket {
+            ticket.retire_if_current();
+        }
         match &mut self.backend {
             CrossBridgeBackend::Pumps { a_to_b, b_to_a, .. } => {
                 a_to_b.abort();
@@ -513,6 +534,9 @@ impl CrossBridgeHandle {
 
 impl Drop for CrossBridgeHandle {
     fn drop(&mut self) {
+        if let Some(ticket) = &self.peer_ticket {
+            ticket.retire_if_current();
+        }
         match &mut self.backend {
             CrossBridgeBackend::Pumps { a_to_b, b_to_a, .. } => {
                 a_to_b.abort();
@@ -561,6 +585,39 @@ mod tests {
             new_from_pt: from,
             new_to_pt: to,
             ack: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn bridge_cleanup_retires_only_its_authoritative_peer_ticket() {
+        use crate::bridge::peer_switch::PeerRouteTicket;
+        for explicit_stop in [false, true] {
+            for committed_successor in [false, true] {
+                let old = PeerRouteTicket::initial();
+                let next = old.stage().unwrap();
+                // Empty route ownership isolates the handle lifecycle hook.
+                let mut handle = CrossBridgeHandle::with_directional_managed_media_graphs(
+                    BridgeId::new(),
+                    ConnectionId::new(),
+                    ConnectionId::new(),
+                    None,
+                    None,
+                );
+                handle.peer_ticket = Some(old.clone());
+                if committed_successor {
+                    assert!(next.commit_from(&old));
+                }
+                if explicit_stop {
+                    handle.stop().await.unwrap();
+                }
+                drop(handle);
+                assert!(!old.is_active());
+                if committed_successor {
+                    assert!(next.is_active());
+                } else {
+                    assert!(!next.commit_from(&old));
+                }
+            }
         }
     }
 

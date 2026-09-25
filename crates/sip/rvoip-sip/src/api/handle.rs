@@ -1310,7 +1310,9 @@ impl SessionHandle {
                     }
                     delivery = send_rx.recv() => delivery,
                 };
-                let Some(mut delivery) = delivery else { break; };
+                let Some(mut delivery) = delivery else {
+                    break;
+                };
                 let accepted_generation = *send_generation.borrow_and_update();
                 if send_rx.is_closed() {
                     break;
@@ -1342,10 +1344,7 @@ impl SessionHandle {
             }
         });
 
-        Ok(AudioStream::new(
-            send_tx,
-            AudioReceiver::new(recv_rx),
-        ))
+        Ok(AudioStream::new(send_tx, AudioReceiver::new(recv_rx)))
     }
 
     // ===== State / info =====

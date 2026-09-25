@@ -8,6 +8,55 @@ use serde_json::{Map, Value};
 
 use crate::error::{Result, VapiError};
 
+/// A provider call already created and verified by the host's durable startup
+/// coordinator. This is a transport handoff, not permission to create a call.
+/// Never construct it from public request/model arguments. The host must match
+/// the call, organization, assistant and transport to its protected receipt.
+#[derive(Clone)]
+pub struct VapiExistingCall {
+    pub(crate) options: VapiCallOptions,
+    pub(crate) call_id: String,
+    pub(crate) websocket_url: url::Url,
+    pub(crate) api_key: Option<crate::VapiApiKey>,
+}
+
+impl VapiExistingCall {
+    pub fn new(options: VapiCallOptions, call_id: String, websocket_url: url::Url) -> Result<Self> {
+        options.validate()?;
+        if call_id.trim().is_empty()
+            || call_id.len() > 512
+            || call_id.chars().any(char::is_control)
+            || !websocket_url.username().is_empty()
+            || websocket_url.password().is_some()
+            || websocket_url.fragment().is_some()
+            || !matches!(websocket_url.scheme(), "wss" | "ws")
+        {
+            return Err(VapiError::InvalidConfiguration(
+                "invalid existing-call transport",
+            ));
+        }
+        Ok(Self {
+            options,
+            call_id,
+            websocket_url,
+            api_key: None,
+        })
+    }
+
+    /// Bind this handoff to its tenant's WebSocket credential. It never becomes
+    /// the adapter's default key and is redacted and zeroized with the route.
+    pub fn with_api_key(mut self, key: crate::VapiApiKey) -> Self {
+        self.api_key = Some(key);
+        self
+    }
+}
+
+impl fmt::Debug for VapiExistingCall {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("VapiExistingCall([redacted])")
+    }
+}
+
 /// Raw audio format on the Vapi WebSocket.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum VapiAudioFormat {
@@ -180,6 +229,7 @@ pub enum VapiPeerFailurePolicy {
 /// Per-call options carried opaquely through `OriginateRequest`.
 #[derive(Clone)]
 pub struct VapiCallOptions {
+    pub(crate) api_key: Option<crate::VapiApiKey>,
     pub assistant: VapiAssistant,
     pub audio_format: VapiAudioFormat,
     pub name: Option<String>,
@@ -191,11 +241,18 @@ impl VapiCallOptions {
     pub fn new(assistant: VapiAssistant) -> Self {
         Self {
             assistant,
+            api_key: None,
             audio_format: VapiAudioFormat::default(),
             name: None,
             metadata: None,
             peer_failure_policy: VapiPeerFailurePolicy::default(),
         }
+    }
+
+    /// Supply a credential for this call only; never changes the shared adapter.
+    pub fn with_api_key(mut self, key: crate::VapiApiKey) -> Self {
+        self.api_key = Some(key);
+        self
     }
 
     pub fn with_audio_format(mut self, audio_format: VapiAudioFormat) -> Self {
@@ -304,6 +361,30 @@ pub(crate) struct AddedMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn existing_call_rejects_unsafe_transport_metadata() {
+        for raw in [
+            "https://example.test/socket",
+            "wss://user:password@example.test/socket",
+            "wss://example.test/socket#fragment",
+        ] {
+            assert!(VapiExistingCall::new(
+                VapiCallOptions::new(VapiAssistant::saved("assistant")),
+                "call".into(),
+                url::Url::parse(raw).unwrap()
+            )
+            .is_err());
+        }
+        for id in ["", "  ", "call\nsecret"] {
+            assert!(VapiExistingCall::new(
+                VapiCallOptions::new(VapiAssistant::saved("assistant")),
+                id.into(),
+                url::Url::parse("wss://example.test/socket").unwrap()
+            )
+            .is_err());
+        }
+    }
 
     #[test]
     fn saved_and_transient_payloads_match_vapi_shape() {

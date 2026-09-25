@@ -398,15 +398,10 @@ mod rtp_playout_tests {
         let start = Instant::now();
         let mut playout = DecodedPlayoutQueue::new();
         for timestamp in [0, 160, 320] {
-            assert!(playout.push(
-                AudioFrame::new(vec![0; 160], 8_000, 1, timestamp),
-                start,
-            ));
+            assert!(playout.push(AudioFrame::new(vec![0; 160], 8_000, 1, timestamp), start,));
         }
         assert_eq!(playout.pop_due(start).expect("first frame").timestamp, 0);
-        assert!(playout
-            .pop_due(start + Duration::from_millis(19))
-            .is_none());
+        assert!(playout.pop_due(start + Duration::from_millis(19)).is_none());
         assert_eq!(
             playout
                 .pop_due(start + Duration::from_millis(20))
@@ -422,9 +417,7 @@ mod rtp_playout_tests {
         let mut playout = DecodedPlayoutQueue::new();
         assert!(playout.push(AudioFrame::new(vec![0; 160], 8_000, 1, 0), start));
         assert!(playout.pop_due(start).is_some());
-        assert!(playout
-            .pop_due(start + Duration::from_secs(5))
-            .is_none());
+        assert!(playout.pop_due(start + Duration::from_secs(5)).is_none());
 
         assert!(playout.push(
             AudioFrame::new(vec![1; 160], 8_000, 1, 40_000),

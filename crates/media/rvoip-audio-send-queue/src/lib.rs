@@ -605,4 +605,3 @@ mod tests {
         assert!(delivered_rx.try_recv().is_err());
     }
 }
-

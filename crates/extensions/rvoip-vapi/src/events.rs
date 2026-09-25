@@ -15,6 +15,7 @@ pub enum VapiEvent {
     SpeechUpdate {
         status: String,
         role: Option<String>,
+        turn: Option<u64>,
     },
     Transcript {
         role: Option<String>,
@@ -58,6 +59,7 @@ impl VapiEvent {
             "speech-update" => Self::SpeechUpdate {
                 status: string_field(&value, "status").unwrap_or_default(),
                 role: string_field(&value, "role"),
+                turn: value.get("turn").and_then(Value::as_u64),
             },
             "transcript" => Self::Transcript {
                 role: string_field(&value, "role"),
@@ -89,7 +91,7 @@ impl VapiEvent {
     pub(crate) fn is_user_speech_start(&self) -> bool {
         matches!(
             self,
-            Self::SpeechUpdate { status, role }
+            Self::SpeechUpdate { status, role, .. }
                 if status.eq_ignore_ascii_case("started")
                     && role.as_deref().is_some_and(|role| role.eq_ignore_ascii_case("user"))
         )
@@ -118,7 +120,7 @@ impl fmt::Debug for VapiEvent {
                 .field("status_present", &!status.is_empty())
                 .field("ended_reason_present", &ended_reason.is_some())
                 .finish(),
-            Self::SpeechUpdate { status, role } => formatter
+            Self::SpeechUpdate { status, role, .. } => formatter
                 .debug_struct("SpeechUpdate")
                 .field("status_present", &!status.is_empty())
                 .field("role_present", &role.is_some())
@@ -227,5 +229,29 @@ mod tests {
         let debug = format!("{event:?}");
         assert!(!debug.contains("role-canary"));
         assert!(!debug.contains("content-canary"));
+    }
+    #[test]
+    fn speech_events_preserve_provider_turn_including_zero() {
+        for turn in [0, 1, 42, u64::MAX] {
+            let event = VapiEvent::parse(
+                &serde_json::json!({
+                    "type":"speech-update", "status":"started", "role":"user", "turn":turn
+                })
+                .to_string(),
+            );
+            assert!(
+                matches!(event, VapiEvent::SpeechUpdate { turn: Some(value), .. } if value == turn)
+            );
+            assert!(event.is_user_speech_start());
+        }
+        for turn in [Value::Null, serde_json::json!(-1), serde_json::json!("0")] {
+            let event = VapiEvent::parse(
+                &serde_json::json!({
+                    "type":"speech-update", "status":"started", "role":"user", "turn":turn
+                })
+                .to_string(),
+            );
+            assert!(matches!(event, VapiEvent::SpeechUpdate { turn: None, .. }));
+        }
     }
 }

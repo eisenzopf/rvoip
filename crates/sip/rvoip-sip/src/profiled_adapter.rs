@@ -845,6 +845,17 @@ impl ConnectionAdapter for ProfiledSipAdapter {
             .await
     }
 
+    async fn set_inbound_audio_codecs(
+        &self,
+        connection_id: ConnectionId,
+        codecs: Vec<String>,
+    ) -> CoreResult<()> {
+        self.owner(&connection_id)?
+            .adapter()
+            .set_inbound_audio_codecs(connection_id, codecs)
+            .await
+    }
+
     async fn renegotiate_media(
         &self,
         connection_id: ConnectionId,

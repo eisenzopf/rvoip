@@ -92,9 +92,7 @@ pub struct AudioSender {
 }
 
 impl AudioSender {
-    pub(crate) fn channel(
-        capacity: usize,
-    ) -> (Self, rvoip_audio_send_queue::Receiver<AudioFrame>) {
+    pub(crate) fn channel(capacity: usize) -> (Self, rvoip_audio_send_queue::Receiver<AudioFrame>) {
         let (tx, rx) = rvoip_audio_send_queue::channel(capacity);
         (Self { tx }, rx)
     }

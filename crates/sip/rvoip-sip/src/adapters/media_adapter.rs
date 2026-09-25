@@ -2711,12 +2711,13 @@ impl MediaAdapter {
             None => self.get_local_port(&session_id)?,
         };
 
-        let formats = compute_answer_formats(
+        let formats = compute_answer_formats_with_policy(
             &parsed_offer,
             &self.effective_offered_formats(),
             self.strict_codec_matching,
             self.offer_srtp,
             self.srtp_required,
+            session.inbound_audio_codecs.as_deref(),
         )?;
         let negotiated_payload_type = select_primary_audio_payload(&formats)
             .ok_or_else(|| bounded_sdp_failure("remote-offer", "missing-primary-payload"))?;
@@ -4386,6 +4387,8 @@ impl MediaAdapter {
             || self.effective_offered_formats(),
             |requested| self.effective_offered_formats_for(requested),
         );
+        let format_pts =
+            apply_inbound_offer_policy(format_pts, session.inbound_audio_codecs.as_deref())?;
         let format_strings: Vec<String> = format_pts.iter().map(|pt| pt.to_string()).collect();
         let formats_ref: Vec<&str> = format_strings.iter().map(|s| s.as_str()).collect();
         let mut sdp_builder = SdpBuilder::new("Session")
@@ -5292,6 +5295,8 @@ impl MediaAdapter {
             || self.effective_offered_formats(),
             |requested| self.effective_offered_formats_for(requested),
         );
+        let format_pts =
+            apply_inbound_offer_policy(format_pts, session.inbound_audio_codecs.as_deref())?;
         let format_strings: Vec<String> = format_pts.iter().map(|pt| pt.to_string()).collect();
         let formats_ref: Vec<&str> = format_strings.iter().map(|s| s.as_str()).collect();
         let mut media_builder = SdpBuilder::new("Session")
@@ -5546,26 +5551,57 @@ impl Clone for MediaAdapter {
     }
 }
 
-/// Sprint 3.5 — compute the answer's `m=audio` format list from the
-/// offer + our policy flags. Pure (no `MediaAdapter` state) so unit
-/// tests can exercise the strict-vs-permissive logic without standing
-/// up a coordinator.
-///
-/// Returns the formats in the order they should appear on the wire.
-/// Caller is responsible for emitting the matching `a=rtpmap:` /
-/// `a=fmtp:` lines.
-///
-/// `Err(SDPNegotiationFailed)` when:
-/// - Strict mode + offer carries no overlap with our supported set
-///   → state machine surfaces this as `488 Not Acceptable Here`.
-/// - Strict mode + matcher rejects on SRTP policy (e.g. `require_srtp`
-///   set + offer is plain RTP/AVP).
+/// Keep local re-offers inside the inbound call's pinned codec policy.
+fn apply_inbound_offer_policy(formats: Vec<u8>, policy: Option<&[String]>) -> Result<Vec<u8>> {
+    let Some(policy) = policy else {
+        return Ok(formats);
+    };
+    let mut selected = Vec::new();
+    for codec in policy {
+        let payloads: &[u8] = match codec.as_str() {
+            "PCMU" => &[0],
+            "PCMA" => &[8],
+            "opus" => &[111],
+            "AMR-WB" => &[AMR_WB_BE_PT, AMR_WB_OA_PT],
+            _ => return Err(bounded_sdp_failure("local-offer", "unknown-policy-codec")),
+        };
+        selected.extend(payloads.iter().copied().filter(|pt| formats.contains(pt)));
+    }
+    if selected.is_empty() {
+        return Err(bounded_sdp_failure("local-offer", "no-policy-overlap"));
+    }
+    selected.extend(formats.into_iter().filter(|pt| matches!(pt, 13 | 101)));
+    Ok(selected)
+}
+
+/// Compute the answer's offered intersection, retaining the existing peer
+/// preference order when no per-connection policy was installed. The caller
+/// emits matching rtpmap/fmtp attributes. No overlap or an incompatible SRTP
+/// policy fails negotiation instead of inventing an unoffered payload.
 pub(crate) fn compute_answer_formats(
     offer: &SdpSession,
     offered_codecs: &[u8],
     strict: bool,
     offer_srtp: bool,
     srtp_required: bool,
+) -> Result<Vec<String>> {
+    compute_answer_formats_with_policy(
+        offer,
+        offered_codecs,
+        strict,
+        offer_srtp,
+        srtp_required,
+        None,
+    )
+}
+
+fn compute_answer_formats_with_policy(
+    offer: &SdpSession,
+    offered_codecs: &[u8],
+    strict: bool,
+    offer_srtp: bool,
+    srtp_required: bool,
+    policy: Option<&[String]>,
 ) -> Result<Vec<String>> {
     let mut supported: Vec<String> = offered_codecs.iter().map(|pt| pt.to_string()).collect();
 
@@ -5672,6 +5708,7 @@ pub(crate) fn compute_answer_formats(
     };
 
     let mut primary = None;
+    let mut primary_rank = usize::MAX;
     let mut auxiliary = Vec::new();
     for format in candidates {
         let payload_type = format
@@ -5682,8 +5719,25 @@ pub(crate) fn compute_answer_formats(
         }
         if matches!(payload_type, 13 | 101) {
             auxiliary.push(format);
-        } else if primary.is_none() {
-            primary = Some(format);
+        } else {
+            let rank = match policy {
+                Some(policy) => {
+                    let Ok((codec, _, _)) =
+                        negotiated_audio_shape_from_sdp(offer, payload_type, false)
+                    else {
+                        continue;
+                    };
+                    let Some(rank) = policy.iter().position(|allowed| allowed == &codec) else {
+                        continue;
+                    };
+                    rank
+                }
+                None => 0,
+            };
+            if primary.is_none() || rank < primary_rank {
+                primary = Some(format);
+                primary_rank = rank;
+            }
         }
     }
 
@@ -5706,6 +5760,140 @@ mod sdp_format_tests {
     //! second fixture for that case.
 
     use super::*;
+
+    #[test]
+    fn inbound_trunk_policies_are_isolated_and_order_the_offered_intersection() {
+        let offer = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16000, "RTP/AVP")
+            .formats(&["0", "8", "101"])
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("8", "PCMA/8000")
+            .rtpmap("101", "telephone-event/8000")
+            .done()
+            .build()
+            .unwrap();
+        let alaw_first = vec!["PCMA".into(), "PCMU".into()];
+        let ulaw_only = vec!["PCMU".into()];
+        let answer = |policy: &[String]| {
+            compute_answer_formats_with_policy(
+                &offer,
+                &[0, 8, 101],
+                true,
+                false,
+                false,
+                Some(policy),
+            )
+            .unwrap()
+        };
+        assert_eq!(answer(&alaw_first), vec!["8", "101"]);
+        assert_eq!(answer(&ulaw_only), vec!["0", "101"]);
+        assert_eq!(answer(&alaw_first), vec!["8", "101"]);
+        assert!(compute_answer_formats_with_policy(
+            &offer,
+            &[0, 8, 101],
+            true,
+            false,
+            false,
+            Some(&["opus".into()])
+        )
+        .is_err());
+        // Codec policy cannot relax the existing requirement for encrypted media.
+        assert!(compute_answer_formats_with_policy(
+            &offer,
+            &[0, 8, 101],
+            true,
+            true,
+            true,
+            Some(&alaw_first)
+        )
+        .is_err());
+        assert_eq!(
+            compute_answer_formats(&offer, &[0, 8, 101], true, false, false).unwrap(),
+            vec!["0", "101"]
+        );
+    }
+
+    #[cfg(feature = "opus")]
+    #[test]
+    fn inbound_trunk_policy_keeps_remote_dynamic_payload_identity() {
+        let offer = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16000, "RTP/AVP")
+            .formats(&["0", "96", "101"])
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("96", "opus/48000/2")
+            .rtpmap("101", "telephone-event/8000")
+            .done()
+            .build()
+            .unwrap();
+        let formats = compute_answer_formats_with_policy(
+            &offer,
+            &[111, 0, 101],
+            true,
+            false,
+            false,
+            Some(&["opus".into(), "PCMU".into()]),
+        )
+        .unwrap();
+        assert_eq!(formats, vec!["96", "101"]);
+    }
+
+    #[test]
+    fn inbound_trunk_policy_persists_for_local_reoffers() {
+        assert_eq!(
+            apply_inbound_offer_policy(vec![0, 8, 111, 101], Some(&["PCMA".into()])).unwrap(),
+            vec![8, 101]
+        );
+        assert!(apply_inbound_offer_policy(vec![0, 101], Some(&["PCMA".into()])).is_err());
+        assert_eq!(
+            apply_inbound_offer_policy(vec![0, 8, 101], None).unwrap(),
+            vec![0, 8, 101]
+        );
+    }
+
+    #[cfg(feature = "amr-wb")]
+    #[test]
+    fn inbound_trunk_policy_matches_amr_by_mapping_not_local_payload_number() {
+        let offer = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16000, "RTP/AVP")
+            .formats(&["0", "111", "101"])
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("111", "AMR-WB/16000")
+            .fmtp("111", "octet-align=1")
+            .rtpmap("101", "telephone-event/8000")
+            .done()
+            .build()
+            .unwrap();
+        assert_eq!(
+            compute_answer_formats_with_policy(
+                &offer,
+                &[0, 111, AMR_WB_OA_PT, 101],
+                true,
+                false,
+                false,
+                Some(&["AMR-WB".into(), "PCMU".into()])
+            )
+            .unwrap(),
+            vec!["111", "101"]
+        );
+        assert!(compute_answer_formats_with_policy(
+            &offer,
+            &[0, 111, AMR_WB_OA_PT, 101],
+            true,
+            false,
+            false,
+            Some(&["opus".into()])
+        )
+        .is_err());
+    }
 
     #[cfg(feature = "dtls-srtp")]
     #[test]

@@ -475,6 +475,7 @@ pub mod media_stream;
 /// Typed, redacted SIP options for transport-neutral outbound origination.
 pub mod originate;
 pub mod profiled_adapter;
+mod response_diagnostics;
 pub mod server;
 
 // These modules remain public for existing internal-style integrations, but

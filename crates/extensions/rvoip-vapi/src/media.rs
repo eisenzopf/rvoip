@@ -60,6 +60,8 @@ pub(crate) struct VapiMediaStream {
     incoming_rx: Arc<Mutex<Option<mpsc::Receiver<MediaFrame>>>>,
     outgoing_tx: mpsc::Sender<MediaFrame>,
     outgoing_rx: Mutex<Option<mpsc::Receiver<MediaFrame>>>,
+    peer_tx: mpsc::Sender<rvoip_core::peer_media::PeerMediaFrame>,
+    peer_rx: Mutex<Option<mpsc::Receiver<rvoip_core::peer_media::PeerMediaFrame>>>,
     active: AtomicBool,
     closed: AtomicBool,
     cancel: CancellationToken,
@@ -74,6 +76,7 @@ impl VapiMediaStream {
     ) -> Arc<Self> {
         let (incoming_tx, incoming_rx) = mpsc::channel(incoming_capacity);
         let (outgoing_tx, outgoing_rx) = mpsc::channel(outgoing_capacity);
+        let (peer_tx, peer_rx) = mpsc::channel(outgoing_capacity);
         Arc::new(Self {
             id: StreamId::new(),
             format,
@@ -81,10 +84,22 @@ impl VapiMediaStream {
             incoming_rx: Arc::new(Mutex::new(Some(incoming_rx))),
             outgoing_tx,
             outgoing_rx: Mutex::new(Some(outgoing_rx)),
+            peer_tx,
+            peer_rx: Mutex::new(Some(peer_rx)),
             active: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             cancel,
         })
+    }
+
+    pub(crate) fn take_peer_receiver(
+        &self,
+    ) -> Result<mpsc::Receiver<rvoip_core::peer_media::PeerMediaFrame>> {
+        self.peer_rx
+            .lock()
+            .map_err(|_| VapiError::NotActive)?
+            .take()
+            .ok_or(VapiError::NotActive)
     }
 
     pub(crate) fn activate(&self) {
@@ -220,6 +235,15 @@ impl MediaStream for VapiMediaStream {
             return Err(RvoipError::InvalidState("Vapi media stream is not active"));
         }
         Ok(self.outgoing_tx.clone())
+    }
+
+    fn try_peer_frames_out(
+        &self,
+    ) -> RvoipResult<mpsc::Sender<rvoip_core::peer_media::PeerMediaFrame>> {
+        if !self.source_ready() {
+            return Err(RvoipError::InvalidState("Vapi media stream is not active"));
+        }
+        Ok(self.peer_tx.clone())
     }
 
     fn quality_snapshot(&self) -> QualitySnapshot {

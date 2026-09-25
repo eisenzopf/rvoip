@@ -1502,11 +1502,11 @@ impl Drop for MediaTapRoute {
 #[derive(Default)]
 pub(crate) struct MediaTapHandle {
     routes: Vec<MediaTapRoute>,
-    tasks: Vec<tokio::task::AbortHandle>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl MediaTapHandle {
-    fn push(&mut self, route: MediaTapRoute, task: tokio::task::AbortHandle) {
+    fn push(&mut self, route: MediaTapRoute, task: tokio::task::JoinHandle<()>) {
         self.routes.push(route);
         self.tasks.push(task);
     }
@@ -1537,6 +1537,36 @@ impl MediaTapHandle {
         for route in routes {
             let _ = route.remove().await;
         }
+    }
+
+    /// Stop accepting recording frames, let every graph queue reach its
+    /// consumer, and wait for the consumers to finish writing before the sink
+    /// is closed. A bounded wait prevents a misbehaving external sink from
+    /// stalling recording teardown forever.
+    async fn drain_and_wait(&mut self) -> bool {
+        let routes = self
+            .routes
+            .drain(..)
+            .filter_map(|mut route| route.take())
+            .collect::<Vec<_>>();
+        let mut complete = true;
+        for route in routes {
+            match route.drain().await {
+                Ok(true) => {}
+                Ok(false) | Err(_) => complete = false,
+            }
+        }
+        for mut task in self.tasks.drain(..) {
+            match tokio::time::timeout(Duration::from_secs(3), &mut task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => complete = false,
+                Err(_) => {
+                    complete = false;
+                    task.abort();
+                }
+            }
+        }
+        complete
     }
 }
 
@@ -2800,6 +2830,21 @@ impl Orchestrator {
             ));
         }
         Ok(ticket)
+    }
+
+    pub(crate) async fn set_pending_inbound_audio_codecs(
+        &self,
+        connection_id: &ConnectionId,
+        transport: Transport,
+        lifecycle_generation: u64,
+        codecs: Vec<String>,
+    ) -> Result<()> {
+        self.pending_inbound_lifecycle(connection_id, transport, lifecycle_generation)?;
+        self.adapter(transport)?
+            .set_inbound_audio_codecs(connection_id.clone(), codecs)
+            .await?;
+        self.pending_inbound_lifecycle(connection_id, transport, lifecycle_generation)?;
+        Ok(())
     }
 
     pub(crate) fn install_staged_inbound_data(
@@ -4286,7 +4331,7 @@ impl Orchestrator {
     /// signals DTMF out-of-band (e.g. UCTP `dtmf.send` envelope) and
     /// the bridged peer needs to inject the corresponding RFC 4733
     /// telephone-event packets onto its outbound RTP.
-    fn bridge_peer_of(&self, conn: &ConnectionId) -> Option<ConnectionId> {
+    pub fn bridge_peer_of(&self, conn: &ConnectionId) -> Option<ConnectionId> {
         let _guard = self
             .bridge_ownership_lock
             .lock()
@@ -4582,7 +4627,8 @@ impl Orchestrator {
         let Some((_, mut handle)) = self.recordings.remove(recording_id) else {
             return false;
         };
-        let routes = handle.media.begin_stop();
+        drop(handle._permit.take());
+        let mut media = std::mem::take(&mut handle.media);
         let sink = Arc::clone(&handle.sink);
         drop(handle);
         self.emit(Event::RecordingStopped {
@@ -4593,9 +4639,7 @@ impl Orchestrator {
         let events = self.events.clone();
         let cross_crate_publisher = self.cross_crate_publisher.clone();
         tokio::spawn(async move {
-            for route in routes {
-                let _ = route.remove().await;
-            }
+            let _ = media.drain_and_wait().await;
             let Ok(artifact) = sink.close().await else {
                 return;
             };
@@ -9453,16 +9497,16 @@ impl Orchestrator {
         let connection_ids = conns.clone();
         let mut media = MediaTapHandle::default();
         for connection_id in conns {
-            let (route, mut receiver) = match self.media_tap_for_connection(connection_id, 64).await
-            {
-                Ok(tap) => tap,
-                // Preserve the pre-graph API contract: recording admission
-                // can reserve a quota slot before a transport publishes its
-                // first audio stream. Once a stream exists, callers can stop
-                // and restart the recording to attach it.
-                Err(RvoipError::AdmissionRejected("no audio stream")) => continue,
-                Err(error) => return Err(error),
-            };
+            let (route, mut receiver) =
+                match self.recording_tap_for_connection(connection_id, 64).await {
+                    Ok(tap) => tap,
+                    // Preserve the pre-graph API contract: recording admission
+                    // can reserve a quota slot before a transport publishes its
+                    // first audio stream. Once a stream exists, callers can stop
+                    // and restart the recording to attach it.
+                    Err(RvoipError::AdmissionRejected("no audio stream")) => continue,
+                    Err(error) => return Err(error),
+                };
             let sink_for_task = Arc::clone(&sink);
             let paused_for_task = Arc::clone(&paused);
             let task = tokio::spawn(async move {
@@ -9475,7 +9519,7 @@ impl Orchestrator {
                     }
                 }
             });
-            media.push(route, task.abort_handle());
+            media.push(route, task);
         }
 
         let statuses = media.statuses();
@@ -9516,7 +9560,7 @@ impl Orchestrator {
             .remove(&recording_id)
             .ok_or_else(|| RvoipError::AdmissionRejected("recording not found"))?;
         drop(handle._permit.take());
-        handle.media.stop_and_wait().await;
+        let _ = handle.media.drain_and_wait().await;
         // V2.B — permit drops with the handle struct, releasing the
         // tenant's admission slot.
         let artifact = handle.sink.close().await?;
@@ -9635,7 +9679,7 @@ impl Orchestrator {
             let _ = stream.close().await;
         });
         let mut media = MediaTapHandle::default();
-        media.push(route, task.abort_handle());
+        media.push(route, task);
         let statuses = media.statuses();
         if let Err(error) = self.validate_connection_lifecycles(&lifecycle_tickets) {
             media.stop_and_wait().await;
@@ -9890,7 +9934,7 @@ impl Orchestrator {
             let _ = stream.close().await;
         });
         let mut media = MediaTapHandle::default();
-        media.push(route, task.abort_handle());
+        media.push(route, task);
 
         // V2.B — permit (if any) stored in the handle; releases on
         // Drop when detach removes the entry.
@@ -10399,6 +10443,7 @@ impl Orchestrator {
                 data_policy,
                 true,
                 None,
+                crate::bridge::peer_switch::PeerRouteTicket::initial(),
             )
             .await?;
         if let Err(error) = self.validate_connection_lifecycles(&lifecycle_tickets) {
@@ -10465,6 +10510,60 @@ impl Orchestrator {
         Ok(id)
     }
 
+    /// Replace a bridge destination only when both the existing and candidate
+    /// transports expose generation-aware delivery queues.
+    pub async fn replace_bridge_destination_transport_fenced(
+        &self,
+        expected_bridge_id: BridgeId,
+        ingress: ConnectionId,
+        expected_destination: ConnectionId,
+        replacement_destination: ConnectionId,
+    ) -> Result<BridgeDestinationReplacement> {
+        if !self
+            .cross_bridges
+            .get(&expected_bridge_id)
+            .is_some_and(|bridge| bridge.peer_transport_fenced)
+        {
+            return Err(RvoipError::NotImplemented(
+                "original bridge does not expose a transport delivery fence",
+            ));
+        }
+
+        let adapter = self.adapter_for(&replacement_destination)?;
+        let deadline = self.config.bridge_stream_deadline;
+        let started = std::time::Instant::now();
+        loop {
+            let stream = adapter
+                .streams(replacement_destination.clone())
+                .await?
+                .into_iter()
+                .find(|stream| stream.kind() == StreamKind::Audio);
+            if let Some(stream) = stream {
+                stream.try_peer_frames_out().map_err(|error| match error {
+                    RvoipError::NotImplemented(_) => RvoipError::NotImplemented(
+                        "replacement transport does not expose a delivery fence",
+                    ),
+                    other => other,
+                })?;
+                break;
+            }
+            if started.elapsed() >= deadline {
+                return Err(RvoipError::AdmissionRejected(
+                    "replacement transport has no audio stream within deadline",
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        self.replace_bridge_destination(
+            expected_bridge_id,
+            ingress,
+            expected_destination,
+            replacement_destination,
+        )
+        .await
+    }
+
     /// Replace one exact bridge destination while preserving the ingress
     /// Connection and Session.
     ///
@@ -10508,7 +10607,7 @@ impl Orchestrator {
             ));
         }
 
-        let (old_a, old_b, media_plan) = self
+        let (old_a, old_b, media_plan, expected_peer) = self
             .cross_bridges
             .get(&expected_bridge_id)
             .map(|entry| -> Result<_> {
@@ -10517,6 +10616,12 @@ impl Orchestrator {
                     handle.a.clone(),
                     handle.b.clone(),
                     handle.directional_media_plan()?,
+                    handle
+                        .peer_route_ticket()
+                        .filter(|ticket| ticket.is_active())
+                        .ok_or(RvoipError::NotImplemented(
+                            "bridge destination replacement requires a transport-fenced bridge",
+                        ))?,
                 ))
             })
             .transpose()?
@@ -10577,6 +10682,9 @@ impl Orchestrator {
             source: ingress.clone(),
             pending_destination: replacement_destination.clone(),
         };
+        let replacement_peer = expected_peer.stage().ok_or(RvoipError::InvalidState(
+            "bridge peer generation is retired",
+        ))?;
         let prepared = self
             .prepare_cross_bridge_for_commit(
                 bridge_id.clone(),
@@ -10586,6 +10694,7 @@ impl Orchestrator {
                 data_policy,
                 false,
                 Some(&replacement_context),
+                replacement_peer.clone(),
             )
             .await?;
 
@@ -10593,6 +10702,25 @@ impl Orchestrator {
             prepared.stop().await;
             return Err(error);
         }
+
+        let peer_quiescence =
+            match tokio::time::timeout(self.config.bridge_stream_deadline, expected_peer.quiesce())
+                .await
+            {
+                Ok(Some(guard)) => guard,
+                Ok(None) => {
+                    prepared.stop().await;
+                    return Err(RvoipError::InvalidState(
+                        "bridge peer changed before replacement commit",
+                    ));
+                }
+                Err(_) => {
+                    prepared.stop().await;
+                    return Err(RvoipError::InvalidState(
+                        "bridge transport delivery did not quiesce before replacement",
+                    ));
+                }
+            };
 
         let PreparedCrossBridge {
             handle,
@@ -10644,6 +10772,11 @@ impl Orchestrator {
                         {
                             return Err(RvoipError::InvalidState(
                                 "bridge data route ended during replacement",
+                            ));
+                        }
+                        if !replacement_peer.commit_from(&expected_peer) {
+                            return Err(RvoipError::InvalidState(
+                                "bridge peer changed before replacement commit",
                             ));
                         }
 
@@ -10729,6 +10862,7 @@ impl Orchestrator {
                 return Err(error);
             }
         };
+        drop(peer_quiescence);
 
         // There must be no suspension point between publishing the committed
         // generation and returning its receipt. A caller may cancel any
@@ -10782,6 +10916,7 @@ impl Orchestrator {
         data_policy: Arc<dyn DataMessageBridgePolicy>,
         buffer_before_commit: bool,
         replacement_context: Option<&ReplacementPreparationContext>,
+        peer_ticket: crate::bridge::peer_switch::PeerRouteTicket,
     ) -> Result<PreparedCrossBridge> {
         let a_adapter = self.adapter_for(&a)?;
         let b_adapter = self.adapter_for(&b)?;
@@ -10822,19 +10957,27 @@ impl Orchestrator {
         validate_bridge_codec_admission(&a_codec)?;
         validate_bridge_codec_admission(&b_codec)?;
         let a_out = if media_plan.b_to_a() {
-            Some(a_audio.try_frames_out()?)
+            Some(crate::media_graph::MediaSinkTarget::for_stream(
+                a_audio.as_ref(),
+            )?)
         } else {
             None
         };
         let b_out = if media_plan.a_to_b() {
-            Some(b_audio.try_frames_out()?)
+            Some(crate::media_graph::MediaSinkTarget::for_stream(
+                b_audio.as_ref(),
+            )?)
         } else {
             None
         };
+        let peer_transport_fenced = [a_out.as_ref(), b_out.as_ref()]
+            .into_iter()
+            .flatten()
+            .all(crate::media_graph::MediaSinkTarget::is_transport_fenced);
         if [a_out.as_ref(), b_out.as_ref()]
             .into_iter()
             .flatten()
-            .any(tokio::sync::mpsc::Sender::is_closed)
+            .any(crate::media_graph::MediaSinkTarget::is_closed)
         {
             return Err(RvoipError::InvalidState(
                 "bridge media target is already closed",
@@ -10855,11 +10998,12 @@ impl Orchestrator {
         if let Some(b_out) = b_out {
             let graph =
                 a_source_graph.expect("validated A-to-B plan initializes the A source graph");
-            let route = if buffer_before_commit {
-                graph.add_buffering_dormant_managed_sink(b_codec.clone(), b_out)?
-            } else {
-                graph.add_dormant_managed_sink(b_codec.clone(), b_out)?
-            };
+            let route = graph.add_dormant_peer_sink_target(
+                b_codec.clone(),
+                b_out,
+                peer_ticket.clone(),
+                buffer_before_commit,
+            )?;
             if let Some(context) = replacement_context {
                 debug_assert!(
                     (a == context.source && b == context.pending_destination)
@@ -10886,11 +11030,12 @@ impl Orchestrator {
         if let Some(a_out) = a_out {
             let graph =
                 b_source_graph.expect("validated B-to-A plan initializes the B source graph");
-            let route = match if buffer_before_commit {
-                graph.add_buffering_dormant_managed_sink(a_codec, a_out)
-            } else {
-                graph.add_dormant_managed_sink(a_codec, a_out)
-            } {
+            let route = match graph.add_dormant_peer_sink_target(
+                a_codec,
+                a_out,
+                peer_ticket.clone(),
+                buffer_before_commit,
+            ) {
                 Ok(route) => route,
                 Err(error) => {
                     if let Some((_, route)) = a_to_b.take() {
@@ -10932,13 +11077,15 @@ impl Orchestrator {
             b_to_a = Some((graph, route));
         }
 
-        let handle = CrossBridgeHandle::with_directional_managed_media_graphs(
+        let mut handle = CrossBridgeHandle::with_directional_managed_media_graphs(
             id,
             a.clone(),
             b.clone(),
             a_to_b,
             b_to_a,
         );
+        handle.peer_ticket = Some(peer_ticket);
+        handle.peer_transport_fenced = peer_transport_fenced;
         let media_statuses = handle.managed_media_route_statuses();
         debug_assert!(
             !media_statuses.is_empty(),
@@ -11310,6 +11457,28 @@ impl Orchestrator {
         let source_codec = graph.latest_snapshot().source_codec;
         let (target, receiver) = tokio::sync::mpsc::channel(channel_capacity.max(1));
         let route = graph.add_managed_sink(source_codec, target)?;
+        route
+            .wait_active()
+            .await
+            .map_err(|_| RvoipError::InvalidState("media graph route terminated during setup"))?;
+        Ok((MediaTapRoute::new(route), receiver))
+    }
+
+    /// Attach a recording consumer whose graph queue is drained during an
+    /// explicit stop or source shutdown. The caller must keep consuming the
+    /// returned receiver while `ManagedMediaRoute::drain` runs.
+    async fn recording_tap_for_connection(
+        &self,
+        connection_id: ConnectionId,
+        channel_capacity: usize,
+    ) -> Result<(
+        MediaTapRoute,
+        tokio::sync::mpsc::Receiver<crate::stream::MediaFrame>,
+    )> {
+        let graph = self.media_graph_for_connection(connection_id).await?;
+        let source_codec = graph.latest_snapshot().source_codec;
+        let (target, receiver) = tokio::sync::mpsc::channel(channel_capacity.max(1));
+        let route = graph.add_recording_sink(source_codec, target)?;
         route
             .wait_active()
             .await

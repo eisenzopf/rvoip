@@ -20,6 +20,7 @@ pub use rvoip_media_core::relay::controller::{BridgeError, BridgeHandle};
 
 pub mod cross_handle;
 pub mod frame_pump;
+pub mod peer_switch;
 
 pub use cross_handle::CrossBridgeHandle;
 

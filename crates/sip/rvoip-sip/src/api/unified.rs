@@ -12451,22 +12451,23 @@ impl UnifiedCoordinator {
                 })
             })
             .transpose()?;
-        let pending_options = (outbound_proxy_uri.is_some() || !extra_headers.is_empty()).then(|| {
-            std::sync::Arc::new(rvoip_sip_dialog::api::unified::RegisterRequestOptions {
-                registrar_uri: registrar_uri.to_string(),
-                aor_uri: from_uri.to_string(),
-                contact_uri: contact_uri.to_string(),
-                expires,
-                authorization: None,
-                proxy_authorization: None,
-                call_id: None,
-                cseq: None,
-                outbound_contact: None,
-                outbound_proxy_uri,
-                extra_headers,
-                refresh: false,
-            })
-        });
+        let pending_options =
+            (outbound_proxy_uri.is_some() || !extra_headers.is_empty()).then(|| {
+                std::sync::Arc::new(rvoip_sip_dialog::api::unified::RegisterRequestOptions {
+                    registrar_uri: registrar_uri.to_string(),
+                    aor_uri: from_uri.to_string(),
+                    contact_uri: contact_uri.to_string(),
+                    expires,
+                    authorization: None,
+                    proxy_authorization: None,
+                    call_id: None,
+                    cseq: None,
+                    outbound_contact: None,
+                    outbound_proxy_uri,
+                    extra_headers,
+                    refresh: false,
+                })
+            });
 
         let _ = self
             .helpers

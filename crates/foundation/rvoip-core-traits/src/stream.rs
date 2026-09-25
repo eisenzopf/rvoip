@@ -348,6 +348,15 @@ pub trait MediaStream: Send + Sync {
         Ok(self.frames_out())
     }
 
+    /// Obtain a generation-aware queue. Implementations must check each entry
+    /// after dequeueing and retain its delivery guard through the local send.
+    /// Legacy queues cannot provide this contract implicitly.
+    fn try_peer_frames_out(&self) -> Result<mpsc::Sender<crate::peer_media::PeerMediaFrame>> {
+        Err(crate::error::RvoipError::NotImplemented(
+            "MediaStream::try_peer_frames_out",
+        ))
+    }
+
     fn quality_snapshot(&self) -> QualitySnapshot;
 
     /// Whether [`Self::quality_snapshot`] reflects an actual measurement.

@@ -15,12 +15,13 @@ use tokio::sync::{broadcast, watch};
 use crate::adapter::VapiAdapter;
 use crate::error::Result;
 use crate::events::VapiEvent;
-use crate::types::{VapiCallOptions, VapiPeerFailurePolicy};
+use crate::types::{VapiCallOptions, VapiExistingCall, VapiPeerFailurePolicy};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum VapiAgentOutcome {
     CallerEnded,
+    HandedOff,
     AgentEnded,
     EventStreamClosed,
 }
@@ -118,11 +119,17 @@ impl VapiAgentCall {
     }
 
     pub async fn wait(&mut self) -> VapiAgentOutcome {
+        self.wait_shared().await
+    }
+
+    /// Observe paired teardown while other owners retain call-control handles.
+    pub async fn wait_shared(&self) -> VapiAgentOutcome {
+        let mut completion = self.completion.clone();
         loop {
-            if let Some(outcome) = *self.completion.borrow() {
+            if let Some(outcome) = *completion.borrow() {
                 return outcome;
             }
-            if self.completion.changed().await.is_err() {
+            if completion.changed().await.is_err() {
                 return VapiAgentOutcome::EventStreamClosed;
             }
         }
@@ -163,6 +170,25 @@ impl VapiAdapter {
         .await
     }
 
+    /// Bridge an exactly verified existing provider call without creating one.
+    /// Uses the same canonical connections, bridge and paired termination as
+    /// `attach_agent`. The caller owns durable admission and receipt validation.
+    pub async fn attach_existing_agent(
+        self: &Arc<Self>,
+        orchestrator: &Arc<Orchestrator>,
+        caller_connection_id: ConnectionId,
+        existing: VapiExistingCall,
+    ) -> RvoipResult<VapiAgentCall> {
+        self.attach_agent_transport(
+            orchestrator,
+            caller_connection_id,
+            ParticipantId::new(),
+            existing.options.clone(),
+            Some(existing),
+        )
+        .await
+    }
+
     /// Attach Vapi as `ai_participant_id` in the caller's Session.
     ///
     /// Rejects if that Participant already exists as `Human`. Joins the
@@ -173,6 +199,24 @@ impl VapiAdapter {
         caller_connection_id: ConnectionId,
         ai_participant_id: ParticipantId,
         options: VapiCallOptions,
+    ) -> RvoipResult<VapiAgentCall> {
+        self.attach_agent_transport(
+            orchestrator,
+            caller_connection_id,
+            ai_participant_id,
+            options,
+            None,
+        )
+        .await
+    }
+
+    async fn attach_agent_transport(
+        self: &Arc<Self>,
+        orchestrator: &Arc<Orchestrator>,
+        caller_connection_id: ConnectionId,
+        ai_participant_id: ParticipantId,
+        options: VapiCallOptions,
+        existing: Option<VapiExistingCall>,
     ) -> RvoipResult<VapiAgentCall> {
         options.validate().map_err(RvoipError::from)?;
         self.ensure_registered(orchestrator)?;
@@ -228,8 +272,11 @@ impl VapiAdapter {
             Direction::Outbound,
             options.audio_format.capabilities(),
         )
-        .with_transport(Transport::Vapi)
-        .with_context(options.clone());
+        .with_transport(Transport::Vapi);
+        let request = match existing {
+            Some(existing) => request.with_context(existing),
+            None => request.with_context(options.clone()),
+        };
         let handle = orchestrator.originate_connection(request).await?;
         let vapi_connection_id = handle.connection.id.clone();
         let initial_events = self.subscribe_call_events(&vapi_connection_id)?;
@@ -320,6 +367,15 @@ async fn supervise_pair(
         let event = match events.recv().await {
             Ok(event) => event,
             Err(broadcast::error::RecvError::Lagged(_)) => {
+                if orchestrator
+                    .bridge_peer_of(caller)
+                    .is_some_and(|peer| peer != *vapi)
+                {
+                    let _ = orchestrator
+                        .end_connection(vapi.clone(), EndReason::Normal)
+                        .await;
+                    return VapiAgentOutcome::HandedOff;
+                }
                 if orchestrator.session_of(caller).is_none() {
                     let _ = orchestrator.unbridge_connections(bridge.clone()).await;
                     let _ = adapter.end(vapi.clone(), EndReason::BridgeTorn).await;
@@ -347,6 +403,22 @@ async fn supervise_pair(
                 return VapiAgentOutcome::EventStreamClosed;
             }
         };
+        if let Event::PeerHandoffCommitted {
+            previous_bridge_id,
+            retained,
+            source,
+            ..
+        } = &event
+        {
+            if previous_bridge_id == bridge && retained == caller && source == vapi {
+                // Ownership has already moved to the new peer. Retire only the
+                // detached AI leg; its old supervisor must not end the caller.
+                let _ = orchestrator
+                    .end_connection(vapi.clone(), EndReason::Normal)
+                    .await;
+                return VapiAgentOutcome::HandedOff;
+            }
+        }
         let terminal_connection = match event {
             Event::ConnectionEnded { connection_id, .. }
             | Event::ConnectionFailed { connection_id, .. } => Some(connection_id),

@@ -114,6 +114,8 @@
 //! crate, not an adapter), used by [`bridge`] for the SIP-fast-path bridge
 //! handle.
 
+pub use rvoip_core_traits::peer_media;
+
 pub mod adapter;
 pub mod bridge;
 pub mod broadcast;

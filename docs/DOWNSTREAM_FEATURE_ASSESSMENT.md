@@ -4,10 +4,10 @@ Reviewed 2026-09-24 against origin/main `c69a427d` (0.3.10).
 The local integration branch also preserves the three existing Parley commits
 and the pre-existing uncommitted WebSocket media bridge change.
 
-Baseline verification: `cargo build --locked --workspace` passed on the local
-integration branch. This covers workspace default features, not all optional
-feature combinations or downstream regression/interop tests. `git diff --check`
-also passed. GitHub CLI active identity was switched to `eisenzopf` before fetch.
+GitHub CLI active identity was switched to `eisenzopf` before fetch. The
+implementation branch includes every library-owned item recommended below;
+provider business logic, deployment configuration, credentials and downstream
+evidence publishing remain in their applications.
 
 ## Recommended library changes
 
@@ -48,17 +48,36 @@ also passed. GitHub CLI active identity was switched to `eisenzopf` before fetch
 - A transport fence covers the library's submission boundary. It cannot recall
   packets already accepted by Quinn/the OS or audio already played remotely.
 
-## Implementation order and verification
+## Implementation result
 
-1. Small independent SIP/codec corrections: registration proxy, offer accessor,
-   CANCEL race, BYE cleanup, G.729 parsing and DTMF regressions.
-2. Recording drain and configurable playout/audio-queue primitives, with
-   EOF/backpressure/overflow/interruption and SSRC-change tests.
-3. Reconcile handoff ownership and transport-neutral lifecycle, then implement
-   SIP/QUIC/Vapi fences and the in-process AI adapter with bidirectional media,
-   failure rollback, stale-generation, provider-acknowledgement and teardown tests.
-4. Add inbound codec policy, Vapi existing-call attachment and safe diagnostics;
-   verify feature-enabled builds and focused integration fixtures.
+The integration adds:
 
-This is the pre-implementation assessment requested by the user. Downstream
-features have not been imported as part of the baseline synchronization.
+- generation-qualified media ownership shared by both bridge directions, with
+  SIP and QUIC transport queues and a strict transport-fenced replacement API;
+- recording-only drain routes and retained delivery receipts, connected to the
+  public recording stop and terminal-cleanup paths;
+- the in-process AI adapter and acknowledged lifecycle work from vapi-central;
+- Vapi existing-call attachment, call-local credentials and handoff-aware
+  supervision;
+- session-scoped inbound codec policy, completed/deduplicated DTMF delivery,
+  safe SIP response diagnostics and the exact retired-BYE cleanup classifier;
+- the bounded generation-aware outbound audio queue, bounded RTP reordering,
+  loss concealment, paced decoded delivery and SSRC reset;
+- G.729/AMR-WB wiring, negotiated framing and DTX-aware packetization; and
+- the registration proxy, offer-SDP accessor, CANCEL race and exact transport
+  activation/cleanup corrections.
+
+The implementation deliberately excludes registry-normalized manifests,
+vendoring fixtures, old dependency pins, application tenant policy, provider
+runtimes, carrier credentials and deployment infrastructure.
+
+Verification after integration:
+
+- `cargo check --offline --locked --workspace`
+- `cargo check --offline -p rvoip-sip --features g729,amr-wb`
+- all `rvoip-core-traits` and `rvoip-audio-send-queue` unit tests
+- focused core recording-drain and peer-cutover tests
+- focused RTP reorder, gap, pacing, duplicate and SSRC-handoff tests
+- focused SIP media-stream, DTMF, inbound codec-policy, response-diagnostic and
+  retired-BYE cleanup tests
+- `git diff --check`
