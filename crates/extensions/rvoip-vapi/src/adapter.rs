@@ -30,13 +30,13 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
 use tracing::{warn, Instrument};
 
-use crate::client::{connect_websocket, VapiHttpClient, VapiSocket};
+use crate::client::{connect_websocket, CreatedCall, VapiHttpClient, VapiSocket};
 use crate::config::VapiConfig;
 use crate::error::{Result, VapiError};
 use crate::events::{VapiEvent, VapiEventEnvelope};
 use crate::health::VapiMediaHealth;
 use crate::media::{AudioFramer, VapiMediaStream};
-use crate::types::{AddedMessage, VapiCallOptions, VapiCommand};
+use crate::types::{AddedMessage, VapiCallOptions, VapiCommand, VapiExistingCall};
 
 pub const ADAPTER_EVENT_CAPACITY: usize = 256;
 pub const VAPI_CALL_REFERENCE_KIND: &str = "vapi-call-id";
@@ -61,6 +61,7 @@ impl fmt::Debug for VapiTransportHandle {
 struct Route {
     connection_id: ConnectionId,
     options: VapiCallOptions,
+    existing_call: Option<VapiExistingCall>,
     stream: Arc<VapiMediaStream>,
     cancel: tokio_util::sync::CancellationToken,
     live: AtomicBool,
@@ -84,6 +85,7 @@ impl Route {
     fn new(
         connection_id: ConnectionId,
         options: VapiCallOptions,
+        existing_call: Option<VapiExistingCall>,
         config: &VapiConfig,
     ) -> Arc<Self> {
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -114,6 +116,7 @@ impl Route {
         Arc::new(Self {
             connection_id,
             options,
+            existing_call,
             stream,
             cancel,
             live: AtomicBool::new(true),
@@ -371,7 +374,15 @@ impl VapiAdapter {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            let environment = self.runtime_environment();
+            let mut environment = self.runtime_environment();
+            if let Some(key) = route
+                .existing_call
+                .as_ref()
+                .and_then(|call| call.api_key.as_ref())
+                .or(route.options.api_key.as_ref())
+            {
+                environment.config.api_key = Some(key.clone());
+            }
             let http = self.http.clone();
             let worker_route = Arc::clone(&route);
             tokio::spawn(async move {
@@ -469,15 +480,28 @@ impl ConnectionAdapter for VapiAdapter {
                 "Vapi originate requires outbound direction",
             ));
         }
-        let options = request.context.downcast_arc::<VapiCallOptions>().ok_or(
-            RvoipError::AdmissionRejected("Vapi originate requires VapiCallOptions context"),
-        )?;
+        let existing_call = request.context.downcast_arc::<VapiExistingCall>();
+        let options = if let Some(existing) = &existing_call {
+            if !self.config.permits_websocket_url(&existing.websocket_url) {
+                return Err(RvoipError::AdmissionRejected(
+                    "existing Vapi call requires an allowed secure transport",
+                ));
+            }
+            Arc::new(existing.options.clone())
+        } else {
+            request.context.downcast_arc::<VapiCallOptions>().ok_or(
+                RvoipError::AdmissionRejected(
+                    "Vapi originate requires call options or an existing-call context",
+                ),
+            )?
+        };
         options.validate().map_err(RvoipError::from)?;
 
         let connection_id = ConnectionId::new();
         let route = Route::new(
             connection_id.clone(),
             options.as_ref().clone(),
+            existing_call.as_deref().cloned(),
             &self.config,
         );
         let codec = options.audio_format.codec();
@@ -695,7 +719,16 @@ async fn activate_route_worker(
     // This request deliberately lives in a detached worker. Cancellation of
     // the caller awaiting `activate_outbound` cannot abandon an ambiguous
     // POST that may already have created a billable remote call.
-    let created = match http.create_call(&environment.config, &route.options).await {
+    let created_result = if let Some(existing) = &route.existing_call {
+        // Never POST for a handoff, including failure/cancellation/recovery.
+        Ok(CreatedCall {
+            id: existing.call_id.clone(),
+            websocket_url: existing.websocket_url.clone(),
+        })
+    } else {
+        http.create_call(&environment.config, &route.options).await
+    };
+    let created = match created_result {
         Ok(created) => created,
         Err(error) => {
             metrics::counter!("rvoip_vapi_setup_failures_total", "stage" => "call_creation")
@@ -902,6 +935,7 @@ fn requested_local_outcome(route: &Route) -> SessionOutcome {
 
 /// What the session loop hands the writer task.
 enum WriteRequest {
+    Peer(rvoip_core::peer_media::PeerMediaFrame),
     Media(WebSocketMessage),
     Control(WebSocketMessage),
 }
@@ -959,11 +993,29 @@ async fn run_socket_writer(
             Some(request) = media.recv() => request,
             else => break,
         };
+        let mut delivery_guard = None;
         let (message, deadline, is_media) = match request {
+            WriteRequest::Peer(frame) => {
+                let Some((frame, guard)) = frame.into_delivery() else {
+                    continue;
+                };
+                if frame.payload_type == Some(101) || frame.payload.len() > config.max_message_bytes
+                {
+                    continue;
+                }
+                delivery_guard = Some(guard);
+                (
+                    WebSocketMessage::Binary(frame.payload),
+                    config.media_write_timeout,
+                    true,
+                )
+            }
             WriteRequest::Media(message) => (message, config.media_write_timeout, true),
             WriteRequest::Control(message) => (message, config.websocket_io_timeout, false),
         };
-        match tokio::time::timeout(deadline, sink.send(message)).await {
+        let sent = tokio::time::timeout(deadline, sink.send(message)).await;
+        drop(delivery_guard);
+        match sent {
             Ok(Ok(())) => {
                 if is_media {
                     consecutive_media_timeouts = 0;
@@ -1016,6 +1068,9 @@ async fn run_websocket_session(
 ) -> SessionOutcome {
     // The write goes to a per-session task so a slow socket cannot park this
     // loop. Reunited before the shutdown handshake, which needs both halves.
+    let Ok(mut peer_outgoing) = route.stream.take_peer_receiver() else {
+        return SessionOutcome::Failed("Vapi peer media receiver unavailable");
+    };
     let (sink, mut stream) = futures::StreamExt::split(socket);
     let (write_tx, write_rx) = mpsc::channel::<WriteRequest>(config.media_queue_capacity);
     // Control gets its own small channel, polled with priority (M3). Sharing
@@ -1219,6 +1274,14 @@ async fn run_websocket_session(
                     .as_mut()
                     .reset(tokio::time::Instant::now() + config.websocket_io_timeout);
                 awaiting_heartbeat_response = true;
+            }
+            Some(media) = peer_outgoing.recv() => {
+                // Keep the generation ticket through every queue and validate
+                // only at the socket writer, holding its guard through send.
+                match write_tx.try_send(WriteRequest::Peer(media)) {
+                    Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {},
+                    Err(mpsc::error::TrySendError::Closed(_)) => break SessionOutcome::Failed("Vapi WebSocket writer stopped"),
+                }
             }
             media = outgoing.recv() => {
                 let Some(media) = media else {

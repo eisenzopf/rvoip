@@ -25,6 +25,7 @@ use std::sync::Mutex;
 use tokio::sync::{mpsc, watch, Mutex as AsyncMutex};
 use tokio::task::AbortHandle;
 
+use rvoip_core_traits::peer_media::PeerMediaFrame;
 use rvoip_core::capability::CodecInfo;
 use rvoip_core::connection::Direction;
 use rvoip_core::error::{Result as RvoipResult, RvoipError};
@@ -199,6 +200,8 @@ struct SipMediaStreamInner {
     frames_in_tx: Mutex<Option<mpsc::Sender<MediaFrame>>>,
     frames_out_tx: mpsc::Sender<MediaFrame>,
     frames_out_rx: Mutex<Option<mpsc::Receiver<MediaFrame>>>,
+    peer_out_tx: mpsc::Sender<PeerMediaFrame>,
+    peer_out_rx: Mutex<Option<mpsc::Receiver<PeerMediaFrame>>>,
     bind_target: Mutex<Option<SipMediaBindTarget>>,
     driver_abort: Mutex<Option<AbortHandle>>,
     lifecycle_gate: AsyncMutex<()>,
@@ -384,6 +387,7 @@ impl SipMediaStream {
         };
         let (frames_in_tx, frames_in_rx) = mpsc::channel::<MediaFrame>(FRAME_CHANNEL_CAP);
         let (frames_out_tx, frames_out_rx) = mpsc::channel::<MediaFrame>(FRAME_CHANNEL_CAP);
+        let (peer_out_tx, peer_out_rx) = mpsc::channel(FRAME_CHANNEL_CAP);
         let (cancel, _) = watch::channel(false);
         let (codec_updates, _) = watch::channel(None);
 
@@ -396,6 +400,7 @@ impl SipMediaStream {
                 frames_in_tx: Mutex::new(Some(frames_in_tx)),
                 frames_out_tx,
                 frames_out_rx: Mutex::new(Some(frames_out_rx)),
+                peer_out_tx, peer_out_rx: Mutex::new(Some(peer_out_rx)),
                 bind_target: Mutex::new(None),
                 driver_abort: Mutex::new(None),
                 lifecycle_gate: AsyncMutex::new(()),
@@ -513,7 +518,9 @@ impl SipMediaStream {
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .take();
-                    let (Some(frames_in_tx), Some(frames_out_rx)) = (frames_in_tx, frames_out_rx)
+                    let peer_out_rx = self.inner.peer_out_rx.lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+                    let (Some(frames_in_tx), Some(frames_out_rx), Some(peer_out_rx)) = (frames_in_tx, frames_out_rx, peer_out_rx)
                     else {
                         self.inner.lifecycle.mark_failed();
                         return Err(crate::errors::SessionError::Other(
@@ -536,6 +543,7 @@ impl SipMediaStream {
                         self.inner.codec_updates.clone(),
                         frames_in_tx,
                         frames_out_rx,
+                        peer_out_rx,
                     ));
                     *self
                         .inner
@@ -629,6 +637,8 @@ impl SipMediaStream {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
+        self.inner.peer_out_rx.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()).take();
     }
 
     /// Make cancellation sticky without requiring an async runtime join.
@@ -703,6 +713,8 @@ impl Drop for SipMediaStream {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
+        self.inner.peer_out_rx.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()).take();
         if let Some(driver) = self
             .inner
             .driver_abort
@@ -795,6 +807,7 @@ async fn run_media_driver(
     codec_updates: watch::Sender<Option<SipMediaCodecRuntime>>,
     frames_in_tx: mpsc::Sender<MediaFrame>,
     frames_out_rx: mpsc::Receiver<MediaFrame>,
+    peer_out_rx: mpsc::Receiver<PeerMediaFrame>,
 ) {
     let playout = coordinator.playout_policy();
     let setup_deadline =
@@ -941,6 +954,7 @@ async fn run_media_driver(
         runtime,
         codec_updates.subscribe(),
         frames_out_rx,
+        peer_out_rx,
     );
     tokio::pin!(inbound, outbound);
     let failed_pump = tokio::select! {
@@ -1077,6 +1091,7 @@ async fn run_outbound_pump(
     mut runtime: SipMediaCodecRuntime,
     mut codec_updates: watch::Receiver<Option<SipMediaCodecRuntime>>,
     mut frames_out_rx: mpsc::Receiver<MediaFrame>,
+    mut peer_out_rx: mpsc::Receiver<PeerMediaFrame>,
 ) -> &'static str {
     let mut decoder = match SipPayloadCodec::from_negotiated(&runtime.negotiated) {
         Ok(codec) => codec,
@@ -1084,9 +1099,9 @@ async fn run_outbound_pump(
     };
     let mut channels = runtime.negotiated.channels.max(1);
     let mut next_timestamp = 0u32;
+    let mut telephone_events = TelephoneEventTracker::default();
     loop {
-        let media_frame = tokio::select! {
-            biased;
+        let (media_frame, mut delivery_guard) = tokio::select! {
             changed = codec_updates.changed() => {
                 if changed.is_err() {
                     return "sip-codec-update-channel-closed";
@@ -1103,14 +1118,37 @@ async fn run_outbound_pump(
                 continue;
             }
             frame = frames_out_rx.recv() => match frame {
-                Some(frame) => frame,
+                Some(frame) => (frame, None),
                 None => return "outbound-producer-closed",
+            },
+            frame = peer_out_rx.recv() => match frame {
+                Some(frame) => match frame.into_delivery() {
+                    Some((frame, guard)) => (frame, Some(guard)),
+                    None => continue,
+                },
+                None => return "peer-outbound-producer-closed",
             }
         };
         const TELEPHONE_EVENT_PT: u8 = 101;
         if media_frame.payload_type == Some(TELEPHONE_EVENT_PT) {
-            if let Some(digit) = parse_rfc4733_digit(&media_frame.payload) {
-                if coordinator.send_dtmf(&session_id, digit).await.is_err() {
+            if let Some(digit) = telephone_events.digit(media_frame.stream_id.as_str(), media_frame.timestamp_rtp, &media_frame.payload) {
+                // Await the complete tone schedule. The single-digit API
+                // returns after spawning a background sender, which lets tone
+                // packets escape a later output-pump cutoff acknowledgment.
+                let mut encoded = [0u8; 4];
+                let digits = digit.encode_utf8(&mut encoded);
+                if let Some(guard) = delivery_guard.take() {
+                    // The sequence itself spawns tone work. Retain the fence
+                    // in an owner that survives cancellation of this pump.
+                    let coordinator = Arc::clone(&coordinator);
+                    let session_id = session_id.clone();
+                    let digits = digits.to_owned();
+                    let send = tokio::spawn(async move {
+                        let _guard = guard;
+                        coordinator.send_dtmf_sequence(&session_id, &digits, 100, 0).await
+                    });
+                    if !matches!(send.await, Ok(Ok(()))) { return "sip-dtmf-send-failed"; }
+                } else if coordinator.send_dtmf_sequence(&session_id, digits, 100, 0).await.is_err() {
                     return "sip-dtmf-send-failed";
                 }
             }
@@ -1247,6 +1285,11 @@ impl MediaStream for SipMediaStream {
         }
     }
 
+    fn try_peer_frames_out(&self) -> RvoipResult<mpsc::Sender<PeerMediaFrame>> {
+        self.try_frames_out()?; // Same activation/lifecycle admission as legacy writes.
+        Ok(self.inner.peer_out_tx.clone())
+    }
+
     fn quality_snapshot(&self) -> QualitySnapshot {
         // The last report the media layer pushed for this connection.
         //
@@ -1358,12 +1401,8 @@ mod media_owner_wait_tests {
     }
 }
 
-/// Parse an RFC 4733 `telephone-event` payload (4 bytes) into a digit
-/// character, but only on the **start** packet of an event (duration
-/// field is zero). Returns `None` for retransmits (duration > 0) and
-/// for malformed payloads so the caller can skip without double-
-/// emitting the same DTMF.
-///
+/// Parse a non-terminal RFC 4733 telephone event. The initial duration may
+/// already be nonzero; timestamp-based event tracking suppresses repetitions.
 /// Payload layout (§2.3 of RFC 4733):
 /// ```text
 ///  0                   1                   2                   3
@@ -1377,9 +1416,8 @@ fn parse_rfc4733_digit(payload: &[u8]) -> Option<char> {
         return None;
     }
     let event = payload[0];
-    let duration = u16::from_be_bytes([payload[2], payload[3]]);
-    if duration != 0 {
-        // Retransmit / end-marker — already emitted on the start packet.
+    if payload[1] & 0x80 != 0 {
+        // End-only arrivals must not start another synthesized tone.
         return None;
     }
     // Event codes 0–9 → '0'..'9', 10 → '*', 11 → '#', 12–15 → 'A'..'D'.
@@ -1392,6 +1430,28 @@ fn parse_rfc4733_digit(payload: &[u8]) -> Option<char> {
         14 => Some('C'),
         15 => Some('D'),
         _ => None,
+    }
+}
+
+#[derive(Default)]
+struct TelephoneEventTracker {
+    source: Option<String>,
+    last_timestamp: Option<u32>,
+}
+
+impl TelephoneEventTracker {
+    fn digit(&mut self, source: &str, timestamp: u32, payload: &[u8]) -> Option<char> {
+        let digit = parse_rfc4733_digit(payload)?;
+        if self.source.as_deref() != Some(source) {
+            self.source = Some(source.to_owned());
+            self.last_timestamp = None;
+        }
+        if self.last_timestamp.is_some_and(|last|
+            timestamp.wrapping_sub(last) as i32 <= 0) {
+            return None;
+        }
+        self.last_timestamp = Some(timestamp);
+        Some(digit)
     }
 }
 
@@ -1602,7 +1662,7 @@ mod negotiated_codec_tests {
 
 #[cfg(test)]
 mod rfc4733_tests {
-    use super::parse_rfc4733_digit;
+    use super::{parse_rfc4733_digit, TelephoneEventTracker};
 
     #[test]
     fn start_packet_returns_digit() {
@@ -1612,10 +1672,23 @@ mod rfc4733_tests {
     }
 
     #[test]
-    fn duration_nonzero_returns_none_to_avoid_duplicates() {
+    fn initial_nonzero_duration_is_valid() {
         // event=5, end=0, volume=10, duration=160
         let packet = [0x05, 0x0A, 0x00, 0xA0];
-        assert_eq!(parse_rfc4733_digit(&packet), None);
+        assert_eq!(parse_rfc4733_digit(&packet), Some('5'));
+    }
+
+    #[test]
+    fn tracker_suppresses_repetitions_and_accepts_timestamp_wrap() {
+        let mut tracker = TelephoneEventTracker::default();
+        let start = [5, 10, 0, 160];
+        assert_eq!(tracker.digit("source-a", u32::MAX - 100, &start), Some('5'));
+        assert_eq!(tracker.digit("source-a", u32::MAX - 100, &[5, 10, 1, 64]), None);
+        assert_eq!(tracker.digit("source-a", u32::MAX - 100, &[5, 0x8a, 3, 32]), None);
+        assert_eq!(tracker.digit("source-a", 100, &start), Some('5'));
+        assert_eq!(tracker.digit("source-a", u32::MAX - 100, &start), None);
+        assert_eq!(tracker.digit("source-a", 200, &[5, 0x8a, 3, 32]), None);
+        assert_eq!(tracker.digit("source-b", 0, &start), Some('5'));
     }
 
     #[test]

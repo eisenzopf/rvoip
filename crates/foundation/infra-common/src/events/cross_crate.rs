@@ -2777,6 +2777,13 @@ pub enum RvoipCoreCrossCrateEvent {
     ConnectionsUnbridged {
         bridge_id: String,
     },
+    PeerHandoffCommitted {
+        previous_bridge_id: String,
+        bridge_id: String,
+        retained: String,
+        source: String,
+        target: String,
+    },
 
     // --- Transfer ---
     ConnectionTransferred {
@@ -2962,6 +2969,7 @@ impl RvoipCoreCrossCrateEvent {
             Self::ConnectionFailed { .. } => "rvoip_core.connection_failed",
             Self::ConnectionsBridged { .. } => "rvoip_core.connections_bridged",
             Self::ConnectionsUnbridged { .. } => "rvoip_core.connections_unbridged",
+            Self::PeerHandoffCommitted { .. } => "rvoip_core.peer_handoff_committed",
             Self::ConnectionTransferred { .. } => "rvoip_core.connection_transferred",
             Self::ConnectionTransferStatus { .. } => "rvoip_core.connection_transfer_status",
             Self::ParticipantJoined { .. } => "rvoip_core.participant_joined",

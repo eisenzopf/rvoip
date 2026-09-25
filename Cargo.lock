@@ -7323,6 +7323,7 @@ dependencies = [
  "rustls",
  "rvoip-auth-core",
  "rvoip-core",
+ "rvoip-core-traits",
  "rvoip-uctp",
  "rvoip-vcon",
  "serde_json",

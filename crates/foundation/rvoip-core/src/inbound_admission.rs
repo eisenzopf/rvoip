@@ -437,6 +437,25 @@ impl InboundAdmission {
         ))
     }
 
+    /// Pin the ordered codec allowlist to this pending inbound connection.
+    /// Call before accepting; unsupported transports reject this operation.
+    pub async fn set_audio_codec_policy(&self, codecs: Vec<String>) -> Result<()> {
+        let orchestrator = self
+            .orchestrator
+            .upgrade()
+            .ok_or(RvoipError::AdmissionRejected(
+                "inbound audio policy owner is unavailable",
+            ))?;
+        orchestrator
+            .set_pending_inbound_audio_codecs(
+                &self.connection_id,
+                self.transport,
+                self.lifecycle_generation,
+                codecs,
+            )
+            .await
+    }
+
     /// Admit the durably authorized connection and wait until normalized
     /// publication has either committed or lost its lifecycle race.
     pub async fn accept(self) -> Result<()> {

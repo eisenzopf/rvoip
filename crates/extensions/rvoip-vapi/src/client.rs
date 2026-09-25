@@ -48,7 +48,15 @@ impl VapiHttpClient {
             let mut response = self
                 .client
                 .post(endpoint)
-                .bearer_auth(config.api_key.expose_secret())
+                .bearer_auth(
+                    config
+                        .api_key
+                        .as_ref()
+                        .ok_or(VapiError::InvalidConfiguration(
+                            "this transport has no provider credential",
+                        ))?
+                        .expose_secret(),
+                )
                 .json(&options.create_call_payload())
                 .send()
                 .await
@@ -133,7 +141,16 @@ pub(crate) async fn connect_websocket(
         .as_str()
         .into_client_request()
         .map_err(|_| VapiError::WebSocketSetup)?;
-    let bearer = Zeroizing::new(format!("Bearer {}", config.api_key.expose_secret()));
+    let bearer = Zeroizing::new(format!(
+        "Bearer {}",
+        config
+            .api_key
+            .as_ref()
+            .ok_or(VapiError::InvalidConfiguration(
+                "this transport has no provider credential"
+            ))?
+            .expose_secret()
+    ));
     let mut authorization =
         HeaderValue::from_str(&bearer).map_err(|_| VapiError::WebSocketSetup)?;
     authorization.set_sensitive(true);

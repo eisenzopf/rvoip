@@ -333,6 +333,9 @@ pub struct SessionState {
     pub local_sdp: Option<String>,
     pub remote_sdp: Option<String>,
     pub negotiated_config: Option<NegotiatedConfig>,
+    /// Application-authorized trunk policy, immutable once SDP has been answered.
+    /// Kept on the exact session lifetime so shared listeners cannot leak policy.
+    pub(crate) inbound_audio_codecs: Option<Vec<String>>,
     /// Negotiated media security, populated after SRTP contexts install.
     pub media_security: Option<MediaSecurityState>,
     /// Stable numeric SDP origin session id used in the `o=` line for
@@ -928,6 +931,7 @@ impl SessionState {
             local_sdp: None,
             remote_sdp: None,
             negotiated_config: None,
+            inbound_audio_codecs: None,
             media_security: None,
             sdp_origin_session_id,
             sdp_origin_version: 0,

@@ -7,6 +7,7 @@
 //! adapter feeds via [`QuicDatagramMediaStream::inbound_tx`] from the
 //! physical peer's sole `quinn::Connection::read_datagram` loop.
 
+use rvoip_core_traits::peer_media::PeerMediaFrame;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::{collections::HashSet, num::NonZeroU16};
@@ -39,6 +40,7 @@ pub struct QuicDatagramMediaStream {
     stream_local_id: u16,
     in_rx: Arc<StdMutex<Option<mpsc::Receiver<MediaFrame>>>>,
     out_tx: mpsc::Sender<MediaFrame>,
+    peer_out_tx: mpsc::Sender<PeerMediaFrame>,
     /// Adapter feeds inbound `MediaFrame`s here from its peer-level datagram
     /// reader (one reader serves every logical Session and Stream).
     inbound_tx: mpsc::Sender<MediaFrame>,
@@ -85,6 +87,7 @@ impl QuicDatagramMediaStream {
     ) -> Arc<Self> {
         let (in_tx, in_rx) = mpsc::channel::<MediaFrame>(FRAME_CAP);
         let (out_tx, mut out_rx) = mpsc::channel::<MediaFrame>(FRAME_CAP);
+        let (peer_out_tx, mut peer_out_rx) = mpsc::channel::<PeerMediaFrame>(FRAME_CAP);
 
         let stream_cancel = peer_cancel.child_token();
         let pump_cancel = stream_cancel.clone();
@@ -105,10 +108,17 @@ impl QuicDatagramMediaStream {
             let mut seq: u32 = 0;
             let mut rtp_seq: u16 = 0;
             loop {
-                let frame = tokio::select! {
+                let (frame, _delivery_guard) = tokio::select! {
                     _ = pump_cancel.cancelled() => break,
                     frame = out_rx.recv() => match frame {
-                        Some(frame) => frame,
+                        Some(frame) => (frame, None),
+                        None => break,
+                    },
+                    frame = peer_out_rx.recv() => match frame {
+                        Some(frame) => match frame.into_delivery() {
+                            Some((frame, guard)) => (frame, Some(guard)),
+                            None => continue,
+                        },
                         None => break,
                     },
                 };
@@ -197,6 +207,7 @@ impl QuicDatagramMediaStream {
             stream_local_id,
             in_rx: Arc::new(StdMutex::new(Some(in_rx))),
             out_tx,
+            peer_out_tx,
             inbound_tx: in_tx,
             quality: parking_lot::RwLock::new(QualitySnapshot::default()),
             cancel: stream_cancel,
@@ -272,6 +283,13 @@ impl MediaStream for QuicDatagramMediaStream {
 
     fn frames_out(&self) -> mpsc::Sender<MediaFrame> {
         self.out_tx.clone()
+    }
+
+    fn try_peer_frames_out(&self) -> RvoipResult<mpsc::Sender<PeerMediaFrame>> {
+        if self.cancel.is_cancelled() || self.peer_out_tx.is_closed() {
+            return Err(rvoip_core::error::RvoipError::InvalidState("QUIC media stream is closed"));
+        }
+        Ok(self.peer_out_tx.clone())
     }
 
     fn quality_snapshot(&self) -> QualitySnapshot {
@@ -553,6 +571,7 @@ mod receiver_ownership_tests {
     fn second_receiver_acquisition_is_a_typed_error() {
         let (inbound_tx, inbound_rx) = mpsc::channel(1);
         let (out_tx, _out_rx) = mpsc::channel(1);
+        let (peer_out_tx, _peer_out_rx) = mpsc::channel(1);
         let stream = QuicDatagramMediaStream {
             id: StreamId::new(),
             kind: StreamKind::Audio,
@@ -567,6 +586,7 @@ mod receiver_ownership_tests {
             stream_local_id: 1,
             in_rx: Arc::new(StdMutex::new(Some(inbound_rx))),
             out_tx,
+            peer_out_tx,
             inbound_tx,
             quality: parking_lot::RwLock::new(QualitySnapshot::default()),
             cancel: CancellationToken::new(),

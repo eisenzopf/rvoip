@@ -901,6 +901,51 @@ impl Drop for BridgeReservation {
     }
 }
 
+/// Prepared routes retain RAII ownership until the lifecycle-checked commit.
+/// Dropping this value before publication cancels routes and rolls back slots.
+struct PreparedCrossBridge {
+    id: BridgeId,
+    a: ConnectionId,
+    b: ConnectionId,
+    lifecycle_tickets: Vec<ConnectionLifecycleTicket>,
+    handle: CrossBridgeHandle,
+    data_route: CrossBridgeDataRoute,
+    // Release connection slots only after route owners have been dropped.
+    reservation: BridgeReservation,
+}
+
+/// Inactive replacement routes. Dropping preparation cancels the target routes
+/// without disconnecting the existing peer. Transport-buffer cutoff remains
+/// a separate requirement before using this primitive for production transfers.
+#[must_use]
+pub struct PreparedPeerHandoff {
+    prepared: PreparedCrossBridge,
+    original: BridgeId,
+    source: ConnectionId,
+    expected_peer: crate::bridge::peer_switch::PeerRouteTicket,
+}
+
+impl PreparedPeerHandoff {
+    pub fn replacement_bridge_id(&self) -> &BridgeId {
+        &self.prepared.id
+    }
+    /// The peer derived from the authoritative original bridge, not caller input.
+    pub fn source_connection(&self) -> &ConnectionId {
+        &self.source
+    }
+}
+
+/// In-process commit evidence; durable publication remains the caller's job.
+#[derive(Clone, Debug)]
+pub struct PeerHandoffReceipt {
+    pub previous_bridge_id: BridgeId,
+    pub bridge_id: BridgeId,
+    pub retained: ConnectionId,
+    pub source: ConnectionId,
+    pub target: ConnectionId,
+    pub committed_at: chrono::DateTime<Utc>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BridgedDataTerminalReason {
     PolicyPanicked,
@@ -931,6 +976,7 @@ impl CrossBridgeDataRoute {
         a_adapter: Arc<dyn ConnectionAdapter>,
         b_adapter: Arc<dyn ConnectionAdapter>,
         policy: Arc<dyn DataMessageBridgePolicy>,
+        peer_ticket: crate::bridge::peer_switch::PeerRouteTicket,
     ) -> Self {
         let (a_to_b, a_to_b_rx) = mpsc::channel(DEFAULT_BRIDGED_DATA_MESSAGE_QUEUE_CAPACITY);
         let (b_to_a, b_to_a_rx) = mpsc::channel(DEFAULT_BRIDGED_DATA_MESSAGE_QUEUE_CAPACITY);
@@ -940,12 +986,14 @@ impl CrossBridgeDataRoute {
             b_adapter,
             Arc::clone(&policy),
             terminal_tx.clone(),
+            peer_ticket.clone(),
         ));
         let b_to_a_worker = tokio::spawn(run_bridged_data_worker(
             b_to_a_rx,
             a_adapter,
             policy,
             terminal_tx,
+            peer_ticket,
         ));
         Self {
             a,
@@ -1021,6 +1069,7 @@ async fn run_bridged_data_worker(
     target_adapter: Arc<dyn ConnectionAdapter>,
     policy: Arc<dyn DataMessageBridgePolicy>,
     terminal: tokio::sync::watch::Sender<Option<BridgedDataTerminalReason>>,
+    peer_ticket: crate::bridge::peer_switch::PeerRouteTicket,
 ) {
     while let Some(envelope) = receiver.recv().await {
         let decision = catch_unwind(AssertUnwindSafe(|| {
@@ -1054,6 +1103,10 @@ async fn run_bridged_data_worker(
             .increment(1);
             continue;
         }
+        let Some(_delivery) = peer_ticket.try_begin_delivery() else {
+            metrics::counter!("rvoip_core_bridged_data_messages_dropped_total", "reason" => "inactive_peer").increment(1);
+            continue;
+        };
         if target_adapter
             .send_data_message(envelope.target, message)
             .await
@@ -2596,6 +2649,21 @@ impl Orchestrator {
         Ok(ticket)
     }
 
+    pub(crate) async fn set_pending_inbound_audio_codecs(
+        &self,
+        connection_id: &ConnectionId,
+        transport: Transport,
+        lifecycle_generation: u64,
+        codecs: Vec<String>,
+    ) -> Result<()> {
+        self.pending_inbound_lifecycle(connection_id, transport, lifecycle_generation)?;
+        self.adapter(transport)?
+            .set_inbound_audio_codecs(connection_id.clone(), codecs)
+            .await?;
+        self.pending_inbound_lifecycle(connection_id, transport, lifecycle_generation)?;
+        Ok(())
+    }
+
     pub(crate) fn install_staged_inbound_data(
         &self,
         connection_id: &ConnectionId,
@@ -4080,7 +4148,7 @@ impl Orchestrator {
     /// signals DTMF out-of-band (e.g. UCTP `dtmf.send` envelope) and
     /// the bridged peer needs to inject the corresponding RFC 4733
     /// telephone-event packets onto its outbound RTP.
-    fn bridge_peer_of(&self, conn: &ConnectionId) -> Option<ConnectionId> {
+    pub fn bridge_peer_of(&self, conn: &ConnectionId) -> Option<ConnectionId> {
         let bridge_id = self
             .cross_bridge_owners
             .get(conn)
@@ -4163,15 +4231,22 @@ impl Orchestrator {
     }
 
     async fn remove_cross_bridge_internal(&self, bridge_id: &BridgeId) -> Result<bool> {
-        let Some((_, mut handle)) = self.cross_bridges.remove(bridge_id) else {
-            if let Some((_, mut data_route)) = self.cross_bridge_data_routes.remove(bridge_id) {
+        let (handle, data_route) = {
+            let _ownership = self.bridge_ownership_lock.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // Removal participates in the same fence as peer preparation and
+            // future handoff commit. Never hold this lock across route shutdown.
+            (self.cross_bridges.remove(bridge_id),
+             self.cross_bridge_data_routes.remove(bridge_id))
+        };
+        let Some((_, mut handle)) = handle else {
+            if let Some((_, mut data_route)) = data_route {
                 data_route.stop().await;
             }
             return Ok(false);
         };
         let a = handle.a.clone();
         let b = handle.b.clone();
-        let data_route = self.cross_bridge_data_routes.remove(bridge_id);
         let (result, ()) = tokio::join!(handle.stop(), async move {
             if let Some((_, mut data_route)) = data_route {
                 data_route.stop().await;
@@ -4195,12 +4270,18 @@ impl Orchestrator {
             if !terminal.await {
                 return;
             }
-            let Some((_, mut handle)) = cross_bridges.remove(&bridge_id) else {
+            let removed = {
+                let _ownership = ownership_lock.lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                cross_bridges.remove(&bridge_id).map(|(_, handle)| {
+                    (handle, data_routes.remove(&bridge_id))
+                })
+            };
+            let Some((mut handle, data_route)) = removed else {
                 return;
             };
             let a = handle.a.clone();
             let b = handle.b.clone();
-            let data_route = data_routes.remove(&bridge_id);
             let (result, ()) = tokio::join!(handle.stop(), async move {
                 if let Some((_, mut data_route)) = data_route {
                     data_route.stop().await;
@@ -9822,6 +9903,232 @@ impl Orchestrator {
         media_plan: DirectionalMediaBridgePlan,
         data_policy: Arc<dyn DataMessageBridgePolicy>,
     ) -> Result<BridgeId> {
+        let PreparedCrossBridge {
+            id, a, b, lifecycle_tickets, reservation, handle, data_route,
+        } = self.prepare_cross_bridge(a, b, media_plan, data_policy, None).await?;
+        let statuses = handle.managed_media_route_statuses();
+        debug_assert!(!statuses.is_empty(), "validated bridge has a media route");
+        let data_terminal = data_route.terminal_status();
+        // Keep the non-Send std::sync lifecycle guards inside this entirely
+        // synchronous scope. In particular, the lock-error cleanup awaits
+        // below must not retain the Result temporary whose Ok variant contains
+        // those guards; public bridge futures are required to remain Send.
+        let commit = match self.lock_connection_lifecycles(&lifecycle_tickets) {
+            Ok(lifecycle_guards) => {
+                self.cross_bridges.insert(id.clone(), handle);
+                self.cross_bridge_data_routes.insert(id.clone(), data_route);
+                reservation.commit();
+                self.emit(Event::ConnectionsBridged {
+                    bridge_id: id.clone(),
+                    a,
+                    b,
+                    at: Utc::now(),
+                });
+                drop(lifecycle_guards);
+                Ok(())
+            }
+            Err(error) => Err((error, handle, data_route)),
+        };
+        if let Err((error, mut handle, mut data_route)) = commit {
+            let (_media, ()) = tokio::join!(handle.stop(), data_route.stop());
+            return Err(error);
+        }
+        self.supervise_cross_bridge_routes(id.clone(), statuses, data_terminal);
+        Ok(id)
+    }
+
+    /// Prepare a handoff only when every active outbound leg of both bridges
+    /// uses generation-bearing transport queues. Legacy graph-only routes are
+    /// explicitly refused; callers must not silently fall back after refusal.
+    pub async fn prepare_transport_fenced_peer_handoff(
+        &self,
+        original: BridgeId,
+        retained: ConnectionId,
+        target: ConnectionId,
+        media_plan: DirectionalMediaBridgePlan,
+        data_policy: Arc<dyn DataMessageBridgePolicy>,
+    ) -> Result<PreparedPeerHandoff> {
+        if !self.cross_bridges.get(&original)
+            .is_some_and(|bridge| bridge.peer_transport_fenced)
+        {
+            return Err(RvoipError::NotImplemented("original bridge transport fence"));
+        }
+        let prepared = self.prepare_peer_handoff(original, retained, target, media_plan, data_policy).await?;
+        if !prepared.prepared.handle.peer_transport_fenced {
+            return Err(RvoipError::NotImplemented("replacement bridge transport fence"));
+        }
+        Ok(prepared)
+    }
+
+    /// Prepare an inactive replacement speaking peer while retaining the live
+    /// bridge. This does not commit a transfer or emit a bridged event.
+    /// Legacy streams provide only graph fencing; production callers needing
+    /// transport cutoff must use `prepare_transport_fenced_peer_handoff`.
+    pub async fn prepare_peer_handoff(
+        &self,
+        original: BridgeId,
+        retained: ConnectionId,
+        target: ConnectionId,
+        media_plan: DirectionalMediaBridgePlan,
+        data_policy: Arc<dyn DataMessageBridgePolicy>,
+    ) -> Result<PreparedPeerHandoff> {
+        let id = BridgeId::new();
+        let (reservation, ticket, source, expected_peer) = {
+            let _guard = self.bridge_ownership_lock.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let bridge = self.cross_bridges.get(&original)
+                .ok_or(RvoipError::InvalidState("original bridge is unavailable"))?;
+            let source = if bridge.a == retained { bridge.b.clone() }
+                else if bridge.b == retained { bridge.a.clone() }
+                else { return Err(RvoipError::InvalidState("retained connection is not on original bridge")); };
+            if target == retained || target == source || self.cross_bridge_owners.contains_key(&target) {
+                return Err(RvoipError::AdmissionRejected("replacement target is already bridged"));
+            }
+            for connection in [&retained, &source] {
+                if !self.cross_bridge_owners.get(connection).is_some_and(|owner| owner.value() == &original) {
+                    return Err(RvoipError::InvalidState("original bridge ownership changed"));
+                }
+            }
+            let current = bridge.peer_route_ticket()
+                .filter(|ticket| ticket.is_active())
+                .ok_or(RvoipError::InvalidState("original peer is inactive"))?;
+            let ticket = current.stage()
+                .ok_or(RvoipError::InvalidState("original peer retired"))?;
+            self.cross_bridge_owners.insert(target.clone(), id.clone());
+            (BridgeReservation {
+                bridge_id: id.clone(), a: retained.clone(), b: target.clone(),
+                owners: Arc::clone(&self.cross_bridge_owners),
+                lock: Arc::clone(&self.bridge_ownership_lock), committed: false,
+            }, ticket, source, current)
+        };
+        let lifecycle = self.capture_connection_lifecycles(&[source.clone()])?;
+        let mut prepared = self.prepare_cross_bridge(retained, target, media_plan, data_policy,
+            Some((reservation, ticket))).await?;
+        self.validate_connection_lifecycles(&lifecycle)?;
+        // Stream lookup and route activation await adapter work. The original
+        // bridge may have been removed while those awaits were in progress.
+        // A live connection lifecycle alone does not prove a live bridge.
+        if !expected_peer.is_active() {
+            return Err(RvoipError::InvalidState("original peer changed during preparation"));
+        }
+        prepared.lifecycle_tickets.extend(lifecycle);
+        // Match capture_connection_lifecycles lock ordering for the eventual
+        // commit that must fence all three connections simultaneously.
+        prepared.lifecycle_tickets.sort_by(|left, right|
+            left.connection_id.cmp(&right.connection_id));
+        Ok(PreparedPeerHandoff { prepared, original, source, expected_peer })
+    }
+
+    /// Pause old-peer delivery and bound the wait for admitted transport sends.
+    /// Cancellation/timeout restores old-peer admission and drops target staging.
+    /// Transport implementations must use the peer queue for this to fence their
+    /// sends; legacy queues retain the documented graph-only guarantee.
+    pub async fn commit_peer_handoff_with_timeout(
+        &self, handoff: PreparedPeerHandoff, timeout: std::time::Duration,
+    ) -> Result<BridgeId> {
+        self.commit_peer_handoff_with_timeout_and_receipt(handoff, timeout)
+            .await.map(|receipt| receipt.bridge_id)
+    }
+
+    /// Bounded commit with the exact timestamp also emitted to event consumers.
+    pub async fn commit_peer_handoff_with_timeout_and_receipt(
+        &self, handoff: PreparedPeerHandoff, timeout: std::time::Duration,
+    ) -> Result<PeerHandoffReceipt> {
+        if !Arc::ptr_eq(&handoff.prepared.reservation.owners, &self.cross_bridge_owners) {
+            return Err(RvoipError::InvalidState("handoff belongs to another orchestrator"));
+        }
+        let _paused = tokio::time::timeout(timeout, handoff.expected_peer.quiesce())
+            .await.map_err(|_| RvoipError::InvalidState("handoff delivery drain timed out"))?
+            .ok_or(RvoipError::InvalidState("handoff peer cannot be paused"))?;
+        self.commit_peer_handoff_with_receipt(handoff)
+    }
+
+    /// Publish prepared peer routes under connection-lifecycle and ownership
+    /// fences. This switches graph delivery and bridge indexing, but cannot
+    /// retract frames/messages already accepted by a transport. Callers must
+    /// not treat this as the complete transport-level transfer contract yet.
+    pub fn commit_peer_handoff(&self, handoff: PreparedPeerHandoff) -> Result<BridgeId> {
+        self.commit_peer_handoff_with_receipt(handoff).map(|receipt| receipt.bridge_id)
+    }
+
+    pub fn commit_peer_handoff_with_receipt(&self, handoff: PreparedPeerHandoff) -> Result<PeerHandoffReceipt> {
+        let PreparedPeerHandoff { prepared, original, source, expected_peer } = handoff;
+        if !Arc::ptr_eq(&prepared.reservation.owners, &self.cross_bridge_owners) {
+            return Err(RvoipError::InvalidState("handoff belongs to another orchestrator"));
+        }
+        let id = prepared.id.clone();
+        let statuses = prepared.handle.managed_media_route_statuses();
+        let data_terminal = prepared.data_route.terminal_status();
+        let (retired, receipt) = (|| {
+            let _lifecycles = self.lock_connection_lifecycles(&prepared.lifecycle_tickets)?;
+            let _ownership = self.bridge_ownership_lock.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for (connection, expected) in [(&prepared.a, &original), (&source, &original), (&prepared.b, &id)] {
+                if !self.cross_bridge_owners.get(connection).is_some_and(|owner| owner.value() == expected) {
+                    return Err(RvoipError::InvalidState("handoff ownership changed before commit"));
+                }
+            }
+            if !self.cross_bridges.contains_key(&original) || !expected_peer.is_current() {
+                return Err(RvoipError::InvalidState("original peer changed before commit"));
+            }
+            if statuses.iter().any(|status| !matches!(status.state(), crate::media_graph::MediaGraphRouteState::Active))
+                || data_terminal.borrow().is_some() {
+                return Err(RvoipError::InvalidState("prepared route terminated before commit"));
+            }
+            let ticket = prepared.handle.peer_route_ticket()
+                .ok_or(RvoipError::InvalidState("prepared peer ticket missing"))?;
+            if !ticket.commit_from(&expected_peer) {
+                return Err(RvoipError::InvalidState("peer changed before commit"));
+            }
+            // All fallible validation precedes the generation switch. No await
+            // or externally callable policy occurs in this publication section.
+            let old = self.cross_bridges.remove(&original).expect("ownership-fenced bridge");
+            let old_data = self.cross_bridge_data_routes.remove(&original);
+            if let Some((_, route)) = &old_data {
+                for worker in &route.workers { worker.abort(); }
+            }
+            self.cross_bridge_owners.insert(prepared.a.clone(), id.clone());
+            self.cross_bridge_owners.remove(&source);
+            self.cross_bridges.insert(id.clone(), prepared.handle);
+            self.cross_bridge_data_routes.insert(id.clone(), prepared.data_route);
+            prepared.reservation.commit();
+            let committed_at = Utc::now();
+            let receipt = PeerHandoffReceipt {
+                previous_bridge_id: original.clone(), bridge_id: id.clone(),
+                retained: prepared.a.clone(), source: source.clone(), target: prepared.b.clone(),
+                committed_at,
+            };
+            self.emit(Event::PeerHandoffCommitted {
+                previous_bridge_id: original.clone(), bridge_id: id.clone(),
+                retained: prepared.a.clone(), source: source.clone(), target: prepared.b.clone(),
+                at: committed_at,
+            });
+            self.emit(Event::ConnectionsUnbridged { bridge_id: original, at: Utc::now() });
+            self.emit(Event::ConnectionsBridged {
+                bridge_id: id.clone(), a: prepared.a, b: prepared.b, at: Utc::now(),
+            });
+            Ok(((old, old_data), receipt))
+        })()?;
+        self.supervise_cross_bridge_routes(id.clone(), statuses, data_terminal);
+        // Cleanup owns old handles independently of the caller's lifetime.
+        // Old peer retirement is generation-checked and cannot stop the new peer.
+        tokio::spawn(async move {
+            let ((_, mut media), data) = retired;
+            let _ = tokio::join!(media.stop(), async move {
+                if let Some((_, mut data)) = data { data.stop().await; }
+            });
+        });
+        Ok(receipt)
+    }
+
+    async fn prepare_cross_bridge(
+        &self,
+        a: ConnectionId,
+        b: ConnectionId,
+        media_plan: DirectionalMediaBridgePlan,
+        data_policy: Arc<dyn DataMessageBridgePolicy>,
+        staged: Option<(BridgeReservation, crate::bridge::peer_switch::PeerRouteTicket)>,
+    ) -> Result<PreparedCrossBridge> {
         if a == b {
             return Err(RvoipError::AdmissionRejected(
                 "cannot bridge a connection to itself",
@@ -9830,8 +10137,15 @@ impl Orchestrator {
         let a_adapter = self.adapter_for(&a)?;
         let b_adapter = self.adapter_for(&b)?;
         let lifecycle_tickets = self.capture_connection_lifecycles(&[a.clone(), b.clone()])?;
-        let id = BridgeId::new();
-        let reservation = self.reserve_cross_bridge(id.clone(), a.clone(), b.clone())?;
+        let (reservation, peer_ticket) = match staged {
+            Some(staged) => staged,
+            None => {
+                let id = BridgeId::new();
+                (self.reserve_cross_bridge(id, a.clone(), b.clone())?,
+                 crate::bridge::peer_switch::PeerRouteTicket::initial())
+            }
+        };
+        let id = reservation.bridge_id.clone();
 
         // Poll both adapters for an audio stream up to the configured
         // deadline. Adapters create streams on connection.ready, so a
@@ -9879,19 +10193,22 @@ impl Orchestrator {
         // here instead of consuming a source and later discovering that its
         // peer sink cannot accept media.
         let a_out = if media_plan.b_to_a() {
-            Some(a_audio.try_frames_out()?)
+            Some(crate::media_graph::MediaSinkTarget::for_stream(a_audio.as_ref())?)
         } else {
             None
         };
         let b_out = if media_plan.a_to_b() {
-            Some(b_audio.try_frames_out()?)
+            Some(crate::media_graph::MediaSinkTarget::for_stream(b_audio.as_ref())?)
         } else {
             None
         };
+        let peer_transport_fenced = [a_out.as_ref(), b_out.as_ref()]
+            .into_iter().flatten()
+            .all(crate::media_graph::MediaSinkTarget::is_transport_fenced);
         if [a_out.as_ref(), b_out.as_ref()]
             .into_iter()
             .flatten()
-            .any(tokio::sync::mpsc::Sender::is_closed)
+            .any(crate::media_graph::MediaSinkTarget::is_closed)
         {
             return Err(RvoipError::InvalidState(
                 "bridge media target is already closed",
@@ -9917,7 +10234,7 @@ impl Orchestrator {
         if let Some(b_out) = b_out {
             let a_graph =
                 a_source_graph.expect("validated A-to-B plan initializes the A source graph");
-            let route = a_graph.add_managed_sink(b_codec.clone(), b_out)?;
+            let route = a_graph.add_peer_sink_target(b_codec.clone(), b_out, peer_ticket.clone())?;
             if route.wait_active().await.is_err() {
                 let _ = route.remove().await;
                 return Err(RvoipError::InvalidState(
@@ -9931,7 +10248,7 @@ impl Orchestrator {
         if let Some(a_out) = a_out {
             let b_graph =
                 b_source_graph.expect("validated B-to-A plan initializes the B source graph");
-            let route = match b_graph.add_managed_sink(a_codec, a_out) {
+            let route = match b_graph.add_peer_sink_target(a_codec, a_out, peer_ticket.clone()) {
                 Ok(route) => route,
                 Err(error) => {
                     if let Some((_, route)) = a_to_b.take() {
@@ -9966,46 +10283,23 @@ impl Orchestrator {
             a_to_b,
             b_to_a,
         );
-        let statuses = handle.managed_media_route_statuses();
-        debug_assert!(!statuses.is_empty(), "validated bridge has a media route");
+        handle.peer_ticket = Some(peer_ticket.clone());
+        handle.peer_transport_fenced = peer_transport_fenced;
         let mut data_route = CrossBridgeDataRoute::new(
             a.clone(),
             b.clone(),
             Arc::clone(&a_adapter),
             Arc::clone(&b_adapter),
             data_policy,
+            peer_ticket,
         );
-        let data_terminal = data_route.terminal_status();
         if let Err(error) = self.validate_connection_lifecycles(&lifecycle_tickets) {
             let (_media, ()) = tokio::join!(handle.stop(), data_route.stop());
             return Err(error);
         }
-        // Keep the non-Send std::sync lifecycle guards inside this entirely
-        // synchronous scope. In particular, the lock-error cleanup awaits
-        // below must not retain the Result temporary whose Ok variant contains
-        // those guards; public bridge futures are required to remain Send.
-        let commit = match self.lock_connection_lifecycles(&lifecycle_tickets) {
-            Ok(lifecycle_guards) => {
-                self.cross_bridges.insert(id.clone(), handle);
-                self.cross_bridge_data_routes.insert(id.clone(), data_route);
-                reservation.commit();
-                self.emit(Event::ConnectionsBridged {
-                    bridge_id: id.clone(),
-                    a,
-                    b,
-                    at: Utc::now(),
-                });
-                drop(lifecycle_guards);
-                Ok(())
-            }
-            Err(error) => Err((error, handle, data_route)),
-        };
-        if let Err((error, mut handle, mut data_route)) = commit {
-            let (_media, ()) = tokio::join!(handle.stop(), data_route.stop());
-            return Err(error);
-        }
-        self.supervise_cross_bridge_routes(id.clone(), statuses, data_terminal);
-        Ok(id)
+        Ok(PreparedCrossBridge {
+            id, a, b, lifecycle_tickets, reservation, handle, data_route,
+        })
     }
 
     async fn media_graphs_for_directional_bridge(

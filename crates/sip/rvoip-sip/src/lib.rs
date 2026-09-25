@@ -467,6 +467,7 @@
 // ── Internal modules (pub for doc visibility, use the re-exports below) ─────
 
 pub mod adapter;
+mod response_diagnostics;
 pub mod api;
 pub mod errors;
 /// D4 — `MediaStream` wrapper that bridges a SIP audio session into

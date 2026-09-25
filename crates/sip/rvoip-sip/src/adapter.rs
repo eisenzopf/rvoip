@@ -314,6 +314,7 @@ impl SipOutboundRoute {
         let (cancel, _) = watch::channel(false);
         let sip_call_id: Arc<str> =
             crate::adapters::dialog_adapter::deterministic_outbound_call_id(&session_id).into();
+        crate::response_diagnostics::prepared(&session_id.to_string(), &connection_id.to_string(), &sip_call_id);
         Arc::new(Self {
             connection_id,
             session_id,
@@ -4357,6 +4358,73 @@ impl ConnectionAdapter for SipAdapter {
             .map_err(Self::map_session_err)
     }
 
+    async fn set_inbound_audio_codecs(
+        &self,
+        conn: ConnectionId,
+        codecs: Vec<String>,
+    ) -> CoreResult<()> {
+        if codecs.is_empty()
+            || codecs.len() > 4
+            || codecs.iter().enumerate().any(|(index, codec)| {
+                !matches!(codec.as_str(), "PCMU" | "PCMA" | "opus" | "AMR-WB")
+                    || (codec == "opus" && !cfg!(feature = "opus"))
+                    || (codec == "AMR-WB" && !cfg!(feature = "amr-wb"))
+                    || codecs[..index].contains(codec)
+            })
+        {
+            return Err(RvoipError::UnsupportedCodec(
+                "invalid inbound audio policy".into(),
+            ));
+        }
+        let session_id = self.lookup_session(&conn)?;
+        let epoch = self
+            .existing_mapped_epoch(&session_id)
+            .filter(|epoch| epoch.connection_id == conn)
+            .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
+        let handle = match &epoch.owner {
+            SipRouteEpochOwner::Admitted(handle) => handle.clone(),
+            SipRouteEpochOwner::Prepared(_) => {
+                return Err(RvoipError::InvalidState(
+                    "audio policy requires an inbound session",
+                ));
+            }
+        };
+        let store = &self.coordinator.helpers.state_machine.store;
+        let lane = store
+            .state_machine_lane_exact(&handle)
+            .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
+        let _lane = lane.lock_owned().await;
+        {
+            let _mapping = self
+                .mapping_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !self.epoch_is_current_locked(&epoch) {
+                return Err(RvoipError::ConnectionNotFound(conn));
+            }
+        }
+        store
+            .update_session_exact_now(&handle, |session| {
+                if session.role != crate::state_table::Role::UAS
+                    || session.sdp_negotiated
+                    || session.local_sdp.is_some()
+                    || session.call_state.is_final()
+                || matches!(session.call_state, CallState::Terminating | CallState::CancelPending | CallState::Cancelling)
+                    || session
+                        .inbound_audio_codecs
+                        .as_ref()
+                        .is_some_and(|current| current != &codecs)
+                {
+                    return Err(RvoipError::InvalidState(
+                        "inbound audio policy must precede SDP answer",
+                    ));
+                }
+                session.inbound_audio_codecs = Some(codecs);
+                Ok(())
+            })
+            .map_err(|_| RvoipError::InvalidState("inbound audio policy session changed"))?
+    }
+
     async fn renegotiate_media(
         &self,
         conn: ConnectionId,
@@ -4790,6 +4858,84 @@ Signal=5\r\nDuration=160\r\n";
             .await
             .unwrap_or_else(|error| panic!("test session admission failed: {error}"));
         session.lifecycle_handle.expect("exact test session handle")
+    }
+
+    #[tokio::test]
+    async fn inbound_trunk_policy_is_pinned_to_one_session_lifetime() {
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("codec-policy", 0))
+            .await
+            .unwrap();
+        let adapter = SipAdapter::new(Arc::clone(&coordinator)).await.unwrap();
+        let first = SessionId::new();
+        let second = SessionId::new();
+        let first_handle = admit_test_session(&coordinator, &first).await;
+        admit_test_session(&coordinator, &second).await;
+        let first_epoch = adapter.ensure_mapped_epoch(first.clone()).unwrap();
+        let second_epoch = adapter.ensure_mapped_epoch(second.clone()).unwrap();
+        adapter
+            .set_inbound_audio_codecs(first_epoch.connection_id.clone(), vec!["PCMA".into()])
+            .await
+            .unwrap();
+        adapter
+            .set_inbound_audio_codecs(second_epoch.connection_id.clone(), vec!["PCMU".into()])
+            .await
+            .unwrap();
+        assert_eq!(
+            coordinator
+                .session_state(&first)
+                .await
+                .unwrap()
+                .inbound_audio_codecs,
+            Some(vec!["PCMA".into()])
+        );
+        assert_eq!(
+            coordinator
+                .session_state(&second)
+                .await
+                .unwrap()
+                .inbound_audio_codecs,
+            Some(vec!["PCMU".into()])
+        );
+        assert!(
+            adapter
+                .set_inbound_audio_codecs(first_epoch.connection_id.clone(), vec!["PCMU".into()])
+                .await
+                .is_err()
+        );
+        assert!(
+            adapter
+                .set_inbound_audio_codecs(first_epoch.connection_id.clone(), vec![])
+                .await
+                .is_err()
+        );
+        let mut answered = coordinator.session_state(&second).await.unwrap();
+        answered.sdp_negotiated = true;
+        coordinator.update_session_state_for_test(answered).await.unwrap();
+        assert!(adapter.set_inbound_audio_codecs(
+            second_epoch.connection_id.clone(), vec!["PCMU".into()]
+        ).await.is_err(), "an answered call cannot receive another policy");
+        retire_test_session(&coordinator, &first_handle).await;
+        elapse_test_reuse_horizon(&coordinator, &first);
+        admit_test_session(&coordinator, &first).await;
+        assert!(
+            adapter
+                .set_inbound_audio_codecs(first_epoch.connection_id, vec!["PCMU".into()])
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            coordinator
+                .session_state(&first)
+                .await
+                .unwrap()
+                .inbound_audio_codecs,
+            None
+        );
+        adapter.drain().await.unwrap();
+        coordinator
+            .shutdown_gracefully(Some(Duration::ZERO))
+            .await
+            .unwrap();
     }
 
     async fn retire_test_session(coordinator: &UnifiedCoordinator, handle: &SessionRegistryHandle) {
@@ -6091,6 +6237,71 @@ Signal=5\r\nDuration=160\r\n";
         .expect("media bind deadline");
         assert_eq!(route.stream.codec().name, "g.711-a");
         assert!(route.stream.try_frames_out().is_ok());
+
+        // Exercise the actual stream pump and RTP writer. A nonzero initial
+        // duration is valid; continuation/end packets must not synthesize
+        // duplicate tones, and queued audio must follow the completed tone.
+        for fenced in [false, true] {
+        let output = route.stream.try_frames_out().unwrap();
+        let peer_output = route.stream.try_peer_frames_out().unwrap();
+        let ticket = rvoip_core_traits::peer_switch::PeerRouteTicket::initial();
+        if fenced {
+            let retired = rvoip_core_traits::peer_switch::PeerRouteTicket::initial();
+            retired.retire_if_current();
+            peer_output.send(rvoip_core_traits::peer_media::PeerMediaFrame::new(
+                rvoip_core::stream::MediaFrame {
+                    stream_id: rvoip_core::ids::StreamId::new(),
+                    kind: rvoip_core::stream::StreamKind::Audio,
+                    payload: bytes::Bytes::from_static(&[9, 10, 0, 160]),
+                    timestamp_rtp: 0, captured_at: chrono::Utc::now(), payload_type: Some(101),
+                }, retired)).await.unwrap();
+        }
+        let send = |frame| {
+            let output = output.clone(); let peer_output = peer_output.clone();
+            let ticket = ticket.clone();
+            async move {
+                if fenced {
+                    peer_output.send(rvoip_core_traits::peer_media::PeerMediaFrame::new(frame, ticket))
+                        .await.unwrap();
+                } else { output.send(frame).await.unwrap(); }
+            }
+        };
+        let source = rvoip_core::ids::StreamId::new();
+        for payload in [[5, 10, 0, 160], [5, 10, 1, 64], [5, 0x8a, 3, 32]] {
+            send(rvoip_core::stream::MediaFrame {
+                stream_id: source.clone(), kind: rvoip_core::stream::StreamKind::Audio,
+                payload: bytes::Bytes::copy_from_slice(&payload), timestamp_rtp: 1_000,
+                captured_at: chrono::Utc::now(), payload_type: Some(101),
+            }).await;
+        }
+        send(rvoip_core::stream::MediaFrame {
+            stream_id: source, kind: rvoip_core::stream::StreamKind::Audio,
+            payload: bytes::Bytes::from(vec![0x00; 160]), timestamp_rtp: 2_000,
+            captured_at: chrono::Utc::now(), payload_type: Some(8),
+        }).await;
+        let mut tone_timestamp = None;
+        let mut tone_ends = 0;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let (length, _) = capture.recv_from(&mut packet).await.unwrap();
+                if length < 12 || packet[0] >> 6 != 2 { continue; }
+                let payload_type = packet[1] & 0x7f;
+                if payload_type == 8 {
+                    assert_eq!(tone_ends, 3, "audio follows one completed tone schedule");
+                    break;
+                }
+                if payload_type != 101 { continue; }
+                assert_eq!(packet[0] & 0x1f, 0, "fixture RTP has no extension or CSRC");
+                assert!(length >= 16);
+                assert_eq!(packet[12], 5);
+                let stamp = u32::from_be_bytes(packet[4..8].try_into().unwrap());
+                if let Some(expected) = tone_timestamp { assert_eq!(stamp, expected); }
+                else { tone_timestamp = Some(stamp); }
+                if packet[13] & 0x80 != 0 { tone_ends += 1; }
+            }
+        }).await.expect("DTMF schedule and subsequent audio reached local RTP socket");
+
+        }
 
         let end_adapter = Arc::clone(&adapter);
         let end_connection = connection_id.clone();
