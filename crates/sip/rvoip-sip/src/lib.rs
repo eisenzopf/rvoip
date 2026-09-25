@@ -547,7 +547,10 @@ pub use api::handlers::{
 };
 
 // Call control
-pub use api::audio::{AudioReceiver, AudioSender, AudioStream};
+pub use api::audio::{
+    AudioGenerationAdvance, AudioReceiver, AudioSendError, AudioSendMetrics, AudioSender,
+    AudioStream,
+};
 // The PCM frame type carried by `AudioStream` (`SessionHandle::audio()`).
 // Re-exported so clients can construct frames (mic -> RTP) without taking a
 // direct dependency on `rvoip-media-core`.

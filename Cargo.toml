@@ -17,6 +17,7 @@ members = [
 
     # media/ — shared media plane (consumed by foundation, uctp, and sip).
     "crates/media/media-core",
+    "crates/media/rvoip-audio-send-queue",
     "crates/media/codec-core",
     "crates/media/rtp-core",
     "crates/media/ice-core",
@@ -223,6 +224,7 @@ rvoip-sip-registrar = { path = "crates/sip/sip-registrar", version = "0.3.10" }
 rvoip-rtp-core      = { path = "crates/media/rtp-core", version = "0.3.10" }
 rvoip-ice-core      = { path = "crates/media/ice-core", version = "0.3.10" }
 rvoip-media-core    = { path = "crates/media/media-core", version = "0.3.10" }
+rvoip-audio-send-queue = { path = "crates/media/rvoip-audio-send-queue", version = "0.3.10" }
 rvoip-sip           = { path = "crates/sip/rvoip-sip", version = "0.3.10" }
 rvoip-core          = { path = "crates/foundation/rvoip-core", version = "0.3.10" }
 rvoip-codec-core    = { path = "crates/media/codec-core", version = "0.3.10" }

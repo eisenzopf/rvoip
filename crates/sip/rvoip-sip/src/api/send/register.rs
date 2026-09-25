@@ -136,6 +136,7 @@ impl RegisterBuilder {
                 &self.user,
                 &self.password,
                 self.expires,
+                self.outbound_proxy.take(),
                 extra_headers,
             )
             .await

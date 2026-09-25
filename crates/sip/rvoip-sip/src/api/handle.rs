@@ -25,7 +25,10 @@ use crate::session_registry::SessionRegistryHandle;
 use crate::state_table::types::SessionId;
 use crate::types::{CallState, SessionInfo};
 
-const AUDIO_STREAM_CHANNEL_FRAMES: usize = 128;
+const AUDIO_RECEIVE_CHANNEL_FRAMES: usize = 128;
+// Nine pending frames plus the pump's one in-flight frame bound transport
+// ownership to ten 20 ms application frames (200 ms).
+const AUDIO_SEND_PENDING_FRAMES: usize = 9;
 
 /// Type alias so callers can refer to a session by `CallId`.
 pub type CallId = SessionId;
@@ -1268,7 +1271,7 @@ impl SessionHandle {
             .await?;
 
         // Create a channel for receiving frames: drain the subscriber into an mpsc channel
-        let (recv_tx, recv_rx) = mpsc::channel::<AudioFrame>(AUDIO_STREAM_CHANNEL_FRAMES);
+        let (recv_tx, recv_rx) = mpsc::channel::<AudioFrame>(AUDIO_RECEIVE_CHANNEL_FRAMES);
         let mut receive_cancellation = cancellation.clone();
         tokio::spawn(async move {
             loop {
@@ -1293,28 +1296,54 @@ impl SessionHandle {
         let call_id = self.call_id.clone();
         let send_handle = lifecycle_handle.clone();
         let mut send_cancellation = cancellation;
-        let (send_tx, mut send_rx) = mpsc::channel::<AudioFrame>(AUDIO_STREAM_CHANNEL_FRAMES);
+        let (send_tx, mut send_rx) = AudioSender::channel(AUDIO_SEND_PENDING_FRAMES);
+        let mut send_generation = send_rx.generation_changes();
         tokio::spawn(async move {
             loop {
+                let delivery = tokio::select! {
+                    biased;
+                    changed = send_cancellation.changed() => {
+                        if changed.is_err() || *send_cancellation.borrow() {
+                            break;
+                        }
+                        continue;
+                    }
+                    delivery = send_rx.recv() => delivery,
+                };
+                let Some(mut delivery) = delivery else { break; };
+                let accepted_generation = *send_generation.borrow_and_update();
+                if send_rx.is_closed() {
+                    break;
+                }
+                if delivery.generation() != accepted_generation {
+                    continue;
+                }
+                let frame = delivery.take();
                 tokio::select! {
+                    biased;
                     changed = send_cancellation.changed() => {
                         if changed.is_err() || *send_cancellation.borrow() {
                             break;
                         }
                     }
-                    frame = send_rx.recv() => {
-                        let Some(frame) = frame else { break; };
-                        if let Err(e) = coordinator.send_audio_exact(&send_handle, frame).await {
+                    changed = send_generation.changed() => {
+                        if changed.is_err() || send_rx.is_closed() {
+                            break;
+                        }
+                    }
+                    result = coordinator.send_audio_exact(&send_handle, frame) => {
+                        if let Err(e) = result {
                             tracing::debug!("[SessionHandle] audio send error for {}: {}", call_id, e);
                             break;
                         }
+                        delivery.mark_submitted();
                     }
                 }
             }
         });
 
         Ok(AudioStream::new(
-            AudioSender::new(send_tx),
+            send_tx,
             AudioReceiver::new(recv_rx),
         ))
     }

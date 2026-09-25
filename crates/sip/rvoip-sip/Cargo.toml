@@ -363,6 +363,7 @@ rvoip-sip-dialog.workspace = true
 rvoip-sip-proxy.workspace = true
 rvoip-sip-transport.workspace = true
 rvoip-media-core.workspace = true
+rvoip-audio-send-queue.workspace = true
 rvoip-sip-core.workspace = true
 rvoip-rtp-core.workspace = true
 rvoip-ice-core.workspace = true

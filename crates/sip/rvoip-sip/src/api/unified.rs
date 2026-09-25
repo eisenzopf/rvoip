@@ -12392,7 +12392,7 @@ impl UnifiedCoordinator {
     /// Internal REGISTER dispatch used by
     /// [`RegisterBuilder`](crate::api::send::RegisterBuilder).
     ///
-    /// When `extra_headers` is non-empty we follow SIP_API_DESIGN_2 §10 #19
+    /// When request-specific options are present we follow SIP_API_DESIGN_2 §10 #19
     /// and stash a `RegisterRequestOptions` on the session *before* the
     /// `StartRegistration` event fires, so `execute_register_action`
     /// (`state_machine/actions.rs`) reads the slice on the very first
@@ -12414,6 +12414,7 @@ impl UnifiedCoordinator {
         username: &str,
         password: &str,
         expires: u32,
+        outbound_proxy: Option<String>,
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> Result<RegistrationHandle> {
         let session_id = SessionId::new();
@@ -12439,7 +12440,18 @@ impl UnifiedCoordinator {
             }
         }
 
-        let pending_options = (!extra_headers.is_empty()).then(|| {
+        let outbound_proxy_uri = outbound_proxy
+            .map(|value| {
+                use std::str::FromStr;
+                rvoip_sip_core::types::uri::Uri::from_str(&value).map_err(|_| {
+                    SessionError::ConfigurationError(format!(
+                        "REGISTER outbound proxy is not a valid SIP URI (bytes={})",
+                        value.len()
+                    ))
+                })
+            })
+            .transpose()?;
+        let pending_options = (outbound_proxy_uri.is_some() || !extra_headers.is_empty()).then(|| {
             std::sync::Arc::new(rvoip_sip_dialog::api::unified::RegisterRequestOptions {
                 registrar_uri: registrar_uri.to_string(),
                 aor_uri: from_uri.to_string(),
@@ -12450,7 +12462,7 @@ impl UnifiedCoordinator {
                 call_id: None,
                 cseq: None,
                 outbound_contact: None,
-                outbound_proxy_uri: None,
+                outbound_proxy_uri,
                 extra_headers,
                 refresh: false,
             })

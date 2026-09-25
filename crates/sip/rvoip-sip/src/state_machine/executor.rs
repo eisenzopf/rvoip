@@ -1843,7 +1843,7 @@ fn registration_refresh_options(
         call_id: Some(call_id),
         cseq: Some(cseq),
         outbound_contact: None,
-        outbound_proxy_uri: None,
+        outbound_proxy_uri: session.registration_outbound_proxy_uri.clone(),
         extra_headers,
         refresh: true,
     })
@@ -7466,6 +7466,11 @@ a=recvonly\r\n";
         session.registration_call_id = Some("registration-call-id".to_string());
         session.registration_cseq = 41;
         session.registration_expires = Some(300);
+        session.registration_outbound_proxy_uri = Some(
+            "sip:192.0.2.20:5060;lr"
+                .parse()
+                .expect("registration proxy URI"),
+        );
         let header = TypedHeader::Other(
             HeaderName::Other("X-Refresh-Canary".to_string()),
             HeaderValue::Raw(b"lane-owned".to_vec()),
@@ -7480,6 +7485,10 @@ a=recvonly\r\n";
         assert_eq!(options.call_id.as_deref(), Some("registration-call-id"));
         assert_eq!(options.cseq, Some(42));
         assert_eq!(options.expires, 180);
+        assert_eq!(
+            options.outbound_proxy_uri.as_ref().map(ToString::to_string),
+            Some("sip:192.0.2.20:5060;lr".to_string())
+        );
         assert_eq!(options.extra_headers.len(), 1);
         assert!(options.refresh);
     }

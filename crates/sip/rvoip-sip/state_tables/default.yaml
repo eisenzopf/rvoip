@@ -1884,6 +1884,23 @@ transitions:
       - "CallCancelled"
     description: "Matched inbound CANCEL already received 200 and ended INVITE with 487; commit lifecycle and cleanup once"
 
+  # AcceptCall enters Answering before its exact final-response action returns.
+  # A back-to-back matched CANCEL can win transaction final-response authorship
+  # during that interval. Dialog-core emits DialogCANCEL only after it has sent
+  # 200(CANCEL) and 487(INVITE), so this event is authoritative cancellation,
+  # not a late CANCEL after a completed INVITE 2xx.
+  - role: "UAS"
+    state: "Answering"
+    event:
+      type: "DialogCANCEL"
+    next_state: "Cancelled"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+    publish:
+      - "CallCancelled"
+    description: "Matched inbound CANCEL won final-response authorship while accept entered Answering; commit lifecycle and cleanup once"
+
   - role: "UAS"
     state: "EarlyMedia"
     event:
