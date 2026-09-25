@@ -33,10 +33,6 @@ rvoip-core-traits.workspace = true
 # rvoip-auth-core → rvoip-core) was broken by switching auth-core
 # to depend on rvoip-core-traits.
 rvoip-vcon = { workspace = true, optional = true }
-# V2.A.9 — optional rvoip-harness dep, gated by `harness`. Now
-# possible because rvoip-harness depends on rvoip-core-traits, not
-# rvoip-core, so this dep doesn't cycle.
-rvoip-harness = { workspace = true, optional = true }
 tracing.workspace = true
 metrics.workspace = true
 serde.workspace = true
@@ -123,10 +119,15 @@ all-codecs = ["g729", "opus", "amr"]
 # feature already pulls the canonical document model used by core's
 # unsigned auto-emission path.
 vcon-signing = ["vcon"]
-# V2.A.9 — Recording / transcription / AI dispatch — pulls
-# rvoip-harness (now possible after V2.A cycle break).
-harness = ["dep:rvoip-harness"]
+# Compatibility feature for consumers that selected the historical harness
+# surface through rvoip-core. Provider traits still live in
+# rvoip-core-traits; the concrete rvoip-harness crate now depends on core so it
+# can supply the first-party InProcessAi ConnectionAdapter.
+harness = []
 client = []
+# Deterministic, bounded orchestration gates used only by integration tests.
+# Default and release builds do not compile these seams.
+test-hooks = []
 full = [
     "webrtc",
     "harness",

@@ -9,7 +9,7 @@ pub use socket::UdpSocketOptions;
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -144,9 +144,11 @@ pub struct UdpTransport {
 }
 
 struct UdpTransportInner {
-    sender: UdpSender,
-    listener: Arc<UdpListener>,
+    sender: StdMutex<Option<UdpSender>>,
+    listener: StdMutex<Option<Arc<UdpListener>>>,
+    local_addr: SocketAddr,
     closed: AtomicBool,
+    socket_use_gate: tokio::sync::RwLock<()>,
     events_tx: mpsc::Sender<TransportEvent>,
     receive_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     parse_tasks: tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -267,9 +269,11 @@ impl UdpTransport {
         // Create the transport
         let transport = UdpTransport {
             inner: Arc::new(UdpTransportInner {
-                sender,
-                listener: Arc::new(listener),
+                sender: StdMutex::new(Some(sender)),
+                listener: StdMutex::new(Some(Arc::new(listener))),
+                local_addr,
                 closed: AtomicBool::new(false),
+                socket_use_gate: tokio::sync::RwLock::new(()),
                 events_tx: events_tx.clone(),
                 receive_task: tokio::sync::Mutex::new(None),
                 parse_tasks: tokio::sync::Mutex::new(Vec::new()),
@@ -306,9 +310,13 @@ impl UdpTransport {
         // Create and return the transport with closed=true so it won't be used
         UdpTransport {
             inner: Arc::new(UdpTransportInner {
-                sender,
-                listener: Arc::new(listener),
+                sender: StdMutex::new(Some(sender)),
+                local_addr: listener
+                    .local_addr()
+                    .unwrap_or_else(|_| "127.0.0.1:0".parse().unwrap()),
+                listener: StdMutex::new(Some(Arc::new(listener))),
                 closed: AtomicBool::new(true), // Mark as closed
+                socket_use_gate: tokio::sync::RwLock::new(()),
                 events_tx,
                 receive_task: tokio::sync::Mutex::new(None),
                 parse_tasks: tokio::sync::Mutex::new(Vec::new()),
@@ -363,7 +371,14 @@ impl UdpTransport {
         }
 
         let mut shutdown_rx = self.inner.shutdown_rx.clone();
-        let listener_clone = self.inner.listener.clone();
+        let listener_clone = self
+            .inner
+            .listener
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .cloned()
+            .expect("a new UDP transport retains its listener");
         let events_tx = self.inner.events_tx.clone();
         let round_robin_worker = Arc::clone(&round_robin_worker);
 
@@ -649,7 +664,7 @@ fn udp_worker_index(
 #[async_trait::async_trait]
 impl Transport for UdpTransport {
     fn local_addr(&self) -> Result<SocketAddr> {
-        self.inner.listener.local_addr()
+        Ok(self.inner.local_addr)
     }
 
     async fn send_message(&self, message: Message, destination: SocketAddr) -> Result<()> {
@@ -657,6 +672,18 @@ impl Transport for UdpTransport {
             return Err(Error::TransportClosed);
         }
         validate_typed_outbound_message(&message)?;
+        let _socket_use = self.inner.socket_use_gate.read().await;
+        if self.is_closed() {
+            return Err(Error::TransportClosed);
+        }
+        let sender = self
+            .inner
+            .sender
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .cloned()
+            .ok_or(Error::TransportClosed)?;
 
         // Convert message to bytes
         let bytes = message.to_bytes();
@@ -674,12 +701,8 @@ impl Transport for UdpTransport {
 
         // Send the message using the sender
         let started = Instant::now();
-        let result = self.inner.sender.send(&bytes, destination).await;
-        let local_addr = self.inner.listener.local_addr().unwrap_or_else(|_| {
-            "0.0.0.0:0"
-                .parse()
-                .expect("hardcoded socket address must parse")
-        });
+        let result = sender.send(&bytes, destination).await;
+        let local_addr = self.inner.local_addr;
         diagnostics::record_outbound_message(
             &message,
             local_addr,
@@ -694,18 +717,26 @@ impl Transport for UdpTransport {
         if self.is_closed() {
             return Err(Error::TransportClosed);
         }
+        let _socket_use = self.inner.socket_use_gate.read().await;
+        if self.is_closed() {
+            return Err(Error::TransportClosed);
+        }
+        let sender = self
+            .inner
+            .sender
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .cloned()
+            .ok_or(Error::TransportClosed)?;
         debug!(
             "UDP: sending {} pre-built bytes to {}",
             bytes.len(),
             destination
         );
         let started = Instant::now();
-        let result = self.inner.sender.send(&bytes, destination).await;
-        let local_addr = self.inner.listener.local_addr().unwrap_or_else(|_| {
-            "0.0.0.0:0"
-                .parse()
-                .expect("hardcoded socket address must parse")
-        });
+        let result = sender.send(&bytes, destination).await;
+        let local_addr = self.inner.local_addr;
         diagnostics::record_outbound_raw(
             bytes.as_ref(),
             local_addr,
@@ -752,6 +783,24 @@ impl Transport for UdpTransport {
         }
         drop(parse_task_guard);
 
+        // Wait for every in-flight send that crossed the pre-close state
+        // check, then remove the final transport-owned socket references.
+        // `UdpTransport` is cloneable and upper layers intentionally retain
+        // closed transport handles for diagnostics; leaving these fields in
+        // place therefore pins the bound UDP file descriptor after a
+        // successful close and makes deterministic listener restart fail.
+        let _socket_use = self.inner.socket_use_gate.write().await;
+        self.inner
+            .sender
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        self.inner
+            .listener
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+
         // Step 3: Send a final closed event to notify upper layers
         // But check if the channel is still open
         let _ = self.inner.events_tx.try_send(TransportEvent::Closed);
@@ -771,11 +820,7 @@ impl Transport for UdpTransport {
 
 impl fmt::Debug for UdpTransport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Ok(addr) = self.inner.listener.local_addr() {
-            write!(f, "UdpTransport({})", addr)
-        } else {
-            write!(f, "UdpTransport(<e>)")
-        }
+        write!(f, "UdpTransport({})", self.inner.local_addr)
     }
 }
 
@@ -793,6 +838,29 @@ mod tests {
             .expect("bind");
         assert_eq!(transport.max_safe_message_size(), UDP_SAFE_MAX_BYTES);
         transport.close().await.ok();
+    }
+
+    #[tokio::test]
+    async fn close_releases_bound_socket_while_transport_clones_remain() {
+        let (transport, _events) = UdpTransport::bind("127.0.0.1:0".parse().unwrap(), None)
+            .await
+            .unwrap();
+        let address = transport.local_addr().unwrap();
+        let retained = transport.clone();
+
+        transport.close().await.unwrap();
+        assert!(retained.is_closed());
+        assert!(matches!(
+            retained
+                .send_message_raw(Bytes::from_static(b"closed"), address)
+                .await,
+            Err(Error::TransportClosed)
+        ));
+
+        let (replacement, _events) = UdpTransport::bind(address, None)
+            .await
+            .expect("a closed cloned transport must not retain its UDP listener");
+        replacement.close().await.unwrap();
     }
 
     #[tokio::test]

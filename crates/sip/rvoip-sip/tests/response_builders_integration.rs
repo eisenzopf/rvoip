@@ -215,6 +215,7 @@ async fn reject_builder_stamps_retry_after_and_warning_on_wire() {
     let bob = CallbackPeer::new(RejectWith503, cfg("bob-r", bob_port))
         .await
         .expect("bob");
+    let bob_coordinator = bob.coordinator().clone();
     let bob_shutdown = bob.shutdown_handle();
     let bob_task = tokio::spawn(async move {
         let _ = bob.run().await;
@@ -249,10 +250,82 @@ async fn reject_builder_stamps_retry_after_and_warning_on_wire() {
         raw.contains("Warning:") && raw.contains("307"),
         "expected Warning: 307 ... on the wire; got:\n{raw}"
     );
+    assert!(
+        wait_for_no_sessions(&alice, Duration::from_secs(2)).await,
+        "rejected INVITE caller retained a SIP session beyond two seconds"
+    );
+    assert!(
+        wait_for_no_sessions(&bob_coordinator, Duration::from_secs(2)).await,
+        "application-rejected UAS retained a SIP session beyond two seconds"
+    );
 
     bob_shutdown.shutdown();
     let _ = tokio::time::timeout(Duration::from_secs(2), bob_task).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+struct RedirectWith302;
+
+#[async_trait::async_trait]
+impl CallHandler for RedirectWith302 {
+    async fn on_incoming_call(&self, call: IncomingCall) -> CallHandlerDecision {
+        let _ = call.redirect_to("sip:alternate@127.0.0.1:17999").await;
+        CallHandlerDecision::Reject {
+            status: 500,
+            reason: "redirect already resolved".into(),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn redirect_builder_releases_exact_uas_session_after_final_response() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let alice_port = 17902;
+    let bob_port = 17903;
+
+    let bob = CallbackPeer::new(RedirectWith302, cfg("bob-redirect", bob_port))
+        .await
+        .expect("bob");
+    let bob_coordinator = bob.coordinator().clone();
+    let bob_shutdown = bob.shutdown_handle();
+    let bob_task = tokio::spawn(async move {
+        let _ = bob.run().await;
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let alice = UnifiedCoordinator::new(cfg("alice-redirect", alice_port))
+        .await
+        .expect("alice");
+    let mut alice_events = alice.events().await.expect("alice events");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    alice
+        .invite(
+            Some(format!("sip:alice@127.0.0.1:{alice_port}")),
+            format!("sip:bob@127.0.0.1:{bob_port}"),
+        )
+        .send()
+        .await
+        .expect("redirected invite");
+
+    let raw = wait_for_inbound_response_status(&mut alice_events, "302", Duration::from_secs(8))
+        .await
+        .expect("alice did not see an inbound 302");
+    assert!(
+        raw.contains("Contact:") && raw.contains("sip:alternate@127.0.0.1:17999"),
+        "expected redirect Contact on the wire; got:\n{raw}"
+    );
+    assert!(
+        wait_for_no_sessions(&bob_coordinator, Duration::from_secs(2)).await,
+        "redirecting UAS retained a SIP session beyond two seconds"
+    );
+
+    bob_shutdown.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(2), bob_task).await;
+    alice
+        .shutdown_gracefully(Some(Duration::from_secs(2)))
+        .await
+        .expect("alice shutdown");
 }
 
 struct AcceptAll;

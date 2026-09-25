@@ -36,11 +36,15 @@ use rvoip_core::stream::{
 use crate::api::unified::UnifiedCoordinator;
 use crate::SessionId;
 
+#[cfg(feature = "amr-wb")]
+use rvoip_media_core::codec::audio::amr::AmrAdapter;
 use rvoip_media_core::codec::audio::common::AudioCodec;
 use rvoip_media_core::codec::audio::g711::G711Codec;
+#[cfg(feature = "g729")]
+use rvoip_media_core::codec::audio::g729::{G729Annexes, G729Codec, G729Config};
 #[cfg(feature = "opus")]
 use rvoip_media_core::codec::audio::opus::{OpusCodec, OpusConfig};
-#[cfg(feature = "opus")]
+#[cfg(any(feature = "g729", feature = "opus"))]
 use rvoip_media_core::types::SampleRate;
 
 /// SIP G.711 PCMU sample rate (8 kHz / 20 ms / 160 samples per frame).
@@ -48,14 +52,23 @@ const G711_SAMPLE_RATE: u32 = 8_000;
 
 enum SipPayloadCodec {
     G711(G711Codec),
+    #[cfg(feature = "g729")]
+    G729(Box<G729Codec>),
     #[cfg(feature = "opus")]
     Opus(OpusCodec),
+    #[cfg(feature = "amr-wb")]
+    AmrWb(Box<AmrAdapter>),
 }
 
 impl SipPayloadCodec {
     fn from_negotiated(
         config: &crate::session_store::state::NegotiatedConfig,
+        payload_type: u8,
     ) -> Result<Self, &'static str> {
+        // Keep codec construction and the descriptor published to rvoip-core
+        // on one validation boundary. Otherwise a malformed shape can build a
+        // hard-coded codec here while `codec_descriptor` correctly rejects it.
+        codec_descriptor(config, payload_type)?;
         if matches!(
             config.codec.to_ascii_lowercase().as_str(),
             "pcmu" | "g.711-mu" | "g711-mu" | "g711-u"
@@ -72,6 +85,32 @@ impl SipPayloadCodec {
                 .map(Self::G711)
                 .map_err(|_| "pcma-codec-init");
         }
+        if is_g729_codec(&config.codec) {
+            #[cfg(feature = "g729")]
+            {
+                let annex_b = negotiated_g729_annex_b(config);
+                return G729Codec::new(
+                    SampleRate::Rate8000,
+                    1,
+                    G729Config {
+                        annexes: G729Annexes {
+                            annex_a: true,
+                            annex_b,
+                        },
+                        frame_size_ms: 10.0,
+                        enable_vad: annex_b,
+                        enable_cng: annex_b,
+                    },
+                )
+                .map(Box::new)
+                .map(Self::G729)
+                .map_err(|_| "g729-codec-init");
+            }
+            #[cfg(not(feature = "g729"))]
+            {
+                return Err("g729-feature-disabled");
+            }
+        }
         if config.codec.eq_ignore_ascii_case("opus") {
             #[cfg(feature = "opus")]
             {
@@ -86,6 +125,19 @@ impl SipPayloadCodec {
                 return Err("opus-feature-disabled");
             }
         }
+        if is_amr_wb_codec(&config.codec) {
+            #[cfg(feature = "amr-wb")]
+            {
+                return AmrAdapter::new(payload_type, "AMR-WB", config.fmtp.as_deref())
+                    .map(Box::new)
+                    .map(Self::AmrWb)
+                    .map_err(|_| "amr-wb-codec-init");
+            }
+            #[cfg(not(feature = "amr-wb"))]
+            {
+                return Err("amr-wb-feature-disabled");
+            }
+        }
         Err("unsupported-negotiated-codec")
     }
 
@@ -95,9 +147,42 @@ impl SipPayloadCodec {
     ) -> rvoip_media_core::error::Result<Vec<u8>> {
         match self {
             Self::G711(codec) => codec.encode(frame),
+            #[cfg(feature = "g729")]
+            Self::G729(codec) => codec.encode(frame),
             #[cfg(feature = "opus")]
             Self::Opus(codec) => codec.encode(frame),
+            #[cfg(feature = "amr-wb")]
+            Self::AmrWb(codec) => codec.encode(frame),
         }
+    }
+
+    /// Encode PCM into graph payloads without hiding a codec's fixed frame
+    /// boundary inside one opaque payload.
+    ///
+    /// The coordinator normally supplies 20 ms PCM. G.729's codec primitive
+    /// consumes 10 ms at a time, while AMR-WB consumes 20 ms. Splitting here
+    /// keeps every graph frame independently decodable and gives each one the
+    /// correct RTP timestamp. It also handles a peer that bundles more than
+    /// one AMR frame in one RTP packet: the transport decoder returns all PCM
+    /// samples, and this boundary emits one valid RFC 4867 payload per frame.
+    fn encode_graph_frames(
+        &mut self,
+        frame: &rvoip_media_core::types::AudioFrame,
+    ) -> rvoip_media_core::error::Result<Vec<(Vec<u8>, u32)>> {
+        #[cfg(feature = "g729")]
+        if let Self::G729(codec) = self {
+            return codec.encode_payload_frames(frame).map(|packets| {
+                packets
+                    .into_iter()
+                    .map(|packet| (packet.payload, packet.timestamp))
+                    .collect()
+            });
+        }
+        #[cfg(feature = "amr-wb")]
+        if let Self::AmrWb(codec) = self {
+            return encode_fixed_graph_frames(codec.as_mut(), frame, 320);
+        }
+        Ok(vec![(self.encode(frame)?, frame.timestamp)])
     }
 
     fn decode(
@@ -106,16 +191,124 @@ impl SipPayloadCodec {
     ) -> rvoip_media_core::error::Result<rvoip_media_core::types::AudioFrame> {
         match self {
             Self::G711(codec) => codec.decode(payload),
+            #[cfg(feature = "g729")]
+            Self::G729(codec) => codec.decode_rtp_payload(payload),
             #[cfg(feature = "opus")]
             Self::Opus(codec) => codec.decode(payload),
+            #[cfg(feature = "amr-wb")]
+            Self::AmrWb(codec) => codec.decode(payload),
         }
     }
+}
+
+#[cfg(feature = "amr-wb")]
+fn encode_fixed_graph_frames<C: AudioCodec>(
+    codec: &mut C,
+    frame: &rvoip_media_core::types::AudioFrame,
+    samples_per_channel: usize,
+) -> rvoip_media_core::error::Result<Vec<(Vec<u8>, u32)>> {
+    let channels = usize::from(frame.channels.max(1));
+    let frame_samples = samples_per_channel * channels;
+    if frame.samples.is_empty() || !frame.samples.len().is_multiple_of(frame_samples) {
+        return Err(rvoip_media_core::error::CodecError::InvalidFrameSize {
+            expected: frame_samples,
+            actual: frame.samples.len(),
+        }
+        .into());
+    }
+    let mut encoded = Vec::with_capacity(frame.samples.len() / frame_samples);
+    for (index, samples) in frame.samples.chunks_exact(frame_samples).enumerate() {
+        let timestamp = frame
+            .timestamp
+            .wrapping_add((index * samples_per_channel) as u32);
+        let payload = codec.encode(&rvoip_media_core::types::AudioFrame::new(
+            samples.to_vec(),
+            frame.sample_rate,
+            frame.channels,
+            timestamp,
+        ))?;
+        encoded.push((payload, timestamp));
+    }
+    Ok(encoded)
+}
+
+fn normalized_codec_name(name: &str) -> String {
+    name.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .flat_map(char::to_uppercase)
+        .collect()
+}
+
+fn is_g729_codec(name: &str) -> bool {
+    matches!(
+        normalized_codec_name(name).as_str(),
+        "G729" | "G729A" | "G729AB" | "G729BA"
+    )
+}
+
+fn is_amr_wb_codec(name: &str) -> bool {
+    normalized_codec_name(name) == "AMRWB"
+}
+
+fn negotiated_g729_annex_b(config: &crate::session_store::state::NegotiatedConfig) -> bool {
+    match normalized_codec_name(&config.codec).as_str() {
+        "G729A" => false,
+        "G729AB" | "G729BA" => true,
+        // RFC 4855 keeps Annex B enabled when the parameter is absent. The
+        // SDP negotiation layer normally canonicalizes this to G729A/G729BA,
+        // but retaining the rule here makes direct NegotiatedConfig users
+        // behave identically.
+        _ => config
+            .fmtp
+            .as_deref()
+            .and_then(|fmtp| {
+                fmtp.split(';').find_map(|parameter| {
+                    let (name, value) = parameter.trim().split_once('=')?;
+                    if !name.trim().eq_ignore_ascii_case("annexb") {
+                        return None;
+                    }
+                    match value.trim().trim_matches('"').to_ascii_lowercase().as_str() {
+                        "yes" | "true" | "1" => Some(true),
+                        "no" | "false" | "0" => Some(false),
+                        _ => None,
+                    }
+                })
+            })
+            .unwrap_or(true),
+    }
+}
+
+fn materialized_g729_fmtp(config: &crate::session_store::state::NegotiatedConfig) -> String {
+    let mut parameters = config
+        .fmtp
+        .as_deref()
+        .into_iter()
+        .flat_map(|fmtp| fmtp.split(';'))
+        .map(str::trim)
+        .filter(|parameter| !parameter.is_empty())
+        .filter(|parameter| {
+            parameter
+                .split_once('=')
+                .is_none_or(|(name, _)| !name.trim().eq_ignore_ascii_case("annexb"))
+        })
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    parameters.push(format!(
+        "annexb={}",
+        if negotiated_g729_annex_b(config) {
+            "yes"
+        } else {
+            "no"
+        }
+    ));
+    parameters.join(";")
 }
 
 pub(crate) fn codec_descriptor(
     config: &crate::session_store::state::NegotiatedConfig,
     payload_type: u8,
 ) -> Result<(CodecInfo, u8), &'static str> {
+    let mut descriptor_fmtp = config.fmtp.clone();
     let name = if matches!(
         config.codec.to_ascii_lowercase().as_str(),
         "pcmu" | "g.711-mu" | "g711-mu" | "g711-u"
@@ -132,6 +325,15 @@ pub(crate) fn codec_descriptor(
             return Err("invalid-pcma-shape");
         }
         "g.711-a"
+    } else if is_g729_codec(&config.codec) {
+        if !cfg!(feature = "g729") {
+            return Err("g729-feature-disabled");
+        }
+        if config.sample_rate != 8_000 || config.channels != 1 {
+            return Err("invalid-g729-shape");
+        }
+        descriptor_fmtp = Some(materialized_g729_fmtp(config));
+        "g729"
     } else if config.codec.eq_ignore_ascii_case("opus") {
         if !cfg!(feature = "opus") {
             return Err("opus-feature-disabled");
@@ -140,6 +342,17 @@ pub(crate) fn codec_descriptor(
             return Err("invalid-opus-shape");
         }
         "opus"
+    } else if is_amr_wb_codec(&config.codec) {
+        if !cfg!(feature = "amr-wb") {
+            return Err("amr-wb-feature-disabled");
+        }
+        if config.sample_rate != 16_000 || config.channels != 1 {
+            return Err("invalid-amr-wb-shape");
+        }
+        if !(96..=127).contains(&payload_type) || payload_type == 101 {
+            return Err("invalid-amr-wb-payload-type");
+        }
+        "AMR-WB"
     } else {
         return Err("unsupported-negotiated-codec");
     };
@@ -151,7 +364,7 @@ pub(crate) fn codec_descriptor(
             // Carried, not dropped. `rvoip-core` keys its transcoding codec
             // groups on this, so a hard-coded `None` puts every SIP leg in one
             // group and silently discards whatever the peer negotiated.
-            fmtp: config.fmtp.clone(),
+            fmtp: descriptor_fmtp,
             // The SIP leg is the one place that unambiguously knows this: it
             // is the payload type the SDP answer settled on, already this
             // function's own argument. Reporting it is what lets consumers
@@ -166,25 +379,35 @@ pub(crate) fn codec_descriptor(
 /// `crates/webrtc/rvoip-webrtc/src/media/pump.rs::FRAME_CHANNEL_CAP`).
 const FRAME_CHANNEL_CAP: usize = 64;
 
-/// Next outbound RTP timestamp for the G.711 (8 kHz) leg.
+/// Epoch-normalized clock for PCM handed to the negotiated SIP media runtime.
 ///
-/// RFC 3550: the RTP timestamp is expressed in the *destination* payload
-/// format's clock and counts samples emitted. The upstream/source RTP
-/// timestamp (`_upstream_rtp_ts`) is **deliberately ignored**: when the source
-/// leg runs on a different clock — e.g. Amazon Connect Opus at 48 kHz, which
-/// advances +960 per 20 ms — stamping that value onto the 8 kHz G.711 leg makes
-/// the timestamp climb 6× too fast (960 vs 160) and the caller's jitter buffer
-/// reads ~100 ms of false jitter (fast, regular clicking). Mature transcoders
-/// (Asterisk `lastts += samples`, FreeSWITCH, rtpengine) always regenerate the
-/// timestamp on the destination clock; we do the same, advancing by the number
-/// of samples actually emitted so partial frames stay correct.
+/// The media graph has already translated `MediaFrame::timestamp_rtp` into the
+/// sink codec's RTP clock. We choose a local epoch for the first frame, then
+/// advance by emitted samples plus any forward gap in that input timeline.
+/// This avoids copying a remote random epoch while preserving Annex-B DTX or
+/// packet-loss intervals that must remain visible to the RTP packetizer.
+#[derive(Default)]
+struct OutboundRtpClock {
+    next_output_timestamp: u32,
+    expected_input_timestamp: Option<u32>,
+}
+
 fn advance_outbound_timestamp(
-    clock: &mut u32,
+    clock: &mut OutboundRtpClock,
     samples_emitted: usize,
-    _upstream_rtp_ts: u32,
+    upstream_rtp_ts: u32,
 ) -> u32 {
-    let ts = *clock;
-    *clock = clock.wrapping_add(samples_emitted as u32);
+    let forward_gap = clock
+        .expected_input_timestamp
+        .map(|expected| upstream_rtp_ts.wrapping_sub(expected))
+        // A delta in the older half of the modular timestamp space means an
+        // out-of-order packet or a restarted sender, not a centuries-long gap.
+        .filter(|gap| *gap <= i32::MAX as u32)
+        .unwrap_or(0);
+    let ts = clock.next_output_timestamp.wrapping_add(forward_gap);
+    let samples_emitted = samples_emitted as u32;
+    clock.next_output_timestamp = ts.wrapping_add(samples_emitted);
+    clock.expected_input_timestamp = Some(upstream_rtp_ts.wrapping_add(samples_emitted));
     ts
 }
 
@@ -346,6 +569,11 @@ pub struct SipMediaStream {
 }
 
 impl SipMediaStream {
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn inject_failure_for_test(&self) -> bool {
+        self.inner.lifecycle.mark_failed()
+    }
+
     /// Record the media layer's latest quality report for this stream.
     pub(crate) fn record_quality(&self, snapshot: QualitySnapshot) {
         *self
@@ -970,10 +1198,11 @@ async fn run_inbound_pump(
     // media clock and losses are concealed rather than heard as clicks.
     let playout_policy = playout;
     let mut playout = playout_policy.map(PlayoutBuffer::new);
-    let mut encoder = match SipPayloadCodec::from_negotiated(&runtime.negotiated) {
-        Ok(codec) => codec,
-        Err(_) => return "sip-codec-reconfigure-failed",
-    };
+    let mut encoder =
+        match SipPayloadCodec::from_negotiated(&runtime.negotiated, runtime.payload_type) {
+            Ok(codec) => codec,
+            Err(_) => return "sip-codec-reconfigure-failed",
+        };
     let mut reported = std::time::Instant::now();
 
     loop {
@@ -997,7 +1226,10 @@ async fn run_inbound_pump(
                 let Some(updated) = codec_updates.borrow_and_update().clone() else {
                     continue;
                 };
-                encoder = match SipPayloadCodec::from_negotiated(&updated.negotiated) {
+                encoder = match SipPayloadCodec::from_negotiated(
+                    &updated.negotiated,
+                    updated.payload_type,
+                ) {
                     Ok(codec) => codec,
                     Err(_) => return "sip-codec-reconfigure-failed",
                 };
@@ -1048,24 +1280,25 @@ async fn run_inbound_pump(
         }
 
         for frame in ready {
-            let timestamp_rtp = frame.timestamp;
-            let encoded = match encoder.encode(&frame) {
-                Ok(bytes) => bytes,
+            let encoded_frames = match encoder.encode_graph_frames(&frame) {
+                Ok(frames) => frames,
                 Err(error) => {
                     tracing::trace!(target: "rvoip_sip", error = %error, "SipMediaStream: audio encode failed");
                     continue;
                 }
             };
-            let media_frame = MediaFrame {
-                stream_id: stream_id.clone(),
-                kind: StreamKind::Audio,
-                payload: Bytes::from(encoded),
-                timestamp_rtp,
-                captured_at: Utc::now(),
-                payload_type: Some(runtime.payload_type),
-            };
-            if frames_in_tx.send(media_frame).await.is_err() {
-                return "inbound-consumer-closed";
+            for (encoded, timestamp_rtp) in encoded_frames {
+                let media_frame = MediaFrame {
+                    stream_id: stream_id.clone(),
+                    kind: StreamKind::Audio,
+                    payload: Bytes::from(encoded),
+                    timestamp_rtp,
+                    captured_at: Utc::now(),
+                    payload_type: Some(runtime.payload_type),
+                };
+                if frames_in_tx.send(media_frame).await.is_err() {
+                    return "inbound-consumer-closed";
+                }
             }
         }
     }
@@ -1078,12 +1311,13 @@ async fn run_outbound_pump(
     mut codec_updates: watch::Receiver<Option<SipMediaCodecRuntime>>,
     mut frames_out_rx: mpsc::Receiver<MediaFrame>,
 ) -> &'static str {
-    let mut decoder = match SipPayloadCodec::from_negotiated(&runtime.negotiated) {
-        Ok(codec) => codec,
-        Err(_) => return "sip-codec-reconfigure-failed",
-    };
+    let mut decoder =
+        match SipPayloadCodec::from_negotiated(&runtime.negotiated, runtime.payload_type) {
+            Ok(codec) => codec,
+            Err(_) => return "sip-codec-reconfigure-failed",
+        };
     let mut channels = runtime.negotiated.channels.max(1);
-    let mut next_timestamp = 0u32;
+    let mut outbound_clock = OutboundRtpClock::default();
     loop {
         let media_frame = tokio::select! {
             biased;
@@ -1094,7 +1328,10 @@ async fn run_outbound_pump(
                 let Some(updated) = codec_updates.borrow_and_update().clone() else {
                     continue;
                 };
-                decoder = match SipPayloadCodec::from_negotiated(&updated.negotiated) {
+                decoder = match SipPayloadCodec::from_negotiated(
+                    &updated.negotiated,
+                    updated.payload_type,
+                ) {
                     Ok(codec) => codec,
                     Err(_) => return "sip-codec-reconfigure-failed",
                 };
@@ -1142,7 +1379,7 @@ async fn run_outbound_pump(
         };
         let samples_emitted = audio_frame.samples.len() / usize::from(channels.max(1));
         audio_frame.timestamp = advance_outbound_timestamp(
-            &mut next_timestamp,
+            &mut outbound_clock,
             samples_emitted,
             media_frame.timestamp_rtp,
         );
@@ -1554,8 +1791,8 @@ mod negotiated_codec_tests {
     #[test]
     fn pcmu_and_pcma_encode_with_different_wire_laws() {
         let frame = rvoip_media_core::types::AudioFrame::new(vec![0; 160], 8_000, 1, 0);
-        let mut pcmu = SipPayloadCodec::from_negotiated(&negotiated("PCMU", 8_000, 1)).unwrap();
-        let mut pcma = SipPayloadCodec::from_negotiated(&negotiated("PCMA", 8_000, 1)).unwrap();
+        let mut pcmu = SipPayloadCodec::from_negotiated(&negotiated("PCMU", 8_000, 1), 0).unwrap();
+        let mut pcma = SipPayloadCodec::from_negotiated(&negotiated("PCMA", 8_000, 1), 8).unwrap();
 
         let pcmu_payload = pcmu.encode(&frame).unwrap();
         let pcma_payload = pcma.encode(&frame).unwrap();
@@ -1574,12 +1811,12 @@ mod negotiated_codec_tests {
         assert_eq!(descriptor.channels, 2);
         assert_eq!(payload_type, 96);
         assert!(matches!(
-            SipPayloadCodec::from_negotiated(&config),
+            SipPayloadCodec::from_negotiated(&config, 96),
             Ok(SipPayloadCodec::Opus(_))
         ));
 
-        let mut encoder = SipPayloadCodec::from_negotiated(&config).unwrap();
-        let mut decoder = SipPayloadCodec::from_negotiated(&config).unwrap();
+        let mut encoder = SipPayloadCodec::from_negotiated(&config, 96).unwrap();
+        let mut decoder = SipPayloadCodec::from_negotiated(&config, 96).unwrap();
         let frame = rvoip_media_core::types::AudioFrame::new(vec![0; 960 * 2], 48_000, 2, 960);
         let payload = encoder.encode(&frame).unwrap();
         let decoded = decoder.decode(&payload).unwrap();
@@ -1588,15 +1825,206 @@ mod negotiated_codec_tests {
         assert_eq!(decoded.samples.len(), 960 * 2);
     }
 
+    #[cfg(feature = "g729")]
+    #[test]
+    fn g729_descriptor_and_codec_preserve_annex_and_twenty_ms_packetization() {
+        let mut config = negotiated("G729A", 8_000, 1);
+        config.fmtp = Some("annexb=no".to_string());
+        let (descriptor, payload_type) = codec_descriptor(&config, 18).unwrap();
+        assert_eq!(descriptor.name, "g729");
+        assert_eq!(descriptor.clock_rate_hz, 8_000);
+        assert_eq!(descriptor.channels, 1);
+        assert_eq!(descriptor.fmtp.as_deref(), Some("annexb=no"));
+        assert_eq!(descriptor.payload_type, Some(18));
+        assert_eq!(payload_type, 18);
+        assert!(!negotiated_g729_annex_b(&config));
+
+        let mut encoder = SipPayloadCodec::from_negotiated(&config, 18).unwrap();
+        let mut decoder = SipPayloadCodec::from_negotiated(&config, 18).unwrap();
+        let samples: Vec<i16> = (0..160)
+            .map(|index| {
+                let phase = f64::from(index) * 2.0 * std::f64::consts::PI * 440.0 / 8_000.0;
+                (phase.sin() * 6_000.0) as i16
+            })
+            .collect();
+        let payloads = encoder
+            .encode_graph_frames(&rvoip_media_core::types::AudioFrame::new(
+                samples, 8_000, 1, 1_000,
+            ))
+            .unwrap();
+        assert_eq!(payloads.len(), 2, "20 ms becomes two G.729 graph frames");
+        assert_eq!(payloads[0].0.len(), 10);
+        assert_eq!(payloads[0].1, 1_000);
+        assert_eq!(payloads[1].0.len(), 10);
+        assert_eq!(payloads[1].1, 1_080);
+        for (payload, _) in payloads {
+            let decoded = decoder.decode(&payload).unwrap();
+            assert_eq!(decoded.sample_rate, 8_000);
+            assert_eq!(decoded.channels, 1);
+            assert_eq!(decoded.samples.len(), 80);
+        }
+
+        let mut annex_b = negotiated("G729BA", 8_000, 1);
+        annex_b.fmtp = Some("annexb=yes".to_string());
+        assert!(negotiated_g729_annex_b(&annex_b));
+        assert!(matches!(
+            SipPayloadCodec::from_negotiated(&annex_b, 18),
+            Ok(SipPayloadCodec::G729(_))
+        ));
+    }
+
+    #[cfg(feature = "g729")]
+    #[test]
+    fn g729_descriptor_materializes_the_effective_annex_b_policy() {
+        for (name, expected) in [
+            ("G729A", "annexb=no"),
+            ("G729BA", "annexb=yes"),
+            ("G729", "annexb=yes"),
+        ] {
+            let (descriptor, _) = codec_descriptor(&negotiated(name, 8_000, 1), 18).unwrap();
+            assert_eq!(descriptor.fmtp.as_deref(), Some(expected), "{name}");
+        }
+
+        let mut with_unrelated = negotiated("G729", 8_000, 1);
+        with_unrelated.fmtp = Some("foo=bar; ANNEXB=no; mode=x".to_string());
+        let (descriptor, _) = codec_descriptor(&with_unrelated, 18).unwrap();
+        assert_eq!(descriptor.fmtp.as_deref(), Some("foo=bar;mode=x;annexb=no"));
+    }
+
+    #[cfg(feature = "g729")]
+    fn g729_test_codec(annex_b: bool) -> G729Codec {
+        G729Codec::new(
+            SampleRate::Rate8000,
+            1,
+            G729Config {
+                annexes: G729Annexes {
+                    annex_a: true,
+                    annex_b,
+                },
+                frame_size_ms: 10.0,
+                enable_vad: annex_b,
+                enable_cng: annex_b,
+            },
+        )
+        .expect("G.729 test codec")
+    }
+
+    #[cfg(feature = "g729")]
+    fn g729_speech_frames(count: usize) -> Vec<u8> {
+        let mut encoder = g729_test_codec(false);
+        let mut payload = Vec::with_capacity(count * 10);
+        for frame_index in 0..count {
+            let samples = (0..80)
+                .map(|sample_index| {
+                    let index = frame_index * 80 + sample_index;
+                    let phase = index as f64 * 2.0 * std::f64::consts::PI * 440.0 / 8_000.0;
+                    (phase.sin() * 6_000.0) as i16
+                })
+                .collect();
+            let encoded = encoder
+                .encode(&rvoip_media_core::types::AudioFrame::new(
+                    samples, 8_000, 1, 0,
+                ))
+                .expect("G.729 speech encode");
+            assert_eq!(encoded.len(), 10, "Annex-A encoder must emit speech");
+            payload.extend(encoded);
+        }
+        payload
+    }
+
+    #[cfg(feature = "g729")]
+    #[test]
+    fn g729_decoder_accepts_speech_frames_followed_by_annex_b_sid() {
+        for (speech_frames, expected_samples) in [(1, 160), (2, 240)] {
+            let mut payload = g729_speech_frames(speech_frames);
+            payload.extend([0, 0]);
+            assert_eq!(payload.len(), speech_frames * 10 + 2);
+
+            let decoded = g729_test_codec(true)
+                .decode_rtp_payload(&payload)
+                .expect("valid G.729 Annex-B RTP payload");
+            assert_eq!(decoded.sample_rate, 8_000);
+            assert_eq!(decoded.channels, 1);
+            assert_eq!(decoded.timestamp, 0);
+            assert_eq!(decoded.samples.len(), expected_samples);
+        }
+    }
+
+    #[cfg(feature = "g729")]
+    #[test]
+    fn g729_decoder_delegates_malformed_rtp_payload_lengths_to_codec_validation() {
+        for payload_len in [1, 3, 4, 8, 11, 13, 21, 23] {
+            let error = g729_test_codec(true)
+                .decode_rtp_payload(&vec![0; payload_len])
+                .expect_err("malformed G.729 RTP payload must be rejected");
+            assert!(
+                error
+                    .to_string()
+                    .contains("invalid G.729 RTP payload length"),
+                "unexpected error for {payload_len}-byte payload: {error}"
+            );
+        }
+    }
+
+    #[cfg(feature = "amr-wb")]
+    #[test]
+    fn amr_wb_descriptor_and_codec_use_negotiated_payload_and_framing() {
+        let mut config = negotiated("AMR-WB", 16_000, 1);
+        config.fmtp = Some("octet-align=1; mode-set=2".to_string());
+        let (descriptor, payload_type) = codec_descriptor(&config, 105).unwrap();
+        assert_eq!(descriptor.name, "AMR-WB");
+        assert_eq!(descriptor.clock_rate_hz, 16_000);
+        assert_eq!(descriptor.channels, 1);
+        assert_eq!(
+            descriptor.fmtp.as_deref(),
+            Some("octet-align=1; mode-set=2")
+        );
+        assert_eq!(descriptor.payload_type, Some(105));
+        assert_eq!(payload_type, 105);
+
+        let mut encoder = SipPayloadCodec::from_negotiated(&config, 105).unwrap();
+        let mut decoder = SipPayloadCodec::from_negotiated(&config, 105).unwrap();
+        let samples: Vec<i16> = (0..640)
+            .map(|index| {
+                let phase = f64::from(index) * 2.0 * std::f64::consts::PI * 440.0 / 16_000.0;
+                (phase.sin() * 6_000.0) as i16
+            })
+            .collect();
+        let payloads = encoder
+            .encode_graph_frames(&rvoip_media_core::types::AudioFrame::new(
+                samples, 16_000, 1, 4_000,
+            ))
+            .unwrap();
+        assert_eq!(
+            payloads.len(),
+            2,
+            "bundled PCM becomes independent AMR payloads"
+        );
+        assert_eq!(payloads[0].1, 4_000);
+        assert_eq!(payloads[1].1, 4_320);
+        assert!(!payloads[0].0.is_empty());
+        for (payload, _) in payloads {
+            let decoded = decoder.decode(&payload).unwrap();
+            assert_eq!(decoded.sample_rate, 16_000);
+            assert_eq!(decoded.channels, 1);
+            assert_eq!(decoded.samples.len(), 320);
+        }
+
+        assert_eq!(
+            codec_descriptor(&config, 18),
+            Err("invalid-amr-wb-payload-type")
+        );
+    }
+
     #[test]
     fn unsupported_negotiated_codec_fails_closed() {
         let config = negotiated("peer-controlled-unknown", 8_000, 1);
         assert!(codec_descriptor(&config, 96).is_err());
-        assert!(SipPayloadCodec::from_negotiated(&config).is_err());
+        assert!(SipPayloadCodec::from_negotiated(&config, 96).is_err());
 
         let internal_pcm = negotiated("pcm_s16le", 16_000, 1);
         assert!(codec_descriptor(&internal_pcm, 96).is_err());
-        assert!(SipPayloadCodec::from_negotiated(&internal_pcm).is_err());
+        assert!(SipPayloadCodec::from_negotiated(&internal_pcm, 96).is_err());
     }
 }
 
@@ -1641,44 +2069,45 @@ mod rfc4733_tests {
 
 #[cfg(test)]
 mod outbound_timestamp_tests {
-    use super::advance_outbound_timestamp;
+    use super::{advance_outbound_timestamp, OutboundRtpClock};
 
     /// A full 20 ms G.711 frame at 8 kHz mono.
     const G711_FRAME_SAMPLES: usize = 160;
 
-    /// Regression: the outbound G.711 timestamp must run on its own 8 kHz clock
-    /// (+160 per 20 ms frame) and ignore the upstream timestamp — even when the
-    /// source is Opus at 48 kHz (which advances +960 per frame). Passing the
-    /// 48 kHz value through made the caller hear ~100 ms of jitter (fast clicks).
+    /// The graph supplies timestamps in the G.711 sink's 8 kHz clock. The SIP
+    /// media runtime chooses a local epoch while retaining that cadence.
     #[test]
-    fn ignores_upstream_48khz_timestamp_and_advances_by_160() {
-        let mut clock = 0u32;
-        // Simulated Amazon Connect Opus 48 kHz timestamps: +960 per 20 ms.
-        let upstream = [1_000_000u32, 1_000_960, 1_001_920, 1_002_880];
+    fn normalizes_remote_epoch_and_advances_in_the_sink_clock() {
+        let mut clock = OutboundRtpClock::default();
+        let upstream = [1_000_000u32, 1_000_160, 1_000_320, 1_000_480];
         let out: Vec<u32> = upstream
             .iter()
             .map(|&u| advance_outbound_timestamp(&mut clock, G711_FRAME_SAMPLES, u))
             .collect();
-        // Clean 8 kHz cadence: +160 each, NOT +960, and independent of upstream.
         assert_eq!(out, vec![0, 160, 320, 480]);
     }
 
-    /// Partial frames advance the clock by their actual sample count.
     #[test]
-    fn advances_by_actual_samples_for_partial_frames() {
-        let mut clock = 500u32;
-        assert_eq!(advance_outbound_timestamp(&mut clock, 80, 9_999_999), 500);
-        assert_eq!(advance_outbound_timestamp(&mut clock, 160, 0), 580);
-        assert_eq!(clock, 740);
+    fn preserves_a_suppressed_dtx_interval() {
+        let mut clock = OutboundRtpClock::default();
+        assert_eq!(advance_outbound_timestamp(&mut clock, 80, 4_000), 0);
+        assert_eq!(advance_outbound_timestamp(&mut clock, 80, 4_080), 80);
+        // Two 10 ms frames were suppressed. Resumed audio retains the +160 gap.
+        assert_eq!(advance_outbound_timestamp(&mut clock, 80, 4_320), 320);
+        assert_eq!(clock.next_output_timestamp, 400);
     }
 
-    /// The clock wraps at u32 like an RTP timestamp.
     #[test]
-    fn wraps_at_u32_boundary() {
-        let mut clock = u32::MAX - 100;
-        let first = advance_outbound_timestamp(&mut clock, 160, 0);
+    fn local_clock_and_remote_input_wrap_at_u32_boundary() {
+        let mut clock = OutboundRtpClock {
+            next_output_timestamp: u32::MAX - 100,
+            expected_input_timestamp: None,
+        };
+        let first = advance_outbound_timestamp(&mut clock, 160, u32::MAX - 100);
         assert_eq!(first, u32::MAX - 100);
-        assert_eq!(clock, 59); // (MAX - 100) + 160 wraps to 59
+        assert_eq!(clock.next_output_timestamp, 59);
+        assert_eq!(advance_outbound_timestamp(&mut clock, 160, 59), 59);
+        assert_eq!(clock.next_output_timestamp, 219);
     }
 }
 

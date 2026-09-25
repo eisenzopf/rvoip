@@ -7058,8 +7058,12 @@ version = "0.3.10"
 dependencies = [
  "async-trait",
  "bytes",
+ "chrono",
+ "dashmap",
+ "rvoip-core",
  "rvoip-core-traits",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -7861,6 +7865,7 @@ dependencies = [
  "rustls-pemfile",
  "rvoip-auth-core",
  "rvoip-core",
+ "rvoip-harness",
  "rvoip-quic",
  "rvoip-rtc",
  "rvoip-rtp-core",

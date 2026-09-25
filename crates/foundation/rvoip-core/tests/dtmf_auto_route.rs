@@ -422,7 +422,7 @@ async fn lifecycle_drain_aborts_and_joins_blocked_dtmf_forward() {
         .unwrap();
     dtmf_entered.wait().await;
     assert_eq!(sip_dtmf.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(orchestrator.connection_lifecycle_task_count(), 3);
+    assert_eq!(orchestrator.connection_lifecycle_task_count(), 4);
 
     tokio::time::timeout(
         Duration::from_secs(1),

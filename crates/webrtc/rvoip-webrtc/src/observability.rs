@@ -15,7 +15,8 @@ use crate::media::WebRtcStatsSnapshot;
 ///
 /// Series names are prefixed with `rvoip_webrtc_`. Counters are monotonic
 /// (`reaped_total`, `inbound_total`, `outbound_total`, `signaling_errors_total`,
-/// `sessions_rejected_over_cap`); `active_sessions` is a gauge.
+/// `sessions_rejected_over_cap`); live session and socket ownership values are
+/// gauges.
 pub fn render_prometheus(metrics: &WebRtcMetrics) -> String {
     let mut out = String::with_capacity(512);
     emit_counter(
@@ -35,6 +36,12 @@ pub fn render_prometheus(metrics: &WebRtcMetrics) -> String {
         "rvoip_webrtc_active_sessions",
         "Currently live WebRTC sessions (gauge).",
         metrics.active_sessions as u64,
+    );
+    emit_gauge(
+        &mut out,
+        "rvoip_webrtc_allocated_media_ports",
+        "Bound ICE/media UDP sockets owned by peer-connection drivers (gauge).",
+        metrics.allocated_media_ports as u64,
     );
     emit_counter(
         &mut out,
@@ -265,6 +272,7 @@ mod tests {
             inbound_total: 7,
             outbound_total: 3,
             active_sessions: 2,
+            allocated_media_ports: 8,
             signaling_errors_total: 1,
             sessions_rejected_over_cap: 0,
             reaped_total: 4,
@@ -284,6 +292,7 @@ mod tests {
             "rvoip_webrtc_inbound_total",
             "rvoip_webrtc_outbound_total",
             "rvoip_webrtc_active_sessions",
+            "rvoip_webrtc_allocated_media_ports",
             "rvoip_webrtc_signaling_errors_total",
             "rvoip_webrtc_sessions_rejected_over_cap",
             "rvoip_webrtc_reaped_total",
@@ -308,6 +317,7 @@ mod tests {
         }
         assert!(body.contains("rvoip_webrtc_inbound_total 7"));
         assert!(body.contains("rvoip_webrtc_active_sessions 2"));
+        assert!(body.contains("rvoip_webrtc_allocated_media_ports 8"));
         assert!(body.contains("rvoip_webrtc_reaped_total 4"));
         assert!(body.contains("rvoip_webrtc_active_http_resources 6"));
         assert!(body.contains("rvoip_webrtc_inbound_admission_tasks 7"));

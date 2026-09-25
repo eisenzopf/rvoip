@@ -147,6 +147,16 @@ impl SessionHandle {
         &self.data_channel
     }
 
+    /// Returns whether this handle has accepted responsibility for closing the
+    /// peer connection.
+    ///
+    /// This is the exact local-handle lifecycle signal. It is distinct from
+    /// [`RvoipPeerConnection::is_connected`], which is intentionally a sticky
+    /// latch recording that ICE/DTLS reached `Connected` at least once.
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// Wait until ICE/DTLS reaches connected.
     pub async fn wait_connected(&self, timeout: Duration) -> Result<()> {
         self.peer.wait_connected(timeout).await
@@ -272,5 +282,63 @@ impl WebRtcClient {
     pub fn parse_ice_candidate(json: &str) -> Result<RTCIceCandidateInit> {
         serde_json::from_str(json)
             .map_err(|e| WebRtcError::Signaling(format!("ice candidate json: {e}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct AnsweringSignaler {
+        answerer: Arc<RvoipPeerConnection>,
+    }
+
+    #[async_trait::async_trait]
+    impl Signaler for AnsweringSignaler {
+        async fn send_offer(&self, offer: &Offer) -> Result<Answer> {
+            Ok(Answer::new(
+                self.answerer.accept_offer_and_gather(&offer.0).await?,
+            ))
+        }
+
+        async fn send_answer(&self, _answer: &Answer) -> Result<()> {
+            Ok(())
+        }
+
+        async fn send_ice(&self, _candidate: &IceCandidate) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn session_handle_reports_explicit_close_across_clones() {
+        let config = WebRtcConfig::loopback();
+        let client = WebRtcClient::connect(config.clone(), "test://local")
+            .await
+            .expect("create offerer");
+        let answerer = RvoipPeerConnection::new(&config, PeerRole::Answerer)
+            .await
+            .expect("create answerer");
+        let signaler = AnsweringSignaler {
+            answerer: Arc::clone(&answerer),
+        };
+        let session = client
+            .call(
+                &signaler,
+                CallTarget::Uri("test".into()),
+                SessionMedium::Audio,
+            )
+            .await
+            .expect("establish session");
+        let clone = session.clone();
+
+        assert!(!session.is_closed());
+        assert!(!clone.is_closed());
+        session.close().await.expect("close session");
+        assert!(session.is_closed());
+        assert!(clone.is_closed());
+        clone.close().await.expect("idempotent close");
+
+        answerer.close().await.expect("close answerer");
     }
 }

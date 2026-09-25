@@ -1366,6 +1366,12 @@ pub trait CallHandler: Send + Sync + 'static {
     }
 
     /// SIP_API_DESIGN_2 Phase E — typed inbound MESSAGE hook (RFC 3428).
+    ///
+    /// This callback observes a MESSAGE only after dialog-core has accepted
+    /// its application delivery and authored the one final SIP response. The
+    /// request retains headers and body for application processing, but it
+    /// intentionally has no response authority; do not call `respond()` or
+    /// `respond_builder()` from this hook.
     #[allow(unused_variables)]
     async fn on_message_received(&self, request: crate::api::incoming::IncomingRequest) {}
 
@@ -2204,8 +2210,7 @@ impl<H: CallHandler> CallbackPeer<H> {
 
                             if let Some(exact_handle) = lifecycle_handle.as_ref() {
                                 let _ = coordinator
-                                    .helpers
-                                    .reject_call_exact(exact_handle, status, &reason)
+                                    .reject_incoming_exact(exact_handle, status, &reason)
                                     .await;
                             } else {
                                 tracing::warn!(call_id = %call_id, "callback reject suppressed without exact lifecycle authority");
@@ -2222,8 +2227,7 @@ impl<H: CallHandler> CallbackPeer<H> {
 
                             if let Some(exact_handle) = lifecycle_handle.as_ref() {
                                 let _ = coordinator
-                                    .helpers
-                                    .redirect_call_exact(exact_handle, 302, vec![target])
+                                    .redirect_incoming_exact(exact_handle, 302, vec![target])
                                     .await;
                             } else {
                                 tracing::warn!(call_id = %call_id, "callback redirect suppressed without exact lifecycle authority");

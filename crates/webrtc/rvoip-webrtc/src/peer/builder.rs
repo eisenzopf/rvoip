@@ -16,7 +16,7 @@ use rtc::rtp_transceiver::rtp_sender::{
 };
 use rvoip_core::capability::CapabilityDescriptor;
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{atomic::AtomicUsize, Arc};
 
 // G6 — RTP header extension URIs. Registered explicitly so that interop SDPs
 // (Chrome / Safari / Firefox) round-trip the right `extmap:` IDs.
@@ -341,6 +341,22 @@ pub async fn build_peer_connection(
     config: &WebRtcConfig,
     handler: Arc<dyn PeerConnectionEventHandler>,
 ) -> Result<Arc<dyn webrtc::peer_connection::PeerConnection>> {
+    build_peer_connection_inner(config, handler, None).await
+}
+
+pub(crate) async fn build_peer_connection_with_allocated_udp_socket_counter(
+    config: &WebRtcConfig,
+    handler: Arc<dyn PeerConnectionEventHandler>,
+    allocated_udp_sockets: Arc<AtomicUsize>,
+) -> Result<Arc<dyn webrtc::peer_connection::PeerConnection>> {
+    build_peer_connection_inner(config, handler, Some(allocated_udp_sockets)).await
+}
+
+async fn build_peer_connection_inner(
+    config: &WebRtcConfig,
+    handler: Arc<dyn PeerConnectionEventHandler>,
+    allocated_udp_sockets: Option<Arc<AtomicUsize>>,
+) -> Result<Arc<dyn webrtc::peer_connection::PeerConnection>> {
     let runtime = default_runtime().ok_or_else(|| {
         WebRtcError::Webrtc("no async runtime found (enable webrtc runtime-tokio)".into())
     })?;
@@ -365,6 +381,9 @@ pub async fn build_peer_connection(
         .with_interceptor_registry(registry)
         .with_handler(handler)
         .with_runtime(runtime);
+    if let Some(counter) = allocated_udp_sockets {
+        builder = builder.with_allocated_udp_socket_counter(counter);
+    }
     if !config.nat_1to1_ips.is_empty() {
         if config.nat_1to1_candidate_type != crate::config::Nat1To1CandidateType::Host {
             return Err(WebRtcError::Webrtc(

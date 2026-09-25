@@ -4,8 +4,10 @@
 //! Uses an inline `MockAdapter` + `MockMediaStream` so the test is
 //! self-contained — no SIP / QUIC / WebSocket setup needed.
 
+use std::future::{poll_fn, Future};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::task::Poll;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -23,6 +25,8 @@ use rvoip_core::identity::IdentityAssurance;
 use rvoip_core::ids::{ConnectionId, MessageId, ParticipantId, SessionId, StreamId};
 use rvoip_core::message::Message;
 use rvoip_core::orchestrator::DEFAULT_BRIDGED_DATA_MESSAGE_QUEUE_CAPACITY;
+#[cfg(feature = "test-hooks")]
+use rvoip_core::orchestrator::{ReplacementPreparationBoundary, ReplacementPreparationTestGate};
 use rvoip_core::stream::{
     BridgedDataMessageDecision, DataMessageBridgePolicy, MediaFrame, MediaReceiverReservation,
     MediaStream, QualitySnapshot, StreamKind,
@@ -202,6 +206,7 @@ struct MockAdapter {
     events_tx: mpsc::Sender<AdapterEvent>,
     events_rx: StdMutex<Option<mpsc::Receiver<AdapterEvent>>>,
     stream_gates: dashmap::DashMap<ConnectionId, Arc<StreamLookupGate>>,
+    empty_stream_lookups: dashmap::DashSet<ConnectionId>,
     data_send_gates: dashmap::DashMap<ConnectionId, Arc<DataSendGate>>,
     sent_data_messages: StdMutex<Vec<(ConnectionId, DataMessage)>>,
     renegotiated_audio: StdMutex<Option<CodecInfo>>,
@@ -260,6 +265,7 @@ impl MockAdapter {
             events_tx,
             events_rx: StdMutex::new(Some(events_rx)),
             stream_gates: dashmap::DashMap::new(),
+            empty_stream_lookups: dashmap::DashSet::new(),
             data_send_gates: dashmap::DashMap::new(),
             sent_data_messages: StdMutex::new(Vec::new()),
             renegotiated_audio: StdMutex::new(None),
@@ -274,6 +280,11 @@ impl MockAdapter {
         let gate = StreamLookupGate::new();
         self.stream_gates.insert(id, Arc::clone(&gate));
         gate
+    }
+
+    #[cfg(feature = "test-hooks")]
+    fn return_no_stream_once(&self, id: ConnectionId) {
+        self.empty_stream_lookups.insert(id);
     }
 
     async fn announce(&self, id: ConnectionId, session_id: SessionId) {
@@ -296,6 +307,16 @@ impl MockAdapter {
             .events_tx
             .send(AdapterEvent::InboundConnection { connection: conn })
             .await;
+    }
+
+    async fn announce_end(&self, id: ConnectionId) {
+        self.events_tx
+            .send(AdapterEvent::Ended {
+                connection_id: id,
+                reason: AdapterEndReason::Normal,
+            })
+            .await
+            .expect("announce mock connection end");
     }
 
     fn sent_data_messages(&self) -> Vec<(ConnectionId, DataMessage)> {
@@ -360,6 +381,9 @@ impl ConnectionAdapter for MockAdapter {
                 gate.entered.notify_one();
                 gate.release.notified().await;
             }
+        }
+        if self.empty_stream_lookups.remove(&c).is_some() {
+            return Ok(Vec::new());
         }
         match self.streams.get(&c) {
             Some(s) => Ok(vec![s.clone() as Arc<dyn MediaStream>]),
@@ -591,6 +615,33 @@ async fn wait_for_sink_count(graph: &rvoip_core::media_graph::MediaGraphHandle, 
     .expect("media graph sink count did not converge");
 }
 
+fn active_bridge_count(orchestrator: &Orchestrator) -> usize {
+    match orchestrator.capacity_report() {
+        Event::CapacityReport { active_bridges, .. } => active_bridges as usize,
+        _ => unreachable!("capacity_report returns a capacity event"),
+    }
+}
+
+async fn wait_for_active_bridge_count(orchestrator: &Orchestrator, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while active_bridge_count(orchestrator) != expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("active bridge count did not converge");
+}
+
+async fn wait_for_connection_retirement(orchestrator: &Orchestrator, connection_id: &ConnectionId) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while orchestrator.connection_transport(connection_id).is_ok() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("connection retirement did not converge");
+}
+
 /// Spin up an Orchestrator with one MockAdapter (Quic transport) holding
 /// two connections + their streams. Returns the orchestrator + the two
 /// streams + their connection ids so tests can inject/observe frames.
@@ -686,6 +737,222 @@ async fn setup_amazon_connect_bridge_orchestrator() -> (
         sip_connection,
         connect_connection,
     )
+}
+
+/// Build one Session whose ingress, current service destination, and
+/// replacement service destination are owned by three different adapters.
+/// This mirrors the SIP -> WebRTC -> in-process-AI handoff that exercises
+/// destination replacement in production without requiring live transports.
+async fn setup_cross_transport_replacement_orchestrator() -> (
+    Arc<Orchestrator>,
+    Arc<MockMediaStream>,
+    Arc<MockMediaStream>,
+    Arc<MockMediaStream>,
+    ConnectionId,
+    ConnectionId,
+    ConnectionId,
+) {
+    let sip_adapter = MockAdapter::new(Transport::Sip);
+    let webrtc_adapter = MockAdapter::new(Transport::WebRtc);
+    let ai_adapter = MockAdapter::new(Transport::InProcessAi);
+    let ingress = ConnectionId::new();
+    let current_destination = ConnectionId::new();
+    let replacement_destination = ConnectionId::new();
+    let ingress_stream = MockMediaStream::new(DEFAULT_TEST_CODEC);
+    let current_stream = MockMediaStream::new(DEFAULT_TEST_CODEC);
+    let replacement_stream = MockMediaStream::new(DEFAULT_TEST_CODEC);
+    sip_adapter.register_connection(ingress.clone(), Arc::clone(&ingress_stream));
+    webrtc_adapter.register_connection(current_destination.clone(), Arc::clone(&current_stream));
+    ai_adapter.register_connection(
+        replacement_destination.clone(),
+        Arc::clone(&replacement_stream),
+    );
+
+    let orchestrator = Orchestrator::new(Config::default());
+    orchestrator
+        .register(sip_adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .expect("register SIP adapter");
+    orchestrator
+        .register(webrtc_adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .expect("register WebRTC adapter");
+    orchestrator
+        .register(ai_adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .expect("register in-process AI adapter");
+
+    let session = SessionId::new();
+    sip_adapter.announce(ingress.clone(), session.clone()).await;
+    webrtc_adapter
+        .announce(current_destination.clone(), session.clone())
+        .await;
+    ai_adapter
+        .announce(replacement_destination.clone(), session)
+        .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    (
+        orchestrator,
+        ingress_stream,
+        current_stream,
+        replacement_stream,
+        ingress,
+        current_destination,
+        replacement_destination,
+    )
+}
+
+struct ReplacementFaultFixture {
+    orchestrator: Arc<Orchestrator>,
+    ingress_adapter: Arc<MockAdapter>,
+    current_adapter: Arc<MockAdapter>,
+    replacement_adapter: Arc<MockAdapter>,
+    ingress_stream: Arc<MockMediaStream>,
+    current_stream: Arc<MockMediaStream>,
+    replacement_stream: Arc<MockMediaStream>,
+    ingress: ConnectionId,
+    current_destination: ConnectionId,
+    replacement_destination: ConnectionId,
+}
+
+impl ReplacementFaultFixture {
+    fn adapter_for(&self, target: ReplacementEndpoint) -> &Arc<MockAdapter> {
+        match target {
+            ReplacementEndpoint::Source => &self.ingress_adapter,
+            ReplacementEndpoint::OldDestination => &self.current_adapter,
+            ReplacementEndpoint::PendingDestination => &self.replacement_adapter,
+        }
+    }
+
+    fn connection_for(&self, target: ReplacementEndpoint) -> &ConnectionId {
+        match target {
+            ReplacementEndpoint::Source => &self.ingress,
+            ReplacementEndpoint::OldDestination => &self.current_destination,
+            ReplacementEndpoint::PendingDestination => &self.replacement_destination,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ReplacementEndpoint {
+    Source,
+    OldDestination,
+    PendingDestination,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ReplacementAwaitBoundary {
+    SourceStreamLookup,
+    PendingStreamLookup,
+    #[cfg(feature = "test-hooks")]
+    StreamAvailabilityRetryDelay,
+    #[cfg(feature = "test-hooks")]
+    SourceMediaGraphInitLock,
+    #[cfg(feature = "test-hooks")]
+    PendingMediaGraphInitLock,
+    #[cfg(feature = "test-hooks")]
+    SourceToPendingRouteActivation,
+    #[cfg(feature = "test-hooks")]
+    PendingToSourceRouteActivation,
+}
+
+enum ReplacementAwaitGate {
+    Stream(Arc<StreamLookupGate>),
+    #[cfg(feature = "test-hooks")]
+    Core(Arc<ReplacementPreparationTestGate>),
+}
+
+impl ReplacementAwaitGate {
+    async fn wait_until_blocked(&self) {
+        match self {
+            Self::Stream(gate) => {
+                tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+                    .await
+                    .expect("replacement did not reach stream lookup gate");
+            }
+            #[cfg(feature = "test-hooks")]
+            Self::Core(gate) => gate
+                .wait_until_blocked()
+                .await
+                .expect("replacement did not reach core preparation gate"),
+        }
+    }
+
+    fn release(&self) {
+        match self {
+            Self::Stream(gate) => gate.release.notify_one(),
+            #[cfg(feature = "test-hooks")]
+            Self::Core(gate) => gate.release(),
+        }
+    }
+}
+
+async fn setup_replacement_fault_fixture() -> ReplacementFaultFixture {
+    let ingress_adapter = MockAdapter::new(Transport::Sip);
+    let current_adapter = MockAdapter::new(Transport::WebRtc);
+    let replacement_adapter = MockAdapter::new(Transport::InProcessAi);
+    let ingress = ConnectionId::new();
+    let current_destination = ConnectionId::new();
+    let replacement_destination = ConnectionId::new();
+    let ingress_stream = MockMediaStream::new(DEFAULT_TEST_CODEC);
+    let current_stream = MockMediaStream::new(DEFAULT_TEST_CODEC);
+    let replacement_stream = MockMediaStream::new(DEFAULT_TEST_CODEC);
+    ingress_adapter.register_connection(ingress.clone(), Arc::clone(&ingress_stream));
+    current_adapter.register_connection(current_destination.clone(), Arc::clone(&current_stream));
+    replacement_adapter.register_connection(
+        replacement_destination.clone(),
+        Arc::clone(&replacement_stream),
+    );
+
+    let orchestrator = Orchestrator::new(Config::default());
+    orchestrator
+        .register(ingress_adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .expect("register fault-fixture source adapter");
+    orchestrator
+        .register(current_adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .expect("register fault-fixture old adapter");
+    orchestrator
+        .register(replacement_adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .expect("register fault-fixture pending adapter");
+    let mut events = orchestrator.subscribe_events();
+
+    let session = SessionId::new();
+    ingress_adapter
+        .announce(ingress.clone(), session.clone())
+        .await;
+    current_adapter
+        .announce(current_destination.clone(), session.clone())
+        .await;
+    replacement_adapter
+        .announce(replacement_destination.clone(), session)
+        .await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let mut ingress_published = false;
+        let mut current_published = false;
+        let mut replacement_published = false;
+        while !(ingress_published && current_published && replacement_published) {
+            if let Event::ConnectionInbound { connection_id, .. } =
+                events.recv().await.expect("core event bus closed")
+            {
+                ingress_published |= connection_id == ingress;
+                current_published |= connection_id == current_destination;
+                replacement_published |= connection_id == replacement_destination;
+            }
+        }
+    })
+    .await
+    .expect("replacement fault fixture was not admitted");
+
+    ReplacementFaultFixture {
+        orchestrator,
+        ingress_adapter,
+        current_adapter,
+        replacement_adapter,
+        ingress_stream,
+        current_stream,
+        replacement_stream,
+        ingress,
+        current_destination,
+        replacement_destination,
+    }
 }
 
 async fn wait_for_data_message_count(adapter: &MockAdapter, expected: usize) {
@@ -798,6 +1065,886 @@ async fn bridge_passes_frames_through_when_codecs_match() {
         received.push(frame.payload[0]);
     }
     assert_eq!(received, (0u8..5).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn bridge_destination_replacement_cuts_media_over_and_fences_stale_generation() {
+    let (
+        orch,
+        ingress_stream,
+        current_stream,
+        replacement_stream,
+        ingress,
+        current_destination,
+        replacement_destination,
+    ) = setup_cross_transport_replacement_orchestrator().await;
+    let mut ingress_out = ingress_stream.take_external_out();
+    let mut current_out = current_stream.take_external_out();
+    let mut replacement_out = replacement_stream.take_external_out();
+    let original_bridge = orch
+        .bridge_connections(ingress.clone(), current_destination.clone())
+        .await
+        .expect("initial SIP-to-WebRTC bridge");
+
+    ingress_stream
+        .inject(mk_frame(ingress_stream.id(), 1))
+        .await;
+    let before_cutover = tokio::time::timeout(Duration::from_secs(2), current_out.recv())
+        .await
+        .expect("current destination did not receive pre-cutover media")
+        .expect("current destination output closed");
+    assert_eq!(before_cutover.payload[0], 1);
+
+    let replacement = orch
+        .replace_bridge_destination(
+            original_bridge.clone(),
+            ingress.clone(),
+            current_destination.clone(),
+            replacement_destination.clone(),
+        )
+        .await
+        .expect("replace WebRTC destination with in-process AI");
+    assert_ne!(replacement.bridge_id, original_bridge);
+    assert_eq!(replacement.previous_bridge_id, original_bridge);
+    assert_eq!(replacement.ingress, ingress);
+    assert_eq!(replacement.previous_destination, current_destination);
+    assert_eq!(replacement.destination, replacement_destination);
+
+    ingress_stream
+        .inject(mk_frame(ingress_stream.id(), 2))
+        .await;
+    let after_cutover = tokio::time::timeout(Duration::from_secs(2), replacement_out.recv())
+        .await
+        .expect("replacement destination did not receive post-cutover media")
+        .expect("replacement destination output closed");
+    assert_eq!(after_cutover.payload[0], 2);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), current_out.recv())
+            .await
+            .is_err(),
+        "retired destination continued receiving ingress media"
+    );
+
+    replacement_stream
+        .inject(mk_frame(replacement_stream.id(), 3))
+        .await;
+    let reverse = tokio::time::timeout(Duration::from_secs(2), ingress_out.recv())
+        .await
+        .expect("ingress did not receive replacement return media")
+        .expect("ingress output closed");
+    assert_eq!(reverse.payload[0], 3);
+
+    assert!(matches!(
+        orch.replace_bridge_destination(
+            original_bridge.clone(),
+            ingress.clone(),
+            current_destination,
+            replacement_destination.clone(),
+        )
+        .await,
+        Err(RvoipError::BridgeNotFound(id)) if id == original_bridge
+    ));
+
+    ingress_stream
+        .inject(mk_frame(ingress_stream.id(), 4))
+        .await;
+    let after_stale_attempt = tokio::time::timeout(Duration::from_secs(2), replacement_out.recv())
+        .await
+        .expect("stale replacement disturbed the committed bridge")
+        .expect("replacement destination output closed");
+    assert_eq!(after_stale_attempt.payload[0], 4);
+
+    orch.unbridge_connections(replacement.bridge_id)
+        .await
+        .expect("remove replacement bridge");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn committed_bridge_replacement_returns_before_retired_cleanup_can_be_cancelled() {
+    let (
+        orch,
+        ingress_stream,
+        _current_stream,
+        replacement_stream,
+        ingress,
+        current_destination,
+        replacement_destination,
+    ) = setup_cross_transport_replacement_orchestrator().await;
+    let mut replacement_out = replacement_stream.take_external_out();
+    let original_bridge = orch
+        .bridge_connections(ingress.clone(), current_destination.clone())
+        .await
+        .expect("initial bridge");
+    // Subscribe after the initial generation so the first relevant event is
+    // produced by replacement itself.
+    let mut events = orch.subscribe_events();
+    let replacement = orch.replace_bridge_destination(
+        original_bridge.clone(),
+        ingress.clone(),
+        current_destination,
+        replacement_destination,
+    );
+    tokio::pin!(replacement);
+
+    let receipt = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut replacement => break result.expect("replacement"),
+                event = events.recv() => {
+                    if matches!(
+                        event.expect("core event bus"),
+                        Event::ConnectionsUnbridged { bridge_id, .. }
+                            if bridge_id == original_bridge
+                    ) {
+                        panic!(
+                            "a committed replacement yielded before returning its generation receipt"
+                        );
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .expect("replacement did not return its commit receipt");
+
+    ingress_stream
+        .inject(mk_frame(ingress_stream.id(), 9))
+        .await;
+    let forwarded = tokio::time::timeout(Duration::from_secs(2), replacement_out.recv())
+        .await
+        .expect("replacement did not receive media")
+        .expect("replacement output closed");
+    assert_eq!(forwarded.payload[0], 9);
+
+    orch.unbridge_connections(receipt.bridge_id)
+        .await
+        .expect("remove replacement bridge");
+    orch.drain_connection_lifecycle_tasks().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn bridge_replacement_fences_blocked_data_for_the_retired_destination() {
+    let adapter = MockAdapter::new(Transport::Quic);
+    let ingress = ConnectionId::new();
+    let retired_destination = ConnectionId::new();
+    let replacement_destination = ConnectionId::new();
+    for connection_id in [
+        ingress.clone(),
+        retired_destination.clone(),
+        replacement_destination.clone(),
+    ] {
+        adapter.register_connection(connection_id, MockMediaStream::new(DEFAULT_TEST_CODEC));
+    }
+
+    let orch = Orchestrator::new(Config::default());
+    orch.register(adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .expect("register adapter");
+    let session = SessionId::new();
+    adapter.announce(ingress.clone(), session.clone()).await;
+    adapter
+        .announce(retired_destination.clone(), session.clone())
+        .await;
+    adapter
+        .announce(replacement_destination.clone(), session)
+        .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let original_bridge = orch
+        .bridge_connections(ingress.clone(), retired_destination.clone())
+        .await
+        .expect("initial bridge");
+    let blocked_send = adapter.gate_data_send(retired_destination.clone());
+    let entered = blocked_send.entered.notified();
+    tokio::pin!(entered);
+    entered.as_mut().enable();
+    let stale = DataMessage::reliable("stale", "text/plain", "old generation");
+    adapter
+        .events_tx
+        .send(AdapterEvent::DataMessage {
+            connection_id: ingress.clone(),
+            message: stale,
+        })
+        .await
+        .expect("queue data for retired destination");
+    tokio::time::timeout(Duration::from_secs(2), &mut entered)
+        .await
+        .expect("old data worker did not enter blocked send");
+
+    let replacement = orch
+        .replace_bridge_destination(
+            original_bridge,
+            ingress.clone(),
+            retired_destination.clone(),
+            replacement_destination.clone(),
+        )
+        .await
+        .expect("replace destination");
+
+    // Releasing the adapter-side send after the replacement receipt must not
+    // allow work retained by the old generation to reach its former peer.
+    blocked_send.release();
+    for _ in 0..4 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        adapter.sent_data_messages().is_empty(),
+        "retired bridge data crossed the replacement boundary"
+    );
+
+    let fresh = DataMessage::reliable("fresh", "text/plain", "new generation");
+    adapter
+        .events_tx
+        .send(AdapterEvent::DataMessage {
+            connection_id: ingress,
+            message: fresh.clone(),
+        })
+        .await
+        .expect("queue data for replacement destination");
+    wait_for_data_message_count(&adapter, 1).await;
+    assert_eq!(
+        adapter.sent_data_messages(),
+        vec![(replacement_destination, fresh)]
+    );
+
+    orch.unbridge_connections(replacement.bridge_id)
+        .await
+        .expect("remove replacement bridge");
+    orch.drain_connection_lifecycle_tasks().await;
+}
+
+#[tokio::test]
+async fn failed_bridge_destination_replacement_rolls_back_and_can_retry() {
+    let (
+        orch,
+        ingress_stream,
+        current_stream,
+        replacement_stream,
+        ingress,
+        current_destination,
+        replacement_destination,
+    ) = setup_cross_transport_replacement_orchestrator().await;
+    let mut current_out = current_stream.take_external_out();
+    replacement_stream.set_writable(false);
+    let original_bridge = orch
+        .bridge_connections(ingress.clone(), current_destination.clone())
+        .await
+        .expect("initial bridge");
+
+    assert!(matches!(
+        orch.replace_bridge_destination(
+            original_bridge.clone(),
+            ingress.clone(),
+            current_destination.clone(),
+            replacement_destination.clone(),
+        )
+        .await,
+        Err(RvoipError::InvalidState(
+            "mock media stream is not activated"
+        ))
+    ));
+
+    ingress_stream
+        .inject(mk_frame(ingress_stream.id(), 5))
+        .await;
+    let retained = tokio::time::timeout(Duration::from_secs(2), current_out.recv())
+        .await
+        .expect("failed replacement disturbed the original bridge")
+        .expect("current destination output closed");
+    assert_eq!(retained.payload[0], 5);
+
+    replacement_stream.set_writable(true);
+    let replacement = orch
+        .replace_bridge_destination(
+            original_bridge,
+            ingress,
+            current_destination,
+            replacement_destination,
+        )
+        .await
+        .expect("failed preflight must release replacement reservation");
+    orch.unbridge_connections(replacement.bridge_id)
+        .await
+        .expect("remove retried replacement bridge");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replacement_endpoint_termination_matrix_compensates_precommit_awaits() {
+    #[cfg(not(feature = "test-hooks"))]
+    let boundaries = vec![
+        ReplacementAwaitBoundary::SourceStreamLookup,
+        ReplacementAwaitBoundary::PendingStreamLookup,
+    ];
+    #[cfg(feature = "test-hooks")]
+    let boundaries = vec![
+        ReplacementAwaitBoundary::SourceStreamLookup,
+        ReplacementAwaitBoundary::PendingStreamLookup,
+        ReplacementAwaitBoundary::StreamAvailabilityRetryDelay,
+        ReplacementAwaitBoundary::SourceMediaGraphInitLock,
+        ReplacementAwaitBoundary::PendingMediaGraphInitLock,
+        ReplacementAwaitBoundary::SourceToPendingRouteActivation,
+        ReplacementAwaitBoundary::PendingToSourceRouteActivation,
+    ];
+    let mut cases = 0_usize;
+    for boundary in boundaries {
+        for endpoint in [
+            ReplacementEndpoint::Source,
+            ReplacementEndpoint::OldDestination,
+            ReplacementEndpoint::PendingDestination,
+        ] {
+            let fixture = setup_replacement_fault_fixture().await;
+            let _ingress_output = fixture.ingress_stream.take_external_out();
+            let mut current_output = fixture.current_stream.take_external_out();
+            let _replacement_output = fixture.replacement_stream.take_external_out();
+            let original_bridge = fixture
+                .orchestrator
+                .bridge_connections(fixture.ingress.clone(), fixture.current_destination.clone())
+                .await
+                .unwrap_or_else(|error| match error {
+                    RvoipError::AdmissionRejected(reason) => {
+                        panic!("initial bridge for termination matrix was rejected: {reason}")
+                    }
+                    error => panic!("initial bridge for termination matrix: {error:?}"),
+                });
+            let ingress_graph = fixture
+                .orchestrator
+                .media_graph_for_connection(fixture.ingress.clone())
+                .await
+                .expect("source graph");
+            let current_graph = fixture
+                .orchestrator
+                .media_graph_for_connection(fixture.current_destination.clone())
+                .await
+                .expect("old destination graph");
+            let gate = match boundary {
+                ReplacementAwaitBoundary::SourceStreamLookup => ReplacementAwaitGate::Stream(
+                    fixture
+                        .ingress_adapter
+                        .gate_next_stream_lookup(fixture.ingress.clone()),
+                ),
+                ReplacementAwaitBoundary::PendingStreamLookup => ReplacementAwaitGate::Stream(
+                    fixture
+                        .replacement_adapter
+                        .gate_next_stream_lookup(fixture.replacement_destination.clone()),
+                ),
+                #[cfg(feature = "test-hooks")]
+                ReplacementAwaitBoundary::StreamAvailabilityRetryDelay => {
+                    fixture
+                        .replacement_adapter
+                        .return_no_stream_once(fixture.replacement_destination.clone());
+                    ReplacementAwaitGate::Core(
+                        fixture
+                            .orchestrator
+                            .install_replacement_preparation_test_gate(
+                                ReplacementPreparationBoundary::StreamAvailabilityRetryDelay,
+                                Duration::from_secs(5),
+                            )
+                            .expect("install stream-availability retry gate"),
+                    )
+                }
+                #[cfg(feature = "test-hooks")]
+                ReplacementAwaitBoundary::SourceMediaGraphInitLock => ReplacementAwaitGate::Core(
+                    fixture
+                        .orchestrator
+                        .install_replacement_preparation_test_gate(
+                            ReplacementPreparationBoundary::SourceMediaGraphInitLock,
+                            Duration::from_secs(5),
+                        )
+                        .expect("install source graph-init gate"),
+                ),
+                #[cfg(feature = "test-hooks")]
+                ReplacementAwaitBoundary::PendingMediaGraphInitLock => ReplacementAwaitGate::Core(
+                    fixture
+                        .orchestrator
+                        .install_replacement_preparation_test_gate(
+                            ReplacementPreparationBoundary::PendingMediaGraphInitLock,
+                            Duration::from_secs(5),
+                        )
+                        .expect("install pending graph-init gate"),
+                ),
+                #[cfg(feature = "test-hooks")]
+                ReplacementAwaitBoundary::SourceToPendingRouteActivation => {
+                    ReplacementAwaitGate::Core(
+                        fixture
+                            .orchestrator
+                            .install_replacement_preparation_test_gate(
+                                ReplacementPreparationBoundary::SourceToPendingRouteActivation,
+                                Duration::from_secs(5),
+                            )
+                            .expect("install source-to-pending route gate"),
+                    )
+                }
+                #[cfg(feature = "test-hooks")]
+                ReplacementAwaitBoundary::PendingToSourceRouteActivation => {
+                    ReplacementAwaitGate::Core(
+                        fixture
+                            .orchestrator
+                            .install_replacement_preparation_test_gate(
+                                ReplacementPreparationBoundary::PendingToSourceRouteActivation,
+                                Duration::from_secs(5),
+                            )
+                            .expect("install pending-to-source route gate"),
+                    )
+                }
+            };
+            let replacement = {
+                let orchestrator = Arc::clone(&fixture.orchestrator);
+                let ingress = fixture.ingress.clone();
+                let old = fixture.current_destination.clone();
+                let pending = fixture.replacement_destination.clone();
+                let bridge = original_bridge.clone();
+                tokio::spawn(async move {
+                    orchestrator
+                        .replace_bridge_destination(bridge, ingress, old, pending)
+                        .await
+                })
+            };
+            gate.wait_until_blocked().await;
+
+            let ended_connection = fixture.connection_for(endpoint).clone();
+            fixture
+                .adapter_for(endpoint)
+                .announce_end(ended_connection.clone())
+                .await;
+            wait_for_connection_retirement(&fixture.orchestrator, &ended_connection).await;
+            gate.release();
+
+            let result = tokio::time::timeout(Duration::from_secs(2), replacement)
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("replacement hung after {endpoint:?} ended at {boundary:?}")
+                })
+                .expect("replacement task panicked");
+            assert!(
+                result.is_err(),
+                "replacement committed after {endpoint:?} ended at {boundary:?}"
+            );
+
+            match endpoint {
+                ReplacementEndpoint::PendingDestination => {
+                    wait_for_active_bridge_count(&fixture.orchestrator, 1).await;
+                    fixture
+                        .ingress_stream
+                        .inject(mk_frame(fixture.ingress_stream.id(), 91))
+                        .await;
+                    let retained =
+                        tokio::time::timeout(Duration::from_secs(2), current_output.recv())
+                            .await
+                            .expect("old destination did not retain media after pending loss")
+                            .expect("old destination output closed");
+                    assert_eq!(retained.payload[0], 91);
+                    wait_for_sink_count(&ingress_graph, 1).await;
+                    wait_for_sink_count(&current_graph, 1).await;
+                    fixture
+                        .orchestrator
+                        .unbridge_connections(original_bridge)
+                        .await
+                        .expect("remove retained original bridge");
+                }
+                ReplacementEndpoint::Source | ReplacementEndpoint::OldDestination => {
+                    wait_for_active_bridge_count(&fixture.orchestrator, 0).await;
+                    wait_for_sink_count(&ingress_graph, 0).await;
+                    wait_for_sink_count(&current_graph, 0).await;
+                    let (surviving_source, surviving_destination) = match endpoint {
+                        ReplacementEndpoint::Source => (
+                            fixture.current_destination.clone(),
+                            fixture.replacement_destination.clone(),
+                        ),
+                        ReplacementEndpoint::OldDestination => (
+                            fixture.ingress.clone(),
+                            fixture.replacement_destination.clone(),
+                        ),
+                        ReplacementEndpoint::PendingDestination => unreachable!(),
+                    };
+                    let retry = fixture
+                        .orchestrator
+                        .bridge_connections(surviving_source, surviving_destination)
+                        .await
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "replacement reservation leaked after {endpoint:?} ended at \
+                                 {boundary:?}: {error:?}"
+                            )
+                        });
+                    fixture
+                        .orchestrator
+                        .unbridge_connections(retry)
+                        .await
+                        .expect("remove reservation-compensation probe bridge");
+                    wait_for_active_bridge_count(&fixture.orchestrator, 0).await;
+                }
+            }
+            fixture
+                .orchestrator
+                .drain_connection_lifecycle_tasks()
+                .await;
+            assert_eq!(fixture.orchestrator.connection_lifecycle_task_count(), 0);
+            cases += 1;
+        }
+    }
+    #[cfg(feature = "test-hooks")]
+    assert_eq!(cases, 21);
+    #[cfg(not(feature = "test-hooks"))]
+    assert_eq!(cases, 6);
+    eprintln!(
+        "{{\"kind\":\"replacement_endpoint_termination_precommit_await_matrix\",\"cases\":{cases},\"boundaries\":{},\"actors\":3}}",
+        cases / 3
+    );
+}
+
+#[tokio::test]
+async fn replacement_second_direction_failure_removes_activated_candidate_route() {
+    let fixture = setup_replacement_fault_fixture().await;
+    let _ingress_output = fixture.ingress_stream.take_external_out();
+    let mut current_output = fixture.current_stream.take_external_out();
+    let _replacement_output = fixture.replacement_stream.take_external_out();
+    let original_bridge = fixture
+        .orchestrator
+        .bridge_connections(fixture.ingress.clone(), fixture.current_destination.clone())
+        .await
+        .expect("initial bridge for media compensation");
+    let ingress_graph = fixture
+        .orchestrator
+        .media_graph_for_connection(fixture.ingress.clone())
+        .await
+        .expect("source graph");
+    let replacement_graph = fixture
+        .orchestrator
+        .media_graph_for_connection(fixture.replacement_destination.clone())
+        .await
+        .expect("replacement source graph");
+
+    let mut saturation_routes = Vec::new();
+    let mut saturation_receivers = Vec::new();
+    loop {
+        let (target, receiver) = mpsc::channel(1);
+        match replacement_graph.add_sink(fixture.replacement_stream.codec(), target) {
+            Ok(route) => {
+                saturation_routes.push(route);
+                saturation_receivers.push(receiver);
+                wait_for_sink_count(&replacement_graph, saturation_routes.len()).await;
+            }
+            Err(RvoipError::AdmissionRejected("media graph maximum sink count reached")) => break,
+            Err(error) => panic!("unexpected media graph saturation error: {error}"),
+        }
+    }
+    let saturated_sink_count = saturation_routes.len();
+    assert!(saturated_sink_count > 0);
+    wait_for_sink_count(&replacement_graph, saturated_sink_count).await;
+
+    assert!(matches!(
+        fixture
+            .orchestrator
+            .replace_bridge_destination(
+                original_bridge.clone(),
+                fixture.ingress.clone(),
+                fixture.current_destination.clone(),
+                fixture.replacement_destination.clone(),
+            )
+            .await,
+        Err(RvoipError::AdmissionRejected(
+            "media graph maximum sink count reached"
+        ))
+    ));
+    wait_for_sink_count(&ingress_graph, 1).await;
+    wait_for_sink_count(&replacement_graph, saturated_sink_count).await;
+    wait_for_active_bridge_count(&fixture.orchestrator, 1).await;
+
+    fixture
+        .ingress_stream
+        .inject(mk_frame(fixture.ingress_stream.id(), 92))
+        .await;
+    let retained = tokio::time::timeout(Duration::from_secs(2), current_output.recv())
+        .await
+        .expect("old destination did not retain media after route compensation")
+        .expect("old destination output closed");
+    assert_eq!(retained.payload[0], 92);
+
+    for route in saturation_routes {
+        replacement_graph
+            .remove_sink_and_wait(route)
+            .await
+            .expect("remove saturation route");
+    }
+    drop(saturation_receivers);
+    fixture
+        .orchestrator
+        .unbridge_connections(original_bridge)
+        .await
+        .expect("remove original bridge after compensation test");
+    wait_for_sink_count(&ingress_graph, 0).await;
+    wait_for_sink_count(&replacement_graph, 0).await;
+}
+
+#[tokio::test]
+async fn promoted_bridge_survives_exact_old_destination_retirement() {
+    let fixture = setup_replacement_fault_fixture().await;
+    let _ingress_output = fixture.ingress_stream.take_external_out();
+    let _current_output = fixture.current_stream.take_external_out();
+    let mut replacement_output = fixture.replacement_stream.take_external_out();
+    let original_bridge = fixture
+        .orchestrator
+        .bridge_connections(fixture.ingress.clone(), fixture.current_destination.clone())
+        .await
+        .expect("initial bridge for exact retirement");
+    let replacement = fixture
+        .orchestrator
+        .replace_bridge_destination(
+            original_bridge,
+            fixture.ingress.clone(),
+            fixture.current_destination.clone(),
+            fixture.replacement_destination.clone(),
+        )
+        .await
+        .expect("promote replacement destination");
+
+    fixture
+        .current_adapter
+        .announce_end(fixture.current_destination.clone())
+        .await;
+    wait_for_connection_retirement(&fixture.orchestrator, &fixture.current_destination).await;
+    wait_for_active_bridge_count(&fixture.orchestrator, 1).await;
+    assert!(fixture
+        .orchestrator
+        .connection_transport(&fixture.ingress)
+        .is_ok());
+    assert!(fixture
+        .orchestrator
+        .connection_transport(&fixture.replacement_destination)
+        .is_ok());
+
+    fixture
+        .ingress_stream
+        .inject(mk_frame(fixture.ingress_stream.id(), 93))
+        .await;
+    let forwarded = tokio::time::timeout(Duration::from_secs(2), replacement_output.recv())
+        .await
+        .expect("replacement stopped after exact old retirement")
+        .expect("replacement output closed");
+    assert_eq!(forwarded.payload[0], 93);
+
+    fixture
+        .replacement_adapter
+        .announce_end(fixture.replacement_destination.clone())
+        .await;
+    wait_for_connection_retirement(&fixture.orchestrator, &fixture.replacement_destination).await;
+    wait_for_active_bridge_count(&fixture.orchestrator, 0).await;
+    assert!(fixture
+        .orchestrator
+        .connection_transport(&fixture.ingress)
+        .is_ok());
+    assert!(matches!(
+        fixture
+            .orchestrator
+            .unbridge_connections(replacement.bridge_id)
+            .await,
+        Err(RvoipError::BridgeNotFound(_))
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn seeded_replacement_glare_keeps_one_generation_and_converges() {
+    const BASE_SEED: u64 = 0x5eed_c0de_d15c_a11e;
+    const ROUNDS: usize = 64;
+
+    let adapter = MockAdapter::new(Transport::Quic);
+    let ingress = ConnectionId::new();
+    let ingress_stream = MockMediaStream::new(DEFAULT_TEST_CODEC);
+    adapter.register_connection(ingress.clone(), Arc::clone(&ingress_stream));
+    let destinations = (0..3).map(|_| ConnectionId::new()).collect::<Vec<_>>();
+    let destination_streams = (0..3)
+        .map(|_| MockMediaStream::new(DEFAULT_TEST_CODEC))
+        .collect::<Vec<_>>();
+    for (connection_id, stream) in destinations.iter().zip(&destination_streams) {
+        adapter.register_connection(connection_id.clone(), Arc::clone(stream));
+    }
+
+    let orchestrator = Orchestrator::new(Config::default());
+    orchestrator
+        .register(adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .expect("register glare adapter");
+    let session = SessionId::new();
+    adapter.announce(ingress.clone(), session.clone()).await;
+    for connection_id in &destinations {
+        adapter
+            .announce(connection_id.clone(), session.clone())
+            .await;
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while std::iter::once(&ingress)
+            .chain(destinations.iter())
+            .any(|connection_id| orchestrator.connection_transport(connection_id).is_err())
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("glare fixture was not admitted");
+
+    let mut ingress_output = ingress_stream.take_external_out();
+    let mut destination_outputs = destination_streams
+        .iter()
+        .map(|stream| stream.take_external_out())
+        .collect::<Vec<_>>();
+    let ingress_graph = orchestrator
+        .media_graph_for_connection(ingress.clone())
+        .await
+        .expect("glare ingress graph");
+    let mut destination_graphs = Vec::new();
+    for connection_id in &destinations {
+        destination_graphs.push(
+            orchestrator
+                .media_graph_for_connection(connection_id.clone())
+                .await
+                .expect("glare destination graph"),
+        );
+    }
+
+    let mut current = 0_usize;
+    let mut bridge_id = orchestrator
+        .bridge_connections(ingress.clone(), destinations[current].clone())
+        .await
+        .expect("initial glare bridge");
+    let sampling = Arc::new(AtomicBool::new(true));
+    let max_total_sinks = Arc::new(AtomicUsize::new(2));
+    let max_lifecycle_tasks = Arc::new(AtomicUsize::new(
+        orchestrator.connection_lifecycle_task_count(),
+    ));
+    let sampler = {
+        let sampling = Arc::clone(&sampling);
+        let max_total_sinks = Arc::clone(&max_total_sinks);
+        let max_lifecycle_tasks = Arc::clone(&max_lifecycle_tasks);
+        let orchestrator = Arc::clone(&orchestrator);
+        let ingress_graph = ingress_graph.clone();
+        let destination_graphs = destination_graphs.clone();
+        tokio::spawn(async move {
+            while sampling.load(Ordering::Acquire) {
+                let total_sinks = ingress_graph.latest_snapshot().sinks.len()
+                    + destination_graphs
+                        .iter()
+                        .map(|graph| graph.latest_snapshot().sinks.len())
+                        .sum::<usize>();
+                max_total_sinks.fetch_max(total_sinks, Ordering::AcqRel);
+                max_lifecycle_tasks.fetch_max(
+                    orchestrator.connection_lifecycle_task_count(),
+                    Ordering::AcqRel,
+                );
+                tokio::task::yield_now().await;
+            }
+        })
+    };
+
+    for round in 0..ROUNDS {
+        let seed = BASE_SEED
+            .wrapping_add(round as u64)
+            .wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        let candidates = (0..destinations.len())
+            .filter(|index| *index != current)
+            .collect::<Vec<_>>();
+        let barrier = Arc::new(Barrier::new(3));
+        let mut attempts = tokio::task::JoinSet::new();
+        for (lane, candidate) in candidates.iter().copied().enumerate() {
+            let orchestrator = Arc::clone(&orchestrator);
+            let barrier = Arc::clone(&barrier);
+            let bridge_id = bridge_id.clone();
+            let ingress = ingress.clone();
+            let old = destinations[current].clone();
+            let pending = destinations[candidate].clone();
+            let yields = ((seed.rotate_left((lane * 17) as u32) >> 60) & 0x7) as usize;
+            attempts.spawn(async move {
+                barrier.wait().await;
+                for _ in 0..yields {
+                    tokio::task::yield_now().await;
+                }
+                (
+                    candidate,
+                    orchestrator
+                        .replace_bridge_destination(bridge_id, ingress, old, pending)
+                        .await,
+                )
+            });
+        }
+        barrier.wait().await;
+
+        let mut winner = None;
+        let mut rejected = 0;
+        while let Some(result) = attempts.join_next().await {
+            let (candidate, result) = result.expect("replacement contender task");
+            match result {
+                Ok(receipt) => {
+                    assert!(winner.replace((candidate, receipt)).is_none());
+                }
+                Err(RvoipError::BridgeNotFound(id)) if id == bridge_id => rejected += 1,
+                Err(RvoipError::InvalidState(reason)) => {
+                    panic!("seed {seed:#x} produced unexpected invalid state: {reason}")
+                }
+                Err(RvoipError::AdmissionRejected(reason)) => {
+                    panic!("seed {seed:#x} produced unexpected admission rejection: {reason}")
+                }
+                Err(error) => panic!("seed {seed:#x} produced unexpected glare error: {error}"),
+            }
+        }
+        assert_eq!(rejected, 1, "seed {seed:#x} did not fence one contender");
+        let (next, receipt) = winner
+            .unwrap_or_else(|| panic!("seed {seed:#x} did not commit exactly one replacement"));
+        current = next;
+        bridge_id = receipt.bridge_id;
+        wait_for_active_bridge_count(&orchestrator, 1).await;
+        wait_for_sink_count(&ingress_graph, 1).await;
+        for (index, graph) in destination_graphs.iter().enumerate() {
+            wait_for_sink_count(graph, usize::from(index == current)).await;
+        }
+
+        while ingress_output.try_recv().is_ok() {}
+        for output in &mut destination_outputs {
+            while output.try_recv().is_ok() {}
+        }
+        let marker = (round as u8).wrapping_add(1);
+        ingress_stream
+            .inject(mk_frame(ingress_stream.id(), marker))
+            .await;
+        let forwarded =
+            tokio::time::timeout(Duration::from_secs(2), destination_outputs[current].recv())
+                .await
+                .unwrap_or_else(|_| panic!("seed {seed:#x} did not forward to its winner"))
+                .expect("winning destination output closed");
+        assert_eq!(forwarded.payload[0], marker);
+        for (index, output) in destination_outputs.iter_mut().enumerate() {
+            if index != current {
+                assert!(
+                    output.try_recv().is_err(),
+                    "seed {seed:#x} mixed media into retired destination {index}"
+                );
+            }
+        }
+        destination_streams[current]
+            .inject(mk_frame(destination_streams[current].id(), marker))
+            .await;
+        let reverse = tokio::time::timeout(Duration::from_secs(2), ingress_output.recv())
+            .await
+            .unwrap_or_else(|_| panic!("seed {seed:#x} lost reverse media"))
+            .expect("ingress output closed");
+        assert_eq!(reverse.payload[0], marker);
+    }
+
+    orchestrator
+        .unbridge_connections(bridge_id)
+        .await
+        .expect("remove final glare bridge");
+    wait_for_sink_count(&ingress_graph, 0).await;
+    for graph in &destination_graphs {
+        wait_for_sink_count(graph, 0).await;
+    }
+    sampling.store(false, Ordering::Release);
+    sampler.await.expect("resource sampler task");
+    orchestrator.drain_connection_lifecycle_tasks().await;
+    assert_eq!(orchestrator.connection_lifecycle_task_count(), 0);
+    assert_eq!(active_bridge_count(&orchestrator), 0);
+    eprintln!(
+        "{{\"kind\":\"seeded_core_bridge_replacement_glare\",\"baseSeed\":\"{BASE_SEED:#x}\",\"rounds\":{ROUNDS},\"resourceHighWater\":{{\"mediaGraphSinks\":{},\"lifecycleTasks\":{}}},\"final\":{{\"activeBridges\":0,\"mediaGraphSinks\":0,\"lifecycleTasks\":0}}}}",
+        max_total_sinks.load(Ordering::Acquire),
+        max_lifecycle_tasks.load(Ordering::Acquire),
+    );
 }
 
 #[cfg(feature = "opus")]
@@ -1725,6 +2872,38 @@ async fn unbridge_aborts_pumps_and_emits_event() {
     assert!(saw, "expected Event::ConnectionsUnbridged within 3s");
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn cancelled_unbridge_releases_ownership_before_cleanup_awaits() {
+    let (orch, _stream_a, _stream_b, conn_a, conn_b) =
+        setup_two_connection_orchestrator(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC).await;
+    let first = orch
+        .bridge_connections(conn_a.clone(), conn_b.clone())
+        .await
+        .expect("first bridge");
+    let mut unbridge = Box::pin(orch.unbridge_connections(first));
+
+    // Poll exactly once. Managed route removal has queued actor work and is
+    // pending on its acknowledgement, so dropping here models cancellation at
+    // the first cleanup await after the synchronous detach commit.
+    poll_fn(|context| {
+        assert!(
+            unbridge.as_mut().poll(context).is_pending(),
+            "managed bridge cleanup unexpectedly completed in one poll"
+        );
+        Poll::Ready(())
+    })
+    .await;
+    drop(unbridge);
+
+    let second = orch
+        .bridge_connections(conn_a, conn_b)
+        .await
+        .expect("cancelled cleanup must not strand endpoint ownership");
+    orch.unbridge_connections(second)
+        .await
+        .expect("remove replacement bridge");
+}
+
 #[tokio::test]
 async fn full_media_target_is_bounded_and_never_backpressures_the_source() {
     let (orch, stream_a, stream_b, conn_a, conn_b) =
@@ -1811,6 +2990,73 @@ async fn terminal_bridge_route_removes_owner_and_allows_rebridge() {
     orch.unbridge_connections(second)
         .await
         .expect("remove replacement bridge");
+}
+
+#[tokio::test]
+async fn lifecycle_drain_aborts_and_joins_cross_bridge_terminal_supervisor() {
+    let (orch, _stream_a, _stream_b, conn_a, conn_b) =
+        setup_two_connection_orchestrator(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC).await;
+    let baseline = orch.connection_lifecycle_task_count();
+    let bridge = orch
+        .bridge_connections(conn_a.clone(), conn_b.clone())
+        .await
+        .expect("bridge");
+    assert_eq!(
+        orch.connection_lifecycle_task_count(),
+        baseline + 1,
+        "one combined terminal supervisor must be owned per bridge"
+    );
+
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        orch.drain_connection_lifecycle_tasks(),
+    )
+    .await
+    .expect("lifecycle supervisor drain");
+    assert_eq!(orch.connection_lifecycle_task_count(), 0);
+    assert!(matches!(
+        orch.bridge_connections(conn_a, conn_b).await,
+        Err(RvoipError::InvalidState(
+            "connection lifecycle supervisor is draining"
+        ))
+    ));
+    orch.unbridge_connections(bridge)
+        .await
+        .expect("explicitly remove bridge after terminal watcher drain");
+}
+
+#[tokio::test]
+async fn lifecycle_drain_rejects_bridge_destination_replacement() {
+    let (
+        orch,
+        _ingress_stream,
+        _current_stream,
+        _replacement_stream,
+        ingress,
+        current_destination,
+        replacement_destination,
+    ) = setup_cross_transport_replacement_orchestrator().await;
+    let bridge = orch
+        .bridge_connections(ingress.clone(), current_destination.clone())
+        .await
+        .expect("initial bridge");
+
+    orch.drain_connection_lifecycle_tasks().await;
+    assert!(matches!(
+        orch.replace_bridge_destination(
+            bridge.clone(),
+            ingress,
+            current_destination,
+            replacement_destination,
+        )
+        .await,
+        Err(RvoipError::InvalidState(
+            "connection lifecycle supervisor is draining"
+        ))
+    ));
+    orch.unbridge_connections(bridge)
+        .await
+        .expect("explicitly remove bridge after rejected replacement");
 }
 
 #[tokio::test]

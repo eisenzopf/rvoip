@@ -15,8 +15,11 @@ use crate::adapter::{
     InboundConnectionContext, OrchestratorAdapterEvent, OriginateRequest, PlaybackHandle,
     PlaybackOutcome, RejectReason, TransferAttemptId, TransferTarget,
 };
-use crate::bridge::{codec_to_pt, BridgeManager, CrossBridgeHandle, DirectionalMediaBridgePlan};
-use crate::capability::{CapabilityDescriptor, CapabilityIntersection};
+use crate::bridge::{
+    resolve_payload_type, BridgeDestinationReplacement, BridgeManager, CrossBridgeHandle,
+    DirectionalMediaBridgePlan,
+};
+use crate::capability::{CapabilityDescriptor, CapabilityIntersection, CodecInfo};
 use crate::commands::{AudioSource, InboundAction, MuteDirection};
 use crate::config::Config;
 use crate::connection::{Direction, Transport};
@@ -34,7 +37,7 @@ use crate::inbound_admission::{
 };
 use crate::media_graph::{
     start_media_graph, validate_media_graph_codec, ManagedMediaRoute, MediaGraphHandle,
-    MediaGraphPolicy, MediaGraphRouteStatus,
+    MediaGraphPolicy, MediaGraphRouteStatus, MediaGraphSourceState,
 };
 use crate::message::{ContentType, Message, MessageOrigin, MessageRecipients};
 use crate::operational_events::{
@@ -374,7 +377,7 @@ struct PreparedOutboundShared {
     decision: AtomicU8,
     published: AtomicBool,
     cleanup_started: AtomicBool,
-    cleanup_complete: Notify,
+    cleanup_complete: CancellationToken,
     abort_detail: Mutex<Option<&'static str>>,
     binding: Mutex<Option<ConnectionSessionBinding>>,
     permit: Mutex<Option<OwnedSemaphorePermit>>,
@@ -386,7 +389,7 @@ impl PreparedOutboundShared {
             decision: AtomicU8::new(PREPARED_OUTBOUND_PENDING),
             published: AtomicBool::new(false),
             cleanup_started: AtomicBool::new(false),
-            cleanup_complete: Notify::new(),
+            cleanup_complete: CancellationToken::new(),
             abort_detail: Mutex::new(None),
             binding: Mutex::new(None),
             permit: Mutex::new(Some(permit)),
@@ -426,6 +429,13 @@ impl PreparedOutboundShared {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
+    }
+
+    async fn wait_for_cleanup(&self) {
+        // CancellationToken is a sticky, multi-waiter completion latch. A
+        // waiter that starts after cleanup cannot miss the transition, unlike
+        // an edge-triggered `Notify::notify_waiters` notification.
+        self.cleanup_complete.cancelled().await;
     }
 }
 
@@ -503,6 +513,43 @@ impl ConnectionLifecycleTaskSupervisor {
         }
         tasks.spawn(task);
         true
+    }
+
+    /// Execute a synchronous ownership commit and install its lifecycle task
+    /// under the same supervisor lock used by drain. Either both become
+    /// visible before drain starts, or neither does.
+    fn spawn_with_commit<T>(
+        &self,
+        task: impl Future<Output = ()> + Send + 'static,
+        commit: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let mut tasks = self
+            .tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while let Some(result) = tasks.try_join_next() {
+            if let Err(error) = result {
+                warn!(%error, "connection lifecycle task failed");
+            }
+        }
+        if self.draining.load(Ordering::Acquire) {
+            return Err(RvoipError::InvalidState(
+                "connection lifecycle supervisor is draining",
+            ));
+        }
+        if tasks.len() >= self.capacity {
+            metrics::counter!(
+                "rvoip_core_connection_lifecycle_task_rejections_total",
+                "reason" => "capacity"
+            )
+            .increment(1);
+            return Err(RvoipError::AdmissionRejected(
+                "connection lifecycle task capacity is full",
+            ));
+        }
+        let value = commit()?;
+        tasks.spawn(task);
+        Ok(value)
     }
 
     fn task_count(&self) -> usize {
@@ -761,13 +808,7 @@ impl PreparedOutboundConnection {
     }
 
     async fn wait_for_abort(&self) {
-        loop {
-            let notified = self.cleanup.shared.cleanup_complete.notified();
-            if self.cleanup.shared.decision.load(Ordering::Acquire) == PREPARED_OUTBOUND_ABORTED {
-                return;
-            }
-            notified.await;
-        }
+        self.cleanup.shared.wait_for_cleanup().await;
     }
 
     async fn abort_committed_work(&mut self) {
@@ -901,6 +942,119 @@ impl Drop for BridgeReservation {
     }
 }
 
+/// Reserves only the pending destination while an existing bridge retains
+/// the ingress and current destination. The row is already the next bridge
+/// generation, so a competing bridge cannot attach the pending Connection.
+struct ReplacementDestinationReservation {
+    bridge_id: BridgeId,
+    destination: ConnectionId,
+    owners: Arc<DashMap<ConnectionId, BridgeId>>,
+    lock: Arc<Mutex<()>>,
+    committed: bool,
+}
+
+impl ReplacementDestinationReservation {
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for ReplacementDestinationReservation {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let owned_by_reservation = self
+            .owners
+            .get(&self.destination)
+            .is_some_and(|owner| owner.value() == &self.bridge_id);
+        if owned_by_reservation {
+            self.owners.remove(&self.destination);
+        }
+    }
+}
+
+/// A suspension point in replacement media preparation that is otherwise too
+/// brief for an integration test to hit deterministically.
+///
+/// This surface is compiled only for explicit test-hook builds. Each variant
+/// names the real production operation immediately following the gate.
+#[cfg(feature = "test-hooks")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReplacementPreparationBoundary {
+    StreamAvailabilityRetryDelay,
+    SourceMediaGraphInitLock,
+    PendingMediaGraphInitLock,
+    SourceToPendingRouteActivation,
+    PendingToSourceRouteActivation,
+}
+
+/// One-shot bounded gate for a replacement preparation boundary.
+#[cfg(feature = "test-hooks")]
+pub struct ReplacementPreparationTestGate {
+    boundary: ReplacementPreparationBoundary,
+    entered: watch::Sender<bool>,
+    released: CancellationToken,
+    max_wait: Duration,
+}
+
+#[cfg(feature = "test-hooks")]
+impl ReplacementPreparationTestGate {
+    fn new(boundary: ReplacementPreparationBoundary, max_wait: Duration) -> Self {
+        let (entered, _) = watch::channel(false);
+        Self {
+            boundary,
+            entered,
+            released: CancellationToken::new(),
+            max_wait,
+        }
+    }
+
+    /// Wait until replacement preparation reaches the selected production
+    /// suspension point.
+    pub async fn wait_until_blocked(&self) -> Result<()> {
+        let mut entered = self.entered.subscribe();
+        tokio::time::timeout(self.max_wait, async {
+            while !*entered.borrow_and_update() {
+                entered.changed().await.map_err(|_| {
+                    RvoipError::InvalidState("replacement preparation test gate closed")
+                })?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| RvoipError::InvalidState("replacement preparation did not reach test gate"))?
+    }
+
+    /// Release the paused replacement operation.
+    pub fn release(&self) {
+        self.released.cancel();
+    }
+
+    #[must_use]
+    pub const fn boundary(&self) -> ReplacementPreparationBoundary {
+        self.boundary
+    }
+
+    async fn pause(&self) -> Result<()> {
+        self.entered.send_replace(true);
+        tokio::time::timeout(self.max_wait, self.released.cancelled())
+            .await
+            .map_err(|_| {
+                RvoipError::InvalidState("replacement preparation test gate was not released")
+            })
+    }
+}
+
+struct ReplacementPreparationContext {
+    source: ConnectionId,
+    pending_destination: ConnectionId,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BridgedDataTerminalReason {
     PolicyPanicked,
@@ -918,6 +1072,7 @@ struct BridgedDataEnvelope {
 struct CrossBridgeDataRoute {
     a: ConnectionId,
     b: ConnectionId,
+    policy: Arc<dyn DataMessageBridgePolicy>,
     a_to_b: mpsc::Sender<BridgedDataEnvelope>,
     b_to_a: mpsc::Sender<BridgedDataEnvelope>,
     workers: Vec<tokio::task::JoinHandle<()>>,
@@ -944,12 +1099,13 @@ impl CrossBridgeDataRoute {
         let b_to_a_worker = tokio::spawn(run_bridged_data_worker(
             b_to_a_rx,
             a_adapter,
-            policy,
+            Arc::clone(&policy),
             terminal_tx,
         ));
         Self {
             a,
             b,
+            policy,
             a_to_b,
             b_to_a,
             workers: vec![a_to_b_worker, b_to_a_worker],
@@ -959,6 +1115,10 @@ impl CrossBridgeDataRoute {
 
     fn terminal_status(&self) -> tokio::sync::watch::Receiver<Option<BridgedDataTerminalReason>> {
         self.terminal.clone()
+    }
+
+    fn policy(&self) -> Arc<dyn DataMessageBridgePolicy> {
+        Arc::clone(&self.policy)
     }
 
     fn try_forward(&self, source: &ConnectionId, message: DataMessage) {
@@ -999,11 +1159,15 @@ impl CrossBridgeDataRoute {
     }
 
     async fn stop(&mut self) {
-        for worker in &self.workers {
-            worker.abort();
-        }
+        self.abort_workers();
         for worker in self.workers.drain(..) {
             let _ = worker.await;
+        }
+    }
+
+    fn abort_workers(&self) {
+        for worker in &self.workers {
+            worker.abort();
         }
     }
 }
@@ -1013,6 +1177,19 @@ impl Drop for CrossBridgeDataRoute {
         for worker in &self.workers {
             worker.abort();
         }
+    }
+}
+
+struct PreparedCrossBridge {
+    handle: CrossBridgeHandle,
+    data_route: CrossBridgeDataRoute,
+    media_statuses: Vec<MediaGraphRouteStatus>,
+    data_terminal: tokio::sync::watch::Receiver<Option<BridgedDataTerminalReason>>,
+}
+
+impl PreparedCrossBridge {
+    async fn stop(mut self) {
+        let (_media, ()) = tokio::join!(self.handle.stop(), self.data_route.stop());
     }
 }
 
@@ -1119,6 +1296,8 @@ pub struct Orchestrator {
     /// the tracked Connection, so slow initialization on one call never
     /// blocks independent calls and the lock table remains bounded.
     media_graph_inits: Arc<DashMap<ConnectionId, Arc<tokio::sync::Mutex<()>>>>,
+    #[cfg(feature = "test-hooks")]
+    replacement_preparation_test_gate: OnceLock<Arc<ReplacementPreparationTestGate>>,
     pub admission: Arc<Semaphore>,
     /// Bounds the number of provisional outbound routes that may await a
     /// durable application bind at once.
@@ -1530,6 +1709,8 @@ impl Orchestrator {
             bridge_ownership_lock: Arc::new(Mutex::new(())),
             media_graphs: Arc::new(DashMap::new()),
             media_graph_inits: Arc::new(DashMap::new()),
+            #[cfg(feature = "test-hooks")]
+            replacement_preparation_test_gate: OnceLock::new(),
             admission,
             prepared_outbound_capacity: Arc::new(Semaphore::new(setup_capacity)),
             prepared_outbound_supervisor: PreparedOutboundSupervisor::new(setup_capacity),
@@ -1603,6 +1784,8 @@ impl Orchestrator {
             bridge_ownership_lock: Arc::new(Mutex::new(())),
             media_graphs: Arc::new(DashMap::new()),
             media_graph_inits: Arc::new(DashMap::new()),
+            #[cfg(feature = "test-hooks")]
+            replacement_preparation_test_gate: OnceLock::new(),
             admission,
             prepared_outbound_capacity: Arc::new(Semaphore::new(setup_capacity)),
             prepared_outbound_supervisor: PreparedOutboundSupervisor::new(setup_capacity),
@@ -1657,6 +1840,42 @@ impl Orchestrator {
             .set(Arc::downgrade(&orchestrator))
             .expect("new orchestrator self reference must be vacant");
         orchestrator
+    }
+
+    /// Install one bounded gate at a real replacement media-preparation
+    /// suspension point. This API is absent from default builds.
+    #[cfg(feature = "test-hooks")]
+    pub fn install_replacement_preparation_test_gate(
+        &self,
+        boundary: ReplacementPreparationBoundary,
+        max_wait: Duration,
+    ) -> Result<Arc<ReplacementPreparationTestGate>> {
+        if max_wait.is_zero() || max_wait > Duration::from_secs(30) {
+            return Err(RvoipError::AdmissionRejected(
+                "replacement preparation test-gate wait must be between 1 ns and 30 seconds",
+            ));
+        }
+        let gate = Arc::new(ReplacementPreparationTestGate::new(boundary, max_wait));
+        self.replacement_preparation_test_gate
+            .set(Arc::clone(&gate))
+            .map_err(|_| {
+                RvoipError::InvalidState("replacement preparation test gate is already installed")
+            })?;
+        Ok(gate)
+    }
+
+    #[cfg(feature = "test-hooks")]
+    async fn wait_at_replacement_preparation_test_gate(
+        &self,
+        boundary: ReplacementPreparationBoundary,
+    ) -> Result<()> {
+        let Some(gate) = self.replacement_preparation_test_gate.get() else {
+            return Ok(());
+        };
+        if gate.boundary() != boundary {
+            return Ok(());
+        }
+        gate.pause().await
     }
 
     /// Register a transport adapter. Spawns a background task that pulls
@@ -2023,14 +2242,7 @@ impl Orchestrator {
     ) {
         if cleanup.shared.cleanup_started.swap(true, Ordering::AcqRel) {
             cleanups.spawn(async move {
-                loop {
-                    let notified = cleanup.shared.cleanup_complete.notified();
-                    if cleanup.shared.decision.load(Ordering::Acquire) == PREPARED_OUTBOUND_ABORTED
-                    {
-                        break;
-                    }
-                    notified.await;
-                }
+                cleanup.shared.wait_for_cleanup().await;
             });
             return;
         }
@@ -2089,7 +2301,7 @@ impl Orchestrator {
             .decision
             .store(PREPARED_OUTBOUND_ABORTED, Ordering::Release);
         cleanup.shared.release_capacity();
-        cleanup.shared.cleanup_complete.notify_waiters();
+        cleanup.shared.cleanup_complete.cancel();
     }
 
     async fn abort_unregistered_prepared_outbound(
@@ -2109,13 +2321,7 @@ impl Orchestrator {
             Self::execute_prepared_outbound_cleanup(owner, cleanup, detail).await;
             return;
         }
-        loop {
-            let notified = cleanup.shared.cleanup_complete.notified();
-            if cleanup.shared.decision.load(Ordering::Acquire) == PREPARED_OUTBOUND_ABORTED {
-                return;
-            }
-            notified.await;
-        }
+        cleanup.shared.wait_for_cleanup().await;
     }
 
     fn retire_prepared_outbound_core(
@@ -4081,6 +4287,10 @@ impl Orchestrator {
     /// the bridged peer needs to inject the corresponding RFC 4733
     /// telephone-event packets onto its outbound RTP.
     fn bridge_peer_of(&self, conn: &ConnectionId) -> Option<ConnectionId> {
+        let _guard = self
+            .bridge_ownership_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let bridge_id = self
             .cross_bridge_owners
             .get(conn)
@@ -4101,6 +4311,10 @@ impl Orchestrator {
     /// bridge route that owns its source connection. This path performs no
     /// await and never invokes an application policy on adapter-event ingest.
     fn forward_bridged_data_message(&self, source: &ConnectionId, message: DataMessage) {
+        let _guard = self
+            .bridge_ownership_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(bridge_id) = self
             .cross_bridge_owners
             .get(source)
@@ -4141,127 +4355,210 @@ impl Orchestrator {
         })
     }
 
-    fn release_cross_bridge_ownership(
+    fn reserve_cross_bridge_replacement_destination(
         &self,
-        bridge_id: &BridgeId,
-        a: &ConnectionId,
-        b: &ConnectionId,
-    ) {
+        expected_bridge_id: &BridgeId,
+        ingress: &ConnectionId,
+        expected_destination: &ConnectionId,
+        replacement_destination: ConnectionId,
+        replacement_bridge_id: BridgeId,
+    ) -> Result<ReplacementDestinationReservation> {
         let _guard = self
             .bridge_ownership_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        for connection_id in [a, b] {
-            let owned_by_bridge = self
-                .cross_bridge_owners
-                .get(connection_id)
-                .is_some_and(|owner| owner.value() == bridge_id);
-            if owned_by_bridge {
-                self.cross_bridge_owners.remove(connection_id);
+        let endpoints_match = self
+            .cross_bridges
+            .get(expected_bridge_id)
+            .is_some_and(|bridge| {
+                (&bridge.a == ingress && &bridge.b == expected_destination)
+                    || (&bridge.b == ingress && &bridge.a == expected_destination)
+            });
+        let ingress_owner_matches = self
+            .cross_bridge_owners
+            .get(ingress)
+            .is_some_and(|owner| owner.value() == expected_bridge_id);
+        let destination_owner_matches = self
+            .cross_bridge_owners
+            .get(expected_destination)
+            .is_some_and(|owner| owner.value() == expected_bridge_id);
+        if !endpoints_match || !ingress_owner_matches || !destination_owner_matches {
+            return Err(RvoipError::BridgeNotFound(expected_bridge_id.clone()));
+        }
+        if self
+            .cross_bridge_owners
+            .contains_key(&replacement_destination)
+        {
+            return Err(RvoipError::AdmissionRejected(
+                "replacement destination is already bridged",
+            ));
+        }
+        self.cross_bridge_owners.insert(
+            replacement_destination.clone(),
+            replacement_bridge_id.clone(),
+        );
+        Ok(ReplacementDestinationReservation {
+            bridge_id: replacement_bridge_id,
+            destination: replacement_destination,
+            owners: Arc::clone(&self.cross_bridge_owners),
+            lock: Arc::clone(&self.bridge_ownership_lock),
+            committed: false,
+        })
+    }
+
+    fn detach_cross_bridge_generation(
+        bridge_id: &BridgeId,
+        cross_bridges: &DashMap<BridgeId, CrossBridgeHandle>,
+        data_routes: &DashMap<BridgeId, CrossBridgeDataRoute>,
+        owners: &DashMap<ConnectionId, BridgeId>,
+        ownership_lock: &Mutex<()>,
+    ) -> (Option<CrossBridgeHandle>, Option<CrossBridgeDataRoute>) {
+        let _guard = ownership_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let handle = cross_bridges.remove(bridge_id).map(|(_, handle)| handle);
+        let data_route = data_routes.remove(bridge_id).map(|(_, route)| route);
+
+        // Registry removal, forwarding quiescence, and ownership release are
+        // one synchronous commit. Cleanup may yield or be cancelled after
+        // this returns, but a removed generation cannot strand endpoint
+        // ownership or continue forwarding into a subsequent bridge.
+        if let Some(handle) = handle.as_ref() {
+            handle.deactivate_media();
+        }
+        if let Some(data_route) = data_route.as_ref() {
+            data_route.abort_workers();
+        }
+        let endpoints = handle
+            .as_ref()
+            .map(|handle| (&handle.a, &handle.b))
+            .or_else(|| data_route.as_ref().map(|route| (&route.a, &route.b)));
+        if let Some((a, b)) = endpoints {
+            for connection_id in [a, b] {
+                let owned_by_bridge = owners
+                    .get(connection_id)
+                    .is_some_and(|owner| owner.value() == bridge_id);
+                if owned_by_bridge {
+                    owners.remove(connection_id);
+                }
             }
         }
+        (handle, data_route)
     }
 
     async fn remove_cross_bridge_internal(&self, bridge_id: &BridgeId) -> Result<bool> {
-        let Some((_, mut handle)) = self.cross_bridges.remove(bridge_id) else {
-            if let Some((_, mut data_route)) = self.cross_bridge_data_routes.remove(bridge_id) {
+        let (handle, data_route) = Self::detach_cross_bridge_generation(
+            bridge_id,
+            &self.cross_bridges,
+            &self.cross_bridge_data_routes,
+            &self.cross_bridge_owners,
+            &self.bridge_ownership_lock,
+        );
+        let Some(mut handle) = handle else {
+            if let Some(mut data_route) = data_route {
                 data_route.stop().await;
             }
             return Ok(false);
         };
-        let a = handle.a.clone();
-        let b = handle.b.clone();
-        let data_route = self.cross_bridge_data_routes.remove(bridge_id);
         let (result, ()) = tokio::join!(handle.stop(), async move {
-            if let Some((_, mut data_route)) = data_route {
+            if let Some(mut data_route) = data_route {
                 data_route.stop().await;
             }
         });
-        self.release_cross_bridge_ownership(bridge_id, &a, &b);
         result.map(|_| true)
     }
 
-    fn spawn_cross_bridge_terminal_supervisor<F>(&self, bridge_id: BridgeId, terminal: F)
-    where
-        F: Future<Output = bool> + Send + 'static,
-    {
+    fn cross_bridge_terminal_task(
+        &self,
+        bridge_id: BridgeId,
+        statuses: Vec<MediaGraphRouteStatus>,
+        mut data_terminal: tokio::sync::watch::Receiver<Option<BridgedDataTerminalReason>>,
+    ) -> impl Future<Output = ()> + Send + 'static {
         let cross_bridges = Arc::clone(&self.cross_bridges);
         let data_routes = Arc::clone(&self.cross_bridge_data_routes);
         let owners = Arc::clone(&self.cross_bridge_owners);
         let ownership_lock = Arc::clone(&self.bridge_ownership_lock);
         let events = self.events.clone();
         let cross_crate_publisher = self.cross_crate_publisher.clone();
-        tokio::spawn(async move {
-            if !terminal.await {
+        let mut statuses = statuses.into_iter();
+        let first_status = statuses.next();
+        let second_status = statuses.next();
+        debug_assert!(
+            statuses.next().is_none(),
+            "a bridge has at most two media routes"
+        );
+        let supervised_bridge_id = bridge_id.clone();
+        async move {
+            let first_terminal = async move {
+                match first_status {
+                    Some(status) => {
+                        let _ = status.wait_terminal().await;
+                        true
+                    }
+                    None => std::future::pending().await,
+                }
+            };
+            let second_terminal = async move {
+                match second_status {
+                    Some(status) => {
+                        let _ = status.wait_terminal().await;
+                        true
+                    }
+                    None => std::future::pending().await,
+                }
+            };
+            let data_route_terminal = async move {
+                loop {
+                    if matches!(
+                        *data_terminal.borrow_and_update(),
+                        Some(BridgedDataTerminalReason::PolicyPanicked)
+                    ) {
+                        return true;
+                    }
+                    if data_terminal.changed().await.is_err() {
+                        return false;
+                    }
+                }
+            };
+            let should_remove = tokio::select! {
+                terminal = first_terminal => terminal,
+                terminal = second_terminal => terminal,
+                terminal = data_route_terminal => terminal,
+            };
+            if !should_remove {
                 return;
             }
-            let Some((_, mut handle)) = cross_bridges.remove(&bridge_id) else {
+            let (handle, data_route) = Self::detach_cross_bridge_generation(
+                &supervised_bridge_id,
+                &cross_bridges,
+                &data_routes,
+                &owners,
+                &ownership_lock,
+            );
+            let Some(mut handle) = handle else {
                 return;
             };
-            let a = handle.a.clone();
-            let b = handle.b.clone();
-            let data_route = data_routes.remove(&bridge_id);
             let (result, ()) = tokio::join!(handle.stop(), async move {
-                if let Some((_, mut data_route)) = data_route {
+                if let Some(mut data_route) = data_route {
                     data_route.stop().await;
                 }
             });
-            {
-                let _guard = ownership_lock
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                for connection_id in [&a, &b] {
-                    let owned = owners
-                        .get(connection_id)
-                        .is_some_and(|owner| owner.value() == &bridge_id);
-                    if owned {
-                        owners.remove(connection_id);
-                    }
-                }
-            }
             match result {
                 Ok(()) => {
                     let event = Event::ConnectionsUnbridged {
-                        bridge_id,
+                        bridge_id: supervised_bridge_id,
                         at: Utc::now(),
                     };
                     let _ =
                         Self::emit_to_channels(&events, cross_crate_publisher.as_deref(), event);
                 }
                 Err(error) => warn!(
-                    %bridge_id,
+                    bridge_id = %supervised_bridge_id,
                     %error,
                     "failed to converge bridge after a route terminated"
                 ),
             }
-        });
-    }
-
-    fn supervise_cross_bridge_routes(
-        &self,
-        bridge_id: BridgeId,
-        statuses: Vec<MediaGraphRouteStatus>,
-        mut data_terminal: tokio::sync::watch::Receiver<Option<BridgedDataTerminalReason>>,
-    ) {
-        for status in statuses {
-            self.spawn_cross_bridge_terminal_supervisor(bridge_id.clone(), async move {
-                let _ = status.wait_terminal().await;
-                true
-            });
         }
-        self.spawn_cross_bridge_terminal_supervisor(bridge_id, async move {
-            loop {
-                if matches!(
-                    *data_terminal.borrow_and_update(),
-                    Some(BridgedDataTerminalReason::PolicyPanicked)
-                ) {
-                    return true;
-                }
-                if data_terminal.changed().await.is_err() {
-                    return false;
-                }
-            }
-        });
     }
 
     /// Remove observer attachments that name an abruptly-ended Connection.
@@ -4622,7 +4919,35 @@ impl Orchestrator {
         }
         self.cleanup_media_attachments_for_connection(conn);
         if let Some((_, graph)) = self.media_graphs.remove(conn) {
-            let _ = graph.shutdown_and_wait().await;
+            match graph.shutdown_and_wait().await {
+                Ok(MediaGraphSourceState::Shutdown | MediaGraphSourceState::Closed) => {}
+                Ok(state @ (MediaGraphSourceState::Aborted | MediaGraphSourceState::Open)) => {
+                    metrics::counter!(
+                        "rvoip_core_media_graph_teardown_failures_total",
+                        "reason" => "forced_abort"
+                    )
+                    .increment(1);
+                    warn!(
+                        connection_id = %conn,
+                        graph_id = %graph.id(),
+                        ?state,
+                        "media graph teardown converged through forced abort"
+                    );
+                }
+                Err(error) => {
+                    metrics::counter!(
+                        "rvoip_core_media_graph_teardown_failures_total",
+                        "reason" => error.diagnostic_class()
+                    )
+                    .increment(1);
+                    warn!(
+                        connection_id = %conn,
+                        graph_id = %graph.id(),
+                        %error,
+                        "media graph teardown required forced convergence"
+                    );
+                }
+            }
         }
         self.media_graph_inits.remove(conn);
         // P1.10 — if this Connection was bound to a Session, detach it
@@ -8109,13 +8434,7 @@ impl Orchestrator {
                 "outbound preparation supervisor is draining",
             );
             self.prepared_outbound_supervisor.state_changed.notify_one();
-            loop {
-                let notified = cleanup.shared.cleanup_complete.notified();
-                if cleanup.shared.decision.load(Ordering::Acquire) == PREPARED_OUTBOUND_ABORTED {
-                    break;
-                }
-                notified.await;
-            }
+            cleanup.shared.wait_for_cleanup().await;
             return Err(RvoipError::AdmissionRejected(
                 "outbound preparation supervisor is draining",
             ));
@@ -10049,23 +10368,423 @@ impl Orchestrator {
         media_plan: DirectionalMediaBridgePlan,
         data_policy: Arc<dyn DataMessageBridgePolicy>,
     ) -> Result<BridgeId> {
+        if self
+            .connection_lifecycle_tasks
+            .draining
+            .load(Ordering::Acquire)
+        {
+            return Err(RvoipError::InvalidState(
+                "connection lifecycle supervisor is draining",
+            ));
+        }
         if a == b {
             return Err(RvoipError::AdmissionRejected(
                 "cannot bridge a connection to itself",
             ));
         }
-        let a_adapter = self.adapter_for(&a)?;
-        let b_adapter = self.adapter_for(&b)?;
         let lifecycle_tickets = self.capture_connection_lifecycles(&[a.clone(), b.clone()])?;
         let id = BridgeId::new();
         let reservation = self.reserve_cross_bridge(id.clone(), a.clone(), b.clone())?;
+        let PreparedCrossBridge {
+            mut handle,
+            mut data_route,
+            media_statuses: statuses,
+            data_terminal,
+        } = self
+            .prepare_cross_bridge_for_commit(
+                id.clone(),
+                a.clone(),
+                b.clone(),
+                media_plan,
+                data_policy,
+                true,
+                None,
+            )
+            .await?;
+        if let Err(error) = self.validate_connection_lifecycles(&lifecycle_tickets) {
+            let (_media, ()) = tokio::join!(handle.stop(), data_route.stop());
+            return Err(error);
+        }
+        let terminal_task = self.cross_bridge_terminal_task(id.clone(), statuses, data_terminal);
+        let mut handle = Some(handle);
+        let mut data_route = Some(data_route);
+        let mut reservation = Some(reservation);
+        // Keep the non-Send std::sync lifecycle guards inside this entirely
+        // synchronous scope. In particular, the lock-error cleanup awaits
+        // below must not retain the Result temporary whose Ok variant contains
+        // those guards; public bridge futures are required to remain Send.
+        let commit = match self.lock_connection_lifecycles(&lifecycle_tickets) {
+            Ok(lifecycle_guards) => {
+                let result = self.connection_lifecycle_tasks.spawn_with_commit(
+                    terminal_task,
+                    || -> Result<()> {
+                        self.cross_bridges.insert(
+                            id.clone(),
+                            handle
+                                .take()
+                                .expect("prepared bridge is consumed exactly once"),
+                        );
+                        self.cross_bridge_data_routes.insert(
+                            id.clone(),
+                            data_route
+                                .take()
+                                .expect("prepared data route is consumed exactly once"),
+                        );
+                        reservation
+                            .take()
+                            .expect("bridge reservation exists until commit")
+                            .commit();
+                        self.cross_bridges
+                            .get(&id)
+                            .expect("new bridge exists during commit")
+                            .activate_media();
+                        self.emit(Event::ConnectionsBridged {
+                            bridge_id: id.clone(),
+                            a,
+                            b,
+                            at: Utc::now(),
+                        });
+                        Ok(())
+                    },
+                );
+                drop(lifecycle_guards);
+                result
+            }
+            Err(error) => Err(error),
+        };
+        if let Err(error) = commit {
+            let mut handle = handle
+                .take()
+                .expect("failed bridge commit retains its prepared media");
+            let mut data_route = data_route
+                .take()
+                .expect("failed bridge commit retains its prepared data route");
+            let (_media, ()) = tokio::join!(handle.stop(), data_route.stop());
+            return Err(error);
+        }
+        Ok(id)
+    }
 
-        // Poll both adapters for an audio stream up to the configured
-        // deadline. Adapters create streams on connection.ready, so a
-        // bridge requested from Event::ConnectionInbound usually has to
-        // wait a handful of ms. 50ms polling interval is small enough
-        // to be inaudible at the call setup level and large enough not
-        // to spin.
+    /// Replace one exact bridge destination while preserving the ingress
+    /// Connection and Session.
+    ///
+    /// The expected bridge ID is a generation fence. Core prepares and waits
+    /// for every new media route before one synchronous ownership commit
+    /// replaces the old bridge. The returned bridge ID is freshly minted and
+    /// must be supplied to a later replacement; replaying the old ID cannot
+    /// modify the new generation. The caller remains responsible for ending
+    /// the retired destination Connection after this method succeeds.
+    #[instrument(
+        skip(self),
+        fields(
+            expected_bridge_id = %expected_bridge_id,
+            ingress = %ingress,
+            expected_destination = %expected_destination,
+            replacement_destination = %replacement_destination
+        )
+    )]
+    pub async fn replace_bridge_destination(
+        &self,
+        expected_bridge_id: BridgeId,
+        ingress: ConnectionId,
+        expected_destination: ConnectionId,
+        replacement_destination: ConnectionId,
+    ) -> Result<BridgeDestinationReplacement> {
+        if self
+            .connection_lifecycle_tasks
+            .draining
+            .load(Ordering::Acquire)
+        {
+            return Err(RvoipError::InvalidState(
+                "connection lifecycle supervisor is draining",
+            ));
+        }
+        if ingress == expected_destination
+            || ingress == replacement_destination
+            || expected_destination == replacement_destination
+        {
+            return Err(RvoipError::AdmissionRejected(
+                "bridge replacement connections must be distinct",
+            ));
+        }
+
+        let (old_a, old_b, media_plan) = self
+            .cross_bridges
+            .get(&expected_bridge_id)
+            .map(|entry| -> Result<_> {
+                let handle = entry.value();
+                Ok((
+                    handle.a.clone(),
+                    handle.b.clone(),
+                    handle.directional_media_plan()?,
+                ))
+            })
+            .transpose()?
+            .ok_or_else(|| RvoipError::BridgeNotFound(expected_bridge_id.clone()))?;
+        let ingress_is_a = if old_a == ingress && old_b == expected_destination {
+            true
+        } else if old_b == ingress && old_a == expected_destination {
+            false
+        } else {
+            return Err(RvoipError::AdmissionRejected(
+                "bridge replacement endpoints do not match the expected generation",
+            ));
+        };
+        let data_policy = self
+            .cross_bridge_data_routes
+            .get(&expected_bridge_id)
+            .map(|route| route.policy())
+            .ok_or(RvoipError::InvalidState(
+                "bridge replacement requires its data route",
+            ))?;
+
+        match (
+            self.session_of(&ingress),
+            self.session_of(&expected_destination),
+            self.session_of(&replacement_destination),
+        ) {
+            (Some(ingress_session), Some(old_session), Some(replacement_session))
+                if ingress_session == old_session && ingress_session == replacement_session => {}
+            // Core has always allowed bridges between registry-only
+            // Connections. Preserve that low-level test/embedding surface,
+            // while rejecting any partial or cross-Session replacement.
+            (None, None, None) => {}
+            _ => {
+                return Err(RvoipError::AdmissionRejected(
+                    "bridge replacement connections must belong to one session",
+                ));
+            }
+        }
+        let lifecycle_tickets = self.capture_connection_lifecycles(&[
+            ingress.clone(),
+            expected_destination.clone(),
+            replacement_destination.clone(),
+        ])?;
+        let bridge_id = BridgeId::new();
+        let mut replacement_reservation = Some(self.reserve_cross_bridge_replacement_destination(
+            &expected_bridge_id,
+            &ingress,
+            &expected_destination,
+            replacement_destination.clone(),
+            bridge_id.clone(),
+        )?);
+        let (new_a, new_b) = if ingress_is_a {
+            (ingress.clone(), replacement_destination.clone())
+        } else {
+            (replacement_destination.clone(), ingress.clone())
+        };
+        let replacement_context = ReplacementPreparationContext {
+            source: ingress.clone(),
+            pending_destination: replacement_destination.clone(),
+        };
+        let prepared = self
+            .prepare_cross_bridge_for_commit(
+                bridge_id.clone(),
+                new_a.clone(),
+                new_b.clone(),
+                media_plan,
+                data_policy,
+                false,
+                Some(&replacement_context),
+            )
+            .await?;
+
+        if let Err(error) = self.validate_connection_lifecycles(&lifecycle_tickets) {
+            prepared.stop().await;
+            return Err(error);
+        }
+
+        let PreparedCrossBridge {
+            handle,
+            data_route,
+            media_statuses,
+            data_terminal,
+        } = prepared;
+        let mut new_handle = Some(handle);
+        let mut new_data_route = Some(data_route);
+        let terminal_task =
+            self.cross_bridge_terminal_task(bridge_id.clone(), media_statuses, data_terminal);
+        let commit = match self.lock_connection_lifecycles(&lifecycle_tickets) {
+            Ok(lifecycle_guards) => {
+                let result = self.connection_lifecycle_tasks.spawn_with_commit(
+                    terminal_task,
+                    || -> Result<(CrossBridgeHandle, CrossBridgeDataRoute)> {
+                        let _ownership_guard = self
+                            .bridge_ownership_lock
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        let generation_matches = self
+                            .cross_bridges
+                            .get(&expected_bridge_id)
+                            .is_some_and(|current| current.a == old_a && current.b == old_b);
+                        let ingress_owner_matches = self
+                            .cross_bridge_owners
+                            .get(&ingress)
+                            .is_some_and(|owner| owner.value() == &expected_bridge_id);
+                        let destination_owner_matches = self
+                            .cross_bridge_owners
+                            .get(&expected_destination)
+                            .is_some_and(|owner| owner.value() == &expected_bridge_id);
+                        if !generation_matches
+                            || !ingress_owner_matches
+                            || !destination_owner_matches
+                        {
+                            return Err(RvoipError::BridgeNotFound(expected_bridge_id.clone()));
+                        }
+                        let replacement_owner_matches = self
+                            .cross_bridge_owners
+                            .get(&replacement_destination)
+                            .is_some_and(|owner| owner.value() == &bridge_id);
+                        if !replacement_owner_matches {
+                            return Err(RvoipError::BridgeNotFound(expected_bridge_id.clone()));
+                        }
+                        if !self
+                            .cross_bridge_data_routes
+                            .contains_key(&expected_bridge_id)
+                        {
+                            return Err(RvoipError::InvalidState(
+                                "bridge data route ended during replacement",
+                            ));
+                        }
+
+                        // Fence queued and in-flight application-data work in
+                        // the same synchronous generation commit as media.
+                        // Removing the route from the registry prevents new
+                        // enqueue operations; aborting its workers here keeps
+                        // retained messages from reaching the retired peer
+                        // after the replacement generation is published.
+                        self.cross_bridge_data_routes
+                            .get(&expected_bridge_id)
+                            .expect("bridge data route was checked under ownership lock")
+                            .abort_workers();
+
+                        // Every slow/fallible preparation and every generation
+                        // check has completed. Forwarding gates are synchronous
+                        // and infallible, so old-off/new-on is the linearization
+                        // boundary: the candidate was silent before this point
+                        // and the retired generation cannot publish afterward.
+                        self.cross_bridges
+                            .get(&expected_bridge_id)
+                            .expect("bridge generation was checked under ownership lock")
+                            .deactivate_media();
+                        new_handle
+                            .as_ref()
+                            .expect("prepared bridge exists until commit")
+                            .activate_media();
+
+                        let (_, old_handle) = self
+                            .cross_bridges
+                            .remove(&expected_bridge_id)
+                            .expect("bridge generation was checked under ownership lock");
+                        let (_, old_data_route) = self
+                            .cross_bridge_data_routes
+                            .remove(&expected_bridge_id)
+                            .expect("bridge data route was checked under ownership lock");
+                        self.cross_bridges.insert(
+                            bridge_id.clone(),
+                            new_handle
+                                .take()
+                                .expect("prepared bridge is consumed exactly once"),
+                        );
+                        self.cross_bridge_data_routes.insert(
+                            bridge_id.clone(),
+                            new_data_route
+                                .take()
+                                .expect("prepared data route is consumed exactly once"),
+                        );
+                        self.cross_bridge_owners
+                            .insert(ingress.clone(), bridge_id.clone());
+                        self.cross_bridge_owners.remove(&expected_destination);
+                        replacement_reservation
+                            .take()
+                            .expect("replacement destination reservation exists until commit")
+                            .commit();
+                        self.emit(Event::ConnectionsUnbridged {
+                            bridge_id: expected_bridge_id.clone(),
+                            at: Utc::now(),
+                        });
+                        self.emit(Event::ConnectionsBridged {
+                            bridge_id: bridge_id.clone(),
+                            a: new_a.clone(),
+                            b: new_b.clone(),
+                            at: Utc::now(),
+                        });
+                        Ok((old_handle, old_data_route))
+                    },
+                );
+                drop(lifecycle_guards);
+                result
+            }
+            Err(error) => Err(error),
+        };
+
+        let (mut old_handle, mut old_data_route) = match commit {
+            Ok(old) => old,
+            Err(error) => {
+                if let (Some(mut handle), Some(mut data_route)) =
+                    (new_handle.take(), new_data_route.take())
+                {
+                    let (_media, ()) = tokio::join!(handle.stop(), data_route.stop());
+                }
+                return Err(error);
+            }
+        };
+
+        // There must be no suspension point between publishing the committed
+        // generation and returning its receipt. A caller may cancel any
+        // future at an `.await`; if retired-route cleanup were awaited here,
+        // cancellation could hide a successful cutover and invite the caller
+        // to roll domain state back to a bridge that is already retired.
+        // Retired resources converge under the bounded lifecycle supervisor.
+        let previous_bridge_id = expected_bridge_id.clone();
+        let replacement_bridge_id = bridge_id.clone();
+        let cleanup_spawned = self.connection_lifecycle_tasks.spawn(async move {
+            let (media_result, ()) = tokio::join!(old_handle.stop(), old_data_route.stop());
+            if let Err(error) = media_result {
+                warn!(
+                    previous_bridge_id = %previous_bridge_id,
+                    new_bridge_id = %replacement_bridge_id,
+                    %error,
+                    "replacement committed but the retired bridge did not converge cleanly"
+                );
+            }
+        });
+        if !cleanup_spawned {
+            // Dropping the rejected cleanup future synchronously drops both
+            // owners. Their Drop implementations disable/remove media routes
+            // and abort data workers as the fail-closed fallback.
+            warn!(
+                previous_bridge_id = %expected_bridge_id,
+                new_bridge_id = %bridge_id,
+                "replacement committed while retired bridge cleanup admission was closed"
+            );
+        }
+
+        Ok(BridgeDestinationReplacement {
+            previous_bridge_id: expected_bridge_id,
+            bridge_id,
+            ingress,
+            previous_destination: expected_destination,
+            destination: replacement_destination,
+        })
+    }
+
+    /// Prepare installed but silent media routes and bounded data workers
+    /// without publishing them into the bridge registry. Callers must
+    /// lifecycle-check and activate+commit the returned bundle or stop it on
+    /// every error path.
+    async fn prepare_cross_bridge_for_commit(
+        &self,
+        id: BridgeId,
+        a: ConnectionId,
+        b: ConnectionId,
+        media_plan: DirectionalMediaBridgePlan,
+        data_policy: Arc<dyn DataMessageBridgePolicy>,
+        buffer_before_commit: bool,
+        replacement_context: Option<&ReplacementPreparationContext>,
+    ) -> Result<PreparedCrossBridge> {
+        let a_adapter = self.adapter_for(&a)?;
+        let b_adapter = self.adapter_for(&b)?;
         let deadline = self.config.bridge_stream_deadline;
         let poll_interval = std::time::Duration::from_millis(50);
         let start = std::time::Instant::now();
@@ -10074,37 +10793,34 @@ impl Orchestrator {
             let b_streams = b_adapter.streams(b.clone()).await?;
             let a_audio = a_streams
                 .into_iter()
-                .find(|s| s.kind() == StreamKind::Audio);
+                .find(|stream| stream.kind() == StreamKind::Audio);
             let b_audio = b_streams
                 .into_iter()
-                .find(|s| s.kind() == StreamKind::Audio);
+                .find(|stream| stream.kind() == StreamKind::Audio);
             match (a_audio, b_audio) {
-                (Some(a_s), Some(b_s)) => break (a_s, b_s),
+                (Some(a_stream), Some(b_stream)) => break (a_stream, b_stream),
                 _ if start.elapsed() >= deadline => {
                     return Err(RvoipError::AdmissionRejected(
                         "no audio stream on one or both connections within deadline",
                     ));
                 }
                 _ => {
+                    #[cfg(feature = "test-hooks")]
+                    if replacement_context.is_some() {
+                        self.wait_at_replacement_preparation_test_gate(
+                            ReplacementPreparationBoundary::StreamAvailabilityRetryDelay,
+                        )
+                        .await?;
+                    }
                     tokio::time::sleep(poll_interval).await;
                 }
             }
         };
 
-        // Resolve and validate the complete directional plan before either
-        // graph consumes a single-take source. Even a one-way route needs the
-        // source and destination codec identities, but it must validate only
-        // (and later acquire only) the sink/source halves that are enabled.
         let a_codec = a_audio.codec();
         let b_codec = b_audio.codec();
-        codec_to_pt(&a_codec.name)
-            .ok_or_else(|| RvoipError::UnsupportedCodec(a_codec.name.clone()))?;
-        codec_to_pt(&b_codec.name)
-            .ok_or_else(|| RvoipError::UnsupportedCodec(b_codec.name.clone()))?;
-
-        // Deferred transports such as SIP return a typed activation error
-        // here instead of consuming a source and later discovering that its
-        // peer sink cannot accept media.
+        validate_bridge_codec_admission(&a_codec)?;
+        validate_bridge_codec_admission(&b_codec)?;
         let a_out = if media_plan.b_to_a() {
             Some(a_audio.try_frames_out()?)
         } else {
@@ -10125,11 +10841,6 @@ impl Orchestrator {
             ));
         }
 
-        // A bidirectional bridge may need to create both source graphs. Take
-        // their per-connection initialization locks in stable ID order and
-        // reserve every missing receiver before committing either one. If the
-        // second source is unavailable, dropping the first reservation puts
-        // its receiver back instead of leaving a half-created graph behind.
         let (a_source_graph, b_source_graph) = self
             .media_graphs_for_directional_bridge(
                 a.clone(),
@@ -10137,28 +10848,49 @@ impl Orchestrator {
                 b.clone(),
                 Arc::clone(&b_audio),
                 media_plan,
+                replacement_context,
             )
             .await?;
-
         let mut a_to_b = None;
         if let Some(b_out) = b_out {
-            let a_graph =
+            let graph =
                 a_source_graph.expect("validated A-to-B plan initializes the A source graph");
-            let route = a_graph.add_managed_sink(b_codec.clone(), b_out)?;
+            let route = if buffer_before_commit {
+                graph.add_buffering_dormant_managed_sink(b_codec.clone(), b_out)?
+            } else {
+                graph.add_dormant_managed_sink(b_codec.clone(), b_out)?
+            };
+            if let Some(context) = replacement_context {
+                debug_assert!(
+                    (a == context.source && b == context.pending_destination)
+                        || (a == context.pending_destination && b == context.source),
+                    "replacement preparation endpoints must match bridge endpoints"
+                );
+                #[cfg(feature = "test-hooks")]
+                self.wait_at_replacement_preparation_test_gate(if a == context.source {
+                    ReplacementPreparationBoundary::SourceToPendingRouteActivation
+                } else {
+                    ReplacementPreparationBoundary::PendingToSourceRouteActivation
+                })
+                .await?;
+            }
             if route.wait_active().await.is_err() {
                 let _ = route.remove().await;
                 return Err(RvoipError::InvalidState(
                     "A-to-B bridge route terminated during setup",
                 ));
             }
-            a_to_b = Some((a_graph, route));
+            a_to_b = Some((graph, route));
         }
-
         let mut b_to_a = None;
         if let Some(a_out) = a_out {
-            let b_graph =
+            let graph =
                 b_source_graph.expect("validated B-to-A plan initializes the B source graph");
-            let route = match b_graph.add_managed_sink(a_codec, a_out) {
+            let route = match if buffer_before_commit {
+                graph.add_buffering_dormant_managed_sink(a_codec, a_out)
+            } else {
+                graph.add_dormant_managed_sink(a_codec, a_out)
+            } {
                 Ok(route) => route,
                 Err(error) => {
                     if let Some((_, route)) = a_to_b.take() {
@@ -10167,6 +10899,20 @@ impl Orchestrator {
                     return Err(error);
                 }
             };
+            if let Some(context) = replacement_context {
+                debug_assert!(
+                    (a == context.source && b == context.pending_destination)
+                        || (a == context.pending_destination && b == context.source),
+                    "replacement preparation endpoints must match bridge endpoints"
+                );
+                #[cfg(feature = "test-hooks")]
+                self.wait_at_replacement_preparation_test_gate(if b == context.source {
+                    ReplacementPreparationBoundary::SourceToPendingRouteActivation
+                } else {
+                    ReplacementPreparationBoundary::PendingToSourceRouteActivation
+                })
+                .await?;
+            }
             if route.wait_active().await.is_err() {
                 let a_route = a_to_b.take().map(|(_, route)| route);
                 let (a_result, b_result) = tokio::join!(
@@ -10183,56 +10929,35 @@ impl Orchestrator {
                     "B-to-A bridge route terminated during setup",
                 ));
             }
-            b_to_a = Some((b_graph, route));
+            b_to_a = Some((graph, route));
         }
 
-        let mut handle = CrossBridgeHandle::with_directional_managed_media_graphs(
-            id.clone(),
+        let handle = CrossBridgeHandle::with_directional_managed_media_graphs(
+            id,
             a.clone(),
             b.clone(),
             a_to_b,
             b_to_a,
         );
-        let statuses = handle.managed_media_route_statuses();
-        debug_assert!(!statuses.is_empty(), "validated bridge has a media route");
-        let mut data_route = CrossBridgeDataRoute::new(
-            a.clone(),
-            b.clone(),
+        let media_statuses = handle.managed_media_route_statuses();
+        debug_assert!(
+            !media_statuses.is_empty(),
+            "validated bridge has a media route"
+        );
+        let data_route = CrossBridgeDataRoute::new(
+            a,
+            b,
             Arc::clone(&a_adapter),
             Arc::clone(&b_adapter),
             data_policy,
         );
         let data_terminal = data_route.terminal_status();
-        if let Err(error) = self.validate_connection_lifecycles(&lifecycle_tickets) {
-            let (_media, ()) = tokio::join!(handle.stop(), data_route.stop());
-            return Err(error);
-        }
-        // Keep the non-Send std::sync lifecycle guards inside this entirely
-        // synchronous scope. In particular, the lock-error cleanup awaits
-        // below must not retain the Result temporary whose Ok variant contains
-        // those guards; public bridge futures are required to remain Send.
-        let commit = match self.lock_connection_lifecycles(&lifecycle_tickets) {
-            Ok(lifecycle_guards) => {
-                self.cross_bridges.insert(id.clone(), handle);
-                self.cross_bridge_data_routes.insert(id.clone(), data_route);
-                reservation.commit();
-                self.emit(Event::ConnectionsBridged {
-                    bridge_id: id.clone(),
-                    a,
-                    b,
-                    at: Utc::now(),
-                });
-                drop(lifecycle_guards);
-                Ok(())
-            }
-            Err(error) => Err((error, handle, data_route)),
-        };
-        if let Err((error, mut handle, mut data_route)) = commit {
-            let (_media, ()) = tokio::join!(handle.stop(), data_route.stop());
-            return Err(error);
-        }
-        self.supervise_cross_bridge_routes(id.clone(), statuses, data_terminal);
-        Ok(id)
+        Ok(PreparedCrossBridge {
+            handle,
+            data_route,
+            media_statuses,
+            data_terminal,
+        })
     }
 
     async fn media_graphs_for_directional_bridge(
@@ -10242,6 +10967,7 @@ impl Orchestrator {
         b: ConnectionId,
         b_stream: Arc<dyn crate::stream::MediaStream>,
         media_plan: DirectionalMediaBridgePlan,
+        replacement_context: Option<&ReplacementPreparationContext>,
     ) -> Result<(Option<MediaGraphHandle>, Option<MediaGraphHandle>)> {
         let bridge_policy = directional_bridge_media_graph_policy(
             self.connection_transport(&a)?,
@@ -10273,14 +10999,32 @@ impl Orchestrator {
         let init_locks = sources
             .iter()
             .map(|source| {
-                self.media_graph_inits
-                    .entry(source.connection_id.clone())
-                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                    .clone()
+                (
+                    source.connection_id.clone(),
+                    self.media_graph_inits
+                        .entry(source.connection_id.clone())
+                        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                        .clone(),
+                )
             })
             .collect::<Vec<_>>();
         let mut _init_guards = Vec::with_capacity(init_locks.len());
-        for lock in init_locks {
+        for (connection_id, lock) in init_locks {
+            if let Some(context) = replacement_context {
+                debug_assert!(
+                    connection_id == context.source || connection_id == context.pending_destination,
+                    "replacement graph source must be source or pending destination"
+                );
+                #[cfg(feature = "test-hooks")]
+                self.wait_at_replacement_preparation_test_gate(
+                    if connection_id == context.source {
+                        ReplacementPreparationBoundary::SourceMediaGraphInitLock
+                    } else {
+                        ReplacementPreparationBoundary::PendingMediaGraphInitLock
+                    },
+                )
+                .await?;
+            }
             _init_guards.push(lock.lock_owned().await);
         }
 
@@ -10826,6 +11570,15 @@ impl Orchestrator {
     }
 }
 
+/// Prove that a negotiated stream has both an RTP payload label and a codec
+/// implementation before the bridge acquires either stream's single-consumer
+/// receiver. Dynamic codecs such as AMR-WB have no conventional payload type,
+/// so their negotiated value must be considered here.
+fn validate_bridge_codec_admission(codec: &CodecInfo) -> Result<()> {
+    resolve_payload_type(codec).ok_or_else(|| RvoipError::UnsupportedCodec(codec.name.clone()))?;
+    validate_media_graph_codec(codec)
+}
+
 fn principal_has_complete_owner(principal: &AuthenticatedPrincipal) -> bool {
     !principal.subject.trim().is_empty()
         && principal
@@ -10902,6 +11655,39 @@ mod cross_crate_publisher_tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::Semaphore as TokioSemaphore;
 
+    #[tokio::test]
+    async fn prepared_outbound_cleanup_completion_is_sticky_for_all_waiters() {
+        let capacity = Arc::new(Semaphore::new(1));
+        let permit = capacity.try_acquire_owned().expect("test cleanup capacity");
+        let shared = Arc::new(PreparedOutboundShared::new(permit));
+
+        let first = {
+            let shared = Arc::clone(&shared);
+            tokio::spawn(async move { shared.wait_for_cleanup().await })
+        };
+        let second = {
+            let shared = Arc::clone(&shared);
+            tokio::spawn(async move { shared.wait_for_cleanup().await })
+        };
+        tokio::task::yield_now().await;
+
+        shared
+            .decision
+            .store(PREPARED_OUTBOUND_ABORTED, Ordering::Release);
+        shared.cleanup_complete.cancel();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            first.await.expect("first cleanup waiter");
+            second.await.expect("second cleanup waiter");
+        })
+        .await
+        .expect("registered cleanup waiters must wake");
+
+        tokio::time::timeout(Duration::from_millis(25), shared.wait_for_cleanup())
+            .await
+            .expect("a waiter created after completion must not miss it");
+    }
+
     #[test]
     fn amazon_connect_directional_bridges_tolerate_startup_backpressure() {
         for (left, right) in [
@@ -10938,6 +11724,38 @@ mod cross_crate_publisher_tests {
             policy.pre_sink_buffer_frames,
             default.pre_sink_buffer_frames
         );
+    }
+
+    #[cfg(feature = "amr-wb")]
+    #[test]
+    fn bridge_codec_admission_accepts_negotiated_amr_wb_and_rejects_incomplete_metadata() {
+        let valid = CodecInfo {
+            name: "AMR-WB".into(),
+            clock_rate_hz: 16_000,
+            channels: 1,
+            fmtp: Some("octet-align=1".into()),
+            payload_type: Some(105),
+        };
+        validate_bridge_codec_admission(&valid)
+            .expect("negotiated AMR-WB payload type 105 must be bridgeable");
+
+        let missing_payload = CodecInfo {
+            payload_type: None,
+            ..valid.clone()
+        };
+        assert!(matches!(
+            validate_bridge_codec_admission(&missing_payload),
+            Err(RvoipError::UnsupportedCodec(codec)) if codec == "AMR-WB"
+        ));
+
+        let malformed_fmtp = CodecInfo {
+            fmtp: Some("octet-align=invalid".into()),
+            ..valid
+        };
+        assert!(matches!(
+            validate_bridge_codec_admission(&malformed_fmtp),
+            Err(RvoipError::UnsupportedCodec(codec)) if codec == "AMR-WB"
+        ));
     }
 
     struct RecordingSink {

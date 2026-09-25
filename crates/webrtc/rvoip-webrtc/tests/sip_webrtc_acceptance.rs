@@ -23,9 +23,11 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use rcgen::generate_simple_self_signed;
 use rvoip_core::adapter::{AdapterEvent, ConnectionAdapter, EndReason, OriginateRequest};
@@ -33,12 +35,20 @@ use rvoip_core::config::Config;
 use rvoip_core::connection::{Direction, Transport};
 use rvoip_core::conversation::ConversationPolicy;
 use rvoip_core::events::Event;
-use rvoip_core::ids::{ConnectionId, MessageId, ParticipantId, TenantId};
+use rvoip_core::ids::{AiSessionId, ConnectionId, MessageId, ParticipantId, SessionId, TenantId};
 use rvoip_core::media_graph::{MediaGraphSnapshot, MediaGraphSourceState};
 use rvoip_core::orchestrator::Orchestrator;
 use rvoip_core::session::SessionMedium;
-use rvoip_core::stream::{MediaFrame, MediaStream, StreamKind, StreamSelector};
+use rvoip_core::stream::{
+    BridgedDataMessageDecision, DataMessageBridgePolicy, MediaFrame, MediaStream, StreamKind,
+    StreamSelector,
+};
 use rvoip_core::{DataMessage, DataReliability, DirectionalMediaBridgePlan};
+use rvoip_harness::{
+    AiOriginateContext, InProcessAiAdapter, InProcessAiConfig, InProcessAiLifecycleState,
+    InProcessAiMedia, InProcessAiSession, InProcessAiSessionFactory, InProcessAiSessionLifecycle,
+    InProcessAiSessionRequest,
+};
 use rvoip_sip::api::unified::{Config as SipConfig, UnifiedCoordinator};
 use rvoip_sip::{SipAdapter, SipInitialHeaders, SipOriginateContext};
 use rvoip_sip_core::parser::parse_message;
@@ -61,6 +71,7 @@ const SIGNALING_TOKEN: &str = "sip-webrtc-acceptance";
 const UAS_TAG: &str = "sip-webrtc-acceptance-uas";
 const TELEPHONE_EVENT_PT: u8 = 101;
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+const COMPOSITION_RACE_SEEDS: [u64; 4] = [0x51A1, 0x51A2, 0x51A3, 0x51A4];
 
 #[derive(Clone, Copy, Debug)]
 enum SipCodec {
@@ -138,6 +149,108 @@ struct SipWirePeer {
 struct RemoteWebRtcServer {
     server: WebRtcServer,
     tls_trust: Option<Arc<WebRtcTlsClientTrust>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DialogueTurn {
+    session_id: AiSessionId,
+    turn: usize,
+}
+
+struct StatefulDialogueFactory {
+    committed_turns: Arc<Mutex<HashMap<AiSessionId, usize>>>,
+    observations: mpsc::UnboundedSender<DialogueTurn>,
+}
+
+struct StatefulDialogueSession {
+    session_id: AiSessionId,
+    committed_turns: Arc<Mutex<HashMap<AiSessionId, usize>>>,
+    observations: mpsc::UnboundedSender<DialogueTurn>,
+}
+
+#[async_trait]
+impl InProcessAiSessionFactory for StatefulDialogueFactory {
+    async fn create(
+        &self,
+        request: InProcessAiSessionRequest,
+    ) -> rvoip_core::Result<Box<dyn InProcessAiSession>> {
+        Ok(Box::new(StatefulDialogueSession {
+            session_id: request.ai_session_id,
+            committed_turns: Arc::clone(&self.committed_turns),
+            observations: self.observations.clone(),
+        }))
+    }
+}
+
+#[async_trait]
+impl InProcessAiSession for StatefulDialogueSession {
+    async fn run(
+        self: Box<Self>,
+        mut media: InProcessAiMedia,
+        mut lifecycle: InProcessAiSessionLifecycle,
+        cancellation: CancellationToken,
+    ) -> rvoip_core::Result<()> {
+        let mut last_frame = None::<tokio::time::Instant>;
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Ok(()),
+                request = lifecycle.recv() => {
+                    let Some(request) = request else { return Ok(()); };
+                    if request.state() == InProcessAiLifecycleState::Running {
+                        last_frame = None;
+                    }
+                    request.acknowledge();
+                }
+                frame = media.recv() => {
+                    let Some(frame) = frame else { return Ok(()); };
+                    let now = tokio::time::Instant::now();
+                    if last_frame.is_none_or(|previous| {
+                        now.duration_since(previous) >= Duration::from_millis(100)
+                    }) {
+                        let turn = {
+                            let mut turns = self
+                                .committed_turns
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            let turn = turns.entry(self.session_id.clone()).or_default();
+                            *turn += 1;
+                            *turn
+                        };
+                        let _ = self.observations.send(DialogueTurn {
+                            session_id: self.session_id.clone(),
+                            turn,
+                        });
+                    }
+                    last_frame = Some(now);
+                    media.send(frame).await?;
+                }
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct BoundedCompositionDataPolicy {
+    forwarded: AtomicUsize,
+    dropped: AtomicUsize,
+}
+
+impl DataMessageBridgePolicy for BoundedCompositionDataPolicy {
+    fn decide(
+        &self,
+        _source: &ConnectionId,
+        _target: &ConnectionId,
+        message: DataMessage,
+    ) -> BridgedDataMessageDecision {
+        if message.label == "bridgefu.context.v1" && message.bytes.len() <= 256 {
+            self.forwarded.fetch_add(1, Ordering::AcqRel);
+            BridgedDataMessageDecision::Forward(message)
+        } else {
+            self.dropped.fetch_add(1, Ordering::AcqRel);
+            BridgedDataMessageDecision::Drop
+        }
+    }
 }
 
 impl SipWirePeer {
@@ -401,6 +514,23 @@ impl SipWirePeer {
             .expect("outbound SIP MESSAGE channel")
     }
 
+    async fn assert_no_outbound_message(&mut self) {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), self.outbound_messages.recv())
+                .await
+                .is_err(),
+            "bounded data policy forwarded a denied SIP MESSAGE"
+        );
+    }
+
+    async fn drain_media(&self) {
+        let mut packet = vec![0u8; 2_048];
+        while tokio::time::timeout(Duration::from_millis(25), self.media.recv_from(&mut packet))
+            .await
+            .is_ok()
+        {}
+    }
+
     async fn send_data_message(&mut self, dialog: &EstablishedDialog, message: &DataMessage) {
         let headers = format!(
             "MESSAGE sip:bridge@{} SIP/2.0\r\n\
@@ -496,6 +626,744 @@ async fn production_sip_rtp_and_webrtc_rtp_bridge_acceptance() {
         run_case(index, signaling, codec, symmetric_rtp).await;
     }
     run_whep_playback_case(3, SipCodec::Pcma).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_orchestrator_composes_sip_webrtc_and_stateful_ai() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_test_writer()
+        .try_init();
+
+    let mut remote_config = WebRtcConfig::loopback();
+    remote_config.trickle_ice = true;
+    let remote = build_remote_server(remote_config, SignalingCase::Whip).await;
+    let remote_adapter = remote.server.adapter();
+    let mut remote_events = remote_adapter.subscribe_events();
+
+    let mut sip_config = SipConfig::local("three-adapter-composition", 0);
+    sip_config.media_port_start = 39_000;
+    sip_config.media_port_end = 39_255;
+    let coordinator = UnifiedCoordinator::new(sip_config)
+        .await
+        .expect("three-adapter SIP coordinator");
+    let sip_adapter = SipAdapter::new(Arc::clone(&coordinator))
+        .await
+        .expect("three-adapter SIP adapter");
+    let webrtc_adapter = WebRtcAdapter::new(WebRtcConfig::loopback());
+    let (dialogue_tx, mut dialogue_rx) = mpsc::unbounded_channel();
+    let committed_turns = Arc::new(Mutex::new(HashMap::new()));
+    let ai_adapter = InProcessAiAdapter::new(
+        InProcessAiConfig::default(),
+        Arc::new(StatefulDialogueFactory {
+            committed_turns: Arc::clone(&committed_turns),
+            observations: dialogue_tx,
+        }),
+    )
+    .expect("three-adapter AI adapter");
+
+    let orchestrator = Orchestrator::new(Config::default());
+    orchestrator
+        .register(Arc::clone(&sip_adapter) as Arc<dyn ConnectionAdapter>)
+        .expect("register production SIP adapter");
+    orchestrator
+        .register(Arc::clone(&webrtc_adapter) as Arc<dyn ConnectionAdapter>)
+        .expect("register production WebRTC adapter");
+    orchestrator
+        .register(Arc::clone(&ai_adapter) as Arc<dyn ConnectionAdapter>)
+        .expect("register production in-process AI adapter");
+
+    let conversation_id = orchestrator
+        .open_conversation(
+            TenantId::new(),
+            ConversationPolicy::default(),
+            HashMap::new(),
+        )
+        .await
+        .expect("open three-adapter conversation");
+
+    run_sip_source_ai_replacement_composition(
+        &orchestrator,
+        &conversation_id,
+        &sip_adapter,
+        &webrtc_adapter,
+        &ai_adapter,
+        &remote,
+        &remote_adapter,
+        &mut remote_events,
+        &mut dialogue_rx,
+    )
+    .await;
+    run_webrtc_source_ai_replacement_composition(
+        &orchestrator,
+        &conversation_id,
+        &sip_adapter,
+        &webrtc_adapter,
+        &ai_adapter,
+        &remote,
+        &remote_adapter,
+        &mut remote_events,
+        &mut dialogue_rx,
+    )
+    .await;
+
+    orchestrator
+        .close_conversation(conversation_id, false)
+        .await
+        .expect("close three-adapter conversation");
+    orchestrator.drain_prepared_outbound_connections().await;
+    orchestrator.drain_connection_lifecycle_tasks().await;
+    assert_eq!(orchestrator.connection_lifecycle_task_count(), 0);
+    ai_adapter
+        .drain(Duration::from_secs(3))
+        .await
+        .expect("drain production AI adapter");
+    assert!(
+        webrtc_adapter
+            .drain_outbound_signaling(Duration::from_secs(3))
+            .await,
+        "three-adapter WebRTC signaling did not drain"
+    );
+    sip_adapter
+        .drain()
+        .await
+        .expect("drain production SIP adapter");
+    coordinator
+        .shutdown_gracefully(Some(Duration::from_secs(2)))
+        .await
+        .expect("shutdown three-adapter SIP coordinator");
+    remote.server.shutdown().await;
+
+    assert_eq!(ai_adapter.resource_snapshot(), Default::default());
+    assert_eq!(sip_adapter.retained_task_count(), 0);
+    assert!(webrtc_adapter.routes().is_empty());
+    assert!(remote_adapter.routes().is_empty());
+    assert_eq!(webrtc_adapter.outbound_signaling_task_count(), 0);
+    assert_eq!(webrtc_adapter.outbound_ws_hub_task_count(), 0);
+    assert_webrtc_clean(&webrtc_adapter);
+    assert_webrtc_clean(&remote_adapter);
+    assert!(
+        committed_turns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .all(|turns| *turns == COMPOSITION_RACE_SEEDS.len() + 1),
+        "each AI dialogue must retain every turn across seeded rollback races"
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_sip_source_ai_replacement_composition(
+    orchestrator: &Arc<Orchestrator>,
+    conversation_id: &rvoip_core::ConversationId,
+    sip_adapter: &Arc<SipAdapter>,
+    webrtc_adapter: &Arc<WebRtcAdapter>,
+    ai_adapter: &Arc<InProcessAiAdapter>,
+    remote: &RemoteWebRtcServer,
+    remote_adapter: &Arc<WebRtcAdapter>,
+    remote_events: &mut mpsc::Receiver<AdapterEvent>,
+    dialogue_rx: &mut mpsc::UnboundedReceiver<DialogueTurn>,
+) {
+    let session_id = composition_session(orchestrator, conversation_id).await;
+    let ai_session_id = AiSessionId::from_string("aisess_composition_sip_source");
+    let ai_connection =
+        composition_ai_connection(orchestrator, ai_adapter, &session_id, ai_session_id.clone())
+            .await;
+    let mut sip_peer = SipWirePeer::start(SipCodec::Pcmu, false).await;
+    let (sip_connection, sip_dialog) = composition_sip_connection(
+        orchestrator,
+        sip_adapter,
+        &session_id,
+        &mut sip_peer,
+        SipCodec::Pcmu,
+        "sip-source",
+    )
+    .await;
+    let policy = Arc::new(BoundedCompositionDataPolicy::default());
+    let bridge_id = orchestrator
+        .bridge_connections_with_data_policy(
+            sip_connection.clone(),
+            ai_connection.clone(),
+            Arc::clone(&policy) as Arc<dyn DataMessageBridgePolicy>,
+        )
+        .await
+        .expect("bridge SIP source to AI destination");
+    let sip_graph = orchestrator
+        .media_graph_for_connection(sip_connection.clone())
+        .await
+        .expect("SIP-source graph");
+
+    sip_peer.send_audio_burst(&sip_dialog, SipCodec::Pcmu).await;
+    wait_for_dialogue_turn(dialogue_rx, &ai_session_id, 1).await;
+    let echoed = sip_peer
+        .receive_rtp_payload(SipCodec::Pcmu.payload_type())
+        .await;
+    let initial_snapshot = wait_for_transcode(&sip_graph).await;
+    assert_eq!(
+        echoed.len(),
+        160,
+        "SIP-to-AI echo codec mismatch; graph={initial_snapshot:?}"
+    );
+    sip_peer.drain_media().await;
+
+    let dead_webrtc = composition_webrtc_connection(
+        orchestrator,
+        webrtc_adapter,
+        &session_id,
+        remote,
+        remote_adapter,
+        remote_events,
+    )
+    .await;
+    orchestrator
+        .end_connection(dead_webrtc.connection_id.clone(), EndReason::Normal)
+        .await
+        .expect("end seeded dead WebRTC destination");
+    wait_for_connection_end(orchestrator, &dead_webrtc.connection_id).await;
+    wait_until(TEST_TIMEOUT, || {
+        !remote_adapter.is_connection_live(&dead_webrtc.remote_connection_id)
+    })
+    .await;
+
+    let original_binding = ai_adapter
+        .session_binding(&ai_session_id)
+        .expect("AI binding before SIP-source rollback races");
+    for (index, seed) in COMPOSITION_RACE_SEEDS.into_iter().enumerate() {
+        seeded_failed_replacement(
+            orchestrator,
+            ai_adapter,
+            bridge_id.clone(),
+            sip_connection.clone(),
+            ai_connection.clone(),
+            dead_webrtc.connection_id.clone(),
+            &ai_session_id,
+            &original_binding,
+            seed,
+        )
+        .await;
+        sip_peer.send_audio_burst(&sip_dialog, SipCodec::Pcmu).await;
+        wait_for_dialogue_turn(dialogue_rx, &ai_session_id, index + 2).await;
+        let echoed = sip_peer
+            .receive_rtp_payload(SipCodec::Pcmu.payload_type())
+            .await;
+        assert_eq!(
+            echoed.len(),
+            160,
+            "seed {seed}: resumed AI did not speak on the original SIP bridge; graph={:?}",
+            sip_graph.snapshot().await
+        );
+        sip_peer.drain_media().await;
+    }
+
+    let live_webrtc = composition_webrtc_connection(
+        orchestrator,
+        webrtc_adapter,
+        &session_id,
+        remote,
+        remote_adapter,
+        remote_events,
+    )
+    .await;
+    let mut remote_audio = live_webrtc
+        .remote_stream
+        .try_frames_in()
+        .expect("reserve SIP-source remote WebRTC receiver");
+    let replacement = orchestrator
+        .replace_bridge_destination(
+            bridge_id,
+            sip_connection.clone(),
+            ai_connection.clone(),
+            live_webrtc.connection_id.clone(),
+        )
+        .await
+        .expect("replace AI with WebRTC for SIP source");
+    orchestrator
+        .end_connection(ai_connection.clone(), EndReason::Normal)
+        .await
+        .expect("retire replaced SIP-source AI destination");
+    wait_for_connection_end(orchestrator, &ai_connection).await;
+
+    sip_peer.send_audio_burst(&sip_dialog, SipCodec::Pcmu).await;
+    let opus = receive_remote_audio(&mut remote_audio, &sip_graph, "SIP-source replacement").await;
+    assert_eq!(opus.payload_type, Some(111));
+    send_opus_burst(&live_webrtc.remote_stream, 500).await;
+    let pcmu = sip_peer
+        .receive_rtp_payload(SipCodec::Pcmu.payload_type())
+        .await;
+    assert_eq!(
+        pcmu.len(),
+        160,
+        "WebRTC return media did not negotiate PCMU; graph={:?}",
+        sip_graph.snapshot().await
+    );
+
+    remote_adapter
+        .send_dtmf(live_webrtc.remote_connection_id.clone(), "5", 100)
+        .await
+        .expect("send WebRTC DTMF after SIP-source replacement");
+    let dtmf = sip_peer.receive_dtmf_end(5).await;
+    assert_ne!(dtmf[1] & 0x80, 0);
+    sip_peer.send_dtmf_burst(&sip_dialog, 6).await;
+    let (digits, _) = wait_for_dtmf(remote_events, &live_webrtc.remote_connection_id).await;
+    assert_eq!(digits, "6");
+
+    let denied = DataMessage::try_new(
+        "composition.denied",
+        "application/octet-stream",
+        Bytes::from_static(b"denied"),
+        DataReliability::ReliableOrdered,
+        MessageId::from_string("composition-denied"),
+    )
+    .expect("denied composition message");
+    remote_adapter
+        .send_data_message(live_webrtc.remote_connection_id.clone(), denied)
+        .await
+        .expect("send denied composition data");
+    wait_until(TEST_TIMEOUT, || policy.dropped.load(Ordering::Acquire) == 1).await;
+    sip_peer.assert_no_outbound_message().await;
+    let allowed = DataMessage::try_new(
+        "bridgefu.context.v1",
+        "application/json",
+        Bytes::from_static(br#"{"composition":"allowed"}"#),
+        DataReliability::ReliableOrdered,
+        MessageId::from_string("composition-allowed"),
+    )
+    .expect("allowed composition message");
+    remote_adapter
+        .send_data_message(live_webrtc.remote_connection_id.clone(), allowed.clone())
+        .await
+        .expect("send allowed composition data");
+    let captured = sip_peer.receive_outbound_message().await;
+    assert_eq!(captured.body, allowed.bytes);
+    assert_eq!(policy.forwarded.load(Ordering::Acquire), 1);
+
+    orchestrator
+        .unbridge_connections(replacement.bridge_id)
+        .await
+        .expect("unbridge SIP-source replacement");
+    orchestrator
+        .end_connection(sip_connection.clone(), EndReason::Normal)
+        .await
+        .expect("end SIP source");
+    orchestrator
+        .end_connection(live_webrtc.connection_id.clone(), EndReason::Normal)
+        .await
+        .expect("end SIP-source WebRTC destination");
+    wait_for_connection_end(orchestrator, &sip_connection).await;
+    wait_for_connection_end(orchestrator, &live_webrtc.connection_id).await;
+    wait_until(TEST_TIMEOUT, || {
+        !remote_adapter.is_connection_live(&live_webrtc.remote_connection_id)
+    })
+    .await;
+    orchestrator
+        .end_session(session_id, EndReason::Normal)
+        .await
+        .expect("end SIP-source composition session");
+    sip_peer.shutdown().await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_webrtc_source_ai_replacement_composition(
+    orchestrator: &Arc<Orchestrator>,
+    conversation_id: &rvoip_core::ConversationId,
+    sip_adapter: &Arc<SipAdapter>,
+    webrtc_adapter: &Arc<WebRtcAdapter>,
+    ai_adapter: &Arc<InProcessAiAdapter>,
+    remote: &RemoteWebRtcServer,
+    remote_adapter: &Arc<WebRtcAdapter>,
+    remote_events: &mut mpsc::Receiver<AdapterEvent>,
+    dialogue_rx: &mut mpsc::UnboundedReceiver<DialogueTurn>,
+) {
+    let session_id = composition_session(orchestrator, conversation_id).await;
+    let ai_session_id = AiSessionId::from_string("aisess_composition_webrtc_source");
+    let ai_connection =
+        composition_ai_connection(orchestrator, ai_adapter, &session_id, ai_session_id.clone())
+            .await;
+    let source_webrtc = composition_webrtc_connection(
+        orchestrator,
+        webrtc_adapter,
+        &session_id,
+        remote,
+        remote_adapter,
+        remote_events,
+    )
+    .await;
+    let mut remote_audio = source_webrtc
+        .remote_stream
+        .try_frames_in()
+        .expect("reserve WebRTC-source remote audio receiver");
+    let bridge_id = orchestrator
+        .bridge_connections(source_webrtc.connection_id.clone(), ai_connection.clone())
+        .await
+        .expect("bridge WebRTC source to AI destination");
+    let webrtc_graph = orchestrator
+        .media_graph_for_connection(source_webrtc.connection_id.clone())
+        .await
+        .expect("WebRTC-source graph");
+
+    send_opus_burst(&source_webrtc.remote_stream, 100).await;
+    wait_for_dialogue_turn(dialogue_rx, &ai_session_id, 1).await;
+    let echoed = receive_remote_audio(&mut remote_audio, &webrtc_graph, "WebRTC-to-AI echo").await;
+    assert_eq!(echoed.payload_type, Some(111));
+    while remote_audio.try_recv().is_ok() {}
+
+    let mut dead_sip_peer = SipWirePeer::start(SipCodec::Pcma, false).await;
+    let (dead_sip, _) = composition_sip_connection(
+        orchestrator,
+        sip_adapter,
+        &session_id,
+        &mut dead_sip_peer,
+        SipCodec::Pcma,
+        "dead-sip-destination",
+    )
+    .await;
+    orchestrator
+        .end_connection(dead_sip.clone(), EndReason::Normal)
+        .await
+        .expect("end seeded dead SIP destination");
+    wait_for_connection_end(orchestrator, &dead_sip).await;
+
+    let original_binding = ai_adapter
+        .session_binding(&ai_session_id)
+        .expect("AI binding before WebRTC-source rollback races");
+    for (index, seed) in COMPOSITION_RACE_SEEDS.into_iter().enumerate() {
+        seeded_failed_replacement(
+            orchestrator,
+            ai_adapter,
+            bridge_id.clone(),
+            source_webrtc.connection_id.clone(),
+            ai_connection.clone(),
+            dead_sip.clone(),
+            &ai_session_id,
+            &original_binding,
+            seed ^ 0xA11,
+        )
+        .await;
+        send_opus_burst(
+            &source_webrtc.remote_stream,
+            200 + u32::try_from(index).expect("bounded seed index") * 24,
+        )
+        .await;
+        wait_for_dialogue_turn(dialogue_rx, &ai_session_id, index + 2).await;
+        let echoed =
+            receive_remote_audio(&mut remote_audio, &webrtc_graph, "resumed WebRTC-source AI")
+                .await;
+        assert_eq!(echoed.payload_type, Some(111));
+        while remote_audio.try_recv().is_ok() {}
+    }
+
+    let mut live_sip_peer = SipWirePeer::start(SipCodec::Pcma, false).await;
+    let (live_sip, live_sip_dialog) = composition_sip_connection(
+        orchestrator,
+        sip_adapter,
+        &session_id,
+        &mut live_sip_peer,
+        SipCodec::Pcma,
+        "live-sip-destination",
+    )
+    .await;
+    let replacement = orchestrator
+        .replace_bridge_destination(
+            bridge_id,
+            source_webrtc.connection_id.clone(),
+            ai_connection.clone(),
+            live_sip.clone(),
+        )
+        .await
+        .expect("replace AI with SIP for WebRTC source");
+    orchestrator
+        .end_connection(ai_connection.clone(), EndReason::Normal)
+        .await
+        .expect("retire replaced WebRTC-source AI destination");
+    wait_for_connection_end(orchestrator, &ai_connection).await;
+    while remote_audio.try_recv().is_ok() {}
+    live_sip_peer.drain_media().await;
+
+    send_opus_burst(&source_webrtc.remote_stream, 500).await;
+    let pcma = live_sip_peer
+        .receive_rtp_payload(SipCodec::Pcma.payload_type())
+        .await;
+    assert_eq!(
+        pcma.len(),
+        160,
+        "WebRTC-source replacement did not negotiate PCMA; graph={:?}",
+        webrtc_graph.snapshot().await
+    );
+    live_sip_peer
+        .send_audio_burst(&live_sip_dialog, SipCodec::Pcma)
+        .await;
+    let opus = receive_remote_audio(
+        &mut remote_audio,
+        &webrtc_graph,
+        "SIP return to WebRTC source",
+    )
+    .await;
+    assert_eq!(opus.payload_type, Some(111));
+
+    orchestrator
+        .unbridge_connections(replacement.bridge_id)
+        .await
+        .expect("unbridge WebRTC-source replacement");
+    orchestrator
+        .end_connection(source_webrtc.connection_id.clone(), EndReason::Normal)
+        .await
+        .expect("end WebRTC source");
+    orchestrator
+        .end_connection(live_sip.clone(), EndReason::Normal)
+        .await
+        .expect("end WebRTC-source SIP destination");
+    wait_for_connection_end(orchestrator, &source_webrtc.connection_id).await;
+    wait_for_connection_end(orchestrator, &live_sip).await;
+    wait_until(TEST_TIMEOUT, || {
+        !remote_adapter.is_connection_live(&source_webrtc.remote_connection_id)
+    })
+    .await;
+    orchestrator
+        .end_session(session_id, EndReason::Normal)
+        .await
+        .expect("end WebRTC-source composition session");
+    dead_sip_peer.shutdown().await;
+    live_sip_peer.shutdown().await;
+}
+
+struct CompositionWebRtcLeg {
+    connection_id: ConnectionId,
+    remote_connection_id: ConnectionId,
+    remote_stream: Arc<dyn MediaStream>,
+}
+
+async fn composition_session(
+    orchestrator: &Arc<Orchestrator>,
+    conversation_id: &rvoip_core::ConversationId,
+) -> SessionId {
+    orchestrator
+        .start_session(conversation_id.clone(), SessionMedium::Voice, vec![])
+        .await
+        .expect("start three-adapter composition session")
+}
+
+async fn composition_ai_connection(
+    orchestrator: &Arc<Orchestrator>,
+    ai_adapter: &Arc<InProcessAiAdapter>,
+    session_id: &SessionId,
+    ai_session_id: AiSessionId,
+) -> ConnectionId {
+    let request = OriginateRequest::new(
+        session_id.clone(),
+        ParticipantId::new(),
+        "stateful-composition-ai",
+        Direction::Outbound,
+        ai_adapter.capabilities(),
+    )
+    .with_transport(Transport::InProcessAi)
+    .with_context(AiOriginateContext {
+        ai_session_id: Some(ai_session_id),
+        ..AiOriginateContext::default()
+    });
+    let prepared = orchestrator
+        .prepare_outbound_connection(request)
+        .await
+        .expect("prepare in-process AI composition route");
+    let connection_id = prepared.connection_id().clone();
+    prepared
+        .commit()
+        .await
+        .expect("commit in-process AI composition route");
+    connection_id
+}
+
+async fn composition_sip_connection(
+    orchestrator: &Arc<Orchestrator>,
+    sip_adapter: &Arc<SipAdapter>,
+    session_id: &SessionId,
+    peer: &mut SipWirePeer,
+    codec: SipCodec,
+    label: &str,
+) -> (ConnectionId, EstablishedDialog) {
+    let correlation = format!("composition-{label}");
+    let headers = SipInitialHeaders::new([
+        ("X-Correlation-Id", correlation.as_str()),
+        ("X-Account-Tier", "composition"),
+    ])
+    .expect("composition SIP headers");
+    let request = OriginateRequest::new(
+        session_id.clone(),
+        ParticipantId::new(),
+        format!("sip:composition@{}", peer.address()),
+        Direction::Outbound,
+        sip_adapter.capabilities(),
+    )
+    .with_transport(Transport::Sip)
+    .with_context(SipOriginateContext::new().with_initial_headers(headers));
+    let prepared = orchestrator
+        .prepare_outbound_connection(request)
+        .await
+        .expect("prepare composition SIP route");
+    let connection_id = prepared.connection_id().clone();
+    let (committed, stream) = tokio::time::timeout(TEST_TIMEOUT, async {
+        tokio::join!(
+            prepared.commit(),
+            orchestrator.wait_for_stream(
+                connection_id.clone(),
+                StreamSelector::new(StreamKind::Audio).with_codec(codec.stream_name()),
+                tokio::time::Instant::now() + TEST_TIMEOUT,
+                CancellationToken::new(),
+            )
+        )
+    })
+    .await
+    .expect("composition SIP commit deadline");
+    committed.expect("commit composition SIP route");
+    let stream = stream.expect("composition SIP media readiness");
+    assert_eq!(stream.codec().clock_rate_hz, 8_000);
+    let dialog = peer.wait_established().await;
+    assert_eq!(dialog.initial_correlation_id, correlation);
+    (connection_id, dialog)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn composition_webrtc_connection(
+    orchestrator: &Arc<Orchestrator>,
+    webrtc_adapter: &Arc<WebRtcAdapter>,
+    session_id: &SessionId,
+    remote: &RemoteWebRtcServer,
+    remote_adapter: &Arc<WebRtcAdapter>,
+    remote_events: &mut mpsc::Receiver<AdapterEvent>,
+) -> CompositionWebRtcLeg {
+    let (endpoint, context) = outbound_webrtc_context(
+        &remote.server,
+        SignalingCase::Whip,
+        remote.tls_trust.clone(),
+    );
+    let request = OriginateRequest::new(
+        session_id.clone(),
+        ParticipantId::new(),
+        endpoint,
+        Direction::Outbound,
+        webrtc_adapter.capabilities(),
+    )
+    .with_transport(Transport::WebRtc)
+    .with_context(context);
+    let prepared = orchestrator
+        .prepare_outbound_connection(request)
+        .await
+        .expect("prepare composition WebRTC route");
+    let connection_id = prepared.connection_id().clone();
+    prepared
+        .commit()
+        .await
+        .expect("commit composition WebRTC route");
+    let remote_connection_id = wait_for_inbound_connection(remote_events).await;
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        let (local, remote) = tokio::join!(
+            webrtc_adapter.accept(connection_id.clone()),
+            remote_adapter.accept(remote_connection_id.clone()),
+        );
+        local.expect("composition local WebRTC ICE/DTLS");
+        remote.expect("composition remote WebRTC ICE/DTLS");
+    })
+    .await
+    .expect("composition WebRTC ICE/DTLS deadline");
+    let remote_stream = audio_stream(remote_adapter, &remote_connection_id).await;
+    assert_eq!(remote_stream.codec().name.to_ascii_lowercase(), "opus");
+    assert_eq!(remote_stream.codec().clock_rate_hz, 48_000);
+    CompositionWebRtcLeg {
+        connection_id,
+        remote_connection_id,
+        remote_stream,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn seeded_failed_replacement(
+    orchestrator: &Arc<Orchestrator>,
+    ai_adapter: &Arc<InProcessAiAdapter>,
+    bridge_id: rvoip_core::BridgeId,
+    source: ConnectionId,
+    ai_connection: ConnectionId,
+    dead_destination: ConnectionId,
+    ai_session_id: &AiSessionId,
+    expected_binding: &rvoip_harness::AiMediaBinding,
+    seed: u64,
+) {
+    let hold_delay = Duration::from_millis(seed % 7);
+    let replacement_delay = Duration::from_millis((seed.rotate_left(5) % 7) + 1);
+    let (hold, replacement) = tokio::join!(
+        async {
+            tokio::time::sleep(hold_delay).await;
+            orchestrator.hold(ai_connection.clone()).await
+        },
+        async {
+            tokio::time::sleep(replacement_delay).await;
+            orchestrator
+                .replace_bridge_destination(
+                    bridge_id,
+                    source,
+                    ai_connection.clone(),
+                    dead_destination,
+                )
+                .await
+        }
+    );
+    hold.unwrap_or_else(|error| panic!("seed {seed}: hold AI before replacement: {error}"));
+    assert!(
+        replacement.is_err(),
+        "seed {seed}: dead replacement unexpectedly committed"
+    );
+    assert_eq!(
+        ai_adapter.resource_snapshot().held_sessions,
+        1,
+        "seed {seed}: failed replacement did not retain resumable AI state"
+    );
+    assert_eq!(
+        ai_adapter.session_binding(ai_session_id).as_ref(),
+        Some(expected_binding),
+        "seed {seed}: failed replacement changed AI binding identity"
+    );
+    orchestrator
+        .resume(ai_connection)
+        .await
+        .unwrap_or_else(|error| panic!("seed {seed}: resume AI after rollback: {error}"));
+}
+
+async fn wait_for_dialogue_turn(
+    observations: &mut mpsc::UnboundedReceiver<DialogueTurn>,
+    session_id: &AiSessionId,
+    expected_turn: usize,
+) {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            let observed = observations
+                .recv()
+                .await
+                .expect("dialogue observation channel");
+            if &observed.session_id == session_id {
+                assert_eq!(
+                    observed.turn, expected_turn,
+                    "dialogue state advanced or reset unexpectedly"
+                );
+                return;
+            }
+        }
+    })
+    .await
+    .expect("dialogue turn deadline");
+}
+
+async fn receive_remote_audio(
+    receiver: &mut mpsc::Receiver<MediaFrame>,
+    graph: &rvoip_core::MediaGraphHandle,
+    label: &str,
+) -> MediaFrame {
+    match tokio::time::timeout(TEST_TIMEOUT, receiver.recv()).await {
+        Ok(Some(frame)) => frame,
+        Ok(None) => panic!(
+            "{label} remote audio closed; graph={:?}",
+            graph.snapshot().await
+        ),
+        Err(_) => panic!("{label} audio deadline; graph={:?}", graph.snapshot().await),
+    }
 }
 
 async fn run_case(index: u16, signaling: SignalingCase, codec: SipCodec, symmetric_rtp: bool) {
