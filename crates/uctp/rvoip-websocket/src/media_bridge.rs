@@ -78,7 +78,7 @@ mod bridge {
     use rvoip_core::ids::StreamId;
     use rvoip_core::stream::MediaStream;
     use rvoip_uctp::payloads::connection::{IceCandidateInit, WebRtcSubstrateSetup};
-    use rvoip_webrtc::config::WebRtcConfig;
+    use rvoip_webrtc::config::{MdnsCandidatePolicy, WebRtcConfig};
     use rvoip_webrtc::media::{from_tracks, WebRtcMediaStream};
     use rvoip_webrtc::peer::{PeerRole, RvoipPeerConnection};
     use rvoip_webrtc::sdp::default_webrtc_capabilities;
@@ -101,7 +101,13 @@ mod bridge {
         }
 
         pub async fn new_answerer() -> Result<Self> {
-            Self::with_config(WebRtcConfig::loopback(), BridgeRole::Answerer).await
+            let mut config = WebRtcConfig::loopback();
+            // Browser offers IPv6 and mDNS host names. rvoip ICE is IPv4-only;
+            // bind dual-stack-capable IPv4 and keep `.local` so Chrome's
+            // anonymized IPv4 candidates are not dropped.
+            config.udp_bind = "0.0.0.0:0".into();
+            config.mdns_candidate_policy = MdnsCandidatePolicy::Pass;
+            Self::with_config(config, BridgeRole::Answerer).await
         }
 
         pub async fn with_config(config: WebRtcConfig, role: BridgeRole) -> Result<Self> {
