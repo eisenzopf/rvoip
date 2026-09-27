@@ -12,11 +12,11 @@
  <a href="https://deps.rs/repo/github/webrtc-rs/webrtc">
   <img src="https://deps.rs/repo/github/webrtc-rs/webrtc/status.svg">
  </a>
- <a href="https://crates.io/crates/webrtc">
-  <img src="https://img.shields.io/crates/v/webrtc.svg">
+ <a href="https://crates.io/crates/rvoip-webrtc-stack">
+  <img src="https://img.shields.io/crates/v/rvoip-webrtc-stack.svg">
  </a>
- <a href="https://docs.rs/webrtc">
-  <img src="https://docs.rs/webrtc/badge.svg">
+ <a href="https://docs.rs/rvoip-webrtc-stack">
+  <img src="https://docs.rs/rvoip-webrtc-stack/badge.svg">
  </a>
  <a href="https://doc.rust-lang.org/1.6.0/complement-project-faq.html#why-dual-mitasl2-license">
   <img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue" alt="License: MIT/Apache 2.0">
@@ -78,59 +78,21 @@ runtime-independent Sans-I/O core.
 our [architecture blog post](https://webrtc.rs/blog/2026/01/31/async-friendly-webrtc-architecture.html) for design
 details and roadmap.
 
-### 🚨 Important Notice: v0.17.x Feature Freeze & v0.20.0+ Development
+### rvoip fork notice
 
-**v0.17.x is the final feature release of the Tokio-coupled async WebRTC implementation.**
-
-#### Current Status (February 2026)
-
-- **v0.17.x branch**: Receives **bug fixes only** (no new features). Use this for Tokio-based production applications.
-- **Master branch**: Under active development for **v0.20.0** with the new Sans-I/O architecture.
-
-#### **What's Changing in upcoming v0.20.0+?**
-
-The new architecture will address critical issues in v0.17.x:
-
-- ❌ Callback hell and Arc explosion
-- ❌ Resources leak in callback
-- ❌ Protocol logic coupled to an executor
-
-**v0.20.0+ will provide:**
-
-✅ **Sans-I/O Core and Qualified Tokio Integration**
+This crate is rvoip's fork of upstream [`webrtc`](https://github.com/webrtc-rs/webrtc)
+0.20.0-alpha.1, published as `rvoip-webrtc-stack`. The Rust library name is still
+`webrtc`. Its `rtc` dependency is bound to the attributed `rvoip-rtc` workspace crate
+(a Cargo path dependency, not a git submodule). Packaging and behavioural changes are
+documented in [RVOIP_PATCHES.md](RVOIP_PATCHES.md). Upstream's v0.17.x feature-freeze /
+v0.20.0 branch-status notice describes upstream branches and does not apply here.
 
 - Runtime-independent protocol logic in `rvoip-rtc`
 - Tokio is always enabled; `runtime-tokio` remains as a compatibility feature name
 
-✅ **Clean Event Handling**
-
-- Trait-based event handlers with native `async fn in trait`
-- No more callback Arc cloning or `Box::new(move |...| Box::pin(async move { ... }))`
-- Centralized state management with `&mut self`
-
-✅ **Sans-I/O Foundation**
-
-- Protocol logic completely separate from I/O (via [rtc](https://github.com/webrtc-rs/rtc) crate)
-- Deterministic testing without real network I/O
-- Zero-cost abstractions
-
-#### **How to Provide Feedback**
-
-We're actively designing v0.20.0+ and welcome your input:
-
-- Review the [architecture blog post](https://webrtc.rs/blog/2026/01/31/async-friendly-webrtc-architecture.html)
-- Join discussions on [GitHub Issues](https://github.com/webrtc-rs/webrtc/issues)
-- Chat with us on [Discord](https://discord.gg/4Ju8UHdXMs)
-
-**For production use:** Stick with v0.17.x branch until v0.20.0+ is stable.
-**For early adopters:** Follow master branch development and provide feedback!
-
 ## Building and Testing
 
 ```bash
-# Update rtc submodule first
-git submodule update --init --recursive
-
 # Build the library
 cargo build
 

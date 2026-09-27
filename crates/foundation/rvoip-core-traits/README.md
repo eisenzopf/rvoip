@@ -1,6 +1,6 @@
 # rvoip-core-traits
 
-[![Crates.io](https://img.shields.io/crates/v/rvoip-core-traits.svg)](https://crates.io/crates/foundation/rvoip-core-traits)
+[![Crates.io](https://img.shields.io/crates/v/rvoip-core-traits.svg)](https://crates.io/crates/rvoip-core-traits)
 [![Documentation](https://docs.rs/rvoip-core-traits/badge.svg)](https://docs.rs/rvoip-core-traits)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/eisenzopf/rvoip)
 
@@ -14,10 +14,12 @@ The shared media surface includes `StreamSelector`, `MediaReadiness`, and
 source-ready, and bidirectional media without importing a transport crate.
 
 This crate exists to **break dependency cycles**. Many consumer crates
-(`rvoip-auth-core`, `rvoip-harness`, `rvoip-vcon`) need to refer to
-rvoip's identity / session / capability types without pulling in the
-`rvoip-core` implementation, which in turn lets `rvoip-core` take those
-crates as optional deps.
+(`rvoip-auth-core`, `rvoip-harness`, `rvoip-users-core`, the identity
+extensions such as `rvoip-oidc` / `rvoip-keycloak` / `rvoip-ldap` /
+`rvoip-scim`, and the substrate adapters) need to refer to rvoip's
+identity / session / capability types without pulling in the `rvoip-core`
+implementation, which in turn lets `rvoip-core` depend on those crates
+without a cycle.
 
 ## Status
 

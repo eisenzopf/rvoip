@@ -154,8 +154,10 @@ impl CallHandler for ScreenPopApp {
 ```
 
 For `REFER`-driven blind transfers, the `Event::ReferReceived { request, .. }`
-event carries the full `IncomingRequest` (also `SipHeaderView`), so the same
-translation applies to headers on the REFER itself.
+event carries `request: Option<IncomingRequest>` (also `SipHeaderView`), so the
+same translation applies to headers on the REFER itself when it is
+`Some(request)`. It is `None` only for legacy publish sites that have not yet
+been migrated to the typed request view.
 
 ## Screen pop
 

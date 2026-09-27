@@ -1,3 +1,9 @@
+> **This crate is rvoip's fork of [`rtc`](https://github.com/webrtc-rs/rtc)**
+> (the WebRTC.rs sans-I/O core, baseline `rtc` 0.20.0-alpha.1), published as
+> `rvoip-rtc`. The Rust library name is still `rtc`, so the `use rtc::...` paths
+> below are unchanged. The patches applied on top of upstream are listed in
+> [RVOIP_PATCHES.md](RVOIP_PATCHES.md). The rest of this README is upstream text.
+
 <h1 align="center">
  <a href="https://webrtc.rs"><img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/rtc.png" alt="WebRTC.rs"></a>
  <br>
@@ -12,11 +18,11 @@
  <a href="https://deps.rs/repo/github/webrtc-rs/rtc">
   <img src="https://deps.rs/repo/github/webrtc-rs/rtc/status.svg">
  </a>
- <a href="https://crates.io/crates/rtc">
-  <img src="https://img.shields.io/crates/v/rtc.svg">
+ <a href="https://crates.io/crates/rvoip-rtc">
+  <img src="https://img.shields.io/crates/v/rvoip-rtc.svg">
  </a>
- <a href="https://docs.rs/rtc">
-  <img src="https://docs.rs/rtc/badge.svg">
+ <a href="https://docs.rs/rvoip-rtc">
+  <img src="https://docs.rs/rvoip-rtc/badge.svg">
  </a>
  <a href="https://doc.rust-lang.org/1.6.0/complement-project-faq.html#why-dual-mitasl2-license">
   <img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue" alt="License: MIT/Apache 2.0">
@@ -104,7 +110,7 @@ Additional methods for external control:
 ### Event Loop Example
 
 ```rust
-use rtc::peer_connection::RTCPeerConnection;
+use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
 use rtc::peer_connection::state::RTCPeerConnectionState;
@@ -120,7 +126,7 @@ use bytes::BytesMut;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Setup peer connection
     let config = RTCConfigurationBuilder::new().build();
-    let mut pc = RTCPeerConnection::new(config)?;
+    let mut pc = RTCPeerConnectionBuilder::new().with_configuration(config).build()?;
 
     // Signaling: Create offer and set local description
     let offer = pc.create_offer(None)?;
@@ -251,10 +257,12 @@ The repository includes comprehensive examples demonstrating various use cases:
 - [stats](https://github.com/webrtc-rs/rtc/tree/master/examples/examples/stats) - Gives statistical
   information about a PeerConnection
 
-Run an example:
+This crate ships no examples of its own (`autoexamples = false`); the upstream
+sans-I/O examples are linked above. The async `rvoip-webrtc-stack` crate in this
+workspace carries the equivalent Tokio example:
 
 ```bash
-cargo run --example data-channels-answer
+cargo run -p rvoip-webrtc-stack --example data-channels-answer
 ```
 
 ## Architecture
@@ -264,7 +272,7 @@ RTC is built from composable crates, each implementing a specific protocol:
 ## RTC Crates
 
 <p align="center">
-    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">RTC<a href="https://crates.io/crates/rtc"><img src="https://img.shields.io/crates/v/rtc.svg"></a>
+    <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">RTC<a href="https://crates.io/crates/rvoip-rtc"><img src="https://img.shields.io/crates/v/rvoip-rtc.svg"></a>
     <br>
     <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">Media<a href="https://crates.io/crates/rtc-media"><img src="https://img.shields.io/crates/v/rtc-media.svg"></a>
     <img src="https://raw.githubusercontent.com/webrtc-rs/webrtc-rs.github.io/master/res/check.png">Interceptor<a href="https://crates.io/crates/rtc-interceptor"><img src="https://img.shields.io/crates/v/rtc-interceptor.svg"></a>
@@ -400,8 +408,8 @@ cargo test
 # Build documentation
 cargo doc --open
 
-# Run examples
-cargo run --example data-channels-answer
+# Run the equivalent example from the async workspace crate
+cargo run -p rvoip-webrtc-stack --example data-channels-answer
 ```
 
 ## Semantic Versioning

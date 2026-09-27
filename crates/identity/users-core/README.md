@@ -30,8 +30,8 @@ Users-Core provides internal user management and JWT token issuance for the RVoI
          │                                         ▲
          ▼                                         │
 ┌─────────────────┐                       ┌────────┴────────┐
-│     SQLite      │                       │ Session-Core-V2 │
-└─────────────────┘                       │                 │
+│ SQLite/Postgres │                       │    rvoip-sip    │
+└─────────────────┘                       │  (rvoip-core)   │
                                           │ • SIP REGISTER  │
                                           │ • Uses tokens   │
                                           └─────────────────┘
@@ -40,7 +40,8 @@ Users-Core provides internal user management and JWT token issuance for the RVoI
 **Key Points:**
 - Users-Core **issues** JWT tokens but doesn't validate them
 - Auth-Core **validates** all tokens (from users-core, OAuth2, etc.)
-- Session-Core-V2 calls Auth-Core for validation, not Users-Core directly
+- `rvoip-sip` and `rvoip-core` call Auth-Core (`BearerValidator`) for
+  validation, not Users-Core directly
 - This separation allows flexible authentication strategies
 
 ## Installation
@@ -49,11 +50,19 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rvoip-users-core = "0.2"
+rvoip-users-core = "0.3.10"
 
 # If you want to use the REST API client examples
-rvoip-users-core = { version = "0.2", features = ["client"] }
+rvoip-users-core = { version = "0.3.10", features = ["client"] }
 ```
+
+Cargo features (all off by default):
+
+- `postgres` — PostgreSQL backend via `sqlx-postgres` (SQLite is always
+  available).
+- `auth-core` — the `UsersCoreAuthProvider` bridge that implements the
+  `rvoip-auth-core` provider traits in-process.
+- `client` — `reqwest` for the REST API demo client example.
 
 ### 0.2 migration
 
@@ -80,7 +89,7 @@ use users_core::{init, CreateUserRequest, UsersConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize with default config (uses sqlite://users.db)
+    // Initialize with default config (uses sqlite://users.db?mode=rwc)
     let config = UsersConfig::default();
     let auth = init(config).await?;
     
@@ -108,8 +117,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 The easiest way to get started is using the built-in REST API:
 
 ```bash
-# Run the example REST API server
-cargo run --example rest_api_server
+# Run the example REST API server (client needs the `client` feature)
+cargo run --example rest_api_demo_server
+cargo run --features client --example rest_api_demo_client
 
 # Or run the interactive demo (on port 8082)
 cd examples/rest_api_demo
@@ -151,8 +161,8 @@ let user = auth.create_user(CreateUserRequest {
 
 // Update user
 auth.user_store().update_user(&user.id, UpdateUserRequest {
-    email: Some(Some("newemail@example.com".to_string())),
-    display_name: Some(Some("Bob Smith".to_string())),
+    email: Some("newemail@example.com".to_string()),
+    display_name: Some("Bob Smith".to_string()),
     roles: Some(vec!["user".to_string(), "admin".to_string()]),
     active: None,
 }).await?;
@@ -274,11 +284,13 @@ require_tls = true           # If true, refuse to start without TLS
 For production, always use HTTPS:
 
 ```bash
-# Generate development certificates
-./scripts/generate_dev_certs.sh
+# Generate a self-signed development certificate (example only; use real
+# certificates in production)
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+    -keyout dev-key.pem -out dev-cert.pem -subj "/CN=localhost"
 
 # Enable TLS in your configuration
-# Set [users_core.tls] enabled = true
+# Set [users_core.tls] enabled = true and point cert_path / key_path at those files
 ```
 
 ## Examples
@@ -615,18 +627,34 @@ Users-Core is a critical component of RVoIP's authentication architecture:
 
 ### Integration with Auth-Core
 
-Auth-Core should be configured to trust tokens issued by users-core:
+There are two ways to let auth-core trust tokens issued by users-core.
+
+Out of process, point auth-core's `JwksJwtValidator` at the users-core JWKS
+endpoint (`/auth/jwks.json`):
 
 ```rust
-// In auth-core configuration
-auth_core.add_trusted_issuer(TrustedIssuer {
-    issuer: "https://users.rvoip.local",
-    jwks_uri: Some("http://users-core:8081/auth/jwks.json"),
-    audiences: vec!["rvoip-api", "rvoip-sip"],
-})?;
+use rvoip_auth_core::JwksJwtValidator;
+use url::Url;
+
+let validator = JwksJwtValidator::new(Url::parse("http://users-core:8081/auth/jwks.json")?)
+    .with_issuer(["https://users.rvoip.local"])
+    .with_audience(["rvoip-api", "rvoip-sip"]);
 ```
 
-### Usage in Session-Core-V2
+In process, enable the `auth-core` feature and wrap the running service in
+`UsersCoreAuthProvider`, which implements auth-core's `BearerValidator`,
+`TokenRevocationChecker`, `PasswordVerifier`, `ApiKeyVerifier`, and
+`DigestSecretProvider` traits directly against the users-core store:
+
+```rust
+use std::sync::Arc;
+use users_core::{init, UsersConfig, UsersCoreAuthProvider};
+
+let auth = init(UsersConfig::default()).await?;
+let provider = UsersCoreAuthProvider::new(Arc::new(auth));
+```
+
+### Usage from rvoip-sip
 
 ```rust
 // SIP REGISTER includes bearer token
@@ -634,14 +662,15 @@ REGISTER sip:example.com SIP/2.0
 Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...
 ```
 
-Session-Core-V2 then validates this token via Auth-Core, not directly with Users-Core.
+`rvoip-sip` (on top of `rvoip-core`) then validates this token through the
+configured auth-core `BearerValidator`, not directly with Users-Core.
 
 ## Troubleshooting
 
 **Database already exists error?**
 ```bash
 rm users.db  # Remove old database
-cargo run --example rest_api_server  # Start fresh
+cargo run --example rest_api_demo_server  # Start fresh
 ```
 
 **Can't validate tokens?**

@@ -81,6 +81,25 @@ Local live tests use `RVOIP_REDIS_URL`, for example:
 RVOIP_REDIS_URL=redis://127.0.0.1:6379 cargo test -p rvoip-redis
 ```
 
+## MOQT session leases (`moq` feature)
+
+The optional `moq` Cargo feature (`moq = ["dep:rvoip-moq"]`) adds
+`RedisMoqSessionLeaseStore`, a Redis-backed implementation of
+`rvoip_moq::MoqSessionLeaseStore` for durable MOQT admission leases.
+Construct it with `RedisMoqSessionLeaseStore::new(redis_url)` or
+`from_config(RedisMoqSessionLeaseConfig)`; the config exposes
+`with_namespace` for tenant scoping. Redis atomically enforces the
+tenant-scoped active-session quota, and every key touched by one admission
+operation shares a tenant hash tag. A relay still owns its own process-global
+permits; this store does not approximate a cross-tenant global limit.
+
+The live test runs against `RVOIP_REDIS_URL`:
+
+```sh
+RVOIP_REDIS_URL=redis://127.0.0.1:6379 \
+    cargo test -p rvoip-redis --features moq --test moq_session_lease_live
+```
+
 ## Redis Cluster
 
 Single-node construction remains unchanged through `RedisAuthProvider::new`
