@@ -836,8 +836,8 @@ fn non_transaction_response_builders_enter_the_state_machine_lane() {
             "GenericResponseBuilder non-transaction branch bypassed YAML via {wire}"
         );
     }
-    assert!(non_transaction.contains(".reject_call_with_extras"));
-    assert!(non_transaction.contains(".redirect_call_with_extras"));
+    assert!(non_transaction.contains(".reject_incoming_with_extras"));
+    assert!(non_transaction.contains(".redirect_incoming_with_extras"));
 }
 
 #[test]
@@ -1550,8 +1550,11 @@ fn incoming_call_control_capability_is_causal_and_generation_qualified() {
         .contains("lifecycle_handle:Option<crate::session_registry::SessionRegistryHandle>"));
     assert!(dispatch.contains("accept_call_exact(exact_handle)"));
     assert!(dispatch.contains("accept_call_with_sdp_exact(exact_handle,sdp)"));
-    assert!(dispatch.contains("reject_call_exact(exact_handle,status,&reason)"));
-    assert!(dispatch.contains("redirect_call_exact(exact_handle,302,vec![target])"));
+    // `reject_incoming_exact` / `redirect_incoming_exact` wrap the exact helper
+    // and add `finalize_local_rejection_exact`; the exact-lifecycle lane is the
+    // invariant, the wrapper name is not.
+    assert!(dispatch.contains("reject_incoming_exact(exact_handle,status,&reason)"));
+    assert!(dispatch.contains("redirect_incoming_exact(exact_handle,302,vec![target])"));
     assert!(dispatch.contains("SessionHandle::new_captured("));
     assert!(dispatch.contains("set_coordinator_captured("));
     assert!(!dispatch.contains("SessionHandle::new("));

@@ -283,6 +283,12 @@ pub struct SessionStateCold {
     /// refresh and unregister requests reuse it without turning it into the
     /// coordinator-wide route for unrelated dialogs.
     pub(crate) registration_outbound_proxy_uri: Option<rvoip_sip_core::types::uri::Uri>,
+    /// Application-authorized trunk policy, immutable once SDP has been answered.
+    /// Kept on the exact session lifetime so shared listeners cannot leak policy.
+    /// Read once per offer/answer, so it lives in the cold block: adding it to
+    /// the hot struct regressed the layout tripwire without being on the
+    /// per-packet path.
+    pub(crate) inbound_audio_codecs: Option<Vec<String>>,
     pub registration_service_route: Option<Vec<String>>,
     pub registration_pub_gruu: Option<String>,
     pub registration_temp_gruu: Option<String>,
@@ -337,9 +343,6 @@ pub struct SessionState {
     pub local_sdp: Option<String>,
     pub remote_sdp: Option<String>,
     pub negotiated_config: Option<NegotiatedConfig>,
-    /// Application-authorized trunk policy, immutable once SDP has been answered.
-    /// Kept on the exact session lifetime so shared listeners cannot leak policy.
-    pub(crate) inbound_audio_codecs: Option<Vec<String>>,
     /// Negotiated media security, populated after SRTP contexts install.
     pub media_security: Option<MediaSecurityState>,
     /// Stable numeric SDP origin session id used in the `o=` line for
@@ -939,7 +942,6 @@ impl SessionState {
             local_sdp: None,
             remote_sdp: None,
             negotiated_config: None,
-            inbound_audio_codecs: None,
             media_security: None,
             sdp_origin_session_id,
             sdp_origin_version: 0,
@@ -1020,6 +1022,7 @@ impl SessionState {
                 registration_next_refresh_at: None,
                 registration_last_failure: None,
                 registration_outbound_proxy_uri: None,
+                inbound_audio_codecs: None,
                 registration_service_route: None,
                 registration_pub_gruu: None,
                 registration_temp_gruu: None,

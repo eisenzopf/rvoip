@@ -110,6 +110,29 @@
   candidates through instead of using the loopback WebRTC profile, so Chrome's
   anonymised IPv4 host candidates pair and ICE completes.
 
+### Bridge cutover fence and glare classification
+
+- The media-graph forwarding gate's cutover mutex was only ever taken by
+  `set_enabled`; the sink worker checked the flag and then called `send()`,
+  which reserves and commits in one step, so a frame parked waiting for
+  target capacity could be published after quiesce. The unticketed legacy
+  sink now reserves first, races that reservation against the quiesce
+  signal, and re-reads the flag under the cutover mutex before committing.
+  A worker either publishes strictly before the cutover or abandons its
+  frame. Routes that buffer while disabled keep their send; ticketed peer
+  routes already fenced on generation and are unchanged.
+- A bridge-destination replacement that loses a race to a concurrent
+  contender now reports `BridgeNotFound` at every detection point (retired
+  peer ticket, quiescence observing a changed peer, or a commit whose
+  generation moved), matching the registry lookup and the reservation
+  step. Callers get one classifiable retry signal instead of three. A
+  quiescence timeout and a data route that ended mid-replacement remain
+  `InvalidState`; a bridge that was never transport fenced remains
+  `NotImplemented`.
+- `SessionState::inbound_audio_codecs` moved from the hot struct to the
+  copy-on-write cold block. It is read once per offer/answer, and keeping
+  it hot had regressed the SIP hot-layout tripwire.
+
 ### Added
 
 - Added Jambonz OSS 0.9.9 as a mandatory external SIP interoperability peer,
