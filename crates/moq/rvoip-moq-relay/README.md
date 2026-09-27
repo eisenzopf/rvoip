@@ -6,8 +6,9 @@ All subscriptions are deduplicated and cached, so that a single publisher can se
 ## Cargo features
 
 The crate has no default features. The `relay-runtime` feature provides the
-complete relay library and binary. Applications that only implement relay
-admission can depend on the crate as-is and omit the HTTP, relay, and metrics
+embeddable relay runtime (capacity, sessions, producers, consumers,
+coordinator, diagnostics, metrics facade). Applications that only implement
+relay admission can depend on the crate as-is and omit the relay and metrics
 runtime:
 
 ```toml
@@ -16,8 +17,13 @@ rvoip-moq-relay = "0.3.10"
 
 This admission-only surface exports `SessionAdmission`, `AdmissionLease`,
 `AdmissionSessionId`, and their supporting request, decision, and lifecycle
-types. The `moq-relay-ietf` binary requires `relay-runtime`. Enabling
-`metrics-prometheus` also enables `relay-runtime`.
+types. Enabling `metrics-prometheus` also enables `relay-runtime`.
+
+The published package is embeddable only: the upstream HTTP API, web
+listener, and `moq-relay-ietf` CLI binary are retained in the source tree for
+attribution but are not built by any feature (`autobins = false`, and a
+`feature_policy` test keeps the HTTP and CLI dependencies out). Embed `Relay`
+in your own process instead.
 
 ## Usage
 
