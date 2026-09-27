@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Release workers move to AWS
+
+- The `remote-release`, `remote-preflight`, and `remote-diagnostic` profiles
+  now run their ephemeral workers on EC2 (`m5.large` / `m5.xlarge` /
+  `m5.2xlarge`, gp3 root volumes) in a dedicated release VPC instead of
+  Google Compute Engine. Resource classes are renamed `gcp-*` to `ec2-*`,
+  the planner emits `aws_matrix` / `aws_shard_count`, and evidence, logs,
+  and the performance prebuild cache live in S3 (`s3://`) rather than GCS.
+- `scripts/release/aws_fanout.py` replaces `gcp_fanout.py`. It keeps the
+  `prepare`, `verify`, and `early-failure-decision` contracts (schemas
+  `rvoip-ec2-release-fanout-v1` / `rvoip-ec2-release-shard-v1`, treating
+  `stopping`, `stopped`, `shutting-down`, and `terminated` as finished) and
+  adds `user-data`, which renders the gzip-compressed EC2 user-data that
+  writes `/etc/rvoip-release.env`, installs the reviewed startup and
+  shutdown scripts, and registers the `rvoip-release-shutdown.service`
+  checkpoint.
+- The controller authenticates with GitHub OIDC role assumption; no cloud
+  key is stored in GitHub. The GCP qualification pilot workflow and its
+  startup script are removed.
+- The release environment identifier becomes
+  `rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5`,
+  so every environment-sensitive gate runs fresh on the first AWS
+  qualification. Historical GCP qualification evidence under
+  `crates/sip/rvoip-sip/docs/` is unchanged. See
+  `docs/AWS_RELEASE_WORKERS.md`.
+
 ### Cloudflare Tunnel (Parley demo)
 
 - `deploy/cloudflare/config.yml` and `scripts/run-cloudflare-tunnel.sh` front a

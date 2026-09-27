@@ -243,80 +243,63 @@ class WorkflowPolicyTests(unittest.TestCase):
                 next_step = text.index(next_step_name, dependency_step)
                 self.assertIn("libvpx-dev", text[dependency_step:next_step])
 
-    def test_parallel_gcp_workspace_is_ephemeral_and_fail_closed(self) -> None:
-        workflow = (ROOT / ".github/workflows/gcp-qualification-pilot.yml").read_text()
-        startup = (ROOT / "infra/release-runners/gcp-pilot-startup.sh").read_text()
-
-        self.assertIn("workspace-parallel", workflow)
-        self.assertIn("Verify parallel GCP capacity", workflow)
-        self.assertIn("Require every quota before creating workers", workflow)
-        self.assertIn("CPUS_ALL_REGIONS", workflow)
-        self.assertIn("SSD_TOTAL_GB", workflow)
-        self.assertIn("DISKS_TOTAL_GB", workflow)
-        self.assertIn("--boot-disk-auto-delete", workflow)
-        self.assertIn("Delete shard worker and attached disk", workflow)
-        self.assertIn('gcloud compute instances describe "$WORKER"', workflow)
-        self.assertIn("Sweep workers left by interrupted shard controllers", workflow)
-        self.assertIn("parallel GCP workers remain after cleanup", workflow)
-        self.assertIn("if: always() && steps.worker.outputs.name != ''", workflow)
-        self.assertIn("expected_shards", workflow)
-        self.assertIn("expected_packages", workflow)
-        self.assertIn("expected_sip_targets", workflow)
-        self.assertIn("a SIP integration target appears in more than one shard", workflow)
-        self.assertIn("sip_test_partitions.py", workflow)
-        self.assertIn('"id": "sip-core"', workflow)
-        self.assertIn('f"sip-integration-{index}"', workflow)
-        self.assertIn('"disk_size_gb": 200', workflow)
-        self.assertIn("publishing_attempted == false", workflow)
-        self.assertIn('"publishing_attempted": False', startup)
-        for profile in (
-            "workspace-policy",
-            "workspace-shard-test",
-            "workspace-shard-clippy",
-            "workspace-doctest",
-            "workspace-security-timing",
-            "workspace-sip-core",
-            "workspace-sip-integration",
-        ):
-            self.assertIn(profile, startup)
-
     def test_release_workers_install_interop_tools_only_for_interop(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
-        startup = (ROOT / "infra/release-runners/gcp-release-startup.sh").read_text()
-        fanout = (ROOT / "scripts/release/gcp_fanout.py").read_text()
+        startup = (ROOT / "infra/release-runners/aws-release-startup.sh").read_text()
+        fanout = (ROOT / "scripts/release/aws_fanout.py").read_text()
 
         self.assertIn('resource_class="$(jq -r .resource_class', workflow)
-        self.assertIn("rvoip-resource-class=${resource_class}", workflow)
-        self.assertIn('RESOURCE_CLASS="$(metadata rvoip-resource-class)"', startup)
-        self.assertIn('"$RESOURCE_CLASS" == "gcp-interop"', startup)
-        self.assertIn('"$RESOURCE_CLASS" == "gcp-proxy-interop"', startup)
-        self.assertIn('"gcp-interop": "n2-standard-4"', fanout)
-        self.assertIn('"gcp-proxy-interop": "n2-standard-2"', fanout)
-        self.assertIn('"gcp-performance": "n2-standard-8"', fanout)
-        self.assertIn('"gcp-performance-soak": "n2-standard-4"', fanout)
-        self.assertIn('"gcp-performance-soak-long": "n2-standard-8"', fanout)
+        self.assertIn("python3 scripts/release/aws_fanout.py user-data", workflow)
+        self.assertIn("source /etc/rvoip-release.env", startup)
+        self.assertIn('"$RESOURCE_CLASS" == "ec2-interop"', startup)
+        self.assertIn('"$RESOURCE_CLASS" == "ec2-proxy-interop"', startup)
+        self.assertIn('"ec2-interop": "m5.xlarge"', fanout)
+        self.assertIn('"ec2-proxy-interop": "m5.large"', fanout)
+        self.assertIn('"ec2-performance": "m5.2xlarge"', fanout)
+        self.assertIn('"ec2-performance-soak": "m5.xlarge"', fanout)
+        self.assertIn('"ec2-performance-soak-long": "m5.2xlarge"', fanout)
         self.assertIn("sip-tester", startup)
         self.assertIn("tshark", startup)
         self.assertIn("docker-compose-v2", startup)
-        self.assertIn('",$GATES," == *",perf.sipp-parity,"*', startup)
-        self.assertIn('",$GATES," == *",preflight.performance-01,"*', startup)
-        self.assertGreaterEqual(startup.count("command -v sipp >/dev/null"), 2)
-        self.assertIn("command -v tshark >/dev/null", startup)
-        self.assertIn("docker compose version >/dev/null", startup)
-        self.assertIn("ulimit -n 262144", startup)
-        self.assertIn('test "$(ulimit -n)" -ge 262144', startup)
-        self.assertIn("sysctl -w net.core.rmem_max=67108864", startup)
-        self.assertIn("sysctl -w net.core.wmem_max=67108864", startup)
-        self.assertIn("-name '*.jsonl'", startup)
-        self.assertNotRegex(startup, r"apt-get install[^\n]*\bsipp\b")
 
-    def test_release_workers_use_a_verified_fail_open_gcs_compiler_cache(self) -> None:
+    def test_release_workflow_is_ephemeral_and_fail_closed_on_aws(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
-        startup = (ROOT / "infra/release-runners/gcp-release-startup.sh").read_text()
 
-        self.assertIn("RVOIP_GCP_CACHE_BUCKET", workflow)
-        self.assertIn("rvoip-cache-bucket=${CACHE_BUCKET}", workflow)
-        self.assertIn('CACHE_BUCKET="$(metadata rvoip-cache-bucket)"', startup)
+        for job in ("preflight-aws", "gate-aws", "cleanup-aws"):
+            self.assertIn(job, workflow)
+        for step in (
+            "Require all compute and storage quota before creating workers",
+            "Create every ephemeral release worker concurrently",
+            "Wait for every immutable worker result",
+            "Download and verify every shard evidence bundle",
+            "Terminate all workers and root volumes",
+            "Sweep workers left by interrupted controllers",
+        ):
+            self.assertIn(step, workflow)
+        self.assertIn(
+            "aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd",
+            workflow,
+        )
+        self.assertIn(
+            "role-to-assume: ${{ vars.RVOIP_AWS_PROVISIONER_ROLE_ARN }}", workflow
+        )
+        self.assertIn("--instance-initiated-shutdown-behavior terminate", workflow)
+        self.assertIn("HttpTokens=required", workflow)
+        self.assertIn("InstanceMetadataTags=enabled", workflow)
+        self.assertIn("L-1216C47A", workflow)
+        self.assertIn("DeleteOnTermination=true", workflow)
+        self.assertIn("VolumeType=gp3", workflow)
+        for line in workflow.splitlines():
+            for forbidden in ("gcloud", "gs://", "google-github-actions"):
+                self.assertNotIn(forbidden, line, line)
+
+    def test_release_workers_use_a_verified_fail_open_s3_compiler_cache(self) -> None:
+        workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
+        startup = (ROOT / "infra/release-runners/aws-release-startup.sh").read_text()
+
+        self.assertIn("RVOIP_AWS_CACHE_BUCKET", workflow)
+        self.assertIn('--env "RVOIP_CACHE_BUCKET=${CACHE_BUCKET}"', workflow)
+        self.assertIn('CACHE_BUCKET="$RVOIP_CACHE_BUCKET"', startup)
         self.assertIn("SCCACHE_VERSION=0.15.0", startup)
         self.assertIn(
             "SCCACHE_SHA256=782d2b5dd7ae0a55ebe368ab258114d0928d019ac2d949ab85d5d02f3926709e",
@@ -324,8 +307,10 @@ class WorkflowPolicyTests(unittest.TestCase):
         )
         self.assertIn("--show-error --location", startup)
         self.assertIn("sha256sum --check --status", startup)
-        self.assertIn("SCCACHE_MULTILEVEL_CHAIN=disk,gcs", startup)
-        self.assertIn("SCCACHE_GCS_RW_MODE=READ_WRITE", startup)
+        self.assertIn("SCCACHE_MULTILEVEL_CHAIN=disk,s3", startup)
+        self.assertIn('SCCACHE_BUCKET="$CACHE_BUCKET"', startup)
+        self.assertIn('SCCACHE_REGION="$AWS_REGION"', startup)
+        self.assertIn("SCCACHE_S3_USE_SSL=true", startup)
         self.assertIn("RUSTC_WRAPPER=sccache", startup)
         self.assertIn("unset RUSTC_WRAPPER", startup)
         self.assertIn("continuing with direct rustc", startup)
@@ -333,45 +318,52 @@ class WorkflowPolicyTests(unittest.TestCase):
 
     def test_performance_workers_consume_one_exact_prebuilt_bundle(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
-        startup = (ROOT / "infra/release-runners/gcp-release-startup.sh").read_text()
+        startup = (ROOT / "infra/release-runners/aws-release-startup.sh").read_text()
         builder = (
-            ROOT / "infra/release-runners/gcp-performance-prebuild-startup.sh"
+            ROOT / "infra/release-runners/aws-performance-prebuild-startup.sh"
         ).read_text()
         helper = (ROOT / "scripts/release/prebuilt_performance.py").read_text()
 
         self.assertIn("Build selected performance executables once", workflow)
-        self.assertIn("--machine-type n2-standard-32", workflow)
-        self.assertIn("--boot-disk-type pd-balanced", workflow)
+        self.assertIn("--instance-type m5.8xlarge", workflow)
+        self.assertIn(
+            "'DeviceName=/dev/sda1,Ebs={VolumeSize=200,VolumeType=gp3,DeleteOnTermination=true}'",
+            workflow,
+        )
         self.assertLess(
             workflow.index("Build selected performance executables once"),
             workflow.index("Create every ephemeral release worker concurrently"),
         )
-        self.assertIn("rvoip-prebuilt-uri=${PREBUILT_URI}", workflow)
-        self.assertIn("rvoip-prebuilt-sha256=${PREBUILT_SHA256}", workflow)
+        self.assertIn('--env "RVOIP_PREBUILT_URI=${PREBUILT_URI}"', workflow)
+        self.assertIn('--env "RVOIP_PREBUILT_SHA256=${PREBUILT_SHA256}"', workflow)
         self.assertIn("install-bundle", startup)
         self.assertIn("RVOIP_PERF_PREBUILT_MANIFEST", startup)
         self.assertIn(
-            'run_bundle_prefix="gs://${BUCKET}/release/${RUN_ID}/prebuild/"',
+            'run_bundle_prefix="s3://${BUCKET}/release/${RUN_ID}/prebuild/"',
             startup,
         )
         self.assertIn(
-            'cache_bundle_prefix="gs://${BUCKET}/release-cache/performance-prebuilt-v1/"',
+            'cache_bundle_prefix="s3://${BUCKET}/release-cache/performance-prebuilt-v1/"',
             startup,
         )
-        self.assertIn("rvoip-external-memory-diagnostics", workflow)
+        self.assertIn(
+            '--env "RVOIP_EXTERNAL_MEMORY_DIAGNOSTICS=${EXTERNAL_MEMORY_DIAGNOSTICS}"',
+            workflow,
+        )
         self.assertIn(
             "inputs.profile == 'remote-diagnostic' && '1' || '0'", workflow
         )
         self.assertIn("capture_external_memory", startup)
         self.assertIn("AnonHugePages", startup)
         self.assertIn("thp_collapse_alloc", startup)
-        self.assertIn("rvoip-mimalloc-allow-thp", startup)
+        self.assertIn('MIMALLOC_ALLOW_THP_OVERRIDE="${RVOIP_MIMALLOC_ALLOW_THP:-}"', startup)
         self.assertIn('export MIMALLOC_ALLOW_THP="$MIMALLOC_ALLOW_THP_OVERRIDE"', startup)
         self.assertIn(
             '"/bundles/${PREBUILT_SHA256}.tar.gz"',
             startup,
         )
         self.assertIn("performance-prebuilt.tar.gz", builder)
+        self.assertIn('"schema": "rvoip-ec2-performance-prebuild-result-v1"', builder)
         self.assertIn('download "$MANIFEST_OBJECT"', builder)
         self.assertIn("performance-manifest-readback.json", builder)
         self.assertIn("publishing_attempted", builder)
@@ -389,7 +381,7 @@ class WorkflowPolicyTests(unittest.TestCase):
     def test_exact_candidate_performance_bundle_is_reused_fail_closed(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
         builder = (
-            ROOT / "infra/release-runners/gcp-performance-prebuild-startup.sh"
+            ROOT / "infra/release-runners/aws-performance-prebuild-startup.sh"
         ).read_text()
         helper = (ROOT / "scripts/release/prebuilt_performance.py").read_text()
 
@@ -398,10 +390,10 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("--cache-key", workflow)
         self.assertLess(
             workflow.index("cached-result.json"),
-            workflow.index("gcloud compute instances create \"$builder\""),
+            workflow.index("--instance-type m5.8xlarge"),
         )
-        self.assertIn("rvoip-prebuild-cache-key=${cache_key}", workflow)
-        self.assertIn('CACHE_KEY="$(metadata rvoip-prebuild-cache-key)"', builder)
+        self.assertIn('--env "RVOIP_PREBUILD_CACHE_KEY=${cache_key}"', workflow)
+        self.assertIn('CACHE_KEY="$RVOIP_PREBUILD_CACHE_KEY"', builder)
         self.assertIn("bundles/${BUNDLE_SHA}.tar.gz", builder)
         self.assertIn("manifests/${MANIFEST_SHA}.json", builder)
         self.assertIn("ensure_content_addressed", builder)
@@ -411,11 +403,11 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("cache_key_sha256", helper)
         self.assertIn("outside the expected cache namespace", helper)
 
-    def test_gcp_release_builds_use_the_versioned_lld_environment(self) -> None:
+    def test_ec2_release_builds_use_the_versioned_lld_environment(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
-        worker = (ROOT / "infra/release-runners/gcp-release-startup.sh").read_text()
+        worker = (ROOT / "infra/release-runners/aws-release-startup.sh").read_text()
         builder = (
-            ROOT / "infra/release-runners/gcp-performance-prebuild-startup.sh"
+            ROOT / "infra/release-runners/aws-performance-prebuild-startup.sh"
         ).read_text()
 
         self.assertIn("prebuilt-perf-v2-lld", workflow)
@@ -427,20 +419,24 @@ class WorkflowPolicyTests(unittest.TestCase):
                 self.assertIn('RUSTFLAGS="-C link-arg=-fuse-ld=lld"', startup)
                 self.assertIn("rvoip-release-v2-lld", startup)
 
-    def test_gcp_artifact_uploads_stream_regular_files(self) -> None:
+    def test_ec2_artifact_uploads_stream_regular_files(self) -> None:
         for relative in (
-            "infra/release-runners/gcp-performance-prebuild-startup.sh",
-            "infra/release-runners/gcp-release-startup.sh",
-            "infra/release-runners/gcp-pilot-startup.sh",
+            "infra/release-runners/aws-performance-prebuild-startup.sh",
+            "infra/release-runners/aws-release-startup.sh",
+            "infra/release-runners/aws-release-shutdown.sh",
         ):
             startup = (ROOT / relative).read_text()
             with self.subTest(startup=relative):
-                self.assertIn('--upload-file "${source}"', startup)
+                self.assertIn(
+                    'aws s3 cp --only-show-errors "$source" "s3://${BUCKET}/${object}"',
+                    startup,
+                )
                 self.assertNotIn("--data-binary", startup)
+                self.assertNotIn("--upload-file", startup)
 
     def test_release_infrastructure_preflight_is_full_shape_and_non_publishing(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
-        startup = (ROOT / "infra/release-runners/gcp-release-startup.sh").read_text()
+        startup = (ROOT / "infra/release-runners/aws-release-startup.sh").read_text()
         probe = (
             ROOT / "infra/release-runners/release-infrastructure-preflight.sh"
         ).read_text()
@@ -454,19 +450,22 @@ class WorkflowPolicyTests(unittest.TestCase):
             "Require protected main candidate or trusted diagnostic branch head",
             workflow,
         )
-        self.assertIn("RVOIP_GCP_WORKLOAD_IDENTITY_PROVIDER", workflow)
-        self.assertNotIn("RVOIP_GCP_PILOT_PROVIDER", workflow)
+        self.assertIn("RVOIP_AWS_PROVISIONER_ROLE_ARN", workflow)
+        self.assertNotIn("RVOIP_GCP_", workflow)
+        self.assertNotIn("pilot", workflow)
         self.assertIn('export RVOIP_RELEASE_RESOURCE_CLASS="$RESOURCE_CLASS"', startup)
         self.assertIn('export RVOIP_RELEASE_CANDIDATE="$CANDIDATE"', startup)
         self.assertIn('export RVOIP_RELEASE_GATES="$GATES"', startup)
         self.assertIn("sysctl -w net.core.rmem_max=67108864", startup)
         self.assertIn("sysctl -w net.core.wmem_max=67108864", startup)
-        self.assertEqual(workflow.count('--min-cpu-platform "$MIN_CPU_PLATFORM"'), 2)
-        self.assertIn("MIN_CPU_PLATFORM: Intel Cascade Lake", workflow)
-        self.assertIn("n2-cascade-lake", workflow)
-        self.assertIn("expected 45 publishable workspace packages", probe)
-        self.assertIn("gcp-performance|gcp-performance-soak-long", probe)
-        self.assertIn("gcp-proxy-interop", probe)
+        self.assertEqual(workflow.count("aws ec2 run-instances"), 2)
+        self.assertIn(
+            "RELEASE_ENVIRONMENT_ID: rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5",
+            workflow,
+        )
+        self.assertIn("expected 46 publishable workspace packages", probe)
+        self.assertIn("ec2-performance|ec2-performance-soak-long", probe)
+        self.assertIn("ec2-proxy-interop", probe)
         self.assertIn("for _ in range(4096)", probe)
         self.assertIn('test "$NOFILE_SOFT" -ge 262144', probe)
         self.assertIn('test "$RMEM_MAX" -ge 8388608', probe)
@@ -572,26 +571,38 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("Protected qualification run and full evidence", release)
         self.assertIn('--notes "$release_notes"', release)
 
-    def test_release_gcp_workers_do_not_consume_one_github_job_each(self) -> None:
+    def test_release_ec2_workers_do_not_consume_one_github_job_each(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
-        controller = workflow.split("\n  gate-gcp:\n", maxsplit=1)[1].split(
-            "\n  cleanup-gcp:\n", maxsplit=1
+        fanout = (ROOT / "scripts/release/aws_fanout.py").read_text()
+        startup = (ROOT / "infra/release-runners/aws-release-startup.sh").read_text()
+        shutdown = (ROOT / "infra/release-runners/aws-release-shutdown.sh").read_text()
+        controller = workflow.split("\n  gate-aws:\n", maxsplit=1)[1].split(
+            "\n  cleanup-aws:\n", maxsplit=1
         )[0]
         self.assertIn("Early failure cutoff", controller)
         self.assertIn("early-failure-decision", controller)
-        self.assertIn("gcloud compute instances stop", controller)
-        self.assertIn("gcp-release-shutdown.sh", controller)
+        self.assertIn("aws ec2 stop-instances", controller)
+        self.assertIn("aws-release-shutdown.sh", controller)
+        self.assertIn("stopped|terminated|shutting-down|stopping)", controller)
+        self.assertIn(
+            'TERMINAL_STATES = frozenset({"stopped", "terminated", "shutting-down", "stopping"})',
+            fanout,
+        )
 
         self.assertNotIn("strategy:", controller)
         self.assertNotIn("matrix: ${{ fromJSON", controller)
-        self.assertIn("Run all ephemeral GCP release shards", controller)
-        self.assertIn("gcp_fanout.py prepare", controller)
+        self.assertIn("Run all ephemeral EC2 release shards", controller)
+        self.assertIn("- GitHub controller jobs: 1", controller)
+        self.assertIn("aws_fanout.py prepare", controller)
         self.assertIn("Create every ephemeral release worker concurrently", controller)
         self.assertIn('pids+=("$!")', controller)
         self.assertIn("Wait for every immutable worker result", controller)
-        self.assertIn("gcp_fanout.py verify", controller)
-        self.assertIn("Delete all workers and attached disks", controller)
-        self.assertIn("release-gate-shard-gcp-controller", controller)
+        self.assertIn("aws_fanout.py verify", controller)
+        self.assertIn("Terminate all workers and root volumes", controller)
+        self.assertIn("release-gate-shard-aws-controller", controller)
+        self.assertIn('RESULT_SCHEMA = "rvoip-ec2-release-shard-v1"', fanout)
+        self.assertIn('"schema": "rvoip-ec2-release-shard-v1"', startup)
+        self.assertIn('"schema": "rvoip-ec2-release-shard-v1"', shutdown)
 
     def test_release_pbx_lifecycle_uses_tracked_templates(self) -> None:
         lifecycle = (ROOT / "infra/release-runners/interop-lifecycle.sh").read_text()

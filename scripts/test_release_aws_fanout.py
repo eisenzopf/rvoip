@@ -1,31 +1,35 @@
 from __future__ import annotations
 
+import base64
+import gzip
 import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import subprocess
 import tarfile
 import tempfile
 import unittest
 
 
-SCRIPT = Path(__file__).with_name("release") / "gcp_fanout.py"
-SPEC = importlib.util.spec_from_file_location("release_gcp_fanout", SCRIPT)
+SCRIPT = Path(__file__).with_name("release") / "aws_fanout.py"
+SPEC = importlib.util.spec_from_file_location("release_aws_fanout", SCRIPT)
 assert SPEC and SPEC.loader
 fanout = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(fanout)
 
 
-class GcpReleaseFanoutTests(unittest.TestCase):
+class AwsReleaseFanoutTests(unittest.TestCase):
     candidate = "c" * 40
 
     @staticmethod
     def matrix_entry(
         shard: str,
         *,
-        resource: str = "gcp-performance",
-        machine: str = "n2-standard-8",
+        resource: str = "ec2-performance",
+        machine: str = "m5.2xlarge",
         gates: str = "perf.one,perf.two",
         disk_size_gb: int = 200,
     ) -> dict[str, object]:
@@ -33,7 +37,7 @@ class GcpReleaseFanoutTests(unittest.TestCase):
             "id": shard,
             "resource_class": resource,
             "machine_type": machine,
-            "disk_type": "pd-standard",
+            "disk_type": "gp3",
             "disk_size_gb": disk_size_gb,
             "gates_csv": gates,
         }
@@ -42,11 +46,11 @@ class GcpReleaseFanoutTests(unittest.TestCase):
         return fanout.prepare_manifest(
             matrix={
                 "include": [
-                    self.matrix_entry("gcp-performance-1"),
+                    self.matrix_entry("ec2-performance-1"),
                     self.matrix_entry(
-                        "gcp-performance-soak-1",
-                        resource="gcp-performance-soak",
-                        machine="n2-standard-4",
+                        "ec2-performance-soak-1",
+                        resource="ec2-performance-soak",
+                        machine="m5.xlarge",
                         gates="perf.soak",
                     ),
                 ]
@@ -64,14 +68,14 @@ class GcpReleaseFanoutTests(unittest.TestCase):
                     self.matrix_entry("bounded"),
                     self.matrix_entry(
                         "long-soak",
-                        resource="gcp-performance-soak-long",
-                        machine="n2-standard-8",
+                        resource="ec2-performance-soak-long",
+                        machine="m5.2xlarge",
                         gates="perf.long-soak",
                     ),
                     self.matrix_entry(
                         "pbx-interop",
-                        resource="gcp-interop",
-                        machine="n2-standard-4",
+                        resource="ec2-interop",
+                        machine="m5.xlarge",
                         gates="interop.pbx",
                     ),
                 ]
@@ -118,18 +122,26 @@ class GcpReleaseFanoutTests(unittest.TestCase):
         workers = manifest["workers"]
         self.assertEqual(
             [worker["id"] for worker in workers],
-            ["gcp-performance-1", "gcp-performance-soak-1"],
+            ["ec2-performance-1", "ec2-performance-soak-1"],
         )
         self.assertEqual(
-            workers[0]["name"], "rvoip-rel-123456789-2-gcp-performance-1"
+            workers[0]["name"], "rvoip-rel-123456789-2-ec2-performance-1"
         )
-        self.assertEqual(workers[0]["prefix"], "release/123456789-2/gcp-performance-1")
+        self.assertEqual(workers[0]["prefix"], "release/123456789-2/ec2-performance-1")
         self.assertEqual(workers[0]["gates_b64"], "cGVyZi5vbmUscGVyZi50d28=")
         fanout.validate_manifest(manifest)
 
     def test_prepare_rejects_duplicate_shards_and_machine_downgrades(self) -> None:
-        duplicate = self.matrix_entry("gcp-performance-1")
-        with self.assertRaisesRegex(fanout.FanoutError, "duplicate GCP shard"):
+        duplicate = self.matrix_entry("ec2-performance-1")
+        with self.assertRaisesRegex(fanout.FanoutError, "255-character tag limit"):
+            fanout.prepare_manifest(
+                matrix={"include": [self.matrix_entry("a" * 48)]},
+                candidate=self.candidate,
+                environment_id="release-environment",
+                run_id="9" * 250,
+                run_attempt="1",
+            )
+        with self.assertRaisesRegex(fanout.FanoutError, "duplicate EC2 shard"):
             fanout.prepare_manifest(
                 matrix={"include": [duplicate, duplicate]},
                 candidate=self.candidate,
@@ -137,12 +149,12 @@ class GcpReleaseFanoutTests(unittest.TestCase):
                 run_id="1",
                 run_attempt="1",
             )
-        with self.assertRaisesRegex(fanout.FanoutError, "must use n2-standard-8"):
+        with self.assertRaisesRegex(fanout.FanoutError, "must use m5.2xlarge"):
             fanout.prepare_manifest(
                 matrix={
                     "include": [
                         self.matrix_entry(
-                            "gcp-performance-1", machine="n2-standard-4"
+                            "ec2-performance-1", machine="m5.xlarge"
                         )
                     ]
                 },
@@ -153,9 +165,9 @@ class GcpReleaseFanoutTests(unittest.TestCase):
             )
 
         proxy = self.matrix_entry(
-            "gcp-proxy-interop-1",
-            resource="gcp-proxy-interop",
-            machine="n2-standard-2",
+            "ec2-proxy-interop-1",
+            resource="ec2-proxy-interop",
+            machine="m5.large",
             gates="interop.remote-proxies.kamailio.rvoip-first.udp",
             disk_size_gb=100,
         )
@@ -169,7 +181,7 @@ class GcpReleaseFanoutTests(unittest.TestCase):
         self.assertEqual(manifest["required_vcpus"], 2)
         self.assertEqual(manifest["workers"][0]["disk_size_gb"], 100)
         proxy["disk_size_gb"] = 200
-        with self.assertRaisesRegex(fanout.FanoutError, "must use a 100 GB boot disk"):
+        with self.assertRaisesRegex(fanout.FanoutError, "must use a 100 GB root volume"):
             fanout.prepare_manifest(
                 matrix={"include": [proxy]},
                 candidate=self.candidate,
@@ -179,9 +191,9 @@ class GcpReleaseFanoutTests(unittest.TestCase):
             )
 
         long_soak = self.matrix_entry(
-            "gcp-performance-soak-long-1",
-            resource="gcp-performance-soak-long",
-            machine="n2-standard-8",
+            "ec2-performance-soak-long-1",
+            resource="ec2-performance-soak-long",
+            machine="m5.2xlarge",
             gates="perf.soak-candidate",
         )
         manifest = fanout.prepare_manifest(
@@ -192,8 +204,8 @@ class GcpReleaseFanoutTests(unittest.TestCase):
             run_attempt="1",
         )
         self.assertEqual(manifest["required_vcpus"], 8)
-        long_soak["machine_type"] = "n2-standard-4"
-        with self.assertRaisesRegex(fanout.FanoutError, "must use n2-standard-8"):
+        long_soak["machine_type"] = "m5.xlarge"
+        with self.assertRaisesRegex(fanout.FanoutError, "must use m5.2xlarge"):
             fanout.prepare_manifest(
                 matrix={"include": [long_soak]},
                 candidate=self.candidate,
@@ -304,24 +316,188 @@ class GcpReleaseFanoutTests(unittest.TestCase):
             bounded = next(
                 worker for worker in manifest["workers"] if worker["id"] == "bounded"
             )
-            states[bounded["name"]] = "TERMINATED"
+            for state in sorted(fanout.TERMINAL_STATES):
+                with self.subTest(state=state):
+                    states[bounded["name"]] = state
+                    decision = fanout.early_failure_decision(
+                        manifest=manifest, downloads=downloads, states=states
+                    )
+                    self.assertTrue(decision["should_stop"])
+                    self.assertEqual(decision["failed_shards"], ["bounded"])
+            states[bounded["name"]] = "running"
             decision = fanout.early_failure_decision(
                 manifest=manifest, downloads=downloads, states=states
             )
-            self.assertTrue(decision["should_stop"])
-            self.assertEqual(decision["failed_shards"], ["bounded"])
+            self.assertFalse(decision["should_stop"])
+            self.assertEqual(decision["early_settled"], 0)
 
     def test_instance_state_csv_is_strict(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "states.csv"
-            path.write_text("worker-1,RUNNING\nworker-2,TERMINATED\n")
+            path.write_text("worker-1,running\nworker-2,terminated\n")
             self.assertEqual(
                 fanout.load_instance_states(path),
-                {"worker-1": "RUNNING", "worker-2": "TERMINATED"},
+                {"worker-1": "running", "worker-2": "terminated"},
             )
             path.write_text("worker-1,RUNNING,extra\n")
-            with self.assertRaisesRegex(fanout.FanoutError, "invalid GCP"):
+            with self.assertRaisesRegex(fanout.FanoutError, "invalid EC2"):
                 fanout.load_instance_states(path)
+
+    def test_user_data_env_file_single_quotes_every_value(self) -> None:
+        env = {
+            "RVOIP_PREBUILT_URI": "s3://bucket/key",
+            "RVOIP_CANDIDATE": "it's 'quoted'",
+            "RVOIP_EMPTY": "",
+        }
+        rendered = fanout.render_env_file(env)
+        self.assertEqual(
+            rendered,
+            "RVOIP_CANDIDATE='it'\\''s '\\''quoted'\\'''\n"
+            "RVOIP_EMPTY=''\n"
+            "RVOIP_PREBUILT_URI='s3://bucket/key'\n",
+        )
+        # Every line is a valid shell assignment that round-trips the value.
+        for key, value in env.items():
+            with self.subTest(key=key):
+                self.assertEqual(
+                    subprocess.run(
+                        ["bash", "-c", f'{rendered}printf %s "${key}"'],
+                        capture_output=True,
+                        check=True,
+                        text=True,
+                    ).stdout,
+                    value,
+                )
+        script = fanout.render_user_data_script(
+            startup="#!/bin/bash\necho startup\n", shutdown=None, env=env
+        )
+        self.assertTrue(script.startswith("#!/bin/bash\n"))
+        self.assertIn("set -Eeuo pipefail", script)
+        self.assertIn("chmod 0600 /etc/rvoip-release.env", script)
+        self.assertIn("chmod 0755 /usr/local/lib/rvoip-release/startup.sh", script)
+        self.assertTrue(script.endswith("exec /usr/local/lib/rvoip-release/startup.sh\n"))
+        self.assertNotIn("rvoip-release-shutdown.service", script)
+        self.assertNotIn("shutdown.sh", script)
+        with self.assertRaisesRegex(fanout.FanoutError, "must match RVOIP_"):
+            fanout.render_env_file({"PATH": "/bin"})
+        with self.assertRaisesRegex(fanout.FanoutError, "must match RVOIP_"):
+            fanout.render_env_file({"RVOIP_lower": "x"})
+        with self.assertRaisesRegex(fanout.FanoutError, "newline"):
+            fanout.render_env_file({"RVOIP_X": "a\nb"})
+        with self.assertRaisesRegex(fanout.FanoutError, "KEY=VALUE"):
+            fanout.parse_env_assignment("RVOIP_X")
+        self.assertEqual(
+            fanout.parse_env_assignment("RVOIP_X=a=b"), ("RVOIP_X", "a=b")
+        )
+
+    def test_user_data_installs_shutdown_checkpoint_unit(self) -> None:
+        script = fanout.render_user_data_script(
+            startup="echo startup\n",
+            shutdown="echo shutdown\n",
+            env={"RVOIP_RUN_ID": "1-1"},
+        )
+        self.assertIn("chmod 0755 /usr/local/lib/rvoip-release/shutdown.sh", script)
+        unit_start = script.index("/etc/systemd/system/rvoip-release-shutdown.service")
+        unit = script[unit_start:]
+        for line in (
+            "[Unit]",
+            "Description=rvoip release shutdown checkpoint",
+            "DefaultDependencies=no",
+            "Before=shutdown.target",
+            "[Service]",
+            "Type=oneshot",
+            "RemainAfterExit=yes",
+            "ExecStart=/bin/true",
+            "ExecStop=/usr/local/lib/rvoip-release/shutdown.sh",
+            "TimeoutStopSec=180",
+            "[Install]",
+            "WantedBy=multi-user.target",
+            "systemctl daemon-reload",
+            "systemctl enable --now rvoip-release-shutdown.service",
+        ):
+            self.assertIn(line, unit)
+        self.assertLess(
+            script.index("systemctl enable --now"),
+            script.index("exec /usr/local/lib/rvoip-release/startup.sh"),
+        )
+        # Heredocs are quoted with one delimiter that no embedded line can close.
+        delimiters = {
+            line.split("<<'", 1)[1].rstrip("'")
+            for line in script.splitlines()
+            if "<<'" in line
+        }
+        self.assertEqual(len(delimiters), 1)
+        delimiter = delimiters.pop()
+        self.assertTrue(delimiter.startswith("RVOIP_USER_DATA_"))
+        self.assertEqual(script.count("<<'" + delimiter + "'"), 4)
+        # The delimiter is content-derived, so user-data is reproducible, and a
+        # script line that already spells it forces a different delimiter.
+        self.assertEqual(
+            fanout.heredoc_delimiter("echo a\n", "echo b\n"),
+            fanout.heredoc_delimiter("echo a\n", "echo b\n"),
+        )
+        collided = fanout.heredoc_delimiter(delimiter + "\n")
+        self.assertNotEqual(collided, delimiter)
+        self.assertNotIn(collided, (delimiter + "\n").splitlines())
+        base = fanout.heredoc_delimiter("x\n")
+        self.assertEqual(fanout.heredoc_delimiter("x\n", "y\n"), fanout.heredoc_delimiter("x\n", "y\n"))
+        self.assertTrue(base.startswith("RVOIP_USER_DATA_"))
+
+    def test_user_data_round_trips_through_gzip_and_enforces_the_limit(self) -> None:
+        startup = "#!/bin/bash\n" + "echo startup line\n" * 50
+        env = {"RVOIP_GATES_B64": "cGVyZi5vbmU="}
+        payload = fanout.build_user_data(startup=startup, shutdown=None, env=env)
+        self.assertEqual(payload[:2], b"\x1f\x8b")
+        self.assertLessEqual(len(payload), fanout.USER_DATA_MAX_BYTES)
+        self.assertEqual(
+            gzip.decompress(payload).decode(),
+            fanout.render_user_data_script(startup=startup, shutdown=None, env=env),
+        )
+        incompressible = base64.b64encode(os.urandom(20000)).decode() + "\n"
+        with self.assertRaisesRegex(fanout.FanoutError, "above the EC2 limit"):
+            fanout.build_user_data(startup=incompressible, shutdown=None, env=env)
+
+    def test_user_data_command_writes_compressed_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "startup.sh").write_text("echo start\n")
+            (root / "shutdown.sh").write_text("echo stop\n")
+            output = root / "out" / "user-data.gz"
+            status = fanout.main(
+                [
+                    "user-data",
+                    "--startup",
+                    str(root / "startup.sh"),
+                    "--shutdown",
+                    str(root / "shutdown.sh"),
+                    "--env",
+                    "RVOIP_SHARD_ID=ec2-performance-1",
+                    "--env",
+                    "RVOIP_PREBUILT_URI=",
+                    "--output",
+                    str(output),
+                ]
+            )
+            self.assertEqual(status, 0)
+            script = gzip.decompress(output.read_bytes()).decode()
+            self.assertIn("RVOIP_SHARD_ID='ec2-performance-1'", script)
+            self.assertIn("RVOIP_PREBUILT_URI=''", script)
+            self.assertIn("echo stop", script)
+            self.assertNotEqual(
+                fanout.main(
+                    [
+                        "user-data",
+                        "--startup",
+                        str(root / "startup.sh"),
+                        "--env",
+                        "HOME=/root",
+                        "--output",
+                        str(root / "bad.gz"),
+                    ]
+                ),
+                0,
+            )
+            self.assertFalse((root / "bad.gz").exists())
 
     @staticmethod
     def write_archive(
@@ -406,13 +582,13 @@ class GcpReleaseFanoutTests(unittest.TestCase):
                 self.assertTrue(
                     (
                         output
-                        / "_gcp-controller"
+                        / "_ec2-controller"
                         / worker["id"]
                         / "result.json"
                     ).is_file()
                 )
             fanout_receipt = json.loads(
-                (output / "_gcp-controller" / "fanout-receipt.json").read_text()
+                (output / "_ec2-controller" / "fanout-receipt.json").read_text()
             )
             self.assertFalse(fanout_receipt["publishing_attempted"])
 
@@ -458,7 +634,7 @@ class GcpReleaseFanoutTests(unittest.TestCase):
             archive = downloads / worker["id"] / "release-shard.tar.gz"
             archive_sha = self.write_archive(
                 archive,
-                "release-shard/_gcp-controller/injected.json",
+                "release-shard/_ec2-controller/injected.json",
                 b"{}\n",
             )
             result_path = downloads / worker["id"] / "result.json"

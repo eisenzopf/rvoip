@@ -376,7 +376,7 @@ version = "2.0.0"
         }
         self.assertEqual(actual, expected)
 
-    def test_split_jobs_remain_available_for_gcp_workspace_workers(self) -> None:
+    def test_split_jobs_remain_available_for_ec2_workspace_workers(self) -> None:
         plan = self.plan("Cargo.lock", job_mode="split")
         self.assertEqual(
             {job["check"] for job in plan["shard_jobs"]},

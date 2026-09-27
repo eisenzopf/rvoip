@@ -3,7 +3,7 @@
 
 # rvoip
 
-**Real-time voice in Rust: SIP telephony, WebRTC, QUIC/WebTransport/WebSocket conversations, Media over QUIC, and voice-AI agents, sharing one call model.**
+**A Rust library for building communications applications. SIP, RTP, WebRTC, QUIC/WebTransport/WebSocket conversations, Media over QUIC, and voice-AI agents share one call model, and the whole stack is in the box: no external SIP server, media server, or RTP engine to install and wire together.**
 
 [![Rust 1.91+](https://img.shields.io/badge/rust-1.91%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#license)
@@ -12,11 +12,22 @@
 [![Facade API](https://img.shields.io/docsrs/rvoip/0.3.10?label=Facade%20API)](https://docs.rs/rvoip/0.3.10/rvoip/)
 [![SIP API](https://img.shields.io/docsrs/rvoip-sip/0.3.10?label=SIP%20API)](https://docs.rs/rvoip-sip/0.3.10/rvoip_sip/)
 
-[**Five-minute start**](#five-minute-start) · [**Which crate?**](#you-need-one-crate) · [**Pick a path**](#pick-your-path) · [**How it fits together**](#how-it-fits-together) · [**What ships**](#what-ships-today) · [**Interop evidence**](#sip-interoperability-and-release-evidence) · [**Changes**](CHANGELOG.md)
+[**Five-minute start**](#five-minute-start) · [**For carriers**](docs/CARRIERS.md) · [**Which crate?**](#you-need-one-crate) · [**Pick a path**](#pick-your-path) · [**How it fits together**](#how-it-fits-together) · [**What ships**](#what-ships-today) · [**Interop evidence**](#sip-interoperability-and-release-evidence) · [**Changes**](CHANGELOG.md)
 
 </div>
 
 ---
+
+## What rvoip is
+
+rvoip is a library, not a server you deploy next to your application. Signalling,
+media, codecs, NAT traversal, security, and the conversation model are all
+Rust crates in this workspace, so a call goes from your code to the wire without
+a separately installed SIP proxy, media server, or RTP engine. The examples
+below run on a laptop with nothing installed but Rust; the same crates carry
+the release-gated interoperability evidence against Asterisk, FreeSWITCH,
+Jambonz, Kamailio, and OpenSIPS. Carriers evaluating standards coverage,
+performance, and reliability should start with [For carriers](docs/CARRIERS.md).
 
 ## Five-minute start
 
@@ -80,7 +91,7 @@ IVR, a B2BUA, then browser and voice-AI gateways.
 
 ## You need one crate
 
-The workspace publishes 45 crates. You import **one** of them; it pulls in
+The workspace publishes 46 crates. You import **one** of them; it pulls in
 everything it needs. The rest are internal layers you never name in your own
 `Cargo.toml`.
 
@@ -423,7 +434,7 @@ extending the platform itself.
 | **Front doors** | [`rvoip`](crates/rvoip), [`rvoip-sip`](crates/sip/rvoip-sip), [`rvoip-client`](crates/rvoip-client) |
 | Foundation | [`rvoip-core`](crates/foundation/rvoip-core), [`rvoip-core-traits`](crates/foundation/rvoip-core-traits), [`rvoip-infra-common`](crates/foundation/infra-common) |
 | SIP internals | [`rvoip-sip-core`](crates/sip/sip-core), [`rvoip-sip-transport`](crates/sip/sip-transport), [`rvoip-sip-dialog`](crates/sip/sip-dialog), [`rvoip-sip-proxy`](crates/sip/sip-proxy), [`rvoip-sip-registrar`](crates/sip/sip-registrar) |
-| Media | [`rvoip-media-core`](crates/media/media-core), [`rvoip-codec-core`](crates/media/codec-core), [`rvoip-rtp-core`](crates/media/rtp-core), [`rvoip-ice-core`](crates/media/ice-core), [`rvoip-audio-device`](crates/media/rvoip-audio-device) |
+| Media | [`rvoip-media-core`](crates/media/media-core), [`rvoip-codec-core`](crates/media/codec-core), [`rvoip-rtp-core`](crates/media/rtp-core), [`rvoip-ice-core`](crates/media/ice-core), [`rvoip-audio-send-queue`](crates/media/rvoip-audio-send-queue), [`rvoip-audio-device`](crates/media/rvoip-audio-device) |
 | WebRTC and Connect | [`rvoip-webrtc`](crates/webrtc/rvoip-webrtc), [`rvoip-rtc`](crates/webrtc/rvoip-rtc), [`rvoip-webrtc-stack`](crates/webrtc/rvoip-webrtc-stack), [`rvoip-amazon-connect`](crates/webrtc/rvoip-amazon-connect) |
 | UCTP | [`rvoip-uctp`](crates/uctp/rvoip-uctp), [`rvoip-quic`](crates/uctp/rvoip-quic), [`rvoip-webtransport`](crates/uctp/rvoip-webtransport), [`rvoip-websocket`](crates/uctp/rvoip-websocket) |
 | MoQ | [`rvoip-moq`](crates/moq/rvoip-moq), [`rvoip-moq-transport`](crates/moq/rvoip-moq-transport), [`rvoip-moq-native`](crates/moq/rvoip-moq-native), [`rvoip-moq-relay`](crates/moq/rvoip-moq-relay) |

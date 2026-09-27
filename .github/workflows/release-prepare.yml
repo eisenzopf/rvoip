@@ -55,7 +55,7 @@ jobs:
         run: |
           python3 -m unittest \
             scripts/test_release.py \
-            scripts/test_release_gcp_fanout.py \
+            scripts/test_release_aws_fanout.py \
             scripts/test_release_gates.py \
             scripts/test_release_carry_forward_attestation.py \
             scripts/test_release_exception_attestation.py \
@@ -90,7 +90,7 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           branch="release/v$VERSION"
-          body="Automated preparation of all 45 workspace crates for v$VERSION."$'\n\n'"The required PR Gate remains authoritative. After merge, run the protected release qualification workflow for this exact commit; publication will reject any other commit or incomplete aggregate."
+          body="Automated preparation of all 46 workspace crates for v$VERSION."$'\n\n'"The required PR Gate remains authoritative. After merge, run the protected release qualification workflow for this exact commit; publication will reject any other commit or incomplete aggregate."
           gh pr create \
             --base main \
             --head "$branch" \

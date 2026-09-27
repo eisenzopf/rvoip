@@ -1,44 +1,54 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# GCE executes this script during an operator/controller VM stop. The normal
-# startup script uploads a final PASS/FAIL result from its EXIT trap, but a VM
-# stop is not required to let that shell trap complete. Snapshot whatever gate
-# receipts have already been paid for before the boot disk is deleted.
+# systemd runs this script as the ExecStop of rvoip-release-shutdown.service
+# during an ACPI stop, which is what a controller `stop-instances` delivers to
+# a deferred or cut-off worker. The normal startup script uploads a final
+# PASS/FAIL result from its EXIT trap, but an instance stop is not required to
+# let that shell trap complete. Snapshot whatever gate receipts have already
+# been paid for before the delete-on-termination root volume is gone.
+#
+# The unit must be ordered after network-online.target so this ExecStop runs
+# while the instance still has a route to S3 and IMDS.
 
-metadata() {
-  curl --fail --silent --show-error \
-    -H 'Metadata-Flavor: Google' \
-    "http://metadata.google.internal/computeMetadata/v1/instance/attributes/$1"
-}
+set -a
+# shellcheck source=/dev/null
+source /etc/rvoip-release.env
+set +a
 
-upload() {
-  local source="$1"
-  local object="$2"
-  local token encoded
-  token="$(curl --fail --silent --show-error \
-    -H 'Metadata-Flavor: Google' \
-    http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')"
-  encoded="$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$object")"
-  curl --fail --silent --show-error --retry 3 --retry-all-errors \
-    -X POST \
-    -H "Authorization: Bearer ${token}" \
-    -H 'Content-Type: application/octet-stream' \
-    --upload-file "${source}" \
-    "https://storage.googleapis.com/upload/storage/v1/b/${BUCKET}/o?uploadType=media&name=${encoded}"
-}
-
-CANDIDATE="$(metadata rvoip-candidate)"
-RUN_ID="$(metadata rvoip-run-id)"
-SHARD_ID="$(metadata rvoip-shard-id)"
-BUCKET="$(metadata rvoip-evidence-bucket)"
-PREFIX="$(metadata rvoip-prefix)"
-GATES="$(metadata rvoip-gates-b64 | base64 --decode)"
+CANDIDATE="$RVOIP_CANDIDATE"
+RUN_ID="$RVOIP_RUN_ID"
+SHARD_ID="$RVOIP_SHARD_ID"
+BUCKET="$RVOIP_EVIDENCE_BUCKET"
+PREFIX="$RVOIP_PREFIX"
+GATES="$(printf '%s' "$RVOIP_GATES_B64" | base64 --decode)"
+AWS_REGION="$RVOIP_AWS_REGION"
+export AWS_REGION
+export AWS_DEFAULT_REGION="$AWS_REGION"
 EVIDENCE=/tmp/release-shard
 ARCHIVE=/tmp/release-shard-partial.tar.gz
 RESULT=/tmp/result-partial.json
 LOG=/var/log/rvoip-release-qualification.log
+S3_CP_ATTEMPTS=3
+
+# The startup script installed the pinned, signature-verified AWS CLI under
+# /usr/local/bin before any evidence could exist; uploads use the runner
+# instance role with no explicit credential.
+upload() {
+  local source="$1"
+  local object="$2"
+  local attempt
+  for attempt in $(seq 1 "$S3_CP_ATTEMPTS"); do
+    if aws s3 cp --only-show-errors "$source" "s3://${BUCKET}/${object}"; then
+      return 0
+    fi
+    echo "upload attempt ${attempt}/${S3_CP_ATTEMPTS} failed: ${object}" >&2
+    if (( attempt < S3_CP_ATTEMPTS )); then
+      sleep "$(( attempt * 5 ))"
+    fi
+  done
+  return 1
+}
 
 exec 9>/tmp/rvoip-release-result.lock
 flock -w 60 9 || exit 0
@@ -69,7 +79,7 @@ for receipt_path in Path(evidence).rglob("receipt.json"):
     if isinstance(gate_id, str) and receipt.get("status") in {"PASS", "FAIL"}:
         completed.add(gate_id)
 payload = {
-    "schema": "rvoip-gcp-release-shard-v1",
+    "schema": "rvoip-ec2-release-shard-v1",
     "candidate_sha": candidate,
     "github_run_id": run_id,
     "shard_id": shard,

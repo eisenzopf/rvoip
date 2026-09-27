@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Prepare and verify one-controller, many-worker GCP release fanout."""
+"""Prepare, verify, and provision one-controller, many-worker EC2 release fanout."""
 
 from __future__ import annotations
 
 import argparse
 import base64
 import csv
+import gzip
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
@@ -16,14 +17,14 @@ import tempfile
 from typing import Any
 
 
-MANIFEST_SCHEMA = "rvoip-gcp-release-fanout-v1"
-RESULT_SCHEMA = "rvoip-gcp-release-shard-v1"
+MANIFEST_SCHEMA = "rvoip-ec2-release-fanout-v1"
+RESULT_SCHEMA = "rvoip-ec2-release-shard-v1"
 COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 RUN_NUMBER = re.compile(r"^[1-9][0-9]*$")
 SHARD_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 GATE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-CONTROLLER_EVIDENCE_DIR = "_gcp-controller"
-WORKER_EVIDENCE_DIR = "_gcp-workers"
+CONTROLLER_EVIDENCE_DIR = "_ec2-controller"
+WORKER_EVIDENCE_DIR = "_ec2-workers"
 WORKER_SIDECAR_NAMES = frozenset(
     {
         "_external-process-memory.tsv",
@@ -32,24 +33,37 @@ WORKER_SIDECAR_NAMES = frozenset(
     }
 )
 RESOURCE_MACHINES = {
-    "gcp-interop": "n2-standard-4",
-    "gcp-performance": "n2-standard-8",
-    "gcp-performance-soak": "n2-standard-4",
-    "gcp-performance-soak-long": "n2-standard-8",
-    "gcp-proxy-interop": "n2-standard-2",
+    "ec2-interop": "m5.xlarge",
+    "ec2-performance": "m5.2xlarge",
+    "ec2-performance-soak": "m5.xlarge",
+    "ec2-performance-soak-long": "m5.2xlarge",
+    "ec2-proxy-interop": "m5.large",
 }
 RESOURCE_DISK_GB = {
-    "gcp-proxy-interop": 100,
+    "ec2-proxy-interop": 100,
 }
 DEFERRED_RESOURCE_CLASSES = {
-    "gcp-interop",
-    "gcp-performance-soak-long",
+    "ec2-interop",
+    "ec2-performance-soak-long",
 }
 MACHINE_VCPUS = {
-    "n2-standard-2": 2,
-    "n2-standard-4": 4,
-    "n2-standard-8": 8,
+    "m5.large": 2,
+    "m5.xlarge": 4,
+    "m5.2xlarge": 8,
 }
+# EC2 instance states that mean a worker can no longer produce a result. A
+# worker's own ``shutdown -h now`` terminates it (instance-initiated shutdown
+# behaviour is ``terminate``), and a controller ``stop-instances`` cutoff
+# passes through ``stopping``/``stopped``; all four mirror GCE ``TERMINATED``.
+TERMINAL_STATES = frozenset({"stopped", "terminated", "shutting-down", "stopping"})
+# EC2 tag values, including the ``Name`` tag, are limited to 255 characters.
+WORKER_NAME_LIMIT = 255
+USER_DATA_ENV_PATH = "/etc/rvoip-release.env"
+USER_DATA_LIB_DIR = "/usr/local/lib/rvoip-release"
+USER_DATA_SHUTDOWN_UNIT = "/etc/systemd/system/rvoip-release-shutdown.service"
+# EC2 rejects user-data larger than 16 KiB after base64 decoding.
+USER_DATA_MAX_BYTES = 16384
+USER_DATA_ENV_KEY = re.compile(r"^RVOIP_[A-Z0-9_]+$")
 
 
 class FanoutError(RuntimeError):
@@ -102,18 +116,18 @@ def prepare_manifest(
         raise FanoutError("GitHub run id and attempt must be positive integers")
     include = matrix.get("include")
     if not isinstance(include, list) or not include:
-        raise FanoutError("GCP matrix must contain at least one worker")
+        raise FanoutError("EC2 matrix must contain at least one worker")
 
     workers = []
     seen_shards: set[str] = set()
     for raw in include:
         if not isinstance(raw, dict):
-            raise FanoutError("every GCP matrix entry must be an object")
-        shard_id = require_string(raw, "id", "GCP matrix entry")
+            raise FanoutError("every EC2 matrix entry must be an object")
+        shard_id = require_string(raw, "id", "EC2 matrix entry")
         if not SHARD_ID.fullmatch(shard_id):
-            raise FanoutError(f"unsafe GCP shard id: {shard_id!r}")
+            raise FanoutError(f"unsafe EC2 shard id: {shard_id!r}")
         if shard_id in seen_shards:
-            raise FanoutError(f"duplicate GCP shard id: {shard_id}")
+            raise FanoutError(f"duplicate EC2 shard id: {shard_id}")
         seen_shards.add(shard_id)
 
         resource_class = require_string(raw, "resource_class", shard_id)
@@ -126,13 +140,13 @@ def prepare_manifest(
                 f"{shard_id} must use {expected_machine}, not {machine_type}"
             )
         disk_type = require_string(raw, "disk_type", shard_id)
-        if disk_type != "pd-standard":
-            raise FanoutError(f"{shard_id} must use pd-standard storage")
+        if disk_type != "gp3":
+            raise FanoutError(f"{shard_id} must use a gp3 root volume")
         disk_size_gb = raw.get("disk_size_gb")
         expected_disk_gb = RESOURCE_DISK_GB.get(resource_class, 200)
         if disk_size_gb != expected_disk_gb:
             raise FanoutError(
-                f"{shard_id} must use a {expected_disk_gb} GB boot disk"
+                f"{shard_id} must use a {expected_disk_gb} GB root volume"
             )
 
         gates_csv = require_string(raw, "gates_csv", shard_id)
@@ -143,8 +157,11 @@ def prepare_manifest(
             raise FanoutError(f"{shard_id} contains duplicate gate ids")
 
         worker_name = f"rvoip-rel-{run_id}-{run_attempt}-{shard_id}"
-        if len(worker_name) > 63:
-            raise FanoutError(f"worker name exceeds the GCE 63-character limit: {worker_name}")
+        if len(worker_name) > WORKER_NAME_LIMIT:
+            raise FanoutError(
+                f"worker name exceeds the EC2 {WORKER_NAME_LIMIT}-character tag limit: "
+                f"{worker_name}"
+            )
         prefix = f"release/{run_id}-{run_attempt}/{shard_id}"
         workers.append(
             {
@@ -177,7 +194,7 @@ def prepare_manifest(
 
 def validate_manifest(manifest: dict[str, Any]) -> None:
     if manifest.get("schema") != MANIFEST_SCHEMA:
-        raise FanoutError("unsupported GCP fanout manifest schema")
+        raise FanoutError("unsupported EC2 fanout manifest schema")
     regenerated = prepare_manifest(
         matrix={
             "include": [
@@ -199,7 +216,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         run_attempt=require_string(manifest, "github_run_attempt", "fanout manifest"),
     )
     if regenerated != manifest:
-        raise FanoutError("GCP fanout manifest is inconsistent or has been altered")
+        raise FanoutError("EC2 fanout manifest is inconsistent or has been altered")
 
 
 def safe_archive_members(archive: Path) -> list[tarfile.TarInfo]:
@@ -234,7 +251,7 @@ def safe_archive_members(archive: Path) -> list[tarfile.TarInfo]:
 
 def merge_archive(archive: Path, destination: Path, shard_id: str) -> None:
     if not SHARD_ID.fullmatch(shard_id):
-        raise FanoutError(f"unsafe GCP shard id: {shard_id!r}")
+        raise FanoutError(f"unsafe EC2 shard id: {shard_id!r}")
     members = safe_archive_members(archive)
     with tarfile.open(archive, "r:gz") as bundle:
         for member in members:
@@ -250,7 +267,7 @@ def merge_archive(archive: Path, destination: Path, shard_id: str) -> None:
                 target.mkdir(parents=True, exist_ok=True)
                 continue
             if target.exists():
-                raise FanoutError(f"duplicate evidence path across GCP shards: {relative}")
+                raise FanoutError(f"duplicate evidence path across EC2 shards: {relative}")
             target.parent.mkdir(parents=True, exist_ok=True)
             source = bundle.extractfile(member)
             if source is None:
@@ -304,18 +321,18 @@ def validate_result(
 
 
 def load_instance_states(path: Path) -> dict[str, str]:
-    """Load the controller's exact GCE instance-name/status snapshot."""
+    """Load the controller's exact EC2 instance Name-tag/state snapshot."""
     try:
         with path.open(newline="", encoding="utf-8") as handle:
             rows = list(csv.reader(handle))
     except OSError as error:
-        raise FanoutError(f"cannot read GCP instance states {path}: {error}") from error
+        raise FanoutError(f"cannot read EC2 instance states {path}: {error}") from error
     states: dict[str, str] = {}
     for row in rows:
         if len(row) != 2 or not row[0] or not row[1]:
-            raise FanoutError(f"invalid GCP instance-state row: {row!r}")
+            raise FanoutError(f"invalid EC2 instance-state row: {row!r}")
         if row[0] in states:
-            raise FanoutError(f"duplicate GCP instance-state row: {row[0]}")
+            raise FanoutError(f"duplicate EC2 instance-state row: {row[0]}")
         states[row[0]] = row[1]
     return states
 
@@ -352,7 +369,7 @@ def early_failure_decision(
                 early_settled += 1
             continue
 
-        if states.get(worker["name"]) == "TERMINATED":
+        if states.get(worker["name"]) in TERMINAL_STATES:
             failed_shards.append(shard)
             if not is_deferred:
                 early_settled += 1
@@ -362,7 +379,7 @@ def early_failure_decision(
     failed_shards.sort()
     deferred_running.sort()
     return {
-        "schema": "rvoip-gcp-early-failure-decision-v1",
+        "schema": "rvoip-ec2-early-failure-decision-v1",
         "early_expected": early_expected,
         "early_settled": early_settled,
         "failed_shards": failed_shards,
@@ -384,7 +401,7 @@ def verify_fanout(
     if output.exists():
         raise FanoutError(f"refusing to overwrite existing evidence directory: {output}")
     if not downloads.is_dir():
-        raise FanoutError(f"GCP download directory does not exist: {downloads}")
+        raise FanoutError(f"EC2 download directory does not exist: {downloads}")
 
     output.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{output.name}-", dir=output.parent))
@@ -440,7 +457,7 @@ def verify_fanout(
 
         failed_shards = sorted(set(failed_shards))
         receipt = {
-            "schema": "rvoip-gcp-release-fanout-receipt-v1",
+            "schema": "rvoip-ec2-release-fanout-receipt-v1",
             "candidate_sha": manifest["candidate_sha"],
             "github_run_id": manifest["github_run_id"],
             "github_run_attempt": manifest["github_run_attempt"],
@@ -458,6 +475,131 @@ def verify_fanout(
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise
+
+
+def shell_single_quote(value: str) -> str:
+    """Quote ``value`` for a POSIX shell single-quoted string."""
+    return "'" + value.replace("'", "'\\''") + "'"
+
+
+def parse_env_assignment(assignment: str) -> tuple[str, str]:
+    key, separator, value = assignment.partition("=")
+    if not separator:
+        raise FanoutError(f"user-data env entry must be KEY=VALUE: {assignment!r}")
+    if not USER_DATA_ENV_KEY.fullmatch(key):
+        raise FanoutError(f"user-data env key must match RVOIP_[A-Z0-9_]+: {key!r}")
+    if "\n" in value or "\r" in value:
+        raise FanoutError(f"user-data env value for {key} must not contain a newline")
+    return key, value
+
+
+def render_env_file(env: dict[str, str]) -> str:
+    """Render ``/etc/rvoip-release.env`` as single-quoted ``KEY='value'`` lines."""
+    lines = []
+    for key in sorted(env):
+        if not USER_DATA_ENV_KEY.fullmatch(key):
+            raise FanoutError(f"user-data env key must match RVOIP_[A-Z0-9_]+: {key!r}")
+        value = env[key]
+        if "\n" in value or "\r" in value:
+            raise FanoutError(f"user-data env value for {key} must not contain a newline")
+        lines.append(f"{key}={shell_single_quote(value)}")
+    return "".join(line + "\n" for line in lines)
+
+
+def heredoc_delimiter(*bodies: str) -> str:
+    """Pick a deterministic heredoc delimiter no embedded script line can close.
+
+    The delimiter is derived from the embedded content so identical inputs
+    render byte-identical user-data, and a counter suffix is appended in the
+    (contrived) case that a script line already spells it.
+    """
+    digest = hashlib.sha256()
+    for body in bodies:
+        digest.update(body.encode("utf-8"))
+        digest.update(b"\0")
+    base = "RVOIP_USER_DATA_" + digest.hexdigest()[:16].upper()
+    lines = {line for body in bodies for line in body.splitlines()}
+    delimiter = base
+    counter = 0
+    while delimiter in lines:
+        counter += 1
+        delimiter = f"{base}_{counter}"
+    return delimiter
+
+
+def render_user_data_script(
+    *, startup: str, shutdown: str | None, env: dict[str, str]
+) -> str:
+    """Render the bash user-data that installs and runs the reviewed scripts."""
+    env_file = render_env_file(env)
+    delimiter = heredoc_delimiter(env_file, startup, shutdown or "")
+    lib = USER_DATA_LIB_DIR
+    parts = [
+        "#!/bin/bash",
+        "# Generated by scripts/release/aws_fanout.py user-data. Do not edit.",
+        "set -Eeuo pipefail",
+        "umask 077",
+        f"install -d -m 0755 {lib}",
+        f"cat > {USER_DATA_ENV_PATH} <<'{delimiter}'",
+        env_file.rstrip("\n"),
+        delimiter,
+        f"chmod 0600 {USER_DATA_ENV_PATH}",
+        f"cat > {lib}/startup.sh <<'{delimiter}'",
+        startup.rstrip("\n"),
+        delimiter,
+        f"chmod 0755 {lib}/startup.sh",
+    ]
+    if shutdown is not None:
+        parts.extend(
+            [
+                f"cat > {lib}/shutdown.sh <<'{delimiter}'",
+                shutdown.rstrip("\n"),
+                delimiter,
+                f"chmod 0755 {lib}/shutdown.sh",
+                f"cat > {USER_DATA_SHUTDOWN_UNIT} <<'{delimiter}'",
+                "[Unit]",
+                "Description=rvoip release shutdown checkpoint",
+                "DefaultDependencies=no",
+                "Before=shutdown.target",
+                "",
+                "[Service]",
+                "Type=oneshot",
+                "RemainAfterExit=yes",
+                "ExecStart=/bin/true",
+                f"ExecStop={lib}/shutdown.sh",
+                "TimeoutStopSec=180",
+                "",
+                "[Install]",
+                "WantedBy=multi-user.target",
+                delimiter,
+                f"chmod 0644 {USER_DATA_SHUTDOWN_UNIT}",
+                "systemctl daemon-reload",
+                "systemctl enable --now rvoip-release-shutdown.service",
+            ]
+        )
+    parts.append(f"exec {lib}/startup.sh")
+    return "\n".join(parts) + "\n"
+
+
+def build_user_data(
+    *, startup: str, shutdown: str | None, env: dict[str, str]
+) -> bytes:
+    """Return gzip-compressed user-data, failing closed above the EC2 limit."""
+    script = render_user_data_script(startup=startup, shutdown=shutdown, env=env)
+    compressed = gzip.compress(script.encode("utf-8"), compresslevel=9, mtime=0)
+    if len(compressed) > USER_DATA_MAX_BYTES:
+        raise FanoutError(
+            f"gzipped user-data is {len(compressed)} bytes, above the EC2 limit of "
+            f"{USER_DATA_MAX_BYTES}"
+        )
+    return compressed
+
+
+def read_script(path: Path, description: str) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise FanoutError(f"cannot read {description} {path}: {error}") from error
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -481,6 +623,18 @@ def build_parser() -> argparse.ArgumentParser:
     cutoff.add_argument("--manifest", type=Path, required=True)
     cutoff.add_argument("--downloads", type=Path, required=True)
     cutoff.add_argument("--states", type=Path, required=True)
+
+    user_data = commands.add_parser("user-data")
+    user_data.add_argument("--startup", type=Path, required=True)
+    user_data.add_argument("--shutdown", type=Path)
+    user_data.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="RVOIP_* worker parameter written to /etc/rvoip-release.env",
+    )
+    user_data.add_argument("--output", type=Path, required=True)
     return parser
 
 
@@ -489,7 +643,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "prepare":
             manifest = prepare_manifest(
-                matrix=load_json(args.matrix, "GCP matrix"),
+                matrix=load_json(args.matrix, "EC2 matrix"),
                 candidate=args.candidate,
                 environment_id=args.environment_id,
                 run_id=args.run_id,
@@ -498,22 +652,40 @@ def main(argv: list[str] | None = None) -> int:
             write_json(args.output, manifest)
         elif args.command == "verify":
             receipt = verify_fanout(
-                manifest=load_json(args.manifest, "GCP fanout manifest"),
+                manifest=load_json(args.manifest, "EC2 fanout manifest"),
                 downloads=args.downloads,
                 output=args.output,
             )
             print(json.dumps(receipt, sort_keys=True))
             if receipt["status"] != "PASS":
                 return 1
-        else:
+        elif args.command == "early-failure-decision":
             decision = early_failure_decision(
-                manifest=load_json(args.manifest, "GCP fanout manifest"),
+                manifest=load_json(args.manifest, "EC2 fanout manifest"),
                 downloads=args.downloads,
                 states=load_instance_states(args.states),
             )
             print(json.dumps(decision, sort_keys=True))
+        else:
+            env: dict[str, str] = {}
+            for assignment in args.env:
+                key, value = parse_env_assignment(assignment)
+                if key in env:
+                    raise FanoutError(f"duplicate user-data env key: {key}")
+                env[key] = value
+            payload = build_user_data(
+                startup=read_script(args.startup, "startup script"),
+                shutdown=(
+                    read_script(args.shutdown, "shutdown script")
+                    if args.shutdown is not None
+                    else None
+                ),
+                env=env,
+            )
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_bytes(payload)
     except FanoutError as error:
-        print(f"GCP release fanout error: {error}", flush=True)
+        print(f"EC2 release fanout error: {error}", flush=True)
         return 1
     return 0
 

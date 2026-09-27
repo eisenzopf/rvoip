@@ -105,7 +105,7 @@ class PrebuiltPerformanceTests(unittest.TestCase):
             gate_ids=["perf.two", "perf.one"],
         )
         cache_root = (
-            "gs://bucket/release-cache/performance-prebuilt-v1/" + cache_key
+            "s3://bucket/release-cache/performance-prebuilt-v1/" + cache_key
         )
         payload = {
             "schema": prebuilt.RESULT_SCHEMA,
@@ -190,9 +190,9 @@ class PrebuiltPerformanceTests(unittest.TestCase):
             "cache_key_sha256": key,
             "status": "PASS",
             "exit_code": 0,
-            "bundle_uri": "gs://bucket/mutable/performance-prebuilt.tar.gz",
+            "bundle_uri": "s3://bucket/mutable/performance-prebuilt.tar.gz",
             "bundle_sha256": "b" * 64,
-            "manifest_uri": "gs://bucket/mutable/performance-manifest.json",
+            "manifest_uri": "s3://bucket/mutable/performance-manifest.json",
             "manifest_sha256": "d" * 64,
             "publishing_attempted": False,
         }
@@ -236,7 +236,7 @@ class PrebuiltPerformanceTests(unittest.TestCase):
         unsupported = []
         for gate in catalog["gates"]:
             if (
-                str(gate.get("resource_class", "")).startswith("gcp-performance")
+                str(gate.get("resource_class", "")).startswith("ec2-performance")
                 and gate.get("executor") == "argv"
                 and not gate["id"].startswith("preflight.performance")
                 and prebuilt.gate_definition(gate) is None

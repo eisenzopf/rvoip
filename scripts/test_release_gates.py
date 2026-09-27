@@ -26,6 +26,7 @@ gates = load_module("release_gates", ROOT / "scripts/release/gates.py")
 builder = load_module(
     "build_gate_catalog", ROOT / "scripts/release/build_gate_catalog.py"
 )
+fanout = load_module("release_aws_fanout", ROOT / "scripts/release/aws_fanout.py")
 run_checks = load_module("ci_run_checks", ROOT / "scripts/ci/run_checks.py")
 
 
@@ -34,14 +35,14 @@ class GateFrameworkTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.catalog = json.loads((ROOT / "scripts/release/gates.json").read_text())
 
-    def test_catalog_maps_108_legacy_and_45_core_gates(self) -> None:
+    def test_catalog_maps_108_legacy_and_46_core_gates(self) -> None:
         gates.validate_catalog(ROOT, self.catalog)
         self.assertEqual(
             sum(bool(gate.get("legacy")) for gate in self.catalog["gates"]), 108
         )
         self.assertEqual(
             sum(gate["id"].startswith("core.") for gate in self.catalog["gates"]),
-            45,
+            46,
         )
         self.assertEqual(
             self.catalog["remote_release_legacy_coverage"]["required_legacy_count"],
@@ -217,9 +218,9 @@ class GateFrameworkTests(unittest.TestCase):
                 for gate_id in soak_ids
             },
             {
-                "perf.monolithic-soak": "gcp-performance-soak-long",
-                "perf.media-burst-matrix": "gcp-performance-soak",
-                "perf.soak-candidate": "gcp-performance-soak-long",
+                "perf.monolithic-soak": "ec2-performance-soak-long",
+                "perf.media-burst-matrix": "ec2-performance-soak",
+                "perf.soak-candidate": "ec2-performance-soak-long",
             },
         )
         matrix = gates.matrix_for(
@@ -232,12 +233,12 @@ class GateFrameworkTests(unittest.TestCase):
         soak_shards = [
             shard
             for shard in matrix
-            if shard["resource_class"] == "gcp-performance-soak-long"
+            if shard["resource_class"] == "ec2-performance-soak-long"
         ]
         self.assertEqual(len(soak_shards), 2)
         self.assertTrue(all(len(shard["gates"]) == 1 for shard in soak_shards))
         self.assertTrue(
-            all(shard["machine_type"] == "n2-standard-8" for shard in soak_shards)
+            all(shard["machine_type"] == "m5.2xlarge" for shard in soak_shards)
         )
         self.assertNotIn(
             "perf.media-burst-matrix",
@@ -251,7 +252,7 @@ class GateFrameworkTests(unittest.TestCase):
         gate = by_id["perf.canonical-2k-current"]
         self.assertIn(gate["id"], self.catalog["profiles"]["remote-release"])
         self.assertTrue(gate["always_fresh"])
-        self.assertEqual(gate["resource_class"], "gcp-performance-soak-long")
+        self.assertEqual(gate["resource_class"], "ec2-performance-soak-long")
         self.assertEqual(gate["timeout_minutes"], 120)
         self.assertEqual(gate["estimated_seconds"], 4_500)
         self.assertIn("canonical_2k_release_eval.sh", " ".join(gate["command"]))
@@ -292,12 +293,12 @@ class GateFrameworkTests(unittest.TestCase):
         )
         self.assertEqual(len(matrix), 7)
         self.assertTrue(all(len(shard["gates"]) == 1 for shard in matrix))
-        self.assertTrue(all(shard["machine_type"] == "n2-standard-4" for shard in matrix))
+        self.assertTrue(all(shard["machine_type"] == "m5.xlarge" for shard in matrix))
         aggregate = by_id["perf.media-burst-matrix"]
         self.assertEqual(aggregate["executor"], "aggregate")
         self.assertEqual(set(aggregate["dependencies"]), scenario_ids)
 
-    def test_remote_preflight_recreates_the_complete_gcp_worker_shape(self) -> None:
+    def test_remote_preflight_recreates_the_complete_ec2_worker_shape(self) -> None:
         selected = self.catalog["profiles"]["remote-preflight"]
         self.assertEqual(len(selected), 18)
         by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
@@ -308,26 +309,26 @@ class GateFrameworkTests(unittest.TestCase):
         counts = {
             resource: sum(shard["resource_class"] == resource for shard in matrix)
             for resource in (
-                "gcp-performance",
-                "gcp-performance-soak",
-                "gcp-performance-soak-long",
-                "gcp-interop",
-                "gcp-proxy-interop",
+                "ec2-performance",
+                "ec2-performance-soak",
+                "ec2-performance-soak-long",
+                "ec2-interop",
+                "ec2-proxy-interop",
             )
         }
         self.assertEqual(
             counts,
             {
-                "gcp-performance": 6,
-                "gcp-performance-soak": 7,
-                "gcp-performance-soak-long": 2,
-                "gcp-interop": 1,
-                "gcp-proxy-interop": 2,
+                "ec2-performance": 6,
+                "ec2-performance-soak": 7,
+                "ec2-performance-soak-long": 2,
+                "ec2-interop": 1,
+                "ec2-proxy-interop": 2,
             },
         )
         self.assertEqual(len(matrix), 18)
         self.assertEqual(
-            sum(int(shard["machine_type"].rsplit("-", 1)[1]) for shard in matrix),
+            sum(fanout.MACHINE_VCPUS[shard["machine_type"]] for shard in matrix),
             100,
         )
         self.assertEqual(sum(int(shard["disk_size_gb"]) for shard in matrix), 3400)
@@ -342,53 +343,54 @@ class GateFrameworkTests(unittest.TestCase):
                     gate["command"],
                 )
 
-    def test_remote_release_uses_the_same_100_vcpu_gcp_shape(self) -> None:
+    def test_remote_release_uses_the_same_100_vcpu_ec2_shape(self) -> None:
         selected = self.catalog["profiles"]["remote-release"]
         by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
         matrix = gates.matrix_for(
             [{"id": gate_id, "decision": "RUN"} for gate_id in selected],
             by_id,
         )
-        gcp = [shard for shard in matrix if not shard["hosted"]]
+        ec2 = [shard for shard in matrix if not shard["hosted"]]
         counts = {
-            resource: sum(shard["resource_class"] == resource for shard in gcp)
+            resource: sum(shard["resource_class"] == resource for shard in ec2)
             for resource in (
-                "gcp-performance",
-                "gcp-performance-soak",
-                "gcp-performance-soak-long",
-                "gcp-interop",
-                "gcp-proxy-interop",
+                "ec2-performance",
+                "ec2-performance-soak",
+                "ec2-performance-soak-long",
+                "ec2-interop",
+                "ec2-proxy-interop",
             )
         }
         self.assertEqual(
             counts,
             {
-                "gcp-performance": 6,
-                "gcp-performance-soak": 7,
-                "gcp-performance-soak-long": 2,
-                "gcp-interop": 1,
-                "gcp-proxy-interop": 2,
+                "ec2-performance": 6,
+                "ec2-performance-soak": 7,
+                "ec2-performance-soak-long": 2,
+                "ec2-interop": 1,
+                "ec2-proxy-interop": 2,
             },
         )
-        self.assertEqual(len(gcp), 18)
+        self.assertEqual(len(ec2), 18)
         self.assertEqual(
-            sum(int(shard["machine_type"].rsplit("-", 1)[1]) for shard in gcp),
+            sum(fanout.MACHINE_VCPUS[shard["machine_type"]] for shard in ec2),
             100,
         )
-        self.assertEqual(sum(int(shard["disk_size_gb"]) for shard in gcp), 3400)
+        self.assertEqual(sum(int(shard["disk_size_gb"]) for shard in ec2), 3400)
         hosted = [shard for shard in matrix if shard["hosted"]]
         standard = [
             shard for shard in hosted if shard["resource_class"] == "github-standard"
         ]
         self.assertEqual(len(standard), 12)
-        # Twelve standard, five nightly, one evidence, and one GCP controller
+        # Twelve standard, five nightly, one evidence, and one EC2 controller
         # stay below the twenty-job repository concurrency ceiling.
         self.assertLessEqual(len(hosted) + 1, 19)
-        # The 45th crate (rvoip-ice-core) adds one bounded core gate while the
-        # twelve-shard cap preserves room below repository concurrency limits.
-        self.assertLessEqual(max(shard["estimated_seconds"] for shard in standard), 1325)
+        # The 45th crate (rvoip-ice-core) and the 46th (rvoip-audio-send-queue)
+        # each add one bounded two-minute core gate while the twelve-shard cap
+        # preserves room below repository concurrency limits.
+        self.assertLessEqual(max(shard["estimated_seconds"] for shard in standard), 1345)
 
-    def test_remote_diagnostic_runs_only_exact_gcp_gates_and_dependencies(self) -> None:
+    def test_remote_diagnostic_runs_only_exact_ec2_gates_and_dependencies(self) -> None:
         requested = ["interop.remote-proxies", "perf.monolithic-soak"]
         selected = gates.profile_selection(
             self.catalog, "remote-diagnostic", requested
@@ -410,8 +412,8 @@ class GateFrameworkTests(unittest.TestCase):
         self.assertEqual(
             {shard["resource_class"] for shard in matrix},
             {
-                "gcp-proxy-interop",
-                "gcp-performance-soak-long",
+                "ec2-proxy-interop",
+                "ec2-performance-soak-long",
                 "github-evidence",
             },
         )
@@ -420,7 +422,7 @@ class GateFrameworkTests(unittest.TestCase):
                 gate_id
                 for shard in matrix
                 for gate_id in shard["gates"]
-                if shard["resource_class"].startswith("gcp-")
+                if shard["resource_class"].startswith("ec2-")
             },
             set(builder.PROXY_INTEROP_GATE_IDS) | {"perf.monolithic-soak"},
         )
@@ -435,8 +437,8 @@ class GateFrameworkTests(unittest.TestCase):
 
         invalid_cases = (
             ([], "requires at least one"),
-            (["core.rvoip"], "executable GCP gates"),
-            (["perf.media-burst-matrix"], "executable GCP gates"),
+            (["core.rvoip"], "executable EC2 gates"),
+            (["perf.media-burst-matrix"], "executable EC2 gates"),
             (["not.a.gate"], "must belong to remote-release or remote-preflight"),
             ([f"gate-{index}" for index in range(21)], "at most 20"),
         )
@@ -507,9 +509,9 @@ class GateFrameworkTests(unittest.TestCase):
             ["cargo", "+1.91.0", "fmt", "--all"],
         )
 
-    def test_gcp_gates_allow_for_cold_release_builds(self) -> None:
+    def test_ec2_gates_allow_for_cold_release_builds(self) -> None:
         for gate in self.catalog["gates"]:
-            if gate["resource_class"].startswith("gcp-"):
+            if gate["resource_class"].startswith("ec2-"):
                 with self.subTest(gate=gate["id"]):
                     self.assertGreaterEqual(gate["timeout_minutes"], 20)
 
@@ -544,7 +546,7 @@ class GateFrameworkTests(unittest.TestCase):
         for gate_id in row_ids:
             gate = by_id[gate_id]
             with self.subTest(gate=gate_id):
-                self.assertEqual(gate["resource_class"], "gcp-proxy-interop")
+                self.assertEqual(gate["resource_class"], "ec2-proxy-interop")
                 self.assertIn(
                     "PROXY_INTEROP_ARTIFACT_DIR={artifact_dir}/proxy-interop",
                     gate["command"],
@@ -558,7 +560,7 @@ class GateFrameworkTests(unittest.TestCase):
         self.assertEqual(len(matrix), 2)
         self.assertTrue(all(len(shard["gates"]) == 6 for shard in matrix))
         self.assertTrue(
-            all(shard["machine_type"] == "n2-standard-2" for shard in matrix)
+            all(shard["machine_type"] == "m5.large" for shard in matrix)
         )
         self.assertTrue(all(shard["disk_size_gb"] == 100 for shard in matrix))
 
@@ -603,18 +605,18 @@ class GateFrameworkTests(unittest.TestCase):
             )
             self.assertEqual(first, second)
 
-    def test_gcp_gate_digest_includes_ephemeral_worker_definition(self) -> None:
+    def test_ec2_gate_digest_includes_ephemeral_worker_definition(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             runner = root / "scripts/release/gates.py"
-            startup = root / "infra/release-runners/gcp-release-startup.sh"
+            startup = root / "infra/release-runners/aws-release-startup.sh"
             runner.parent.mkdir(parents=True)
             startup.parent.mkdir(parents=True)
             runner.write_text("runner-v1\n")
             startup.write_text("startup-v1\n")
             gate = {
                 "id": "gate-a",
-                "resource_class": "gcp-performance",
+                "resource_class": "ec2-performance",
                 "affected_paths": [],
                 "affected_crates": [],
                 "dependencies": [],
@@ -629,7 +631,7 @@ class GateFrameworkTests(unittest.TestCase):
                     environment_id="environment-v1",
                     files=[
                         "scripts/release/gates.py",
-                        "infra/release-runners/gcp-release-startup.sh",
+                        "infra/release-runners/aws-release-startup.sh",
                     ],
                     package_roots={},
                     package_dependencies={},
@@ -900,11 +902,11 @@ class GateFrameworkTests(unittest.TestCase):
             self.assertEqual(status, 124)
             self.assertIn("exceeded catalogued timeout", log.read_text())
 
-    def test_github_outputs_split_hosted_and_ephemeral_gcp_matrices(self) -> None:
+    def test_github_outputs_split_hosted_and_ephemeral_ec2_matrices(self) -> None:
         plan = {
             "matrix": [
                 {"id": "hosted", "hosted": True},
-                {"id": "gcp", "hosted": False},
+                {"id": "ec2", "hosted": False},
             ],
             "gates": [{"decision": "RUN"}, {"decision": "REUSE"}],
             "candidate_sha": "c" * 40,
@@ -915,9 +917,9 @@ class GateFrameworkTests(unittest.TestCase):
             gates.write_github_output(output, plan)
             values = dict(line.split("=", 1) for line in output.read_text().splitlines())
         self.assertEqual(json.loads(values["hosted_matrix"])["include"], [plan["matrix"][0]])
-        self.assertEqual(json.loads(values["gcp_matrix"])["include"], [plan["matrix"][1]])
+        self.assertEqual(json.loads(values["aws_matrix"])["include"], [plan["matrix"][1]])
         self.assertEqual(values["hosted_shard_count"], "1")
-        self.assertEqual(values["gcp_shard_count"], "1")
+        self.assertEqual(values["aws_shard_count"], "1")
 
     def test_collector_materializes_aggregate_only_after_dependencies_pass(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -20,7 +20,7 @@ env:
 
 jobs:
   plan:
-    name: Plan all 45 crates
+    name: Plan all 46 crates
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -66,11 +66,11 @@ jobs:
           done < <(find examples -mindepth 2 -maxdepth 2 -name Cargo.toml -print | sort)
           python3 scripts/ci/pr_plan.py "${args[@]}"
 
-      - name: Require exactly 45 workspace crates
+      - name: Require exactly 46 workspace crates
         run: |
           count="$(jq '.selected_crates | length' target/ci-plan/plan.json)"
-          test "$count" = 45 || {
-            echo "expected 45 workspace crates, planned $count" >&2
+          test "$count" = 46 || {
+            echo "expected 46 workspace crates, planned $count" >&2
             exit 1
           }
 

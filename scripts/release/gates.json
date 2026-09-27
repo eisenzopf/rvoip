@@ -412,6 +412,7 @@
         "rvoip",
         "rvoip-amazon-connect",
         "rvoip-audio-device",
+        "rvoip-audio-send-queue",
         "rvoip-audit",
         "rvoip-auth-core",
         "rvoip-client",
@@ -499,6 +500,7 @@
         "rvoip",
         "rvoip-amazon-connect",
         "rvoip-audio-device",
+        "rvoip-audio-send-queue",
         "rvoip-audit",
         "rvoip-auth-core",
         "rvoip-client",
@@ -588,6 +590,7 @@
         "rvoip",
         "rvoip-amazon-connect",
         "rvoip-audio-device",
+        "rvoip-audio-send-queue",
         "rvoip-audit",
         "rvoip-auth-core",
         "rvoip-client",
@@ -1954,6 +1957,7 @@
         "rvoip",
         "rvoip-amazon-connect",
         "rvoip-audio-device",
+        "rvoip-audio-send-queue",
         "rvoip-audit",
         "rvoip-auth-core",
         "rvoip-client",
@@ -2751,7 +2755,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "local FreeSWITCH down before Asterisk",
-      "resource_class": "gcp-interop",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -2794,7 +2798,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "local Asterisk up",
-      "resource_class": "gcp-interop",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -2846,7 +2850,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "local Asterisk PBX matrix",
-      "resource_class": "gcp-interop",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -2889,7 +2893,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "local Asterisk down after matrix",
-      "resource_class": "gcp-interop",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -2932,7 +2936,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "local Asterisk down before FreeSWITCH",
-      "resource_class": "gcp-interop",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -2975,7 +2979,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "local FreeSWITCH up",
-      "resource_class": "gcp-interop",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -3027,7 +3031,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "local FreeSWITCH PBX matrix",
-      "resource_class": "gcp-interop",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -3070,7 +3074,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "local FreeSWITCH down after matrix",
-      "resource_class": "gcp-interop",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -3113,7 +3117,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "restore local Asterisk down",
-      "resource_class": "gcp-interop",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -3156,7 +3160,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "restore local FreeSWITCH down",
-      "resource_class": "gcp-interop",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -3206,7 +3210,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "SIPp standalone target build",
-      "resource_class": "gcp-interop",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -3249,7 +3253,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "SIPp standalone target start",
-      "resource_class": "gcp-interop",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -3297,7 +3301,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "SIPp standalone matrix",
-      "resource_class": "gcp-interop",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -3340,7 +3344,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "SIPp standalone target stop",
-      "resource_class": "gcp-interop",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -3383,7 +3387,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "baresip strict-UA matrix",
-      "resource_class": "gcp-interop",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -3421,7 +3425,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "Kamailio/OpenSIPS proxy de-scope audit",
-      "resource_class": "gcp-interop",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -3458,7 +3462,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "perf results capture boundary",
-      "resource_class": "gcp-performance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -3495,7 +3499,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "literal-all perf configuration",
-      "resource_class": "gcp-performance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -3551,7 +3555,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "perf call setup CPS (endpoint)",
-      "resource_class": "gcp-performance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -3607,7 +3611,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "perf call setup CPS (pbx-media-server)",
-      "resource_class": "gcp-performance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -3663,7 +3667,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "perf call setup CPS (signaling-only-server-high-performance)",
-      "resource_class": "gcp-performance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -3715,7 +3719,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "perf registration throughput",
-      "resource_class": "gcp-performance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -3767,7 +3771,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "perf concurrent active calls",
-      "resource_class": "gcp-performance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -3819,7 +3823,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "perf RTP steady state",
-      "resource_class": "gcp-performance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -3871,7 +3875,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "perf backpressure step",
-      "resource_class": "gcp-performance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -3923,7 +3927,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "perf transport recovery",
-      "resource_class": "gcp-performance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -3975,7 +3979,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "all registered resiliency tests",
-      "resource_class": "gcp-performance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -4027,7 +4031,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "perf mid-call signaling under media",
-      "resource_class": "gcp-performance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -4079,7 +4083,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "perf TLS overhead",
-      "resource_class": "gcp-performance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -4131,7 +4135,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "perf SRTP overhead",
-      "resource_class": "gcp-performance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -4183,7 +4187,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "perf PDD with 180 first",
-      "resource_class": "gcp-performance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -4235,7 +4239,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "perf sustained long-duration calls",
-      "resource_class": "gcp-performance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -4287,7 +4291,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "perf registrar binding scale",
-      "resource_class": "gcp-performance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -4339,7 +4343,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "perf mixed workload",
-      "resource_class": "gcp-performance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -4391,7 +4395,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "perf B2BUA forwarding",
-      "resource_class": "gcp-performance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -4443,7 +4447,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "perf AI-agent load",
-      "resource_class": "gcp-performance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -4495,7 +4499,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "perf contact-center transfers",
-      "resource_class": "gcp-performance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -4547,7 +4551,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "perf SIPp parity",
-      "resource_class": "gcp-performance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -4601,7 +4605,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "perf soak target invariant tests",
-      "resource_class": "gcp-performance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -4659,7 +4663,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "perf media churn",
-      "resource_class": "gcp-performance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -4722,7 +4726,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "perf monolithic soak",
-      "resource_class": "gcp-performance-soak-long",
+      "resource_class": "ec2-performance-soak-long",
       "retry_on_exit_codes": [
         75
       ],
@@ -4783,7 +4787,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "perf mass teardown stress",
-      "resource_class": "gcp-performance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -4839,7 +4843,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "perf session churn leak",
-      "resource_class": "gcp-performance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -4894,7 +4898,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "perf media burst matrix",
-      "resource_class": "gcp-performance-soak",
+      "resource_class": "ec2-performance-soak",
       "retry_on_exit_codes": [
         75
       ],
@@ -4953,7 +4957,7 @@
       },
       "max_infrastructure_retries": 1,
       "name": "perf soak candidate",
-      "resource_class": "gcp-performance-soak-long",
+      "resource_class": "ec2-performance-soak-long",
       "retry_on_exit_codes": [
         75
       ],
@@ -5466,7 +5470,7 @@
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
-      "name": "45-package release inventory audit",
+      "name": "46-package release inventory audit",
       "resource_class": "github-evidence",
       "retry_on_exit_codes": [
         75
@@ -5517,7 +5521,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "pinned SRTP and DTLS-SRTP interoperability",
-      "resource_class": "gcp-interop",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -5603,7 +5607,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "three-pass exact-candidate 2,000-CPS performance evaluation",
-      "resource_class": "gcp-performance-soak-long",
+      "resource_class": "ec2-performance-soak-long",
       "retry_on_exit_codes": [
         75
       ],
@@ -5643,7 +5647,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "kamailio rvoip-first udp proxy interoperability",
-      "resource_class": "gcp-proxy-interop",
+      "resource_class": "ec2-proxy-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -5683,7 +5687,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "kamailio rvoip-first tcp proxy interoperability",
-      "resource_class": "gcp-proxy-interop",
+      "resource_class": "ec2-proxy-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -5723,7 +5727,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "kamailio rvoip-first tls proxy interoperability",
-      "resource_class": "gcp-proxy-interop",
+      "resource_class": "ec2-proxy-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -5763,7 +5767,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "kamailio peer-first udp proxy interoperability",
-      "resource_class": "gcp-proxy-interop",
+      "resource_class": "ec2-proxy-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -5803,7 +5807,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "kamailio peer-first tcp proxy interoperability",
-      "resource_class": "gcp-proxy-interop",
+      "resource_class": "ec2-proxy-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -5843,7 +5847,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "kamailio peer-first tls proxy interoperability",
-      "resource_class": "gcp-proxy-interop",
+      "resource_class": "ec2-proxy-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -5883,7 +5887,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "opensips rvoip-first udp proxy interoperability",
-      "resource_class": "gcp-proxy-interop",
+      "resource_class": "ec2-proxy-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -5923,7 +5927,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "opensips rvoip-first tcp proxy interoperability",
-      "resource_class": "gcp-proxy-interop",
+      "resource_class": "ec2-proxy-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -5963,7 +5967,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "opensips rvoip-first tls proxy interoperability",
-      "resource_class": "gcp-proxy-interop",
+      "resource_class": "ec2-proxy-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -6003,7 +6007,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "opensips peer-first udp proxy interoperability",
-      "resource_class": "gcp-proxy-interop",
+      "resource_class": "ec2-proxy-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -6043,7 +6047,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "opensips peer-first tcp proxy interoperability",
-      "resource_class": "gcp-proxy-interop",
+      "resource_class": "ec2-proxy-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -6083,7 +6087,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "opensips peer-first tls proxy interoperability",
-      "resource_class": "gcp-proxy-interop",
+      "resource_class": "ec2-proxy-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -6164,7 +6168,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "kamailio + rtpengine lab up",
-      "resource_class": "gcp-proxy-interop",
+      "resource_class": "ec2-proxy-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -6210,7 +6214,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "kamailio + rtpengine AMR passthrough matrix",
-      "resource_class": "gcp-proxy-interop",
+      "resource_class": "ec2-proxy-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -6248,7 +6252,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "kamailio + rtpengine lab down",
-      "resource_class": "gcp-proxy-interop",
+      "resource_class": "ec2-proxy-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -6286,7 +6290,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "opensips + rtpengine lab up",
-      "resource_class": "gcp-proxy-interop",
+      "resource_class": "ec2-proxy-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -6332,7 +6336,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "opensips + rtpengine AMR passthrough matrix",
-      "resource_class": "gcp-proxy-interop",
+      "resource_class": "ec2-proxy-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -6370,7 +6374,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "opensips + rtpengine lab down",
-      "resource_class": "gcp-proxy-interop",
+      "resource_class": "ec2-proxy-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -6448,7 +6452,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "Jambonz latest stable open-source release pin",
-      "resource_class": "gcp-interop",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -6487,7 +6491,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "latest pinned Jambonz OSS lab up",
-      "resource_class": "gcp-interop",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -6534,7 +6538,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "Jambonz OSS PBX/B2BUA matrix",
-      "resource_class": "gcp-interop",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -6573,7 +6577,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "Jambonz OSS lab teardown and residue proof",
-      "resource_class": "gcp-interop",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -6611,7 +6615,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "Asterisk lab up for the AMR per-rate sweep",
-      "resource_class": "gcp-interop",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -6657,7 +6661,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "AMR amrnb every mode over UDP, each pinned by mode-set",
-      "resource_class": "gcp-interop",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -6703,7 +6707,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "AMR amrwb every mode over UDP, each pinned by mode-set",
-      "resource_class": "gcp-interop",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -6749,7 +6753,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "AMR amrnb every mode over TLS, each pinned by mode-set",
-      "resource_class": "gcp-interop",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -6795,7 +6799,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "AMR amrwb every mode over TLS, each pinned by mode-set",
-      "resource_class": "gcp-interop",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -6836,7 +6840,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "Asterisk lab down after the AMR per-rate sweep",
-      "resource_class": "gcp-interop",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -7088,7 +7092,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "media burst scenario: carrier-smoke",
-      "resource_class": "gcp-performance-soak",
+      "resource_class": "ec2-performance-soak",
       "retry_on_exit_codes": [
         75
       ],
@@ -7126,7 +7130,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "media burst scenario: access-edge-microburst",
-      "resource_class": "gcp-performance-soak",
+      "resource_class": "ec2-performance-soak",
       "retry_on_exit_codes": [
         75
       ],
@@ -7164,7 +7168,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "media burst scenario: contact-center-flash",
-      "resource_class": "gcp-performance-soak",
+      "resource_class": "ec2-performance-soak",
       "retry_on_exit_codes": [
         75
       ],
@@ -7202,7 +7206,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "media burst scenario: shift-change-long-hold",
-      "resource_class": "gcp-performance-soak",
+      "resource_class": "ec2-performance-soak",
       "retry_on_exit_codes": [
         75
       ],
@@ -7240,7 +7244,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "media burst scenario: overload-recovery",
-      "resource_class": "gcp-performance-soak",
+      "resource_class": "ec2-performance-soak",
       "retry_on_exit_codes": [
         75
       ],
@@ -7278,7 +7282,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "media burst scenario: high-density-media-burst",
-      "resource_class": "gcp-performance-soak",
+      "resource_class": "ec2-performance-soak",
       "retry_on_exit_codes": [
         75
       ],
@@ -7316,7 +7320,7 @@
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "media burst scenario: buffer-ab-legacy",
-      "resource_class": "gcp-performance-soak",
+      "resource_class": "ec2-performance-soak",
       "retry_on_exit_codes": [
         75
       ],
@@ -7327,23 +7331,23 @@
       "affected_crates": [],
       "affected_paths": [
         ".github/workflows/release-qualify.yml",
-        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/aws-release-startup.sh",
         "infra/release-runners/release-infrastructure-preflight.sh",
         "scripts/release/build_gate_catalog.py",
         "scripts/release/gates.py",
         "scripts/release/gates.json",
-        "scripts/release/gcp_fanout.py"
+        "scripts/release/aws_fanout.py"
       ],
       "always_fresh": true,
       "category": "Remote release framework",
       "command": [
         "bash",
         "infra/release-runners/release-infrastructure-preflight.sh",
-        "gcp-performance",
+        "ec2-performance",
         "{artifact_dir}"
       ],
       "dependencies": [],
-      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance {artifact_dir}",
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh ec2-performance {artifact_dir}",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -7354,8 +7358,8 @@
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
-      "name": "gcp-performance worker 01 infrastructure acceptance",
-      "resource_class": "gcp-performance",
+      "name": "ec2-performance worker 01 infrastructure acceptance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -7366,23 +7370,23 @@
       "affected_crates": [],
       "affected_paths": [
         ".github/workflows/release-qualify.yml",
-        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/aws-release-startup.sh",
         "infra/release-runners/release-infrastructure-preflight.sh",
         "scripts/release/build_gate_catalog.py",
         "scripts/release/gates.py",
         "scripts/release/gates.json",
-        "scripts/release/gcp_fanout.py"
+        "scripts/release/aws_fanout.py"
       ],
       "always_fresh": true,
       "category": "Remote release framework",
       "command": [
         "bash",
         "infra/release-runners/release-infrastructure-preflight.sh",
-        "gcp-performance",
+        "ec2-performance",
         "{artifact_dir}"
       ],
       "dependencies": [],
-      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance {artifact_dir}",
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh ec2-performance {artifact_dir}",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -7393,8 +7397,8 @@
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
-      "name": "gcp-performance worker 02 infrastructure acceptance",
-      "resource_class": "gcp-performance",
+      "name": "ec2-performance worker 02 infrastructure acceptance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -7405,23 +7409,23 @@
       "affected_crates": [],
       "affected_paths": [
         ".github/workflows/release-qualify.yml",
-        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/aws-release-startup.sh",
         "infra/release-runners/release-infrastructure-preflight.sh",
         "scripts/release/build_gate_catalog.py",
         "scripts/release/gates.py",
         "scripts/release/gates.json",
-        "scripts/release/gcp_fanout.py"
+        "scripts/release/aws_fanout.py"
       ],
       "always_fresh": true,
       "category": "Remote release framework",
       "command": [
         "bash",
         "infra/release-runners/release-infrastructure-preflight.sh",
-        "gcp-performance",
+        "ec2-performance",
         "{artifact_dir}"
       ],
       "dependencies": [],
-      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance {artifact_dir}",
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh ec2-performance {artifact_dir}",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -7432,8 +7436,8 @@
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
-      "name": "gcp-performance worker 03 infrastructure acceptance",
-      "resource_class": "gcp-performance",
+      "name": "ec2-performance worker 03 infrastructure acceptance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -7444,23 +7448,23 @@
       "affected_crates": [],
       "affected_paths": [
         ".github/workflows/release-qualify.yml",
-        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/aws-release-startup.sh",
         "infra/release-runners/release-infrastructure-preflight.sh",
         "scripts/release/build_gate_catalog.py",
         "scripts/release/gates.py",
         "scripts/release/gates.json",
-        "scripts/release/gcp_fanout.py"
+        "scripts/release/aws_fanout.py"
       ],
       "always_fresh": true,
       "category": "Remote release framework",
       "command": [
         "bash",
         "infra/release-runners/release-infrastructure-preflight.sh",
-        "gcp-performance",
+        "ec2-performance",
         "{artifact_dir}"
       ],
       "dependencies": [],
-      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance {artifact_dir}",
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh ec2-performance {artifact_dir}",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -7471,8 +7475,8 @@
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
-      "name": "gcp-performance worker 04 infrastructure acceptance",
-      "resource_class": "gcp-performance",
+      "name": "ec2-performance worker 04 infrastructure acceptance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -7483,23 +7487,23 @@
       "affected_crates": [],
       "affected_paths": [
         ".github/workflows/release-qualify.yml",
-        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/aws-release-startup.sh",
         "infra/release-runners/release-infrastructure-preflight.sh",
         "scripts/release/build_gate_catalog.py",
         "scripts/release/gates.py",
         "scripts/release/gates.json",
-        "scripts/release/gcp_fanout.py"
+        "scripts/release/aws_fanout.py"
       ],
       "always_fresh": true,
       "category": "Remote release framework",
       "command": [
         "bash",
         "infra/release-runners/release-infrastructure-preflight.sh",
-        "gcp-performance",
+        "ec2-performance",
         "{artifact_dir}"
       ],
       "dependencies": [],
-      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance {artifact_dir}",
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh ec2-performance {artifact_dir}",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -7510,8 +7514,8 @@
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
-      "name": "gcp-performance worker 05 infrastructure acceptance",
-      "resource_class": "gcp-performance",
+      "name": "ec2-performance worker 05 infrastructure acceptance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -7522,23 +7526,23 @@
       "affected_crates": [],
       "affected_paths": [
         ".github/workflows/release-qualify.yml",
-        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/aws-release-startup.sh",
         "infra/release-runners/release-infrastructure-preflight.sh",
         "scripts/release/build_gate_catalog.py",
         "scripts/release/gates.py",
         "scripts/release/gates.json",
-        "scripts/release/gcp_fanout.py"
+        "scripts/release/aws_fanout.py"
       ],
       "always_fresh": true,
       "category": "Remote release framework",
       "command": [
         "bash",
         "infra/release-runners/release-infrastructure-preflight.sh",
-        "gcp-performance",
+        "ec2-performance",
         "{artifact_dir}"
       ],
       "dependencies": [],
-      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance {artifact_dir}",
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh ec2-performance {artifact_dir}",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -7549,8 +7553,8 @@
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
-      "name": "gcp-performance worker 06 infrastructure acceptance",
-      "resource_class": "gcp-performance",
+      "name": "ec2-performance worker 06 infrastructure acceptance",
+      "resource_class": "ec2-performance",
       "retry_on_exit_codes": [
         75
       ],
@@ -7561,23 +7565,23 @@
       "affected_crates": [],
       "affected_paths": [
         ".github/workflows/release-qualify.yml",
-        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/aws-release-startup.sh",
         "infra/release-runners/release-infrastructure-preflight.sh",
         "scripts/release/build_gate_catalog.py",
         "scripts/release/gates.py",
         "scripts/release/gates.json",
-        "scripts/release/gcp_fanout.py"
+        "scripts/release/aws_fanout.py"
       ],
       "always_fresh": true,
       "category": "Remote release framework",
       "command": [
         "bash",
         "infra/release-runners/release-infrastructure-preflight.sh",
-        "gcp-performance-soak",
+        "ec2-performance-soak",
         "{artifact_dir}"
       ],
       "dependencies": [],
-      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance-soak {artifact_dir}",
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh ec2-performance-soak {artifact_dir}",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -7588,8 +7592,8 @@
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
-      "name": "gcp-performance-soak worker 01 infrastructure acceptance",
-      "resource_class": "gcp-performance-soak",
+      "name": "ec2-performance-soak worker 01 infrastructure acceptance",
+      "resource_class": "ec2-performance-soak",
       "retry_on_exit_codes": [
         75
       ],
@@ -7600,23 +7604,23 @@
       "affected_crates": [],
       "affected_paths": [
         ".github/workflows/release-qualify.yml",
-        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/aws-release-startup.sh",
         "infra/release-runners/release-infrastructure-preflight.sh",
         "scripts/release/build_gate_catalog.py",
         "scripts/release/gates.py",
         "scripts/release/gates.json",
-        "scripts/release/gcp_fanout.py"
+        "scripts/release/aws_fanout.py"
       ],
       "always_fresh": true,
       "category": "Remote release framework",
       "command": [
         "bash",
         "infra/release-runners/release-infrastructure-preflight.sh",
-        "gcp-performance-soak",
+        "ec2-performance-soak",
         "{artifact_dir}"
       ],
       "dependencies": [],
-      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance-soak {artifact_dir}",
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh ec2-performance-soak {artifact_dir}",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -7627,8 +7631,8 @@
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
-      "name": "gcp-performance-soak worker 02 infrastructure acceptance",
-      "resource_class": "gcp-performance-soak",
+      "name": "ec2-performance-soak worker 02 infrastructure acceptance",
+      "resource_class": "ec2-performance-soak",
       "retry_on_exit_codes": [
         75
       ],
@@ -7639,23 +7643,23 @@
       "affected_crates": [],
       "affected_paths": [
         ".github/workflows/release-qualify.yml",
-        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/aws-release-startup.sh",
         "infra/release-runners/release-infrastructure-preflight.sh",
         "scripts/release/build_gate_catalog.py",
         "scripts/release/gates.py",
         "scripts/release/gates.json",
-        "scripts/release/gcp_fanout.py"
+        "scripts/release/aws_fanout.py"
       ],
       "always_fresh": true,
       "category": "Remote release framework",
       "command": [
         "bash",
         "infra/release-runners/release-infrastructure-preflight.sh",
-        "gcp-performance-soak",
+        "ec2-performance-soak",
         "{artifact_dir}"
       ],
       "dependencies": [],
-      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance-soak {artifact_dir}",
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh ec2-performance-soak {artifact_dir}",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -7666,8 +7670,8 @@
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
-      "name": "gcp-performance-soak worker 03 infrastructure acceptance",
-      "resource_class": "gcp-performance-soak",
+      "name": "ec2-performance-soak worker 03 infrastructure acceptance",
+      "resource_class": "ec2-performance-soak",
       "retry_on_exit_codes": [
         75
       ],
@@ -7678,23 +7682,23 @@
       "affected_crates": [],
       "affected_paths": [
         ".github/workflows/release-qualify.yml",
-        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/aws-release-startup.sh",
         "infra/release-runners/release-infrastructure-preflight.sh",
         "scripts/release/build_gate_catalog.py",
         "scripts/release/gates.py",
         "scripts/release/gates.json",
-        "scripts/release/gcp_fanout.py"
+        "scripts/release/aws_fanout.py"
       ],
       "always_fresh": true,
       "category": "Remote release framework",
       "command": [
         "bash",
         "infra/release-runners/release-infrastructure-preflight.sh",
-        "gcp-performance-soak",
+        "ec2-performance-soak",
         "{artifact_dir}"
       ],
       "dependencies": [],
-      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance-soak {artifact_dir}",
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh ec2-performance-soak {artifact_dir}",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -7705,8 +7709,8 @@
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
-      "name": "gcp-performance-soak worker 04 infrastructure acceptance",
-      "resource_class": "gcp-performance-soak",
+      "name": "ec2-performance-soak worker 04 infrastructure acceptance",
+      "resource_class": "ec2-performance-soak",
       "retry_on_exit_codes": [
         75
       ],
@@ -7717,23 +7721,23 @@
       "affected_crates": [],
       "affected_paths": [
         ".github/workflows/release-qualify.yml",
-        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/aws-release-startup.sh",
         "infra/release-runners/release-infrastructure-preflight.sh",
         "scripts/release/build_gate_catalog.py",
         "scripts/release/gates.py",
         "scripts/release/gates.json",
-        "scripts/release/gcp_fanout.py"
+        "scripts/release/aws_fanout.py"
       ],
       "always_fresh": true,
       "category": "Remote release framework",
       "command": [
         "bash",
         "infra/release-runners/release-infrastructure-preflight.sh",
-        "gcp-performance-soak",
+        "ec2-performance-soak",
         "{artifact_dir}"
       ],
       "dependencies": [],
-      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance-soak {artifact_dir}",
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh ec2-performance-soak {artifact_dir}",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -7744,8 +7748,8 @@
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
-      "name": "gcp-performance-soak worker 05 infrastructure acceptance",
-      "resource_class": "gcp-performance-soak",
+      "name": "ec2-performance-soak worker 05 infrastructure acceptance",
+      "resource_class": "ec2-performance-soak",
       "retry_on_exit_codes": [
         75
       ],
@@ -7756,23 +7760,23 @@
       "affected_crates": [],
       "affected_paths": [
         ".github/workflows/release-qualify.yml",
-        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/aws-release-startup.sh",
         "infra/release-runners/release-infrastructure-preflight.sh",
         "scripts/release/build_gate_catalog.py",
         "scripts/release/gates.py",
         "scripts/release/gates.json",
-        "scripts/release/gcp_fanout.py"
+        "scripts/release/aws_fanout.py"
       ],
       "always_fresh": true,
       "category": "Remote release framework",
       "command": [
         "bash",
         "infra/release-runners/release-infrastructure-preflight.sh",
-        "gcp-performance-soak",
+        "ec2-performance-soak",
         "{artifact_dir}"
       ],
       "dependencies": [],
-      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance-soak {artifact_dir}",
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh ec2-performance-soak {artifact_dir}",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -7783,8 +7787,8 @@
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
-      "name": "gcp-performance-soak worker 06 infrastructure acceptance",
-      "resource_class": "gcp-performance-soak",
+      "name": "ec2-performance-soak worker 06 infrastructure acceptance",
+      "resource_class": "ec2-performance-soak",
       "retry_on_exit_codes": [
         75
       ],
@@ -7795,23 +7799,23 @@
       "affected_crates": [],
       "affected_paths": [
         ".github/workflows/release-qualify.yml",
-        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/aws-release-startup.sh",
         "infra/release-runners/release-infrastructure-preflight.sh",
         "scripts/release/build_gate_catalog.py",
         "scripts/release/gates.py",
         "scripts/release/gates.json",
-        "scripts/release/gcp_fanout.py"
+        "scripts/release/aws_fanout.py"
       ],
       "always_fresh": true,
       "category": "Remote release framework",
       "command": [
         "bash",
         "infra/release-runners/release-infrastructure-preflight.sh",
-        "gcp-performance-soak",
+        "ec2-performance-soak",
         "{artifact_dir}"
       ],
       "dependencies": [],
-      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance-soak {artifact_dir}",
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh ec2-performance-soak {artifact_dir}",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -7822,8 +7826,8 @@
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
-      "name": "gcp-performance-soak worker 07 infrastructure acceptance",
-      "resource_class": "gcp-performance-soak",
+      "name": "ec2-performance-soak worker 07 infrastructure acceptance",
+      "resource_class": "ec2-performance-soak",
       "retry_on_exit_codes": [
         75
       ],
@@ -7834,23 +7838,23 @@
       "affected_crates": [],
       "affected_paths": [
         ".github/workflows/release-qualify.yml",
-        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/aws-release-startup.sh",
         "infra/release-runners/release-infrastructure-preflight.sh",
         "scripts/release/build_gate_catalog.py",
         "scripts/release/gates.py",
         "scripts/release/gates.json",
-        "scripts/release/gcp_fanout.py"
+        "scripts/release/aws_fanout.py"
       ],
       "always_fresh": true,
       "category": "Remote release framework",
       "command": [
         "bash",
         "infra/release-runners/release-infrastructure-preflight.sh",
-        "gcp-performance-soak-long",
+        "ec2-performance-soak-long",
         "{artifact_dir}"
       ],
       "dependencies": [],
-      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance-soak-long {artifact_dir}",
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh ec2-performance-soak-long {artifact_dir}",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -7861,8 +7865,8 @@
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
-      "name": "gcp-performance-soak-long worker 01 infrastructure acceptance",
-      "resource_class": "gcp-performance-soak-long",
+      "name": "ec2-performance-soak-long worker 01 infrastructure acceptance",
+      "resource_class": "ec2-performance-soak-long",
       "retry_on_exit_codes": [
         75
       ],
@@ -7873,23 +7877,23 @@
       "affected_crates": [],
       "affected_paths": [
         ".github/workflows/release-qualify.yml",
-        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/aws-release-startup.sh",
         "infra/release-runners/release-infrastructure-preflight.sh",
         "scripts/release/build_gate_catalog.py",
         "scripts/release/gates.py",
         "scripts/release/gates.json",
-        "scripts/release/gcp_fanout.py"
+        "scripts/release/aws_fanout.py"
       ],
       "always_fresh": true,
       "category": "Remote release framework",
       "command": [
         "bash",
         "infra/release-runners/release-infrastructure-preflight.sh",
-        "gcp-performance-soak-long",
+        "ec2-performance-soak-long",
         "{artifact_dir}"
       ],
       "dependencies": [],
-      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-performance-soak-long {artifact_dir}",
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh ec2-performance-soak-long {artifact_dir}",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -7900,8 +7904,8 @@
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
-      "name": "gcp-performance-soak-long worker 02 infrastructure acceptance",
-      "resource_class": "gcp-performance-soak-long",
+      "name": "ec2-performance-soak-long worker 02 infrastructure acceptance",
+      "resource_class": "ec2-performance-soak-long",
       "retry_on_exit_codes": [
         75
       ],
@@ -7912,23 +7916,23 @@
       "affected_crates": [],
       "affected_paths": [
         ".github/workflows/release-qualify.yml",
-        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/aws-release-startup.sh",
         "infra/release-runners/release-infrastructure-preflight.sh",
         "scripts/release/build_gate_catalog.py",
         "scripts/release/gates.py",
         "scripts/release/gates.json",
-        "scripts/release/gcp_fanout.py"
+        "scripts/release/aws_fanout.py"
       ],
       "always_fresh": true,
       "category": "Remote release framework",
       "command": [
         "bash",
         "infra/release-runners/release-infrastructure-preflight.sh",
-        "gcp-interop",
+        "ec2-interop",
         "{artifact_dir}"
       ],
       "dependencies": [],
-      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-interop {artifact_dir}",
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh ec2-interop {artifact_dir}",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -7939,8 +7943,8 @@
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
-      "name": "gcp-interop worker 01 infrastructure acceptance",
-      "resource_class": "gcp-interop",
+      "name": "ec2-interop worker 01 infrastructure acceptance",
+      "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -7951,23 +7955,23 @@
       "affected_crates": [],
       "affected_paths": [
         ".github/workflows/release-qualify.yml",
-        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/aws-release-startup.sh",
         "infra/release-runners/release-infrastructure-preflight.sh",
         "scripts/release/build_gate_catalog.py",
         "scripts/release/gates.py",
         "scripts/release/gates.json",
-        "scripts/release/gcp_fanout.py"
+        "scripts/release/aws_fanout.py"
       ],
       "always_fresh": true,
       "category": "Remote release framework",
       "command": [
         "bash",
         "infra/release-runners/release-infrastructure-preflight.sh",
-        "gcp-proxy-interop",
+        "ec2-proxy-interop",
         "{artifact_dir}"
       ],
       "dependencies": [],
-      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-proxy-interop {artifact_dir}",
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh ec2-proxy-interop {artifact_dir}",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -7978,8 +7982,8 @@
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
-      "name": "gcp-proxy-interop worker 01 infrastructure acceptance",
-      "resource_class": "gcp-proxy-interop",
+      "name": "ec2-proxy-interop worker 01 infrastructure acceptance",
+      "resource_class": "ec2-proxy-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -7990,23 +7994,23 @@
       "affected_crates": [],
       "affected_paths": [
         ".github/workflows/release-qualify.yml",
-        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/aws-release-startup.sh",
         "infra/release-runners/release-infrastructure-preflight.sh",
         "scripts/release/build_gate_catalog.py",
         "scripts/release/gates.py",
         "scripts/release/gates.json",
-        "scripts/release/gcp_fanout.py"
+        "scripts/release/aws_fanout.py"
       ],
       "always_fresh": true,
       "category": "Remote release framework",
       "command": [
         "bash",
         "infra/release-runners/release-infrastructure-preflight.sh",
-        "gcp-proxy-interop",
+        "ec2-proxy-interop",
         "{artifact_dir}"
       ],
       "dependencies": [],
-      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh gcp-proxy-interop {artifact_dir}",
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh ec2-proxy-interop {artifact_dir}",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -8017,8 +8021,8 @@
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
-      "name": "gcp-proxy-interop worker 02 infrastructure acceptance",
-      "resource_class": "gcp-proxy-interop",
+      "name": "ec2-proxy-interop worker 02 infrastructure acceptance",
+      "resource_class": "ec2-proxy-interop",
       "retry_on_exit_codes": [
         75
       ],
@@ -8034,7 +8038,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8078,7 +8082,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8122,7 +8126,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8159,6 +8163,50 @@
     },
     {
       "affected_crates": [
+        "rvoip-audio-send-queue"
+      ],
+      "affected_paths": [
+        "crates/media/rvoip-audio-send-queue/**",
+        "scripts/ci/run_checks.py"
+      ],
+      "always_fresh": false,
+      "category": "Parallel 46-crate core",
+      "command": [
+        "python3",
+        "scripts/ci/run_checks.py",
+        "shard",
+        "--name",
+        "release-rvoip-audio-send-queue",
+        "--packages",
+        "rvoip-audio-send-queue",
+        "--output",
+        "{artifact_dir}/nested-ci-receipt.json"
+      ],
+      "dependencies": [
+        "source.remote-clean"
+      ],
+      "display_command": "test and lint rvoip-audio-send-queue",
+      "estimated_seconds": 120,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log",
+        "nested-ci-receipt.json"
+      ],
+      "id": "core.rvoip-audio-send-queue",
+      "kind": "cargo",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "rvoip-audio-send-queue unit, integration, example, and Clippy checks",
+      "resource_class": "github-standard",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [
         "rvoip-audit"
       ],
       "affected_paths": [
@@ -8166,7 +8214,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8210,7 +8258,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8254,7 +8302,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8298,7 +8346,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8342,7 +8390,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8386,7 +8434,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8430,7 +8478,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8474,7 +8522,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8518,7 +8566,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8562,7 +8610,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8606,7 +8654,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8650,7 +8698,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8694,7 +8742,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8738,7 +8786,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8782,7 +8830,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8826,7 +8874,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8870,7 +8918,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8914,7 +8962,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8958,7 +9006,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9002,7 +9050,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9046,7 +9094,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9090,7 +9138,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9134,7 +9182,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9178,7 +9226,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9222,7 +9270,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9266,7 +9314,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9310,7 +9358,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9354,7 +9402,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9398,7 +9446,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9442,7 +9490,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9486,7 +9534,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9530,7 +9578,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9574,7 +9622,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9618,7 +9666,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9662,7 +9710,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9706,7 +9754,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9750,7 +9798,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9794,7 +9842,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9838,7 +9886,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9882,7 +9930,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9926,7 +9974,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9970,7 +10018,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 45-crate core",
+      "category": "Parallel 46-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -10498,6 +10546,7 @@
         "core.rvoip",
         "core.rvoip-amazon-connect",
         "core.rvoip-audio-device",
+        "core.rvoip-audio-send-queue",
         "core.rvoip-audit",
         "core.rvoip-auth-core",
         "core.rvoip-client",
@@ -10810,6 +10859,7 @@
       "core.rvoip",
       "core.rvoip-amazon-connect",
       "core.rvoip-audio-device",
+      "core.rvoip-audio-send-queue",
       "core.rvoip-audit",
       "core.rvoip-auth-core",
       "core.rvoip-client",
@@ -10937,6 +10987,7 @@
       "core.rvoip",
       "core.rvoip-amazon-connect",
       "core.rvoip-audio-device",
+      "core.rvoip-audio-send-queue",
       "core.rvoip-audit",
       "core.rvoip-auth-core",
       "core.rvoip-client",
@@ -11135,5 +11186,5 @@
     "unautomated_legacy_ids": []
   },
   "schema": "rvoip-release-gate-catalog-v1",
-  "workspace_package_count": 45
+  "workspace_package_count": 46
 }

@@ -1,6 +1,6 @@
 # Unified Workspace Release
 
-All 45 publishable workspace crates use `[workspace.package].version` and ship
+All 46 publishable workspace crates use `[workspace.package].version` and ship
 together. `scripts/release.sh` is the only release authority; it discovers the
 package graph from Cargo metadata and publishes normal/build dependencies
 before their dependents.
@@ -22,18 +22,19 @@ release PR must pass the normal `PR Gate`; it is never pushed directly to
 The underlying `scripts/release.sh prepare` command rejects unstable SemVer
 strings, version downgrades, versions already present on crates.io, dirty
 trees, missing internal dependency versions, and a workspace inventory other
-than the expected 45 publishable packages. It updates package inheritance and
+than the expected 46 publishable packages. It updates package inheritance and
 the lockfile transactionally.
 
 ## Verify
 
 After the preparation PR merges, run **Release qualification** for that exact
 `main` commit. After release-orchestration changes merge, use
-`remote-preflight` first. It launches the same 18-worker, 100-vCPU GCP shape as
+`remote-preflight` first. It launches the same 18-worker, 100-vCPU EC2 shape as
 a full run, but
-executes short infrastructure probes so credentials, quota, VM startup, OS
-limits, tool installation, repository checkout, GCS evidence transfer,
-controller reconciliation, and cleanup fail within a target of 15 minutes.
+executes short infrastructure probes so role assumption, quota, instance
+startup, OS limits, tool installation, repository checkout, S3 evidence
+transfer, controller reconciliation, and cleanup fail within a target of 15
+minutes.
 The preflight is deliberately non-publishing and is not release evidence.
 
 For `remote-release`, the planner waits up to one hour for all five CodeQL
@@ -53,10 +54,10 @@ matching evidence can be reused while failed and affected gates are rerun.
 Diagnose and reproduce a failed gate by itself before spending another complete
 qualification run.
 
-For a real GCP performance, soak, or interoperability failure, dispatch
+For a real EC2 performance, soak, or interoperability failure, dispatch
 `remote-diagnostic` on protected `main` and enter one or more exact catalog gate
 IDs in `diagnostic_gates`, separated by commas. The planner accepts only
-executable GCP gates from `remote-release`, adds their declared dependencies,
+executable EC2 gates from `remote-release`, adds their declared dependencies,
 and forces them to run fresh with their release commands, machines, workloads,
 and thresholds. At most 20 gates may be requested. The resulting profile is
 non-publishing and cannot qualify a release.
@@ -102,7 +103,7 @@ scripts/release.sh verify --version X.Y.Z \
   --remote-qualification /path/to/aggregate.json
 ```
 
-Verification still validates the unified workspace metadata, exact 45-crate
+Verification still validates the unified workspace metadata, exact 46-crate
 package inventory, package file manifests, and registry-resolvable archive
 hashes. Before first publication, Cargo cannot build a dependent `.crate`
 archive until that crate's new internal dependency version is visible on
@@ -111,32 +112,38 @@ run.
 
 The `remote-core` profile uses GitHub-hosted runners. The complete
 `remote-release` profile sends performance, soak, and PBX/SIPp gates to real
-ephemeral Compute Engine workers. One GitHub controller creates all planned
-workers concurrently through workload identity, monitors their immutable GCS
-results, verifies and merges their evidence, and deletes every instance and
-auto-delete disk. A separate cleanup job sweeps interrupted runs. The workers
-never receive the crates.io token and no release worker remains provisioned
-between qualifications.
+ephemeral EC2 workers in a dedicated release VPC. One GitHub controller
+assumes the provisioner role through GitHub OIDC role assumption, creates all
+planned workers concurrently, monitors their immutable S3 results, verifies
+and merges their evidence, and terminates every instance together with its
+delete-on-termination root volume. A separate cleanup job sweeps interrupted
+runs, and a scheduled janitor terminates any worker that outlives its
+expiry tag. The workers never receive the crates.io token, no cloud access
+key is stored in GitHub, and no release worker remains provisioned between
+qualifications. [docs/AWS_RELEASE_WORKERS.md](AWS_RELEASE_WORKERS.md)
+records the machine classes, account resources, worker contract, and
+evidence layout.
 
 Hosted qualification, release preparation, and publication runners install the
 native ALSA, Opus, OpenSSL, libvpx, and Protobuf development packages before
 building. `libvpx-dev` is required by the WebRTC VP8/VP9 dependency graph when
 the release rustdoc gate compiles the complete workspace with `--all-features`.
 
-The current full profile is balanced across six `n2-standard-8` short-performance
-workers, two `n2-standard-8` one-hour-soak workers, seven `n2-standard-4`
-burst/soak workers, one `n2-standard-4` stateful interoperability worker, and
-two `n2-standard-2` proxy-interoperability workers. Each proxy worker runs six
+The current full profile is balanced across six `m5.2xlarge` short-performance
+workers, two `m5.2xlarge` one-hour-soak workers, seven `m5.xlarge`
+burst/soak workers, one `m5.xlarge` stateful interoperability worker, and
+two `m5.large` proxy-interoperability workers. Each proxy worker runs six
 of the twelve required peer/order/transport rows. The two
 long soaks receive the additional cores for the measured workload; the total
-runtime shape is 100 N2 vCPUs. These are real
+runtime shape is 100 concurrent On-Demand vCPUs, checked against the
+account's vCPU quota before any instance is created. These are real
 performance machines; the workflow
 does not substitute GitHub-hosted capacity or reduce workloads and thresholds.
 Before creating that runtime shape, the controller uses one ephemeral
-`n2-standard-32` builder with balanced persistent disk to compile the selected
+`m5.8xlarge` builder with a gp3 root volume to compile the selected
 performance executables exactly once. The builder uploads a candidate-, source
-tree-, toolchain-, and environment-bound bundle, then is deleted before the
-measurement workers start. Every performance worker verifies the bundle and
+tree-, toolchain-, and environment-bound bundle to S3, then is terminated
+before the measurement workers start. Every performance worker verifies the bundle and
 each executable by SHA-256 and records both bundle and manifest digests in its
 gate receipt. Compilation therefore cannot perturb performance measurements or
 be repeated independently on every worker.
@@ -145,7 +152,7 @@ shards to 16 app-session event dispatcher workers. That preserves the reviewed
 configuration on the standardized eight-vCPU worker instead of allowing the
 library's host-CPU-derived endpoint default to change the experiment.
 The `remote-preflight` profile recreates that complete capacity shape, including
-all 18 concurrent VM creations, but its short probes never substitute for the
+all 18 concurrent instance creations, but its short probes never substitute for the
 real performance, interoperability, and soak commands in `remote-release`.
 The one-hour soak establishes a physical lower bound of one hour for a fresh
 qualification, plus short provisioning and evidence overhead. The shared build
@@ -162,20 +169,22 @@ always fresh and runs three clean passes from the exact candidate. The release
 report also requires a current performance evaluation in JSON and Markdown and
 a SHA-256 index covering the packaged performance artifacts. July 2026 results
 remain historical baselines and cannot qualify a later release.
-The GCS lifecycle expires only `release-cache/` objects after 14 days; it does
-not apply to the durable run-scoped qualification receipts and logs.
+The S3 evidence bucket lifecycle expires only `release-cache/` objects after 14
+days; it does not apply to the durable run-scoped qualification receipts and
+logs.
 Each proxy row has its own stable gate ID, so a later diagnostic can rerun only
 the failed combination without rerunning the other eleven rows.
 
-The shared builder and GCP workers use a verified, pinned `sccache` binary and a private,
-lifecycle-managed GCS compiler-cache bucket. The cache is content-addressed,
-contains no release credentials, and is shared only by trusted protected-main
-or same-repository diagnostic workflows. Build processes record cache
-statistics in their evidence. A cache
-download or backend failure falls back to direct compilation without changing
-the command, workload, machine class, or acceptance threshold. Hosted release
+The shared builder and EC2 workers use a verified, pinned `sccache` binary
+with a private S3 bucket as its lifecycle-managed compiler cache, reached
+through the runner instance role rather than a stored key. The cache is
+content-addressed, contains no release credentials, and is shared only by
+trusted protected-main or same-repository diagnostic workflows. Build
+processes record cache statistics in their evidence. A cache download or
+backend failure falls back to direct compilation without changing the
+command, workload, machine class, or acceptance threshold. Hosted release
 checks are balanced across twelve standard shards; together with five nightly
-shards, one evidence shard, and the one GCP controller, the workflow remains
+shards, one evidence shard, and the one EC2 controller, the workflow remains
 below the repository's twenty-job concurrency ceiling.
 
 This verification is the version/package delta boundary. It does not claim
@@ -201,7 +210,7 @@ performance audit, cleanup convergence, source binding, executable hash, and
 evidence-tree hash are independently rechecked.
 
 This mode still runs the normal current workspace compile, library, target,
-integration, example, doctest, and 45-package verification. Its receipt says
+integration, example, doctest, and 46-package verification. Its receipt says
 `OWNER-APPROVED-CARRY-FORWARD` and `NOT-RERUN`; it cannot label the inherited
 `0.3.2` evidence as a current beta PASS. The `0.3.4` full beta,
 interoperability matrix, and long soaks remain explicitly `NOT-RERUN`.
@@ -304,7 +313,7 @@ An interrupted run is resumable. A version already on crates.io is skipped
 only when its registry checksum matches the locally verified `.crate` artifact;
 any mismatch fails closed.
 
-After all 45 versions are visible, the workflow creates the protected
+After all 46 versions are visible, the workflow creates the protected
 annotated tag and GitHub release with generated notes listing merged PRs by
 release-note label. It refuses to tag or release a partial crates.io
 publication. An interrupted publication is resumable; an existing version is

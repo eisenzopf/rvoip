@@ -190,8 +190,8 @@ def validate_catalog(root: Path, catalog: dict[str, Any]) -> None:
     ):
         raise GateError("remote-release legacy coverage ledger is inconsistent")
     core = [gate for gate in gates if gate["id"].startswith("core.")]
-    if len(core) != catalog.get("workspace_package_count") or len(core) != 45:
-        raise GateError("catalog must contain one core gate for each of 45 workspace crates")
+    if len(core) != catalog.get("workspace_package_count") or len(core) != 46:
+        raise GateError("catalog must contain one core gate for each of 46 workspace crates")
 
 
 def tracked_files(root: Path) -> list[str]:
@@ -288,8 +288,8 @@ def input_record(
             "deny.toml",
         }
     )
-    if gate["resource_class"].startswith("gcp-"):
-        patterns.add("infra/release-runners/gcp-release-startup.sh")
+    if gate["resource_class"].startswith("ec2-"):
+        patterns.add("infra/release-runners/aws-release-startup.sh")
     selected = [path for path in files if matches(path, patterns)]
     file_hashes = {path: file_sha256(root / path) for path in selected}
     payload = {
@@ -478,29 +478,30 @@ def matrix_for(plan_gates: list[dict[str, Any]], by_id: dict[str, dict[str, Any]
         # Keep the complete hosted release fanout below GitHub's 20-job
         # repository limit while avoiding the two 50+ minute serial shards
         # observed during the v0.3.6 qualification. Twelve standard shards,
-        # five nightly shards, one evidence shard, and the single GCP
+        # five nightly shards, one evidence shard, and the single EC2
         # controller peak at nineteen concurrent jobs.
         "github-standard": 12,
         "github-nightly": 5,
         "github-evidence": 1,
-        "gcp-performance": 6,
-        "gcp-performance-soak": 7,
-        "gcp-performance-soak-long": 2,
+        "ec2-performance": 6,
+        "ec2-performance-soak": 7,
+        "ec2-performance-soak-long": 2,
         # The twelve proxy rows have independent ephemeral peer labs. Two
-        # workers fit the complete release fanout inside the 100-vCPU regional
-        # quota, while a failed row can still be retried alone.
-        "gcp-proxy-interop": 2,
+        # workers keep the complete release fanout at 100 concurrent vCPUs,
+        # well inside the account's On-Demand Standard vCPU quota, while a
+        # failed row can still be retried alone.
+        "ec2-proxy-interop": 2,
         # Interoperability gates share one stateful peer lab. Keep their
         # lifecycle dependency chain in one shard so start/matrix/stop/restore
         # operations cannot race across ephemeral jobs.
-        "gcp-interop": 1,
+        "ec2-interop": 1,
     }
     for resource in sorted(groups):
         gates = groups[resource]
         shards = balance_gates(gates, min(limits.get(resource, 1), len(gates)))
         for index, shard in enumerate(shards, start=1):
             gate_ids = sorted(gate["id"] for gate in shard)
-            if resource.startswith("gcp-"):
+            if resource.startswith("ec2-"):
                 runs_on: str | list[str] = ["self-hosted", "rvoip-release", resource]
             else:
                 runs_on = "ubuntu-latest"
@@ -509,16 +510,16 @@ def matrix_for(plan_gates: list[dict[str, Any]], by_id: dict[str, dict[str, Any]
                     "id": re.sub(r"[^A-Za-z0-9_-]", "-", f"{resource}-{index}"),
                     "resource_class": resource,
                     "runs_on": runs_on,
-                    "hosted": not resource.startswith("gcp-"),
+                    "hosted": not resource.startswith("ec2-"),
                     "machine_type": (
-                        "n2-standard-2"
-                        if resource == "gcp-proxy-interop"
-                        else "n2-standard-4"
-                        if resource in {"gcp-interop", "gcp-performance-soak"}
-                        else "n2-standard-8"
+                        "m5.large"
+                        if resource == "ec2-proxy-interop"
+                        else "m5.xlarge"
+                        if resource in {"ec2-interop", "ec2-performance-soak"}
+                        else "m5.2xlarge"
                     ),
-                    "disk_type": "pd-standard",
-                    "disk_size_gb": 100 if resource == "gcp-proxy-interop" else 200,
+                    "disk_type": "gp3",
+                    "disk_size_gb": 100 if resource == "ec2-proxy-interop" else 200,
                     "gates": gate_ids,
                     "gates_csv": ",".join(gate_ids),
                     "needs_nightly": any(
@@ -570,13 +571,13 @@ def profile_selection(
         for gate_id in requested
         if gate_id != "interop.remote-proxies"
         and (
-            not by_id[gate_id]["resource_class"].startswith("gcp-")
+            not by_id[gate_id]["resource_class"].startswith("ec2-")
             or by_id[gate_id]["executor"] != "argv"
         )
     )
     if invalid:
         raise GateError(
-            "remote-diagnostic accepts executable GCP gates or the proxy-matrix aggregate only: "
+            "remote-diagnostic accepts executable EC2 gates or the proxy-matrix aggregate only: "
             + ", ".join(invalid)
         )
 
@@ -712,14 +713,14 @@ def create_plan(
 
 def write_github_output(path: Path, plan: dict[str, Any]) -> None:
     hosted = [item for item in plan["matrix"] if item["hosted"]]
-    gcp = [item for item in plan["matrix"] if not item["hosted"]]
+    ec2 = [item for item in plan["matrix"] if not item["hosted"]]
     values = {
         "matrix": json.dumps({"include": plan["matrix"]}, separators=(",", ":")),
         "hosted_matrix": json.dumps({"include": hosted}, separators=(",", ":")),
-        "gcp_matrix": json.dumps({"include": gcp}, separators=(",", ":")),
+        "aws_matrix": json.dumps({"include": ec2}, separators=(",", ":")),
         "shard_count": str(len(plan["matrix"])),
         "hosted_shard_count": str(len(hosted)),
-        "gcp_shard_count": str(len(gcp)),
+        "aws_shard_count": str(len(ec2)),
         "run_count": str(sum(item["decision"] == "RUN" for item in plan["gates"])),
         "reuse_count": str(sum(item["decision"] == "REUSE" for item in plan["gates"])),
         "candidate_sha": plan["candidate_sha"],
@@ -753,7 +754,7 @@ def prebuilt_performance_command(
 
     manifest = os.environ.get("RVOIP_PERF_PREBUILT_MANIFEST")
     if not manifest or not str(gate.get("resource_class", "")).startswith(
-        "gcp-performance"
+        "ec2-performance"
     ):
         return None
     command = gate.get("command") or []
@@ -1487,7 +1488,7 @@ def parser() -> argparse.ArgumentParser:
     )
     plan.add_argument(
         "--only-gates",
-        help="comma-separated exact GCP gate IDs for remote-diagnostic",
+        help="comma-separated exact EC2 gate IDs for remote-diagnostic",
     )
     plan.add_argument("--candidate", required=True)
     plan.add_argument("--environment-id", required=True)
@@ -1517,7 +1518,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "validate":
             print(
                 f"catalog valid: {len(catalog['gates'])} gates, "
-                "108 legacy mappings, 45 crate gates"
+                "108 legacy mappings, 46 crate gates"
             )
             return 0
         if args.command == "plan":

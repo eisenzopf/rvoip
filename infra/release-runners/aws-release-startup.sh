@@ -4,29 +4,31 @@ set -Eeuo pipefail
 LOG=/var/log/rvoip-release-qualification.log
 exec > >(tee -a "$LOG") 2>&1
 
-metadata() {
-  curl --fail --silent --show-error \
-    -H 'Metadata-Flavor: Google' \
-    "http://metadata.google.internal/computeMetadata/v1/instance/attributes/$1"
-}
+# The controller's user-data writes /etc/rvoip-release.env (mode 0600) before
+# it runs this script. Every key is present on every worker; unused keys are
+# empty. Exporting them keeps the env file the single source of worker
+# parameters for this script, the shutdown checkpoint, and gate subprocesses.
+set -a
+# shellcheck source=/dev/null
+source /etc/rvoip-release.env
+set +a
 
-CANDIDATE="$(metadata rvoip-candidate)"
-RUN_ID="$(metadata rvoip-run-id)"
-SHARD_ID="$(metadata rvoip-shard-id)"
-RESOURCE_CLASS="$(metadata rvoip-resource-class)"
-BUCKET="$(metadata rvoip-evidence-bucket)"
-CACHE_BUCKET="$(metadata rvoip-cache-bucket)"
-PREFIX="$(metadata rvoip-prefix)"
-GATES="$(metadata rvoip-gates-b64 | base64 --decode)"
-ENVIRONMENT_ID="$(metadata rvoip-environment-b64 | base64 --decode)"
-PREBUILT_URI="$(metadata rvoip-prebuilt-uri)"
-PREBUILT_SHA256="$(metadata rvoip-prebuilt-sha256)"
-EXTERNAL_MEMORY_DIAGNOSTICS="$(
-  metadata rvoip-external-memory-diagnostics 2>/dev/null || printf '0'
-)"
-MIMALLOC_ALLOW_THP_OVERRIDE="$(
-  metadata rvoip-mimalloc-allow-thp 2>/dev/null || true
-)"
+CANDIDATE="$RVOIP_CANDIDATE"
+RUN_ID="$RVOIP_RUN_ID"
+SHARD_ID="$RVOIP_SHARD_ID"
+RESOURCE_CLASS="$RVOIP_RESOURCE_CLASS"
+BUCKET="$RVOIP_EVIDENCE_BUCKET"
+CACHE_BUCKET="$RVOIP_CACHE_BUCKET"
+PREFIX="$RVOIP_PREFIX"
+GATES="$(printf '%s' "$RVOIP_GATES_B64" | base64 --decode)"
+ENVIRONMENT_ID="$(printf '%s' "$RVOIP_ENVIRONMENT_B64" | base64 --decode)"
+PREBUILT_URI="$RVOIP_PREBUILT_URI"
+PREBUILT_SHA256="$RVOIP_PREBUILT_SHA256"
+EXTERNAL_MEMORY_DIAGNOSTICS="${RVOIP_EXTERNAL_MEMORY_DIAGNOSTICS:-0}"
+MIMALLOC_ALLOW_THP_OVERRIDE="${RVOIP_MIMALLOC_ALLOW_THP:-}"
+AWS_REGION="$RVOIP_AWS_REGION"
+export AWS_REGION
+export AWS_DEFAULT_REGION="$AWS_REGION"
 WORKSPACE=/opt/rvoip
 EVIDENCE=/tmp/release-shard
 ARCHIVE=/tmp/release-shard.tar.gz
@@ -34,39 +36,46 @@ RESULT=/tmp/result.json
 STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 START_SECONDS="$(date +%s)"
 EXTERNAL_MEMORY_SAMPLER_PID=""
+S3_CP_ATTEMPTS=3
 
+# Evidence transfers use the AWS CLI with the runner instance role; there is
+# no explicit credential anywhere on the worker. The CLI already retries
+# throttled and transient API errors internally; the outer loop covers a
+# whole-command failure such as a dropped connection mid-stream.
+# shellcheck disable=SC2329  # invoked from the EXIT trap
 upload() {
   local source="$1"
   local object="$2"
-  local token encoded
-  token="$(curl --fail --silent --show-error \
-    -H 'Metadata-Flavor: Google' \
-    http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')"
-  encoded="$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$object")"
-  curl --fail --silent --show-error --retry 3 --retry-all-errors \
-    -X POST \
-    -H "Authorization: Bearer ${token}" \
-    -H 'Content-Type: application/octet-stream' \
-    --upload-file "${source}" \
-    "https://storage.googleapis.com/upload/storage/v1/b/${BUCKET}/o?uploadType=media&name=${encoded}"
+  local attempt
+  for attempt in $(seq 1 "$S3_CP_ATTEMPTS"); do
+    if aws s3 cp --only-show-errors "$source" "s3://${BUCKET}/${object}"; then
+      return 0
+    fi
+    echo "upload attempt ${attempt}/${S3_CP_ATTEMPTS} failed: ${object}" >&2
+    if (( attempt < S3_CP_ATTEMPTS )); then
+      sleep "$(( attempt * 5 ))"
+    fi
+  done
+  return 1
 }
 
 download() {
   local object="$1"
   local destination="$2"
-  local token encoded
-  token="$(curl --fail --silent --show-error \
-    -H 'Metadata-Flavor: Google' \
-    http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')"
-  encoded="$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$object")"
-  curl --fail --silent --show-error --retry 3 --retry-all-errors \
-    -H "Authorization: Bearer ${token}" \
-    "https://storage.googleapis.com/download/storage/v1/b/${BUCKET}/o/${encoded}?alt=media" \
-    -o "$destination"
+  local attempt
+  for attempt in $(seq 1 "$S3_CP_ATTEMPTS"); do
+    if aws s3 cp --only-show-errors "s3://${BUCKET}/${object}" "$destination"; then
+      return 0
+    fi
+    echo "download attempt ${attempt}/${S3_CP_ATTEMPTS} failed: ${object}" >&2
+    if (( attempt < S3_CP_ATTEMPTS )); then
+      sleep "$(( attempt * 5 ))"
+    fi
+  done
+  return 1
 }
 
+# shellcheck disable=SC2329  # invoked via `trap finish EXIT`
 finish() {
   local exit_code=$?
   local ended_at duration archive_sha
@@ -77,7 +86,8 @@ finish() {
     shutdown -h now || true
     exit "$exit_code"
   fi
-  # A GCE shutdown checkpoint may already have committed a PARTIAL result.
+  # The EC2 shutdown checkpoint (the ExecStop of rvoip-release-shutdown.service
+  # during a controller stop) may already have committed a PARTIAL result.
   # Never overwrite that immutable object with a racing local EXIT result.
   if [[ -f /tmp/result-partial.json ]]; then
     sync
@@ -122,7 +132,7 @@ import sys
 
 path, candidate, run_id, shard, gates, started, ended, duration, code, archive_sha = sys.argv[1:]
 payload = {
-    "schema": "rvoip-gcp-release-shard-v1",
+    "schema": "rvoip-ec2-release-shard-v1",
     "candidate_sha": candidate,
     "github_run_id": run_id,
     "shard_id": shard,
@@ -142,6 +152,9 @@ PY
   upload "$LOG" "${PREFIX}/qualification.log" || true
   upload "$RESULT" "${PREFIX}/result.json" || true
   sync
+  # The instance was created with InstanceInitiatedShutdownBehavior=terminate
+  # and a delete-on-termination root volume, so this halt is the worker's own
+  # termination and disk release.
   shutdown -h now || true
   exit "$exit_code"
 }
@@ -223,14 +236,89 @@ capture_external_memory() {
   done
 }
 
+# Every evidence transfer, including the EXIT-trap result upload, goes through
+# the AWS CLI, so it is the first thing installed. The archive is the pinned
+# official build and its detached PGP signature must verify against the AWS
+# CLI Team public key embedded below (fingerprint
+# FB5D B77F D5C1 18B8 0511 ADA8 A631 0ACC 4672 475C, expires 2027-07-01).
+# Any download, key, or signature problem fails closed before the CLI is used.
+AWS_CLI_VERSION=2.37.4
+AWS_CLI_ARCHIVE="awscli-exe-linux-x86_64-${AWS_CLI_VERSION}.zip"
+AWS_CLI_URL="https://awscli.amazonaws.com/${AWS_CLI_ARCHIVE}"
+AWS_CLI_KEY_FINGERPRINT=FB5DB77FD5C118B80511ADA8A6310ACC4672475C
+install_aws_cli() {
+  local workdir
+  workdir="$(mktemp -d /tmp/rvoip-awscli.XXXXXX)"
+  cat > "$workdir/aws-cli-team.asc" <<'KEY'
+-----BEGIN PGP PUBLIC KEY BLOCK-----
+
+mQINBF2Cr7UBEADJZHcgusOJl7ENSyumXh85z0TRV0xJorM2B/JL0kHOyigQluUG
+ZMLhENaG0bYatdrKP+3H91lvK050pXwnO/R7fB/FSTouki4ciIx5OuLlnJZIxSzx
+PqGl0mkxImLNbGWoi6Lto0LYxqHN2iQtzlwTVmq9733zd3XfcXrZ3+LblHAgEt5G
+TfNxEKJ8soPLyWmwDH6HWCnjZ/aIQRBTIQ05uVeEoYxSh6wOai7ss/KveoSNBbYz
+gbdzoqI2Y8cgH2nbfgp3DSasaLZEdCSsIsK1u05CinE7k2qZ7KgKAUIcT/cR/grk
+C6VwsnDU0OUCideXcQ8WeHutqvgZH1JgKDbznoIzeQHJD238GEu+eKhRHcz8/jeG
+94zkcgJOz3KbZGYMiTh277Fvj9zzvZsbMBCedV1BTg3TqgvdX4bdkhf5cH+7NtWO
+lrFj6UwAsGukBTAOxC0l/dnSmZhJ7Z1KmEWilro/gOrjtOxqRQutlIqG22TaqoPG
+fYVN+en3Zwbt97kcgZDwqbuykNt64oZWc4XKCa3mprEGC3IbJTBFqglXmZ7l9ywG
+EEUJYOlb2XrSuPWml39beWdKM8kzr1OjnlOm6+lpTRCBfo0wa9F8YZRhHPAkwKkX
+XDeOGpWRj4ohOx0d2GWkyV5xyN14p2tQOCdOODmz80yUTgRpPVQUtOEhXQARAQAB
+tCFBV1MgQ0xJIFRlYW0gPGF3cy1jbGlAYW1hem9uLmNvbT6JAlQEEwEIAD4CGwMF
+CwkIBwIGFQoJCAsCBBYCAwECHgECF4AWIQT7Xbd/1cEYuAURraimMQrMRnJHXAUC
+akV0ygUJDqP4lQAKCRCmMQrMRnJHXFHjD/9eyZLYcKuQOlLvtqSDtUBiEZf6ZZjM
+i3ygYH8rJNtuToUH+HvSpe819urJCquXhDrlK6N+aqW0hCLtNABJG/vsafIgvIYJ
+hSGgpgtNnQyMV1jViRWqPjbouw8OkYKBThUfT1i2Y+wn58ifs6ODBCmTexWtXspA
+Si+Gt49xDOW0APmbOPnI+a4HJW6tVEo6MWS0WjzpiBayR3d1A4pt4YrPfSdDgpLo
+h2SLQqlRqvvVZJaWBjhkErNFpfsBA06sDcPEOb0G8LBUbR4WOcdvhe5LubJbZuxC
+AG9kNPCVeQP1ixwjgjXKysaxeQ6rv0VzIQgRp6tLVLWhy6AKDNvLjFSsmXZ1Wl08
+Y/RlOHXlzLuQMRE6sR1wOdRxc9TsrNWTGiBK65cvSWOy03JeBkQQ8pesqltiyxI9
+U21kkgiXtTSKNGfKK8pO27D81YANhRqPK7iTp6kuFiY2WtOg90KTMNlIT+Ff85Y2
+b1rHj6Z0SrCkJujhWk3IBPic/wJgz01LEc/OAdUPlby90RJZcIBhSlWhT7mXnXIO
+c0HWlNQrns2s3CTyYwZSiSlYe9ApeLwhjDo8NhbFuCAy61l6O5UsR4AfZxx/rGKv
+2wFb1/RN/P4gNe6vmxZAPjR0AQcwD3tc2McimOLr/22kmPz8IH3I0X7WoSFr0Biz
+E91G7bb0hOb/cA==
+=knv7
+-----END PGP PUBLIC KEY BLOCK-----
+KEY
+  curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+    --retry 3 --retry-all-errors \
+    "$AWS_CLI_URL" -o "$workdir/awscliv2.zip"
+  curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+    --retry 3 --retry-all-errors \
+    "${AWS_CLI_URL}.sig" -o "$workdir/awscliv2.sig"
+  mkdir -m 0700 "$workdir/gnupg"
+  gpg --homedir "$workdir/gnupg" --batch --quiet \
+    --import "$workdir/aws-cli-team.asc"
+  # The scratch keyring must contain exactly the published AWS CLI key.
+  gpg --homedir "$workdir/gnupg" --batch --with-colons --fingerprint \
+    > "$workdir/keyring-fingerprints"
+  test "$(grep -c '^fpr:' "$workdir/keyring-fingerprints")" -eq 1
+  grep -q "^fpr:::::::::${AWS_CLI_KEY_FINGERPRINT}:$" \
+    "$workdir/keyring-fingerprints"
+  # Require a VALIDSIG made by that key, not merely a zero exit status.
+  gpg --homedir "$workdir/gnupg" --batch --status-fd 3 \
+    --verify "$workdir/awscliv2.sig" "$workdir/awscliv2.zip" \
+    3> "$workdir/verify-status"
+  awk -v key="$AWS_CLI_KEY_FINGERPRINT" \
+    '$1 == "[GNUPG:]" && $2 == "VALIDSIG" && ($3 == key || $NF == key) { ok = 1 }
+     END { exit !ok }' "$workdir/verify-status"
+  unzip -q "$workdir/awscliv2.zip" -d "$workdir"
+  "$workdir/aws/install" --install-dir /usr/local/aws-cli --bin-dir /usr/local/bin
+  test "$(aws --version | awk '{print $1}')" = "aws-cli/${AWS_CLI_VERSION}"
+  gpgconf --homedir "$workdir/gnupg" --kill all >/dev/null 2>&1 || true
+  rm -rf "$workdir"
+}
+
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
+apt-get install -y --no-install-recommends ca-certificates curl gnupg unzip
+install_aws_cli
 apt-get install -y --no-install-recommends \
   build-essential ca-certificates cmake curl git jq libasound2-dev libopus-dev \
   libssl-dev lld pkg-config protobuf-compiler
 
-if [[ "$RESOURCE_CLASS" == "gcp-interop" \
-  || "$RESOURCE_CLASS" == "gcp-proxy-interop" ]]; then
+if [[ "$RESOURCE_CLASS" == "ec2-interop" \
+  || "$RESOURCE_CLASS" == "ec2-proxy-interop" ]]; then
   # Ubuntu packages the SIPp binary as `sip-tester`; `sipp` is not a package.
   # Keep these heavyweight, network-facing tools off performance-only workers.
   apt-get install -y --no-install-recommends \
@@ -253,7 +341,7 @@ sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain 1.91.0 \
 export PATH=/root/.cargo/bin:$PATH
 command -v ld.lld >/dev/null
 ld.lld --version
-# Match the exact-candidate prebuilder. Some non-performance GCP gates compile
+# Match the exact-candidate prebuilder. Some non-performance EC2 gates compile
 # directly on their worker, so both paths must use the same versioned linker
 # contract.
 export RUSTFLAGS="-C link-arg=-fuse-ld=lld"
@@ -267,8 +355,8 @@ test "$(git rev-parse HEAD)" = "$CANDIDATE"
 prebuilt_gate_ids="$(python3 scripts/release/prebuilt_performance.py select-gates \
   --catalog scripts/release/gates.json --gates "$GATES")"
 if [[ -n "$prebuilt_gate_ids" ]]; then
-  run_bundle_prefix="gs://${BUCKET}/release/${RUN_ID}/prebuild/"
-  cache_bundle_prefix="gs://${BUCKET}/release-cache/performance-prebuilt-v1/"
+  run_bundle_prefix="s3://${BUCKET}/release/${RUN_ID}/prebuild/"
+  cache_bundle_prefix="s3://${BUCKET}/release-cache/performance-prebuilt-v1/"
   if [[ ! "$PREBUILT_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
     echo "performance worker lacks an exact-run prebuilt bundle" >&2
     exit 1
@@ -282,7 +370,7 @@ if [[ -n "$prebuilt_gate_ids" ]]; then
     echo "performance worker lacks an exact-run or content-addressed cached bundle" >&2
     exit 1
   fi
-  prebuilt_object="${PREBUILT_URI#"gs://${BUCKET}/"}"
+  prebuilt_object="${PREBUILT_URI#"s3://${BUCKET}/"}"
   download "$prebuilt_object" /tmp/performance-prebuilt.tar.gz
   python3 scripts/release/prebuilt_performance.py install-bundle \
     --archive /tmp/performance-prebuilt.tar.gz \
@@ -299,7 +387,7 @@ if [[ -n "$prebuilt_gate_ids" ]]; then
 fi
 
 # Every ephemeral worker previously spent roughly twenty-one minutes compiling
-# the same release graph. Use a dedicated, lifecycle-managed GCS bucket as a
+# the same release graph. Use a dedicated, lifecycle-managed S3 bucket as a
 # content-addressed compiler cache. Cache availability is an optimization only:
 # a download, authentication, or backend failure falls back to direct rustc so
 # release correctness never depends on cached state.
@@ -325,22 +413,17 @@ if install_sccache; then
   export SCCACHE_BASEDIRS="$WORKSPACE"
   export SCCACHE_CACHE_SIZE=20G
   export SCCACHE_DIR=/var/cache/rvoip-sccache
-  export SCCACHE_GCS_BUCKET="$CACHE_BUCKET"
-  export SCCACHE_GCS_KEY_PREFIX=rvoip-release-v2-lld/rust-1.91.0/x86_64-unknown-linux-gnu
-  export SCCACHE_GCS_RW_MODE=READ_WRITE
-  cache_service_account="$(curl --fail --silent --show-error \
-    -H 'Metadata-Flavor: Google' \
-    http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email)" \
-    || cache_service_account=""
+  # sccache authenticates to S3 through the same instance role as the CLI.
+  export SCCACHE_BUCKET="$CACHE_BUCKET"
+  export SCCACHE_REGION="$AWS_REGION"
+  export SCCACHE_S3_KEY_PREFIX=rvoip-release-v2-lld/rust-1.91.0/x86_64-unknown-linux-gnu
+  export SCCACHE_S3_USE_SSL=true
   export SCCACHE_IDLE_TIMEOUT=0
-  export SCCACHE_MULTILEVEL_CHAIN=disk,gcs
+  export SCCACHE_MULTILEVEL_CHAIN=disk,s3
   export SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=ignore
-  if [[ -n "$cache_service_account" ]]; then
-    export SCCACHE_GCS_SERVICE_ACCOUNT="$cache_service_account"
-  fi
-  if [[ -n "$cache_service_account" ]] && sccache --start-server; then
+  if sccache --start-server; then
     export RVOIP_SCCACHE_ACTIVE=1
-    echo "shared GCS compiler cache enabled"
+    echo "shared S3 compiler cache enabled"
   else
     unset RUSTC_WRAPPER
     echo "shared compiler cache unavailable; continuing with direct rustc" >&2
@@ -379,7 +462,7 @@ case "$MIMALLOC_ALLOW_THP_OVERRIDE" in
     echo "mimalloc THP override set to ${MIMALLOC_ALLOW_THP} for diagnostic A/B"
     ;;
   *)
-    echo "rvoip-mimalloc-allow-thp must be 0, 1, or unset" >&2
+    echo "RVOIP_MIMALLOC_ALLOW_THP must be 0, 1, or unset" >&2
     exit 1
     ;;
 esac
