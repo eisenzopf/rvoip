@@ -49,6 +49,41 @@
 - `rvoip::app::SipConfig::source_rate_limit` and `ingress_observer` expose
   both through the facade; they take effect with the trusted-trunk policy.
 
+### SIP NAT traversal on the live RTP socket
+
+- `TransportStunClient` in `rvoip-rtp-core` sends Binding requests through a
+  running `RtpTransport` and reads the response from the transport event
+  stream. `rvoip-sip` now discovers the public mapping after allocating each
+  call's RTP transport and waits for that exact mapping before rendering offer
+  or answer SDP, so the advertised port is the port media actually uses. A
+  static `media_public_addr` remains authoritative; resolution, timeout, and
+  response failures still fall back to the local media address. With STUN
+  configured, initial SDP generation can wait up to 1.5 seconds.
+
+### SIP DTLS-SRTP interoperability
+
+- `UDP/TLS/RTP/SAVPF` is accepted as a DTLS-SRTP audio profile alongside
+  `SAVP`, so media servers that answer with the WebRTC feedback profile no
+  longer fail before the DTLS handshake.
+- `Config` gains `DtlsSetupRole` (`actpass` by default, `active` or `passive`
+  for endpoint and NAT interop), and `srtp_offered_suites` now drives the DTLS
+  `use_srtp` profile list in the configured order. AES-256 SDES suites are
+  rejected when DTLS-SRTP is selected because the DTLS stack supports only the
+  AES-128 SHA1-80 and SHA1-32 profiles.
+
+### WebTransport origin allowlist
+
+- `UctpWtConfig` accepts an opt-in exact `Origin` allowlist. Missing,
+  duplicate, and unlisted browser origins are rejected before the WebTransport
+  CONNECT is accepted; non-browser behaviour is unchanged when no policy is
+  configured.
+
+### WebSocket media bridge browser candidates
+
+- The WebSocket media bridge answerer binds `0.0.0.0` and passes mDNS `.local`
+  candidates through instead of using the loopback WebRTC profile, so Chrome's
+  anonymised IPv4 host candidates pair and ICE completes.
+
 ### Added
 
 - Added Jambonz OSS 0.9.9 as a mandatory external SIP interoperability peer,
