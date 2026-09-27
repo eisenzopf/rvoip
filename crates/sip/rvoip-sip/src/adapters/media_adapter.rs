@@ -5,13 +5,14 @@
 
 #[cfg(feature = "dtls-srtp")]
 use crate::adapters::dtls_negotiator::parse_dtls_offer;
+#[cfg(feature = "dtls-srtp")]
 use crate::adapters::dtls_negotiator::SetupRole;
 use crate::adapters::srtp_negotiator::{
     into_public_negotiation_error, SrtpDetailedResult, SrtpNegotiator, SrtpPair,
 };
 use crate::api::events::{Event, MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState};
 use crate::api::lifecycle::{LifecycleIndex, SessionEventPublisher};
-use crate::api::unified::{MediaMode, SdesBase64Mode};
+use crate::api::unified::{DtlsSetupRole, MediaMode, SdesBase64Mode};
 use crate::cleanup_diag::{self, CleanupStage};
 use crate::errors::{Result, SessionError};
 use crate::session_lifecycle::{
@@ -315,6 +316,28 @@ fn dtls_profile_to_crypto_suite(
             "DTLS selected an unsupported SRTP protection profile".to_string(),
         )),
     }
+}
+
+#[cfg(feature = "dtls-srtp")]
+fn dtls_protection_profiles(
+    suites: &[CryptoSuite],
+) -> Result<Vec<rvoip_rtp_core::dtls_srtp::SrtpProtectionProfile>> {
+    use rvoip_rtp_core::dtls_srtp::SrtpProtectionProfile;
+
+    suites
+        .iter()
+        .map(|suite| match suite {
+            CryptoSuite::AesCm128HmacSha1_80 => {
+                Ok(SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80)
+            }
+            CryptoSuite::AesCm128HmacSha1_32 => {
+                Ok(SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_32)
+            }
+            unsupported => Err(SessionError::ConfigError(format!(
+                "DTLS-SRTP profile {unsupported:?} is not supported"
+            ))),
+        })
+        .collect()
 }
 
 /// NEXT_STEPS C2 — lookup helper from RTP payload type to the
@@ -1360,6 +1383,9 @@ pub struct MediaAdapter {
     /// RFC 4568 SDES when SRTP policy is enabled.
     offer_dtls_srtp: bool,
 
+    /// Role advertised in outgoing DTLS-SRTP offers.
+    dtls_setup_role: DtlsSetupRole,
+
     /// Per-negotiation certificate identity retained until the exact SIP
     /// answer/ACK commit boundary starts the handshake.
     #[cfg(feature = "dtls-srtp")]
@@ -1383,12 +1409,14 @@ pub struct MediaAdapter {
     /// App-level event publisher that updates lifecycle before bus delivery.
     pub(crate) app_event_publisher: Arc<tokio::sync::RwLock<Option<SessionEventPublisher>>>,
 
-    /// Sprint 3 A6 — public RTP-side address advertised in SDP `c=` /
-    /// `o=` / `m=audio` lines. Set at coordinator boot from either
-    /// `Config::media_public_addr` (static override) or a successful
-    /// `Config::stun_server` probe. `None` falls back to `local_ip` +
-    /// the per-session local RTP port (today's behaviour).
+    /// Static public RTP-side address advertised in SDP `c=` / `o=` /
+    /// `m=audio` lines. `None` falls back to per-session STUN discovery or
+    /// the local bind address.
     public_rtp_addr: std::sync::RwLock<Option<SocketAddr>>,
+
+    /// STUN server used to discover each live RTP socket's exact public
+    /// mapping before rendering SDP.
+    stun_server: Option<String>,
 
     /// Sprint 3 C1 — when `true`, generated offers and answers
     /// advertise PT 13 (RFC 3389 Comfort Noise) alongside the
@@ -1522,12 +1550,14 @@ impl MediaAdapter {
             pending_srtp_offerers: Arc::new(DashMap::new()),
             negotiated_srtp: Arc::new(DashMap::new()),
             offer_dtls_srtp: false,
+            dtls_setup_role: DtlsSetupRole::Actpass,
             #[cfg(feature = "dtls-srtp")]
             pending_dtls_identities: Arc::new(DashMap::new()),
             staged_media_negotiations: Arc::new(DashMap::new()),
             global_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
             app_event_publisher: Arc::new(tokio::sync::RwLock::new(None)),
             public_rtp_addr: std::sync::RwLock::new(None),
+            stun_server: None,
             comfort_noise_enabled: false,
             strict_codec_matching: true,
             offered_codecs: vec![0, 8, 101],
@@ -1852,11 +1882,9 @@ impl MediaAdapter {
             })
     }
 
-    /// Set the public RTP address advertised in SDP. Called at
-    /// coordinator boot from `Config::media_public_addr` (static
-    /// override) or a successful STUN probe. Idempotent — subsequent
-    /// calls overwrite. The IP address goes into `c=`/`o=` lines and
-    /// the port (when set) replaces `info.rtp_port` in `m=audio`.
+    /// Set the static public RTP address advertised in SDP. The IP address
+    /// goes into `c=`/`o=` lines and the port (when set) replaces the local
+    /// RTP port in `m=audio`.
     pub fn set_public_rtp_addr(&self, addr: Option<SocketAddr>) {
         if let Ok(mut guard) = self.public_rtp_addr.write() {
             *guard = addr;
@@ -1869,8 +1897,65 @@ impl MediaAdapter {
         self.public_rtp_addr.read().ok().and_then(|g| *g)
     }
 
-    /// Local IP address bound by the adapter. Used by the Sprint 3
-    /// A6 STUN probe to bind its temp socket on the same interface.
+    /// Configure per-session STUN discovery on the live RTP socket.
+    pub fn set_stun_server(&mut self, server: Option<String>) {
+        self.stun_server = server;
+    }
+
+    async fn effective_public_rtp_addr(
+        &self,
+        dialog_id: &rvoip_media_core::DialogId,
+    ) -> Option<SocketAddr> {
+        if let Some(address) = self.public_rtp_addr() {
+            return Some(address);
+        }
+        let target = self.stun_server.as_deref()?;
+        let target = if target.contains(':') {
+            target.to_string()
+        } else {
+            format!("{target}:3478")
+        };
+        let server = match tokio::net::lookup_host(&target).await {
+            Ok(addresses) => addresses
+                .into_iter()
+                .find(|address| address.is_ipv4() == self.local_ip.is_ipv4()),
+            Err(error) => {
+                tracing::warn!("STUN resolve '{}' failed: {}", target, error);
+                return None;
+            }
+        };
+        let Some(server) = server else {
+            tracing::warn!("STUN '{}' resolved to no compatible address", target);
+            return None;
+        };
+        let Some(transport) = self.controller.ice_transport(dialog_id).await else {
+            tracing::warn!("STUN skipped for {}: RTP transport unavailable", dialog_id);
+            return None;
+        };
+        match rvoip_rtp_core::network::stun::TransportStunClient::new(transport, server)
+            .discover()
+            .await
+        {
+            Ok(address) => {
+                tracing::info!(
+                    "RTP public addr: {} (STUN-discovered on media socket via {})",
+                    address,
+                    target
+                );
+                Some(address)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "STUN probe failed against '{}' on media socket: {} — falling back to local address",
+                    target,
+                    error
+                );
+                None
+            }
+        }
+    }
+
+    /// Local IP address bound by the adapter.
     pub fn local_ip(&self) -> IpAddr {
         self.local_ip
     }
@@ -2002,6 +2087,11 @@ impl MediaAdapter {
     /// Select DTLS-SRTP rather than SDES for secure media negotiation.
     pub fn set_dtls_srtp_policy(&mut self, enabled: bool) {
         self.offer_dtls_srtp = enabled;
+    }
+
+    /// Select the role advertised in outgoing DTLS-SRTP offers.
+    pub fn set_dtls_setup_role(&mut self, setup_role: DtlsSetupRole) {
+        self.dtls_setup_role = setup_role;
     }
 
     #[cfg(feature = "dtls-srtp")]
@@ -2771,7 +2861,10 @@ impl MediaAdapter {
         // Sprint 3 A6 — same public-address override as the offer
         // path, so answers carry the discovered/configured public
         // mapping when one is set.
-        let public = self.public_rtp_addr();
+        let public = match ice_dialog_id.as_ref() {
+            Some(dialog_id) => self.effective_public_rtp_addr(dialog_id).await,
+            None => self.public_rtp_addr(),
+        };
         let advertised_ip = public.map(|sa| sa.ip()).unwrap_or(self.local_ip);
         let local_ip_str = advertised_ip.to_string();
         let advertised_port = public
@@ -2999,7 +3092,7 @@ impl MediaAdapter {
                 role,
                 remote_addr,
                 plan.expected_remote_fingerprint_sha256,
-                rvoip_rtp_core::dtls_srtp::default_srtp_profiles(),
+                dtls_protection_profiles(&self.srtp_offered_suites)?,
                 Duration::from_secs(10),
             )
             .await
@@ -4304,15 +4397,10 @@ impl MediaAdapter {
             ));
         }
 
-        // Sprint 3 A6 — when a public RTP address has been configured
-        // (static override or STUN-discovered), advertise that in the
-        // SDP `c=` / `o=` / `m=audio` lines instead of the bind-address.
-        // The static override's port wins when set; otherwise we keep
-        // the per-session local RTP port (most NATs don't preserve
-        // ports across the binding, but absent better info the local
-        // port is our best guess and symmetric-RTP latching covers
-        // the rest).
-        let public = self.public_rtp_addr();
+        // Advertise a configured static address or the exact mapping STUN
+        // observed on this session's RTP socket. With neither, use the local
+        // bind address and allocated RTP port.
+        let public = self.effective_public_rtp_addr(dialog_id).await;
         let port = public
             .filter(|sa| sa.port() != 0)
             .map(|sa| sa.port())
@@ -4415,7 +4503,7 @@ impl MediaAdapter {
             .media_audio(port, transport)
             .formats(&formats_ref);
         if dtls_offer_attrs.is_some() {
-            media_builder = media_builder.setup(SetupRole::Actpass.as_str());
+            media_builder = media_builder.setup(self.dtls_setup_role.as_str());
         }
         if let Some(material) = &ice_material {
             media_builder = media_builder
@@ -5525,12 +5613,14 @@ impl Clone for MediaAdapter {
             pending_srtp_offerers: self.pending_srtp_offerers.clone(),
             negotiated_srtp: self.negotiated_srtp.clone(),
             offer_dtls_srtp: self.offer_dtls_srtp,
+            dtls_setup_role: self.dtls_setup_role,
             #[cfg(feature = "dtls-srtp")]
             pending_dtls_identities: self.pending_dtls_identities.clone(),
             staged_media_negotiations: self.staged_media_negotiations.clone(),
             global_coordinator: self.global_coordinator.clone(),
             app_event_publisher: self.app_event_publisher.clone(),
             public_rtp_addr: std::sync::RwLock::new(self.public_rtp_addr()),
+            stun_server: self.stun_server.clone(),
             comfort_noise_enabled: self.comfort_noise_enabled,
             strict_codec_matching: self.strict_codec_matching,
             offered_codecs: self.offered_codecs.clone(),
@@ -5914,6 +6004,26 @@ mod sdp_format_tests {
             tag_length: 10,
         };
         assert!(dtls_profile_to_crypto_suite(&unsupported).is_err());
+    }
+
+    #[cfg(feature = "dtls-srtp")]
+    #[test]
+    fn dtls_profile_offer_uses_the_configured_suites_in_order() {
+        use rvoip_rtp_core::dtls_srtp::SrtpProtectionProfile;
+
+        let profiles = dtls_protection_profiles(&[
+            CryptoSuite::AesCm128HmacSha1_32,
+            CryptoSuite::AesCm128HmacSha1_80,
+        ])
+        .expect("supported DTLS-SRTP profiles");
+
+        assert_eq!(
+            profiles,
+            vec![
+                SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_32,
+                SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80,
+            ]
+        );
     }
 
     fn build_srtp_answer(attr: Option<CryptoAttribute>) -> String {
@@ -7873,6 +7983,103 @@ a=fmtp:101 0-15\r\n";
             "default offer must not advertise Opus:\n{}",
             sdp
         );
+    }
+
+    #[tokio::test]
+    async fn stun_offer_advertises_the_live_rtp_socket_mapping() {
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use rvoip_rtp_core::network::stun::MAGIC_COOKIE;
+        use std::net::Ipv4Addr;
+        use tokio::net::UdpSocket;
+
+        let stun_socket = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock STUN server");
+        let stun_addr = stun_socket.local_addr().expect("mock STUN address");
+        let responder = tokio::spawn(async move {
+            let mut request = [0u8; 1500];
+            let (length, source) = stun_socket
+                .recv_from(&mut request)
+                .await
+                .expect("receive STUN binding request");
+            assert!(length >= 20, "STUN request must contain a full header");
+            let transaction_id: [u8; 12] = request[8..20].try_into().expect("STUN transaction ID");
+            let source_v4 = match source.ip() {
+                IpAddr::V4(ip) => ip,
+                IpAddr::V6(_) => panic!("test expects an IPv4 RTP socket"),
+            };
+            let xor_port = source.port() ^ ((MAGIC_COOKIE >> 16) as u16);
+            let xor_ip = u32::from_be_bytes(source_v4.octets()) ^ MAGIC_COOKIE;
+
+            let mut response = Vec::with_capacity(32);
+            response.extend_from_slice(&0x0101u16.to_be_bytes());
+            response.extend_from_slice(&12u16.to_be_bytes());
+            response.extend_from_slice(&MAGIC_COOKIE.to_be_bytes());
+            response.extend_from_slice(&transaction_id);
+            response.extend_from_slice(&0x0020u16.to_be_bytes());
+            response.extend_from_slice(&8u16.to_be_bytes());
+            response.extend_from_slice(&[0, 1]);
+            response.extend_from_slice(&xor_port.to_be_bytes());
+            response.extend_from_slice(&xor_ip.to_be_bytes());
+            stun_socket
+                .send_to(&response, source)
+                .await
+                .expect("send STUN binding response");
+            source
+        });
+
+        let controller = Arc::new(MediaSessionController::new());
+        let store = Arc::new(SessionStore::new());
+        let session_id = SessionId("stun-live-rtp-socket-test".to_string());
+        store
+            .create_session(session_id.clone(), Role::UAC, false)
+            .await
+            .expect("create session");
+
+        let mut adapter = MediaAdapter::new(
+            Arc::clone(&controller),
+            store,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16_000,
+            16_100,
+        );
+        adapter.set_stun_server(Some(stun_addr.to_string()));
+        adapter
+            .start_session(&session_id)
+            .await
+            .expect("start media session");
+
+        let exact = adapter
+            .current_media(&session_id)
+            .expect("exact media resource");
+        let info = controller
+            .get_session_info(&exact.dialog_id)
+            .await
+            .expect("media session info");
+        let rtp_port = info.rtp_port.expect("allocated RTP port");
+        let sdp = adapter
+            .generate_local_sdp_offer(&session_id, crate::types::MediaDirection::SendRecv)
+            .await
+            .expect("offer builds after STUN discovery");
+        let stun_source = responder.await.expect("mock STUN responder completes");
+
+        assert_eq!(stun_source.port(), rtp_port);
+        assert!(
+            sdp.lines()
+                .any(|line| line.starts_with(&format!("m=audio {rtp_port} "))),
+            "offer did not advertise the STUN-observed RTP port:\n{sdp}"
+        );
+        assert!(
+            sdp.lines().any(|line| line == "c=IN IP4 127.0.0.1"),
+            "offer did not advertise the STUN-observed RTP address:\n{sdp}"
+        );
+
+        adapter
+            .cleanup_session(&session_id)
+            .await
+            .expect("cleanup media session");
     }
 
     #[test]

@@ -619,8 +619,9 @@ pub use api::unified::{
     SymmetricRtpPolicy,
 };
 pub use api::{
-    Config, MediaMode, RegistrationHandle, RegistrationInfo, RegistrationStatus, SdesBase64Mode,
-    SipContactMode, SipTlsMode, SrtpKeyingMode, SrtpSuitePolicy, UnifiedCoordinator,
+    Config, DtlsSetupRole, MediaMode, RegistrationHandle, RegistrationInfo, RegistrationStatus,
+    SdesBase64Mode, SipContactMode, SipTlsMode, SrtpKeyingMode, SrtpSuitePolicy,
+    UnifiedCoordinator,
 };
 
 // Events
@@ -662,10 +663,10 @@ pub mod prelude {
         CallHandlerDecision, CallId, CallLifecycleSnapshot, CallProgressInfo, CallState,
         CallTerminalInfo, CallbackPeer, CallbackPeerBuilder, CallbackPeerControl, Config,
         DialogInfo, DialogInfoDocument, DialogPackageEvent, DialogPackageState,
-        DialogSubscriptionHandle, EndReason, Endpoint, EndpointAccount, EndpointAccountConfig,
-        EndpointAudio, EndpointAudioFrame, EndpointAudioReceiver, EndpointAudioSender,
-        EndpointBuilder, EndpointCall, EndpointCallId, EndpointConfig, EndpointControl,
-        EndpointEvent, EndpointEvents, EndpointIncomingCall, EndpointMediaConfig,
+        DialogSubscriptionHandle, DtlsSetupRole, EndReason, Endpoint, EndpointAccount,
+        EndpointAccountConfig, EndpointAudio, EndpointAudioFrame, EndpointAudioReceiver,
+        EndpointAudioSender, EndpointBuilder, EndpointCall, EndpointCallId, EndpointConfig,
+        EndpointControl, EndpointEvent, EndpointEvents, EndpointIncomingCall, EndpointMediaConfig,
         EndpointNetworkConfig, EndpointProfile, EndpointProfileName, EndpointRegistrationInfo,
         EndpointRegistrationStatus, EndpointSipTrace, EndpointSrtpMode, EndpointTransport, Event,
         EventReceiver, HeaderName, IncomingCall, IncomingCallGuard, MediaMode, MediaPoolConfig,

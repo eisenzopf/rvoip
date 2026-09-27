@@ -10,8 +10,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rvoip_rtp_core::network::stun::{
-    decode_binding_response, encode_binding_request, StunClient, MAGIC_COOKIE,
+    decode_binding_response, encode_binding_request, StunClient, TransportStunClient, MAGIC_COOKIE,
 };
+use rvoip_rtp_core::transport::{RtpTransport, RtpTransportConfig, UdpRtpTransport};
 use tokio::net::UdpSocket;
 
 /// Bind a UDP socket on 127.0.0.1 and return it plus its bound address.
@@ -94,6 +95,43 @@ async fn stun_client_round_trip_against_loopback_server() {
         "loopback responder should echo the client's bind address"
     );
 
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn transport_stun_client_uses_the_live_rtp_socket() {
+    let server_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let server_addr = server_sock.local_addr().unwrap();
+    let server = tokio::spawn(run_responder(server_sock));
+
+    let transport: Arc<dyn RtpTransport> = Arc::new(
+        UdpRtpTransport::new(RtpTransportConfig {
+            local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+            local_rtcp_addr: None,
+            symmetric_rtp: true,
+            rtcp_mux: true,
+            session_id: None,
+            use_port_allocator: false,
+            ..RtpTransportConfig::default()
+        })
+        .await
+        .expect("create RTP transport"),
+    );
+    let media_addr = transport.local_rtp_addr().expect("RTP bind address");
+    let client = TransportStunClient::new(Arc::clone(&transport), server_addr)
+        .with_attempt_timeout(Duration::from_millis(500))
+        .with_total_budget(Duration::from_secs(2));
+
+    let discovered = client
+        .discover()
+        .await
+        .expect("STUN discovery through RTP transport");
+    assert_eq!(
+        discovered, media_addr,
+        "the mapping must belong to the actual RTP socket"
+    );
+
+    transport.close().await.expect("close RTP transport");
     server.await.unwrap();
 }
 
