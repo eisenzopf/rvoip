@@ -569,10 +569,11 @@ impl MediaSinkTarget {
         &self,
         frame: MediaFrame,
         ticket: Option<&crate::bridge::peer_switch::PeerRouteTicket>,
+        forwarding: &RouteForwardingGate,
     ) -> std::result::Result<bool, ()> {
         match (self, ticket) {
             (Self::Legacy(tx), Some(ticket)) => ticket.forward(tx, frame).await.map_err(|_| ()),
-            (Self::Legacy(tx), None) => tx.send(frame).await.map(|()| true).map_err(|_| ()),
+            (Self::Legacy(tx), None) => forwarding.publish_fenced(tx, frame).await,
             (Self::Peer(tx), Some(ticket)) => {
                 let frame =
                     rvoip_core_traits::peer_media::PeerMediaFrame::new(frame, ticket.clone());
@@ -702,6 +703,58 @@ impl RouteForwardingGate {
                 return;
             }
         }
+    }
+
+    /// Resolve once this route is quiesced.
+    ///
+    /// A closed activation channel means the gate outlived its route, which
+    /// is not a cutover, so this never resolves in that case and lets the
+    /// racing capacity reservation decide.
+    async fn wait_until_disabled(&self) {
+        let mut activation = self.activation.subscribe();
+        loop {
+            if !*activation.borrow_and_update() {
+                return;
+            }
+            if activation.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+
+    /// Publish one frame under the cutover gate.
+    ///
+    /// Reserving capacity and committing the frame are separate steps so a
+    /// cutover can retire work that is only waiting for room in the target.
+    /// The commit decision is taken under the same mutex as [`Self::set_enabled`],
+    /// so a worker either publishes before the cutover or abandons its frame;
+    /// it can never publish after one. A route that buffers while disabled is
+    /// paused rather than retired, so it keeps its send.
+    async fn publish_fenced<T>(
+        &self,
+        target: &mpsc::Sender<T>,
+        frame: T,
+    ) -> std::result::Result<bool, ()> {
+        if self.buffer_while_disabled {
+            return target.send(frame).await.map(|()| true).map_err(|_| ());
+        }
+        let permit = tokio::select! {
+            biased;
+            () = self.wait_until_disabled() => return Ok(false),
+            capacity = target.reserve() => match capacity {
+                Ok(permit) => permit,
+                Err(_) => return Err(()),
+            },
+        };
+        let _cutover = self
+            .cutover
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !self.enabled.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        permit.send(frame);
+        Ok(true)
     }
 }
 
@@ -2404,7 +2457,9 @@ fn start_media_graph_with_activity_interval(
                                     } else if !forwarding_for_task.is_enabled() {
                                         continue;
                                     }
-                                    let result = target.send(frame, peer_ticket.as_ref()).await;
+                                    let result = target
+                                        .send(frame, peer_ticket.as_ref(), &forwarding_for_task)
+                                        .await;
                                     match result {
                                         Ok(true) => delivery_for_task.record_delivery(),
                                         Ok(false) => {}

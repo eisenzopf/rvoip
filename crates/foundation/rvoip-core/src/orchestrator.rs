@@ -10616,12 +10616,23 @@ impl Orchestrator {
                     handle.a.clone(),
                     handle.b.clone(),
                     handle.directional_media_plan()?,
-                    handle
-                        .peer_route_ticket()
-                        .filter(|ticket| ticket.is_active())
-                        .ok_or(RvoipError::NotImplemented(
-                            "bridge destination replacement requires a transport-fenced bridge",
-                        ))?,
+                    {
+                        // A bridge with no peer ticket was never transport
+                        // fenced, which is a capability error. A ticket that
+                        // exists but is no longer active was retired by a
+                        // replacement that already committed, which is a lost
+                        // race. Keep the two apart so a glare loser reports
+                        // the same rejection wherever it is detected.
+                        let ticket = handle.peer_route_ticket().ok_or(
+                            RvoipError::NotImplemented(
+                                "bridge destination replacement requires a transport-fenced bridge",
+                            ),
+                        )?;
+                        if !ticket.is_active() {
+                            return Err(RvoipError::BridgeNotFound(expected_bridge_id.clone()));
+                        }
+                        ticket
+                    },
                 ))
             })
             .transpose()?
@@ -10682,9 +10693,15 @@ impl Orchestrator {
             source: ingress.clone(),
             pending_destination: replacement_destination.clone(),
         };
-        let replacement_peer = expected_peer.stage().ok_or(RvoipError::InvalidState(
-            "bridge peer generation is retired",
-        ))?;
+        // Losing a replacement race is not an invalid state. Another
+        // contender committed against this bridge generation, so report the
+        // same outcome a late contender already gets from the registry
+        // lookup and from `reserve_cross_bridge_replacement_destination`.
+        // One classifiable rejection lets a caller re-read the topology and
+        // retry instead of having to parse three different reasons.
+        let replacement_peer = expected_peer
+            .stage()
+            .ok_or_else(|| RvoipError::BridgeNotFound(expected_bridge_id.clone()))?;
         let prepared = self
             .prepare_cross_bridge_for_commit(
                 bridge_id.clone(),
@@ -10710,9 +10727,7 @@ impl Orchestrator {
                 Ok(Some(guard)) => guard,
                 Ok(None) => {
                     prepared.stop().await;
-                    return Err(RvoipError::InvalidState(
-                        "bridge peer changed before replacement commit",
-                    ));
+                    return Err(RvoipError::BridgeNotFound(expected_bridge_id.clone()));
                 }
                 Err(_) => {
                     prepared.stop().await;
@@ -10775,9 +10790,7 @@ impl Orchestrator {
                             ));
                         }
                         if !replacement_peer.commit_from(&expected_peer) {
-                            return Err(RvoipError::InvalidState(
-                                "bridge peer changed before replacement commit",
-                            ));
+                            return Err(RvoipError::BridgeNotFound(expected_bridge_id.clone()));
                         }
 
                         // Fence queued and in-flight application-data work in
