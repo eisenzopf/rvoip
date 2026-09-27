@@ -127,7 +127,10 @@ let sip = SipConfig::bind("0.0.0.0:5060")
 SIP-TLS listener startup refuses an incomplete or unreadable identity, strict
 SRTP cannot be enabled without offering SRTP, and codec offers reject empty,
 duplicate, or unavailable payload types. UDP, TCP, and WebSocket listener
-enablement remains controlled by the lower `rvoip-sip::Config` surface.
+enablement remains controlled by the lower `rvoip-sip::Config` surface. The
+facade also exposes the listener's per-source request budget and admission
+observer through `SipConfig::source_rate_limit(SipSourceRateLimit)` and
+`SipConfig::ingress_observer(Arc<dyn SipIngressObserver>)`.
 
 `full` means every **facade feature**, not every crate in the rvoip workspace.
 
@@ -140,6 +143,7 @@ enablement remains controlled by the lower `rvoip-sip::Config` surface.
 | `rvoip::sip` | `sip` | [`rvoip-sip`](../sip/rvoip-sip) |
 | `rvoip::stir_shaken` | `sip-stir-shaken` | [`rvoip-stir-shaken`](../extensions/rvoip-stir-shaken) |
 | `rvoip::webrtc` | `webrtc` | [`rvoip-webrtc`](../webrtc/rvoip-webrtc) |
+| `rvoip::auth` | `webrtc` | [`rvoip-auth-core`](../identity/auth-core) |
 | `rvoip::uctp::{protocol, quic, webtransport, websocket}` | `uctp` | UCTP and substrate crates |
 | `rvoip::vapi` | `vapi` | [`rvoip-vapi`](../extensions/rvoip-vapi) |
 | `rvoip::{vcon, identity, harness}` | `voip-3` | Conversation-model extension crates |

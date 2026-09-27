@@ -1,9 +1,10 @@
 # rvoip examples
 
 **Start here.** These are runnable, scenario-oriented examples for building with
-rvoip — organized by *what you want to build*, not by which API you use. Each is
-a standalone Cargo project with its own README and (for multi-process demos) a
-`./run_demo.sh` that boots every process and checks the result.
+rvoip — organized by *what you want to build*, not by which API you use. The
+`examples/` directory is one Cargo workspace, separate from the crate
+workspace; each example is a member with its own README and (for multi-process
+demos) a `./run_demo.sh` that boots every process and checks the result.
 
 ## Maturity scope
 
@@ -50,7 +51,9 @@ The source of truth is
 
 ## Conventions
 
-- **Self-contained projects.** Each example is its own Cargo workspace and uses
+- **One examples workspace.** `examples/Cargo.toml` is a single `[workspace]`
+  with all 14 examples as members sharing `examples/Cargo.lock`; run each from
+  its own directory. Every example uses
   local rvoip crates from this checkout through `path`. The paired `version`
   tracks the unified workspace train (`0.3.10`). When copying an example into
   your own project, drop `path` and select the published version you intend to

@@ -52,6 +52,17 @@ The low-level path is also available: register `VapiAdapter` as a
 `ConnectionAdapter`, originate `Transport::Vapi` with a typed
 `VapiCallOptions` context, then bridge the resulting connection yourself.
 
+For a provider call that the host already created and verified,
+`VapiAdapter::attach_existing_agent` bridges a `VapiExistingCall` without
+creating one, using the same canonical connections, bridge, and paired
+termination as `attach_agent`; the host owns durable admission and receipt
+validation, and must never construct the handoff from public request
+arguments. `VapiConfig::existing_calls_only()` builds a shared transport that
+retains no default tenant key, so each handoff (or a `VapiCallOptions`)
+supplies its own WebSocket credential through `with_api_key`, which never
+becomes the adapter's default. `VapiAgentCall::wait_shared` observes paired
+teardown while other owners retain call-control handles.
+
 Call events are available through `VapiAgentCall::subscribe_events` and
 `VapiAdapter::subscribe_vapi_events`. Unknown event types are preserved rather
 than closing the audio session. The first per-call subscriber also receives

@@ -4,15 +4,18 @@ WebRTC **interop adapter** for [`rvoip-core`](../../foundation/rvoip-core): term
 (ICE/DTLS-SRTP, SDP offer/answer) and exposes voip-3 `Connection`s with channel-based
 `MediaStream` flows.
 
-Built on [webrtc-rs](https://webrtc.rs) **`0.20.0-alpha.1`** (Sans-I/O `rtc` core + async
-`PeerConnectionBuilder` / `PeerConnectionEventHandler` API).
+Built on the workspace's attributed forks of [webrtc-rs](https://webrtc.rs)
+**`0.20.0-alpha.1`**: [`rvoip-webrtc-stack`](../rvoip-webrtc-stack) (the async
+`webrtc` crate with the `PeerConnectionBuilder` / `PeerConnectionEventHandler`
+API) and [`rvoip-rtc`](../rvoip-rtc) (the Sans-I/O `rtc` core).
 
 ## Scope
 
 - **Dual role:** gateway/interop adapter (`WebRtcAdapter` → orchestrator) **and** WebRTC server
   (WHIP/WHEP/WS signaling surfaces feeding the same adapter). See
   [`docs/archived/IMPLEMENTATION_PLAN.md`](docs/archived/IMPLEMENTATION_PLAN.md) §1.
-- **In scope:** WHIP/WHEP and WebSocket JSON signaling, 1:1 audio + VP8 video interop,
+- **In scope:** WHIP/WHEP and WebSocket JSON signaling, 1:1 audio + VP8 video interop
+  (H.264 as well via `client-video-h264`, see `tests/video_h264.rs`),
   full-gather and trickle ICE, Opus + G.711, SCTP data channels, RFC 4733 DTMF
   send/receive, fixture-encoded RTP for deterministic tests, `ConnectionAdapter` for
   `Transport::WebRtc`, the QUIC bridge demo/test, and external TURN configuration via
@@ -42,6 +45,15 @@ upstream without project-owner review.
 | `client` | Native `WebRtcClient` surface |
 | `comprehensive` | `client` + WS signaling + full WebRTC basics E2E (bidirectional audio/VP8, fixture RTP, SCTP DC chat, DTMF, gap tests) |
 | `bridge-quic` | Real `rvoip-quic` cross-transport bridge demo + e2e test |
+| `client-cpal` | `comprehensive` + cpal microphone capture / speaker playback and a real Opus encoder |
+| `client-video` | `comprehensive` + `VideoSource` / `VideoSink` traits and RFC 7741/6184 packetizers (pure Rust) |
+| `client-video-vp8` | `client-video` + VP8 encoder via libvpx and `nokhwa` camera capture |
+| `client-video-h264` | `client-video` + H.264 encoder via `openh264` and `nokhwa` camera capture |
+| `tls-rustls` | WHIPS/WSS listeners (`with_whips`, `with_wss`) over rustls |
+| `interop-browser` | Headless-Chromium interop test (dev-only; needs a Chromium binary on `PATH`) |
+| `soak-1h` | Long-running task-leak soak test (`SOAK_SECS=3600` for the full hour) |
+| `test-hooks` | Test-only hooks; absent from ordinary builds |
+| `turn-fork-candidate` | Deprecated compatibility marker; enables no implementation or qualification tests |
 
 Enable both signaling features for the unified [`WebRtcServer`](src/server.rs) facade.
 
@@ -104,7 +116,7 @@ inbound routing hint. WHIP uses its path tag as the hint; WebSocket hooks set
 Quick start:
 
 ```bash
-./scripts/demo-webrtc-server.sh
+scripts/demo-webrtc-server.sh   # from the repository root
 # or
 cargo run -p rvoip-webrtc --example webrtc_server --features signaling-whip,signaling-ws
 ```
@@ -115,7 +127,7 @@ WHIP publish → orchestrator → synthetic QUIC leg (frame pump). Lightweight s
 before wiring real adapters:
 
 ```bash
-./scripts/demo-webrtc-bridge.sh
+scripts/demo-webrtc-bridge.sh   # from the repository root
 # or
 cargo run -p rvoip-webrtc --example webrtc_bridge_demo --features signaling-whip
 ```
@@ -128,7 +140,7 @@ WHIP publish → orchestrator → **`rvoip-quic::UctpQuicAdapter`** (auth + sess
 datagram media):
 
 ```bash
-./scripts/demo-webrtc-quic-bridge.sh
+scripts/demo-webrtc-quic-bridge.sh   # from the repository root
 # or
 cargo run -p rvoip-webrtc --example webrtc_quic_bridge_demo --features bridge-quic
 ```
@@ -155,7 +167,7 @@ confirmation via `stats` JSON.
 Optional env: `CHAT_MESSAGE` (custom chat body), `MEDIUM` (`audio`|`video`|`audiovideo`).
 
 ```bash
-./scripts/test-webrtc-comprehensive.sh
+scripts/test-webrtc-comprehensive.sh   # from the repository root
 # or separately:
 cargo run -p rvoip-webrtc --example webrtc_comprehensive_server --features comprehensive
 WS_URL=ws://127.0.0.1:8081 CHAT_MESSAGE="Hello team" \
@@ -190,8 +202,8 @@ fails closed against an older server because that server rejects the unknown
 
 | Type | Methods |
 |------|---------|
-| `WebRtcServerBuilder` | `new`, `with_whip`, `with_ws`, `with_inbound_admission_confirmation`, `build` |
-| `WebRtcServer` | `adapter`, `whip_addr`, `ws_addr`, `shutdown` |
+| `WebRtcServerBuilder` | `new`, `with_whip`, `with_ws`, `with_whips(addr, TlsConfig)`, `with_wss(addr, TlsConfig)`, `with_whip_auth`, `with_ws_auth`, `with_whep_server_mode`, `with_inbound_admission_confirmation`, `build` |
+| `WebRtcServer` | `adapter`, `whip_addr`, `ws_addr`, `whips_addr`, `wss_addr`, `shutdown`, `shutdown_with_deadline(Duration)` |
 
 ## Limitations
 
@@ -215,9 +227,12 @@ implement SFU/MCU fan-out — every connection is an independent peer.
 See [`docs/GAP_PLAN.md`](docs/GAP_PLAN.md) §4 for the complete
 out-of-scope list.
 
-## Future integration
+## Integration with rvoip-websocket
 
-[`rvoip-websocket`](../../uctp/rvoip-websocket) may replace its stub `WebRtcMediaBridge` with types
-from this crate in a follow-up PR — WebRTC expertise stays here.
+[`rvoip-websocket`](../../uctp/rvoip-websocket)'s `WebRtcMediaBridge`
+(`src/media_bridge.rs`) delegates ICE/DTLS-SRTP and RTP bridging to this crate
+behind its `media-webrtc` feature, and accepts browser mDNS (`.local`) and
+dual-stack candidates. Without the feature it remains a stub that returns a
+documented error — WebRTC expertise stays here.
 
 See [`docs/archived/IMPLEMENTATION_PLAN.md`](docs/archived/IMPLEMENTATION_PLAN.md) for the full design.

@@ -56,7 +56,10 @@ Transport handoff remains an rvoip-core topology operation. The harness does
 not implement SIP REFER, WebRTC signaling, routing policy, or account policy.
 Callers use the generation-fenced `Orchestrator::replace_bridge_destination`
 primitive to replace an AI connection with a prepared SIP/WebRTC connection,
-or the reverse, while the candidate media route stays silent until promotion.
+or the reverse, while the candidate media route stays silent until promotion;
+`replace_bridge_destination_transport_fenced` is the variant that succeeds
+only when both the existing and candidate transports expose generation-aware
+delivery queues.
 Reusable provider state is keyed by `AiSessionId`, independently of the AI
 adapter's `ConnectionId`. `AiOriginateContext` carries bounded provider
 references and a resume policy. `rebind_session` sends a typed,
@@ -67,6 +70,11 @@ media route: hold the AI connection, change the bridge, rebind the provider to
 the authoritative peer generation, then resume it. The replacement primitive
 retires its old destination, so use explicit unbridge/rebridge when the old AI
 session must survive detachment.
+
+The `test-reference` feature exposes deterministic `ReferenceAsrProvider`,
+`ReferenceTtsProvider`, and `ReferenceDialogManager` implementations (with
+`ReferenceProviderControl`, `ReferenceProviderSnapshot`, and `ReferenceStage`)
+for examples and external tests; the module is excluded from normal builds.
 
 Part of the [**rvoip**](https://github.com/eisenzopf/rvoip) workspace (the "rvoip 3"
 unified real-time-communications stack). Published so the

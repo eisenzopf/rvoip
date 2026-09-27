@@ -367,8 +367,8 @@ exclusions are recorded in signed qualification evidence; see the
 | **Jambonz OSS 0.9.9** | Release-gated | Revision- and digest-pinned Jambonz SBC/registrar/RTPengine profile across the applicable public-API UDP/plain-RTP matrix |
 | **SIPp** | Release-gated | Standards scenarios and bounded signaling-load profiles |
 | **baresip** | Release-gated | External strict user-agent call against the RVoIP SIP listener |
-| **Kamailio** | Lab-tested, not release-gated | Registrar-proxy with an rtpengine media relay: registration, calls, AMR in all four framings, DTMF, SDES-SRTP, over UDP and TLS |
-| **OpenSIPS** | Lab-tested, not release-gated | The same lab scope over UDP only |
+| **Kamailio** | Release-gated | RFC 3261 transaction-stateful proxy in both hop orders over UDP, TCP, and TLS, plus registrar-proxy with an rtpengine media relay: registration, calls, AMR in all four framings, DTMF, SDES-SRTP |
+| **OpenSIPS** | Release-gated | The same proxy matrix in both hop orders over UDP, TCP, and TLS, and the same rtpengine lab scope |
 
 The strict full-beta gate requires an explicit PASS attestation for Asterisk,
 FreeSWITCH, Jambonz, Kamailio, and OpenSIPS. The report generator binds each

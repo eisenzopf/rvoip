@@ -26,6 +26,8 @@ session.end().await?;
 
 Use `Client::connect_with_options(..., ClientOptions)` for pinned/self-signed QUIC TLS in dev and tests. For production SIP softphones today, continue to use [`rvoip-sip`](https://crates.io/crates/rvoip-sip) directly.
 
+Features: `default = ["uctp"]`. The `sip` and `webrtc` features currently only re-export `rvoip_sip::api` and `rvoip_webrtc` as `rvoip_client::sip` / `rvoip_client::webrtc`; `Client::connect` dispatches only the `uctp+quic` scheme, so `sip://` URIs return `NotImplemented` even with the feature enabled.
+
 Part of the [**rvoip**](https://github.com/eisenzopf/rvoip) workspace (the "rvoip 3"
 unified real-time-communications stack). Published so the
 [`rvoip`](https://crates.io/crates/rvoip) facade can expose it behind the `client`

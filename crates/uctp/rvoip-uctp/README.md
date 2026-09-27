@@ -2,7 +2,7 @@
 
 > ⚠️ **Experimental surface** (unified `0.3.x` release) — API-unstable; expect breaking changes before `1.0`.
 
-UCTP (Universal Conversation Transport Protocol) — envelopes, state machine, capability negotiation, and substrate helpers shared by rvoip-quic and rvoip-webtransport
+UCTP (Universal Conversation Transport Protocol) — envelopes, state machine, capability negotiation, and substrate helpers shared by rvoip-quic, rvoip-webtransport, and rvoip-websocket
 
 Part of the [**rvoip**](https://github.com/eisenzopf/rvoip) workspace (the "rvoip 3"
 unified real-time-communications stack). Published so the
@@ -69,6 +69,21 @@ nonzero peer-global ID per negotiated Stream. The coordinator validates the
 entire batch before reserving IDs and emits no `stream.opened` on failure;
 another `connection.ready` may retry. Announced IDs are not reused during the
 physical peer lifetime.
+
+## Conversation dispatch
+
+`conversation_ops::consume_conversation_event` fulfils `conversation.create`,
+`conversation.list`, and `conversation.close` envelopes against the
+`rvoip_core::Orchestrator`. Substrate adapters (QUIC, WebTransport, WebSocket)
+call it from their coordinator event loop so those oneshots are never dropped;
+any other event is returned for the adapter to map. Replies are the typed
+`ConversationOpenedReply`, `ConversationListReply`, and
+`ConversationClosedReply` in `state::events`.
+
+## Features
+
+- `dev-dangerous` — disables client-side certificate verification. For tests
+  and demos only; never enable in production builds.
 
 ## License
 
