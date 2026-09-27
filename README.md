@@ -126,6 +126,62 @@ first one.
 | `CallbackPeer` | You are writing a server that reacts to inbound calls (IVR, auto-attendant) | [`09-ivr-server`](examples/09-ivr-server) |
 | `UnifiedCoordinator` + `server::b2bua` | You need a PBX, registrar, proxy, or B2BUA with routing and media bridging | [`10-call-center-b2bua`](examples/10-call-center-b2bua) |
 
+Register an account on a PBX and place a call through it:
+
+```rust,no_run
+use std::time::Duration;
+use rvoip_sip::{Endpoint, EndpointProfile, Result};
+
+# async fn example() -> Result<()> {
+let mut endpoint = Endpoint::builder()
+    .name("alice")
+    .account("1001")
+    .password("secret")
+    .registrar("sips:pbx.example.com:5061")
+    .profile(EndpointProfile::AsteriskTlsSrtpRegisteredFlow)
+    .build()
+    .await?;
+
+endpoint.register().await?;
+
+let call = endpoint
+    .call_and_wait("1002", Some(Duration::from_secs(30)))
+    .await?;
+call.send_dtmf('1').await?;
+call.hangup_and_wait(Some(Duration::from_secs(5))).await?;
+endpoint.shutdown().await?;
+# Ok(())
+# }
+```
+
+Answer calls and react to key presses, the shape of an IVR or auto-attendant:
+
+```rust,no_run
+use rvoip_sip::{CallHandlerDecision, CallbackPeer, Config, Result};
+
+# async fn example() -> Result<()> {
+let peer = CallbackPeer::builder(Config::local("ivr", 5120))
+    .on_incoming(|call| async move {
+        println!("incoming call from {}", call.from);
+        CallHandlerDecision::Accept
+    })
+    .on_dtmf(|call, digit| async move {
+        if digit == '0' {
+            call.transfer_blind("sip:operator@127.0.0.1:5122").await?;
+        }
+        Ok(())
+    })
+    .on_ended(|call_id, reason| async move {
+        println!("call {call_id} ended: {reason:?}");
+        Ok(())
+    })
+    .build()
+    .await?;
+
+peer.run().await
+# }
+```
+
 Security and transports are configuration, not different APIs: SDES-SRTP in
 [`07-secure-call-srtp`](examples/07-secure-call-srtp), TLS in
 [`08-tls-transport`](examples/08-tls-transport), DTLS-SRTP, G.729, AMR-NB/WB,
@@ -180,7 +236,28 @@ see [`13-sip-to-amazon-connect`](examples/13-sip-to-amazon-connect).
   bridged to the agent through the `Orchestrator`; the agent joins as its own
   AI participant with typed events, control messages, and supervised teardown.
   Start from [`14-vapi-agent`](examples/14-vapi-agent), one server that accepts
-  either kind of caller.
+  either kind of caller. Attaching an agent to a caller you already hold:
+
+  ```rust,no_run
+  use std::sync::Arc;
+  use rvoip::Orchestrator;
+  use rvoip::core_traits::ids::ConnectionId;
+  use rvoip::vapi::{VapiAdapter, VapiApiKey, VapiAssistant, VapiCallOptions, VapiConfig};
+
+  # async fn attach(orchestrator: Arc<Orchestrator>, caller: ConnectionId)
+  # -> Result<(), Box<dyn std::error::Error>> {
+  let key = VapiApiKey::new(std::env::var("VAPI_API_KEY")?)?;
+  let adapter = VapiAdapter::new(VapiConfig::new(key))?;
+  let options = VapiCallOptions::new(VapiAssistant::saved(std::env::var("VAPI_ASSISTANT_ID")?));
+
+  // Joins a distinct AI participant, originates the agent leg, bridges audio.
+  let mut call = adapter.attach_agent(&orchestrator, caller, options).await?;
+  call.say("One moment while I look that up.", false, true).await?;
+  let _outcome = call.wait().await;
+  # Ok(())
+  # }
+  ```
+
 - **Your own pipeline.** [`rvoip-harness`](crates/extensions/rvoip-harness)
   gives you ASR, TTS, dialog, and recording provider traits, and
   [`rvoip-vcon`](crates/extensions/rvoip-vcon) emits signed vCon records of the
