@@ -204,7 +204,9 @@ pub use operational_events::{
     OperationalEventStreamHealthSubscription, OperationalFailureReason, OperationalTransferOutcome,
     OperationalTransferTarget,
 };
-pub use orchestrator::{Orchestrator, PreparedOutboundConnection};
+pub use orchestrator::{
+    Orchestrator, PeerHandoffReceipt, PreparedOutboundConnection, PreparedPeerHandoff,
+};
 pub use participant::{Participant, ParticipantKind, ParticipantRole};
 pub use rvoip_core_traits::data::{
     DataMessage, DataMessageValidationError, DataReliability, MAX_CONTENT_TYPE_BYTES,

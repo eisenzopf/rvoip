@@ -110,6 +110,36 @@
   candidates through instead of using the loopback WebRTC profile, so Chrome's
   anonymised IPv4 host candidates pair and ICE completes.
 
+### Two-phase bridge peer handoff
+
+- `Orchestrator::prepare_transport_fenced_peer_handoff` and
+  `prepare_peer_handoff` stage a replacement bridge and return a
+  `PreparedPeerHandoff` that owns the staged routes and destination
+  reservation. `commit_peer_handoff_with_timeout_and_receipt`,
+  `commit_peer_handoff_with_timeout`, `commit_peer_handoff_with_receipt`,
+  and `commit_peer_handoff` perform the bounded quiescence and ownership
+  commit and return a `PeerHandoffReceipt` (previous and replacement
+  bridge ids, retained, source, target, `committed_at`). Dropping or
+  awaiting `abandon()` on a prepared handoff rolls back without touching
+  the original bridge. The strict variant refuses a bridge without a
+  transport delivery fence with `NotImplemented`. Applications that must
+  do durable work and re-check authority between preparation and commit
+  can now do so; `replace_bridge_destination` and its transport-fenced
+  wrapper are unchanged and are implemented as prepare followed by
+  commit, so there is one commit path.
+- `Event::PeerHandoffCommitted` is now emitted. It was defined in 0.3.10
+  but never published. It fires exactly once from the shared commit
+  path, after the ownership switch and before the compatibility
+  `ConnectionsUnbridged` and `ConnectionsBridged` events, and never on
+  a failed or abandoned handoff. `VapiAgentCall::wait_shared` now
+  resolves to `HandedOff` when the AI leg is retired by a handoff.
+- Ported the downstream acceptance tests for the handoff, the Vapi
+  existing-call attachment (credential isolation on a shared
+  credential-free adapter, no provider-call creation, no fallback to
+  creation on socket failure), and the QUIC transport fence (stale
+  generation rejected at dequeue; three-client A–B to A–C cutover where B
+  receives no post-handoff frame).
+
 ### Bridge cutover fence and glare classification
 
 - The media-graph forwarding gate's cutover mutex was only ever taken by

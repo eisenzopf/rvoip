@@ -22,7 +22,7 @@ use rvoip_core::commands::{AttachmentRef, ListenerSink, ListenerTarget, Recordin
 use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
 use rvoip_core::events::Event;
 use rvoip_core::identity::IdentityAssurance;
-use rvoip_core::ids::{ConnectionId, MessageId, ParticipantId, SessionId, StreamId};
+use rvoip_core::ids::{BridgeId, ConnectionId, MessageId, ParticipantId, SessionId, StreamId};
 use rvoip_core::message::Message;
 use rvoip_core::orchestrator::DEFAULT_BRIDGED_DATA_MESSAGE_QUEUE_CAPACITY;
 #[cfg(feature = "test-hooks")]
@@ -3271,4 +3271,765 @@ async fn bridge_recording_ai_and_listener_share_one_source_and_cleanup_routes() 
         .await
         .expect("unbridge");
     wait_for_sink_count(&graph, 0).await;
+}
+
+// =====================================================================
+// Two-phase peer handoff (prepare / commit)
+// =====================================================================
+
+/// One Quic adapter holding `count` connections in a single Session, each
+/// with a G.711 mock stream, admitted before the fixture returns.
+async fn setup_shared_session_orchestrator(
+    count: usize,
+) -> (
+    Arc<Orchestrator>,
+    Vec<Arc<MockMediaStream>>,
+    Vec<ConnectionId>,
+    Arc<MockAdapter>,
+) {
+    let adapter = MockAdapter::new(Transport::Quic);
+    let connections = (0..count).map(|_| ConnectionId::new()).collect::<Vec<_>>();
+    let streams = (0..count)
+        .map(|_| MockMediaStream::new(DEFAULT_TEST_CODEC))
+        .collect::<Vec<_>>();
+    for (connection_id, stream) in connections.iter().zip(&streams) {
+        adapter.register_connection(connection_id.clone(), Arc::clone(stream));
+    }
+    let orchestrator = Orchestrator::new(Config::default());
+    orchestrator
+        .register(adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .expect("register handoff adapter");
+    let session = SessionId::new();
+    for connection_id in &connections {
+        adapter
+            .announce(connection_id.clone(), session.clone())
+            .await;
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while connections
+            .iter()
+            .any(|connection_id| orchestrator.connection_transport(connection_id).is_err())
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("handoff fixture was not admitted");
+    (orchestrator, streams, connections, adapter)
+}
+
+fn bidirectional_plan() -> DirectionalMediaBridgePlan {
+    DirectionalMediaBridgePlan::new(true, true).expect("bidirectional plan")
+}
+
+async fn expect_frame(receiver: &mut mpsc::Receiver<MediaFrame>, expected: u8) {
+    let frame = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+        .await
+        .unwrap_or_else(|_| panic!("frame {expected} was not forwarded"))
+        .expect("media output closed");
+    assert_eq!(frame.payload[0], expected);
+}
+
+async fn expect_silence(receiver: &mut mpsc::Receiver<MediaFrame>) {
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), receiver.recv())
+            .await
+            .is_err(),
+        "a silent route forwarded media"
+    );
+}
+
+/// Skip unrelated bus traffic until `matches` accepts an event.
+async fn next_event_matching(
+    events: &mut tokio::sync::broadcast::Receiver<Event>,
+    matches: impl Fn(&Event) -> bool,
+) -> Event {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let event = events.recv().await.expect("core event bus closed");
+            if matches(&event) {
+                break event;
+            }
+        }
+    })
+    .await
+    .expect("expected core event was not published")
+}
+
+fn assert_send_ref<T: Send>(_: &T) {}
+
+#[tokio::test]
+async fn staged_peer_handoff_is_silent_and_rollback_preserves_original_bridge() {
+    let (orch, streams, connections, _adapter) = setup_shared_session_orchestrator(3).await;
+    let (a, b, c) = (&streams[0], &streams[1], &streams[2]);
+    let (ca, cb, cc) = (&connections[0], &connections[1], &connections[2]);
+    let mut a_out = a.take_external_out();
+    let mut b_out = b.take_external_out();
+    let mut c_out = c.take_external_out();
+    let bridge = orch
+        .bridge_connections(ca.clone(), cb.clone())
+        .await
+        .expect("original bridge");
+    let c_graph = orch
+        .media_graph_for_connection(cc.clone())
+        .await
+        .expect("target graph");
+
+    for await_rollback in [false, true] {
+        let staged = orch
+            .prepare_peer_handoff(
+                bridge.clone(),
+                ca.clone(),
+                cc.clone(),
+                bidirectional_plan(),
+                Arc::new(SelectiveDataPolicy::default()),
+            )
+            .await
+            .expect("stage (or restage after rollback) the target");
+        assert_eq!(staged.previous_bridge_id(), &bridge);
+        assert_eq!(staged.retained_connection(), ca);
+        assert_eq!(staged.source_connection(), cb);
+        assert_eq!(staged.target_connection(), cc);
+        assert_ne!(staged.replacement_bridge_id(), &bridge);
+        assert_eq!(
+            active_bridge_count(&orch),
+            1,
+            "staging must not publish a bridge"
+        );
+
+        a.inject(mk_frame(a.id(), 71)).await;
+        b.inject(mk_frame(b.id(), 72)).await;
+        c.inject(mk_frame(c.id(), 73)).await;
+        expect_frame(&mut b_out, 71).await;
+        expect_frame(&mut a_out, 72).await;
+        expect_silence(&mut c_out).await;
+        expect_silence(&mut a_out).await;
+
+        if await_rollback {
+            staged.abandon().await;
+            assert!(
+                c_graph.latest_snapshot().sinks.is_empty(),
+                "awaited rollback must remove the dormant target route"
+            );
+        } else {
+            drop(staged);
+        }
+        wait_for_sink_count(&c_graph, 0).await;
+        assert_eq!(active_bridge_count(&orch), 1);
+    }
+
+    a.inject(mk_frame(a.id(), 74)).await;
+    expect_frame(&mut b_out, 74).await;
+    orch.unbridge_connections(bridge)
+        .await
+        .expect("remove original bridge");
+    let retry = orch
+        .bridge_connections(ca.clone(), cc.clone())
+        .await
+        .expect("rolled-back handoff released the target reservation");
+    orch.unbridge_connections(retry).await.expect("cleanup");
+}
+
+#[tokio::test]
+async fn committed_peer_handoff_switches_both_directions_and_can_switch_back() {
+    let (orch, streams, connections, _adapter) = setup_shared_session_orchestrator(3).await;
+    let (a, b, c) = (&streams[0], &streams[1], &streams[2]);
+    let (ca, cb, cc) = (&connections[0], &connections[1], &connections[2]);
+    let mut a_out = a.take_external_out();
+    let mut b_out = b.take_external_out();
+    let mut c_out = c.take_external_out();
+    let mut bridge = orch
+        .bridge_connections(ca.clone(), cb.clone())
+        .await
+        .expect("original bridge");
+
+    // Legacy mock queues carry no transport delivery fence, so the strict
+    // variant must refuse before reserving anything.
+    assert!(matches!(
+        orch.prepare_transport_fenced_peer_handoff(
+            bridge.clone(),
+            ca.clone(),
+            cc.clone(),
+            bidirectional_plan(),
+            Arc::new(rvoip_core::stream::PassThroughDataMessageBridgePolicy),
+        )
+        .await,
+        Err(RvoipError::NotImplemented(_))
+    ));
+
+    let recording = Arc::new(VecRecordingSink::new("memory:rec/handoff"));
+    orch.register_recording_sink("handoff", recording.clone());
+    let recording_id = orch
+        .start_recording(RecordingTarget::Connection(ca.clone()), "handoff")
+        .await
+        .expect("record the retained connection");
+    a.inject(mk_frame(a.id(), 60)).await;
+    expect_frame(&mut b_out, 60).await;
+
+    let mut events = orch.subscribe_events();
+    let staged = orch
+        .prepare_peer_handoff(
+            bridge.clone(),
+            ca.clone(),
+            cc.clone(),
+            bidirectional_plan(),
+            Arc::new(SelectiveDataPolicy::default()),
+        )
+        .await
+        .expect("stage the target");
+    assert_eq!(staged.source_connection(), cb);
+    let previous = bridge.clone();
+    let expected_replacement = staged.replacement_bridge_id().clone();
+    let commit = orch.commit_peer_handoff_with_timeout_and_receipt(staged, Duration::from_secs(1));
+    assert_send_ref(&commit);
+    let receipt = commit.await.expect("commit the target");
+    bridge = receipt.bridge_id.clone();
+    assert_eq!(bridge, expected_replacement);
+    assert_eq!(receipt.previous_bridge_id, previous);
+    assert_eq!(receipt.retained, *ca);
+    assert_eq!(receipt.source, *cb);
+    assert_eq!(receipt.target, *cc);
+
+    let handoff = next_event_matching(&mut events, |event| {
+        matches!(
+            event,
+            Event::PeerHandoffCommitted { .. }
+                | Event::ConnectionsUnbridged { .. }
+                | Event::ConnectionsBridged { .. }
+        )
+    })
+    .await;
+    match handoff {
+        Event::PeerHandoffCommitted {
+            previous_bridge_id,
+            bridge_id,
+            retained,
+            source,
+            target,
+            at,
+        } => {
+            assert_eq!(at, receipt.committed_at);
+            assert_eq!(previous_bridge_id, previous);
+            assert_eq!(bridge_id, bridge);
+            assert_eq!(retained, *ca);
+            assert_eq!(source, *cb);
+            assert_eq!(target, *cc);
+        }
+        other => panic!("handoff must precede compatibility events: {other:?}"),
+    }
+    assert!(matches!(
+        next_event_matching(&mut events, |event| matches!(
+            event,
+            Event::ConnectionsUnbridged { .. } | Event::ConnectionsBridged { .. }
+        ))
+        .await,
+        Event::ConnectionsUnbridged { bridge_id, .. } if bridge_id == previous
+    ));
+    assert!(matches!(
+        next_event_matching(&mut events, |event| matches!(
+            event,
+            Event::ConnectionsBridged { .. }
+        ))
+        .await,
+        Event::ConnectionsBridged { bridge_id, a, b, .. }
+            if bridge_id == bridge && a == *ca && b == *cc
+    ));
+
+    a.inject(mk_frame(a.id(), 81)).await;
+    c.inject(mk_frame(c.id(), 82)).await;
+    b.inject(mk_frame(b.id(), 83)).await;
+    expect_frame(&mut c_out, 81).await;
+    expect_frame(&mut a_out, 82).await;
+    expect_silence(&mut b_out).await;
+    expect_silence(&mut a_out).await;
+
+    // The retired peer is unowned again and can be handed back in.
+    let staged = orch
+        .prepare_peer_handoff(
+            bridge.clone(),
+            ca.clone(),
+            cb.clone(),
+            bidirectional_plan(),
+            Arc::new(SelectiveDataPolicy::default()),
+        )
+        .await
+        .expect("old peer released for return");
+    assert_eq!(staged.source_connection(), cc);
+    let returned = orch
+        .commit_peer_handoff_with_timeout(staged, Duration::from_secs(1))
+        .await
+        .expect("commit the return");
+    a.inject(mk_frame(a.id(), 91)).await;
+    b.inject(mk_frame(b.id(), 92)).await;
+    expect_frame(&mut b_out, 91).await;
+    expect_frame(&mut a_out, 92).await;
+    expect_silence(&mut c_out).await;
+
+    assert_eq!(a.source_acquisitions(), 1);
+    assert_eq!(b.source_acquisitions(), 1);
+    assert_eq!(c.source_acquisitions(), 1);
+    let expected: Vec<u8> = [60, 81, 91]
+        .into_iter()
+        .flat_map(|byte| mk_frame(a.id(), byte).payload.to_vec())
+        .collect();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while recording.bytes().len() < expected.len() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("retained recording receives frames across both commits");
+    orch.stop_recording(recording_id)
+        .await
+        .expect("same recording remains controllable");
+    assert_eq!(recording.bytes(), expected);
+    orch.unbridge_connections(returned).await.expect("cleanup");
+}
+
+#[tokio::test]
+async fn peer_handoff_derives_source_from_either_bridge_side() {
+    let (orch, streams, connections, _adapter) = setup_shared_session_orchestrator(3).await;
+    let (a, b, c) = (&streams[0], &streams[1], &streams[2]);
+    let (ca, cb, cc) = (&connections[0], &connections[1], &connections[2]);
+    let mut a_out = a.take_external_out();
+    let _b_out = b.take_external_out();
+    let mut c_out = c.take_external_out();
+    // Retain the `b` side of the original bridge.
+    let bridge = orch
+        .bridge_connections(cb.clone(), ca.clone())
+        .await
+        .expect("original bridge");
+    let mut events = orch.subscribe_events();
+    let staged = orch
+        .prepare_peer_handoff(
+            bridge.clone(),
+            ca.clone(),
+            cc.clone(),
+            bidirectional_plan(),
+            Arc::new(SelectiveDataPolicy::default()),
+        )
+        .await
+        .expect("stage from the b side");
+    assert_eq!(staged.source_connection(), cb);
+    let receipt = orch
+        .commit_peer_handoff_with_receipt(staged)
+        .expect("synchronous commit");
+    assert_eq!(receipt.retained, *ca);
+    assert_eq!(receipt.source, *cb);
+    assert_eq!(receipt.target, *cc);
+    // The replacement keeps the original endpoint orientation.
+    assert!(matches!(
+        next_event_matching(&mut events, |event| matches!(
+            event,
+            Event::ConnectionsBridged { .. }
+        ))
+        .await,
+        Event::ConnectionsBridged { bridge_id, a, b, .. }
+            if bridge_id == receipt.bridge_id && a == *cc && b == *ca
+    ));
+    a.inject(mk_frame(a.id(), 51)).await;
+    c.inject(mk_frame(c.id(), 52)).await;
+    expect_frame(&mut c_out, 51).await;
+    expect_frame(&mut a_out, 52).await;
+    orch.unbridge_connections(receipt.bridge_id)
+        .await
+        .expect("cleanup");
+    orch.drain_connection_lifecycle_tasks().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn peer_handoff_commit_rejects_foreign_and_stale_preparations_and_releases_target() {
+    let (orch, streams, connections, _adapter) = setup_shared_session_orchestrator(3).await;
+    let (a, b) = (&streams[0], &streams[1]);
+    let (ca, cb, cc) = (&connections[0], &connections[1], &connections[2]);
+    let mut b_out = b.take_external_out();
+    let original = orch
+        .bridge_connections(ca.clone(), cb.clone())
+        .await
+        .expect("original bridge");
+    let prepare = || {
+        orch.prepare_peer_handoff(
+            original.clone(),
+            ca.clone(),
+            cc.clone(),
+            bidirectional_plan(),
+            Arc::new(SelectiveDataPolicy::default()),
+        )
+    };
+
+    let foreign = Orchestrator::new(Config::default());
+    assert!(matches!(
+        foreign.commit_peer_handoff(prepare().await.expect("stage")),
+        Err(RvoipError::InvalidState(
+            "handoff belongs to another orchestrator"
+        ))
+    ));
+    assert!(matches!(
+        foreign
+            .commit_peer_handoff_with_timeout(
+                prepare().await.expect("restage"),
+                Duration::from_secs(1)
+            )
+            .await,
+        Err(RvoipError::InvalidState(
+            "handoff belongs to another orchestrator"
+        ))
+    ));
+    a.inject(mk_frame(a.id(), 61)).await;
+    expect_frame(&mut b_out, 61).await;
+
+    let stale = prepare()
+        .await
+        .expect("foreign rejection released the target");
+    orch.unbridge_connections(original.clone())
+        .await
+        .expect("remove original bridge");
+    let committing = {
+        let orch = Arc::clone(&orch);
+        tokio::spawn(async move { orch.commit_peer_handoff(stale) })
+    };
+    let result = tokio::time::timeout(Duration::from_secs(2), committing)
+        .await
+        .expect("failed commit must not deadlock reservation cleanup")
+        .expect("commit task panicked");
+    assert!(
+        matches!(result, Err(RvoipError::BridgeNotFound(id)) if id == original),
+        "a retired original bridge is a lost generation, not an invalid state"
+    );
+    let retry = orch
+        .bridge_connections(ca.clone(), cc.clone())
+        .await
+        .expect("stale rejection released the target");
+    orch.unbridge_connections(retry).await.expect("cleanup");
+    orch.drain_connection_lifecycle_tasks().await;
+}
+
+#[tokio::test]
+async fn peer_handoff_commit_after_concurrent_replacement_reports_bridge_not_found() {
+    for bounded in [false, true] {
+        let (orch, streams, connections, _adapter) = setup_shared_session_orchestrator(4).await;
+        let (a, d) = (&streams[0], &streams[3]);
+        let (ca, cb, cc, cd) = (
+            &connections[0],
+            &connections[1],
+            &connections[2],
+            &connections[3],
+        );
+        let mut d_out = d.take_external_out();
+        let original = orch
+            .bridge_connections(ca.clone(), cb.clone())
+            .await
+            .expect("original bridge");
+        let staged = orch
+            .prepare_peer_handoff(
+                original.clone(),
+                ca.clone(),
+                cc.clone(),
+                bidirectional_plan(),
+                Arc::new(SelectiveDataPolicy::default()),
+            )
+            .await
+            .expect("stage the first contender");
+
+        // A second contender wins the generation while the first is staged.
+        let winner = orch
+            .replace_bridge_destination(original.clone(), ca.clone(), cb.clone(), cd.clone())
+            .await
+            .expect("concurrent one-shot replacement");
+
+        let result = if bounded {
+            orch.commit_peer_handoff_with_timeout(staged, Duration::from_secs(1))
+                .await
+        } else {
+            orch.commit_peer_handoff(staged)
+        };
+        assert!(
+            matches!(result, Err(RvoipError::BridgeNotFound(id)) if id == original),
+            "bounded={bounded}: losing the generation must classify as BridgeNotFound"
+        );
+        a.inject(mk_frame(a.id(), 41)).await;
+        expect_frame(&mut d_out, 41).await;
+        let released = orch
+            .bridge_connections(cc.clone(), cb.clone())
+            .await
+            .expect("losing contender released its target");
+        orch.unbridge_connections(released).await.expect("cleanup");
+        orch.unbridge_connections(winner.bridge_id)
+            .await
+            .expect("cleanup");
+        orch.drain_connection_lifecycle_tasks().await;
+    }
+}
+
+#[tokio::test]
+async fn peer_handoff_preparation_rejects_original_bridge_removed_during_setup() {
+    let (orch, _streams, connections, adapter) = setup_shared_session_orchestrator(3).await;
+    let (ca, cb, cc) = (&connections[0], &connections[1], &connections[2]);
+    let original = orch
+        .bridge_connections(ca.clone(), cb.clone())
+        .await
+        .expect("original bridge");
+    let gate = adapter.gate_next_stream_lookup(cc.clone());
+    let pending = {
+        let orch = Arc::clone(&orch);
+        let original = original.clone();
+        let ca = ca.clone();
+        let cc = cc.clone();
+        tokio::spawn(async move {
+            orch.prepare_peer_handoff(
+                original,
+                ca,
+                cc,
+                bidirectional_plan(),
+                Arc::new(SelectiveDataPolicy::default()),
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(2), gate.entered.notified())
+        .await
+        .expect("preparation did not reach the target stream lookup");
+    orch.unbridge_connections(original.clone())
+        .await
+        .expect("remove original bridge mid-preparation");
+    gate.release.notify_one();
+    let result = tokio::time::timeout(Duration::from_secs(2), pending)
+        .await
+        .expect("preparation hung")
+        .expect("preparation task panicked");
+    assert!(matches!(result, Err(RvoipError::BridgeNotFound(id)) if id == original));
+    let retry = orch
+        .bridge_connections(ca.clone(), cc.clone())
+        .await
+        .expect("failed preparation released the target");
+    orch.unbridge_connections(retry).await.expect("cleanup");
+}
+
+#[tokio::test]
+async fn peer_handoff_preparation_validates_endpoints_before_reserving() {
+    let (orch, _streams, connections, _adapter) = setup_shared_session_orchestrator(4).await;
+    let (ca, cb, cc, cd) = (
+        &connections[0],
+        &connections[1],
+        &connections[2],
+        &connections[3],
+    );
+    let original = orch
+        .bridge_connections(ca.clone(), cb.clone())
+        .await
+        .expect("original bridge");
+    let policy = || Arc::new(SelectiveDataPolicy::default());
+    // The retained connection must be on the expected bridge.
+    assert!(matches!(
+        orch.prepare_peer_handoff(
+            original.clone(),
+            cc.clone(),
+            cd.clone(),
+            bidirectional_plan(),
+            policy()
+        )
+        .await,
+        Err(RvoipError::AdmissionRejected(_))
+    ));
+    // The target must be distinct from both bridge endpoints.
+    assert!(matches!(
+        orch.prepare_peer_handoff(
+            original.clone(),
+            ca.clone(),
+            cb.clone(),
+            bidirectional_plan(),
+            policy()
+        )
+        .await,
+        Err(RvoipError::AdmissionRejected(_))
+    ));
+    assert!(matches!(
+        orch.prepare_peer_handoff(
+            original.clone(),
+            ca.clone(),
+            ca.clone(),
+            bidirectional_plan(),
+            policy()
+        )
+        .await,
+        Err(RvoipError::AdmissionRejected(_))
+    ));
+    // An unknown generation is a lost fence.
+    let stale = BridgeId::new();
+    assert!(matches!(
+        orch.prepare_peer_handoff(stale.clone(), ca.clone(), cc.clone(), bidirectional_plan(), policy())
+            .await,
+        Err(RvoipError::BridgeNotFound(id)) if id == stale
+    ));
+    // Nothing above reserved the spare connections.
+    let probe = orch
+        .bridge_connections(cc.clone(), cd.clone())
+        .await
+        .expect("rejected preparations reserved nothing");
+    orch.unbridge_connections(probe).await.expect("cleanup");
+
+    orch.drain_connection_lifecycle_tasks().await;
+    assert!(matches!(
+        orch.prepare_peer_handoff(
+            original.clone(),
+            ca.clone(),
+            cc.clone(),
+            bidirectional_plan(),
+            policy()
+        )
+        .await,
+        Err(RvoipError::InvalidState(
+            "connection lifecycle supervisor is draining"
+        ))
+    ));
+    orch.unbridge_connections(original)
+        .await
+        .expect("explicitly remove bridge after rejected preparation");
+}
+
+/// Drain everything currently on the bus, returning the events in order.
+async fn drain_events(events: &mut tokio::sync::broadcast::Receiver<Event>) -> Vec<Event> {
+    let mut drained = Vec::new();
+    while let Ok(Ok(event)) = tokio::time::timeout(Duration::from_millis(100), events.recv()).await
+    {
+        drained.push(event);
+    }
+    drained
+}
+
+#[tokio::test]
+async fn peer_handoff_committed_is_published_once_after_commit_and_never_on_failure() {
+    let (orch, streams, connections, _adapter) = setup_shared_session_orchestrator(3).await;
+    let (a, c) = (&streams[0], &streams[2]);
+    let (ca, cb, cc) = (&connections[0], &connections[1], &connections[2]);
+    let _a_out = a.take_external_out();
+    let mut c_out = c.take_external_out();
+    let original = orch
+        .bridge_connections(ca.clone(), cb.clone())
+        .await
+        .expect("original bridge");
+    let mut events = orch.subscribe_events();
+    let prepare = |bridge: BridgeId, target: ConnectionId| {
+        orch.prepare_peer_handoff(
+            bridge,
+            ca.clone(),
+            target,
+            bidirectional_plan(),
+            Arc::new(SelectiveDataPolicy::default()),
+        )
+    };
+
+    // Rejected commits publish nothing: a foreign orchestrator, and a
+    // generation lost to a one-shot contender while the handoff was staged.
+    let foreign = Orchestrator::new(Config::default());
+    let staged = prepare(original.clone(), cc.clone()).await.expect("stage");
+    assert!(foreign
+        .commit_peer_handoff_with_timeout(staged, Duration::from_secs(1))
+        .await
+        .is_err());
+    let lost = prepare(original.clone(), cc.clone())
+        .await
+        .expect("restage after foreign rejection");
+    // Rolling the lost handoff back must not publish either.
+    lost.abandon().await;
+    assert!(
+        !drain_events(&mut events)
+            .await
+            .iter()
+            .any(|event| matches!(event, Event::PeerHandoffCommitted { .. })),
+        "a rejected or abandoned handoff must not publish PeerHandoffCommitted"
+    );
+
+    // Two-phase commit: exactly one PeerHandoffCommitted, carrying the
+    // receipt's identities, published before the replacement's
+    // ConnectionsBridged.
+    let staged = prepare(original.clone(), cc.clone()).await.expect("stage");
+    let receipt = orch
+        .commit_peer_handoff_with_timeout_and_receipt(staged, Duration::from_secs(1))
+        .await
+        .expect("commit");
+    a.inject(mk_frame(a.id(), 21)).await;
+    expect_frame(&mut c_out, 21).await;
+    let published = drain_events(&mut events).await;
+    let handoffs = published
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| matches!(event, Event::PeerHandoffCommitted { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        handoffs.len(),
+        1,
+        "exactly one handoff event: {published:?}"
+    );
+    let (handoff_index, handoff) = handoffs[0];
+    match handoff {
+        Event::PeerHandoffCommitted {
+            previous_bridge_id,
+            bridge_id,
+            retained,
+            source,
+            target,
+            at,
+        } => {
+            assert_eq!(previous_bridge_id, &receipt.previous_bridge_id);
+            assert_eq!(bridge_id, &receipt.bridge_id);
+            assert_eq!(retained, &receipt.retained);
+            assert_eq!(source, &receipt.source);
+            assert_eq!(target, &receipt.target);
+            assert_eq!(at, &receipt.committed_at);
+            assert_eq!(previous_bridge_id, &original);
+            assert_eq!((retained, source, target), (ca, cb, cc));
+        }
+        other => unreachable!("filtered handoff event: {other:?}"),
+    }
+    let unbridged_index = published
+        .iter()
+        .position(|event| {
+            matches!(event, Event::ConnectionsUnbridged { bridge_id, .. } if bridge_id == &original)
+        })
+        .expect("retired generation publishes ConnectionsUnbridged");
+    let bridged_index = published
+        .iter()
+        .position(|event| {
+            matches!(event, Event::ConnectionsBridged { bridge_id, .. } if bridge_id == &receipt.bridge_id)
+        })
+        .expect("replacement generation publishes ConnectionsBridged");
+    assert!(
+        handoff_index < unbridged_index && unbridged_index < bridged_index,
+        "handoff must precede the compatibility events: {published:?}"
+    );
+
+    // The one-shot path shares the commit and publishes the same event.
+    let replacement = orch
+        .replace_bridge_destination(
+            receipt.bridge_id.clone(),
+            ca.clone(),
+            cc.clone(),
+            cb.clone(),
+        )
+        .await
+        .expect("one-shot replacement back to the first peer");
+    let published = drain_events(&mut events).await;
+    let handoffs = published
+        .iter()
+        .filter(|event| matches!(event, Event::PeerHandoffCommitted { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        handoffs.len(),
+        1,
+        "one-shot path publishes one handoff event"
+    );
+    assert!(matches!(
+        handoffs[0],
+        Event::PeerHandoffCommitted { previous_bridge_id, bridge_id, retained, source, target, .. }
+            if previous_bridge_id == &replacement.previous_bridge_id
+                && bridge_id == &replacement.bridge_id
+                && retained == &replacement.ingress
+                && source == &replacement.previous_destination
+                && target == &replacement.destination
+    ));
+    orch.unbridge_connections(replacement.bridge_id)
+        .await
+        .expect("cleanup");
+    orch.drain_connection_lifecycle_tasks().await;
 }
