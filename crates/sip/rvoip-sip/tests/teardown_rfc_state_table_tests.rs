@@ -309,3 +309,37 @@ fn uas_answering_ack_timeout_fails_without_bye() {
         assert!(t.publish_events.contains(&EventTemplate::CallFailed));
     }
 }
+
+/// A matched CANCEL can win final-response authorship in the interval between
+/// AcceptCall entering Answering and the exact 200 action returning.
+/// Dialog-core emits DialogCANCEL only after it has already sent 200 to the
+/// CANCEL and 487 to the INVITE, so it is authoritative cancellation, not a
+/// late CANCEL after a completed 2xx. The table must commit it from Answering
+/// exactly as it does from Ringing and EarlyMedia; rejecting the event there
+/// lost the CallCancelled lifecycle event. Pinned from vapi-ref-harness's
+/// state-table override.
+#[test]
+fn uas_matched_cancel_commits_cancellation_once_from_every_pre_answer_state() {
+    let table = load();
+
+    for state in [CallState::Ringing, CallState::EarlyMedia, CallState::Answering] {
+        let t = transition(&table, Role::UAS, state, EventType::DialogCANCEL);
+        assert_eq!(t.next_state, Some(CallState::Cancelled), "{state:?}");
+        assert!(
+            t.actions.contains(&Action::CleanupDialog),
+            "{state:?} must release the dialog on authoritative cancellation"
+        );
+        assert!(
+            t.actions.contains(&Action::CleanupMedia),
+            "{state:?} must release media on authoritative cancellation"
+        );
+        assert_eq!(
+            t.publish_events
+                .iter()
+                .filter(|event| matches!(event, EventTemplate::CallCancelled))
+                .count(),
+            1,
+            "{state:?} must publish CallCancelled exactly once"
+        );
+    }
+}

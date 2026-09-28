@@ -141,6 +141,12 @@
   still refuses one that does not, and the SIP stream's descriptor and
   codec follow the SDP clock and fmtp in both RFC 4867 framings while a
   non-16 kHz-mono shape is refused before a codec is built.
+- vapi-ref-harness carried a state-table override adding the UAS
+  `Answering + DialogCANCEL -> Cancelled` transition for a matched CANCEL
+  that wins final-response authorship while accept is entering `Answering`.
+  The shipped table already contains that transition byte for byte; a
+  state-table test now pins it alongside the `Ringing` and `EarlyMedia`
+  cases so it cannot regress silently.
 
 ### Receive-side playout overflow no longer silences a dialog
 
