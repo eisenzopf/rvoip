@@ -112,6 +112,61 @@ class ReadmeLinkPolicyTests(unittest.TestCase):
             self.assertTrue(any("canonical performance report" in error for error in errors))
             self.assertTrue(any("release checklist" in error for error in errors))
 
+    def test_prepared_candidate_ahead_of_archived_evidence_passes(self) -> None:
+        # The version-bump PR names the next release while the evidence still
+        # describes the newest qualified one; publish writes the new evidence.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            docs = root / "crates/sip/rvoip-sip/docs"
+            archive = docs / "releases/qualification/20260907T000000Z-0.3.10"
+            archive.mkdir(parents=True)
+            (root / "Cargo.toml").write_text(
+                '[workspace]\n[workspace.package]\nversion = "0.3.11"\n',
+                encoding="utf-8",
+            )
+            (docs / "BETA_RELEASE_REPORT.md").write_text(
+                "# RVoIP 0.3.10 Release Qualification Report\n", encoding="utf-8"
+            )
+            (docs / "BETA_PERFORMANCE_REPORT.md").write_text(
+                "Release: `0.3.10`\n", encoding="utf-8"
+            )
+            (docs / "BETA_RELEASE_CHECKLIST.md").write_text(
+                "Current published qualified runtime crate version: `0.3.11`.\n",
+                encoding="utf-8",
+            )
+            for filename in (
+                "QUALIFICATION_SUMMARY.json",
+                "QUALIFICATION_REPORT_ATTESTATION.json",
+            ):
+                (docs / filename).write_text(
+                    '{"release":{"version":"0.3.10"}}\n', encoding="utf-8"
+                )
+            (archive / "BETA_RELEASE_REPORT.md").write_text(
+                "# RVoIP 0.3.10 Release Qualification Report\n", encoding="utf-8"
+            )
+            for filename in (
+                "BETA_GATE_REPORT.md",
+                "BETA_PERFORMANCE_REPORT.md",
+                "QUALIFICATION_REPORT_ATTESTATION.json",
+                "QUALIFICATION_REPORT_ATTESTATION.json.sha256",
+                "QUALIFICATION_SUMMARY.json",
+                "current-performance-artifact-index.json",
+                "current-performance-evaluation.json",
+                "current-performance-evaluation.md",
+            ):
+                (archive / filename).write_text("x\n", encoding="utf-8")
+            (docs / "releases/qualification/README.md").write_text(
+                f"| `0.3.10` at `abc` | {archive.name} |\n", encoding="utf-8"
+            )
+            self.assertEqual(readme_links.validate_current_release_evidence(root), [])
+
+            # The same layout with the archive removed is stale evidence again.
+            for path in sorted(archive.iterdir()):
+                path.unlink()
+            archive.rmdir()
+            errors = readme_links.validate_current_release_evidence(root)
+            self.assertTrue(any("canonical release report" in error for error in errors))
+
 
 if __name__ == "__main__":
     unittest.main()

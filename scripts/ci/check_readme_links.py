@@ -174,12 +174,54 @@ def validate_release_surfaces(root: Path = ROOT) -> list[str]:
     return errors
 
 
+def _semver_key(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in version.split("."))
+
+
+def _canonical_evidence_version(docs: Path) -> str | None:
+    """The single release every canonical evidence artifact describes, or None."""
+
+    report = (docs / "BETA_RELEASE_REPORT.md").read_text(encoding="utf-8")
+    match = re.search(r"^# RVoIP (\d+\.\d+\.\d+) Release Qualification Report", report, re.M)
+    if match is None:
+        return None
+    candidate = match.group(1)
+    performance = (docs / "BETA_PERFORMANCE_REPORT.md").read_text(encoding="utf-8")
+    if f"Release: `{candidate}`" not in performance:
+        return None
+    for filename in ("QUALIFICATION_SUMMARY.json", "QUALIFICATION_REPORT_ATTESTATION.json"):
+        path = docs / filename
+        if not path.is_file():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("release", {}).get("version") != candidate:
+            return None
+    return candidate
+
+
 def validate_current_release_evidence(root: Path = ROOT) -> list[str]:
-    """Keep canonical and archived qualification evidence on the workspace release."""
+    """Keep canonical and archived qualification evidence on the workspace release.
+
+    Between the version-bump merge and publication the workspace is a prepared
+    candidate: `Cargo.toml` already names the next release while every
+    evidence artifact still describes the newest qualified one, because the
+    publish workflow is what writes the new evidence. That window is accepted
+    only when the evidence is complete for one older release and archived and
+    indexed; anything else is stale evidence and fails exactly as before.
+    """
 
     version = workspace_version(root)
     docs = root / "crates/sip/rvoip-sip/docs"
     errors: list[str] = []
+
+    evidence_version = _canonical_evidence_version(docs)
+    if (
+        evidence_version is not None
+        and evidence_version != version
+        and _semver_key(evidence_version) < _semver_key(version)
+        and not _archived_evidence_errors(docs, evidence_version)
+    ):
+        return errors
 
     release_report = docs / "BETA_RELEASE_REPORT.md"
     performance_report = docs / "BETA_PERFORMANCE_REPORT.md"
@@ -204,6 +246,14 @@ def validate_current_release_evidence(root: Path = ROOT) -> list[str]:
         if data.get("release", {}).get("version") != version:
             errors.append(f"canonical {filename} is not for {version}")
 
+    errors.extend(_archived_evidence_errors(docs, version))
+    return errors
+
+
+def _archived_evidence_errors(docs: Path, version: str) -> list[str]:
+    """Exactly one complete, indexed archive must exist for `version`."""
+
+    errors: list[str] = []
     history_root = docs / "releases/qualification"
     archives = []
     for report in history_root.glob("*/BETA_RELEASE_REPORT.md"):
@@ -233,7 +283,8 @@ def validate_current_release_evidence(root: Path = ROOT) -> list[str]:
         if not (archive / filename).is_file():
             errors.append(f"archived {version} evidence is missing {filename}")
 
-    history = (history_root / "README.md").read_text(encoding="utf-8")
+    index = history_root / "README.md"
+    history = index.read_text(encoding="utf-8") if index.is_file() else ""
     if f"| `{version}` at `" not in history or archive.name not in history:
         errors.append(f"qualification history does not index archived {version} evidence")
     return errors
