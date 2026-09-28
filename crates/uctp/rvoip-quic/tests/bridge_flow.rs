@@ -491,7 +491,10 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
     .expect("real transport handoff timed out")
     .expect("real transport handoff");
     assert_eq!(replacement.previous_bridge_id, bridge_id);
-    assert_ne!(replacement.bridge_id, bridge_id, "a fresh generation is minted");
+    assert_ne!(
+        replacement.bridge_id, bridge_id,
+        "a fresh generation is minted"
+    );
     assert_eq!(replacement.ingress, retained);
     assert_eq!(replacement.previous_destination, previous_destination);
     assert_eq!(replacement.destination, target);
@@ -518,7 +521,10 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
             .await
             .unwrap_or_else(|_| panic!("timed out waiting for the post-handoff {label} frame"))
             .unwrap_or_else(|| panic!("{label} stream closed unexpectedly"));
-        assert_eq!(received.payload[0], expected, "{label} carried the wrong frame");
+        assert_eq!(
+            received.payload[0], expected,
+            "{label} carried the wrong frame"
+        );
     }
     assert!(
         tokio::time::timeout(Duration::from_millis(200), client_b_in.recv())

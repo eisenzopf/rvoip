@@ -39,7 +39,7 @@ CODEC_FEATURE_GATES = {
 # feature is added without a decision about this gate.
 NON_PERF_SIP_FEATURES = (
     "all-codecs,amr,amr-nb,amr-wb,dev-insecure-tls,dhat,dtls-srtp,event-history,g729,"
-    "generated-validation,opus,opus-sim,persistence,tokio-console"
+    "generated-validation,opus,opus-sim,persistence,test-hooks,tokio-console"
 )
 
 

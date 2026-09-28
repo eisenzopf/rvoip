@@ -161,10 +161,7 @@ impl UctpWsConfig {
 
     /// Intercept `conversation.create` so the product can identity-match
     /// before a new Orchestrator Conversation is allocated.
-    pub fn with_conversation_create_hook(
-        mut self,
-        hook: Arc<dyn ConversationCreateHook>,
-    ) -> Self {
+    pub fn with_conversation_create_hook(mut self, hook: Arc<dyn ConversationCreateHook>) -> Self {
         self.conversation_create_hook = Some(hook);
         self
     }

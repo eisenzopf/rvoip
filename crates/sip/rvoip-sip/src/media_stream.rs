@@ -2077,7 +2077,10 @@ mod negotiated_codec_tests {
             );
         }
         let wrong_shape = negotiated("AMR-WB", 8_000, 1);
-        assert_eq!(codec_descriptor(&wrong_shape, 104), Err("invalid-amr-wb-shape"));
+        assert_eq!(
+            codec_descriptor(&wrong_shape, 104),
+            Err("invalid-amr-wb-shape")
+        );
     }
 
     #[cfg(feature = "amr-wb")]

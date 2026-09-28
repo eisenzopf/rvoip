@@ -322,7 +322,11 @@ fn uas_answering_ack_timeout_fails_without_bye() {
 fn uas_matched_cancel_commits_cancellation_once_from_every_pre_answer_state() {
     let table = load();
 
-    for state in [CallState::Ringing, CallState::EarlyMedia, CallState::Answering] {
+    for state in [
+        CallState::Ringing,
+        CallState::EarlyMedia,
+        CallState::Answering,
+    ] {
         let t = transition(&table, Role::UAS, state, EventType::DialogCANCEL);
         assert_eq!(t.next_state, Some(CallState::Cancelled), "{state:?}");
         assert!(

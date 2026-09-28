@@ -3861,6 +3861,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rvoip-audio-send-queue"
+version = "0.3.10"
+dependencies = [
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "rvoip-auth-core"
 version = "0.3.10"
 dependencies = [
@@ -4112,8 +4120,12 @@ version = "0.3.10"
 dependencies = [
  "async-trait",
  "bytes",
+ "chrono",
+ "dashmap",
+ "rvoip-core",
  "rvoip-core-traits",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -4193,6 +4205,7 @@ dependencies = [
  "rustls",
  "rvoip-auth-core",
  "rvoip-core",
+ "rvoip-core-traits",
  "rvoip-uctp",
  "serde_json",
  "thiserror 1.0.69",
@@ -4288,6 +4301,7 @@ dependencies = [
  "lazy_static",
  "rand 0.8.7",
  "roxmltree",
+ "rvoip-audio-send-queue",
  "rvoip-auth-core",
  "rvoip-core",
  "rvoip-core-traits",

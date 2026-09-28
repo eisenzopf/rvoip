@@ -845,7 +845,10 @@ async fn committed_peer_handoff_retires_ai_without_ending_retained_caller() {
         .await
         .expect("commit the handoff");
     assert_eq!(receipt.previous_bridge_id, original_bridge);
-    assert_ne!(receipt.bridge_id, original_bridge, "a fresh generation is minted");
+    assert_ne!(
+        receipt.bridge_id, original_bridge,
+        "a fresh generation is minted"
+    );
     assert_eq!(receipt.retained, caller);
     assert_eq!(receipt.source, vapi);
     assert_eq!(receipt.target, target);
@@ -896,7 +899,10 @@ async fn committed_peer_handoff_retires_ai_without_ending_retained_caller() {
     })
     .await
     .expect("the retired Vapi leg never reached a terminal state");
-    assert!(saw_handoff, "PeerHandoffCommitted precedes the AI leg's terminal");
+    assert!(
+        saw_handoff,
+        "PeerHandoffCommitted precedes the AI leg's terminal"
+    );
 
     // The old Vapi WebSocket was closed through the normal end protocol.
     let mut saw_end_call = false;
@@ -910,7 +916,10 @@ async fn committed_peer_handoff_retires_ai_without_ending_retained_caller() {
             break;
         }
     }
-    assert!(saw_end_call, "the retired Vapi leg must send end-call on its socket");
+    assert!(
+        saw_end_call,
+        "the retired Vapi leg must send end-call on its socket"
+    );
     assert!(!adapter.is_connection_live(&vapi));
 
     // The retained caller and the new peer both remain in their Session.

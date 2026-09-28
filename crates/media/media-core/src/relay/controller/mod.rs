@@ -361,7 +361,11 @@ mod rtp_playout_tests {
         let start = Instant::now();
         let mut buffer = RtpPlayoutBuffer::new();
         assert_eq!(
-            buffer.push(packet(101), start).iter().map(sequence).collect::<Vec<_>>(),
+            buffer
+                .push(packet(101), start)
+                .iter()
+                .map(sequence)
+                .collect::<Vec<_>>(),
             [101]
         );
         assert!(buffer
@@ -491,11 +495,17 @@ mod rtp_playout_tests {
         let terminate =
             enqueue_rtp_playout_items(burst, &runtime, &dialog_id, &mut playout, now).await;
 
-        assert!(!terminate, "a playout overflow must not terminate the RTP receive loop");
+        assert!(
+            !terminate,
+            "a playout overflow must not terminate the RTP receive loop"
+        );
         assert_eq!(playout.pending.len(), RTP_REORDER_MAX_PACKETS);
         assert_eq!(playout.dropped_frames, u64::from(overflow));
         assert_eq!(
-            playout.pop_due(now).expect("the head frame survives the overflow").timestamp,
+            playout
+                .pop_due(now)
+                .expect("the head frame survives the overflow")
+                .timestamp,
             0,
             "overflow drops the newest frames, not the ones already queued"
         );
