@@ -135,6 +135,15 @@ data "aws_iam_policy_document" "provisioner" {
     }
   }
 
+  # The capacity preflight confirms the instance profile exists and names
+  # the runner role before any worker is launched.
+  statement {
+    sid       = "ReadRunnerInstanceProfile"
+    effect    = "Allow"
+    actions   = ["iam:GetInstanceProfile"]
+    resources = [aws_iam_instance_profile.runner.arn]
+  }
+
   statement {
     sid       = "ReadUbuntuAmiParameter"
     effect    = "Allow"
