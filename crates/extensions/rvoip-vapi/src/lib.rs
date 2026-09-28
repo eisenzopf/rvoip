@@ -27,4 +27,6 @@ pub use config::{VapiApiKey, VapiConfig};
 pub use error::{Result, VapiError};
 pub use events::{VapiEvent, VapiEventEnvelope};
 pub use health::VapiMediaHealth;
-pub use types::{VapiAssistant, VapiAudioFormat, VapiCallOptions, VapiPeerFailurePolicy};
+pub use types::{
+    VapiAssistant, VapiAudioFormat, VapiCallOptions, VapiExistingCall, VapiPeerFailurePolicy,
+};

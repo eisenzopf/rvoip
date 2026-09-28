@@ -14,6 +14,13 @@ use crate::errors::{Result, SessionError};
 use rvoip_media_core::types::AudioFrame;
 use tokio::sync::mpsc;
 
+/// Atomic evidence returned after a response-generation advance.
+pub use rvoip_audio_send_queue::GenerationAdvance as AudioGenerationAdvance;
+/// Observable counters for the bounded outbound audio queue.
+pub use rvoip_audio_send_queue::Metrics as AudioSendMetrics;
+/// Typed rejection returned by generation-aware outbound audio submission.
+pub use rvoip_audio_send_queue::SendError as AudioSendError;
+
 /// Split duplex audio stream for a single session.
 ///
 /// Obtain one via [`SessionHandle::audio()`][crate::api::handle::SessionHandle::audio].
@@ -81,17 +88,19 @@ impl AudioStream {
 /// media layer.
 #[derive(Clone)]
 pub struct AudioSender {
-    tx: mpsc::Sender<AudioFrame>,
+    tx: rvoip_audio_send_queue::Sender<AudioFrame>,
 }
 
 impl AudioSender {
-    pub(crate) fn new(tx: mpsc::Sender<AudioFrame>) -> Self {
-        Self { tx }
+    pub(crate) fn channel(capacity: usize) -> (Self, rvoip_audio_send_queue::Receiver<AudioFrame>) {
+        let (tx, rx) = rvoip_audio_send_queue::channel(capacity);
+        (Self { tx }, rx)
     }
 
     /// Send an audio frame to the remote party.
     ///
-    /// Returns `Err` only if the session has ended and the channel is closed.
+    /// Returns `Err` if the session ended or the bounded outbound queue entered
+    /// its terminal overload state.
     ///
     /// # Examples
     ///
@@ -103,9 +112,37 @@ impl AudioSender {
     /// # }
     /// ```
     pub async fn send(&self, frame: AudioFrame) -> Result<()> {
-        self.tx.send(frame).await.map_err(|_| {
-            SessionError::Other("Audio send channel closed (session ended)".to_string())
-        })
+        self.try_send_generation(self.current_generation(), frame)
+            .map_err(|error| SessionError::Other(error.to_string()))
+    }
+
+    /// Submit a frame for an exact response generation without waiting.
+    pub fn try_send_generation(
+        &self,
+        generation: u64,
+        frame: AudioFrame,
+    ) -> std::result::Result<(), AudioSendError> {
+        self.tx.try_send(generation, frame)
+    }
+
+    /// Accept a newer response generation and synchronously flush older frames.
+    pub fn advance_generation(&self, generation: u64) -> Option<AudioGenerationAdvance> {
+        self.tx.advance_to(generation)
+    }
+
+    /// Close the queue and synchronously remove pending frames.
+    pub fn close_and_flush(&self) {
+        self.tx.close_and_flush();
+    }
+
+    /// Return the generation currently accepted by this sender.
+    pub fn current_generation(&self) -> u64 {
+        self.tx.generation()
+    }
+
+    /// Return a point-in-time snapshot of bounded queue counters.
+    pub fn metrics(&self) -> AudioSendMetrics {
+        self.tx.metrics()
     }
 
     /// Returns `true` if the underlying session is still active.
@@ -120,7 +157,7 @@ impl AudioSender {
     /// # }
     /// ```
     pub fn is_open(&self) -> bool {
-        !self.tx.is_closed()
+        self.tx.is_open()
     }
 }
 

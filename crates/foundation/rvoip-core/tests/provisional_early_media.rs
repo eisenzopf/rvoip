@@ -520,6 +520,11 @@ async fn pending_admission_routes_early_media_without_answer_or_target_source_co
     assert!(target_admission.authenticated_principal().is_ok());
 
     source_stream.inject(frame(1)).await;
+    tokio::time::timeout(Duration::from_secs(2), route.wait_for_first_delivery())
+        .await
+        .expect("early-media delivery observation deadline")
+        .expect("early-media route remained live through first delivery");
+    assert_eq!(route.delivered_frames(), 1);
     let delivered = tokio::time::timeout(Duration::from_secs(2), target_output.recv())
         .await
         .expect("early-media frame deadline")

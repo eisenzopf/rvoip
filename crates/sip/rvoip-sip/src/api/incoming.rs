@@ -85,6 +85,7 @@ fn spawn_exact_incoming_reject(
     };
     let authority = Arc::clone(coordinator.helpers.state_machine.store.authority());
     let state_machine = Arc::clone(&coordinator.helpers.state_machine);
+    let finalizer = Arc::clone(&coordinator);
     let operation_key = lifecycle_handle.key().clone();
     let log_call_id = lifecycle_handle.session_id().clone();
     let scheduled = authority.spawn_owned_exact(
@@ -98,17 +99,31 @@ fn spawn_exact_incoming_reject(
                     return rollback_owned_incoming_guard(failure.into_operation(), ()).await;
                 }
             };
-            if let Err(error) = state_machine
+            let terminal_reason = reason.clone();
+            let dispatch = state_machine
                 .process_event_exact(&lifecycle_handle, EventType::RejectCall { status, reason })
-                .await
-            {
+                .await;
+            if let Err(error) = &dispatch {
                 tracing::debug!(
                     session_id = %lifecycle_handle.session_id(),
                     %error,
                     "exact incoming-call rejection did not dispatch"
                 );
             }
-            committed.complete(())
+            let completion = committed.complete(());
+            if dispatch.is_ok()
+                && !finalizer.spawn_local_rejection_finalization(
+                    lifecycle_handle.clone(),
+                    status,
+                    terminal_reason,
+                )
+            {
+                tracing::debug!(
+                    session_id = %lifecycle_handle.session_id(),
+                    "exact incoming-call rejection finalization was not admitted"
+                );
+            }
+            completion
         },
     );
     if let Err(error) = scheduled {
@@ -825,6 +840,7 @@ impl IncomingCallGuard {
         let state_machine = Arc::clone(&coordinator.helpers.state_machine);
         if let Some(lifecycle_handle) = lifecycle_handle.clone() {
             let authority = Arc::clone(state_machine.store.authority());
+            let finalizer = Arc::clone(&coordinator);
             let operation_key = lifecycle_handle.key().clone();
             let watchdog_resolved = Arc::clone(&resolved);
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -865,7 +881,18 @@ impl IncomingCallGuard {
                         );
                         return rollback_owned_incoming_guard(operation, ()).await;
                     }
-                    commit_owned_incoming_guard(operation, ()).await
+                    let completion = commit_owned_incoming_guard(operation, ()).await;
+                    if !finalizer.spawn_local_rejection_finalization(
+                        lifecycle_handle.clone(),
+                        503,
+                        "Service Unavailable".to_string(),
+                    ) {
+                        tracing::debug!(
+                            session_id = %lifecycle_handle.session_id(),
+                            "incoming-call guard timeout finalization was not admitted"
+                        );
+                    }
+                    completion
                 },
             );
             if let Err(error) = scheduled {
@@ -1049,8 +1076,7 @@ impl IncomingCallGuard {
             ))
         })?;
         self.coordinator
-            .helpers
-            .reject_call_exact(lifecycle_handle, status, reason)
+            .reject_incoming_exact(lifecycle_handle, status, reason)
             .await?;
 
         let fut = async {
@@ -1260,6 +1286,14 @@ impl Drop for IncomingCallGuard {
 
 /// An in-dialog received SIP request (REFER / NOTIFY / INFO /
 /// OPTIONS / UPDATE / MESSAGE).
+///
+/// Response authority depends on the method. INFO and other
+/// application-owned requests carry their exact inbound server transaction
+/// and can use [`IncomingRequest::respond`] or
+/// [`IncomingRequest::respond_builder`]. MESSAGE and OPTIONS callbacks are
+/// post-response observations: dialog-core has already authored their one
+/// final response before publishing the request, so applications must not
+/// attempt a second response.
 ///
 /// Implements [`SipHeaderView`] for uniform header inspection.
 #[derive(Clone)]
@@ -1566,6 +1600,9 @@ impl IncomingRequest {
                 self.exact_response_obligation()?,
             );
         }
+        if let Some(error) = self.dialog_owned_response_error() {
+            return Err(error);
+        }
         if matches!(
             self.method,
             rvoip_sip_core::Method::Info
@@ -1605,7 +1642,10 @@ impl IncomingRequest {
     /// This does not run INVITE accept/reject call-state transitions. It is
     /// therefore the response API for inbound INFO and similar application
     /// requests. Legacy events that lack exact transaction correlation return
-    /// `InvalidInput` rather than guessing from dialog state.
+    /// `InvalidInput` rather than guessing from dialog state. MESSAGE and
+    /// OPTIONS are published only after dialog-core has sent their final
+    /// response, so this method also returns `InvalidInput` for those
+    /// observation-only requests.
     pub fn respond(&self, status: u16) -> Result<crate::api::respond::InDialogResponseBuilder> {
         let transaction_id = self.exact_response_transaction()?;
         let coord = self.coordinator.clone().ok_or_else(|| {
@@ -1633,9 +1673,12 @@ impl IncomingRequest {
 
     fn exact_response_transaction(&self) -> Result<rvoip_sip_dialog::transaction::TransactionKey> {
         let transaction = self.response_transaction.clone().ok_or_else(|| {
-            SessionError::InvalidInput(
-                "IncomingRequest response requires an exact inbound server transaction".to_string(),
-            )
+            self.dialog_owned_response_error().unwrap_or_else(|| {
+                SessionError::InvalidInput(
+                    "IncomingRequest response requires an exact inbound server transaction"
+                        .to_string(),
+                )
+            })
         })?;
         let wire_transaction = self
             .request
@@ -1655,6 +1698,20 @@ impl IncomingRequest {
             ));
         }
         Ok(transaction)
+    }
+
+    fn dialog_owned_response_error(&self) -> Option<SessionError> {
+        if self.response_transaction.is_some() {
+            return None;
+        }
+        let method = match self.method {
+            rvoip_sip_core::Method::Message => "MESSAGE",
+            rvoip_sip_core::Method::Options => "OPTIONS",
+            _ => return None,
+        };
+        Some(SessionError::InvalidInput(format!(
+            "Inbound {method} is a post-response observation; dialog-core already authored its final response"
+        )))
     }
 
     /// Begin an `AuthChallengeBuilder` for 401/407 on the inbound request.
@@ -2628,6 +2685,54 @@ mod tests {
     }
 
     #[test]
+    fn dialog_owned_observations_reject_second_response_builders() {
+        for method in [
+            rvoip_sip_core::types::Method::Message,
+            rvoip_sip_core::types::Method::Options,
+        ] {
+            let raw = format!(
+                "{method} sip:bob@example.test SIP/2.0\r\n\
+                 Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-observation\r\n\
+                 From: <sip:alice@example.test>;tag=from-tag\r\n\
+                 To: <sip:bob@example.test>;tag=to-tag\r\n\
+                 Call-ID: observation-only\r\n\
+                 CSeq: 2 {method}\r\n\
+                 Content-Length: 0\r\n\r\n"
+            );
+            let request = match rvoip_sip_core::parse_message(raw.as_bytes())
+                .expect("parse observation-only request")
+            {
+                rvoip_sip_core::Message::Request(request) => request,
+                other => panic!("expected request, got {other:?}"),
+            };
+            let incoming = IncomingRequest::from_bus_request(
+                crate::state_table::types::SessionId("observation-only".into()),
+                "sip:alice@example.test".into(),
+                "sip:bob@example.test".into(),
+                method.clone(),
+                Arc::new(request),
+            );
+
+            let direct_error = match incoming.respond(200) {
+                Ok(_) => panic!("observation-only request gained direct response authority"),
+                Err(error) => error,
+            };
+            let generic_error = match incoming.respond_builder(486) {
+                Ok(_) => panic!("observation-only request gained generic response authority"),
+                Err(error) => error,
+            };
+            for error in [direct_error, generic_error] {
+                assert!(matches!(
+                    error,
+                    SessionError::InvalidInput(message)
+                        if message.contains("post-response observation")
+                            && message.contains("dialog-core already authored")
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn cancelled_exact_response_claim_returns_to_retryable_state() {
         let obligation = Arc::new(ExactResponseObligation::new(
             CallId::new(),
@@ -2963,15 +3068,20 @@ mod tests {
             })
             .expect("mark generation A ringing");
 
+        // MESSAGE and OPTIONS callbacks are post-response observations, so
+        // they intentionally reject a second response before consulting the
+        // captured lifetime. Use an application-owned method here so this
+        // regression reaches the exact generation fence it is meant to test.
+        let method = rvoip_sip_core::types::Method::Publish;
         let request = Request::new(
-            rvoip_sip_core::types::Method::Options,
+            method.clone(),
             rvoip_sip_core::types::Uri::sip("callee.example.test"),
         );
         let mut incoming = IncomingRequest::from_bus_request(
             call_id.clone(),
             "sip:caller@example.test".to_string(),
             "sip:callee@example.test".to_string(),
-            rvoip_sip_core::types::Method::Options,
+            method,
             Arc::new(request),
         );
         assert!(matches!(
@@ -3016,25 +3126,27 @@ mod tests {
                 .is_err(),
             "the request-derived session handle must not re-resolve generation B"
         );
+        let generic_error = incoming
+            .respond_builder(486)
+            .expect("application-owned generic response builder")
+            .send()
+            .await
+            .expect_err("a delayed generic response must fail against retired generation A");
         assert!(
-            incoming
-                .respond_builder(486)
-                .expect("exact generic response builder")
-                .send()
-                .await
-                .is_err(),
-            "a delayed generic response must fail against retired generation A"
+            matches!(generic_error, SessionError::SessionNotFound(_)),
+            "the generic response must be rejected by the retired exact lifetime: {generic_error:?}"
         );
+        let challenge_error = incoming
+            .challenge_builder(crate::api::respond::AuthScheme::Digest)
+            .expect("exact challenge builder")
+            .with_realm("example.test")
+            .with_nonce("generation-a-nonce")
+            .send()
+            .await
+            .expect_err("a delayed auth challenge must fail against retired generation A");
         assert!(
-            incoming
-                .challenge_builder(crate::api::respond::AuthScheme::Digest)
-                .expect("exact challenge builder")
-                .with_realm("example.test")
-                .with_nonce("generation-a-nonce")
-                .send()
-                .await
-                .is_err(),
-            "a delayed auth challenge must fail against retired generation A"
+            matches!(challenge_error, SessionError::SessionNotFound(_)),
+            "the challenge must be rejected by the retired exact lifetime: {challenge_error:?}"
         );
         assert_eq!(
             store

@@ -13,8 +13,8 @@ use rvoip_core::identity::IdentityAssurance;
 use rvoip_core::ids::IdentityId;
 use rvoip_uctp::{
     envelope::UctpEnvelope,
-    payloads::{auth, connection, session},
-    state::{UctpCoordinator, UctpSessionEvent, ENVELOPE_CHANNEL_CAP},
+    payloads::{auth, connection, conversation, session},
+    state::{ConversationOpenedReply, UctpCoordinator, UctpSessionEvent, ENVELOPE_CHANNEL_CAP},
     types::MessageType,
 };
 use std::sync::Arc;
@@ -2377,4 +2377,103 @@ async fn dtmf_send_for_unknown_connid_emits_404() {
     let payload: rvoip_uctp::payloads::control::Error = reply.decode_payload().unwrap();
     assert_eq!(payload.code, 404);
     assert_eq!(payload.reason, "unknown-connid");
+}
+
+#[tokio::test]
+async fn conversation_create_emits_event_and_opened_on_reply() {
+    let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (events_tx, mut events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let _coord = UctpCoordinator::start("quic", in_rx, out_tx, events_tx, bearer_stub());
+    drive_auth_handshake(&in_tx, &mut out_rx).await;
+    assert!(matches!(
+        events_rx.recv().await,
+        Some(UctpSessionEvent::Authenticated { .. })
+    ));
+
+    in_tx
+        .send(UctpEnvelope {
+            v: 1,
+            msg_type: MessageType::ConversationCreate,
+            id: "env_create".into(),
+            ts: Utc::now(),
+            cid: None,
+            sid: None,
+            connid: None,
+            in_reply_to: None,
+            payload: serde_json::to_value(conversation::ConversationCreate {
+                tenant_id: "ten_local".into(),
+                policy: conversation::ConversationPolicy::Ephemeral,
+                idle_close_secs: Some(30),
+                metadata: serde_json::json!({}),
+                initial_participants: vec![],
+            })
+            .unwrap(),
+            signature: None,
+        })
+        .await
+        .unwrap();
+
+    match events_rx.recv().await.expect("ConversationCreate") {
+        UctpSessionEvent::ConversationCreate { reply, cid, .. } => {
+            assert!(cid.is_none());
+            reply
+                .send(Ok(ConversationOpenedReply {
+                    cid: "conv_test".into(),
+                    tenant_id: "ten_local".into(),
+                    policy: conversation::ConversationPolicy::Ephemeral,
+                    idle_close_secs: Some(30),
+                    participants: vec![],
+                    opened_at: Utc::now(),
+                    metadata: serde_json::json!({}),
+                }))
+                .expect("reply");
+        }
+        other => panic!("expected ConversationCreate, got {other:?}"),
+    }
+
+    let opened = out_rx.recv().await.expect("conversation.opened");
+    assert_eq!(opened.msg_type, MessageType::ConversationOpened);
+    assert_eq!(opened.cid.as_deref(), Some("conv_test"));
+    assert_eq!(opened.in_reply_to.as_deref(), Some("env_create"));
+}
+
+#[tokio::test]
+async fn conversation_close_emits_closed_on_reply() {
+    let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (events_tx, mut events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let _coord = UctpCoordinator::start("quic", in_rx, out_tx, events_tx, bearer_stub());
+    drive_auth_handshake(&in_tx, &mut out_rx).await;
+    let _ = events_rx.recv().await;
+
+    in_tx
+        .send(
+            UctpEnvelope::new(
+                MessageType::ConversationClose,
+                serde_json::json!({ "reason": "explicit-close" }),
+            )
+            .with_cid("conv_test"),
+        )
+        .await
+        .unwrap();
+
+    match events_rx.recv().await.expect("ConversationClose") {
+        UctpSessionEvent::ConversationClose { reply, cid, .. } => {
+            assert_eq!(cid.as_deref(), Some("conv_test"));
+            reply
+                .send(Ok(rvoip_uctp::state::ConversationClosedReply {
+                    cid: "conv_test".into(),
+                    reason_code: 200,
+                    reason: "explicit-close".into(),
+                    closed_at: Utc::now(),
+                }))
+                .expect("reply");
+        }
+        other => panic!("expected ConversationClose, got {other:?}"),
+    }
+
+    let closed = out_rx.recv().await.expect("conversation.closed");
+    assert_eq!(closed.msg_type, MessageType::ConversationClosed);
+    assert_eq!(closed.cid.as_deref(), Some("conv_test"));
 }

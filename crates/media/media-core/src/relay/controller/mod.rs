@@ -17,8 +17,9 @@
 //! Use `set_audio_muted()` and `is_audio_muted()` for muting functionality.
 
 use dashmap::DashMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, trace, warn};
 
@@ -43,10 +44,473 @@ use rvoip_rtp_core::transport::{
     AllocationStrategy, GlobalPortAllocator, PortAllocator, PortAllocatorConfig, SymmetricRtpPolicy,
 };
 use rvoip_rtp_core::{
-    RtpSession, RtpSessionBufferConfig, RtpSessionConfig, RtpTransportBufferConfig,
+    RtpPacket, RtpSession, RtpSessionBufferConfig, RtpSessionConfig, RtpTransportBufferConfig,
 };
 
 mod codec_runtime;
+
+const RTP_REORDER_HOLD: Duration = Duration::from_millis(45);
+const RTP_REORDER_MAX_PACKETS: usize = 64;
+const RTP_MAX_CONCEALMENT_PACKETS: u16 = 8;
+
+#[derive(Debug)]
+struct PendingRtpPacket {
+    packet: RtpPacket,
+}
+
+#[derive(Debug)]
+enum RtpPlayoutItem {
+    Packet(RtpPacket),
+    Gap {
+        sequence_number: u16,
+        timestamp: u32,
+        samples_per_channel: usize,
+    },
+}
+
+/// Small per-dialog reorder window at the media decode boundary.
+///
+/// rtp-core currently exposes its jitter-buffer settings but does not connect
+/// them to the event-driven session path. Keeping this stage here preserves RTP
+/// sequence/timestamp information until packets are ordered, while still
+/// delivering decoded PCM through the existing bounded callback channel.
+struct RtpPlayoutBuffer {
+    active_ssrc: Option<u32>,
+    pending: BTreeMap<u16, PendingRtpPacket>,
+    expected_sequence: Option<u16>,
+    startup_started_at: Option<Instant>,
+    gap_started_at: Option<Instant>,
+    last_timestamp: Option<u32>,
+    timestamp_step: Option<u32>,
+}
+
+impl RtpPlayoutBuffer {
+    fn new() -> Self {
+        Self {
+            active_ssrc: None,
+            pending: BTreeMap::new(),
+            expected_sequence: None,
+            startup_started_at: None,
+            gap_started_at: None,
+            last_timestamp: None,
+            timestamp_step: None,
+        }
+    }
+
+    fn push(&mut self, packet: RtpPacket, now: Instant) -> Vec<RtpPlayoutItem> {
+        let ssrc = packet.header.ssrc;
+        if self.active_ssrc.is_some_and(|active| active != ssrc) {
+            // A re-INVITE can replace a temporary media relay with the final
+            // peer while keeping the dialog and payload type unchanged. RTP
+            // sequence and timestamp spaces belong to an SSRC, so retaining
+            // the former source's reorder state would classify the new stream
+            // as late and discard it indefinitely.
+            self.pending.clear();
+            self.expected_sequence = None;
+            self.startup_started_at = None;
+            self.gap_started_at = None;
+            self.last_timestamp = None;
+            self.timestamp_step = None;
+        }
+        self.active_ssrc = Some(ssrc);
+        let sequence = packet.header.sequence_number;
+        if self.expected_sequence.is_some_and(|expected| {
+            sequence != expected && sequence.wrapping_sub(expected) >= 32_768
+        }) {
+            return Vec::new();
+        }
+        self.pending
+            .entry(sequence)
+            .or_insert(PendingRtpPacket { packet });
+        self.startup_started_at.get_or_insert(now);
+
+        self.tick(now)
+    }
+
+    fn tick(&mut self, now: Instant) -> Vec<RtpPlayoutItem> {
+        if self.expected_sequence.is_none() {
+            let Some(started_at) = self.startup_started_at else {
+                return Vec::new();
+            };
+            // Hold the stream start only while the pending packets show a
+            // gap. An unbroken run carries no evidence of reordering, and
+            // holding it would cost every call up to RTP_REORDER_HOLD of
+            // first-frame latency, which an application that answers on the
+            // first delivered early-media frame cannot afford.
+            let startup_elapsed = now.saturating_duration_since(started_at);
+            if !self.pending_is_contiguous()
+                && startup_elapsed < RTP_REORDER_HOLD
+                && self.pending.len() < RTP_REORDER_MAX_PACKETS
+            {
+                return Vec::new();
+            }
+            self.expected_sequence = self.oldest_pending_sequence();
+        }
+
+        self.drain_ready(now)
+    }
+
+    /// True when the pending packets form one unbroken sequence run.
+    fn pending_is_contiguous(&self) -> bool {
+        let Some(oldest) = self.oldest_pending_sequence() else {
+            return true;
+        };
+        (0..self.pending.len() as u16)
+            .all(|offset| self.pending.contains_key(&oldest.wrapping_add(offset)))
+    }
+
+    fn oldest_pending_sequence(&self) -> Option<u16> {
+        self.pending.keys().copied().find(|candidate| {
+            self.pending
+                .keys()
+                .all(|other| other == candidate || other.wrapping_sub(*candidate) < 32_768)
+        })
+    }
+
+    fn drain_ready(&mut self, now: Instant) -> Vec<RtpPlayoutItem> {
+        let mut ready = Vec::new();
+        loop {
+            let Some(expected) = self.expected_sequence else {
+                break;
+            };
+            if let Some(buffered) = self.pending.remove(&expected) {
+                self.observe_timestamp(buffered.packet.header.timestamp);
+                self.expected_sequence = Some(expected.wrapping_add(1));
+                self.gap_started_at = None;
+                ready.push(RtpPlayoutItem::Packet(buffered.packet));
+                continue;
+            }
+
+            let nearest = self
+                .pending
+                .iter()
+                .filter_map(|(sequence, buffered)| {
+                    let distance = sequence.wrapping_sub(expected);
+                    (distance > 0 && distance < 32_768).then_some((distance, *sequence, buffered))
+                })
+                .min_by_key(|(distance, _, _)| *distance);
+            let Some((distance, nearest_sequence, nearest_packet)) = nearest else {
+                break;
+            };
+            let missing_since = *self.gap_started_at.get_or_insert(now);
+            if now.saturating_duration_since(missing_since) < RTP_REORDER_HOLD
+                && self.pending.len() < RTP_REORDER_MAX_PACKETS
+            {
+                break;
+            }
+
+            if distance > RTP_MAX_CONCEALMENT_PACKETS {
+                self.expected_sequence = Some(nearest_sequence);
+                self.gap_started_at = None;
+                continue;
+            }
+
+            let Some(step) = self.timestamp_step.or_else(|| {
+                self.last_timestamp.map(|previous| {
+                    nearest_packet
+                        .packet
+                        .header
+                        .timestamp
+                        .wrapping_sub(previous)
+                        / u32::from(distance)
+                })
+            }) else {
+                break;
+            };
+            if step == 0 {
+                break;
+            }
+            let timestamp = self
+                .last_timestamp
+                .map_or(nearest_packet.packet.header.timestamp, |previous| {
+                    previous.wrapping_add(step)
+                });
+            self.last_timestamp = Some(timestamp);
+            self.timestamp_step = Some(step);
+            self.expected_sequence = Some(expected.wrapping_add(1));
+            self.gap_started_at = None;
+            ready.push(RtpPlayoutItem::Gap {
+                sequence_number: expected,
+                timestamp,
+                samples_per_channel: step as usize,
+            });
+        }
+        ready
+    }
+
+    fn observe_timestamp(&mut self, timestamp: u32) {
+        if let Some(previous) = self.last_timestamp {
+            let step = timestamp.wrapping_sub(previous);
+            if step > 0 {
+                self.timestamp_step = Some(step);
+            }
+        }
+        self.last_timestamp = Some(timestamp);
+    }
+}
+
+struct DecodedPlayoutQueue {
+    pending: VecDeque<AudioFrame>,
+    next_delivery_at: Option<Instant>,
+    /// Frames dropped on overflow. The first drop is logged; the rest are
+    /// counted so a burst does not flood the log.
+    dropped_frames: u64,
+}
+
+impl DecodedPlayoutQueue {
+    fn new() -> Self {
+        Self {
+            pending: VecDeque::new(),
+            next_delivery_at: None,
+            dropped_frames: 0,
+        }
+    }
+
+    fn push(&mut self, frame: AudioFrame, now: Instant) -> bool {
+        if self.pending.len() >= RTP_REORDER_MAX_PACKETS {
+            return false;
+        }
+        if self.next_delivery_at.is_none() {
+            self.next_delivery_at = Some(now);
+        }
+        self.pending.push_back(frame);
+        true
+    }
+
+    fn pop_due(&mut self, now: Instant) -> Option<AudioFrame> {
+        let deadline = self.next_delivery_at?;
+        if now < deadline {
+            return None;
+        }
+        let frame = self.pending.pop_front()?;
+        self.next_delivery_at = self
+            .pending
+            .front()
+            .map(|_| now + frame.duration.max(Duration::from_millis(1)));
+        Some(frame)
+    }
+}
+
+#[cfg(test)]
+mod rtp_playout_tests {
+    use super::*;
+    use bytes::Bytes;
+    use rvoip_rtp_core::RtpHeader;
+
+    fn packet(sequence: u16) -> RtpPacket {
+        packet_for_ssrc(sequence, 0x0102_0304)
+    }
+
+    fn packet_for_ssrc(sequence: u16, ssrc: u32) -> RtpPacket {
+        RtpPacket {
+            header: RtpHeader::new(0, sequence, u32::from(sequence) * 160, ssrc),
+            payload: Bytes::from(vec![0xff; 160]),
+            padding_size: 0,
+        }
+    }
+
+    #[test]
+    fn ssrc_handoff_resets_the_sequence_and_timestamp_space() {
+        let start = Instant::now();
+        let mut buffer = RtpPlayoutBuffer::new();
+        let first = buffer.push(packet_for_ssrc(50_000, 0x1111_1111), start);
+        assert_eq!(first.iter().map(sequence).collect::<Vec<_>>(), [50_000]);
+        assert!(buffer.tick(start + Duration::from_millis(46)).is_empty());
+
+        // A new SSRC resets the sequence space: 100 is not "late" relative to
+        // 50_000, it is the first packet of a new stream and leaves at once.
+        let handoff = buffer.push(
+            packet_for_ssrc(100, 0x2222_2222),
+            start + Duration::from_millis(100),
+        );
+        assert_eq!(handoff.iter().map(sequence).collect::<Vec<_>>(), [100]);
+        assert!(buffer.tick(start + Duration::from_millis(146)).is_empty());
+    }
+
+    fn sequence(item: &RtpPlayoutItem) -> u16 {
+        match item {
+            RtpPlayoutItem::Packet(packet) => packet.header.sequence_number,
+            RtpPlayoutItem::Gap {
+                sequence_number, ..
+            } => *sequence_number,
+        }
+    }
+
+    #[test]
+    fn startup_releases_a_contiguous_first_packet_without_holding_it() {
+        // The first packet of a stream carries no evidence of reordering, so
+        // it is not held for RTP_REORDER_HOLD. An application that answers a
+        // call on the first delivered early-media frame depends on this.
+        let start = Instant::now();
+        let mut buffer = RtpPlayoutBuffer::new();
+        let ready = buffer.push(packet(101), start);
+        assert_eq!(ready.iter().map(sequence).collect::<Vec<_>>(), [101]);
+        // A lower sequence arriving afterwards is late relative to a stream
+        // that has already started, and is discarded rather than reordered.
+        assert!(buffer
+            .push(packet(100), start + Duration::from_millis(35))
+            .is_empty());
+        assert!(buffer.tick(start + Duration::from_millis(46)).is_empty());
+    }
+
+    #[test]
+    fn startup_holds_only_once_a_gap_is_observed() {
+        // Reorder protection is still in force from the first observed gap:
+        // 103 arriving ahead of 102 waits, and both leave in order once 102
+        // arrives inside the hold.
+        let start = Instant::now();
+        let mut buffer = RtpPlayoutBuffer::new();
+        assert_eq!(
+            buffer
+                .push(packet(101), start)
+                .iter()
+                .map(sequence)
+                .collect::<Vec<_>>(),
+            [101]
+        );
+        assert!(buffer
+            .push(packet(103), start + Duration::from_millis(20))
+            .is_empty());
+        let ready = buffer.push(packet(102), start + Duration::from_millis(35));
+        assert_eq!(ready.iter().map(sequence).collect::<Vec<_>>(), [102, 103]);
+    }
+
+    #[test]
+    fn active_window_waits_for_a_delayed_predecessor() {
+        let start = Instant::now();
+        let mut buffer = RtpPlayoutBuffer::new();
+        let mut initial = Vec::new();
+        initial.extend(buffer.push(packet(100), start));
+        initial.extend(buffer.push(packet(101), start + Duration::from_millis(20)));
+        initial.extend(buffer.push(packet(102), start + Duration::from_millis(40)));
+        assert_eq!(
+            initial.iter().map(sequence).collect::<Vec<_>>(),
+            [100, 101, 102]
+        );
+        assert!(buffer.tick(start + Duration::from_millis(46)).is_empty());
+        assert!(buffer
+            .push(packet(104), start + Duration::from_millis(80))
+            .is_empty());
+        let ready = buffer.push(packet(103), start + Duration::from_millis(95));
+        assert_eq!(ready.iter().map(sequence).collect::<Vec<_>>(), [103, 104]);
+    }
+
+    #[test]
+    fn confirmed_gap_advances_one_timestamp_sized_playout_slot() {
+        let start = Instant::now();
+        let mut buffer = RtpPlayoutBuffer::new();
+        buffer.push(packet(100), start);
+        buffer.push(packet(101), start + Duration::from_millis(20));
+        buffer.push(packet(102), start + Duration::from_millis(40));
+        buffer.tick(start + Duration::from_millis(46));
+        assert!(buffer
+            .push(packet(104), start + Duration::from_millis(80))
+            .is_empty());
+        let ready = buffer.tick(start + Duration::from_millis(126));
+        assert_eq!(ready.iter().map(sequence).collect::<Vec<_>>(), [103, 104]);
+        assert!(matches!(
+            &ready[0],
+            RtpPlayoutItem::Gap {
+                timestamp,
+                samples_per_channel: 160,
+                ..
+            } if *timestamp == 103 * 160
+        ));
+    }
+
+    #[test]
+    fn duplicate_and_late_packets_do_not_reenter_playout() {
+        let start = Instant::now();
+        let mut buffer = RtpPlayoutBuffer::new();
+        let ready = buffer.push(packet(100), start);
+        assert_eq!(ready.iter().map(sequence).collect::<Vec<_>>(), [100]);
+        assert!(buffer.tick(start + Duration::from_millis(46)).is_empty());
+        assert!(buffer
+            .push(packet(100), start + Duration::from_millis(50))
+            .is_empty());
+    }
+
+    #[test]
+    fn decoded_playout_paces_a_reordered_batch() {
+        let start = Instant::now();
+        let mut playout = DecodedPlayoutQueue::new();
+        for timestamp in [0, 160, 320] {
+            assert!(playout.push(AudioFrame::new(vec![0; 160], 8_000, 1, timestamp), start,));
+        }
+        assert_eq!(playout.pop_due(start).expect("first frame").timestamp, 0);
+        assert!(playout.pop_due(start + Duration::from_millis(19)).is_none());
+        assert_eq!(
+            playout
+                .pop_due(start + Duration::from_millis(20))
+                .expect("second frame")
+                .timestamp,
+            160
+        );
+    }
+
+    #[test]
+    fn decoded_playout_does_not_invent_audio_across_a_talkspurt_pause() {
+        let start = Instant::now();
+        let mut playout = DecodedPlayoutQueue::new();
+        assert!(playout.push(AudioFrame::new(vec![0; 160], 8_000, 1, 0), start));
+        assert!(playout.pop_due(start).is_some());
+        assert!(playout.pop_due(start + Duration::from_secs(5)).is_none());
+
+        assert!(playout.push(
+            AudioFrame::new(vec![1; 160], 8_000, 1, 40_000),
+            start + Duration::from_secs(5),
+        ));
+        assert_eq!(
+            playout
+                .pop_due(start + Duration::from_secs(5))
+                .expect("new talkspurt")
+                .timestamp,
+            40_000
+        );
+    }
+
+    #[tokio::test]
+    async fn decoded_playout_overflow_drops_frames_but_keeps_the_receive_loop_alive() {
+        // A bridge that releases media buffered until commit, or any producer
+        // running ahead of real time, can hand the decode boundary more than
+        // RTP_REORDER_MAX_PACKETS frames in one drain. That must cost frames,
+        // never the dialog's receive loop.
+        let config = MediaConfig {
+            local_addr: "127.0.0.1:0".parse().expect("local addr"),
+            remote_addr: None,
+            preferred_codec: Some("PCMU".to_string()),
+            parameters: std::collections::HashMap::new(),
+        };
+        let format = codec_runtime::resolve_codec(&config).expect("PCMU resolves");
+        let runtime =
+            Arc::new(codec_runtime::DialogCodecRuntime::new(format).expect("codec runtime"));
+        let dialog_id = DialogId::new("playout-overflow");
+        let mut playout = DecodedPlayoutQueue::new();
+        let now = Instant::now();
+        let overflow = 16u16;
+        let burst: Vec<RtpPlayoutItem> = (0..(RTP_REORDER_MAX_PACKETS as u16 + overflow))
+            .map(|sequence| RtpPlayoutItem::Packet(packet(sequence)))
+            .collect();
+
+        let terminate =
+            enqueue_rtp_playout_items(burst, &runtime, &dialog_id, &mut playout, now).await;
+
+        assert!(
+            !terminate,
+            "a playout overflow must not terminate the RTP receive loop"
+        );
+        assert_eq!(playout.pending.len(), RTP_REORDER_MAX_PACKETS);
+        assert_eq!(playout.dropped_frames, u64::from(overflow));
+        assert_eq!(
+            playout
+                .pop_due(now)
+                .expect("the head frame survives the overflow")
+                .timestamp,
+            0,
+            "overflow drops the newest frames, not the ones already queued"
+        );
+    }
+}
 
 /// Which side of the DTLS handshake a dialog plays, per RFC 4145/5763's
 /// `a=setup` active/passive mapping (the caller resolves the SDP
@@ -228,6 +692,177 @@ fn perf_skip_audio_frame_delivery() -> bool {
     })
 }
 
+#[derive(Default)]
+struct RtpDeliveryState {
+    decoded_audio_frame_count: u64,
+    logged_missing_audio_callback: bool,
+    last_delivered_at: Option<Instant>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn enqueue_rtp_playout_items(
+    items: Vec<RtpPlayoutItem>,
+    codec_runtime: &Arc<codec_runtime::DialogCodecRuntime>,
+    dialog_id: &DialogId,
+    decoded_playout: &mut DecodedPlayoutQueue,
+    arrived_at: Instant,
+) -> bool {
+    for item in items {
+        let audio_frame = match item {
+            RtpPlayoutItem::Packet(packet) => {
+                match codec_runtime
+                    .decode(&packet.payload, packet.header.timestamp)
+                    .await
+                {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        warn!(
+                            "Failed to decode {} for dialog {}: {}",
+                            codec_runtime.format.name, dialog_id, error
+                        );
+                        continue;
+                    }
+                }
+            }
+            RtpPlayoutItem::Gap {
+                sequence_number,
+                timestamp,
+                samples_per_channel,
+            } => {
+                warn!(
+                    %dialog_id,
+                    sequence_number,
+                    timestamp,
+                    samples_per_channel,
+                    "concealing confirmed missing RTP audio packet"
+                );
+                AudioFrame::new(
+                    vec![0; samples_per_channel * usize::from(codec_runtime.format.channels)],
+                    codec_runtime.format.clock_rate,
+                    codec_runtime.format.channels,
+                    timestamp,
+                )
+            }
+        };
+        if !decoded_playout.push(audio_frame, arrived_at) {
+            // The paced queue is a jitter bound, not a lifecycle boundary. A
+            // producer running ahead of real time, such as a bridge releasing
+            // media it buffered until commit, overflows it in bursts. Drop the
+            // newest frame and keep the receive loop alive, exactly as a full
+            // application callback channel is handled: terminating the loop
+            // here silenced the dialog for the rest of the call.
+            decoded_playout.dropped_frames += 1;
+            if decoded_playout.dropped_frames == 1 {
+                warn!(
+                    %dialog_id,
+                    capacity_frames = RTP_REORDER_MAX_PACKETS,
+                    "decoded playout queue overflow; dropping frames until playout catches up"
+                );
+            }
+        }
+    }
+    false
+}
+
+#[allow(clippy::too_many_arguments)]
+fn deliver_due_audio_frame(
+    now: Instant,
+    decoded_playout: &mut DecodedPlayoutQueue,
+    dialog_id: &DialogId,
+    media_directions: &DashMap<DialogId, MediaDirection>,
+    audio_frame_callbacks: &DashMap<DialogId, mpsc::Sender<AudioFrame>>,
+    collect_audio_quality: bool,
+    skip_audio_frame_delivery: bool,
+    state: &mut RtpDeliveryState,
+) -> bool {
+    let Some(audio_frame) = decoded_playout.pop_due(now) else {
+        return false;
+    };
+    let decoded_len = audio_frame.samples.len();
+
+    let receive_enabled = media_directions
+        .get(dialog_id)
+        .map(|direction| {
+            matches!(
+                *direction,
+                MediaDirection::SendRecv | MediaDirection::RecvOnly
+            )
+        })
+        .unwrap_or(true);
+    if !receive_enabled {
+        debug!(
+            "Dropping received RTP audio for dialog {} due to media direction",
+            dialog_id
+        );
+        return false;
+    }
+    if collect_audio_quality {
+        diagnostics::record_audio_rx_decoded_frame();
+    }
+
+    if skip_audio_frame_delivery {
+        state.decoded_audio_frame_count += 1;
+        record_transient_allocation(
+            "media_core.audio.rx.decoded_without_frame_delivery",
+            decoded_len * std::mem::size_of::<i16>(),
+        );
+        return false;
+    }
+
+    let sender = audio_frame_callbacks
+        .get(dialog_id)
+        .map(|entry| entry.value().clone());
+    if let Some(sender) = sender {
+        state.decoded_audio_frame_count += 1;
+        record_transient_allocation(
+            "media_core.audio.rx.audio_frame.samples_vec",
+            audio_frame.samples.capacity() * std::mem::size_of::<i16>(),
+        );
+
+        match sender.try_send(audio_frame) {
+            Ok(()) => {
+                if collect_audio_quality {
+                    let delivered_at = Instant::now();
+                    let delivery_gap = state
+                        .last_delivered_at
+                        .map(|previous| delivered_at.duration_since(previous));
+                    diagnostics::record_audio_rx_delivered_frame(delivery_gap);
+                    state.last_delivered_at = Some(delivered_at);
+                }
+                if state.decoded_audio_frame_count % 10 == 0
+                    || state.decoded_audio_frame_count == 100
+                    || state.decoded_audio_frame_count == 101
+                {
+                    info!(
+                        "✅ Sent decoded audio frame #{} to callback for dialog {}",
+                        state.decoded_audio_frame_count, dialog_id
+                    );
+                }
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                warn!(
+                    "Audio frame buffer full for dialog {} at frame #{}, dropping frame",
+                    dialog_id, state.decoded_audio_frame_count
+                );
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                error!(
+                        "❌ Audio frame channel closed for dialog {} at frame #{} - THIS IS THE 100-FRAME BUG!",
+                        dialog_id, state.decoded_audio_frame_count
+                    );
+                return true;
+            }
+        }
+    } else if !state.logged_missing_audio_callback {
+        info!(
+            "⚠️ No audio frame callback registered yet for dialog {}",
+            dialog_id
+        );
+        state.logged_missing_audio_callback = true;
+    }
+    false
+}
+
 /// RFC 4733 DTMF event delivered from media-core to session-core.
 #[derive(Debug, Clone, Copy)]
 pub struct DtmfNotification {
@@ -371,6 +1006,15 @@ pub struct MediaSessionController {
 }
 
 impl MediaSessionController {
+    /// Exact number of RTP/RTCP UDP ports currently leased by this controller.
+    /// Controllers without a configured allocator own no range-backed ports.
+    pub async fn allocated_port_count(&self) -> usize {
+        match &self.port_allocator {
+            Some(allocator) => allocator.allocated_count().await,
+            None => 0,
+        }
+    }
+
     /// Create a new media session controller
     pub fn new() -> Self {
         Self::new_with_capacity_hint(0)
@@ -1624,16 +2268,57 @@ impl MediaSessionController {
         spawn_memory_tracked("media_core.rtp_event_handler_task", async move {
             info!("🎧 Started RTP event handler for dialog: {}", dialog_id);
             let mut rtp_count = 0u64;
-            let mut decoded_audio_frame_count = 0u64;
-            let mut logged_missing_audio_callback = false;
             let mut last_sequence_number: Option<u16> = None;
             let mut last_rtp_timestamp: Option<u32> = None;
             let mut last_rtp_arrival: Option<Instant> = None;
-            let mut last_delivered_at: Option<Instant> = None;
             let mut jitter_ns = 0.0_f64;
+            let mut rtp_playout = RtpPlayoutBuffer::new();
+            let mut decoded_playout = DecodedPlayoutQueue::new();
+            let mut delivery_state = RtpDeliveryState::default();
+            let mut playout_tick = tokio::time::interval(Duration::from_millis(5));
+            playout_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-            loop {
-                match rtp_events.recv().await {
+            'events: loop {
+                let received = tokio::select! {
+                    event = rtp_events.recv() => Some(event),
+                    _ = playout_tick.tick() => None,
+                };
+                if received.is_none() {
+                    let now = Instant::now();
+                    let items = rtp_playout.tick(now);
+                    if !items.is_empty() {
+                        if let Some(codec_runtime) = codec_runtimes
+                            .get(&dialog_id)
+                            .map(|entry| entry.value().clone())
+                        {
+                            if enqueue_rtp_playout_items(
+                                items,
+                                &codec_runtime,
+                                &dialog_id,
+                                &mut decoded_playout,
+                                now,
+                            )
+                            .await
+                            {
+                                break 'events;
+                            }
+                        }
+                    }
+                    if deliver_due_audio_frame(
+                        now,
+                        &mut decoded_playout,
+                        &dialog_id,
+                        &media_directions,
+                        &audio_frame_callbacks,
+                        collect_audio_quality,
+                        skip_audio_frame_delivery,
+                        &mut delivery_state,
+                    ) {
+                        break 'events;
+                    }
+                    continue;
+                }
+                match received.expect("received event checked above") {
                     Ok(event) => {
                         match event {
                             rtp_core::session::RtpSessionEvent::PacketReceived(packet) => {
@@ -1724,109 +2409,36 @@ impl MediaSessionController {
                                     last_rtp_arrival = Some(arrival);
                                 }
 
-                                let audio_frame = match codec_runtime
-                                    .decode(&packet.payload, packet.header.timestamp)
-                                    .await
+                                let arrived_at = Instant::now();
+                                let playout_items = rtp_playout.push(packet, arrived_at);
+                                if enqueue_rtp_playout_items(
+                                    playout_items,
+                                    &codec_runtime,
+                                    &dialog_id,
+                                    &mut decoded_playout,
+                                    arrived_at,
+                                )
+                                .await
                                 {
-                                    Ok(frame) => frame,
-                                    Err(error) => {
-                                        warn!(
-                                            "Failed to decode {} for dialog {}: {}",
-                                            codec_runtime.format.name, dialog_id, error
-                                        );
-                                        continue;
-                                    }
-                                };
-                                let decoded_len = audio_frame.samples.len();
-
-                                let receive_enabled = media_directions
-                                    .get(&dialog_id)
-                                    .map(|direction| {
-                                        matches!(
-                                            *direction,
-                                            MediaDirection::SendRecv | MediaDirection::RecvOnly
-                                        )
-                                    })
-                                    .unwrap_or(true);
-                                if !receive_enabled {
-                                    debug!(
-                                        "Dropping received RTP audio for dialog {} due to media direction",
-                                        dialog_id
-                                    );
-                                    continue;
+                                    break 'events;
                                 }
-                                if collect_audio_quality {
-                                    diagnostics::record_audio_rx_decoded_frame();
-                                }
-
-                                if skip_audio_frame_delivery {
-                                    decoded_audio_frame_count += 1;
-                                    record_transient_allocation(
-                                        "media_core.audio.rx.decoded_without_frame_delivery",
-                                        decoded_len * std::mem::size_of::<i16>(),
-                                    );
-                                    continue;
-                                }
-
-                                // Check for callback each time (it might be registered later).
-                                // DashMap shard guard is held only across the synchronous
-                                // try_send; we never await with a guard alive.
-                                let sender = audio_frame_callbacks
-                                    .get(&dialog_id)
-                                    .map(|r| r.value().clone());
-                                if let Some(sender) = sender {
-                                    decoded_audio_frame_count += 1;
-                                    record_transient_allocation(
-                                        "media_core.audio.rx.audio_frame.samples_vec",
-                                        audio_frame.samples.capacity() * std::mem::size_of::<i16>(),
-                                    );
-
-                                    // Use try_send to avoid blocking the RTP event handler
-                                    match sender.try_send(audio_frame) {
-                                        Ok(_) => {
-                                            if collect_audio_quality {
-                                                let delivered_at = Instant::now();
-                                                let delivery_gap =
-                                                    last_delivered_at.map(|previous| {
-                                                        delivered_at.duration_since(previous)
-                                                    });
-                                                diagnostics::record_audio_rx_delivered_frame(
-                                                    delivery_gap,
-                                                );
-                                                last_delivered_at = Some(delivered_at);
-                                            }
-                                            if decoded_audio_frame_count % 10 == 0
-                                                || decoded_audio_frame_count == 100
-                                                || decoded_audio_frame_count == 101
-                                            {
-                                                info!(
-                                                    "✅ Sent decoded audio frame #{} to callback for dialog {}",
-                                                    decoded_audio_frame_count, dialog_id
-                                                );
-                                            }
-                                        }
-                                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                                            warn!(
-                                                "Audio frame buffer full for dialog {} at frame #{}, dropping frame",
-                                                dialog_id, decoded_audio_frame_count
-                                            );
-                                        }
-                                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                                            error!(
-                                                "❌ Audio frame channel closed for dialog {} at frame #{} - THIS IS THE 100-FRAME BUG!",
-                                                dialog_id, decoded_audio_frame_count
-                                            );
-                                            break;
-                                        }
-                                    }
-                                } else {
-                                    if !logged_missing_audio_callback {
-                                        info!(
-                                            "⚠️ No audio frame callback registered yet for dialog {}",
-                                            dialog_id
-                                        );
-                                        logged_missing_audio_callback = true;
-                                    }
+                                // A frame that is already due leaves on arrival
+                                // rather than waiting up to one playout tick.
+                                // The first frame of a stream is due the moment
+                                // it is queued, so this keeps first-frame
+                                // latency at the pre-pacing sub-millisecond
+                                // level; later frames still pace on the tick.
+                                if deliver_due_audio_frame(
+                                    arrived_at,
+                                    &mut decoded_playout,
+                                    &dialog_id,
+                                    &media_directions,
+                                    &audio_frame_callbacks,
+                                    collect_audio_quality,
+                                    skip_audio_frame_delivery,
+                                    &mut delivery_state,
+                                ) {
+                                    break 'events;
                                 }
                             }
                             rtp_core::session::RtpSessionEvent::NewStreamDetected {

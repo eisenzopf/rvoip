@@ -1198,7 +1198,7 @@ async fn execute_register_action(
             // synthesized lifecycle sends deliberately do not.
             cseq: None,
             outbound_contact: None,
-            outbound_proxy_uri: None,
+            outbound_proxy_uri: session.registration_outbound_proxy_uri.clone(),
             extra_headers: Vec::new(),
             refresh,
         }
@@ -1230,6 +1230,7 @@ async fn execute_register_action(
             .await?;
         attempt.context.apply(session);
         options = attempt.request_options;
+        session.registration_outbound_proxy_uri = options.outbound_proxy_uri.clone();
         session.pending_register_options = Some(Arc::new(options.clone()));
 
         match attempt.outcome {

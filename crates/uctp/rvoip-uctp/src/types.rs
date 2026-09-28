@@ -37,6 +37,7 @@ pub enum MessageType {
     ConversationCreate,
     ConversationOpened,
     ConversationClosed,
+    ConversationClose,
     ConversationList,
 
     // --- Session (§7.2–§7.3) ---
@@ -138,6 +139,7 @@ impl MessageType {
             MessageType::ConversationCreate => "conversation.create",
             MessageType::ConversationOpened => "conversation.opened",
             MessageType::ConversationClosed => "conversation.closed",
+            MessageType::ConversationClose => "conversation.close",
             MessageType::ConversationList => "conversation.list",
             MessageType::SessionInvite => "session.invite",
             MessageType::SessionAccept => "session.accept",
@@ -194,6 +196,7 @@ impl MessageType {
             "conversation.create" => MessageType::ConversationCreate,
             "conversation.opened" => MessageType::ConversationOpened,
             "conversation.closed" => MessageType::ConversationClosed,
+            "conversation.close" => MessageType::ConversationClose,
             "conversation.list" => MessageType::ConversationList,
             "session.invite" => MessageType::SessionInvite,
             "session.accept" => MessageType::SessionAccept,

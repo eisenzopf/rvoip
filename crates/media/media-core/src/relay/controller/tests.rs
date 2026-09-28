@@ -445,11 +445,13 @@ mod tests {
             .await
             .expect("session should exist after retry");
         assert_eq!(session_info.rtp_port, Some(occupied_port + 1));
+        assert_eq!(controller.allocated_port_count().await, 1);
 
         controller
             .stop_media(&dialog_id)
             .await
             .expect("session should stop cleanly");
+        assert_eq!(controller.allocated_port_count().await, 0);
     }
 
     #[tokio::test]

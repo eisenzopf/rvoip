@@ -2335,7 +2335,11 @@ impl DialogManager {
 
         // Find the dialog associated with this transaction
         if let Some(dialog_id) = dialog_id {
-            if let Err(_error) = self
+            let is_final_response = matches!(
+                &event,
+                TransactionEvent::SuccessResponse { .. } | TransactionEvent::FailureResponse { .. }
+            );
+            if let Err(error) = self
                 .process_transaction_event_with_causal_delivery(
                     &transaction_id,
                     &dialog_id,
@@ -2345,10 +2349,26 @@ impl DialogManager {
                 )
                 .await
             {
-                error!(
-                    "Failed to process transaction event for dialog {}",
-                    dialog_id
-                );
+                if self.transaction_event_error_is_retired_cleanup(
+                    &transaction_id,
+                    &dialog_id,
+                    is_final_response,
+                    &error,
+                ) {
+                    debug!(
+                        transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id),
+                        %dialog_id,
+                        error_class=error.diagnostic_class(),
+                        "Ignoring transaction event after exact dialog cleanup"
+                    );
+                } else {
+                    error!(
+                        transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id),
+                        %dialog_id,
+                        error_class=error.diagnostic_class(),
+                        "Failed to process transaction event for dialog"
+                    );
+                }
             }
         } else if matches!(&event, TransactionEvent::AckRequest { .. }) {
             // A 2xx ACK is emitted by transaction-core with the exact matched
@@ -2369,6 +2389,30 @@ impl DialogManager {
                 error!("Failed to handle unassociated transaction event");
             }
         }
+    }
+
+    /// Return whether a BYE event lost a race with authoritative dialog
+    /// cleanup. A missing dialog or session route is benign only for the
+    /// teardown method, after dialog storage is gone, and while the transaction
+    /// mapping is either the exact stale owner observed by the dispatcher or
+    /// has also been retired.
+    fn transaction_event_error_is_retired_cleanup(
+        &self,
+        transaction_id: &TransactionKey,
+        dialog_id: &DialogId,
+        is_final_response: bool,
+        error: &DialogError,
+    ) -> bool {
+        matches!(
+            error,
+            DialogError::DialogNotFound { .. } | DialogError::RoutingError { .. }
+        ) && is_final_response
+            && transaction_id.method() == &Method::Bye
+            && !self.dialogs.contains_key(dialog_id)
+            && self
+                .transaction_to_dialog
+                .get(transaction_id)
+                .is_none_or(|mapped| mapped.value() == dialog_id)
     }
 
     /// Extract transaction ID from any TransactionEvent variant
@@ -4608,6 +4652,107 @@ mod outbound_flow_handler_tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn retired_dialog_event_error_is_benign_only_after_exact_cleanup() {
+        let (manager, _rx) = make_manager().await;
+        let dialog = Dialog::new(
+            "retired-event-race".to_string(),
+            "sip:alice@example.com".parse().unwrap(),
+            "sip:bob@example.com".parse().unwrap(),
+            Some("alice-retired".to_string()),
+            Some("bob-retired".to_string()),
+            true,
+        );
+        let dialog_id = dialog.id.clone();
+        manager.store_dialog(dialog).await.expect("store dialog");
+        let transaction_id =
+            TransactionKey::new("z9hG4bK-retired-event".to_string(), Method::Bye, false);
+        manager.link_transaction_to_dialog_indexed(&transaction_id, &dialog_id);
+        let missing = DialogError::dialog_not_found(&dialog_id.to_string());
+
+        assert!(
+            !manager.transaction_event_error_is_retired_cleanup(
+                &transaction_id,
+                &dialog_id,
+                true,
+                &missing,
+            ),
+            "a live dialog must keep the error visible"
+        );
+
+        assert!(manager.remove_dialog_storage(&dialog_id).is_some());
+        assert!(manager.transaction_event_error_is_retired_cleanup(
+            &transaction_id,
+            &dialog_id,
+            true,
+            &missing,
+        ));
+        let retired_route = DialogError::routing_error(
+            "authoritative session dispatch had no session-core handler",
+        );
+        assert!(manager.transaction_event_error_is_retired_cleanup(
+            &transaction_id,
+            &dialog_id,
+            true,
+            &retired_route,
+        ));
+
+        let replacement_dialog = DialogId::new();
+        manager
+            .transaction_to_dialog
+            .insert(transaction_id.clone(), replacement_dialog);
+        assert!(
+            !manager.transaction_event_error_is_retired_cleanup(
+                &transaction_id,
+                &dialog_id,
+                true,
+                &missing,
+            ),
+            "a mapping reassigned to another dialog must keep the error visible"
+        );
+
+        manager.cleanup_transaction_receiver(&transaction_id);
+        assert!(manager.transaction_event_error_is_retired_cleanup(
+            &transaction_id,
+            &dialog_id,
+            true,
+            &missing,
+        ));
+
+        let invite_transaction =
+            TransactionKey::new("z9hG4bK-retired-invite".to_string(), Method::Invite, false);
+        assert!(
+            !manager.transaction_event_error_is_retired_cleanup(
+                &invite_transaction,
+                &dialog_id,
+                true,
+                &missing,
+            ),
+            "missing non-BYE dialogs must keep the error visible"
+        );
+
+        assert!(
+            !manager.transaction_event_error_is_retired_cleanup(
+                &transaction_id,
+                &dialog_id,
+                false,
+                &missing,
+            ),
+            "a non-final BYE event must keep the error visible"
+        );
+
+        let protocol_error = DialogError::protocol_error("test protocol failure");
+        assert!(
+            !manager.transaction_event_error_is_retired_cleanup(
+                &transaction_id,
+                &dialog_id,
+                true,
+                &protocol_error,
+            ),
+            "authoritative cleanup must not hide a different error class"
+        );
+    }
 
     #[test]
     fn inbound_message_has_causal_delivery_and_one_final_response() {

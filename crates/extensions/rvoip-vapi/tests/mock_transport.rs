@@ -29,13 +29,14 @@ use rvoip_core::identity::IdentityAssurance;
 use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId, StreamId, TenantId};
 use rvoip_core::message::Message;
 use rvoip_core::orchestrator::Orchestrator;
+use rvoip_core::participant::{ParticipantKind, ParticipantRole};
 use rvoip_core::session::SessionMedium;
 use rvoip_core::stream::{
     MediaFrame, MediaReceiverReservation, MediaStream, QualitySnapshot, StreamKind,
 };
 use rvoip_vapi::{
-    VapiAdapter, VapiApiKey, VapiAssistant, VapiAudioFormat, VapiCallOptions, VapiConfig,
-    VapiError, VapiEvent, VAPI_CALL_REFERENCE_KIND,
+    VapiAdapter, VapiAgentOutcome, VapiApiKey, VapiAssistant, VapiAudioFormat, VapiCallOptions,
+    VapiConfig, VapiError, VapiEvent, VapiExistingCall, VAPI_CALL_REFERENCE_KIND,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -278,7 +279,15 @@ async fn start_mock_with_behavior(
 
 struct CallerAdapter {
     events: Mutex<Option<mpsc::Receiver<AdapterEvent>>>,
-    stream: Arc<CallerStream>,
+    /// One media stream per admitted caller Connection. A shared adapter can
+    /// carry several callers at once, and each bridge acquires its own
+    /// single-consumer receiver.
+    streams: Mutex<HashMap<ConnectionId, Arc<CallerStream>>>,
+    /// Opt-in. When set, every stream this adapter hands out exposes a
+    /// generation-fenced peer queue (`try_peer_frames_out`), which makes any
+    /// bridge over it transport-fenced. Off by default so the other tests keep
+    /// exercising the legacy sink path.
+    transport_fenced: bool,
 }
 
 struct CallerStream {
@@ -287,6 +296,7 @@ struct CallerStream {
     inbound_rx: Arc<Mutex<Option<mpsc::Receiver<MediaFrame>>>>,
     outbound_tx: mpsc::Sender<MediaFrame>,
     _outbound_rx: Mutex<Option<mpsc::Receiver<MediaFrame>>>,
+    transport_fenced: bool,
 }
 
 #[async_trait::async_trait]
@@ -348,6 +358,31 @@ impl MediaStream for CallerStream {
         self.outbound_tx.clone()
     }
 
+    /// A legacy fixture (the default) reports the trait's `NotImplemented`,
+    /// so core treats it as an unfenced queue. A transport-fenced fixture
+    /// honours the contract: each entry is re-checked after dequeue and its
+    /// delivery guard is held through the local send.
+    fn try_peer_frames_out(
+        &self,
+    ) -> RvoipResult<mpsc::Sender<rvoip_core::peer_media::PeerMediaFrame>> {
+        if !self.transport_fenced {
+            return Err(RvoipError::NotImplemented(
+                "caller fixture is a legacy media queue",
+            ));
+        }
+        let (tx, mut rx) = mpsc::channel::<rvoip_core::peer_media::PeerMediaFrame>(1);
+        let outgoing = self.outbound_tx.clone();
+        tokio::spawn(async move {
+            while let Some(entry) = rx.recv().await {
+                if let Some((frame, guard)) = entry.into_delivery() {
+                    let _ = outgoing.send(frame).await;
+                    drop(guard);
+                }
+            }
+        });
+        Ok(tx)
+    }
+
     fn quality_snapshot(&self) -> QualitySnapshot {
         QualitySnapshot::default()
     }
@@ -359,24 +394,40 @@ impl MediaStream for CallerStream {
 
 impl CallerAdapter {
     fn new() -> (Arc<Self>, mpsc::Sender<AdapterEvent>) {
+        Self::with_transport_fence(false)
+    }
+
+    fn new_transport_fenced() -> (Arc<Self>, mpsc::Sender<AdapterEvent>) {
+        Self::with_transport_fence(true)
+    }
+
+    fn with_transport_fence(transport_fenced: bool) -> (Arc<Self>, mpsc::Sender<AdapterEvent>) {
         let (event_tx, event_rx) = mpsc::channel(16);
+        (
+            Arc::new(Self {
+                events: Mutex::new(Some(event_rx)),
+                streams: Mutex::new(HashMap::new()),
+                transport_fenced,
+            }),
+            event_tx,
+        )
+    }
+}
+
+impl CallerStream {
+    fn new(transport_fenced: bool) -> Self {
         let (inbound_tx, inbound_rx) = mpsc::channel(32);
         // One frame can enter the caller transport; later frames must remain
         // in the graph sink queue until the test deliberately flushes it.
         let (outbound_tx, outbound_rx) = mpsc::channel(1);
-        (
-            Arc::new(Self {
-                events: Mutex::new(Some(event_rx)),
-                stream: Arc::new(CallerStream {
-                    id: StreamId::new(),
-                    _inbound_tx: inbound_tx,
-                    inbound_rx: Arc::new(Mutex::new(Some(inbound_rx))),
-                    outbound_tx,
-                    _outbound_rx: Mutex::new(Some(outbound_rx)),
-                }),
-            }),
-            event_tx,
-        )
+        Self {
+            id: StreamId::new(),
+            _inbound_tx: inbound_tx,
+            inbound_rx: Arc::new(Mutex::new(Some(inbound_rx))),
+            outbound_tx,
+            _outbound_rx: Mutex::new(Some(outbound_rx)),
+            transport_fenced,
+        }
     }
 }
 
@@ -418,8 +469,12 @@ impl ConnectionAdapter for CallerAdapter {
         Ok(())
     }
 
-    async fn streams(&self, _: ConnectionId) -> RvoipResult<Vec<Arc<dyn MediaStream>>> {
-        Ok(vec![Arc::clone(&self.stream) as Arc<dyn MediaStream>])
+    async fn streams(&self, connection: ConnectionId) -> RvoipResult<Vec<Arc<dyn MediaStream>>> {
+        let mut streams = self.streams.lock().expect("caller streams lock");
+        let stream = streams
+            .entry(connection)
+            .or_insert_with(|| Arc::new(CallerStream::new(self.transport_fenced)));
+        Ok(vec![Arc::clone(stream) as Arc<dyn MediaStream>])
     }
 
     async fn send_message(&self, _: ConnectionId, _: Message) -> RvoipResult<()> {
@@ -460,11 +515,41 @@ impl ConnectionAdapter for CallerAdapter {
 }
 
 async fn setup_caller() -> (Arc<Orchestrator>, ConnectionId) {
+    let (orchestrator, connection_id, _) = setup_caller_with_events().await;
+    (orchestrator, connection_id)
+}
+
+/// Like [`setup_caller`], but also returns the caller adapter's event sender so
+/// a test can admit further callers or end the caller leg from the outside.
+async fn setup_caller_with_events() -> (Arc<Orchestrator>, ConnectionId, mpsc::Sender<AdapterEvent>)
+{
+    setup_caller_with_events_on(CallerAdapter::new()).await
+}
+
+/// [`setup_caller_with_events`] over a caller adapter whose streams expose a
+/// transport delivery fence, for tests that need a fenced caller bridge.
+async fn setup_fenced_caller_with_events(
+) -> (Arc<Orchestrator>, ConnectionId, mpsc::Sender<AdapterEvent>) {
+    setup_caller_with_events_on(CallerAdapter::new_transport_fenced()).await
+}
+
+async fn setup_caller_with_events_on(
+    (adapter, events): (Arc<CallerAdapter>, mpsc::Sender<AdapterEvent>),
+) -> (Arc<Orchestrator>, ConnectionId, mpsc::Sender<AdapterEvent>) {
     let orchestrator = Orchestrator::new(CoreConfig::default());
-    let (adapter, events) = CallerAdapter::new();
     orchestrator
         .register(adapter)
         .expect("register caller adapter");
+    let connection_id = admit_caller_on(&orchestrator, &events).await;
+    (orchestrator, connection_id, events)
+}
+
+/// Open a fresh Conversation and Session on `orchestrator`, publish one inbound
+/// caller Connection through the caller adapter, and accept it.
+async fn admit_caller_on(
+    orchestrator: &Arc<Orchestrator>,
+    events: &mpsc::Sender<AdapterEvent>,
+) -> ConnectionId {
     let conversation_id = orchestrator
         .open_conversation(
             TenantId::new(),
@@ -477,6 +562,16 @@ async fn setup_caller() -> (Arc<Orchestrator>, ConnectionId) {
         .start_session(conversation_id, SessionMedium::Voice, vec![])
         .await
         .expect("start caller session");
+    admit_caller_into_session(orchestrator, events, session_id).await
+}
+
+/// Publish one inbound caller Connection into an existing Session through the
+/// caller adapter and accept it there.
+async fn admit_caller_into_session(
+    orchestrator: &Arc<Orchestrator>,
+    events: &mpsc::Sender<AdapterEvent>,
+    session_id: SessionId,
+) -> ConnectionId {
     let connection_id = ConnectionId::new();
     events
         .send(AdapterEvent::InboundConnection {
@@ -509,7 +604,371 @@ async fn setup_caller() -> (Arc<Orchestrator>, ConnectionId) {
         )
         .await
         .expect("accept caller");
-    (orchestrator, connection_id)
+    connection_id
+}
+
+/// An externally created provider call is attached through the canonical
+/// staged connection/bridge lifecycle without a second `POST /call`: the
+/// receipt carries the handed-off call ID, the adapter's default key
+/// authenticates the WebSocket, media is graphed, and the caller hanging up
+/// tears the pair down as `CallerEnded` with the create counter still at zero.
+#[tokio::test]
+async fn existing_call_bridges_and_ends_without_creating_a_provider_call() {
+    let (api_base, state, _observed, server) =
+        start_mock_with_behavior(Duration::ZERO, SocketBehavior::Interactive, Vec::new()).await;
+    let mut config = VapiConfig::new(VapiApiKey::new("mock-api-key").expect("mock key"))
+        .with_api_base(api_base)
+        .with_loopback_test_transport();
+    config.heartbeat_interval = Duration::from_secs(60);
+    config.graceful_shutdown_timeout = Duration::from_millis(100);
+    let adapter = VapiAdapter::new(config).expect("adapter");
+    let (orchestrator, caller, caller_events) = setup_caller_with_events().await;
+    let websocket_url = Url::parse(&state.websocket_url.lock().expect("websocket URL lock"))
+        .expect("mock websocket URL");
+    let existing = VapiExistingCall::new(
+        VapiCallOptions::new(VapiAssistant::saved("assistant-mock"))
+            .with_audio_format(VapiAudioFormat::PcmS16Le16Khz),
+        "already-created-call".into(),
+        websocket_url,
+    )
+    .expect("existing call");
+    assert_eq!(format!("{existing:?}"), "VapiExistingCall([redacted])");
+
+    let mut call = adapter
+        .attach_existing_agent(&orchestrator, caller.clone(), existing)
+        .await
+        .expect("attach existing Vapi call");
+    assert_eq!(state.create_count.load(Ordering::SeqCst), 0);
+
+    // Re-requesting the receipt after attachment returns the committed
+    // activation rather than starting another one.
+    let receipt = adapter
+        .activate_outbound_with_receipt(call.vapi_connection_id().clone())
+        .await
+        .expect("activation receipt");
+    let reference = receipt
+        .external_references()
+        .first()
+        .expect("Vapi call reference");
+    assert_eq!(reference.kind(), VAPI_CALL_REFERENCE_KIND);
+    assert_eq!(reference.expose_secret(), "already-created-call");
+    assert_eq!(
+        state
+            .websocket_authorization
+            .lock()
+            .expect("websocket authorization lock")
+            .as_deref(),
+        Some("Bearer mock-api-key")
+    );
+    assert!(orchestrator
+        .media_graph_snapshot(call.vapi_connection_id())
+        .await
+        .is_some());
+
+    caller_events
+        .send(AdapterEvent::Ended {
+            connection_id: caller,
+            reason: EndReason::Normal,
+        })
+        .await
+        .expect("publish caller hangup");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), call.wait())
+            .await
+            .expect("paired teardown timeout"),
+        VapiAgentOutcome::CallerEnded
+    );
+    assert!(!adapter.is_connection_live(call.vapi_connection_id()));
+    assert_eq!(state.create_count.load(Ordering::SeqCst), 0);
+    server.abort();
+}
+
+/// One credential-free transport adapter (`existing_calls_only`) serves two
+/// concurrent handoffs to two different providers. Each WebSocket is
+/// authenticated with exactly its own call's key, neither key is retained as
+/// an adapter default, neither provider ever sees a create request, and a
+/// plain `attach_agent` on the shared adapter is refused before any HTTP.
+#[tokio::test]
+async fn shared_existing_transport_uses_each_call_key_and_cannot_create() {
+    let (api_base, first, _first_observed, first_server) =
+        start_mock_with_behavior(Duration::ZERO, SocketBehavior::Interactive, Vec::new()).await;
+    let (_, second, _second_observed, second_server) =
+        start_mock_with_behavior(Duration::ZERO, SocketBehavior::Interactive, Vec::new()).await;
+    let mut config = VapiConfig::existing_calls_only()
+        .with_api_base(api_base)
+        .with_loopback_test_transport();
+    config.heartbeat_interval = Duration::from_secs(60);
+    assert!(config.api_key.is_none());
+    let adapter = VapiAdapter::new(config).expect("adapter");
+    let (orchestrator, caller, caller_events) = setup_caller_with_events().await;
+
+    let mut calls = Vec::new();
+    for (state, key, call_id) in [
+        (&first, "first-tenant-key", "first-call"),
+        (&second, "second-tenant-key", "second-call"),
+    ] {
+        let websocket_url = Url::parse(&state.websocket_url.lock().expect("websocket URL lock"))
+            .expect("mock websocket URL");
+        let existing = VapiExistingCall::new(
+            VapiCallOptions::new(VapiAssistant::saved("assistant-mock"))
+                .with_audio_format(VapiAudioFormat::PcmS16Le16Khz),
+            call_id.into(),
+            websocket_url,
+        )
+        .expect("existing call")
+        .with_api_key(VapiApiKey::new(key).expect("tenant key"));
+        assert!(
+            !format!("{existing:?}").contains(key),
+            "a call-local credential must be redacted from Debug output"
+        );
+        let tenant_caller = admit_caller_on(&orchestrator, &caller_events).await;
+        calls.push(
+            adapter
+                .attach_existing_agent(&orchestrator, tenant_caller, existing)
+                .await
+                .expect("attach tenant call"),
+        );
+        assert_eq!(
+            state
+                .websocket_authorization
+                .lock()
+                .expect("websocket authorization lock")
+                .as_deref(),
+            Some(format!("Bearer {key}").as_str()),
+            "each handoff authenticates with exactly its own key"
+        );
+        assert_eq!(state.create_count.load(Ordering::SeqCst), 0);
+    }
+    // The second provider never saw the first tenant's key, and vice versa.
+    assert_eq!(
+        first
+            .websocket_authorization
+            .lock()
+            .expect("websocket authorization lock")
+            .as_deref(),
+        Some("Bearer first-tenant-key")
+    );
+    assert_eq!(
+        second
+            .websocket_authorization
+            .lock()
+            .expect("websocket authorization lock")
+            .as_deref(),
+        Some("Bearer second-tenant-key")
+    );
+    for call in &calls {
+        assert!(adapter.is_connection_live(call.vapi_connection_id()));
+    }
+
+    // A caller cannot turn the shared media adapter into a provider creator,
+    // even after it has handled credentialed calls.
+    assert!(adapter
+        .attach_agent(
+            &orchestrator,
+            caller,
+            VapiCallOptions::new(VapiAssistant::saved("assistant-mock"))
+        )
+        .await
+        .is_err());
+    assert_eq!(first.create_count.load(Ordering::SeqCst), 0);
+    assert_eq!(second.create_count.load(Ordering::SeqCst), 0);
+    assert!(
+        first.create_authorization.lock().expect("lock").is_none()
+            && second.create_authorization.lock().expect("lock").is_none(),
+        "the refused create request must fail before any HTTP"
+    );
+
+    for call in calls {
+        let _ = call.end().await;
+    }
+    first_server.abort();
+    second_server.abort();
+}
+
+/// Production-shaped strict peer handoff: the caller's Vapi bridge is
+/// transport-fenced on both legs, a human target in the same Session is staged
+/// with `prepare_transport_fenced_peer_handoff` and committed with
+/// `commit_peer_handoff_with_timeout_and_receipt`. The Vapi supervisor observes
+/// `PeerHandoffCommitted`, retires only the detached AI leg (`HandedOff` from
+/// `wait_shared`, `end-call` on the wire, core `ConnectionEnded`, socket no
+/// longer live) and leaves the retained caller and the new peer in their
+/// Session. No provider call is created at any point.
+#[tokio::test]
+async fn committed_peer_handoff_retires_ai_without_ending_retained_caller() {
+    let (api_base, state, mut observed, server) =
+        start_mock_with_behavior(Duration::ZERO, SocketBehavior::Interactive, Vec::new()).await;
+    let mut config = VapiConfig::new(VapiApiKey::new("mock-api-key").expect("mock key"))
+        .with_api_base(api_base)
+        .with_loopback_test_transport();
+    config.heartbeat_interval = Duration::from_secs(60);
+    config.graceful_shutdown_timeout = Duration::from_millis(100);
+    let adapter = VapiAdapter::new(config).expect("adapter");
+    let (orchestrator, caller, caller_events) = setup_fenced_caller_with_events().await;
+    let session_id = orchestrator
+        .session_of(&caller)
+        .expect("retained caller session");
+    let target = admit_caller_into_session(&orchestrator, &caller_events, session_id.clone()).await;
+    let websocket_url = Url::parse(&state.websocket_url.lock().expect("websocket URL lock"))
+        .expect("mock websocket URL");
+    let existing = VapiExistingCall::new(
+        VapiCallOptions::new(VapiAssistant::saved("assistant-mock")),
+        "handoff-call".into(),
+        websocket_url,
+    )
+    .expect("existing call");
+    let call = adapter
+        .attach_existing_agent(&orchestrator, caller.clone(), existing)
+        .await
+        .expect("attach existing Vapi call");
+    let vapi = call.vapi_connection_id().clone();
+    let original_bridge = call.bridge_id().clone();
+    assert!(adapter.is_connection_live(&vapi));
+    assert_eq!(state.create_count.load(Ordering::SeqCst), 0);
+
+    let mut core_events = orchestrator.subscribe_events();
+    let staged = orchestrator
+        .prepare_transport_fenced_peer_handoff(
+            original_bridge.clone(),
+            caller.clone(),
+            target.clone(),
+            rvoip_core::DirectionalMediaBridgePlan::new(true, true).expect("bidirectional plan"),
+            Arc::new(rvoip_core::stream::PassThroughDataMessageBridgePolicy),
+        )
+        .await
+        .expect("stage the human target against a fenced caller bridge");
+    assert_eq!(staged.previous_bridge_id(), &original_bridge);
+    assert_eq!(staged.retained_connection(), &caller);
+    assert_eq!(staged.source_connection(), &vapi);
+    assert_eq!(staged.target_connection(), &target);
+    let receipt = orchestrator
+        .commit_peer_handoff_with_timeout_and_receipt(staged, Duration::from_secs(2))
+        .await
+        .expect("commit the handoff");
+    assert_eq!(receipt.previous_bridge_id, original_bridge);
+    assert_ne!(
+        receipt.bridge_id, original_bridge,
+        "a fresh generation is minted"
+    );
+    assert_eq!(receipt.retained, caller);
+    assert_eq!(receipt.source, vapi);
+    assert_eq!(receipt.target, target);
+
+    // The supervisor retires the AI leg without ending the retained caller.
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), call.wait_shared())
+            .await
+            .expect("handoff outcome timeout"),
+        VapiAgentOutcome::HandedOff
+    );
+    // The outcome is latched, so shared observers can read it again while the
+    // handle is still held for call control.
+    assert_eq!(call.wait_shared().await, VapiAgentOutcome::HandedOff);
+
+    // Core published the handoff once, then ended exactly the Vapi leg.
+    let mut saw_handoff = false;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match core_events.recv().await.expect("core event bus") {
+                rvoip_core::events::Event::PeerHandoffCommitted {
+                    previous_bridge_id,
+                    bridge_id,
+                    retained,
+                    source,
+                    target: handoff_target,
+                    ..
+                } => {
+                    assert!(!saw_handoff, "PeerHandoffCommitted must be published once");
+                    assert_eq!(previous_bridge_id, original_bridge);
+                    assert_eq!(bridge_id, receipt.bridge_id);
+                    assert_eq!(retained, caller);
+                    assert_eq!(source, vapi);
+                    assert_eq!(handoff_target, target);
+                    saw_handoff = true;
+                }
+                rvoip_core::events::Event::ConnectionEnded { connection_id, .. }
+                | rvoip_core::events::Event::ConnectionFailed { connection_id, .. } => {
+                    assert_ne!(connection_id, caller, "the retained caller was ended");
+                    assert_ne!(connection_id, target, "the new peer was ended");
+                    if connection_id == vapi {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("the retired Vapi leg never reached a terminal state");
+    assert!(
+        saw_handoff,
+        "PeerHandoffCommitted precedes the AI leg's terminal"
+    );
+
+    // The old Vapi WebSocket was closed through the normal end protocol.
+    let mut saw_end_call = false;
+    for _ in 0..6 {
+        let Ok(Some(message)) = tokio::time::timeout(Duration::from_secs(1), observed.recv()).await
+        else {
+            break;
+        };
+        if matches!(message, Observed::Json(ref value) if value["type"] == "end-call") {
+            saw_end_call = true;
+            break;
+        }
+    }
+    assert!(
+        saw_end_call,
+        "the retired Vapi leg must send end-call on its socket"
+    );
+    assert!(!adapter.is_connection_live(&vapi));
+
+    // The retained caller and the new peer both remain in their Session.
+    assert_eq!(orchestrator.session_of(&caller), Some(session_id.clone()));
+    assert_eq!(orchestrator.session_of(&target), Some(session_id));
+    assert_eq!(state.create_count.load(Ordering::SeqCst), 0);
+    server.abort();
+}
+
+/// A handoff whose WebSocket is rejected fails the attachment outright. It
+/// never falls back to creating a replacement provider call, even on an adapter
+/// that holds a default key and therefore could.
+#[tokio::test]
+async fn existing_call_failed_socket_never_falls_back_to_creation() {
+    let (api_base, state, _observed, server) =
+        start_mock_with_behavior(Duration::ZERO, SocketBehavior::RejectUpgrade, Vec::new()).await;
+    let config = VapiConfig::new(VapiApiKey::new("mock-api-key").expect("mock key"))
+        .with_api_base(api_base)
+        .with_loopback_test_transport();
+    let adapter = VapiAdapter::new(config).expect("adapter");
+    let (orchestrator, caller) = setup_caller().await;
+    let websocket_url = Url::parse(&state.websocket_url.lock().expect("websocket URL lock"))
+        .expect("mock websocket URL");
+    let existing = VapiExistingCall::new(
+        VapiCallOptions::new(VapiAssistant::saved("assistant-mock")),
+        "already-created-call".into(),
+        websocket_url,
+    )
+    .expect("existing call");
+
+    assert!(adapter
+        .attach_existing_agent(&orchestrator, caller.clone(), existing)
+        .await
+        .is_err());
+    assert_eq!(
+        state
+            .websocket_authorization
+            .lock()
+            .expect("websocket authorization lock")
+            .as_deref(),
+        Some("Bearer mock-api-key"),
+        "the handoff was attempted against the provider socket"
+    );
+    assert_eq!(state.create_count.load(Ordering::SeqCst), 0);
+    assert!(
+        orchestrator.session_of(&caller).is_some(),
+        "a failed handoff must not end the retained caller"
+    );
+    server.abort();
 }
 
 #[tokio::test]
@@ -1456,5 +1915,98 @@ async fn cancellation_during_post_is_reconciled_with_end_call() {
         saw_end_call,
         "the detached activation owner must reconcile a post-cancel remote call"
     );
+    server.abort();
+}
+
+#[tokio::test]
+async fn attach_agent_attributes_vapi_to_distinct_ai_participant() {
+    let (api_base, _state, _observed, server) =
+        start_mock_with_behavior(Duration::ZERO, SocketBehavior::Interactive, Vec::new()).await;
+    let mut config = VapiConfig::new(VapiApiKey::new("mock-api-key").expect("mock key"))
+        .with_api_base(api_base)
+        .with_loopback_test_transport();
+    config.heartbeat_interval = Duration::from_secs(60);
+    let adapter = VapiAdapter::new(config).expect("adapter");
+    let (orchestrator, caller_connection_id) = setup_caller().await;
+    let call = adapter
+        .attach_agent(
+            &orchestrator,
+            caller_connection_id.clone(),
+            VapiCallOptions::new(VapiAssistant::saved("assistant-mock")),
+        )
+        .await
+        .expect("attach Vapi agent");
+
+    let session_id = orchestrator
+        .session_of(call.caller_connection_id())
+        .expect("caller session");
+    let session = orchestrator.session(&session_id).expect("session handle");
+    let session = session.read().expect("session lock");
+    let caller_participant = session
+        .connections
+        .get(call.caller_connection_id())
+        .expect("caller connection")
+        .participant_id
+        .clone();
+    let vapi_participant = session
+        .connections
+        .get(call.vapi_connection_id())
+        .expect("vapi connection")
+        .participant_id
+        .clone();
+    assert_ne!(
+        caller_participant, vapi_participant,
+        "Vapi Connection must not reuse the caller's participant_id"
+    );
+    assert_eq!(&vapi_participant, call.ai_participant_id());
+
+    let conversation = orchestrator
+        .conversation(&session.conversation_id)
+        .expect("conversation");
+    let conversation = conversation.read().expect("conversation lock");
+    let ai = conversation
+        .participants
+        .iter()
+        .find(|participant| participant.id == vapi_participant)
+        .expect("AI participant on conversation");
+    assert_eq!(ai.kind, ParticipantKind::Ai);
+    assert_eq!(ai.role, ParticipantRole::Agent);
+    server.abort();
+}
+
+#[tokio::test]
+async fn attach_agent_for_participant_rejects_existing_human() {
+    let (api_base, _state, _observed, server) =
+        start_mock_with_behavior(Duration::ZERO, SocketBehavior::Interactive, Vec::new()).await;
+    let mut config = VapiConfig::new(VapiApiKey::new("mock-api-key").expect("mock key"))
+        .with_api_base(api_base)
+        .with_loopback_test_transport();
+    config.heartbeat_interval = Duration::from_secs(60);
+    let adapter = VapiAdapter::new(config).expect("adapter");
+    let (orchestrator, caller_connection_id) = setup_caller().await;
+    let session_id = orchestrator
+        .session_of(&caller_connection_id)
+        .expect("caller session");
+    let human = ParticipantId::new();
+    orchestrator
+        .join_session(
+            session_id,
+            human.clone(),
+            ParticipantKind::Human,
+            ParticipantRole::Customer,
+        )
+        .await
+        .expect("join human");
+
+    let error = adapter
+        .attach_agent_for_participant(
+            &orchestrator,
+            caller_connection_id,
+            human,
+            VapiCallOptions::new(VapiAssistant::saved("assistant-mock")),
+        )
+        .await
+        .expect_err("human cannot be the AI participant");
+    assert!(matches!(error, RvoipError::InvalidState(_)));
     server.abort();
 }

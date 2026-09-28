@@ -520,6 +520,18 @@ pub trait ConnectionAdapter: Send + Sync {
         ))
     }
     async fn send_dtmf(&self, conn: ConnectionId, digits: &str, duration_ms: u32) -> Result<()>;
+    /// Install an application-selected codec policy before answering an inbound
+    /// connection. Implementations must bind it to that exact connection lifetime,
+    /// never to a listener or another call. Unsupported transports fail closed.
+    async fn set_inbound_audio_codecs(
+        &self,
+        _conn: ConnectionId,
+        _codecs: Vec<String>,
+    ) -> Result<()> {
+        Err(RvoipError::NotImplemented(
+            "ConnectionAdapter::set_inbound_audio_codecs",
+        ))
+    }
     async fn renegotiate_media(
         &self,
         conn: ConnectionId,

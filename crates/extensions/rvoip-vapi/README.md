@@ -5,7 +5,12 @@ or WebRTC leg; Vapi owns the full ASR, model, synthesis, and interruption
 pipeline through its bidirectional raw-audio WebSocket transport.
 
 The primary API attaches an agent to a caller connection that is already bound
-to an active rvoip session:
+to an active rvoip session. `attach_agent` creates a new Conversation
+Participant (`kind=Ai`, `role=Agent`) and originates the Vapi Connection
+under that id — it does **not** reuse the caller's `participant_id`. Use
+`attach_agent_for_participant` when Parley (or another Conversation server)
+already allocated the AI Participant. `VapiAgentCall::ai_participant_id()`
+returns that id.
 
 ```no_run
 use std::sync::Arc;
@@ -23,8 +28,10 @@ async fn attach(
     let options =
         VapiCallOptions::new(VapiAssistant::saved(std::env::var("VAPI_ASSISTANT_ID")?));
 
-    // Registers this adapter when no Vapi adapter is registered, originates
-    // the remote agent, bridges both audio directions, and supervises teardown.
+    // Registers this adapter when no Vapi adapter is registered, joins a
+    // distinct AI Participant, originates the remote agent, bridges audio,
+    // and supervises teardown. The Vapi Connection is not attributed to the
+    // caller.
     let mut call = adapter.attach_agent(&orchestrator, caller, options).await?;
 
     call.say("One moment while I look that up.", false, true).await?;
@@ -44,6 +51,17 @@ rvoip's media graph for conversion to the caller codec.
 The low-level path is also available: register `VapiAdapter` as a
 `ConnectionAdapter`, originate `Transport::Vapi` with a typed
 `VapiCallOptions` context, then bridge the resulting connection yourself.
+
+For a provider call that the host already created and verified,
+`VapiAdapter::attach_existing_agent` bridges a `VapiExistingCall` without
+creating one, using the same canonical connections, bridge, and paired
+termination as `attach_agent`; the host owns durable admission and receipt
+validation, and must never construct the handoff from public request
+arguments. `VapiConfig::existing_calls_only()` builds a shared transport that
+retains no default tenant key, so each handoff (or a `VapiCallOptions`)
+supplies its own WebSocket credential through `with_api_key`, which never
+becomes the adapter's default. `VapiAgentCall::wait_shared` observes paired
+teardown while other owners retain call-control handles.
 
 Call events are available through `VapiAgentCall::subscribe_events` and
 `VapiAdapter::subscribe_vapi_events`. Unknown event types are preserved rather

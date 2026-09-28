@@ -15,8 +15,11 @@ use crate::adapter::{
     InboundConnectionContext, OrchestratorAdapterEvent, OriginateRequest, PlaybackHandle,
     PlaybackOutcome, RejectReason, TransferAttemptId, TransferTarget,
 };
-use crate::bridge::{codec_to_pt, BridgeManager, CrossBridgeHandle, DirectionalMediaBridgePlan};
-use crate::capability::{CapabilityDescriptor, CapabilityIntersection};
+use crate::bridge::{
+    resolve_payload_type, BridgeDestinationReplacement, BridgeManager, CrossBridgeHandle,
+    DirectionalMediaBridgePlan,
+};
+use crate::capability::{CapabilityDescriptor, CapabilityIntersection, CodecInfo};
 use crate::commands::{AudioSource, InboundAction, MuteDirection};
 use crate::config::Config;
 use crate::connection::{Direction, Transport};
@@ -34,7 +37,7 @@ use crate::inbound_admission::{
 };
 use crate::media_graph::{
     start_media_graph, validate_media_graph_codec, ManagedMediaRoute, MediaGraphHandle,
-    MediaGraphPolicy, MediaGraphRouteStatus,
+    MediaGraphPolicy, MediaGraphRouteStatus, MediaGraphSourceState,
 };
 use crate::message::{ContentType, Message, MessageOrigin, MessageRecipients};
 use crate::operational_events::{
@@ -374,7 +377,7 @@ struct PreparedOutboundShared {
     decision: AtomicU8,
     published: AtomicBool,
     cleanup_started: AtomicBool,
-    cleanup_complete: Notify,
+    cleanup_complete: CancellationToken,
     abort_detail: Mutex<Option<&'static str>>,
     binding: Mutex<Option<ConnectionSessionBinding>>,
     permit: Mutex<Option<OwnedSemaphorePermit>>,
@@ -386,7 +389,7 @@ impl PreparedOutboundShared {
             decision: AtomicU8::new(PREPARED_OUTBOUND_PENDING),
             published: AtomicBool::new(false),
             cleanup_started: AtomicBool::new(false),
-            cleanup_complete: Notify::new(),
+            cleanup_complete: CancellationToken::new(),
             abort_detail: Mutex::new(None),
             binding: Mutex::new(None),
             permit: Mutex::new(Some(permit)),
@@ -426,6 +429,13 @@ impl PreparedOutboundShared {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
+    }
+
+    async fn wait_for_cleanup(&self) {
+        // CancellationToken is a sticky, multi-waiter completion latch. A
+        // waiter that starts after cleanup cannot miss the transition, unlike
+        // an edge-triggered `Notify::notify_waiters` notification.
+        self.cleanup_complete.cancelled().await;
     }
 }
 
@@ -503,6 +513,43 @@ impl ConnectionLifecycleTaskSupervisor {
         }
         tasks.spawn(task);
         true
+    }
+
+    /// Execute a synchronous ownership commit and install its lifecycle task
+    /// under the same supervisor lock used by drain. Either both become
+    /// visible before drain starts, or neither does.
+    fn spawn_with_commit<T>(
+        &self,
+        task: impl Future<Output = ()> + Send + 'static,
+        commit: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let mut tasks = self
+            .tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while let Some(result) = tasks.try_join_next() {
+            if let Err(error) = result {
+                warn!(%error, "connection lifecycle task failed");
+            }
+        }
+        if self.draining.load(Ordering::Acquire) {
+            return Err(RvoipError::InvalidState(
+                "connection lifecycle supervisor is draining",
+            ));
+        }
+        if tasks.len() >= self.capacity {
+            metrics::counter!(
+                "rvoip_core_connection_lifecycle_task_rejections_total",
+                "reason" => "capacity"
+            )
+            .increment(1);
+            return Err(RvoipError::AdmissionRejected(
+                "connection lifecycle task capacity is full",
+            ));
+        }
+        let value = commit()?;
+        tasks.spawn(task);
+        Ok(value)
     }
 
     fn task_count(&self) -> usize {
@@ -761,13 +808,7 @@ impl PreparedOutboundConnection {
     }
 
     async fn wait_for_abort(&self) {
-        loop {
-            let notified = self.cleanup.shared.cleanup_complete.notified();
-            if self.cleanup.shared.decision.load(Ordering::Acquire) == PREPARED_OUTBOUND_ABORTED {
-                return;
-            }
-            notified.await;
-        }
+        self.cleanup.shared.wait_for_cleanup().await;
     }
 
     async fn abort_committed_work(&mut self) {
@@ -901,6 +942,119 @@ impl Drop for BridgeReservation {
     }
 }
 
+/// Reserves only the pending destination while an existing bridge retains
+/// the ingress and current destination. The row is already the next bridge
+/// generation, so a competing bridge cannot attach the pending Connection.
+struct ReplacementDestinationReservation {
+    bridge_id: BridgeId,
+    destination: ConnectionId,
+    owners: Arc<DashMap<ConnectionId, BridgeId>>,
+    lock: Arc<Mutex<()>>,
+    committed: bool,
+}
+
+impl ReplacementDestinationReservation {
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for ReplacementDestinationReservation {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let owned_by_reservation = self
+            .owners
+            .get(&self.destination)
+            .is_some_and(|owner| owner.value() == &self.bridge_id);
+        if owned_by_reservation {
+            self.owners.remove(&self.destination);
+        }
+    }
+}
+
+/// A suspension point in replacement media preparation that is otherwise too
+/// brief for an integration test to hit deterministically.
+///
+/// This surface is compiled only for explicit test-hook builds. Each variant
+/// names the real production operation immediately following the gate.
+#[cfg(feature = "test-hooks")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReplacementPreparationBoundary {
+    StreamAvailabilityRetryDelay,
+    SourceMediaGraphInitLock,
+    PendingMediaGraphInitLock,
+    SourceToPendingRouteActivation,
+    PendingToSourceRouteActivation,
+}
+
+/// One-shot bounded gate for a replacement preparation boundary.
+#[cfg(feature = "test-hooks")]
+pub struct ReplacementPreparationTestGate {
+    boundary: ReplacementPreparationBoundary,
+    entered: watch::Sender<bool>,
+    released: CancellationToken,
+    max_wait: Duration,
+}
+
+#[cfg(feature = "test-hooks")]
+impl ReplacementPreparationTestGate {
+    fn new(boundary: ReplacementPreparationBoundary, max_wait: Duration) -> Self {
+        let (entered, _) = watch::channel(false);
+        Self {
+            boundary,
+            entered,
+            released: CancellationToken::new(),
+            max_wait,
+        }
+    }
+
+    /// Wait until replacement preparation reaches the selected production
+    /// suspension point.
+    pub async fn wait_until_blocked(&self) -> Result<()> {
+        let mut entered = self.entered.subscribe();
+        tokio::time::timeout(self.max_wait, async {
+            while !*entered.borrow_and_update() {
+                entered.changed().await.map_err(|_| {
+                    RvoipError::InvalidState("replacement preparation test gate closed")
+                })?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| RvoipError::InvalidState("replacement preparation did not reach test gate"))?
+    }
+
+    /// Release the paused replacement operation.
+    pub fn release(&self) {
+        self.released.cancel();
+    }
+
+    #[must_use]
+    pub const fn boundary(&self) -> ReplacementPreparationBoundary {
+        self.boundary
+    }
+
+    async fn pause(&self) -> Result<()> {
+        self.entered.send_replace(true);
+        tokio::time::timeout(self.max_wait, self.released.cancelled())
+            .await
+            .map_err(|_| {
+                RvoipError::InvalidState("replacement preparation test gate was not released")
+            })
+    }
+}
+
+struct ReplacementPreparationContext {
+    source: ConnectionId,
+    pending_destination: ConnectionId,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BridgedDataTerminalReason {
     PolicyPanicked,
@@ -918,6 +1072,7 @@ struct BridgedDataEnvelope {
 struct CrossBridgeDataRoute {
     a: ConnectionId,
     b: ConnectionId,
+    policy: Arc<dyn DataMessageBridgePolicy>,
     a_to_b: mpsc::Sender<BridgedDataEnvelope>,
     b_to_a: mpsc::Sender<BridgedDataEnvelope>,
     workers: Vec<tokio::task::JoinHandle<()>>,
@@ -944,12 +1099,13 @@ impl CrossBridgeDataRoute {
         let b_to_a_worker = tokio::spawn(run_bridged_data_worker(
             b_to_a_rx,
             a_adapter,
-            policy,
+            Arc::clone(&policy),
             terminal_tx,
         ));
         Self {
             a,
             b,
+            policy,
             a_to_b,
             b_to_a,
             workers: vec![a_to_b_worker, b_to_a_worker],
@@ -959,6 +1115,10 @@ impl CrossBridgeDataRoute {
 
     fn terminal_status(&self) -> tokio::sync::watch::Receiver<Option<BridgedDataTerminalReason>> {
         self.terminal.clone()
+    }
+
+    fn policy(&self) -> Arc<dyn DataMessageBridgePolicy> {
+        Arc::clone(&self.policy)
     }
 
     fn try_forward(&self, source: &ConnectionId, message: DataMessage) {
@@ -999,11 +1159,15 @@ impl CrossBridgeDataRoute {
     }
 
     async fn stop(&mut self) {
-        for worker in &self.workers {
-            worker.abort();
-        }
+        self.abort_workers();
         for worker in self.workers.drain(..) {
             let _ = worker.await;
+        }
+    }
+
+    fn abort_workers(&self) {
+        for worker in &self.workers {
+            worker.abort();
         }
     }
 }
@@ -1013,6 +1177,142 @@ impl Drop for CrossBridgeDataRoute {
         for worker in &self.workers {
             worker.abort();
         }
+    }
+}
+
+struct PreparedCrossBridge {
+    handle: CrossBridgeHandle,
+    data_route: CrossBridgeDataRoute,
+    media_statuses: Vec<MediaGraphRouteStatus>,
+    data_terminal: tokio::sync::watch::Receiver<Option<BridgedDataTerminalReason>>,
+}
+
+impl PreparedCrossBridge {
+    async fn stop(mut self) {
+        let (_media, ()) = tokio::join!(self.handle.stop(), self.data_route.stop());
+    }
+}
+
+/// A staged replacement for the speaking peer of one live bridge.
+///
+/// Produced by [`Orchestrator::prepare_peer_handoff`] or
+/// [`Orchestrator::prepare_transport_fenced_peer_handoff`] and consumed by
+/// exactly one `Orchestrator::commit_peer_handoff*` call. Between the two
+/// phases the replacement media routes are installed but silent, the target
+/// Connection is reserved for the pending bridge generation, and the original
+/// bridge keeps forwarding untouched. A caller may do durable work and
+/// re-check its own authority in that window; nothing observable has changed
+/// until commit publishes the new generation.
+///
+/// Dropping the value before commit rolls the preparation back without
+/// disturbing the original bridge: the dormant routes are removed by their
+/// media-graph owners, the bounded data workers are aborted, and the target
+/// reservation is released under the bridge ownership lock. Route removal is
+/// signalled synchronously but converges on the graph actors; use
+/// [`Self::abandon`] when a retry must not observe the dormant routes.
+pub struct PreparedPeerHandoff {
+    // Field order is the rollback order: routes stop before the target slot
+    // is released, so a competing bridge cannot attach to a Connection whose
+    // dormant routes are still being torn down.
+    prepared: PreparedCrossBridge,
+    reservation: ReplacementDestinationReservation,
+    lifecycle_tickets: Vec<ConnectionLifecycleTicket>,
+    previous_bridge_id: BridgeId,
+    previous_a: ConnectionId,
+    previous_b: ConnectionId,
+    retained: ConnectionId,
+    source: ConnectionId,
+    target: ConnectionId,
+    expected_peer: crate::bridge::peer_switch::PeerRouteTicket,
+    replacement_peer: crate::bridge::peer_switch::PeerRouteTicket,
+}
+
+impl PreparedPeerHandoff {
+    /// The freshly minted bridge generation that commit publishes.
+    pub fn replacement_bridge_id(&self) -> &BridgeId {
+        &self.prepared.handle.id
+    }
+
+    /// The bridge generation this handoff retires.
+    pub fn previous_bridge_id(&self) -> &BridgeId {
+        &self.previous_bridge_id
+    }
+
+    /// The Connection that stays bridged across the handoff.
+    pub fn retained_connection(&self) -> &ConnectionId {
+        &self.retained
+    }
+
+    /// The peer being retired, derived from the authoritative original
+    /// bridge at preparation time rather than from caller input.
+    pub fn source_connection(&self) -> &ConnectionId {
+        &self.source
+    }
+
+    /// The Connection that becomes the retained Connection's new peer.
+    pub fn target_connection(&self) -> &ConnectionId {
+        &self.target
+    }
+
+    /// Roll the preparation back and wait for the dormant routes to be
+    /// removed before releasing the target reservation. Dropping the value
+    /// performs the same rollback without waiting.
+    pub async fn abandon(self) {
+        let Self {
+            prepared,
+            reservation,
+            ..
+        } = self;
+        prepared.stop().await;
+        drop(reservation);
+    }
+}
+
+/// Receipt for one committed peer handoff.
+///
+/// `committed_at` is the exact timestamp carried by the
+/// [`Event::PeerHandoffCommitted`] event, so a caller can apply the same
+/// cutoff to its own records (recordings, billing) as event consumers see.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PeerHandoffReceipt {
+    pub previous_bridge_id: BridgeId,
+    pub bridge_id: BridgeId,
+    pub retained: ConnectionId,
+    pub source: ConnectionId,
+    pub target: ConnectionId,
+    pub committed_at: chrono::DateTime<Utc>,
+}
+
+/// A handoff whose ownership-fenced commit was refused. The prepared routes
+/// and the target reservation are handed back so the caller can retire them
+/// in the same order as a pre-commit rollback.
+struct RejectedPeerHandoff {
+    error: RvoipError,
+    prepared: PreparedCrossBridge,
+    reservation: ReplacementDestinationReservation,
+}
+
+impl RejectedPeerHandoff {
+    async fn stop(self) -> RvoipError {
+        let Self {
+            error,
+            prepared,
+            reservation,
+        } = self;
+        prepared.stop().await;
+        drop(reservation);
+        error
+    }
+}
+
+/// Poll a future exactly once without a runtime. `None` means the future
+/// would have suspended; it is dropped, which runs its cancellation path.
+fn poll_once<F: Future>(future: F) -> Option<F::Output> {
+    let mut future = std::pin::pin!(future);
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    match future.as_mut().poll(&mut context) {
+        std::task::Poll::Ready(output) => Some(output),
+        std::task::Poll::Pending => None,
     }
 }
 
@@ -1119,6 +1419,8 @@ pub struct Orchestrator {
     /// the tracked Connection, so slow initialization on one call never
     /// blocks independent calls and the lock table remains bounded.
     media_graph_inits: Arc<DashMap<ConnectionId, Arc<tokio::sync::Mutex<()>>>>,
+    #[cfg(feature = "test-hooks")]
+    replacement_preparation_test_gate: OnceLock<Arc<ReplacementPreparationTestGate>>,
     pub admission: Arc<Semaphore>,
     /// Bounds the number of provisional outbound routes that may await a
     /// durable application bind at once.
@@ -1323,11 +1625,11 @@ impl Drop for MediaTapRoute {
 #[derive(Default)]
 pub(crate) struct MediaTapHandle {
     routes: Vec<MediaTapRoute>,
-    tasks: Vec<tokio::task::AbortHandle>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl MediaTapHandle {
-    fn push(&mut self, route: MediaTapRoute, task: tokio::task::AbortHandle) {
+    fn push(&mut self, route: MediaTapRoute, task: tokio::task::JoinHandle<()>) {
         self.routes.push(route);
         self.tasks.push(task);
     }
@@ -1358,6 +1660,36 @@ impl MediaTapHandle {
         for route in routes {
             let _ = route.remove().await;
         }
+    }
+
+    /// Stop accepting recording frames, let every graph queue reach its
+    /// consumer, and wait for the consumers to finish writing before the sink
+    /// is closed. A bounded wait prevents a misbehaving external sink from
+    /// stalling recording teardown forever.
+    async fn drain_and_wait(&mut self) -> bool {
+        let routes = self
+            .routes
+            .drain(..)
+            .filter_map(|mut route| route.take())
+            .collect::<Vec<_>>();
+        let mut complete = true;
+        for route in routes {
+            match route.drain().await {
+                Ok(true) => {}
+                Ok(false) | Err(_) => complete = false,
+            }
+        }
+        for mut task in self.tasks.drain(..) {
+            match tokio::time::timeout(Duration::from_secs(3), &mut task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => complete = false,
+                Err(_) => {
+                    complete = false;
+                    task.abort();
+                }
+            }
+        }
+        complete
     }
 }
 
@@ -1530,6 +1862,8 @@ impl Orchestrator {
             bridge_ownership_lock: Arc::new(Mutex::new(())),
             media_graphs: Arc::new(DashMap::new()),
             media_graph_inits: Arc::new(DashMap::new()),
+            #[cfg(feature = "test-hooks")]
+            replacement_preparation_test_gate: OnceLock::new(),
             admission,
             prepared_outbound_capacity: Arc::new(Semaphore::new(setup_capacity)),
             prepared_outbound_supervisor: PreparedOutboundSupervisor::new(setup_capacity),
@@ -1603,6 +1937,8 @@ impl Orchestrator {
             bridge_ownership_lock: Arc::new(Mutex::new(())),
             media_graphs: Arc::new(DashMap::new()),
             media_graph_inits: Arc::new(DashMap::new()),
+            #[cfg(feature = "test-hooks")]
+            replacement_preparation_test_gate: OnceLock::new(),
             admission,
             prepared_outbound_capacity: Arc::new(Semaphore::new(setup_capacity)),
             prepared_outbound_supervisor: PreparedOutboundSupervisor::new(setup_capacity),
@@ -1657,6 +1993,42 @@ impl Orchestrator {
             .set(Arc::downgrade(&orchestrator))
             .expect("new orchestrator self reference must be vacant");
         orchestrator
+    }
+
+    /// Install one bounded gate at a real replacement media-preparation
+    /// suspension point. This API is absent from default builds.
+    #[cfg(feature = "test-hooks")]
+    pub fn install_replacement_preparation_test_gate(
+        &self,
+        boundary: ReplacementPreparationBoundary,
+        max_wait: Duration,
+    ) -> Result<Arc<ReplacementPreparationTestGate>> {
+        if max_wait.is_zero() || max_wait > Duration::from_secs(30) {
+            return Err(RvoipError::AdmissionRejected(
+                "replacement preparation test-gate wait must be between 1 ns and 30 seconds",
+            ));
+        }
+        let gate = Arc::new(ReplacementPreparationTestGate::new(boundary, max_wait));
+        self.replacement_preparation_test_gate
+            .set(Arc::clone(&gate))
+            .map_err(|_| {
+                RvoipError::InvalidState("replacement preparation test gate is already installed")
+            })?;
+        Ok(gate)
+    }
+
+    #[cfg(feature = "test-hooks")]
+    async fn wait_at_replacement_preparation_test_gate(
+        &self,
+        boundary: ReplacementPreparationBoundary,
+    ) -> Result<()> {
+        let Some(gate) = self.replacement_preparation_test_gate.get() else {
+            return Ok(());
+        };
+        if gate.boundary() != boundary {
+            return Ok(());
+        }
+        gate.pause().await
     }
 
     /// Register a transport adapter. Spawns a background task that pulls
@@ -2023,14 +2395,7 @@ impl Orchestrator {
     ) {
         if cleanup.shared.cleanup_started.swap(true, Ordering::AcqRel) {
             cleanups.spawn(async move {
-                loop {
-                    let notified = cleanup.shared.cleanup_complete.notified();
-                    if cleanup.shared.decision.load(Ordering::Acquire) == PREPARED_OUTBOUND_ABORTED
-                    {
-                        break;
-                    }
-                    notified.await;
-                }
+                cleanup.shared.wait_for_cleanup().await;
             });
             return;
         }
@@ -2089,7 +2454,7 @@ impl Orchestrator {
             .decision
             .store(PREPARED_OUTBOUND_ABORTED, Ordering::Release);
         cleanup.shared.release_capacity();
-        cleanup.shared.cleanup_complete.notify_waiters();
+        cleanup.shared.cleanup_complete.cancel();
     }
 
     async fn abort_unregistered_prepared_outbound(
@@ -2109,13 +2474,7 @@ impl Orchestrator {
             Self::execute_prepared_outbound_cleanup(owner, cleanup, detail).await;
             return;
         }
-        loop {
-            let notified = cleanup.shared.cleanup_complete.notified();
-            if cleanup.shared.decision.load(Ordering::Acquire) == PREPARED_OUTBOUND_ABORTED {
-                return;
-            }
-            notified.await;
-        }
+        cleanup.shared.wait_for_cleanup().await;
     }
 
     fn retire_prepared_outbound_core(
@@ -2594,6 +2953,21 @@ impl Orchestrator {
             ));
         }
         Ok(ticket)
+    }
+
+    pub(crate) async fn set_pending_inbound_audio_codecs(
+        &self,
+        connection_id: &ConnectionId,
+        transport: Transport,
+        lifecycle_generation: u64,
+        codecs: Vec<String>,
+    ) -> Result<()> {
+        self.pending_inbound_lifecycle(connection_id, transport, lifecycle_generation)?;
+        self.adapter(transport)?
+            .set_inbound_audio_codecs(connection_id.clone(), codecs)
+            .await?;
+        self.pending_inbound_lifecycle(connection_id, transport, lifecycle_generation)?;
+        Ok(())
     }
 
     pub(crate) fn install_staged_inbound_data(
@@ -4080,7 +4454,11 @@ impl Orchestrator {
     /// signals DTMF out-of-band (e.g. UCTP `dtmf.send` envelope) and
     /// the bridged peer needs to inject the corresponding RFC 4733
     /// telephone-event packets onto its outbound RTP.
-    fn bridge_peer_of(&self, conn: &ConnectionId) -> Option<ConnectionId> {
+    pub fn bridge_peer_of(&self, conn: &ConnectionId) -> Option<ConnectionId> {
+        let _guard = self
+            .bridge_ownership_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let bridge_id = self
             .cross_bridge_owners
             .get(conn)
@@ -4101,6 +4479,10 @@ impl Orchestrator {
     /// bridge route that owns its source connection. This path performs no
     /// await and never invokes an application policy on adapter-event ingest.
     fn forward_bridged_data_message(&self, source: &ConnectionId, message: DataMessage) {
+        let _guard = self
+            .bridge_ownership_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(bridge_id) = self
             .cross_bridge_owners
             .get(source)
@@ -4141,127 +4523,210 @@ impl Orchestrator {
         })
     }
 
-    fn release_cross_bridge_ownership(
+    fn reserve_cross_bridge_replacement_destination(
         &self,
-        bridge_id: &BridgeId,
-        a: &ConnectionId,
-        b: &ConnectionId,
-    ) {
+        expected_bridge_id: &BridgeId,
+        ingress: &ConnectionId,
+        expected_destination: &ConnectionId,
+        replacement_destination: ConnectionId,
+        replacement_bridge_id: BridgeId,
+    ) -> Result<ReplacementDestinationReservation> {
         let _guard = self
             .bridge_ownership_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        for connection_id in [a, b] {
-            let owned_by_bridge = self
-                .cross_bridge_owners
-                .get(connection_id)
-                .is_some_and(|owner| owner.value() == bridge_id);
-            if owned_by_bridge {
-                self.cross_bridge_owners.remove(connection_id);
+        let endpoints_match = self
+            .cross_bridges
+            .get(expected_bridge_id)
+            .is_some_and(|bridge| {
+                (&bridge.a == ingress && &bridge.b == expected_destination)
+                    || (&bridge.b == ingress && &bridge.a == expected_destination)
+            });
+        let ingress_owner_matches = self
+            .cross_bridge_owners
+            .get(ingress)
+            .is_some_and(|owner| owner.value() == expected_bridge_id);
+        let destination_owner_matches = self
+            .cross_bridge_owners
+            .get(expected_destination)
+            .is_some_and(|owner| owner.value() == expected_bridge_id);
+        if !endpoints_match || !ingress_owner_matches || !destination_owner_matches {
+            return Err(RvoipError::BridgeNotFound(expected_bridge_id.clone()));
+        }
+        if self
+            .cross_bridge_owners
+            .contains_key(&replacement_destination)
+        {
+            return Err(RvoipError::AdmissionRejected(
+                "replacement destination is already bridged",
+            ));
+        }
+        self.cross_bridge_owners.insert(
+            replacement_destination.clone(),
+            replacement_bridge_id.clone(),
+        );
+        Ok(ReplacementDestinationReservation {
+            bridge_id: replacement_bridge_id,
+            destination: replacement_destination,
+            owners: Arc::clone(&self.cross_bridge_owners),
+            lock: Arc::clone(&self.bridge_ownership_lock),
+            committed: false,
+        })
+    }
+
+    fn detach_cross_bridge_generation(
+        bridge_id: &BridgeId,
+        cross_bridges: &DashMap<BridgeId, CrossBridgeHandle>,
+        data_routes: &DashMap<BridgeId, CrossBridgeDataRoute>,
+        owners: &DashMap<ConnectionId, BridgeId>,
+        ownership_lock: &Mutex<()>,
+    ) -> (Option<CrossBridgeHandle>, Option<CrossBridgeDataRoute>) {
+        let _guard = ownership_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let handle = cross_bridges.remove(bridge_id).map(|(_, handle)| handle);
+        let data_route = data_routes.remove(bridge_id).map(|(_, route)| route);
+
+        // Registry removal, forwarding quiescence, and ownership release are
+        // one synchronous commit. Cleanup may yield or be cancelled after
+        // this returns, but a removed generation cannot strand endpoint
+        // ownership or continue forwarding into a subsequent bridge.
+        if let Some(handle) = handle.as_ref() {
+            handle.deactivate_media();
+        }
+        if let Some(data_route) = data_route.as_ref() {
+            data_route.abort_workers();
+        }
+        let endpoints = handle
+            .as_ref()
+            .map(|handle| (&handle.a, &handle.b))
+            .or_else(|| data_route.as_ref().map(|route| (&route.a, &route.b)));
+        if let Some((a, b)) = endpoints {
+            for connection_id in [a, b] {
+                let owned_by_bridge = owners
+                    .get(connection_id)
+                    .is_some_and(|owner| owner.value() == bridge_id);
+                if owned_by_bridge {
+                    owners.remove(connection_id);
+                }
             }
         }
+        (handle, data_route)
     }
 
     async fn remove_cross_bridge_internal(&self, bridge_id: &BridgeId) -> Result<bool> {
-        let Some((_, mut handle)) = self.cross_bridges.remove(bridge_id) else {
-            if let Some((_, mut data_route)) = self.cross_bridge_data_routes.remove(bridge_id) {
+        let (handle, data_route) = Self::detach_cross_bridge_generation(
+            bridge_id,
+            &self.cross_bridges,
+            &self.cross_bridge_data_routes,
+            &self.cross_bridge_owners,
+            &self.bridge_ownership_lock,
+        );
+        let Some(mut handle) = handle else {
+            if let Some(mut data_route) = data_route {
                 data_route.stop().await;
             }
             return Ok(false);
         };
-        let a = handle.a.clone();
-        let b = handle.b.clone();
-        let data_route = self.cross_bridge_data_routes.remove(bridge_id);
         let (result, ()) = tokio::join!(handle.stop(), async move {
-            if let Some((_, mut data_route)) = data_route {
+            if let Some(mut data_route) = data_route {
                 data_route.stop().await;
             }
         });
-        self.release_cross_bridge_ownership(bridge_id, &a, &b);
         result.map(|_| true)
     }
 
-    fn spawn_cross_bridge_terminal_supervisor<F>(&self, bridge_id: BridgeId, terminal: F)
-    where
-        F: Future<Output = bool> + Send + 'static,
-    {
+    fn cross_bridge_terminal_task(
+        &self,
+        bridge_id: BridgeId,
+        statuses: Vec<MediaGraphRouteStatus>,
+        mut data_terminal: tokio::sync::watch::Receiver<Option<BridgedDataTerminalReason>>,
+    ) -> impl Future<Output = ()> + Send + 'static {
         let cross_bridges = Arc::clone(&self.cross_bridges);
         let data_routes = Arc::clone(&self.cross_bridge_data_routes);
         let owners = Arc::clone(&self.cross_bridge_owners);
         let ownership_lock = Arc::clone(&self.bridge_ownership_lock);
         let events = self.events.clone();
         let cross_crate_publisher = self.cross_crate_publisher.clone();
-        tokio::spawn(async move {
-            if !terminal.await {
+        let mut statuses = statuses.into_iter();
+        let first_status = statuses.next();
+        let second_status = statuses.next();
+        debug_assert!(
+            statuses.next().is_none(),
+            "a bridge has at most two media routes"
+        );
+        let supervised_bridge_id = bridge_id.clone();
+        async move {
+            let first_terminal = async move {
+                match first_status {
+                    Some(status) => {
+                        let _ = status.wait_terminal().await;
+                        true
+                    }
+                    None => std::future::pending().await,
+                }
+            };
+            let second_terminal = async move {
+                match second_status {
+                    Some(status) => {
+                        let _ = status.wait_terminal().await;
+                        true
+                    }
+                    None => std::future::pending().await,
+                }
+            };
+            let data_route_terminal = async move {
+                loop {
+                    if matches!(
+                        *data_terminal.borrow_and_update(),
+                        Some(BridgedDataTerminalReason::PolicyPanicked)
+                    ) {
+                        return true;
+                    }
+                    if data_terminal.changed().await.is_err() {
+                        return false;
+                    }
+                }
+            };
+            let should_remove = tokio::select! {
+                terminal = first_terminal => terminal,
+                terminal = second_terminal => terminal,
+                terminal = data_route_terminal => terminal,
+            };
+            if !should_remove {
                 return;
             }
-            let Some((_, mut handle)) = cross_bridges.remove(&bridge_id) else {
+            let (handle, data_route) = Self::detach_cross_bridge_generation(
+                &supervised_bridge_id,
+                &cross_bridges,
+                &data_routes,
+                &owners,
+                &ownership_lock,
+            );
+            let Some(mut handle) = handle else {
                 return;
             };
-            let a = handle.a.clone();
-            let b = handle.b.clone();
-            let data_route = data_routes.remove(&bridge_id);
             let (result, ()) = tokio::join!(handle.stop(), async move {
-                if let Some((_, mut data_route)) = data_route {
+                if let Some(mut data_route) = data_route {
                     data_route.stop().await;
                 }
             });
-            {
-                let _guard = ownership_lock
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                for connection_id in [&a, &b] {
-                    let owned = owners
-                        .get(connection_id)
-                        .is_some_and(|owner| owner.value() == &bridge_id);
-                    if owned {
-                        owners.remove(connection_id);
-                    }
-                }
-            }
             match result {
                 Ok(()) => {
                     let event = Event::ConnectionsUnbridged {
-                        bridge_id,
+                        bridge_id: supervised_bridge_id,
                         at: Utc::now(),
                     };
                     let _ =
                         Self::emit_to_channels(&events, cross_crate_publisher.as_deref(), event);
                 }
                 Err(error) => warn!(
-                    %bridge_id,
+                    bridge_id = %supervised_bridge_id,
                     %error,
                     "failed to converge bridge after a route terminated"
                 ),
             }
-        });
-    }
-
-    fn supervise_cross_bridge_routes(
-        &self,
-        bridge_id: BridgeId,
-        statuses: Vec<MediaGraphRouteStatus>,
-        mut data_terminal: tokio::sync::watch::Receiver<Option<BridgedDataTerminalReason>>,
-    ) {
-        for status in statuses {
-            self.spawn_cross_bridge_terminal_supervisor(bridge_id.clone(), async move {
-                let _ = status.wait_terminal().await;
-                true
-            });
         }
-        self.spawn_cross_bridge_terminal_supervisor(bridge_id, async move {
-            loop {
-                if matches!(
-                    *data_terminal.borrow_and_update(),
-                    Some(BridgedDataTerminalReason::PolicyPanicked)
-                ) {
-                    return true;
-                }
-                if data_terminal.changed().await.is_err() {
-                    return false;
-                }
-            }
-        });
     }
 
     /// Remove observer attachments that name an abruptly-ended Connection.
@@ -4285,7 +4750,8 @@ impl Orchestrator {
         let Some((_, mut handle)) = self.recordings.remove(recording_id) else {
             return false;
         };
-        let routes = handle.media.begin_stop();
+        drop(handle._permit.take());
+        let mut media = std::mem::take(&mut handle.media);
         let sink = Arc::clone(&handle.sink);
         drop(handle);
         self.emit(Event::RecordingStopped {
@@ -4296,9 +4762,7 @@ impl Orchestrator {
         let events = self.events.clone();
         let cross_crate_publisher = self.cross_crate_publisher.clone();
         tokio::spawn(async move {
-            for route in routes {
-                let _ = route.remove().await;
-            }
+            let _ = media.drain_and_wait().await;
             let Ok(artifact) = sink.close().await else {
                 return;
             };
@@ -4622,7 +5086,35 @@ impl Orchestrator {
         }
         self.cleanup_media_attachments_for_connection(conn);
         if let Some((_, graph)) = self.media_graphs.remove(conn) {
-            let _ = graph.shutdown_and_wait().await;
+            match graph.shutdown_and_wait().await {
+                Ok(MediaGraphSourceState::Shutdown | MediaGraphSourceState::Closed) => {}
+                Ok(state @ (MediaGraphSourceState::Aborted | MediaGraphSourceState::Open)) => {
+                    metrics::counter!(
+                        "rvoip_core_media_graph_teardown_failures_total",
+                        "reason" => "forced_abort"
+                    )
+                    .increment(1);
+                    warn!(
+                        connection_id = %conn,
+                        graph_id = %graph.id(),
+                        ?state,
+                        "media graph teardown converged through forced abort"
+                    );
+                }
+                Err(error) => {
+                    metrics::counter!(
+                        "rvoip_core_media_graph_teardown_failures_total",
+                        "reason" => error.diagnostic_class()
+                    )
+                    .increment(1);
+                    warn!(
+                        connection_id = %conn,
+                        graph_id = %graph.id(),
+                        %error,
+                        "media graph teardown required forced convergence"
+                    );
+                }
+            }
         }
         self.media_graph_inits.remove(conn);
         // P1.10 — if this Connection was bound to a Session, detach it
@@ -4651,7 +5143,28 @@ impl Orchestrator {
         policy: ConversationPolicy,
         metadata: HashMap<String, String>,
     ) -> Result<ConversationId> {
-        let id = ConversationId::new();
+        self.open_conversation_with_id(ConversationId::new(), tenant_id, policy, metadata)
+            .await
+    }
+
+    /// Open a Conversation with a caller-supplied id, or return that id when
+    /// an Open Conversation already exists (idempotent `conversation.create`).
+    pub async fn open_conversation_with_id(
+        &self,
+        id: ConversationId,
+        tenant_id: TenantId,
+        policy: ConversationPolicy,
+        metadata: HashMap<String, String>,
+    ) -> Result<ConversationId> {
+        if let Some(existing) = self.conversations.get(&id).map(|e| Arc::clone(e.value())) {
+            let conv = existing.read().expect("conversation lock poisoned");
+            if conv.state == ConversationState::Open {
+                return Ok(id);
+            }
+            return Err(RvoipError::InvalidState(
+                "open_conversation: conversation is closed",
+            ));
+        }
         let now = Utc::now();
         let conv = Conversation {
             id: id.clone(),
@@ -4668,8 +5181,6 @@ impl Orchestrator {
         };
         self.conversations
             .insert(id.clone(), Arc::new(RwLock::new(conv)));
-        // P6 — index by tenant for `list_for_tenant` and isolation
-        // enforcement.
         self.conversations_by_tenant
             .entry(tenant_id_for_index(&self.conversations, &id))
             .or_default()
@@ -4679,6 +5190,11 @@ impl Orchestrator {
             at: now,
         });
         Ok(id)
+    }
+
+    /// Snapshot of live Conversation ids. Used by UCTP `conversation.list`.
+    pub fn live_conversation_ids(&self) -> Vec<ConversationId> {
+        self.conversations.iter().map(|e| e.key().clone()).collect()
     }
 
     /// P6 — install/replace per-tenant quotas. V2.B provisions the
@@ -5013,6 +5529,31 @@ impl Orchestrator {
         Ok(())
     }
 
+    /// Re-open a Closed Conversation so Parley identity match can continue
+    /// the same `cid` inside the reopen window. No-op if already Open.
+    pub async fn reopen_conversation(&self, id: ConversationId) -> Result<()> {
+        let conv_arc = self
+            .conversations
+            .get(&id)
+            .map(|e| Arc::clone(e.value()))
+            .ok_or_else(|| RvoipError::ConversationNotFound(id.clone()))?;
+        let now = Utc::now();
+        {
+            let mut conv = conv_arc.write().expect("conversation lock poisoned");
+            if conv.state == ConversationState::Open {
+                return Ok(());
+            }
+            conv.state = ConversationState::Open;
+            conv.closed_at = None;
+            conv.last_activity_at = now;
+        }
+        self.emit(Event::ConversationOpened {
+            conversation_id: id,
+            at: now,
+        });
+        Ok(())
+    }
+
     /// Start a new Session within an Open Conversation. Emits
     /// `Event::SessionStarted`. `invitees` populates the
     /// `Session::participants` set immediately; matching `Participant`
@@ -5336,6 +5877,184 @@ impl Orchestrator {
             at: now,
         });
         Ok(())
+    }
+
+    /// Change a Conversation Participant's voip-3 role. No-op (no event)
+    /// when the requested role already matches. Does not move Connections
+    /// or bridges.
+    pub async fn set_participant_role(
+        &self,
+        participant_id: ParticipantId,
+        role: ParticipantRole,
+    ) -> Result<()> {
+        let (conversation_id, conv_arc) =
+            self.conversation_containing_participant(&participant_id)?;
+        let now = Utc::now();
+        let from = {
+            let mut conv = conv_arc.write().expect("conversation lock poisoned");
+            let participant = conv
+                .participants
+                .iter_mut()
+                .find(|participant| participant.id == participant_id)
+                .ok_or_else(|| RvoipError::ParticipantNotFound(participant_id.clone()))?;
+            let from = participant.role.clone();
+            if from == role {
+                return Ok(());
+            }
+            participant.role = role.clone();
+            conv.last_activity_at = now;
+            from
+        };
+        self.emit(Event::ParticipantRoleChanged {
+            conversation_id,
+            session_id: self.unique_active_session_for_participant(&participant_id),
+            participant_id,
+            from,
+            to: role,
+            at: now,
+        });
+        Ok(())
+    }
+
+    /// Promote `to` to `Agent` in `session_id`. Every other `Agent` in that
+    /// Session becomes `Observer`. Joins `to` if they are not already in
+    /// the Session. Does not move Connections or bridges.
+    pub async fn take_over(
+        &self,
+        session_id: SessionId,
+        to: ParticipantId,
+        to_kind: ParticipantKind,
+    ) -> Result<()> {
+        let (participants_in_session, conversation_id) =
+            self.live_session_participants(&session_id)?;
+        let agents = self.session_agents(&conversation_id, &participants_in_session);
+        for agent_id in agents.into_iter().filter(|id| *id != to) {
+            self.set_participant_role(agent_id, ParticipantRole::Observer)
+                .await?;
+        }
+        if !participants_in_session.contains(&to) {
+            self.join_session(session_id, to.clone(), to_kind, ParticipantRole::Agent)
+                .await?;
+        }
+        self.set_participant_role(to, ParticipantRole::Agent).await
+    }
+
+    /// `from` must currently be `Agent` in `session_id`. Then the same
+    /// demote/promote as [`Self::take_over`]: `from` (and any other Agents
+    /// in the Session) become `Observer`, `to` becomes `Agent`.
+    pub async fn hand_off(
+        &self,
+        session_id: SessionId,
+        from: ParticipantId,
+        to: ParticipantId,
+        to_kind: ParticipantKind,
+    ) -> Result<()> {
+        let (participants_in_session, conversation_id) =
+            self.live_session_participants(&session_id)?;
+        if !participants_in_session.contains(&from) {
+            return Err(RvoipError::InvalidState(
+                "hand_off: from is not in the session",
+            ));
+        }
+        let from_is_agent = self
+            .conversations
+            .get(&conversation_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or_else(|| RvoipError::ConversationNotFound(conversation_id.clone()))?
+            .read()
+            .expect("conversation lock poisoned")
+            .participants
+            .iter()
+            .find(|participant| participant.id == from)
+            .map(|participant| participant.role == ParticipantRole::Agent)
+            .ok_or_else(|| RvoipError::ParticipantNotFound(from.clone()))?;
+        if !from_is_agent {
+            return Err(RvoipError::InvalidState("hand_off: from is not an agent"));
+        }
+        self.take_over(session_id, to, to_kind).await
+    }
+
+    fn conversation_containing_participant(
+        &self,
+        participant_id: &ParticipantId,
+    ) -> Result<(ConversationId, Arc<RwLock<Conversation>>)> {
+        for entry in self.conversations.iter() {
+            let conv = entry.value().read().expect("conversation lock poisoned");
+            if conv
+                .participants
+                .iter()
+                .any(|participant| participant.id == *participant_id)
+            {
+                return Ok((entry.key().clone(), Arc::clone(entry.value())));
+            }
+        }
+        Err(RvoipError::ParticipantNotFound(participant_id.clone()))
+    }
+
+    fn unique_active_session_for_participant(
+        &self,
+        participant_id: &ParticipantId,
+    ) -> Option<SessionId> {
+        let mut found = None;
+        for entry in self.sessions.iter() {
+            let session = entry.value().read().expect("session lock poisoned");
+            if session.state == SessionState::Active
+                && session.participants.contains(participant_id)
+            {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(entry.key().clone());
+            }
+        }
+        found
+    }
+
+    fn live_session_participants(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(HashSet<ParticipantId>, ConversationId)> {
+        let session = self
+            .sessions
+            .get(session_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or_else(|| RvoipError::SessionNotFound(session_id.clone()))?;
+        let session = session.read().expect("session lock poisoned");
+        if matches!(
+            session.state,
+            SessionState::Ending | SessionState::Ended | SessionState::Failed
+        ) {
+            return Err(RvoipError::InvalidState(
+                "take_over: session is ending or ended",
+            ));
+        }
+        Ok((
+            session.participants.clone(),
+            session.conversation_id.clone(),
+        ))
+    }
+
+    fn session_agents(
+        &self,
+        conversation_id: &ConversationId,
+        participants_in_session: &HashSet<ParticipantId>,
+    ) -> Vec<ParticipantId> {
+        let Some(conv_arc) = self
+            .conversations
+            .get(conversation_id)
+            .map(|entry| Arc::clone(entry.value()))
+        else {
+            return Vec::new();
+        };
+        let conv = conv_arc.read().expect("conversation lock poisoned");
+        conv.participants
+            .iter()
+            .filter(|participant| {
+                participants_in_session.contains(&participant.id)
+                    && participant.role == ParticipantRole::Agent
+            })
+            .map(|participant| participant.id.clone())
+            .collect()
     }
 
     /// P1.12 — reverse lookup `ConnectionId → SessionId`. Populated by
@@ -7882,13 +8601,7 @@ impl Orchestrator {
                 "outbound preparation supervisor is draining",
             );
             self.prepared_outbound_supervisor.state_changed.notify_one();
-            loop {
-                let notified = cleanup.shared.cleanup_complete.notified();
-                if cleanup.shared.decision.load(Ordering::Acquire) == PREPARED_OUTBOUND_ABORTED {
-                    break;
-                }
-                notified.await;
-            }
+            cleanup.shared.wait_for_cleanup().await;
             return Err(RvoipError::AdmissionRejected(
                 "outbound preparation supervisor is draining",
             ));
@@ -8907,16 +9620,16 @@ impl Orchestrator {
         let connection_ids = conns.clone();
         let mut media = MediaTapHandle::default();
         for connection_id in conns {
-            let (route, mut receiver) = match self.media_tap_for_connection(connection_id, 64).await
-            {
-                Ok(tap) => tap,
-                // Preserve the pre-graph API contract: recording admission
-                // can reserve a quota slot before a transport publishes its
-                // first audio stream. Once a stream exists, callers can stop
-                // and restart the recording to attach it.
-                Err(RvoipError::AdmissionRejected("no audio stream")) => continue,
-                Err(error) => return Err(error),
-            };
+            let (route, mut receiver) =
+                match self.recording_tap_for_connection(connection_id, 64).await {
+                    Ok(tap) => tap,
+                    // Preserve the pre-graph API contract: recording admission
+                    // can reserve a quota slot before a transport publishes its
+                    // first audio stream. Once a stream exists, callers can stop
+                    // and restart the recording to attach it.
+                    Err(RvoipError::AdmissionRejected("no audio stream")) => continue,
+                    Err(error) => return Err(error),
+                };
             let sink_for_task = Arc::clone(&sink);
             let paused_for_task = Arc::clone(&paused);
             let task = tokio::spawn(async move {
@@ -8929,7 +9642,7 @@ impl Orchestrator {
                     }
                 }
             });
-            media.push(route, task.abort_handle());
+            media.push(route, task);
         }
 
         let statuses = media.statuses();
@@ -8970,7 +9683,7 @@ impl Orchestrator {
             .remove(&recording_id)
             .ok_or_else(|| RvoipError::AdmissionRejected("recording not found"))?;
         drop(handle._permit.take());
-        handle.media.stop_and_wait().await;
+        let _ = handle.media.drain_and_wait().await;
         // V2.B — permit drops with the handle struct, releasing the
         // tenant's admission slot.
         let artifact = handle.sink.close().await?;
@@ -9089,7 +9802,7 @@ impl Orchestrator {
             let _ = stream.close().await;
         });
         let mut media = MediaTapHandle::default();
-        media.push(route, task.abort_handle());
+        media.push(route, task);
         let statuses = media.statuses();
         if let Err(error) = self.validate_connection_lifecycles(&lifecycle_tickets) {
             media.stop_and_wait().await;
@@ -9344,7 +10057,7 @@ impl Orchestrator {
             let _ = stream.close().await;
         });
         let mut media = MediaTapHandle::default();
-        media.push(route, task.abort_handle());
+        media.push(route, task);
 
         // V2.B — permit (if any) stored in the handle; releases on
         // Drop when detach removes the entry.
@@ -9822,23 +10535,912 @@ impl Orchestrator {
         media_plan: DirectionalMediaBridgePlan,
         data_policy: Arc<dyn DataMessageBridgePolicy>,
     ) -> Result<BridgeId> {
+        if self
+            .connection_lifecycle_tasks
+            .draining
+            .load(Ordering::Acquire)
+        {
+            return Err(RvoipError::InvalidState(
+                "connection lifecycle supervisor is draining",
+            ));
+        }
         if a == b {
             return Err(RvoipError::AdmissionRejected(
                 "cannot bridge a connection to itself",
             ));
         }
-        let a_adapter = self.adapter_for(&a)?;
-        let b_adapter = self.adapter_for(&b)?;
         let lifecycle_tickets = self.capture_connection_lifecycles(&[a.clone(), b.clone()])?;
         let id = BridgeId::new();
         let reservation = self.reserve_cross_bridge(id.clone(), a.clone(), b.clone())?;
+        let PreparedCrossBridge {
+            mut handle,
+            mut data_route,
+            media_statuses: statuses,
+            data_terminal,
+        } = self
+            .prepare_cross_bridge_for_commit(
+                id.clone(),
+                a.clone(),
+                b.clone(),
+                media_plan,
+                data_policy,
+                true,
+                None,
+                crate::bridge::peer_switch::PeerRouteTicket::initial(),
+            )
+            .await?;
+        if let Err(error) = self.validate_connection_lifecycles(&lifecycle_tickets) {
+            let (_media, ()) = tokio::join!(handle.stop(), data_route.stop());
+            return Err(error);
+        }
+        let terminal_task = self.cross_bridge_terminal_task(id.clone(), statuses, data_terminal);
+        let mut handle = Some(handle);
+        let mut data_route = Some(data_route);
+        let mut reservation = Some(reservation);
+        // Keep the non-Send std::sync lifecycle guards inside this entirely
+        // synchronous scope. In particular, the lock-error cleanup awaits
+        // below must not retain the Result temporary whose Ok variant contains
+        // those guards; public bridge futures are required to remain Send.
+        let commit = match self.lock_connection_lifecycles(&lifecycle_tickets) {
+            Ok(lifecycle_guards) => {
+                let result = self.connection_lifecycle_tasks.spawn_with_commit(
+                    terminal_task,
+                    || -> Result<()> {
+                        self.cross_bridges.insert(
+                            id.clone(),
+                            handle
+                                .take()
+                                .expect("prepared bridge is consumed exactly once"),
+                        );
+                        self.cross_bridge_data_routes.insert(
+                            id.clone(),
+                            data_route
+                                .take()
+                                .expect("prepared data route is consumed exactly once"),
+                        );
+                        reservation
+                            .take()
+                            .expect("bridge reservation exists until commit")
+                            .commit();
+                        self.cross_bridges
+                            .get(&id)
+                            .expect("new bridge exists during commit")
+                            .activate_media();
+                        self.emit(Event::ConnectionsBridged {
+                            bridge_id: id.clone(),
+                            a,
+                            b,
+                            at: Utc::now(),
+                        });
+                        Ok(())
+                    },
+                );
+                drop(lifecycle_guards);
+                result
+            }
+            Err(error) => Err(error),
+        };
+        if let Err(error) = commit {
+            let mut handle = handle
+                .take()
+                .expect("failed bridge commit retains its prepared media");
+            let mut data_route = data_route
+                .take()
+                .expect("failed bridge commit retains its prepared data route");
+            let (_media, ()) = tokio::join!(handle.stop(), data_route.stop());
+            return Err(error);
+        }
+        Ok(id)
+    }
 
-        // Poll both adapters for an audio stream up to the configured
-        // deadline. Adapters create streams on connection.ready, so a
-        // bridge requested from Event::ConnectionInbound usually has to
-        // wait a handful of ms. 50ms polling interval is small enough
-        // to be inaudible at the call setup level and large enough not
-        // to spin.
+    /// Replace a bridge destination only when both the existing and candidate
+    /// transports expose generation-aware delivery queues.
+    ///
+    /// This is the one-shot form of
+    /// [`Self::prepare_transport_fenced_peer_handoff`] followed by a commit
+    /// bounded by [`Config::bridge_stream_deadline`].
+    pub async fn replace_bridge_destination_transport_fenced(
+        &self,
+        expected_bridge_id: BridgeId,
+        ingress: ConnectionId,
+        expected_destination: ConnectionId,
+        replacement_destination: ConnectionId,
+    ) -> Result<BridgeDestinationReplacement> {
+        self.require_transport_fenced_bridge(&expected_bridge_id)?;
+        self.require_transport_fenced_audio_stream(&replacement_destination)
+            .await?;
+        self.replace_bridge_destination(
+            expected_bridge_id,
+            ingress,
+            expected_destination,
+            replacement_destination,
+        )
+        .await
+    }
+
+    /// Replace one exact bridge destination while preserving the ingress
+    /// Connection and Session.
+    ///
+    /// The expected bridge ID is a generation fence. Core prepares and waits
+    /// for every new media route before one synchronous ownership commit
+    /// replaces the old bridge. The returned bridge ID is freshly minted and
+    /// must be supplied to a later replacement; replaying the old ID cannot
+    /// modify the new generation. The caller remains responsible for ending
+    /// the retired destination Connection after this method succeeds.
+    ///
+    /// This is the one-shot form of the two-phase peer handoff: it prepares
+    /// exactly as [`Self::prepare_peer_handoff`] does, except that the
+    /// replacement inherits the retiring bridge's media plan and data policy
+    /// and `expected_destination` must name the retiring peer, and then
+    /// commits with a peer quiescence bounded by
+    /// [`Config::bridge_stream_deadline`]. Losing a replacement race to a
+    /// concurrent contender is reported as `BridgeNotFound` at every
+    /// detection point.
+    #[instrument(
+        skip(self),
+        fields(
+            expected_bridge_id = %expected_bridge_id,
+            ingress = %ingress,
+            expected_destination = %expected_destination,
+            replacement_destination = %replacement_destination
+        )
+    )]
+    pub async fn replace_bridge_destination(
+        &self,
+        expected_bridge_id: BridgeId,
+        ingress: ConnectionId,
+        expected_destination: ConnectionId,
+        replacement_destination: ConnectionId,
+    ) -> Result<BridgeDestinationReplacement> {
+        let handoff = self
+            .prepare_peer_replacement(
+                expected_bridge_id,
+                ingress,
+                Some(&expected_destination),
+                replacement_destination,
+                None,
+            )
+            .await?;
+        let receipt = self
+            .commit_peer_handoff_bounded(handoff, self.config.bridge_stream_deadline)
+            .await?;
+        Ok(BridgeDestinationReplacement {
+            previous_bridge_id: receipt.previous_bridge_id,
+            bridge_id: receipt.bridge_id,
+            ingress: receipt.retained,
+            previous_destination: receipt.source,
+            destination: receipt.target,
+        })
+    }
+
+    /// Prepare a peer handoff, refusing any bridge or replacement transport
+    /// that cannot fence transport delivery.
+    ///
+    /// The original bridge must have been built over generation-aware
+    /// delivery queues, and `target`'s audio stream must expose one too;
+    /// otherwise `NotImplemented` is returned before anything is reserved.
+    /// The preparation itself is [`Self::prepare_peer_handoff`].
+    #[instrument(
+        skip(self, media_plan, data_policy),
+        fields(
+            expected_bridge_id = %expected_bridge_id,
+            retained = %retained,
+            target_connection = %target
+        )
+    )]
+    pub async fn prepare_transport_fenced_peer_handoff(
+        &self,
+        expected_bridge_id: BridgeId,
+        retained: ConnectionId,
+        target: ConnectionId,
+        media_plan: DirectionalMediaBridgePlan,
+        data_policy: Arc<dyn DataMessageBridgePolicy>,
+    ) -> Result<PreparedPeerHandoff> {
+        self.require_transport_fenced_bridge(&expected_bridge_id)?;
+        self.require_transport_fenced_audio_stream(&target).await?;
+        let handoff = self
+            .prepare_peer_handoff(
+                expected_bridge_id,
+                retained,
+                target,
+                media_plan,
+                data_policy,
+            )
+            .await?;
+        if !handoff.prepared.handle.peer_transport_fenced {
+            handoff.abandon().await;
+            return Err(RvoipError::NotImplemented(
+                "replacement bridge does not expose a transport delivery fence",
+            ));
+        }
+        Ok(handoff)
+    }
+
+    /// Prepare an inactive replacement peer for `retained` while its current
+    /// bridge keeps forwarding.
+    ///
+    /// `expected_bridge_id` is a generation fence; the retiring peer is
+    /// derived from that bridge (the endpoint that is not `retained`) and is
+    /// reported by [`PreparedPeerHandoff::source_connection`], so a caller
+    /// can compare it with its own expectation before committing. The
+    /// replacement bridge keeps the original bridge's endpoint orientation.
+    ///
+    /// `media_plan` is relative to `(retained, target)` and, together with
+    /// `data_policy`, applies to the replacement bridge; the one-shot
+    /// [`Self::replace_bridge_destination`] passes the retiring bridge's own
+    /// plan and policy here. The replacement's media routes are installed and
+    /// waited for, its data workers are started, and `target` is reserved
+    /// for the pending generation, but no forwarding changes and no event is
+    /// emitted until commit. Dropping the result rolls all of that back.
+    ///
+    /// Legacy streams provide only the graph-level fence; a caller that needs
+    /// transport-level cutoff must use
+    /// [`Self::prepare_transport_fenced_peer_handoff`].
+    ///
+    /// Errors:
+    /// - `InvalidState` while the lifecycle supervisor is draining.
+    /// - `AdmissionRejected` if the connections are not distinct, `retained`
+    ///   is not on the expected bridge, the three connections do not share
+    ///   one Session, or `target` is already bridged.
+    /// - `NotImplemented` if the bridge was not built by the peer-gated path.
+    /// - `BridgeNotFound` if the bridge generation is gone or was already
+    ///   retired by a competing replacement.
+    /// - `ConnectionNotFound` if an endpoint ended during preparation.
+    #[instrument(
+        skip(self, media_plan, data_policy),
+        fields(
+            expected_bridge_id = %expected_bridge_id,
+            retained = %retained,
+            target_connection = %target
+        )
+    )]
+    pub async fn prepare_peer_handoff(
+        &self,
+        expected_bridge_id: BridgeId,
+        retained: ConnectionId,
+        target: ConnectionId,
+        media_plan: DirectionalMediaBridgePlan,
+        data_policy: Arc<dyn DataMessageBridgePolicy>,
+    ) -> Result<PreparedPeerHandoff> {
+        self.prepare_peer_replacement(
+            expected_bridge_id,
+            retained,
+            None,
+            target,
+            Some((media_plan, data_policy)),
+        )
+        .await
+    }
+
+    /// Commit a prepared handoff after pausing the retiring peer and waiting
+    /// up to `timeout` for its admitted transport deliveries to drain.
+    ///
+    /// On timeout the retiring peer resumes, the preparation is rolled back,
+    /// and `InvalidState` is returned; the original bridge is undisturbed.
+    /// A handoff prepared by another `Orchestrator` is refused. Losing the
+    /// generation to a concurrent replacement is `BridgeNotFound`.
+    pub async fn commit_peer_handoff_with_timeout(
+        &self,
+        handoff: PreparedPeerHandoff,
+        timeout: Duration,
+    ) -> Result<BridgeId> {
+        self.commit_peer_handoff_with_timeout_and_receipt(handoff, timeout)
+            .await
+            .map(|receipt| receipt.bridge_id)
+    }
+
+    /// [`Self::commit_peer_handoff_with_timeout`] returning the full receipt,
+    /// whose `committed_at` is the exact timestamp published on
+    /// [`Event::PeerHandoffCommitted`].
+    pub async fn commit_peer_handoff_with_timeout_and_receipt(
+        &self,
+        handoff: PreparedPeerHandoff,
+        timeout: Duration,
+    ) -> Result<PeerHandoffReceipt> {
+        self.commit_peer_handoff_bounded(handoff, timeout).await
+    }
+
+    /// Commit a prepared handoff without suspending.
+    ///
+    /// The retiring peer is fenced only if it has no transport delivery in
+    /// flight at this instant; a legacy (graph-only) bridge always
+    /// qualifies. If a fenced transport is mid-send, the handoff is rolled
+    /// back and `InvalidState` is returned so the caller can retry with
+    /// [`Self::commit_peer_handoff_with_timeout`]. Retired-route cleanup is
+    /// handed to the lifecycle supervisor rather than awaited.
+    pub fn commit_peer_handoff(&self, handoff: PreparedPeerHandoff) -> Result<BridgeId> {
+        self.commit_peer_handoff_with_receipt(handoff)
+            .map(|receipt| receipt.bridge_id)
+    }
+
+    /// [`Self::commit_peer_handoff`] returning the full receipt.
+    pub fn commit_peer_handoff_with_receipt(
+        &self,
+        handoff: PreparedPeerHandoff,
+    ) -> Result<PeerHandoffReceipt> {
+        if let Err(error) = self.check_peer_handoff_owner(&handoff) {
+            // A foreign handoff must roll back on its own Orchestrator; only
+            // its reservation and route owners know that Orchestrator.
+            drop(handoff);
+            return Err(error);
+        }
+        let previous_bridge_id = handoff.previous_bridge_id.clone();
+        let quiescence = match poll_once(handoff.expected_peer.quiesce()) {
+            Some(Some(guard)) => guard,
+            Some(None) => {
+                self.abandon_peer_handoff_in_background(handoff);
+                return Err(RvoipError::BridgeNotFound(previous_bridge_id));
+            }
+            None => {
+                self.abandon_peer_handoff_in_background(handoff);
+                return Err(RvoipError::InvalidState(
+                    "bridge transport delivery is in flight; use a bounded handoff commit",
+                ));
+            }
+        };
+        let published = self.publish_peer_handoff(handoff);
+        drop(quiescence);
+        published.map_err(|rejected| {
+            let RejectedPeerHandoff {
+                error,
+                prepared,
+                reservation,
+            } = rejected;
+            self.stop_prepared_bridge_in_background(prepared, reservation);
+            error
+        })
+    }
+
+    async fn commit_peer_handoff_bounded(
+        &self,
+        handoff: PreparedPeerHandoff,
+        timeout: Duration,
+    ) -> Result<PeerHandoffReceipt> {
+        if let Err(error) = self.check_peer_handoff_owner(&handoff) {
+            handoff.abandon().await;
+            return Err(error);
+        }
+        let previous_bridge_id = handoff.previous_bridge_id.clone();
+        // Losing the generation between prepare and commit is not an invalid
+        // state; report it as the same `BridgeNotFound` a late contender gets
+        // from the registry lookup so callers can classify a glare loss.
+        let quiescence = match tokio::time::timeout(timeout, handoff.expected_peer.quiesce()).await
+        {
+            Ok(Some(guard)) => guard,
+            Ok(None) => {
+                handoff.abandon().await;
+                return Err(RvoipError::BridgeNotFound(previous_bridge_id));
+            }
+            Err(_) => {
+                handoff.abandon().await;
+                return Err(RvoipError::InvalidState(
+                    "bridge transport delivery did not quiesce before replacement",
+                ));
+            }
+        };
+        let published = self.publish_peer_handoff(handoff);
+        drop(quiescence);
+        match published {
+            Ok(receipt) => Ok(receipt),
+            Err(rejected) => Err(rejected.stop().await),
+        }
+    }
+
+    fn check_peer_handoff_owner(&self, handoff: &PreparedPeerHandoff) -> Result<()> {
+        if Arc::ptr_eq(&handoff.reservation.owners, &self.cross_bridge_owners) {
+            Ok(())
+        } else {
+            Err(RvoipError::InvalidState(
+                "handoff belongs to another orchestrator",
+            ))
+        }
+    }
+
+    fn abandon_peer_handoff_in_background(&self, handoff: PreparedPeerHandoff) {
+        let PreparedPeerHandoff {
+            prepared,
+            reservation,
+            ..
+        } = handoff;
+        self.stop_prepared_bridge_in_background(prepared, reservation);
+    }
+
+    /// Retire a prepared-but-unpublished bridge from a synchronous context.
+    /// The target reservation is released now, exactly as dropping a
+    /// [`PreparedPeerHandoff`] would; route removal converges under the
+    /// lifecycle supervisor. If the supervisor refuses the task, dropping the
+    /// future drops the route owners, whose `Drop` implementations remove the
+    /// routes and abort the data workers as the fail-closed fallback.
+    fn stop_prepared_bridge_in_background(
+        &self,
+        prepared: PreparedCrossBridge,
+        reservation: ReplacementDestinationReservation,
+    ) {
+        let bridge_id = prepared.handle.id.clone();
+        let spawned = self
+            .connection_lifecycle_tasks
+            .spawn(async move { prepared.stop().await });
+        if !spawned {
+            debug!(
+                bridge_id = %bridge_id,
+                "prepared handoff rollback relied on drop fallbacks while cleanup admission was closed"
+            );
+        }
+        drop(reservation);
+    }
+
+    fn require_transport_fenced_bridge(&self, expected_bridge_id: &BridgeId) -> Result<()> {
+        if self
+            .cross_bridges
+            .get(expected_bridge_id)
+            .is_some_and(|bridge| bridge.peer_transport_fenced)
+        {
+            Ok(())
+        } else {
+            Err(RvoipError::NotImplemented(
+                "original bridge does not expose a transport delivery fence",
+            ))
+        }
+    }
+
+    /// Wait up to [`Config::bridge_stream_deadline`] for the Connection's
+    /// audio stream and require it to expose a generation-aware peer queue.
+    async fn require_transport_fenced_audio_stream(
+        &self,
+        connection_id: &ConnectionId,
+    ) -> Result<()> {
+        let adapter = self.adapter_for(connection_id)?;
+        let deadline = self.config.bridge_stream_deadline;
+        let started = std::time::Instant::now();
+        loop {
+            let stream = adapter
+                .streams(connection_id.clone())
+                .await?
+                .into_iter()
+                .find(|stream| stream.kind() == StreamKind::Audio);
+            if let Some(stream) = stream {
+                stream.try_peer_frames_out().map_err(|error| match error {
+                    RvoipError::NotImplemented(_) => RvoipError::NotImplemented(
+                        "replacement transport does not expose a delivery fence",
+                    ),
+                    other => other,
+                })?;
+                return Ok(());
+            }
+            if started.elapsed() >= deadline {
+                return Err(RvoipError::AdmissionRejected(
+                    "replacement transport has no audio stream within deadline",
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Shared preparation for the one-shot and two-phase replacement paths.
+    ///
+    /// `expected_source`, when given, must equal the peer derived from the
+    /// bridge. `media` overrides the retiring bridge's plan (relative to
+    /// `(retained, target)`) and data policy; `None` inherits both.
+    async fn prepare_peer_replacement(
+        &self,
+        expected_bridge_id: BridgeId,
+        retained: ConnectionId,
+        expected_source: Option<&ConnectionId>,
+        target: ConnectionId,
+        media: Option<(DirectionalMediaBridgePlan, Arc<dyn DataMessageBridgePolicy>)>,
+    ) -> Result<PreparedPeerHandoff> {
+        if self
+            .connection_lifecycle_tasks
+            .draining
+            .load(Ordering::Acquire)
+        {
+            return Err(RvoipError::InvalidState(
+                "connection lifecycle supervisor is draining",
+            ));
+        }
+        if retained == target
+            || expected_source.is_some_and(|source| source == &retained || source == &target)
+        {
+            return Err(RvoipError::AdmissionRejected(
+                "bridge replacement connections must be distinct",
+            ));
+        }
+
+        let (old_a, old_b, bridge_plan, expected_peer) =
+            self.cross_bridges
+                .get(&expected_bridge_id)
+                .map(|entry| -> Result<_> {
+                    let handle = entry.value();
+                    Ok((
+                        handle.a.clone(),
+                        handle.b.clone(),
+                        handle.directional_media_plan()?,
+                        {
+                            // A bridge with no peer ticket was never transport
+                            // fenced, which is a capability error. A ticket that
+                            // exists but is no longer active was retired by a
+                            // replacement that already committed, which is a lost
+                            // race. Keep the two apart so a glare loser reports
+                            // the same rejection wherever it is detected.
+                            let ticket = handle
+                                .peer_route_ticket()
+                                .ok_or(RvoipError::NotImplemented(
+                                "bridge destination replacement requires a transport-fenced bridge",
+                            ))?;
+                            if !ticket.is_active() {
+                                return Err(RvoipError::BridgeNotFound(expected_bridge_id.clone()));
+                            }
+                            ticket
+                        },
+                    ))
+                })
+                .transpose()?
+                .ok_or_else(|| RvoipError::BridgeNotFound(expected_bridge_id.clone()))?;
+        // The retiring peer is whichever bridge endpoint is not retained. A
+        // caller-supplied expectation is checked against it, never used in
+        // its place.
+        let (retained_is_a, source) = if old_a == retained {
+            (true, old_b.clone())
+        } else if old_b == retained {
+            (false, old_a.clone())
+        } else {
+            return Err(RvoipError::AdmissionRejected(
+                "bridge replacement endpoints do not match the expected generation",
+            ));
+        };
+        if expected_source.is_some_and(|expected| expected != &source) {
+            return Err(RvoipError::AdmissionRejected(
+                "bridge replacement endpoints do not match the expected generation",
+            ));
+        }
+        if source == target {
+            return Err(RvoipError::AdmissionRejected(
+                "bridge replacement connections must be distinct",
+            ));
+        }
+        let (media_plan, data_policy) = match media {
+            Some((plan, policy)) => {
+                // The caller's plan is relative to (retained, target); the
+                // replacement keeps the original (a, b) orientation.
+                let plan = if retained_is_a {
+                    plan
+                } else {
+                    DirectionalMediaBridgePlan::new(plan.b_to_a(), plan.a_to_b())?
+                };
+                (plan, policy)
+            }
+            None => (
+                bridge_plan,
+                self.cross_bridge_data_routes
+                    .get(&expected_bridge_id)
+                    .map(|route| route.policy())
+                    .ok_or(RvoipError::InvalidState(
+                        "bridge replacement requires its data route",
+                    ))?,
+            ),
+        };
+
+        match (
+            self.session_of(&retained),
+            self.session_of(&source),
+            self.session_of(&target),
+        ) {
+            (Some(retained_session), Some(source_session), Some(target_session))
+                if retained_session == source_session && retained_session == target_session => {}
+            // Core has always allowed bridges between registry-only
+            // Connections. Preserve that low-level test/embedding surface,
+            // while rejecting any partial or cross-Session replacement.
+            (None, None, None) => {}
+            _ => {
+                return Err(RvoipError::AdmissionRejected(
+                    "bridge replacement connections must belong to one session",
+                ));
+            }
+        }
+        let lifecycle_tickets = self.capture_connection_lifecycles(&[
+            retained.clone(),
+            source.clone(),
+            target.clone(),
+        ])?;
+        let bridge_id = BridgeId::new();
+        let reservation = self.reserve_cross_bridge_replacement_destination(
+            &expected_bridge_id,
+            &retained,
+            &source,
+            target.clone(),
+            bridge_id.clone(),
+        )?;
+        let (new_a, new_b) = if retained_is_a {
+            (retained.clone(), target.clone())
+        } else {
+            (target.clone(), retained.clone())
+        };
+        let replacement_context = ReplacementPreparationContext {
+            source: retained.clone(),
+            pending_destination: target.clone(),
+        };
+        // Losing a replacement race is not an invalid state. Another
+        // contender committed against this bridge generation, so report the
+        // same outcome a late contender already gets from the registry
+        // lookup and from `reserve_cross_bridge_replacement_destination`.
+        // One classifiable rejection lets a caller re-read the topology and
+        // retry instead of having to parse three different reasons.
+        let replacement_peer = expected_peer
+            .stage()
+            .ok_or_else(|| RvoipError::BridgeNotFound(expected_bridge_id.clone()))?;
+        let prepared = self
+            .prepare_cross_bridge_for_commit(
+                bridge_id,
+                new_a,
+                new_b,
+                media_plan,
+                data_policy,
+                false,
+                Some(&replacement_context),
+                replacement_peer.clone(),
+            )
+            .await?;
+
+        if let Err(error) = self.validate_connection_lifecycles(&lifecycle_tickets) {
+            prepared.stop().await;
+            return Err(error);
+        }
+        // Stream lookup and route activation suspended above. Live endpoint
+        // lifecycles prove the Connections, not the bridge generation, which
+        // a concurrent replacement may have retired meanwhile.
+        if !expected_peer.is_current() {
+            prepared.stop().await;
+            return Err(RvoipError::BridgeNotFound(expected_bridge_id));
+        }
+
+        Ok(PreparedPeerHandoff {
+            prepared,
+            reservation,
+            lifecycle_tickets,
+            previous_bridge_id: expected_bridge_id,
+            previous_a: old_a,
+            previous_b: old_b,
+            retained,
+            source,
+            target,
+            expected_peer,
+            replacement_peer,
+        })
+    }
+
+    /// The ownership-fenced publication of a prepared handoff. Never
+    /// suspends. The caller must already hold the retiring peer's quiescence.
+    fn publish_peer_handoff(
+        &self,
+        handoff: PreparedPeerHandoff,
+    ) -> std::result::Result<PeerHandoffReceipt, RejectedPeerHandoff> {
+        let PreparedPeerHandoff {
+            prepared,
+            reservation,
+            lifecycle_tickets,
+            previous_bridge_id: expected_bridge_id,
+            previous_a: old_a,
+            previous_b: old_b,
+            retained,
+            source,
+            target,
+            expected_peer,
+            replacement_peer,
+        } = handoff;
+        let bridge_id = prepared.handle.id.clone();
+        let new_a = prepared.handle.a.clone();
+        let new_b = prepared.handle.b.clone();
+        let terminal_task = self.cross_bridge_terminal_task(
+            bridge_id.clone(),
+            prepared.media_statuses.clone(),
+            prepared.data_terminal.clone(),
+        );
+        let mut prepared = Some(prepared);
+        let mut reservation = Some(reservation);
+        // Keep the non-Send std::sync lifecycle guards inside this entirely
+        // synchronous scope so the public commit futures remain Send.
+        let commit = match self.lock_connection_lifecycles(&lifecycle_tickets) {
+            Ok(lifecycle_guards) => {
+                let result = self.connection_lifecycle_tasks.spawn_with_commit(
+                    terminal_task,
+                    || -> Result<(CrossBridgeHandle, CrossBridgeDataRoute, PeerHandoffReceipt)> {
+                        let _ownership_guard = self
+                            .bridge_ownership_lock
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        let generation_matches = self
+                            .cross_bridges
+                            .get(&expected_bridge_id)
+                            .is_some_and(|current| current.a == old_a && current.b == old_b);
+                        let retained_owner_matches = self
+                            .cross_bridge_owners
+                            .get(&retained)
+                            .is_some_and(|owner| owner.value() == &expected_bridge_id);
+                        let source_owner_matches = self
+                            .cross_bridge_owners
+                            .get(&source)
+                            .is_some_and(|owner| owner.value() == &expected_bridge_id);
+                        if !generation_matches || !retained_owner_matches || !source_owner_matches
+                        {
+                            return Err(RvoipError::BridgeNotFound(expected_bridge_id.clone()));
+                        }
+                        let target_owner_matches = self
+                            .cross_bridge_owners
+                            .get(&target)
+                            .is_some_and(|owner| owner.value() == &bridge_id);
+                        if !target_owner_matches {
+                            return Err(RvoipError::BridgeNotFound(expected_bridge_id.clone()));
+                        }
+                        if !self
+                            .cross_bridge_data_routes
+                            .contains_key(&expected_bridge_id)
+                        {
+                            return Err(RvoipError::InvalidState(
+                                "bridge data route ended during replacement",
+                            ));
+                        }
+                        if !replacement_peer.commit_from(&expected_peer) {
+                            // Under quiescence the only way to fail is a
+                            // generation change. Without it, a fenced
+                            // transport may still hold a delivery guard.
+                            return Err(if expected_peer.is_current() {
+                                RvoipError::InvalidState(
+                                    "bridge transport delivery is in flight; use a bounded handoff commit",
+                                )
+                            } else {
+                                RvoipError::BridgeNotFound(expected_bridge_id.clone())
+                            });
+                        }
+
+                        // Fence queued and in-flight application-data work in
+                        // the same synchronous generation commit as media.
+                        // Removing the route from the registry prevents new
+                        // enqueue operations; aborting its workers here keeps
+                        // retained messages from reaching the retired peer
+                        // after the replacement generation is published.
+                        self.cross_bridge_data_routes
+                            .get(&expected_bridge_id)
+                            .expect("bridge data route was checked under ownership lock")
+                            .abort_workers();
+
+                        let PreparedCrossBridge {
+                            handle: new_handle,
+                            data_route: new_data_route,
+                            ..
+                        } = prepared
+                            .take()
+                            .expect("prepared bridge is consumed exactly once");
+
+                        // Every slow/fallible preparation and every generation
+                        // check has completed. Forwarding gates are synchronous
+                        // and infallible, so old-off/new-on is the linearization
+                        // boundary: the candidate was silent before this point
+                        // and the retired generation cannot publish afterward.
+                        self.cross_bridges
+                            .get(&expected_bridge_id)
+                            .expect("bridge generation was checked under ownership lock")
+                            .deactivate_media();
+                        new_handle.activate_media();
+
+                        let (_, old_handle) = self
+                            .cross_bridges
+                            .remove(&expected_bridge_id)
+                            .expect("bridge generation was checked under ownership lock");
+                        let (_, old_data_route) = self
+                            .cross_bridge_data_routes
+                            .remove(&expected_bridge_id)
+                            .expect("bridge data route was checked under ownership lock");
+                        self.cross_bridges.insert(bridge_id.clone(), new_handle);
+                        self.cross_bridge_data_routes
+                            .insert(bridge_id.clone(), new_data_route);
+                        self.cross_bridge_owners
+                            .insert(retained.clone(), bridge_id.clone());
+                        self.cross_bridge_owners.remove(&source);
+                        reservation
+                            .take()
+                            .expect("replacement destination reservation exists until commit")
+                            .commit();
+                        let committed_at = Utc::now();
+                        let receipt = PeerHandoffReceipt {
+                            previous_bridge_id: expected_bridge_id.clone(),
+                            bridge_id: bridge_id.clone(),
+                            retained: retained.clone(),
+                            source: source.clone(),
+                            target: target.clone(),
+                            committed_at,
+                        };
+                        self.emit(Event::PeerHandoffCommitted {
+                            previous_bridge_id: expected_bridge_id.clone(),
+                            bridge_id: bridge_id.clone(),
+                            retained: retained.clone(),
+                            source: source.clone(),
+                            target: target.clone(),
+                            at: committed_at,
+                        });
+                        self.emit(Event::ConnectionsUnbridged {
+                            bridge_id: expected_bridge_id.clone(),
+                            at: Utc::now(),
+                        });
+                        self.emit(Event::ConnectionsBridged {
+                            bridge_id: bridge_id.clone(),
+                            a: new_a.clone(),
+                            b: new_b.clone(),
+                            at: Utc::now(),
+                        });
+                        Ok((old_handle, old_data_route, receipt))
+                    },
+                );
+                drop(lifecycle_guards);
+                result
+            }
+            Err(error) => Err(error),
+        };
+
+        let (mut old_handle, mut old_data_route, receipt) = match commit {
+            Ok(committed) => committed,
+            Err(error) => {
+                return Err(RejectedPeerHandoff {
+                    error,
+                    prepared: prepared
+                        .take()
+                        .expect("rejected commit retains its prepared bridge"),
+                    reservation: reservation
+                        .take()
+                        .expect("rejected commit retains its target reservation"),
+                });
+            }
+        };
+
+        // There must be no suspension point between publishing the committed
+        // generation and returning its receipt. A caller may cancel any
+        // future at an `.await`; if retired-route cleanup were awaited here,
+        // cancellation could hide a successful cutover and invite the caller
+        // to roll domain state back to a bridge that is already retired.
+        // Retired resources converge under the bounded lifecycle supervisor.
+        let previous_bridge_id = receipt.previous_bridge_id.clone();
+        let replacement_bridge_id = receipt.bridge_id.clone();
+        let cleanup_spawned = self.connection_lifecycle_tasks.spawn(async move {
+            let (media_result, ()) = tokio::join!(old_handle.stop(), old_data_route.stop());
+            if let Err(error) = media_result {
+                warn!(
+                    previous_bridge_id = %previous_bridge_id,
+                    new_bridge_id = %replacement_bridge_id,
+                    %error,
+                    "replacement committed but the retired bridge did not converge cleanly"
+                );
+            }
+        });
+        if !cleanup_spawned {
+            // Dropping the rejected cleanup future synchronously drops both
+            // owners. Their Drop implementations disable/remove media routes
+            // and abort data workers as the fail-closed fallback.
+            warn!(
+                previous_bridge_id = %receipt.previous_bridge_id,
+                new_bridge_id = %receipt.bridge_id,
+                "replacement committed while retired bridge cleanup admission was closed"
+            );
+        }
+
+        Ok(receipt)
+    }
+
+    /// Prepare installed but silent media routes and bounded data workers
+    /// without publishing them into the bridge registry. Callers must
+    /// lifecycle-check and activate+commit the returned bundle or stop it on
+    /// every error path.
+    async fn prepare_cross_bridge_for_commit(
+        &self,
+        id: BridgeId,
+        a: ConnectionId,
+        b: ConnectionId,
+        media_plan: DirectionalMediaBridgePlan,
+        data_policy: Arc<dyn DataMessageBridgePolicy>,
+        buffer_before_commit: bool,
+        replacement_context: Option<&ReplacementPreparationContext>,
+        peer_ticket: crate::bridge::peer_switch::PeerRouteTicket,
+    ) -> Result<PreparedCrossBridge> {
+        let a_adapter = self.adapter_for(&a)?;
+        let b_adapter = self.adapter_for(&b)?;
         let deadline = self.config.bridge_stream_deadline;
         let poll_interval = std::time::Duration::from_millis(50);
         let start = std::time::Instant::now();
@@ -9847,62 +11449,62 @@ impl Orchestrator {
             let b_streams = b_adapter.streams(b.clone()).await?;
             let a_audio = a_streams
                 .into_iter()
-                .find(|s| s.kind() == StreamKind::Audio);
+                .find(|stream| stream.kind() == StreamKind::Audio);
             let b_audio = b_streams
                 .into_iter()
-                .find(|s| s.kind() == StreamKind::Audio);
+                .find(|stream| stream.kind() == StreamKind::Audio);
             match (a_audio, b_audio) {
-                (Some(a_s), Some(b_s)) => break (a_s, b_s),
+                (Some(a_stream), Some(b_stream)) => break (a_stream, b_stream),
                 _ if start.elapsed() >= deadline => {
                     return Err(RvoipError::AdmissionRejected(
                         "no audio stream on one or both connections within deadline",
                     ));
                 }
                 _ => {
+                    #[cfg(feature = "test-hooks")]
+                    if replacement_context.is_some() {
+                        self.wait_at_replacement_preparation_test_gate(
+                            ReplacementPreparationBoundary::StreamAvailabilityRetryDelay,
+                        )
+                        .await?;
+                    }
                     tokio::time::sleep(poll_interval).await;
                 }
             }
         };
 
-        // Resolve and validate the complete directional plan before either
-        // graph consumes a single-take source. Even a one-way route needs the
-        // source and destination codec identities, but it must validate only
-        // (and later acquire only) the sink/source halves that are enabled.
         let a_codec = a_audio.codec();
         let b_codec = b_audio.codec();
-        codec_to_pt(&a_codec.name)
-            .ok_or_else(|| RvoipError::UnsupportedCodec(a_codec.name.clone()))?;
-        codec_to_pt(&b_codec.name)
-            .ok_or_else(|| RvoipError::UnsupportedCodec(b_codec.name.clone()))?;
-
-        // Deferred transports such as SIP return a typed activation error
-        // here instead of consuming a source and later discovering that its
-        // peer sink cannot accept media.
+        validate_bridge_codec_admission(&a_codec)?;
+        validate_bridge_codec_admission(&b_codec)?;
         let a_out = if media_plan.b_to_a() {
-            Some(a_audio.try_frames_out()?)
+            Some(crate::media_graph::MediaSinkTarget::for_stream(
+                a_audio.as_ref(),
+            )?)
         } else {
             None
         };
         let b_out = if media_plan.a_to_b() {
-            Some(b_audio.try_frames_out()?)
+            Some(crate::media_graph::MediaSinkTarget::for_stream(
+                b_audio.as_ref(),
+            )?)
         } else {
             None
         };
+        let peer_transport_fenced = [a_out.as_ref(), b_out.as_ref()]
+            .into_iter()
+            .flatten()
+            .all(crate::media_graph::MediaSinkTarget::is_transport_fenced);
         if [a_out.as_ref(), b_out.as_ref()]
             .into_iter()
             .flatten()
-            .any(tokio::sync::mpsc::Sender::is_closed)
+            .any(crate::media_graph::MediaSinkTarget::is_closed)
         {
             return Err(RvoipError::InvalidState(
                 "bridge media target is already closed",
             ));
         }
 
-        // A bidirectional bridge may need to create both source graphs. Take
-        // their per-connection initialization locks in stable ID order and
-        // reserve every missing receiver before committing either one. If the
-        // second source is unavailable, dropping the first reservation puts
-        // its receiver back instead of leaving a half-created graph behind.
         let (a_source_graph, b_source_graph) = self
             .media_graphs_for_directional_bridge(
                 a.clone(),
@@ -9910,28 +11512,51 @@ impl Orchestrator {
                 b.clone(),
                 Arc::clone(&b_audio),
                 media_plan,
+                replacement_context,
             )
             .await?;
-
         let mut a_to_b = None;
         if let Some(b_out) = b_out {
-            let a_graph =
+            let graph =
                 a_source_graph.expect("validated A-to-B plan initializes the A source graph");
-            let route = a_graph.add_managed_sink(b_codec.clone(), b_out)?;
+            let route = graph.add_dormant_peer_sink_target(
+                b_codec.clone(),
+                b_out,
+                peer_ticket.clone(),
+                buffer_before_commit,
+            )?;
+            if let Some(context) = replacement_context {
+                debug_assert!(
+                    (a == context.source && b == context.pending_destination)
+                        || (a == context.pending_destination && b == context.source),
+                    "replacement preparation endpoints must match bridge endpoints"
+                );
+                #[cfg(feature = "test-hooks")]
+                self.wait_at_replacement_preparation_test_gate(if a == context.source {
+                    ReplacementPreparationBoundary::SourceToPendingRouteActivation
+                } else {
+                    ReplacementPreparationBoundary::PendingToSourceRouteActivation
+                })
+                .await?;
+            }
             if route.wait_active().await.is_err() {
                 let _ = route.remove().await;
                 return Err(RvoipError::InvalidState(
                     "A-to-B bridge route terminated during setup",
                 ));
             }
-            a_to_b = Some((a_graph, route));
+            a_to_b = Some((graph, route));
         }
-
         let mut b_to_a = None;
         if let Some(a_out) = a_out {
-            let b_graph =
+            let graph =
                 b_source_graph.expect("validated B-to-A plan initializes the B source graph");
-            let route = match b_graph.add_managed_sink(a_codec, a_out) {
+            let route = match graph.add_dormant_peer_sink_target(
+                a_codec,
+                a_out,
+                peer_ticket.clone(),
+                buffer_before_commit,
+            ) {
                 Ok(route) => route,
                 Err(error) => {
                     if let Some((_, route)) = a_to_b.take() {
@@ -9940,6 +11565,20 @@ impl Orchestrator {
                     return Err(error);
                 }
             };
+            if let Some(context) = replacement_context {
+                debug_assert!(
+                    (a == context.source && b == context.pending_destination)
+                        || (a == context.pending_destination && b == context.source),
+                    "replacement preparation endpoints must match bridge endpoints"
+                );
+                #[cfg(feature = "test-hooks")]
+                self.wait_at_replacement_preparation_test_gate(if b == context.source {
+                    ReplacementPreparationBoundary::SourceToPendingRouteActivation
+                } else {
+                    ReplacementPreparationBoundary::PendingToSourceRouteActivation
+                })
+                .await?;
+            }
             if route.wait_active().await.is_err() {
                 let a_route = a_to_b.take().map(|(_, route)| route);
                 let (a_result, b_result) = tokio::join!(
@@ -9956,56 +11595,37 @@ impl Orchestrator {
                     "B-to-A bridge route terminated during setup",
                 ));
             }
-            b_to_a = Some((b_graph, route));
+            b_to_a = Some((graph, route));
         }
 
         let mut handle = CrossBridgeHandle::with_directional_managed_media_graphs(
-            id.clone(),
+            id,
             a.clone(),
             b.clone(),
             a_to_b,
             b_to_a,
         );
-        let statuses = handle.managed_media_route_statuses();
-        debug_assert!(!statuses.is_empty(), "validated bridge has a media route");
-        let mut data_route = CrossBridgeDataRoute::new(
-            a.clone(),
-            b.clone(),
+        handle.peer_ticket = Some(peer_ticket);
+        handle.peer_transport_fenced = peer_transport_fenced;
+        let media_statuses = handle.managed_media_route_statuses();
+        debug_assert!(
+            !media_statuses.is_empty(),
+            "validated bridge has a media route"
+        );
+        let data_route = CrossBridgeDataRoute::new(
+            a,
+            b,
             Arc::clone(&a_adapter),
             Arc::clone(&b_adapter),
             data_policy,
         );
         let data_terminal = data_route.terminal_status();
-        if let Err(error) = self.validate_connection_lifecycles(&lifecycle_tickets) {
-            let (_media, ()) = tokio::join!(handle.stop(), data_route.stop());
-            return Err(error);
-        }
-        // Keep the non-Send std::sync lifecycle guards inside this entirely
-        // synchronous scope. In particular, the lock-error cleanup awaits
-        // below must not retain the Result temporary whose Ok variant contains
-        // those guards; public bridge futures are required to remain Send.
-        let commit = match self.lock_connection_lifecycles(&lifecycle_tickets) {
-            Ok(lifecycle_guards) => {
-                self.cross_bridges.insert(id.clone(), handle);
-                self.cross_bridge_data_routes.insert(id.clone(), data_route);
-                reservation.commit();
-                self.emit(Event::ConnectionsBridged {
-                    bridge_id: id.clone(),
-                    a,
-                    b,
-                    at: Utc::now(),
-                });
-                drop(lifecycle_guards);
-                Ok(())
-            }
-            Err(error) => Err((error, handle, data_route)),
-        };
-        if let Err((error, mut handle, mut data_route)) = commit {
-            let (_media, ()) = tokio::join!(handle.stop(), data_route.stop());
-            return Err(error);
-        }
-        self.supervise_cross_bridge_routes(id.clone(), statuses, data_terminal);
-        Ok(id)
+        Ok(PreparedCrossBridge {
+            handle,
+            data_route,
+            media_statuses,
+            data_terminal,
+        })
     }
 
     async fn media_graphs_for_directional_bridge(
@@ -10015,6 +11635,7 @@ impl Orchestrator {
         b: ConnectionId,
         b_stream: Arc<dyn crate::stream::MediaStream>,
         media_plan: DirectionalMediaBridgePlan,
+        replacement_context: Option<&ReplacementPreparationContext>,
     ) -> Result<(Option<MediaGraphHandle>, Option<MediaGraphHandle>)> {
         let bridge_policy = directional_bridge_media_graph_policy(
             self.connection_transport(&a)?,
@@ -10046,14 +11667,32 @@ impl Orchestrator {
         let init_locks = sources
             .iter()
             .map(|source| {
-                self.media_graph_inits
-                    .entry(source.connection_id.clone())
-                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                    .clone()
+                (
+                    source.connection_id.clone(),
+                    self.media_graph_inits
+                        .entry(source.connection_id.clone())
+                        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                        .clone(),
+                )
             })
             .collect::<Vec<_>>();
         let mut _init_guards = Vec::with_capacity(init_locks.len());
-        for lock in init_locks {
+        for (connection_id, lock) in init_locks {
+            if let Some(context) = replacement_context {
+                debug_assert!(
+                    connection_id == context.source || connection_id == context.pending_destination,
+                    "replacement graph source must be source or pending destination"
+                );
+                #[cfg(feature = "test-hooks")]
+                self.wait_at_replacement_preparation_test_gate(
+                    if connection_id == context.source {
+                        ReplacementPreparationBoundary::SourceMediaGraphInitLock
+                    } else {
+                        ReplacementPreparationBoundary::PendingMediaGraphInitLock
+                    },
+                )
+                .await?;
+            }
             _init_guards.push(lock.lock_owned().await);
         }
 
@@ -10346,6 +11985,28 @@ impl Orchestrator {
         Ok((MediaTapRoute::new(route), receiver))
     }
 
+    /// Attach a recording consumer whose graph queue is drained during an
+    /// explicit stop or source shutdown. The caller must keep consuming the
+    /// returned receiver while `ManagedMediaRoute::drain` runs.
+    async fn recording_tap_for_connection(
+        &self,
+        connection_id: ConnectionId,
+        channel_capacity: usize,
+    ) -> Result<(
+        MediaTapRoute,
+        tokio::sync::mpsc::Receiver<crate::stream::MediaFrame>,
+    )> {
+        let graph = self.media_graph_for_connection(connection_id).await?;
+        let source_codec = graph.latest_snapshot().source_codec;
+        let (target, receiver) = tokio::sync::mpsc::channel(channel_capacity.max(1));
+        let route = graph.add_recording_sink(source_codec, target)?;
+        route
+            .wait_active()
+            .await
+            .map_err(|_| RvoipError::InvalidState("media graph route terminated during setup"))?;
+        Ok((MediaTapRoute::new(route), receiver))
+    }
+
     /// Return the latest retained operational snapshot for a connection's
     /// reusable source graph. The snapshot is aggregate-safe and contains no
     /// tenant, participant, or packet payload data.
@@ -10599,6 +12260,15 @@ impl Orchestrator {
     }
 }
 
+/// Prove that a negotiated stream has both an RTP payload label and a codec
+/// implementation before the bridge acquires either stream's single-consumer
+/// receiver. Dynamic codecs such as AMR-WB have no conventional payload type,
+/// so their negotiated value must be considered here.
+fn validate_bridge_codec_admission(codec: &CodecInfo) -> Result<()> {
+    resolve_payload_type(codec).ok_or_else(|| RvoipError::UnsupportedCodec(codec.name.clone()))?;
+    validate_media_graph_codec(codec)
+}
+
 fn principal_has_complete_owner(principal: &AuthenticatedPrincipal) -> bool {
     !principal.subject.trim().is_empty()
         && principal
@@ -10675,6 +12345,39 @@ mod cross_crate_publisher_tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::Semaphore as TokioSemaphore;
 
+    #[tokio::test]
+    async fn prepared_outbound_cleanup_completion_is_sticky_for_all_waiters() {
+        let capacity = Arc::new(Semaphore::new(1));
+        let permit = capacity.try_acquire_owned().expect("test cleanup capacity");
+        let shared = Arc::new(PreparedOutboundShared::new(permit));
+
+        let first = {
+            let shared = Arc::clone(&shared);
+            tokio::spawn(async move { shared.wait_for_cleanup().await })
+        };
+        let second = {
+            let shared = Arc::clone(&shared);
+            tokio::spawn(async move { shared.wait_for_cleanup().await })
+        };
+        tokio::task::yield_now().await;
+
+        shared
+            .decision
+            .store(PREPARED_OUTBOUND_ABORTED, Ordering::Release);
+        shared.cleanup_complete.cancel();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            first.await.expect("first cleanup waiter");
+            second.await.expect("second cleanup waiter");
+        })
+        .await
+        .expect("registered cleanup waiters must wake");
+
+        tokio::time::timeout(Duration::from_millis(25), shared.wait_for_cleanup())
+            .await
+            .expect("a waiter created after completion must not miss it");
+    }
+
     #[test]
     fn amazon_connect_directional_bridges_tolerate_startup_backpressure() {
         for (left, right) in [
@@ -10711,6 +12414,38 @@ mod cross_crate_publisher_tests {
             policy.pre_sink_buffer_frames,
             default.pre_sink_buffer_frames
         );
+    }
+
+    #[cfg(feature = "amr-wb")]
+    #[test]
+    fn bridge_codec_admission_accepts_negotiated_amr_wb_and_rejects_incomplete_metadata() {
+        let valid = CodecInfo {
+            name: "AMR-WB".into(),
+            clock_rate_hz: 16_000,
+            channels: 1,
+            fmtp: Some("octet-align=1".into()),
+            payload_type: Some(105),
+        };
+        validate_bridge_codec_admission(&valid)
+            .expect("negotiated AMR-WB payload type 105 must be bridgeable");
+
+        let missing_payload = CodecInfo {
+            payload_type: None,
+            ..valid.clone()
+        };
+        assert!(matches!(
+            validate_bridge_codec_admission(&missing_payload),
+            Err(RvoipError::UnsupportedCodec(codec)) if codec == "AMR-WB"
+        ));
+
+        let malformed_fmtp = CodecInfo {
+            fmtp: Some("octet-align=invalid".into()),
+            ..valid
+        };
+        assert!(matches!(
+            validate_bridge_codec_admission(&malformed_fmtp),
+            Err(RvoipError::UnsupportedCodec(codec)) if codec == "AMR-WB"
+        ));
     }
 
     struct RecordingSink {

@@ -1,6 +1,6 @@
 # rvoip-core
 
-[![Crates.io](https://img.shields.io/crates/v/rvoip-core.svg)](https://crates.io/crates/foundation/rvoip-core)
+[![Crates.io](https://img.shields.io/crates/v/rvoip-core.svg)](https://crates.io/crates/rvoip-core)
 [![Documentation](https://docs.rs/rvoip-core/badge.svg)](https://docs.rs/rvoip-core)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/eisenzopf/rvoip)
 
@@ -18,9 +18,33 @@ crates. SIP, WebRTC, QUIC, WebTransport, and WebSocket all sit *above*
 ## Status
 
 **Release-gated SIP dependency** — published in the unified `0.3.x` workspace release. The
-type surface and `Orchestrator` are stable for the SIP path; optional
-features `vcon-signing` (vCon JWS signing) and `harness`
-(ASR/TTS/DialogManager dispatch) are alpha-quality and may evolve.
+type surface and `Orchestrator` are stable for the SIP path; the optional
+`vcon-signing` feature (vCon JWS signing) is alpha-quality and may evolve.
+
+### Cargo features
+
+Default features are `uctp`, `sip`, `rtp`, `media`, `vcon`, and `identity`.
+The `uctp`/`sip`/`rtp`/`media`/`identity` flags are advisory shape flags and
+gate no code; `vcon` pulls the optional `rvoip-vcon` document model. The
+opt-in features are:
+
+- `vcon-signing` — enables the vCon JWS signing API (implies `vcon`).
+- `harness` — compatibility no-op. Provider traits live in
+  `rvoip-core-traits`; the concrete `rvoip-harness` crate depends on
+  `rvoip-core` and supplies the in-process AI `ConnectionAdapter`.
+- `webrtc` — advisory shape flag for WebRTC consumers; gates no code here.
+- `client` — advisory shape flag for `rvoip-client`; gates no code here.
+- `aauth-experimental` — advisory flag reserved for actor-authentication
+  work; gates no code here.
+- `identity-fingerprint-binding` — advisory flag reserved for identity
+  fingerprint binding; gates no code here today.
+- `test-hooks` — deterministic, bounded orchestration gates used only by
+  integration tests; never enable in release builds.
+- `g729`, `opus`, `amr-nb`, `amr-wb`, `amr` (= both AMR variants),
+  `all-codecs` — forward the matching `rvoip-media-core` codec backends.
+  G.711 is always available.
+- `full` — `webrtc`, `harness`, `client`, `aauth-experimental`,
+  `identity-fingerprint-binding`, `vcon-signing`, and `all-codecs`.
 
 The rvoip 3 vision and rationale live alongside this crate's source:
 
@@ -33,7 +57,7 @@ The rvoip 3 vision and rationale live alongside this crate's source:
 ## Install
 
 Most users don't depend on `rvoip-core` directly — depend on
-[`rvoip-sip`](https://crates.io/crates/sip/rvoip-sip) (or eventually the
+[`rvoip-sip`](https://crates.io/crates/rvoip-sip) (or eventually the
 [`rvoip`](https://crates.io/crates/rvoip) umbrella) and the spine comes
 along transitively.
 
@@ -105,6 +129,22 @@ native negotiation to commit before updating a live bridge. Cross-transport
 media graphs receive the complete negotiated `CodecInfo`, including the exact
 dynamic payload type and fmtp, rather than reconstructing codec identity from
 the name. An adapter error leaves the graph on its prior codec generation.
+
+With the matching features enabled, G.729 (static PT 18) and AMR-NB / AMR-WB
+(negotiated PT only) flow through the media graph alongside G.711 and Opus;
+see [`docs/MEDIA_GRAPH_CODECS.md`](docs/MEDIA_GRAPH_CODECS.md) for the
+admission rules.
+
+## Participant roles and bridge handoff
+
+`Orchestrator::set_participant_role`, `take_over`, and `hand_off` change a
+Participant's role within a Session (for example promoting a human to
+`Agent` and demoting the previous Agent to `Observer`) without moving
+Connections or bridges. `Orchestrator::replace_bridge_destination` swaps one
+exact far leg of a live bridge, such as handing a caller from an in-process
+AI adapter to a human endpoint, while preserving the ingress Connection and
+Session; the expected bridge ID acts as a generation fence and a fresh ID is
+returned for the next replacement.
 
 ## License
 

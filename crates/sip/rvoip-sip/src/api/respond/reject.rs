@@ -113,15 +113,13 @@ impl RejectBuilder {
 
         if extras.is_empty() {
             self.coord
-                .helpers
-                .reject_call_exact(lifecycle_handle, self.status, &reason)
+                .reject_incoming_exact(lifecycle_handle, self.status, &reason)
                 .await
         } else {
             // Carry extras through the exact transition lane so there is one
             // response and no pre-dispatch session snapshot write.
             self.coord
-                .helpers
-                .reject_call_with_extras_exact(lifecycle_handle, self.status, &reason, extras)
+                .reject_incoming_with_extras_exact(lifecycle_handle, self.status, &reason, extras)
                 .await
         }
     }

@@ -43,24 +43,26 @@ ask *before* it acquires a stream's single-consumer receiver to hand over:
 leftover — it is the correct answer. There is no number to label its frames
 with, and the key the graph computes is stamped onto what it emits.
 
-### Packet time: AMR re-frames rather than refusing
+### Packet time: fixed-frame encoders re-frame rather than refusing
 
-`AmrAdapter::encode` takes exactly one frame — 160 samples narrowband, 320
-wideband — and rejects anything else. A source whose packet time is not 20 ms
-therefore used to fail on every packet: 10 ms is common on G.711 trunks and
-30 ms is what several SIP stacks default to.
+The media-core Opus adapter is configured for one 20 ms frame (960 samples per
+mono channel at 48 kHz). `AmrAdapter::encode` likewise takes exactly one frame
+— 160 samples narrowband, 320 wideband. Each adapter rejects any other sample
+count. Libopus can encode several standard frame durations, but an adapter
+created with the negotiated graph's default 20 ms configuration still has one
+exact input boundary.
 
 `ConfiguredTranscodingSession` now accumulates decoded PCM and emits exactly
 one frame's worth at a time, so a transcode yields zero, one, or several
-payloads rather than always one. 10 ms packets are joined; 30 ms packets are
-split with the remainder carried forward.
+payloads rather than always one. Short or uneven WebRTC PCM callbacks are
+joined into 20 ms Opus frames; 10 ms packets are joined and 30 ms packets are
+split with the remainder carried forward for AMR.
 
 Two properties keep this honest:
 
 - **It engages only for codecs that need it.** `AudioCodecSpec::required_frame_samples`
-  returns `Some` for AMR and `None` for everything else, so G.711, Opus and
-  `pcm_s16le` still pass through whatever length they are handed. Nothing about
-  their buffering or latency changed.
+  returns `Some` for Opus and AMR and `None` for codecs such as G.711 and
+  `pcm_s16le` that accept arbitrary input lengths.
 - **Timestamps re-sync whenever the buffer empties**, which is every packet in
   the 20 ms case. A stream that never needs buffering emits exactly the
   timestamps it did before, and a stream resuming after a gap picks up the

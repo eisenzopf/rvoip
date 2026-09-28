@@ -234,6 +234,7 @@ fn spawn_agent_call(
         info!(
             caller = %call.caller_connection_id(),
             vapi = %call.vapi_connection_id(),
+            ai_participant = %call.ai_participant_id(),
             bridge = %call.bridge_id(),
             "Vapi agent bridge active"
         );

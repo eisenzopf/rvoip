@@ -301,6 +301,54 @@ async fn loopback_datagram_pump_round_trip() {
         "ordering broken on client→server"
     );
 
+    // Generation-fenced peer queue: the transport must re-check the ticket at
+    // dequeue, not only at graph enqueue. An entry carrying a generation that
+    // was retired while it sat in the queue must never become a datagram on
+    // this connection, while an entry carrying the current generation must.
+    {
+        use rvoip_core::bridge::peer_switch::PeerRouteTicket;
+        use rvoip_core::peer_media::PeerMediaFrame;
+
+        let old = PeerRouteTicket::initial();
+        let current = old.stage().expect("stage a successor generation");
+        assert!(current.commit_from(&old), "successor takes over delivery");
+        assert!(!old.is_active() && current.is_active());
+
+        let peer_out = client_stream
+            .try_peer_frames_out()
+            .expect("peer queue on a live stream");
+        for (byte, ticket) in [(200u8, old), (201u8, current)] {
+            peer_out
+                .send(PeerMediaFrame::new(
+                    MediaFrame {
+                        stream_id: client_stream.id(),
+                        kind: StreamKind::Audio,
+                        payload: Bytes::from(vec![byte]),
+                        timestamp_rtp: 1_000,
+                        captured_at: Utc::now(),
+                        payload_type: None,
+                    },
+                    ticket,
+                ))
+                .await
+                .expect("peer queue accepts both entries");
+        }
+        let fresh = tokio::time::timeout(Duration::from_secs(5), server_in.recv())
+            .await
+            .expect("current-generation datagram timed out")
+            .expect("server stream closed");
+        assert_eq!(
+            fresh.payload[0], 201,
+            "stale peer audio reached the QUIC transport"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), server_in.recv())
+                .await
+                .is_err(),
+            "nothing further should arrive: the stale entry was discarded at dequeue"
+        );
+    }
+
     // Server → client: 10 frames.
     let server_out = rvoip_core::stream::MediaStream::frames_out(server_stream.as_ref());
     let mut client_in = client_stream

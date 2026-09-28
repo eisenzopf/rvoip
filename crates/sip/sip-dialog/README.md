@@ -1,20 +1,18 @@
-# rvoip-dialog-core
+# rvoip-sip-dialog
 
-[![Crates.io](https://img.shields.io/crates/v/rvoip-dialog-core.svg)](https://crates.io/crates/rvoip-dialog-core)
-[![Documentation](https://docs.rs/rvoip-dialog-core/badge.svg)](https://docs.rs/rvoip-dialog-core)
+[![Crates.io](https://img.shields.io/crates/v/rvoip-sip-dialog.svg)](https://crates.io/crates/rvoip-sip-dialog)
+[![Documentation](https://docs.rs/rvoip-sip-dialog/badge.svg)](https://docs.rs/rvoip-sip-dialog)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../../LICENSE)
 
-> **Beta scope notice:** this README still contains older package names and
-> broad completion language. For the `rvoip-sip` beta, dialog-layer claims are
+> **Beta scope notice:** for the `rvoip-sip` beta, dialog-layer claims are
 > governed by `crates/sip/rvoip-sip/docs/COMPATIBILITY_MATRIX.md` and
-> `crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md` until this README is fully
-> rewritten.
+> `crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md`.
 
-RFC 3261 SIP Dialog Management Layer for the [rvoip](../../../README.md) VoIP stack, providing clean separation between session coordination and SIP protocol operations.
+RFC 3261 SIP transaction and dialog layers for the [rvoip](../../../README.md) VoIP stack, providing clean separation between session coordination and SIP protocol operations.
 
 ## Overview
 
-`rvoip-dialog-core` implements the SIP dialog layer as defined in RFC 3261, serving as the protocol processing engine between session coordination (handled by `session-core`) and transaction reliability (handled by `transaction-core`). This crate manages SIP dialogs, routes messages within dialog contexts, and coordinates with the session layer through well-defined events.
+`rvoip-sip-dialog` implements the SIP dialog layer as defined in RFC 3261, and also contains the SIP transaction layer (the former `transaction-core` crate was merged into this crate as the `transaction` module). It sits between the `rvoip-sip` umbrella crate (session, proxy, and registrar coordination) and `rvoip-sip-transport` (network I/O). This crate manages SIP dialogs, routes messages within dialog contexts, and coordinates with the session layer through well-defined events.
 
 ## Features
 
@@ -27,6 +25,9 @@ RFC 3261 SIP Dialog Management Layer for the [rvoip](../../../README.md) VoIP st
   - ✅ ACK routing within confirmed dialogs
   - ✅ CANCEL request handling for early dialogs
   - ✅ Re-INVITE support for session modifications
+  - ✅ OPTIONS, INFO, PRACK (RFC 3262), and UPDATE (RFC 3311) handling
+  - ✅ REFER (RFC 3515) with implicit subscription and NOTIFY progress
+  - ✅ SUBSCRIBE/NOTIFY (RFC 6665) dialogs (`subscription` module) and presence (`presence` module)
 
 - **Dialog State Management**
   - ✅ RFC 3261 compliant dialog state machine
@@ -44,15 +45,26 @@ RFC 3261 SIP Dialog Management Layer for the [rvoip](../../../README.md) VoIP st
   - ✅ Contact header management
   - ✅ Route/Record-Route header handling
 
+- **Transaction Layer** (`transaction` module)
+  - ✅ RFC 3261 client/server INVITE and non-INVITE transactions with timers
+  - ✅ `TransactionManager` over any `rvoip_sip_transport::Transport`
+  - ✅ Ingress authorization seam: `SipRequestIngressAuthorizer` returns
+    `SipRequestAuthorization::{Authorized, Rejected, Dropped}`; `Dropped`
+    silently discards requests from a source that has exhausted its request
+    budget (no response is sent, so floods are not amplified)
+  - ✅ RFC 3263 resolution and failover of INVITE targets
+    (`tests/rfc3263_resolution.rs`, `tests/rfc3263_failover.rs`)
+
 - **Session Coordination**
-  - ✅ Event-driven architecture with `session-core`
+  - ✅ Event-driven architecture via `SessionCoordinationEvent` and the
+    `rvoip-infra-common` `GlobalEventCoordinator`
   - ✅ SDP negotiation coordination
   - ✅ Incoming call notification events
   - ✅ Call answered/terminated event propagation
   - ✅ Registration event handling
 
 - **Recovery & Reliability**
-  - ✅ Dialog recovery from failures
+  - ✅ Dialog recovery from failures (`Recovering` state)
   - ✅ Transaction correlation with dialogs
   - ✅ Graceful error handling and cleanup
   - ✅ Dialog expiration and cleanup
@@ -63,24 +75,14 @@ RFC 3261 SIP Dialog Management Layer for the [rvoip](../../../README.md) VoIP st
   - 🚧 Dialog forking support for parallel searches
   - 🚧 Dialog replacement (RFC 3891) support
   - 🚧 Enhanced dialog recovery mechanisms
-  - 🚧 Dialog transfer coordination
 
 - **Protocol Extensions**
-  - 🚧 SUBSCRIBE/NOTIFY dialog handling
-  - 🚧 REFER method support for call transfers
   - 🚧 MESSAGE method for instant messaging
-  - 🚧 UPDATE method for mid-dialog updates
 
 - **Performance Optimizations**
   - 🚧 Dialog caching and indexing improvements
   - 🚧 Memory-optimized dialog storage
-  - 🚧 High-throughput dialog processing
   - 🚧 Concurrent dialog operation batching
-
-- **Event System Integration**
-  - 🚧 Integration with infra-common event bus
-  - 🚧 Priority-based event processing
-  - 🚧 Advanced event filtering and routing
 
 ## Architecture
 
@@ -89,49 +91,40 @@ RFC 3261 SIP Dialog Management Layer for the [rvoip](../../../README.md) VoIP st
 ```
 ┌─────────────────────────────────────────┐
 │      Application Layer                  │
-│    (client-core, call-engine)           │
 ├─────────────────────────────────────────┤
 │        Session Layer                    │
-│       (session-core)                    │
+│         (rvoip-sip)                     │
 ├─────────────────────────────────────────┤
-│        Dialog Layer                     │
-│      (dialog-core) ⬅️ YOU ARE HERE      │
-├─────────────────────────────────────────┤
-│      Transaction Layer                  │
-│     (transaction-core)                  │
+│   Dialog + Transaction Layers           │
+│   (rvoip-sip-dialog) ⬅️ YOU ARE HERE    │
 ├─────────────────────────────────────────┤
 │       Transport Layer                   │
-│      (sip-transport)                    │
+│     (rvoip-sip-transport)               │
 └─────────────────────────────────────────┘
 ```
 
 ### Dialog Management Architecture
 
-```rust
-pub struct DialogManager {
-    // Core components
-    transaction_manager: Arc<TransactionManager>,
-    transport: Arc<dyn SipTransport>,
-    
-    // Dialog storage and routing
-    dialogs: Arc<RwLock<DialogStore>>,
-    routing_table: Arc<RwLock<DialogRoutingTable>>,
-    
-    // Session coordination
-    session_coordinator: Option<mpsc::Sender<SessionCoordinationEvent>>,
-    
-    // Event processing
-    event_processor: Arc<DialogEventProcessor>,
-}
-```
+`DialogManager` (in `src/manager/core.rs`) owns an `Arc<TransactionManager>`
+and the local bind address, and keeps dialogs in `DashMap`s keyed by
+`DialogId` plus lookup tables keyed by Call-ID and tags. Session
+coordination events are emitted with `emit_session_coordination_event(..)`
+through the global event coordinator rather than a per-manager channel.
+
+`UnifiedDialogManager` wraps `DialogManager` with a `DialogManagerConfig`
+(client, server, or hybrid behaviour) and exposes the one-liner
+`send_*` helpers used by `UnifiedDialogApi`, `DialogClient`, and
+`DialogServer`.
 
 ### Dialog State Machine
 
 ```rust
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DialogState {
+    Initial,    // Created, before any response
     Early,      // After 1xx response received/sent
     Confirmed,  // After 2xx response received/sent
+    Recovering, // Recovery in progress after a failure
     Terminated, // After BYE or error
 }
 ```
@@ -141,81 +134,77 @@ pub enum DialogState {
 ### Basic Dialog Creation
 
 ```rust
-use rvoip_dialog_core::{DialogManager, DialogError, SessionCoordinationEvent};
-use rvoip_transaction_core::TransactionManager;
-use rvoip_sip_transport::UdpTransport;
+use rvoip_sip_dialog::api::{DialogApi, DialogServer};
+use rvoip_sip_dialog::api::config::ServerConfig;
+use rvoip_sip_dialog::transaction::transport::{TransportManager, TransportManagerConfig};
+use rvoip_sip_dialog::transaction::TransactionManager;
 use std::sync::Arc;
 
 #[tokio::main]
-async fn main() -> Result<(), DialogError> {
-    // Create dependencies
-    let transaction_manager = Arc::new(TransactionManager::new().await?);
-    let transport = Arc::new(UdpTransport::new("0.0.0.0:5060").await?);
-    
-    // Create dialog manager
-    let dialog_manager = DialogManager::new(
-        transaction_manager,
-        transport
-    ).await?;
-    
-    // Set up session coordination
-    let (session_tx, mut session_rx) = tokio::sync::mpsc::channel(100);
-    dialog_manager.set_session_coordinator(session_tx);
-    
-    // Handle session events
-    tokio::spawn(async move {
-        while let Some(event) = session_rx.recv().await {
-            match event {
-                SessionCoordinationEvent::IncomingCall { dialog_id, .. } => {
-                    println!("New incoming call: {:?}", dialog_id);
-                }
-                SessionCoordinationEvent::CallAnswered { dialog_id, .. } => {
-                    println!("Call answered: {:?}", dialog_id);
-                }
-                _ => {}
-            }
-        }
-    });
-    
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Transport layer (UDP on 0.0.0.0:5060)
+    let config = TransportManagerConfig {
+        enable_udp: true,
+        bind_addresses: vec!["0.0.0.0:5060".parse()?],
+        ..Default::default()
+    };
+    let (transport, transport_rx) = TransportManager::new(config).await?;
+
+    // Transaction layer
+    let (transaction_manager, transaction_rx) =
+        TransactionManager::with_transport_manager(transport, transport_rx, Some(100)).await?;
+
+    // Dialog layer; session coordination events flow via the
+    // GlobalEventCoordinator wired up by with_global_events(..)
+    let server = DialogServer::with_global_events(
+        Arc::new(transaction_manager),
+        transaction_rx,
+        ServerConfig::default(),
+    )
+    .await?;
+
     // Start processing
-    dialog_manager.start().await?;
-    
+    server.start().await?;
+
     Ok(())
 }
+```
+
+If you want the low-level manager directly, the constructors are:
+
+```rust
+use rvoip_sip_dialog::transaction::TransactionManager;
+use rvoip_sip_dialog::DialogManager;
+use rvoip_sip_transport::UdpTransport;
+use std::sync::Arc;
+
+let local_addr = "0.0.0.0:5060".parse()?;
+let (transport, transport_rx) = UdpTransport::bind(local_addr, None).await?;
+let (transaction_manager, _transaction_rx) =
+    TransactionManager::new(Arc::new(transport), transport_rx, None).await?;
+let dialog_manager = DialogManager::new(Arc::new(transaction_manager), local_addr).await?;
+dialog_manager.start().await?;
 ```
 
 ### Outgoing Call Example
 
 ```rust
-use rvoip_dialog_core::{DialogManager, DialogId};
-use rvoip_sip_core::{Method, Request, Uri};
+use rvoip_sip_dialog::api::{DialogApi, DialogClient};
+use rvoip_sip_dialog::{DialogError, DialogId};
 
 async fn make_call(
-    dialog_manager: &DialogManager,
-    from_uri: Uri,
-    to_uri: Uri,
-    sdp_offer: String,
-) -> Result<DialogId, DialogError> {
-    // Create INVITE request
-    let invite_request = Request::builder()
-        .method(Method::INVITE)
-        .uri(to_uri.clone())
-        .header("From", format!("<{}>;tag={}", from_uri, generate_tag()))
-        .header("To", format!("<{}>", to_uri))
-        .header("Call-ID", generate_call_id())
-        .header("CSeq", "1 INVITE")
-        .header("Content-Type", "application/sdp")
-        .body(sdp_offer)
-        .build()?;
-    
-    // Create dialog and send INVITE
-    let dialog_id = dialog_manager.create_dialog(&invite_request).await?;
-    let transaction_id = dialog_manager.send_request(
-        &dialog_id,
-        Method::INVITE,
-        Some(invite_request.body().clone())
-    ).await?;
-    
+    client: &DialogClient,
+    from_uri: &str,
+    to_uri: &str,
+) -> Result<DialogId, Box<dyn std::error::Error>> {
+    // Create an outgoing dialog; the API generates Call-ID, tags, and CSeq
+    let dialog = client.create_dialog(from_uri, to_uri).await?;
+    let dialog_id = dialog.id().clone();
+
+    // In-dialog one-liners
+    let _info_tx = client.send_info(&dialog_id, "Application data".to_string()).await?;
+    let _bye_tx = client.send_bye(&dialog_id).await?;
+
     Ok(dialog_id)
 }
 ```
@@ -223,28 +212,25 @@ async fn make_call(
 ### Registration Handling
 
 ```rust
+use rvoip_sip_core::builder::SimpleRequestBuilder;
+use rvoip_sip_dialog::{DialogError, DialogManager};
+use std::net::SocketAddr;
+
 async fn handle_registration(
     dialog_manager: &DialogManager,
-    user_uri: Uri,
-    contact_uri: Uri,
-    expires: u32,
+    source: SocketAddr,
 ) -> Result<(), DialogError> {
-    let register_request = Request::builder()
-        .method(Method::REGISTER)
-        .uri(user_uri.clone())
-        .header("From", format!("<{}>", user_uri))
-        .header("To", format!("<{}>", user_uri))
-        .header("Contact", format!("<{}>;expires={}", contact_uri, expires))
-        .header("Call-ID", generate_call_id())
-        .header("CSeq", "1 REGISTER")
-        .build()?;
-    
-    dialog_manager.handle_register(
-        register_request,
-        "0.0.0.0:5060".parse()?
-    ).await?;
-    
-    Ok(())
+    let register_request = SimpleRequestBuilder::register("sip:example.com")?
+        .from("Alice", "sip:alice@example.com", Some("tag-1"))
+        .to("Alice", "sip:alice@example.com", None)
+        .call_id("register-1")
+        .cseq(1)
+        .via("192.0.2.10:5060", "UDP", Some("z9hG4bK-1"))
+        .contact("sip:alice@192.0.2.10:5060", None)
+        .build();
+
+    // Emits SessionCoordinationEvent::RegistrationRequest for the session layer
+    dialog_manager.handle_register(register_request, source).await
 }
 ```
 
@@ -253,29 +239,22 @@ async fn handle_registration(
 ### Core Dependencies
 
 - **`rvoip-sip-core`**: Provides SIP message types, parsing, and core protocol structures
-- **`rvoip-transaction-core`**: Handles transaction reliability and retransmission
-- **`rvoip-sip-transport`**: Provides network transport abstraction
+- **`rvoip-sip-transport`**: Provides network transport abstraction (`dns` feature enabled for RFC 3263)
+- **`rvoip-infra-common`**: Global event coordinator used for session coordination
+- **`rvoip-core-traits`**: Shared identity/principal types used by the ingress authorizer
 - **`tokio`**: Async runtime for concurrent dialog processing
 - **`async-trait`**: Async trait support for transport abstraction
-
-### Optional Dependencies
-
-- **`rvoip-infra-common`**: Event bus integration (planned)
-- **`serde`**: Serialization support for dialog persistence (recovery feature)
-- **`tracing`**: Enhanced logging and observability (monitoring feature)
 
 ### Integration with rvoip Stack
 
 ```
 ┌─────────────────────────────────────────┐
 │            Application Layer            │
-│         (client-core, call-engine)      │
 ├─────────────────────────────────────────┤
-│          rvoip-session-core             │ ← Coordinates sessions
+│              rvoip-sip                  │ ← Coordinates sessions
 │                    ↕️                    │
-│         rvoip-dialog-core  ⬅️ YOU ARE HERE │ ← Manages SIP dialogs
-│                    ↕️                    │
-│         rvoip-transaction-core          │ ← Handles reliability
+│   rvoip-sip-dialog  ⬅️ YOU ARE HERE      │ ← Manages SIP dialogs
+│   (transaction module inside)           │ ← Handles reliability
 ├─────────────────────────────────────────┤
 │         rvoip-sip-transport             │ ← Network transport
 └─────────────────────────────────────────┘
@@ -283,62 +262,47 @@ async fn handle_registration(
 
 The dialog layer provides:
 
-- **Upward Interface**: Session coordination events to `session-core`
-- **Downward Interface**: Transaction requests to `transaction-core`
+- **Upward Interface**: `SessionCoordinationEvent`s to `rvoip-sip` via the global event coordinator
+- **Downward Interface**: Transaction requests to the in-crate `transaction` module
 - **Horizontal Interface**: Dialog state queries for other components
 
 ## Performance Characteristics
 
 ### Dialog Operations
 
-- **Dialog Creation**: O(1) with optimized hash-based storage
-- **Dialog Lookup**: O(1) average case with efficient routing table
-- **Message Routing**: O(1) for established dialogs, O(log n) for routing decisions
-- **Dialog Cleanup**: Batched cleanup to minimize lock contention
-
-### Memory Management
-
-- **Dialog Storage**: Memory-efficient with reference counting for shared data
-- **Event Processing**: Zero-copy event propagation where possible
-- **Header Processing**: Cached header parsing to avoid repeated work
-- **Transaction Correlation**: Optimized correlation tables
+- **Dialog Creation**: O(1) with `DashMap`-based storage
+- **Dialog Lookup**: O(1) average case via Call-ID/tag lookup tables
+- **Dialog Cleanup**: Background cleanup tasks to avoid blocking
 
 ### Concurrency
 
-- **Read-Heavy Workloads**: Optimized with `RwLock` for dialog access
-- **Write Operations**: Minimized lock scope for dialog modifications
+- **Lock-free reads**: `DashMap` dialog storage and `arc-swap` event subscriber lists
 - **Event Processing**: Async processing with configurable buffer sizes
-- **Resource Cleanup**: Background cleanup tasks to avoid blocking
 
 ## Error Handling
 
-The crate provides comprehensive error handling with categorized error types:
+`DialogError` uses struct-style variants; `DialogResult<T>` is the alias for
+`Result<T, DialogError>`:
 
 ```rust
-use rvoip_dialog_core::{DialogError, DialogResult};
+use rvoip_sip_dialog::{DialogError, DialogResult};
 
 match dialog_result {
-    Err(DialogError::DialogNotFound(dialog_id)) => {
+    Err(DialogError::DialogNotFound { id }) => {
         // Handle missing dialog - often recoverable for new requests
-        if request.method() == Method::INVITE {
-            create_new_dialog(request).await?;
-        }
+        log::warn!("dialog {} not found", id);
     }
-    Err(DialogError::InvalidDialogState { current, expected }) => {
+    Err(DialogError::InvalidState { expected, actual }) => {
         // Handle state violations - typically not recoverable
-        log::error!("Dialog state error: expected {:?}, got {:?}", expected, current);
-        terminate_dialog(dialog_id).await?;
+        log::error!("Dialog state error: expected {}, got {}", expected, actual);
     }
-    Err(DialogError::TransactionError(tx_error)) => {
-        // Handle transaction layer errors - may be recoverable
-        if tx_error.is_recoverable() {
-            retry_operation().await?;
-        }
+    Err(DialogError::TransactionError { message }) => {
+        // Handle transaction layer errors
+        log::error!("transaction error: {}", message);
     }
-    Err(DialogError::SessionCoordinationFailed(msg)) => {
-        // Handle session layer communication errors
-        log::warn!("Session coordination failed: {}", msg);
-        // Continue dialog processing without session coordination
+    Err(other) => {
+        // Every variant maps to a stable, payload-free class for logs/metrics
+        log::error!("dialog error class {}: {}", other.diagnostic_class(), other);
     }
     Ok(result) => {
         // Handle success
@@ -346,45 +310,36 @@ match dialog_result {
 }
 ```
 
-### Error Categories
-
-```rust
-impl DialogError {
-    pub fn is_recoverable(&self) -> bool {
-        match self {
-            DialogError::DialogNotFound(_) => true,
-            DialogError::TransactionError(e) => e.is_recoverable(),
-            DialogError::InvalidDialogState { .. } => false,
-            DialogError::SessionCoordinationFailed(_) => true,
-            _ => false,
-        }
-    }
-}
-```
+Other variants include `DialogAlreadyExists`, `ProtocolError`, `RoutingError`,
+`SdpError`, `InternalError`, `NetworkError`, `TimeoutError`, and
+`ConfigError` (see `src/errors/dialog_errors.rs`).
 
 ## Testing
 
-Run the comprehensive test suite:
+Run the test suite:
 
 ```bash
 # Run all tests
-cargo test -p rvoip-dialog-core
+cargo test -p rvoip-sip-dialog
 
 # Run with specific features
-cargo test -p rvoip-dialog-core --features "recovery events testing"
+cargo test -p rvoip-sip-dialog --features "recovery events testing"
 
-# Run integration tests
-cargo test -p rvoip-dialog-core --test integration_tests
+# Dialog lifecycle and RFC compliance suites
+cargo test -p rvoip-sip-dialog --test dialog_lifecycle
+cargo test -p rvoip-sip-dialog --test sip_compliance
+cargo test -p rvoip-sip-dialog --features generated-validation --test generated_sip_compliance
 
-# Run RFC compliance tests
-cargo test -p rvoip-dialog-core --test rfc_compliance
-
-# Run with SIPp interoperability tests
-cargo test -p rvoip-dialog-core --test sipp_integration
-
-# Run performance benchmarks
-cargo bench -p rvoip-dialog-core
+# REFER, subscriptions, and RFC 3263 failover
+cargo test -p rvoip-sip-dialog --test refer_transfer_tests
+cargo test -p rvoip-sip-dialog --test subscription_dialogs
+cargo test -p rvoip-sip-dialog --test rfc3263_failover
 ```
+
+Other suites in [`tests/`](tests/) cover the API layer, BYE termination,
+dialog recovery and state, identity signing/verification, MTU failover,
+OPTIONS, PRACK, REGISTER flows, request routing, rport restamping, SDP
+negotiation, multi-ID subscriptions, and the unified API.
 
 ## Features
 
@@ -392,75 +347,103 @@ The crate supports the following optional features:
 
 - **`recovery`** (default): Dialog recovery and persistence capabilities
 - **`events`** (default): Enhanced event system with filtering
-- **`monitoring`** (default): Metrics and observability support
 - **`testing`**: Additional test utilities and mock implementations
+- **`generated-validation`**: Forwards to `rvoip-sip-core/generated-validation` for the generated compliance suite
+- **`ws`**: WebSocket transport cfg gates (a no-op until `rvoip-sip-transport`'s `ws` feature is wired through)
+- **`dev`**: `recovery` + `events` + `testing`
+- **`dev-insecure-tls`**: Dev-only; forwards to `rvoip-sip-transport/dev-insecure-tls`
 
 Disable default features and enable only what you need:
 
 ```toml
 [dependencies]
-rvoip-dialog-core = { version = "0.1", default-features = false, features = ["recovery"] }
+rvoip-sip-dialog = { version = "0.3.10", default-features = false, features = ["recovery"] }
 ```
 
 ## Examples
 
-The `examples/` directory contains comprehensive examples:
+The `examples/` directory contains:
 
 - **`basic_dialog.rs`** - Basic dialog creation and management
 - **`dialog_recovery.rs`** - Dialog recovery and failure handling
 - **`multi_dialog.rs`** - Managing multiple concurrent dialogs
-- **`outgoing_call.rs`** - Complete outgoing call flow
-- **`registration_server.rs`** - Registration processing example
-- **`session_coordination.rs`** - Integration with session-core
+- **`global_events_test.rs`** - Global event coordinator wiring
+- **`phase3_integration_showcase.rs`** - The one-liner `send_*` helpers end to end
+- **`debug_state_error.rs`**, **`simple_test.rs`** - Small diagnostic programs
 
 Run examples:
 
 ```bash
-cargo run -p rvoip-dialog-core --example basic_dialog
-cargo run -p rvoip-dialog-core --example outgoing_call --features "recovery"
+cargo run -p rvoip-sip-dialog --example basic_dialog
+cargo run -p rvoip-sip-dialog --example dialog_recovery --features "recovery"
 ```
 
 ## 🔧 **Core API**
 
 ### DialogManager
-The main interface for dialog management:
+The low-level interface for dialog management:
 
 ```rust
 impl DialogManager {
     // Lifecycle
     pub async fn new(
         transaction_manager: Arc<TransactionManager>,
-        transport: Arc<dyn SipTransport>
-    ) -> Result<Self, DialogError>;
-    
-    pub async fn start(&self) -> Result<(), DialogError>;
-    pub async fn stop(&self) -> Result<(), DialogError>;
-    
+        local_address: SocketAddr,
+    ) -> DialogResult<Self>;
+    pub async fn with_global_events(
+        transaction_manager: Arc<TransactionManager>,
+        transaction_events: mpsc::Receiver<TransactionEvent>,
+        local_address: SocketAddr,
+    ) -> DialogResult<Self>;
+
+    pub async fn start(&self) -> DialogResult<()>;
+    pub async fn stop(&self) -> DialogResult<()>;
+
     // Dialog operations
-    pub async fn create_dialog(&self, request: &Request) -> Result<DialogId, DialogError>;
-    pub async fn find_dialog(&self, request: &Request) -> Option<DialogId>;
-    pub async fn terminate_dialog(&self, dialog_id: &DialogId) -> Result<(), DialogError>;
-    
+    pub async fn create_dialog(&self, request: &Request) -> DialogResult<DialogId>;
+    pub async fn create_outgoing_dialog(&self, local_uri: Uri, remote_uri: Uri, call_id: Option<String>) -> DialogResult<DialogId>;
+    pub async fn find_dialog_for_request(&self, request: &Request) -> Option<DialogId>;
+    pub async fn terminate_dialog(&self, dialog_id: &DialogId) -> DialogResult<()>;
+
     // Protocol handling
-    pub async fn handle_invite(&self, request: Request, source: SocketAddr) -> Result<(), DialogError>;
-    pub async fn handle_bye(&self, request: Request) -> Result<(), DialogError>;
-    pub async fn handle_register(&self, request: Request, source: SocketAddr) -> Result<(), DialogError>;
-    
+    pub async fn handle_invite(&self, request: Request, source: SocketAddr) -> DialogResult<()>;
+    pub async fn handle_bye(&self, request: Request) -> DialogResult<()>;
+    pub async fn handle_register(&self, request: Request, source: SocketAddr) -> DialogResult<()>;
+    pub async fn handle_refer(&self, request: Request, source: SocketAddr) -> DialogResult<()>;
+    pub async fn handle_subscribe(&self, request: Request, source: SocketAddr) -> DialogResult<()>;
+    pub async fn handle_notify(&self, request: Request, source: SocketAddr) -> DialogResult<()>;
+
     // Request/Response operations
-    pub async fn send_request(&self, dialog_id: &DialogId, method: Method, body: Option<Bytes>) -> Result<TransactionKey, DialogError>;
-    pub async fn send_response(&self, transaction_id: &TransactionKey, response: Response) -> Result<(), DialogError>;
-    
-    // Session coordination
-    pub fn set_session_coordinator(&self, sender: mpsc::Sender<SessionCoordinationEvent>);
-    
+    pub async fn send_request(&self, dialog_id: &DialogId, method: Method, body: Option<Bytes>) -> DialogResult<TransactionKey>;
+    pub async fn send_response(&self, transaction_id: &TransactionKey, response: Response) -> DialogResult<()>;
+
+    // Session coordination (delivered through the GlobalEventCoordinator)
+    pub async fn emit_session_coordination_event(&self, event: SessionCoordinationEvent);
+
     // Monitoring and diagnostics
-    pub fn get_dialog_count(&self) -> usize;
-    pub fn get_dialog_stats(&self) -> DialogStats;
+    pub fn dialog_count(&self) -> usize;
+    pub fn retention_counts(&self) -> DialogManagerRetentionCounts;
 }
 ```
 
+### UnifiedDialogManager one-liners
+
+`UnifiedDialogManager` (and the `UnifiedDialogApi` / `DialogClient` /
+`DialogServer` wrappers) add in-dialog helpers, each returning
+`ApiResult<TransactionKey>`:
+
+- `send_bye(&dialog_id)`, `send_cancel(&dialog_id)`, `send_prack(&dialog_id, rseq)`
+- `send_refer(&dialog_id, target_uri, refer_body)` and `send_refer_notify(&dialog_id, status_code, reason)`
+- `send_notify(&dialog_id, event, body, subscription_state)`
+- `send_update(&dialog_id, sdp)` and `send_info(&dialog_id, info_body)`
+- `send_subscribe_out_of_dialog_for_session(..)` and `send_subscribe_refresh(..)`
+- `send_invite_with_auth(..)`, `send_invite_with_options(..)`, and the session-timer variants
+
+`UnifiedDialogApi::get_stats()` returns `DialogStats` (active/total dialogs,
+successful/failed calls).
+
 ### Session Coordination Events
-Events sent to `session-core` for session management:
+Events delivered to the session layer (`src/events/session_coordination.rs`):
 
 ```rust
 #[derive(Debug, Clone)]
@@ -487,58 +470,38 @@ pub enum SessionCoordinationEvent {
     },
     DialogStateChanged {
         dialog_id: DialogId,
-        old_state: DialogState,
-        new_state: DialogState,
+        new_state: String,
+        previous_state: String,
     },
+    // ... plus ReInvite, CallRinging, CallTerminating, ByeReceived, CallCancelled,
+    // ResponseReceived, EarlyMedia, TransferRequest, SessionRefreshed,
+    // OutboundFlowFailed, RegisteredFlowClosed, and others
 }
 ```
 
 ## 🔍 **Integration with RVOIP**
 
-This crate is designed to be used by `session-core` as its dialog management layer:
+`rvoip-sip` uses this crate as its dialog and transaction layer. It builds a
+`UnifiedDialogApi` with the shared global event coordinator
+(`UnifiedDialogApi::with_shared_global_events_and_coordinator(..)`) and
+subscribes to `SessionCoordinationEvent`s there; there is no per-manager
+`set_session_coordinator` channel any more.
 
 ```rust
-// In session-core
-use rvoip_dialog_core::{DialogManager, SessionCoordinationEvent};
+use rvoip_sip_dialog::{DialogManagerConfig, UnifiedDialogApi};
+use std::sync::Arc;
 
-impl SessionManager {
-    pub async fn new() -> Result<Self, Error> {
-        let dialog_manager = DialogManager::new(
-            transaction_manager,
-            transport
-        ).await?;
-        
-        // Set up coordination
-        let (coord_tx, coord_rx) = mpsc::channel(100);
-        dialog_manager.set_session_coordinator(coord_tx);
-        
-        // Handle coordination events
-        self.spawn_coordination_handler(coord_rx);
-        
-        Ok(SessionManager {
-            dialog_manager,
-            // ... other fields
-        })
-    }
-    
-    async fn spawn_coordination_handler(&self, mut coord_rx: mpsc::Receiver<SessionCoordinationEvent>) {
-        tokio::spawn(async move {
-            while let Some(event) = coord_rx.recv().await {
-                match event {
-                    SessionCoordinationEvent::IncomingCall { dialog_id, .. } => {
-                        // Create new session for incoming call
-                        self.create_session(dialog_id).await;
-                    }
-                    SessionCoordinationEvent::CallTerminated { dialog_id, .. } => {
-                        // Clean up session resources
-                        self.terminate_session(dialog_id).await;
-                    }
-                    _ => {}
-                }
-            }
-        });
-    }
-}
+let config = DialogManagerConfig::client("0.0.0.0:5060".parse()?)
+    .with_from_uri("sip:alice@example.com")
+    .build();
+
+let api = UnifiedDialogApi::with_global_events_and_coordinator(
+    Arc::new(transaction_manager),
+    transaction_rx,
+    config,
+    global_coordinator, // Arc<rvoip_infra_common::events::coordinator::GlobalEventCoordinator>
+)
+.await?;
 ```
 
 ## Future Improvements
@@ -547,27 +510,26 @@ See [TODO.md](./TODO.md) for a comprehensive list of planned enhancements, inclu
 
 - Advanced dialog forking and parallel search support
 - Enhanced dialog recovery mechanisms with persistent state
-- Integration with infra-common event bus for high-throughput processing
 - Performance optimizations for high-scale deployments
-- Protocol extensions (SUBSCRIBE/NOTIFY, REFER, MESSAGE)
+- MESSAGE method support
 - Advanced monitoring and diagnostics capabilities
 
 ## 🚀 **Development Status**
 
-This crate is part of the RVOIP architecture refactoring to establish clean layer separation. Current status:
-
 - ✅ Core dialog management implemented
-- ✅ Basic protocol handling (INVITE, BYE, REGISTER)
-- ✅ Session coordination events
+- ✅ Transaction layer merged into this crate (`transaction` module)
+- ✅ Protocol handling for INVITE, BYE, CANCEL, ACK, REGISTER, OPTIONS, INFO, PRACK, UPDATE, REFER, SUBSCRIBE, NOTIFY
+- ✅ Session coordination events via the global event coordinator
+- ✅ RFC 3263 resolution and failover
 - 🚧 Advanced recovery mechanisms
 - 🚧 Performance optimizations
-- 🚧 Protocol extensions
+- 🚧 MESSAGE method
 
 ## Contributing
 
 Contributions are welcome! Please see the main [rvoip contributing guidelines](../../../README.md#contributing) for details.
 
-When contributing to dialog-core:
+When contributing to `rvoip-sip-dialog`:
 1. Ensure proper RFC 3261 compliance
 2. Maintain clean layer separation
 3. Add comprehensive tests for new functionality

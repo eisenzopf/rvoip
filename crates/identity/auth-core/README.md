@@ -5,14 +5,18 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/eisenzopf/rvoip)
 
 OAuth2 and token-based authentication primitives for [rvoip](https://github.com/eisenzopf/rvoip).
-Used by `rvoip-sip-registrar`, `rvoip-vcon` (JWS signing), and any rvoip
+Used by `rvoip-core`, `rvoip-sip`, `rvoip-sip-registrar`, `rvoip-users-core`,
+the UCTP / WebRTC / MoQ transports, the identity extensions (`rvoip-oidc`,
+`rvoip-keycloak`, `rvoip-ldap`, `rvoip-scim`, `rvoip-redis`), and any rvoip
 service that authenticates incoming requests via Bearer tokens or RFC 8898
 SIP/OAuth profiles.
 
 This crate depends on the trait-only `rvoip-core-traits`, not on
-`rvoip-core` itself — that's what breaks the
-`rvoip-core` → `rvoip-vcon` → `rvoip-auth-core` → `rvoip-core` cycle and
-lets `rvoip-core` take `rvoip-vcon` as an optional dep.
+`rvoip-core` itself. That split was originally introduced to break a
+`rvoip-core` → `rvoip-vcon` → `rvoip-auth-core` → `rvoip-core` cycle;
+`rvoip-vcon` no longer depends on this crate and `rvoip-core` now depends on
+`rvoip-auth-core` directly, but keeping `rvoip-auth-core` off `rvoip-core`
+is what makes that direct dependency possible.
 
 ## Status
 
@@ -42,6 +46,17 @@ rvoip-auth-core = "0.3.10"
 - Production JWT/JWKS deployments can enable `with_required_jti`; configuring
   a revocation checker also requires `jti`. Introspection deployments can use
   `with_required_token_id` when a provider-issued identifier is mandatory.
+- Actor authentication (AAuth): [`src/aauth.rs`](src/aauth.rs) provides
+  `AAuthValidator`, `ActorClaims`, and the `ActorTokenValidator` trait for
+  validating an agent's actor token alongside the subject bearer token.
+- DPoP (RFC 9449): [`src/dpop.rs`](src/dpop.rs) provides `DpopValidator`,
+  `DpopProof`, `ValidatedDpop`, and `jwk_thumbprint`.
+- HTTP Message Signatures (RFC 9421) for UCTP envelopes:
+  [`src/sig9421.rs`](src/sig9421.rs) provides `Sig9421Verifier` with
+  pluggable `KeyResolver`, `SignatureReplayStore`, and `SignatureClock`.
+- SIP Digest (RFC 7616 / RFC 8760): [`src/sip_digest.rs`](src/sip_digest.rs)
+  provides `DigestAuthenticator`, `DigestClient`, `DigestChallenge`, and
+  `DigestAlgorithm`.
 - Integration examples live in the [rvoip-sip
   README](../../sip/rvoip-sip/README.md) and in
   [`crates/sip/rvoip-sip/examples/callback_peer/`](../../sip/rvoip-sip/examples/callback_peer/).

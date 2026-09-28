@@ -1,6 +1,6 @@
 # rvoip-sip-core
 
-[![Crates.io](https://img.shields.io/crates/v/rvoip-sip-core.svg)](https://crates.io/crates/sip/rvoip-sip-core)
+[![Crates.io](https://img.shields.io/crates/v/rvoip-sip-core.svg)](https://crates.io/crates/rvoip-sip-core)
 [![Documentation](https://docs.rs/rvoip-sip-core/badge.svg)](https://docs.rs/rvoip-sip-core)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../../LICENSE)
 
@@ -25,11 +25,10 @@ media, or WebRTC behavior.
 - **Multipart Bodies**: MIME multipart message handling for complex content scenarios
 
 ### ❌ **Delegated Responsibilities**
-- **Network Transport**: Handled by `sip-transport` for UDP/TCP/TLS/SCTP protocols
-- **Transaction Management**: Handled by `transaction-core` for request/response matching
-- **Dialog Management**: Handled by `dialog-core` for call state and session tracking  
-- **Media Processing**: Handled by `media-core` and `rtp-core` for audio/video streams
-- **Call Control Logic**: Handled by `session-core` and `call-engine` for business logic
+- **Network Transport**: Handled by `rvoip-sip-transport` (UDP, TCP, TLS, WS, WSS)
+- **Transaction and Dialog Management**: Handled by `rvoip-sip-dialog` (its `transaction` module does request/response matching; the dialog manager tracks call state)
+- **Media Processing**: Handled by `rvoip-media-core` and `rvoip-rtp-core` for audio/video streams
+- **Call Control Logic**: Handled by the `rvoip-sip` umbrella crate (session, proxy, and registrar coordination)
 
 The SIP-Core sits at the protocol foundation layer, providing the building blocks for all higher-level VoIP functionality:
 
@@ -37,18 +36,15 @@ The SIP-Core sits at the protocol foundation layer, providing the building block
 ┌─────────────────────────────────────────┐
 │       Application Layer                 │
 ├─────────────────────────────────────────┤
-│    rvoip-call-engine                    │
+│       rvoip-sip (umbrella crate)        │
 ├─────────────────────────────────────────┤
-│       rvoip-session-core                │
+│  rvoip-sip-dialog  │ rvoip-media-core   │
+│ (transaction +     │                    │
+│  dialog layers)    │                    │
 ├─────────────────────────────────────────┤
-│  rvoip-dialog-core │ rvoip-media-core   │
-├─────────────────────────────────────────┤
-│ rvoip-transaction  │   rvoip-rtp-core   │
-│     -core          │                    │
+│ rvoip-sip-transport│   rvoip-rtp-core   │
 ├─────────────────────────────────────────┤
 │           rvoip-sip-core    ⬅️ YOU ARE HERE
-├─────────────────────────────────────────┤
-│         rvoip-sip-transport             │
 ├─────────────────────────────────────────┤
 │            Network Layer                │
 └─────────────────────────────────────────┘
@@ -184,15 +180,15 @@ The SIP-Core sits at the protocol foundation layer, providing the building block
   - ✅ Expires header for subscription duration
   - ✅ Accept header for payload format negotiation
 - ✅ **REFER Builders**: Type-safe call transfer message construction
-  - ✅ `refer(uri, refer_to)` - Create REFER for blind transfer
-  - ✅ Refer-To header for transfer target
-  - ✅ Referred-By header for transferor identification
+  - ✅ `SimpleRequestBuilder::new(Method::Refer, uri)` plus the `ReferToExt` / `ReferredByExt` header extensions
+  - ✅ `refer_to_uri(..)` / `refer_to_address(..)` - Refer-To header for transfer target
+  - ✅ `referred_by(..)` / `referred_by_uri(..)` - Referred-By header for transferor identification
   - ✅ Implicit subscription creation (automatic NOTIFY expected)
 - ✅ **Presence Builders**: Type-safe builders for presence operations
   - ✅ `publish(uri, event)` - Create PUBLISH requests with Event header
   - ✅ `unauthorized()`, `forbidden()`, `interval_too_brief()`, `bad_event()` - Error responses
 - ✅ **Bearer Authentication**: Modern OAuth2 support
-  - ✅ `authorization_bearer(token)` - Add Bearer token to requests
+  - ✅ `Authorization::bearer(token)` - Bearer credentials, added via `.header(TypedHeader::Authorization(..))`
   - ✅ `www_authenticate_bearer(realm)` - Create Bearer challenges
   - ✅ `www_authenticate_bearer_error(realm, error, description)` - Bearer with error details
 
@@ -356,7 +352,9 @@ let authorized_request = SimpleRequestBuilder::register("sip:example.com")
     .call_id("register-002")
     .cseq(1)
     .via("192.168.1.10:5060", "UDP", Some("branch-123"))
-    .authorization_bearer("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...")
+    .header(TypedHeader::Authorization(Authorization::bearer(
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+    )))
     .build();
 ```
 
@@ -375,7 +373,8 @@ let authorized_request = SimpleRequestBuilder::register("sip:example.com")
 │  └─────────────┴─────────────┴─────────────┴─────────────┘  │
 ├─────────────────────────────────────────────────────────────┤
 │                     External Dependencies                   │
-│  bytes │ nom │ uuid │ base64 │ md5 │ sha2 │ time │ regex    │
+│  nom │ bytes │ uuid │ base64 │ chrono │ rand │ serde       │
+│  serde_json │ thiserror │ tracing │ log │ ordered-float │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -394,8 +393,8 @@ Clean separation enables easy integration across the VoIP stack:
 ┌─────────────────┐    SIP Messages        ┌─────────────────┐
 │                 │ ──────────────────────► │                 │
 │  Higher Layers  │                         │   sip-core      │
-│ (session-core,  │ ◄──────────────────────── │ (Protocol       │
-│  dialog-core)   │    Parsed Messages      │  Foundation)    │
+│ (rvoip-sip,     │ ◄──────────────────────── │ (Protocol       │
+│  sip-dialog)    │    Parsed Messages      │  Foundation)    │
 └─────────────────┘                         └─────────────────┘
                                                      │
                          Raw Network Data            │ Type-Safe APIs
@@ -486,7 +485,7 @@ let request = RequestBuilder::new(Method::Invite, &bob_uri.to_string())
     .header(TypedHeader::To(To::new(Address::new_with_display_name("Bob", bob_uri.clone()))))
     .header(TypedHeader::CallId(CallId::new("a84b4c76e66710@pc33.atlanta.com")))
     .header(TypedHeader::CSeq(CSeq::new(314159, Method::Invite)))
-    .header(TypedHeader::Via(Via::parse("SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds").unwrap()))
+    .header(TypedHeader::Via("SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds".parse::<Via>().unwrap()))
     .header(TypedHeader::MaxForwards(MaxForwards::new(70)))
     .header(TypedHeader::Contact(Contact::new(Address::new(contact_uri))))
     .header(TypedHeader::ContentLength(ContentLength::new(0)))
@@ -496,21 +495,27 @@ let request = RequestBuilder::new(Method::Invite, &bob_uri.to_string())
 #### Using the SIP Macros (recommended for simple messages)
 
 ```rust
-use rvoip_sip_core::prelude::*;
+use rvoip_sip_core::types::Method;
+use rvoip_sip_core::{option_expr, sip_request};
 
-// Create a SIP request with the sip! macro
-let request = sip! {
+// Create a SIP request with the sip_request! macro
+// (sip_response! is the counterpart for responses)
+let request = sip_request! {
     method: Method::Invite,
     uri: "sip:bob@example.com",
+    from_name: "Alice",
+    from_uri: "sip:alice@atlanta.com",
+    from_tag: "1928301774",
+    to_name: "Bob",
+    to_uri: "sip:bob@example.com",
+    call_id: "a84b4c76e66710@pc33.atlanta.com",
+    cseq: "314159",
+    via_host: "pc33.atlanta.com",
+    via_transport: "UDP",
+    via_branch: "z9hG4bK776asdhds",
+    max_forwards: "70",
     headers: {
-        Via: "SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds",
-        MaxForwards: 70,
-        To: "Bob <sip:bob@example.com>",
-        From: "Alice <sip:alice@atlanta.com>;tag=1928301774",
-        CallId: "a84b4c76e66710@pc33.atlanta.com",
-        CSeq: "314159 INVITE",
-        Contact: "<sip:alice@pc33.atlanta.com>",
-        ContentLength: 0
+        Contact: "<sip:alice@pc33.atlanta.com>"
     }
 };
 ```
@@ -630,8 +635,9 @@ let sdp = sdp! {
 | `Min-SE` | RFC 4028 | ✅ Complete | Minimum session expiration |
 | `Path` | RFC 3327 | ✅ Complete | Registration path for NAT traversal |
 | `Service-Route` | RFC 3608 | ✅ Complete | Service routing for registrations |
-| `P-Access-Network-Info` | RFC 3455 | ✅ Complete | Access network information |
-| `P-Charging-Vector` | RFC 3455 | ✅ Complete | Charging information |
+| `P-Asserted-Identity` | RFC 3325 | ✅ Complete | Asserted caller identity |
+| `P-Access-Network-Info` | RFC 3455 | ⚠️ Generic only | No typed header; carried as a raw/custom header |
+| `P-Charging-Vector` | RFC 3455 | ⚠️ Generic only | No typed header; carried as a raw/custom header |
 | `RSeq` | RFC 3262 | ✅ Complete | Reliable provisional response sequence |
 | `RAck` | RFC 3262 | ✅ Complete | Reliable response acknowledgment |
 
@@ -869,24 +875,20 @@ let lenient_message = parse_message_with_mode(&data, ParseMode::Lenient);
 
 ```rust
 use rvoip_sip_core::prelude::*;
-use bytes::Bytes;
+use rvoip_sip_core::builder::MultipartBodyBuilder;
 
-// Create a multipart body
-let mut multipart = MultipartBody::new("mixed");
-multipart.add_part(MimePart::new(
-    "application/sdp",
-    Bytes::from("v=0\r\no=- 123456 789012 IN IP4 192.168.1.1\r\ns=Call\r\nc=IN IP4 192.168.1.1\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n")
-));
-multipart.add_part(MimePart::new(
-    "application/xml",
-    Bytes::from("<xml>Some XML content</xml>")
-));
+// Create a multipart body; each add_*_part sets the part's Content-Type
+let multipart = MultipartBodyBuilder::new()
+    .boundary("boundary42")
+    .add_sdp_part("v=0\r\no=- 123456 789012 IN IP4 192.168.1.1\r\ns=Call\r\nc=IN IP4 192.168.1.1\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n")
+    .add_xml_part("<xml>Some XML content</xml>")
+    .build();
 
-// Add to a request using the builder
+// Add to a request using the builder (to_string() serialises the MultipartBody)
 let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com")
     .unwrap()
     // Add headers...
-    .body(multipart.to_bytes())
+    .body(multipart.to_string())
     .build();
 ```
 
@@ -895,16 +897,18 @@ let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com")
 ```rust
 use rvoip_sip_core::prelude::*;
 
-// Create an Authorization header
-let auth = Authorization::new_digest(
-    "example.com",
+// Create a Digest Authorization header (response = precomputed digest value)
+let auth = Authorization::new(
+    AuthScheme::Digest,
     "alice",
-    "password",
-    "INVITE",
-    "sip:bob@example.com",
+    "example.com",
     "nonce-value",
-    "cnonce-value"
-);
+    "sip:bob@example.com".parse::<Uri>()?,
+    "response-hash",
+)
+.with_cnonce("cnonce-value")
+.with_qop(Qop::Auth)
+.with_algorithm(Algorithm::Md5);
 
 // Add to a request using the builder
 let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com")
@@ -927,11 +931,8 @@ let is_valid = is_valid_ipv4("192.168.1.1"); // true
 let is_valid = is_valid_ipv4("256.0.0.1");   // false (invalid IPv4)
 
 // Validate an SDP session
-let validation_result = sdp_session.validate();
-if let Err(errors) = validation_result {
-    for error in errors {
-        println!("Validation error: {}", error);
-    }
+if let Err(error) = validate_sdp(&sdp_session) {
+    println!("Validation error: {}", error);
 }
 ```
 
@@ -949,7 +950,9 @@ use rvoip_sip_core::sdp_prelude::*;
 
 ## Feature Flags
 
+- `sdp` (default): Session Description Protocol parser, builder, and types
 - `lenient_parsing`: Enables more lenient parsing mode for torture tests and handling of non-compliant messages
+- `generated-validation`: Heavy generated-message serialize/strict-parse verifier used by tests and dev diagnostics
 
 ## 📚 **Examples**
 
@@ -1031,28 +1034,22 @@ cargo test -p rvoip-sip-core --features="lenient_parsing"
 
 ## Integration with Other Crates
 
-### Transaction-Core Integration
+### rvoip-sip-dialog Integration (transaction + dialog layers)
 
-- **Transaction Management**: SIP-core provides the message foundation for transaction handling
-- **Dialog Correlation**: Headers provide the necessary correlation information
+- **Transaction Management**: SIP-core provides the message foundation for the `transaction` module
 - **Branch Parameters**: Via headers enable proper transaction identification
 - **Method Processing**: Request/response matching via CSeq and method
-
-### Dialog-Core Integration  
-
 - **Dialog State**: Call-ID, From/To tags enable dialog tracking
 - **Route Sets**: Record-Route and Route headers for proper routing
 - **Contact URIs**: Direct communication endpoints for subsequent requests
-- **Session Correlation**: Headers provide all necessary dialog information
 
-### Session-Core Integration
+### rvoip-sip Integration (umbrella crate)
 
 - **SDP Processing**: Complete session description for media negotiation
 - **Authentication**: Digest authentication for secure session establishment
-- **Session Information**: Headers provide context for session management
-- **Media Coordination**: SDP attributes for media session setup
+- **Session Information**: Headers provide context for session, proxy, and registrar coordination
 
-### Media-Core Integration
+### rvoip-media-core Integration
 
 - **SDP Attributes**: Media descriptions with codec and transport information
 - **WebRTC Attributes**: parser/serializer support only; full ICE, DTLS, and browser interop are post-beta at the `rvoip-sip` layer
@@ -1064,26 +1061,29 @@ cargo test -p rvoip-sip-core --features="lenient_parsing"
 The library provides comprehensive error handling with detailed diagnostics:
 
 ```rust
-use rvoip_sip_core::{parse_message, SipError};
+use rvoip_sip_core::{parse_message, Error};
 
 match parse_message(&data) {
     Ok(message) => {
         // Process parsed message
     }
     Err(err) => match err {
-        SipError::ParseError { line, column, message } => {
+        Error::ParserWithLocation { line, column, message } => {
             eprintln!("Parse error at {}:{}: {}", line, column, message);
         }
-        SipError::InvalidHeader { name, value, reason } => {
-            eprintln!("Invalid header {}: {} - {}", name, value, reason);
+        Error::ParseError(message) => {
+            eprintln!("Parse error: {}", message);
         }
-        SipError::InvalidUri { uri, reason } => {
-            eprintln!("Invalid URI {}: {}", uri, reason);
+        Error::InvalidHeader(reason) => {
+            eprintln!("Invalid header: {}", reason);
         }
-        SipError::InvalidSdp { line, reason } => {
-            eprintln!("Invalid SDP at line {}: {}", line, reason);
+        Error::InvalidUri(reason) => {
+            eprintln!("Invalid URI: {}", reason);
         }
-        _ => eprintln!("Other error: {}", err),
+        Error::SdpParsingError(reason) | Error::SdpValidationError(reason) => {
+            eprintln!("Invalid SDP: {}", reason);
+        }
+        _ => eprintln!("Other error ({}): {}", err.diagnostic_class(), err),
     }
 }
 ```
@@ -1172,11 +1172,11 @@ For sip-core specific contributions:
 - **✅ Type Safety**: All public APIs have comprehensive test coverage
 - **✅ Performance**: Benchmarked against real-world traffic patterns
 
-**Integration Status**: 📈 **Foundation Complete, Higher Layers Ready**
-- **Foundation Layer**: ✅ COMPLETE - All protocol parsing and construction
-- **Transaction Layer**: 🔄 IN PROGRESS - Built on sip-core foundation
-- **Dialog Layer**: 🔄 IN PROGRESS - Uses sip-core header correlation
-- **Session Layer**: 🔄 IN PROGRESS - Leverages sip-core SDP support
+**Integration Status**: 📈 **Foundation Complete, Higher Layers Shipped**
+- **Foundation Layer**: ✅ `rvoip-sip-core` - All protocol parsing and construction
+- **Transaction + Dialog Layers**: ✅ `rvoip-sip-dialog` - Built on sip-core message and header correlation
+- **Transport Layer**: ✅ `rvoip-sip-transport` - UDP/TCP/TLS/WS/WSS carriers for sip-core messages
+- **Umbrella Layer**: ✅ `rvoip-sip` - Session, proxy, and registrar coordination on top of the above
 
 ## License
 

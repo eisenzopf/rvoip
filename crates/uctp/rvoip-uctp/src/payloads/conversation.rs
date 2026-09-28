@@ -50,6 +50,15 @@ pub struct ConversationClosed {
     pub closed_at: DateTime<Utc>,
 }
 
+/// `conversation.close` (C→S) payload.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ConversationClose {
+    #[serde(default)]
+    pub reason_code: Option<u16>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
 /// `conversation.list` (C→S) payload.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ConversationList {
@@ -88,6 +97,7 @@ metadata_only_debug!(
     ConversationCreate,
     ConversationOpened,
     ConversationClosed,
+    ConversationClose,
     ConversationList,
     InitialParticipant,
     Participant,

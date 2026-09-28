@@ -7,13 +7,96 @@ use std::fmt;
 use tokio::sync::oneshot;
 
 use crate::ids::{ConnectionId, SessionId, StreamId};
+use crate::payloads::conversation::{
+    ConversationPolicy, InitialParticipant, Participant as ConversationParticipant,
+};
 
 use super::connection::AcceptedStream;
+
+/// Adapter reply for `conversation.create` / list entries.
+#[derive(Clone)]
+pub struct ConversationOpenedReply {
+    pub cid: String,
+    pub tenant_id: String,
+    pub policy: ConversationPolicy,
+    pub idle_close_secs: Option<u32>,
+    pub participants: Vec<ConversationParticipant>,
+    pub opened_at: chrono::DateTime<chrono::Utc>,
+    pub metadata: serde_json::Value,
+}
+
+impl fmt::Debug for ConversationOpenedReply {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ConversationOpenedReply")
+            .field("policy", &self.policy)
+            .field("participant_count", &self.participants.len())
+            .finish()
+    }
+}
+
+/// Adapter reply for `conversation.list`.
+#[derive(Clone, Debug)]
+pub struct ConversationListReply {
+    pub conversations: Vec<ConversationOpenedReply>,
+    pub next_cursor: Option<String>,
+}
+
+/// Adapter reply for `conversation.close`.
+#[derive(Clone)]
+pub struct ConversationClosedReply {
+    pub cid: String,
+    pub reason_code: u16,
+    pub reason: String,
+    pub closed_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl fmt::Debug for ConversationClosedReply {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ConversationClosedReply")
+            .field("reason_code", &self.reason_code)
+            .field("reason_bytes", &self.reason.len())
+            .finish()
+    }
+}
 
 /// One coordinator event. Adapter crates map this to
 /// `rvoip_core::AdapterEvent` per design doc §4.4.
 #[non_exhaustive]
 pub enum UctpSessionEvent {
+    /// Peer sent `conversation.create`. The adapter opens or reuses an
+    /// Orchestrator Conversation and replies; the coordinator then sends
+    /// `conversation.opened`.
+    ConversationCreate {
+        env_id: String,
+        cid: Option<String>,
+        tenant_id: String,
+        policy: ConversationPolicy,
+        idle_close_secs: Option<u32>,
+        metadata: serde_json::Value,
+        initial_participants: Vec<InitialParticipant>,
+        reply: oneshot::Sender<Result<ConversationOpenedReply, crate::errors::UctpError>>,
+    },
+
+    /// Peer sent `conversation.list`.
+    ConversationList {
+        env_id: String,
+        filter: serde_json::Value,
+        cursor: Option<String>,
+        limit: Option<u32>,
+        reply: oneshot::Sender<Result<ConversationListReply, crate::errors::UctpError>>,
+    },
+
+    /// Peer sent `conversation.close`.
+    ConversationClose {
+        env_id: String,
+        cid: Option<String>,
+        reason_code: Option<u16>,
+        reason: Option<String>,
+        reply: oneshot::Sender<Result<ConversationClosedReply, crate::errors::UctpError>>,
+    },
+
     /// Peer sent `auth.session` — we are authenticated.
     Authenticated {
         identity_id: String,
@@ -139,6 +222,12 @@ pub enum UctpSessionEvent {
 impl fmt::Debug for UctpSessionEvent {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ConversationCreate { policy, .. } => formatter
+                .debug_struct("ConversationCreate")
+                .field("policy", policy)
+                .finish(),
+            Self::ConversationList { .. } => formatter.write_str("ConversationList"),
+            Self::ConversationClose { .. } => formatter.write_str("ConversationClose"),
             Self::Authenticated { .. } => formatter.write_str("Authenticated"),
             Self::InboundInvite { to, medium, .. } => formatter
                 .debug_struct("InboundInvite")

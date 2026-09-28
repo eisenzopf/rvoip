@@ -14,6 +14,7 @@ description = "rvoip-core ConnectionAdapter implementation over raw QUIC for the
 
 [dependencies]
 rvoip-core.workspace = true
+rvoip-core-traits.workspace = true
 rvoip-uctp.workspace = true
 rvoip-auth-core.workspace = true
 

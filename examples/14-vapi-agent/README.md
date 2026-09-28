@@ -96,8 +96,9 @@ transport and runs:
 vapi.attach_agent(&orchestrator, connection_id, options).await?
 ```
 
-`attach_agent` originates the Vapi WebSocket leg, bridges full-duplex audio,
-and supervises both sides. If the caller hangs up, rvoip sends Vapi
+`attach_agent` joins a distinct AI Participant, originates the Vapi WebSocket
+leg, bridges full-duplex audio, and supervises both sides. The Vapi Connection
+is not attributed to the caller. If the caller hangs up, rvoip sends Vapi
 `end-call`; if Vapi ends first, the caller is ended by the default peer policy.
 
 Run `cargo run -- --help` for all flags. `RUST_LOG=debug` enables more

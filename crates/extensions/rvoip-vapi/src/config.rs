@@ -50,7 +50,7 @@ impl Drop for VapiApiKey {
 /// Static configuration shared by all calls placed through an adapter.
 #[derive(Clone)]
 pub struct VapiConfig {
-    pub api_key: VapiApiKey,
+    pub api_key: Option<VapiApiKey>,
     pub api_base: Url,
     pub http_timeout: Duration,
     pub websocket_timeout: Duration,
@@ -157,6 +157,17 @@ pub struct VapiConfig {
 
 impl VapiConfig {
     pub fn new(api_key: VapiApiKey) -> Self {
+        Self::with_optional_key(Some(api_key))
+    }
+
+    /// Shared transport for externally created calls. No default tenant key is
+    /// retained and provider creation fails before HTTP. Each handoff supplies
+    /// its own WebSocket credential.
+    pub fn existing_calls_only() -> Self {
+        Self::with_optional_key(None)
+    }
+
+    fn with_optional_key(api_key: Option<VapiApiKey>) -> Self {
         let api_base = match Url::parse("https://api.vapi.ai/") {
             Ok(url) => url,
             Err(_) => unreachable!("the built-in Vapi API URL is valid"),

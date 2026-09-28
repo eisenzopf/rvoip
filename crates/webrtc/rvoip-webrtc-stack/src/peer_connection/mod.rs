@@ -6,7 +6,10 @@ pub(crate) mod ice_gatherer;
 use log::error;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::time::Instant;
 
 use crate::data_channel::{DataChannel, DataChannelEvent, DataChannelImpl};
@@ -162,6 +165,12 @@ where
     udp_addrs: Vec<A>,
     tcp_addrs: Vec<A>,
     udp_advertised_ip: Option<IpAddr>,
+    allocated_udp_sockets: Option<Arc<AtomicUsize>>,
+}
+
+struct UdpSocketDriverOptions {
+    advertised_ip: Option<IpAddr>,
+    allocated_sockets: Option<Arc<AtomicUsize>>,
 }
 
 impl<A: ToSocketAddrs> Default for PeerConnectionBuilder<A, NoopInterceptor> {
@@ -173,6 +182,7 @@ impl<A: ToSocketAddrs> Default for PeerConnectionBuilder<A, NoopInterceptor> {
             udp_addrs: vec![],
             tcp_addrs: vec![],
             udp_advertised_ip: None,
+            allocated_udp_sockets: None,
         }
     }
 }
@@ -216,6 +226,7 @@ where
             udp_addrs: self.udp_addrs,
             tcp_addrs: self.tcp_addrs,
             udp_advertised_ip: self.udp_advertised_ip,
+            allocated_udp_sockets: self.allocated_udp_sockets,
         }
     }
 
@@ -231,6 +242,13 @@ where
 
     pub fn with_udp_addrs(mut self, udp_addrs: Vec<A>) -> Self {
         self.udp_addrs = udp_addrs;
+        self
+    }
+
+    /// Count UDP sockets for as long as their peer-connection driver owns
+    /// them. The counter is decremented when that driver exits or is aborted.
+    pub fn with_allocated_udp_socket_counter(mut self, counter: Arc<AtomicUsize>) -> Self {
+        self.allocated_udp_sockets = Some(counter);
         self
     }
 
@@ -270,7 +288,10 @@ where
             opts,
             self.udp_addrs,
             self.tcp_addrs,
-            self.udp_advertised_ip,
+            UdpSocketDriverOptions {
+                advertised_ip: self.udp_advertised_ip,
+                allocated_sockets: self.allocated_udp_sockets,
+            },
         )
         .await
     }
@@ -304,7 +325,10 @@ where
             opts,
             socket,
             self.tcp_addrs,
-            self.udp_advertised_ip,
+            UdpSocketDriverOptions {
+                advertised_ip: self.udp_advertised_ip,
+                allocated_sockets: self.allocated_udp_sockets,
+            },
         )
         .await
     }
@@ -452,7 +476,7 @@ where
         opts: RTCIceGatherOptions,
         udp_addrs: Vec<A>,
         _tcp_addrs: Vec<A>,
-        udp_advertised_ip: Option<IpAddr>,
+        udp_options: UdpSocketDriverOptions,
     ) -> Result<Self> {
         let mut local_addrs = vec![];
         let mut async_udp_sockets = HashMap::new();
@@ -485,8 +509,9 @@ where
         };
 
         let (host_candidate_addrs, advertised_to_socket) =
-            advertised_udp_addrs(&local_addrs, udp_advertised_ip)?;
+            advertised_udp_addrs(&local_addrs, udp_options.advertised_ip)?;
         let ice_gatherer = RTCIceGatherer::new(local_addrs, host_candidate_addrs, opts);
+        let socket_count = async_udp_sockets.len();
         let mut driver = PeerConnectionDriver::new(
             peer_connection.inner.clone(),
             ice_gatherer,
@@ -494,7 +519,11 @@ where
             advertised_to_socket,
         )
         .await?;
+        let socket_ownership = udp_options
+            .allocated_sockets
+            .map(|counter| AllocatedUdpSocketGuard::new(counter, socket_count));
         let driver_handle = runtime.spawn(Box::pin(async move {
+            let _socket_ownership = socket_ownership;
             if let Err(e) = driver.event_loop(driver_event_rx).await {
                 error!("I/O error: {}", e);
             }
@@ -511,7 +540,7 @@ where
         opts: RTCIceGatherOptions,
         socket: UdpSocket,
         _tcp_addrs: Vec<A>,
-        udp_advertised_ip: Option<IpAddr>,
+        udp_options: UdpSocketDriverOptions,
     ) -> Result<Self> {
         socket.set_nonblocking(true)?;
         let local_addr = socket.local_addr()?;
@@ -534,8 +563,9 @@ where
             driver_handle: Mutex::new(None),
         };
         let (host_candidate_addrs, advertised_to_socket) =
-            advertised_udp_addrs(&local_addrs, udp_advertised_ip)?;
+            advertised_udp_addrs(&local_addrs, udp_options.advertised_ip)?;
         let ice_gatherer = RTCIceGatherer::new(local_addrs, host_candidate_addrs, opts);
+        let socket_count = async_udp_sockets.len();
         let mut driver = PeerConnectionDriver::new(
             peer_connection.inner.clone(),
             ice_gatherer,
@@ -543,7 +573,11 @@ where
             advertised_to_socket,
         )
         .await?;
+        let socket_ownership = udp_options
+            .allocated_sockets
+            .map(|counter| AllocatedUdpSocketGuard::new(counter, socket_count));
         let driver_handle = runtime.spawn(Box::pin(async move {
+            let _socket_ownership = socket_ownership;
             if let Err(e) = driver.event_loop(driver_event_rx).await {
                 error!("I/O error: {}", e);
             }
@@ -553,95 +587,25 @@ where
     }
 }
 
-#[cfg(test)]
-mod udp_port_range_tests {
-    use super::*;
-    use std::sync::{Arc as StdArc, Barrier};
+struct AllocatedUdpSocketGuard {
+    counter: Arc<AtomicUsize>,
+    count: usize,
+}
 
-    fn available_two_port_range() -> (u16, u16) {
-        for start in 30_000u16..=60_000u16 {
-            let Ok(first) = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, start)) else {
-                continue;
-            };
-            let Ok(second) = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, start + 1)) else {
-                continue;
-            };
-            drop((first, second));
-            return (start, start + 1);
-        }
-        panic!("no two-port loopback range available");
+impl AllocatedUdpSocketGuard {
+    fn new(counter: Arc<AtomicUsize>, count: usize) -> Self {
+        counter.fetch_add(count, Ordering::AcqRel);
+        Self { counter, count }
     }
+}
 
-    #[test]
-    fn bounded_udp_allocator_is_atomic_exhaustible_and_reusable() {
-        let (start, end) = available_two_port_range();
-        let bind_ip = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
-        let barrier = StdArc::new(Barrier::new(3));
-        let mut workers = Vec::new();
-        for _ in 0..2 {
-            let barrier = StdArc::clone(&barrier);
-            workers.push(std::thread::spawn(move || {
-                barrier.wait();
-                bind_udp_from_range(bind_ip, start, end).expect("allocate bounded UDP port")
-            }));
-        }
-        barrier.wait();
-        let sockets: Vec<UdpSocket> = workers
-            .into_iter()
-            .map(|worker| worker.join().expect("allocator worker"))
-            .collect();
-        let mut ports: Vec<u16> = sockets
-            .iter()
-            .map(|socket| socket.local_addr().expect("local address").port())
-            .collect();
-        ports.sort_unstable();
-        assert_eq!(ports, vec![start, end]);
-        let exhausted = bind_udp_from_range(bind_ip, start, end).expect_err("range exhausted");
-        assert!(exhausted.to_string().contains(UDP_PORT_RANGE_EXHAUSTED));
-        drop(sockets);
-        let reused = bind_udp_from_range(bind_ip, start, end).expect("released port reusable");
-        assert!((start..=end).contains(&reused.local_addr().expect("local address").port()));
-    }
-
-    #[test]
-    fn bounded_udp_allocator_rejects_zero_and_reversed_ranges() {
-        let bind_ip = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
-        for (start, end) in [(0, 1), (40_001, 40_000)] {
-            let error = bind_udp_from_range(bind_ip, start, end).expect_err("invalid range");
-            assert!(error.to_string().contains(INVALID_UDP_PORT_RANGE));
-        }
-    }
-
-    #[test]
-    fn one_to_one_nat_preserves_port_and_records_bidirectional_route() {
-        let socket_addr: SocketAddr = "0.0.0.0:49152".parse().expect("socket address");
-        let public_ip: IpAddr = "203.0.113.44".parse().expect("public IP");
-        let (candidates, routes) =
-            advertised_udp_addrs(&[socket_addr], Some(public_ip)).expect("NAT mapping");
-        let advertised: SocketAddr = "203.0.113.44:49152".parse().expect("advertised address");
-        assert_eq!(candidates, vec![advertised]);
-        assert_eq!(routes, HashMap::from([(advertised, socket_addr)]));
-    }
-
-    #[test]
-    fn one_to_one_nat_fails_closed_for_ambiguous_or_mixed_family_sockets() {
-        let two_sockets = [
-            "0.0.0.0:49152".parse().expect("first socket"),
-            "0.0.0.0:49153".parse().expect("second socket"),
-        ];
-        let error = advertised_udp_addrs(
-            &two_sockets,
-            Some("203.0.113.44".parse().expect("public IP")),
-        )
-        .expect_err("ambiguous mapping must fail");
-        assert!(error.to_string().contains("requires-one-udp-socket"));
-
-        let error = advertised_udp_addrs(
-            &["0.0.0.0:49152".parse().expect("IPv4 socket")],
-            Some("2001:db8::44".parse().expect("IPv6 public IP")),
-        )
-        .expect_err("mixed address families must fail");
-        assert!(error.to_string().contains("address-family-mismatch"));
+impl Drop for AllocatedUdpSocketGuard {
+    fn drop(&mut self) {
+        let previous = self.counter.fetch_sub(self.count, Ordering::AcqRel);
+        debug_assert!(
+            previous >= self.count,
+            "allocated UDP socket counter underflow"
+        );
     }
 }
 
@@ -969,5 +933,97 @@ where
     async fn get_stats(&self, now: Instant, selector: StatsSelector) -> RTCStatsReport {
         let mut core = self.inner.core.lock().await;
         core.get_stats(now, selector)
+    }
+}
+
+#[cfg(test)]
+mod udp_port_range_tests {
+    use super::*;
+    use std::sync::{Arc as StdArc, Barrier};
+
+    fn available_two_port_range() -> (u16, u16) {
+        for start in 30_000u16..=60_000u16 {
+            let Ok(first) = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, start)) else {
+                continue;
+            };
+            let Ok(second) = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, start + 1)) else {
+                continue;
+            };
+            drop((first, second));
+            return (start, start + 1);
+        }
+        panic!("no two-port loopback range available");
+    }
+
+    #[test]
+    fn bounded_udp_allocator_is_atomic_exhaustible_and_reusable() {
+        let (start, end) = available_two_port_range();
+        let bind_ip = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+        let barrier = StdArc::new(Barrier::new(3));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let barrier = StdArc::clone(&barrier);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                bind_udp_from_range(bind_ip, start, end).expect("allocate bounded UDP port")
+            }));
+        }
+        barrier.wait();
+        let sockets: Vec<UdpSocket> = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("allocator worker"))
+            .collect();
+        let mut ports: Vec<u16> = sockets
+            .iter()
+            .map(|socket| socket.local_addr().expect("local address").port())
+            .collect();
+        ports.sort_unstable();
+        assert_eq!(ports, vec![start, end]);
+        let exhausted = bind_udp_from_range(bind_ip, start, end).expect_err("range exhausted");
+        assert!(exhausted.to_string().contains(UDP_PORT_RANGE_EXHAUSTED));
+        drop(sockets);
+        let reused = bind_udp_from_range(bind_ip, start, end).expect("released port reusable");
+        assert!((start..=end).contains(&reused.local_addr().expect("local address").port()));
+    }
+
+    #[test]
+    fn bounded_udp_allocator_rejects_zero_and_reversed_ranges() {
+        let bind_ip = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+        for (start, end) in [(0, 1), (40_001, 40_000)] {
+            let error = bind_udp_from_range(bind_ip, start, end).expect_err("invalid range");
+            assert!(error.to_string().contains(INVALID_UDP_PORT_RANGE));
+        }
+    }
+
+    #[test]
+    fn one_to_one_nat_preserves_port_and_records_bidirectional_route() {
+        let socket_addr: SocketAddr = "0.0.0.0:49152".parse().expect("socket address");
+        let public_ip: IpAddr = "203.0.113.44".parse().expect("public IP");
+        let (candidates, routes) =
+            advertised_udp_addrs(&[socket_addr], Some(public_ip)).expect("NAT mapping");
+        let advertised: SocketAddr = "203.0.113.44:49152".parse().expect("advertised address");
+        assert_eq!(candidates, vec![advertised]);
+        assert_eq!(routes, HashMap::from([(advertised, socket_addr)]));
+    }
+
+    #[test]
+    fn one_to_one_nat_fails_closed_for_ambiguous_or_mixed_family_sockets() {
+        let two_sockets = [
+            "0.0.0.0:49152".parse().expect("first socket"),
+            "0.0.0.0:49153".parse().expect("second socket"),
+        ];
+        let error = advertised_udp_addrs(
+            &two_sockets,
+            Some("203.0.113.44".parse().expect("public IP")),
+        )
+        .expect_err("ambiguous mapping must fail");
+        assert!(error.to_string().contains("requires-one-udp-socket"));
+
+        let error = advertised_udp_addrs(
+            &["0.0.0.0:49152".parse().expect("IPv4 socket")],
+            Some("2001:db8::44".parse().expect("IPv6 public IP")),
+        )
+        .expect_err("mixed address families must fail");
+        assert!(error.to_string().contains("address-family-mismatch"));
     }
 }

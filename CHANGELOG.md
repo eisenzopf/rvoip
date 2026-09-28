@@ -2,6 +2,218 @@
 
 ## Unreleased
 
+### Release workers move to AWS
+
+- The `remote-release`, `remote-preflight`, and `remote-diagnostic` profiles
+  now run their ephemeral workers on EC2 (`m5.large` / `m5.xlarge` /
+  `m5.2xlarge`, gp3 root volumes) in a dedicated release VPC instead of
+  Google Compute Engine. Resource classes are renamed `gcp-*` to `ec2-*`,
+  the planner emits `aws_matrix` / `aws_shard_count`, and evidence, logs,
+  and the performance prebuild cache live in S3 (`s3://`) rather than GCS.
+- `scripts/release/aws_fanout.py` replaces `gcp_fanout.py`. It keeps the
+  `prepare`, `verify`, and `early-failure-decision` contracts (schemas
+  `rvoip-ec2-release-fanout-v1` / `rvoip-ec2-release-shard-v1`, treating
+  `stopping`, `stopped`, `shutting-down`, and `terminated` as finished) and
+  adds `user-data`, which renders the gzip-compressed EC2 user-data that
+  writes `/etc/rvoip-release.env`, installs the reviewed startup and
+  shutdown scripts, and registers the `rvoip-release-shutdown.service`
+  checkpoint.
+- The controller authenticates with GitHub OIDC role assumption; no cloud
+  key is stored in GitHub. The GCP qualification pilot workflow and its
+  startup script are removed.
+- The release environment identifier becomes
+  `rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5`,
+  so every environment-sensitive gate runs fresh on the first AWS
+  qualification. Historical GCP qualification evidence under
+  `crates/sip/rvoip-sip/docs/` is unchanged. See
+  `docs/AWS_RELEASE_WORKERS.md`.
+
+### Cloudflare Tunnel (Parley demo)
+
+- `deploy/cloudflare/config.yml` and `scripts/run-cloudflare-tunnel.sh` front a
+  localhost Parley process through `parley.rudeless.ai` (HTTP `/v1`, widget,
+  desk, webhooks) and `parley-uctp.rudeless.ai` (UCTP WebSocket). SIP/UDP is
+  not in the ingress. Requires a named tunnel or `CLOUDFLARE_TUNNEL_TOKEN`.
+
+### UCTP conversation dispatch
+
+- The UCTP coordinator dispatches `conversation.create`, `conversation.list`,
+  and `conversation.close` to the substrate adapter (oneshot + Orchestrator)
+  instead of dropping them. WebSocket, QUIC, and WebTransport adapters fulfill
+  those envelopes when configured with an Orchestrator. `conversation.close`
+  is a new C→S type; `conversation.opened` / `conversation.closed` remain the
+  server replies. `session.invite` with an Open `cid` can attach to that
+  Conversation via `start_session`.
+
+### Vapi AI Participant (breaking)
+
+- `VapiAdapter::attach_agent` no longer copies the caller's `participant_id`
+  onto the Vapi Connection. It joins a distinct `Ai`/`Agent` Participant and
+  originates under that id. `attach_agent_for_participant` accepts an existing
+  AI Participant (rejected if that id is already `Human`).
+- `VapiAgentCall::ai_participant_id()` returns the AI Participant.
+
+### Orchestrator Participant role verbs
+
+- `Orchestrator::set_participant_role`, `take_over`, and `hand_off` change
+  voip-3 roles without moving Connections. `take_over` / `hand_off` leave at
+  most one `Agent` in the Session; extra agents become `Observer`.
+- `Event::ParticipantRoleChanged` (and `rvoip_core.participant_role_changed`
+  on the cross-crate bus) fires when the role actually changes.
+
+### SIP ingress budget and admission observer
+
+- `SipListenerAuthPolicy::with_source_rate_limit` drops requests from any
+  source address over its token budget before any other admission check,
+  trusted trunks included, and answers nothing: a flood is not told it is
+  heard. `SipRequestAuthorization::Dropped` carries that outcome through the
+  transaction layer without a response.
+- `SipListenerAuthPolicy::with_ingress_observer` reports every admission
+  decision (`SipIngressEvent`: source, method, admitted/rejected/dropped) to
+  a caller-supplied `SipIngressObserver`, so an edge can count what it
+  refuses instead of reading it back out of logs.
+- `rvoip::app::SipConfig::source_rate_limit` and `ingress_observer` expose
+  both through the facade; they take effect with the trusted-trunk policy.
+
+### SIP NAT traversal on the live RTP socket
+
+- `TransportStunClient` in `rvoip-rtp-core` sends Binding requests through a
+  running `RtpTransport` and reads the response from the transport event
+  stream. `rvoip-sip` now discovers the public mapping after allocating each
+  call's RTP transport and waits for that exact mapping before rendering offer
+  or answer SDP, so the advertised port is the port media actually uses. A
+  static `media_public_addr` remains authoritative; resolution, timeout, and
+  response failures still fall back to the local media address. With STUN
+  configured, initial SDP generation can wait up to 1.5 seconds.
+
+### SIP DTLS-SRTP interoperability
+
+- `UDP/TLS/RTP/SAVPF` is accepted as a DTLS-SRTP audio profile alongside
+  `SAVP`, so media servers that answer with the WebRTC feedback profile no
+  longer fail before the DTLS handshake.
+- `Config` gains `DtlsSetupRole` (`actpass` by default, `active` or `passive`
+  for endpoint and NAT interop), and `srtp_offered_suites` now drives the DTLS
+  `use_srtp` profile list in the configured order. AES-256 SDES suites are
+  rejected when DTLS-SRTP is selected because the DTLS stack supports only the
+  AES-128 SHA1-80 and SHA1-32 profiles.
+
+### WebTransport origin allowlist
+
+- `UctpWtConfig` accepts an opt-in exact `Origin` allowlist. Missing,
+  duplicate, and unlisted browser origins are rejected before the WebTransport
+  CONNECT is accepted; non-browser behaviour is unchanged when no policy is
+  configured.
+
+### WebSocket media bridge browser candidates
+
+- The WebSocket media bridge answerer binds `0.0.0.0` and passes mDNS `.local`
+  candidates through instead of using the loopback WebRTC profile, so Chrome's
+  anonymised IPv4 host candidates pair and ICE completes.
+
+### First-frame media latency restored on the receive side
+
+- The bounded-audio-delivery work added a paced decoded-playout queue with
+  two delays in front of the first decoded frame of every stream: a 45 ms
+  startup reorder hold applied unconditionally, and delivery to the
+  application only on a 5 ms playout tick. Together they added up to
+  50 ms before an application saw the first frame, where it previously saw
+  it within the packet's own arrival. An application that answers a call
+  the moment the first early-media frame is delivered, as vapi-central's
+  node does, lost that race to its own 200 OK every time.
+- A decoded frame that is already due now leaves at packet arrival instead
+  of waiting for the tick; later frames still pace on the tick.
+- The startup reorder hold now applies only once a sequence gap is
+  observed among the pending packets. An unbroken first run carries no
+  evidence of reordering and is released at once; from the first observed
+  gap onward the 45 ms hold protects ordering exactly as before. The one
+  behaviour given up: if the first two packets of a stream arrive
+  backwards, the earlier one is now treated as late rather than reordered.
+  Tests: `startup_releases_a_contiguous_first_packet_without_holding_it`,
+  `startup_holds_only_once_a_gap_is_observed`.
+
+### AMR-WB coverage ported from Thelve
+
+- Thelve's vendored fixes for AMR-WB, an `AmrWb` arm on the SIP media
+  stream and bridge admission by negotiated payload type rather than the
+  codec-name table, were already present here through the SIP-core codec
+  wiring. Their acceptance tests are now carried too: the cross-connection
+  bridge admits an AMR-WB leg that reports its negotiated payload type and
+  still refuses one that does not, and the SIP stream's descriptor and
+  codec follow the SDP clock and fmtp in both RFC 4867 framings while a
+  non-16 kHz-mono shape is refused before a codec is built.
+- vapi-ref-harness carried a state-table override adding the UAS
+  `Answering + DialogCANCEL -> Cancelled` transition for a matched CANCEL
+  that wins final-response authorship while accept is entering `Answering`.
+  The shipped table already contains that transition byte for byte; a
+  state-table test now pins it alongside the `Ringing` and `EarlyMedia`
+  cases so it cannot regress silently.
+
+### Receive-side playout overflow no longer silences a dialog
+
+- The paced decoded-playout queue added with bounded audio delivery holds
+  at most 64 frames. When a burst overflowed it, the RTP event handler for
+  that dialog terminated, so no audio was ever decoded again for the rest
+  of the call. A bridge releasing media it buffered until commit produces
+  exactly such a burst, which is why a caller receiving forwarded early
+  media saw the final answer before any decoded audio. Overflow now drops
+  the newest frame and keeps the receive loop alive, the same way a full
+  application callback channel is handled; the first drop is logged and
+  the rest are counted. Regression test:
+  `decoded_playout_overflow_drops_frames_but_keeps_the_receive_loop_alive`.
+
+### Two-phase bridge peer handoff
+
+- `Orchestrator::prepare_transport_fenced_peer_handoff` and
+  `prepare_peer_handoff` stage a replacement bridge and return a
+  `PreparedPeerHandoff` that owns the staged routes and destination
+  reservation. `commit_peer_handoff_with_timeout_and_receipt`,
+  `commit_peer_handoff_with_timeout`, `commit_peer_handoff_with_receipt`,
+  and `commit_peer_handoff` perform the bounded quiescence and ownership
+  commit and return a `PeerHandoffReceipt` (previous and replacement
+  bridge ids, retained, source, target, `committed_at`). Dropping or
+  awaiting `abandon()` on a prepared handoff rolls back without touching
+  the original bridge. The strict variant refuses a bridge without a
+  transport delivery fence with `NotImplemented`. Applications that must
+  do durable work and re-check authority between preparation and commit
+  can now do so; `replace_bridge_destination` and its transport-fenced
+  wrapper are unchanged and are implemented as prepare followed by
+  commit, so there is one commit path.
+- `Event::PeerHandoffCommitted` is now emitted. It was defined in 0.3.10
+  but never published. It fires exactly once from the shared commit
+  path, after the ownership switch and before the compatibility
+  `ConnectionsUnbridged` and `ConnectionsBridged` events, and never on
+  a failed or abandoned handoff. `VapiAgentCall::wait_shared` now
+  resolves to `HandedOff` when the AI leg is retired by a handoff.
+- Ported the downstream acceptance tests for the handoff, the Vapi
+  existing-call attachment (credential isolation on a shared
+  credential-free adapter, no provider-call creation, no fallback to
+  creation on socket failure), and the QUIC transport fence (stale
+  generation rejected at dequeue; three-client A–B to A–C cutover where B
+  receives no post-handoff frame).
+
+### Bridge cutover fence and glare classification
+
+- The media-graph forwarding gate's cutover mutex was only ever taken by
+  `set_enabled`; the sink worker checked the flag and then called `send()`,
+  which reserves and commits in one step, so a frame parked waiting for
+  target capacity could be published after quiesce. The unticketed legacy
+  sink now reserves first, races that reservation against the quiesce
+  signal, and re-reads the flag under the cutover mutex before committing.
+  A worker either publishes strictly before the cutover or abandons its
+  frame. Routes that buffer while disabled keep their send; ticketed peer
+  routes already fenced on generation and are unchanged.
+- A bridge-destination replacement that loses a race to a concurrent
+  contender now reports `BridgeNotFound` at every detection point (retired
+  peer ticket, quiescence observing a changed peer, or a commit whose
+  generation moved), matching the registry lookup and the reservation
+  step. Callers get one classifiable retry signal instead of three. A
+  quiescence timeout and a data route that ended mid-replacement remain
+  `InvalidState`; a bridge that was never transport fenced remains
+  `NotImplemented`.
+- `SessionState::inbound_audio_codecs` moved from the hot struct to the
+  copy-on-write cold block. It is read once per offer/answer, and keeping
+  it hot had regressed the SIP hot-layout tripwire.
+
 ### Added
 
 - Added Jambonz OSS 0.9.9 as a mandatory external SIP interoperability peer,

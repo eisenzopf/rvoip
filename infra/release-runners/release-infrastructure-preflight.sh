@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-EXPECTED_RESOURCE="${1:?expected GCP resource class is required}"
+EXPECTED_RESOURCE="${1:?expected EC2 resource class is required}"
 ARTIFACT_DIR="${2:?artifact directory is required}"
 
 case "$EXPECTED_RESOURCE" in
-  gcp-performance|gcp-performance-soak-long)
+  ec2-performance|ec2-performance-soak-long)
     EXPECTED_VCPUS=8
     EXPECTED_MEMORY_GIB=28
     EXPECTED_DISK_GIB=180
     ;;
-  gcp-performance-soak|gcp-interop)
+  ec2-performance-soak|ec2-interop)
     EXPECTED_VCPUS=4
     EXPECTED_MEMORY_GIB=14
     EXPECTED_DISK_GIB=180
     ;;
-  gcp-proxy-interop)
+  ec2-proxy-interop)
     EXPECTED_VCPUS=2
     EXPECTED_MEMORY_GIB=7
     EXPECTED_DISK_GIB=90
@@ -78,8 +78,8 @@ for program in cargo cmake git jq pkg-config protoc rustc; do
   command -v "$program" >/dev/null
 done
 
-if [[ "$EXPECTED_RESOURCE" == gcp-interop \
-  || "$EXPECTED_RESOURCE" == gcp-proxy-interop ]]; then
+if [[ "$EXPECTED_RESOURCE" == ec2-interop \
+  || "$EXPECTED_RESOURCE" == ec2-proxy-interop ]]; then
   command -v sipp >/dev/null
   command -v tshark >/dev/null
   command -v docker >/dev/null
@@ -154,8 +154,8 @@ publishable = [
     for package in metadata["packages"]
     if package["id"] in members and package.get("publish") != []
 ]
-if len(publishable) != 45:
-    raise SystemExit(f"expected 45 publishable workspace packages, found {len(publishable)}")
+if len(publishable) != 46:
+    raise SystemExit(f"expected 46 publishable workspace packages, found {len(publishable)}")
 PY
 
 # Opening thousands of descriptors catches the stock systemd soft-limit bug

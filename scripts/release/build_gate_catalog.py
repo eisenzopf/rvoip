@@ -332,12 +332,12 @@ def resource_class(record: dict[str, Any]) -> str:
     gate_id = record["id"]
     if gate_id.startswith("perf."):
         if gate_id in {"perf.monolithic-soak", "perf.soak-candidate"}:
-            return "gcp-performance-soak-long"
+            return "ec2-performance-soak-long"
         if gate_id == "perf.media-burst-matrix":
-            return "gcp-performance-soak"
-        return "gcp-performance"
+            return "ec2-performance-soak"
+        return "ec2-performance"
     if gate_id.startswith("interop."):
-        return "gcp-interop"
+        return "ec2-interop"
     if gate_id.startswith("security.fuzz"):
         return "github-nightly"
     if gate_id.startswith(("source.", "report.")):
@@ -405,8 +405,8 @@ def legacy_gate(record: dict[str, Any], records: list[dict[str, Any]], packages:
         # Release shards can begin cold, so leave enough time to compile and
         # then execute the required test instead of timing out mid-build.
         timeout_minutes = max(timeout_minutes, 20)
-    if resource_class(record).startswith("gcp-"):
-        # GCP workers start without a warm target directory. Preserve enough
+    if resource_class(record).startswith("ec2-"):
+        # EC2 workers start without a warm target directory. Preserve enough
         # headroom for the first release build as well as the measured gate.
         timeout_minutes = max(timeout_minutes, 20)
     expected_outputs = ["receipt.json", "command.log"]
@@ -453,7 +453,7 @@ def core_gate(package: dict[str, Any], root: Path, weights: dict[str, int]) -> d
     return {
         "id": f"core.{slug}",
         "name": f"{name} unit, integration, example, and Clippy checks",
-        "category": "Parallel 45-crate core",
+        "category": "Parallel 46-crate core",
         "kind": "cargo",
         "executor": "argv",
         "command": [
@@ -576,7 +576,7 @@ def proxy_pbx_gates() -> list[dict[str, Any]]:
                 "infra/release-runners/interop-lifecycle.sh",
                 f"{peer}-up",
             ],
-            resource="gcp-proxy-interop",
+            resource="ec2-proxy-interop",
             dependencies=["source.remote-clean"],
             paths=paths,
         )
@@ -600,7 +600,7 @@ def proxy_pbx_gates() -> list[dict[str, Any]]:
                 "--scenario",
                 "all",
             ],
-            resource="gcp-proxy-interop",
+            resource="ec2-proxy-interop",
             dependencies=[f"interop.proxy-pbx.{peer}.up"],
             paths=paths,
         )
@@ -615,7 +615,7 @@ def proxy_pbx_gates() -> list[dict[str, Any]]:
                 "infra/release-runners/interop-lifecycle.sh",
                 f"{peer}-down",
             ],
-            resource="gcp-proxy-interop",
+            resource="ec2-proxy-interop",
             dependencies=[f"interop.proxy-pbx.{peer}.matrix"],
             paths=paths,
             always_fresh=True,
@@ -672,7 +672,7 @@ def amr_rate_sweep_gates() -> list[dict[str, Any]]:
         "Asterisk lab up for the AMR per-rate sweep",
         executor="argv",
         command=["bash", "infra/release-runners/interop-lifecycle.sh", "asterisk-up"],
-        resource="gcp-interop",
+        resource="ec2-interop",
         dependencies=["source.remote-clean"],
         paths=paths,
     )
@@ -697,7 +697,7 @@ def amr_rate_sweep_gates() -> list[dict[str, Any]]:
                 "--transport",
                 transport,
             ],
-            resource="gcp-interop",
+            resource="ec2-interop",
             dependencies=["interop.amr-rate-sweep.up"],
             paths=paths,
         )
@@ -711,7 +711,7 @@ def amr_rate_sweep_gates() -> list[dict[str, Any]]:
         "Asterisk lab down after the AMR per-rate sweep",
         executor="argv",
         command=["bash", "infra/release-runners/interop-lifecycle.sh", "asterisk-down"],
-        resource="gcp-interop",
+        resource="ec2-interop",
         dependencies=[cell["id"] for cell in cells],
         paths=paths,
         # Runs even when a sweep fails: a lab left up holds its ports and the
@@ -747,7 +747,7 @@ def jambonz_interop_gates() -> list[dict[str, Any]]:
             "--receipt",
             "{artifact_dir}/latest.json",
         ],
-        resource="gcp-interop",
+        resource="ec2-interop",
         dependencies=["source.remote-clean", "interop.freeswitch-down-after"],
         paths=paths,
         always_fresh=True,
@@ -763,7 +763,7 @@ def jambonz_interop_gates() -> list[dict[str, Any]]:
             "infra/release-runners/interop-lifecycle.sh",
             "jambonz-up",
         ],
-        resource="gcp-interop",
+        resource="ec2-interop",
         dependencies=["interop.jambonz-latest"],
         paths=paths,
     )
@@ -791,7 +791,7 @@ def jambonz_interop_gates() -> list[dict[str, Any]]:
             "--transport",
             "UDP",
         ],
-        resource="gcp-interop",
+        resource="ec2-interop",
         dependencies=["interop.jambonz-up"],
         paths=paths,
     )
@@ -808,7 +808,7 @@ def jambonz_interop_gates() -> list[dict[str, Any]]:
             "infra/release-runners/interop-lifecycle.sh",
             "jambonz-down",
         ],
-        resource="gcp-interop",
+        resource="ec2-interop",
         dependencies=["interop.jambonz-matrix"],
         paths=paths,
         always_fresh=True,
@@ -839,7 +839,7 @@ def proxy_interop_gates() -> list[dict[str, Any]]:
                         order,
                         transport,
                     ],
-                    resource="gcp-proxy-interop",
+                    resource="ec2-proxy-interop",
                     dependencies=["source.remote-clean"],
                     paths=paths,
                 )
@@ -860,7 +860,7 @@ def proxy_interop_gates() -> list[dict[str, Any]]:
 
 
 def infrastructure_preflight_gates() -> list[dict[str, Any]]:
-    """Build the full-shape, short-running GCP orchestration acceptance profile.
+    """Build the full-shape, short-running EC2 orchestration acceptance profile.
 
     The release profile uses six short-performance workers, seven burst/soak
     workers, two long-soak workers, one stateful interoperability worker, and
@@ -870,22 +870,22 @@ def infrastructure_preflight_gates() -> list[dict[str, Any]]:
     """
     paths = [
         ".github/workflows/release-qualify.yml",
-        "infra/release-runners/gcp-release-startup.sh",
+        "infra/release-runners/aws-release-startup.sh",
         "infra/release-runners/release-infrastructure-preflight.sh",
         "scripts/release/build_gate_catalog.py",
         "scripts/release/gates.py",
         "scripts/release/gates.json",
-        "scripts/release/gcp_fanout.py",
+        "scripts/release/aws_fanout.py",
     ]
     result = []
     for resource, count in (
-        ("gcp-performance", 6),
-        ("gcp-performance-soak", 7),
-        ("gcp-performance-soak-long", 2),
-        ("gcp-interop", 1),
-        ("gcp-proxy-interop", 2),
+        ("ec2-performance", 6),
+        ("ec2-performance-soak", 7),
+        ("ec2-performance-soak-long", 2),
+        ("ec2-interop", 1),
+        ("ec2-proxy-interop", 2),
     ):
-        suffix = resource.removeprefix("gcp-")
+        suffix = resource.removeprefix("ec2-")
         for index in range(1, count + 1):
             result.append(
                 synthetic_gate(
@@ -973,7 +973,7 @@ def burst_scenario_gates() -> list[dict[str, Any]]:
                 "bash",
                 "{workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
             ],
-            resource="gcp-performance-soak",
+            resource="ec2-performance-soak",
             dependencies=["source.remote-clean"],
             paths=[
                 "crates/sip/rvoip-sip/**",
@@ -1036,8 +1036,8 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
         (package for package in metadata["packages"] if package["id"] in members),
         key=lambda package: package["name"],
     )
-    if len(package_rows) != 45:
-        raise RuntimeError(f"expected 45 workspace packages, found {len(package_rows)}")
+    if len(package_rows) != 46:
+        raise RuntimeError(f"expected 46 workspace packages, found {len(package_rows)}")
     package_names = [package["name"] for package in package_rows]
     weights = json.loads((root / "scripts/ci/policy.json").read_text()).get("package_weights", {})
 
@@ -1050,7 +1050,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
         ),
         synthetic_gate(
             "package.inventory",
-            "45-package release inventory audit",
+            "46-package release inventory audit",
             executor="argv",
             command=["python3", "scripts/release.py", "audit"],
             dependencies=["source.remote-clean"],
@@ -1072,7 +1072,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
                 "--output",
                 "{artifact_dir}/nested-ci-receipt.json",
             ],
-            resource="gcp-interop",
+            resource="ec2-interop",
             dependencies=["source.remote-clean"],
             paths=[
                 "Cargo.lock",
@@ -1098,7 +1098,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
                 "RVOIP_CANONICAL_EVAL_OUTPUT={artifact_dir}",
                 "{workspace}/crates/sip/rvoip-sip/scripts/canonical_2k_release_eval.sh",
             ],
-            resource="gcp-performance-soak-long",
+            resource="ec2-performance-soak-long",
             dependencies=["source.remote-clean"],
             paths=[
                 "Cargo.lock",

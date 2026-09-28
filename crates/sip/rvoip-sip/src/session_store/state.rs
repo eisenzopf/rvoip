@@ -279,6 +279,16 @@ pub struct SessionStateCold {
     pub registration_registered_at: Option<Instant>,
     pub registration_next_refresh_at: Option<Instant>,
     pub registration_last_failure: Option<String>,
+    /// Explicit proxy selected for this registration lifetime. REGISTER
+    /// refresh and unregister requests reuse it without turning it into the
+    /// coordinator-wide route for unrelated dialogs.
+    pub(crate) registration_outbound_proxy_uri: Option<rvoip_sip_core::types::uri::Uri>,
+    /// Application-authorized trunk policy, immutable once SDP has been answered.
+    /// Kept on the exact session lifetime so shared listeners cannot leak policy.
+    /// Read once per offer/answer, so it lives in the cold block: adding it to
+    /// the hot struct regressed the layout tripwire without being on the
+    /// per-packet path.
+    pub(crate) inbound_audio_codecs: Option<Vec<String>>,
     pub registration_service_route: Option<Vec<String>>,
     pub registration_pub_gruu: Option<String>,
     pub registration_temp_gruu: Option<String>,
@@ -681,6 +691,10 @@ impl fmt::Debug for SessionState {
                 &self.registration_last_failure.is_some(),
             )
             .field(
+                "registration_outbound_proxy_present",
+                &self.registration_outbound_proxy_uri.is_some(),
+            )
+            .field(
                 "registration_service_route_count",
                 &self.registration_service_route.as_ref().map_or(0, Vec::len),
             )
@@ -1007,6 +1021,8 @@ impl SessionState {
                 registration_registered_at: None,
                 registration_next_refresh_at: None,
                 registration_last_failure: None,
+                registration_outbound_proxy_uri: None,
+                inbound_audio_codecs: None,
                 registration_service_route: None,
                 registration_pub_gruu: None,
                 registration_temp_gruu: None,
@@ -1174,6 +1190,7 @@ impl SessionState {
             || cold.pending_reinvite_options.is_some()
             || cold.pending_offer_answer.is_some()
             || cold.pending_register_options.is_some()
+            || cold.registration_outbound_proxy_uri.is_some()
             || cold.pending_refer_options.is_some()
             || cold.pending_bye_options.is_some()
             || cold.pending_cancel_options.is_some()
@@ -1209,6 +1226,7 @@ impl SessionState {
         cold.pending_reinvite_options = None;
         cold.pending_offer_answer = None;
         cold.pending_register_options = None;
+        cold.registration_outbound_proxy_uri = None;
         cold.pending_refer_options = None;
         cold.pending_bye_options = None;
         cold.pending_cancel_options = None;

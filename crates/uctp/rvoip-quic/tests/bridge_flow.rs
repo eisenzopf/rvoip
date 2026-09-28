@@ -218,43 +218,20 @@ async fn dial_and_invite(
     (client, stream_local_id)
 }
 
-#[tokio::test]
-async fn quic_bridge_flows_real_audio_frame_end_to_end() {
-    let _ = tracing_subscriber::fmt::try_init();
-    install_crypto_provider();
-
-    // --- Server (with adapter + orchestrator) ---
-    let (server_ep, cert_der) = server_endpoint("127.0.0.1:0".parse().unwrap());
-    let server_addr = server_ep.local_addr().expect("local_addr");
-    let mut routes = dispatch_by_alpn(Arc::clone(&server_ep), &[ALPN_UCTP]).expect("dispatcher");
-    let accept_rx = routes.take(ALPN_UCTP).expect("uctp/1 channel");
-
-    let cfg = UctpQuicConfig::new(Arc::clone(&server_ep), accept_rx, bearer_stub());
-    let adapter = UctpQuicAdapter::new(cfg).await.expect("adapter");
-    let orchestrator = Orchestrator::new(Config::default());
-    orchestrator
-        .register(adapter.clone() as Arc<dyn ConnectionAdapter>)
-        .expect("register");
-    let mut events = orchestrator.subscribe_events();
-
-    // --- Two clients ---
-    let client_ep_a = client_endpoint();
-    let client_ep_b = client_endpoint();
-    let (client_a, client_a_local_id) =
-        dial_and_invite(&client_ep_a, server_addr, &cert_der, "sess_a", "part_alice").await;
-    let (client_b, client_b_local_id) =
-        dial_and_invite(&client_ep_b, server_addr, &cert_der, "sess_b", "part_bob").await;
-
-    // --- Wait for two InboundConnection events + paired ConnectionAuthenticated ---
-    // A3: every UCTP InboundConnection should now be followed by a
-    // ConnectionAuthenticated carrying the auth handshake's identity_id
-    // / participant_id / assurance triple. We accumulate both and
-    // assert pairing after the loop.
-    let mut conn_ids: Vec<ConnectionId> = Vec::new();
-    let mut authenticated: Vec<(ConnectionId, String, String)> = Vec::new();
-    let mut principals = Vec::new();
+/// Drain core events until `want` inbound Connections have been observed,
+/// accumulating the paired `ConnectionAuthenticated` /
+/// `ConnectionPrincipalAuthenticated` events along the way so none is lost
+/// between two dial steps. Bounded so a missing event fails the test
+/// instead of hanging it.
+async fn collect_admissions(
+    events: &mut tokio::sync::broadcast::Receiver<Event>,
+    conn_ids: &mut Vec<ConnectionId>,
+    authenticated: &mut Vec<(ConnectionId, String, String)>,
+    principals: &mut Vec<(ConnectionId, rvoip_core::identity::AuthenticatedPrincipal)>,
+    want: usize,
+) {
     for _ in 0..60 {
-        if conn_ids.len() == 2 && authenticated.len() == 2 && principals.len() == 2 {
+        if conn_ids.len() >= want && authenticated.len() >= want && principals.len() >= want {
             break;
         }
         match tokio::time::timeout(Duration::from_millis(200), events.recv()).await {
@@ -279,6 +256,63 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
             _ => continue,
         }
     }
+}
+
+#[tokio::test]
+async fn quic_bridge_flows_real_audio_frame_end_to_end() {
+    let _ = tracing_subscriber::fmt::try_init();
+    install_crypto_provider();
+
+    // --- Server (with adapter + orchestrator) ---
+    let (server_ep, cert_der) = server_endpoint("127.0.0.1:0".parse().unwrap());
+    let server_addr = server_ep.local_addr().expect("local_addr");
+    let mut routes = dispatch_by_alpn(Arc::clone(&server_ep), &[ALPN_UCTP]).expect("dispatcher");
+    let accept_rx = routes.take(ALPN_UCTP).expect("uctp/1 channel");
+
+    let cfg = UctpQuicConfig::new(Arc::clone(&server_ep), accept_rx, bearer_stub());
+    let adapter = UctpQuicAdapter::new(cfg).await.expect("adapter");
+    let orchestrator = Orchestrator::new(Config::default());
+    orchestrator
+        .register(adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .expect("register");
+    let mut events = orchestrator.subscribe_events();
+
+    // --- Two clients ---
+    // A3: every UCTP InboundConnection should now be followed by a
+    // ConnectionAuthenticated carrying the auth handshake's identity_id
+    // / participant_id / assurance triple. We accumulate both and
+    // assert pairing after the loop.
+    //
+    // Client A is admitted and its core ConnectionId pinned as `retained`
+    // before client B dials, so the later handoff names A by identity rather
+    // than by event order.
+    let mut conn_ids: Vec<ConnectionId> = Vec::new();
+    let mut authenticated: Vec<(ConnectionId, String, String)> = Vec::new();
+    let mut principals = Vec::new();
+    let client_ep_a = client_endpoint();
+    let client_ep_b = client_endpoint();
+    let (client_a, client_a_local_id) =
+        dial_and_invite(&client_ep_a, server_addr, &cert_der, "sess_a", "part_alice").await;
+    collect_admissions(
+        &mut events,
+        &mut conn_ids,
+        &mut authenticated,
+        &mut principals,
+        1,
+    )
+    .await;
+    assert_eq!(conn_ids.len(), 1, "expected client A's ConnectionInbound");
+    let retained = conn_ids[0].clone();
+    let (client_b, client_b_local_id) =
+        dial_and_invite(&client_ep_b, server_addr, &cert_der, "sess_b", "part_bob").await;
+    collect_admissions(
+        &mut events,
+        &mut conn_ids,
+        &mut authenticated,
+        &mut principals,
+        2,
+    )
+    .await;
     assert_eq!(conn_ids.len(), 2, "expected two ConnectionInbound events");
     assert_eq!(
         authenticated.len(),
@@ -316,7 +350,7 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
     }
 
     // --- Bridge ---
-    let _bridge_id = orchestrator
+    let bridge_id = orchestrator
         .bridge_connections(conn_ids[0].clone(), conn_ids[1].clone())
         .await
         .expect("bridge succeeds — both sides have streams");
@@ -339,11 +373,15 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
         payload_type: Some(0),
     };
 
+    // Client A is sendrecv (`Inbound` on a local peer; see the loopback
+    // test): it injects now and must also be able to receive from client C
+    // after the handoff below. An `Outbound` binding would reject C's
+    // datagrams at A's reader.
     let client_a_stream = QuicDatagramMediaStream::start(
         StreamId::new(),
         StreamKind::Audio,
         codec.clone(),
-        rvoip_core::connection::Direction::Outbound,
+        rvoip_core::connection::Direction::Inbound,
         client_a_local_id,
         client_a.connection.clone(),
     );
@@ -399,6 +437,103 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
             payload
         );
     }
+
+    // --- Peer handoff over real transports: A–B becomes A–C ---
+    // A third QUIC client is admitted, then core's transport-fenced
+    // replacement swaps B for C while A stays put. Afterwards both new
+    // directions carry audio over the wire, B receives nothing, and A is
+    // still live. The property under test is the transport fence, not the
+    // entry point that drives it, so the one-shot core API is used here.
+    let client_ep_c = client_endpoint();
+    let (client_c, client_c_local_id) =
+        dial_and_invite(&client_ep_c, server_addr, &cert_der, "sess_c", "part_carol").await;
+    collect_admissions(
+        &mut events,
+        &mut conn_ids,
+        &mut authenticated,
+        &mut principals,
+        3,
+    )
+    .await;
+    assert_eq!(conn_ids.len(), 3, "expected client C's ConnectionInbound");
+    let previous_destination = conn_ids[1].clone();
+    let target = conn_ids[2].clone();
+    assert_ne!(target, retained);
+    assert_ne!(target, previous_destination);
+
+    let client_c_stream = QuicDatagramMediaStream::start(
+        StreamId::new(),
+        StreamKind::Audio,
+        client_b_stream.codec(),
+        rvoip_core::connection::Direction::Inbound,
+        client_c_local_id,
+        client_c.connection.clone(),
+    );
+    let router_c = Arc::new(parking_lot::RwLock::new(vec![Arc::clone(&client_c_stream)]));
+    spawn_datagram_reader(client_c.connection.clone(), router_c, None);
+    let mut client_c_in = client_c_stream
+        .try_frames_in()
+        .expect("client C media receiver");
+    let mut client_a_in = client_a_stream
+        .try_frames_in()
+        .expect("client A media receiver");
+
+    let replacement = tokio::time::timeout(
+        Duration::from_secs(5),
+        orchestrator.replace_bridge_destination_transport_fenced(
+            bridge_id.clone(),
+            retained.clone(),
+            previous_destination.clone(),
+            target.clone(),
+        ),
+    )
+    .await
+    .expect("real transport handoff timed out")
+    .expect("real transport handoff");
+    assert_eq!(replacement.previous_bridge_id, bridge_id);
+    assert_ne!(
+        replacement.bridge_id, bridge_id,
+        "a fresh generation is minted"
+    );
+    assert_eq!(replacement.ingress, retained);
+    assert_eq!(replacement.previous_destination, previous_destination);
+    assert_eq!(replacement.destination, target);
+
+    for (stream, value) in [(&client_a_stream, 71u8), (&client_c_stream, 72u8)] {
+        stream
+            .frames_out()
+            .send(MediaFrame {
+                stream_id: stream.id(),
+                kind: StreamKind::Audio,
+                payload: Bytes::from(vec![value]),
+                timestamp_rtp: 2_000,
+                captured_at: Utc::now(),
+                payload_type: Some(0),
+            })
+            .await
+            .expect("inject post-handoff frame");
+    }
+    for (receiver, expected, label) in [
+        (&mut client_c_in, 71u8, "A→C"),
+        (&mut client_a_in, 72u8, "C→A"),
+    ] {
+        let received = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for the post-handoff {label} frame"))
+            .unwrap_or_else(|| panic!("{label} stream closed unexpectedly"));
+        assert_eq!(
+            received.payload[0], expected,
+            "{label} carried the wrong frame"
+        );
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), client_b_in.recv())
+            .await
+            .is_err(),
+        "the retired peer received post-handoff audio"
+    );
+    assert!(adapter.is_connection_live(&retained));
+    assert!(adapter.is_connection_live(&target));
 
     // Core owns terminal dispatch. The adapter removes route ownership before
     // wire teardown, then reports exactly one normalized terminal even if a

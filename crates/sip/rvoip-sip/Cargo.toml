@@ -363,6 +363,7 @@ rvoip-sip-dialog.workspace = true
 rvoip-sip-proxy.workspace = true
 rvoip-sip-transport.workspace = true
 rvoip-media-core.workspace = true
+rvoip-audio-send-queue.workspace = true
 rvoip-sip-core.workspace = true
 rvoip-rtp-core.workspace = true
 rvoip-ice-core.workspace = true
@@ -452,6 +453,7 @@ harness = false
 
 [features]
 default = []
+test-hooks = []
 event-history = []
 persistence = []
 generated-validation = [
@@ -465,15 +467,20 @@ generated-validation = [
 # session-core only depends on sip-transport as a dev-dependency, and
 # feature chains via dev-deps don't participate in regular builds.
 dev-insecure-tls = ["rvoip-sip-dialog/dev-insecure-tls"]
-# Optional G.729A/G.729AB media support. Off by default.
-g729 = ["rvoip-media-core/g729"]
+# Optional G.729A/G.729AB media support. Off by default. Forward the feature
+# into rvoip-core as well as media-core: SipAdapter publishes encoded G.729
+# frames into core's media graph, whose transcoder is feature-gated separately.
+g729 = ["rvoip-media-core/g729", "rvoip-core/g729"]
 amr-nb = ["rvoip-media-core/amr-nb"]
-amr-wb = ["rvoip-media-core/amr-wb"]
+# The core-facing SIP stream carries AMR-WB under its negotiated dynamic
+# payload type, and the graph must be able to construct that exact fmtp-bound
+# codec when a bridge requires transcoding.
+amr-wb = ["rvoip-media-core/amr-wb", "rvoip-core/amr-wb"]
 amr = ["amr-nb", "amr-wb"]
 # Optional native Opus media support for negotiated SIP legs. Bridgefu enables
 # this so SIP Opus is represented as Opus codec payload in MediaFrame rather
 # than being mis-decoded as G.711.
-opus = ["rvoip-media-core/opus"]
+opus = ["rvoip-media-core/opus", "rvoip-core/opus"]
 # Deprecated compatibility alias; this selects the same real backend.
 opus-sim = ["opus"]
 all-codecs = ["g729", "opus", "amr"]

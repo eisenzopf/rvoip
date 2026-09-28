@@ -114,6 +114,9 @@ wrappers = [
     "rvoip-identity",
     # Vapi implements the full ConnectionAdapter and drives Orchestrator.
     "rvoip-vapi",
+    # The in-process AI harness is a ConnectionAdapter too: it owns the AI
+    # Connection, its session medium, and its capability surface directly.
+    "rvoip-harness",
     # Optional VCon/PostgreSQL integration consumes Orchestrator storage APIs.
     "rvoip-vcon-postgres",
 ]

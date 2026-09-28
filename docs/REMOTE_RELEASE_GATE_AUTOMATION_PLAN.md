@@ -366,160 +366,175 @@ The implementation PR expands this minimum into the exact leaf catalog,
 including all existing SIP beta entries. Policy tests assert the exact selected
 inventory for a full release.
 
-## Google Cloud architecture
+## AWS architecture
 
 ### Recommended machine classes
 
-| Worker class | Default VM | Memory | Work disk | Use |
-| --- | --- | ---: | ---: | --- |
-| controller-light | GitHub-hosted Ubuntu | managed | managed | plan, formatting, report, small checks |
-| cargo-heavy | n2-standard-8 | 32 GB | 250 GB pd-balanced | workspace and per-crate shards |
-| interop | n2-standard-8 | 32 GB | 250 GB pd-ssd | PBX, proxy, browser, live-service lanes |
-| performance | n2-standard-32 | 128 GB | 1,200 GB pd-ssd | canonical, load, performance, and soaks |
+| Worker class | Instance type | vCPU | Memory | Root volume | Use |
+| --- | --- | ---: | ---: | --- | --- |
+| controller | GitHub-hosted Ubuntu | managed | managed | managed | plan, hosted shards, report, small checks |
+| ec2-performance | m5.2xlarge | 8 | 32 GB | 200 GB gp3 | short performance and regression gates |
+| ec2-performance-soak | m5.xlarge | 4 | 16 GB | 200 GB gp3 | burst and soak gates |
+| ec2-performance-soak-long | m5.2xlarge | 8 | 32 GB | 200 GB gp3 | one-hour soaks |
+| ec2-interop | m5.xlarge | 4 | 16 GB | 200 GB gp3 | stateful PBX interoperability lane |
+| ec2-proxy-interop | m5.large | 2 | 8 GB | 100 GB gp3 | proxy interoperability rows |
+| performance prebuilder | m5.8xlarge | 32 | 128 GB | 200 GB gp3 | compiles the performance bundle once |
 
-Google documents n2-standard-32 as 32 vCPU and 128 GB RAM:
-https://docs.cloud.google.com/compute/docs/general-purpose-machines
+The `m5` family is the same generation as the N2 workers it replaces (Intel
+Skylake-SP or Cascade Lake, 4 GB per vCPU). AWS does not expose a minimum CPU
+platform, so every worker records the actual CPU model in its evidence.
+Amazon documents the `m5` sizes here:
+https://aws.amazon.com/ec2/instance-types/m5/
 
-The performance VM uses the STANDARD provisioning model, not Spot. Cargo-heavy
-workers may use Spot after retry behavior is proven because an interruption is
-classified as INFRA_ERROR. Interop and live-service jobs use STANDARD by
-default.
+Every worker uses On-Demand capacity, not Spot. The full `remote-release`
+shape is six short-performance workers, two long-soak workers, seven
+burst/soak workers, one interoperability worker, and two
+proxy-interoperability workers: 100 concurrent vCPUs, plus the 32-vCPU
+builder that runs and is terminated before the fleet starts. The controller
+verifies the account's On-Demand Standard vCPU quota (`L-1216C47A`) and gp3
+storage quota against that peak before creating anything.
 
-Machine classes and disks are policy values recorded in every attestation.
-Changing them invalidates environment-sensitive evidence.
+Machine classes and volumes are policy values recorded in every attestation.
+Changing them invalidates environment-sensitive evidence; moving clouds
+changed the release environment identifier to
+`rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5`.
 
-### Dedicated Google Cloud project
+### Dedicated release VPC
 
-Use a dedicated project for release testing. It contains only:
+Release workers run in a dedicated VPC created by the Terraform module in
+`infra/aws`. Everything it creates is tagged `rvoip-release=true`:
 
-- a private release-runner subnet;
-- Cloud NAT for outbound access;
-- no inbound internet firewall rule;
-- one immutable Ubuntu 24.04 runner image family;
-- narrowly scoped service accounts;
-- a Workload Identity Federation pool/provider for GitHub;
-- an evidence bucket;
-- a compiler-cache bucket;
-- Cloud Logging;
-- budget alerts;
-- quotas; and
+- one public subnet per availability zone with an internet gateway for
+  outbound package, toolchain, and S3 access;
+- a security group with no ingress rules and unrestricted egress;
+- IMDSv2 required, with instance tags readable from IMDS;
+- a runner instance role and profile scoped to the evidence and cache buckets
+  only, with no EC2 permissions;
+- a versioned evidence bucket and a lifecycle-managed compiler-cache bucket;
+- service-quota visibility for the provisioner; and
 - an expired-resource janitor.
 
-Project, region, zone, network, and bucket names are configured inputs. The
-initial recommended region is us-central1 because N2 capacity is broadly
-available, but qualification is not enabled until quota and actual availability
-are verified.
+Region, subnet, security group, instance profile, bucket names, and the AMI
+parameter are repository variables (`RVOIP_AWS_*`) populated from the module
+outputs. The region is `us-west-2`; qualification is not enabled until the
+vCPU quota and actual availability are verified there.
 
-### Keyless GitHub-to-Google authentication
+### Keyless GitHub-to-AWS authentication
 
-GitHub Actions authenticates to Google Cloud through Workload Identity
-Federation using GitHub OIDC. No downloaded service-account JSON key is stored
-in GitHub.
+GitHub Actions authenticates to AWS by assuming the `rvoip-gh-provisioner`
+IAM role through GitHub OIDC. No access key is stored in GitHub.
 
-The provider condition must restrict:
+The role's trust policy restricts:
 
 - the exact GitHub repository;
-- protected main or release branch refs;
-- the exact release workflow identity; and
-- the expected repository owner.
+- the exact release workflow identity, matched on the customised
+  `job_workflow_ref` `sub` claim
+  (`repo:eisenzopf/rvoip:job_workflow_ref:eisenzopf/rvoip/.github/workflows/release-qualify.yml@refs/heads/*`);
+  and
+- the `sts.amazonaws.com` audience.
 
-The controller impersonates a provisioner service account with only the
-permissions required to create, inspect, stop, and delete release-runner VMs
-and disks.
+The provisioner role may run, describe, tag, stop, and terminate only
+instances that carry `managed-by=github-actions`, pass the runner instance
+role, read the Ubuntu AMI parameter, and read quotas and the evidence bucket.
+It cannot write evidence, so a compromised controller cannot forge a worker
+result.
 
-Google documents GitHub deployment-pipeline federation here:
-https://docs.cloud.google.com/iam/docs/workload-identity-federation-with-deployment-pipelines
+GitHub documents OIDC federation with AWS here:
+https://docs.github.com/en/actions/security-for-github-actions/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services
 
-### Ephemeral GitHub runners
+### Ephemeral workers
 
-Every Google Cloud worker:
+Workers are not GitHub runners. Every EC2 worker:
 
-1. boots from a pinned immutable image;
-2. receives a short-lived just-in-time GitHub runner configuration;
-3. registers with the ephemeral option;
-4. accepts exactly one Actions job;
-5. streams runner and system logs to Cloud Logging;
-6. uploads gate evidence before completion;
-7. deregisters automatically;
-8. shuts down; and
-9. is deleted with its work disk.
+1. boots from the pinned immutable image;
+2. receives its parameters and the reviewed startup and shutdown scripts as
+   gzip-compressed user-data built by `scripts/release/aws_fanout.py
+   user-data` from the controller's checkout of the exact candidate;
+3. installs `rvoip-release-shutdown.service`, whose `ExecStop` snapshots
+   partial evidence when the controller stops the instance early;
+4. checks out the candidate and runs exactly one shard of gates;
+5. uploads its immutable result, log, and evidence bundle to S3 with the
+   instance role;
+6. shuts itself down; and
+7. is terminated with its root volume because the instance-initiated shutdown
+   behaviour is `terminate`.
 
-GitHub recommends ephemeral runners for autoscaling because one runner receives
-one job:
-https://docs.github.com/en/actions/reference/runners/self-hosted-runners
+One GitHub controller creates all workers concurrently, polls S3 and instance
+states, treats `stopping`, `stopped`, `shutting-down`, and `terminated` as
+finished, and verifies every bundle by SHA-256 before merging it. No
+long-lived credential or GitHub token is placed on a worker.
 
-A GitHub App or other short-lived GitHub credential requests the just-in-time
-runner configuration. A long-lived personal access token is not placed on the
-VM.
+### Immutable image
 
-### Immutable runner image
+Workers boot from Canonical's Ubuntu 24.04 amd64 image, resolved at run time
+from the canonical SSM parameter
+`/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id`
+and recorded in the run's preflight receipt. The startup script installs the
+pinned tool set on top of it:
 
-The image contains:
-
-- Ubuntu 24.04 x64;
-- a pinned GitHub runner version;
 - Docker Engine and Compose;
-- build-essential, Clang, CMake, pkg-config, protobuf, OpenSSL, ALSA, and Opus
-  development packages;
-- browser prerequisites;
-- SIPp and baresip versions required by policy;
-- cargo-audit, cargo-deny, cargo-public-api, and cargo-fuzz versions required
-  by policy;
+- build-essential, Clang, CMake, pkg-config, protobuf, OpenSSL, ALSA, Opus,
+  and libvpx development packages;
+- SIPp and baresip versions required by policy, on interoperability workers
+  only;
 - packet capture and diagnostic tools;
-- Google Cloud Ops Agent; and
-- the bootstrap/cleanup service.
+- the AWS CLI from the pinned official archive, signature-verified; and
+- a verified, pinned `sccache` using the S3 backend.
 
-Rust toolchains remain installed from repository-pinned definitions so a
-toolchain change is visible in the candidate. The image digest and tool
-versions are captured by every worker.
+Rust toolchains are installed from repository-pinned definitions so a
+toolchain change is visible in the candidate. The AMI id and tool versions
+are captured by every worker.
 
-The image is rebuilt through a separate reviewed workflow. Release jobs never
-run an unreviewed mutable latest image.
+The startup script is reviewed in the repository and hashed into every EC2
+gate's environment digest. Release jobs never run an unreviewed script.
 
 ### Evidence storage
 
 Use both:
 
 - GitHub Actions artifacts for convenient review; and
-- a versioned Google Cloud Storage bucket for durable resume and aggregation.
+- a versioned S3 bucket for durable resume and aggregation.
 
 Canonical object layout:
 
 ~~~text
-gs://BUCKET/releases/0.3.5/candidates/CANDIDATE_ID/
-  plan/
-  gates/GATE_ID/REUSE_KEY/ATTEMPT_ID/
-  aggregate/
-  diagnostics/
+s3://EVIDENCE/release/<run>-<attempt>/<shard>/result.json
+s3://EVIDENCE/release/<run>-<attempt>/<shard>/release-shard.tar.gz
+s3://EVIDENCE/release/<run>-<attempt>/<shard>/qualification.log
+s3://EVIDENCE/release/<run>-<attempt>/prebuild/{prebuild-result.json,prebuild.log}
+s3://EVIDENCE/release-cache/performance-prebuilt-v1/<cache-key>/...
 ~~~
 
-Every uploaded object has a SHA-256 manifest. GitHub artifact attestations bind
-the gate bundle to its workflow, repository, commit, and job. GCS object
-generation and checksum are recorded in the gate attestation.
+Every uploaded object has a SHA-256 manifest. GitHub artifact attestations
+bind the gate bundle to its workflow, repository, commit, and job. The S3
+object version and checksum are recorded in the gate attestation.
 
-The active-release bucket uses uniform bucket-level access, object versioning,
-retention, and lifecycle rules. A permanent retention lock is not enabled until
-the owner reviews its irreversible consequences.
+The evidence bucket is private, SSE-S3 encrypted, and versioned. Its
+lifecycle rule expires only the `release-cache/` prefix after 14 days;
+run-scoped receipts and logs are durable. An Object Lock retention is not
+enabled until the owner reviews its irreversible consequences.
 
 ### Cleanup guarantees
 
-Each instance and disk carries:
+Each instance carries these tags:
 
-- release version;
-- candidate ID;
-- GitHub run and job IDs;
-- worker class;
-- created-at time; and
-- expires-at time.
+- `Name`, `managed-by=github-actions`, and `rvoip-role`;
+- `rvoip-run-id`, `rvoip-candidate`, `rvoip-shard-id`, and
+  `rvoip-resource-class`; and
+- `rvoip-expires-at`, set to four hours after creation.
 
 Cleanup runs in three layers:
 
-1. worker shutdown after evidence upload;
-2. controller finally-job deletion; and
-3. a scheduled Google Cloud janitor that deletes expired labeled VMs and disks.
+1. worker self-termination after evidence upload;
+2. controller termination of every planned worker on `always()`, plus a
+   `cleanup-aws` job that sweeps instances tagged with the run and fails if
+   any remain; and
+3. an EventBridge-scheduled janitor Lambda that, every 30 minutes,
+   terminates any `managed-by=github-actions` instance whose
+   `rvoip-expires-at` tag is in the past.
 
-The collector fails if an assigned worker has no deletion receipt. Budget
-alerts and a maximum instance quota limit accidental fan-out.
+The collector fails if an assigned worker has no termination receipt. The
+vCPU quota check and the per-run worker count limit accidental fan-out.
 
 ## Workflow architecture
 

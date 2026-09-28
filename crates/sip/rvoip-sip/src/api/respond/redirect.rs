@@ -70,8 +70,12 @@ impl RedirectBuilder {
 
         let extras = take_staged(&mut self.state);
         self.coord
-            .helpers
-            .redirect_call_with_extras_exact(lifecycle_handle, self.status, self.contacts, extras)
+            .redirect_incoming_with_extras_exact(
+                lifecycle_handle,
+                self.status,
+                self.contacts,
+                extras,
+            )
             .await
     }
 }

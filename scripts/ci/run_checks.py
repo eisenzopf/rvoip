@@ -39,7 +39,7 @@ CODEC_FEATURE_GATES = {
 # feature is added without a decision about this gate.
 NON_PERF_SIP_FEATURES = (
     "all-codecs,amr,amr-nb,amr-wb,dev-insecure-tls,dhat,dtls-srtp,event-history,g729,"
-    "generated-validation,opus,opus-sim,persistence,tokio-console"
+    "generated-validation,opus,opus-sim,persistence,test-hooks,tokio-console"
 )
 
 
@@ -304,7 +304,7 @@ def specialty_commands(
                     "scripts/test_release.py",
                     "scripts/test_release_carry_forward_attestation.py",
                     "scripts/test_release_exception_attestation.py",
-                    "scripts/test_release_gcp_fanout.py",
+                    "scripts/test_release_aws_fanout.py",
                     "scripts/test_release_gates.py",
                     "scripts/test_release_prebuilt_performance.py",
                     "scripts/test_render_qualification_reports.py",

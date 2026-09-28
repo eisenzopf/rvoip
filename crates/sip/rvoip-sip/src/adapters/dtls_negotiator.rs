@@ -3,7 +3,8 @@
 //! This module is the SDP-side scaffold for DTLS-SRTP. It handles:
 //!
 //! 1. Detecting a DTLS-SRTP offer (presence of `a=fingerprint:` and
-//!    `a=setup:` on an audio m-line with `UDP/TLS/RTP/SAVP` proto).
+//!    `a=setup:` on an audio m-line with `UDP/TLS/RTP/SAVP` or
+//!    `UDP/TLS/RTP/SAVPF` proto).
 //! 2. Computing the complementary `a=setup:` role per RFC 8842 §5.1
 //!    so the answer carries the matching active/passive value.
 //! 3. Selecting our advertised fingerprint hash.
@@ -156,9 +157,11 @@ pub fn parse_dtls_offer(sdp: &SdpSession) -> Result<Option<DtlsOffer>> {
     if fingerprint.is_none() && setup.is_none() {
         return Ok(None);
     }
-    if !audio.protocol.eq_ignore_ascii_case("UDP/TLS/RTP/SAVP") {
+    if !audio.protocol.eq_ignore_ascii_case("UDP/TLS/RTP/SAVP")
+        && !audio.protocol.eq_ignore_ascii_case("UDP/TLS/RTP/SAVPF")
+    {
         return Err(SessionError::SDPNegotiationFailed(
-            "DTLS-SRTP attributes require UDP/TLS/RTP/SAVP".to_string(),
+            "DTLS-SRTP attributes require UDP/TLS/RTP/SAVP or UDP/TLS/RTP/SAVPF".to_string(),
         ));
     }
     let (hash_function, fingerprint) = fingerprint.ok_or_else(|| {
@@ -231,6 +234,18 @@ mod tests {
             let parsed = SetupRole::parse(role).expect("legal role parses");
             assert_eq!(parsed.as_str(), role);
         }
+    }
+
+    #[test]
+    fn accepts_secure_feedback_profile_used_by_webrtc_media_servers() {
+        let fingerprint = "AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89:AB:CD:EF:01:23:45:67:89";
+        let mut answer = dtls_audio_offer("sha-256", fingerprint, "passive");
+        answer.media_descriptions[0].protocol = "UDP/TLS/RTP/SAVPF".to_string();
+
+        let parsed = parse_dtls_offer(&answer)
+            .expect("SAVPF is a valid DTLS-SRTP transport profile")
+            .expect("DTLS attributes detected");
+        assert_eq!(parsed.setup_role, SetupRole::Passive);
     }
 
     #[test]

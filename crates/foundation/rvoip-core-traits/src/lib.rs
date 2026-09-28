@@ -73,3 +73,7 @@ pub use identity::{
     AuthenticatedPrincipal, AuthenticationMethod, BearerAuthError, PrincipalOwnershipKey,
 };
 pub use ids::TransferAttemptId;
+
+pub mod peer_media;
+/// Generation-fenced peer delivery shared with transport implementations.
+pub mod peer_switch;

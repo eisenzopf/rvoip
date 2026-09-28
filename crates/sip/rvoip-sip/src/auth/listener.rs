@@ -16,8 +16,9 @@ use rvoip_sip_dialog::transaction::{
 use rvoip_sip_transport::transport::TransportType;
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
-use std::time::Duration;
+use std::net::IpAddr;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 const DEFAULT_AUTH_RATE_LIMIT_RETRY_AFTER_SECS: u32 = 1;
 const MAX_AUTH_RATE_LIMIT_RETRY_AFTER_SECS: u32 = 3_600;
@@ -35,6 +36,138 @@ fn bounded_auth_retry_after_secs(retry_after: Option<Duration>) -> u32 {
         )
         .try_into()
         .expect("bounded authentication Retry-After fits u32")
+}
+
+/// A per-source request budget applied before any other admission check.
+///
+/// Every source address, trusted or not, may spend `burst` requests at once
+/// and then `requests_per_second` sustained; beyond that its requests are
+/// dropped without a response. The budget is keyed by IP, never by port,
+/// because ports are the sender's to choose. Tracking is bounded by
+/// `max_tracked_sources`; when a spray of addresses fills it, the stalest
+/// entries are forgotten, which errs toward admitting rather than toward
+/// losing a real peer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SipSourceRateLimit {
+    /// Sustained requests per second per source address.
+    pub requests_per_second: f64,
+    /// Requests a source may spend at once before the sustained rate applies.
+    pub burst: u32,
+    /// How many source addresses are tracked at once.
+    pub max_tracked_sources: usize,
+}
+
+impl Default for SipSourceRateLimit {
+    fn default() -> Self {
+        Self {
+            requests_per_second: 20.0,
+            burst: 60,
+            max_tracked_sources: 10_000,
+        }
+    }
+}
+
+impl SipSourceRateLimit {
+    fn validate(&self) -> crate::errors::Result<()> {
+        if self.requests_per_second <= 0.0
+            || !self.requests_per_second.is_finite()
+            || self.burst == 0
+            || self.max_tracked_sources == 0
+        {
+            return Err(crate::errors::SessionError::ConfigError(
+                "SIP source rate limit needs a positive rate, a non-zero burst, and a non-zero tracking bound"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One source's token bucket.
+#[derive(Clone, Copy, Debug)]
+struct SourceBucket {
+    tokens: f64,
+    refilled_at: Instant,
+}
+
+#[derive(Debug, Default)]
+struct SourceBudgets {
+    buckets: HashMap<IpAddr, SourceBucket>,
+}
+
+impl SourceBudgets {
+    /// Spend one request from `source`'s bucket; `false` means the source is
+    /// over budget and the request is to be dropped.
+    fn admit(&mut self, limit: &SipSourceRateLimit, source: IpAddr, now: Instant) -> bool {
+        if self.buckets.len() >= limit.max_tracked_sources && !self.buckets.contains_key(&source) {
+            // Forget every bucket that has fully refilled; they hold no
+            // information. If the map is still full, forget the stalest half.
+            let full_after =
+                Duration::from_secs_f64(f64::from(limit.burst) / limit.requests_per_second);
+            self.buckets
+                .retain(|_, bucket| now.duration_since(bucket.refilled_at) < full_after);
+            if self.buckets.len() >= limit.max_tracked_sources {
+                let mut by_age: Vec<(IpAddr, Instant)> = self
+                    .buckets
+                    .iter()
+                    .map(|(address, bucket)| (*address, bucket.refilled_at))
+                    .collect();
+                by_age.sort_by_key(|(_, refilled_at)| *refilled_at);
+                for (address, _) in by_age.iter().take(by_age.len() / 2 + 1) {
+                    self.buckets.remove(address);
+                }
+            }
+        }
+        let burst = f64::from(limit.burst);
+        let bucket = self.buckets.entry(source).or_insert(SourceBucket {
+            tokens: burst,
+            refilled_at: now,
+        });
+        let elapsed = now.duration_since(bucket.refilled_at).as_secs_f64();
+        bucket.tokens = (bucket.tokens + elapsed * limit.requests_per_second).min(burst);
+        bucket.refilled_at = now;
+        if bucket.tokens >= 1.0 {
+            bucket.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// What the listener decided about one inbound request, for whoever counts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SipIngressOutcome {
+    /// The request was admitted under a principal.
+    Admitted,
+    /// The request was answered with this status and not dispatched.
+    Rejected {
+        /// The SIP status sent to the peer.
+        status: StatusCode,
+    },
+    /// The request was discarded without a response (over its budget).
+    Dropped,
+}
+
+/// One admission decision, with the source it concerned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SipIngressEvent {
+    /// The peer's address; the port is included for diagnostics only.
+    pub source: std::net::SocketAddr,
+    /// The request method, as sent.
+    pub method: String,
+    /// What was decided.
+    pub outcome: SipIngressOutcome,
+}
+
+/// Receives every admission decision the listener makes.
+///
+/// Implementations must be cheap and must not block: an observer that counts
+/// into atomics is the intended shape. A flood reaches this hook once per
+/// request, so anything heavier belongs behind a channel the observer owns.
+pub trait SipIngressObserver: Send + Sync + fmt::Debug {
+    /// Record one decision.
+    fn observe(&self, event: &SipIngressEvent);
 }
 
 /// Disabled-by-default policy enforced before a new SIP request reaches the
@@ -57,6 +190,11 @@ pub struct SipListenerAuthPolicy {
     auth_service: Option<SipAuthService>,
     trusted_sources: Vec<(IpNet, AuthenticatedPrincipal)>,
     mtls_principals: HashMap<String, AuthenticatedPrincipal>,
+    /// Per-source request budget, checked before every other mechanism. The
+    /// bucket state is shared by every clone of the policy, so the budget
+    /// is one budget however the policy is passed around.
+    source_rate_limit: Option<(SipSourceRateLimit, Arc<Mutex<SourceBudgets>>)>,
+    observer: Option<Arc<dyn SipIngressObserver>>,
 }
 
 impl fmt::Debug for SipListenerAuthPolicy {
@@ -68,6 +206,11 @@ impl fmt::Debug for SipListenerAuthPolicy {
             .field("auth_service_configured", &self.auth_service.is_some())
             .field("trusted_source_count", &self.trusted_sources.len())
             .field("mtls_principal_count", &self.mtls_principals.len())
+            .field(
+                "source_rate_limit",
+                &self.source_rate_limit.as_ref().map(|(limit, _)| *limit),
+            )
+            .field("observer_configured", &self.observer.is_some())
             .finish()
     }
 }
@@ -88,8 +231,7 @@ impl SipListenerAuthPolicy {
             enabled: true,
             tenant: None,
             auth_service: Some(auth_service),
-            trusted_sources: Vec::new(),
-            mtls_principals: HashMap::new(),
+            ..Self::default()
         }
     }
 
@@ -118,8 +260,7 @@ impl SipListenerAuthPolicy {
             enabled: true,
             tenant: Some(validated_listener_tenant(tenant.into())?),
             auth_service: Some(auth_service),
-            trusted_sources: Vec::new(),
-            mtls_principals: HashMap::new(),
+            ..Self::default()
         })
     }
 
@@ -192,6 +333,20 @@ impl SipListenerAuthPolicy {
         self
     }
 
+    /// Drop requests from any source that exceeds `limit`, before any other
+    /// admission check runs -- a trusted trunk included, because a trusted
+    /// address is exactly the one a flood will forge.
+    pub fn with_source_rate_limit(mut self, limit: SipSourceRateLimit) -> Self {
+        self.source_rate_limit = Some((limit, Arc::new(Mutex::new(SourceBudgets::default()))));
+        self
+    }
+
+    /// Report every admission decision to `observer`.
+    pub fn with_ingress_observer(mut self, observer: Arc<dyn SipIngressObserver>) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
     /// Whether transaction ingress enforcement should be installed.
     pub fn is_enabled(&self) -> bool {
         self.enabled
@@ -209,6 +364,9 @@ impl SipListenerAuthPolicy {
             )
         })?;
         validate_listener_tenant(tenant)?;
+        if let Some((limit, _)) = &self.source_rate_limit {
+            limit.validate()?;
+        }
         if self.auth_service.is_none()
             && self.trusted_sources.is_empty()
             && self.mtls_principals.is_empty()
@@ -312,13 +470,51 @@ impl SipListenerAuthPolicy {
     }
 }
 
-#[async_trait]
-impl SipRequestIngressAuthorizer for SipListenerAuthPolicy {
-    async fn authorize(
+impl SipListenerAuthPolicy {
+    /// Spend one request from the source's budget, if a budget is configured.
+    fn within_source_budget(&self, context: &SipRequestIngressContext) -> bool {
+        let Some((limit, budgets)) = &self.source_rate_limit else {
+            return true;
+        };
+        let mut budgets = budgets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        budgets.admit(limit, context.source.ip(), Instant::now())
+    }
+
+    fn observe(
+        &self,
+        request: &rvoip_sip_core::Request,
+        context: &SipRequestIngressContext,
+        decision: &SipRequestAuthorization,
+    ) {
+        let Some(observer) = &self.observer else {
+            return;
+        };
+        let outcome = match decision {
+            SipRequestAuthorization::Authorized { .. } => SipIngressOutcome::Admitted,
+            SipRequestAuthorization::Rejected(rejection) => SipIngressOutcome::Rejected {
+                status: rejection.status,
+            },
+            SipRequestAuthorization::Dropped { .. } => SipIngressOutcome::Dropped,
+        };
+        observer.observe(&SipIngressEvent {
+            source: context.source,
+            method: request.method().to_string(),
+            outcome,
+        });
+    }
+
+    async fn decide(
         &self,
         request: &rvoip_sip_core::Request,
         context: &SipRequestIngressContext,
     ) -> SipRequestAuthorization {
+        if !self.within_source_budget(context) {
+            return SipRequestAuthorization::Dropped {
+                reason: Some("SIP source exceeded its request budget".to_string()),
+            };
+        }
         if !self.enabled {
             return SipRequestAuthorization::Rejected(
                 SipRequestRejection::new(StatusCode::ServerInternalError)
@@ -479,6 +675,19 @@ fn validate_static_principal_tenant(
         )));
     }
     Ok(())
+}
+
+#[async_trait]
+impl SipRequestIngressAuthorizer for SipListenerAuthPolicy {
+    async fn authorize(
+        &self,
+        request: &rvoip_sip_core::Request,
+        context: &SipRequestIngressContext,
+    ) -> SipRequestAuthorization {
+        let decision = self.decide(request, context).await;
+        self.observe(request, context, &decision);
+        decision
+    }
 }
 
 #[cfg(test)]
@@ -720,7 +929,7 @@ mod tests {
         let rendered = format!("{policy:?}");
         assert_eq!(
             rendered,
-            "SipListenerAuthPolicy { enabled: true, tenant_configured: true, auth_service_configured: true, trusted_source_count: 1, mtls_principal_count: 1 }"
+            "SipListenerAuthPolicy { enabled: true, tenant_configured: true, auth_service_configured: true, trusted_source_count: 1, mtls_principal_count: 1, source_rate_limit: None, observer_configured: false }"
         );
         for canary in [PRINCIPAL_CANARY, FINGERPRINT_CANARY, "192.0.2.0/24"] {
             assert!(
@@ -1056,5 +1265,124 @@ mod tests {
                 if rejection.status == StatusCode::Unauthorized
                     && rejection.headers.iter().any(|header| header.name() == HeaderName::WwwAuthenticate)
         ));
+    }
+
+    #[derive(Debug, Default)]
+    struct CountingObserver {
+        events: Mutex<Vec<SipIngressEvent>>,
+    }
+
+    impl SipIngressObserver for CountingObserver {
+        fn observe(&self, event: &SipIngressEvent) {
+            self.events.lock().unwrap().push(event.clone());
+        }
+    }
+
+    fn trusted_policy() -> SipListenerAuthPolicy {
+        SipListenerAuthPolicy::enabled_for_tenant("tenant-a")
+            .expect("tenant policy")
+            .with_trusted_cidr(
+                IpNet::from_str("192.0.2.0/24").unwrap(),
+                principal("trunk", AuthenticationMethod::SipDigest),
+            )
+    }
+
+    /// A source over its budget is dropped, not answered, and a trusted
+    /// trunk is budgeted like anyone else because a trusted address is the
+    /// one a flood forges.
+    #[tokio::test]
+    async fn a_source_over_its_budget_is_dropped_without_a_response() {
+        let observer = Arc::new(CountingObserver::default());
+        let policy = trusted_policy()
+            .with_source_rate_limit(SipSourceRateLimit {
+                requests_per_second: 1.0,
+                burst: 3,
+                max_tracked_sources: 16,
+            })
+            .with_ingress_observer(observer.clone());
+        policy.validate().expect("valid policy");
+        let trusted = context("192.0.2.42:5060", TransportType::Udp);
+        for _ in 0..3 {
+            assert!(matches!(
+                policy.authorize(&invite(None), &trusted).await,
+                SipRequestAuthorization::Authorized { .. }
+            ));
+        }
+        // The fourth request from the same address is over budget: dropped,
+        // whatever port it arrives from.
+        let same_host_other_port = context("192.0.2.42:40000", TransportType::Udp);
+        assert!(matches!(
+            policy.authorize(&invite(None), &same_host_other_port).await,
+            SipRequestAuthorization::Dropped { .. }
+        ));
+        // Another address has its own budget.
+        assert!(matches!(
+            policy
+                .authorize(
+                    &invite(None),
+                    &context("192.0.2.43:5060", TransportType::Udp)
+                )
+                .await,
+            SipRequestAuthorization::Authorized { .. }
+        ));
+        // An untrusted source is refused with a response while within
+        // budget, and dropped once over it.
+        let stranger = context("198.51.100.7:5060", TransportType::Udp);
+        for _ in 0..3 {
+            assert!(matches!(
+                policy.authorize(&invite(None), &stranger).await,
+                SipRequestAuthorization::Rejected(_)
+            ));
+        }
+        assert!(matches!(
+            policy.authorize(&invite(None), &stranger).await,
+            SipRequestAuthorization::Dropped { .. }
+        ));
+        let events = observer.events.lock().unwrap();
+        let count = |wanted: fn(&SipIngressOutcome) -> bool| {
+            events.iter().filter(|event| wanted(&event.outcome)).count()
+        };
+        assert_eq!(count(|outcome| *outcome == SipIngressOutcome::Admitted), 4);
+        assert_eq!(
+            count(|outcome| matches!(outcome, SipIngressOutcome::Rejected { .. })),
+            3
+        );
+        assert_eq!(count(|outcome| *outcome == SipIngressOutcome::Dropped), 2);
+        assert!(events.iter().all(|event| event.method == "INVITE"));
+    }
+
+    /// The budget refills at the sustained rate.
+    #[test]
+    fn a_budget_refills_at_the_sustained_rate() {
+        let limit = SipSourceRateLimit {
+            requests_per_second: 10.0,
+            burst: 2,
+            max_tracked_sources: 4,
+        };
+        let source: IpAddr = "192.0.2.1".parse().unwrap();
+        let mut budgets = SourceBudgets::default();
+        let start = Instant::now();
+        assert!(budgets.admit(&limit, source, start));
+        assert!(budgets.admit(&limit, source, start));
+        assert!(!budgets.admit(&limit, source, start));
+        assert!(budgets.admit(&limit, source, start + Duration::from_millis(100)));
+        assert!(!budgets.admit(&limit, source, start + Duration::from_millis(100)));
+        // A spray of addresses beyond the tracking bound forgets the stalest
+        // rather than refusing to track.
+        for index in 0..8u8 {
+            let address: IpAddr = format!("203.0.113.{index}").parse().unwrap();
+            assert!(budgets.admit(&limit, address, start + Duration::from_secs(1)));
+        }
+        assert!(budgets.buckets.len() <= limit.max_tracked_sources);
+    }
+
+    #[test]
+    fn a_zero_budget_is_refused_at_validation() {
+        let policy = trusted_policy().with_source_rate_limit(SipSourceRateLimit {
+            requests_per_second: 0.0,
+            burst: 1,
+            max_tracked_sources: 1,
+        });
+        assert!(policy.validate().is_err());
     }
 }

@@ -929,6 +929,11 @@ impl EndpointIncomingCall {
         &self.incoming.to
     }
 
+    /// Return the remote SDP offer carried by the inbound INVITE, if present.
+    pub fn offer_sdp(&self) -> Option<&str> {
+        self.incoming.sdp.as_deref()
+    }
+
     /// Answer the incoming call.
     pub async fn answer(self) -> Result<EndpointCall> {
         let handle = self.incoming.accept().await?;

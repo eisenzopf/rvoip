@@ -612,7 +612,7 @@ impl AudioTransmitter {
                 let mut pacing_consecutive_skip_max = 0_u64;
                 let mut next_timestamp = 0_u32;
 
-                while is_active.load(Ordering::Acquire) {
+                'transmit: while is_active.load(Ordering::Acquire) {
                     tokio::time::sleep_until(next_tick_at).await;
                     if collect_diagnostics {
                         let tick_at = TokioInstant::now();
@@ -666,62 +666,68 @@ impl AudioTransmitter {
                         generator.generate_pcm_frame(effective_samples_per_packet, channels)
                     };
                     let frame = AudioFrame::new(pcm_samples, clock_rate, channels, next_timestamp);
-                    let audio_samples = match codec_runtime.encode(&frame).await {
-                        Ok(payload) => Bytes::from(payload),
+                    let encoded_packets = match codec_runtime.encode_packets(&frame).await {
+                        Ok(packets) => packets,
                         Err(error) => {
                             error!("Failed to encode generated RTP audio: {}", error);
                             is_active.store(false, Ordering::Release);
                             break;
                         }
                     };
-                    let current_timestamp = next_timestamp;
                     next_timestamp = next_timestamp.wrapping_add(
                         u32::try_from(effective_samples_per_packet).unwrap_or(u32::MAX),
                     );
 
-                    // Fast path: send through the lock-free handle — no
-                    // `session.lock().await` per frame. PT and bytes come
-                    // from the same immutable codec generation.
-                    let send_started = collect_diagnostics.then(Instant::now);
-                    let send_result = if let Some(handle) = &send_handle {
-                        handle
-                            .send_packet_with_pt(
-                                current_timestamp,
-                                audio_samples,
-                                false,
-                                payload_type,
-                            )
-                            .await
-                    } else {
-                        let session = rtp_session.lock().await;
-                        session
-                            .send_packet_with_pt(
-                                current_timestamp,
-                                audio_samples,
-                                false,
-                                payload_type,
-                            )
-                            .await
-                    };
-                    if let Some(send_started) = send_started {
-                        let send_elapsed = send_started.elapsed();
-                        send_count = send_count.saturating_add(1);
-                        if send_result.is_err() {
-                            send_failures = send_failures.saturating_add(1);
-                        }
-                        send_total = send_total.saturating_add(send_elapsed);
-                        send_max = send_max.max(send_elapsed);
-                    }
+                    for packet in encoded_packets {
+                        let packet_bytes = packet.payload.len();
+                        let packet_timestamp = packet.timestamp;
+                        let packet_marker = packet.marker;
+                        let audio_samples = Bytes::from(packet.payload);
 
-                    if let Err(e) = send_result {
-                        error!("Failed to send RTP audio packet: {}", e);
-                        is_active.store(false, Ordering::Release);
-                        break;
+                        // Fast path: send through the lock-free handle — no
+                        // `session.lock().await` per packet. PT and bytes come
+                        // from the same immutable codec generation.
+                        let send_started = collect_diagnostics.then(Instant::now);
+                        let send_result = if let Some(handle) = &send_handle {
+                            handle
+                                .send_packet_with_pt(
+                                    packet_timestamp,
+                                    audio_samples,
+                                    packet_marker,
+                                    payload_type,
+                                )
+                                .await
+                        } else {
+                            let session = rtp_session.lock().await;
+                            session
+                                .send_packet_with_pt(
+                                    packet_timestamp,
+                                    audio_samples,
+                                    packet_marker,
+                                    payload_type,
+                                )
+                                .await
+                        };
+                        if let Some(send_started) = send_started {
+                            let send_elapsed = send_started.elapsed();
+                            send_count = send_count.saturating_add(1);
+                            if send_result.is_err() {
+                                send_failures = send_failures.saturating_add(1);
+                            }
+                            send_total = send_total.saturating_add(send_elapsed);
+                            send_max = send_max.max(send_elapsed);
+                        }
+
+                        if let Err(e) = send_result {
+                            error!("Failed to send RTP audio packet: {}", e);
+                            is_active.store(false, Ordering::Release);
+                            break 'transmit;
+                        }
+                        debug!(
+                            "📡 Sent RTP audio packet (timestamp: {}, {} bytes, PT {})",
+                            packet_timestamp, packet_bytes, payload_type
+                        );
                     }
-                    debug!(
-                        "📡 Sent RTP audio packet (timestamp: {}, {} frames, PT {})",
-                        current_timestamp, effective_samples_per_packet, payload_type
-                    );
                 }
 
                 if collect_diagnostics {

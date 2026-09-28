@@ -336,6 +336,34 @@ pub enum SrtpKeyingMode {
     DtlsSrtp,
 }
 
+/// DTLS connection role advertised in an outgoing SIP SDP offer.
+///
+/// [`DtlsSetupRole::Actpass`] is the standards-oriented default. Endpoints
+/// behind NAT can select [`DtlsSetupRole::Active`] so they initiate the DTLS
+/// handshake after the answer arrives instead of waiting for an inbound
+/// ClientHello that may not reach their private media address.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DtlsSetupRole {
+    /// Let the answerer choose which endpoint initiates DTLS.
+    #[default]
+    Actpass,
+    /// Advertise `a=setup:active` and initiate DTLS as the client.
+    Active,
+    /// Advertise `a=setup:passive` and wait for the peer to initiate DTLS.
+    Passive,
+}
+
+impl DtlsSetupRole {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Actpass => "actpass",
+            Self::Active => "active",
+            Self::Passive => "passive",
+        }
+    }
+}
+
 /// Named SRTP suite offer policies for common PBX/carrier interop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SrtpSuitePolicy {
@@ -2210,6 +2238,14 @@ pub struct Config {
     /// closed when either requirement is missing.
     pub srtp_keying: SrtpKeyingMode,
 
+    /// DTLS role to advertise on outgoing offers when
+    /// [`Config::srtp_keying`] is [`SrtpKeyingMode::DtlsSrtp`].
+    ///
+    /// The default is [`DtlsSetupRole::Actpass`]. Choose
+    /// [`DtlsSetupRole::Active`] for a client behind NAT that must open the
+    /// media path by sending the first DTLS packet.
+    pub dtls_setup_role: DtlsSetupRole,
+
     /// Playout smoothing and packet-loss concealment for inbound audio.
     ///
     /// `None` forwards frames exactly as they arrive, gaps included — the
@@ -2251,16 +2287,17 @@ pub struct Config {
     /// Default: `false` — soft-prefer SRTP but accept plaintext.
     pub srtp_required: bool,
 
-    /// SRTP crypto suites to advertise on outgoing offers, in
-    /// preference order. The answerer picks the first suite it
-    /// supports.
+    /// SRTP crypto suites to advertise on outgoing offers, in preference
+    /// order. For SDES these become `a=crypto:` attributes; for DTLS-SRTP
+    /// they become `use_srtp` protection profiles in the DTLS ClientHello.
+    /// The answerer picks the first suite it supports.
     ///
     /// Default:
     /// `[AesCm128HmacSha1_80, AesCm128HmacSha1_32]` —
     /// RFC 4568 §6.2.1 MTI suite first (`_80`, ubiquitous), then
     /// `_32` (smaller auth tag for bandwidth-conscious carriers).
-    /// Modify when a specific carrier requires a non-default
-    /// preference.
+    /// Modify when a specific carrier requires a non-default preference.
+    /// DTLS-SRTP currently supports only the two AES-128 suites.
     pub srtp_offered_suites: Vec<CryptoSuite>,
 
     /// Override the RTP-side public address advertised in SDP `c=` /
@@ -2361,20 +2398,16 @@ pub struct Config {
     /// Media-core controller pool and capacity tuning for SIP media calls.
     pub media_session_controller_config: MediaSessionControllerConfig,
 
-    /// STUN server (RFC 8489 §14) to probe for the RTP-side public
-    /// mapping at coordinator boot. Format: `"host:port"` or `"host"`
+    /// STUN server (RFC 8489 §14) used to discover each RTP socket's exact
+    /// public mapping before its SDP is rendered. Format: `"host:port"` or `"host"`
     /// (default port 3478). Common public servers:
     /// `stun.l.google.com:19302`, `stun.cloudflare.com:3478`.
     ///
-    /// The probe runs once at startup using a fresh UDP socket bound to
-    /// [`Config::local_ip`]. This is best-effort address discovery: it is
-    /// useful for simple cone-NAT labs, but it does not guarantee the exact
-    /// mapping of a later per-call RTP socket. Symmetric NATs and production
-    /// Internet edges should use a static [`Config::media_public_addr`] today
-    /// or ICE in a future WebRTC/edge layer. Failure mode: probe timeout /
-    /// unreachable / unparseable response → log a warning and fall back to
-    /// the local interface address. STUN is intentionally soft-fail — the
-    /// call path is never blocked on it.
+    /// The probe uses the allocated per-call RTP socket, so its mapped IP and
+    /// port match the media path. SDP generation waits up to 1.5 seconds for
+    /// discovery. Failure is soft: timeout, resolution, or parse errors log a
+    /// warning and fall back to the local interface address. Use a static
+    /// [`Config::media_public_addr`] when the mapping is already known.
     ///
     /// Default: `None` — no probe runs (today's behaviour).
     pub stun_server: Option<String>,
@@ -2413,13 +2446,17 @@ pub struct Config {
     /// answers. Default `[0, 8, 101]` (PCMU + PCMA + telephone-event)
     /// preserves the established beta media profile.
     ///
-    /// Beta validation intentionally rejects audio payload types that
-    /// media-core cannot encode/decode end to end. The advertised full-media
-    /// set is limited to PCMU (`0`), PCMA (`8`), telephone-event (`101`),
+    /// Beta validation limits this SIP coordinator's negotiable payloads to
+    /// PCMU (`0`), PCMA (`8`), telephone-event (`101`),
     /// comfort noise (`13`) when `comfort_noise_enabled = true`, G.729 (`18`)
-    /// when the `g729` feature is enabled, and Opus (`111`) when the `opus`
-    /// feature is enabled. G.722 (`9`) retains wire metadata support but is
-    /// rejected because no working encoder/decoder is implemented.
+    /// when the `g729` feature is enabled, Opus (`111`) when the `opus`
+    /// feature is enabled, AMR-WB (`104` bandwidth-efficient, `105`
+    /// octet-aligned) when `amr-wb` is enabled. G.722 (`9`) retains wire
+    /// metadata support but is rejected because no working encoder/decoder is
+    /// implemented. AMR-NB payload types `106` and `107` remain available to
+    /// the coordinator-only media path when `amr-nb` is enabled; they are not
+    /// supported by the core-facing `SipMediaStream` and are not an end-to-end
+    /// codec claim for this API.
     ///
     /// Default: `vec![0, 8, 101]`.
     pub offered_codecs: Vec<u8>,
@@ -2810,6 +2847,7 @@ impl std::fmt::Debug for Config {
             )
             .field("offer_srtp", &self.offer_srtp)
             .field("srtp_keying", &self.srtp_keying)
+            .field("dtls_setup_role", &self.dtls_setup_role)
             .field("ice", &self.ice)
             .field("srtp_required", &self.srtp_required)
             .field("amr_dtx", &self.amr_dtx)
@@ -2974,6 +3012,7 @@ impl Config {
             tls_insecure_skip_verify: false,
             offer_srtp: false,
             srtp_keying: SrtpKeyingMode::Sdes,
+            dtls_setup_role: DtlsSetupRole::Actpass,
             srtp_required: false,
             amr_dtx: false,
             amr_auto_cmr: false,
@@ -3094,6 +3133,7 @@ impl Config {
             tls_insecure_skip_verify: false,
             offer_srtp: false,
             srtp_keying: SrtpKeyingMode::Sdes,
+            dtls_setup_role: DtlsSetupRole::Actpass,
             srtp_required: false,
             amr_dtx: false,
             amr_auto_cmr: false,
@@ -3370,6 +3410,12 @@ impl Config {
     /// unavailable or signaling-only combination instead of downgrading.
     pub fn with_srtp_keying(mut self, keying: SrtpKeyingMode) -> Self {
         self.srtp_keying = keying;
+        self
+    }
+
+    /// Select the DTLS role advertised by outgoing SIP SDP offers.
+    pub fn with_dtls_setup_role(mut self, role: DtlsSetupRole) -> Self {
+        self.dtls_setup_role = role;
         self
     }
 
@@ -4644,12 +4690,23 @@ impl Config {
                     .to_string(),
             ));
         }
-        if self.offer_srtp
-            && self.srtp_keying == SrtpKeyingMode::Sdes
-            && self.srtp_offered_suites.is_empty()
-        {
+        if self.offer_srtp && self.srtp_offered_suites.is_empty() {
             return Err(SessionError::ConfigError(
                 "offer_srtp=true requires at least one srtp_offered_suites entry".to_string(),
+            ));
+        }
+        if self.offer_srtp
+            && self.srtp_keying == SrtpKeyingMode::DtlsSrtp
+            && self.srtp_offered_suites.iter().any(|suite| {
+                !matches!(
+                    suite,
+                    CryptoSuite::AesCm128HmacSha1_80 | CryptoSuite::AesCm128HmacSha1_32
+                )
+            })
+        {
+            return Err(SessionError::ConfigError(
+                "DTLS-SRTP supports only AES_CM_128_HMAC_SHA1_80 and AES_CM_128_HMAC_SHA1_32"
+                    .to_string(),
             ));
         }
         if matches!(
@@ -8885,6 +8942,7 @@ impl UnifiedCoordinator {
         media_adapter_inner.set_dtls_srtp_policy(
             config.offer_srtp && config.srtp_keying == SrtpKeyingMode::DtlsSrtp,
         );
+        media_adapter_inner.set_dtls_setup_role(config.dtls_setup_role);
         media_adapter_inner.set_sdes_base64_mode(sdes_base64_mode);
         // Sprint 3 C1 — propagate Comfort Noise opt-in.
         media_adapter_inner.set_comfort_noise(config.comfort_noise_enabled);
@@ -8898,28 +8956,23 @@ impl UnifiedCoordinator {
         // NEXT_STEPS C2 — propagate the configured offered codec list.
         media_adapter_inner.set_offered_codecs(config.offered_codecs.clone());
         media_adapter_inner.set_g729_annex_b(config.g729_annex_b);
-        let media_adapter = Arc::new(media_adapter_inner);
-
-        // Sprint 3 A6 — resolve the public RTP address. Static
-        // override wins over STUN; STUN failure is soft (warn + use
-        // local IP). Probe runs once, here, before any session is
-        // created.
-        let pending_stun_probe = if let Some(static_addr) = config.media_public_addr {
+        // A static media override wins over per-session STUN discovery.
+        if let Some(static_addr) = config.media_public_addr {
             if config.stun_server.is_some() {
                 tracing::warn!(
                     "Both Config::media_public_addr and Config::stun_server are set; \
-                     using the static override and skipping the STUN probe"
+                     using the static override and skipping STUN discovery"
                 );
             }
             tracing::info!(
                 "RTP public addr: {} (static override from Config::media_public_addr)",
                 static_addr
             );
-            media_adapter.set_public_rtp_addr(Some(static_addr));
-            None
+            media_adapter_inner.set_public_rtp_addr(Some(static_addr));
         } else {
-            config.stun_server.clone()
-        };
+            media_adapter_inner.set_stun_server(config.stun_server.clone());
+        }
+        let media_adapter = Arc::new(media_adapter_inner);
         // RFC 4733 DTMF bridge: adapter publishes `Event::DtmfReceived`
         // onto the API bus whenever media-core signals a DTMF event.
         media_adapter
@@ -9023,25 +9076,6 @@ impl UnifiedCoordinator {
                 exact_response_shutdown_rx,
             ));
         debug_assert!(exact_response_runner_started);
-        if let Some(stun_target) = pending_stun_probe {
-            // Keep boot nonblocking while making constructor cancellation and
-            // graceful shutdown join the probe before media dependencies drop.
-            let adapter_for_probe = media_adapter.clone();
-            let probe_started =
-                coordinator
-                    .setup_teardown_scheduler
-                    .spawn_lifecycle_task(async move {
-                        if let Err(e) = run_stun_probe(adapter_for_probe, &stun_target).await {
-                            tracing::warn!(
-                                "STUN probe failed against '{}': {} — falling back to local IP",
-                                stun_target,
-                                e
-                            );
-                        }
-                    });
-            debug_assert!(probe_started);
-        }
-
         // Start the dialog adapter. The scheduler runner is already retained;
         // join it explicitly on constructor failure rather than relying on a
         // later last-owner drop to wake and detach it.
@@ -10009,7 +10043,10 @@ impl UnifiedCoordinator {
         self.release_after_observed_terminal_exact(&handle).await;
     }
 
-    async fn release_after_observed_terminal_exact(&self, handle: &SessionRegistryHandle) {
+    pub(crate) async fn release_after_observed_terminal_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) {
         let session_id = handle.session_id();
         let release_guard = crate::cleanup_diag::stage_guard(
             crate::cleanup_diag::CleanupStage::TerminalRelease,
@@ -10445,6 +10482,107 @@ impl UnifiedCoordinator {
             reason: reason.into(),
         };
         self.finalize_local_terminal_exact(handle, api_event).await
+    }
+
+    /// Commit an application-authored non-2xx final response and release the
+    /// exact inbound call lifetime after its terminal observation is retained.
+    ///
+    /// `RejectCall` and `RedirectCall` both finish in `Terminated` after their
+    /// wire response and lower-layer cleanup succeed. They do not have a later
+    /// dialog event to drive the session event handler's ordinary terminal
+    /// release path, so the API operation that authored the final response
+    /// must own that release explicitly.
+    pub(crate) async fn reject_incoming_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        status: u16,
+        reason: &str,
+    ) -> Result<()> {
+        self.helpers
+            .reject_call_exact(handle, status, reason)
+            .await?;
+        self.finalize_local_rejection_exact(handle, status, reason)
+            .await
+    }
+
+    pub(crate) async fn reject_incoming_with_extras_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        status: u16,
+        reason: &str,
+        extras: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> Result<()> {
+        self.helpers
+            .reject_call_with_extras_exact(handle, status, reason, extras)
+            .await?;
+        self.finalize_local_rejection_exact(handle, status, reason)
+            .await
+    }
+
+    pub(crate) async fn redirect_incoming_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        status: u16,
+        contacts: Vec<String>,
+    ) -> Result<()> {
+        self.helpers
+            .redirect_call_exact(handle, status, contacts)
+            .await?;
+        self.finalize_local_rejection_exact(handle, status, "Redirected")
+            .await
+    }
+
+    pub(crate) async fn redirect_incoming_with_extras_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        status: u16,
+        contacts: Vec<String>,
+        extras: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> Result<()> {
+        self.helpers
+            .redirect_call_with_extras_exact(handle, status, contacts, extras)
+            .await?;
+        self.finalize_local_rejection_exact(handle, status, "Redirected")
+            .await
+    }
+
+    pub(crate) async fn finalize_local_rejection_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        status: u16,
+        reason: impl Into<String>,
+    ) -> Result<()> {
+        let api_event = crate::api::events::Event::CallFailed {
+            call_id: handle.session_id().clone(),
+            status_code: status,
+            reason: reason.into(),
+        };
+        self.finalize_local_terminal_exact(handle, api_event).await
+    }
+
+    /// Retain local-rejection finalization outside an exact lifecycle-owned
+    /// operation. Quiescing waits for those operations, so awaiting release
+    /// inside one would make the operation wait on itself.
+    pub(crate) fn spawn_local_rejection_finalization(
+        self: &Arc<Self>,
+        handle: SessionRegistryHandle,
+        status: u16,
+        reason: String,
+    ) -> bool {
+        let coordinator = Arc::clone(self);
+        self.setup_teardown_scheduler
+            .spawn_lifecycle_task(async move {
+                if let Err(error) = coordinator
+                    .finalize_local_rejection_exact(&handle, status, reason)
+                    .await
+                {
+                    tracing::debug!(
+                        session_id = %handle.session_id(),
+                        %error,
+                        "exact incoming-call rejection did not release local ownership"
+                    );
+                }
+            })
     }
 
     async fn finalize_local_terminal_exact(
@@ -11408,6 +11546,12 @@ impl UnifiedCoordinator {
         self.helpers.negotiated_media_config_exact(handle).await
     }
 
+    /// Exact number of range-backed RTP/RTCP ports currently leased by SIP
+    /// media sessions owned by this coordinator.
+    pub async fn allocated_media_port_count(&self) -> usize {
+        self.media_adapter.allocated_port_count().await
+    }
+
     pub(crate) fn subscribe_renegotiation_completions(
         &self,
     ) -> tokio::sync::broadcast::Receiver<crate::api::lifecycle::RenegotiationCompletion> {
@@ -12278,7 +12422,7 @@ impl UnifiedCoordinator {
     /// Internal REGISTER dispatch used by
     /// [`RegisterBuilder`](crate::api::send::RegisterBuilder).
     ///
-    /// When `extra_headers` is non-empty we follow SIP_API_DESIGN_2 §10 #19
+    /// When request-specific options are present we follow SIP_API_DESIGN_2 §10 #19
     /// and stash a `RegisterRequestOptions` on the session *before* the
     /// `StartRegistration` event fires, so `execute_register_action`
     /// (`state_machine/actions.rs`) reads the slice on the very first
@@ -12300,6 +12444,7 @@ impl UnifiedCoordinator {
         username: &str,
         password: &str,
         expires: u32,
+        outbound_proxy: Option<String>,
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> Result<RegistrationHandle> {
         let session_id = SessionId::new();
@@ -12325,22 +12470,34 @@ impl UnifiedCoordinator {
             }
         }
 
-        let pending_options = (!extra_headers.is_empty()).then(|| {
-            std::sync::Arc::new(rvoip_sip_dialog::api::unified::RegisterRequestOptions {
-                registrar_uri: registrar_uri.to_string(),
-                aor_uri: from_uri.to_string(),
-                contact_uri: contact_uri.to_string(),
-                expires,
-                authorization: None,
-                proxy_authorization: None,
-                call_id: None,
-                cseq: None,
-                outbound_contact: None,
-                outbound_proxy_uri: None,
-                extra_headers,
-                refresh: false,
+        let outbound_proxy_uri = outbound_proxy
+            .map(|value| {
+                use std::str::FromStr;
+                rvoip_sip_core::types::uri::Uri::from_str(&value).map_err(|_| {
+                    SessionError::ConfigurationError(format!(
+                        "REGISTER outbound proxy is not a valid SIP URI (bytes={})",
+                        value.len()
+                    ))
+                })
             })
-        });
+            .transpose()?;
+        let pending_options =
+            (outbound_proxy_uri.is_some() || !extra_headers.is_empty()).then(|| {
+                std::sync::Arc::new(rvoip_sip_dialog::api::unified::RegisterRequestOptions {
+                    registrar_uri: registrar_uri.to_string(),
+                    aor_uri: from_uri.to_string(),
+                    contact_uri: contact_uri.to_string(),
+                    expires,
+                    authorization: None,
+                    proxy_authorization: None,
+                    call_id: None,
+                    cseq: None,
+                    outbound_contact: None,
+                    outbound_proxy_uri,
+                    extra_headers,
+                    refresh: false,
+                })
+            });
 
         let _ = self
             .helpers
@@ -12910,65 +13067,4 @@ impl Registration {
         self.contact_uri = Some(uri.into());
         self
     }
-}
-
-/// Sprint 3 A6 — best-effort STUN probe for the RTP-side public
-/// mapping.
-///
-/// **Caveat.** The probe binds a fresh ephemeral UDP socket on the
-/// configured `local_ip` and asks the STUN server what mapping it
-/// sees. For typical cone NATs (most consumer routers, AWS / GCP
-/// NAT gateways) the mapping is keyed by source IP only, so the
-/// discovered address matches what the actual RTP path will see
-/// later. For symmetric NATs the mapping is per-(source IP, source
-/// port) and the result will be wrong — those deployments need ICE
-/// (Sprint 4 D3). For Sprint 3 the simple shape is the right
-/// trade-off; a deployment that breaks here can fall back to
-/// `Config::media_public_addr` (static override).
-async fn run_stun_probe(adapter: Arc<MediaAdapter>, stun_target: &str) -> Result<()> {
-    use std::sync::Arc as StdArc;
-    use tokio::net::UdpSocket as TokioUdpSocket;
-
-    // Normalise "host" → "host:3478"; "host:port" passes through.
-    let target_str = if stun_target.contains(':') {
-        stun_target.to_string()
-    } else {
-        format!("{}:3478", stun_target)
-    };
-
-    // Resolve via tokio's DNS — STUN servers are typically fronted by
-    // SRV in production but the public ones (Google, Cloudflare) all
-    // expose plain A records.
-    let server_addr = tokio::net::lookup_host(&target_str)
-        .await
-        .map_err(|e| {
-            SessionError::ConfigError(format!("STUN resolve '{}' failed: {}", target_str, e))
-        })?
-        .next()
-        .ok_or_else(|| {
-            SessionError::ConfigError(format!("STUN '{}' resolved to nothing", target_str))
-        })?;
-
-    // Bind a probe socket on the same interface as the SIP/media
-    // bind. Random ephemeral port; the cone-NAT-mapping caveat above
-    // applies.
-    let bind_local = std::net::SocketAddr::new(adapter.local_ip(), 0);
-    let probe_sock = TokioUdpSocket::bind(bind_local).await.map_err(|e| {
-        SessionError::ConfigError(format!("STUN probe bind {} failed: {}", bind_local, e))
-    })?;
-    let probe_sock = StdArc::new(probe_sock);
-
-    let client = rvoip_rtp_core::network::stun::StunClient::new(probe_sock, server_addr);
-    let discovered = client
-        .discover()
-        .await
-        .map_err(|e| SessionError::ConfigError(format!("STUN probe failed: {}", e)))?;
-
-    tracing::info!(
-        "RTP public addr: {} (STUN-discovered via {})",
-        discovered,
-        target_str
-    );
-    adapter.set_public_rtp_addr(Some(discovered));
-    Ok(())
 }

@@ -1,6 +1,6 @@
 # rvoip-sip-transport
 
-[![Crates.io](https://img.shields.io/crates/v/rvoip-sip-transport.svg)](https://crates.io/crates/sip/rvoip-sip-transport)
+[![Crates.io](https://img.shields.io/crates/v/rvoip-sip-transport.svg)](https://crates.io/crates/rvoip-sip-transport)
 [![Documentation](https://docs.rs/rvoip-sip-transport/badge.svg)](https://docs.rs/rvoip-sip-transport)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../../LICENSE)
 
@@ -46,17 +46,20 @@ SIP transport layer implementation for the [rvoip](../../../README.md) VoIP stac
   - ✅ Zero-copy techniques where possible
 
 - **Integration**
-  - ✅ Seamless integration with `transaction-core`
+  - ✅ Seamless integration with the `rvoip-sip-dialog` transaction layer (`rvoip_sip_dialog::transaction`)
   - ✅ Event-driven architecture with `TransportEvent`
   - ✅ Compatible with rvoip's layered architecture
 
 ### 🚧 Planned Features
 
+- **Server Location (RFC 3263)**
+  - ✅ `Resolver` trait (always compiled) with `ResolvedTarget` candidates
+  - ✅ `HickoryResolver` NAPTR/SRV/A ladder behind the `dns` feature
+
 - **Enhanced Management**
   - 🚧 Transport failover capabilities
   - 🚧 Load balancing for outgoing connections
   - 🚧 Transport monitoring and health checks
-  - 🚧 RFC 3263 procedures for SIP server location
 
 - **Scalability Improvements**
   - 🚧 Backpressure mechanisms for high traffic
@@ -179,7 +182,8 @@ plain `ws` hints are rejected.
 
 ```rust
 use rvoip_sip_transport::prelude::*;
-use rvoip_sip_core::Message;
+use rvoip_sip_core::builder::SimpleRequestBuilder;
+use rvoip_sip_core::{Message, Method};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -205,8 +209,14 @@ async fn main() -> Result<()> {
     });
     
     // Send a message
-    let message = Message::new_request(/* ... */);
-    transport.send_message(message, "127.0.0.1:5061".parse()?).await?;
+    let request = SimpleRequestBuilder::new(Method::Options, "sip:bob@127.0.0.1:5061")?
+        .from("Alice", "sip:alice@127.0.0.1", Some("tag-1"))
+        .to("Bob", "sip:bob@127.0.0.1:5061", None)
+        .call_id("options-1")
+        .cseq(1)
+        .via("127.0.0.1:5060", "UDP", Some("z9hG4bK-1"))
+        .build();
+    transport.send_message(Message::Request(request), "127.0.0.1:5061".parse()?).await?;
     
     Ok(())
 }
@@ -215,13 +225,18 @@ async fn main() -> Result<()> {
 ### Transport Factory
 
 ```rust
-use rvoip_sip_transport::factory::TransportFactory;
+use rvoip_sip_transport::factory::{TransportFactory, TransportType};
 
-let factory = TransportFactory::new();
+let factory = TransportFactory::with_defaults(); // or TransportFactory::new(config)
 
-// Create transport based on URI scheme
+// Create a transport of a given type bound to a local address
 let (transport, events) = factory
-    .create_from_uri("sip:example.com:5060;transport=tcp")
+    .create_transport(TransportType::Tcp, "0.0.0.0:5060".parse()?)
+    .await?;
+
+// Or pick the type from a SIP URI scheme ("sip", "sips", "ws", "wss")
+let (transport, events) = factory
+    .create_transport_for_scheme("sips", "0.0.0.0:5061".parse()?)
     .await?;
 ```
 
@@ -229,12 +244,15 @@ let (transport, events) = factory
 
 ```rust
 use rvoip_sip_transport::manager::TransportManager;
+use std::sync::Arc;
 
-let mut manager = TransportManager::new();
+// `new(config)` and `with_defaults()` both return the manager plus an
+// aggregated event receiver for every registered transport
+let (manager, mut events) = TransportManager::with_defaults().await?;
 
-// Add multiple transports
-manager.add_transport("udp", udp_transport).await?;
-manager.add_transport("tcp", tcp_transport).await?;
+// Register already-bound transports
+manager.register_transport(Arc::new(udp_transport)).await?;
+manager.register_transport(Arc::new(tcp_transport)).await?;
 
 // Send message with automatic transport selection
 manager.send_message(message, destination).await?;
@@ -259,9 +277,9 @@ manager.send_message(message, destination).await?;
 ┌─────────────────────────────────────────┐
 │            Application Layer            │
 ├─────────────────────────────────────────┤
-│          rvoip-session-core             │
+│       rvoip-sip (umbrella crate)        │
 ├─────────────────────────────────────────┤
-│         rvoip-transaction-core          │
+│  rvoip-sip-dialog (transaction+dialog)  │
 ├─────────────────────────────────────────┤
 │         rvoip-sip-transport  ⬅️ YOU ARE HERE
 ├─────────────────────────────────────────┤
@@ -271,7 +289,7 @@ manager.send_message(message, destination).await?;
 
 The transport layer sits between the transaction layer and the network, providing:
 
-- **Upward Interface**: Delivers received messages to transaction-core
+- **Upward Interface**: Delivers received messages to the `rvoip-sip-dialog` transaction layer
 - **Downward Interface**: Handles actual network I/O operations
 - **Event Propagation**: Notifies upper layers of transport events
 
@@ -286,9 +304,16 @@ cargo test -p rvoip-sip-transport
 # Run with specific features
 cargo test -p rvoip-sip-transport --features "tls ws"
 
-# Run integration tests
-cargo test -p rvoip-sip-transport --test integration_tests
+# Run individual integration suites (see tests/)
+cargo test -p rvoip-sip-transport --test tls_handshake_test
+cargo test -p rvoip-sip-transport --test ws_client_round_trip
+cargo test -p rvoip-sip-transport --features dns --test resolver_hickory_e2e
 ```
+
+Integration suites live in [`tests/`](tests/): `mtls_server_auth`,
+`raw_bytes_preservation`, `resolver_hickory_e2e`, `resolver_mock`,
+`stateless_proxy_helpers`, `tls_handshake_test`, `ws_client_round_trip`,
+and `ws_handshake_admission`.
 
 ## Features
 
@@ -298,6 +323,9 @@ The crate supports the following optional features:
 - **`tcp`** (default): TCP transport support  
 - **`tls`** (default): TLS transport support
 - **`ws`** (default): WebSocket transport support
+- **`wss`** (default, implies `ws` + `tls`): WebSocket Secure server-side accept
+- **`dns`**: RFC 3263 `HickoryResolver` (NAPTR/SRV/A ladder); the `Resolver` trait is always available
+- **`dev-insecure-tls`**: Dev-only accept-all-certs TLS client verifier; never enable in production
 
 Disable default features and enable only what you need:
 

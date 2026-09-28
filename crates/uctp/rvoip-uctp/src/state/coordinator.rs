@@ -31,7 +31,9 @@ use rvoip_core::capability::{
 use rvoip_core::identity::IdentityAssurance;
 
 use super::connection::{ConnectionInput, ConnectionMachine};
-use super::events::UctpSessionEvent;
+use super::events::{
+    ConversationClosedReply, ConversationListReply, ConversationOpenedReply, UctpSessionEvent,
+};
 use super::session::{SessionInput, SessionMachine};
 use super::subscription::{
     rejecting_handler, PeerResourceBindings, ResourceBindingError, SubscriptionHandler,
@@ -140,6 +142,9 @@ impl UctpScopePolicy {
             MessageType::ConnectionEnd,
             MessageType::ConnectionQuality,
             MessageType::IdentityStepUpResponse,
+            MessageType::ConversationCreate,
+            MessageType::ConversationList,
+            MessageType::ConversationClose,
         ] {
             policy = policy.with_required_scope(message_type, UCTP_SESSION_SCOPE);
         }
@@ -1204,6 +1209,9 @@ impl UctpCoordinator {
                     // the inbound dispatcher (the server does not
                     // expect to receive its own request shape).
                     MessageType::IdentityStepUpRequest => Ok(()),
+                    MessageType::ConversationCreate => self.handle_conversation_create(env).await,
+                    MessageType::ConversationList => self.handle_conversation_list(env).await,
+                    MessageType::ConversationClose => self.handle_conversation_close(env).await,
                     _ => Ok(()),
                 }
             }
@@ -1240,6 +1248,169 @@ impl UctpCoordinator {
             credential: payload.credential,
         })
         .await
+    }
+
+    async fn handle_conversation_create(&self, env: UctpEnvelope) -> Result<()> {
+        let payload: payloads::conversation::ConversationCreate = match env.decode_payload() {
+            Ok(payload) => payload,
+            Err(_) => {
+                return self
+                    .emit_error(env.id.clone(), 400, "protocol", "malformed-payload")
+                    .await
+                    .or_else(|_| Ok(()));
+            }
+        };
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.emit_event(UctpSessionEvent::ConversationCreate {
+            env_id: env.id.clone(),
+            cid: env.cid.clone(),
+            tenant_id: payload.tenant_id,
+            policy: payload.policy,
+            idle_close_secs: payload.idle_close_secs,
+            metadata: payload.metadata,
+            initial_participants: payload.initial_participants,
+            reply,
+        })
+        .await?;
+        let Some(opened) = self
+            .await_conversation_reply::<ConversationOpenedReply>(
+                env.id.clone(),
+                env.cid.clone(),
+                response,
+            )
+            .await?
+        else {
+            return Ok(());
+        };
+        let body = payloads::conversation::ConversationOpened {
+            tenant_id: opened.tenant_id,
+            policy: opened.policy,
+            idle_close_secs: opened.idle_close_secs,
+            participants: opened.participants,
+            opened_at: opened.opened_at,
+            metadata: opened.metadata,
+        };
+        let envelope =
+            UctpEnvelope::new(MessageType::ConversationOpened, serde_json::to_value(body)?)
+                .with_in_reply_to(env.id)
+                .with_cid(opened.cid);
+        self.send_out(envelope).await
+    }
+
+    async fn handle_conversation_list(&self, env: UctpEnvelope) -> Result<()> {
+        let payload: payloads::conversation::ConversationList = match env.decode_payload() {
+            Ok(payload) => payload,
+            Err(_) => {
+                return self
+                    .emit_error(env.id.clone(), 400, "protocol", "malformed-payload")
+                    .await
+                    .or_else(|_| Ok(()));
+            }
+        };
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.emit_event(UctpSessionEvent::ConversationList {
+            env_id: env.id.clone(),
+            filter: payload.filter,
+            cursor: payload.cursor,
+            limit: payload.limit,
+            reply,
+        })
+        .await?;
+        let Some(list) = self
+            .await_conversation_reply::<ConversationListReply>(env.id.clone(), None, response)
+            .await?
+        else {
+            return Ok(());
+        };
+        for opened in list.conversations {
+            let cid = opened.cid.clone();
+            let body = payloads::conversation::ConversationOpened {
+                tenant_id: opened.tenant_id,
+                policy: opened.policy,
+                idle_close_secs: opened.idle_close_secs,
+                participants: opened.participants,
+                opened_at: opened.opened_at,
+                metadata: opened.metadata,
+            };
+            let envelope =
+                UctpEnvelope::new(MessageType::ConversationOpened, serde_json::to_value(body)?)
+                    .with_in_reply_to(env.id.clone())
+                    .with_cid(cid);
+            self.send_out(envelope).await?;
+        }
+        let ack = payloads::control::Ack {
+            details: match list.next_cursor {
+                Some(cursor) => serde_json::json!({ "next_cursor": cursor }),
+                None => serde_json::Value::Null,
+            },
+        };
+        let envelope = UctpEnvelope::new(MessageType::Ack, serde_json::to_value(ack)?)
+            .with_in_reply_to(env.id);
+        self.send_out(envelope).await
+    }
+
+    async fn handle_conversation_close(&self, env: UctpEnvelope) -> Result<()> {
+        let payload: payloads::conversation::ConversationClose = match env.decode_payload() {
+            Ok(payload) => payload,
+            Err(_) => {
+                return self
+                    .emit_error(env.id.clone(), 400, "protocol", "malformed-payload")
+                    .await
+                    .or_else(|_| Ok(()));
+            }
+        };
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.emit_event(UctpSessionEvent::ConversationClose {
+            env_id: env.id.clone(),
+            cid: env.cid.clone(),
+            reason_code: payload.reason_code,
+            reason: payload.reason,
+            reply,
+        })
+        .await?;
+        let Some(closed) = self
+            .await_conversation_reply::<ConversationClosedReply>(
+                env.id.clone(),
+                env.cid.clone(),
+                response,
+            )
+            .await?
+        else {
+            return Ok(());
+        };
+        let body = payloads::conversation::ConversationClosed {
+            reason_code: closed.reason_code,
+            reason: closed.reason,
+            closed_at: closed.closed_at,
+        };
+        let envelope =
+            UctpEnvelope::new(MessageType::ConversationClosed, serde_json::to_value(body)?)
+                .with_in_reply_to(env.id)
+                .with_cid(closed.cid);
+        self.send_out(envelope).await
+    }
+
+    async fn await_conversation_reply<T>(
+        &self,
+        env_id: String,
+        _cid: Option<String>,
+        response: tokio::sync::oneshot::Receiver<std::result::Result<T, UctpError>>,
+    ) -> Result<Option<T>> {
+        match tokio::time::timeout(self.caps.signaling_send_timeout, response).await {
+            Ok(Ok(Ok(value))) => Ok(Some(value)),
+            Ok(Ok(Err(_))) | Ok(Err(_)) | Err(_) => {
+                self.emit_error_full(
+                    env_id,
+                    503,
+                    "transient",
+                    "conversation-handler-unavailable",
+                    None,
+                    None,
+                )
+                .await?;
+                Ok(None)
+            }
+        }
     }
 
     /// P12.6 — build and send an `identity.step-up-request` envelope

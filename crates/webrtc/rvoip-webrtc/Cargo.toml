@@ -14,6 +14,7 @@ description = "rvoip-core WebRTC interop adapter built on webrtc-rs 0.20.0-alpha
 
 [features]
 default = []
+test-hooks = []
 signaling-whip = ["dep:axum", "dep:hyper", "dep:tower", "dep:tower-http", "dep:serde_json", "dep:rvoip-auth-core", "dep:reqwest"]
 signaling-ws = ["dep:tokio-tungstenite", "dep:serde_json", "dep:rvoip-auth-core"]
 client = ["dep:serde_json"]
@@ -120,6 +121,11 @@ env-libvpx-sys = { version = "5", features = ["generate"], optional = true }
 openh264 = { version = "0.9.3", optional = true }
 
 [dev-dependencies]
+# The SIP/WebRTC acceptance tests negotiate Opus end to end and must run the
+# real media-graph backend. Keeping this on the dev side, as rvoip-uctp does,
+# stops the library from forcing libopus onto every consumer: the facade's
+# pure-Rust bundle includes this crate and must stay free of native codecs.
+rvoip-core = { workspace = true, features = ["opus"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
@@ -135,6 +141,7 @@ rcgen.workspace = true
 # Forward dev-dep: path-only (no version) so `cargo publish` strips it from the
 # published manifest rather than requiring rvoip-sip on crates.io. See rvoip-core.
 rvoip-sip = { path = "../../sip/rvoip-sip" }
+rvoip-harness = { workspace = true }
 rvoip-rtp-core.workspace = true
 rand = { workspace = true }
 tokio-util.workspace = true

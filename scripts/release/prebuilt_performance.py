@@ -2,7 +2,7 @@
 """Build, install, and execute exact-candidate performance test binaries.
 
 Release performance workers must measure the candidate, not spend most of their
-life compiling it.  This helper turns the selected GCP performance gates into a
+life compiling it.  This helper turns the selected EC2 performance gates into a
 small set of Cargo build invocations, packages the resulting test executables,
 and verifies every byte again before a runtime worker may execute it.
 """
@@ -27,15 +27,15 @@ from typing import Any
 
 
 MANIFEST_SCHEMA = "rvoip-performance-prebuilt-v1"
-RESULT_SCHEMA = "rvoip-gcp-performance-prebuild-result-v1"
+RESULT_SCHEMA = "rvoip-ec2-performance-prebuild-result-v1"
 CACHE_KEY_SCHEMA = "rvoip-performance-prebuilt-cache-key-v1"
 COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", re.DOTALL)
 PERFORMANCE_RESOURCES = {
-    "gcp-performance",
-    "gcp-performance-soak",
-    "gcp-performance-soak-long",
+    "ec2-performance",
+    "ec2-performance-soak",
+    "ec2-performance-soak-long",
 }
 
 
@@ -783,7 +783,7 @@ def validate_result(
     gate_ids: list[str],
     expected_cache_key: str | None = None,
 ) -> dict[str, Any]:
-    result = load_json(result_path, "GCP prebuild result")
+    result = load_json(result_path, "EC2 prebuild result")
     expected = {
         "schema": RESULT_SCHEMA,
         "candidate_sha": candidate,
@@ -811,12 +811,12 @@ def validate_result(
     if not HEX_SHA256.fullmatch(str(result.get("manifest_sha256", ""))):
         failures.append("manifest_sha256 is missing or invalid")
     uri = result.get("bundle_uri")
-    if not isinstance(uri, str) or not uri.startswith("gs://"):
+    if not isinstance(uri, str) or not uri.startswith("s3://"):
         failures.append("bundle_uri is missing or invalid")
     elif not uri.endswith(f"/bundles/{result.get('bundle_sha256')}.tar.gz"):
         failures.append("bundle_uri is not content-addressed by bundle_sha256")
     manifest_uri = result.get("manifest_uri")
-    if not isinstance(manifest_uri, str) or not manifest_uri.startswith("gs://"):
+    if not isinstance(manifest_uri, str) or not manifest_uri.startswith("s3://"):
         failures.append("manifest_uri is missing or invalid")
     elif not manifest_uri.endswith(
         f"/manifests/{result.get('manifest_sha256')}.json"
@@ -829,7 +829,7 @@ def validate_result(
                 failures.append(f"{label} is outside the expected cache namespace")
     if failures:
         raise PrebuiltError(
-            "GCP prebuild result verification failed:\n- " + "\n- ".join(failures)
+            "EC2 prebuild result verification failed:\n- " + "\n- ".join(failures)
         )
     return result
 

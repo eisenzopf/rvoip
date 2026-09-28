@@ -73,7 +73,7 @@ case "$engine_arch" in
 Jambonz release interop requires an amd64 Docker engine because its pinned
 MySQL 5.7 and Jambonz images are amd64-only. This engine reports '$engine_arch'.
 With Colima on Apple Silicon, use a dedicated x86_64 Colima profile, or run the
-mandatory gate on the repository's x86 GCP interop worker.
+mandatory gate on the repository's x86 EC2 interop worker.
 EOF
     exit 1
     ;;

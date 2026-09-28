@@ -840,7 +840,18 @@ impl DialogEventHub {
                     if is_invite_2xx {
                         crate::diagnostics::record_hub_response_invite_2xx_session(false);
                     }
-                    warn!("No session ID found for dialog {:?}", dialog_id);
+                    if transaction_id.method() == &rvoip_sip_core::Method::Bye
+                        && response.status_code() >= 200
+                        && !self.dialog_manager.has_dialog(&dialog_id)
+                    {
+                        debug!(
+                            dialog=%dialog_id,
+                            transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id),
+                            "Ignoring final BYE response after exact dialog cleanup"
+                        );
+                    } else {
+                        warn!("No session ID found for dialog {:?}", dialog_id);
+                    }
                     None
                 }
             }

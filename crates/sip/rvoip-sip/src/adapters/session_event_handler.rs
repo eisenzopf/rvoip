@@ -1196,6 +1196,7 @@ fn project_committed_response_events(
                 sdp.clone(),
                 raw_response,
             );
+            crate::response_diagnostics::observe(&detailed, "");
             [
                 crate::api::events::Event::CallProgress {
                     call_id,
@@ -1214,6 +1215,7 @@ fn project_committed_response_events(
                 sdp.clone(),
                 raw_response,
             );
+            crate::response_diagnostics::observe(&detailed, "");
             [
                 crate::api::events::Event::CallAnswered { call_id, sdp },
                 crate::api::events::Event::CallEstablishedDetailed(detailed),
@@ -1231,6 +1233,7 @@ fn project_committed_response_events(
                 None,
                 raw_response,
             );
+            crate::response_diagnostics::observe(&detailed, "");
             [
                 crate::api::events::Event::CallFailedDetailed(detailed),
                 crate::api::events::Event::CallFailed {

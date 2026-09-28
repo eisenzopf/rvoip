@@ -1,7 +1,7 @@
 //! `RvoipPeerConnection` — offer/answer lifecycle on webrtc-rs 0.20.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -89,10 +89,34 @@ pub struct RvoipPeerConnection {
 
 impl RvoipPeerConnection {
     pub async fn new(config: &WebRtcConfig, role: PeerRole) -> Result<Arc<Self>> {
+        Self::new_inner(config, role, None).await
+    }
+
+    pub(crate) async fn new_with_allocated_udp_socket_counter(
+        config: &WebRtcConfig,
+        role: PeerRole,
+        allocated_udp_sockets: Arc<AtomicUsize>,
+    ) -> Result<Arc<Self>> {
+        Self::new_inner(config, role, Some(allocated_udp_sockets)).await
+    }
+
+    async fn new_inner(
+        config: &WebRtcConfig,
+        role: PeerRole,
+        allocated_udp_sockets: Option<Arc<AtomicUsize>>,
+    ) -> Result<Arc<Self>> {
         let (channels, receivers, connected_flag, failed_flag, ice_candidates, drops) =
             HandlerChannels::pair(config.handler_channel_capacity);
         let handler = ConnectionHandler::new(channels);
-        let pc = builder::build_peer_connection(config, handler).await?;
+        let pc = match allocated_udp_sockets {
+            Some(counter) => {
+                builder::build_peer_connection_with_allocated_udp_socket_counter(
+                    config, handler, counter,
+                )
+                .await?
+            }
+            None => builder::build_peer_connection(config, handler).await?,
+        };
         let gather_timeout = Duration::from_secs(config.gather_timeout_secs);
 
         Ok(Arc::new(Self {
@@ -1299,6 +1323,14 @@ impl RvoipPeerConnection {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+
+    /// Trigger the same state observed from a peer-connection `Failed`
+    /// callback. Available only to integration tests that exercise the
+    /// adapter's production failure watcher and terminal delivery path.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn inject_failure_for_test(&self) {
+        self.failed_flag.store(true, Ordering::Release);
     }
 
     /// Hold: mute local track; best-effort recvonly on audio transceivers.

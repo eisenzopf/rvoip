@@ -156,35 +156,30 @@ is documented in [`examples/sip_client/README.md`](examples/sip_client/README.md
 
 ## Interoperability status
 
-The `0.3.9` release recorded revision-bound PASS evidence for Asterisk,
-FreeSWITCH, Kamailio, and OpenSIPS. Kamailio and OpenSIPS must each pass both
-adjacency orders over UDP, TCP, and verified TLS. Publication remains blocked
-unless the generated report records the complete required matrix as PASS.
-
-The 0.3.2 full release run passed all 16 selected PBX and interoperability
-gates. Asterisk and FreeSWITCH were executed as external PBX peers; Kamailio
-and OpenSIPS were named and audited, but their proxy/rtpengine topology was
-explicitly de-scoped rather than silently presented as tested.
-
-Both proxies have since been exercised in the AMR interop lab. That is lab
-evidence and is labelled as such below — it does not move them into the 0.3.2
-release claim, and it does not meet the four-peer attestation boundary.
+The published release recorded fresh, revision-bound PASS evidence at commit
+`77a99cd38a07641294cf7dc547146b115b135dc7` for Asterisk, FreeSWITCH, Jambonz,
+SIPp, baresip, Kamailio, and OpenSIPS. Kamailio and OpenSIPS each passed both
+adjacency orders (peer-first and rvoip-first) over UDP, TCP, and TLS
+(`interop.remote-proxies.*`) plus the registrar-proxy matrix through an
+rtpengine media relay (`interop.proxy-pbx.*`). The generated
+[gate ledger](docs/BETA_GATE_REPORT.md) is the exact record; publication is
+blocked unless it records the complete required matrix as PASS.
 
 | Peer/tool | Status | Executed scope |
 | --- | --- | --- |
-| **Asterisk** | **0.3.2 interop matrix passed** | `Endpoint`, `StreamPeer`, and `CallbackPeer` across registration, basic call, G.729A/G.729AB, hold/resume, ring-cancel, RFC 4733 DTMF, rejection, and blind transfer over UDP and TLS |
-| **FreeSWITCH** | **0.3.2 interop matrix passed** | The same API, scenario, codec, and UDP/TLS matrix as Asterisk |
-| **Jambonz OSS 0.9.9** | **Mandatory 0.3.10 release gate** | The same registered-user `Endpoint`, `StreamPeer`, and `CallbackPeer` scenario runner used for Asterisk and FreeSWITCH, across the applicable UDP SIP/SDP/RTP B2BUA matrix; publication requires a protected exact-source PASS |
-| **SIPp** | **0.3.2 standalone matrix passed** | 30, 100, 300, 1,000, and 2,000 CPS with 100% configured call completion |
-| **baresip** | **0.3.2 strict-UA check passed** | External user-agent call against the rvoip SIP listener |
-| **Kamailio** | **Lab-tested; not release-gated** | Registrar-proxy with an rtpengine media relay: registration, calls, AMR in all four framings relayed verbatim, DTMF, and SDES-SRTP, over UDP and TLS. No TCP, no second adjacency order, not bound into the release attestation |
-| **OpenSIPS** | **Lab-tested; not release-gated** | The same lab scope over UDP only — no TLS image yet |
+| **Asterisk** | **Release-gated; matrix passed** (`interop.asterisk-matrix`) | `Endpoint`, `StreamPeer`, and `CallbackPeer` across registration, basic call, G.729A/G.729AB, hold/resume, ring-cancel, RFC 4733 DTMF, rejection, and blind transfer over UDP and TLS |
+| **FreeSWITCH** | **Release-gated; matrix passed** (`interop.freeswitch-matrix`) | The same API, scenario, codec, and UDP/TLS matrix as Asterisk |
+| **Jambonz OSS 0.9.9** | **0.3.10 release gate passed** (`interop.jambonz-matrix`) | The same registered-user `Endpoint`, `StreamPeer`, and `CallbackPeer` scenario runner used for Asterisk and FreeSWITCH, across the applicable UDP SIP/SDP/RTP B2BUA matrix |
+| **SIPp** | **Release-gated; standalone matrix passed** (`interop.sipp-matrix`) | 30, 100, 300, 1,000, and 2,000 CPS with 100% configured call completion |
+| **baresip** | **Release-gated; strict-UA check passed** (`interop.strict-ua`) | External user-agent call against the rvoip SIP listener |
+| **Kamailio** | **Release-gated; proxy matrix passed** | Proxy interoperability in both adjacency orders over UDP, TCP, and TLS (`interop.remote-proxies.kamailio.*`), plus the `Endpoint` all-scenario matrix through an rtpengine media relay with AMR passthrough required (`interop.proxy-pbx.kamailio.matrix`) |
+| **OpenSIPS** | **Release-gated; proxy matrix passed** | The same adjacency-order, transport, and rtpengine AMR passthrough matrix as Kamailio (`interop.remote-proxies.opensips.*`, `interop.proxy-pbx.opensips.matrix`) |
 
-The machine-bound [0.3.2 gate
-record](docs/BETA_GATE_EXCEPTION.md), [compatibility
-matrix](docs/COMPATIBILITY_MATRIX.md), and [topology
-profiles](docs/TOPOLOGY_PROFILES.md) define the exact claim. These results do
-not imply carrier certification or untested peer-version/topology coverage.
+The machine-bound [current gate ledger](docs/BETA_GATE_REPORT.md),
+[compatibility matrix](docs/COMPATIBILITY_MATRIX.md), and [topology
+profiles](docs/TOPOLOGY_PROFILES.md) define the exact claim; the
+[0.3.2 gate record](docs/BETA_GATE_EXCEPTION.md) is historical. These results
+do not imply carrier certification or untested peer-version/topology coverage.
 
 ## Capabilities
 
@@ -194,9 +189,23 @@ not imply carrier certification or untested peer-version/topology coverage.
   regression fixtures.
 - UDP and TLS SIP paths in the beta-candidate evidence set.
 - RTP media sessions, bidirectional audio frames, RFC 4733 DTMF, SDES-SRTP,
-  and feature-gated DTLS-SRTP negotiation state. The exact supported and
+  and feature-gated DTLS-SRTP negotiation state. DTLS-SRTP accepts both the
+  `UDP/TLS/RTP/SAVP` and `UDP/TLS/RTP/SAVPF` profiles, and the offered
+  `a=setup` role is selectable with `DtlsSetupRole` (`Actpass`, `Active`,
+  `Passive`) through `Config::with_dtls_setup_role`. The exact supported and
   fail-closed boundaries are documented in
   [Crypto capability boundaries](docs/CRYPTO_CAPABILITIES.md).
+- STUN-discovered RTP mapping: `Config::stun_server` runs an RFC 8489 probe
+  from the call's own RTP socket (rtp-core `TransportStunClient`) so the
+  public IP and port rendered in SDP match the media path. Discovery failure
+  falls back to the local address, and a static `Config::media_public_addr`
+  takes precedence when the mapping is already known.
+- Listener per-source request budget:
+  `SipListenerAuthPolicy::with_source_rate_limit(SipSourceRateLimit)` drops
+  over-budget sources (keyed by IP, trusted trunks included) before any other
+  admission check, and `with_ingress_observer(Arc<dyn SipIngressObserver>)`
+  reports every `SipIngressEvent` with its `SipIngressOutcome` (`Admitted`,
+  `Rejected`, or `Dropped`).
 - Hold/resume, blind transfer, REFER/NOTIFY progress, attended-transfer
   primitives, and transfer outcome events.
 - Builder-shaped outbound requests with custom headers, carry-through reports,
@@ -340,28 +349,35 @@ Operational references:
 | `persistence` | Experimental persistence hooks; applications must validate their own storage behavior. |
 | `generated-validation` | Development and CI validation for generated SIP messages. |
 | `dev-insecure-tls` | Local test-only TLS convenience; never enable for deployed systems. |
-| `g729` | Optional G.729A/G.729AB media support with PT 18 SDP and Annex B `fmtp` negotiation. |
+| `g729` | Optional G.729A/G.729AB media support with PT 18 SDP and Annex B `fmtp` negotiation. Also forwards `rvoip-core/g729` so the core media graph can transcode bridged legs. |
 | `amr-nb` | Optional AMR narrowband media support with RFC 4867 payload framing, DTX, CMR, and `mode-set`/`octet-align` negotiation. |
-| `amr-wb` | The same for AMR wideband (G.722.2) at 16 kHz. |
+| `amr-wb` | The same for AMR wideband (G.722.2) at 16 kHz. Also forwards `rvoip-core/amr-wb` so the core media graph can transcode bridged legs. |
 | `amr` | Both AMR variants. |
 | `opus` | Optional Opus media support; requires libopus on the build host. |
+| `opus-sim` | Deprecated compatibility alias for `opus`; selects the same real backend. |
 | `all-codecs` | `g729` + `opus` + `amr`. |
 | `dtls-srtp` | SIP DTLS-SRTP keying over the call's RTP socket with SHA-256 SDP fingerprint binding. |
 | `perf-tests` | Opt-in performance gate and benchmark support. |
 | `dhat` | Heap profiling support for `examples/profiling/dhat_*.rs`. |
 | `tokio-console` | Tokio console support for profiling examples; requires `RUSTFLAGS="--cfg tokio_unstable"`. |
+| `test-hooks` | Test-only fault injection (`SipAdapter::inject_media_failure_for_test`); absent from ordinary builds. |
+| `perf-infra-memory-diagnostics` | `perf-tests` plus `rvoip-infra-common` memory diagnostics for targeted investigation runs. |
+| `perf-media-diagnostics` | `perf-tests` plus `rvoip-media-core` perf diagnostics. |
+| `perf-media-memory-diagnostics` | `perf-tests` plus `rvoip-media-core` memory diagnostics. |
+| `perf-rtp-memory-diagnostics` | `perf-tests` plus `rvoip-rtp-core` memory diagnostics. |
+| `perf-call-setup-diagnostics` | `perf-tests` plus the hidden `call_setup_diag` state-machine instrumentation. |
+| `perf-system-allocator` | Perf-only allocator A/B switch that disables the mimalloc global allocator. |
 
 ## Known limits
 
-- This is a beta release approved with one performance exception, not a broad
+- The current qualification passed every gate, but PASS applies to the exact
+  tested commit, commands, peers, and environment; it is not a broad
   production-readiness claim.
 - Carrier SBC readiness is partial and not certified.
-- Kamailio/OpenSIPS plus rtpengine are lab-tested, not release-gated. The AMR
-  interop lab runs registration and call scenarios through both proxies with an
-  rtpengine media relay — Kamailio over UDP and TLS with SDES-SRTP, OpenSIPS
-  over UDP only — but neither runs TCP or both adjacency orders, and neither is
-  bound into the four-peer release attestation. They were explicitly de-scoped
-  from the 0.3.2 claim and that has not changed.
+- Kamailio/OpenSIPS plus rtpengine are release-gated only in the proxy matrix
+  recorded in the gate ledger (both adjacency orders over UDP, TCP, and TLS,
+  plus the rtpengine AMR passthrough run); other proxy versions, images, and
+  topologies are not claimed.
 - WebRTC/browser interop, TURN, and WSS outbound remain outside the SIP beta
   claim unless separately completed and tested. SIP DTLS-SRTP is a distinct
   feature-gated 0.3.10 capability whose claim is bounded by fresh protected

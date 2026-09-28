@@ -4,6 +4,7 @@ use crate::ids::{
     AiAttachmentId, BridgeId, ConnectionId, ConversationId, IdentityId, ListenerId, MessageId,
     ParticipantId, RecordingId, SessionId, StreamId, TenantId,
 };
+use crate::participant::ParticipantRole;
 use crate::store::VconHandle;
 use crate::stream::QualitySnapshot;
 use crate::vcon::VconRef;
@@ -118,6 +119,16 @@ pub enum Event {
         bridge_id: BridgeId,
         at: DateTime<Utc>,
     },
+    /// Published after ownership commit, before compatibility bridge events.
+    /// Identifies one peer replacement, not a retained-connection termination.
+    PeerHandoffCommitted {
+        previous_bridge_id: BridgeId,
+        bridge_id: BridgeId,
+        retained: ConnectionId,
+        source: ConnectionId,
+        target: ConnectionId,
+        at: DateTime<Utc>,
+    },
 
     // --- Transfer ---
     /// Legacy compatibility event indicating that an adapter accepted the
@@ -144,6 +155,16 @@ pub enum Event {
     ParticipantLeft {
         session_id: SessionId,
         participant_id: ParticipantId,
+        at: DateTime<Utc>,
+    },
+    /// A Participant's voip-3 role changed. `session_id` is set when the
+    /// Participant is in exactly one Active Session; otherwise `None`.
+    ParticipantRoleChanged {
+        conversation_id: ConversationId,
+        session_id: Option<SessionId>,
+        participant_id: ParticipantId,
+        from: ParticipantRole,
+        to: ParticipantRole,
         at: DateTime<Utc>,
     },
 
@@ -364,6 +385,7 @@ impl fmt::Debug for Event {
                 .finish(),
             Self::ConnectionsBridged { .. } => formatter.write_str("ConnectionsBridged"),
             Self::ConnectionsUnbridged { .. } => formatter.write_str("ConnectionsUnbridged"),
+            Self::PeerHandoffCommitted { .. } => formatter.write_str("PeerHandoffCommitted"),
             Self::ConnectionTransferred { .. } => formatter.write_str("ConnectionTransferred"),
             Self::ConnectionTransferStatus { status, .. } => formatter
                 .debug_struct("ConnectionTransferStatus")
@@ -371,6 +393,11 @@ impl fmt::Debug for Event {
                 .finish(),
             Self::ParticipantJoined { .. } => formatter.write_str("ParticipantJoined"),
             Self::ParticipantLeft { .. } => formatter.write_str("ParticipantLeft"),
+            Self::ParticipantRoleChanged { from, to, .. } => formatter
+                .debug_struct("ParticipantRoleChanged")
+                .field("from", from)
+                .field("to", to)
+                .finish(),
             Self::AiAttached { provider_ref, .. } => formatter
                 .debug_struct("AiAttached")
                 .field("provider_ref_present", &!provider_ref.is_empty())
@@ -646,6 +673,20 @@ impl Event {
                     bridge_id: bridge_id.to_string(),
                 }
             }
+            PeerHandoffCommitted {
+                previous_bridge_id,
+                bridge_id,
+                retained,
+                source,
+                target,
+                ..
+            } => RvoipCoreCrossCrateEvent::PeerHandoffCommitted {
+                previous_bridge_id: previous_bridge_id.to_string(),
+                bridge_id: bridge_id.to_string(),
+                retained: retained.to_string(),
+                source: source.to_string(),
+                target: target.to_string(),
+            },
             ConnectionTransferred {
                 connection_id,
                 target,
@@ -677,6 +718,20 @@ impl Event {
             } => RvoipCoreCrossCrateEvent::ParticipantLeft {
                 session_id: session_id.to_string(),
                 participant_id: participant_id.to_string(),
+            },
+            ParticipantRoleChanged {
+                conversation_id,
+                session_id,
+                participant_id,
+                from,
+                to,
+                ..
+            } => RvoipCoreCrossCrateEvent::ParticipantRoleChanged {
+                conversation_id: conversation_id.to_string(),
+                session_id: session_id.as_ref().map(ToString::to_string),
+                participant_id: participant_id.to_string(),
+                from: format!("{from:?}"),
+                to: format!("{to:?}"),
             },
             AiAttached {
                 connection_id,
@@ -887,6 +942,40 @@ impl Event {
 #[cfg(test)]
 mod credential_diagnostic_tests {
     use super::*;
+
+    #[test]
+    fn handoff_projection_preserves_exact_bridge_and_peer_identity() {
+        let previous = BridgeId::new();
+        let replacement = BridgeId::new();
+        let retained = ConnectionId::new();
+        let source = ConnectionId::new();
+        let target = ConnectionId::new();
+        let event = Event::PeerHandoffCommitted {
+            previous_bridge_id: previous.clone(),
+            bridge_id: replacement.clone(),
+            retained: retained.clone(),
+            source: source.clone(),
+            target: target.clone(),
+            at: Utc::now(),
+        };
+        match projected_core(event) {
+            RvoipCoreCrossCrateEvent::PeerHandoffCommitted {
+                previous_bridge_id,
+                bridge_id,
+                retained: r,
+                source: s,
+                target: t,
+            } => {
+                assert_eq!(previous_bridge_id, previous.to_string());
+                assert_eq!(bridge_id, replacement.to_string());
+                assert_eq!(
+                    (r, s, t),
+                    (retained.to_string(), source.to_string(), target.to_string())
+                );
+            }
+            other => panic!("handoff must retain its semantics: {other:?}"),
+        }
+    }
 
     fn projected_core(event: Event) -> RvoipCoreCrossCrateEvent {
         let RvoipCrossCrateEvent::Core(inner) = event.to_cross_crate() else {

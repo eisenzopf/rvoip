@@ -215,7 +215,7 @@ class QualificationReportTests(unittest.TestCase):
     def test_ignores_reviewed_baseline_but_validates_nested_current_output(
         self,
     ) -> None:
-        profile = self.evidence / "_perf-results/gcp-soak/profiles/run-1"
+        profile = self.evidence / "_perf-results/ec2-soak/profiles/run-1"
         current = profile / "output-target/perf-results/perf_call_setup/100.json"
         baseline = profile / "reviewed-baseline/perf_call_setup/100.json"
         current.parent.mkdir(parents=True)

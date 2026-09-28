@@ -212,6 +212,13 @@ impl TransactionManager {
                 );
                 false
             }
+            SipRequestAuthorization::Dropped { .. } => {
+                debug!(
+                    source=%ingress_context.source,
+                    "Dropping unmatched proxy CANCEL from a source over its request budget"
+                );
+                false
+            }
         }
     }
 
@@ -946,6 +953,16 @@ impl TransactionManager {
                 self.send_response(transaction.id(), response).await?;
                 Ok(false)
             }
+            SipRequestAuthorization::Dropped { reason } => {
+                // No response: answering a flood is what the flood wants.
+                debug!(
+                    method=%crate::transaction::safe_diagnostics::SafeMethod::new(&request.method()),
+                    source = %ingress_context.source,
+                    reason_present = reason.is_some(),
+                    "SIP listener dropped request without response"
+                );
+                Ok(false)
+            }
         }
     }
 
@@ -1096,7 +1113,9 @@ impl TransactionManager {
                 SipRequestAuthorization::Authorized { principal } => {
                     Some(super::ServerAuthenticatedOwner::from(principal))
                 }
-                SipRequestAuthorization::Rejected(_) => None,
+                SipRequestAuthorization::Rejected(_) | SipRequestAuthorization::Dropped { .. } => {
+                    None
+                }
             };
             preauthorization = Some(decision);
             owner

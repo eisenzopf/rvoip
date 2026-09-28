@@ -291,6 +291,11 @@ pub struct SipConfig {
     egress_profiles: Vec<SipEgressProfileConfig>,
     /// Fail-closed production posture for remote registered SIP endpoints.
     remote_endpoint_profile: bool,
+    /// Per-source request budget applied ahead of every other admission
+    /// check; a source over budget is dropped without a response.
+    source_rate_limit: Option<rvoip_sip::SipSourceRateLimit>,
+    /// Receives every listener admission decision, for counting.
+    ingress_observer: Option<Arc<dyn rvoip_sip::SipIngressObserver>>,
 }
 
 impl std::fmt::Debug for SipConfig {
@@ -573,6 +578,8 @@ impl SipConfig {
             // says so rather than inheriting it.
             playout: None,
             srtp: SipMediaSecurity::Disabled,
+            source_rate_limit: None,
+            ingress_observer: None,
             tls_listener: None,
             tls_advertised_addr: None,
             tls_extra_ca_path: None,
@@ -605,6 +612,20 @@ impl SipConfig {
     pub fn trusted_trunk(mut self, cidr: impl Into<String>, subject: impl Into<String>) -> Self {
         self.trusted_trunks.push((cidr.into(), subject.into()));
         self.playout.get_or_insert_default();
+        self
+    }
+
+    /// Drop requests from any source that exceeds `limit`, trusted trunks
+    /// included, before any other admission check. Takes effect with the
+    /// listener admission policy, i.e. once a trusted trunk is configured.
+    pub fn source_rate_limit(mut self, limit: rvoip_sip::SipSourceRateLimit) -> Self {
+        self.source_rate_limit = Some(limit);
+        self
+    }
+
+    /// Report every listener admission decision to `observer`.
+    pub fn ingress_observer(mut self, observer: Arc<dyn rvoip_sip::SipIngressObserver>) -> Self {
+        self.ingress_observer = Some(observer);
         self
     }
 
@@ -1323,6 +1344,12 @@ impl RvoipAppBuilder {
                     })?;
                     policy =
                         policy.with_trusted_cidr(parsed, trusted_trunk_principal(subject, &tenant));
+                }
+                if let Some(limit) = sip.source_rate_limit {
+                    policy = policy.with_source_rate_limit(limit);
+                }
+                if let Some(observer) = sip.ingress_observer.clone() {
+                    policy = policy.with_ingress_observer(observer);
                 }
                 UnifiedCoordinator::new_with_listener_auth(low_sip, policy).await
             }

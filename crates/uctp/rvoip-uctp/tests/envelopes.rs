@@ -97,6 +97,7 @@ fn unknown_message_type_decodes_to_unknown_variant() {
 fn message_type_roundtrip_through_string() {
     // Every known variant must round-trip through its wire string.
     for mt in [
+        MessageType::ConversationClose,
         MessageType::AuthHello,
         MessageType::SessionInvite,
         MessageType::ConnectionOffer,

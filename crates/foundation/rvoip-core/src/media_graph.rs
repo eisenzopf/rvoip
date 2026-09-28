@@ -20,12 +20,14 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use rvoip_media_core::codec::audio::{payload_type::PCM_S16LE, AudioCodec, PcmS16LeCodec};
+#[cfg(feature = "g729")]
+use rvoip_media_core::codec::audio::{G729Annexes, G729Codec, G729Config};
 #[cfg(feature = "opus")]
 use rvoip_media_core::codec::audio::{OpusApplication, OpusCodec, OpusConfig};
 use rvoip_media_core::codec::factory::CodecFactory;
@@ -211,6 +213,50 @@ pub enum MediaGraphRouteState {
     Terminal(MediaGraphRouteTerminalReason),
 }
 
+/// Retained delivery evidence for one route. `settled` requires both terminal
+/// routing and pump completion. Delivery means acceptance by the target channel,
+/// not durable consumption by its receiver. A recording consumer must also drain
+/// and validate its own target channel before finalization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MediaRouteDeliverySnapshot {
+    pub offered_frames: u64,
+    pub delivered_frames: u64,
+    pub settled: bool,
+}
+
+struct RouteDelivery {
+    offered: AtomicU64,
+    delivered: AtomicU64,
+    pump_finished: AtomicBool,
+    changed: watch::Sender<u64>,
+}
+
+impl Default for RouteDelivery {
+    fn default() -> Self {
+        let (changed, _) = watch::channel(0);
+        Self {
+            offered: AtomicU64::new(0),
+            delivered: AtomicU64::new(0),
+            pump_finished: AtomicBool::new(false),
+            changed,
+        }
+    }
+}
+
+impl RouteDelivery {
+    fn record_delivery(&self) {
+        let delivered = self.delivered.fetch_add(1, Ordering::AcqRel) + 1;
+        self.changed.send_replace(delivered);
+    }
+}
+
+struct DeliveryPumpGuard(Arc<RouteDelivery>);
+impl Drop for DeliveryPumpGuard {
+    fn drop(&mut self) {
+        self.0.pump_finished.store(true, Ordering::SeqCst);
+    }
+}
+
 /// Cloneable lifecycle observer for one graph sink route.
 ///
 /// Status observers do not own graph membership. Cloning this value never
@@ -219,9 +265,21 @@ pub enum MediaGraphRouteState {
 pub struct MediaGraphRouteStatus {
     route_id: MediaRouteId,
     state: watch::Receiver<MediaGraphRouteState>,
+    delivery: Arc<RouteDelivery>,
 }
 
 impl MediaGraphRouteStatus {
+    /// Read bounded evidence retained after the graph has removed this route.
+    pub fn delivery_snapshot(&self) -> MediaRouteDeliverySnapshot {
+        let terminal = matches!(self.state(), MediaGraphRouteState::Terminal(_));
+        let settled = terminal && self.delivery.pump_finished.load(Ordering::SeqCst);
+        MediaRouteDeliverySnapshot {
+            offered_frames: self.delivery.offered.load(Ordering::SeqCst),
+            delivered_frames: self.delivery.delivered.load(Ordering::SeqCst),
+            settled,
+        }
+    }
+
     pub fn id(&self) -> &MediaRouteId {
         &self.route_id
     }
@@ -279,6 +337,8 @@ pub struct ManagedMediaRoute {
     status: MediaGraphRouteStatus,
     commands: mpsc::Sender<Command>,
     owner_liveness: Arc<RouteOwnerLiveness>,
+    delivery: Arc<RouteDelivery>,
+    forwarding: Arc<RouteForwardingGate>,
     remove_on_drop: bool,
 }
 
@@ -303,6 +363,58 @@ impl ManagedMediaRoute {
         self.status.wait_terminal().await
     }
 
+    /// Return the number of frames accepted by this route's target channel.
+    ///
+    /// The counter advances only after the cutover fence permits the frame and
+    /// the target channel has reserved capacity. It therefore observes the
+    /// graph-to-adapter delivery boundary rather than only a graph offer.
+    pub fn delivered_frames(&self) -> u64 {
+        self.delivery.delivered.load(Ordering::Acquire)
+    }
+
+    /// Wait until the target channel has accepted this route's first frame.
+    ///
+    /// If graph or target teardown wins first, return the retained terminal
+    /// reason instead of leaving the caller blocked.
+    pub async fn wait_for_first_delivery(
+        &self,
+    ) -> std::result::Result<(), MediaGraphRouteTerminalReason> {
+        let mut delivery = self.delivery.changed.subscribe();
+        loop {
+            if self.delivered_frames() > 0 {
+                return Ok(());
+            }
+            tokio::select! {
+                changed = delivery.changed() => {
+                    if changed.is_err() {
+                        return Err(MediaGraphRouteTerminalReason::OwnerRemoved);
+                    }
+                }
+                reason = self.status.wait_terminal() => return Err(reason),
+            }
+        }
+    }
+
+    /// Enable delivery for an installed route.
+    ///
+    /// Installation and forwarding are separate so an orchestrator can fully
+    /// validate a replacement route before making it audible. The gate is
+    /// deliberately synchronous and infallible: bridge ownership can switch
+    /// old-off/new-on inside one generation-checked commit section.
+    pub(crate) fn enable_forwarding(&self) {
+        self.forwarding.set_enabled(true);
+    }
+
+    /// Stop all future delivery before returning.
+    ///
+    /// A sink worker takes the same cutover lock immediately before publishing
+    /// to the adapter channel, so a worker that was waiting for capacity either
+    /// publishes before this boundary or observes the disabled state and drops
+    /// its frame afterward.
+    pub(crate) fn disable_forwarding(&self) {
+        self.forwarding.set_enabled(false);
+    }
+
     /// Remove this route with actor acknowledgement. Clone [`Self::status`]
     /// first when the caller also wants to observe the retained terminal
     /// reason after consuming the owning lease.
@@ -323,6 +435,27 @@ impl ManagedMediaRoute {
             .await
             .map_err(|_| RvoipError::InvalidState("media graph removal timed out"))?
             .map_err(|_| RvoipError::InvalidState("media graph removal was cancelled"))
+    }
+
+    /// Detach a recording route and drain queued frames within two seconds.
+    /// The target must be consumed concurrently. A false result means delivery
+    /// was incomplete; the retained receipt describes any missing frames.
+    pub async fn drain(self) -> Result<bool> {
+        let (ack, done) = oneshot::channel();
+        tokio::time::timeout(
+            SNAPSHOT_TIMEOUT,
+            self.commands.send(Command::Drain {
+                route_id: self.status.route_id.clone(),
+                ack,
+            }),
+        )
+        .await
+        .map_err(|_| RvoipError::InvalidState("recording drain queue timed out"))?
+        .map_err(|_| RvoipError::InvalidState("recording graph is closed"))?;
+        tokio::time::timeout(Duration::from_secs(3), done)
+            .await
+            .map_err(|_| RvoipError::InvalidState("recording drain timed out"))?
+            .map_err(|_| RvoipError::InvalidState("recording drain cancelled"))
     }
 
     fn into_unmanaged_route_id(mut self) -> MediaRouteId {
@@ -408,13 +541,64 @@ pub struct MediaGraphSnapshot {
     pub recent_evictions: Vec<MediaGraphEvictionSnapshot>,
 }
 
+pub(crate) enum MediaSinkTarget {
+    Legacy(mpsc::Sender<MediaFrame>),
+    Peer(mpsc::Sender<rvoip_core_traits::peer_media::PeerMediaFrame>),
+}
+
+impl MediaSinkTarget {
+    pub(crate) fn is_transport_fenced(&self) -> bool {
+        matches!(self, Self::Peer(_))
+    }
+    pub(crate) fn for_stream(stream: &dyn crate::stream::MediaStream) -> Result<Self> {
+        match stream.try_peer_frames_out() {
+            Ok(sender) => Ok(Self::Peer(sender)),
+            Err(RvoipError::NotImplemented(_)) => stream.try_frames_out().map(Self::Legacy),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        match self {
+            Self::Legacy(tx) => tx.is_closed(),
+            Self::Peer(tx) => tx.is_closed(),
+        }
+    }
+
+    async fn send(
+        &self,
+        frame: MediaFrame,
+        ticket: Option<&crate::bridge::peer_switch::PeerRouteTicket>,
+        forwarding: &RouteForwardingGate,
+    ) -> std::result::Result<bool, ()> {
+        match (self, ticket) {
+            (Self::Legacy(tx), Some(ticket)) => ticket.forward(tx, frame).await.map_err(|_| ()),
+            (Self::Legacy(tx), None) => forwarding.publish_fenced(tx, frame).await,
+            (Self::Peer(tx), Some(ticket)) => {
+                let frame =
+                    rvoip_core_traits::peer_media::PeerMediaFrame::new(frame, ticket.clone());
+                ticket.forward(tx, frame).await.map_err(|_| ())
+            }
+            (Self::Peer(_), None) => Err(()),
+        }
+    }
+}
+
 enum Command {
     Add {
         route_id: MediaRouteId,
         codec: CodecInfo,
-        target: mpsc::Sender<MediaFrame>,
+        target: MediaSinkTarget,
         owner_liveness: Arc<RouteOwnerLiveness>,
+        delivery: Arc<RouteDelivery>,
+        forwarding: Arc<RouteForwardingGate>,
         admission: SinkAdmissionPermit,
+        drain_on_close: bool,
+        peer_ticket: Option<crate::bridge::peer_switch::PeerRouteTicket>,
+    },
+    Drain {
+        route_id: MediaRouteId,
+        ack: oneshot::Sender<bool>,
     },
     Remove {
         route_id: MediaRouteId,
@@ -465,6 +649,112 @@ impl RouteOwnerLiveness {
 
     fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
+    }
+}
+
+/// Linearization gate for media-route cutover.
+///
+/// The atomic is the cheap source hot-path check. The mutex is taken only by
+/// bridge cutover and by a sink worker after it has reserved target capacity;
+/// it closes the race where an old worker is blocked in `send().await` while a
+/// replacement is promoted.
+struct RouteForwardingGate {
+    enabled: AtomicBool,
+    buffer_while_disabled: bool,
+    cutover: Mutex<()>,
+    activation: watch::Sender<bool>,
+}
+
+impl RouteForwardingGate {
+    fn new(enabled: bool, buffer_while_disabled: bool) -> Self {
+        let (activation, _) = watch::channel(enabled);
+        Self {
+            enabled: AtomicBool::new(enabled),
+            buffer_while_disabled,
+            cutover: Mutex::new(()),
+            activation,
+        }
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
+    }
+
+    fn set_enabled(&self, enabled: bool) {
+        let _guard = self
+            .cutover
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.enabled.store(enabled, Ordering::Release);
+        self.activation.send_replace(enabled);
+    }
+
+    fn accepts_while_disabled(&self) -> bool {
+        self.buffer_while_disabled
+    }
+
+    async fn wait_until_enabled(&self) {
+        if self.is_enabled() {
+            return;
+        }
+        let mut activation = self.activation.subscribe();
+        while !*activation.borrow_and_update() {
+            if activation.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
+    /// Resolve once this route is quiesced.
+    ///
+    /// A closed activation channel means the gate outlived its route, which
+    /// is not a cutover, so this never resolves in that case and lets the
+    /// racing capacity reservation decide.
+    async fn wait_until_disabled(&self) {
+        let mut activation = self.activation.subscribe();
+        loop {
+            if !*activation.borrow_and_update() {
+                return;
+            }
+            if activation.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+
+    /// Publish one frame under the cutover gate.
+    ///
+    /// Reserving capacity and committing the frame are separate steps so a
+    /// cutover can retire work that is only waiting for room in the target.
+    /// The commit decision is taken under the same mutex as [`Self::set_enabled`],
+    /// so a worker either publishes before the cutover or abandons its frame;
+    /// it can never publish after one. A route that buffers while disabled is
+    /// paused rather than retired, so it keeps its send.
+    async fn publish_fenced<T>(
+        &self,
+        target: &mpsc::Sender<T>,
+        frame: T,
+    ) -> std::result::Result<bool, ()> {
+        if self.buffer_while_disabled {
+            return target.send(frame).await.map(|()| true).map_err(|_| ());
+        }
+        let permit = tokio::select! {
+            biased;
+            () = self.wait_until_disabled() => return Ok(false),
+            capacity = target.reserve() => match capacity {
+                Ok(permit) => permit,
+                Err(_) => return Err(()),
+            },
+        };
+        let _cutover = self
+            .cutover
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !self.enabled.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        permit.send(frame);
+        Ok(true)
     }
 }
 
@@ -528,6 +818,29 @@ pub struct MediaGraphHandle {
     sink_admission: Arc<SinkAdmissionState>,
 }
 
+struct MediaGraphShutdownGuard {
+    actor: AbortHandle,
+    armed: bool,
+}
+
+impl MediaGraphShutdownGuard {
+    fn new(actor: AbortHandle) -> Self {
+        Self { actor, armed: true }
+    }
+
+    fn complete(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for MediaGraphShutdownGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.actor.abort();
+        }
+    }
+}
+
 impl MediaGraphHandle {
     pub fn id(&self) -> &MediaGraphId {
         &self.graph_id
@@ -558,6 +871,121 @@ impl MediaGraphHandle {
         codec: CodecInfo,
         target: mpsc::Sender<MediaFrame>,
     ) -> Result<ManagedMediaRoute> {
+        self.add_sink_internal(
+            codec,
+            MediaSinkTarget::Legacy(target),
+            false,
+            None,
+            true,
+            false,
+        )
+    }
+
+    /// Recording-only route: source EOF drains its bounded queue before shutdown.
+    /// Call `ManagedMediaRoute::drain` for explicit stop while consuming the target.
+    pub fn add_recording_sink(
+        &self,
+        codec: CodecInfo,
+        target: mpsc::Sender<MediaFrame>,
+    ) -> Result<ManagedMediaRoute> {
+        self.add_sink_internal(
+            codec,
+            MediaSinkTarget::Legacy(target),
+            true,
+            None,
+            true,
+            false,
+        )
+    }
+
+    /// Install and validate a managed sink while keeping it silent.
+    #[cfg(test)]
+    pub(crate) fn add_dormant_managed_sink(
+        &self,
+        codec: CodecInfo,
+        target: mpsc::Sender<MediaFrame>,
+    ) -> Result<ManagedMediaRoute> {
+        self.add_sink_internal(
+            codec,
+            MediaSinkTarget::Legacy(target),
+            false,
+            None,
+            false,
+            false,
+        )
+    }
+
+    /// Install a silent route that retains a bounded setup window until its
+    /// first activation.
+    ///
+    /// Initial bridges use this variant because a freshly activated source
+    /// may produce immediately after outbound connection activation. The
+    /// graph's existing bounded sink queue holds those frames until the bridge
+    /// ownership commit enables forwarding. Replacement candidates use
+    /// [`Self::add_dormant_managed_sink`] instead so pre-promotion media is
+    /// discarded and can never be replayed to the candidate.
+    #[cfg(test)]
+    pub(crate) fn add_buffering_dormant_managed_sink(
+        &self,
+        codec: CodecInfo,
+        target: mpsc::Sender<MediaFrame>,
+    ) -> Result<ManagedMediaRoute> {
+        self.add_sink_internal(
+            codec,
+            MediaSinkTarget::Legacy(target),
+            false,
+            None,
+            false,
+            true,
+        )
+    }
+
+    /// Stage a speaking route behind a shared peer-switch boundary. Recording
+    /// routes must use their independent recording sink, never this gate.
+    pub fn add_peer_sink(
+        &self,
+        codec: CodecInfo,
+        target: mpsc::Sender<MediaFrame>,
+        ticket: crate::bridge::peer_switch::PeerRouteTicket,
+    ) -> Result<ManagedMediaRoute> {
+        self.add_peer_sink_target(codec, MediaSinkTarget::Legacy(target), ticket)
+    }
+
+    pub(crate) fn add_peer_sink_target(
+        &self,
+        codec: CodecInfo,
+        target: MediaSinkTarget,
+        ticket: crate::bridge::peer_switch::PeerRouteTicket,
+    ) -> Result<ManagedMediaRoute> {
+        self.add_sink_internal(codec, target, false, Some(ticket), true, false)
+    }
+
+    pub(crate) fn add_dormant_peer_sink_target(
+        &self,
+        codec: CodecInfo,
+        target: MediaSinkTarget,
+        ticket: crate::bridge::peer_switch::PeerRouteTicket,
+        buffer_before_commit: bool,
+    ) -> Result<ManagedMediaRoute> {
+        self.add_sink_internal(
+            codec,
+            target,
+            false,
+            Some(ticket),
+            false,
+            buffer_before_commit,
+        )
+    }
+
+    fn add_sink_internal(
+        &self,
+        codec: CodecInfo,
+        target: MediaSinkTarget,
+        drain_on_close: bool,
+        peer_ticket: Option<crate::bridge::peer_switch::PeerRouteTicket>,
+        forwarding_enabled: bool,
+        buffer_while_disabled: bool,
+    ) -> Result<ManagedMediaRoute> {
         admit_codec(&codec)?;
         let Some(admission) = self.sink_admission.try_acquire() else {
             metrics::counter!(
@@ -572,6 +1000,11 @@ impl MediaGraphHandle {
         let route_id = MediaRouteId::new();
         let (status_tx, status_rx) = watch::channel(MediaGraphRouteState::Pending);
         let owner_liveness = Arc::new(RouteOwnerLiveness::default());
+        let delivery = Arc::new(RouteDelivery::default());
+        let forwarding = Arc::new(RouteForwardingGate::new(
+            forwarding_enabled,
+            buffer_while_disabled,
+        ));
         self.route_statuses
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -581,7 +1014,11 @@ impl MediaGraphHandle {
             codec,
             target,
             owner_liveness: Arc::clone(&owner_liveness),
+            delivery: Arc::clone(&delivery),
+            forwarding: Arc::clone(&forwarding),
             admission,
+            drain_on_close,
+            peer_ticket,
         }) {
             self.route_statuses
                 .lock()
@@ -593,9 +1030,12 @@ impl MediaGraphHandle {
             status: MediaGraphRouteStatus {
                 route_id,
                 state: status_rx,
+                delivery: Arc::clone(&delivery),
             },
             commands: self.commands.clone(),
             owner_liveness,
+            delivery,
+            forwarding,
             remove_on_drop: true,
         })
     }
@@ -749,31 +1189,75 @@ impl MediaGraphHandle {
     /// Request graceful shutdown and wait for both the graph actor and every
     /// sink-forwarding task to converge on a terminal state.
     pub async fn shutdown_and_wait(&self) -> Result<MediaGraphSourceState> {
+        self.shutdown_and_wait_with_timeout(SHUTDOWN_TIMEOUT).await
+    }
+
+    async fn shutdown_and_wait_with_timeout(
+        &self,
+        graceful_timeout: Duration,
+    ) -> Result<MediaGraphSourceState> {
         self.shutdown();
-        self.wait_closed().await
+        // If teardown itself is cancelled, the removed graph must not keep
+        // running without an owner. The terminal guard inside the actor
+        // publishes Aborted state and cancels every sink task.
+        let mut shutdown_guard = MediaGraphShutdownGuard::new(self.abort.clone());
+        match tokio::time::timeout(graceful_timeout, self.wait_closed_unbounded()).await {
+            Ok(result) => {
+                shutdown_guard.complete();
+                result
+            }
+            Err(_) => {
+                // The graph has already been removed from its orchestrator
+                // registry by teardown. Retaining a live actor here would
+                // orphan its source receiver and sink tasks, so force abort
+                // and own convergence before surfacing the failed graceful
+                // shutdown to the caller.
+                self.abort.abort();
+                let result = match tokio::time::timeout(
+                    SNAPSHOT_TIMEOUT,
+                    self.wait_closed_unbounded(),
+                )
+                .await
+                {
+                    Ok(Ok(_)) => Err(RvoipError::InvalidState(
+                        "media graph shutdown timed out; actor was aborted",
+                    )),
+                    Ok(Err(_)) => Err(RvoipError::InvalidState(
+                        "media graph shutdown timed out; abort completion was dropped",
+                    )),
+                    Err(_) => Err(RvoipError::InvalidState(
+                        "media graph shutdown timed out; actor abort did not converge",
+                    )),
+                };
+                shutdown_guard.complete();
+                result
+            }
+        }
     }
 
     /// Wait for graph and sink-task convergence without initiating shutdown.
     pub async fn wait_closed(&self) -> Result<MediaGraphSourceState> {
+        tokio::time::timeout(SHUTDOWN_TIMEOUT, self.wait_closed_unbounded())
+            .await
+            .map_err(|_| RvoipError::InvalidState("media graph shutdown timed out"))?
+    }
+
+    async fn wait_closed_unbounded(&self) -> Result<MediaGraphSourceState> {
         let mut completion = self.completion.clone();
         let actor = self.abort.clone();
-        tokio::time::timeout(SHUTDOWN_TIMEOUT, async move {
-            let state = loop {
-                if let Some(state) = *completion.borrow() {
-                    break state;
-                }
-                completion
-                    .changed()
-                    .await
-                    .map_err(|_| RvoipError::InvalidState("media graph completion was dropped"))?;
-            };
-            while !actor.is_finished() {
-                tokio::task::yield_now().await;
+        let state = loop {
+            if let Some(state) = *completion.borrow() {
+                break state;
             }
-            Ok(state)
-        })
-        .await
-        .map_err(|_| RvoipError::InvalidState("media graph shutdown timed out"))?
+            completion
+                .changed()
+                .await
+                .map_err(|_| RvoipError::InvalidState("media graph completion was dropped"))?;
+        };
+        while !actor.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        Ok(state)
     }
 
     pub fn abort_handle(&self) -> AbortHandle {
@@ -860,6 +1344,7 @@ struct SinkQueueState {
 }
 
 struct SinkQueue {
+    peer_ticket: Option<crate::bridge::peer_switch::PeerRouteTicket>,
     capacity: usize,
     state: Mutex<SinkQueueState>,
     notify: Notify,
@@ -867,15 +1352,25 @@ struct SinkQueue {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OfferResult {
+    Suppressed,
     Enqueued,
     DroppedOldest,
     Closed,
 }
 
 impl SinkQueue {
+    #[cfg(test)]
     fn new(capacity: usize) -> Self {
+        Self::with_peer_ticket(capacity, None)
+    }
+
+    fn with_peer_ticket(
+        capacity: usize,
+        peer_ticket: Option<crate::bridge::peer_switch::PeerRouteTicket>,
+    ) -> Self {
         let capacity = capacity.max(1);
         Self {
+            peer_ticket,
             capacity,
             state: Mutex::new(SinkQueueState {
                 frames: VecDeque::with_capacity(capacity),
@@ -888,6 +1383,13 @@ impl SinkQueue {
     /// Enqueue without awaiting a slow sink. The oldest queued frame is
     /// discarded when full so the sink always sees the freshest media.
     fn offer(&self, frame: MediaFrame) -> OfferResult {
+        if self
+            .peer_ticket
+            .as_ref()
+            .is_some_and(|ticket| !ticket.is_active())
+        {
+            return OfferResult::Suppressed;
+        }
         let result = {
             let mut state = self.state.lock().expect("media sink queue poisoned");
             if state.closed {
@@ -920,6 +1422,9 @@ impl SinkQueue {
 
     async fn receive(&self) -> Option<MediaFrame> {
         loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             let closed = {
                 let mut state = self.state.lock().expect("media sink queue poisoned");
                 if let Some(frame) = state.frames.pop_front() {
@@ -930,7 +1435,7 @@ impl SinkQueue {
             if closed {
                 return None;
             }
-            self.notify.notified().await;
+            notified.await;
         }
     }
 
@@ -940,6 +1445,11 @@ impl SinkQueue {
             .expect("media sink queue poisoned")
             .frames
             .len()
+    }
+
+    fn seal(&self) {
+        self.state.lock().expect("media sink queue poisoned").closed = true;
+        self.notify.notify_waiters();
     }
 
     fn close(&self) {
@@ -957,6 +1467,7 @@ struct SinkRuntime {
     target_pt: u8,
     group_key: CodecGroupKey,
     owner_liveness: Arc<RouteOwnerLiveness>,
+    forwarding: Arc<RouteForwardingGate>,
     /// Releasing the runtime route returns one slot to the graph-wide
     /// admission budget. Pending add commands hold the same kind of permit.
     _admission: SinkAdmissionPermit,
@@ -976,11 +1487,14 @@ struct SinkRuntime {
     rolling_drops: usize,
     offered_frames: u64,
     dropped_frames: u64,
+    delivery: Arc<RouteDelivery>,
+    drain_on_close: bool,
 }
 
 impl SinkRuntime {
     fn record_offer(&mut self, now: Instant, dropped: bool, policy: &MediaGraphPolicy) -> bool {
         self.offered_frames = self.offered_frames.saturating_add(1);
+        self.delivery.offered.fetch_add(1, Ordering::SeqCst);
         if dropped {
             self.dropped_frames = self.dropped_frames.saturating_add(1);
         }
@@ -1029,6 +1543,9 @@ impl Drop for SinkRuntime {
 
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct CodecGroupKey {
+    // Peer routes cannot share buffered codec state with recordings or other
+    // generations: inactive peer audio must never enter a reframer.
+    peer_route: Option<MediaRouteId>,
     payload_type: u8,
     name: String,
     clock_rate_hz: u32,
@@ -1053,6 +1570,7 @@ impl fmt::Debug for CodecGroupKey {
 impl CodecGroupKey {
     fn new(codec: &CodecInfo, payload_type: u8) -> Self {
         Self {
+            peer_route: None,
             payload_type,
             name: canonical_codec_name(codec, payload_type),
             clock_rate_hz: codec.clock_rate_hz,
@@ -1062,14 +1580,16 @@ impl CodecGroupKey {
     }
 }
 
-fn canonical_codec_name(codec: &CodecInfo, payload_type: u8) -> String {
-    match payload_type {
-        0 => "pcmu".into(),
-        8 => "pcma".into(),
-        18 => "g729".into(),
-        111 => "opus".into(),
-        PCM_S16LE => "pcm_s16le".into(),
-        _ => codec.name.trim().to_ascii_lowercase(),
+fn canonical_codec_name(codec: &CodecInfo, _payload_type: u8) -> String {
+    match codec.name.trim().to_ascii_lowercase().as_str() {
+        "pcmu" | "g.711-mu" | "g711-mu" | "g711-u" => "pcmu".into(),
+        "pcma" | "g.711-a" | "g711-a" => "pcma".into(),
+        "g729" | "g.729" => "g729".into(),
+        "g729a" | "g.729a" => "g729a".into(),
+        "g729ab" | "g729ba" => "g729ba".into(),
+        "opus" => "opus".into(),
+        "pcm_s16le" | "pcm-s16le" => "pcm_s16le".into(),
+        name => name.into(),
     }
 }
 
@@ -1093,6 +1613,39 @@ fn normalize_fmtp(fmtp: Option<&str>) -> Option<String> {
         .collect();
     parameters.sort();
     (!parameters.is_empty()).then(|| parameters.join(";"))
+}
+
+#[cfg(feature = "g729")]
+fn g729_annex_b(codec: &CodecInfo) -> rvoip_media_core::Result<bool> {
+    let normalized_name = codec
+        .name
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|character| character.to_ascii_lowercase())
+        .collect::<String>();
+    match normalized_name.as_str() {
+        "g729a" => return Ok(false),
+        "g729ab" | "g729ba" => return Ok(true),
+        _ => {}
+    }
+    for parameter in codec.fmtp.as_deref().unwrap_or_default().split(';') {
+        let Some((name, value)) = parameter.trim().split_once('=') else {
+            continue;
+        };
+        if !name.trim().eq_ignore_ascii_case("annexb") {
+            continue;
+        }
+        return match value.trim().trim_matches('"').to_ascii_lowercase().as_str() {
+            "yes" | "true" | "1" => Ok(true),
+            "no" | "false" | "0" => Ok(false),
+            invalid => Err(CodecError::InvalidParameters {
+                details: format!("invalid G.729 annexb value {invalid:?}"),
+            }
+            .into()),
+        };
+    }
+    // RFC 4855: Annex B is enabled when its parameter is absent.
+    Ok(true)
 }
 
 struct RtpClockTranslator {
@@ -1160,6 +1713,10 @@ struct ConfiguredTranscodingSession {
     /// calls because a buffered frame's audio began before the packet that
     /// completed it.
     next_timestamp: Option<u32>,
+    /// First source-domain RTP timestamp not yet consumed. A mismatch means
+    /// media was suppressed, lost, or restarted; partial target PCM from the
+    /// old interval must not be joined to the new interval.
+    expected_source_timestamp: Option<u32>,
     source_clock_rate: u32,
     target_clock_rate: u32,
 }
@@ -1186,6 +1743,7 @@ impl ConfiguredTranscodingSession {
             pending: Vec::new(),
             required_samples,
             next_timestamp: None,
+            expected_source_timestamp: None,
             source_clock_rate: source.clock_rate_hz.max(1),
             target_clock_rate: target.clock_rate_hz.max(1),
         })
@@ -1214,6 +1772,7 @@ impl ConfiguredTranscodingSession {
     fn discard_pending(&mut self) {
         self.pending.clear();
         self.next_timestamp = None;
+        self.expected_source_timestamp = None;
     }
 
     fn transcode(
@@ -1221,7 +1780,28 @@ impl ConfiguredTranscodingSession {
         encoded_data: &[u8],
         timestamp_rtp: u32,
     ) -> rvoip_media_core::Result<Vec<TranscodedFrame>> {
+        if self.required_samples.is_some()
+            && self
+                .expected_source_timestamp
+                .is_some_and(|expected| expected != timestamp_rtp)
+        {
+            // Padding would synthesize audio and can extend a caller's speech.
+            // Discarding the incomplete target frame is deterministic and
+            // keeps audio on opposite sides of a DTX/loss gap separate.
+            self.pending.clear();
+            self.next_timestamp = None;
+        }
         let source_frame = self.source_codec.decode(encoded_data)?;
+        if self.required_samples.is_some() {
+            let channels = usize::from(source_frame.channels.max(1));
+            let samples_per_channel = source_frame.samples.len() / channels;
+            let source_ticks = u32::try_from(
+                (samples_per_channel as u64) * u64::from(self.source_clock_rate)
+                    / u64::from(source_frame.sample_rate.max(1)),
+            )
+            .unwrap_or(u32::MAX);
+            self.expected_source_timestamp = Some(timestamp_rtp.wrapping_add(source_ticks));
+        }
         let target_info = self.target_codec.get_info();
         let converted = if source_frame.sample_rate != target_info.sample_rate
             || source_frame.channels != target_info.channels
@@ -1242,8 +1822,9 @@ impl ConfiguredTranscodingSession {
         };
 
         let Some(frame_samples) = self.required_samples else {
-            // The target takes whatever it is handed, which is every codec
-            // here except AMR. Unchanged from before re-framing existed:
+            // The target takes whatever it is handed. Exact-frame codecs
+            // (G.729, Opus and AMR) took the buffered branch above. Unchanged
+            // from before re-framing existed:
             // one payload out per payload in, at the input's own timestamp.
             return Ok(vec![TranscodedFrame {
                 payload: self.target_codec.encode(&converted)?,
@@ -1335,65 +1916,139 @@ fn create_configured_codec(
     codec: &CodecInfo,
     payload_type: u8,
 ) -> rvoip_media_core::Result<Box<dyn AudioCodec>> {
-    match payload_type {
-        0 | 8 | 18 => CodecFactory::create_codec(
-            payload_type,
+    let name = codec.name.trim();
+    let dynamic_payload = (96..=127).contains(&payload_type) && payload_type != 101;
+    let invalid_payload_identity = || CodecError::InvalidParameters {
+        details: format!(
+            "codec {:?} cannot use RTP payload type {payload_type}",
+            codec.name
+        ),
+    };
+
+    if matches!(
+        name.to_ascii_lowercase().as_str(),
+        "pcmu" | "g.711-mu" | "g711-mu" | "g711-u"
+    ) {
+        if payload_type != 0 && !dynamic_payload {
+            return Err(invalid_payload_identity().into());
+        }
+        return CodecFactory::create_codec(
+            0,
             Some(codec.clock_rate_hz),
             Some(codec.channels.into()),
-        ),
-        111 => {
-            #[cfg(not(feature = "opus"))]
+        );
+    }
+    if matches!(
+        name.to_ascii_lowercase().as_str(),
+        "pcma" | "g.711-a" | "g711-a"
+    ) {
+        if payload_type != 8 && !dynamic_payload {
+            return Err(invalid_payload_identity().into());
+        }
+        return CodecFactory::create_codec(
+            8,
+            Some(codec.clock_rate_hz),
+            Some(codec.channels.into()),
+        );
+    }
+    if matches!(
+        name.to_ascii_lowercase().as_str(),
+        "g729" | "g.729" | "g729a" | "g.729a" | "g729ab" | "g729ba"
+    ) {
+        if payload_type != 18 && !dynamic_payload {
+            return Err(invalid_payload_identity().into());
+        }
+        if codec.clock_rate_hz != 8_000 || codec.channels != 1 {
+            return Err(CodecError::InvalidParameters {
+                details: format!(
+                    "G.729 requires 8000Hz mono, got {}Hz/{}ch",
+                    codec.clock_rate_hz, codec.channels
+                ),
+            }
+            .into());
+        }
+        #[cfg(feature = "g729")]
+        {
+            let annex_b = g729_annex_b(codec)?;
+            return Ok(Box::new(G729Codec::new(
+                SampleRate::Rate8000,
+                1,
+                G729Config {
+                    annexes: G729Annexes {
+                        annex_a: true,
+                        annex_b,
+                    },
+                    frame_size_ms: 10.0,
+                    enable_vad: annex_b,
+                    enable_cng: annex_b,
+                },
+            )?));
+        }
+        #[cfg(not(feature = "g729"))]
+        {
             return Err(CodecError::UnsupportedPayloadType { payload_type }.into());
-
-            #[cfg(feature = "opus")]
+        }
+    }
+    if name.eq_ignore_ascii_case("opus") {
+        if !dynamic_payload {
+            return Err(invalid_payload_identity().into());
+        }
+        #[cfg(feature = "opus")]
+        {
+            let sample_rate = SampleRate::from_hz(codec.clock_rate_hz).ok_or_else(|| {
+                CodecError::InvalidParameters {
+                    details: format!("unsupported Opus clock rate {}", codec.clock_rate_hz),
+                }
+            })?;
+            let mut config = OpusConfig {
+                application: OpusApplication::Voip,
+                ..OpusConfig::default()
+            };
+            for parameter in normalize_fmtp(codec.fmtp.as_deref())
+                .as_deref()
+                .unwrap_or_default()
+                .split(';')
             {
-                let sample_rate = SampleRate::from_hz(codec.clock_rate_hz).ok_or_else(|| {
-                    CodecError::InvalidParameters {
-                        details: format!("unsupported Opus clock rate {}", codec.clock_rate_hz),
-                    }
-                })?;
-                let mut config = OpusConfig {
-                    application: OpusApplication::Voip,
-                    ..OpusConfig::default()
-                };
-                for parameter in normalize_fmtp(codec.fmtp.as_deref())
-                    .as_deref()
-                    .unwrap_or_default()
-                    .split(';')
-                {
-                    if let Some(("maxaveragebitrate", value)) = parameter.split_once('=') {
-                        if let Ok(bitrate) = value.parse::<u32>() {
-                            if (6_000..=510_000).contains(&bitrate) {
-                                config.bitrate = bitrate;
-                            }
+                if let Some(("maxaveragebitrate", value)) = parameter.split_once('=') {
+                    if let Ok(bitrate) = value.parse::<u32>() {
+                        if (6_000..=510_000).contains(&bitrate) {
+                            config.bitrate = bitrate;
                         }
                     }
-                    if parameter == "cbr=1" {
-                        config.vbr = false;
-                    }
                 }
-                Ok(Box::new(OpusCodec::new(
-                    sample_rate,
-                    codec.channels,
-                    config,
-                )?))
+                if parameter == "cbr=1" {
+                    config.vbr = false;
+                }
             }
+            return Ok(Box::new(OpusCodec::new(
+                sample_rate,
+                codec.channels,
+                config,
+            )?));
         }
-        PCM_S16LE => Ok(Box::new(PcmS16LeCodec::new(
+        #[cfg(not(feature = "opus"))]
+        {
+            return Err(CodecError::UnsupportedPayloadType { payload_type }.into());
+        }
+    }
+    if name.eq_ignore_ascii_case("pcm_s16le") || name.eq_ignore_ascii_case("pcm-s16le") {
+        if payload_type != PCM_S16LE {
+            return Err(invalid_payload_identity().into());
+        }
+        return Ok(Box::new(PcmS16LeCodec::new(
             codec.clock_rate_hz,
             codec.channels,
-        )?)),
-        // Anything with a negotiated payload type goes through media-core's
-        // own spec, which is the only constructor that takes fmtp — and for
+        )?));
+    }
+    if name.eq_ignore_ascii_case("AMR") || name.eq_ignore_ascii_case("AMR-WB") {
+        if !dynamic_payload {
+            return Err(invalid_payload_identity().into());
+        }
         // AMR fmtp is not decoration: `octet-align` decides the framing, so
-        // building it without the negotiated parameters produces a stream no
-        // peer can parse rather than a degraded one.
-        //
-        // The arms above stay as they are. They predate `AudioCodecSpec` and
-        // the Opus one honours `maxaveragebitrate` and `cbr=1`, which
-        // `AudioCodecSpec::build` does not; routing them here would silently
-        // drop both.
-        _ => rvoip_media_core::codec::spec::AudioCodecSpec {
+        // build through the negotiated spec rather than a payload-number
+        // table. Dynamic payload numbers are session-local and may coincide
+        // with this graph's conventional Opus or internal PCM keys.
+        return rvoip_media_core::codec::spec::AudioCodecSpec {
             name: codec.name.clone(),
             payload_type,
             clock_rate: codec.clock_rate_hz,
@@ -1401,8 +2056,10 @@ fn create_configured_codec(
             fmtp: codec.fmtp.clone(),
         }
         .build()
-        .map_err(|_| CodecError::UnsupportedPayloadType { payload_type }.into()),
+        .map_err(|_| CodecError::UnsupportedPayloadType { payload_type }.into());
     }
+
+    Err(CodecError::UnsupportedPayloadType { payload_type }.into())
 }
 
 struct CodecGroup {
@@ -1755,7 +2412,11 @@ fn start_media_graph_with_activity_interval(
                             codec,
                             target,
                             owner_liveness,
+                            delivery,
+                            forwarding,
                             admission,
+                            drain_on_close,
+                            peer_ticket,
                         } => {
                             if owner_liveness.is_cancelled() {
                                 terminate_route(
@@ -1781,15 +2442,31 @@ fn start_media_graph_with_activity_interval(
                             let first_sink = !source_routing_started;
                             let target_clock_rate_hz = codec.clock_rate_hz;
                             let status_route_id = route_id.clone();
-                            let queue = Arc::new(SinkQueue::new(policy.sink_queue_frames));
+                            let queue = Arc::new(SinkQueue::with_peer_ticket(policy.sink_queue_frames, peer_ticket.clone()));
                             let queue_for_task = Arc::clone(&queue);
+                            let forwarding_for_task = Arc::clone(&forwarding);
+                            let delivery_for_task = Arc::clone(&delivery);
                             let route_for_task = route_id.clone();
                             let event_tx = sink_event_tx.clone();
+                            let delivery_guard = DeliveryPumpGuard(Arc::clone(&delivery));
                             let task = tokio::spawn(async move {
+                                let _guard = delivery_guard;
                                 while let Some(frame) = queue_for_task.receive().await {
-                                    if target.send(frame).await.is_err() {
-                                        let _ = event_tx.send(route_for_task.clone()).await;
-                                        return;
+                                    if forwarding_for_task.accepts_while_disabled() {
+                                        forwarding_for_task.wait_until_enabled().await;
+                                    } else if !forwarding_for_task.is_enabled() {
+                                        continue;
+                                    }
+                                    let result = target
+                                        .send(frame, peer_ticket.as_ref(), &forwarding_for_task)
+                                        .await;
+                                    match result {
+                                        Ok(true) => delivery_for_task.record_delivery(),
+                                        Ok(false) => {}
+                                        Err(_) => {
+                                            let _ = event_tx.send(route_for_task.clone()).await;
+                                            return;
+                                        }
                                     }
                                 }
                             });
@@ -1798,7 +2475,10 @@ fn start_media_graph_with_activity_interval(
                                 .lock()
                                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                                 .push(task.abort_handle());
-                            let group_key = CodecGroupKey::new(&codec, target_pt);
+                            let mut group_key = CodecGroupKey::new(&codec, target_pt);
+                            if queue.peer_ticket.is_some() {
+                                group_key.peer_route = Some(route_id.clone());
+                            }
                             groups.entry(group_key.clone())
                                 .or_insert_with(|| CodecGroup::new(
                                     &source_codec,
@@ -1812,6 +2492,7 @@ fn start_media_graph_with_activity_interval(
                                 target_pt,
                                 group_key,
                                 owner_liveness,
+                                forwarding,
                                 _admission: admission,
                                 clock: RtpClockTranslator::new(
                                     source_codec.clock_rate_hz,
@@ -1822,6 +2503,8 @@ fn start_media_graph_with_activity_interval(
                                 warmup_since: None,
                                 history: VecDeque::new(),
                                 rolling_drops: 0,
+                                delivery,
+                                drain_on_close,
                                 offered_frames: 0,
                                 dropped_frames: 0,
                             });
@@ -1902,6 +2585,26 @@ fn start_media_graph_with_activity_interval(
                             if let Some(ack) = ack {
                                 let _ = ack.send(dropped);
                             }
+                        }
+                        Command::Drain { route_id, ack } => {
+                            if !sinks.get(&route_id).is_some_and(|sink| sink.drain_on_close) {
+                                let _ = ack.send(false);
+                                continue;
+                            }
+                            let sink = sinks.remove(&route_id).expect("recording route checked");
+                            if let Some(group) = groups.get_mut(&sink.group_key) { group.sinks.remove(&route_id); }
+                            groups.retain(|_, group| !group.sinks.is_empty());
+                            let statuses = Arc::clone(&route_statuses_for_actor);
+                            sink.queue.seal();
+                            tokio::spawn(async move {
+                                let complete = wait_for_recording_delivery(&sink).await;
+                                drop(sink);
+                                terminate_route(&statuses, &route_id, MediaGraphRouteTerminalReason::OwnerRemoved);
+                                let _ = ack.send(complete);
+                            });
+                            aggregate_metrics.set_sink_count(sinks.len());
+                            aggregate_metrics.set_codec_group_count(groups.len());
+                            snapshot_dirty = true;
                         }
                         Command::Remove { route_id, ack } => {
                             let removed = remove_sink(&route_id, &mut sinks, &mut groups);
@@ -2228,6 +2931,18 @@ fn start_media_graph_with_activity_interval(
             last_activity_at,
             stats.source_frames,
         );
+        // Preserve immediate cancellation for playout. Recording routes opt in
+        // to a single bounded drain window while their consumers keep reading.
+        sinks.retain(|_, sink| sink.drain_on_close);
+        for sink in sinks.values() {
+            sink.queue.seal();
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(2), async {
+            while sinks.values().any(|sink| !sink.task.is_finished()) {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await;
         sinks.clear();
         groups.clear();
         aggregate_metrics.set_sink_count(0);
@@ -2350,6 +3065,19 @@ fn route_source_frame(
     let is_telephone_event = frame.payload_type == Some(DEFAULT_TELEPHONE_EVENT_PT);
 
     for group in groups.values_mut() {
+        // Skip before transcoding, not merely before enqueueing the output.
+        // Otherwise a partial packet received while staged could be emitted
+        // after activation. Peer groups are isolated from observer groups.
+        if group.sinks.iter().all(|route| {
+            sinks.get(route).is_none_or(|sink| {
+                sink.queue
+                    .peer_ticket
+                    .as_ref()
+                    .is_some_and(|ticket| !ticket.is_active())
+            })
+        }) {
+            continue;
+        }
         group.source_frames_routed = group.source_frames_routed.saturating_add(1);
 
         // What this group emits for this input. Usually one frame; a
@@ -2404,6 +3132,9 @@ fn route_source_frame(
             let Some(sink) = sinks.get_mut(route_id) else {
                 continue;
             };
+            if !sink.forwarding.is_enabled() && !sink.forwarding.accepts_while_disabled() {
+                continue;
+            }
             for produced in &grouped {
                 let mut routed = produced.clone();
                 if !is_telephone_event {
@@ -2413,6 +3144,9 @@ fn route_source_frame(
                     routed.timestamp_rtp = sink.clock.translate(produced.timestamp_rtp);
                 }
                 let offer = sink.queue.offer(routed);
+                if offer == OfferResult::Suppressed {
+                    continue;
+                }
                 if offer == OfferResult::Closed {
                     closed.push(route_id.clone());
                     break;
@@ -2476,7 +3210,10 @@ fn update_sink_group(
     if let Some(group) = groups.get_mut(&sink.group_key) {
         group.sinks.remove(route_id);
     }
-    let group_key = CodecGroupKey::new(&codec, target_pt);
+    let mut group_key = CodecGroupKey::new(&codec, target_pt);
+    if sink.queue.peer_ticket.is_some() {
+        group_key.peer_route = Some(route_id.clone());
+    }
     sink.clock
         .reconfigure(source_codec.clock_rate_hz, codec.clock_rate_hz);
     sink.target_codec = codec.clone();
@@ -2521,6 +3258,20 @@ fn rebuild_transcoders(
             group.target_pt,
         );
     }
+}
+
+async fn wait_for_recording_delivery(sink: &SinkRuntime) -> bool {
+    if tokio::time::timeout(Duration::from_secs(2), async {
+        while !sink.task.is_finished() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .is_err()
+    {
+        return false;
+    }
+    sink.delivery.offered.load(Ordering::SeqCst) == sink.delivery.delivered.load(Ordering::SeqCst)
 }
 
 fn remove_sink(
@@ -2575,10 +3326,10 @@ fn codec_for_payload_type(payload_type: u8) -> Option<CodecInfo> {
         clock_rate_hz,
         channels: 1,
         fmtp: None,
-        // The payload type is this function's own input, so the descriptor
-        // it hands back can carry it. Only static types reach here — the
-        // match refuses everything else — so this never reports a number
-        // that a different call could have assigned to a different codec.
+        // This compatibility path starts from a bare graph key and can infer
+        // only the conventional mappings above. Transport-negotiated dynamic
+        // codecs arrive as a complete CodecInfo and do not pass through this
+        // number-only lookup.
         payload_type: Some(payload_type),
     })
 }
@@ -2774,6 +3525,130 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn peer_transport_queue_rechecks_generation_after_graph_enqueue() {
+        use crate::bridge::peer_switch::PeerRouteTicket;
+        let (source_tx, source_rx) = mpsc::channel(4);
+        let graph = start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap();
+        let old = PeerRouteTicket::initial();
+        let next = old.stage().unwrap();
+        let (old_tx, mut old_rx) = mpsc::channel(4);
+        let (next_tx, mut next_rx) = mpsc::channel(4);
+        let old_route = graph
+            .add_peer_sink_target(
+                codec("pcmu", 8_000),
+                MediaSinkTarget::Peer(old_tx),
+                old.clone(),
+            )
+            .unwrap();
+        let next_route = graph
+            .add_peer_sink_target(
+                codec("pcmu", 8_000),
+                MediaSinkTarget::Peer(next_tx),
+                next.clone(),
+            )
+            .unwrap();
+        old_route.wait_active().await.unwrap();
+        next_route.wait_active().await.unwrap();
+        source_tx.send(frame(7)).await.unwrap();
+        let queued = tokio::time::timeout(Duration::from_secs(2), old_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(next.commit_from(&old));
+        assert!(
+            queued.into_delivery().is_none(),
+            "old frame cannot be sent after dequeue"
+        );
+        source_tx.send(frame(8)).await.unwrap();
+        let (fresh, guard) = tokio::time::timeout(Duration::from_secs(2), next_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .into_delivery()
+            .unwrap();
+        assert_eq!(fresh.payload[0], 8);
+        let later = next.stage().unwrap();
+        assert!(!later.commit_from(&next));
+        drop(guard);
+        assert!(later.commit_from(&next));
+        graph.shutdown_and_wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn inactive_peer_does_not_feed_shared_codec_buffers() {
+        use crate::bridge::peer_switch::PeerRouteTicket;
+        let (source_tx, source_rx) = mpsc::channel(4);
+        let graph = start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap();
+        let old = PeerRouteTicket::initial();
+        let next = old.stage().unwrap();
+        let (peer_tx, mut peer_rx) = mpsc::channel(4);
+        let (record_tx, mut record_rx) = mpsc::channel(4);
+        let peer = graph
+            .add_peer_sink(codec("pcma", 8_000), peer_tx, next.clone())
+            .unwrap();
+        let recording = graph
+            .add_recording_sink(codec("pcma", 8_000), record_tx)
+            .unwrap();
+        peer.wait_active().await.unwrap();
+        recording.wait_active().await.unwrap();
+        source_tx.send(frame(7)).await.unwrap();
+        record_rx.recv().await.unwrap();
+        let before = graph.snapshot().await;
+        assert_eq!(
+            before.codec_groups.len(),
+            2,
+            "peer codec state is isolated from recording"
+        );
+        assert_eq!(
+            before.transcode_operations, 1,
+            "inactive peer never enters transcoder"
+        );
+        assert!(peer_rx.try_recv().is_err());
+        assert!(next.commit_from(&old));
+        source_tx.send(frame(8)).await.unwrap();
+        let recorded = record_rx.recv().await.unwrap();
+        let spoken = peer_rx.recv().await.unwrap();
+        assert_eq!(spoken.payload, recorded.payload);
+        assert_eq!(graph.snapshot().await.transcode_operations, 3);
+        graph.shutdown_and_wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn peer_cutover_keeps_recording_and_does_not_replay_staged_audio() {
+        use crate::bridge::peer_switch::PeerRouteTicket;
+        let (source_tx, source_rx) = mpsc::channel(4);
+        let graph = start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap();
+        let old = PeerRouteTicket::initial();
+        let next = old.stage().unwrap();
+        let (old_tx, mut old_rx) = mpsc::channel(4);
+        let (next_tx, mut next_rx) = mpsc::channel(4);
+        let (record_tx, mut record_rx) = mpsc::channel(4);
+        let old_route = graph
+            .add_peer_sink(codec("pcmu", 8_000), old_tx, old.clone())
+            .unwrap();
+        let next_route = graph
+            .add_peer_sink(codec("pcmu", 8_000), next_tx, next.clone())
+            .unwrap();
+        let recording = graph
+            .add_recording_sink(codec("pcmu", 8_000), record_tx)
+            .unwrap();
+        old_route.wait_active().await.unwrap();
+        next_route.wait_active().await.unwrap();
+        recording.wait_active().await.unwrap();
+        source_tx.send(frame(7)).await.unwrap();
+        assert_eq!(old_rx.recv().await.unwrap().payload[0], 7);
+        assert_eq!(record_rx.recv().await.unwrap().payload[0], 7);
+        assert!(next_rx.try_recv().is_err());
+        assert!(next.commit_from(&old));
+        source_tx.send(frame(8)).await.unwrap();
+        assert_eq!(next_rx.recv().await.unwrap().payload[0], 8);
+        assert_eq!(record_rx.recv().await.unwrap().payload[0], 8);
+        assert!(old_rx.try_recv().is_err());
+        assert!(next_rx.try_recv().is_err());
+        graph.shutdown_and_wait().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn one_source_reaches_multiple_sinks() {
         let (source_tx, source_rx) = mpsc::channel(4);
         let graph = start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap();
@@ -2834,6 +3709,113 @@ mod tests {
             .expect("next activity observation");
         assert_eq!(second.source_frames, 33);
         assert!(second.observed_at >= first.observed_at);
+        graph.shutdown_and_wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dormant_managed_route_is_silent_until_promoted_and_after_quiesce() {
+        let (source_tx, source_rx) = mpsc::channel(4);
+        let graph = start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap();
+        let (target_tx, mut target_rx) = mpsc::channel(4);
+        let route = graph
+            .add_dormant_managed_sink(codec("pcmu", 8_000), target_tx)
+            .unwrap();
+        route.wait_active().await.unwrap();
+
+        source_tx.send(frame(1)).await.unwrap();
+        wait_until(|| graph.latest_snapshot().source_frames >= 1).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), target_rx.recv())
+                .await
+                .is_err(),
+            "a prepared route forwarded before promotion"
+        );
+
+        route.enable_forwarding();
+        source_tx.send(frame(2)).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), target_rx.recv())
+                .await
+                .expect("promoted route did not forward")
+                .expect("promoted route closed")
+                .payload[0],
+            2
+        );
+
+        route.disable_forwarding();
+        source_tx.send(frame(3)).await.unwrap();
+        wait_until(|| graph.latest_snapshot().source_frames >= 3).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), target_rx.recv())
+                .await
+                .is_err(),
+            "a quiesced route forwarded after cutover"
+        );
+        graph.shutdown_and_wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn initial_bridge_route_buffers_setup_media_until_commit() {
+        let (source_tx, source_rx) = mpsc::channel(4);
+        let graph = start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap();
+        let (target_tx, mut target_rx) = mpsc::channel(4);
+        let route = graph
+            .add_buffering_dormant_managed_sink(codec("pcmu", 8_000), target_tx)
+            .unwrap();
+        route.wait_active().await.unwrap();
+
+        source_tx.send(frame(1)).await.unwrap();
+        wait_until(|| graph.latest_snapshot().source_frames >= 1).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), target_rx.recv())
+                .await
+                .is_err(),
+            "an initial route forwarded before its bridge commit"
+        );
+
+        route.enable_forwarding();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), target_rx.recv())
+                .await
+                .expect("setup media was not released after bridge commit")
+                .expect("initial route closed")
+                .payload[0],
+            1
+        );
+        graph.shutdown_and_wait().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn quiesce_fences_worker_waiting_for_target_capacity() {
+        let (source_tx, source_rx) = mpsc::channel(4);
+        let graph = start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap();
+        let (target_tx, mut target_rx) = mpsc::channel(1);
+        target_tx.send(frame(99)).await.unwrap();
+        let route = graph
+            .add_managed_sink(codec("pcmu", 8_000), target_tx)
+            .unwrap();
+        route.wait_active().await.unwrap();
+
+        source_tx.send(frame(7)).await.unwrap();
+        wait_until(|| {
+            graph
+                .latest_snapshot()
+                .sinks
+                .first()
+                .is_some_and(|sink| sink.offered_frames >= 1)
+        })
+        .await;
+
+        // The sink worker has taken the graph frame and is waiting for room in
+        // the adapter channel. Quiesce must win before that pending publish.
+        route.disable_forwarding();
+        assert_eq!(target_rx.recv().await.unwrap().payload[0], 99);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), target_rx.recv())
+                .await
+                .is_err(),
+            "a worker published its reserved frame after quiesce"
+        );
         graph.shutdown_and_wait().await.unwrap();
     }
 
@@ -3222,6 +4204,7 @@ mod tests {
             target_codec,
             target_pt: 0,
             owner_liveness: Arc::new(RouteOwnerLiveness::default()),
+            forwarding: Arc::new(RouteForwardingGate::new(true, false)),
             _admission: Arc::new(SinkAdmissionState::new(1)).try_acquire().unwrap(),
             clock: RtpClockTranslator::new(8_000, 8_000),
             queue: Arc::new(SinkQueue::new(1)),
@@ -3229,6 +4212,8 @@ mod tests {
             warmup_since: None,
             history: VecDeque::new(),
             rolling_drops: 0,
+            delivery: Arc::new(RouteDelivery::default()),
+            drain_on_close: false,
             offered_frames: 0,
             dropped_frames: 0,
         };
@@ -3269,6 +4254,7 @@ mod tests {
             target_codec,
             target_pt: 0,
             owner_liveness: Arc::new(RouteOwnerLiveness::default()),
+            forwarding: Arc::new(RouteForwardingGate::new(true, false)),
             _admission: Arc::new(SinkAdmissionState::new(1)).try_acquire().unwrap(),
             clock: RtpClockTranslator::new(8_000, 8_000),
             queue: Arc::new(SinkQueue::new(policy_queue_frames)),
@@ -3276,6 +4262,8 @@ mod tests {
             warmup_since: Some(installed_at),
             history: VecDeque::new(),
             rolling_drops: 0,
+            delivery: Arc::new(RouteDelivery::default()),
+            drain_on_close: false,
             offered_frames: 0,
             dropped_frames: 0,
         }
@@ -3645,6 +4633,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recording_drain_preserves_queued_frames_on_stop_and_source_close() {
+        for source_close in [false, true] {
+            let (source, input) = mpsc::channel(1);
+            let graph = start_media_graph(input, codec("pcmu", 8_000), Default::default()).unwrap();
+            let (target, mut output) = mpsc::channel(1);
+            let route = graph
+                .add_recording_sink(codec("pcmu", 8_000), target)
+                .unwrap();
+            route.wait_active().await.unwrap();
+            let status = route.status();
+            for n in 0..20 {
+                source.send(frame_at(0xff, n * 160)).await.unwrap();
+                while graph.snapshot().await.source_frames < u64::from(n + 1) {
+                    tokio::task::yield_now().await;
+                }
+            }
+            assert!(graph.snapshot().await.sinks[0].queue_depth > 0);
+            let consume = async {
+                let mut received = 0;
+                while output.recv().await.is_some() {
+                    received += 1;
+                }
+                received
+            };
+            let received = if source_close {
+                drop(source);
+                let (closed, received) = tokio::join!(graph.wait_closed(), consume);
+                closed.unwrap();
+                drop(route);
+                received
+            } else {
+                let (drained, received) = tokio::join!(route.drain(), consume);
+                assert!(drained.unwrap());
+                graph.shutdown_and_wait().await.unwrap();
+                received
+            };
+            assert_eq!(received, 20);
+            let receipt = status.delivery_snapshot();
+            assert!(receipt.settled);
+            assert_eq!(receipt.offered_frames, 20);
+            assert_eq!(receipt.delivered_frames, 20);
+        }
+    }
+
+    #[tokio::test]
+    async fn recording_drain_times_out_without_claiming_complete_delivery() {
+        let (source, input) = mpsc::channel(1);
+        let graph = start_media_graph(input, codec("pcmu", 8_000), Default::default()).unwrap();
+        let (target, _output) = mpsc::channel(1);
+        let route = graph
+            .add_recording_sink(codec("pcmu", 8_000), target)
+            .unwrap();
+        route.wait_active().await.unwrap();
+        let status = route.status();
+        for n in 0..5 {
+            source.send(frame_at(0xff, n * 160)).await.unwrap();
+            while graph.snapshot().await.source_frames < u64::from(n + 1) {
+                tokio::task::yield_now().await;
+            }
+        }
+        assert!(!tokio::time::timeout(Duration::from_secs(4), route.drain())
+            .await
+            .unwrap()
+            .unwrap());
+        graph.shutdown_and_wait().await.unwrap();
+        let receipt = status.delivery_snapshot();
+        assert!(receipt.settled);
+        assert!(receipt.delivered_frames < receipt.offered_frames);
+    }
+
+    #[tokio::test]
     async fn source_close_closes_sinks_and_retains_final_snapshot() {
         let (source_tx, source_rx) = mpsc::channel(1);
         let graph = start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap();
@@ -3707,6 +4766,29 @@ mod tests {
         assert_eq!(snapshot.source_state, MediaGraphSourceState::Aborted);
         assert!(snapshot.sinks.is_empty());
         assert!(snapshot.codec_groups.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn graceful_shutdown_timeout_force_aborts_and_owns_actor_completion() {
+        let (_source_tx, source_rx) = mpsc::channel(1);
+        let graph = start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap();
+        let (target_tx, mut target_rx) = mpsc::channel(1);
+        graph.add_sink(codec("pcmu", 8_000), target_tx).unwrap();
+
+        let error = graph
+            .shutdown_and_wait_with_timeout(Duration::ZERO)
+            .await
+            .expect_err("zero graceful deadline must force the abort fallback");
+        assert!(matches!(
+            error,
+            RvoipError::InvalidState("media graph shutdown timed out; actor was aborted")
+        ));
+        assert!(graph.abort_handle().is_finished());
+        assert!(target_rx.recv().await.is_none());
+        assert_eq!(
+            graph.latest_snapshot().source_state,
+            MediaGraphSourceState::Aborted
+        );
     }
 
     #[tokio::test]
@@ -4100,6 +5182,170 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "g729")]
+    #[test]
+    fn g729_target_reframes_twenty_ms_pcm_into_ten_ms_payloads() {
+        let pcm = codec("pcm_s16le", 16_000);
+        let mut g729 = codec("g729", 8_000);
+        g729.fmtp = Some("annexb=no".into());
+        let linear = (0..320)
+            .map(|sample| {
+                let phase = sample as f32 * 440.0 * std::f32::consts::TAU / 16_000.0;
+                (phase.sin() * 8_000.0) as i16
+            })
+            .flat_map(i16::to_le_bytes)
+            .collect::<Vec<_>>();
+
+        let mut session = ConfiguredTranscodingSession::new(&pcm, PCM_S16LE, &g729, 18).unwrap();
+        assert_eq!(session.required_samples, Some(80));
+        let produced = session.transcode(&linear, 10_000).unwrap();
+        assert_eq!(produced.len(), 2);
+        assert_eq!(produced[0].payload.len(), 10);
+        assert_eq!(produced[0].timestamp_rtp, 10_000);
+        assert_eq!(produced[1].payload.len(), 10);
+        // Timestamps remain in the 16 kHz source domain: 10 ms is 160 ticks.
+        assert_eq!(produced[1].timestamp_rtp, 10_160);
+
+        let mut decoder = rvoip_media_core::codec::spec::AudioCodecSpec::new("G729", 18, 8_000, 1)
+            .build()
+            .expect("the G.729 decoder builds");
+        for frame in produced {
+            let decoded = decoder.decode(&frame.payload).unwrap();
+            assert_eq!(decoded.samples.len(), 80);
+        }
+    }
+
+    #[cfg(all(feature = "g729", feature = "opus"))]
+    #[test]
+    fn source_timestamp_gap_discards_partial_target_frame() {
+        let mut g729 = codec("g729", 8_000);
+        g729.fmtp = Some("annexb=no".into());
+        let opus = codec("opus", 48_000);
+        let mut encoder = G729Codec::new(
+            SampleRate::Rate8000,
+            1,
+            G729Config {
+                annexes: G729Annexes {
+                    annex_a: true,
+                    annex_b: false,
+                },
+                frame_size_ms: 10.0,
+                enable_vad: false,
+                enable_cng: false,
+            },
+        )
+        .expect("G.729 encoder builds");
+        let mut session =
+            ConfiguredTranscodingSession::new(&g729, 18, &opus, 111).expect("session builds");
+        assert_eq!(session.required_samples, Some(960));
+
+        let mut encode = |phase, timestamp| {
+            let samples = (0..80)
+                .map(|sample| {
+                    let index = phase + sample;
+                    let angle = index as f32 * std::f32::consts::TAU * 440.0 / 8_000.0;
+                    (angle.sin() * 8_000.0) as i16
+                })
+                .collect();
+            encoder
+                .encode(&rvoip_media_core::types::AudioFrame::new(
+                    samples, 8_000, 1, timestamp,
+                ))
+                .expect("G.729 speech frame")
+        };
+
+        let before_gap = session
+            .transcode(&encode(0, 10_000), 10_000)
+            .expect("first half-frame buffers");
+        assert!(before_gap.is_empty());
+        assert_eq!(session.next_timestamp, Some(10_000));
+
+        // 10_080 is absent. The frame at 10_160 must replace, rather than be
+        // joined to, the half target frame retained from before the gap.
+        let after_gap = session
+            .transcode(&encode(160, 10_160), 10_160)
+            .expect("post-gap half-frame buffers");
+        assert!(after_gap.is_empty());
+        assert_eq!(session.next_timestamp, Some(10_160));
+
+        let complete = session
+            .transcode(&encode(240, 10_240), 10_240)
+            .expect("contiguous audio completes one Opus frame");
+        assert_eq!(complete.len(), 1);
+        assert_eq!(complete[0].timestamp_rtp, 10_160);
+    }
+
+    #[cfg(feature = "opus")]
+    #[tokio::test]
+    async fn recording_drain_preserves_opus_to_g711_duration_and_tone() {
+        for channels in [1, 2] {
+            let mut opus = codec("opus", 48_000);
+            opus.channels = channels;
+            opus.payload_type = Some(111);
+            let mut encoder = create_configured_codec(&opus, 111).unwrap();
+            let (source, input) = mpsc::channel(1);
+            let graph = start_media_graph(input, opus, Default::default()).unwrap();
+            let (target, mut output) = mpsc::channel(1);
+            let route = graph
+                .add_recording_sink(codec("pcmu", 8_000), target)
+                .unwrap();
+            route.wait_active().await.unwrap();
+            let status = route.status();
+            for n in 0..20u32 {
+                let samples = (0..960)
+                    .flat_map(|i| {
+                        let value = (8000.0
+                            * (2.0 * std::f32::consts::PI * 440.0 * (n * 960 + i) as f32
+                                / 48_000.0)
+                                .sin()) as i16;
+                        std::iter::repeat_n(value, usize::from(channels))
+                    })
+                    .collect();
+                let audio =
+                    rvoip_media_core::types::AudioFrame::new(samples, 48_000, channels, n * 960);
+                let mut frame = frame_at(0xff, n * 960);
+                frame.payload = encoder.encode(&audio).unwrap().into();
+                frame.payload_type = Some(111);
+                source.send(frame).await.unwrap();
+                while graph.snapshot().await.source_frames < u64::from(n + 1) {
+                    tokio::task::yield_now().await;
+                }
+            }
+            drop(source);
+            let consume = async {
+                let mut decoded = Vec::new();
+                let mut decoder = create_configured_codec(&codec("pcmu", 8_000), 0).unwrap();
+                let mut n = 0;
+                while let Some(frame) = output.recv().await {
+                    assert_eq!(frame.timestamp_rtp, n * 160);
+                    assert_eq!(frame.payload.len(), 160);
+                    decoded.extend(decoder.decode(&frame.payload).unwrap().samples);
+                    n += 1;
+                }
+                decoded
+            };
+            let (closed, samples) = tokio::join!(graph.wait_closed(), consume);
+            closed.unwrap();
+            assert_eq!(samples.len(), 3200);
+            // Ignore codec startup delay; the intended tone must dominate a
+            // distant frequency, independently of merely receiving some bytes.
+            let energy = |hz: f64| {
+                let (mut re, mut im) = (0.0, 0.0);
+                for (n, value) in samples.iter().skip(400).enumerate() {
+                    let phase = 2.0 * std::f64::consts::PI * hz * n as f64 / 8000.0;
+                    re += f64::from(*value) * phase.cos();
+                    im += f64::from(*value) * phase.sin();
+                }
+                re * re + im * im
+            };
+            assert!(energy(440.0) > 25.0 * energy(1200.0));
+            let receipt = status.delivery_snapshot();
+            assert!(receipt.settled);
+            assert_eq!(receipt.offered_frames, 20);
+            assert_eq!(receipt.delivered_frames, 20);
+        }
+    }
+
     #[cfg(feature = "opus")]
     #[test]
     fn configured_transcoder_preserves_pcm_wideband_path_through_opus() {
@@ -4120,6 +5366,62 @@ mod tests {
         let back = to_pcm.transcode(&encoded, 0).unwrap();
         assert_eq!(back.len(), 1);
         assert_eq!(back[0].payload.len(), 640);
+    }
+
+    /// WebRTC PCM delivery is allowed to split one audio interval across
+    /// uneven callbacks. The Opus adapter is configured for 20 ms frames, so
+    /// passing each callback directly to it used to produce errors such as
+    /// `expected 960, got 24` and `expected 960, got 924`. The graph must
+    /// retain those samples until it has one complete encoder frame.
+    #[cfg(feature = "opus")]
+    #[test]
+    fn opus_target_reframes_short_pcm_chunks_before_encoding() {
+        let pcm = codec("pcm_s16le", 16_000);
+        let opus = codec("opus", 48_000);
+        let samples = (0..320)
+            .map(|sample| {
+                let phase = sample as f32 * 440.0 * std::f32::consts::TAU / 16_000.0;
+                (phase.sin() * 8_000.0) as i16
+            })
+            .collect::<Vec<_>>();
+        let mut session = ConfiguredTranscodingSession::new(&pcm, PCM_S16LE, &opus, 111).unwrap();
+
+        assert_eq!(session.required_samples, Some(960));
+
+        let encode_pcm = |samples: &[i16]| {
+            samples
+                .iter()
+                .flat_map(|sample| sample.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+
+        let first = session
+            .transcode(&encode_pcm(&samples[..8]), 10_000)
+            .expect("a callback resampled to 24 samples is buffered");
+        assert!(first.is_empty());
+        assert_eq!(session.pending.len(), 24);
+
+        let second = session
+            .transcode(&encode_pcm(&samples[8..316]), 10_008)
+            .expect("a callback resampled to 924 samples joins the first callback");
+        assert!(second.is_empty());
+        assert_eq!(session.pending.len(), 948);
+
+        let complete = session
+            .transcode(&encode_pcm(&samples[316..]), 10_316)
+            .expect("the final callback resamples to the 12 samples needed for one Opus frame");
+        assert_eq!(complete.len(), 1);
+        assert_eq!(complete[0].timestamp_rtp, 10_000);
+        assert!(session.pending.is_empty());
+
+        let mut decoder =
+            rvoip_media_core::codec::spec::AudioCodecSpec::new("opus", 111, 48_000, 1)
+                .build()
+                .expect("the Opus decoder builds");
+        let decoded = decoder
+            .decode(&complete[0].payload)
+            .expect("the re-framed payload is valid Opus");
+        assert_eq!(decoded.samples.len(), 960);
     }
 
     /// The AMR boundary, asserted rather than only documented.
@@ -4583,6 +5885,64 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "amr-nb")]
+    #[tokio::test]
+    async fn staged_peer_discards_partial_audio_before_amr_activation() {
+        use crate::bridge::peer_switch::PeerRouteTicket;
+        let (source_tx, source_rx) = mpsc::channel(4);
+        let graph = start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap();
+        let old = PeerRouteTicket::initial();
+        let next = old.stage().unwrap();
+        let (peer_tx, mut peer_rx) = mpsc::channel(4);
+        let target_codec = CodecInfo {
+            name: "AMR".into(),
+            clock_rate_hz: 8_000,
+            channels: 1,
+            fmtp: Some("octet-align=1".into()),
+            payload_type: Some(107),
+        };
+        let peer = graph
+            .add_peer_sink(target_codec.clone(), peer_tx, next.clone())
+            .unwrap();
+        let (record_tx, mut record_rx) = mpsc::channel(4);
+        let recording = graph
+            .add_recording_sink(codec("pcmu", 8_000), record_tx)
+            .unwrap();
+        peer.wait_active().await.unwrap();
+        recording.wait_active().await.unwrap();
+        let packet = |timestamp, byte| {
+            let mut packet = frame(byte);
+            packet.timestamp_rtp = timestamp;
+            packet.payload = vec![byte; 80].into();
+            packet
+        };
+        source_tx.send(packet(0, 0x80)).await.unwrap();
+        record_rx.recv().await.unwrap();
+        assert_eq!(graph.snapshot().await.transcode_operations, 0);
+        assert!(next.commit_from(&old));
+        source_tx.send(packet(8_000, 0xff)).await.unwrap();
+        record_rx.recv().await.unwrap();
+        assert_eq!(graph.snapshot().await.transcode_operations, 1);
+        assert!(
+            peer_rx.try_recv().is_err(),
+            "fresh half-frame cannot combine with staged audio"
+        );
+        source_tx.send(packet(8_080, 0xff)).await.unwrap();
+        record_rx.recv().await.unwrap();
+        let emitted = tokio::time::timeout(Duration::from_secs(2), peer_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(emitted.timestamp_rtp, 8_000);
+        let mut reference =
+            ConfiguredTranscodingSession::new(&codec("pcmu", 8_000), 0, &target_codec, 107)
+                .unwrap();
+        let expected = reference.transcode(&[0xff; 160], 8_000).unwrap();
+        assert_eq!(emitted.payload.as_ref(), expected[0].payload.as_slice());
+        assert!(peer_rx.try_recv().is_err());
+        graph.shutdown_and_wait().await.unwrap();
+    }
+
     /// A flush empties the re-framer, not just the sink queues.
     ///
     /// Everything held at the moment of a barge-in is stale, and the
@@ -4609,6 +5969,7 @@ mod tests {
         session.discard_pending();
         assert!(session.pending.is_empty());
         assert_eq!(session.next_timestamp, None);
+        assert_eq!(session.expected_source_timestamp, None);
 
         // The next packet is a fresh timeline: exactly one frame out, at the
         // sender's own timestamp, with no stale audio joined to the front.
@@ -4718,6 +6079,132 @@ mod tests {
         assert!(
             start_media_graph(source_rx, bogus, Default::default()).is_err(),
             "a payload type is not evidence that a codec exists"
+        );
+    }
+
+    #[cfg(all(feature = "amr-wb", feature = "opus"))]
+    #[test]
+    fn negotiated_dynamic_payload_identity_selects_the_codec_implementation() {
+        let negotiated = |name: &str, clock_rate_hz: u32, payload_type: u8| CodecInfo {
+            name: name.into(),
+            clock_rate_hz,
+            channels: 1,
+            fmtp: (name == "AMR-WB").then(|| "octet-align=1".into()),
+            payload_type: Some(payload_type),
+        };
+
+        // Dynamic numbers are session-local. A peer may legally assign the
+        // graph's conventional Opus number or internal PCM key to AMR-WB; the
+        // negotiated encoding name must still select the AMR-WB implementation.
+        for payload_type in [111, PCM_S16LE] {
+            let codec = negotiated("AMR-WB", 16_000, payload_type);
+            assert_eq!(
+                CodecGroupKey::new(&codec, payload_type).name,
+                "amr-wb",
+                "dynamic PT {payload_type} must not overwrite the negotiated codec identity"
+            );
+            let built = create_configured_codec(&codec, payload_type)
+                .unwrap_or_else(|error| panic!("AMR-WB PT {payload_type} must build: {error:?}"));
+            assert_eq!(built.get_info().name, "AMR-WB");
+        }
+
+        let opus = create_configured_codec(&negotiated("opus", 48_000, 111), 111)
+            .expect("the conventional Opus mapping must still build");
+        assert!(opus.get_info().name.eq_ignore_ascii_case("opus"));
+        assert_eq!(
+            CodecGroupKey::new(&negotiated("opus", 48_000, 111), 111).name,
+            "opus"
+        );
+
+        let pcm = create_configured_codec(&negotiated("pcm_s16le", 16_000, PCM_S16LE), PCM_S16LE)
+            .expect("the internal PCM mapping must still build");
+        assert!(pcm.get_info().name.eq_ignore_ascii_case("pcm_s16le"));
+        assert_eq!(
+            CodecGroupKey::new(&negotiated("pcm_s16le", 16_000, PCM_S16LE), PCM_S16LE).name,
+            "pcm_s16le"
+        );
+        assert!(
+            make_transcoder(
+                &negotiated("AMR-WB", 16_000, PCM_S16LE),
+                PCM_S16LE,
+                &negotiated("pcm_s16le", 16_000, PCM_S16LE),
+                PCM_S16LE,
+            )
+            .is_some(),
+            "AMR-WB PT 120 and internal PCM 120 must not be treated as wire-compatible"
+        );
+        assert!(
+            make_transcoder(
+                &negotiated("AMR-WB", 16_000, 111),
+                111,
+                &negotiated("opus", 48_000, 111),
+                111,
+            )
+            .is_some(),
+            "AMR-WB PT 111 and Opus PT 111 must not be treated as wire-compatible"
+        );
+
+        // A static payload number cannot be relabelled as another codec. A
+        // negotiated dynamic number can carry G.711, and that existing path
+        // remains valid.
+        for (name, clock_rate_hz, payload_type) in [
+            ("PCMA", 8_000, 0),
+            ("PCMU", 8_000, 8),
+            ("AMR-WB", 16_000, 0),
+            ("opus", 48_000, 0),
+            ("pcm_s16le", 16_000, 111),
+        ] {
+            let codec = negotiated(name, clock_rate_hz, payload_type);
+            assert!(
+                create_configured_codec(&codec, payload_type).is_err(),
+                "{name} must not be constructed from incompatible PT {payload_type}"
+            );
+        }
+        create_configured_codec(&negotiated("PCMA", 8_000, 96), 96)
+            .expect("an explicitly negotiated dynamic G.711 mapping remains valid");
+    }
+
+    #[cfg(feature = "g729")]
+    #[test]
+    fn g729_aliases_select_g729_without_overriding_static_payload_identity() {
+        for name in ["G729", "G.729", "G729A", "G.729A", "G729AB", "G729BA"] {
+            let codec = CodecInfo {
+                name: name.into(),
+                clock_rate_hz: 8_000,
+                channels: 1,
+                fmtp: None,
+                payload_type: Some(18),
+            };
+            let built = create_configured_codec(&codec, 18)
+                .unwrap_or_else(|error| panic!("{name} must build at PT 18: {error:?}"));
+            assert_eq!(built.get_info().name, "G.729");
+        }
+
+        let profile = |name: &str| CodecInfo {
+            name: name.into(),
+            clock_rate_hz: 8_000,
+            channels: 1,
+            fmtp: None,
+            payload_type: Some(18),
+        };
+        assert!(!g729_annex_b(&profile("G729A")).unwrap());
+        assert!(g729_annex_b(&profile("G729BA")).unwrap());
+        assert_ne!(
+            CodecGroupKey::new(&profile("G729A"), 18),
+            CodecGroupKey::new(&profile("G729BA"), 18),
+            "Annex-B and non-Annex-B profiles must not bypass transcoding"
+        );
+
+        let collision = CodecInfo {
+            name: "G729".into(),
+            clock_rate_hz: 8_000,
+            channels: 1,
+            fmtp: None,
+            payload_type: Some(0),
+        };
+        assert!(
+            create_configured_codec(&collision, 0).is_err(),
+            "static PCMU PT 0 must not construct a G.729 codec"
         );
     }
 

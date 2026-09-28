@@ -181,8 +181,7 @@ impl GenericResponseBuilder {
         // 3xx → redirect path; 4xx/5xx/6xx → reject path.
         if (300..=399).contains(&self.status) {
             self.coord
-                .helpers
-                .redirect_call_with_extras_exact(
+                .redirect_incoming_with_extras_exact(
                     lifecycle_handle,
                     self.status,
                     vec![reason],
@@ -191,8 +190,7 @@ impl GenericResponseBuilder {
                 .await
         } else {
             self.coord
-                .helpers
-                .reject_call_with_extras_exact(lifecycle_handle, self.status, &reason, extras)
+                .reject_incoming_with_extras_exact(lifecycle_handle, self.status, &reason, extras)
                 .await
         }
     }

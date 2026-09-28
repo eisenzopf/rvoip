@@ -5,18 +5,25 @@ All subscriptions are deduplicated and cached, so that a single publisher can se
 
 ## Cargo features
 
-The default `runtime` feature preserves the complete relay library and binary.
-Applications that only implement relay admission can omit the HTTP, relay, and
-metrics runtime:
+The crate has no default features. The `relay-runtime` feature provides the
+embeddable relay runtime (capacity, sessions, producers, consumers,
+coordinator, diagnostics, metrics facade). Applications that only implement
+relay admission can depend on the crate as-is and omit the relay and metrics
+runtime:
 
 ```toml
-moq-relay-ietf = { path = "../moq-rs/moq-relay-ietf", default-features = false }
+rvoip-moq-relay = "0.3.10"
 ```
 
 This admission-only surface exports `SessionAdmission`, `AdmissionLease`,
 `AdmissionSessionId`, and their supporting request, decision, and lifecycle
-types. The `moq-relay-ietf` binary requires `runtime`. Enabling
-`metrics-prometheus` also enables `runtime`.
+types. Enabling `metrics-prometheus` also enables `relay-runtime`.
+
+The published package is embeddable only: the upstream HTTP API, web
+listener, and `moq-relay-ietf` CLI binary are retained in the source tree for
+attribution but are not built by any feature (`autobins = false`, and a
+`feature_policy` test keeps the HTTP and CLI dependencies out). Embed `Relay`
+in your own process instead.
 
 ## Usage
 
@@ -24,9 +31,6 @@ The publisher must choose a unique name for their broadcast, sent as the WebTran
 Connection paths are normalized and validated: trailing slashes are trimmed, dot segments and percent-encoded characters are rejected, and empty segments are not allowed. Capitalization matters.
 
 For example: `CONNECT https://relay.quic.video/BigBuckBunny`
-
-The MoqTransport handshake includes a `role` parameter, which must be `publisher` or `subscriber`.
-The specification allows a `both` role but you'll get an error.
 
 You can have one publisher and any number of subscribers connected to the same path.
 If the publisher disconnects, then all subscribers receive an error and will not get updates, even if a new publisher reuses the path.

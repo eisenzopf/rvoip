@@ -29,7 +29,7 @@ use rvoip_core::message::{ContentType, Message};
 use rvoip_core::stream::MediaStream;
 use rvoip_core::{DataMessage, DataReliability};
 use rvoip_sip_core::types::sdp::SdpSession;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::{mpsc, watch, Mutex as AsyncMutex, Notify};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, instrument, warn};
@@ -88,6 +88,10 @@ pub struct WebRtcMetrics {
     pub sessions_rejected_over_cap: u64,
     pub reaped_total: u64,
     pub data_messages_dropped_total: u64,
+    /// ICE/media UDP sockets currently owned by adapter-created peer
+    /// connection drivers. This tracks allocator ownership, not routes or
+    /// signaling sessions.
+    pub allocated_media_ports: usize,
     /// Live WHIP/WHEP HTTP resources. This is distinct from peer routes so
     /// lifecycle tests can detect stale ETag/session state after a transport
     /// terminates outside HTTP DELETE.
@@ -882,6 +886,7 @@ pub struct WebRtcAdapter {
     metrics_rejected: Arc<AtomicU64>,
     metrics_reaped: Arc<AtomicU64>,
     metrics_data_dropped: Arc<AtomicU64>,
+    allocated_media_ports: Arc<AtomicUsize>,
     metrics_legacy_whep: Arc<AtomicU64>,
     http_resource_tasks: Arc<std::sync::atomic::AtomicUsize>,
     peer_session_tasks: Arc<std::sync::atomic::AtomicUsize>,
@@ -944,6 +949,7 @@ impl WebRtcAdapter {
             metrics_rejected: Arc::new(AtomicU64::new(0)),
             metrics_reaped: Arc::clone(&metrics_reaped),
             metrics_data_dropped: Arc::new(AtomicU64::new(0)),
+            allocated_media_ports: Arc::new(AtomicUsize::new(0)),
             metrics_legacy_whep: Arc::new(AtomicU64::new(0)),
             http_resource_tasks: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             peer_session_tasks: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -1088,6 +1094,7 @@ impl WebRtcAdapter {
             sessions_rejected_over_cap: self.metrics_rejected.load(Ordering::Relaxed),
             reaped_total: self.metrics_reaped.load(Ordering::Relaxed),
             data_messages_dropped_total: self.metrics_data_dropped.load(Ordering::Relaxed),
+            allocated_media_ports: self.allocated_media_ports.load(Ordering::Acquire),
             active_http_resources: self.http_resources.len(),
             http_resource_tasks: self.http_resource_tasks.load(Ordering::Acquire),
             peer_session_tasks: self.peer_session_tasks.load(Ordering::Acquire),
@@ -1099,6 +1106,18 @@ impl WebRtcAdapter {
             inbound_admission_tasks: self.inbound_admission_tasks.load(Ordering::Acquire),
             legacy_whep_sessions_total: self.metrics_legacy_whep.load(Ordering::Relaxed),
         }
+    }
+
+    /// Inject a peer-driver failure through the production route failure
+    /// watcher. This hook is absent from ordinary builds.
+    #[cfg(feature = "test-hooks")]
+    pub fn inject_peer_failure_for_test(&self, connection_id: &ConnectionId) -> Result<()> {
+        let route = self
+            .routes
+            .get(connection_id)
+            .ok_or(WebRtcError::ConnectionNotFound)?;
+        route.peer.inject_failure_for_test();
+        Ok(())
     }
 
     /// G12 — reset every counter to zero. Useful for operators that rotate
@@ -1667,6 +1686,20 @@ impl WebRtcAdapter {
             .is_ok()
     }
 
+    fn publish_data_message_to(
+        stages: &DashMap<ConnectionId, Arc<WebRtcOutboundRoute>>,
+        events_tx: &mpsc::Sender<OrchestratorAdapterEvent>,
+        dropped: &AtomicU64,
+        event: AdapterEvent,
+    ) -> bool {
+        debug_assert!(matches!(event, AdapterEvent::DataMessage { .. }));
+        let published = Self::publish_or_stage_to(stages, events_tx, event);
+        if !published {
+            dropped.fetch_add(1, Ordering::Relaxed);
+        }
+        published
+    }
+
     fn try_send(&self, event: AdapterEvent) {
         if !Self::publish_or_stage_to(&self.outbound_event_stages, &self.events_tx, event) {
             warn!("WebRtcAdapter event channel full or closed");
@@ -1911,11 +1944,10 @@ impl WebRtcAdapter {
                                     frame.is_string,
                                 ) {
                                     Ok(message) => {
-                                        if !Self::publish_or_stage_to(&outbound_event_stages, &events_tx, AdapterEvent::DataMessage {
+                                        if !Self::publish_data_message_to(&outbound_event_stages, &events_tx, &dropped, AdapterEvent::DataMessage {
                                             connection_id: conn.clone(),
                                             message,
                                         }) {
-                                            dropped.fetch_add(1, Ordering::Relaxed);
                                             warn!(
                                                 conn = %conn,
                                                 label_bytes = label.len(),
@@ -2318,7 +2350,7 @@ impl WebRtcAdapter {
             Some(_) => {
                 return Err(WebRtcError::Forbidden(
                     "connection already belongs to another principal".into(),
-                ))
+                ));
             }
         };
         drop(route);
@@ -2459,6 +2491,13 @@ impl WebRtcAdapter {
                     stage.request_shutdown(false);
                 }
                 route.cancel_tasks();
+                // The failure watcher is itself route-supervised, so it cannot
+                // call `Route::shutdown` (which would try to join this task).
+                // It must still close the peer explicitly: cancellation only
+                // stops adapter helpers and does not release the ICE/media UDP
+                // socket owned by the peer-connection driver.
+                let _ =
+                    tokio::time::timeout(PEER_SESSION_SHUTDOWN_TIMEOUT, route.peer.close()).await;
                 route.close_media_streams().await;
                 Self::release_session_slot_from(&live_sessions_fail);
                 if outbound_stages_fail.contains_key(&conn_fail)
@@ -2665,7 +2704,12 @@ impl WebRtcAdapter {
         let conn_id = ConnectionId::new();
         let mut peer_config = self.config.clone();
         peer_config.trickle_ice = false;
-        let peer = RvoipPeerConnection::new(&peer_config, PeerRole::Offerer).await?;
+        let peer = RvoipPeerConnection::new_with_allocated_udp_socket_counter(
+            &peer_config,
+            PeerRole::Offerer,
+            Arc::clone(&self.allocated_media_ports),
+        )
+        .await?;
         peer.prepare_send_only_offer().await?;
 
         // Keep the transport-neutral DataMessage path available on the
@@ -2901,7 +2945,12 @@ impl WebRtcAdapter {
         if let Some(policy) = ice_policy {
             peer_config.trickle_ice = policy == WebRtcIceExchangePolicy::Trickle;
         }
-        let peer = RvoipPeerConnection::new(&peer_config, PeerRole::Answerer).await?;
+        let peer = RvoipPeerConnection::new_with_allocated_udp_socket_counter(
+            &peer_config,
+            PeerRole::Answerer,
+            Arc::clone(&self.allocated_media_ports),
+        )
+        .await?;
         let answer_sdp = peer.accept_offer_and_gather(offer_sdp).await?;
 
         let (negotiated, audio_payload_type) =
@@ -3765,7 +3814,7 @@ impl WebRtcAdapter {
             match tokio::time::timeout_at(deadline, ws_client_pool.open(context.clone())).await {
                 Ok(Ok(session)) => session,
                 Ok(Err(_)) => {
-                    return OutboundDriverExit::RemoteFailed("WebRTC WebSocket connection failed")
+                    return OutboundDriverExit::RemoteFailed("WebRTC WebSocket connection failed");
                 }
                 Err(_) => return OutboundDriverExit::RemoteFailed("WebRTC signaling timed out"),
             };
@@ -4669,9 +4718,13 @@ impl ConnectionAdapter for WebRtcAdapter {
             peer_config.capabilities.supports_message_text = false;
         }
         let route_capabilities = peer_config.capabilities.clone();
-        let peer = RvoipPeerConnection::new(&peer_config, PeerRole::Offerer)
-            .await
-            .map_err(|e| RvoipError::Adapter(format!("{e}")))?;
+        let peer = RvoipPeerConnection::new_with_allocated_udp_socket_counter(
+            &peer_config,
+            PeerRole::Offerer,
+            Arc::clone(&self.allocated_media_ports),
+        )
+        .await
+        .map_err(|e| RvoipError::Adapter(format!("{e}")))?;
 
         // Pre-attach a video track when the caller wants outbound offers to
         // include `m=video`. `create_offer_and_gather` skips its auto-audio
@@ -5736,6 +5789,74 @@ mod inbound_hardening_tests {
             events_rx.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn bounded_data_event_queue_reports_every_drop_monotonically() {
+        let stages = DashMap::new();
+        let (events_tx, _events_rx) = mpsc::channel(ADAPTER_EVENT_CAP);
+        for _ in 0..ADAPTER_EVENT_CAP {
+            events_tx
+                .try_send(OrchestratorAdapterEvent::Public(AdapterEvent::Native {
+                    kind: "queue-filler",
+                    detail: String::new(),
+                }))
+                .expect("fill bounded adapter event queue");
+        }
+        let dropped = AtomicU64::new(0);
+        for expected in 1..=2 {
+            assert!(!WebRtcAdapter::publish_data_message_to(
+                &stages,
+                &events_tx,
+                &dropped,
+                AdapterEvent::DataMessage {
+                    connection_id: ConnectionId::new(),
+                    message: DataMessage::reliable(
+                        "vapi.context.v1",
+                        "application/json",
+                        b"{}".as_slice(),
+                    ),
+                },
+            ));
+            assert_eq!(dropped.load(Ordering::Relaxed), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn allocated_media_port_gauge_tracks_driver_socket_ownership() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let adapter = WebRtcAdapter::new(WebRtcConfig::loopback());
+        assert_eq!(adapter.metrics().allocated_media_ports, 0);
+
+        let handle = adapter
+            .originate(OriginateRequest {
+                session_id: rvoip_core::ids::SessionId::new(),
+                participant_id: rvoip_core::ids::ParticipantId::new(),
+                target: String::new(),
+                direction: Direction::Outbound,
+                capabilities: adapter.capabilities(),
+                transport: None,
+                context: Default::default(),
+            })
+            .await
+            .expect("adapter-owned peer route");
+        assert_eq!(
+            adapter.metrics().allocated_media_ports,
+            1,
+            "the peer driver owns exactly one bound ICE/media UDP socket"
+        );
+
+        adapter
+            .end(handle.connection.id, EndReason::Normal)
+            .await
+            .expect("close adapter-owned peer route");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while adapter.metrics().allocated_media_ports != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("driver socket gauge returns to baseline");
     }
 
     #[tokio::test]

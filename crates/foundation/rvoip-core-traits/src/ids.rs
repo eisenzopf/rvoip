@@ -53,6 +53,7 @@ macro_rules! id_type {
 
 id_type!(ConversationId, "conv");
 id_type!(SessionId, "sess");
+id_type!(AiSessionId, "aisess");
 id_type!(ConnectionId, "conn");
 id_type!(StreamId, "strm");
 id_type!(MessageId, "msg");
@@ -80,6 +81,7 @@ mod diagnostic_tests {
         let ids = [
             format!("{:?}", ConversationId::from_string(CANARY)),
             format!("{:?}", SessionId::from_string(CANARY)),
+            format!("{:?}", AiSessionId::from_string(CANARY)),
             format!("{:?}", ConnectionId::from_string(CANARY)),
             format!("{:?}", StreamId::from_string(CANARY)),
             format!("{:?}", MessageId::from_string(CANARY)),

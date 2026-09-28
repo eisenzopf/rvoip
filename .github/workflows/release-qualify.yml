@@ -19,7 +19,7 @@ on:
           - remote-core
           - remote-release
       diagnostic_gates:
-        description: Comma-separated exact release or preflight GCP gate IDs for remote-diagnostic
+        description: Comma-separated exact release or preflight EC2 gate IDs for remote-diagnostic
         required: false
         type: string
       first_candidate:
@@ -43,13 +43,12 @@ permissions:
 
 concurrency:
   # Supersede the same qualification request, but allow disjoint diagnostic
-  # gate sets for one candidate to use independent GCP workers concurrently.
+  # gate sets for one candidate to use independent EC2 workers concurrently.
   group: release-qualification-${{ inputs.profile }}-${{ inputs.candidate }}-${{ inputs.diagnostic_gates || 'all' }}
   cancel-in-progress: ${{ inputs.profile == 'remote-preflight' || inputs.profile == 'remote-diagnostic' }}
 
 env:
-  RELEASE_ENVIRONMENT_ID: rvoip-release-v5-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-n2-cascade-lake
-  MIN_CPU_PLATFORM: Intel Cascade Lake
+  RELEASE_ENVIRONMENT_ID: rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5
   RUSTUP_MAX_RETRIES: "10"
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
@@ -67,10 +66,10 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       hosted_matrix: ${{ steps.plan.outputs.hosted_matrix }}
-      gcp_matrix: ${{ steps.plan.outputs.gcp_matrix }}
+      aws_matrix: ${{ steps.plan.outputs.aws_matrix }}
       shard_count: ${{ steps.plan.outputs.shard_count }}
       hosted_shard_count: ${{ steps.plan.outputs.hosted_shard_count }}
-      gcp_shard_count: ${{ steps.plan.outputs.gcp_shard_count }}
+      aws_shard_count: ${{ steps.plan.outputs.aws_shard_count }}
       candidate_sha: ${{ steps.plan.outputs.candidate_sha }}
       environment_id: ${{ steps.plan.outputs.environment_id }}
       run_count: ${{ steps.plan.outputs.run_count }}
@@ -289,86 +288,131 @@ jobs:
           retention-days: 90
           if-no-files-found: warn
 
-  preflight-gcp:
-    name: Verify ephemeral GCP capacity
-    if: needs.plan.outputs.gcp_shard_count != '0'
+  preflight-aws:
+    name: Verify ephemeral EC2 capacity
+    if: needs.plan.outputs.aws_shard_count != '0'
     needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
       id-token: write
+    outputs:
+      ami_id: ${{ steps.capacity.outputs.ami_id }}
     steps:
-      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+      - name: Assume the provisioner role without a stored key
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
-          workload_identity_provider: ${{ vars.RVOIP_GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.RVOIP_GCP_PROVISIONER_SERVICE_ACCOUNT }}
-      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
-      - name: Require all compute and disk quota before creating workers
+          role-to-assume: ${{ vars.RVOIP_AWS_PROVISIONER_ROLE_ARN }}
+          aws-region: ${{ vars.RVOIP_AWS_REGION }}
+      - name: Require all compute and storage quota before creating workers
+        id: capacity
         env:
-          CACHE_BUCKET: ${{ vars.RVOIP_GCP_CACHE_BUCKET }}
-          PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
-          REGION: ${{ vars.RVOIP_GCP_REGION }}
-          GCP_MATRIX: ${{ needs.plan.outputs.gcp_matrix }}
+          REGION: ${{ vars.RVOIP_AWS_REGION }}
+          CACHE_BUCKET: ${{ vars.RVOIP_AWS_CACHE_BUCKET }}
+          EVIDENCE_BUCKET: ${{ vars.RVOIP_AWS_EVIDENCE_BUCKET }}
+          SUBNET_ID: ${{ vars.RVOIP_AWS_SUBNET_ID }}
+          SECURITY_GROUP_ID: ${{ vars.RVOIP_AWS_SECURITY_GROUP_ID }}
+          INSTANCE_PROFILE: ${{ vars.RVOIP_AWS_RUNNER_INSTANCE_PROFILE }}
+          AMI_PARAMETER: ${{ vars.RVOIP_AWS_AMI_SSM_PARAMETER }}
+          AWS_MATRIX: ${{ needs.plan.outputs.aws_matrix }}
         run: |
           set -euo pipefail
+          test -n "$REGION"
           test -n "$CACHE_BUCKET"
-          gcloud compute project-info describe --project "$PROJECT" --format=json > global-quotas.json
-          gcloud compute regions describe "$REGION" --project "$PROJECT" --format=json > regional-quotas.json
-          python3 - <<'PY'
+          test -n "$EVIDENCE_BUCKET"
+          test -n "$SUBNET_ID"
+          test -n "$SECURITY_GROUP_ID"
+          test -n "$INSTANCE_PROFILE"
+          test -n "$AMI_PARAMETER"
+
+          # On-Demand Standard (A, C, D, H, I, M, R, T, Z) instance vCPUs.
+          aws service-quotas get-service-quota \
+            --service-code ec2 --quota-code L-1216C47A \
+            --output json > vcpu-quota.json
+          aws ec2 describe-instances \
+            --filters Name=instance-state-name,Values=pending,running \
+            --query 'Reservations[].Instances[].CpuOptions.[CoreCount,ThreadsPerCore]' \
+            --output json > vcpu-usage.json
+          # Storage for General Purpose SSD (gp3) volumes, in TiB.
+          aws service-quotas get-service-quota \
+            --service-code ebs --quota-code L-7A658B76 \
+            --output json > gp3-quota.json
+
+          # Fail closed on every resource the controller will reference.
+          ami_id="$(aws ssm get-parameter --name "$AMI_PARAMETER" \
+            --query Parameter.Value --output text)"
+          [[ "$ami_id" =~ ^ami-[0-9a-f]+$ ]] || {
+            echo "AMI parameter ${AMI_PARAMETER} did not resolve to an AMI ID: ${ami_id}" >&2
+            exit 1
+          }
+          echo "ami_id=${ami_id}" >> "$GITHUB_OUTPUT"
+          aws ec2 describe-subnets --subnet-ids "$SUBNET_ID" \
+            --query 'Subnets[0].SubnetId' --output text | grep -Fqx "$SUBNET_ID"
+          aws ec2 describe-security-groups --group-ids "$SECURITY_GROUP_ID" \
+            --query 'SecurityGroups[0].GroupId' --output text | grep -Fqx "$SECURITY_GROUP_ID"
+          aws iam get-instance-profile --instance-profile-name "$INSTANCE_PROFILE" \
+            --query InstanceProfile.InstanceProfileName --output text | grep -Fqx "$INSTANCE_PROFILE"
+
+          AMI_ID="$ami_id" python3 - <<'PY'
           import json
           import os
           from pathlib import Path
 
-          workers = json.loads(os.environ["GCP_MATRIX"])["include"]
-          worker_vcpus = sum(int(item["machine_type"].rsplit("-", 1)[1]) for item in workers)
+          # Machine classes are policy values (docs/AWS_RELEASE_WORKERS.md); an
+          # instance type outside this table is a plan bug, not a quota question.
+          VCPUS = {
+              "m5.large": 2,
+              "m5.xlarge": 4,
+              "m5.2xlarge": 8,
+              "m5.4xlarge": 16,
+              "m5.8xlarge": 32,
+          }
+          workers = json.loads(os.environ["AWS_MATRIX"])["include"]
+          unknown = sorted({item["machine_type"] for item in workers} - VCPUS.keys())
+          if unknown:
+              raise SystemExit(f"unknown EC2 instance types in the plan: {', '.join(unknown)}")
+          worker_vcpus = sum(VCPUS[item["machine_type"]] for item in workers)
           worker_instances = len(workers)
           worker_disk_gb = sum(int(item["disk_size_gb"]) for item in workers)
           has_performance = any(
-              item["resource_class"].startswith("gcp-performance") for item in workers
+              item["resource_class"].startswith("ec2-performance") for item in workers
           )
-          # The 32-vCPU builder runs first and is deleted before measurement
+          # The 32-vCPU builder runs first and is terminated before measurement
           # workers are created, so capacity is the larger phase, not their sum.
           vcpus = max(worker_vcpus, 32 if has_performance else 0)
           instances = max(worker_instances, 1 if has_performance else 0)
           disk_gb = max(worker_disk_gb, 200 if has_performance else 0)
-          global_quotas = {
-              row["metric"]: row
-              for row in json.loads(Path("global-quotas.json").read_text())["quotas"]
-          }
-          regional_quotas = {
-              row["metric"]: row
-              for row in json.loads(Path("regional-quotas.json").read_text())["quotas"]
-          }
+
+          vcpu_limit = int(json.loads(Path("vcpu-quota.json").read_text())["Quota"]["Value"])
+          vcpu_usage = sum(
+              int(cores) * int(threads)
+              for cores, threads in json.loads(Path("vcpu-usage.json").read_text())
+          )
+          gp3_limit_tib = float(json.loads(Path("gp3-quota.json").read_text())["Quota"]["Value"])
           required = {
-              "CPUS_ALL_REGIONS": (global_quotas, vcpus),
-              "CPUS": (regional_quotas, vcpus),
-              "N2_CPUS": (regional_quotas, vcpus),
-              "INSTANCES": (regional_quotas, instances),
-              "IN_USE_ADDRESSES": (regional_quotas, instances),
-              "DISKS_TOTAL_GB": (regional_quotas, disk_gb),
-              "SSD_TOTAL_GB": (regional_quotas, 200 if has_performance else 0),
+              "On-Demand Standard vCPUs (L-1216C47A)": (vcpus, vcpu_limit - vcpu_usage),
+              "gp3 storage GiB (L-7A658B76)": (disk_gb, int(gp3_limit_tib * 1024)),
           }
           failures = []
           summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
           with summary.open("a") as output:
               output.write("## Ephemeral release capacity\n\n")
-              output.write(f"- Peak instances: {instances}\n- Peak N2 vCPUs: {vcpus}\n- Peak persistent disk: {disk_gb} GB\n\n")
+              output.write(f"- Peak instances: {instances}\n- Peak vCPUs: {vcpus}\n- Peak gp3 storage: {disk_gb} GB\n")
+              output.write(f"- Region: {os.environ['REGION']}\n- AMI: `{os.environ['AMI_ID']}`\n\n")
               output.write("| Quota | Required | Available |\n| --- | ---: | ---: |\n")
-              for metric, (source, needed) in required.items():
-                  quota = source.get(metric)
-                  available = -1 if quota is None else int(quota["limit"] - quota.get("usage", 0))
+              for metric, (needed, available) in required.items():
                   output.write(f"| {metric} | {needed} | {available} |\n")
                   if available < needed:
                       failures.append(f"{metric}: requires {needed}, only {available} available")
           if failures:
-              raise SystemExit("GCP capacity preflight failed:\n- " + "\n- ".join(failures))
+              raise SystemExit("EC2 capacity preflight failed:\n- " + "\n- ".join(failures))
           PY
 
-  gate-gcp:
-    name: Run all ephemeral GCP release shards
-    if: needs.plan.outputs.gcp_shard_count != '0'
-    needs: [plan, preflight-gcp]
+  gate-aws:
+    name: Run all ephemeral EC2 release shards
+    if: needs.plan.outputs.aws_shard_count != '0'
+    needs: [plan, preflight-aws]
     runs-on: ubuntu-latest
     timeout-minutes: 180
     permissions:
@@ -380,58 +424,55 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.candidate_sha }}
 
-      - name: Authenticate to Google Cloud without a key
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+      - name: Assume the provisioner role without a stored key
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
-          workload_identity_provider: ${{ vars.RVOIP_GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.RVOIP_GCP_PROVISIONER_SERVICE_ACCOUNT }}
-
-      - name: Install Google Cloud CLI
-        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+          role-to-assume: ${{ vars.RVOIP_AWS_PROVISIONER_ROLE_ARN }}
+          aws-region: ${{ vars.RVOIP_AWS_REGION }}
 
       - name: Bind every worker to the exact candidate and gate shard
         env:
           CANDIDATE: ${{ needs.plan.outputs.candidate_sha }}
           ENVIRONMENT_ID: ${{ needs.plan.outputs.environment_id }}
-          GCP_MATRIX: ${{ needs.plan.outputs.gcp_matrix }}
+          AWS_MATRIX: ${{ needs.plan.outputs.aws_matrix }}
         run: |
           set -euo pipefail
-          mkdir -p target/gcp-controller
-          printf '%s\n' "$GCP_MATRIX" > target/gcp-controller/matrix.json
-          python3 scripts/release/gcp_fanout.py prepare \
-            --matrix target/gcp-controller/matrix.json \
+          mkdir -p target/aws-controller
+          printf '%s\n' "$AWS_MATRIX" > target/aws-controller/matrix.json
+          python3 scripts/release/aws_fanout.py prepare \
+            --matrix target/aws-controller/matrix.json \
             --candidate "$CANDIDATE" \
             --environment-id "$ENVIRONMENT_ID" \
             --run-id "$GITHUB_RUN_ID" \
             --run-attempt "$GITHUB_RUN_ATTEMPT" \
-            --output target/gcp-controller/workers.json
+            --output target/aws-controller/workers.json
           {
-            echo "## Ephemeral GCP fanout"
+            echo "## Ephemeral EC2 fanout"
             echo
             echo "- GitHub controller jobs: 1"
-            echo "- GCP workers: $(jq -r .worker_count target/gcp-controller/workers.json)"
-            echo "- N2 vCPUs: $(jq -r .required_vcpus target/gcp-controller/workers.json)"
+            echo "- EC2 workers: $(jq -r .worker_count target/aws-controller/workers.json)"
+            echo "- vCPUs: $(jq -r .required_vcpus target/aws-controller/workers.json)"
             echo "- Idle workers retained after the run: 0"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build selected performance executables once
         id: prebuild
         env:
-          CACHE_BUCKET: ${{ vars.RVOIP_GCP_CACHE_BUCKET }}
+          REGION: ${{ vars.RVOIP_AWS_REGION }}
+          CACHE_BUCKET: ${{ vars.RVOIP_AWS_CACHE_BUCKET }}
           CANDIDATE: ${{ needs.plan.outputs.candidate_sha }}
           ENVIRONMENT_ID: ${{ needs.plan.outputs.environment_id }}
-          PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
-          ZONE: ${{ vars.RVOIP_GCP_ZONE }}
-          NETWORK: ${{ vars.RVOIP_GCP_NETWORK }}
-          SUBNET: ${{ vars.RVOIP_GCP_SUBNET }}
-          BUCKET: ${{ vars.RVOIP_GCP_EVIDENCE_BUCKET }}
-          RUNNER_SERVICE_ACCOUNT: ${{ vars.RVOIP_GCP_RUNNER_SERVICE_ACCOUNT }}
+          AMI_ID: ${{ needs.preflight-aws.outputs.ami_id }}
+          SUBNET_ID: ${{ vars.RVOIP_AWS_SUBNET_ID }}
+          SECURITY_GROUP_ID: ${{ vars.RVOIP_AWS_SECURITY_GROUP_ID }}
+          INSTANCE_PROFILE: ${{ vars.RVOIP_AWS_RUNNER_INSTANCE_PROFILE }}
+          BUCKET: ${{ vars.RVOIP_AWS_EVIDENCE_BUCKET }}
         run: |
           set -euo pipefail
-          mkdir -p target/gcp-controller/prebuild
+          mkdir -p target/aws-controller/prebuild target/aws-controller/user-data
           selected_gates="$(
-            jq -r '[.workers[] | select(.resource_class | startswith("gcp-performance")) | .gates[]] | unique | join(",")' \
-              target/gcp-controller/workers.json
+            jq -r '[.workers[] | select(.resource_class | startswith("ec2-performance")) | .gates[]] | unique | join(",")' \
+              target/aws-controller/workers.json
           )"
           gates_csv="$(python3 scripts/release/prebuilt_performance.py select-gates \
             --catalog scripts/release/gates.json --gates "$selected_gates")"
@@ -449,101 +490,150 @@ jobs:
             --environment-id "$ENVIRONMENT_ID" \
             --gates "$gates_csv")"
           cache_prefix="release-cache/performance-prebuilt-v1/${cache_key}"
-          cache_result_uri="gs://${BUCKET}/${cache_prefix}/prebuild-result.json"
+          cache_result_uri="s3://${BUCKET}/${cache_prefix}/prebuild-result.json"
           cache_hit=false
-          if gcloud storage cp "$cache_result_uri" \
-            target/gcp-controller/prebuild/cached-result.json 2>/dev/null \
+          if aws s3 cp "$cache_result_uri" \
+            target/aws-controller/prebuild/cached-result.json >/dev/null 2>&1 \
             && python3 scripts/release/prebuilt_performance.py verify-result \
-              --result target/gcp-controller/prebuild/cached-result.json \
+              --result target/aws-controller/prebuild/cached-result.json \
               --candidate "$CANDIDATE" \
               --environment-id "$ENVIRONMENT_ID" \
               --gates "$gates_csv" \
               --cache-key "$cache_key"; then
-            mv target/gcp-controller/prebuild/cached-result.json \
-              target/gcp-controller/prebuild/prebuild-result.json
+            mv target/aws-controller/prebuild/cached-result.json \
+              target/aws-controller/prebuild/prebuild-result.json
             cache_hit=true
           else
-            rm -f target/gcp-controller/prebuild/cached-result.json
+            rm -f target/aws-controller/prebuild/cached-result.json
           fi
 
-          builder="rvoip-rel-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-prebuild"
-          prefix="release/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/prebuild"
+          run_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          builder="rvoip-rel-${run_id}-prebuild"
+          prefix="release/${run_id}/prebuild"
           if [[ "$cache_hit" != true ]]; then
             gates_b64="$(printf '%s' "$gates_csv" | base64 -w0)"
             environment_b64="$(printf '%s' "$ENVIRONMENT_ID" | base64 -w0)"
             cleanup_builder() {
-              gcloud compute instances delete "$builder" \
-                --project "$PROJECT" --zone "$ZONE" --quiet >/dev/null 2>&1 || true
+              builder_ids="$(aws ec2 describe-instances \
+                --filters "Name=tag:Name,Values=${builder}" \
+                  Name=tag:managed-by,Values=github-actions \
+                  Name=instance-state-name,Values=pending,running,stopping,stopped \
+                --query 'Reservations[].Instances[].InstanceId' \
+                --output text 2>/dev/null | tr '\t' '\n' | grep -v '^None$' || true)"
+              if [[ -n "$builder_ids" ]]; then
+                # shellcheck disable=SC2086
+                aws ec2 terminate-instances --instance-ids $builder_ids >/dev/null 2>&1 || true
+              fi
             }
             trap cleanup_builder EXIT
 
-            gcloud compute instances create "$builder" \
-              --project "$PROJECT" \
-              --zone "$ZONE" \
-              --machine-type n2-standard-32 \
-              --min-cpu-platform "$MIN_CPU_PLATFORM" \
-              --network "$NETWORK" \
-              --subnet "$SUBNET" \
-              --image-family ubuntu-2404-lts-amd64 \
-              --image-project ubuntu-os-cloud \
-              --boot-disk-type pd-balanced \
-              --boot-disk-size 200GB \
-              --boot-disk-auto-delete \
-              --service-account "$RUNNER_SERVICE_ACCOUNT" \
-              --scopes cloud-platform \
-              --shielded-secure-boot \
-              --shielded-vtpm \
-              --shielded-integrity-monitoring \
-              --labels rvoip-role=release-prebuild,managed-by=github-actions \
-              --metadata "rvoip-candidate=${CANDIDATE},rvoip-run-id=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT},rvoip-evidence-bucket=${BUCKET},rvoip-cache-bucket=${CACHE_BUCKET},rvoip-prefix=${prefix},rvoip-prebuild-cache-key=${cache_key},rvoip-gates-b64=${gates_b64},rvoip-environment-b64=${environment_b64}" \
-              --metadata-from-file startup-script=infra/release-runners/gcp-performance-prebuild-startup.sh \
-              > target/gcp-controller/prebuild/create.log
+            python3 scripts/release/aws_fanout.py user-data \
+              --startup infra/release-runners/aws-performance-prebuild-startup.sh \
+              --env "RVOIP_AWS_REGION=${REGION}" \
+              --env "RVOIP_CANDIDATE=${CANDIDATE}" \
+              --env "RVOIP_RUN_ID=${run_id}" \
+              --env "RVOIP_SHARD_ID=prebuild" \
+              --env "RVOIP_RESOURCE_CLASS=ec2-prebuild" \
+              --env "RVOIP_EVIDENCE_BUCKET=${BUCKET}" \
+              --env "RVOIP_CACHE_BUCKET=${CACHE_BUCKET}" \
+              --env "RVOIP_PREFIX=${prefix}" \
+              --env "RVOIP_GATES_B64=${gates_b64}" \
+              --env "RVOIP_ENVIRONMENT_B64=${environment_b64}" \
+              --env "RVOIP_PREBUILT_URI=" \
+              --env "RVOIP_PREBUILT_SHA256=" \
+              --env "RVOIP_EXTERNAL_MEMORY_DIAGNOSTICS=0" \
+              --env "RVOIP_MIMALLOC_ALLOW_THP=" \
+              --env "RVOIP_PREBUILD_CACHE_KEY=${cache_key}" \
+              --output target/aws-controller/user-data/prebuild.gz
 
-            result_uri="gs://${BUCKET}/${prefix}/prebuild-result.json"
+            # The janitor terminates anything still alive after this deadline.
+            expires_at="$(date -u -d '+4 hours' +%Y-%m-%dT%H:%M:%SZ)"
+            tag_list() {
+              # key=value ... -> Tags=[{Key=key,Value=value},...] for --tag-specifications
+              local pairs=()
+              for pair in "$@"; do
+                pairs+=("{Key=${pair%%=*},Value=${pair#*=}}")
+              done
+              local IFS=,
+              printf 'Tags=[%s]' "${pairs[*]}"
+            }
+            tags="$(tag_list \
+              "Name=${builder}" \
+              managed-by=github-actions \
+              rvoip-role=release-prebuild \
+              "rvoip-run-id=${run_id}" \
+              "rvoip-candidate=${CANDIDATE}" \
+              rvoip-shard-id=prebuild \
+              rvoip-resource-class=ec2-prebuild \
+              "rvoip-expires-at=${expires_at}")"
+            aws ec2 run-instances \
+              --image-id "$AMI_ID" \
+              --instance-type m5.8xlarge \
+              --subnet-id "$SUBNET_ID" \
+              --security-group-ids "$SECURITY_GROUP_ID" \
+              --iam-instance-profile "Name=${INSTANCE_PROFILE}" \
+              --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=200,VolumeType=gp3,DeleteOnTermination=true}' \
+              --metadata-options HttpTokens=required,HttpEndpoint=enabled,InstanceMetadataTags=enabled \
+              --instance-initiated-shutdown-behavior terminate \
+              --user-data fileb://target/aws-controller/user-data/prebuild.gz \
+              --tag-specifications \
+                "ResourceType=instance,${tags}" \
+                "ResourceType=volume,${tags}" \
+              --output json > target/aws-controller/prebuild/create.json
+            builder_id="$(jq -r '.Instances[0].InstanceId' target/aws-controller/prebuild/create.json)"
+
+            result_uri="s3://${BUCKET}/${prefix}/prebuild-result.json"
             for attempt in $(seq 1 120); do
-              if gcloud storage cp "$result_uri" \
-                target/gcp-controller/prebuild/prebuild-result.json 2>/dev/null; then
+              if aws s3 cp "$result_uri" \
+                target/aws-controller/prebuild/prebuild-result.json >/dev/null 2>&1; then
                 break
               fi
-              state="$(gcloud compute instances describe "$builder" \
-                --project "$PROJECT" --zone "$ZONE" --format='value(status)' || true)"
-              if [[ "$state" == TERMINATED ]]; then
-                echo "performance prebuilder stopped without an immutable result" >&2
-                break
-              fi
+              state="$(aws ec2 describe-instances --instance-ids "$builder_id" \
+                --query 'Reservations[].Instances[].State.Name' --output text 2>/dev/null || true)"
+              case "$state" in
+                stopped|terminated|shutting-down|stopping)
+                  # The result upload and the self-initiated shutdown can cross
+                  # between polls; check the exact object once more.
+                  if ! aws s3 cp "$result_uri" \
+                    target/aws-controller/prebuild/prebuild-result.json >/dev/null 2>&1; then
+                    echo "performance prebuilder stopped without an immutable result" >&2
+                  fi
+                  break
+                  ;;
+              esac
               echo "Waiting for exact-candidate performance bundle (poll ${attempt}/120)"
               sleep 20
             done
-            gcloud storage cp "gs://${BUCKET}/${prefix}/prebuild.log" \
-              target/gcp-controller/prebuild/prebuild.log 2>/dev/null || true
+            aws s3 cp "s3://${BUCKET}/${prefix}/prebuild.log" \
+              target/aws-controller/prebuild/prebuild.log >/dev/null 2>&1 || true
           fi
-          test -f target/gcp-controller/prebuild/prebuild-result.json
+          test -f target/aws-controller/prebuild/prebuild-result.json
           python3 scripts/release/prebuilt_performance.py verify-result \
-            --result target/gcp-controller/prebuild/prebuild-result.json \
+            --result target/aws-controller/prebuild/prebuild-result.json \
             --candidate "$CANDIDATE" \
             --environment-id "$ENVIRONMENT_ID" \
             --gates "$gates_csv" \
             --cache-key "$cache_key" \
             --github-output "$GITHUB_OUTPUT"
-          manifest_uri="$(jq -r .manifest_uri target/gcp-controller/prebuild/prebuild-result.json)"
-          manifest_sha="$(jq -r .manifest_sha256 target/gcp-controller/prebuild/prebuild-result.json)"
-          gcloud storage cp "$manifest_uri" \
-            target/gcp-controller/prebuild/performance-manifest.json
-          echo "${manifest_sha}  target/gcp-controller/prebuild/performance-manifest.json" \
+          manifest_uri="$(jq -r .manifest_uri target/aws-controller/prebuild/prebuild-result.json)"
+          manifest_sha="$(jq -r .manifest_sha256 target/aws-controller/prebuild/prebuild-result.json)"
+          aws s3 cp "$manifest_uri" \
+            target/aws-controller/prebuild/performance-manifest.json >/dev/null
+          echo "${manifest_sha}  target/aws-controller/prebuild/performance-manifest.json" \
             | sha256sum --check --status
-          duration="$(jq -r .duration_seconds target/gcp-controller/prebuild/prebuild-result.json)"
-          count="$(jq -r '.selected_gate_ids | length' target/gcp-controller/prebuild/prebuild-result.json)"
+          duration="$(jq -r .duration_seconds target/aws-controller/prebuild/prebuild-result.json)"
+          count="$(jq -r '.selected_gate_ids | length' target/aws-controller/prebuild/prebuild-result.json)"
           {
             echo
             echo "### Shared exact-candidate performance build"
             echo
             echo "- Selected gates: ${count}"
             if [[ "$cache_hit" == true ]]; then
-              echo "- Bundle source: verified exact-candidate GCS cache"
+              echo "- Bundle source: verified exact-candidate S3 cache"
               echo "- Cache lookup and verification: $(( $(date +%s) - cache_started ))s"
               echo "- Original build and package duration avoided: ${duration}s"
             else
-              echo "- Bundle source: ephemeral n2-standard-32 builder"
+              echo "- Bundle source: ephemeral m5.8xlarge builder"
               echo "- Build and package duration: ${duration}s"
             fi
             echo "- Builder retained after this step: no"
@@ -551,20 +641,32 @@ jobs:
 
       - name: Create every ephemeral release worker concurrently
         env:
+          REGION: ${{ vars.RVOIP_AWS_REGION }}
           CANDIDATE: ${{ needs.plan.outputs.candidate_sha }}
-          CACHE_BUCKET: ${{ vars.RVOIP_GCP_CACHE_BUCKET }}
-          PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
-          ZONE: ${{ vars.RVOIP_GCP_ZONE }}
-          NETWORK: ${{ vars.RVOIP_GCP_NETWORK }}
-          SUBNET: ${{ vars.RVOIP_GCP_SUBNET }}
-          BUCKET: ${{ vars.RVOIP_GCP_EVIDENCE_BUCKET }}
-          RUNNER_SERVICE_ACCOUNT: ${{ vars.RVOIP_GCP_RUNNER_SERVICE_ACCOUNT }}
+          CACHE_BUCKET: ${{ vars.RVOIP_AWS_CACHE_BUCKET }}
+          AMI_ID: ${{ needs.preflight-aws.outputs.ami_id }}
+          SUBNET_ID: ${{ vars.RVOIP_AWS_SUBNET_ID }}
+          SECURITY_GROUP_ID: ${{ vars.RVOIP_AWS_SECURITY_GROUP_ID }}
+          INSTANCE_PROFILE: ${{ vars.RVOIP_AWS_RUNNER_INSTANCE_PROFILE }}
+          BUCKET: ${{ vars.RVOIP_AWS_EVIDENCE_BUCKET }}
           PREBUILT_URI: ${{ steps.prebuild.outputs.bundle_uri }}
           PREBUILT_SHA256: ${{ steps.prebuild.outputs.bundle_sha256 }}
           EXTERNAL_MEMORY_DIAGNOSTICS: ${{ inputs.profile == 'remote-diagnostic' && '1' || '0' }}
         run: |
           set -euo pipefail
-          mkdir -p target/gcp-controller/create-logs
+          mkdir -p target/aws-controller/create-logs target/aws-controller/user-data
+          run_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          # The janitor terminates anything still alive after this deadline.
+          expires_at="$(date -u -d '+4 hours' +%Y-%m-%dT%H:%M:%SZ)"
+          tag_list() {
+            # key=value ... -> Tags=[{Key=key,Value=value},...] for --tag-specifications
+            local pairs=()
+            for pair in "$@"; do
+              pairs+=("{Key=${pair%%=*},Value=${pair#*=}}")
+            done
+            local IFS=,
+            printf 'Tags=[%s]' "${pairs[*]}"
+          }
           pids=()
           while IFS= read -r descriptor; do
             shard_id="$(jq -r .id <<< "$descriptor")"
@@ -576,258 +678,306 @@ jobs:
             disk_size_gb="$(jq -r .disk_size_gb <<< "$descriptor")"
             gates_b64="$(jq -r .gates_b64 <<< "$descriptor")"
             environment_b64="$(jq -r .environment_b64 <<< "$descriptor")"
+            user_data="target/aws-controller/user-data/${shard_id}.gz"
+            python3 scripts/release/aws_fanout.py user-data \
+              --startup infra/release-runners/aws-release-startup.sh \
+              --shutdown infra/release-runners/aws-release-shutdown.sh \
+              --env "RVOIP_AWS_REGION=${REGION}" \
+              --env "RVOIP_CANDIDATE=${CANDIDATE}" \
+              --env "RVOIP_RUN_ID=${run_id}" \
+              --env "RVOIP_SHARD_ID=${shard_id}" \
+              --env "RVOIP_RESOURCE_CLASS=${resource_class}" \
+              --env "RVOIP_EVIDENCE_BUCKET=${BUCKET}" \
+              --env "RVOIP_CACHE_BUCKET=${CACHE_BUCKET}" \
+              --env "RVOIP_PREFIX=${prefix}" \
+              --env "RVOIP_GATES_B64=${gates_b64}" \
+              --env "RVOIP_ENVIRONMENT_B64=${environment_b64}" \
+              --env "RVOIP_PREBUILT_URI=${PREBUILT_URI}" \
+              --env "RVOIP_PREBUILT_SHA256=${PREBUILT_SHA256}" \
+              --env "RVOIP_EXTERNAL_MEMORY_DIAGNOSTICS=${EXTERNAL_MEMORY_DIAGNOSTICS}" \
+              --env "RVOIP_MIMALLOC_ALLOW_THP=" \
+              --output "$user_data"
+            tags="$(tag_list \
+              "Name=${worker}" \
+              managed-by=github-actions \
+              rvoip-role=release-gate \
+              "rvoip-run-id=${run_id}" \
+              "rvoip-candidate=${CANDIDATE}" \
+              "rvoip-shard-id=${shard_id}" \
+              "rvoip-resource-class=${resource_class}" \
+              "rvoip-expires-at=${expires_at}")"
             (
-              gcloud compute instances create "$worker" \
-                --project "$PROJECT" \
-                --zone "$ZONE" \
-                --machine-type "$machine_type" \
-                --min-cpu-platform "$MIN_CPU_PLATFORM" \
-                --network "$NETWORK" \
-                --subnet "$SUBNET" \
-                --image-family ubuntu-2404-lts-amd64 \
-                --image-project ubuntu-os-cloud \
-                --boot-disk-type "$disk_type" \
-                --boot-disk-size "${disk_size_gb}GB" \
-                --boot-disk-auto-delete \
-                --service-account "$RUNNER_SERVICE_ACCOUNT" \
-                --scopes cloud-platform \
-                --shielded-secure-boot \
-                --shielded-vtpm \
-                --shielded-integrity-monitoring \
-                --labels rvoip-role=release-gate,managed-by=github-actions \
-                --metadata "rvoip-candidate=${CANDIDATE},rvoip-run-id=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT},rvoip-shard-id=${shard_id},rvoip-resource-class=${resource_class},rvoip-evidence-bucket=${BUCKET},rvoip-cache-bucket=${CACHE_BUCKET},rvoip-prefix=${prefix},rvoip-gates-b64=${gates_b64},rvoip-environment-b64=${environment_b64},rvoip-prebuilt-uri=${PREBUILT_URI},rvoip-prebuilt-sha256=${PREBUILT_SHA256},rvoip-external-memory-diagnostics=${EXTERNAL_MEMORY_DIAGNOSTICS}" \
-                --metadata-from-file \
-                  startup-script=infra/release-runners/gcp-release-startup.sh,shutdown-script=infra/release-runners/gcp-release-shutdown.sh
-            ) > "target/gcp-controller/create-logs/${shard_id}.log" 2>&1 &
+              aws ec2 run-instances \
+                --image-id "$AMI_ID" \
+                --instance-type "$machine_type" \
+                --subnet-id "$SUBNET_ID" \
+                --security-group-ids "$SECURITY_GROUP_ID" \
+                --iam-instance-profile "Name=${INSTANCE_PROFILE}" \
+                --block-device-mappings "DeviceName=/dev/sda1,Ebs={VolumeSize=${disk_size_gb},VolumeType=${disk_type},DeleteOnTermination=true}" \
+                --metadata-options HttpTokens=required,HttpEndpoint=enabled,InstanceMetadataTags=enabled \
+                --instance-initiated-shutdown-behavior terminate \
+                --user-data "fileb://${user_data}" \
+                --tag-specifications \
+                  "ResourceType=instance,${tags}" \
+                  "ResourceType=volume,${tags}" \
+                --output json
+            ) > "target/aws-controller/create-logs/${shard_id}.log" 2>&1 &
             pids+=("$!")
-          done < <(jq -c '.workers[]' target/gcp-controller/workers.json)
+          done < <(jq -c '.workers[]' target/aws-controller/workers.json)
 
           status=0
           for pid in "${pids[@]}"; do
             wait "$pid" || status=1
           done
           if (( status != 0 )); then
-            tail -n 100 target/gcp-controller/create-logs/*.log
+            tail -n 100 target/aws-controller/create-logs/*.log
             exit "$status"
           fi
 
       - name: Wait for every immutable worker result
         env:
-          PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
-          ZONE: ${{ vars.RVOIP_GCP_ZONE }}
-          BUCKET: ${{ vars.RVOIP_GCP_EVIDENCE_BUCKET }}
+          BUCKET: ${{ vars.RVOIP_AWS_EVIDENCE_BUCKET }}
         run: |
           set -euo pipefail
-          mkdir -p target/gcp-controller/downloads
-          expected="$(jq -r .worker_count target/gcp-controller/workers.json)"
-          object_root="gs://${BUCKET}/release/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          run_prefix="rvoip-rel-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-"
+          mkdir -p target/aws-controller/downloads
+          expected="$(jq -r .worker_count target/aws-controller/workers.json)"
+          run_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          builder="rvoip-rel-${run_id}-prebuild"
           for attempt in $(seq 1 340); do
-            gcloud storage ls --recursive "${object_root}/" \
-              > target/gcp-controller/objects.txt 2>/dev/null || true
-            gcloud compute instances list \
-              --project "$PROJECT" \
-              --filter="name~'^${run_prefix}'" \
-              --format='csv[no-heading](name,status)' \
-              > target/gcp-controller/states.csv
+            {
+              aws s3api list-objects-v2 \
+                --bucket "$BUCKET" \
+                --prefix "release/${run_id}/" \
+                --query 'Contents[].Key' \
+                --output text 2>/dev/null \
+                | tr '\t' '\n' \
+                | awk -v bucket="$BUCKET" '$0 != "" && $0 != "None" { print "s3://" bucket "/" $0 }'
+            } > target/aws-controller/objects.txt || true
+            aws ec2 describe-instances \
+              --filters "Name=tag:rvoip-run-id,Values=${run_id}" Name=tag:managed-by,Values=github-actions \
+              --query 'Reservations[].Instances[].[Tags[?Key==`Name`]|[0].Value,State.Name]' \
+              --output text | tr '\t' ',' > target/aws-controller/states-all.csv
+            awk -F, -v builder="$builder" 'NF >= 2 && $1 != builder' \
+              target/aws-controller/states-all.csv > target/aws-controller/states.csv
             completed=0
             terminated_without_result=()
             while IFS= read -r descriptor; do
               shard_id="$(jq -r .id <<< "$descriptor")"
               worker="$(jq -r .name <<< "$descriptor")"
               prefix="$(jq -r .prefix <<< "$descriptor")"
-              directory="target/gcp-controller/downloads/${shard_id}"
-              result_uri="gs://${BUCKET}/${prefix}/result.json"
+              directory="target/aws-controller/downloads/${shard_id}"
+              result_uri="s3://${BUCKET}/${prefix}/result.json"
               mkdir -p "$directory"
               if [[ ! -f "${directory}/result.json" ]] \
-                && grep -Fqx "$result_uri" target/gcp-controller/objects.txt; then
-                gcloud storage cp "$result_uri" "${directory}/result.json"
+                && grep -Fqx "$result_uri" target/aws-controller/objects.txt; then
+                aws s3 cp "$result_uri" "${directory}/result.json" >/dev/null
               fi
               if [[ -f "${directory}/result.json" ]]; then
                 completed=$((completed + 1))
                 continue
               fi
-              state="$(awk -F, -v worker="$worker" '$1 == worker { print $2 }' target/gcp-controller/states.csv)"
-              if [[ "$state" == TERMINATED ]]; then
-                # The result upload and instance-state update can cross between
-                # the two bulk polls. Check the exact object once more before
-                # treating a stopped worker as an evidence failure.
-                if gcloud storage cp "$result_uri" "${directory}/result.json" 2>/dev/null; then
-                  completed=$((completed + 1))
-                  continue
-                fi
-                terminated_without_result+=("$worker")
-              fi
-            done < <(jq -c '.workers[]' target/gcp-controller/workers.json)
+              state="$(awk -F, -v worker="$worker" '$1 == worker { print $2 }' target/aws-controller/states.csv)"
+              case "$state" in
+                stopped|terminated|shutting-down|stopping)
+                  # The result upload and instance-state update can cross between
+                  # the two bulk polls. Check the exact object once more before
+                  # treating a stopped worker as an evidence failure.
+                  if aws s3 cp "$result_uri" "${directory}/result.json" >/dev/null 2>&1; then
+                    completed=$((completed + 1))
+                    continue
+                  fi
+                  terminated_without_result+=("$worker")
+                  ;;
+              esac
+            done < <(jq -c '.workers[]' target/aws-controller/workers.json)
 
             # A candidate that has already failed the bounded performance,
             # burst, or proxy lane cannot become releasable by finishing an
             # hour-long soak.  Preserve all early results, then stop only the
             # still-running deferred workers so fixes can be verified without
             # waiting for proof that can no longer qualify this candidate.
-            cutoff_json="$(python3 scripts/release/gcp_fanout.py \
+            cutoff_json="$(python3 scripts/release/aws_fanout.py \
               early-failure-decision \
-              --manifest target/gcp-controller/workers.json \
-              --downloads target/gcp-controller/downloads \
-              --states target/gcp-controller/states.csv)"
+              --manifest target/aws-controller/workers.json \
+              --downloads target/aws-controller/downloads \
+              --states target/aws-controller/states.csv)"
             while IFS= read -r failed_shard; do
-              announcement="target/gcp-controller/downloads/${failed_shard}/failure-announced"
+              announcement="target/aws-controller/downloads/${failed_shard}/failure-announced"
               if [[ ! -f "$announcement" ]]; then
-                echo "::error title=GCP release gate failed::${failed_shard} reported or produced invalid failure evidence"
+                echo "::error title=EC2 release gate failed::${failed_shard} reported or produced invalid failure evidence"
                 touch "$announcement"
               fi
             done < <(jq -r '.failed_shards[]' <<< "$cutoff_json")
             mapfile -t deferred_running \
               < <(jq -r '.deferred_running[]' <<< "$cutoff_json")
             if [[ "$(jq -r .should_stop <<< "$cutoff_json")" == true \
-              && ! -f target/gcp-controller/early-failure-cutoff.txt ]]; then
+              && ! -f target/aws-controller/early-failure-cutoff.txt ]]; then
               early_expected="$(jq -r .early_expected <<< "$cutoff_json")"
               early_settled="$(jq -r .early_settled <<< "$cutoff_json")"
               observed_failures="$(jq '.failed_shards | length' <<< "$cutoff_json")"
               printf '%s\n' "${deferred_running[@]}" \
-                > target/gcp-controller/early-failure-cutoff.txt
-              echo "::error title=Release candidate rejected early::Stopping ${#deferred_running[@]} deferred GCP workers after the bounded lane failed"
+                > target/aws-controller/early-failure-cutoff.txt
+              echo "::error title=Release candidate rejected early::Stopping ${#deferred_running[@]} deferred EC2 workers after the bounded lane failed"
               {
                 echo
                 echo "### Early failure cutoff"
                 echo
-                echo "- Bounded GCP workers settled: ${early_settled}/${early_expected}"
+                echo "- Bounded EC2 workers settled: ${early_settled}/${early_expected}"
                 echo "- Observed failures: ${observed_failures}"
                 echo "- Deferred workers stopped: ${#deferred_running[@]}"
                 echo "- Completed evidence remains reusable when its exact digests match."
               } >> "$GITHUB_STEP_SUMMARY"
-              gcloud compute instances stop "${deferred_running[@]}" \
-                --project "$PROJECT" --zone "$ZONE" --quiet || true
+              # An ACPI stop runs the shutdown checkpoint, which snapshots
+              # partial evidence; the terminate step reclaims the instance.
+              deferred_names="$(IFS=,; printf '%s' "${deferred_running[*]}")"
+              mapfile -t deferred_ids < <(
+                aws ec2 describe-instances \
+                  --filters "Name=tag:rvoip-run-id,Values=${run_id}" \
+                    Name=tag:managed-by,Values=github-actions \
+                    "Name=tag:Name,Values=${deferred_names}" \
+                    Name=instance-state-name,Values=pending,running \
+                  --query 'Reservations[].Instances[].InstanceId' \
+                  --output text 2>/dev/null | tr '\t' '\n' | grep -v '^None$' || true
+              )
+              if (( ${#deferred_ids[@]} != 0 )); then
+                aws ec2 stop-instances --instance-ids "${deferred_ids[@]}" >/dev/null || true
+              fi
             fi
             settled=$((completed + ${#terminated_without_result[@]}))
             if (( settled == expected )); then
               if (( ${#terminated_without_result[@]} != 0 )); then
                 printf '%s\n' "${terminated_without_result[@]}" \
-                  > target/gcp-controller/terminated-without-result.txt
-                echo "GCP workers terminated without immutable results: ${terminated_without_result[*]}" >&2
+                  > target/aws-controller/terminated-without-result.txt
+                echo "EC2 workers terminated without immutable results: ${terminated_without_result[*]}" >&2
               fi
               exit 0
             fi
-            echo "GCP release evidence: ${completed} complete, ${#terminated_without_result[@]} failed without a result, ${expected} total (poll ${attempt}/340)"
+            echo "EC2 release evidence: ${completed} complete, ${#terminated_without_result[@]} failed without a result, ${expected} total (poll ${attempt}/340)"
             sleep 30
           done
-          echo "GCP release fanout exceeded its 170-minute evidence deadline" >&2
+          echo "EC2 release fanout exceeded its 170-minute evidence deadline" >&2
           exit 1
 
       - name: Download and verify every shard evidence bundle
         if: always()
         env:
-          BUCKET: ${{ vars.RVOIP_GCP_EVIDENCE_BUCKET }}
+          BUCKET: ${{ vars.RVOIP_AWS_EVIDENCE_BUCKET }}
         run: |
           set -euo pipefail
           pids=()
           while IFS= read -r descriptor; do
             shard_id="$(jq -r .id <<< "$descriptor")"
             prefix="$(jq -r .prefix <<< "$descriptor")"
-            directory="target/gcp-controller/downloads/${shard_id}"
+            directory="target/aws-controller/downloads/${shard_id}"
             (
               mkdir -p "$directory"
               if [[ ! -f "${directory}/result.json" ]]; then
-                gcloud storage cp \
-                  "gs://${BUCKET}/${prefix}/result.json" \
+                aws s3 cp \
+                  "s3://${BUCKET}/${prefix}/result.json" \
                   "${directory}/result.json" || true
               fi
               if [[ -f "${directory}/result.json" ]]; then
-                gcloud storage cp \
-                  "gs://${BUCKET}/${prefix}/release-shard.tar.gz" \
+                aws s3 cp \
+                  "s3://${BUCKET}/${prefix}/release-shard.tar.gz" \
                   "${directory}/release-shard.tar.gz"
-                gcloud storage cp \
-                  "gs://${BUCKET}/${prefix}/qualification.log" \
+                aws s3 cp \
+                  "s3://${BUCKET}/${prefix}/qualification.log" \
                   "${directory}/qualification.log" || true
               fi
-            ) > "target/gcp-controller/download-${shard_id}.log" 2>&1 &
+            ) > "target/aws-controller/download-${shard_id}.log" 2>&1 &
             pids+=("$!")
-          done < <(jq -c '.workers[]' target/gcp-controller/workers.json)
+          done < <(jq -c '.workers[]' target/aws-controller/workers.json)
 
           status=0
           for pid in "${pids[@]}"; do
             wait "$pid" || status=1
           done
           if (( status != 0 )); then
-            tail -n 100 target/gcp-controller/download-*.log
+            tail -n 100 target/aws-controller/download-*.log
           fi
-          python3 scripts/release/gcp_fanout.py verify \
-            --manifest target/gcp-controller/workers.json \
-            --downloads target/gcp-controller/downloads \
+          python3 scripts/release/aws_fanout.py verify \
+            --manifest target/aws-controller/workers.json \
+            --downloads target/aws-controller/downloads \
             --output target/release-shard
 
-      - name: Delete all workers and attached disks
+      - name: Terminate all workers and root volumes
         if: always()
-        env:
-          PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
-          ZONE: ${{ vars.RVOIP_GCP_ZONE }}
         run: |
           set -euo pipefail
-          run_prefix="rvoip-rel-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-"
+          run_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          # Root volumes are DeleteOnTermination=true, so terminating the
+          # instance reclaims the disk without a second sweep.
           mapfile -t workers < <(
-            gcloud compute instances list \
-              --project "$PROJECT" \
-              --filter="labels.managed-by=github-actions AND name~'^${run_prefix}'" \
-              --format='value(name)'
+            aws ec2 describe-instances \
+              --filters "Name=tag:rvoip-run-id,Values=${run_id}" \
+                Name=tag:managed-by,Values=github-actions \
+                Name=instance-state-name,Values=pending,running,stopping,stopped \
+              --query 'Reservations[].Instances[].InstanceId' \
+              --output text | tr '\t' '\n' | grep -v '^None$' || true
           )
           if (( ${#workers[@]} != 0 )); then
-            gcloud compute instances delete "${workers[@]}" \
-              --project "$PROJECT" \
-              --zone "$ZONE" \
-              --quiet
+            aws ec2 terminate-instances --instance-ids "${workers[@]}" \
+              --output json > target/aws-controller/terminate.json
           fi
 
-      - name: Upload merged GCP shard evidence
+      - name: Upload merged EC2 shard evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: release-gate-shard-gcp-controller
+          name: release-gate-shard-aws-controller
           path: target/release-shard/
           retention-days: 90
           if-no-files-found: warn
 
-      - name: Upload GCP controller diagnostics
+      - name: Upload EC2 controller diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: release-gcp-controller-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/gcp-controller/
+          name: release-aws-controller-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/aws-controller/
           retention-days: 30
           if-no-files-found: warn
 
-  cleanup-gcp:
-    name: Delete every ephemeral release worker
-    if: always() && needs.plan.outputs.gcp_shard_count != '0'
-    needs: [plan, gate-gcp]
+  cleanup-aws:
+    name: Terminate every ephemeral release worker
+    if: always() && needs.plan.outputs.aws_shard_count != '0'
+    needs: [plan, gate-aws]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
       id-token: write
     steps:
-      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+      - name: Assume the provisioner role without a stored key
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
-          workload_identity_provider: ${{ vars.RVOIP_GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.RVOIP_GCP_PROVISIONER_SERVICE_ACCOUNT }}
-      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+          role-to-assume: ${{ vars.RVOIP_AWS_PROVISIONER_ROLE_ARN }}
+          aws-region: ${{ vars.RVOIP_AWS_REGION }}
       - name: Sweep workers left by interrupted controllers
         env:
-          PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
-          RUN_PREFIX: rvoip-rel-${{ github.run_id }}-${{ github.run_attempt }}-
+          RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          instances="$(gcloud compute instances list --project "$PROJECT" --filter="labels.managed-by=github-actions AND name~'^${RUN_PREFIX}'" --format='csv[no-heading](name,zone.basename())' || true)"
-          while IFS=, read -r worker zone; do
-            test -n "$worker" || continue
-            gcloud compute instances delete "$worker" --project "$PROJECT" --zone "$zone" --quiet
-          done <<< "$instances"
-          remaining="$(gcloud compute instances list --project "$PROJECT" --filter="labels.managed-by=github-actions AND name~'^${RUN_PREFIX}'" --format='value(name)')"
+          list_run_instances() {
+            aws ec2 describe-instances \
+              --filters "Name=tag:rvoip-run-id,Values=${RUN_ID}" \
+                Name=tag:managed-by,Values=github-actions \
+                Name=instance-state-name,Values=pending,running,stopping,stopped \
+              --query 'Reservations[].Instances[].InstanceId' \
+              --output text | tr '\t' '\n' | grep -v '^None$' || true
+          }
+          mapfile -t instances < <(list_run_instances)
+          if (( ${#instances[@]} != 0 )); then
+            echo "Terminating workers left behind: ${instances[*]}"
+            aws ec2 terminate-instances --instance-ids "${instances[@]}" >/dev/null
+          fi
+          remaining="$(list_run_instances)"
           test -z "$remaining"
 
   collect:
     name: Release Gate
     if: always()
-    needs: [plan, gate-hosted, gate-gcp, cleanup-gcp]
+    needs: [plan, gate-hosted, gate-aws, cleanup-aws]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

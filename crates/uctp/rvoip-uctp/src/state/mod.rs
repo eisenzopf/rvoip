@@ -18,7 +18,9 @@ pub use coordinator::{
     MAX_SESSIONS_PER_PEER, MAX_STREAMS_PER_CONNECTION, SIGNALING_SEND_TIMEOUT, UCTP_DATA_SCOPE,
     UCTP_RECEIVE_ONLY_SCOPE, UCTP_SESSION_SCOPE, UCTP_SUBSCRIBE_SCOPE,
 };
-pub use events::UctpSessionEvent;
+pub use events::{
+    ConversationClosedReply, ConversationListReply, ConversationOpenedReply, UctpSessionEvent,
+};
 pub use orchestrator_handler::{OrchestratorSubscriptionHandler, DEFAULT_ACCEPTED_CODECS};
 pub use session::{SessionInput, SessionMachine, UctpSessionState};
 pub use signature_policy::{Sig9421Config, Sig9421Policy};

@@ -475,6 +475,7 @@ pub mod media_stream;
 /// Typed, redacted SIP options for transport-neutral outbound origination.
 pub mod originate;
 pub mod profiled_adapter;
+mod response_diagnostics;
 pub mod server;
 
 // These modules remain public for existing internal-style integrations, but
@@ -547,7 +548,10 @@ pub use api::handlers::{
 };
 
 // Call control
-pub use api::audio::{AudioReceiver, AudioSender, AudioStream};
+pub use api::audio::{
+    AudioGenerationAdvance, AudioReceiver, AudioSendError, AudioSendMetrics, AudioSender,
+    AudioStream,
+};
 // The PCM frame type carried by `AudioStream` (`SessionHandle::audio()`).
 // Re-exported so clients can construct frames (mic -> RTP) without taking a
 // direct dependency on `rvoip-media-core`.
@@ -583,7 +587,8 @@ pub use auth::{
     JwksJwtValidator, JwtValidator, OAuth2IntrospectionValidator, PasswordVerifier,
     SipAuthChallenge, SipAuthContext, SipAuthDecision, SipAuthPolicy, SipAuthScheme,
     SipAuthService, SipAuthSource, SipClientAuth, SipDigestAuthService, SipIncomingAuthenticator,
-    SipListenerAuthPolicy, SipPrincipalAuthDecision, SipTransportSecurityContext,
+    SipIngressEvent, SipIngressObserver, SipIngressOutcome, SipListenerAuthPolicy,
+    SipPrincipalAuthDecision, SipSourceRateLimit, SipTransportSecurityContext,
     TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
 };
 pub use rvoip_media_core::performance::pool::PoolConfig as MediaPoolConfig;
@@ -614,8 +619,9 @@ pub use api::unified::{
     SymmetricRtpPolicy,
 };
 pub use api::{
-    Config, MediaMode, RegistrationHandle, RegistrationInfo, RegistrationStatus, SdesBase64Mode,
-    SipContactMode, SipTlsMode, SrtpKeyingMode, SrtpSuitePolicy, UnifiedCoordinator,
+    Config, DtlsSetupRole, MediaMode, RegistrationHandle, RegistrationInfo, RegistrationStatus,
+    SdesBase64Mode, SipContactMode, SipTlsMode, SrtpKeyingMode, SrtpSuitePolicy,
+    UnifiedCoordinator,
 };
 
 // Events
@@ -657,10 +663,10 @@ pub mod prelude {
         CallHandlerDecision, CallId, CallLifecycleSnapshot, CallProgressInfo, CallState,
         CallTerminalInfo, CallbackPeer, CallbackPeerBuilder, CallbackPeerControl, Config,
         DialogInfo, DialogInfoDocument, DialogPackageEvent, DialogPackageState,
-        DialogSubscriptionHandle, EndReason, Endpoint, EndpointAccount, EndpointAccountConfig,
-        EndpointAudio, EndpointAudioFrame, EndpointAudioReceiver, EndpointAudioSender,
-        EndpointBuilder, EndpointCall, EndpointCallId, EndpointConfig, EndpointControl,
-        EndpointEvent, EndpointEvents, EndpointIncomingCall, EndpointMediaConfig,
+        DialogSubscriptionHandle, DtlsSetupRole, EndReason, Endpoint, EndpointAccount,
+        EndpointAccountConfig, EndpointAudio, EndpointAudioFrame, EndpointAudioReceiver,
+        EndpointAudioSender, EndpointBuilder, EndpointCall, EndpointCallId, EndpointConfig,
+        EndpointControl, EndpointEvent, EndpointEvents, EndpointIncomingCall, EndpointMediaConfig,
         EndpointNetworkConfig, EndpointProfile, EndpointProfileName, EndpointRegistrationInfo,
         EndpointRegistrationStatus, EndpointSipTrace, EndpointSrtpMode, EndpointTransport, Event,
         EventReceiver, HeaderName, IncomingCall, IncomingCallGuard, MediaMode, MediaPoolConfig,

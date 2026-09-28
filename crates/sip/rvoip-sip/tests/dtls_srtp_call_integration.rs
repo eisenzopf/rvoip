@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use rvoip_sip::api::events::{Event, MediaSecurityKeying, MediaSecurityProfile};
 use rvoip_sip::api::stream_peer::EventReceiver;
-use rvoip_sip::api::unified::{Config, SrtpKeyingMode, UnifiedCoordinator};
+use rvoip_sip::api::unified::{Config, DtlsSetupRole, SrtpKeyingMode, UnifiedCoordinator};
+use rvoip_sip_core::types::sdp::CryptoSuite;
 
 fn reserve_loopback_port() -> u16 {
     UdpSocket::bind("127.0.0.1:0")
@@ -40,15 +41,17 @@ where
     }
 }
 
-fn assert_dtls_srtp_installed(event: Event, endpoint: &str) {
+fn assert_dtls_srtp_installed(event: Event, endpoint: &str, expected_suite: CryptoSuite) {
     match event {
         Event::MediaSecurityNegotiated {
             keying,
             profile,
+            suite,
             contexts_installed,
             ..
         } => {
             assert_eq!(keying, MediaSecurityKeying::DtlsSrtp, "{endpoint} keying");
+            assert_eq!(suite, expected_suite, "{endpoint} SRTP suite");
             assert_eq!(
                 profile,
                 MediaSecurityProfile::UdpTlsRtpSavp,
@@ -62,6 +65,32 @@ fn assert_dtls_srtp_installed(event: Event, endpoint: &str) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn dtls_srtp_call_negotiates_and_installs_contexts_on_both_endpoints() {
+    run_dtls_srtp_call(
+        DtlsSetupRole::Actpass,
+        vec![
+            CryptoSuite::AesCm128HmacSha1_80,
+            CryptoSuite::AesCm128HmacSha1_32,
+        ],
+        CryptoSuite::AesCm128HmacSha1_80,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn active_dtls_offer_negotiates_the_only_configured_profile() {
+    run_dtls_srtp_call(
+        DtlsSetupRole::Active,
+        vec![CryptoSuite::AesCm128HmacSha1_32],
+        CryptoSuite::AesCm128HmacSha1_32,
+    )
+    .await;
+}
+
+async fn run_dtls_srtp_call(
+    setup_role: DtlsSetupRole,
+    suites: Vec<CryptoSuite>,
+    expected_suite: CryptoSuite,
+) {
     let _ = tracing_subscriber::fmt::try_init();
 
     let alice_port = reserve_loopback_port();
@@ -74,11 +103,14 @@ async fn dtls_srtp_call_negotiates_and_installs_contexts_on_both_endpoints() {
     alice_cfg.offer_srtp = true;
     alice_cfg.srtp_required = true;
     alice_cfg.srtp_keying = SrtpKeyingMode::DtlsSrtp;
+    alice_cfg.dtls_setup_role = setup_role;
+    alice_cfg.srtp_offered_suites = suites.clone();
 
     let mut bob_cfg = Config::local("bob", bob_port);
     bob_cfg.offer_srtp = true;
     bob_cfg.srtp_required = true;
     bob_cfg.srtp_keying = SrtpKeyingMode::DtlsSrtp;
+    bob_cfg.srtp_offered_suites = suites;
 
     let alice = UnifiedCoordinator::new(alice_cfg)
         .await
@@ -132,14 +164,14 @@ async fn dtls_srtp_call_negotiates_and_installs_contexts_on_both_endpoints() {
     })
     .await
     .expect("alice never installed DTLS-derived SRTP contexts");
-    assert_dtls_srtp_installed(alice_security, "alice");
+    assert_dtls_srtp_installed(alice_security, "alice", expected_suite);
 
     let bob_security = wait_for(&mut bob_events, Duration::from_secs(12), |event| {
         matches!(event, Event::MediaSecurityNegotiated { .. })
     })
     .await
     .expect("bob never installed DTLS-derived SRTP contexts");
-    assert_dtls_srtp_installed(bob_security, "bob");
+    assert_dtls_srtp_installed(bob_security, "bob", expected_suite);
 
     bob.terminate_current_session().await.ok();
     alice.terminate_current_session().await.ok();
