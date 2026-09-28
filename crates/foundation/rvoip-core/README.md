@@ -63,7 +63,7 @@ along transitively.
 
 ```toml
 [dependencies]
-rvoip-core = "0.3.10"
+rvoip-core = "0.3.11"
 ```
 
 ## Examples

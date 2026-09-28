@@ -417,7 +417,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rvoip-sip-core = "0.3.10"
+rvoip-sip-core = "0.3.11"
 bytes = "1.4"  # For handling raw message data
 tokio = { version = "1.0", features = ["full"] }  # For async examples
 ```
@@ -974,7 +974,7 @@ is the smallest standalone parsing walkthrough.
 ### 🔧 Developer Resources
 
 - **[Test-suite guide](tests/README.md)** - Parser, header, RFC-compliance, and validation coverage
-- **[API reference](https://docs.rs/rvoip-sip-core/0.3.10/rvoip_sip_core/)** - Published types and methods for this release
+- **[API reference](https://docs.rs/rvoip-sip-core/0.3.11/rvoip_sip_core/)** - Published types and methods for this release
 
 ## Quality and Testing
 
