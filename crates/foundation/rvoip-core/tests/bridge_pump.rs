@@ -71,22 +71,31 @@ impl MockMediaStream {
     }
 
     fn with_output_capacity(codec_name: &str, output_capacity: usize) -> Arc<Self> {
-        let (external_in_tx, in_rx) = mpsc::channel::<MediaFrame>(64);
-        let (out_tx, external_out_rx) = mpsc::channel::<MediaFrame>(output_capacity);
         let clock_rate_hz = match codec_name.to_ascii_lowercase().as_str() {
             "opus" => 48_000,
             "amr-wb" => 16_000,
             _ => 8_000,
         };
-        Arc::new(Self {
-            id: StreamId::new(),
-            codec: CodecInfo {
+        Self::with_codec(
+            CodecInfo {
                 name: codec_name.to_string(),
                 clock_rate_hz,
                 channels: 1,
                 fmtp: None,
                 payload_type: None,
             },
+            output_capacity,
+        )
+    }
+
+    /// A stream whose transport reported a complete codec identity, payload
+    /// type included, the way the SIP adapter reports a negotiated answer.
+    fn with_codec(codec: CodecInfo, output_capacity: usize) -> Arc<Self> {
+        let (external_in_tx, in_rx) = mpsc::channel::<MediaFrame>(64);
+        let (out_tx, external_out_rx) = mpsc::channel::<MediaFrame>(output_capacity);
+        Arc::new(Self {
+            id: StreamId::new(),
+            codec,
             external_in_tx,
             in_rx: Arc::new(StdMutex::new(Some(in_rx))),
             source_acquisitions: Arc::new(AtomicUsize::new(0)),
@@ -4032,4 +4041,68 @@ async fn peer_handoff_committed_is_published_once_after_commit_and_never_on_fail
         .await
         .expect("cleanup");
     orch.drain_connection_lifecycle_tasks().await;
+}
+
+/// Register two streams on one adapter and bridge them both ways.
+async fn bridge_two_streams(
+    stream_a: Arc<MockMediaStream>,
+    stream_b: Arc<MockMediaStream>,
+) -> rvoip_core::error::Result<()> {
+    let adapter = MockAdapter::new(Transport::Quic);
+    let conn_a = ConnectionId::new();
+    let conn_b = ConnectionId::new();
+    adapter.register_connection(conn_a.clone(), stream_a);
+    adapter.register_connection(conn_b.clone(), stream_b);
+    let orchestrator = Orchestrator::new(Config::default());
+    orchestrator
+        .register(adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .expect("register");
+    let session = SessionId::new();
+    adapter.announce(conn_a.clone(), session.clone()).await;
+    adapter.announce(conn_b.clone(), session).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    orchestrator
+        .bridge_connections_directional(
+            conn_a,
+            conn_b,
+            DirectionalMediaBridgePlan::new(true, true).expect("two-way plan"),
+        )
+        .await
+        .map(|_| ())
+}
+
+/// The bridge gate admits a leg by its negotiated payload type, as the graphs
+/// do. AMR has no row in the name table by design (its payload type is
+/// settled per call), so a leg that reports the payload type its SDP chose
+/// must not be refused for that reason alone. Ported from Thelve's vendored
+/// core, where an AMR-WB carrier leg was torn down the instant it connected.
+#[cfg(feature = "amr-wb")]
+#[tokio::test]
+async fn bridge_admits_an_amr_wb_leg_by_its_negotiated_payload_type() {
+    let amr_wb = MockMediaStream::with_codec(
+        CodecInfo {
+            name: "AMR-WB".into(),
+            clock_rate_hz: 16_000,
+            channels: 1,
+            fmtp: Some("octet-align=1".into()),
+            payload_type: Some(105),
+        },
+        64,
+    );
+    let pcmu = MockMediaStream::new("PCMU");
+    bridge_two_streams(amr_wb, pcmu)
+        .await
+        .expect("an AMR-WB leg with its negotiated payload type bridges");
+}
+
+/// Without the negotiated payload type there is nothing to key AMR on, and
+/// the gate must still refuse rather than invent one.
+#[tokio::test]
+async fn bridge_still_refuses_amr_wb_without_a_negotiated_payload_type() {
+    let unlabelled = MockMediaStream::new("AMR-WB");
+    let pcmu = MockMediaStream::new("PCMU");
+    assert!(matches!(
+        bridge_two_streams(unlabelled, pcmu).await,
+        Err(RvoipError::UnsupportedCodec(codec)) if codec == "AMR-WB"
+    ));
 }

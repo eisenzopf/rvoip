@@ -2052,6 +2052,34 @@ mod negotiated_codec_tests {
         }
     }
 
+    /// A carrier may answer AMR-WB in either RFC 4867 framing. The
+    /// descriptor follows the SDP clock and carries the fmtp that selects the
+    /// framing, and the codec builds for both: bandwidth-efficient when no
+    /// fmtp is given, octet-aligned when `octet-align=1` is. A stream shape
+    /// other than 16 kHz mono is refused before a codec is built. Ported from
+    /// Thelve's vendored SIP crate.
+    #[cfg(feature = "amr-wb")]
+    #[test]
+    fn amr_wb_descriptor_and_codec_follow_sdp_clock_and_fmtp_in_both_framings() {
+        for (payload_type, fmtp) in [(104u8, None), (105u8, Some("octet-align=1"))] {
+            let mut config = negotiated("AMR-WB", 16_000, 1);
+            config.fmtp = fmtp.map(str::to_string);
+            let (descriptor, resolved) = codec_descriptor(&config, payload_type)
+                .unwrap_or_else(|error| panic!("descriptor for pt {payload_type}: {error}"));
+            assert_eq!(descriptor.name, "AMR-WB");
+            assert_eq!(descriptor.clock_rate_hz, 16_000);
+            assert_eq!(descriptor.channels, 1);
+            assert_eq!(descriptor.fmtp.as_deref(), fmtp);
+            assert_eq!(resolved, payload_type);
+            assert!(
+                SipPayloadCodec::from_negotiated(&config, payload_type).is_ok(),
+                "AMR-WB codec must build for pt {payload_type} with fmtp {fmtp:?}"
+            );
+        }
+        let wrong_shape = negotiated("AMR-WB", 8_000, 1);
+        assert_eq!(codec_descriptor(&wrong_shape, 104), Err("invalid-amr-wb-shape"));
+    }
+
     #[cfg(feature = "amr-wb")]
     #[test]
     fn amr_wb_descriptor_and_codec_use_negotiated_payload_and_framing() {

@@ -110,6 +110,51 @@
   candidates through instead of using the loopback WebRTC profile, so Chrome's
   anonymised IPv4 host candidates pair and ICE completes.
 
+### First-frame media latency restored on the receive side
+
+- The bounded-audio-delivery work added a paced decoded-playout queue with
+  two delays in front of the first decoded frame of every stream: a 45 ms
+  startup reorder hold applied unconditionally, and delivery to the
+  application only on a 5 ms playout tick. Together they added up to
+  50 ms before an application saw the first frame, where it previously saw
+  it within the packet's own arrival. An application that answers a call
+  the moment the first early-media frame is delivered, as vapi-central's
+  node does, lost that race to its own 200 OK every time.
+- A decoded frame that is already due now leaves at packet arrival instead
+  of waiting for the tick; later frames still pace on the tick.
+- The startup reorder hold now applies only once a sequence gap is
+  observed among the pending packets. An unbroken first run carries no
+  evidence of reordering and is released at once; from the first observed
+  gap onward the 45 ms hold protects ordering exactly as before. The one
+  behaviour given up: if the first two packets of a stream arrive
+  backwards, the earlier one is now treated as late rather than reordered.
+  Tests: `startup_releases_a_contiguous_first_packet_without_holding_it`,
+  `startup_holds_only_once_a_gap_is_observed`.
+
+### AMR-WB coverage ported from Thelve
+
+- Thelve's vendored fixes for AMR-WB, an `AmrWb` arm on the SIP media
+  stream and bridge admission by negotiated payload type rather than the
+  codec-name table, were already present here through the SIP-core codec
+  wiring. Their acceptance tests are now carried too: the cross-connection
+  bridge admits an AMR-WB leg that reports its negotiated payload type and
+  still refuses one that does not, and the SIP stream's descriptor and
+  codec follow the SDP clock and fmtp in both RFC 4867 framings while a
+  non-16 kHz-mono shape is refused before a codec is built.
+
+### Receive-side playout overflow no longer silences a dialog
+
+- The paced decoded-playout queue added with bounded audio delivery holds
+  at most 64 frames. When a burst overflowed it, the RTP event handler for
+  that dialog terminated, so no audio was ever decoded again for the rest
+  of the call. A bridge releasing media it buffered until commit produces
+  exactly such a burst, which is why a caller receiving forwarded early
+  media saw the final answer before any decoded audio. Overflow now drops
+  the newest frame and keeps the receive loop alive, the same way a full
+  application callback channel is handled; the first drop is logged and
+  the rest are counted. Regression test:
+  `decoded_playout_overflow_drops_frames_but_keeps_the_receive_loop_alive`.
+
 ### Two-phase bridge peer handoff
 
 - `Orchestrator::prepare_transport_fenced_peer_handoff` and

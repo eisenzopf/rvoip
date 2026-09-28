@@ -132,14 +132,31 @@ impl RtpPlayoutBuffer {
             let Some(started_at) = self.startup_started_at else {
                 return Vec::new();
             };
+            // Hold the stream start only while the pending packets show a
+            // gap. An unbroken run carries no evidence of reordering, and
+            // holding it would cost every call up to RTP_REORDER_HOLD of
+            // first-frame latency, which an application that answers on the
+            // first delivered early-media frame cannot afford.
             let startup_elapsed = now.saturating_duration_since(started_at);
-            if startup_elapsed < RTP_REORDER_HOLD && self.pending.len() < RTP_REORDER_MAX_PACKETS {
+            if !self.pending_is_contiguous()
+                && startup_elapsed < RTP_REORDER_HOLD
+                && self.pending.len() < RTP_REORDER_MAX_PACKETS
+            {
                 return Vec::new();
             }
             self.expected_sequence = self.oldest_pending_sequence();
         }
 
         self.drain_ready(now)
+    }
+
+    /// True when the pending packets form one unbroken sequence run.
+    fn pending_is_contiguous(&self) -> bool {
+        let Some(oldest) = self.oldest_pending_sequence() else {
+            return true;
+        };
+        (0..self.pending.len() as u16)
+            .all(|offset| self.pending.contains_key(&oldest.wrapping_add(offset)))
     }
 
     fn oldest_pending_sequence(&self) -> Option<u16> {
@@ -235,6 +252,9 @@ impl RtpPlayoutBuffer {
 struct DecodedPlayoutQueue {
     pending: VecDeque<AudioFrame>,
     next_delivery_at: Option<Instant>,
+    /// Frames dropped on overflow. The first drop is logged; the rest are
+    /// counted so a burst does not flood the log.
+    dropped_frames: u64,
 }
 
 impl DecodedPlayoutQueue {
@@ -242,6 +262,7 @@ impl DecodedPlayoutQueue {
         Self {
             pending: VecDeque::new(),
             next_delivery_at: None,
+            dropped_frames: 0,
         }
     }
 
@@ -292,30 +313,18 @@ mod rtp_playout_tests {
     fn ssrc_handoff_resets_the_sequence_and_timestamp_space() {
         let start = Instant::now();
         let mut buffer = RtpPlayoutBuffer::new();
-        buffer.push(packet_for_ssrc(50_000, 0x1111_1111), start);
-        assert_eq!(
-            buffer
-                .tick(start + Duration::from_millis(46))
-                .iter()
-                .map(sequence)
-                .collect::<Vec<_>>(),
-            [50_000]
-        );
+        let first = buffer.push(packet_for_ssrc(50_000, 0x1111_1111), start);
+        assert_eq!(first.iter().map(sequence).collect::<Vec<_>>(), [50_000]);
+        assert!(buffer.tick(start + Duration::from_millis(46)).is_empty());
 
-        assert!(buffer
-            .push(
-                packet_for_ssrc(100, 0x2222_2222),
-                start + Duration::from_millis(100)
-            )
-            .is_empty());
-        assert_eq!(
-            buffer
-                .tick(start + Duration::from_millis(146))
-                .iter()
-                .map(sequence)
-                .collect::<Vec<_>>(),
-            [100]
+        // A new SSRC resets the sequence space: 100 is not "late" relative to
+        // 50_000, it is the first packet of a new stream and leaves at once.
+        let handoff = buffer.push(
+            packet_for_ssrc(100, 0x2222_2222),
+            start + Duration::from_millis(100),
         );
+        assert_eq!(handoff.iter().map(sequence).collect::<Vec<_>>(), [100]);
+        assert!(buffer.tick(start + Duration::from_millis(146)).is_empty());
     }
 
     fn sequence(item: &RtpPlayoutItem) -> u16 {
@@ -328,29 +337,53 @@ mod rtp_playout_tests {
     }
 
     #[test]
-    fn startup_window_orders_packets_that_arrive_backward() {
+    fn startup_releases_a_contiguous_first_packet_without_holding_it() {
+        // The first packet of a stream carries no evidence of reordering, so
+        // it is not held for RTP_REORDER_HOLD. An application that answers a
+        // call on the first delivered early-media frame depends on this.
         let start = Instant::now();
         let mut buffer = RtpPlayoutBuffer::new();
-        assert!(buffer.push(packet(101), start).is_empty());
+        let ready = buffer.push(packet(101), start);
+        assert_eq!(ready.iter().map(sequence).collect::<Vec<_>>(), [101]);
+        // A lower sequence arriving afterwards is late relative to a stream
+        // that has already started, and is discarded rather than reordered.
         assert!(buffer
             .push(packet(100), start + Duration::from_millis(35))
             .is_empty());
-        let ready = buffer.tick(start + Duration::from_millis(46));
-        assert_eq!(ready.iter().map(sequence).collect::<Vec<_>>(), [100, 101]);
+        assert!(buffer.tick(start + Duration::from_millis(46)).is_empty());
+    }
+
+    #[test]
+    fn startup_holds_only_once_a_gap_is_observed() {
+        // Reorder protection is still in force from the first observed gap:
+        // 103 arriving ahead of 102 waits, and both leave in order once 102
+        // arrives inside the hold.
+        let start = Instant::now();
+        let mut buffer = RtpPlayoutBuffer::new();
+        assert_eq!(
+            buffer.push(packet(101), start).iter().map(sequence).collect::<Vec<_>>(),
+            [101]
+        );
+        assert!(buffer
+            .push(packet(103), start + Duration::from_millis(20))
+            .is_empty());
+        let ready = buffer.push(packet(102), start + Duration::from_millis(35));
+        assert_eq!(ready.iter().map(sequence).collect::<Vec<_>>(), [102, 103]);
     }
 
     #[test]
     fn active_window_waits_for_a_delayed_predecessor() {
         let start = Instant::now();
         let mut buffer = RtpPlayoutBuffer::new();
-        buffer.push(packet(100), start);
-        buffer.push(packet(101), start + Duration::from_millis(20));
-        buffer.push(packet(102), start + Duration::from_millis(40));
-        let initial = buffer.tick(start + Duration::from_millis(46));
+        let mut initial = Vec::new();
+        initial.extend(buffer.push(packet(100), start));
+        initial.extend(buffer.push(packet(101), start + Duration::from_millis(20)));
+        initial.extend(buffer.push(packet(102), start + Duration::from_millis(40)));
         assert_eq!(
             initial.iter().map(sequence).collect::<Vec<_>>(),
             [100, 101, 102]
         );
+        assert!(buffer.tick(start + Duration::from_millis(46)).is_empty());
         assert!(buffer
             .push(packet(104), start + Duration::from_millis(80))
             .is_empty());
@@ -385,9 +418,9 @@ mod rtp_playout_tests {
     fn duplicate_and_late_packets_do_not_reenter_playout() {
         let start = Instant::now();
         let mut buffer = RtpPlayoutBuffer::new();
-        buffer.push(packet(100), start);
-        let ready = buffer.tick(start + Duration::from_millis(46));
+        let ready = buffer.push(packet(100), start);
         assert_eq!(ready.iter().map(sequence).collect::<Vec<_>>(), [100]);
+        assert!(buffer.tick(start + Duration::from_millis(46)).is_empty());
         assert!(buffer
             .push(packet(100), start + Duration::from_millis(50))
             .is_empty());
@@ -429,6 +462,42 @@ mod rtp_playout_tests {
                 .expect("new talkspurt")
                 .timestamp,
             40_000
+        );
+    }
+
+    #[tokio::test]
+    async fn decoded_playout_overflow_drops_frames_but_keeps_the_receive_loop_alive() {
+        // A bridge that releases media buffered until commit, or any producer
+        // running ahead of real time, can hand the decode boundary more than
+        // RTP_REORDER_MAX_PACKETS frames in one drain. That must cost frames,
+        // never the dialog's receive loop.
+        let config = MediaConfig {
+            local_addr: "127.0.0.1:0".parse().expect("local addr"),
+            remote_addr: None,
+            preferred_codec: Some("PCMU".to_string()),
+            parameters: std::collections::HashMap::new(),
+        };
+        let format = codec_runtime::resolve_codec(&config).expect("PCMU resolves");
+        let runtime =
+            Arc::new(codec_runtime::DialogCodecRuntime::new(format).expect("codec runtime"));
+        let dialog_id = DialogId::new("playout-overflow");
+        let mut playout = DecodedPlayoutQueue::new();
+        let now = Instant::now();
+        let overflow = 16u16;
+        let burst: Vec<RtpPlayoutItem> = (0..(RTP_REORDER_MAX_PACKETS as u16 + overflow))
+            .map(|sequence| RtpPlayoutItem::Packet(packet(sequence)))
+            .collect();
+
+        let terminate =
+            enqueue_rtp_playout_items(burst, &runtime, &dialog_id, &mut playout, now).await;
+
+        assert!(!terminate, "a playout overflow must not terminate the RTP receive loop");
+        assert_eq!(playout.pending.len(), RTP_REORDER_MAX_PACKETS);
+        assert_eq!(playout.dropped_frames, u64::from(overflow));
+        assert_eq!(
+            playout.pop_due(now).expect("the head frame survives the overflow").timestamp,
+            0,
+            "overflow drops the newest frames, not the ones already queued"
         );
     }
 }
@@ -666,12 +735,20 @@ async fn enqueue_rtp_playout_items(
             }
         };
         if !decoded_playout.push(audio_frame, arrived_at) {
-            error!(
-                %dialog_id,
-                capacity_frames = RTP_REORDER_MAX_PACKETS,
-                "decoded playout queue overflow"
-            );
-            return true;
+            // The paced queue is a jitter bound, not a lifecycle boundary. A
+            // producer running ahead of real time, such as a bridge releasing
+            // media it buffered until commit, overflows it in bursts. Drop the
+            // newest frame and keep the receive loop alive, exactly as a full
+            // application callback channel is handled: terminating the loop
+            // here silenced the dialog for the rest of the call.
+            decoded_playout.dropped_frames += 1;
+            if decoded_playout.dropped_frames == 1 {
+                warn!(
+                    %dialog_id,
+                    capacity_frames = RTP_REORDER_MAX_PACKETS,
+                    "decoded playout queue overflow; dropping frames until playout catches up"
+                );
+            }
         }
     }
     false
@@ -2322,16 +2399,35 @@ impl MediaSessionController {
                                     last_rtp_arrival = Some(arrival);
                                 }
 
-                                let playout_items = rtp_playout.push(packet, Instant::now());
+                                let arrived_at = Instant::now();
+                                let playout_items = rtp_playout.push(packet, arrived_at);
                                 if enqueue_rtp_playout_items(
                                     playout_items,
                                     &codec_runtime,
                                     &dialog_id,
                                     &mut decoded_playout,
-                                    Instant::now(),
+                                    arrived_at,
                                 )
                                 .await
                                 {
+                                    break 'events;
+                                }
+                                // A frame that is already due leaves on arrival
+                                // rather than waiting up to one playout tick.
+                                // The first frame of a stream is due the moment
+                                // it is queued, so this keeps first-frame
+                                // latency at the pre-pacing sub-millisecond
+                                // level; later frames still pace on the tick.
+                                if deliver_due_audio_frame(
+                                    arrived_at,
+                                    &mut decoded_playout,
+                                    &dialog_id,
+                                    &media_directions,
+                                    &audio_frame_callbacks,
+                                    collect_audio_quality,
+                                    skip_audio_frame_delivery,
+                                    &mut delivery_state,
+                                ) {
                                     break 'events;
                                 }
                             }
