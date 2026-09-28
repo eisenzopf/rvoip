@@ -61,7 +61,7 @@ bridge-quic = [
 ]
 
 [dependencies]
-rvoip-core = { workspace = true, features = ["opus"] }
+rvoip-core.workspace = true
 rvoip-sip-core.workspace = true
 webrtc = { workspace = true, features = ["runtime-tokio"] }
 rtc.workspace = true
@@ -121,6 +121,11 @@ env-libvpx-sys = { version = "5", features = ["generate"], optional = true }
 openh264 = { version = "0.9.3", optional = true }
 
 [dev-dependencies]
+# The SIP/WebRTC acceptance tests negotiate Opus end to end and must run the
+# real media-graph backend. Keeping this on the dev side, as rvoip-uctp does,
+# stops the library from forcing libopus onto every consumer: the facade's
+# pure-Rust bundle includes this crate and must stay free of native codecs.
+rvoip-core = { workspace = true, features = ["opus"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
