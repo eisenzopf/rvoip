@@ -47,7 +47,7 @@ path, so the repository has to opt into a custom claim shape once:
 
 ```sh
 gh api --method PUT repos/eisenzopf/rvoip/actions/oidc/customization/sub \
-  -f use_default=false \
+  -F use_default=false \
   -f 'include_claim_keys[]=repo' \
   -f 'include_claim_keys[]=job_workflow_ref'
 ```
