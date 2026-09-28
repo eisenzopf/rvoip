@@ -12,7 +12,7 @@ relay admission can depend on the crate as-is and omit the relay and metrics
 runtime:
 
 ```toml
-rvoip-moq-relay = "0.3.10"
+rvoip-moq-relay = "0.3.11"
 ```
 
 This admission-only surface exports `SessionAdmission`, `AdmissionLease`,

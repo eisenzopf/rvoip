@@ -140,11 +140,45 @@ fn beta_release_docs_exist_and_archived_docs_are_out_of_active_set() {
     }
 }
 
+/// The release the canonical evidence must describe.
+///
+/// That is this crate's version, except in the window between the
+/// version-bump merge and publication: the workspace already names the next
+/// release while the evidence still describes the newest qualified one,
+/// because the publish workflow writes the new evidence. A canonical report
+/// for an older release is that prepared-candidate state and is checked as
+/// itself; a report for a newer release than the crate is never accepted.
+fn qualified_release_version(docs: &Path) -> String {
+    let crate_version = env!("CARGO_PKG_VERSION");
+    let report = read(docs.join("BETA_RELEASE_REPORT.md"));
+    let documented = report
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("# RVoIP ")
+                .and_then(|rest| rest.strip_suffix(" Release Qualification Report"))
+        })
+        .unwrap_or_else(|| panic!("canonical release report carries no release header"));
+    if documented == crate_version {
+        return crate_version.to_string();
+    }
+    let key = |version: &str| -> Vec<u64> {
+        version
+            .split('.')
+            .map(|part| part.parse().expect("numeric release component"))
+            .collect()
+    };
+    assert!(
+        key(documented) < key(crate_version),
+        "canonical release report is for {documented}, newer than this crate's {crate_version}"
+    );
+    documented.to_string()
+}
+
 #[test]
 fn current_beta_reports_are_complete_and_match_immutable_snapshot() {
     let crate_dir = manifest_dir();
     let docs = crate_dir.join("docs");
-    let release_version = env!("CARGO_PKG_VERSION");
+    let release_version = qualified_release_version(&docs);
     let history = docs.join("releases/qualification");
     let snapshots: Vec<_> = fs::read_dir(&history)
         .unwrap()

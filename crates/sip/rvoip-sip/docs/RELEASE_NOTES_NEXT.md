@@ -1,6 +1,6 @@
-# rvoip 0.3.10 Release Notes
+# rvoip 0.3.11 Release Notes
 
-These notes describe the coordinated 45-crate `0.3.10` release. It was
+These notes describe the coordinated 45-crate `0.3.11` release. It was
 published from the exact source commit accepted by the protected release
 qualification and publication workflows. The signed qualification artifact
 and GitHub release identify that immutable commit, workflow run, complete gate
@@ -10,7 +10,7 @@ the released tag.
 
 ## Headline
 
-`0.3.10` is a patch release that hardens the `0.3.9` feature set and adds
+`0.3.11` is a patch release that hardens the `0.3.9` feature set and adds
 Jambonz OSS as a mandatory external SIP interoperability peer. It corrects
 REFER/NOTIFY ordering under concurrent transfer progress, preserves an
 optional `Referred-By` header across a Jambonz-mediated transfer, closes
@@ -79,7 +79,7 @@ documented SIP, SDP, RTP, codec, and facade profiles.
 
 ## Performance evaluation
 
-The protected `0.3.10` qualification executed three clean canonical 2,000-CPS
+The protected `0.3.11` qualification executed three clean canonical 2,000-CPS
 passes, the full performance and resiliency matrix, the 160-CPS high-density
 full-media burst, a one-hour
 30-call monolithic soak, a one-hour 500-call split soak, teardown/churn tests,
@@ -106,7 +106,7 @@ is no Telnyx- or Jambonz-specific runtime dependency in RVoIP and no provider
 REST API in the SIP stack.
 
 The `0.3.9` tag, crates, and qualification evidence remain immutable release
-history; none of that evidence is reused to qualify `0.3.10`.
+history; none of that evidence is reused to qualify `0.3.11`.
 
 ## Qualification record
 
@@ -118,8 +118,8 @@ regression, source-fence, and cleanup gates. It produces a signed aggregate
 bound to the exact source SHA and immutable artifact hashes.
 
 The protected Release Publish workflow accepted that aggregate after verifying
-that its source SHA was still `main`, its version was exactly `0.3.10`, its
+that its source SHA was still `main`, its version was exactly `0.3.11`, its
 evidence was fresh and complete, and the dry-run and live publication inputs
 resolved to the same commit. The resulting GitHub release is the durable link
-to the exact qualification run and measured reports; the protected `v0.3.10`
+to the exact qualification run and measured reports; the protected `v0.3.11`
 tag identifies the source without a self-referential documentation commit.
