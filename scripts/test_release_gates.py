@@ -238,7 +238,7 @@ class GateFrameworkTests(unittest.TestCase):
         self.assertEqual(len(soak_shards), 2)
         self.assertTrue(all(len(shard["gates"]) == 1 for shard in soak_shards))
         self.assertTrue(
-            all(shard["machine_type"] == "m5.2xlarge" for shard in soak_shards)
+            all(shard["machine_type"] == "m5.4xlarge" for shard in soak_shards)
         )
         self.assertNotIn(
             "perf.media-burst-matrix",
@@ -329,7 +329,7 @@ class GateFrameworkTests(unittest.TestCase):
         self.assertEqual(len(matrix), 18)
         self.assertEqual(
             sum(fanout.MACHINE_VCPUS[shard["machine_type"]] for shard in matrix),
-            100,
+            116,
         )
         self.assertEqual(sum(int(shard["disk_size_gb"]) for shard in matrix), 3400)
         self.assertTrue(all(not shard["hosted"] for shard in matrix))
@@ -343,7 +343,7 @@ class GateFrameworkTests(unittest.TestCase):
                     gate["command"],
                 )
 
-    def test_remote_release_uses_the_same_100_vcpu_ec2_shape(self) -> None:
+    def test_remote_release_uses_the_same_116_vcpu_ec2_shape(self) -> None:
         selected = self.catalog["profiles"]["remote-release"]
         by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
         matrix = gates.matrix_for(
@@ -374,7 +374,7 @@ class GateFrameworkTests(unittest.TestCase):
         self.assertEqual(len(ec2), 18)
         self.assertEqual(
             sum(fanout.MACHINE_VCPUS[shard["machine_type"]] for shard in ec2),
-            100,
+            116,
         )
         self.assertEqual(sum(int(shard["disk_size_gb"]) for shard in ec2), 3400)
         hosted = [shard for shard in matrix if shard["hosted"]]

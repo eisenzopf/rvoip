@@ -397,7 +397,9 @@ storage quota against that peak before creating anything.
 Machine classes and volumes are policy values recorded in every attestation.
 Changing them invalidates environment-sensitive evidence; moving clouds
 changed the release environment identifier to
-`rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5`.
+`rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5`, and resizing
+the long-soak class to 16 vCPUs changed it to
+`rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-soaklong16`.
 
 ### Dedicated release VPC
 

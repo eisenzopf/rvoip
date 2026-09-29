@@ -36,7 +36,11 @@ RESOURCE_MACHINES = {
     "ec2-interop": "m5.xlarge",
     "ec2-performance": "m5.2xlarge",
     "ec2-performance-soak": "m5.xlarge",
-    "ec2-performance-soak-long": "m5.2xlarge",
+    # At least 16 vCPUs. The canonical 2,000-CPS sweep costs about 3 ms of CPU
+    # per call, roughly 5.65 cores at 2,000 CPS; on 8 vCPUs (4 physical cores)
+    # that is the CPU knee, where p99 setup latency swung 17-39 ms run to run on
+    # identical code. 16 vCPUs keeps the gate measuring the code, not saturation.
+    "ec2-performance-soak-long": "m5.4xlarge",
     "ec2-proxy-interop": "m5.large",
 }
 RESOURCE_DISK_GB = {
@@ -50,6 +54,7 @@ MACHINE_VCPUS = {
     "m5.large": 2,
     "m5.xlarge": 4,
     "m5.2xlarge": 8,
+    "m5.4xlarge": 16,
 }
 # EC2 instance states that mean a worker can no longer produce a result. A
 # worker's own ``shutdown -h now`` terminates it (instance-initiated shutdown

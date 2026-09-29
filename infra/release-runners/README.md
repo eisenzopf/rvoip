@@ -77,7 +77,7 @@ every worker records the actual CPU model in its evidence.
 | --- | --- | ---: | ---: | --- |
 | `ec2-performance` | `m5.2xlarge` | 8 | 32 GB | 200 GB gp3 |
 | `ec2-performance-soak` | `m5.xlarge` | 4 | 16 GB | 200 GB gp3 |
-| `ec2-performance-soak-long` | `m5.2xlarge` | 8 | 32 GB | 200 GB gp3 |
+| `ec2-performance-soak-long` | `m5.4xlarge` | 16 | 64 GB | 200 GB gp3 |
 | `ec2-interop` | `m5.xlarge` | 4 | 16 GB | 200 GB gp3 |
 | `ec2-proxy-interop` | `m5.large` | 2 | 8 GB | 100 GB gp3 |
 | performance prebuilder | `m5.8xlarge` | 32 | 128 GB | 200 GB gp3 |

@@ -22,9 +22,15 @@
   key is stored in GitHub. The GCP qualification pilot workflow and its
   startup script are removed.
 - The release environment identifier becomes
-  `rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5`,
+  `rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-soaklong16`,
   so every environment-sensitive gate runs fresh on the first AWS
-  qualification. Historical GCP qualification evidence under
+  qualification.
+- The long-soak worker class, which runs the canonical 2,000-CPS gate, is
+  sized at 16 vCPUs (`m5.4xlarge`) and must stay at 16 or more. On 8 vCPUs
+  the sweep sits at its CPU knee: about 3 ms of CPU per call needs roughly
+  5.65 cores at 2,000 CPS, and p99 setup latency swung 17 to 39 ms run to
+  run on identical code. Transparent huge pages were ruled out with zero
+  compaction stalls. Historical GCP qualification evidence under
   `crates/sip/rvoip-sip/docs/` is unchanged. See
   `docs/AWS_RELEASE_WORKERS.md`.
 
