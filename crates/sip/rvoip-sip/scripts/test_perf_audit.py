@@ -125,7 +125,7 @@ class PerfAuditIdentityTests(unittest.TestCase):
                 json.dumps(
                     {
                         "schema": "rvoip-perf-regression-baseline-v1",
-                        "baseline_id": "20260706T181609Z",
+                        "baseline_id": "20260929T034251Z",
                         "comparison_paths": [f"{SCENARIO}/2000.json"],
                     }
                 ),
@@ -153,7 +153,7 @@ class PerfAuditIdentityTests(unittest.TestCase):
     def test_reviewed_manifest_identity_is_written_to_report(self):
         result, report = self.run_audit(with_manifest=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("reviewed baseline: `20260706T181609Z`", report)
+        self.assertIn("reviewed baseline: `20260929T034251Z`", report)
         self.assertIn("manifest SHA-256", report)
 
     def test_reviewed_manifest_comparison_path_is_required_in_current(self):

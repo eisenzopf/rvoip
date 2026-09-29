@@ -329,7 +329,9 @@ class AcceptanceTests(unittest.TestCase):
 
     def test_absolute_metric_regression_fails(self):
         report = canonical_report()
-        report["latency_ns"]["setup_latency"]["p99"] = 20_000_000
+        # Above the 45 ms knee ceiling; 20 ms is now a passing value on the
+        # release fleet, where the 2,000-CPS p99 sits in the twenties.
+        report["latency_ns"]["setup_latency"]["p99"] = 50_000_000
         self.assertEqual(self.evaluate(report)["status"], "FAIL")
 
         report = canonical_report()

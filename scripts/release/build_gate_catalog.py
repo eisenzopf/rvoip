@@ -89,7 +89,24 @@ JAMBONZ_GATE_IDS = [
     "interop.jambonz-down",
 ]
 CURRENT_PERFORMANCE_EVALUATION_GATE_IDS = ["perf.canonical-2k-current"]
+# The reviewed performance-regression baseline moves when it is re-recorded on
+# new release hardware, but this gate's argv is reconstructed from the July
+# 2026 legacy evidence, which names whichever baseline was current then. Pin
+# the packaging gate to the baseline the rest of the tooling reads so the
+# catalog stays reproducible and current at the same time.
+REVIEWED_PERF_BASELINE_ID = "20260929T034251Z"
 COMMAND_OVERRIDES = {
+    "report.regression-baseline": [
+        "python3",
+        "{workspace}/crates/sip/rvoip-sip/scripts/perf_regression_baseline.py",
+        "package",
+        "--manifest",
+        f"{{workspace}}/crates/sip/rvoip-sip/perf-baselines/{REVIEWED_PERF_BASELINE_ID}/manifest.json",
+        "--source-root",
+        f"{{workspace}}/crates/sip/rvoip-sip/perf-baselines/{REVIEWED_PERF_BASELINE_ID}",
+        "--artifact-dir",
+        "{artifact_dir}",
+    ],
     "security.advisory-audit": [
         "cargo",
         "deny",
