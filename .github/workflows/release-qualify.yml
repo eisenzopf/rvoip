@@ -48,7 +48,7 @@ concurrency:
   cancel-in-progress: ${{ inputs.profile == 'remote-preflight' || inputs.profile == 'remote-diagnostic' }}
 
 env:
-  RELEASE_ENVIRONMENT_ID: rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5
+  RELEASE_ENVIRONMENT_ID: rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-soaklong16
   RUSTUP_MAX_RETRIES: "10"
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
@@ -948,6 +948,12 @@ jobs:
           if (( ${#workers[@]} != 0 )); then
             aws ec2 terminate-instances --instance-ids "${workers[@]}" \
               --output json > target/aws-controller/terminate.json
+            # Termination is asynchronous. A worker that was already stopping
+            # when the request landed, such as one the early-failure cutoff
+            # stopped, can still report `stopping` for a few seconds, and a
+            # single immediate re-list failed a qualification on exactly that.
+            # Wait for the terminal state (15 s polls, 10 min cap) instead.
+            aws ec2 wait instance-terminated --instance-ids "${workers[@]}"
           fi
           # An empty list is only a clean teardown if the listing itself
           # succeeded. With expired credentials describe-instances fails,

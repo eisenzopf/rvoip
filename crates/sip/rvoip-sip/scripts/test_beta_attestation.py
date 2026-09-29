@@ -180,7 +180,7 @@ class BetaAttestationTests(unittest.TestCase):
         self.sipp_scenario.write_text("<scenario/>\n", encoding="utf-8")
         self.performance_baseline_manifest = (
             WORKSPACE_ROOT
-            / "crates/sip/rvoip-sip/perf-baselines/20260929T034251Z/manifest.json"
+            / "crates/sip/rvoip-sip/perf-baselines/20260929T224805Z/manifest.json"
         )
         self.assertEqual(
             digest(self.performance_baseline_manifest.read_bytes()),
@@ -361,7 +361,7 @@ class BetaAttestationTests(unittest.TestCase):
             "beta_perf_media_churn_duration_secs": "120",
             "beta_perf_monolithic_soak_active_calls": "30",
             "beta_perf_monolithic_soak_duration_secs": "1800",
-            "beta_perf_regression_baseline_id": "20260929T034251Z",
+            "beta_perf_regression_baseline_id": "20260929T224805Z",
             "beta_perf_regression_baseline_manifest_sha256": digest(
                 self.performance_baseline_manifest.read_bytes()
             ),

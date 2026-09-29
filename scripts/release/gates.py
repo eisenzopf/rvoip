@@ -516,6 +516,8 @@ def matrix_for(plan_gates: list[dict[str, Any]], by_id: dict[str, dict[str, Any]
                         if resource == "ec2-proxy-interop"
                         else "m5.xlarge"
                         if resource in {"ec2-interop", "ec2-performance-soak"}
+                        else "m5.4xlarge"
+                        if resource == "ec2-performance-soak-long"
                         else "m5.2xlarge"
                     ),
                     "disk_type": "gp3",

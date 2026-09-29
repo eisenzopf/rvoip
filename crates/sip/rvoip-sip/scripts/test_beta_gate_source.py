@@ -448,8 +448,8 @@ class BetaGateCompatibilitySourceTests(unittest.TestCase):
         required = [
             "RVOIP_REQUIRE_API_TOOLS=1",
             "RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS=160",
-            "BETA_PERF_REGRESSION_BASELINE_ROOT=crates/sip/rvoip-sip/perf-baselines/20260929T034251Z",
-            "BETA_PERF_REGRESSION_BASELINE_MANIFEST=crates/sip/rvoip-sip/perf-baselines/20260929T034251Z/manifest.json",
+            "BETA_PERF_REGRESSION_BASELINE_ROOT=crates/sip/rvoip-sip/perf-baselines/20260929T224805Z",
+            "BETA_PERF_REGRESSION_BASELINE_MANIFEST=crates/sip/rvoip-sip/perf-baselines/20260929T224805Z/manifest.json",
         ]
         for document in documents:
             body = document.read_text(encoding="utf-8")

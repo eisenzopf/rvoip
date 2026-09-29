@@ -1,0 +1,47 @@
+{
+  "schema": "rvoip-perf-regression-baseline-v1",
+  "baseline_id": "20260929T224805Z",
+  "qualification": {
+    "release_evidence": false,
+    "permitted_use": "reviewed immutable performance-regression threshold input only; recorded on the release qualification long-soak class (EC2 m5.4xlarge, 16 vCPU) from a clean exact-candidate run of the gate harness"
+  },
+  "source": {
+    "git_revision": "5d828dd7",
+    "git_status": "clean"
+  },
+  "comparison_paths": [
+    "perf_call_setup_cps_pbx-media-server/2000.json"
+  ],
+  "files": [
+    {
+      "path": "perf_call_setup_cps_pbx-media-server/30.json",
+      "bytes": 32971,
+      "sha256": "69924493468e0874144b9ba9066aff032ea77d131b68293e0658c1a488213358"
+    },
+    {
+      "path": "perf_call_setup_cps_pbx-media-server/100.json",
+      "bytes": 33185,
+      "sha256": "b01d450039573594ea80c56cf75c76e93bdc9a957fdc36b09b8f3df81a451f90"
+    },
+    {
+      "path": "perf_call_setup_cps_pbx-media-server/300.json",
+      "bytes": 33369,
+      "sha256": "6748ffed4eca276b426bedde1396e101c5ab31d4e8f46459086d7fcb14ad366d"
+    },
+    {
+      "path": "perf_call_setup_cps_pbx-media-server/1000.json",
+      "bytes": 33465,
+      "sha256": "c3e5c502edd121cdcb287a2d3e229d3cb84e33b818eb4aae768cf51db08f6e06"
+    },
+    {
+      "path": "perf_call_setup_cps_pbx-media-server/2000.json",
+      "bytes": 187580,
+      "sha256": "36219d8e403d55172b5633f8d8418661e4bb501f446a2569bc2f4e8dee7dd4b9"
+    },
+    {
+      "path": "perf_call_setup_cps_pbx-media-server/_sweep.json",
+      "bytes": 370887,
+      "sha256": "19903fb442750acf9bbfa7676acba42d275a4572cf0794de151524711ce45323"
+    }
+  ]
+}

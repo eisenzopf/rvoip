@@ -36,7 +36,7 @@ The conditioning sequence is part of the measurement identity. The reviewed
 2,000-CPS result was the fifth point of this exact shared-peer sweep, so a cold
 single-point process is useful diagnostic evidence but is not beta-comparable.
 The reviewed comparison input is tracked at
-`perf-baselines/20260929T034251Z/perf_call_setup_cps_pbx-media-server/2000.json`.
+`perf-baselines/20260929T224805Z/perf_call_setup_cps_pbx-media-server/2000.json`.
 Every clean run snapshots and hashes it; canonical evidence packages that
 snapshot so a copied final attestation does not depend on an ignored or mutable
 workspace report.
@@ -83,7 +83,7 @@ contains:
 - an immutable copy of the report produced by that invocation;
 - for `clean`, `acceptance.json` plus a baseline-compatible
   `perf-results/<scenario>/2000.json` audit view and `perf-audit.md` comparison
-  against the run-local, hashed snapshot of the tracked `20260929T034251Z`
+  against the run-local, hashed snapshot of the tracked `20260929T224805Z`
   reviewed baseline.
 
 The test writes its raw report beneath that run directory through
@@ -289,7 +289,7 @@ clean beta binary.
    canonical conditioning/window identity, actual coverage, structural drain,
    absolute 2,000-CPS beta thresholds, and
    zero-error condition pass. It also runs `perf_audit.py --fail-on-regression`
-   against the reviewed `20260929T034251Z` baseline and records that status in
+   against the reviewed `20260929T224805Z` baseline and records that status in
    the manifest.
 2. Run one profiler mode from the identical source fingerprint.
 3. Identify the largest inclusive stacks, waits, retained structures, or task

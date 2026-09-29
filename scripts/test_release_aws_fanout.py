@@ -29,14 +29,17 @@ class AwsReleaseFanoutTests(unittest.TestCase):
         shard: str,
         *,
         resource: str = "ec2-performance",
-        machine: str = "m5.2xlarge",
+        machine: str | None = None,
         gates: str = "perf.one,perf.two",
         disk_size_gb: int = 200,
     ) -> dict[str, object]:
         return {
             "id": shard,
             "resource_class": resource,
-            "machine_type": machine,
+            # Default to the class's real machine so fixtures track the sizing
+            # table instead of restating it; pass one explicitly to test a
+            # mismatch.
+            "machine_type": machine or fanout.RESOURCE_MACHINES[resource],
             "disk_type": "gp3",
             "disk_size_gb": disk_size_gb,
             "gates_csv": gates,
@@ -69,7 +72,6 @@ class AwsReleaseFanoutTests(unittest.TestCase):
                     self.matrix_entry(
                         "long-soak",
                         resource="ec2-performance-soak-long",
-                        machine="m5.2xlarge",
                         gates="perf.long-soak",
                     ),
                     self.matrix_entry(
@@ -193,7 +195,6 @@ class AwsReleaseFanoutTests(unittest.TestCase):
         long_soak = self.matrix_entry(
             "ec2-performance-soak-long-1",
             resource="ec2-performance-soak-long",
-            machine="m5.2xlarge",
             gates="perf.soak-candidate",
         )
         manifest = fanout.prepare_manifest(
@@ -203,9 +204,10 @@ class AwsReleaseFanoutTests(unittest.TestCase):
             run_id="1",
             run_attempt="1",
         )
-        self.assertEqual(manifest["required_vcpus"], 8)
-        long_soak["machine_type"] = "m5.xlarge"
-        with self.assertRaisesRegex(fanout.FanoutError, "must use m5.2xlarge"):
+        # Long soak runs the canonical 2,000-CPS sweep and must have 16 vCPUs.
+        self.assertEqual(manifest["required_vcpus"], 16)
+        long_soak["machine_type"] = "m5.2xlarge"
+        with self.assertRaisesRegex(fanout.FanoutError, "must use m5.4xlarge"):
             fanout.prepare_manifest(
                 matrix={"include": [long_soak]},
                 candidate=self.candidate,

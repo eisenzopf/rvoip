@@ -257,7 +257,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('"ec2-proxy-interop": "m5.large"', fanout)
         self.assertIn('"ec2-performance": "m5.2xlarge"', fanout)
         self.assertIn('"ec2-performance-soak": "m5.xlarge"', fanout)
-        self.assertIn('"ec2-performance-soak-long": "m5.2xlarge"', fanout)
+        self.assertIn('"ec2-performance-soak-long": "m5.4xlarge"', fanout)
         self.assertIn("sip-tester", startup)
         self.assertIn("tshark", startup)
         self.assertIn("docker-compose-v2", startup)
@@ -460,7 +460,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("sysctl -w net.core.wmem_max=67108864", startup)
         self.assertEqual(workflow.count("aws ec2 run-instances"), 2)
         self.assertIn(
-            "RELEASE_ENVIRONMENT_ID: rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5",
+            "RELEASE_ENVIRONMENT_ID: rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-soaklong16",
             workflow,
         )
         self.assertIn("expected 46 publishable workspace packages", probe)
