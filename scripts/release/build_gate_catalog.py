@@ -94,7 +94,7 @@ CURRENT_PERFORMANCE_EVALUATION_GATE_IDS = ["perf.canonical-2k-current"]
 # 2026 legacy evidence, which names whichever baseline was current then. Pin
 # the packaging gate to the baseline the rest of the tooling reads so the
 # catalog stays reproducible and current at the same time.
-REVIEWED_PERF_BASELINE_ID = "20260929T034251Z"
+REVIEWED_PERF_BASELINE_ID = "20260929T224805Z"
 COMMAND_OVERRIDES = {
     "report.regression-baseline": [
         "python3",

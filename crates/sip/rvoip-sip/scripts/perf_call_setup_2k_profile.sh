@@ -11,10 +11,10 @@ CRATE_DIR="${WORKSPACE_ROOT}/crates/sip/rvoip-sip"
 PERF_DIR="${WORKSPACE_ROOT}/target/perf-results"
 TEST_NAME="perf_call_setup_cps"
 FEATURES="perf-tests"
-REVIEWED_BASELINE_ID="20260929T034251Z"
+REVIEWED_BASELINE_ID="20260929T224805Z"
 REVIEWED_BASELINE_SCENARIO="perf_call_setup_cps_pbx-media-server"
 REVIEWED_BASELINE_RELATIVE_PATH="${REVIEWED_BASELINE_SCENARIO}/2000.json"
-REVIEWED_BASELINE_CANONICAL_SHA256="8a12b63eea2105ee37ada7582957f36e7365dbe4e7b3aa6389c3971d9485d075"
+REVIEWED_BASELINE_CANONICAL_SHA256="36219d8e403d55172b5633f8d8418661e4bb501f446a2569bc2f4e8dee7dd4b9"
 TRACKED_REVIEWED_BASELINE="${CRATE_DIR}/perf-baselines/${REVIEWED_BASELINE_ID}"
 REVIEWED_BASELINE="${RVOIP_PERF_REVIEWED_BASELINE:-${TRACKED_REVIEWED_BASELINE}}"
 REVIEWED_BASELINE_REPORT="${REVIEWED_BASELINE}/${REVIEWED_BASELINE_RELATIVE_PATH}"
@@ -824,8 +824,6 @@ if [[ -f "${raw_report_path}" ]]; then
       --baseline "${REVIEWED_BASELINE_SNAPSHOT}" \
       --current "${audit_results_dir}" \
       --out "${RUN_DIR}/perf-audit.md" \
-      --latency-tolerance-pct 50 \
-      --report-only-latency-percentiles p99 \
       --fail-on-regression
     then
       audit_status="PASS"

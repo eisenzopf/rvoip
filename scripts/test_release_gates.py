@@ -989,7 +989,7 @@ class GateFrameworkTests(unittest.TestCase):
 
     def test_performance_reconciliation_runs_real_baseline_audit(self) -> None:
         baseline_root = (
-            ROOT / "crates/sip/rvoip-sip/perf-baselines/20260929T034251Z"
+            ROOT / "crates/sip/rvoip-sip/perf-baselines/20260929T224805Z"
         )
         manifest = json.loads((baseline_root / "manifest.json").read_text())
         with tempfile.TemporaryDirectory() as directory:
@@ -1019,7 +1019,7 @@ class GateFrameworkTests(unittest.TestCase):
         self,
     ) -> None:
         baseline_root = (
-            ROOT / "crates/sip/rvoip-sip/perf-baselines/20260929T034251Z"
+            ROOT / "crates/sip/rvoip-sip/perf-baselines/20260929T224805Z"
         )
         manifest = json.loads((baseline_root / "manifest.json").read_text())
         with tempfile.TemporaryDirectory() as directory:
@@ -1062,7 +1062,7 @@ class GateFrameworkTests(unittest.TestCase):
         self,
     ) -> None:
         baseline_root = (
-            ROOT / "crates/sip/rvoip-sip/perf-baselines/20260929T034251Z"
+            ROOT / "crates/sip/rvoip-sip/perf-baselines/20260929T224805Z"
         )
         manifest = json.loads((baseline_root / "manifest.json").read_text())
         with tempfile.TemporaryDirectory() as directory:
@@ -1098,7 +1098,7 @@ class GateFrameworkTests(unittest.TestCase):
         self,
     ) -> None:
         baseline_root = (
-            ROOT / "crates/sip/rvoip-sip/perf-baselines/20260929T034251Z"
+            ROOT / "crates/sip/rvoip-sip/perf-baselines/20260929T224805Z"
         )
         with tempfile.TemporaryDirectory() as directory:
             evidence = Path(directory) / "evidence"

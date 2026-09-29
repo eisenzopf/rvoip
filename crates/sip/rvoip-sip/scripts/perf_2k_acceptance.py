@@ -29,25 +29,15 @@ LIMITS = (
     ("results.achieved_cps", ">=", 1578.53),
     ("results.asr", ">=", 0.999),
     ("results.ner", ">=", 0.999),
-    # p50 and p95 keep their original absolute ceilings; the fleet clears them
-    # by a wide margin (about 2 ms and 4 ms) and the sensitive check for those
-    # two is now the regression audit against a same-hardware baseline.
-    #
-    # The p99 ceiling had to move. It was set from a 16-core laptop whose
-    # distribution was flat -- p50 11 ms, p95 12 ms, p99 13 ms -- so one
-    # "baseline + 25%" band covered all three. On the release fleet (EC2
-    # m5.2xlarge, 4 physical cores) the distribution is steep, and 2,000 CPS
-    # is the sweep's own detected knee. Four samples of identical code on that
-    # hardware measured p99 at 20.35, 25.43, 28.46 and 39.32 ms, a nearly
-    # twofold swing, while p50 held between 1.98 and 2.18 ms and every lower
-    # load point held to within 0.1 ms (1,000 CPS keeps a 2.2 ms p99). No
-    # relative tolerance on that p99 can be both meaningful and reliable, so
-    # the regression audit reports it without gating and this absolute ceiling
-    # is its gate, with headroom for three consecutive passes. p50 and p95 stay
-    # gated by the audit against the same-hardware baseline.
+    # These absolute ceilings are a coarse floor; the sensitive check is the
+    # regression audit against the reviewed same-hardware baseline. On the
+    # 16-vCPU long-soak class the 2,000-CPS point measures p50 1.34-1.41 ms,
+    # p95 1.86-1.96 ms and p99 2.44-2.61 ms across runs, well inside them. On
+    # 8 vCPUs that point was the CPU knee and p99 swung 17-39 ms run to run,
+    # which is why the long-soak class must stay at 16 vCPUs or more.
     ("latency_ns.setup_latency.p50", "<=", 13.97e6),
     ("latency_ns.setup_latency.p95", "<=", 15.36e6),
-    ("latency_ns.setup_latency.p99", "<=", 60.0e6),
+    ("latency_ns.setup_latency.p99", "<=", 16.69e6),
     ("latency_ns.full_cycle.p50", "<=", 154.66e6),
     ("latency_ns.full_cycle.p95", "<=", 156.88e6),
     ("latency_ns.full_cycle.p99", "<=", 159.66e6),
