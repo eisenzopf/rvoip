@@ -159,6 +159,21 @@ impl RtpPlayoutBuffer {
             .all(|offset| self.pending.contains_key(&oldest.wrapping_add(offset)))
     }
 
+    /// When `tick` could next release something on its own, if anything is
+    /// pending. `None` means the buffer is idle and only an arrival can
+    /// change that; arrivals tick the buffer themselves through `push`.
+    fn next_deadline(&self) -> Option<Instant> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        let hold_started = if self.expected_sequence.is_none() {
+            self.startup_started_at
+        } else {
+            self.gap_started_at
+        };
+        hold_started.map(|started| started + RTP_REORDER_HOLD)
+    }
+
     fn oldest_pending_sequence(&self) -> Option<u16> {
         self.pending.keys().copied().find(|candidate| {
             self.pending
@@ -288,6 +303,14 @@ impl DecodedPlayoutQueue {
             .front()
             .map(|_| now + frame.duration.max(Duration::from_millis(1)));
         Some(frame)
+    }
+
+    /// When the head frame becomes due, if any frame is queued.
+    fn next_deadline(&self) -> Option<Instant> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        self.next_delivery_at
     }
 }
 
@@ -467,6 +490,56 @@ mod rtp_playout_tests {
                 .timestamp,
             40_000
         );
+    }
+
+    #[test]
+    fn idle_playout_reports_no_deadline_so_the_receive_loop_parks_on_the_channel() {
+        assert!(RtpPlayoutBuffer::new().next_deadline().is_none());
+        assert!(DecodedPlayoutQueue::new().next_deadline().is_none());
+    }
+
+    #[test]
+    fn a_held_gap_reports_the_hold_expiry_as_its_deadline() {
+        let start = Instant::now();
+        let mut buffer = RtpPlayoutBuffer::new();
+        assert_eq!(buffer.push(packet(101), start).len(), 1);
+        assert!(
+            buffer.next_deadline().is_none(),
+            "nothing is pending after a release"
+        );
+        // 103 ahead of 102 opens a gap. The buffer must ask to be woken when
+        // the reorder hold expires so a lost 102 is concealed on time even
+        // if no further packet ever arrives.
+        let gap_at = start + Duration::from_millis(20);
+        assert!(buffer.push(packet(103), gap_at).is_empty());
+        assert_eq!(buffer.next_deadline(), Some(gap_at + RTP_REORDER_HOLD));
+        // 102 arriving inside the hold releases both and leaves it idle again.
+        let ready = buffer.push(packet(102), start + Duration::from_millis(35));
+        assert_eq!(ready.iter().map(sequence).collect::<Vec<_>>(), [102, 103]);
+        assert!(buffer.next_deadline().is_none());
+    }
+
+    #[test]
+    fn a_queued_frame_reports_its_delivery_time_as_the_deadline() {
+        let now = Instant::now();
+        let mut queue = DecodedPlayoutQueue::new();
+        assert!(queue.push(AudioFrame::new(vec![0; 160], 8_000, 1, 0), now));
+        assert_eq!(
+            queue.next_deadline(),
+            Some(now),
+            "the first frame is due at once"
+        );
+        let first = queue.pop_due(now).expect("first frame is due");
+        assert!(queue.next_deadline().is_none(), "an emptied queue is idle");
+        assert!(queue.push(AudioFrame::new(vec![0; 160], 8_000, 1, 160), now));
+        assert!(queue.push(AudioFrame::new(vec![0; 160], 8_000, 1, 320), now));
+        let head = queue.pop_due(now).expect("head frame is due");
+        assert_eq!(
+            queue.next_deadline(),
+            Some(now + head.duration.max(Duration::from_millis(1))),
+            "the remaining frame is paced one frame duration after the head"
+        );
+        assert_eq!(first.timestamp, 0);
     }
 
     #[tokio::test]
@@ -2275,13 +2348,28 @@ impl MediaSessionController {
             let mut rtp_playout = RtpPlayoutBuffer::new();
             let mut decoded_playout = DecodedPlayoutQueue::new();
             let mut delivery_state = RtpDeliveryState::default();
-            let mut playout_tick = tokio::time::interval(Duration::from_millis(5));
-            playout_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             'events: loop {
-                let received = tokio::select! {
-                    event = rtp_events.recv() => Some(event),
-                    _ = playout_tick.tick() => None,
+                // Wake for playout only when something is actually waiting:
+                // a packet held for reordering, or a decoded frame due for
+                // paced delivery. A dialog with nothing buffered parks on
+                // the RTP channel, and one that is buffering wakes when the
+                // work is due rather than at the next fixed boundary. The
+                // unconditional 5 ms tick this replaces cost every in-flight
+                // dialog 200 timer wakes a second it never used, and at
+                // 2,000 calls per second that scheduler pressure surfaced
+                // in the call-setup latency tail.
+                let playout_deadline =
+                    match (rtp_playout.next_deadline(), decoded_playout.next_deadline()) {
+                        (Some(rtp), Some(decoded)) => Some(rtp.min(decoded)),
+                        (rtp, decoded) => rtp.or(decoded),
+                    };
+                let received = match playout_deadline {
+                    Some(deadline) => tokio::select! {
+                        event = rtp_events.recv() => Some(event),
+                        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => None,
+                    },
+                    None => Some(rtp_events.recv().await),
                 };
                 if received.is_none() {
                     let now = Instant::now();
