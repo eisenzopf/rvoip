@@ -583,7 +583,14 @@ jobs:
             builder_id="$(jq -r '.Instances[0].InstanceId' target/aws-controller/prebuild/create.json)"
 
             result_uri="s3://${BUCKET}/${prefix}/prebuild-result.json"
-            for attempt in $(seq 1 120); do
+            # 90 minutes. The shared compiler cache makes a warm prebuild a
+            # few minutes, but a cold one compiles the whole workspace and
+            # every performance executable from scratch, which is what a new
+            # account, region, or RELEASE_ENVIRONMENT_ID always starts from.
+            # A 40-minute budget cut exactly that first build off mid-compile.
+            # Waiting longer costs nothing when the bundle lands early: the
+            # loop exits on the object, or as soon as the builder stops.
+            for attempt in $(seq 1 180); do
               if aws s3 cp "$result_uri" \
                 target/aws-controller/prebuild/prebuild-result.json >/dev/null 2>&1; then
                 break
@@ -601,13 +608,20 @@ jobs:
                   break
                   ;;
               esac
-              echo "Waiting for exact-candidate performance bundle (poll ${attempt}/120)"
-              sleep 20
+              echo "Waiting for exact-candidate performance bundle (poll ${attempt}/180)"
+              sleep 30
             done
             aws s3 cp "s3://${BUCKET}/${prefix}/prebuild.log" \
               target/aws-controller/prebuild/prebuild.log >/dev/null 2>&1 || true
           fi
-          test -f target/aws-controller/prebuild/prebuild-result.json
+          if [[ ! -f target/aws-controller/prebuild/prebuild-result.json ]]; then
+            # Without this the step fails on a bare `test -f` and the cause
+            # has to be reconstructed from the builder's console output.
+            echo "no exact-candidate performance bundle was produced." >&2
+            echo "The builder neither uploaded a result nor stopped on its own within the wait budget; it was still building when the controller gave up." >&2
+            echo "s3://${BUCKET}/${prefix}/prebuild.log holds the builder log when the builder got far enough to upload one." >&2
+            exit 1
+          fi
           python3 scripts/release/prebuilt_performance.py verify-result \
             --result target/aws-controller/prebuild/prebuild-result.json \
             --candidate "$CANDIDATE" \
