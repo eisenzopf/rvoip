@@ -458,11 +458,21 @@ exclusions are recorded in signed qualification evidence; see the
 | **Kamailio** | Release-gated | RFC 3261 transaction-stateful proxy in both hop orders over UDP, TCP, and TLS, plus registrar-proxy with an rtpengine media relay: registration, calls, AMR in all four framings, DTMF, SDES-SRTP |
 | **OpenSIPS** | Release-gated | The same proxy matrix in both hop orders over UDP, TCP, and TLS, and the same rtpengine lab scope |
 
-The strict full-beta gate requires an explicit PASS attestation for Asterisk,
-FreeSWITCH, Jambonz, Kamailio, and OpenSIPS. The report generator binds each
-row to the tested source tree, exact peer identity and configuration, selected
-matrix, and hashed evidence; it refuses to produce a release-candidate report
-if a required peer is missing, skipped, ambiguous, unpinned, or failing.
+### SIP interoperability attestation
+
+The strict full-beta gate requires an explicit PASS attestation for every
+required independently managed peer below. The report generator binds each row
+to the tested source tree, exact peer identity and configuration, selected
+matrix, and hashed evidence; it refuses to produce a strict release-candidate
+report if a required peer is missing, skipped, ambiguous, unpinned, or failing.
+
+| Peer | Attested boundary | Required release evidence |
+| --- | --- | --- |
+| **Asterisk** | PBX/B2BUA call control and RTP media | Provider-specific all-PASS rows from the recorded API, scenario, codec, and security matrix, plus the exact local revision and configuration fingerprint |
+| **FreeSWITCH** | PBX/B2BUA call control and RTP media | Provider-specific all-PASS rows from the recorded API, scenario, codec, and security matrix, plus the exact local revision and configuration fingerprint |
+| **Jambonz OSS** | SBC/B2BUA, registrar, and anchored RTP media | Latest-version check, source and image pins, all-PASS applicable public-API UDP/plain-RTP matrix, and post-run cleanup |
+| **Kamailio** | RFC 3261 transaction-stateful proxy interoperability | Digest-pinned peer, both hop orders, UDP/TCP/TLS, packet assertions, verified TLS evidence, and post-retention cleanup |
+| **OpenSIPS** | RFC 3261 transaction-stateful proxy interoperability | Digest-pinned peer, both hop orders, UDP/TCP/TLS, packet assertions, verified TLS evidence, and post-retention cleanup |
 
 The current release's authority documents:
 
@@ -472,10 +482,14 @@ The current release's authority documents:
 - [Interop plan](crates/sip/rvoip-sip/docs/INTEROP_CI_PLAN.md) — the evidence boundaries.
 - [Changelog](CHANGELOG.md) and [release notes](crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md) — what changed in this release.
 
-A passing lab matrix is bounded interoperability evidence, not carrier
-certification or a claim about every peer version and topology. Anything
-outside a stated qualification boundary remains the application's
-responsibility to validate in its own deployment.
+This is bounded interoperability evidence, not a claim of compatibility with
+every version, module, configuration, transport, codec, or SIP extension, and
+not carrier certification. Anything outside a stated qualification boundary
+remains the application's responsibility to validate in its own deployment.
+
+Developer-preview products document their own supported scope and gaps in
+their crate READMEs. A published crate or Cargo feature is evidence of
+availability, not a blanket production-readiness statement.
 
 ## Building and testing the workspace
 
