@@ -200,7 +200,7 @@ Environment:
   BETA_PERF_REGRESSION_FAIL=1    Make a regression vs the reviewed immutable baseline a hard gate failure. Default 0 (report-only + perf-audit.md).
   BETA_PERF_REGRESSION_BASELINE_ROOT
                                   Reviewed immutable regression-baseline root. Defaults to
-                                  perf-baselines/20260706T181609Z in this crate.
+                                  perf-baselines/20260929T034251Z in this crate.
   BETA_PERF_REGRESSION_BASELINE_MANIFEST
                                   Manifest for the reviewed regression baseline. Defaults to
                                   <baseline-root>/manifest.json. The manifest and every listed
@@ -297,7 +297,7 @@ export RVOIP_REQUIRE_API_TOOLS
 RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS="${RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS:-130}"
 export RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS
 
-PERF_REGRESSION_BASELINE_ROOT="${BETA_PERF_REGRESSION_BASELINE_ROOT:-$CRATE_DIR/perf-baselines/20260706T181609Z}"
+PERF_REGRESSION_BASELINE_ROOT="${BETA_PERF_REGRESSION_BASELINE_ROOT:-$CRATE_DIR/perf-baselines/20260929T034251Z}"
 case "$PERF_REGRESSION_BASELINE_ROOT" in
   /*) ;;
   *) PERF_REGRESSION_BASELINE_ROOT="$WORKSPACE_ROOT/$PERF_REGRESSION_BASELINE_ROOT" ;;

@@ -4976,9 +4976,9 @@
         "{workspace}/crates/sip/rvoip-sip/scripts/perf_regression_baseline.py",
         "package",
         "--manifest",
-        "{workspace}/crates/sip/rvoip-sip/perf-baselines/20260706T181609Z/manifest.json",
+        "{workspace}/crates/sip/rvoip-sip/perf-baselines/20260929T034251Z/manifest.json",
         "--source-root",
-        "{workspace}/crates/sip/rvoip-sip/perf-baselines/20260706T181609Z",
+        "{workspace}/crates/sip/rvoip-sip/perf-baselines/20260929T034251Z",
         "--artifact-dir",
         "{artifact_dir}"
       ],
@@ -5013,7 +5013,7 @@
         "perf.tls-overhead",
         "perf.transport-recovery"
       ],
-      "display_command": "python3 <workspace>/crates/sip/rvoip-sip/scripts/perf_regression_baseline.py package --manifest <workspace>/crates/sip/rvoip-sip/perf-baselines/20260706T181609Z/manifest.json --source-root <workspace>/crates/sip/rvoip-sip/perf-baselines/20260706T181609Z --artifact-dir <source-report>",
+      "display_command": "python3 <workspace>/crates/sip/rvoip-sip/scripts/perf_regression_baseline.py package --manifest <workspace>/crates/sip/rvoip-sip/perf-baselines/20260929T034251Z/manifest.json --source-root <workspace>/crates/sip/rvoip-sip/perf-baselines/20260929T034251Z --artifact-dir <source-report>",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [

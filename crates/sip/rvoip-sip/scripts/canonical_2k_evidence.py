@@ -27,12 +27,12 @@ CANONICAL_SCENARIO = "perf_call_setup_cps_pbx-media-server"
 MANIFEST_SCHEMA = "rvoip-perf-profile-manifest-v2"
 INDEX_SCHEMA = "rvoip-canonical-2k-evidence-v2"
 ACCEPTANCE_SCHEMA = "rvoip-sip-2k-acceptance-v3"
-REVIEWED_BASELINE_ID = "20260706T181609Z"
+REVIEWED_BASELINE_ID = "20260929T034251Z"
 REVIEWED_BASELINE_RELATIVE_PATH = (
     "perf_call_setup_cps_pbx-media-server/2000.json"
 )
 REVIEWED_BASELINE_SHA256 = (
-    "6d55df11e169ff22dd955c466c02cb86a506830559e3f9d2aa03fc2b86f417c3"
+    "8a12b63eea2105ee37ada7582957f36e7365dbe4e7b3aa6389c3971d9485d075"
 )
 REVIEWED_BASELINE_PACKAGED_PATH = (
     f"reviewed-baseline/{REVIEWED_BASELINE_RELATIVE_PATH}"

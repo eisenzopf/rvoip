@@ -12,7 +12,7 @@ import unittest
 
 
 SCRIPT = pathlib.Path(__file__).with_name("perf_regression_baseline.py")
-TRACKED_BASELINE = SCRIPT.parent.parent / "perf-baselines/20260706T181609Z"
+TRACKED_BASELINE = SCRIPT.parent.parent / "perf-baselines/20260929T034251Z"
 
 
 def digest(value: bytes) -> str:
@@ -32,7 +32,7 @@ class PerfRegressionBaselineTests(unittest.TestCase):
             json.dumps(
                 {
                     "schema": "rvoip-perf-regression-baseline-v1",
-                    "baseline_id": "20260706T181609Z",
+                    "baseline_id": "20260929T034251Z",
                     "qualification": {
                         "release_evidence": False,
                         "permitted_use": "reviewed regression threshold only",
@@ -104,7 +104,7 @@ class PerfRegressionBaselineTests(unittest.TestCase):
             str(TRACKED_BASELINE),
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("20260706T181609Z (6 files)", result.stdout)
+        self.assertIn("20260929T034251Z (6 files)", result.stdout)
 
     def test_changed_file_fails_closed(self) -> None:
         (self.source / "fixture.json").write_bytes(self.payload + b" ")

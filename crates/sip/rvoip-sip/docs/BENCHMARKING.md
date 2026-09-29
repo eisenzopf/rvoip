@@ -49,7 +49,7 @@ each of the four Alice shards so the canonical configuration does not depend
 on the runner's detected CPU count. `clean` also verifies the exact
 workload/configuration, runs
 `scripts/perf_2k_acceptance.py` against the absolute beta limits, and gates
-`perf_audit.py --fail-on-regression` against the reviewed `20260706T181609Z`
+`perf_audit.py --fail-on-regression` against the reviewed `20260929T034251Z`
 baseline tracked under `perf-baselines/`. The runner snapshots that input into
 each run and records its relative path and SHA-256. An explicit
 `RVOIP_PERF_REVIEWED_BASELINE` may only relocate the byte-identical reviewed
@@ -96,7 +96,7 @@ report contains:
 
 The release used the clean `perf-tests` feature set with diagnostic hot-path
 instrumentation disabled, full application `AudioFrame` delivery enabled, and
-the reviewed `20260706T181609Z` regression baseline. The complete release
+the reviewed `20260929T034251Z` regression baseline. The complete release
 result is in [BETA_RELEASE_REPORT.md](BETA_RELEASE_REPORT.md); do not use
 ignored, untracked run directories as documentation references.
 

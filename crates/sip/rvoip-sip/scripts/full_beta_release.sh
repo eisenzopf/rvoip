@@ -579,8 +579,8 @@ run_full_beta_gate() {
     BETA_PERF_REGRESSION_TOLERANCE_PCT=15 \
     BETA_PERF_LATENCY_TOLERANCE_PCT=25 \
     BETA_PERF_PROFILE_MATRIX="endpoint:30 pbx-media-server:30,100,300,1000,2000 signaling-only-server-high-performance:30,100,300,1000,2000" \
-    BETA_PERF_REGRESSION_BASELINE_ROOT=crates/sip/rvoip-sip/perf-baselines/20260706T181609Z \
-    BETA_PERF_REGRESSION_BASELINE_MANIFEST=crates/sip/rvoip-sip/perf-baselines/20260706T181609Z/manifest.json \
+    BETA_PERF_REGRESSION_BASELINE_ROOT=crates/sip/rvoip-sip/perf-baselines/20260929T034251Z \
+    BETA_PERF_REGRESSION_BASELINE_MANIFEST=crates/sip/rvoip-sip/perf-baselines/20260929T034251Z/manifest.json \
     BETA_RUN_BURST_SMOKE=1 \
     BETA_RUN_BURST_MATRIX=1 \
     BETA_BURST_MATRIX=all \

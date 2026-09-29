@@ -1,0 +1,1036 @@
+{
+  "diagnostics": {
+    "bye_failures": {
+      "call_elapsed_bucket_counts": {},
+      "error_counts": {},
+      "hangup_elapsed_bucket_counts": {},
+      "load_phase_counts": {},
+      "schema": "rvoip-sip-bye-failure-diagnostics-v1",
+      "stage_counts": {}
+    },
+    "effective_config": {
+      "alice": {
+        "auto_100_trying": true,
+        "auto_180_ringing": true,
+        "diagnostics": {
+          "cleanup": false,
+          "dialog_timing": false,
+          "media_setup": false,
+          "sip_udp": false,
+          "transaction_timing": false
+        },
+        "effective_sip_invite_2xx_retransmit_max_due_per_tick": 2048,
+        "effective_sip_transaction_command_channel_capacity": 32,
+        "effective_sip_transaction_dispatch_priority_burst_max": 64,
+        "fast_auto_accept_incoming_calls": false,
+        "global_event_channel_capacity": 256,
+        "incoming_call_channel_capacity": 1000,
+        "media_mode": {
+          "kind": "enabled"
+        },
+        "media_port_capacity": 3634,
+        "media_port_end": 54633,
+        "media_port_start": 51000,
+        "media_session_capacity": 2000,
+        "server_call_admission_limit": null,
+        "server_call_admission_pacing_delay_ms": null,
+        "server_call_admission_soft_limit": null,
+        "server_call_capacity": null,
+        "server_overload_retry_after_secs": 1,
+        "server_retained_lifecycle_capacity": null,
+        "session_event_dispatcher_channel_capacity": 256,
+        "session_event_dispatcher_workers": 16,
+        "sip_dialog_dispatch_queue_capacity": null,
+        "sip_dialog_dispatch_workers": null,
+        "sip_invite_2xx_retransmit_max_due_per_tick": null,
+        "sip_transaction_command_channel_capacity": null,
+        "sip_transaction_dispatch_priority_burst_max": null,
+        "sip_transaction_dispatch_queue_capacity": null,
+        "sip_transaction_dispatch_workers": null,
+        "sip_transport_channel_capacity": 10000,
+        "sip_transport_dispatch_queue_capacity": null,
+        "sip_transport_dispatch_workers": null,
+        "sip_udp_parse_dispatch": null,
+        "sip_udp_parse_queue_capacity": null,
+        "sip_udp_parse_workers": null,
+        "sip_udp_recv_buffer_size": null,
+        "sip_udp_send_buffer_size": null,
+        "state_event_channel_capacity": 1000,
+        "transaction_event_channel_capacity": 10000
+      },
+      "alice_channel_capacity_per_shard": 2000,
+      "alice_session_event_dispatcher_workers_override": 16,
+      "alice_shard_configs": [
+        {
+          "config": {
+            "auto_100_trying": true,
+            "auto_180_ringing": true,
+            "diagnostics": {
+              "cleanup": false,
+              "dialog_timing": false,
+              "media_setup": false,
+              "sip_udp": false,
+              "transaction_timing": false
+            },
+            "effective_sip_invite_2xx_retransmit_max_due_per_tick": 2048,
+            "effective_sip_transaction_command_channel_capacity": 32,
+            "effective_sip_transaction_dispatch_priority_burst_max": 64,
+            "fast_auto_accept_incoming_calls": false,
+            "global_event_channel_capacity": 256,
+            "incoming_call_channel_capacity": 1000,
+            "media_mode": {
+              "kind": "enabled"
+            },
+            "media_port_capacity": 3634,
+            "media_port_end": 54633,
+            "media_port_start": 51000,
+            "media_session_capacity": 2000,
+            "server_call_admission_limit": null,
+            "server_call_admission_pacing_delay_ms": null,
+            "server_call_admission_soft_limit": null,
+            "server_call_capacity": null,
+            "server_overload_retry_after_secs": 1,
+            "server_retained_lifecycle_capacity": null,
+            "session_event_dispatcher_channel_capacity": 256,
+            "session_event_dispatcher_workers": 16,
+            "sip_dialog_dispatch_queue_capacity": null,
+            "sip_dialog_dispatch_workers": null,
+            "sip_invite_2xx_retransmit_max_due_per_tick": null,
+            "sip_transaction_command_channel_capacity": null,
+            "sip_transaction_dispatch_priority_burst_max": null,
+            "sip_transaction_dispatch_queue_capacity": null,
+            "sip_transaction_dispatch_workers": null,
+            "sip_transport_channel_capacity": 10000,
+            "sip_transport_dispatch_queue_capacity": null,
+            "sip_transport_dispatch_workers": null,
+            "sip_udp_parse_dispatch": null,
+            "sip_udp_parse_queue_capacity": null,
+            "sip_udp_parse_workers": null,
+            "sip_udp_recv_buffer_size": null,
+            "sip_udp_send_buffer_size": null,
+            "state_event_channel_capacity": 1000,
+            "transaction_event_channel_capacity": 10000
+          },
+          "from": "sip:alice0@127.0.0.1:44239"
+        },
+        {
+          "config": {
+            "auto_100_trying": true,
+            "auto_180_ringing": true,
+            "diagnostics": {
+              "cleanup": false,
+              "dialog_timing": false,
+              "media_setup": false,
+              "sip_udp": false,
+              "transaction_timing": false
+            },
+            "effective_sip_invite_2xx_retransmit_max_due_per_tick": 2048,
+            "effective_sip_transaction_command_channel_capacity": 32,
+            "effective_sip_transaction_dispatch_priority_burst_max": 64,
+            "fast_auto_accept_incoming_calls": false,
+            "global_event_channel_capacity": 256,
+            "incoming_call_channel_capacity": 1000,
+            "media_mode": {
+              "kind": "enabled"
+            },
+            "media_port_capacity": 3634,
+            "media_port_end": 58267,
+            "media_port_start": 54634,
+            "media_session_capacity": 2000,
+            "server_call_admission_limit": null,
+            "server_call_admission_pacing_delay_ms": null,
+            "server_call_admission_soft_limit": null,
+            "server_call_capacity": null,
+            "server_overload_retry_after_secs": 1,
+            "server_retained_lifecycle_capacity": null,
+            "session_event_dispatcher_channel_capacity": 256,
+            "session_event_dispatcher_workers": 16,
+            "sip_dialog_dispatch_queue_capacity": null,
+            "sip_dialog_dispatch_workers": null,
+            "sip_invite_2xx_retransmit_max_due_per_tick": null,
+            "sip_transaction_command_channel_capacity": null,
+            "sip_transaction_dispatch_priority_burst_max": null,
+            "sip_transaction_dispatch_queue_capacity": null,
+            "sip_transaction_dispatch_workers": null,
+            "sip_transport_channel_capacity": 10000,
+            "sip_transport_dispatch_queue_capacity": null,
+            "sip_transport_dispatch_workers": null,
+            "sip_udp_parse_dispatch": null,
+            "sip_udp_parse_queue_capacity": null,
+            "sip_udp_parse_workers": null,
+            "sip_udp_recv_buffer_size": null,
+            "sip_udp_send_buffer_size": null,
+            "state_event_channel_capacity": 1000,
+            "transaction_event_channel_capacity": 10000
+          },
+          "from": "sip:alice1@127.0.0.1:44240"
+        },
+        {
+          "config": {
+            "auto_100_trying": true,
+            "auto_180_ringing": true,
+            "diagnostics": {
+              "cleanup": false,
+              "dialog_timing": false,
+              "media_setup": false,
+              "sip_udp": false,
+              "transaction_timing": false
+            },
+            "effective_sip_invite_2xx_retransmit_max_due_per_tick": 2048,
+            "effective_sip_transaction_command_channel_capacity": 32,
+            "effective_sip_transaction_dispatch_priority_burst_max": 64,
+            "fast_auto_accept_incoming_calls": false,
+            "global_event_channel_capacity": 256,
+            "incoming_call_channel_capacity": 1000,
+            "media_mode": {
+              "kind": "enabled"
+            },
+            "media_port_capacity": 3634,
+            "media_port_end": 61901,
+            "media_port_start": 58268,
+            "media_session_capacity": 2000,
+            "server_call_admission_limit": null,
+            "server_call_admission_pacing_delay_ms": null,
+            "server_call_admission_soft_limit": null,
+            "server_call_capacity": null,
+            "server_overload_retry_after_secs": 1,
+            "server_retained_lifecycle_capacity": null,
+            "session_event_dispatcher_channel_capacity": 256,
+            "session_event_dispatcher_workers": 16,
+            "sip_dialog_dispatch_queue_capacity": null,
+            "sip_dialog_dispatch_workers": null,
+            "sip_invite_2xx_retransmit_max_due_per_tick": null,
+            "sip_transaction_command_channel_capacity": null,
+            "sip_transaction_dispatch_priority_burst_max": null,
+            "sip_transaction_dispatch_queue_capacity": null,
+            "sip_transaction_dispatch_workers": null,
+            "sip_transport_channel_capacity": 10000,
+            "sip_transport_dispatch_queue_capacity": null,
+            "sip_transport_dispatch_workers": null,
+            "sip_udp_parse_dispatch": null,
+            "sip_udp_parse_queue_capacity": null,
+            "sip_udp_parse_workers": null,
+            "sip_udp_recv_buffer_size": null,
+            "sip_udp_send_buffer_size": null,
+            "state_event_channel_capacity": 1000,
+            "transaction_event_channel_capacity": 10000
+          },
+          "from": "sip:alice2@127.0.0.1:44241"
+        },
+        {
+          "config": {
+            "auto_100_trying": true,
+            "auto_180_ringing": true,
+            "diagnostics": {
+              "cleanup": false,
+              "dialog_timing": false,
+              "media_setup": false,
+              "sip_udp": false,
+              "transaction_timing": false
+            },
+            "effective_sip_invite_2xx_retransmit_max_due_per_tick": 2048,
+            "effective_sip_transaction_command_channel_capacity": 32,
+            "effective_sip_transaction_dispatch_priority_burst_max": 64,
+            "fast_auto_accept_incoming_calls": false,
+            "global_event_channel_capacity": 256,
+            "incoming_call_channel_capacity": 1000,
+            "media_mode": {
+              "kind": "enabled"
+            },
+            "media_port_capacity": 3634,
+            "media_port_end": 65535,
+            "media_port_start": 61902,
+            "media_session_capacity": 2000,
+            "server_call_admission_limit": null,
+            "server_call_admission_pacing_delay_ms": null,
+            "server_call_admission_soft_limit": null,
+            "server_call_capacity": null,
+            "server_overload_retry_after_secs": 1,
+            "server_retained_lifecycle_capacity": null,
+            "session_event_dispatcher_channel_capacity": 256,
+            "session_event_dispatcher_workers": 16,
+            "sip_dialog_dispatch_queue_capacity": null,
+            "sip_dialog_dispatch_workers": null,
+            "sip_invite_2xx_retransmit_max_due_per_tick": null,
+            "sip_transaction_command_channel_capacity": null,
+            "sip_transaction_dispatch_priority_burst_max": null,
+            "sip_transaction_dispatch_queue_capacity": null,
+            "sip_transaction_dispatch_workers": null,
+            "sip_transport_channel_capacity": 10000,
+            "sip_transport_dispatch_queue_capacity": null,
+            "sip_transport_dispatch_workers": null,
+            "sip_udp_parse_dispatch": null,
+            "sip_udp_parse_queue_capacity": null,
+            "sip_udp_parse_workers": null,
+            "sip_udp_recv_buffer_size": null,
+            "sip_udp_send_buffer_size": null,
+            "state_event_channel_capacity": 1000,
+            "transaction_event_channel_capacity": 10000
+          },
+          "from": "sip:alice3@127.0.0.1:44242"
+        }
+      ],
+      "alice_shards": 4,
+      "bob": {
+        "auto_100_trying": false,
+        "auto_180_ringing": false,
+        "diagnostics": {
+          "cleanup": false,
+          "dialog_timing": false,
+          "media_setup": false,
+          "sip_udp": false,
+          "transaction_timing": false
+        },
+        "effective_sip_invite_2xx_retransmit_max_due_per_tick": 2048,
+        "effective_sip_transaction_command_channel_capacity": 128,
+        "effective_sip_transaction_dispatch_priority_burst_max": 64,
+        "fast_auto_accept_incoming_calls": true,
+        "global_event_channel_capacity": 80000,
+        "incoming_call_channel_capacity": 8000,
+        "media_mode": {
+          "kind": "enabled"
+        },
+        "media_port_capacity": 24616,
+        "media_port_end": 40999,
+        "media_port_start": 16384,
+        "media_session_capacity": 8000,
+        "server_call_admission_limit": 8000,
+        "server_call_admission_pacing_delay_ms": 1,
+        "server_call_admission_soft_limit": 7200,
+        "server_call_capacity": 8000,
+        "server_overload_retry_after_secs": 1,
+        "server_retained_lifecycle_capacity": 168000,
+        "session_event_dispatcher_channel_capacity": 80000,
+        "session_event_dispatcher_workers": 4,
+        "sip_dialog_dispatch_queue_capacity": null,
+        "sip_dialog_dispatch_workers": 4,
+        "sip_invite_2xx_retransmit_max_due_per_tick": null,
+        "sip_transaction_command_channel_capacity": 128,
+        "sip_transaction_dispatch_priority_burst_max": null,
+        "sip_transaction_dispatch_queue_capacity": null,
+        "sip_transaction_dispatch_workers": 2,
+        "sip_transport_channel_capacity": 80000,
+        "sip_transport_dispatch_queue_capacity": null,
+        "sip_transport_dispatch_workers": null,
+        "sip_udp_parse_dispatch": "RoundRobin",
+        "sip_udp_parse_queue_capacity": 8000,
+        "sip_udp_parse_workers": 4,
+        "sip_udp_recv_buffer_size": 8388608,
+        "sip_udp_send_buffer_size": 8388608,
+        "state_event_channel_capacity": 8000,
+        "transaction_event_channel_capacity": 80000
+      },
+      "channel_capacity": 8000,
+      "client_profile": "endpoint",
+      "max_in_flight_limit": null,
+      "max_in_flight_override": null,
+      "profile": "pbx-media-server",
+      "recipe": {
+        "requested_path": null,
+        "resolved_path": null,
+        "sha256": "6ea4ad66fafc5f94b04a9fc9313175d6b8032271608c94374afb285af331125f",
+        "source": "bundled"
+      },
+      "recipe_file": null,
+      "report_scenario": "perf_call_setup_cps_pbx-media-server",
+      "retained_lifecycle_sizing": {
+        "anti_reuse_horizon_secs": 64,
+        "churn_headroom_percent": 25,
+        "max_offered_cps": 2000
+      },
+      "runtime_switches": {
+        "effective": {
+          "allocator_diagnostics": false,
+          "audio_tx_pacing": false,
+          "audio_tx_shared_scheduler": false,
+          "boundary_snapshot": false,
+          "call_setup_diagnostics": false,
+          "compiled_diagnostic_features": {
+            "call_setup": false,
+            "infra_memory": false,
+            "media": false,
+            "media_memory": false,
+            "rtp_memory": false
+          },
+          "memory_diagnostics": false,
+          "retention_snapshot": false,
+          "skip_audio_frame_delivery": false
+        },
+        "environment": {
+          "RVOIP_MEDIA_AUDIO_QUALITY_DIAGNOSTICS": "0",
+          "RVOIP_MEDIA_AUDIO_TX_PACING": "0",
+          "RVOIP_MEDIA_AUDIO_TX_PACING_TARGET_ACTIVE": null,
+          "RVOIP_MEDIA_AUDIO_TX_SHARED_BATCH_SIZE": null,
+          "RVOIP_MEDIA_AUDIO_TX_SHARED_SCHEDULER": "0",
+          "RVOIP_MEDIA_DIAGNOSTICS": "0",
+          "RVOIP_PERF_ALICE_SESSION_EVENT_DISPATCHER_WORKERS": "16",
+          "RVOIP_PERF_ALICE_SHARDS": "4",
+          "RVOIP_PERF_ALLOCATOR_DIAGNOSTICS": "0",
+          "RVOIP_PERF_BOUNDARY_SNAPSHOT": "0",
+          "RVOIP_PERF_BUILD_FEATURES": "perf-tests",
+          "RVOIP_PERF_CALL_SETUP_DIAGNOSTICS": "0",
+          "RVOIP_PERF_CALL_TIMEOUT_SECS": "15",
+          "RVOIP_PERF_CLIENT_PROFILE": "endpoint",
+          "RVOIP_PERF_COOLDOWN_SECS": "5",
+          "RVOIP_PERF_DHAT": "0",
+          "RVOIP_PERF_EMBED_RESOURCE_SAMPLES": "1",
+          "RVOIP_PERF_MAX_IN_FLIGHT": null,
+          "RVOIP_PERF_MEMORY_DIAGNOSTICS": "0",
+          "RVOIP_PERF_MIN_ASR": "0.999",
+          "RVOIP_PERF_OUTPUT_ROOT": "/opt/rvoip/target/perf-results/profiles/20260929T034251Z_clean_NA9mzw/output-target",
+          "RVOIP_PERF_POST_DRAIN_SAMPLE_SECS": "600",
+          "RVOIP_PERF_POST_DRAIN_SETTLE_SECS": "95",
+          "RVOIP_PERF_PROFILE": "pbx-media-server",
+          "RVOIP_PERF_RAMP_SECS": "5",
+          "RVOIP_PERF_RECIPE_FILE": null,
+          "RVOIP_PERF_REPORT_SCENARIO": "perf_call_setup_cps_pbx-media-server",
+          "RVOIP_PERF_REQUIRE_ALL_POINTS": "1",
+          "RVOIP_PERF_REQUIRE_ZERO_ERRORS": "1",
+          "RVOIP_PERF_RETENTION_SNAPSHOT": "0",
+          "RVOIP_PERF_RSS_TAIL_WINDOW_SECS": "60",
+          "RVOIP_PERF_RUN_MODE": "clean",
+          "RVOIP_PERF_SCHED_TICK_MS": "1",
+          "RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY": "0",
+          "RVOIP_PERF_STEADY_SECS": "30",
+          "RVOIP_PERF_SWEEP_CPS": "30,100,300,1000,2000",
+          "RVOIP_PERF_SYSTEM_ALLOCATOR": "0",
+          "RVOIP_PERF_TARGET_CPS": null,
+          "RVOIP_PERF_WORKER_THREADS": "8",
+          "RVOIP_RTP_DIAGNOSTICS": "0",
+          "RVOIP_SIP_DIAGNOSTICS": "0",
+          "RVOIP_SRTP_DIAGNOSTICS": "0",
+          "RVOIP_TEST": null,
+          "RVOIP_TEST_TRANSACTION_TIMEOUT_MS": null
+        }
+      },
+      "same_host_media_carveout": {
+        "alice": {
+          "end": 65535,
+          "start": 51000
+        },
+        "bob": {
+          "end": 40999,
+          "start": 16384
+        }
+      }
+    },
+    "measurement_identity": {
+      "conditioning": {
+        "calls_offered": 975,
+        "calls_succeeded": 975,
+        "point_count": 1,
+        "points": [
+          {
+            "calls_offered": 975,
+            "calls_succeeded": 975,
+            "target_cps": 30.0
+          }
+        ]
+      },
+      "measured_point_cps": 100.0,
+      "peer_lifecycle": "shared_for_entire_sweep",
+      "point_index": 1,
+      "post_drain_cleanup": {
+        "end_phase": null,
+        "minimum_representative_separation_secs": null,
+        "requested_secs": 0,
+        "rss_endpoint_estimator": null,
+        "rss_intent_mb_per_hour": null,
+        "rss_metric": null,
+        "rss_retained_delta_metric": null,
+        "rss_trend_metric": null,
+        "settle_secs": 0,
+        "start_phase": null,
+        "structural_metrics": []
+      },
+      "resource_window": {
+        "end_phase": "calls_drained",
+        "kind": "active_load",
+        "metric": "resources.rss_active_growth_mb_per_min",
+        "sample_interval_ms": 500,
+        "start_phase": "point_start"
+      },
+      "schema": "rvoip-sip-perf-measurement-identity-v2",
+      "sweep_points_cps": [
+        30.0,
+        100.0,
+        300.0,
+        1000.0,
+        2000.0
+      ]
+    },
+    "phase_markers": [
+      {
+        "elapsed_ms": 0,
+        "kind": "actual",
+        "phase": "point_start"
+      },
+      {
+        "elapsed_ms": 5000,
+        "kind": "planned",
+        "phase": "ramp_end"
+      },
+      {
+        "elapsed_ms": 35000,
+        "kind": "planned",
+        "phase": "steady_end"
+      },
+      {
+        "elapsed_ms": 40000,
+        "kind": "planned",
+        "phase": "cooldown_end"
+      },
+      {
+        "elapsed_ms": 35000,
+        "kind": "actual",
+        "phase": "dispatch_complete"
+      },
+      {
+        "elapsed_ms": 35002,
+        "kind": "actual",
+        "phase": "calls_drained"
+      },
+      {
+        "elapsed_ms": 35002,
+        "kind": "actual",
+        "phase": "cooldown_start"
+      },
+      {
+        "elapsed_ms": 40001,
+        "kind": "actual",
+        "phase": "cooldown_end"
+      },
+      {
+        "elapsed_ms": 40009,
+        "kind": "actual",
+        "phase": "resource_sampling_stopped"
+      }
+    ]
+  },
+  "duration_secs": 0,
+  "environment": {
+    "build_profile": "release",
+    "cargo_features": [
+      "perf-tests"
+    ],
+    "cpu_count_logical": 8,
+    "cpu_count_physical": 4,
+    "cpu_model": "Intel(R) Xeon(R) Platinum 8175M CPU @ 2.50GHz",
+    "git_commit": "0603158ab47ff4484fb522df3b071edd0ad1934a",
+    "git_dirty": false,
+    "git_rev": "0603158a",
+    "global_allocator": "mimalloc",
+    "mimalloc_enabled": true,
+    "network_topology": "loopback",
+    "nic": "loopback",
+    "os": "Ubuntu 24.04",
+    "requested_cargo_features": "perf-tests",
+    "rustc": "rustc 1.91.0 (f8297e351 2025-10-28)",
+    "rvoip_sip_version": "0.3.11",
+    "source_fingerprint_sha256": "66cda75baf9fabc86a24d36ac2a4bf6ebb9a83b05768abf0223bf6a07d8fe902",
+    "tokio_version": "1.40",
+    "total_ram_gb": 30.646686553955078
+  },
+  "latency_ns": {
+    "full_cycle": {
+      "count": 3250,
+      "max": 2795519,
+      "mean": 1944322.363076923,
+      "min": 1754112,
+      "p50": 1922047,
+      "p95": 2127871,
+      "p99": 2326527,
+      "p99_9": 2590719
+    },
+    "setup_latency": {
+      "count": 3250,
+      "max": 1916927,
+      "mean": 1302318.4738461538,
+      "min": 1168384,
+      "p50": 1289215,
+      "p95": 1417215,
+      "p99": 1569791,
+      "p99_9": 1803263
+    }
+  },
+  "load": {
+    "cooldown_secs": 5,
+    "ramp_secs": 5,
+    "steady_secs": 30,
+    "target_cps": 100.0
+  },
+  "resources": {
+    "avg_cpu_pct": 31.992715108394624,
+    "baseline_rss_mb": 228.44140625,
+    "peak_rss_mb": 327.36328125,
+    "rss_active_growth_mb_per_min": 180.30455697596832,
+    "rss_cleanup_endpoint_growth_mb_per_hour": null,
+    "rss_cleanup_growth_mb_per_hour": null,
+    "rss_cleanup_growth_mb_per_min": null,
+    "rss_cleanup_retained_growth_mb": null,
+    "rss_growth_mb_per_min": 164.15336547178268,
+    "rss_sample_count": 81,
+    "rss_sample_interval_estimate_secs": 0.5001144530000019,
+    "rss_samples_embedded": true,
+    "rss_samples_mb": [
+      {
+        "cpu_pct": 0.0,
+        "rss_mb": 228.44140625,
+        "t_secs": 0.000073177
+      },
+      {
+        "cpu_pct": 3.9991369247436523,
+        "rss_mb": 228.5234375,
+        "t_secs": 0.500181087
+      },
+      {
+        "cpu_pct": 7.998178005218506,
+        "rss_mb": 228.859375,
+        "t_secs": 1.000294982
+      },
+      {
+        "cpu_pct": 9.99770450592041,
+        "rss_mb": 229.30859375,
+        "t_secs": 1.500409777
+      },
+      {
+        "cpu_pct": 13.99669361114502,
+        "rss_mb": 230.10546875,
+        "t_secs": 2.000527898
+      },
+      {
+        "cpu_pct": 21.995018005371094,
+        "rss_mb": 231.44921875,
+        "t_secs": 2.5006411440000003
+      },
+      {
+        "cpu_pct": 19.995445251464844,
+        "rss_mb": 232.83203125,
+        "t_secs": 3.000755045
+      },
+      {
+        "cpu_pct": 25.99404525756836,
+        "rss_mb": 234.265625,
+        "t_secs": 3.500869576
+      },
+      {
+        "cpu_pct": 29.992145538330078,
+        "rss_mb": 236.06640625,
+        "t_secs": 4.001000529
+      },
+      {
+        "cpu_pct": 33.99205780029297,
+        "rss_mb": 238.18359375,
+        "t_secs": 4.5011173620000005
+      },
+      {
+        "cpu_pct": 35.99200439453125,
+        "rss_mb": 240.4765625,
+        "t_secs": 5.001228457
+      },
+      {
+        "cpu_pct": 39.9915885925293,
+        "rss_mb": 242.8359375,
+        "t_secs": 5.501333626
+      },
+      {
+        "cpu_pct": 37.99148178100586,
+        "rss_mb": 245.453125,
+        "t_secs": 6.001445709
+      },
+      {
+        "cpu_pct": 39.99099349975586,
+        "rss_mb": 247.8984375,
+        "t_secs": 6.501558329
+      },
+      {
+        "cpu_pct": 35.991790771484375,
+        "rss_mb": 250.28515625,
+        "t_secs": 7.001672354
+      },
+      {
+        "cpu_pct": 39.9909782409668,
+        "rss_mb": 252.421875,
+        "t_secs": 7.501785159
+      },
+      {
+        "cpu_pct": 37.99042892456055,
+        "rss_mb": 254.34375,
+        "t_secs": 8.001911115
+      },
+      {
+        "cpu_pct": 39.990962982177734,
+        "rss_mb": 256.3359375,
+        "t_secs": 8.502024105
+      },
+      {
+        "cpu_pct": 35.9913330078125,
+        "rss_mb": 258.1875,
+        "t_secs": 9.00214453
+      },
+      {
+        "cpu_pct": 39.990848541259766,
+        "rss_mb": 260.1796875,
+        "t_secs": 9.502258944
+      },
+      {
+        "cpu_pct": 35.9913215637207,
+        "rss_mb": 262.04296875,
+        "t_secs": 10.002379497
+      },
+      {
+        "cpu_pct": 39.99049377441406,
+        "rss_mb": 263.59765625,
+        "t_secs": 10.502498358
+      },
+      {
+        "cpu_pct": 41.99116134643555,
+        "rss_mb": 265.203125,
+        "t_secs": 11.002603594
+      },
+      {
+        "cpu_pct": 37.99124526977539,
+        "rss_mb": 266.3671875,
+        "t_secs": 11.502718792
+      },
+      {
+        "cpu_pct": 37.991485595703125,
+        "rss_mb": 268.09375,
+        "t_secs": 12.002830868
+      },
+      {
+        "cpu_pct": 39.990760803222656,
+        "rss_mb": 269.5234375,
+        "t_secs": 12.502946373
+      },
+      {
+        "cpu_pct": 37.99296569824219,
+        "rss_mb": 271.1171875,
+        "t_secs": 13.003038959
+      },
+      {
+        "cpu_pct": 35.99192428588867,
+        "rss_mb": 272.78515625,
+        "t_secs": 13.503151141
+      },
+      {
+        "cpu_pct": 39.99106979370117,
+        "rss_mb": 274.67578125,
+        "t_secs": 14.003262817
+      },
+      {
+        "cpu_pct": 37.99146270751953,
+        "rss_mb": 276.54296875,
+        "t_secs": 14.503375151
+      },
+      {
+        "cpu_pct": 37.991249084472656,
+        "rss_mb": 278.1640625,
+        "t_secs": 15.003490337
+      },
+      {
+        "cpu_pct": 37.991493225097656,
+        "rss_mb": 279.5546875,
+        "t_secs": 15.503602301
+      },
+      {
+        "cpu_pct": 37.99116897583008,
+        "rss_mb": 281.20703125,
+        "t_secs": 16.003718547
+      },
+      {
+        "cpu_pct": 43.990234375,
+        "rss_mb": 282.6328125,
+        "t_secs": 16.503829534
+      },
+      {
+        "cpu_pct": 37.9914665222168,
+        "rss_mb": 284.4765625,
+        "t_secs": 17.003941827
+      },
+      {
+        "cpu_pct": 37.991180419921875,
+        "rss_mb": 286.9765625,
+        "t_secs": 17.504057903
+      },
+      {
+        "cpu_pct": 39.99090576171875,
+        "rss_mb": 289.18359375,
+        "t_secs": 18.004171593
+      },
+      {
+        "cpu_pct": 37.9912223815918,
+        "rss_mb": 290.85546875,
+        "t_secs": 18.504287096
+      },
+      {
+        "cpu_pct": 37.99163055419922,
+        "rss_mb": 292.24609375,
+        "t_secs": 19.004397258
+      },
+      {
+        "cpu_pct": 37.991580963134766,
+        "rss_mb": 293.484375,
+        "t_secs": 19.50450806
+      },
+      {
+        "cpu_pct": 37.99148178100586,
+        "rss_mb": 294.96875,
+        "t_secs": 20.004620164
+      },
+      {
+        "cpu_pct": 39.99083709716797,
+        "rss_mb": 296.35546875,
+        "t_secs": 20.504734731
+      },
+      {
+        "cpu_pct": 37.99119567871094,
+        "rss_mb": 297.6328125,
+        "t_secs": 21.004850615
+      },
+      {
+        "cpu_pct": 41.989383697509766,
+        "rss_mb": 299.0078125,
+        "t_secs": 21.504977034
+      },
+      {
+        "cpu_pct": 41.990203857421875,
+        "rss_mb": 300.20703125,
+        "t_secs": 22.005093661
+      },
+      {
+        "cpu_pct": 37.991058349609375,
+        "rss_mb": 300.6796875,
+        "t_secs": 22.505211333
+      },
+      {
+        "cpu_pct": 37.9912109375,
+        "rss_mb": 302.015625,
+        "t_secs": 23.005327009
+      },
+      {
+        "cpu_pct": 39.99088668823242,
+        "rss_mb": 303.03125,
+        "t_secs": 23.505440943
+      },
+      {
+        "cpu_pct": 37.99148178100586,
+        "rss_mb": 304.359375,
+        "t_secs": 24.005553029
+      },
+      {
+        "cpu_pct": 37.99116134643555,
+        "rss_mb": 305.37890625,
+        "t_secs": 24.505669355
+      },
+      {
+        "cpu_pct": 37.99126434326172,
+        "rss_mb": 306.546875,
+        "t_secs": 25.005784322
+      },
+      {
+        "cpu_pct": 39.9906005859375,
+        "rss_mb": 307.5078125,
+        "t_secs": 25.505901848
+      },
+      {
+        "cpu_pct": 37.990638732910156,
+        "rss_mb": 308.6328125,
+        "t_secs": 26.006025063
+      },
+      {
+        "cpu_pct": 39.990684509277344,
+        "rss_mb": 309.58984375,
+        "t_secs": 26.506141539
+      },
+      {
+        "cpu_pct": 39.99153518676758,
+        "rss_mb": 310.4765625,
+        "t_secs": 27.006247356
+      },
+      {
+        "cpu_pct": 41.990333557128906,
+        "rss_mb": 311.6015625,
+        "t_secs": 27.50636246
+      },
+      {
+        "cpu_pct": 35.991905212402344,
+        "rss_mb": 312.76953125,
+        "t_secs": 28.006474926
+      },
+      {
+        "cpu_pct": 41.99024963378906,
+        "rss_mb": 313.58984375,
+        "t_secs": 28.506591048
+      },
+      {
+        "cpu_pct": 37.99099349975586,
+        "rss_mb": 314.5859375,
+        "t_secs": 29.006709605
+      },
+      {
+        "cpu_pct": 39.99065017700195,
+        "rss_mb": 315.71875,
+        "t_secs": 29.506826503
+      },
+      {
+        "cpu_pct": 39.99067687988281,
+        "rss_mb": 316.8203125,
+        "t_secs": 30.00694308
+      },
+      {
+        "cpu_pct": 39.99352264404297,
+        "rss_mb": 317.87890625,
+        "t_secs": 30.507024063
+      },
+      {
+        "cpu_pct": 39.9907341003418,
+        "rss_mb": 318.828125,
+        "t_secs": 31.007139934
+      },
+      {
+        "cpu_pct": 39.99092483520508,
+        "rss_mb": 319.90625,
+        "t_secs": 31.507253376
+      },
+      {
+        "cpu_pct": 37.991146087646484,
+        "rss_mb": 321.12890625,
+        "t_secs": 32.007369877
+      },
+      {
+        "cpu_pct": 41.99107360839844,
+        "rss_mb": 322.31640625,
+        "t_secs": 32.507476171
+      },
+      {
+        "cpu_pct": 39.9908447265625,
+        "rss_mb": 323.34375,
+        "t_secs": 33.007590624
+      },
+      {
+        "cpu_pct": 35.991783142089844,
+        "rss_mb": 324.42578125,
+        "t_secs": 33.507704787
+      },
+      {
+        "cpu_pct": 39.990745544433594,
+        "rss_mb": 325.28515625,
+        "t_secs": 34.007820515
+      },
+      {
+        "cpu_pct": 37.991336822509766,
+        "rss_mb": 326.2734375,
+        "t_secs": 34.507934521
+      },
+      {
+        "cpu_pct": 37.991424560546875,
+        "rss_mb": 327.36328125,
+        "t_secs": 35.008047369
+      },
+      {
+        "cpu_pct": 1.9995999336242676,
+        "rss_mb": 327.36328125,
+        "t_secs": 35.508147401
+      },
+      {
+        "cpu_pct": 1.9996237754821777,
+        "rss_mb": 327.296875,
+        "t_secs": 36.008241472
+      },
+      {
+        "cpu_pct": 1.9995806217193604,
+        "rss_mb": 327.296875,
+        "t_secs": 36.508346337
+      },
+      {
+        "cpu_pct": 0.0,
+        "rss_mb": 327.30859375,
+        "t_secs": 37.008443686
+      },
+      {
+        "cpu_pct": 1.9995676279067993,
+        "rss_mb": 327.3125,
+        "t_secs": 37.508551804
+      },
+      {
+        "cpu_pct": 1.999516487121582,
+        "rss_mb": 327.32421875,
+        "t_secs": 38.008672705
+      },
+      {
+        "cpu_pct": 1.999497652053833,
+        "rss_mb": 327.32421875,
+        "t_secs": 38.508798328
+      },
+      {
+        "cpu_pct": 1.9995040893554688,
+        "rss_mb": 327.328125,
+        "t_secs": 39.00892234
+      },
+      {
+        "cpu_pct": 0.0,
+        "rss_mb": 327.3359375,
+        "t_secs": 39.509047415
+      },
+      {
+        "cpu_pct": 1.9994901418685913,
+        "rss_mb": 327.34765625,
+        "t_secs": 40.009174925
+      }
+    ],
+    "rss_samples_path": null,
+    "rss_tail_growth_mb_per_min": 164.15336547178268,
+    "rss_tail_sample_count": 81,
+    "rss_tail_window_complete": false,
+    "rss_tail_window_requested_secs": 60.0,
+    "rss_tail_window_secs": 40.009101748000006,
+    "rss_windows": {
+      "active_load": {
+        "actual_coverage_secs": 34.507861344000005,
+        "boundary_tolerance_secs": 0.7501716795000029,
+        "complete": true,
+        "end_phase": "calls_drained",
+        "first_sample_secs": 0.000073177,
+        "last_sample_secs": 34.507934521,
+        "name": "active_load",
+        "requested_coverage_secs": 35.00212906,
+        "requested_end_secs": 35.00212906,
+        "requested_start_secs": 0.0,
+        "rss_end_median_mb": 320.517578125,
+        "rss_end_representative_secs": 31.7573116265,
+        "rss_end_sample_count": 12,
+        "rss_endpoint_band_secs": 5.751310224000001,
+        "rss_endpoint_growth_mb_per_hour": 10968.430730426708,
+        "rss_endpoint_separation_secs": 29.006613532000003,
+        "rss_growth_mb_per_min": 180.30455697596832,
+        "rss_retained_growth_mb": 88.376953125,
+        "rss_start_median_mb": 232.140625,
+        "rss_start_representative_secs": 2.7506980945,
+        "rss_start_sample_count": 12,
+        "sample_count": 70,
+        "start_phase": "point_start"
+      }
+    }
+  },
+  "results": {
+    "achieved_cps": 92.86,
+    "asr": 1.0,
+    "calls_offered": 3250,
+    "calls_succeeded": 3250,
+    "cps_per_core": 23.21,
+    "errors": {
+      "answer_failed": 0,
+      "bye_failed": 0,
+      "harness_backpressure_rejected": 0,
+      "invite_send_error_counts": {},
+      "invite_send_failed": 0,
+      "timeout": 0
+    },
+    "harness_backpressure_rejected": 0,
+    "max_in_flight_limit": null,
+    "max_in_flight_observed": 1,
+    "ner": 1.0
+  },
+  "scenario": "perf_call_setup_cps_pbx-media-server"
+}
