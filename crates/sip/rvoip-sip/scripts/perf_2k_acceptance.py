@@ -37,14 +37,17 @@ LIMITS = (
     # distribution was flat -- p50 11 ms, p95 12 ms, p99 13 ms -- so one
     # "baseline + 25%" band covered all three. On the release fleet (EC2
     # m5.2xlarge, 4 physical cores) the distribution is steep, and 2,000 CPS
-    # is the sweep's own detected knee: p99 measured 20.35 ms and 28.46 ms
-    # across two runs of identical code, while every other load point held to
-    # within 0.1 ms and 1,000 CPS held a 2.2 ms p99. The ceiling now carries
-    # enough headroom that three consecutive passes do not flake on knee
-    # variance, and the audit catches a real regression against the baseline.
+    # is the sweep's own detected knee. Four samples of identical code on that
+    # hardware measured p99 at 20.35, 25.43, 28.46 and 39.32 ms, a nearly
+    # twofold swing, while p50 held between 1.98 and 2.18 ms and every lower
+    # load point held to within 0.1 ms (1,000 CPS keeps a 2.2 ms p99). No
+    # relative tolerance on that p99 can be both meaningful and reliable, so
+    # the regression audit reports it without gating and this absolute ceiling
+    # is its gate, with headroom for three consecutive passes. p50 and p95 stay
+    # gated by the audit against the same-hardware baseline.
     ("latency_ns.setup_latency.p50", "<=", 13.97e6),
     ("latency_ns.setup_latency.p95", "<=", 15.36e6),
-    ("latency_ns.setup_latency.p99", "<=", 45.0e6),
+    ("latency_ns.setup_latency.p99", "<=", 60.0e6),
     ("latency_ns.full_cycle.p50", "<=", 154.66e6),
     ("latency_ns.full_cycle.p95", "<=", 156.88e6),
     ("latency_ns.full_cycle.p99", "<=", 159.66e6),

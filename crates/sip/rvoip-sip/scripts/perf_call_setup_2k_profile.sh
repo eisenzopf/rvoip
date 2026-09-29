@@ -824,7 +824,8 @@ if [[ -f "${raw_report_path}" ]]; then
       --baseline "${REVIEWED_BASELINE_SNAPSHOT}" \
       --current "${audit_results_dir}" \
       --out "${RUN_DIR}/perf-audit.md" \
-      --latency-tolerance-pct 75 \
+      --latency-tolerance-pct 50 \
+      --report-only-latency-percentiles p99 \
       --fail-on-regression
     then
       audit_status="PASS"

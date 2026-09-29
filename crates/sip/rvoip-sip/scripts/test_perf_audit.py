@@ -181,5 +181,63 @@ class PerfAuditIdentityTests(unittest.TestCase):
         self.assertIn("active-load resource window is incomplete", report)
 
 
+
+class ReportOnlyLatencyPercentileTests(unittest.TestCase):
+    """A report-only percentile is compared and shown but never gates."""
+
+    @staticmethod
+    def _audit():
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("perf_audit_under_test", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    @staticmethod
+    def _report(p50, p95, p99):
+        return {"latency_ns": {"setup_latency": {"p50": p50, "p95": p95, "p99": p99}}}
+
+    def _rows(self, report_only):
+        audit = self._audit()
+        base = self._report(2_000_000, 4_800_000, 20_000_000)
+        # p99 nearly doubles, as it does at the 2,000-CPS knee on unchanged code;
+        # p50 and p95 stay within tolerance.
+        cur = self._report(2_100_000, 4_300_000, 39_000_000)
+        rows = audit.collect_metrics(base, cur, None, None, 15.0, 50.0, report_only)
+        return {label: (regressed, gated) for label, _b, _c, _d, regressed, gated in rows}
+
+    def test_a_knee_p99_swing_gates_by_default(self):
+        rows = self._rows(frozenset())
+        self.assertEqual(rows["setup_latency p99 (ms)"], (True, True))
+
+    def test_a_report_only_p99_is_shown_but_does_not_gate(self):
+        rows = self._rows(frozenset({"p99"}))
+        self.assertEqual(rows["setup_latency p99 (ms)"], (False, False))
+        # p50 and p95 are still gated, and still pass.
+        self.assertEqual(rows["setup_latency p50 (ms)"], (False, True))
+        self.assertEqual(rows["setup_latency p95 (ms)"], (False, True))
+
+    def test_a_real_p95_regression_still_fails_with_p99_report_only(self):
+        audit = self._audit()
+        base = self._report(2_000_000, 4_800_000, 20_000_000)
+        cur = self._report(2_100_000, 9_000_000, 21_000_000)
+        rows = audit.collect_metrics(base, cur, None, None, 15.0, 50.0, frozenset({"p99"}))
+        p95 = next(row for row in rows if row[0] == "setup_latency p95 (ms)")
+        self.assertTrue(p95[4], "an 87% p95 rise must still count as a regression")
+
+    def test_an_unknown_percentile_is_refused(self):
+        result = subprocess.run(
+            [
+                "python3", str(SCRIPT),
+                "--baseline", "/nonexistent", "--current", "/nonexistent",
+                "--out", "/dev/null", "--report-only-latency-percentiles", "p90",
+            ],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unknown latency percentile", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
