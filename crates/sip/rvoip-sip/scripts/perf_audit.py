@@ -326,8 +326,23 @@ def metric_get(report, key, identity):
     return None
 
 
-def collect_metrics(base, cur, base_identity, cur_identity, throughput_tol, latency_tol):
-    """Yield comparison rows for one scenario (only metrics present on both sides)."""
+def collect_metrics(
+    base,
+    cur,
+    base_identity,
+    cur_identity,
+    throughput_tol,
+    latency_tol,
+    report_only_percentiles=frozenset(),
+):
+    """Yield comparison rows for one scenario (only metrics present on both sides).
+
+    Latency percentiles named in ``report_only_percentiles`` are compared and
+    reported but can never count as a regression, the same treatment avg CPU
+    gets. Use it for a percentile whose run-to-run spread on unchanged code is
+    larger than any tolerance that would still be meaningful, and gate that
+    percentile with an absolute ceiling instead.
+    """
     rows = []
     for key, label, direction, abs_floor, gate in SCALAR_METRICS:
         b = metric_get(base, key, base_identity)
@@ -350,7 +365,10 @@ def collect_metrics(base, cur, base_identity, cur_identity, throughput_tol, late
                 # Sub-millisecond latencies are timer-quantization noise; don't
                 # gate below a 1 ms floor (values here are in nanoseconds).
                 regressed, delta = is_regression(b, c, "higher_worse", latency_tol, 1_000_000.0)
-                rows.append((f"{name} {pct} (ms)", b / 1e6, c / 1e6, delta, regressed, True))
+                gated = pct not in report_only_percentiles
+                rows.append(
+                    (f"{name} {pct} (ms)", b / 1e6, c / 1e6, delta, gated and regressed, gated)
+                )
     return rows
 
 
@@ -376,9 +394,20 @@ def main():
                     help="allowed throughput/RSS change before flagging (default 15)")
     ap.add_argument("--latency-tolerance-pct", type=float, default=25.0,
                     help="allowed latency increase before flagging (default 25)")
+    ap.add_argument(
+        "--report-only-latency-percentiles",
+        default="",
+        help="comma-separated latency percentiles (e.g. p99) to report without gating",
+    )
     ap.add_argument("--fail-on-regression", action="store_true",
                     help="exit non-zero if any gated regression is found")
     args = ap.parse_args()
+    report_only_percentiles = frozenset(
+        value.strip() for value in args.report_only_latency_percentiles.split(",") if value.strip()
+    )
+    unknown = report_only_percentiles - set(LATENCY_PERCENTILES)
+    if unknown:
+        ap.error(f"unknown latency percentile(s): {', '.join(sorted(unknown))}")
 
     baseline_manifest = baseline_manifest_identity(args.baseline_manifest)
     if isinstance(baseline_manifest, dict) and baseline_manifest.get("error"):
@@ -529,6 +558,7 @@ def main():
             cur_identity,
             args.tolerance_pct,
             args.latency_tolerance_pct,
+            report_only_percentiles,
         ):
             scen = base_idx[rel].get("scenario") or rel
             all_rows.append((scen, label, b, c, delta, regressed, gated))
