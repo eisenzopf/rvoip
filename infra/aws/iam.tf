@@ -37,6 +37,12 @@ data "aws_iam_policy_document" "provisioner_trust" {
 }
 
 resource "aws_iam_role" "provisioner" {
+  # The controller job assumes this role once and then holds it through the
+  # performance prebuild (up to 90 min) and the shard wait (up to 170 min).
+  # The AWS default of one hour expired mid-run on the first qualification,
+  # stranding four workers and discarding thirteen finished shards. Six hours
+  # covers both budgets with margin; the workflow requests the same value.
+  max_session_duration = 21600
   name               = "${var.name_prefix}-gh-provisioner"
   description        = "Assumed by the ${var.github_repository} release qualification workflow to run the ephemeral EC2 worker fleet."
   assume_role_policy = data.aws_iam_policy_document.provisioner_trust.json
