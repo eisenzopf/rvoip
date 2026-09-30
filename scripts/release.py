@@ -392,7 +392,11 @@ def internal_dependencies(
     return {
         dependency["name"]
         for dependency in package["dependencies"]
-        if dependency["name"] in package_names and dependency.get("kind") != "dev"
+        if dependency["name"] in package_names
+        and (
+            dependency.get("kind") != "dev"
+            or dependency.get("req", "*") != "*"
+        )
     }
 
 
@@ -415,7 +419,7 @@ def topological_order(packages: dict[str, dict[str, Any]]) -> list[str]:
                 ready.append(dependent)
     if len(ordered) != len(packages):
         cycle = sorted(name for name, degree in indegree.items() if degree)
-        raise ReleaseError(f"normal/build workspace dependency cycle: {cycle}")
+        raise ReleaseError(f"publishable workspace dependency cycle: {cycle}")
     return ordered
 
 
