@@ -19,3 +19,7 @@ FROM ${MYSQL_IMAGE} AS mysql
 COPY --from=source /source/test/db/jambones-sql.sql /docker-entrypoint-initdb.d/01-schema.sql
 COPY --from=source /source/test/db/populate-test-data.sql /docker-entrypoint-initdb.d/02-populate.sql
 COPY rvoip.sql /docker-entrypoint-initdb.d/03-rvoip.sql
+# COPY keeps the build context's mode. Release workers check out under
+# umask 077, and the entrypoint reads seeds as the mysql user, so an
+# unreadable 0600 seed exits the container before it ever becomes healthy.
+RUN chmod 0644 /docker-entrypoint-initdb.d/*.sql
