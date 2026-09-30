@@ -169,7 +169,13 @@ fi
 export JAMBONZ_RTP_PORT_START="${JAMBONZ_RTP_PORT_START:-10000}"
 export JAMBONZ_RTP_PORT_END="${JAMBONZ_RTP_PORT_END:-10199}"
 
-compose_lab up --detach
+if ! compose_lab up --detach; then
+  # `up` fails before the health loop when a dependency exits during start,
+  # so print every container's logs here or the receipt names no cause.
+  compose_lab ps --all >&2 || true
+  compose_lab logs >&2 || true
+  exit 1
+fi
 
 for _ in $(seq 1 120); do
   if docker exec rvoip-jambonz-sbc-outbound node -e \

@@ -159,6 +159,19 @@ class JambonzInteropPolicyTests(unittest.TestCase):
             self.assertIn(f"rvoip-jambonz-{component}", up)
         self.assertIn("Required Jambonz container is not running", up)
 
+    def test_mysql_seeds_are_readable_under_a_restrictive_umask(self) -> None:
+        # Release workers check out under umask 077; COPY keeps that 0600
+        # mode and the MySQL entrypoint reads seeds as the mysql user.
+        fixture = (LAB / "fixture.Dockerfile").read_text(encoding="utf-8")
+        copy = fixture.index("COPY rvoip.sql /docker-entrypoint-initdb.d/")
+        chmod = fixture.index("RUN chmod 0644 /docker-entrypoint-initdb.d/*.sql")
+        self.assertLess(copy, chmod)
+
+    def test_failed_compose_up_prints_the_lab_logs(self) -> None:
+        up = (LAB / "up.sh").read_text(encoding="utf-8")
+        start = up.index("if ! compose_lab up --detach; then")
+        self.assertIn("compose_lab logs >&2", up[start : start + 400])
+
     def test_public_and_release_docs_define_the_same_jambonz_profile(self) -> None:
         release_line = self.pin_values()["JAMBONZ_RELEASE_LINE"]
         documents = {

@@ -41,6 +41,11 @@
   `7099671e69342dac60e2ab3001c56b18820ee302`, with source tarball digests
   re-verified. The release check requires the pinned components to be the
   current upstream heads, and upstream had moved on from 0.9.9.
+- The Jambonz lab's MySQL fixture makes its seed files world-readable. EC2
+  workers check out the candidate under `umask 077`, `COPY` kept the rvoip
+  seed at 0600, and the MySQL entrypoint, which reads seeds as the `mysql`
+  user, exited before the lab could start. When `compose up` fails, the lab
+  now prints every container's logs so the receipt names the cause.
 - The interoperability worker moves to 16 vCPUs (`m5.4xlarge`) and, with the
   proxy-interop workers, launches alongside the performance prebuild instead
   of after it. Interop reads no performance bundle; it is the fleet's longest
