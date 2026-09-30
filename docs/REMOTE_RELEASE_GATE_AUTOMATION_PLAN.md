@@ -387,9 +387,9 @@ Amazon documents the `m5` sizes here:
 https://aws.amazon.com/ec2/instance-types/m5/
 
 Every worker uses On-Demand capacity, not Spot. The full `remote-release`
-shape is six short-performance workers, two long-soak workers, seven
+shape is six short-performance workers, three long-soak workers, seven
 burst/soak workers, one interoperability worker, and two
-proxy-interoperability workers: 100 concurrent vCPUs, plus the 32-vCPU
+proxy-interoperability workers: 132 concurrent vCPUs, plus the 32-vCPU
 builder that runs and is terminated before the fleet starts. The controller
 verifies the account's On-Demand Standard vCPU quota (`L-1216C47A`) and gp3
 storage quota against that peak before creating anything.

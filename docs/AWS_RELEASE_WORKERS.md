@@ -36,11 +36,16 @@ than saturation. Changing this class's machine type requires re-recording the
 reviewed canonical 2k baseline on the new hardware, since latency and
 CPS-per-core are hardware-relative.
 
-The full `remote-release` shape is six short-performance workers, two long-soak
-workers, seven burst/soak workers, one interoperability worker, and two
-proxy-interoperability workers, 116 vCPUs concurrently, plus the 32-vCPU
-builder that runs and is terminated before the fleet starts. Peak
-demand is therefore 116 On-Demand Standard vCPUs against the account's
+The full `remote-release` shape is six short-performance workers, three
+long-soak workers, seven burst/soak workers, one interoperability worker, and
+two proxy-interoperability workers, 132 vCPUs concurrently, plus the 32-vCPU
+builder that runs and is terminated before the fleet starts. Each long-soak
+worker owns one long gate: the canonical 2,000-CPS evaluation, the monolithic
+soak, or the soak candidate. Packed two to a worker, the two hour-long soaks
+ran back to back for about 2 h 20 min, leaving the three-hour controller job,
+which also covers the prebuild, about ten minutes of slack, and starting the
+second soak on a machine the first had just loaded. Peak
+demand is therefore 132 On-Demand Standard vCPUs against the account's
 1,152-vCPU quota in `us-west-2`.
 
 Machine classes are policy values recorded in every attestation. Moving clouds

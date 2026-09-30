@@ -485,9 +485,14 @@ def matrix_for(plan_gates: list[dict[str, Any]], by_id: dict[str, dict[str, Any]
         "github-evidence": 1,
         "ec2-performance": 6,
         "ec2-performance-soak": 7,
-        "ec2-performance-soak-long": 2,
+        # One worker per long gate: the canonical 2,000-CPS evaluation and the
+        # two hour-long soaks. Packed two to a worker, both soaks ran back to
+        # back for about 2 h 20 min, which left the three-hour controller job
+        # (prebuild included) about ten minutes of slack and started the second
+        # soak on a machine the first had just finished loading.
+        "ec2-performance-soak-long": 3,
         # The twelve proxy rows have independent ephemeral peer labs. Two
-        # workers keep the complete release fanout at 100 concurrent vCPUs,
+        # workers keep the complete release fanout at 132 concurrent vCPUs,
         # well inside the account's On-Demand Standard vCPU quota, while a
         # failed row can still be retried alone.
         "ec2-proxy-interop": 2,

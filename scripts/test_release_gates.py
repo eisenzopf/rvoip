@@ -300,7 +300,7 @@ class GateFrameworkTests(unittest.TestCase):
 
     def test_remote_preflight_recreates_the_complete_ec2_worker_shape(self) -> None:
         selected = self.catalog["profiles"]["remote-preflight"]
-        self.assertEqual(len(selected), 18)
+        self.assertEqual(len(selected), 19)
         by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
         matrix = gates.matrix_for(
             [{"id": gate_id, "decision": "RUN"} for gate_id in selected],
@@ -321,17 +321,17 @@ class GateFrameworkTests(unittest.TestCase):
             {
                 "ec2-performance": 6,
                 "ec2-performance-soak": 7,
-                "ec2-performance-soak-long": 2,
+                "ec2-performance-soak-long": 3,
                 "ec2-interop": 1,
                 "ec2-proxy-interop": 2,
             },
         )
-        self.assertEqual(len(matrix), 18)
+        self.assertEqual(len(matrix), 19)
         self.assertEqual(
             sum(fanout.MACHINE_VCPUS[shard["machine_type"]] for shard in matrix),
-            116,
+            132,
         )
-        self.assertEqual(sum(int(shard["disk_size_gb"]) for shard in matrix), 3400)
+        self.assertEqual(sum(int(shard["disk_size_gb"]) for shard in matrix), 3600)
         self.assertTrue(all(not shard["hosted"] for shard in matrix))
         self.assertTrue(all(len(shard["gates"]) == 1 for shard in matrix))
         for gate_id in selected:
@@ -343,7 +343,7 @@ class GateFrameworkTests(unittest.TestCase):
                     gate["command"],
                 )
 
-    def test_remote_release_uses_the_same_116_vcpu_ec2_shape(self) -> None:
+    def test_remote_release_uses_the_same_132_vcpu_ec2_shape(self) -> None:
         selected = self.catalog["profiles"]["remote-release"]
         by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
         matrix = gates.matrix_for(
@@ -351,6 +351,13 @@ class GateFrameworkTests(unittest.TestCase):
             by_id,
         )
         ec2 = [shard for shard in matrix if not shard["hosted"]]
+        # Each long gate owns a long-soak worker, so neither hour-long soak
+        # waits behind the other.
+        long_soak = [shard for shard in ec2 if shard["resource_class"] == "ec2-performance-soak-long"]
+        self.assertEqual(
+            sorted(tuple(shard["gates"]) for shard in long_soak),
+            [("perf.canonical-2k-current",), ("perf.monolithic-soak",), ("perf.soak-candidate",)],
+        )
         counts = {
             resource: sum(shard["resource_class"] == resource for shard in ec2)
             for resource in (
@@ -366,17 +373,17 @@ class GateFrameworkTests(unittest.TestCase):
             {
                 "ec2-performance": 6,
                 "ec2-performance-soak": 7,
-                "ec2-performance-soak-long": 2,
+                "ec2-performance-soak-long": 3,
                 "ec2-interop": 1,
                 "ec2-proxy-interop": 2,
             },
         )
-        self.assertEqual(len(ec2), 18)
+        self.assertEqual(len(ec2), 19)
         self.assertEqual(
             sum(fanout.MACHINE_VCPUS[shard["machine_type"]] for shard in ec2),
-            116,
+            132,
         )
-        self.assertEqual(sum(int(shard["disk_size_gb"]) for shard in ec2), 3400)
+        self.assertEqual(sum(int(shard["disk_size_gb"]) for shard in ec2), 3600)
         hosted = [shard for shard in matrix if shard["hosted"]]
         standard = [
             shard for shard in hosted if shard["resource_class"] == "github-standard"

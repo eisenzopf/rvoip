@@ -30,7 +30,12 @@
   the sweep sits at its CPU knee: about 3 ms of CPU per call needs roughly
   5.65 cores at 2,000 CPS, and p99 setup latency swung 17 to 39 ms run to
   run on identical code. Transparent huge pages were ruled out with zero
-  compaction stalls. Historical GCP qualification evidence under
+  compaction stalls.
+- Each long gate now owns a long-soak worker: three instead of two. The two
+  hour-long soaks previously ran back to back on one worker for about
+  2 h 20 min, which left the three-hour controller job about ten minutes of
+  slack. Qualification now finishes about an hour sooner, at a peak of 132
+  vCPUs. Historical GCP qualification evidence under
   `crates/sip/rvoip-sip/docs/` is unchanged. See
   `docs/AWS_RELEASE_WORKERS.md`.
 
