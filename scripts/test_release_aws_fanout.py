@@ -119,7 +119,7 @@ class AwsReleaseFanoutTests(unittest.TestCase):
     def test_prepare_is_deterministic_and_capacity_aware(self) -> None:
         manifest = self.manifest()
         self.assertEqual(manifest["worker_count"], 2)
-        self.assertEqual(manifest["required_vcpus"], 12)
+        self.assertEqual(manifest["required_vcpus"], 20)
         workers = manifest["workers"]
         self.assertEqual(
             [worker["id"] for worker in workers],
@@ -150,7 +150,7 @@ class AwsReleaseFanoutTests(unittest.TestCase):
                 run_id="1",
                 run_attempt="1",
             )
-        with self.assertRaisesRegex(fanout.FanoutError, "must use m5.2xlarge"):
+        with self.assertRaisesRegex(fanout.FanoutError, "must use m5.4xlarge"):
             fanout.prepare_manifest(
                 matrix={
                     "include": [
@@ -404,6 +404,8 @@ class AwsReleaseFanoutTests(unittest.TestCase):
             "[Unit]",
             "Description=rvoip release shutdown checkpoint",
             "DefaultDependencies=no",
+            "Wants=network-online.target",
+            "After=network-online.target",
             "Before=shutdown.target",
             "[Service]",
             "Type=oneshot",

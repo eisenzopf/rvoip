@@ -492,7 +492,7 @@ def matrix_for(plan_gates: list[dict[str, Any]], by_id: dict[str, dict[str, Any]
         # soak on a machine the first had just finished loading.
         "ec2-performance-soak-long": 3,
         # The twelve proxy rows have independent ephemeral peer labs. Two
-        # workers keep the complete release fanout at 144 concurrent vCPUs,
+        # workers keep the complete release fanout at 192 concurrent vCPUs,
         # well inside the account's On-Demand Standard vCPU quota, while a
         # failed row can still be retried alone.
         "ec2-proxy-interop": 2,
@@ -522,8 +522,6 @@ def matrix_for(plan_gates: list[dict[str, Any]], by_id: dict[str, dict[str, Any]
                         else "m5.xlarge"
                         if resource == "ec2-performance-soak"
                         else "m5.4xlarge"
-                        if resource in {"ec2-interop", "ec2-performance-soak-long"}
-                        else "m5.2xlarge"
                     ),
                     "disk_type": "gp3",
                     "disk_size_gb": 100 if resource == "ec2-proxy-interop" else 200,

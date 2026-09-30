@@ -6,7 +6,7 @@
 
 - The `remote-release`, `remote-preflight`, and `remote-diagnostic` profiles
   now run their ephemeral workers on EC2 (`m5.large` / `m5.xlarge` /
-  `m5.2xlarge`, gp3 root volumes) in a dedicated release VPC instead of
+  `m5.4xlarge`, gp3 root volumes) in a dedicated release VPC instead of
   Google Compute Engine. Resource classes are renamed `gcp-*` to `ec2-*`,
   the planner emits `aws_matrix` / `aws_shard_count`, and evidence, logs,
   and the performance prebuild cache live in S3 (`s3://`) rather than GCS.
@@ -22,7 +22,7 @@
   key is stored in GitHub. The GCP qualification pilot workflow and its
   startup script are removed.
 - The release environment identifier becomes
-  `rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-soaklong16-interop16`,
+  `rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-perf16-soaklong16-interop16`,
   so every environment-sensitive gate runs fresh on the first AWS
   qualification.
 - The long-soak worker class, which runs the canonical 2,000-CPS gate, is
@@ -41,6 +41,16 @@
   `7099671e69342dac60e2ab3001c56b18820ee302`, with source tarball digests
   re-verified. The release check requires the pinned components to be the
   current upstream heads, and upstream had moved on from 0.9.9.
+- The short-performance worker class moves to 16 vCPUs (`m5.4xlarge`). Its
+  call-setup sweeps drive 2,000 CPS, the same load that put the long soak on
+  its CPU knee: on 8 vCPUs the PBX media-server profile's 2,000-CPS point
+  passed at 15.8 ms p99 in one run and fell to a 47.5% answer rate in the
+  next, on identical code. Its gates use absolute thresholds, so no baseline
+  was re-recorded. Peak fleet demand is 192 vCPUs.
+- The shutdown checkpoint unit is ordered after `network-online.target`, as
+  its script requires. Without the ordering, the network could stop while a
+  cut-off worker was still uploading, and interop and the long soaks left no
+  `PARTIAL` result when the early-failure cutoff stopped them.
 - The Jambonz lab's MySQL fixture makes its seed files world-readable. EC2
   workers check out the candidate under `umask 077`, `COPY` kept the rvoip
   seed at 0600, and the MySQL entrypoint, which reads seeds as the `mysql`
