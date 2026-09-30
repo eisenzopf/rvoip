@@ -324,7 +324,16 @@ for CPS in $CPS_LEVELS; do
   if [[ "$CALLS" -lt 10 ]]; then CALLS=10; fi
   START_EPOCH="$(date +%s)"
   RUNNERS="$(runner_count_for_cps "$CPS")"
-  BASE_PORT=$(( 35000 + RANDOM % 1000 ))
+  # SIPp binds BASE_PORT..BASE_PORT+RUNNERS-1 on this host. Redraw any range
+  # that covers the target's own port: the release matrix listens on 35060,
+  # and a draw landing on it fails the whole rate with a bind error
+  # (errno 98, sipp rc 254) before a single call is placed.
+  while :; do
+    BASE_PORT=$(( 35000 + RANDOM % 1000 ))
+    if (( TARGET_PORT < BASE_PORT || TARGET_PORT >= BASE_PORT + RUNNERS )); then
+      break
+    fi
+  done
   REMAINING_CPS="$CPS"
   REMAINING_CALLS="$CALLS"
   PIDS=()
