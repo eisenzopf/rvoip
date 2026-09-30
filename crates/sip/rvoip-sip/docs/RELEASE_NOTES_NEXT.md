@@ -24,9 +24,9 @@ documented SIP, SDP, RTP, codec, and facade profiles.
   media anchor using the same PBX runner and the same `Endpoint`, `StreamPeer`,
   and `CallbackPeer` APIs used for Asterisk and FreeSWITCH.
 - The release profile pins the latest reviewed open-source component line,
-  currently Jambonz OSS `0.9.9`: `sbc-inbound` commit
-  `b7b707cc2e2a1025623076f16446ea61bae429e0` and `sbc-outbound` commit
-  `fec25d5d1539cdcb80ef8e8b8fc0bc090319dd27`. Source archives and every
+  currently Jambonz OSS `0.9.11`: `sbc-inbound` commit
+  `d0d8ba93b2f3f9d09e3877be6a434744305cac4d` and `sbc-outbound` commit
+  `7099671e69342dac60e2ab3001c56b18820ee302`. Source archives and every
   container are digest-verified, and qualification fails if those component
   pins are no longer the selected upstream heads.
 - The mandatory UDP/plain-RTP matrix covers authenticated registration,

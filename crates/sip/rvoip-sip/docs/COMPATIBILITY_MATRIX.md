@@ -44,7 +44,7 @@ its pending status.
 
 | Peer | Profile | APIs | Covered scenarios | Status and limits |
 |---|---|---|---|---|
-| Jambonz OSS 0.9.9 | Real inbound/outbound SBC, registrar, Drachtio, Redis, MySQL, and RTPengine; source revisions and images are digest-pinned and latest-version checked | `Endpoint`, `StreamPeer`, `CallbackPeer` | Authenticated registration; PCMU/PCMA bidirectional calls; provisional/final signaling; hold/resume; RFC 4733 DTMF; CANCEL/487; rejection; RFC 3515 blind transfer with ordered NOTIFY; optional RFC 3892 Referred-By propagation; replacement INVITE; either-side BYE; cleanup | Local Colima rehearsal passed; protected `0.3.10` exact-candidate result pending. UDP/plain RTP only. G.729, AMR, TLS/SRTP, RVoIP-as-B2BUA, WebRTC, PSTN, application verbs, recording, HA, and load are excluded from this peer profile. |
+| Jambonz OSS 0.9.11 | Real inbound/outbound SBC, registrar, Drachtio, Redis, MySQL, and RTPengine; source revisions and images are digest-pinned and latest-version checked | `Endpoint`, `StreamPeer`, `CallbackPeer` | Authenticated registration; PCMU/PCMA bidirectional calls; provisional/final signaling; hold/resume; RFC 4733 DTMF; CANCEL/487; rejection; RFC 3515 blind transfer with ordered NOTIFY; optional RFC 3892 Referred-By propagation; replacement INVITE; either-side BYE; cleanup | Local Colima rehearsal passed; protected `0.3.10` exact-candidate result pending. UDP/plain RTP only. G.729, AMR, TLS/SRTP, RVoIP-as-B2BUA, WebRTC, PSTN, application verbs, recording, HA, and load are excluded from this peer profile. |
 
 This is a SIP/SDP/RTP interoperability claim about the exact open-source
 profile above. It is not a claim about commercial Jambonz 10.x, hosted

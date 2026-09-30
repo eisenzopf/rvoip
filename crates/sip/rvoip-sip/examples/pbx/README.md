@@ -138,7 +138,7 @@ Asterisk registered-flow TLS/SRTP is provider-gated: set
 
 `infra/release-runners/pbx/jambonz` runs Jambonz as a first-class release
 peer, at the same policy level as Asterisk and FreeSWITCH. The 0.3.10 profile
-selects the latest stable open-source component line (currently 0.9.9), checks
+selects the latest stable open-source component line (currently 0.9.11), checks
 that both SBC pins are still upstream HEAD, verifies source tarball hashes,
 and runs only digest-pinned containers. The test target is the actual Jambonz
 outbound SBC, registrar, Drachtio server, database, Redis, and RTPengine—not a

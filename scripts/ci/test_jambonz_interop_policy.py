@@ -46,7 +46,7 @@ class JambonzInteropPolicyTests(unittest.TestCase):
         text = PINS.read_text(encoding="utf-8")
         match = re.search(r"(?m)^JAMBONZ_RELEASE_LINE=([^\s]+)$", text)
         self.assertIsNotNone(match)
-        self.assertEqual(match.group(1), "0.9.9")
+        self.assertEqual(match.group(1), "0.9.11")
 
     def test_release_profile_uses_the_shared_rvoip_sip_matrix(self) -> None:
         catalog = json.loads(CATALOG.read_text(encoding="utf-8"))

@@ -452,7 +452,7 @@ exclusions are recorded in signed qualification evidence; see the
 | --- | --- | --- |
 | **Asterisk** | Release-gated | `Endpoint`, `StreamPeer`, and `CallbackPeer`; registration, calls/media, codecs, hold/resume, ring-cancel, RFC 4733 DTMF, rejection, and blind transfer over the documented UDP and TLS profiles |
 | **FreeSWITCH** | Release-gated | The corresponding public-API, scenario, codec, and transport matrix |
-| **Jambonz OSS 0.9.9** | Release-gated | Revision- and digest-pinned Jambonz SBC/registrar/RTPengine profile across the applicable public-API UDP/plain-RTP matrix |
+| **Jambonz OSS 0.9.11** | Release-gated | Revision- and digest-pinned Jambonz SBC/registrar/RTPengine profile across the applicable public-API UDP/plain-RTP matrix |
 | **SIPp** | Release-gated | Standards scenarios and bounded signaling-load profiles |
 | **baresip** | Release-gated | External strict user-agent call against the RVoIP SIP listener |
 | **Kamailio** | Release-gated | RFC 3261 transaction-stateful proxy in both hop orders over UDP, TCP, and TLS, plus registrar-proxy with an rtpengine media relay: registration, calls, AMR in all four framings, DTMF, SDES-SRTP |
