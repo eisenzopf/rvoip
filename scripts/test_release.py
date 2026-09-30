@@ -228,6 +228,19 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaises(release.ReleaseError):
             release.topological_order(packages)
 
+    def test_versioned_dev_dependency_cycle_fails_before_publish(self) -> None:
+        packages = {
+            "core": package(
+                "core", "0.3.0",
+                [{"name": "harness", "kind": "dev", "req": "^0.3.0"}],
+            ),
+            "harness": package("harness", "0.3.0", [dependency("core")]),
+        }
+        with self.assertRaisesRegex(
+            release.ReleaseError, "publishable workspace dependency cycle"
+        ):
+            release.topological_order(packages)
+
     def test_workspace_package_discovery_rejects_duplicates(self) -> None:
         metadata = {
             "workspace_members": ["first", "second"],
