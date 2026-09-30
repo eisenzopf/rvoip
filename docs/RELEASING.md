@@ -129,14 +129,14 @@ native ALSA, Opus, OpenSSL, libvpx, and Protobuf development packages before
 building. `libvpx-dev` is required by the WebRTC VP8/VP9 dependency graph when
 the release rustdoc gate compiles the complete workspace with `--all-features`.
 
-The current full profile is balanced across six `m5.2xlarge` short-performance
-workers, two `m5.2xlarge` one-hour-soak workers, seven `m5.xlarge`
-burst/soak workers, one `m5.xlarge` stateful interoperability worker, and
+The current full profile is balanced across six `m5.4xlarge` short-performance
+workers, three `m5.4xlarge` long-soak workers, seven `m5.xlarge`
+burst/soak workers, one `m5.4xlarge` stateful interoperability worker, and
 two `m5.large` proxy-interoperability workers. Each proxy worker runs six
-of the twelve required peer/order/transport rows. The two
-long soaks receive the additional cores for the measured workload; the total
-runtime shape is 100 concurrent On-Demand vCPUs, checked against the
-account's vCPU quota before any instance is created. These are real
+of the twelve required peer/order/transport rows. Workers that drive
+2,000 CPS get 16 vCPUs so the gates measure the code rather than CPU
+saturation; the total runtime shape is 192 concurrent On-Demand vCPUs,
+checked against the account's vCPU quota before any instance is created. These are real
 performance machines; the workflow
 does not substitute GitHub-hosted capacity or reduce workloads and thresholds.
 Before creating that runtime shape, the controller uses one ephemeral

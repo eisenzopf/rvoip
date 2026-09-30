@@ -40,7 +40,11 @@ RESOURCE_MACHINES = {
     # cold release build overran its timeout and the libSRTP build alone took
     # 28 minutes.
     "ec2-interop": "m5.4xlarge",
-    "ec2-performance": "m5.2xlarge",
+    # At least 16 vCPUs, for the same reason as the long soak below: the
+    # call-setup sweeps drive 2,000 CPS. On 8 vCPUs the PBX media-server
+    # profile's 2,000-CPS point sat on the CPU knee, passing at 15.8 ms p99 in
+    # one run and collapsing to 47.5% answer rate in the next on identical code.
+    "ec2-performance": "m5.4xlarge",
     "ec2-performance-soak": "m5.xlarge",
     # At least 16 vCPUs. The canonical 2,000-CPS sweep costs about 3 ms of CPU
     # per call, roughly 5.65 cores at 2,000 CPS; on 8 vCPUs (4 physical cores)
@@ -571,6 +575,11 @@ def render_user_data_script(
                 "[Unit]",
                 "Description=rvoip release shutdown checkpoint",
                 "DefaultDependencies=no",
+                # Stop order is the reverse of start order: without this the
+                # network can go down while the checkpoint is still uploading,
+                # and a cut-off worker leaves no PARTIAL result at all.
+                "Wants=network-online.target",
+                "After=network-online.target",
                 "Before=shutdown.target",
                 "",
                 "[Service]",

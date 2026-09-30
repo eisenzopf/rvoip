@@ -373,10 +373,10 @@ inventory for a full release.
 | Worker class | Instance type | vCPU | Memory | Root volume | Use |
 | --- | --- | ---: | ---: | --- | --- |
 | controller | GitHub-hosted Ubuntu | managed | managed | managed | plan, hosted shards, report, small checks |
-| ec2-performance | m5.2xlarge | 8 | 32 GB | 200 GB gp3 | short performance and regression gates |
+| ec2-performance | m5.4xlarge | 16 | 64 GB | 200 GB gp3 | short performance and regression gates |
 | ec2-performance-soak | m5.xlarge | 4 | 16 GB | 200 GB gp3 | burst and soak gates |
-| ec2-performance-soak-long | m5.2xlarge | 8 | 32 GB | 200 GB gp3 | one-hour soaks |
-| ec2-interop | m5.xlarge | 4 | 16 GB | 200 GB gp3 | stateful PBX interoperability lane |
+| ec2-performance-soak-long | m5.4xlarge | 16 | 64 GB | 200 GB gp3 | canonical 2k gate and one-hour soaks |
+| ec2-interop | m5.4xlarge | 16 | 64 GB | 200 GB gp3 | stateful PBX interoperability lane |
 | ec2-proxy-interop | m5.large | 2 | 8 GB | 100 GB gp3 | proxy interoperability rows |
 | performance prebuilder | m5.8xlarge | 32 | 128 GB | 200 GB gp3 | compiles the performance bundle once |
 
@@ -389,8 +389,9 @@ https://aws.amazon.com/ec2/instance-types/m5/
 Every worker uses On-Demand capacity, not Spot. The full `remote-release`
 shape is six short-performance workers, three long-soak workers, seven
 burst/soak workers, one interoperability worker, and two
-proxy-interoperability workers: 144 concurrent vCPUs, plus the 32-vCPU
-builder that runs and is terminated before the fleet starts. The controller
+proxy-interoperability workers: 192 concurrent vCPUs, plus the 32-vCPU
+builder. Interop and proxy interop run alongside the builder; the
+performance workers start once its bundle is verified. The controller
 verifies the account's On-Demand Standard vCPU quota (`L-1216C47A`) and gp3
 storage quota against that peak before creating anything.
 
@@ -398,8 +399,9 @@ Machine classes and volumes are policy values recorded in every attestation.
 Changing them invalidates environment-sensitive evidence; moving clouds
 changed the release environment identifier to
 `rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5`, and resizing
-the long-soak class to 16 vCPUs changed it to
-`rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-soaklong16-interop16`.
+the long-soak, interop, and short-performance classes to 16 vCPUs changed it
+to
+`rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-perf16-soaklong16-interop16`.
 
 ### Dedicated release VPC
 

@@ -18,27 +18,33 @@ its evidence as before.
 
 | Resource class | Instance type | vCPU | Memory | Root volume | Was |
 | --- | --- | ---: | ---: | --- | --- |
-| `ec2-performance` | `m5.2xlarge` | 8 | 32 GB | 200 GB gp3 | `gcp-performance` / `n2-standard-8` |
+| `ec2-performance` | `m5.4xlarge` | 16 | 64 GB | 200 GB gp3 | `gcp-performance` / `n2-standard-8` |
 | `ec2-performance-soak` | `m5.xlarge` | 4 | 16 GB | 200 GB gp3 | `gcp-performance-soak` / `n2-standard-4` |
 | `ec2-performance-soak-long` | `m5.4xlarge` | 16 | 64 GB | 200 GB gp3 | `gcp-performance-soak-long` / `n2-standard-8` |
 | `ec2-interop` | `m5.4xlarge` | 16 | 64 GB | 200 GB gp3 | `gcp-interop` / `n2-standard-4` |
 | `ec2-proxy-interop` | `m5.large` | 2 | 8 GB | 100 GB gp3 | `gcp-proxy-interop` / `n2-standard-2` |
 | performance prebuilder | `m5.8xlarge` | 32 | 128 GB | 200 GB gp3 | `n2-standard-32` |
 
-The long-soak class is sized up from the N2 it replaced and must stay at 16
-vCPUs or more. It runs the canonical 2,000-CPS sweep, which costs about 3 ms
-of CPU per call, roughly 5.65 cores at 2,000 CPS. On 8 vCPUs (4 physical
-cores) that point is the CPU knee: p99 setup latency swung between 17 and
-39 ms across runs of identical code while the median held near 2 ms, and a
+The long-soak and short-performance classes are sized up from the N2 they
+replaced and must stay at 16 vCPUs or more, because both drive 2,000 CPS.
+The long soak runs the canonical 2,000-CPS sweep, which costs about 3 ms of
+CPU per call, roughly 5.65 cores at 2,000 CPS. On 8 vCPUs (4 physical cores)
+that point is the CPU knee: p99 setup latency swung between 17 and 39 ms
+across runs of identical code while the median held near 2 ms, and a
 four-worker A/B collapsed to 8% answer rate. Transparent huge pages were ruled
-out with zero compaction stalls. At 16 vCPUs the gate measures the code rather
-than saturation. Changing this class's machine type requires re-recording the
+out with zero compaction stalls. The short-performance call-setup sweeps hit
+the same knee: on 8 vCPUs the PBX media-server profile's 2,000-CPS point
+passed at 15.8 ms p99 in one run and collapsed to a 47.5% answer rate in the
+next, on identical code. At 16 vCPUs the gates measure the code rather than
+saturation. Changing the long-soak machine type requires re-recording the
 reviewed canonical 2k baseline on the new hardware, since latency and
-CPS-per-core are hardware-relative.
+CPS-per-core are hardware-relative. The short-performance gates use absolute
+thresholds rather than a reviewed baseline, so resizing that class needed no
+rebaseline.
 
 The full `remote-release` shape is six short-performance workers, three
 long-soak workers, seven burst/soak workers, one interoperability worker, and
-two proxy-interoperability workers, 144 vCPUs concurrently. The interop and
+two proxy-interoperability workers, 192 vCPUs concurrently. The interop and
 proxy-interop workers read no performance bundle, so they launch alongside the
 32-vCPU builder instead of waiting for it; the performance workers launch once
 the builder's bundle is verified. Interop is the fleet's longest serial chain,
@@ -50,17 +56,18 @@ soak, or the soak candidate. Packed two to a worker, the two hour-long soaks
 ran back to back for about 2 h 20 min, leaving the three-hour controller job,
 which also covers the prebuild, about ten minutes of slack, and starting the
 second soak on a machine the first had just loaded. Peak
-demand is therefore 144 On-Demand Standard vCPUs against the account's
+demand is therefore 192 On-Demand Standard vCPUs against the account's
 1,152-vCPU quota in `us-west-2`.
 
 Machine classes are policy values recorded in every attestation. Moving clouds
 changes the environment, so the release environment identifier became
 `rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5` and
 every environment-sensitive gate ran fresh on the first AWS qualification.
-Resizing the long-soak class to 16 vCPUs changed it again, to
-`rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-soaklong16-interop16`: the per-gate
+Resizing the long-soak, interop, and short-performance classes to 16 vCPUs
+changed it again, to
+`rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-perf16-soaklong16-interop16`: the per-gate
 evidence identity is the environment identifier plus the resource class, so
-without the bump an 8-vCPU long-soak receipt would still match.
+without the bump an 8-vCPU receipt would still match.
 Performance thresholds are unchanged; the first AWS run establishes whether
 `m5` meets them and becomes the comparison baseline for later releases.
 
