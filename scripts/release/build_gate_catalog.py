@@ -898,7 +898,7 @@ def infrastructure_preflight_gates() -> list[dict[str, Any]]:
     for resource, count in (
         ("ec2-performance", 6),
         ("ec2-performance-soak", 7),
-        ("ec2-performance-soak-long", 2),
+        ("ec2-performance-soak-long", 3),
         ("ec2-interop", 1),
         ("ec2-proxy-interop", 2),
     ):

@@ -7928,6 +7928,45 @@
       "command": [
         "bash",
         "infra/release-runners/release-infrastructure-preflight.sh",
+        "ec2-performance-soak-long",
+        "{artifact_dir}"
+      ],
+      "dependencies": [],
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh ec2-performance-soak-long {artifact_dir}",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "preflight.performance-soak-long-03",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "ec2-performance-soak-long worker 03 infrastructure acceptance",
+      "resource_class": "ec2-performance-soak-long",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        ".github/workflows/release-qualify.yml",
+        "infra/release-runners/aws-release-startup.sh",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "scripts/release/build_gate_catalog.py",
+        "scripts/release/gates.py",
+        "scripts/release/gates.json",
+        "scripts/release/aws_fanout.py"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "bash",
+        "infra/release-runners/release-infrastructure-preflight.sh",
         "ec2-interop",
         "{artifact_dir}"
       ],
@@ -10960,6 +10999,7 @@
       "preflight.performance-soak-07",
       "preflight.performance-soak-long-01",
       "preflight.performance-soak-long-02",
+      "preflight.performance-soak-long-03",
       "preflight.proxy-interop-01",
       "preflight.proxy-interop-02"
     ],
