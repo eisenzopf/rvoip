@@ -22,7 +22,7 @@
   key is stored in GitHub. The GCP qualification pilot workflow and its
   startup script are removed.
 - The release environment identifier becomes
-  `rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-soaklong16`,
+  `rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-soaklong16-interop16`,
   so every environment-sensitive gate runs fresh on the first AWS
   qualification.
 - The long-soak worker class, which runs the canonical 2,000-CPS gate, is
@@ -35,7 +35,19 @@
   hour-long soaks previously ran back to back on one worker for about
   2 h 20 min, which left the three-hour controller job about ten minutes of
   slack. Qualification now finishes about an hour sooner, at a peak of 132
-  vCPUs. Historical GCP qualification evidence under
+  vCPUs.
+- The Jambonz OSS interoperability pins move to the 0.9.11 release line:
+  `sbc-inbound` `d0d8ba93b2f3f9d09e3877be6a434744305cac4d` and `sbc-outbound`
+  `7099671e69342dac60e2ab3001c56b18820ee302`, with source tarball digests
+  re-verified. The release check requires the pinned components to be the
+  current upstream heads, and upstream had moved on from 0.9.9.
+- The interoperability worker moves to 16 vCPUs (`m5.4xlarge`) and, with the
+  proxy-interop workers, launches alongside the performance prebuild instead
+  of after it. Interop reads no performance bundle; it is the fleet's longest
+  serial chain, and three of its gates compile on the worker. On 4 vCPUs the
+  SIPp listener's cold full-LTO release build overran its timeout and the
+  libSRTP build took 28 minutes. Cold release builds on EC2 now get a
+  45-minute timeout, and four interop estimates carry measured durations. Historical GCP qualification evidence under
   `crates/sip/rvoip-sip/docs/` is unchanged. See
   `docs/AWS_RELEASE_WORKERS.md`.
 

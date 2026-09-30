@@ -48,7 +48,7 @@ concurrency:
   cancel-in-progress: ${{ inputs.profile == 'remote-preflight' || inputs.profile == 'remote-diagnostic' }}
 
 env:
-  RELEASE_ENVIRONMENT_ID: rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-soaklong16
+  RELEASE_ENVIRONMENT_ID: rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-soaklong16-interop16
   RUSTUP_MAX_RETRIES: "10"
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
@@ -471,6 +471,108 @@ jobs:
             echo "- Idle workers retained after the run: 0"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # Interoperability and proxy workers run no performance gate, so they need
+      # no prebuilt bundle. Launch them before the prebuild instead of after it:
+      # interop is the longest serial chain in the fleet (one stateful peer lab,
+      # 27 gates, three source builds), and waiting ~26 minutes for a bundle it
+      # never reads put that wait directly on the qualification's critical path.
+      - name: Create bundle-free workers before the prebuild
+        env:
+          REGION: ${{ vars.RVOIP_AWS_REGION }}
+          CANDIDATE: ${{ needs.plan.outputs.candidate_sha }}
+          CACHE_BUCKET: ${{ vars.RVOIP_AWS_CACHE_BUCKET }}
+          AMI_ID: ${{ needs.preflight-aws.outputs.ami_id }}
+          SUBNET_ID: ${{ vars.RVOIP_AWS_SUBNET_ID }}
+          SECURITY_GROUP_ID: ${{ vars.RVOIP_AWS_SECURITY_GROUP_ID }}
+          INSTANCE_PROFILE: ${{ vars.RVOIP_AWS_RUNNER_INSTANCE_PROFILE }}
+          BUCKET: ${{ vars.RVOIP_AWS_EVIDENCE_BUCKET }}
+          # Bundle-free by construction; the startup script only requires a
+          # bundle when the shard holds a performance gate.
+          PREBUILT_URI: ""
+          PREBUILT_SHA256: ""
+          EXTERNAL_MEMORY_DIAGNOSTICS: ${{ inputs.profile == 'remote-diagnostic' && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/aws-controller/create-logs target/aws-controller/user-data
+          run_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          # The janitor terminates anything still alive after this deadline.
+          expires_at="$(date -u -d '+4 hours' +%Y-%m-%dT%H:%M:%SZ)"
+          tag_list() {
+            # key=value ... -> Tags=[{Key=key,Value=value},...] for --tag-specifications
+            local pairs=()
+            for pair in "$@"; do
+              pairs+=("{Key=${pair%%=*},Value=${pair#*=}}")
+            done
+            local IFS=,
+            printf 'Tags=[%s]' "${pairs[*]}"
+          }
+          pids=()
+          while IFS= read -r descriptor; do
+            shard_id="$(jq -r .id <<< "$descriptor")"
+            worker="$(jq -r .name <<< "$descriptor")"
+            prefix="$(jq -r .prefix <<< "$descriptor")"
+            resource_class="$(jq -r .resource_class <<< "$descriptor")"
+            machine_type="$(jq -r .machine_type <<< "$descriptor")"
+            disk_type="$(jq -r .disk_type <<< "$descriptor")"
+            disk_size_gb="$(jq -r .disk_size_gb <<< "$descriptor")"
+            gates_b64="$(jq -r .gates_b64 <<< "$descriptor")"
+            environment_b64="$(jq -r .environment_b64 <<< "$descriptor")"
+            user_data="target/aws-controller/user-data/${shard_id}.gz"
+            python3 scripts/release/aws_fanout.py user-data \
+              --startup infra/release-runners/aws-release-startup.sh \
+              --shutdown infra/release-runners/aws-release-shutdown.sh \
+              --env "RVOIP_AWS_REGION=${REGION}" \
+              --env "RVOIP_CANDIDATE=${CANDIDATE}" \
+              --env "RVOIP_RUN_ID=${run_id}" \
+              --env "RVOIP_SHARD_ID=${shard_id}" \
+              --env "RVOIP_RESOURCE_CLASS=${resource_class}" \
+              --env "RVOIP_EVIDENCE_BUCKET=${BUCKET}" \
+              --env "RVOIP_CACHE_BUCKET=${CACHE_BUCKET}" \
+              --env "RVOIP_PREFIX=${prefix}" \
+              --env "RVOIP_GATES_B64=${gates_b64}" \
+              --env "RVOIP_ENVIRONMENT_B64=${environment_b64}" \
+              --env "RVOIP_PREBUILT_URI=${PREBUILT_URI}" \
+              --env "RVOIP_PREBUILT_SHA256=${PREBUILT_SHA256}" \
+              --env "RVOIP_EXTERNAL_MEMORY_DIAGNOSTICS=${EXTERNAL_MEMORY_DIAGNOSTICS}" \
+              --env "RVOIP_MIMALLOC_ALLOW_THP=" \
+              --output "$user_data"
+            tags="$(tag_list \
+              "Name=${worker}" \
+              managed-by=github-actions \
+              rvoip-role=release-gate \
+              "rvoip-run-id=${run_id}" \
+              "rvoip-candidate=${CANDIDATE}" \
+              "rvoip-shard-id=${shard_id}" \
+              "rvoip-resource-class=${resource_class}" \
+              "rvoip-expires-at=${expires_at}")"
+            (
+              aws ec2 run-instances \
+                --image-id "$AMI_ID" \
+                --instance-type "$machine_type" \
+                --subnet-id "$SUBNET_ID" \
+                --security-group-ids "$SECURITY_GROUP_ID" \
+                --iam-instance-profile "Name=${INSTANCE_PROFILE}" \
+                --block-device-mappings "DeviceName=/dev/sda1,Ebs={VolumeSize=${disk_size_gb},VolumeType=${disk_type},DeleteOnTermination=true}" \
+                --metadata-options HttpTokens=required,HttpEndpoint=enabled,InstanceMetadataTags=enabled \
+                --instance-initiated-shutdown-behavior terminate \
+                --user-data "fileb://${user_data}" \
+                --tag-specifications \
+                  "ResourceType=instance,${tags}" \
+                  "ResourceType=volume,${tags}" \
+                --output json
+            ) > "target/aws-controller/create-logs/${shard_id}.log" 2>&1 &
+            pids+=("$!")
+          done < <(jq -c '.workers[] | select(.resource_class | startswith("ec2-performance") | not)' target/aws-controller/workers.json)
+
+          status=0
+          for pid in "${pids[@]}"; do
+            wait "$pid" || status=1
+          done
+          if (( status != 0 )); then
+            tail -n 100 target/aws-controller/create-logs/*.log
+            exit "$status"
+          fi
+
       - name: Build selected performance executables once
         id: prebuild
         env:
@@ -669,7 +771,7 @@ jobs:
             echo "- Builder retained after this step: no"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Create every ephemeral release worker concurrently
+      - name: Create performance workers once the bundle exists
         env:
           REGION: ${{ vars.RVOIP_AWS_REGION }}
           CANDIDATE: ${{ needs.plan.outputs.candidate_sha }}
@@ -753,7 +855,7 @@ jobs:
                 --output json
             ) > "target/aws-controller/create-logs/${shard_id}.log" 2>&1 &
             pids+=("$!")
-          done < <(jq -c '.workers[]' target/aws-controller/workers.json)
+          done < <(jq -c '.workers[] | select(.resource_class | startswith("ec2-performance"))' target/aws-controller/workers.json)
 
           status=0
           for pid in "${pids[@]}"; do

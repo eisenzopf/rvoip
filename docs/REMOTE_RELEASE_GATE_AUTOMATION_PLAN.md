@@ -389,7 +389,7 @@ https://aws.amazon.com/ec2/instance-types/m5/
 Every worker uses On-Demand capacity, not Spot. The full `remote-release`
 shape is six short-performance workers, three long-soak workers, seven
 burst/soak workers, one interoperability worker, and two
-proxy-interoperability workers: 132 concurrent vCPUs, plus the 32-vCPU
+proxy-interoperability workers: 144 concurrent vCPUs, plus the 32-vCPU
 builder that runs and is terminated before the fleet starts. The controller
 verifies the account's On-Demand Standard vCPU quota (`L-1216C47A`) and gp3
 storage quota against that peak before creating anything.
@@ -399,7 +399,7 @@ Changing them invalidates environment-sensitive evidence; moving clouds
 changed the release environment identifier to
 `rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5`, and resizing
 the long-soak class to 16 vCPUs changed it to
-`rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-soaklong16`.
+`rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-soaklong16-interop16`.
 
 ### Dedicated release VPC
 

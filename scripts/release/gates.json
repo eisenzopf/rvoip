@@ -2963,7 +2963,7 @@
         "interop.asterisk-down-before-freeswitch"
       ],
       "display_command": "<local-path>",
-      "estimated_seconds": 7,
+      "estimated_seconds": 433,
       "executor": "argv",
       "expected_outputs": [
         "receipt.json",
@@ -3214,7 +3214,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 20,
+      "timeout_minutes": 45,
       "working_directory": "."
     },
     {
@@ -3371,7 +3371,7 @@
         "interop.sipp-stop"
       ],
       "display_command": "env RVOIP_STRICT_UA_RESULTS=<source-report> <workspace>/crates/sip/rvoip-sip/tests/interop/baresip/run_strict_ua.sh",
-      "estimated_seconds": 9,
+      "estimated_seconds": 392,
       "executor": "argv",
       "expected_outputs": [
         "receipt.json",
@@ -5510,7 +5510,7 @@
         "source.remote-clean"
       ],
       "display_command": "python3 scripts/ci/run_checks.py specialty --name release-rtp-interop --gate rtp-interop --output {artifact_dir}/nested-ci-receipt.json",
-      "estimated_seconds": 1,
+      "estimated_seconds": 1663,
       "executor": "argv",
       "expected_outputs": [
         "receipt.json",
@@ -6604,7 +6604,7 @@
         "source.remote-clean"
       ],
       "display_command": "bash infra/release-runners/interop-lifecycle.sh asterisk-up",
-      "estimated_seconds": 120,
+      "estimated_seconds": 440,
       "executor": "argv",
       "expected_outputs": [
         "receipt.json",
