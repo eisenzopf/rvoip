@@ -253,7 +253,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("source /etc/rvoip-release.env", startup)
         self.assertIn('"$RESOURCE_CLASS" == "ec2-interop"', startup)
         self.assertIn('"$RESOURCE_CLASS" == "ec2-proxy-interop"', startup)
-        self.assertIn('"ec2-interop": "m5.xlarge"', fanout)
+        self.assertIn('"ec2-interop": "m5.4xlarge"', fanout)
         self.assertIn('"ec2-proxy-interop": "m5.large"', fanout)
         self.assertIn('"ec2-performance": "m5.2xlarge"', fanout)
         self.assertIn('"ec2-performance-soak": "m5.xlarge"', fanout)
@@ -269,7 +269,7 @@ class WorkflowPolicyTests(unittest.TestCase):
             self.assertIn(job, workflow)
         for step in (
             "Require all compute and storage quota before creating workers",
-            "Create every ephemeral release worker concurrently",
+            "Create performance workers once the bundle exists",
             "Wait for every immutable worker result",
             "Download and verify every shard evidence bundle",
             "Terminate all workers and root volumes",
@@ -332,8 +332,17 @@ class WorkflowPolicyTests(unittest.TestCase):
         )
         self.assertLess(
             workflow.index("Build selected performance executables once"),
-            workflow.index("Create every ephemeral release worker concurrently"),
+            workflow.index("Create performance workers once the bundle exists"),
         )
+        # Workers that read no bundle launch before it is built, and only they do.
+        early = workflow.index("Create bundle-free workers before the prebuild")
+        self.assertLess(early, workflow.index("Build selected performance executables once"))
+        early_step = workflow[early : workflow.index("Build selected performance executables once")]
+        self.assertIn('startswith("ec2-performance") | not', early_step)
+        self.assertIn('PREBUILT_URI: ""', early_step)
+        late = workflow.index("Create performance workers once the bundle exists")
+        late_step = workflow[late : workflow.index("Wait for every immutable worker result")]
+        self.assertIn('select(.resource_class | startswith("ec2-performance"))', late_step)
         self.assertIn('--env "RVOIP_PREBUILT_URI=${PREBUILT_URI}"', workflow)
         self.assertIn('--env "RVOIP_PREBUILT_SHA256=${PREBUILT_SHA256}"', workflow)
         self.assertIn("install-bundle", startup)
@@ -458,9 +467,11 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('export RVOIP_RELEASE_GATES="$GATES"', startup)
         self.assertIn("sysctl -w net.core.rmem_max=67108864", startup)
         self.assertIn("sysctl -w net.core.wmem_max=67108864", startup)
-        self.assertEqual(workflow.count("aws ec2 run-instances"), 2)
+        # One launch for the prebuilder, one for bundle-free workers (interop and
+        # proxy interop) before the prebuild, one for performance workers after.
+        self.assertEqual(workflow.count("aws ec2 run-instances"), 3)
         self.assertIn(
-            "RELEASE_ENVIRONMENT_ID: rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-soaklong16",
+            "RELEASE_ENVIRONMENT_ID: rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-soaklong16-interop16",
             workflow,
         )
         self.assertIn("expected 46 publishable workspace packages", probe)
@@ -594,7 +605,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("Run all ephemeral EC2 release shards", controller)
         self.assertIn("- GitHub controller jobs: 1", controller)
         self.assertIn("aws_fanout.py prepare", controller)
-        self.assertIn("Create every ephemeral release worker concurrently", controller)
+        self.assertIn("Create performance workers once the bundle exists", controller)
         self.assertIn('pids+=("$!")', controller)
         self.assertIn("Wait for every immutable worker result", controller)
         self.assertIn("aws_fanout.py verify", controller)

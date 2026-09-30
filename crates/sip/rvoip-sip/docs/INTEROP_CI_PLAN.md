@@ -27,7 +27,7 @@ failure rather than a skip.
 | SIPp | Deterministic UAC/UAS and load generator | Required release gate. |
 | Asterisk `res_pjsip` | PBX interop | Required release gate. |
 | FreeSWITCH Sofia | PBX/B2BUA interop | Required release gate. |
-| Latest stable Jambonz OSS | SBC/B2BUA, registrar, and anchored-media interop | Required 0.3.11 release gate; currently component line 0.9.9. |
+| Latest stable Jambonz OSS | SBC/B2BUA, registrar, and anchored-media interop | Required 0.3.11 release gate; currently component line 0.9.11. |
 | PJSIP or baresip | Strict SIP user agent | Required release gate. |
 | Kamailio | Transaction-stateful proxy interoperability peer | Required for the `0.3.11` proxy release gate. |
 | OpenSIPS | Independent transaction-stateful proxy interoperability peer | Required for the `0.3.11` proxy release gate. |

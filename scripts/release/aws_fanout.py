@@ -33,7 +33,13 @@ WORKER_SIDECAR_NAMES = frozenset(
     }
 )
 RESOURCE_MACHINES = {
-    "ec2-interop": "m5.xlarge",
+    # 16 vCPUs. Interop is the fleet's longest serial chain: one stateful peer
+    # lab running 27 gates, three of which compile on the worker (the SIPp
+    # listener with full LTO, the libSRTP interop test binaries, and the strict
+    # UA harness) alongside the Docker PBX labs. On 4 vCPUs the SIPp listener's
+    # cold release build overran its timeout and the libSRTP build alone took
+    # 28 minutes.
+    "ec2-interop": "m5.4xlarge",
     "ec2-performance": "m5.2xlarge",
     "ec2-performance-soak": "m5.xlarge",
     # At least 16 vCPUs. The canonical 2,000-CPS sweep costs about 3 ms of CPU

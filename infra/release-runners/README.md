@@ -78,14 +78,15 @@ every worker records the actual CPU model in its evidence.
 | `ec2-performance` | `m5.2xlarge` | 8 | 32 GB | 200 GB gp3 |
 | `ec2-performance-soak` | `m5.xlarge` | 4 | 16 GB | 200 GB gp3 |
 | `ec2-performance-soak-long` | `m5.4xlarge` | 16 | 64 GB | 200 GB gp3 |
-| `ec2-interop` | `m5.xlarge` | 4 | 16 GB | 200 GB gp3 |
+| `ec2-interop` | `m5.4xlarge` | 16 | 64 GB | 200 GB gp3 |
 | `ec2-proxy-interop` | `m5.large` | 2 | 8 GB | 100 GB gp3 |
 | performance prebuilder | `m5.8xlarge` | 32 | 128 GB | 200 GB gp3 |
 
 The full `remote-release` shape is six short-performance workers, three
 long-soak workers, seven burst/soak workers, one interoperability worker, and
-two proxy-interoperability workers (132 vCPUs concurrently), plus the 32-vCPU
-builder that runs and is terminated before the fleet starts. `preflight-aws`
+two proxy-interoperability workers (144 vCPUs concurrently), plus the 32-vCPU
+builder, which the interop and proxy-interop workers run alongside and which
+is terminated before the performance workers start. `preflight-aws`
 reads the On-Demand Standard vCPU quota and current usage before creating
 anything and fails closed if peak demand does not fit.
 

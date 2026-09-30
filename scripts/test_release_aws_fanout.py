@@ -77,7 +77,6 @@ class AwsReleaseFanoutTests(unittest.TestCase):
                     self.matrix_entry(
                         "pbx-interop",
                         resource="ec2-interop",
-                        machine="m5.xlarge",
                         gates="interop.pbx",
                     ),
                 ]

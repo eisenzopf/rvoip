@@ -94,6 +94,17 @@ CURRENT_PERFORMANCE_EVALUATION_GATE_IDS = ["perf.canonical-2k-current"]
 # 2026 legacy evidence, which names whichever baseline was current then. Pin
 # the packaging gate to the baseline the rest of the tooling reads so the
 # catalog stays reproducible and current at the same time.
+# Gate durations measured on the first complete AWS interop run (qualification
+# 36651186833, m5.xlarge) where the inherited estimate was far below reality.
+# Each of these starts a lab or compiles on the worker, which the historical
+# warm-host durations never included. Estimates balance multi-shard classes
+# and size summaries; they never change a gate's timeout.
+MEASURED_EC2_SECONDS = {
+    "interop.amr-rate-sweep.up": 440,
+    "interop.freeswitch-up": 433,
+    "interop.remote-libsrtp": 1663,
+    "interop.strict-ua": 392,
+}
 REVIEWED_PERF_BASELINE_ID = "20260929T224805Z"
 COMMAND_OVERRIDES = {
     "report.regression-baseline": [
@@ -426,6 +437,16 @@ def legacy_gate(record: dict[str, Any], records: list[dict[str, Any]], packages:
         # EC2 workers start without a warm target directory. Preserve enough
         # headroom for the first release build as well as the measured gate.
         timeout_minutes = max(timeout_minutes, 20)
+    if (
+        resource_class(record).startswith("ec2-")
+        and command
+        and command[:2] == ["cargo", "build"]
+        and "--release" in command
+    ):
+        # A cold release build uses the workspace's full LTO with one codegen
+        # unit, which is far longer than a debug build. The SIPp listener's
+        # first AWS build overran the 20-minute floor above.
+        timeout_minutes = max(timeout_minutes, 45)
     expected_outputs = ["receipt.json", "command.log"]
     if record["id"] == "report.performance-metrics":
         expected_outputs.extend(
@@ -1186,6 +1207,10 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
         ),
     ]
     gates = legacy + synthetic + preflight + core + security + final
+    for gate in gates:
+        measured = MEASURED_EC2_SECONDS.get(gate["id"])
+        if measured is not None:
+            gate["estimated_seconds"] = max(int(gate["estimated_seconds"]), measured)
 
     direct_legacy = [gate["id"] for gate in legacy if gate["executor"] == "argv"]
     structured_legacy = [

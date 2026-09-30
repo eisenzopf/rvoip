@@ -169,7 +169,7 @@ blocked unless it records the complete required matrix as PASS.
 | --- | --- | --- |
 | **Asterisk** | **Release-gated; matrix passed** (`interop.asterisk-matrix`) | `Endpoint`, `StreamPeer`, and `CallbackPeer` across registration, basic call, G.729A/G.729AB, hold/resume, ring-cancel, RFC 4733 DTMF, rejection, and blind transfer over UDP and TLS |
 | **FreeSWITCH** | **Release-gated; matrix passed** (`interop.freeswitch-matrix`) | The same API, scenario, codec, and UDP/TLS matrix as Asterisk |
-| **Jambonz OSS 0.9.9** | **0.3.11 release gate passed** (`interop.jambonz-matrix`) | The same registered-user `Endpoint`, `StreamPeer`, and `CallbackPeer` scenario runner used for Asterisk and FreeSWITCH, across the applicable UDP SIP/SDP/RTP B2BUA matrix |
+| **Jambonz OSS 0.9.11** | **0.3.11 release gate passed** (`interop.jambonz-matrix`) | The same registered-user `Endpoint`, `StreamPeer`, and `CallbackPeer` scenario runner used for Asterisk and FreeSWITCH, across the applicable UDP SIP/SDP/RTP B2BUA matrix |
 | **SIPp** | **Release-gated; standalone matrix passed** (`interop.sipp-matrix`) | 30, 100, 300, 1,000, and 2,000 CPS with 100% configured call completion |
 | **baresip** | **Release-gated; strict-UA check passed** (`interop.strict-ua`) | External user-agent call against the rvoip SIP listener |
 | **Kamailio** | **Release-gated; proxy matrix passed** | Proxy interoperability in both adjacency orders over UDP, TCP, and TLS (`interop.remote-proxies.kamailio.*`), plus the `Endpoint` all-scenario matrix through an rtpengine media relay with AMR passthrough required (`interop.proxy-pbx.kamailio.matrix`) |

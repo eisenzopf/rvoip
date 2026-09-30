@@ -21,7 +21,7 @@ its evidence as before.
 | `ec2-performance` | `m5.2xlarge` | 8 | 32 GB | 200 GB gp3 | `gcp-performance` / `n2-standard-8` |
 | `ec2-performance-soak` | `m5.xlarge` | 4 | 16 GB | 200 GB gp3 | `gcp-performance-soak` / `n2-standard-4` |
 | `ec2-performance-soak-long` | `m5.4xlarge` | 16 | 64 GB | 200 GB gp3 | `gcp-performance-soak-long` / `n2-standard-8` |
-| `ec2-interop` | `m5.xlarge` | 4 | 16 GB | 200 GB gp3 | `gcp-interop` / `n2-standard-4` |
+| `ec2-interop` | `m5.4xlarge` | 16 | 64 GB | 200 GB gp3 | `gcp-interop` / `n2-standard-4` |
 | `ec2-proxy-interop` | `m5.large` | 2 | 8 GB | 100 GB gp3 | `gcp-proxy-interop` / `n2-standard-2` |
 | performance prebuilder | `m5.8xlarge` | 32 | 128 GB | 200 GB gp3 | `n2-standard-32` |
 
@@ -38,14 +38,19 @@ CPS-per-core are hardware-relative.
 
 The full `remote-release` shape is six short-performance workers, three
 long-soak workers, seven burst/soak workers, one interoperability worker, and
-two proxy-interoperability workers, 132 vCPUs concurrently, plus the 32-vCPU
-builder that runs and is terminated before the fleet starts. Each long-soak
+two proxy-interoperability workers, 144 vCPUs concurrently. The interop and
+proxy-interop workers read no performance bundle, so they launch alongside the
+32-vCPU builder instead of waiting for it; the performance workers launch once
+the builder's bundle is verified. Interop is the fleet's longest serial chain,
+one stateful peer lab running 27 gates, three of which compile on the worker,
+which is why it has 16 vCPUs and why it no longer waits about 26 minutes for a
+bundle it never reads. Each long-soak
 worker owns one long gate: the canonical 2,000-CPS evaluation, the monolithic
 soak, or the soak candidate. Packed two to a worker, the two hour-long soaks
 ran back to back for about 2 h 20 min, leaving the three-hour controller job,
 which also covers the prebuild, about ten minutes of slack, and starting the
 second soak on a machine the first had just loaded. Peak
-demand is therefore 132 On-Demand Standard vCPUs against the account's
+demand is therefore 144 On-Demand Standard vCPUs against the account's
 1,152-vCPU quota in `us-west-2`.
 
 Machine classes are policy values recorded in every attestation. Moving clouds
@@ -53,7 +58,7 @@ changes the environment, so the release environment identifier became
 `rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5` and
 every environment-sensitive gate ran fresh on the first AWS qualification.
 Resizing the long-soak class to 16 vCPUs changed it again, to
-`rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-soaklong16`: the per-gate
+`rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-soaklong16-interop16`: the per-gate
 evidence identity is the environment identifier plus the resource class, so
 without the bump an 8-vCPU long-soak receipt would still match.
 Performance thresholds are unchanged; the first AWS run establishes whether
