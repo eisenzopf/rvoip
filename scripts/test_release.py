@@ -1329,6 +1329,29 @@ rvoip-rtc = { path = "../rvoip-rtc" }
                     Path("/repo"), "0.3.0", require_no_tag=True
                 )
 
+    def test_credential_preflight_skips_never_published_crates(self) -> None:
+        log = mock.Mock()
+        exists = {"rvoip-new": False, "rvoip-old": True, "rvoip-top": True}
+        with mock.patch.object(
+            release, "crates_io_exists", side_effect=lambda name: exists[name]
+        ):
+            release.credential_preflight(
+                Path("/repo"), ["rvoip-new", "rvoip-old", "rvoip-top"], log
+            )
+        log.command.assert_called_once_with(
+            ["cargo", "owner", "--list", "rvoip-old", "--registry", "crates-io"],
+            Path("/repo"),
+        )
+
+    def test_credential_preflight_fails_closed_without_a_published_crate(self) -> None:
+        log = mock.Mock()
+        with (
+            mock.patch.object(release, "crates_io_exists", return_value=False),
+            self.assertRaisesRegex(release.ReleaseError, "no workspace crate exists"),
+        ):
+            release.credential_preflight(Path("/repo"), ["rvoip-new"], log)
+        log.command.assert_not_called()
+
     def test_stale_origin_main_fails_closed(self) -> None:
         completed = release.subprocess.CompletedProcess(
             ["git", "ls-remote"], 0, stdout="def\trefs/heads/main\n", stderr=""

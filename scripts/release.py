@@ -2043,9 +2043,32 @@ def wait_for_version(
         time.sleep(poll_seconds)
 
 
-def credential_preflight(root: Path, first_crate: str, log: ReleaseLog) -> None:
+def crates_io_exists(name: str) -> bool:
+    url = f"https://crates.io/api/v1/crates/{name}"
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(request, timeout=20):
+            return True
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return False
+        raise ReleaseError(f"crates.io returned HTTP {error.code} for {name}")
+    except Exception as error:
+        raise ReleaseError(f"crates.io lookup failed for {name}: {error}")
+
+
+def credential_preflight(root: Path, ordered: list[str], log: ReleaseLog) -> None:
+    # `cargo owner --list` 404s for a crate that has never been published, so
+    # probe the first crate crates.io already knows. A release that adds a new
+    # crate at the bottom of the graph (rvoip-audio-send-queue in 0.3.11) must
+    # not fail its credential check before the first upload.
+    probe = next((name for name in ordered if crates_io_exists(name)), None)
+    if probe is None:
+        raise ReleaseError(
+            "no workspace crate exists on crates.io to probe publish credentials"
+        )
     log.command(
-        ["cargo", "owner", "--list", first_crate, "--registry", "crates-io"],
+        ["cargo", "owner", "--list", probe, "--registry", "crates-io"],
         root,
     )
 
@@ -2095,7 +2118,7 @@ def publish(
         git_commit=head,
     )
     if execute:
-        credential_preflight(root, ordered[0], log)
+        credential_preflight(root, ordered, log)
     visible: set[str] = set()
     for index, name in enumerate(ordered, 1):
         log.message(f"== {index}/{len(ordered)} {name}@{version}")
