@@ -5,9 +5,9 @@ candidate's results. The versioned reporting and selection authority is
 `config/beta-release-policy.yaml`; current outcomes are generated from evidence:
 
 Current workspace runtime crate version: `0.3.12`.
-Current published qualified runtime crate version: `0.3.12`.
-Next release candidate runtime crate version: not declared.
-Protected run `34074372543` qualified the exact published `0.3.12` commit with
+Current published qualified runtime crate version: `0.3.10`.
+Next release candidate runtime crate version: `0.3.12`.
+Protected run `34074372543` qualified the exact published `0.3.10` commit with
 213/213 fresh gates and covered all 108 requirements in the strict legacy
 ledger. Its generated reports are promoted below and archived in the protected
 qualification history. The `0.3.9` evidence and historical `0.3.2` exception
