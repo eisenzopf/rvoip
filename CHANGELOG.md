@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.12
+
 ### 0.3.12 release recovery
 
 - The protected 0.3.11 publication stopped after 25 of 46 crates reached
