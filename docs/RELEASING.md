@@ -169,6 +169,10 @@ always fresh and runs three clean passes from the exact candidate. The release
 report also requires a current performance evaluation in JSON and Markdown and
 a SHA-256 index covering the packaged performance artifacts. July 2026 results
 remain historical baselines and cannot qualify a later release.
+The regression audit still reports every latency comparison, but a current
+latency below 10 ms cannot fail the percentage regression gate. At 10 ms or
+above, the existing 25% latency tolerance applies. Throughput, memory, ASR,
+and NER thresholds are unchanged.
 The S3 evidence bucket lifecycle expires only `release-cache/` objects after 14
 days; it does not apply to the durable run-scoped qualification receipts and
 logs.

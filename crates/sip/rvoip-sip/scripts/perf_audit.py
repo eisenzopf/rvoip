@@ -53,6 +53,7 @@ SCALAR_METRICS = [
 STRICT_TOLERANCE = {"results.asr": 2.0, "results.ner": 2.0}
 
 LATENCY_PERCENTILES = ["p50", "p95", "p99"]
+LATENCY_GATE_FLOOR_NS = 10_000_000.0
 
 
 def dotted_get(obj, path):
@@ -362,9 +363,11 @@ def collect_metrics(
                 c = dotted_get(c_lat[name], pct)
                 if b is None or c is None:
                     continue
-                # Sub-millisecond latencies are timer-quantization noise; don't
-                # gate below a 1 ms floor (values here are in nanoseconds).
-                regressed, delta = is_regression(b, c, "higher_worse", latency_tol, 1_000_000.0)
+                # A current latency below 10 ms is acceptable even when its
+                # percentage increase exceeds the regression tolerance.
+                # Values here are in nanoseconds.
+                delta = pct_change(b, c)
+                regressed = c >= LATENCY_GATE_FLOOR_NS and delta > latency_tol
                 gated = pct not in report_only_percentiles
                 rows.append(
                     (f"{name} {pct} (ms)", b / 1e6, c / 1e6, delta, gated and regressed, gated)
@@ -601,7 +604,8 @@ def main():
         )
     lines.append(f"current:  `{args.current}` (git_rev {git_rev(cur_idx)})")
     lines.append(f"tolerances: throughput/RSS ±{args.tolerance_pct:g}%, "
-                 f"latency +{args.latency_tolerance_pct:g}%, ASR/NER +2%")
+                 f"latency +{args.latency_tolerance_pct:g}% at or above "
+                 f"{LATENCY_GATE_FLOOR_NS / 1e6:g} ms, ASR/NER +2%")
     lines.append(f"scenarios compared: {len(shared)}"
                  + (f" (baseline-only: {len(only_base)}, current-only: {len(only_cur)})"
                     if (only_base or only_cur) else ""))

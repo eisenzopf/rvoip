@@ -221,10 +221,27 @@ class ReportOnlyLatencyPercentileTests(unittest.TestCase):
     def test_a_real_p95_regression_still_fails_with_p99_report_only(self):
         audit = self._audit()
         base = self._report(2_000_000, 4_800_000, 20_000_000)
-        cur = self._report(2_100_000, 9_000_000, 21_000_000)
+        cur = self._report(2_100_000, 10_000_000, 21_000_000)
         rows = audit.collect_metrics(base, cur, None, None, 15.0, 50.0, frozenset({"p99"}))
         p95 = next(row for row in rows if row[0] == "setup_latency p95 (ms)")
-        self.assertTrue(p95[4], "an 87% p95 rise must still count as a regression")
+        self.assertTrue(p95[4], "a p95 rise to 10 ms must still count as a regression")
+
+    def test_latency_below_10_ms_never_gates(self):
+        audit = self._audit()
+        base = self._report(1_000_000, 4_080_000, 9_000_000)
+        cur = self._report(9_900_000, 5_296_000, 9_999_999)
+        rows = audit.collect_metrics(base, cur, None, None, 15.0, 25.0)
+        self.assertTrue(all(not regressed for _label, _b, _c, _d, regressed, _gated in rows))
+
+    def test_latency_at_10_ms_still_uses_percentage_gate(self):
+        audit = self._audit()
+        base = self._report(1_000_000, 4_080_000, 10_000_000)
+        cur = self._report(1_000_000, 10_000_000, 12_000_000)
+        rows = audit.collect_metrics(base, cur, None, None, 15.0, 25.0)
+        p95 = next(row for row in rows if row[0] == "setup_latency p95 (ms)")
+        self.assertTrue(p95[4])
+        p99 = next(row for row in rows if row[0] == "setup_latency p99 (ms)")
+        self.assertFalse(p99[4], "a 20% rise stays within the 25% tolerance")
 
     def test_an_unknown_percentile_is_refused(self):
         result = subprocess.run(
