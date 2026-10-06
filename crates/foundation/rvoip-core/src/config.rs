@@ -32,6 +32,9 @@ pub struct Config {
     pub max_direct_subscribers: usize,
     pub conversation_store: Arc<dyn ConversationStore>,
     pub vcon_store: Arc<dyn VconStore>,
+    /// Build per-session vCons. Disable when the deployment uses an external
+    /// durable audit system and has not provisioned a bounded vCon store.
+    pub capture_session_vcon: bool,
     /// P4 — message log + history pager. Default in-memory.
     pub message_store: Arc<dyn MessageStore>,
     /// How long `bridge_connections` waits for both peers' audio streams
@@ -73,6 +76,7 @@ impl Default for Config {
             max_direct_subscribers: 1_000,
             conversation_store: Arc::new(MemoryConversationStore::new()),
             vcon_store: Arc::new(MemoryVconStore::new()),
+            capture_session_vcon: true,
             message_store: Arc::new(MemoryMessageStore::new()),
             bridge_stream_deadline: Duration::from_secs(5),
             outbound_preparation_timeout: Duration::from_secs(30),

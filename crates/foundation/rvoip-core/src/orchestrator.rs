@@ -1456,12 +1456,15 @@ pub struct Orchestrator {
     /// acquire it.
     connection_registry_lock: Mutex<()>,
     connection_id_budget: AtomicUsize,
+    bounded_connection_lifecycles: AtomicBool,
+    connection_lifecycle_started: AtomicBool,
+    lifecycle_reap_counter: AtomicUsize,
     connections: Arc<DashMap<ConnectionId, ConnectionEntry>>,
     /// Generation-checked setup commit barrier. Async setup can do slow work
     /// without holding a mutex, then atomically commit only if every source is
     /// still on the generation captured before setup began. Retired IDs stay
-    /// as process-lifetime tombstones because adapter events do not yet carry
-    /// a route epoch; adapters must therefore generate non-reusable IDs.
+    /// as process-lifetime tombstones in compatibility mode. Bounded mode
+    /// fences queued clones intrinsically and releases records after teardown.
     connection_lifecycles: Arc<DashMap<ConnectionId, Arc<Mutex<ConnectionLifecycleState>>>>,
     /// Adapter routes that may still exist after their core lifecycle and
     /// secrets have been synchronously retired. A successful reject/end or a
@@ -1880,6 +1883,9 @@ impl Orchestrator {
             operational_event_order: TokioMutex::new(()),
             connection_registry_lock: Mutex::new(()),
             connection_id_budget: AtomicUsize::new(DEFAULT_CONNECTION_ID_BUDGET),
+            bounded_connection_lifecycles: AtomicBool::new(false),
+            connection_lifecycle_started: AtomicBool::new(false),
+            lifecycle_reap_counter: AtomicUsize::new(0),
             connections: Arc::new(DashMap::new()),
             connection_lifecycles: Arc::new(DashMap::new()),
             adapter_cleanup_quarantines: Arc::new(DashMap::new()),
@@ -1955,6 +1961,9 @@ impl Orchestrator {
             operational_event_order: TokioMutex::new(()),
             connection_registry_lock: Mutex::new(()),
             connection_id_budget: AtomicUsize::new(DEFAULT_CONNECTION_ID_BUDGET),
+            bounded_connection_lifecycles: AtomicBool::new(false),
+            connection_lifecycle_started: AtomicBool::new(false),
+            lifecycle_reap_counter: AtomicUsize::new(0),
             connections: Arc::new(DashMap::new()),
             connection_lifecycles: Arc::new(DashMap::new()),
             adapter_cleanup_quarantines: Arc::new(DashMap::new()),
@@ -2509,7 +2518,9 @@ impl Orchestrator {
             .connection_registry_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !self.connection_lifecycles.is_empty() {
+        if self.connection_lifecycle_started.load(Ordering::Acquire)
+            || !self.connection_lifecycles.is_empty()
+        {
             return Err(RvoipError::InvalidState(
                 "connection ID budget must be configured before first use",
             ));
@@ -2518,12 +2529,104 @@ impl Orchestrator {
         Ok(())
     }
 
+    /// Enable bounded retirement before registering adapters. Adapter routes
+    /// must carry a `ConnectionId::new()` capability through clones. String /
+    /// serde identities remain valid for command lookups, but are refused as
+    /// adapter lifecycle authority. The budget now bounds retained concurrent
+    /// work, not total calls over process lifetime.
+    pub fn configure_bounded_connection_lifecycles(&self, maximum: usize) -> Result<()> {
+        let _registry = self
+            .connection_registry_lock
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if maximum == 0
+            || self.connection_lifecycle_started.load(Ordering::Acquire)
+            || !self.adapters.is_empty()
+            || !self
+                .adapter_registrations
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_empty()
+            || !self.connection_lifecycles.is_empty()
+            || !self.conversations.is_empty()
+            || !self.sessions.is_empty()
+        {
+            return Err(RvoipError::InvalidState(
+                "bounded lifecycle configuration must precede adapters and connections",
+            ));
+        }
+        self.connection_id_budget.store(maximum, Ordering::Relaxed);
+        self.bounded_connection_lifecycles
+            .store(true, Ordering::Release);
+        Ok(())
+    }
+
+    pub fn bounded_connection_lifecycles_enabled(&self) -> bool {
+        self.bounded_connection_lifecycles.load(Ordering::Acquire)
+    }
+
+    // Caller holds registry lock. Inactive records can be removed because the
+    // capability is retired first; stale queued IDs retain that retirement.
+    // Cleanup quarantines retain capacity until their route is conclusively gone.
+    fn reap_retired_connection_lifecycles_locked(&self) {
+        if !self.bounded_connection_lifecycles_enabled() {
+            return;
+        }
+        self.connection_lifecycles.retain(|id, state| {
+            let state = state.lock().unwrap_or_else(|p| p.into_inner());
+            !(state.retired
+                && id.lifecycle_reclaimable()
+                && !self.adapter_cleanup_quarantines.contains_key(id))
+        });
+    }
+
+    fn adapter_identity_is_authoritative(&self, id: &ConnectionId) -> bool {
+        if !self.bounded_connection_lifecycles_enabled() {
+            return true;
+        }
+        id.has_lifecycle_fence()
+            && self.connection_lifecycles.get(id).map_or_else(
+                || !id.lifecycle_claimed(),
+                |current| current.key().same_lifecycle_fence(id),
+            )
+    }
+
+    /// Retained lifecycle rows and their enforced budget. In bounded mode,
+    /// completed rows are released; compatibility mode includes tombstones.
+    /// Reading usage never releases an identity or permits ID reuse.
+    pub fn connection_id_budget_usage(&self) -> (usize, usize) {
+        let _registry = self
+            .connection_registry_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (
+            self.connection_lifecycles.len(),
+            self.connection_id_budget.load(Ordering::Relaxed),
+        )
+    }
+
     /// Number of adapter routes whose core lifecycle has been retired but
     /// whose bounded reject/end cleanup has not yet completed conclusively.
     /// Principals, inbound contexts, and operational core routing are removed
     /// before an entry appears here.
     pub fn adapter_cleanup_quarantine_count(&self) -> usize {
         self.adapter_cleanup_quarantines.len()
+    }
+
+    fn reclaim_completed_connection_lifecycle(&self, id: &ConnectionId) {
+        if !self.bounded_connection_lifecycles_enabled() {
+            return;
+        }
+        let _registry = self
+            .connection_registry_lock
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        self.connection_lifecycles.remove_if(id, |key, state| {
+            let state = state.lock().unwrap_or_else(|p| p.into_inner());
+            state.retired
+                && key.lifecycle_reclaimable()
+                && !self.adapter_cleanup_quarantines.contains_key(key)
+        });
     }
 
     fn resolve_adapter_cleanup_quarantine(
@@ -2537,6 +2640,7 @@ impl Orchestrator {
                 quarantine.transport == transport
                     && quarantine.lifecycle_generation == lifecycle_generation
             });
+        self.reclaim_completed_connection_lifecycle(connection_id);
     }
 
     fn resolve_adapter_cleanup_quarantine_from_terminal(
@@ -2548,6 +2652,7 @@ impl Orchestrator {
             .remove_if(connection_id, |_, quarantine| {
                 quarantine.transport == transport
             });
+        self.reclaim_completed_connection_lifecycle(connection_id);
     }
 
     /// Install one bounded, fail-closed inbound admission gate.
@@ -3540,7 +3645,7 @@ impl Orchestrator {
             {
                 let _ = adapter
                     .end(
-                        connection_id,
+                        connection_id.clone(),
                         EndReason::Failed {
                             detail: "connection ID transport collision".into(),
                         },
@@ -3549,6 +3654,21 @@ impl Orchestrator {
             }
         })
         .await;
+        if self.bounded_connection_lifecycles_enabled()
+            && !adapter.is_connection_live(&connection_id)
+        {
+            let _registry = self
+                .connection_registry_lock
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if let Some(current) = self.connection_lifecycles.get(&connection_id) {
+                let state = current.lock().unwrap_or_else(|p| p.into_inner());
+                if state.retired {
+                    current.key().complete_lifecycle_cleanup();
+                }
+            }
+            self.reap_retired_connection_lifecycles_locked();
+        }
     }
 
     async fn cleanup_failed_adapter_route(
@@ -3681,6 +3801,21 @@ impl Orchestrator {
     }
 
     fn ensure_connection_lifecycle(&self, connection_id: &ConnectionId) -> bool {
+        self.connection_lifecycle_started
+            .store(true, Ordering::Release);
+        if self.bounded_connection_lifecycles_enabled() {
+            if !self.adapter_identity_is_authoritative(connection_id)
+                || connection_id.lifecycle_retired()
+            {
+                return false;
+            }
+            if self.lifecycle_reap_counter.fetch_add(1, Ordering::Relaxed) % 64 == 0
+                || self.connection_lifecycles.len()
+                    >= self.connection_id_budget.load(Ordering::Relaxed)
+            {
+                self.reap_retired_connection_lifecycles_locked();
+            }
+        }
         if let Some(state) = self.connection_lifecycles.get(connection_id) {
             let state = state
                 .lock()
@@ -3690,6 +3825,9 @@ impl Orchestrator {
         let retained = self.connection_lifecycles.len();
         if retained >= self.connection_id_budget.load(Ordering::Relaxed) {
             metrics::counter!("rvoip_core_connection_id_budget_exhausted_total").increment(1);
+            return false;
+        }
+        if self.bounded_connection_lifecycles_enabled() && !connection_id.claim_lifecycle() {
             return false;
         }
         let state = self
@@ -3717,6 +3855,13 @@ impl Orchestrator {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if self.connection_lifecycles.contains_key(connection_id) {
+            return;
+        }
+        if self.bounded_connection_lifecycles_enabled() {
+            // A claimed capability missing here belongs to another core.
+            if !connection_id.lifecycle_claimed() {
+                connection_id.retire_lifecycle();
+            }
             return;
         }
         if self.connection_lifecycles.len() >= self.connection_id_budget.load(Ordering::Relaxed) {
@@ -3814,6 +3959,15 @@ impl Orchestrator {
                 .increment(1);
                 return None;
             }
+            if self.bounded_connection_lifecycles_enabled() {
+                if !connection_id.has_lifecycle_fence()
+                    || connection_id.lifecycle_retired()
+                    || connection_id.lifecycle_claimed()
+                {
+                    return None;
+                }
+                connection_id.retire_lifecycle();
+            }
             let lifecycle = Arc::new(Mutex::new(ConnectionLifecycleState {
                 generation: 1,
                 active: false,
@@ -3866,6 +4020,18 @@ impl Orchestrator {
             .connection_registry_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.connection_lifecycle_started
+            .store(true, Ordering::Release);
+        if self.bounded_connection_lifecycles_enabled() {
+            self.reap_retired_connection_lifecycles_locked();
+            if !self.adapter_identity_is_authoritative(connection_id)
+                || connection_id.lifecycle_retired()
+            {
+                return Err(RvoipError::AdmissionRejected(
+                    "outbound identity lacks live lifecycle authority",
+                ));
+            }
+        }
         if self.connections.contains_key(connection_id)
             || self.connection_lifecycles.contains_key(connection_id)
         {
@@ -3877,6 +4043,11 @@ impl Orchestrator {
             metrics::counter!("rvoip_core_connection_id_budget_exhausted_total").increment(1);
             return Err(RvoipError::AdmissionRejected(
                 "connection ID registry is full",
+            ));
+        }
+        if self.bounded_connection_lifecycles_enabled() && !connection_id.claim_lifecycle() {
+            return Err(RvoipError::AdmissionRejected(
+                "connection identity has already been claimed",
             ));
         }
         let state = Arc::new(Mutex::new(ConnectionLifecycleState {
@@ -4150,6 +4321,9 @@ impl Orchestrator {
                 );
             }
             let removed = self.connections.remove(&ticket.connection_id)?;
+            if self.bounded_connection_lifecycles_enabled() {
+                current.key().retire_lifecycle();
+            }
             lifecycle.active = false;
             lifecycle.retired = true;
             lifecycle.generation = lifecycle.generation.saturating_add(1);
@@ -4932,10 +5106,12 @@ impl Orchestrator {
                 .connection_registry_lock
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            // Retain a process-lifetime tombstone. Adapter lifecycle events do
-            // not carry a route epoch, so safely distinguishing a late event
-            // from a reused external ConnectionId is otherwise impossible.
+            // Retire the intrinsic fence before releasing any ownership.
+            // Compatibility mode retains an external-ID tombstone instead.
             if let Some(state) = self.connection_lifecycles.get(conn) {
+                if self.bounded_connection_lifecycles_enabled() {
+                    state.key().retire_lifecycle();
+                }
                 let mut state = state
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -4950,6 +5126,9 @@ impl Orchestrator {
                     );
                 }
                 state.generation = state.generation.saturating_add(1);
+            } else if self.bounded_connection_lifecycles_enabled() {
+                // Covers terminal-before-originate-return without a map tombstone.
+                conn.retire_lifecycle();
             } else if self.connection_lifecycles.len()
                 < self.connection_id_budget.load(Ordering::Relaxed)
             {
@@ -5030,6 +5209,9 @@ impl Orchestrator {
                     entry.inbound_publication
                         == InboundPublicationState::Rejecting(claimed.lifecycle.generation)
                 })?;
+            if self.bounded_connection_lifecycles_enabled() {
+                current.key().retire_lifecycle();
+            }
             lifecycle.active = false;
             lifecycle.retired = true;
             lifecycle.generation = lifecycle.generation.saturating_add(1);
@@ -5122,6 +5304,23 @@ impl Orchestrator {
         // Must run before subscription cleanup so the Session lookup
         // sees a stable connection set.
         self.detach_connection_from_session(conn);
+        if self.bounded_connection_lifecycles_enabled() {
+            let _registry = self
+                .connection_registry_lock
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if let Some(current) = self.connection_lifecycles.get(conn) {
+                current.key().complete_lifecycle_cleanup();
+            } else {
+                conn.complete_lifecycle_cleanup();
+            }
+            self.connection_lifecycles.remove_if(conn, |id, state| {
+                let state = state.lock().unwrap_or_else(|p| p.into_inner());
+                state.retired
+                    && id.lifecycle_reclaimable()
+                    && !self.adapter_cleanup_quarantines.contains_key(id)
+            });
+        }
         forgotten
     }
 
@@ -5156,6 +5355,11 @@ impl Orchestrator {
         policy: ConversationPolicy,
         metadata: HashMap<String, String>,
     ) -> Result<ConversationId> {
+        let _registry = self.bounded_connection_lifecycles_enabled().then(|| {
+            self.connection_registry_lock
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+        });
         if let Some(existing) = self.conversations.get(&id).map(|e| Arc::clone(e.value())) {
             let conv = existing.read().expect("conversation lock poisoned");
             if conv.state == ConversationState::Open {
@@ -5163,6 +5367,18 @@ impl Orchestrator {
             }
             return Err(RvoipError::InvalidState(
                 "open_conversation: conversation is closed",
+            ));
+        }
+        if self.bounded_connection_lifecycles_enabled()
+            && self.conversations.len() >= self.connection_id_budget.load(Ordering::Relaxed)
+        {
+            return Err(RvoipError::AdmissionRejected(
+                "retained conversation capacity exhausted",
+            ));
+        }
+        if self.bounded_connection_lifecycles_enabled() && !id.claim_lifecycle() {
+            return Err(RvoipError::AdmissionRejected(
+                "conversation identity lacks fresh creation authority",
             ));
         }
         let now = Utc::now();
@@ -5529,6 +5745,84 @@ impl Orchestrator {
         Ok(())
     }
 
+    /// Explicitly release completed history after its owner has archived the
+    /// required call evidence. Closed objects cannot be reopened after release.
+    /// Refuses live sessions, attached connections, outstanding vCon builders,
+    /// or an in-flight conversation owner. No age rule can evict a live call.
+    pub fn release_closed_conversation(&self, id: &ConversationId) -> Result<bool> {
+        if !self.bounded_connection_lifecycles_enabled() {
+            return Err(RvoipError::InvalidState(
+                "closed history release requires bounded lifecycle authority",
+            ));
+        }
+        // Bounded creation and removal share this lock, including tenant
+        // index commits, so empty index rows can be removed without losing a
+        // simultaneous new conversation's membership.
+        let _registry = self
+            .connection_registry_lock
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let removed = self.conversations.remove_if(id, |_, arc| {
+            if Arc::strong_count(arc) != 1 {
+                return false;
+            }
+            let Ok(conv) = arc.try_read() else {
+                return false;
+            };
+            let releasable = conv.state == ConversationState::Closed
+                && conv.sessions.iter().all(|sid| {
+                    #[cfg(feature = "vcon")]
+                    if self.session_vcons.contains_key(sid) {
+                        return false;
+                    }
+                    self.sessions.get(sid).is_none_or(|session| {
+                        let Ok(session) = session.try_read() else {
+                            return false;
+                        };
+                        matches!(session.state, SessionState::Ended | SessionState::Failed)
+                            && session
+                                .connections
+                                .keys()
+                                .all(|id| !self.connections.contains_key(id))
+                    })
+                });
+            if releasable {
+                conv.id.retire_lifecycle();
+            }
+            releasable
+        });
+        let Some((_, arc)) = removed else {
+            if self.conversations.contains_key(id) {
+                return Err(RvoipError::InvalidState(
+                    "conversation history is still owned or live",
+                ));
+            }
+            return Ok(false);
+        };
+        let conv = arc.read().expect("conversation lock poisoned");
+        for sid in &conv.sessions {
+            self.drop_session_subscriptions(sid);
+            self.session_quality.remove(sid);
+            self.sessions.remove(sid);
+        }
+        if let Some(index) = self.conversations_by_tenant.get(&conv.tenant_id) {
+            index.remove(id);
+        }
+        self.conversations_by_tenant
+            .remove_if(&conv.tenant_id, |_, index| index.is_empty());
+        metrics::counter!("rvoip_core_closed_conversations_released_total").increment(1);
+        Ok(true)
+    }
+
+    /// Reachable core lifecycle/history rows; useful for churn qualification.
+    pub fn retained_lifecycle_counts(&self) -> (usize, usize, usize) {
+        (
+            self.connection_lifecycles.len(),
+            self.sessions.len(),
+            self.conversations.len(),
+        )
+    }
+
     /// Re-open a Closed Conversation so Parley identity match can continue
     /// the same `cid` inside the reopen window. No-op if already Open.
     pub async fn reopen_conversation(&self, id: ConversationId) -> Result<()> {
@@ -5567,6 +5861,18 @@ impl Orchestrator {
         medium: SessionMedium,
         invitees: Vec<ParticipantId>,
     ) -> Result<SessionId> {
+        let _registry = self.bounded_connection_lifecycles_enabled().then(|| {
+            self.connection_registry_lock
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+        });
+        if self.bounded_connection_lifecycles_enabled()
+            && self.sessions.len() >= self.connection_id_budget.load(Ordering::Relaxed)
+        {
+            return Err(RvoipError::AdmissionRejected(
+                "retained session capacity exhausted",
+            ));
+        }
         let conv_arc = self
             .conversations
             .get(&conversation_id)
@@ -5605,7 +5911,7 @@ impl Orchestrator {
         // P3 — every Session gets a vCon builder bound to it on start
         // when canonical vCon support is enabled.
         #[cfg(feature = "vcon")]
-        {
+        if self.config.capture_session_vcon {
             let builder = Arc::new(crate::vcon::DefaultVconBuilder::new());
             for participant_id in vcon_invitees {
                 builder.add_party(crate::vcon::VconParty {
@@ -7185,6 +7491,11 @@ impl Orchestrator {
                 participant_id,
                 principal,
             } => {
+                if !self.adapter_identity_is_authoritative(&connection.id) {
+                    self.reject_colliding_adapter_route(transport, connection.id)
+                        .await;
+                    return;
+                }
                 if !self.adapter_connection_is_live(transport, &connection.id) {
                     return;
                 }
@@ -7446,6 +7757,41 @@ impl Orchestrator {
     }
 
     async fn handle_adapter_event(self: &Arc<Self>, transport: Transport, event: AdapterEvent) {
+        let identity = match &event {
+            AdapterEvent::InboundConnection { connection } => Some(&connection.id),
+            AdapterEvent::Connected { connection_id }
+            | AdapterEvent::Progress { connection_id, .. }
+            | AdapterEvent::Authenticated { connection_id, .. }
+            | AdapterEvent::PrincipalAuthenticated { connection_id, .. }
+            | AdapterEvent::Dtmf { connection_id, .. }
+            | AdapterEvent::Quality { connection_id, .. }
+            | AdapterEvent::Message { connection_id, .. }
+            | AdapterEvent::DataMessage { connection_id, .. }
+            | AdapterEvent::TransferStatus { connection_id, .. }
+            | AdapterEvent::StepUpResponse { connection_id, .. }
+            | AdapterEvent::Ended { connection_id, .. }
+            | AdapterEvent::Failed { connection_id, .. } => Some(connection_id),
+            _ => None,
+        };
+        // Dispatch APIs accept serialized lookup IDs; some adapters echo that
+        // lookup ID in terminal/operational events. Such references may address
+        // an existing lifecycle, but can never mint a lifecycle or tombstone.
+        let birth = matches!(&event, AdapterEvent::InboundConnection { .. });
+        let valid_identity = |id: &ConnectionId| {
+            self.adapter_identity_is_authoritative(id)
+                || (self.bounded_connection_lifecycles_enabled()
+                    && !birth
+                    && !id.has_lifecycle_fence()
+                    && self.connection_lifecycles.contains_key(id))
+        };
+        if let Some(id) = identity.filter(|id| !valid_identity(id)) {
+            if matches!(&event, AdapterEvent::InboundConnection { .. }) {
+                self.reject_colliding_adapter_route(transport, id.clone())
+                    .await;
+            }
+            return;
+        }
+
         let needs_authoritative_order = matches!(
             &event,
             AdapterEvent::Connected { .. }
@@ -12651,5 +12997,256 @@ mod cross_crate_publisher_tests {
             orchestrator.validate_stream_wait_lifecycle(&lifecycle),
             Err(StreamWaitError::GenerationReplaced)
         );
+    }
+}
+
+#[cfg(test)]
+mod bounded_lifecycle_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn bounded_lifecycle_churn_exceeds_old_lifetime_cap_without_reuse() {
+        let core = Orchestrator::new(Config::default());
+        core.configure_bounded_connection_lifecycles(4).unwrap();
+        let survivor = ConnectionId::new();
+        assert!(core.track_connection(&survivor, Transport::Sip, None));
+        let old = ConnectionId::new();
+        assert!(core.track_connection(&old, Transport::Sip, None));
+        let stale = core
+            .capture_connection_lifecycles(&[old.clone()])
+            .unwrap()
+            .remove(0);
+        let ended = core.begin_connection_teardown(&old, InboundAdmissionTermination::RemoteEnded);
+        core.finish_connection_teardown(&old, ended).await;
+        assert_eq!(core.connection_id_budget_usage(), (1, 4));
+        assert!(core.validate_connection_lifecycles(&[stale]).is_err());
+        assert!(!core.track_connection(&old, Transport::Sip, None));
+        assert!(!core.track_connection(
+            &ConnectionId::from_string(old.as_str()),
+            Transport::Sip,
+            None
+        ));
+        let mut previous = old.to_string();
+        for _ in 0..270_000 {
+            let id = ConnectionId::new();
+            assert!(
+                id.as_str() > previous.as_str(),
+                "minted counter must never wrap or repeat"
+            );
+            previous = id.to_string();
+            assert!(core.track_connection(&id, Transport::Sip, None));
+            assert_eq!(core.connection_id_budget_usage(), (2, 4));
+            let ended =
+                core.begin_connection_teardown(&id, InboundAdmissionTermination::RemoteEnded);
+            core.finish_connection_teardown(&id, ended).await;
+            assert_eq!(core.connection_id_budget_usage(), (1, 4));
+        }
+        assert!(core.capture_connection_lifecycles(&[survivor]).is_ok());
+        assert!(core.configure_bounded_connection_lifecycles(8).is_err());
+    }
+
+    #[tokio::test]
+    async fn terminal_before_originate_and_serialized_identity_cannot_revive() {
+        let core = Orchestrator::new(Config::default());
+        core.configure_bounded_connection_lifecycles(2).unwrap();
+        let id = ConnectionId::new();
+        let ended = core.begin_connection_teardown(&id, InboundAdmissionTermination::RemoteEnded);
+        core.finish_connection_teardown(&id, ended).await;
+        assert!(core.claim_outbound_connection(&id, Transport::Sip).is_err());
+        let fresh = ConnectionId::new();
+        let ticket = core
+            .claim_outbound_connection(&fresh, Transport::Sip)
+            .unwrap();
+        // A lookup-only command ID must retire the canonical capability too.
+        let lookup = ConnectionId::from_string(fresh.as_str());
+        let ended =
+            core.begin_connection_teardown(&lookup, InboundAdmissionTermination::RemoteEnded);
+        core.finish_connection_teardown(&lookup, ended).await;
+        assert!(fresh.lifecycle_retired());
+        assert!(core.validate_connection_lifecycles(&[ticket]).is_err());
+        assert!(core
+            .claim_outbound_connection(&fresh, Transport::Sip)
+            .is_err());
+        assert_eq!(core.retained_lifecycle_counts(), (0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn model_capacity_is_enforced_and_reclaimed_without_conversation_reuse() {
+        let core = Orchestrator::new(Config {
+            capture_session_vcon: false,
+            ..Config::default()
+        });
+        core.configure_bounded_connection_lifecycles(2).unwrap();
+        let tenant = TenantId::new();
+        let policy = ConversationPolicy::Ephemeral {
+            idle_close_secs: 30,
+        };
+        let first = core
+            .open_conversation(tenant.clone(), policy.clone(), HashMap::new())
+            .await
+            .unwrap();
+        core.open_conversation(tenant.clone(), policy.clone(), HashMap::new())
+            .await
+            .unwrap();
+        assert!(core
+            .open_conversation(tenant.clone(), policy.clone(), HashMap::new())
+            .await
+            .is_err());
+        let a = core
+            .start_session(
+                first.clone(),
+                crate::session::SessionMedium::Voice,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let b = core
+            .start_session(
+                first.clone(),
+                crate::session::SessionMedium::Voice,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert!(core
+            .start_session(
+                first.clone(),
+                crate::session::SessionMedium::Voice,
+                Vec::new()
+            )
+            .await
+            .is_err());
+        core.end_session(a, EndReason::Normal).await.unwrap();
+        core.end_session(b, EndReason::Normal).await.unwrap();
+        core.close_conversation(first.clone(), false).await.unwrap();
+        core.release_closed_conversation(&first).unwrap();
+        let next = core
+            .open_conversation(tenant, policy, HashMap::new())
+            .await
+            .unwrap();
+        assert_ne!(first, next);
+        assert_eq!(core.retained_lifecycle_counts(), (0, 0, 2));
+    }
+
+    #[cfg(feature = "vcon")]
+    #[tokio::test]
+    async fn unfinalized_vcon_builder_prevents_history_release() {
+        let core = Orchestrator::new(Config::default());
+        core.configure_bounded_connection_lifecycles(2).unwrap();
+        let cid = core
+            .open_conversation(
+                TenantId::new(),
+                ConversationPolicy::Ephemeral {
+                    idle_close_secs: 30,
+                },
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        let sid = core
+            .start_session(
+                cid.clone(),
+                crate::session::SessionMedium::Voice,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let session = core.sessions.get(&sid).unwrap().clone();
+        {
+            let mut session = session.write().unwrap();
+            session.state = SessionState::Ended;
+        }
+        core.close_conversation(cid.clone(), false).await.unwrap();
+        assert!(core.release_closed_conversation(&cid).is_err());
+        assert!(core.session_vcons.contains_key(&sid));
+        assert_eq!(core.retained_lifecycle_counts(), (0, 1, 1));
+    }
+
+    #[tokio::test]
+    async fn foreign_claim_and_string_birth_are_rejected_without_retiring_owner() {
+        let owner = Orchestrator::new(Config::default());
+        let other = Orchestrator::new(Config::default());
+        owner.configure_bounded_connection_lifecycles(2).unwrap();
+        other.configure_bounded_connection_lifecycles(2).unwrap();
+        let id = ConnectionId::new();
+        assert!(owner.track_connection(&id, Transport::Sip, None));
+        assert!(!other.track_connection(&id, Transport::Sip, None));
+        other.retire_untracked_connection_id(&id);
+        assert!(!id.lifecycle_retired());
+        assert!(owner.capture_connection_lifecycles(&[id.clone()]).is_ok());
+        let alias = ConnectionId::from_string(id.as_str());
+        assert!(!other.track_connection(&alias, Transport::Sip, None));
+        assert!(owner.capture_connection_lifecycles(&[id]).is_ok());
+    }
+
+    #[tokio::test]
+    async fn lifecycle_capacity_stays_reserved_until_cleanup_completes() {
+        let core = Orchestrator::new(Config::default());
+        core.configure_bounded_connection_lifecycles(1).unwrap();
+        let id = ConnectionId::new();
+        assert!(core.track_connection(&id, Transport::Sip, None));
+        let ended = core.begin_connection_teardown(&id, InboundAdmissionTermination::RemoteEnded);
+        assert!(!core.track_connection(&ConnectionId::new(), Transport::Sip, None));
+        core.finish_connection_teardown(&id, ended).await;
+        assert!(core.track_connection(&ConnectionId::new(), Transport::Sip, None));
+    }
+
+    #[tokio::test]
+    async fn completed_conversation_history_releases_sessions_and_tenant_index() {
+        let core = Orchestrator::new(Config {
+            capture_session_vcon: false,
+            ..Config::default()
+        });
+        core.configure_bounded_connection_lifecycles(4).unwrap();
+        for _ in 0..1_000 {
+            let tenant = TenantId::from_string("tenant-bounded-history");
+            let cid = core
+                .open_conversation(
+                    tenant.clone(),
+                    ConversationPolicy::Ephemeral {
+                        idle_close_secs: 30,
+                    },
+                    HashMap::new(),
+                )
+                .await
+                .unwrap();
+            let sid = core
+                .start_session(
+                    cid.clone(),
+                    crate::session::SessionMedium::Voice,
+                    Vec::new(),
+                )
+                .await
+                .unwrap();
+            assert!(core.release_closed_conversation(&cid).is_err());
+            core.end_session(sid, EndReason::Normal).await.unwrap();
+            core.close_conversation(cid.clone(), false).await.unwrap();
+            // vCon-enabled builds must retain unfinalized audit builders.
+            assert!(core.release_closed_conversation(&cid).unwrap());
+            assert!(core
+                .open_conversation_with_id(
+                    cid.clone(),
+                    tenant.clone(),
+                    ConversationPolicy::Ephemeral {
+                        idle_close_secs: 30
+                    },
+                    HashMap::new()
+                )
+                .await
+                .is_err());
+            assert!(core
+                .open_conversation_with_id(
+                    ConversationId::from_string(cid.as_str()),
+                    tenant.clone(),
+                    ConversationPolicy::Ephemeral {
+                        idle_close_secs: 30
+                    },
+                    HashMap::new()
+                )
+                .await
+                .is_err());
+            assert_eq!(core.retained_lifecycle_counts(), (0, 0, 0));
+            assert!(!core.conversations_by_tenant.contains_key(&tenant));
+        }
     }
 }
