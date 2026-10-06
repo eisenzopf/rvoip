@@ -39,6 +39,7 @@ impl UctpWsServer {
         sig9421: Option<rvoip_uctp::state::Sig9421Config>,
         orchestrator: Option<Arc<rvoip_core::Orchestrator>>,
         conversation_create_hook: Option<Arc<dyn crate::adapter::ConversationCreateHook>>,
+        application_handler: Option<Arc<dyn rvoip_uctp::application::ApplicationHandler>>,
         #[cfg(feature = "wss")] tls: Option<Arc<rustls::ServerConfig>>,
     ) -> Arc<Self> {
         #[cfg(feature = "wss")]
@@ -77,6 +78,7 @@ impl UctpWsServer {
                 let sig9421 = sig9421.clone();
                 let orchestrator = orchestrator.clone();
                 let conversation_create_hook = conversation_create_hook.clone();
+                let application_handler = application_handler.clone();
                 #[cfg(feature = "wss")]
                 let tls_acceptor = tls_acceptor.clone();
                 tokio::spawn(async move {
@@ -132,6 +134,7 @@ impl UctpWsServer {
                                 sig9421.clone(),
                                 orchestrator.clone(),
                                 conversation_create_hook.clone(),
+                                application_handler.clone(),
                             )
                             .await;
                             info!(%peer_addr, "rvoip-websocket: peer disconnected (wss)");
@@ -172,6 +175,7 @@ impl UctpWsServer {
                         sig9421,
                         orchestrator,
                         conversation_create_hook,
+                        application_handler,
                     )
                     .await;
                     info!(%peer_addr, "rvoip-websocket: peer disconnected");
@@ -220,6 +224,7 @@ async fn spawn_peer_session<S>(
     sig9421: Option<rvoip_uctp::state::Sig9421Config>,
     orchestrator: Option<Arc<rvoip_core::Orchestrator>>,
     conversation_create_hook: Option<Arc<dyn crate::adapter::ConversationCreateHook>>,
+    application_handler: Option<Arc<dyn rvoip_uctp::application::ApplicationHandler>>,
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -271,6 +276,9 @@ async fn spawn_peer_session<S>(
     // Gap plan §4.2 v1 punch list — capture the coordinator's
     // `Pending` correlator so per-Route adapter code can await
     // typed responses.
+    if let Some(handler) = application_handler {
+        coord.set_application_handler(handler);
+    }
     let pending = coord.pending();
     let auth_guard =
         rvoip_uctp::state::spawn_auth_lifecycle_guard(Arc::clone(&coord), authentication_deadline);
@@ -474,7 +482,13 @@ async fn spawn_peer_session<S>(
                             detail: "bearer".into(),
                         })
                     }
-                    UctpSessionEvent::InboundInvite { cid, sid, from, .. } => {
+                    UctpSessionEvent::InboundInvite {
+                        cid,
+                        sid,
+                        from,
+                        medium,
+                        ..
+                    } => {
                         let Some(principal) = coord_for_translator.authenticated_principal() else {
                             warn!(sid = ?CorrelationIdDiagnostic::new(sid.as_str()), "authenticated invite missing retained principal; refusing route");
                             continue;
@@ -507,6 +521,7 @@ async fn spawn_peer_session<S>(
                         let route = Route {
                             cid,
                             sid: sid.to_string(),
+                            medium,
                             binding:
                                 rvoip_uctp::adapter_helpers::AuthenticatedConnectionBinding::new(
                                     &principal,

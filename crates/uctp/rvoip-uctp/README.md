@@ -88,3 +88,35 @@ any other event is returned for the adapter to map. Replies are the typed
 ## License
 
 Licensed under the MIT License — see [LICENSE](https://github.com/eisenzopf/rvoip/blob/main/LICENSE).
+
+## Opt-in application command profiles
+
+A host can implement `application::ApplicationHandler` to expose its command
+profile through the existing UCTP envelope. Install it on the coordinator before
+connecting ingress. The WebSocket adapter provides
+`UctpWsConfig::with_application_handler` and installs the handler for each peer.
+The profile name is advertised in `auth.challenge.server_capabilities.application_profiles`;
+clients opt in with an explicit string `payload.profile`. Only one handler is
+installed per coordinator in this experimental API.
+
+Profile commands pass the coordinator's version, signature, authentication,
+resource-authorization and handler-scope gates before dispatch. The default
+required scope is `uctp:conversation-control`. The handler receives the complete
+request, authenticated principal, bounded peer output channel and cancellation
+token. Replies are correlated to the request and inherit omitted Conversation,
+Session and Connection IDs. Unknown profiles return an explicit capability error;
+profile-free envelopes keep their existing dispatch path.
+
+The host must authorize Conversation membership and every referenced recipient
+or resource before effects, validate its profile's command schema, and persist
+idempotency across reconnects. The coordinator's bounded peer replay cache calls
+`replay` rather than executing `handle` twice; it is not a durable idempotency
+store. A replay implementation must compare stored command content and may only
+retrieve an existing outcome. The default replay implementation rejects duplicates.
+Observer work should use the cancellation token and bounded channel without
+blocking media. This hook does not standardize a travel workflow or add a new
+wire version; QUIC/WebTransport adapter configuration is not added here.
+
+`UctpWsAdapter::inbound_context` exposes peer-selected Conversation/Session/medium
+hints only to the authenticated route owner. These hints are not proof of
+Conversation membership; the host must authorize admission separately.
