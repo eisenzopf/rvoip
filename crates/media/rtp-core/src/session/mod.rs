@@ -861,6 +861,7 @@ impl RtpSession {
             // Set the remote RTP address on the UDP transport
             if let Some(t) = transport.as_any().downcast_ref::<UdpRtpTransport>() {
                 t.set_remote_rtp_addr(addr).await;
+                t.set_remote_rtcp_addr(addr).await;
             }
         }
 
@@ -1218,16 +1219,17 @@ impl RtpSession {
             }
         });
 
-        // Start RTCP sending task if we have a remote address and report generator
-        if let (Some(remote_addr), Some(mut rtcp_generator)) =
-            (self.config.remote_addr, self.rtcp_generator.take())
-        {
+        // Outbound offer/answer sessions start before their SDP peer is known.
+        // Keep one report task alive and resolve the current destination at each
+        // tick; taking the generator only when a peer existed stranded late SDP.
+        if let Some(mut rtcp_generator) = self.rtcp_generator.take() {
             let transport = self.transport.clone();
             let ssrc = self.ssrc;
             let event_tx = self.event_tx.clone();
             let stats = self.stats.clone();
             let sender_octets = self.sender_octets.clone();
             let report_streams = self.streams.clone();
+            let report_sender = self.packet_sender.clone();
             let active_state = Arc::new(tokio::sync::Mutex::new(true));
             let _active_state_clone = active_state.clone();
             let bandwidth = self.bandwidth_bps;
@@ -1252,6 +1254,18 @@ impl RtpSession {
                     if !*active_state.lock().await {
                         break;
                     }
+
+                    let remote_addr =
+                        if let Some(udp) = transport.as_any().downcast_ref::<UdpRtpTransport>() {
+                            udp.remote_rtcp_addr()
+                                .await
+                                .or_else(|| *report_sender.remote_addr.read())
+                        } else {
+                            *report_sender.remote_addr.read()
+                        };
+                    let Some(remote_addr) = remote_addr else {
+                        continue; // SDP has not supplied a peer yet.
+                    };
 
                     // Update RTP statistics before sending the report
                     let (sender_packet_count, sender_octet_count) =
@@ -1441,6 +1455,7 @@ impl RtpSession {
         self.packet_sender.set_remote_addr(addr);
         if let Some(t) = self.transport.as_any().downcast_ref::<UdpRtpTransport>() {
             t.set_remote_rtp_addr(addr).await;
+            t.set_remote_rtcp_addr(addr).await;
         }
     }
 
@@ -1973,6 +1988,51 @@ impl RtpSessionSender {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn periodic_rtcp_follows_late_sdp_peer_changes_and_stops_on_close() {
+        let first = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let second = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut session = RtpSession::new(RtpSessionConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            remote_addr: None,
+            ..RtpSessionConfig::default()
+        })
+        .await
+        .unwrap();
+        let mut bytes = [0u8; 2048];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1100), first.recv_from(&mut bytes))
+                .await
+                .is_err()
+        );
+        session.set_remote_addr(first.local_addr().unwrap()).await;
+        let (n, _) = tokio::time::timeout(Duration::from_secs(4), first.recv_from(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        let report = crate::packet::rtcp::RtcpCompoundPacket::parse(&bytes[..n]).unwrap();
+        assert_eq!(report.get_sr().unwrap().ssrc, session.ssrc);
+        session.set_remote_addr(second.local_addr().unwrap()).await;
+        let (n, _) = tokio::time::timeout(Duration::from_secs(4), second.recv_from(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        let report = crate::packet::rtcp::RtcpCompoundPacket::parse(&bytes[..n]).unwrap();
+        assert_eq!(report.get_sr().unwrap().ssrc, session.ssrc);
+        session.close().await.unwrap();
+        // Drain the synchronous compound BYE, then require the report task to stop.
+        let (n, _) = tokio::time::timeout(Duration::from_secs(1), second.recv_from(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_compound_bye(&bytes[..n], session.ssrc, "Session closed");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1600), second.recv_from(&mut bytes))
+                .await
+                .is_err()
+        );
+    }
 
     async fn next_packet_event(events: &mut broadcast::Receiver<RtpSessionEvent>) -> RtpPacket {
         tokio::time::timeout(Duration::from_secs(1), async {

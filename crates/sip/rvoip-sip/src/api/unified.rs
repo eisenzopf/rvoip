@@ -2232,6 +2232,10 @@ pub struct Config {
     /// See [`Config::srtp_required`] for the strict-mode variant.
     pub offer_srtp: bool,
 
+    /// Require SDP negotiation of RTP/RTCP multiplexing for the single media socket.
+    /// Peers declining it fail negotiation instead of silently losing RTCP.
+    pub rtcp_mux_required: bool,
+
     /// Select how SRTP keys are established when [`Config::offer_srtp`] is
     /// enabled. SDES remains the compatibility default. DTLS-SRTP requires
     /// the `dtls-srtp` Cargo feature and full media mode; configuration fails
@@ -3011,6 +3015,7 @@ impl Config {
             #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
             offer_srtp: false,
+            rtcp_mux_required: false,
             srtp_keying: SrtpKeyingMode::Sdes,
             dtls_setup_role: DtlsSetupRole::Actpass,
             srtp_required: false,
@@ -3132,6 +3137,7 @@ impl Config {
             #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
             offer_srtp: false,
+            rtcp_mux_required: false,
             srtp_keying: SrtpKeyingMode::Sdes,
             dtls_setup_role: DtlsSetupRole::Actpass,
             srtp_required: false,
@@ -8932,6 +8938,7 @@ impl UnifiedCoordinator {
             config.media_port_end,
         );
         media_adapter_inner.set_media_mode(config.media_mode);
+        media_adapter_inner.set_rtcp_mux_required(config.rtcp_mux_required);
         media_adapter_inner.set_ice_policy(config.ice);
         // Apply RFC 4568 SDES-SRTP policy from Config (Step 2B.1).
         media_adapter_inner.set_srtp_policy(
