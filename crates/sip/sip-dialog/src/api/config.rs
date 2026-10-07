@@ -214,6 +214,11 @@ pub struct DialogConfig {
     #[serde(default)]
     pub tls_advertised_local_address: Option<SocketAddr>,
 
+    /// Accept explicit SIP TLS Contacts on SIPS INVITEs received over TLS.
+    /// Off by default; remote targets are normalized to SIPS, never cleartext.
+    #[serde(default)]
+    pub allow_tls_contact_on_sips: bool,
+
     /// User agent string to include in SIP messages
     ///
     /// This appears in the User-Agent header of outgoing SIP requests
@@ -299,6 +304,7 @@ impl Default for DialogConfig {
             local_contact_uri: None,
             tls_local_address: None,
             tls_advertised_local_address: None,
+            allow_tls_contact_on_sips: false,
             user_agent: Some("RVOIP-Dialog/1.0".to_string()),
             dialog_timeout: Duration::from_secs(180), // 3 minutes
             max_dialogs: Some(10000),

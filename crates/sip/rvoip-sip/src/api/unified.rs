@@ -2134,6 +2134,10 @@ pub struct Config {
     /// expected on the existing outbound registration flow.
     pub sip_contact_mode: SipContactMode,
 
+    /// Opt-in compatibility for explicit SIP TLS Contacts on inbound SIPS calls.
+    /// Requires an observed TLS transaction and preserves SIPS remote routing.
+    pub sip_allow_tls_contact_on_sips: bool,
+
     /// Optional local SIP TLS listener address. Used for
     /// [`SipTlsMode::ServerOnly`] and [`SipTlsMode::ClientAndServer`].
     /// When unset, rvoip-sip-dialog retains its legacy default of deriving the
@@ -2998,6 +3002,7 @@ impl Config {
             unregister_on_shutdown_timeout_secs: 3,
             sip_tls_mode: SipTlsMode::Disabled,
             sip_contact_mode: SipContactMode::ReachableContact,
+            sip_allow_tls_contact_on_sips: false,
             tls_bind_addr: None,
             tls_advertised_addr: None,
             contact_uri: None,
@@ -3119,6 +3124,7 @@ impl Config {
             unregister_on_shutdown_timeout_secs: 3,
             sip_tls_mode: SipTlsMode::Disabled,
             sip_contact_mode: SipContactMode::ReachableContact,
+            sip_allow_tls_contact_on_sips: false,
             tls_bind_addr: None,
             tls_advertised_addr: None,
             contact_uri: None,
@@ -12026,6 +12032,19 @@ impl UnifiedCoordinator {
         }
         let transaction_manager = Arc::new(transaction_manager);
 
+        // Deployment opt-in for app-facade users that cannot supply low-level
+        // dialog configuration. Reject typos rather than silently changing policy.
+        let tls_contact_compatibility = match std::env::var("RVOIP_SIP_TLS_CONTACT_COMPATIBILITY") {
+            Ok(value) if value == "true" => true,
+            Ok(value) if value == "false" => false,
+            Err(std::env::VarError::NotPresent) => config.sip_allow_tls_contact_on_sips,
+            _ => {
+                return Err(SessionError::InternalError(
+                    "RVOIP_SIP_TLS_CONTACT_COMPATIBILITY must be true or false".into(),
+                ))
+            }
+        };
+
         // Create dialog config - use hybrid mode to support both incoming and outgoing calls
         let dialog_config = DialogManagerConfig::hybrid(config.bind_addr)
             .with_from_uri(&config.local_uri)
@@ -12036,6 +12055,7 @@ impl UnifiedCoordinator {
             .with_dialog_config(|mut dialog| {
                 dialog.advertised_local_address = config.sip_advertised_addr;
                 dialog.local_contact_uri = config.contact_uri.clone();
+                dialog.allow_tls_contact_on_sips = tls_contact_compatibility;
                 dialog.tls_local_address = dialog_tls_local_address;
                 dialog.tls_advertised_local_address = config.tls_advertised_addr;
                 dialog.max_dialogs = Some(config.dialog_index_capacity_hint());
