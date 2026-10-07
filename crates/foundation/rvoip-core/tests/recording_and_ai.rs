@@ -523,3 +523,80 @@ async fn playback_reports_completion_and_delivery_failure() {
     );
     orch.drain_playback_tasks().await;
 }
+
+#[tokio::test]
+async fn pcm_playback_paces_wire_frames_and_completes() {
+    let (orch, _tx, stream, conn) = setup().await;
+    let (mut input, source) = rvoip_core::playback::PcmPlaybackSource::channel(8_000, 2).unwrap();
+    let handle = orch.play_pcm(conn, source).await.unwrap();
+    input.send(&[1000; 160]).await.unwrap();
+    input.finish(&[1000; 160]).await.unwrap();
+    let mut output = stream.outbound_rx.lock().unwrap().take().unwrap();
+    let a = tokio::time::timeout(Duration::from_secs(1), output.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let b = tokio::time::timeout(Duration::from_secs(1), output.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.payload.as_ref(), &[0xce; 160]);
+    assert_eq!(a.stream_id, stream.id);
+    assert_eq!(a.payload_type, Some(0));
+    assert_eq!(b.timestamp_rtp.wrapping_sub(a.timestamp_rtp), 160);
+    assert!((b.captured_at - a.captured_at).num_milliseconds() >= 20);
+    assert_eq!(
+        handle.wait().await.unwrap(),
+        rvoip_core::adapter::PlaybackOutcome::Completed
+    );
+    orch.drain_playback_tasks().await;
+    assert_eq!(orch.playback_task_count(), 0);
+}
+
+#[tokio::test]
+async fn pcm_playback_teardown_cancels_an_idle_source_and_closes_its_producer() {
+    let (orch, tx, _stream, conn) = setup().await;
+    let (mut input, source) = rvoip_core::playback::PcmPlaybackSource::channel(8_000, 1).unwrap();
+    let handle = orch.play_pcm(conn.clone(), source).await.unwrap();
+    tx.send(AdapterEvent::Ended {
+        connection_id: conn,
+        reason: EndReason::Normal,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), handle.wait())
+            .await
+            .unwrap()
+            .unwrap(),
+        rvoip_core::adapter::PlaybackOutcome::Cancelled
+    );
+    assert!(input.send(&[0; 160]).await.is_err());
+    orch.drain_playback_tasks().await;
+}
+
+#[tokio::test]
+async fn pcm_playback_cancel_interrupts_blocked_delivery() {
+    let (orch, _tx, stream, conn) = setup().await;
+    for _ in 0..stream.outbound_tx.max_capacity() {
+        stream.outbound_tx.try_send(playback_test_frame()).unwrap();
+    }
+    let (mut input, source) = rvoip_core::playback::PcmPlaybackSource::channel(8_000, 1).unwrap();
+    input.send(&[0; 160]).await.unwrap();
+    let handle = orch.play_pcm(conn, source).await.unwrap();
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    handle.cancel().unwrap();
+    // Admission of a new chunk may race cancellation, so wait for receiver
+    // closure rather than assuming the cancellation send joins the task.
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while input.send(&[0; 160]).await.is_ok() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    orch.drain_playback_tasks().await;
+    assert_eq!(orch.playback_task_count(), 0);
+}

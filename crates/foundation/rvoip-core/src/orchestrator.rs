@@ -1831,6 +1831,33 @@ impl Drop for PlaybackRouteGuard {
     }
 }
 
+enum StreamPlaybackSource {
+    Tts(TtsPlaybackCancelGuard),
+    Pcm(crate::playback::PcmFrameProducer),
+}
+impl StreamPlaybackSource {
+    async fn next_frame(&mut self) -> Result<Option<crate::stream::MediaFrame>> {
+        match self {
+            Self::Tts(source) => Ok(source.playback().next_frame().await),
+            Self::Pcm(source) => source.next_frame().await,
+        }
+    }
+    fn delivered(&mut self) {
+        if let Self::Pcm(source) = self {
+            source.delivered();
+        }
+    }
+    async fn finish(&mut self, outcome: PlaybackOutcome) {
+        if let Self::Tts(source) = self {
+            if outcome == PlaybackOutcome::Completed {
+                source.complete();
+            } else {
+                source.cancel().await;
+            }
+        }
+    }
+}
+
 struct TtsPlaybackCancelGuard {
     playback: Arc<dyn crate::harness::TtsPlayback>,
     completed: bool,
@@ -10486,15 +10513,45 @@ impl Orchestrator {
                 sample_rate_hz: None,
             })
             .await?;
-        let playback = TtsPlaybackCancelGuard::new(playback);
+        let playback = StreamPlaybackSource::Tts(TtsPlaybackCancelGuard::new(playback));
         self.start_stream_playback(&lifecycle_tickets, connection_id, playback, frames_out)
+    }
+
+    /// Play caller-fed mono PCM through the negotiated audio stream. Supports
+    /// PCMU/PCMA and feature-enabled Opus; resamples/upmixes with media-core,
+    /// paces 20 ms frames, and reports acceptance by the transport queue.
+    /// Completion does not prove peer playout. Negotiation is fixed for this
+    /// playback; cancel before renegotiating the connection's audio codec.
+    pub async fn play_pcm(
+        &self,
+        connection_id: ConnectionId,
+        source: crate::playback::PcmPlaybackSource,
+    ) -> Result<PlaybackHandle> {
+        let tickets = self.capture_connection_lifecycles(std::slice::from_ref(&connection_id))?;
+        let adapter = self.adapter_for(&connection_id)?;
+        let audio = adapter
+            .streams(connection_id.clone())
+            .await?
+            .into_iter()
+            .find(|stream| stream.kind() == StreamKind::Audio)
+            .ok_or(RvoipError::AdmissionRejected(
+                "play_pcm: connection has no audio stream",
+            ))?;
+        let output = audio.try_frames_out()?;
+        let producer = crate::playback::PcmFrameProducer::new(source, audio.id(), audio.codec())?;
+        self.start_stream_playback(
+            &tickets,
+            connection_id,
+            StreamPlaybackSource::Pcm(producer),
+            output,
+        )
     }
 
     fn start_stream_playback(
         &self,
         tickets: &[ConnectionLifecycleTicket],
         connection_id: ConnectionId,
-        mut playback: TtsPlaybackCancelGuard,
+        mut playback: StreamPlaybackSource,
         frames_out: mpsc::Sender<crate::stream::MediaFrame>,
     ) -> Result<PlaybackHandle> {
         let (handle, mut cancel_rx, completion) =
@@ -10513,10 +10570,12 @@ impl Orchestrator {
                     biased;
                     _ = &mut cancel_rx => break PlaybackOutcome::Cancelled,
                     _ = worker_terminal.cancelled() => break PlaybackOutcome::Cancelled,
-                    frame = playback.playback().next_frame() => frame,
+                    frame = playback.next_frame() => frame,
                 };
-                let Some(frame) = frame else {
-                    break PlaybackOutcome::Completed;
+                let frame = match frame {
+                    Ok(Some(frame)) => frame,
+                    Ok(None) => break PlaybackOutcome::Completed,
+                    Err(_) => break PlaybackOutcome::Failed,
                 };
                 let delivered = tokio::select! {
                     biased;
@@ -10527,12 +10586,9 @@ impl Orchestrator {
                 if delivered.is_err() {
                     break PlaybackOutcome::Failed;
                 }
+                playback.delivered();
             };
-            if outcome == PlaybackOutcome::Completed {
-                playback.complete();
-            } else {
-                playback.cancel().await;
-            }
+            playback.finish(outcome).await;
             route.finish(outcome);
         };
         // Fence installation against terminal teardown after asynchronous
