@@ -331,7 +331,12 @@ impl PlayoutBuffer {
             .filter(|count| *count > 0)
             .or(self.samples_per_frame)
             .unwrap_or(0);
-        self.next_timestamp = Some(emitted.timestamp.wrapping_add(samples));
+        // RTP advances once per sample time, not once per interleaved channel.
+        self.next_timestamp = Some(
+            emitted
+                .timestamp
+                .wrapping_add(samples / u32::from(emitted.channels.max(1))),
+        );
     }
 
     /// Depth to fill to, grown by observed jitter when adaptive.
@@ -439,6 +444,29 @@ mod tests {
             }),
             Instant::now(),
         )
+    }
+
+    #[test]
+    fn stereo_playout_preserves_each_packet_across_timestamp_wrap() {
+        let (mut playout, now) = buffer();
+        let start = u32::MAX - 400;
+        for index in 0..3u32 {
+            playout.push(
+                AudioFrame::new(
+                    vec![(index + 1) as i16; 1920],
+                    48_000,
+                    2,
+                    start.wrapping_add(index * 960),
+                ),
+                now,
+            );
+        }
+        for index in 0..3u32 {
+            let emitted = playout.pop().expect("queued stereo packet");
+            assert_eq!(emitted.timestamp, start.wrapping_add(index * 960));
+            assert_eq!(emitted.samples, vec![(index + 1) as i16; 1920]);
+        }
+        assert_eq!(playout.stats().frames_concealed, 0);
     }
 
     #[test]
