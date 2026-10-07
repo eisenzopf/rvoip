@@ -2518,6 +2518,21 @@ impl Orchestrator {
         Ok(())
     }
 
+    /// Retained connection lifecycle identities and their enforced budget.
+    /// Includes retired tombstones: observing usage never releases an identity
+    /// or permits ID reuse. Workers can use this snapshot to rotate before
+    /// the fail-closed lifetime budget is exhausted.
+    pub fn connection_id_budget_usage(&self) -> (usize, usize) {
+        let _registry = self
+            .connection_registry_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (
+            self.connection_lifecycles.len(),
+            self.connection_id_budget.load(Ordering::Relaxed),
+        )
+    }
+
     /// Number of adapter routes whose core lifecycle has been retired but
     /// whose bounded reject/end cleanup has not yet completed conclusively.
     /// Principals, inbound contexts, and operational core routing are removed
