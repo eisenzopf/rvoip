@@ -4002,6 +4002,18 @@ impl Drop for SipAdapter {
 
 #[async_trait::async_trait]
 impl ConnectionAdapter for SipAdapter {
+    async fn resource_snapshot(
+        &self,
+    ) -> CoreResult<Option<rvoip_core::resources::AdapterResourceCounts>> {
+        let mut counts = rvoip_core::resources::AdapterResourceCounts::default();
+        counts.registered_connections = Some(self.by_connection.len());
+        counts.outbound_owners = Some(self.outbound_routes.len());
+        counts.media_streams = Some(self.streams_cache.len());
+        counts.tasks.retained_workers = Some(self.retained_task_count());
+        counts.allocated_media_ports = Some(self.allocated_media_port_count().await);
+        Ok(Some(counts))
+    }
+
     fn transport(&self) -> Transport {
         Transport::Sip
     }
@@ -4739,6 +4751,29 @@ mod inbound_context_tests {
 
     struct RecordingLifecycleSink {
         deliveries: AtomicUsize,
+    }
+
+    #[tokio::test]
+    async fn resource_snapshot_reports_measured_zero_after_drain() {
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("resource-snapshot", 0))
+            .await
+            .expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        let before = adapter.resource_snapshot().await.unwrap().unwrap();
+        assert_eq!(before.registered_connections, Some(0));
+        assert_eq!(before.allocated_media_ports, Some(0));
+        assert!(before.tasks.retained_workers.unwrap() > 0);
+        assert_eq!(before.tasks.peer_workers, None);
+        adapter.drain().await.expect("adapter drain");
+        let after = adapter.resource_snapshot().await.unwrap().unwrap();
+        assert_eq!(after.tasks.retained_workers, Some(0));
+        assert_eq!(after.media_streams, Some(0));
+        coordinator
+            .shutdown_gracefully(Some(Duration::ZERO))
+            .await
+            .expect("shutdown");
     }
 
     #[test]

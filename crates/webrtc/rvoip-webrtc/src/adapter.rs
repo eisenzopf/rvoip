@@ -4611,6 +4611,29 @@ impl WebRtcAdapter {
 
 #[async_trait]
 impl ConnectionAdapter for WebRtcAdapter {
+    async fn resource_snapshot(
+        &self,
+    ) -> RvoipResult<Option<rvoip_core::resources::AdapterResourceCounts>> {
+        let mut counts = rvoip_core::resources::AdapterResourceCounts::default();
+        let metrics = self.metrics();
+        counts.registered_connections = Some(self.routes.len());
+        counts.outbound_owners = Some(self.outbound_event_stages.len());
+        counts.media_streams = Some(self.routes.iter().map(|route| route.streams.len()).sum());
+        counts.allocated_media_ports = Some(metrics.allocated_media_ports);
+        counts.http_resources = Some(metrics.active_http_resources);
+        counts.tasks.peer_workers = Some(metrics.peer_session_tasks);
+        counts.tasks.media_workers = Some(metrics.media_tasks);
+        counts.tasks.http_workers = Some(metrics.http_resource_tasks);
+        counts.tasks.inbound_ws_workers = Some(metrics.inbound_ws_connection_tasks);
+        counts.tasks.inbound_admission_workers = Some(metrics.inbound_admission_tasks);
+        counts.tasks.outbound_signaling_workers = Some(self.outbound_signaling_task_count());
+        #[cfg(feature = "signaling-ws")]
+        {
+            counts.tasks.outbound_ws_hub_workers = Some(self.outbound_ws_hub_task_count());
+        }
+        Ok(Some(counts))
+    }
+
     fn transport(&self) -> Transport {
         Transport::WebRtc
     }
@@ -5827,6 +5850,9 @@ mod inbound_hardening_tests {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let adapter = WebRtcAdapter::new(WebRtcConfig::loopback());
         assert_eq!(adapter.metrics().allocated_media_ports, 0);
+        let before = adapter.resource_snapshot().await.unwrap().unwrap();
+        assert_eq!(before.allocated_media_ports, Some(0));
+        assert_eq!(before.tasks.retained_workers, None);
 
         let handle = adapter
             .originate(OriginateRequest {
@@ -5846,6 +5872,10 @@ mod inbound_hardening_tests {
             "the peer driver owns exactly one bound ICE/media UDP socket"
         );
 
+        let live = adapter.resource_snapshot().await.unwrap().unwrap();
+        assert_eq!(live.registered_connections, Some(1));
+        assert_eq!(live.allocated_media_ports, Some(1));
+
         adapter
             .end(handle.connection.id, EndReason::Normal)
             .await
@@ -5857,6 +5887,9 @@ mod inbound_hardening_tests {
         })
         .await
         .expect("driver socket gauge returns to baseline");
+        let after = adapter.resource_snapshot().await.unwrap().unwrap();
+        assert_eq!(after.registered_connections, Some(0));
+        assert_eq!(after.allocated_media_ports, Some(0));
     }
 
     #[tokio::test]
