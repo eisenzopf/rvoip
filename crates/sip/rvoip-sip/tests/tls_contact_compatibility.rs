@@ -79,6 +79,7 @@ async fn tls_contact_compatibility_preserves_transport_and_bidirectional_rtp() {
         (true, true, ";transport=udp", false, false),
         (false, true, ";transport=tls", false, false),
         (true, true, ";transport=tls", true, false),
+        (true, true, ";transport=tls", true, true),
     ] {
         let directory = tempfile::tempdir().unwrap();
         let identity = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();

@@ -66,6 +66,11 @@ pub struct Dialog {
     #[serde(default)]
     pub allow_tls_contact_on_sips: bool,
 
+    /// Exact admitted TLS flow for the opt-in direct-peer Contact workaround.
+    /// Process-local: never restore a stale flow ID from persisted dialogs.
+    #[serde(skip)]
+    pub tls_contact_flow: Option<(Uri, rvoip_sip_transport::TransportRoute)>,
+
     /// Route set for this dialog
     pub route_set: Vec<Uri>,
 
@@ -202,6 +207,7 @@ impl Dialog {
             remote_target: remote_uri, // Initially same as remote URI
             secure_transport_required,
             allow_tls_contact_on_sips: false,
+            tls_contact_flow: None,
             route_set: Vec::new(),
             is_initiator,
             last_known_remote_addr: None,
@@ -408,6 +414,7 @@ impl Dialog {
             remote_target,
             secure_transport_required,
             allow_tls_contact_on_sips: false,
+            tls_contact_flow: None,
             route_set,
             is_initiator,
             last_known_remote_addr: None,
@@ -526,6 +533,7 @@ impl Dialog {
             remote_target,
             secure_transport_required,
             allow_tls_contact_on_sips: false,
+            tls_contact_flow: None,
             route_set,
             is_initiator,
             last_known_remote_addr: None,
@@ -758,6 +766,27 @@ impl Dialog {
             remote_target.scheme = Scheme::Sips;
         }
         remote_target
+    }
+
+    /// Reuse an admitted direct TLS flow only while the request still targets
+    /// the pinned Contact. Route headers and target refreshes use normal routing.
+    pub(crate) fn compatible_tls_contact_route(
+        &self,
+        request: &Request,
+    ) -> Option<rvoip_sip_transport::TransportRoute> {
+        if !self.allow_tls_contact_on_sips
+            || !self.secure_transport_required
+            || !self.route_set.is_empty()
+            || request.header(&HeaderName::Route).is_some()
+        {
+            return None;
+        }
+        let (target, route) = self.tls_contact_flow.as_ref()?;
+        (request.uri() == target
+            && &self.remote_target == target
+            && route.flow_id.is_some()
+            && route.transport_type == Some(rvoip_sip_transport::transport::TransportType::Tls))
+        .then(|| route.clone())
     }
 
     /// Update a remote target without permitting a signaling downgrade.
@@ -1068,5 +1097,59 @@ mod tests {
         assert!(!dialog.update_from_2xx(&response));
         assert_eq!(dialog.state, DialogState::Early);
         assert_eq!(dialog.remote_target, original_target);
+    }
+    #[test]
+    fn compatible_flow_never_overrides_routes_or_target_refresh_and_is_not_persisted() {
+        use rvoip_sip_core::types::route::Route;
+        use rvoip_sip_transport::transport::TransportType;
+        use rvoip_sip_transport::{TransportFlowId, TransportRoute};
+        use std::str::FromStr;
+        let target: Uri = "sips:peer@127.0.0.1:5061;transport=tls".parse().unwrap();
+        let mut dialog = Dialog::new_early(
+            "flow-call".into(),
+            "sips:local@127.0.0.1".parse().unwrap(),
+            target.clone(),
+            None,
+            Some("remote".into()),
+            false,
+        );
+        dialog.allow_tls_contact_on_sips = true;
+        let mut route = TransportRoute::new("127.0.0.1:43210".parse().unwrap())
+            .with_transport_type(TransportType::Tls);
+        route.flow_id = TransportFlowId::from_process_local_value(17);
+        dialog.tls_contact_flow = Some((target.clone(), route));
+        let mut request = Request::new(Method::Bye, target.clone());
+        assert_eq!(
+            dialog
+                .compatible_tls_contact_route(&request)
+                .unwrap()
+                .flow_id
+                .unwrap()
+                .as_u64(),
+            17
+        );
+        let encoded = serde_json::to_string(&dialog).unwrap();
+        assert!(!encoded.contains("tls_contact_flow"));
+        let restored: Dialog = serde_json::from_str(&encoded).unwrap();
+        assert!(restored.tls_contact_flow.is_none());
+        assert!(restored.compatible_tls_contact_route(&request).is_none());
+        dialog
+            .route_set
+            .push("sips:proxy.example.test;lr".parse().unwrap());
+        assert!(dialog.compatible_tls_contact_route(&request).is_none());
+        dialog.route_set.clear();
+        request.headers.push(TypedHeader::Route(
+            Route::from_str("<sips:proxy.example.test;lr>").unwrap(),
+        ));
+        assert!(dialog.compatible_tls_contact_route(&request).is_none());
+        request.headers.clear();
+        dialog.remote_target = "sips:peer@127.0.0.1:5062;transport=tls".parse().unwrap();
+        assert!(dialog.compatible_tls_contact_route(&request).is_none());
+        request.uri = dialog.remote_target.clone();
+        assert!(dialog.compatible_tls_contact_route(&request).is_none());
+        dialog.remote_target = target.clone();
+        request.uri = target;
+        dialog.allow_tls_contact_on_sips = false;
+        assert!(dialog.compatible_tls_contact_route(&request).is_none());
     }
 }

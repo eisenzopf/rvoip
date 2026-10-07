@@ -5955,6 +5955,23 @@ impl DialogManager {
             .map(|(transaction_id, destination)| (transaction_id, destination, None));
         }
 
+        // Direct-peer compatibility keeps in-dialog requests on the exact
+        // TLS flow that formed this dialog. A dead flow fails explicitly;
+        // never silently reconnect or downgrade, and never override Route.
+        let mut candidates = candidates;
+        if !is_initial_invite {
+            if let Some(dialog_id) = tx_to_dialog {
+                let dialog = self.get_dialog(dialog_id)?;
+                if let Some(route) = dialog.compatible_tls_contact_route(&request) {
+                    let mut target = candidates[0].clone();
+                    target.addr = route.destination;
+                    target.transport = rvoip_sip_transport::transport::TransportType::Tls;
+                    target.flow_id = route.flow_id;
+                    candidates = vec![target];
+                }
+            }
+        }
+
         let total = candidates.len();
         let mut last_err: Option<crate::errors::DialogError> = None;
 
@@ -5976,6 +5993,7 @@ impl DialogManager {
             if let Some(authority) = target.authority.clone() {
                 request_route.authority = Some(authority);
             }
+            request_route.flow_id = target.flow_id;
             let tx_result = self
                 .transaction_manager
                 .create_client_transaction_on_route_with_completion(req, request_route)

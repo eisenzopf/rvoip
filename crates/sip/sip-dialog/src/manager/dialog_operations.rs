@@ -548,17 +548,17 @@ impl DialogLookup for DialogManager {
         dialog.secure_transport_required |= matches!(request.uri().scheme(), Scheme::Sips);
         // A Via header is not proof of transport. Use transaction-core's
         // retained ingress route, and keep direct/offline callers strict.
+        let ingress_route =
+            crate::transaction::TransactionKey::from_request(request).and_then(|key| {
+                self.transaction_manager()
+                    .server_transaction_response_route(&key)
+            });
         dialog.allow_tls_contact_on_sips = self
             .config()
             .is_some_and(|config| config.dialog_config().allow_tls_contact_on_sips)
-            && crate::transaction::TransactionKey::from_request(request)
-                .and_then(|key| {
-                    self.transaction_manager()
-                        .server_transaction_response_route(&key)
-                })
-                .is_some_and(|route| {
-                    route.transport_type == Some(rvoip_sip_transport::transport::TransportType::Tls)
-                });
+            && ingress_route.as_ref().is_some_and(|route| {
+                route.transport_type == Some(rvoip_sip_transport::transport::TransportType::Tls)
+            });
         if let Some(remote_target) = remote_target_from_request(request) {
             if !dialog.update_remote_target(remote_target) {
                 return Err(DialogError::protocol_error(
@@ -569,6 +569,17 @@ impl DialogLookup for DialogManager {
         // RFC 3261 §12.1.1: UAS route set from the INVITE's Record-Route,
         // in message order (see create_dialog).
         dialog.route_set = crate::dialog::dialog_impl::route_set_from_request(request);
+        // Opt-in direct-peer interop only. Do not bypass proxies or a Contact
+        // claiming a different host. Retain the opaque accepted flow.
+        if dialog.allow_tls_contact_on_sips && dialog.route_set.is_empty() {
+            if let Some(route) = ingress_route.filter(|route| route.flow_id.is_some()) {
+                if matches!(dialog.remote_target.host,
+                    rvoip_sip_core::Host::Address(ip) if ip == route.destination.ip())
+                {
+                    dialog.tls_contact_flow = Some((dialog.remote_target.clone(), route));
+                }
+            }
+        }
 
         let dialog_id = dialog.id.clone();
 
