@@ -246,6 +246,139 @@ mod tests {
         assert_eq!(frame.timestamp, timestamp);
     }
 
+    /// Exercise the actual RTP event handler, decode and callback, not just
+    /// timestamp arithmetic. Both G.711 and the failing Opus path use it.
+    #[cfg(feature = "opus")]
+    #[tokio::test]
+    async fn source_handoff_delivers_continuous_audible_frames() {
+        use crate::codec::audio::common::AudioCodec;
+        use crate::codec::audio::{G711Codec, OpusCodec, OpusConfig};
+        use crate::types::SampleRate;
+
+        for (opus, use_udp) in [(false, false), (true, false), (false, true), (true, true)] {
+            let controller = MediaSessionController::new();
+            let dialog = DialogId::new("source-handoff");
+            let rate = if opus { 48_000 } else { 8_000 };
+            let ticks = rate / 50;
+            let pt = if opus { 102 } else { 0 };
+            let mut parameters = HashMap::new();
+            parameters.insert(types::RTP_PAYLOAD_TYPE_PARAMETER.into(), pt.to_string());
+            parameters.insert(types::RTP_CLOCK_RATE_PARAMETER.into(), rate.to_string());
+            parameters.insert(types::AUDIO_CHANNELS_PARAMETER.into(), "1".into());
+            let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let config = MediaConfig {
+                local_addr: "127.0.0.1:0".parse().unwrap(),
+                remote_addr: Some(udp.local_addr().unwrap()),
+                preferred_codec: Some(if opus { "opus" } else { "PCMU" }.into()),
+                parameters,
+            };
+            let (rtp_tx, rtp_rx) = tokio::sync::broadcast::channel(16);
+            let mut udp_port = 0;
+            if use_udp {
+                controller
+                    .start_media(dialog.clone(), config)
+                    .await
+                    .unwrap();
+                udp_port = controller
+                    .get_session_info(&dialog)
+                    .await
+                    .unwrap()
+                    .rtp_port
+                    .unwrap();
+            } else {
+                let format = codec_runtime::resolve_codec(&config).unwrap();
+                controller.codec_runtimes.insert(
+                    dialog.clone(),
+                    Arc::new(codec_runtime::DialogCodecRuntime::new(format).unwrap()),
+                );
+                controller.spawn_rtp_event_handler(dialog.clone(), rtp_rx, pt);
+            }
+            let samples = (0..ticks)
+                .map(|i| {
+                    (8000.0 * (i as f64 * 440.0 * std::f64::consts::TAU / rate as f64).sin()) as i16
+                })
+                .collect();
+            let frame = AudioFrame::new(samples, rate, 1, 0);
+            let payload = if opus {
+                OpusCodec::new(SampleRate::Rate48000, 1, OpusConfig::default())
+                    .unwrap()
+                    .encode(&frame)
+                    .unwrap()
+            } else {
+                G711Codec::mu_law(rate, 1).unwrap().encode(&frame).unwrap()
+            };
+            let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel(16);
+            controller
+                .set_audio_frame_callback(dialog.clone(), audio_tx)
+                .await
+                .unwrap();
+            // Independent clock origins and old-source packets after cutover.
+            for (ssrc, seq, timestamp) in [
+                (1, 10, 14_560),
+                (1, 11, 14_560 + ticks),
+                (2, 80, 456_000),
+                (1, 12, 14_560 + 2 * ticks),
+                (2, 81, 456_000 + ticks),
+                (1, 13, 14_560 + 3 * ticks),
+                (2, 82, 456_000 + 2 * ticks),
+                (1, 14, 14_560 + 4 * ticks),
+            ] {
+                let packet = RtpPacket::new_with_payload(
+                    pt,
+                    seq,
+                    timestamp,
+                    ssrc,
+                    Bytes::from(payload.clone()),
+                );
+                if use_udp {
+                    udp.send_to(&packet.serialize().unwrap(), ("127.0.0.1", udp_port))
+                        .await
+                        .unwrap();
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                } else {
+                    rtp_tx
+                        .send(RtpSessionEvent::PacketReceived(packet))
+                        .unwrap();
+                }
+            }
+            drop(rtp_tx); // Handler drains events, then closes its callback clone.
+            let mut previous = None;
+            for _ in 0..5 {
+                let frame =
+                    tokio::time::timeout(std::time::Duration::from_secs(2), audio_rx.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(frame.sample_rate, rate);
+                assert_eq!(frame.samples.len(), ticks as usize);
+                let energy = frame
+                    .samples
+                    .iter()
+                    .map(|s| f64::from(*s).powi(2))
+                    .sum::<f64>()
+                    / frame.samples.len() as f64;
+                assert!(energy > 100_000.0, "decoded speech must not become silence");
+                if let Some(previous) = previous {
+                    let step = frame.timestamp.wrapping_sub(previous);
+                    assert!(
+                        step >= ticks && step < rate / 5,
+                        "artificial timestamp jump: {step}"
+                    );
+                }
+                previous = Some(frame.timestamp);
+            }
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(50), audio_rx.recv())
+                    .await
+                    .is_err(),
+                "probation and retired-source packets must not reach the callback"
+            );
+            if use_udp {
+                controller.stop_media(&dialog).await.unwrap();
+            }
+        }
+    }
+
     #[tokio::test]
     async fn test_dynamic_port_allocation() {
         println!("🧪 Testing dynamic port allocation integration");
