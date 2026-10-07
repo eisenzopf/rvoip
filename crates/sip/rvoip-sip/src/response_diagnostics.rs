@@ -60,21 +60,81 @@ fn reason_header(value: &str) -> Value {
     };
     let mut cause = None;
     let mut text = None;
+    let mut analytics_block = serde_json::Map::new();
     for part in parts.take(12) {
         if let Some((name, value)) = part.trim().split_once('=') {
+            let value = value.trim();
             if name.eq_ignore_ascii_case("cause") {
-                cause = value.trim().parse::<u16>().ok().filter(|v| match protocol {
+                cause = value.parse::<u16>().ok().filter(|v| match protocol {
                     "Q.850" => *v <= 127,
                     "SIP" => (100..=699).contains(v),
                     _ => false,
                 });
             } else if name.eq_ignore_ascii_case("text") {
-                let (context, redacted) = reason_text(value.trim().trim_matches('"'));
+                let (context, redacted) = reason_text(value.trim_matches('"'));
                 text = Some(json!({"context":context,"redacted":redacted}));
+            } else if let Some((field, value)) = analytics_block_parameter(name, value) {
+                analytics_block.insert(field.into(), Value::String(value));
             }
         }
     }
-    json!({"protocol":protocol,"cause":cause,"text":text})
+    let analytics_block = if protocol != "SIP"
+        || cause != Some(603)
+        || analytics_block.get("version").and_then(Value::as_str) != Some("analytics1")
+    {
+        Value::Null
+    } else if analytics_block.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(analytics_block)
+    };
+    json!({"protocol":protocol,"cause":cause,"text":text,"analytics_block":analytics_block})
+}
+
+/// Project only the recognized SIP 603 analytics1 profile fields. Carrier
+/// redress contacts are intentionally observable; arbitrary Reason parameters
+/// are not. URL credentials, query parameters and fragments are removed.
+fn analytics_block_parameter(name: &str, value: &str) -> Option<(&'static str, String)> {
+    let value = value.trim_matches('"').trim();
+    let printable = |limit: usize| {
+        value.len() <= limit
+            && !value.is_empty()
+            && value
+                .chars()
+                .all(|c| c.is_ascii_graphic() && c != '"' && c != '<' && c != '>')
+    };
+    match name.to_ascii_lowercase().as_str() {
+        "v" => value
+            .eq_ignore_ascii_case("analytics1")
+            .then(|| ("version", "analytics1".to_owned())),
+        "location" => (!value.is_empty()
+            && value.len() <= 32
+            && value.chars().all(|c| c.is_ascii_alphabetic()))
+        .then(|| ("location", value.to_ascii_lowercase())),
+        "url" => {
+            if !printable(256) {
+                return None;
+            }
+            let mut url = url::Url::parse(value).ok()?;
+            if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+                return None;
+            }
+            url.set_username("").ok()?;
+            url.set_password(None).ok()?;
+            url.set_query(None);
+            url.set_fragment(None);
+            Some(("redress_url", url.to_string()))
+        }
+        "tel" => (value.len() <= 32
+            && !value.is_empty()
+            && value
+                .chars()
+                .all(|c| c.is_ascii_digit() || matches!(c, '+' | '-' | '.' | '(' | ')')))
+        .then(|| ("redress_tel", value.to_owned())),
+        "email" => (printable(128) && value.matches('@').count() == 1)
+            .then(|| ("redress_email", value.to_owned())),
+        _ => None,
+    }
 }
 
 pub(crate) fn projection(response: &IncomingResponse, connection: &str) -> Value {
@@ -206,5 +266,50 @@ mod tests {
             "Q.850;cause=21"
         );
         assert_eq!(header_value("reason", "Q.850;cause=21"), "Q.850;cause=21");
+    }
+    #[test]
+    fn sip_603_plus_analytics_parameters_are_kept_and_everything_else_is_not() {
+        let value = reason_header(
+            "SIP;cause=603;text=\"Network Blocked\";v=analytics1;location=terminating;url=\"https://carrier.example/redress?ref=42\";tel=\"+1-800-555-0100\";email=\"blocks@carrier.example\";token=SECRET",
+        );
+        assert_eq!(value["cause"], 603);
+        assert_eq!(value["text"]["context"], "network blocked");
+        assert_eq!(value["analytics_block"]["version"], "analytics1");
+        assert_eq!(value["analytics_block"]["location"], "terminating");
+        assert_eq!(
+            value["analytics_block"]["redress_url"],
+            "https://carrier.example/redress"
+        );
+        assert_eq!(value["analytics_block"]["redress_tel"], "+1-800-555-0100");
+        assert_eq!(
+            value["analytics_block"]["redress_email"],
+            "blocks@carrier.example"
+        );
+        assert!(!value.to_string().contains("SECRET"));
+
+        let hostile = reason_header(
+            "SIP;cause=603;v=analytics2;location=\"nowhere near\";url=javascript:alert(1);tel=call-me;email=\"a@b@c\"",
+        );
+        assert!(hostile["analytics_block"].is_null(), "{hostile}");
+        assert!(reason_header("Q.850;cause=16")["analytics_block"].is_null());
+    }
+    #[test]
+    fn analytics_redress_requires_the_exact_profile_and_redacts_url_credentials() {
+        for header in [
+            "Q.850;cause=21;v=analytics1;url=https://example.test/redress",
+            "SIP;cause=403;v=analytics1;url=https://example.test/redress",
+            "SIP;cause=603;url=https://example.test/redress",
+        ] {
+            assert!(reason_header(header)["analytics_block"].is_null());
+        }
+        let result = reason_header("SIP;cause=603;v=analytics1;url=\"https://user:password@example.test/redress?token=CANARY#CANARY\"");
+        assert_eq!(
+            result["analytics_block"]["redress_url"],
+            "https://example.test/redress"
+        );
+        let text = result.to_string();
+        for secret in ["user", "password", "token", "CANARY"] {
+            assert!(!text.contains(secret));
+        }
     }
 }
