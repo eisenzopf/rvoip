@@ -958,6 +958,59 @@ impl WriterFault {
     }
 }
 
+/// Classify transport failures without formatting provider bodies, URLs or
+/// underlying error messages, which can contain credentials.
+fn websocket_write_error_class(error: &tokio_tungstenite::tungstenite::Error) -> &'static str {
+    use std::io::ErrorKind;
+    use tokio_tungstenite::tungstenite::Error;
+    match error {
+        Error::ConnectionClosed | Error::AlreadyClosed => "closed",
+        Error::Io(error) => match error.kind() {
+            ErrorKind::ConnectionReset => "connection-reset",
+            ErrorKind::ConnectionAborted => "connection-aborted",
+            ErrorKind::BrokenPipe => "broken-pipe",
+            ErrorKind::TimedOut => "io-timeout",
+            ErrorKind::WouldBlock => "would-block",
+            _ => "io",
+        },
+        Error::Protocol(_) => "protocol",
+        Error::Capacity(_) => "capacity",
+        Error::Tls(_) => "tls",
+        _ => "other",
+    }
+}
+
+#[cfg(test)]
+mod writer_diagnostics_tests {
+    use super::websocket_write_error_class;
+    use std::io::{Error as IoError, ErrorKind};
+    use tokio_tungstenite::tungstenite::{error::ProtocolError, Error};
+
+    #[test]
+    fn write_errors_are_distinguishable_without_exposing_underlying_details() {
+        for (kind, expected) in [
+            (ErrorKind::ConnectionReset, "connection-reset"),
+            (ErrorKind::BrokenPipe, "broken-pipe"),
+            (ErrorKind::TimedOut, "io-timeout"),
+            (ErrorKind::Other, "io"),
+        ] {
+            let error = Error::Io(IoError::new(kind, "private-provider-url-and-credential"));
+            assert_eq!(websocket_write_error_class(&error), expected);
+        }
+        assert_eq!(websocket_write_error_class(&Error::AlreadyClosed), "closed");
+        assert_eq!(
+            websocket_write_error_class(&Error::ConnectionClosed),
+            "closed"
+        );
+        assert_eq!(
+            websocket_write_error_class(&Error::Protocol(
+                ProtocolError::ResetWithoutClosingHandshake
+            )),
+            "protocol"
+        );
+    }
+}
+
 /// Owns the socket's sink half so a slow write cannot park the session loop.
 ///
 /// FreeSWITCH's media model rests on the media thread never blocking on a
@@ -1021,7 +1074,14 @@ async fn run_socket_writer(
                     consecutive_media_timeouts = 0;
                 }
             }
-            Ok(Err(_)) => {
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    connection_id = %route.connection_id,
+                    write_kind = if is_media { "media" } else { "control" },
+                    error_class = websocket_write_error_class(&error),
+                    consecutive_media_timeouts,
+                    "Vapi WebSocket write failed"
+                );
                 let _ = faults
                     .send(if is_media {
                         WriterFault::Failed
@@ -1033,6 +1093,12 @@ async fn run_socket_writer(
             }
             Err(_) => {
                 if !is_media {
+                    tracing::warn!(
+                        connection_id = %route.connection_id,
+                        timeout_ms = deadline.as_millis() as u64,
+                        consecutive_media_timeouts,
+                        "Vapi WebSocket control write exceeded its deadline"
+                    );
                     let _ = faults.send(WriterFault::ControlFailed).await;
                     break;
                 }
