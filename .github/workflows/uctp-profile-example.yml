@@ -1,0 +1,27 @@
+name: UCTP application profile example
+
+on:
+  pull_request:
+    paths:
+      - 'crates/uctp/rvoip-websocket/examples/**'
+      - '.github/workflows/uctp-profile-example.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/uctp/rvoip-websocket/examples/**'
+      - '.github/workflows/uctp-profile-example.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  loopback:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: '1.91.0'
+      - run: cargo test --locked -p rvoip-websocket --example application_profile
+      - run: python3 crates/uctp/rvoip-websocket/examples/run_application_profile.py

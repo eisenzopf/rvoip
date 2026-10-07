@@ -1,5 +1,10 @@
 # rvoip-websocket
 
+For a minimal authenticated application-control host and client, run the
+[application-profile example](examples/README.md). It demonstrates opt-in
+profile negotiation, scoped commands, correlation and duplicate-ID refusal
+without allocating media or using live providers.
+
 > ⚠️ **Experimental surface** (unified `0.3.x` release) — API-unstable; expect breaking changes before `1.0`.
 
 rvoip-core ConnectionAdapter implementation over WebSocket (signaling) for the
