@@ -1567,6 +1567,7 @@ pub struct Orchestrator {
     /// and is released by Drop on `stop_recording`. Absent entry =
     /// unlimited (no admission check). Replaces the DashMap-shard-
     /// contention-bound check-then-increment from v1.
+    tenant_quota_update_lock: Mutex<()>,
     recording_sems: Arc<DashMap<TenantId, Arc<Semaphore>>>,
     ai_sems: Arc<DashMap<TenantId, Arc<Semaphore>>>,
 }
@@ -1910,6 +1911,7 @@ impl Orchestrator {
             session_quality: Arc::new(DashMap::new()),
             tenant_quotas: Arc::new(DashMap::new()),
             conversations_by_tenant: Arc::new(DashMap::new()),
+            tenant_quota_update_lock: Mutex::new(()),
             recording_sems: Arc::new(DashMap::new()),
             ai_sems: Arc::new(DashMap::new()),
         });
@@ -1985,6 +1987,7 @@ impl Orchestrator {
             session_quality: Arc::new(DashMap::new()),
             tenant_quotas: Arc::new(DashMap::new()),
             conversations_by_tenant: Arc::new(DashMap::new()),
+            tenant_quota_update_lock: Mutex::new(()),
             recording_sems: Arc::new(DashMap::new()),
             ai_sems: Arc::new(DashMap::new()),
         });
@@ -5197,70 +5200,67 @@ impl Orchestrator {
         self.conversations.iter().map(|e| e.key().clone()).collect()
     }
 
-    /// P6 — install/replace per-tenant quotas. V2.B provisions the
-    /// per-tenant admission semaphores from the quota config: each
-    /// `max_concurrent_*` slot gets an `Arc<Semaphore>` with that
-    /// capacity. Resize-up is supported (extra permits added via
-    /// `Semaphore::add_permits`); resize-down with live permits would
-    /// require revoking issued permits and is intentionally rejected
-    /// — call sites that want to shrink a quota should drain the
-    /// active sessions first.
+    /// Install or replace per-tenant quotas. Repeating a configured limit is
+    /// idempotent even while permits are held. Increases apply to total
+    /// capacity; decreases or removal require all affected permits to drain.
+    /// Validation precedes every mutation, so a rejected update is atomic.
     pub fn set_tenant_quotas(
         &self,
         tenant: TenantId,
         quotas: crate::config::TenantQuotas,
     ) -> Result<()> {
-        // Provision / resize recording semaphore.
-        if let Some(new_cap) = quotas.max_concurrent_recordings {
-            match self.recording_sems.entry(tenant.clone()) {
-                dashmap::mapref::entry::Entry::Vacant(v) => {
-                    v.insert(Arc::new(Semaphore::new(new_cap)));
-                }
-                dashmap::mapref::entry::Entry::Occupied(o) => {
-                    // Compare against an implicit "total issued" — we
-                    // can't directly read total capacity from a tokio
-                    // Semaphore, so we track resize-up by checking if
-                    // new_cap exceeds current available + outstanding.
-                    // Outstanding = total - available. We approximate
-                    // by using the Semaphore's add_permits which always
-                    // adds (no resize-down possible).
-                    let sem = o.get();
-                    let available = sem.available_permits();
-                    // For resize-up: add (new - available) permits when
-                    // new > available. This is conservative — if the
-                    // existing cap was already higher than `available`,
-                    // we may end up adding too few permits (loss of
-                    // capacity that's currently held). Documented as
-                    // a v2.B.1 caveat — call sites that mix shrink and
-                    // expand on the same tenant need explicit drain
-                    // semantics.
-                    if new_cap > available {
-                        sem.add_permits(new_cap - available);
-                    } else if new_cap < available {
-                        return Err(RvoipError::InvalidState(
-                            "set_tenant_quotas: shrinking recording quota \
-                             not supported while permits are held; drain first",
-                        ));
-                    }
+        let _update = self
+            .tenant_quota_update_lock
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let previous = self
+            .tenant_quotas
+            .get(&tenant)
+            .map(|q| *q)
+            .unwrap_or_default();
+        let changes = [
+            (
+                &self.recording_sems,
+                previous.max_concurrent_recordings,
+                quotas.max_concurrent_recordings,
+            ),
+            (
+                &self.ai_sems,
+                previous.max_concurrent_ai_sessions,
+                quotas.max_concurrent_ai_sessions,
+            ),
+        ];
+        for (semaphores, old, new) in changes {
+            if new.is_some_and(|capacity| capacity > Semaphore::MAX_PERMITS) {
+                return Err(RvoipError::InvalidState(
+                    "tenant quota exceeds semaphore capacity",
+                ));
+            }
+            if let Some(old) = old {
+                if new.is_none_or(|new| new < old)
+                    && semaphores
+                        .get(&tenant)
+                        .is_some_and(|sem| sem.available_permits() != old)
+                {
+                    return Err(RvoipError::InvalidState(
+                        "tenant quota decrease or removal requires drained permits",
+                    ));
                 }
             }
         }
-        if let Some(new_cap) = quotas.max_concurrent_ai_sessions {
-            match self.ai_sems.entry(tenant.clone()) {
-                dashmap::mapref::entry::Entry::Vacant(v) => {
-                    v.insert(Arc::new(Semaphore::new(new_cap)));
+        for (semaphores, old, new) in changes {
+            match new {
+                None => {
+                    semaphores.remove(&tenant);
                 }
-                dashmap::mapref::entry::Entry::Occupied(o) => {
-                    let sem = o.get();
-                    let available = sem.available_permits();
-                    if new_cap > available {
-                        sem.add_permits(new_cap - available);
-                    } else if new_cap < available {
-                        return Err(RvoipError::InvalidState(
-                            "set_tenant_quotas: shrinking AI quota not \
-                             supported while permits are held; drain first",
-                        ));
+                Some(new) => {
+                    if let Some(old) = old.filter(|old| new >= *old) {
+                        if let Some(sem) = semaphores.get(&tenant) {
+                            sem.add_permits(new - old);
+                            continue;
+                        }
                     }
+                    semaphores.insert(tenant.clone(), Arc::new(Semaphore::new(new)));
                 }
             }
         }
@@ -9594,6 +9594,11 @@ impl Orchestrator {
         // permit is stored in `RecordingHandle._permit` and released
         // by Drop when the handle is removed.
         let permit = if let Some(ref tid) = tenant_id {
+            // Serialize reservation with quota validation and replacement.
+            let _update = self
+                .tenant_quota_update_lock
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
             self.recording_sems
                 .get(tid)
                 .map(|s| Arc::clone(s.value()))
@@ -9878,6 +9883,11 @@ impl Orchestrator {
         // V2.B — per-tenant Semaphore admission. Permit stored in the
         // AiAttachmentHandle and released by Drop on detach.
         let ai_permit = if let Some(ref tid) = tenant_id {
+            // Serialize reservation with quota validation and replacement.
+            let _update = self
+                .tenant_quota_update_lock
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
             self.ai_sems
                 .get(tid)
                 .map(|s| Arc::clone(s.value()))
@@ -12651,5 +12661,132 @@ mod cross_crate_publisher_tests {
             orchestrator.validate_stream_wait_lifecycle(&lifecycle),
             Err(StreamWaitError::GenerationReplaced)
         );
+    }
+}
+
+#[cfg(test)]
+mod tenant_quota_reconciliation_tests {
+    use super::*;
+    use crate::config::TenantQuotas;
+
+    fn limits(n: usize) -> TenantQuotas {
+        TenantQuotas {
+            max_concurrent_recordings: Some(n),
+            max_concurrent_ai_sessions: Some(n),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn repeated_limits_and_growth_account_for_held_permits() {
+        let core = Orchestrator::new(Config::default());
+        let tenant = TenantId::new();
+        core.set_tenant_quotas(tenant.clone(), limits(10)).unwrap();
+        let recording = core.recording_sems.get(&tenant).unwrap().clone();
+        let ai = core.ai_sems.get(&tenant).unwrap().clone();
+        let _recording = recording.clone().try_acquire_many_owned(3).unwrap();
+        let _ai = ai.clone().try_acquire_many_owned(3).unwrap();
+        for _ in 0..10 {
+            core.set_tenant_quotas(tenant.clone(), limits(10)).unwrap();
+        }
+        assert_eq!(recording.available_permits(), 7);
+        assert_eq!(ai.available_permits(), 7);
+        core.set_tenant_quotas(tenant, limits(12)).unwrap();
+        assert_eq!(recording.available_permits(), 9);
+        assert_eq!(ai.available_permits(), 9);
+    }
+
+    #[test]
+    fn shrink_is_rejected_even_when_requested_limit_exceeds_available_permits() {
+        let core = Orchestrator::new(Config::default());
+        let tenant = TenantId::new();
+        core.set_tenant_quotas(tenant.clone(), limits(10)).unwrap();
+        let sem = core.ai_sems.get(&tenant).unwrap().clone();
+        let _held = sem.clone().try_acquire_many_owned(8).unwrap();
+        assert!(core.set_tenant_quotas(tenant.clone(), limits(5)).is_err());
+        assert_eq!(sem.available_permits(), 2);
+        assert_eq!(
+            core.tenant_quotas
+                .get(&tenant)
+                .unwrap()
+                .max_concurrent_ai_sessions,
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn rejected_second_limit_does_not_partially_grow_the_first() {
+        let core = Orchestrator::new(Config::default());
+        let tenant = TenantId::new();
+        core.set_tenant_quotas(tenant.clone(), limits(10)).unwrap();
+        let _held = core
+            .ai_sems
+            .get(&tenant)
+            .unwrap()
+            .clone()
+            .try_acquire_owned()
+            .unwrap();
+        let result = core.set_tenant_quotas(
+            tenant.clone(),
+            TenantQuotas {
+                max_concurrent_recordings: Some(20),
+                max_concurrent_ai_sessions: Some(5),
+                ..Default::default()
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            core.recording_sems
+                .get(&tenant)
+                .unwrap()
+                .available_permits(),
+            10
+        );
+        assert!(core
+            .set_tenant_quotas(tenant, limits(Semaphore::MAX_PERMITS + 1))
+            .is_err());
+    }
+
+    #[test]
+    fn drained_limits_can_shrink_and_be_removed() {
+        let core = Orchestrator::new(Config::default());
+        let tenant = TenantId::new();
+        core.set_tenant_quotas(tenant.clone(), limits(10)).unwrap();
+        core.set_tenant_quotas(tenant.clone(), limits(2)).unwrap();
+        assert_eq!(
+            core.recording_sems
+                .get(&tenant)
+                .unwrap()
+                .available_permits(),
+            2
+        );
+        core.set_tenant_quotas(tenant.clone(), TenantQuotas::default())
+            .unwrap();
+        assert!(!core.recording_sems.contains_key(&tenant));
+        assert!(!core.ai_sems.contains_key(&tenant));
+    }
+
+    #[test]
+    fn concurrent_identical_updates_do_not_inflate_capacity() {
+        let core = Orchestrator::new(Config::default());
+        let tenant = TenantId::new();
+        core.set_tenant_quotas(tenant.clone(), limits(10)).unwrap();
+        let sem = core.recording_sems.get(&tenant).unwrap().clone();
+        let _held = sem.clone().try_acquire_many_owned(3).unwrap();
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let core = core.clone();
+                let tenant = tenant.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..100 {
+                        core.set_tenant_quotas(tenant.clone(), limits(10)).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(sem.available_permits(), 7);
     }
 }
