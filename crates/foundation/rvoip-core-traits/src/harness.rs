@@ -101,6 +101,17 @@ pub trait TtsPlayback: Send + Sync {
 #[async_trait]
 pub trait TtsProvider: Send + Sync {
     async fn synthesize(&self, request: TtsRequest) -> Result<Box<dyn TtsPlayback>>;
+
+    /// Synthesize for the destination's negotiated codec. Legacy providers
+    /// retain their existing behavior; codec-aware providers must emit that
+    /// codec's encoded payload, clock rate, channels and payload type.
+    async fn synthesize_for_codec(
+        &self,
+        request: TtsRequest,
+        _codec: crate::capability::CodecInfo,
+    ) -> Result<Box<dyn TtsPlayback>> {
+        self.synthesize(request).await
+    }
 }
 
 // --- DialogManager -----------------------------------------------------

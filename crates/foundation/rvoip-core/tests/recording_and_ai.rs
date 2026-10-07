@@ -252,6 +252,7 @@ async fn recording_collects_frames_and_stop_produces_artifact() {
 /// assert exactly what `play_audio` pumped into the stream.
 struct CountedTts {
     frames: usize,
+    codec_seen: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct CountedPlayback {
@@ -290,6 +291,19 @@ impl rvoip_harness::TtsProvider for CountedTts {
             remaining: Mutex::new(self.frames),
         }))
     }
+    async fn synthesize_for_codec(
+        &self,
+        request: rvoip_harness::TtsRequest,
+        codec: CodecInfo,
+    ) -> RvResult<Box<dyn rvoip_harness::TtsPlayback>> {
+        self.codec_seen
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(codec.name, "PCMU");
+        assert_eq!(codec.clock_rate_hz, 8_000);
+        assert_eq!(codec.channels, 1);
+        assert_eq!(request.sample_rate_hz, Some(codec.clock_rate_hz));
+        self.synthesize(request).await
+    }
 }
 
 /// A spoken prompt must reach the connection's audio stream through the
@@ -299,7 +313,14 @@ impl rvoip_harness::TtsProvider for CountedTts {
 #[tokio::test]
 async fn play_audio_tts_pumps_synthesized_frames_into_the_stream() {
     let (orch, _tx, stream, connid) = setup().await;
-    orch.register_tts_provider("counted", Arc::new(CountedTts { frames: 5 }));
+    let codec_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    orch.register_tts_provider(
+        "counted",
+        Arc::new(CountedTts {
+            frames: 5,
+            codec_seen: codec_seen.clone(),
+        }),
+    );
 
     let _handle = orch
         .play_audio(
@@ -322,6 +343,10 @@ async fn play_audio_tts_pumps_synthesized_frames_into_the_stream() {
         }
     }
     assert_eq!(received, 5, "all synthesized frames reach the stream");
+    assert!(
+        codec_seen.load(std::sync::atomic::Ordering::SeqCst),
+        "destination codec must reach the provider"
+    );
 }
 
 #[tokio::test]

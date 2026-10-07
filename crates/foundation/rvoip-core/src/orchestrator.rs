@@ -10414,12 +10414,16 @@ impl Orchestrator {
                 "play_audio: connection has no audio stream",
             ))?;
         let frames_out = audio.try_frames_out()?;
+        let codec = audio.codec();
         let playback = tts
-            .synthesize(crate::harness::TtsRequest {
-                voice,
-                text,
-                sample_rate_hz: None,
-            })
+            .synthesize_for_codec(
+                crate::harness::TtsRequest {
+                    voice,
+                    text,
+                    sample_rate_hz: Some(codec.clock_rate_hz),
+                },
+                codec,
+            )
             .await?;
         let (handle, mut cancel_rx, completion) =
             PlaybackHandle::new_tracked(crate::ids::PlaybackId::new());
