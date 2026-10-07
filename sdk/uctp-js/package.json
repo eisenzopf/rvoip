@@ -1,0 +1,20 @@
+{
+  "name": "@rvoip/uctp-websocket",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Experimental browser and Node UCTP v1 WebSocket control client",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./client.mjs"
+    }
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "test:types": "tsc --noEmit --strict --module NodeNext --moduleResolution NodeNext --target ES2022 test/types.ts"
+  },
+  "devDependencies": { "typescript": "5.9.3" },
+  "engines": { "node": ">=22" }
+}

@@ -125,6 +125,11 @@ SIEM sinks, SAML, SCIM, WebAuthn, STIR/SHAKEN, IMS AKA) are separate
 
 ## Pick your path
 
+For JavaScript UCTP control, see the [experimental browser/Node WebSocket
+client](sdk/uctp-js/README.md). It is available as source with TypeScript
+declarations; the package is not yet published to npm. Application-profile
+dispatch is a separate opt-in server extension, not a stock 0.3.12 capability.
+
 ### Path 1 — SIP telephony (`rvoip-sip`)
 
 Four API surfaces, from simplest to most control. Most applications use the
