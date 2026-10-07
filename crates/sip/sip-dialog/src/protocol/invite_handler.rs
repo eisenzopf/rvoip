@@ -244,7 +244,25 @@ impl DialogManager {
         }
 
         // Create early dialog
-        let dialog_id = self.create_early_dialog_from_invite(&request).await?;
+        let dialog_id = match self.create_early_dialog_from_invite(&request).await {
+            Ok(dialog_id) => dialog_id,
+            Err(error) => {
+                tracing::warn!(
+                    error_class = error.diagnostic_class(),
+                    error_reason = error.diagnostic_reason(),
+                    "Incoming INVITE dialog creation failed"
+                );
+                let status = if matches!(error, DialogError::ProtocolError { .. }) {
+                    StatusCode::BadRequest
+                } else {
+                    StatusCode::ServerInternalError
+                };
+                let response = response_builders::create_response(&request, status);
+                self.send_unowned_final_response_classified(&transaction_id, response)
+                    .await?;
+                return Ok(None);
+            }
+        };
         tracing::debug!("🔍 INVITE HANDLER: Created early dialog {}", dialog_id);
 
         // Capture INVITE CSeq + peer 100rel support on the dialog so the UAS
@@ -673,5 +691,28 @@ mod exact_invite_response_tests {
         );
         assert_eq!(manager.dialog_count(), 1);
         assert!(manager.find_dialog_for_request(&request).await.is_some());
+    }
+    #[tokio::test]
+    async fn invalid_secure_contact_gets_one_final_response_without_a_dialog() {
+        let (manager, transport) = recording_manager().await;
+        let mut request =
+            initial_invite("invalid-secure-contact", "z9hG4bK-invalid-secure-contact");
+        request.uri = "sips:receiver@127.0.0.1".parse().unwrap();
+        let source = "127.0.0.1:5061".parse().unwrap();
+        let transaction = manager
+            .transaction_manager()
+            .create_server_transaction(request.clone(), source)
+            .await
+            .expect("ingress INVITE");
+        manager
+            .handle_initial_invite(transaction.id().clone(), request.clone(), source)
+            .await
+            .expect("final rejection");
+        let sent = transport.sent.lock().await;
+        assert_eq!(sent.len(), 1);
+        assert!(matches!(sent.first(), Some(Message::Response(response))
+            if response.status_code() == StatusCode::BadRequest.as_u16()));
+        assert_eq!(manager.find_dialog_for_request(&request).await, None);
+        assert_eq!(manager.dialog_count(), 0);
     }
 }
