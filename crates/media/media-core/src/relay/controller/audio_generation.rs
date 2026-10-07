@@ -1030,14 +1030,15 @@ mod tests {
             48_000,
             8_000,
             AudioSource::CustomSamples {
-                samples: vec![0xff, 0x7f],
+                samples: vec![0xff, 0x80],
                 repeat: false,
             },
         );
         let output = generator.generate_pcm_frame(12, 1);
-        assert!(output[..6].iter().all(|sample| *sample == output[0]));
-        assert!(output[6..].iter().all(|sample| *sample == output[6]));
-        assert_ne!(output[0], output[6]);
+        // 0xff and 0x7f are both G.711 silence. Use a nonzero codeword
+        // to verify rate conversion, with independent wire expectations.
+        assert_eq!(&output[..6], &[0; 6]);
+        assert_eq!(&output[6..], &[32_124; 6]);
     }
 
     #[tokio::test]
