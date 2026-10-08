@@ -20,11 +20,11 @@ Serde and `from_string` preserve an opaque correlation string for lookup, not cr
 
 Core retires authority before dropping ownership. Connection records are reclaimed after media shutdown/session detachment and conclusive adapter cleanup. Unresolved quarantines retain reservations; successful later cleanup reclaims them without requiring new calls. The existing ticket pointer/generation checks still reject stale asynchronous commits. No live call is expired by age.
 
-`release_closed_conversation` explicitly releases completed models and tenant membership/empty index rows after the application has retained required durable evidence. It requires bounded mode, a closed/unowned conversation, terminal sessions with no live connections, and no outstanding vCon builder. Removed conversation IDs cannot be reused to create new conversations. Applications needing reopening/history must retain it externally according to their own policy.
+`release_closed_conversation` explicitly releases completed models and tenant membership/empty index rows after the application has retained required durable evidence. **Applications must call it after every conversation teardown in bounded mode.** Closed conversations and their ended sessions keep counting against the retained conversation/session budget until released; core never releases them on its own, so an application that only closes conversations will eventually have `open_conversation*` and `start_session` rejected with `AdmissionRejected`. `close_conversation` and the periodic idle closer (`spawn_idle_closer`, supervised separately) close conversations but do not release them; wiring the idle closer to release is not part of this change. It requires bounded mode, a closed/unowned conversation, terminal sessions with no live connections, and no outstanding vCon builder. Removed conversation IDs cannot be reused to create new conversations. Applications needing reopening/history must retain it externally according to their own policy.
 
 `Config.capture_session_vcon` preserves the old default `true`, allowing deployments without a provisioned vCon exporter to explicitly disable the default memory-only capture. This does not repair vCon auto-finalization or provide production retention for the default memory stores.
 
-Added retained-count/configuration accessors support continuous object-count and RSS qualification. Compatibility mode retains the previous fail-closed connection tombstone behavior for legacy external IDs.
+The `connection_id_budget_usage` and configuration accessors support continuous object-count and RSS qualification. Compatibility mode retains the previous fail-closed connection tombstone behavior for legacy external IDs.
 
 ## Compatibility and release review
 

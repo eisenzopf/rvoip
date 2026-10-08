@@ -1930,6 +1930,13 @@ impl Orchestrator {
         config: Config,
         coordinator: Arc<GlobalEventCoordinator>,
     ) -> Arc<Self> {
+        Self::new_with_cross_crate_sink(config, coordinator)
+    }
+
+    fn new_with_cross_crate_sink(
+        config: Config,
+        cross_crate_sink: Arc<dyn CrossCrateEventSink>,
+    ) -> Arc<Self> {
         let setup_capacity = config.max_concurrent_setups;
         let max_direct_subscribers = config.max_direct_subscribers;
         let admission = Arc::new(Semaphore::new(setup_capacity));
@@ -1968,7 +1975,7 @@ impl Orchestrator {
             connection_lifecycles: Arc::new(DashMap::new()),
             adapter_cleanup_quarantines: Arc::new(DashMap::new()),
             events,
-            cross_crate_publisher: Some(Arc::new(CrossCrateEventPublisher::new(coordinator))),
+            cross_crate_publisher: Some(Arc::new(CrossCrateEventPublisher::new(cross_crate_sink))),
             subscriptions: Arc::new(
                 crate::subscriptions::SubscriptionRegistry::with_direct_listener_limit(
                     max_direct_subscribers,
@@ -2534,6 +2541,11 @@ impl Orchestrator {
     /// serde identities remain valid for command lookups, but are refused as
     /// adapter lifecycle authority. The budget now bounds retained concurrent
     /// work, not total calls over process lifetime.
+    ///
+    /// The same `maximum` also caps retained conversations and sessions,
+    /// including closed/ended history. Connection rows are reclaimed by core,
+    /// but conversation/session history is retained until the application
+    /// calls [`Self::release_closed_conversation`] after teardown.
     pub fn configure_bounded_connection_lifecycles(&self, maximum: usize) -> Result<()> {
         let _registry = self
             .connection_registry_lock
@@ -5355,7 +5367,7 @@ impl Orchestrator {
         policy: ConversationPolicy,
         metadata: HashMap<String, String>,
     ) -> Result<ConversationId> {
-        let _registry = self.bounded_connection_lifecycles_enabled().then(|| {
+        let registry = self.bounded_connection_lifecycles_enabled().then(|| {
             self.connection_registry_lock
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
@@ -5401,6 +5413,12 @@ impl Orchestrator {
             .entry(tenant_id_for_index(&self.conversations, &id))
             .or_default()
             .insert(id.clone());
+        // The registry lock only orders the capacity check, identity claim
+        // and index commit. `emit` is non-blocking today (broadcast send plus
+        // a bounded cross-crate queue drained on its own task), but publish
+        // after releasing the std mutex anyway so a future synchronous hook
+        // cannot self-deadlock by calling back into registry-locking APIs.
+        drop(registry);
         self.emit(Event::ConversationOpened {
             conversation_id: id.clone(),
             at: now,
@@ -5749,6 +5767,19 @@ impl Orchestrator {
     /// required call evidence. Closed objects cannot be reopened after release.
     /// Refuses live sessions, attached connections, outstanding vCon builders,
     /// or an in-flight conversation owner. No age rule can evict a live call.
+    ///
+    /// **Applications in bounded mode must call this after teardown.** A
+    /// closed conversation and its ended sessions keep counting against the
+    /// retained conversation/session budget set by
+    /// [`Self::configure_bounded_connection_lifecycles`] until they are
+    /// released here; nothing releases them automatically. Once the budget is
+    /// full, `open_conversation*` and `start_session` reject new work with
+    /// `AdmissionRejected`. `close_conversation` and the periodic idle closer
+    /// (`spawn_idle_closer`) only close; they never release.
+    ///
+    /// Returns `Ok(true)` when the conversation was released, `Ok(false)` when
+    /// it is unknown (for example already released), and an error outside
+    /// bounded mode or while the history is still open, owned, or live.
     pub fn release_closed_conversation(&self, id: &ConversationId) -> Result<bool> {
         if !self.bounded_connection_lifecycles_enabled() {
             return Err(RvoipError::InvalidState(
@@ -5814,15 +5845,6 @@ impl Orchestrator {
         Ok(true)
     }
 
-    /// Reachable core lifecycle/history rows; useful for churn qualification.
-    pub fn retained_lifecycle_counts(&self) -> (usize, usize, usize) {
-        (
-            self.connection_lifecycles.len(),
-            self.sessions.len(),
-            self.conversations.len(),
-        )
-    }
-
     /// Re-open a Closed Conversation so Parley identity match can continue
     /// the same `cid` inside the reopen window. No-op if already Open.
     pub async fn reopen_conversation(&self, id: ConversationId) -> Result<()> {
@@ -5861,7 +5883,7 @@ impl Orchestrator {
         medium: SessionMedium,
         invitees: Vec<ParticipantId>,
     ) -> Result<SessionId> {
-        let _registry = self.bounded_connection_lifecycles_enabled().then(|| {
+        let registry = self.bounded_connection_lifecycles_enabled().then(|| {
             self.connection_registry_lock
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
@@ -5931,6 +5953,8 @@ impl Orchestrator {
             conv.last_activity_at = now;
         }
 
+        // Publish outside the registry lock, as in open_conversation_with_id.
+        drop(registry);
         self.emit(Event::SessionStarted {
             session_id: sid.clone(),
             conversation_id,
@@ -13004,6 +13028,68 @@ mod cross_crate_publisher_tests {
 mod bounded_lifecycle_tests {
     use super::*;
 
+    /// Retained (connection lifecycle, session, conversation) rows.
+    fn retained_rows(core: &Orchestrator) -> (usize, usize, usize) {
+        (
+            core.connection_lifecycles.len(),
+            core.sessions.len(),
+            core.conversations.len(),
+        )
+    }
+
+    /// Cross-crate sink that calls back into registry-locking orchestrator
+    /// APIs while handling each published event, then reports completion.
+    struct ReentrantSink {
+        core: OnceLock<Weak<Orchestrator>>,
+        done: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl CrossCrateEventSink for ReentrantSink {
+        async fn publish(&self, _event: RvoipCrossCrateEvent) -> std::result::Result<(), String> {
+            if let Some(core) = self.core.get().and_then(Weak::upgrade) {
+                let _ = core.connection_id_budget_usage();
+                let _ = core.release_closed_conversation(&ConversationId::from_string("absent"));
+            }
+            self.done.notify_one();
+            Ok(())
+        }
+    }
+
+    /// Regression guard: cross-crate delivery that re-enters registry-locking
+    /// APIs must not deadlock against bounded conversation/session creation.
+    /// Delivery is queued to a separate task, so this also passes when the
+    /// event is emitted under the registry lock; it pins the contract rather
+    /// than proving the lock-scope change.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reentrant_cross_crate_sink_does_not_deadlock_bounded_creation() {
+        let sink = Arc::new(ReentrantSink {
+            core: OnceLock::new(),
+            done: tokio::sync::Notify::new(),
+        });
+        let core = Orchestrator::new_with_cross_crate_sink(Config::default(), sink.clone());
+        sink.core.set(Arc::downgrade(&core)).unwrap();
+        core.configure_bounded_connection_lifecycles(8).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let conversation = core
+                .open_conversation(
+                    TenantId::new(),
+                    ConversationPolicy::default(),
+                    HashMap::new(),
+                )
+                .await
+                .unwrap();
+            sink.done.notified().await;
+            core.start_session(conversation, SessionMedium::Voice, Vec::new())
+                .await
+                .unwrap();
+            sink.done.notified().await;
+        })
+        .await
+        .expect("re-entrant event delivery deadlocked bounded creation");
+    }
+
     #[tokio::test]
     async fn bounded_lifecycle_churn_exceeds_old_lifetime_cap_without_reuse() {
         let core = Orchestrator::new(Config::default());
@@ -13067,7 +13153,7 @@ mod bounded_lifecycle_tests {
         assert!(core
             .claim_outbound_connection(&fresh, Transport::Sip)
             .is_err());
-        assert_eq!(core.retained_lifecycle_counts(), (0, 0, 0));
+        assert_eq!(retained_rows(&core), (0, 0, 0));
     }
 
     #[tokio::test]
@@ -13125,7 +13211,7 @@ mod bounded_lifecycle_tests {
             .await
             .unwrap();
         assert_ne!(first, next);
-        assert_eq!(core.retained_lifecycle_counts(), (0, 0, 2));
+        assert_eq!(retained_rows(&core), (0, 0, 2));
     }
 
     #[cfg(feature = "vcon")]
@@ -13159,7 +13245,7 @@ mod bounded_lifecycle_tests {
         core.close_conversation(cid.clone(), false).await.unwrap();
         assert!(core.release_closed_conversation(&cid).is_err());
         assert!(core.session_vcons.contains_key(&sid));
-        assert_eq!(core.retained_lifecycle_counts(), (0, 1, 1));
+        assert_eq!(retained_rows(&core), (0, 1, 1));
     }
 
     #[tokio::test]
@@ -13245,7 +13331,7 @@ mod bounded_lifecycle_tests {
                 )
                 .await
                 .is_err());
-            assert_eq!(core.retained_lifecycle_counts(), (0, 0, 0));
+            assert_eq!(retained_rows(&core), (0, 0, 0));
             assert!(!core.conversations_by_tenant.contains_key(&tenant));
         }
     }
