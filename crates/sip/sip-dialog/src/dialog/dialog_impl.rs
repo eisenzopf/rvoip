@@ -742,9 +742,8 @@ impl Dialog {
         }
     }
 
-    /// Update the remote target while preserving the dialog-forming SIPS
-    /// requirement. Returns `false` when the target would downgrade a secure
-    /// dialog and leaves the existing target unchanged.
+    /// Map an explicit `sip:...;transport=tls` Contact to SIPS when this
+    /// dialog opted in to TLS Contact compatibility; other targets are unchanged.
     fn normalize_tls_contact(&self, mut remote_target: Uri) -> Uri {
         if self.secure_transport_required
             && self.allow_tls_contact_on_sips
@@ -760,7 +759,9 @@ impl Dialog {
         remote_target
     }
 
-    /// Update a remote target without permitting a signaling downgrade.
+    /// Update the remote target while preserving the dialog-forming SIPS
+    /// requirement. Returns `false` when the target would downgrade a secure
+    /// dialog and leaves the existing target unchanged.
     pub fn update_remote_target(&mut self, remote_target: Uri) -> bool {
         let remote_target = self.normalize_tls_contact(remote_target);
         if self.secure_transport_required && !matches!(remote_target.scheme(), Scheme::Sips) {

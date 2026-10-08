@@ -2136,6 +2136,8 @@ pub struct Config {
 
     /// Opt-in compatibility for explicit SIP TLS Contacts on inbound SIPS calls.
     /// Requires an observed TLS transaction and preserves SIPS remote routing.
+    /// Defaults to `false`. This field is the only switch: the library reads no
+    /// environment variable for it, so embedders map deployment settings here.
     pub sip_allow_tls_contact_on_sips: bool,
 
     /// Optional local SIP TLS listener address. Used for
@@ -12032,19 +12034,6 @@ impl UnifiedCoordinator {
         }
         let transaction_manager = Arc::new(transaction_manager);
 
-        // Deployment opt-in for app-facade users that cannot supply low-level
-        // dialog configuration. Reject typos rather than silently changing policy.
-        let tls_contact_compatibility = match std::env::var("RVOIP_SIP_TLS_CONTACT_COMPATIBILITY") {
-            Ok(value) if value == "true" => true,
-            Ok(value) if value == "false" => false,
-            Err(std::env::VarError::NotPresent) => config.sip_allow_tls_contact_on_sips,
-            _ => {
-                return Err(SessionError::InternalError(
-                    "RVOIP_SIP_TLS_CONTACT_COMPATIBILITY must be true or false".into(),
-                ))
-            }
-        };
-
         // Create dialog config - use hybrid mode to support both incoming and outgoing calls
         let dialog_config = DialogManagerConfig::hybrid(config.bind_addr)
             .with_from_uri(&config.local_uri)
@@ -12055,7 +12044,7 @@ impl UnifiedCoordinator {
             .with_dialog_config(|mut dialog| {
                 dialog.advertised_local_address = config.sip_advertised_addr;
                 dialog.local_contact_uri = config.contact_uri.clone();
-                dialog.allow_tls_contact_on_sips = tls_contact_compatibility;
+                dialog.allow_tls_contact_on_sips = config.sip_allow_tls_contact_on_sips;
                 dialog.tls_local_address = dialog_tls_local_address;
                 dialog.tls_advertised_local_address = config.tls_advertised_addr;
                 dialog.max_dialogs = Some(config.dialog_index_capacity_hint());
