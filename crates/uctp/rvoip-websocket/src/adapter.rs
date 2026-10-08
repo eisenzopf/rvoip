@@ -250,6 +250,23 @@ impl UctpWsAdapter {
         }))
     }
 
+    /// Stop accepting new peers while existing peers finish naturally.
+    pub fn begin_drain(&self) {
+        self._server.begin_drain();
+    }
+
+    pub fn is_draining(&self) -> bool {
+        self._server.is_draining()
+    }
+
+    /// Cancel the listener and all inbound peers, then wait up to `budget`.
+    /// Returns true only when their cleanup is complete. On timeout cleanup
+    /// continues under the listener's ownership; calling again is safe.
+    /// Outbound clients created by `originate` are not owned by this listener.
+    pub async fn shutdown(&self, budget: std::time::Duration) -> bool {
+        self._server.shutdown(budget).await
+    }
+
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
