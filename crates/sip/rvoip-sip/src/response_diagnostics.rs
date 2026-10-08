@@ -78,12 +78,12 @@ fn reason_header(value: &str) -> Value {
             }
         }
     }
+    // A recognized `v=analytics1` parameter is itself an entry, so the
+    // profile check also rules out an empty block.
     let analytics_block = if protocol != "SIP"
         || cause != Some(603)
         || analytics_block.get("version").and_then(Value::as_str) != Some("analytics1")
     {
-        Value::Null
-    } else if analytics_block.is_empty() {
         Value::Null
     } else {
         Value::Object(analytics_block)
@@ -93,7 +93,10 @@ fn reason_header(value: &str) -> Value {
 
 /// Project only the recognized SIP 603 analytics1 profile fields. Carrier
 /// redress contacts are intentionally observable; arbitrary Reason parameters
-/// are not. URL credentials, query parameters and fragments are removed.
+/// are not. A redress URL is reduced to its origin (scheme, host and any
+/// non-default port): carriers can put the caller number or a ticket token in
+/// the path, and credentials, query and fragment are never needed to find the
+/// carrier's redress site.
 fn analytics_block_parameter(name: &str, value: &str) -> Option<(&'static str, String)> {
     let value = value.trim_matches('"').trim();
     let printable = |limit: usize| {
@@ -115,15 +118,11 @@ fn analytics_block_parameter(name: &str, value: &str) -> Option<(&'static str, S
             if !printable(256) {
                 return None;
             }
-            let mut url = url::Url::parse(value).ok()?;
+            let url = url::Url::parse(value).ok()?;
             if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
                 return None;
             }
-            url.set_username("").ok()?;
-            url.set_password(None).ok()?;
-            url.set_query(None);
-            url.set_fragment(None);
-            Some(("redress_url", url.to_string()))
+            Some(("redress_url", url.origin().ascii_serialization()))
         }
         "tel" => (value.len() <= 32
             && !value.is_empty()
@@ -278,7 +277,7 @@ mod tests {
         assert_eq!(value["analytics_block"]["location"], "terminating");
         assert_eq!(
             value["analytics_block"]["redress_url"],
-            "https://carrier.example/redress"
+            "https://carrier.example"
         );
         assert_eq!(value["analytics_block"]["redress_tel"], "+1-800-555-0100");
         assert_eq!(
@@ -305,11 +304,33 @@ mod tests {
         let result = reason_header("SIP;cause=603;v=analytics1;url=\"https://user:password@example.test/redress?token=CANARY#CANARY\"");
         assert_eq!(
             result["analytics_block"]["redress_url"],
-            "https://example.test/redress"
+            "https://example.test"
         );
         let text = result.to_string();
-        for secret in ["user", "password", "token", "CANARY"] {
+        for secret in ["user", "password", "token", "CANARY", "/redress"] {
             assert!(!text.contains(secret));
         }
+    }
+    #[test]
+    fn analytics_redress_url_keeps_only_the_origin() {
+        // Carrier redress paths can carry the blocked caller's number or a
+        // per-call ticket; only scheme, host and a non-default port survive.
+        let result = reason_header(
+            "SIP;cause=603;v=analytics1;url=\"https://carrier.example:8443/redress/+15551234567/TICKET-9F2\"",
+        );
+        assert_eq!(
+            result["analytics_block"]["redress_url"],
+            "https://carrier.example:8443"
+        );
+        let text = result.to_string();
+        for secret in ["15551234567", "TICKET", "redress/"] {
+            assert!(!text.contains(secret), "{text}");
+        }
+        let default_port =
+            reason_header("SIP;cause=603;v=analytics1;url=http://Carrier.Example:80/r/15551234567");
+        assert_eq!(
+            default_port["analytics_block"]["redress_url"],
+            "http://carrier.example"
+        );
     }
 }
