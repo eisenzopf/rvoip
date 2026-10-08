@@ -1081,7 +1081,9 @@ struct PendingSipInboundObservation {
 }
 
 enum SipInboundContextState {
-    Available(InboundConnectionContext),
+    // Boxed: the context carries fenced lifecycle identities and is far
+    // larger than the data-free `Consumed` marker kept for every call.
+    Available(Box<InboundConnectionContext>),
     Consumed,
 }
 
@@ -1206,7 +1208,7 @@ impl SipInboundContextStore {
                         pending.trusted_signaling,
                     )
                 }) {
-                    Ok(context) => SipInboundContextState::Available(context),
+                    Ok(context) => SipInboundContextState::Available(Box::new(context)),
                     Err(error) => {
                         self.by_connection
                             .entry(connection_id.clone())
@@ -1260,7 +1262,7 @@ impl SipInboundContextStore {
     fn take(&self, connection_id: &ConnectionId) -> Option<InboundConnectionContext> {
         let mut entry = self.by_connection.get_mut(connection_id)?;
         match std::mem::replace(entry.value_mut(), SipInboundContextState::Consumed) {
-            SipInboundContextState::Available(context) => Some(context),
+            SipInboundContextState::Available(context) => Some(*context),
             SipInboundContextState::Consumed => None,
         }
     }
