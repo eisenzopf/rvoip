@@ -1434,6 +1434,9 @@ pub struct Orchestrator {
     /// Owns adapter normalizers and asynchronous connection side effects so
     /// shutdown can abort and join them deterministically.
     connection_lifecycle_tasks: ConnectionLifecycleTaskSupervisor,
+    playback_tasks: ConnectionLifecycleTaskSupervisor,
+    playback_routes:
+        Arc<DashMap<crate::ids::PlaybackId, (ConnectionId, tokio_util::sync::CancellationToken)>>,
     /// Safe self-reference used by opaque tickets without requiring every
     /// existing command method to change its `&self` receiver to `&Arc<Self>`.
     self_weak: OnceLock<Weak<Orchestrator>>,
@@ -1805,6 +1808,56 @@ pub(crate) struct AiAttachmentHandle {
     pub _permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
+/// Removes the route even when a worker is aborted before its first poll.
+struct PlaybackRouteGuard {
+    routes:
+        Arc<DashMap<crate::ids::PlaybackId, (ConnectionId, tokio_util::sync::CancellationToken)>>,
+    id: crate::ids::PlaybackId,
+    completion: Option<crate::adapter::PlaybackCompletionSender>,
+}
+
+impl PlaybackRouteGuard {
+    fn finish(&mut self, outcome: PlaybackOutcome) {
+        if let Some(completion) = self.completion.take() {
+            completion.finish(outcome);
+        }
+    }
+}
+
+impl Drop for PlaybackRouteGuard {
+    fn drop(&mut self) {
+        self.routes.remove(&self.id);
+        self.finish(PlaybackOutcome::Cancelled);
+    }
+}
+
+enum StreamPlaybackSource {
+    Tts(TtsPlaybackCancelGuard),
+    Pcm(crate::playback::PcmFrameProducer),
+}
+impl StreamPlaybackSource {
+    async fn next_frame(&mut self) -> Result<Option<crate::stream::MediaFrame>> {
+        match self {
+            Self::Tts(source) => Ok(source.playback().next_frame().await),
+            Self::Pcm(source) => source.next_frame().await,
+        }
+    }
+    fn delivered(&mut self) {
+        if let Self::Pcm(source) = self {
+            source.delivered();
+        }
+    }
+    async fn finish(&mut self, outcome: PlaybackOutcome) {
+        if let Self::Tts(source) = self {
+            if outcome == PlaybackOutcome::Completed {
+                source.complete();
+            } else {
+                source.cancel().await;
+            }
+        }
+    }
+}
+
 struct TtsPlaybackCancelGuard {
     playback: Arc<dyn crate::harness::TtsPlayback>,
     completed: bool,
@@ -1869,6 +1922,10 @@ impl Orchestrator {
             prepared_outbound_supervisor: PreparedOutboundSupervisor::new(setup_capacity),
             prepared_outbound_draining: AtomicBool::new(false),
             prepared_outbound_drained: AtomicBool::new(false),
+            playback_tasks: ConnectionLifecycleTaskSupervisor::new(
+                setup_capacity.saturating_mul(4).max(64),
+            ),
+            playback_routes: Arc::new(DashMap::new()),
             connection_lifecycle_tasks: ConnectionLifecycleTaskSupervisor::new(
                 setup_capacity.saturating_mul(4).max(64),
             ),
@@ -1944,6 +2001,10 @@ impl Orchestrator {
             prepared_outbound_supervisor: PreparedOutboundSupervisor::new(setup_capacity),
             prepared_outbound_draining: AtomicBool::new(false),
             prepared_outbound_drained: AtomicBool::new(false),
+            playback_tasks: ConnectionLifecycleTaskSupervisor::new(
+                setup_capacity.saturating_mul(4).max(64),
+            ),
+            playback_routes: Arc::new(DashMap::new()),
             connection_lifecycle_tasks: ConnectionLifecycleTaskSupervisor::new(
                 setup_capacity.saturating_mul(4).max(64),
             ),
@@ -2200,7 +2261,24 @@ impl Orchestrator {
     /// prepared outbound connections first so their cleanup events can still
     /// be normalized before calling this method.
     pub async fn drain_connection_lifecycle_tasks(&self) {
+        self.drain_playback_tasks().await;
         self.connection_lifecycle_tasks.drain().await;
+    }
+
+    /// Cancel and join core-owned stream playback workers. Terminal and
+    /// idempotent. Aborted TTS providers receive best-effort asynchronous
+    /// cancellation through their existing cancellation guard.
+    pub async fn drain_playback_tasks(&self) {
+        for route in self.playback_routes.iter() {
+            route.value().1.cancel();
+        }
+        self.playback_tasks.drain().await;
+    }
+
+    /// Number of retained playback workers, after reaping completed workers.
+    #[must_use]
+    pub fn playback_task_count(&self) -> usize {
+        self.playback_tasks.task_count()
     }
 
     /// Number of retained adapter-normalizer and connection-side-effect
@@ -4878,7 +4956,17 @@ impl Orchestrator {
         });
     }
 
+    fn cancel_connection_playbacks(&self, conn: &ConnectionId) {
+        for route in self.playback_routes.iter() {
+            if &route.value().0 == conn {
+                route.value().1.cancel();
+            }
+        }
+    }
+
     fn cleanup_media_attachments_for_connection(&self, conn: &ConnectionId) {
+        self.cancel_connection_playbacks(conn);
+
         let recording_ids: Vec<_> = self
             .recordings
             .iter()
@@ -4972,6 +5060,7 @@ impl Orchestrator {
             }
             self.connections.remove(conn)
         };
+        self.cancel_connection_playbacks(conn);
         if let Some(staged) = removed
             .as_ref()
             .and_then(|(_, entry)| entry.staged_inbound_data.as_ref())
@@ -5035,6 +5124,7 @@ impl Orchestrator {
             lifecycle.generation = lifecycle.generation.saturating_add(1);
             removed
         };
+        self.cancel_connection_playbacks(&claimed.connection_id);
         debug_assert!(matches!(
             removed.1.inbound_publication,
             InboundPublicationState::Rejecting(_)
@@ -10406,6 +10496,8 @@ impl Orchestrator {
             .ok_or(RvoipError::AdmissionRejected(
                 "play_audio: TTS provider not registered",
             ))?;
+        let lifecycle_tickets =
+            self.capture_connection_lifecycles(std::slice::from_ref(&connection_id))?;
         let streams = adapter.streams(connection_id.clone()).await?;
         let audio = streams
             .into_iter()
@@ -10425,34 +10517,92 @@ impl Orchestrator {
                 codec,
             )
             .await?;
+        let playback = StreamPlaybackSource::Tts(TtsPlaybackCancelGuard::new(playback));
+        self.start_stream_playback(&lifecycle_tickets, connection_id, playback, frames_out)
+    }
+
+    /// Play caller-fed mono PCM through the negotiated audio stream. Supports
+    /// PCMU/PCMA and feature-enabled Opus; resamples/upmixes with media-core,
+    /// paces 20 ms frames, and reports acceptance by the transport queue.
+    /// Completion does not prove peer playout. Negotiation is fixed for this
+    /// playback; cancel before renegotiating the connection's audio codec.
+    pub async fn play_pcm(
+        &self,
+        connection_id: ConnectionId,
+        source: crate::playback::PcmPlaybackSource,
+    ) -> Result<PlaybackHandle> {
+        let tickets = self.capture_connection_lifecycles(std::slice::from_ref(&connection_id))?;
+        let adapter = self.adapter_for(&connection_id)?;
+        let audio = adapter
+            .streams(connection_id.clone())
+            .await?
+            .into_iter()
+            .find(|stream| stream.kind() == StreamKind::Audio)
+            .ok_or(RvoipError::AdmissionRejected(
+                "play_pcm: connection has no audio stream",
+            ))?;
+        let output = audio.try_frames_out()?;
+        let producer = crate::playback::PcmFrameProducer::new(source, audio.id(), audio.codec())?;
+        self.start_stream_playback(
+            &tickets,
+            connection_id,
+            StreamPlaybackSource::Pcm(producer),
+            output,
+        )
+    }
+
+    fn start_stream_playback(
+        &self,
+        tickets: &[ConnectionLifecycleTicket],
+        connection_id: ConnectionId,
+        mut playback: StreamPlaybackSource,
+        frames_out: mpsc::Sender<crate::stream::MediaFrame>,
+    ) -> Result<PlaybackHandle> {
         let (handle, mut cancel_rx, completion) =
             PlaybackHandle::new_tracked(crate::ids::PlaybackId::new());
-        tokio::spawn(async move {
-            let mut playback = TtsPlaybackCancelGuard::new(playback);
+        let id = handle.id().clone();
+        let terminal = tokio_util::sync::CancellationToken::new();
+        let worker_terminal = terminal.clone();
+        let mut route = PlaybackRouteGuard {
+            routes: Arc::clone(&self.playback_routes),
+            id: id.clone(),
+            completion: Some(completion),
+        };
+        let task = async move {
             let outcome = loop {
-                tokio::select! {
+                let frame = tokio::select! {
+                    biased;
                     _ = &mut cancel_rx => break PlaybackOutcome::Cancelled,
-                    frame_opt = playback.playback().next_frame() => {
-                        let Some(frame) = frame_opt else {
-                            break PlaybackOutcome::Completed;
-                        };
-                        if frames_out.send(frame).await.is_err() {
-                            break PlaybackOutcome::Failed;
-                        }
-                    }
+                    _ = worker_terminal.cancelled() => break PlaybackOutcome::Cancelled,
+                    frame = playback.next_frame() => frame,
+                };
+                let frame = match frame {
+                    Ok(Some(frame)) => frame,
+                    Ok(None) => break PlaybackOutcome::Completed,
+                    Err(_) => break PlaybackOutcome::Failed,
+                };
+                let delivered = tokio::select! {
+                    biased;
+                    _ = &mut cancel_rx => break PlaybackOutcome::Cancelled,
+                    _ = worker_terminal.cancelled() => break PlaybackOutcome::Cancelled,
+                    result = frames_out.send(frame) => result,
+                };
+                if delivered.is_err() {
+                    break PlaybackOutcome::Failed;
                 }
+                playback.delivered();
             };
-            // Every exit other than the provider's natural end-of-stream
-            // must cancel the provider explicitly: `TtsPlayback` has no
-            // Drop-cancels contract, so merely dropping it can leave remote
-            // synthesis work running.
-            if outcome == PlaybackOutcome::Completed {
-                playback.complete();
-            } else {
-                playback.cancel().await;
-            }
-            completion.finish(outcome);
-        });
+            playback.finish(outcome).await;
+            route.finish(outcome);
+        };
+        // Fence installation against terminal teardown after asynchronous
+        // stream lookup and synthesis, and against supervisor drain.
+        let guards = self.lock_connection_lifecycles(tickets)?;
+        self.playback_tasks.spawn_with_commit(task, || {
+            self.playback_routes.insert(id, (connection_id, terminal));
+            Ok(())
+        })?;
+        drop(guards);
         Ok(handle)
     }
 
