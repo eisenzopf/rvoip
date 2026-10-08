@@ -398,6 +398,8 @@ rand = "0.8"
 # `parse_action_by_name`).
 strum = { version = "0.26", features = ["derive"] }
 
+url = "2.5"
+
 [dev-dependencies]
 tokio-rustls = { workspace = true }
 tokio = { version = "1.40", features = ["full", "test-util"] }
