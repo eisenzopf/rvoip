@@ -72,6 +72,9 @@ fn header<'a>(message: &'a str, name: &str) -> &'a str {
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tls_contact_compatibility_preserves_transport_and_bidirectional_rtp() {
+    // Explicit Config is the only switch. A stale deployment variable that the
+    // library once read must not veto the opted-in case below.
+    std::env::set_var("RVOIP_SIP_TLS_CONTACT_COMPATIBILITY", "false");
     // Permit only the explicit TLS Contact, over actual TLS, with opt-in.
     for (tls, compatibility, contact_transport, accepted, local_hangup) in [
         (true, false, ";transport=tls", false, false),
