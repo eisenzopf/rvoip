@@ -21,7 +21,6 @@ struct Active {
 struct Candidate {
     ssrc: u32,
     sequence: u16,
-    timestamp: u32,
     arrival: Instant,
 }
 
@@ -66,47 +65,59 @@ impl SourceTimeline {
         };
         let previous = active.packet;
         let changed = ssrc != previous.ssrc;
+        // Receive time elapsed since the anchor, in RTP ticks. Used only where
+        // the sender's own clock cannot be trusted to place the packet.
+        let elapsed_ticks = (arrival.saturating_duration_since(active.arrival).as_nanos()
+            * u128::from(clock_rate)
+            / 1_000_000_000)
+            .min(u128::from(u32::MAX / 2)) as u32;
         let output = if !changed {
+            // Sequence numbers, not timestamps, identify duplicates and late
+            // packets (RFC 3550 section 5.1). Do not feed those into a stateful
+            // decoder. Ordinary loss, DTX gaps and wrap survive.
             let sequence_delta = sequence.wrapping_sub(previous.sequence);
-            let timestamp_delta = timestamp.wrapping_sub(previous.source_timestamp);
-            // Do not feed duplicates or late packets into a stateful decoder.
-            // Ordinary packet loss, DTX gaps and timestamp/sequence wrap survive.
-            if sequence_delta == 0
-                || sequence_delta >= (1 << 15)
-                || timestamp_delta == 0
-                || timestamp_delta >= (1 << 31)
-            {
+            if sequence_delta == 0 || sequence_delta >= (1 << 15) {
                 return None;
             }
-            previous.timestamp.wrapping_add(timestamp_delta)
+            let timestamp_delta = timestamp.wrapping_sub(previous.source_timestamp);
+            if timestamp_delta == 0 || timestamp_delta >= (1 << 31) {
+                // The sequence advanced but the clock did not: the sender
+                // reset or stepped its RTP clock without changing SSRC.
+                // Re-anchor here rather than discarding audio until the old
+                // clock catches up, which could take hours.
+                previous.timestamp.wrapping_add(
+                    active
+                        .duration_ticks
+                        .saturating_mul(u32::from(sequence_delta))
+                        .max(elapsed_ticks),
+                )
+            } else {
+                previous.timestamp.wrapping_add(timestamp_delta)
+            }
         } else {
             if self.retired.contains(&ssrc)
                 && arrival.saturating_duration_since(active.arrival) < SOURCE_QUIET
             {
                 return None;
             }
+            // Sequence continuity is the probation test. The replacement's
+            // own clock is not used to place it, so a sender whose timestamps
+            // do not advance is not locked out.
             let validated = self.candidate.is_some_and(|candidate| {
                 candidate.ssrc == ssrc
                     && sequence == candidate.sequence.wrapping_add(1)
-                    && timestamp.wrapping_sub(candidate.timestamp) > 0
-                    && timestamp.wrapping_sub(candidate.timestamp) < (1 << 31)
                     && arrival.saturating_duration_since(candidate.arrival) < SOURCE_QUIET
             });
             if !validated {
                 self.candidate = Some(Candidate {
                     ssrc,
                     sequence,
-                    timestamp,
                     arrival,
                 });
                 return None;
             }
             // Use elapsed receive time only across independent clock epochs.
             // Within an epoch the sender's clock (including silence) is kept.
-            let elapsed_ticks = (arrival.saturating_duration_since(active.arrival).as_nanos()
-                * u128::from(clock_rate)
-                / 1_000_000_000)
-                .min(u128::from(u32::MAX / 2)) as u32;
             previous
                 .timestamp
                 .wrapping_add(active.duration_ticks.max(elapsed_ticks))
@@ -236,6 +247,51 @@ mod tests {
         // One lost packet, then five seconds of DTX without a source change.
         assert_eq!(receive(&mut t, now, 7, 2, 1920), Some(1920));
         assert_eq!(receive(&mut t, now, 7, 3, 241_920), Some(241_920));
+    }
+
+    /// A sender that keeps its SSRC and sequence continuity but resets or
+    /// steps its RTP clock must keep playing, re-anchored onto the call
+    /// timeline, instead of being treated as late until the old clock
+    /// catches up.
+    #[test]
+    fn same_source_timestamp_discontinuity_reanchors_without_dropping() {
+        let now = Instant::now();
+        let ms = |n| now + Duration::from_millis(n);
+        let mut t = SourceTimeline::default();
+        assert_eq!(receive(&mut t, ms(0), 7, 10, 1_000_000), Some(1_000_000));
+        assert_eq!(receive(&mut t, ms(20), 7, 11, 1_000_960), Some(1_000_960));
+        // Clock reset to zero: re-anchored one frame later, not dropped.
+        assert_eq!(receive(&mut t, ms(40), 7, 12, 0), Some(1_001_920));
+        // The new clock is then followed exactly.
+        assert_eq!(receive(&mut t, ms(60), 7, 13, 960), Some(1_002_880));
+        // A stuck clock (no timestamp advance) still plays.
+        assert_eq!(receive(&mut t, ms(80), 7, 14, 960), Some(1_003_840));
+        // A forward step of 2^31 or more is indistinguishable from a reset.
+        let stepped = 960u32.wrapping_add(1 << 31);
+        assert_eq!(receive(&mut t, ms(100), 7, 15, stepped), Some(1_004_800));
+        // A backward step after loss accounts for the lost packets...
+        let back = stepped.wrapping_sub(50_000);
+        assert_eq!(receive(&mut t, ms(120), 7, 18, back), Some(1_007_680));
+        // ...and for receive time when that is longer (silence before reset).
+        let again = back.wrapping_sub(1);
+        assert_eq!(receive(&mut t, ms(1_120), 7, 19, again), Some(1_055_680));
+        // Duplicates and late packets are still identified by sequence.
+        assert_eq!(receive(&mut t, ms(1_140), 7, 19, again + 960), None);
+        assert_eq!(receive(&mut t, ms(1_140), 7, 17, again + 960), None);
+        assert_eq!(
+            receive(&mut t, ms(1_140), 7, 20, again + 960),
+            Some(1_056_640)
+        );
+    }
+
+    #[test]
+    fn replacement_source_with_a_stuck_clock_is_admitted() {
+        let now = Instant::now();
+        let mut t = SourceTimeline::default();
+        receive(&mut t, now, 1, 1, 100).unwrap();
+        assert_eq!(receive(&mut t, now, 2, 50, 7), None);
+        assert_eq!(receive(&mut t, now, 2, 51, 7), Some(1060));
+        assert_eq!(receive(&mut t, now, 2, 52, 7), Some(2020));
     }
 
     #[test]
