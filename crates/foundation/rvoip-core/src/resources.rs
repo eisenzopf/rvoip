@@ -23,7 +23,12 @@ pub struct CoreResourceCounts {
     pub connection_routes: usize,
     /// All retained lifecycle identities, including active identities.
     pub retained_connection_ids: usize,
-    /// Retired anti-reuse tombstones; distinct from live routing entries.
+    /// Retained lifecycle identities already marked retired (a subset of
+    /// `retained_connection_ids`), distinct from live routing entries. What a
+    /// retired row means depends on the lifecycle retention mode: in
+    /// compatibility mode it is a permanent anti-reuse tombstone, while in
+    /// bounded lifecycle mode it is a retired row still awaiting reclaim
+    /// (media shutdown or adapter cleanup), after which it leaves the count.
     pub retired_connection_ids: usize,
     /// Adapter cleanup failures/unconfirmed terminal compensation.
     pub adapter_cleanup_quarantines: usize,
