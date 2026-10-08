@@ -104,8 +104,16 @@ resource-authorization and handler-scope gates before dispatch. The default
 required scope is `uctp:conversation-control`. The handler receives the complete
 request, authenticated principal, bounded peer output channel and cancellation
 token. Replies are correlated to the request and inherit omitted Conversation,
-Session and Connection IDs. Unknown profiles return an explicit capability error;
-profile-free envelopes keep their existing dispatch path.
+Session and Connection IDs. With a handler installed, unknown profiles return an
+explicit capability error; profile-free envelopes keep their existing dispatch
+path. Without a handler the profile branch never runs, so a `payload.profile`
+field is ordinary data and the envelope is dispatched exactly as before.
+
+Handlers run inline on the peer's signaling driver, so each `handle`/`replay`
+call is bounded by `UctpCoordinatorCaps::application_handler_timeout` (default
+`APPLICATION_HANDLER_TIMEOUT`, 5 s). On expiry the handler future is dropped and
+the peer receives `error 504 transient/application-handler-timeout`; spawn
+long-running work and report it through the bounded output channel instead.
 
 The host must authorize Conversation membership and every referenced recipient
 or resource before effects, validate its profile's command schema, and persist
