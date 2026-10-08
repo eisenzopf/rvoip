@@ -242,7 +242,9 @@ impl RtpPlayoutBuffer {
     fn observe_timestamp(&mut self, timestamp: u32) {
         if let Some(previous) = self.last_timestamp {
             let step = timestamp.wrapping_sub(previous);
-            if step > 0 {
+            // A backward clock step on the same SSRC is not a frame size; a
+            // concealment frame sized from it would be gigabytes of silence.
+            if step > 0 && step < (1 << 31) {
                 self.timestamp_step = Some(step);
             }
         }
@@ -416,6 +418,32 @@ mod rtp_playout_tests {
                 samples_per_channel: 160,
                 ..
             } if *timestamp == 103 * 160
+        ));
+    }
+
+    #[test]
+    fn backward_clock_step_does_not_size_a_concealment_frame() {
+        let start = Instant::now();
+        let mut buffer = RtpPlayoutBuffer::new();
+        let at = |sequence: u16, timestamp: u32| {
+            let mut packet = packet(sequence);
+            packet.header.timestamp = timestamp;
+            packet
+        };
+        buffer.push(at(100, 1_000_000), start);
+        buffer.push(at(101, 1_000_160), start + Duration::from_millis(20));
+        // Same SSRC resets its clock, then the next packet is lost.
+        buffer.push(at(102, 0), start + Duration::from_millis(40));
+        buffer.push(at(104, 320), start + Duration::from_millis(80));
+        let ready = buffer.tick(start + Duration::from_millis(126));
+        assert_eq!(ready.iter().map(sequence).collect::<Vec<_>>(), [103, 104]);
+        assert!(matches!(
+            &ready[0],
+            RtpPlayoutItem::Gap {
+                timestamp: 160,
+                samples_per_channel: 160,
+                ..
+            }
         ));
     }
 
@@ -2434,9 +2462,11 @@ impl MediaSessionController {
                                     .as_ref()
                                     .is_some_and(|previous| !Arc::ptr_eq(previous, &codec_runtime))
                                 {
+                                    // Packets buffered under the previous codec
+                                    // cannot be decoded by this one. Frames already
+                                    // decoded are valid audio and still play.
                                     source_timeline = source_timeline::SourceTimeline::default();
                                     rtp_playout = RtpPlayoutBuffer::new();
-                                    decoded_playout = DecodedPlayoutQueue::new();
                                     metrics_ssrc = None;
                                 }
                                 receive_codec = Some(Arc::clone(&codec_runtime));
