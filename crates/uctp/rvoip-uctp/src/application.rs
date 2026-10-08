@@ -45,6 +45,11 @@ pub trait ApplicationHandler: Send + Sync {
 
     /// Authorize the principal's access to every referenced object before
     /// executing a typed protocol command. Persist idempotency before effects.
+    ///
+    /// Runs inline on the peer's signaling driver and is bounded by
+    /// `UctpCoordinatorCaps::application_handler_timeout`. On expiry the
+    /// future is dropped and the peer receives a `504` error, so long-running
+    /// work belongs on a spawned task that reports through `context.outbound`.
     async fn handle(
         &self,
         context: ApplicationContext,
