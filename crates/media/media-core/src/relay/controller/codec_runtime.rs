@@ -563,10 +563,29 @@ impl DialogCodecRuntime {
         self.encoder.lock().await.encode_packets(frame)
     }
 
+    #[cfg(test)]
     pub(super) async fn decode(&self, payload: &[u8], timestamp: u32) -> Result<AudioFrame> {
+        self.decode_source(payload, timestamp, false).await
+    }
+
+    /// Install a fresh receive decoder only after a replacement source decodes.
+    /// Preserve the independent transmit encoder and its negotiated state.
+    pub(super) async fn decode_source(
+        &self,
+        payload: &[u8],
+        timestamp: u32,
+        source_changed: bool,
+    ) -> Result<AudioFrame> {
         let (mut frame, mode_request, automatic_cmr) = {
             let mut decoder = self.decoder.lock().await;
-            let frame = decoder.decode(payload)?;
+            let frame = if source_changed {
+                let mut replacement = StatefulCodec::new(&self.format)?;
+                let frame = replacement.decode(payload)?;
+                *decoder = replacement;
+                frame
+            } else {
+                decoder.decode(payload)?
+            };
             (
                 frame,
                 decoder.take_mode_request(),
@@ -613,6 +632,57 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::net::SocketAddr;
+
+    #[cfg(feature = "opus")]
+    #[tokio::test]
+    async fn source_handoff_resets_opus_decoder_without_resetting_encoder() {
+        let format = resolve_codec(&config("opus")).unwrap();
+        let runtime = DialogCodecRuntime::new(format.clone()).unwrap();
+        let reference = DialogCodecRuntime::new(format.clone()).unwrap();
+        let source_b = DialogCodecRuntime::new(format).unwrap();
+        let tone = |hz: f64| {
+            AudioFrame::new(
+                (0..960)
+                    .flat_map(|i| {
+                        let sample = (8000.0
+                            * (i as f64 * hz * std::f64::consts::TAU / 48000.0).sin())
+                            as i16;
+                        [sample, sample]
+                    })
+                    .collect(),
+                48_000,
+                2,
+                0,
+            )
+        };
+        for _ in 0..5 {
+            // Keep both transmit encoders in identical states. Only runtime's
+            // receive decoder is primed with the previous speaker's audio.
+            let payload = runtime.encode(&tone(440.0)).await.unwrap();
+            assert_eq!(payload, reference.encode(&tone(440.0)).await.unwrap());
+            runtime.decode(&payload, 0).await.unwrap();
+        }
+        let b = source_b.encode(&tone(880.0)).await.unwrap();
+        let expected = reference.decode(&b, 960).await.unwrap();
+        let actual = runtime.decode_source(&b, 960, true).await.unwrap();
+        assert_eq!(
+            actual.samples, expected.samples,
+            "replacement uses fresh decoder state"
+        );
+        assert_eq!(
+            runtime.encode(&tone(440.0)).await.unwrap(),
+            reference.encode(&tone(440.0)).await.unwrap(),
+            "receive handoff must not reset the transmit encoder"
+        );
+
+        // An invalid replacement cannot discard the current decoder state.
+        assert!(runtime.decode_source(&[0xff], 1920, true).await.is_err());
+        let b_next = source_b.encode(&tone(880.0)).await.unwrap();
+        assert_eq!(
+            runtime.decode(&b_next, 1920).await.unwrap().samples,
+            reference.decode(&b_next, 1920).await.unwrap().samples
+        );
+    }
 
     fn config(codec: &str) -> MediaConfig {
         MediaConfig {

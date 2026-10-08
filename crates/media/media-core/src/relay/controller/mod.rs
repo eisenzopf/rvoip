@@ -48,6 +48,7 @@ use rvoip_rtp_core::{
 };
 
 mod codec_runtime;
+mod source_timeline;
 
 const RTP_REORDER_HOLD: Duration = Duration::from_millis(45);
 const RTP_REORDER_MAX_PACKETS: usize = 64;
@@ -241,7 +242,9 @@ impl RtpPlayoutBuffer {
     fn observe_timestamp(&mut self, timestamp: u32) {
         if let Some(previous) = self.last_timestamp {
             let step = timestamp.wrapping_sub(previous);
-            if step > 0 {
+            // A backward clock step on the same SSRC is not a frame size; a
+            // concealment frame sized from it would be gigabytes of silence.
+            if step > 0 && step < (1 << 31) {
                 self.timestamp_step = Some(step);
             }
         }
@@ -419,6 +422,32 @@ mod rtp_playout_tests {
     }
 
     #[test]
+    fn backward_clock_step_does_not_size_a_concealment_frame() {
+        let start = Instant::now();
+        let mut buffer = RtpPlayoutBuffer::new();
+        let at = |sequence: u16, timestamp: u32| {
+            let mut packet = packet(sequence);
+            packet.header.timestamp = timestamp;
+            packet
+        };
+        buffer.push(at(100, 1_000_000), start);
+        buffer.push(at(101, 1_000_160), start + Duration::from_millis(20));
+        // Same SSRC resets its clock, then the next packet is lost.
+        buffer.push(at(102, 0), start + Duration::from_millis(40));
+        buffer.push(at(104, 320), start + Duration::from_millis(80));
+        let ready = buffer.tick(start + Duration::from_millis(126));
+        assert_eq!(ready.iter().map(sequence).collect::<Vec<_>>(), [103, 104]);
+        assert!(matches!(
+            &ready[0],
+            RtpPlayoutItem::Gap {
+                timestamp: 160,
+                samples_per_channel: 160,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn duplicate_and_late_packets_do_not_reenter_playout() {
         let start = Instant::now();
         let mut buffer = RtpPlayoutBuffer::new();
@@ -492,8 +521,15 @@ mod rtp_playout_tests {
             .map(|sequence| RtpPlayoutItem::Packet(packet(sequence)))
             .collect();
 
-        let terminate =
-            enqueue_rtp_playout_items(burst, &runtime, &dialog_id, &mut playout, now).await;
+        let terminate = enqueue_rtp_playout_items(
+            burst,
+            &runtime,
+            &dialog_id,
+            &mut playout,
+            &mut source_timeline::SourceTimeline::default(),
+            now,
+        )
+        .await;
 
         assert!(
             !terminate,
@@ -509,6 +545,66 @@ mod rtp_playout_tests {
             0,
             "overflow drops the newest frames, not the ones already queued"
         );
+    }
+    #[tokio::test]
+    async fn selected_source_keeps_reordering_and_continuous_decoded_timestamps() {
+        let config = MediaConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            remote_addr: None,
+            preferred_codec: Some("PCMU".into()),
+            parameters: Default::default(),
+        };
+        let runtime = Arc::new(
+            codec_runtime::DialogCodecRuntime::new(codec_runtime::resolve_codec(&config).unwrap())
+                .unwrap(),
+        );
+        let mut timeline = source_timeline::SourceTimeline::default();
+        let mut reorder = RtpPlayoutBuffer::new();
+        let mut decoded = DecodedPlayoutQueue::new();
+        let now = Instant::now();
+        let mut delivered = Vec::new();
+        // Out-of-order packets inside the first source must remain reorderable.
+        for (ssrc, seq, timestamp, elapsed) in [
+            (1, 10, 14_560, 0),
+            (1, 12, 14_880, 20),
+            (1, 11, 14_720, 30),
+            (2, 80, 456_000, 40),
+            (2, 81, 456_160, 50),
+            (1, 13, 15_040, 60),
+            (2, 82, 456_320, 70),
+        ] {
+            let at = now + Duration::from_millis(elapsed);
+            if !timeline.should_buffer(ssrc, seq, timestamp, at, 8_000) {
+                continue;
+            }
+            let mut packet = packet_for_ssrc(seq, ssrc);
+            packet.header.timestamp = timestamp;
+            packet.payload = Bytes::from(vec![0x90; 160]);
+            let items = reorder.push(packet, at);
+            enqueue_rtp_playout_items(
+                items,
+                &runtime,
+                &DialogId::new("source-switch"),
+                &mut decoded,
+                &mut timeline,
+                at,
+            )
+            .await;
+        }
+        let mut deadline = now + Duration::from_secs(1);
+        while let Some(frame) = decoded.pop_due(deadline) {
+            assert!(frame.samples.iter().any(|sample| *sample != 0));
+            delivered.push(frame.timestamp);
+            deadline += Duration::from_millis(20);
+        }
+        assert_eq!(&delivered[..3], &[14_560, 14_720, 14_880]);
+        assert_eq!(
+            delivered.len(),
+            5,
+            "probation and retired-source audio do not escape"
+        );
+        assert_eq!(delivered[4].wrapping_sub(delivered[3]), 160);
+        assert!(delivered[3].wrapping_sub(delivered[2]) <= 400);
     }
 }
 
@@ -706,16 +802,33 @@ async fn enqueue_rtp_playout_items(
     codec_runtime: &Arc<codec_runtime::DialogCodecRuntime>,
     dialog_id: &DialogId,
     decoded_playout: &mut DecodedPlayoutQueue,
+    timeline: &mut source_timeline::SourceTimeline,
     arrived_at: Instant,
 ) -> bool {
     for item in items {
         let audio_frame = match item {
             RtpPlayoutItem::Packet(packet) => {
+                let Some(accepted) = timeline.prepare(
+                    packet.header.ssrc,
+                    packet.header.sequence_number,
+                    packet.header.timestamp,
+                    arrived_at,
+                    codec_runtime.format.clock_rate,
+                ) else {
+                    continue;
+                };
                 match codec_runtime
-                    .decode(&packet.payload, packet.header.timestamp)
+                    .decode_source(&packet.payload, accepted.timestamp, accepted.source_changed)
                     .await
                 {
-                    Ok(frame) => frame,
+                    Ok(frame) => {
+                        let ticks = (frame.samples_per_channel() as u64
+                            * u64::from(codec_runtime.format.clock_rate)
+                            / u64::from(frame.sample_rate.max(1)))
+                            as u32;
+                        timeline.commit(accepted, arrived_at, ticks);
+                        frame
+                    }
                     Err(error) => {
                         warn!(
                             "Failed to decode {} for dialog {}: {}",
@@ -741,7 +854,7 @@ async fn enqueue_rtp_playout_items(
                     vec![0; samples_per_channel * usize::from(codec_runtime.format.channels)],
                     codec_runtime.format.clock_rate,
                     codec_runtime.format.channels,
-                    timestamp,
+                    timeline.map_gap(timestamp),
                 )
             }
         };
@@ -2279,6 +2392,9 @@ impl MediaSessionController {
             let mut last_rtp_arrival: Option<Instant> = None;
             let mut jitter_ns = 0.0_f64;
             let mut rtp_playout = RtpPlayoutBuffer::new();
+            let mut source_timeline = source_timeline::SourceTimeline::default();
+            let mut receive_codec: Option<Arc<codec_runtime::DialogCodecRuntime>> = None;
+            let mut metrics_ssrc = None;
             let mut decoded_playout = DecodedPlayoutQueue::new();
             let mut delivery_state = RtpDeliveryState::default();
             let mut playout_tick = tokio::time::interval(Duration::from_millis(5));
@@ -2302,6 +2418,7 @@ impl MediaSessionController {
                                 &codec_runtime,
                                 &dialog_id,
                                 &mut decoded_playout,
+                                &mut source_timeline,
                                 now,
                             )
                             .await
@@ -2345,6 +2462,36 @@ impl MediaSessionController {
                                         codec_runtime.format.payload_type
                                     );
                                     continue;
+                                }
+
+                                if receive_codec
+                                    .as_ref()
+                                    .is_some_and(|previous| !Arc::ptr_eq(previous, &codec_runtime))
+                                {
+                                    // Packets buffered under the previous codec
+                                    // cannot be decoded by this one. Frames already
+                                    // decoded are valid audio and still play.
+                                    source_timeline = source_timeline::SourceTimeline::default();
+                                    rtp_playout = RtpPlayoutBuffer::new();
+                                    metrics_ssrc = None;
+                                }
+                                receive_codec = Some(Arc::clone(&codec_runtime));
+                                let arrived_at = Instant::now();
+                                if !source_timeline.should_buffer(
+                                    packet.header.ssrc,
+                                    packet.header.sequence_number,
+                                    packet.header.timestamp,
+                                    arrived_at,
+                                    codec_runtime.format.clock_rate,
+                                ) {
+                                    continue;
+                                }
+                                if metrics_ssrc != Some(packet.header.ssrc) {
+                                    last_sequence_number = None;
+                                    last_rtp_timestamp = None;
+                                    last_rtp_arrival = None;
+                                    jitter_ns = 0.0;
+                                    metrics_ssrc = Some(packet.header.ssrc);
                                 }
 
                                 if rtp_count % 10 == 0
@@ -2415,13 +2562,13 @@ impl MediaSessionController {
                                     last_rtp_arrival = Some(arrival);
                                 }
 
-                                let arrived_at = Instant::now();
                                 let playout_items = rtp_playout.push(packet, arrived_at);
                                 if enqueue_rtp_playout_items(
                                     playout_items,
                                     &codec_runtime,
                                     &dialog_id,
                                     &mut decoded_playout,
+                                    &mut source_timeline,
                                     arrived_at,
                                 )
                                 .await
