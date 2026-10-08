@@ -183,3 +183,106 @@ async fn configured_resolver_overrides_default_for_ip_literal_uri_resolution_pat
     assert_eq!(addr.to_string(), "203.0.113.7:5060");
     assert_eq!(mock.calls().len(), 1);
 }
+
+// Regression: asynchronous DNS must not retain a dialog shard write lock.
+#[derive(Default)]
+struct PausedResolver {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+#[async_trait]
+impl Resolver for PausedResolver {
+    async fn resolve(&self, _uri: &Uri) -> Result<Vec<ResolvedTarget>, ResolverError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(Vec::new())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dialog_lookup_progresses_while_outbound_dns_is_pending() {
+    use rvoip_sip_core::Method;
+    use rvoip_sip_dialog::dialog::DialogState;
+    use rvoip_sip_dialog::manager::transaction_integration::TransactionIntegration;
+    use std::time::Duration;
+    for operation in ["bye", "initial-invite", "prack"] {
+        let manager = build_manager().await;
+        let id = manager
+            .create_outgoing_dialog(
+                "sip:alice@127.0.0.1".parse().unwrap(),
+                "sip:bob@dns-pending.invalid".parse().unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        {
+            let mut dialog = manager.get_dialog_mut(&id).unwrap();
+            dialog.local_tag = Some("local-tag".into());
+            dialog.remote_tag = Some("remote-tag".into());
+            dialog.invite_cseq = Some(1);
+            if operation != "initial-invite" {
+                dialog.state = DialogState::Confirmed;
+            }
+        }
+        let resolver = Arc::new(PausedResolver::default());
+        manager.set_resolver(Some(resolver.clone()));
+        let sender = manager.clone();
+        let target = id.clone();
+        let send = tokio::spawn(async move {
+            match operation {
+                "bye" => {
+                    sender
+                        .send_request_in_dialog(&target, Method::Bye, None)
+                        .await
+                }
+                "prack" => sender.send_prack(&target, 1).await,
+                _ => {
+                    sender
+                        .send_initial_invite_with_extra_headers(
+                            &target,
+                            Some(bytes::Bytes::from_static(b"v=0\r\n")),
+                            Vec::new(),
+                            None,
+                            None,
+                            None,
+                            false,
+                        )
+                        .await
+                }
+            }
+        });
+        if tokio::time::timeout(Duration::from_secs(2), resolver.entered.notified())
+            .await
+            .is_err()
+        {
+            resolver.release.notify_one();
+            let result = tokio::time::timeout(Duration::from_secs(2), send).await;
+            panic!("{operation} did not reach paused DNS resolver: {result:?}");
+        }
+        let reader = manager.clone();
+        // A blocking pool thread bounds the regression without blocking the
+        // runtime needed to release the deliberately paused DNS request.
+        let mut lookup = tokio::task::spawn_blocking(move || reader.get_dialog_state(&id));
+        let progressed = tokio::time::timeout(Duration::from_millis(250), &mut lookup).await;
+        resolver.release.notify_one();
+        if progressed.is_err() {
+            tokio::time::timeout(Duration::from_secs(2), lookup)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        }
+        let send_result = tokio::time::timeout(Duration::from_secs(2), send)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            send_result.is_err(),
+            "empty resolver must not send a request"
+        );
+        assert!(
+            matches!(progressed, Ok(Ok(Ok(_)))),
+            "{operation} held the dialog lock during DNS"
+        );
+    }
+}
