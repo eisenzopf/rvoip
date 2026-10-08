@@ -2,6 +2,9 @@
 //! coordinator per accepted socket; envelopes ride as text frames.
 
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 
 use chrono::Utc;
 use dashmap::DashMap;
@@ -23,7 +26,18 @@ use tracing::{debug, info, warn};
 
 use crate::adapter::Route;
 
-pub struct UctpWsServer;
+pub struct UctpWsServer {
+    admission_cancel: CancellationToken,
+    peer_cancel: CancellationToken,
+    stopped: CancellationToken,
+}
+
+impl Drop for UctpWsServer {
+    fn drop(&mut self) {
+        self.admission_cancel.cancel();
+        self.peer_cancel.cancel();
+    }
+}
 
 impl UctpWsServer {
     pub(crate) fn start(
@@ -44,15 +58,27 @@ impl UctpWsServer {
         #[cfg(feature = "wss")]
         let tls_acceptor = tls.map(tokio_rustls::TlsAcceptor::from);
 
+        let admission_cancel = CancellationToken::new();
+        let peer_cancel = CancellationToken::new();
+        let stopped = CancellationToken::new();
+        let accept_cancel = admission_cancel.clone();
+        let shutdown = peer_cancel.clone();
+        let finished = stopped.clone();
         tokio::spawn(async move {
+            let mut peers = JoinSet::new();
             let connection_slots = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
             loop {
-                let (tcp, peer_addr) = match listener.accept().await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        warn!(error = %e, "rvoip-websocket: accept failed");
-                        continue;
-                    }
+                let (tcp, peer_addr) = tokio::select! {
+                    biased;
+                    _ = accept_cancel.cancelled() => break,
+                    _ = peers.join_next(), if !peers.is_empty() => continue,
+                    result = listener.accept() => match result {
+                        Ok(v) => v,
+                        Err(e) => {
+                            warn!(error = %e, "rvoip-websocket: accept failed");
+                            continue;
+                        }
+                    },
                 };
                 let permit = match Arc::clone(&connection_slots).try_acquire_owned() {
                     Ok(permit) => permit,
@@ -79,18 +105,18 @@ impl UctpWsServer {
                 let conversation_create_hook = conversation_create_hook.clone();
                 #[cfg(feature = "wss")]
                 let tls_acceptor = tls_acceptor.clone();
-                tokio::spawn(async move {
+                let peer_stop = shutdown.clone();
+                peers.spawn(async move {
                     let _permit = permit;
                     let authentication_deadline = caps.authentication_deadline;
                     #[cfg(feature = "wss")]
                     {
                         if let Some(acceptor) = tls_acceptor {
-                            let tls_stream = match tokio::time::timeout(
-                                authentication_deadline,
-                                acceptor.accept(tcp),
-                            )
-                            .await
-                            {
+                            let tls_stream = match tokio::select! {
+                                biased;
+                                _ = peer_stop.cancelled() => return,
+                                result = tokio::time::timeout(authentication_deadline, acceptor.accept(tcp)) => result,
+                            } {
                                 Ok(Ok(stream)) => stream,
                                 Ok(Err(_)) => {
                                     warn!(error_class = "tls-handshake", %peer_addr, "rvoip-websocket: TLS handshake failed");
@@ -101,12 +127,11 @@ impl UctpWsServer {
                                     return;
                                 }
                             };
-                            let ws = match tokio::time::timeout(
-                                authentication_deadline,
-                                tokio_tungstenite::accept_async(tls_stream),
-                            )
-                            .await
-                            {
+                            let ws = match tokio::select! {
+                                biased;
+                                _ = peer_stop.cancelled() => return,
+                                result = tokio::time::timeout(authentication_deadline, tokio_tungstenite::accept_async(tls_stream)) => result,
+                            } {
                                 Ok(Ok(ws)) => ws,
                                 Ok(Err(_)) => {
                                     warn!(error_class = "websocket-upgrade", %peer_addr, "rvoip-websocket: handshake failed (wss)");
@@ -121,6 +146,7 @@ impl UctpWsServer {
                             metrics::gauge!("uctp_active_connections", "transport" => "websocket")
                                 .increment(1.0);
                             spawn_peer_session(
+                                peer_stop,
                                 ws,
                                 bearer,
                                 events_tx,
@@ -141,12 +167,11 @@ impl UctpWsServer {
                         }
                     }
 
-                    let ws = match tokio::time::timeout(
-                        authentication_deadline,
-                        tokio_tungstenite::accept_async(tcp),
-                    )
-                    .await
-                    {
+                    let ws = match tokio::select! {
+                        biased;
+                        _ = peer_stop.cancelled() => return,
+                        result = tokio::time::timeout(authentication_deadline, tokio_tungstenite::accept_async(tcp)) => result,
+                    } {
                         Ok(Ok(ws)) => ws,
                         Ok(Err(e)) => {
                             warn!(error = %e, %peer_addr, "rvoip-websocket: handshake failed");
@@ -161,6 +186,7 @@ impl UctpWsServer {
                     metrics::gauge!("uctp_active_connections", "transport" => "websocket")
                         .increment(1.0);
                     spawn_peer_session(
+                        peer_stop,
                         ws,
                         bearer,
                         events_tx,
@@ -179,8 +205,38 @@ impl UctpWsServer {
                         .decrement(1.0);
                 });
             }
+            // Release the port before awaiting active peers. Completed peers are
+            // reaped during admission so the task registry stays bounded.
+            drop(listener);
+            while peers.join_next().await.is_some() {}
+            finished.cancel();
         });
-        Arc::new(Self)
+        Arc::new(Self {
+            admission_cancel,
+            peer_cancel,
+            stopped,
+        })
+    }
+
+    /// Stop admission; existing peers may finish naturally.
+    pub fn begin_drain(&self) {
+        self.admission_cancel.cancel();
+    }
+
+    pub fn is_draining(&self) -> bool {
+        self.admission_cancel.is_cancelled()
+    }
+
+    /// Stop admission and cancel every peer, including incomplete upgrades.
+    /// Returns true only after listener and peer cleanup have completed.
+    /// A false result limits this caller's wait; owned cleanup continues and
+    /// a later call can wait again. Concurrent calls are safe and idempotent.
+    pub async fn shutdown(&self, budget: Duration) -> bool {
+        self.begin_drain();
+        self.peer_cancel.cancel();
+        tokio::time::timeout(budget, self.stopped.cancelled())
+            .await
+            .is_ok()
     }
 }
 
@@ -209,6 +265,7 @@ fn build_connection(sid: SessionId, from: String) -> (ConnectionId, Connection) 
 }
 
 async fn spawn_peer_session<S>(
+    peer_stop: CancellationToken,
     ws: tokio_tungstenite::WebSocketStream<S>,
     bearer: Arc<dyn BearerValidator>,
     events_tx: mpsc::Sender<OrchestratorAdapterEvent>,
@@ -293,8 +350,17 @@ async fn spawn_peer_session<S>(
     let by_uctp_sid_for_inbound = Arc::clone(&by_uctp_sid);
     #[cfg(feature = "media-webrtc")]
     let route_out_tx_for_inbound = route_out_tx.clone();
+    let inbound_stop = peer_stop.clone();
     let inbound_pump = tokio::spawn(async move {
-        while let Some(msg) = stream.next().await {
+        loop {
+            let msg = tokio::select! {
+                biased;
+                _ = inbound_stop.cancelled() => return,
+                msg = stream.next() => match msg {
+                    Some(msg) => msg,
+                    None => return,
+                },
+            };
             match msg {
                 Ok(Message::Text(text)) => match serde_json::from_str::<UctpEnvelope>(&text) {
                     Ok(env) => {
@@ -310,7 +376,7 @@ async fn spawn_peer_session<S>(
                                 .await;
                             }
                         }
-                        if in_tx_for_pump.send(env).await.is_err() {
+                        if !send_inbound(&in_tx_for_pump, env, &inbound_stop).await {
                             return;
                         }
                     }
@@ -834,7 +900,15 @@ async fn spawn_peer_session<S>(
 
     let _ = rvoip_uctp::state::supervise_peer_tasks(
         Arc::clone(&coord),
-        vec![inbound_pump, outbound_pump, event_pump, auth_guard],
+        vec![
+            inbound_pump,
+            outbound_pump,
+            event_pump,
+            auth_guard,
+            tokio::spawn(async move {
+                peer_stop.cancelled().await;
+            }),
+        ],
         drain_grace,
     )
     .await;
@@ -1228,4 +1302,42 @@ fn spawn_trickle_ice_pump_with_cancel(
             }
         }
     });
+}
+
+// Cancellation must also win while the bounded coordinator queue is full.
+async fn send_inbound(
+    sender: &mpsc::Sender<UctpEnvelope>,
+    envelope: UctpEnvelope,
+    stop: &CancellationToken,
+) -> bool {
+    tokio::select! {
+        biased;
+        _ = stop.cancelled() => false,
+        result = sender.send(envelope) => result.is_ok(),
+    }
+}
+
+#[cfg(test)]
+mod listener_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn shutdown_interrupts_a_full_coordinator_queue() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let envelope = UctpEnvelope::new(
+            rvoip_uctp::types::MessageType::AuthHello,
+            serde_json::json!({}),
+        );
+        sender.send(envelope.clone()).await.unwrap();
+        let stop = CancellationToken::new();
+        let send = send_inbound(&sender, envelope.clone(), &stop);
+        tokio::pin!(send);
+        assert!(futures::poll!(&mut send).is_pending());
+        stop.cancel();
+        assert!(!tokio::time::timeout(Duration::from_secs(1), send)
+            .await
+            .unwrap());
+        assert_eq!(receiver.recv().await.unwrap().id, envelope.id);
+        assert!(receiver.try_recv().is_err());
+    }
 }
