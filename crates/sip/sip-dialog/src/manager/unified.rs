@@ -2007,6 +2007,7 @@ impl UnifiedDialogManager {
                 local_tag,
             )
             .map_err(|_error| ApiError::protocol("Failed to build SUBSCRIBE"))?;
+            drop(dialog);
             let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(
                 &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
             )
@@ -2184,6 +2185,7 @@ impl UnifiedDialogManager {
             for hdr in extra_headers {
                 request.headers.push(hdr);
             }
+            drop(dialog);
             let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(
                 &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
             )

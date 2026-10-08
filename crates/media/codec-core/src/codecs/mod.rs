@@ -74,6 +74,11 @@ use crate::error::{CodecError, Result};
 use crate::types::{AudioCodec, CodecConfig, CodecInfo, CodecType};
 use std::collections::HashMap;
 
+// The ITU-T G.711 reference algorithms back the always-compiled `utils`
+// helpers, so they build even when the `g711` codec feature is disabled.
+#[path = "g711/reference.rs"]
+pub(crate) mod g711_reference;
+
 // Codec implementations
 #[cfg(feature = "g711")]
 pub mod g711;

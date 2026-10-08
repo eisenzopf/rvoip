@@ -60,7 +60,7 @@
 
 use crate::error::CodecError;
 
-mod reference;
+use super::g711_reference as reference;
 
 #[cfg(test)]
 pub mod tests;

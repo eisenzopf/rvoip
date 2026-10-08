@@ -4047,6 +4047,7 @@ async fn retired_connection_id_budget_saturates_fail_closed() {
         Err(RvoipError::InvalidState(_))
     ));
     orchestrator.configure_connection_id_budget(2).unwrap();
+    assert_eq!(orchestrator.connection_id_budget_usage(), (0, 2));
     let mut admissions = orchestrator
         .install_inbound_admission_gate(1, Duration::from_secs(1))
         .unwrap();
@@ -4066,6 +4067,10 @@ async fn retired_connection_id_budget_saturates_fail_closed() {
             .await
             .unwrap();
         wait_for_count(&counts.reject, expected_rejections).await;
+        assert_eq!(
+            orchestrator.connection_id_budget_usage(),
+            (expected_rejections, 2)
+        );
     }
     assert!(matches!(
         orchestrator.configure_connection_id_budget(3),

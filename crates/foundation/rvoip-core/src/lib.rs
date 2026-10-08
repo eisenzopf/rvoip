@@ -136,6 +136,7 @@ pub mod message;
 pub mod operational_events;
 pub mod orchestrator;
 pub mod participant;
+pub mod playback;
 pub mod resources;
 pub mod rtp_boundary;
 pub mod session;
