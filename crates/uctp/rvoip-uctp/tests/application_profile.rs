@@ -219,7 +219,14 @@ async fn absent_or_unknown_profiles_do_not_reach_an_application_handler() {
         let mut command = request();
         command.payload["profile"] = json!("uninstalled/control-v1");
         input.send(command).await.unwrap();
-        assert_eq!(receive(&mut output).await.payload["code"], 501);
+        let reply = receive(&mut output).await;
+        if installed {
+            assert_eq!(reply.payload["code"], 501);
+        } else {
+            // Stock deployments never take the profile branch: a `profile`
+            // field is ordinary payload data on the legacy dispatch path.
+            assert_eq!(reply.payload["reason"], "malformed-data-message");
+        }
         // A profile-free envelope still follows legacy message dispatch.
         let mut legacy = request();
         legacy.payload.as_object_mut().unwrap().remove("profile");
@@ -228,4 +235,98 @@ async fn absent_or_unknown_profiles_do_not_reach_an_application_handler() {
         assert_eq!(handler.effects.load(Ordering::SeqCst), 0);
         coordinator.shutdown().await;
     }
+}
+
+#[tokio::test]
+async fn profile_field_without_installed_handler_keeps_legacy_dispatch() {
+    // A stock coordinator (no handler) must treat a string `payload.profile`
+    // as plain data: an unauthenticated peer still gets the legacy 401, and
+    // an authenticated `message.send` reaches the legacy handler, which
+    // answers exactly as it does for the profile-free envelope.
+    let (coordinator, input, mut output) = coordinator(None, bearer_stub());
+    authenticate(&input, &mut output).await;
+    let with_profile = request();
+    let mut without_profile = request();
+    without_profile
+        .payload
+        .as_object_mut()
+        .unwrap()
+        .remove("profile");
+    input.send(without_profile).await.unwrap();
+    let legacy = receive(&mut output).await;
+    input.send(with_profile).await.unwrap();
+    let profiled = receive(&mut output).await;
+    assert_eq!(legacy.msg_type, MessageType::Error);
+    assert_eq!(profiled.payload["code"], legacy.payload["code"]);
+    assert_eq!(profiled.payload["reason"], legacy.payload["reason"]);
+    assert_ne!(profiled.payload["code"], 501);
+    coordinator.shutdown().await;
+}
+
+struct NeverCompletes {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl ApplicationHandler for NeverCompletes {
+    fn profile(&self) -> &'static str {
+        "example/control-v1"
+    }
+
+    async fn handle(
+        &self,
+        _context: ApplicationContext,
+        _request: UctpEnvelope,
+    ) -> Result<UctpEnvelope, ApplicationError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn stalled_application_handler_times_out_without_wedging_the_peer() {
+    use rvoip_uctp::state::UctpCoordinatorCaps;
+
+    let (input, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (output, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (events, _events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let caps = UctpCoordinatorCaps {
+        application_handler_timeout: Duration::from_millis(200),
+        ..Default::default()
+    };
+    let coordinator = UctpCoordinator::start_full_with_caps(
+        "websocket",
+        in_rx,
+        output,
+        events,
+        bearer_stub(),
+        Arc::new(rvoip_uctp::state::default_v0_descriptor()),
+        rvoip_uctp::state::rejecting_handler(),
+        caps,
+    );
+    let handler = Arc::new(NeverCompletes {
+        calls: AtomicUsize::new(0),
+    });
+    coordinator.set_application_handler(handler.clone());
+    authenticate(&input, &mut out_rx).await;
+
+    let request = request();
+    input.send(request.clone()).await.unwrap();
+    let timed_out = receive(&mut out_rx).await;
+    assert_eq!(timed_out.msg_type, MessageType::Error);
+    assert_eq!(timed_out.payload["code"], 504);
+    assert_eq!(timed_out.payload["reason"], "application-handler-timeout");
+    assert_eq!(timed_out.in_reply_to.as_deref(), Some(request.id.as_str()));
+    assert_eq!(handler.calls.load(Ordering::SeqCst), 1);
+
+    // The peer driver is free again: legacy signaling is still serviced.
+    let mut legacy = UctpEnvelope::new(
+        MessageType::MessageSend,
+        json!({"to":["part_recipient"], "medium":"sms", "body":"fixture"}),
+    );
+    legacy.connid = Some("conn_profile".into());
+    input.send(legacy.clone()).await.unwrap();
+    let after = receive(&mut out_rx).await;
+    assert_eq!(after.in_reply_to.as_deref(), Some(legacy.id.as_str()));
+    coordinator.shutdown().await;
 }

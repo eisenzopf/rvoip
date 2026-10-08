@@ -56,6 +56,15 @@ pub const ENVELOPE_CHANNEL_CAP: usize = 256;
 /// `signaling_send_timeout` to [`UctpCoordinator::start_full_with_caps`].
 pub const SIGNALING_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Default bound on one installed
+/// [`ApplicationHandler`](crate::application::ApplicationHandler) call.
+/// Handlers run inline on the per-peer driver, so a host handler that never
+/// completes would otherwise stall that peer's signaling. On expiry the
+/// handler future is dropped and the peer receives
+/// `error 504 transient/application-handler-timeout`. Override via
+/// [`UctpCoordinatorCaps::application_handler_timeout`].
+pub const APPLICATION_HANDLER_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Default per-peer Session cap. A coordinator that has more than this
 /// many `Inviting`/`Active`/`Ending` sessions refuses further
 /// `session.invite` envelopes with `error 429 too-many-sessions`. v0.x
@@ -203,6 +212,9 @@ pub struct UctpCoordinatorCaps {
     pub replay_protection: Option<Duration>,
     /// Scope requirements for authenticated inbound commands.
     pub scope_policy: UctpScopePolicy,
+    /// Upper bound on one application-profile handler call. See
+    /// [`APPLICATION_HANDLER_TIMEOUT`].
+    pub application_handler_timeout: Duration,
 }
 
 impl Default for UctpCoordinatorCaps {
@@ -215,6 +227,7 @@ impl Default for UctpCoordinatorCaps {
             max_streams_per_connection: MAX_STREAMS_PER_CONNECTION,
             replay_protection: Some(DEFAULT_REPLAY_WINDOW),
             scope_policy: UctpScopePolicy::secure_defaults(),
+            application_handler_timeout: APPLICATION_HANDLER_TIMEOUT,
         }
     }
 }
@@ -1175,21 +1188,26 @@ impl UctpCoordinator {
         }
         // Explicit profile commands share the wire/auth gates but retain their
         // complete application context, including recipients and request IDs.
-        if let Some(profile) = env.payload.get("profile").and_then(|v| v.as_str()) {
+        // The branch is opt-in: without an installed handler, a `profile`
+        // payload field is ordinary data and the envelope keeps its legacy
+        // dispatch path below.
+        let profile_request = self.application_handler.get().and_then(|handler| {
+            env.payload
+                .get("profile")
+                .and_then(|v| v.as_str())
+                .map(|profile| (Arc::clone(handler), handler.profile() == profile))
+        });
+        if let Some((handler, profile_matches)) = profile_request {
             if !self.require_authenticated(&env).await?
                 || !self.require_resource_authorization(&env).await?
             {
                 return Ok(());
             }
-            let Some(handler) = self
-                .application_handler
-                .get()
-                .filter(|h| h.profile() == profile)
-            else {
+            if !profile_matches {
                 return self
                     .emit_error(env.id, 501, "capability", "unsupported-application-profile")
                     .await;
-            };
+            }
             let Some(principal) = self.authenticated_principal() else {
                 return Ok(());
             };
@@ -1207,14 +1225,34 @@ impl UctpCoordinator {
             let cid = env.cid.clone();
             let sid = env.sid.clone();
             let connid = env.connid.clone();
+            let profile = handler.profile();
+            let bound = self.caps.application_handler_timeout;
             let result = if self.record_replay_id(&env, false) {
-                handler.handle(context, env).await
+                tokio::time::timeout(bound, handler.handle(context, env)).await
             } else {
-                handler.replay(context, env).await
+                tokio::time::timeout(bound, handler.replay(context, env)).await
             };
             let mut reply = match result {
-                Ok(reply) => reply,
-                Err(error) => UctpEnvelope::new(
+                Ok(Ok(reply)) => reply,
+                Err(_elapsed) => {
+                    warn!(
+                        transport = %self.transport,
+                        profile,
+                        timeout_ms = bound.as_millis() as u64,
+                        "uctp.coordinator: application handler timed out"
+                    );
+                    return self
+                        .emit_error_full(
+                            request_id,
+                            504,
+                            "transient",
+                            "application-handler-timeout",
+                            sid,
+                            connid,
+                        )
+                        .await;
+                }
+                Ok(Err(error)) => UctpEnvelope::new(
                     MessageType::Error,
                     serde_json::json!({
                         "code": error.code, "category": "application", "reason": error.reason
