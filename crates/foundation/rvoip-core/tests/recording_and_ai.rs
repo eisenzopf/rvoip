@@ -248,19 +248,35 @@ async fn recording_collects_frames_and_stop_produces_artifact() {
     assert_eq!(sink.bytes().len(), 8);
 }
 
-/// TTS provider emitting a fixed number of one-byte frames, so a test can
-/// assert exactly what `play_audio` pumped into the stream.
+/// TTS provider emitting a fixed number of destination-encoded frames, so a
+/// test can assert exactly what `play_audio` pumped into the stream. It
+/// records the request so tests can check what the provider was told.
 struct CountedTts {
     frames: usize,
-    codec_seen: Arc<std::sync::atomic::AtomicBool>,
+    request_seen: Arc<Mutex<Option<rvoip_harness::TtsRequest>>>,
+}
+
+impl CountedTts {
+    fn new(frames: usize) -> Self {
+        Self {
+            frames,
+            request_seen: Arc::default(),
+        }
+    }
 }
 
 struct CountedPlayback {
     remaining: Mutex<usize>,
+    codec: CodecInfo,
 }
 
 #[async_trait::async_trait]
 impl rvoip_harness::TtsPlayback for CountedPlayback {
+    fn audio_format(&self) -> rvoip_harness::TtsAudioFormat {
+        rvoip_harness::TtsAudioFormat::Encoded {
+            codec: self.codec.clone(),
+        }
+    }
     async fn next_frame(&self) -> Option<MediaFrame> {
         let mut remaining = self.remaining.lock().unwrap();
         if *remaining == 0 {
@@ -285,24 +301,17 @@ impl rvoip_harness::TtsPlayback for CountedPlayback {
 impl rvoip_harness::TtsProvider for CountedTts {
     async fn synthesize(
         &self,
-        _request: rvoip_harness::TtsRequest,
+        request: rvoip_harness::TtsRequest,
     ) -> RvResult<Box<dyn rvoip_harness::TtsPlayback>> {
+        let codec = request
+            .destination_codec
+            .clone()
+            .expect("play_audio names the destination codec");
+        *self.request_seen.lock().unwrap() = Some(request);
         Ok(Box::new(CountedPlayback {
             remaining: Mutex::new(self.frames),
+            codec,
         }))
-    }
-    async fn synthesize_for_codec(
-        &self,
-        request: rvoip_harness::TtsRequest,
-        codec: CodecInfo,
-    ) -> RvResult<Box<dyn rvoip_harness::TtsPlayback>> {
-        self.codec_seen
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(codec.name, "PCMU");
-        assert_eq!(codec.clock_rate_hz, 8_000);
-        assert_eq!(codec.channels, 1);
-        assert_eq!(request.sample_rate_hz, Some(codec.clock_rate_hz));
-        self.synthesize(request).await
     }
 }
 
@@ -313,14 +322,9 @@ impl rvoip_harness::TtsProvider for CountedTts {
 #[tokio::test]
 async fn play_audio_tts_pumps_synthesized_frames_into_the_stream() {
     let (orch, _tx, stream, connid) = setup().await;
-    let codec_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    orch.register_tts_provider(
-        "counted",
-        Arc::new(CountedTts {
-            frames: 5,
-            codec_seen: codec_seen.clone(),
-        }),
-    );
+    let tts = Arc::new(CountedTts::new(5));
+    let request_seen = Arc::clone(&tts.request_seen);
+    orch.register_tts_provider("counted", tts);
 
     let _handle = orch
         .play_audio(
@@ -343,9 +347,14 @@ async fn play_audio_tts_pumps_synthesized_frames_into_the_stream() {
         }
     }
     assert_eq!(received, 5, "all synthesized frames reach the stream");
-    assert!(
-        codec_seen.load(std::sync::atomic::Ordering::SeqCst),
-        "destination codec must reach the provider"
+    let request = request_seen.lock().unwrap().take().expect("synthesized");
+    let codec = request.destination_codec.expect("destination codec");
+    assert_eq!(codec.name, "PCMU");
+    assert_eq!(codec.clock_rate_hz, 8_000);
+    assert_eq!(codec.channels, 1);
+    assert_eq!(
+        request.sample_rate_hz, None,
+        "an RTP clock rate is never passed off as a PCM rate"
     );
 }
 
@@ -402,6 +411,17 @@ struct ObservedPlayback {
 }
 #[async_trait::async_trait]
 impl rvoip_harness::TtsPlayback for ObservedPlayback {
+    fn audio_format(&self) -> rvoip_harness::TtsAudioFormat {
+        rvoip_harness::TtsAudioFormat::Encoded {
+            codec: CodecInfo {
+                name: "PCMU".into(),
+                clock_rate_hz: 8_000,
+                channels: 1,
+                fmtp: None,
+                payload_type: None,
+            },
+        }
+    }
     async fn next_frame(&self) -> Option<MediaFrame> {
         self.requested.notify_one();
         Some(playback_test_frame())
@@ -521,7 +541,7 @@ async fn playback_drain_joins_workers_and_rejects_restart() {
 #[tokio::test]
 async fn playback_reports_completion_and_delivery_failure() {
     let (orch, _tx, stream, conn) = setup().await;
-    orch.register_tts_provider("counted", Arc::new(CountedTts { frames: 5 }));
+    orch.register_tts_provider("counted", Arc::new(CountedTts::new(5)));
     let source = || rvoip_core::commands::AudioSource::TtsRequest {
         provider_ref: "counted".into(),
         text: "test".into(),
