@@ -67,6 +67,8 @@ parking_lot = { workspace = true }
 # path-only so packaging rvoip-core does not require an unpublished harness.
 rvoip-harness = { path = "../../extensions/rvoip-harness" }
 tracing-subscriber.workspace = true
+# Paused-clock tests prove real-time playback pacing deterministically.
+tokio = { workspace = true, features = ["test-util"] }
 
 [[example]]
 name = "sip_only_orchestrator"

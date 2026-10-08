@@ -5,6 +5,7 @@
 //! in `rvoip-harness` (which re-exports these and supplies no-op
 //! defaults).
 
+use crate::capability::CodecInfo;
 use crate::error::Result;
 use crate::ids::{ConnectionId, ParticipantId, RecordingId, StreamId};
 use crate::stream::MediaFrame;
@@ -73,11 +74,25 @@ pub trait AsrProvider: Send + Sync {
 
 // --- TTS ---------------------------------------------------------------
 
+/// One synthesis request.
+///
+/// `destination_codec` is the codec negotiated on the stream the audio will
+/// be played into, when there is one (`Orchestrator::play_audio` always sets
+/// it; offline synthesis leaves it `None`). A provider that can synthesize
+/// directly in that codec may do so and report
+/// [`TtsAudioFormat::Encoded`]; every other provider reports
+/// [`TtsAudioFormat::PcmS16Le`] and rvoip encodes for the destination.
+///
+/// `sample_rate_hz` is an optional PCM-rate *preference* and is never derived
+/// from the destination codec: an RTP clock rate is not a PCM rate (Opus is
+/// always 48000 on the wire, G.722 is 8000 on the wire but 16 kHz audio).
+/// `play_audio` leaves it `None`, so the provider picks its native rate.
 #[derive(Clone, Default)]
 pub struct TtsRequest {
     pub voice: Option<String>,
     pub text: String,
     pub sample_rate_hz: Option<u32>,
+    pub destination_codec: Option<CodecInfo>,
 }
 
 impl fmt::Debug for TtsRequest {
@@ -88,12 +103,36 @@ impl fmt::Debug for TtsRequest {
             .field("text_present", &!self.text.is_empty())
             .field("text_bytes", &self.text.len())
             .field("sample_rate_hz", &self.sample_rate_hz)
+            .field("destination_codec", &self.destination_codec)
             .finish()
     }
 }
 
+/// What the payloads of a [`TtsPlayback`]'s frames contain.
+///
+/// rvoip never forwards TTS payloads it cannot describe: the format decides
+/// whether frames are encoded for the destination or only re-labelled, and
+/// in both cases delivery is paced at real time (one 20 ms frame per 20 ms).
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TtsAudioFormat {
+    /// Mono signed 16-bit little-endian PCM at `sample_rate_hz` (8, 16, 24,
+    /// 32 or 48 kHz). Frames may carry any number of samples; rvoip
+    /// re-frames them into 20 ms chunks, zero-pads the final chunk, and
+    /// encodes through the same encoder as `Orchestrator::play_pcm`.
+    PcmS16Le { sample_rate_hz: u32 },
+    /// Already encoded in `codec`, which must match the request's
+    /// `destination_codec` by name, clock rate and channel count. Each frame
+    /// must hold exactly one 20 ms packet. rvoip stamps the destination
+    /// stream id, negotiated payload type and RTP timestamps.
+    Encoded { codec: CodecInfo },
+}
+
 #[async_trait]
 pub trait TtsPlayback: Send + Sync {
+    /// The format of every frame this playback yields. Must not change
+    /// during the playback.
+    fn audio_format(&self) -> TtsAudioFormat;
     async fn next_frame(&self) -> Option<MediaFrame>;
     async fn cancel(&self) -> Result<()>;
 }
@@ -215,6 +254,13 @@ mod diagnostic_tests {
                     voice: Some(CANARY.into()),
                     text: CANARY.into(),
                     sample_rate_hz: Some(48_000),
+                    destination_codec: Some(CodecInfo {
+                        name: CANARY.into(),
+                        clock_rate_hz: 8_000,
+                        channels: 1,
+                        fmtp: Some(CANARY.into()),
+                        payload_type: Some(0),
+                    }),
                 }
             ),
             format!(

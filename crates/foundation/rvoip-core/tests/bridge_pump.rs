@@ -36,7 +36,7 @@ use rvoip_core::{
 };
 use rvoip_harness::{
     AsrConfig, AsrProvider, AsrResult, AsrStream, DialogAction, DialogManager, ListenOnlyDialog,
-    NoOpTtsProvider, TtsPlayback, TtsProvider, TtsRequest, VecRecordingSink,
+    NoOpTtsProvider, TtsAudioFormat, TtsPlayback, TtsProvider, TtsRequest, VecRecordingSink,
 };
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::{mpsc, Barrier, Notify};
@@ -495,6 +495,7 @@ struct CountingTtsProvider {
 struct CountingTtsPlayback {
     cancellations: Arc<AtomicUsize>,
     frame_delivered: AtomicBool,
+    codec: CodecInfo,
 }
 
 #[async_trait]
@@ -577,17 +578,23 @@ impl DialogManager for SayDialog {
 impl TtsProvider for CountingTtsProvider {
     async fn synthesize(
         &self,
-        _request: TtsRequest,
+        request: TtsRequest,
     ) -> rvoip_core::error::Result<Box<dyn TtsPlayback>> {
         Ok(Box::new(CountingTtsPlayback {
             cancellations: Arc::clone(&self.cancellations),
             frame_delivered: AtomicBool::new(false),
+            codec: request.destination_codec.unwrap_or_default(),
         }))
     }
 }
 
 #[async_trait]
 impl TtsPlayback for CountingTtsPlayback {
+    fn audio_format(&self) -> TtsAudioFormat {
+        TtsAudioFormat::Encoded {
+            codec: self.codec.clone(),
+        }
+    }
     async fn next_frame(&self) -> Option<MediaFrame> {
         if !self.frame_delivered.swap(true, Ordering::AcqRel) {
             return Some(mk_frame(StreamId::new(), 7));

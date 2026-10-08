@@ -77,6 +77,11 @@ impl TtsProvider for NoOpTtsProvider {
 
 #[async_trait]
 impl TtsPlayback for NoOpTtsPlayback {
+    fn audio_format(&self) -> TtsAudioFormat {
+        TtsAudioFormat::PcmS16Le {
+            sample_rate_hz: 8_000,
+        }
+    }
     async fn next_frame(&self) -> Option<MediaFrame> {
         None
     }

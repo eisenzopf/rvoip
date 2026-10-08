@@ -958,6 +958,59 @@ impl WriterFault {
     }
 }
 
+/// Classify transport failures without formatting provider bodies, URLs or
+/// underlying error messages, which can contain credentials.
+fn websocket_write_error_class(error: &tokio_tungstenite::tungstenite::Error) -> &'static str {
+    use std::io::ErrorKind;
+    use tokio_tungstenite::tungstenite::Error;
+    match error {
+        Error::ConnectionClosed | Error::AlreadyClosed => "closed",
+        Error::Io(error) => match error.kind() {
+            ErrorKind::ConnectionReset => "connection-reset",
+            ErrorKind::ConnectionAborted => "connection-aborted",
+            ErrorKind::BrokenPipe => "broken-pipe",
+            ErrorKind::TimedOut => "io-timeout",
+            ErrorKind::WouldBlock => "would-block",
+            _ => "io",
+        },
+        Error::Protocol(_) => "protocol",
+        Error::Capacity(_) => "capacity",
+        Error::Tls(_) => "tls",
+        _ => "other",
+    }
+}
+
+#[cfg(test)]
+mod writer_diagnostics_tests {
+    use super::websocket_write_error_class;
+    use std::io::{Error as IoError, ErrorKind};
+    use tokio_tungstenite::tungstenite::{error::ProtocolError, Error};
+
+    #[test]
+    fn write_errors_are_distinguishable_without_exposing_underlying_details() {
+        for (kind, expected) in [
+            (ErrorKind::ConnectionReset, "connection-reset"),
+            (ErrorKind::BrokenPipe, "broken-pipe"),
+            (ErrorKind::TimedOut, "io-timeout"),
+            (ErrorKind::Other, "io"),
+        ] {
+            let error = Error::Io(IoError::new(kind, "private-provider-url-and-credential"));
+            assert_eq!(websocket_write_error_class(&error), expected);
+        }
+        assert_eq!(websocket_write_error_class(&Error::AlreadyClosed), "closed");
+        assert_eq!(
+            websocket_write_error_class(&Error::ConnectionClosed),
+            "closed"
+        );
+        assert_eq!(
+            websocket_write_error_class(&Error::Protocol(
+                ProtocolError::ResetWithoutClosingHandshake
+            )),
+            "protocol"
+        );
+    }
+}
+
 /// Owns the socket's sink half so a slow write cannot park the session loop.
 ///
 /// FreeSWITCH's media model rests on the media thread never blocking on a
@@ -977,6 +1030,12 @@ async fn run_socket_writer(
 ) -> futures::stream::SplitSink<VapiSocket, WebSocketMessage> {
     use futures::SinkExt;
     let mut consecutive_media_timeouts: u32 = 0;
+    let started = tokio::time::Instant::now();
+    let mut last_report = started;
+    let mut attempted_media_messages = 0u64;
+    let mut attempted_media_bytes = 0u64;
+    let mut completed_media_messages = 0u64;
+    let mut largest_media_message_bytes = 0usize;
     loop {
         // M3: control and media used to share one channel, so an uplink stall
         // backed Pings, Pongs and commands up behind a media queue that drains
@@ -1013,15 +1072,31 @@ async fn run_socket_writer(
             WriteRequest::Media(message) => (message, config.media_write_timeout, true),
             WriteRequest::Control(message) => (message, config.websocket_io_timeout, false),
         };
+        let message_bytes = message.len();
+        if is_media {
+            attempted_media_messages = attempted_media_messages.saturating_add(1);
+            attempted_media_bytes = attempted_media_bytes.saturating_add(message_bytes as u64);
+            largest_media_message_bytes = largest_media_message_bytes.max(message_bytes);
+        }
         let sent = tokio::time::timeout(deadline, sink.send(message)).await;
         drop(delivery_guard);
         match sent {
             Ok(Ok(())) => {
                 if is_media {
                     consecutive_media_timeouts = 0;
+                    completed_media_messages = completed_media_messages.saturating_add(1);
                 }
             }
-            Ok(Err(_)) => {
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    connection_id = %route.connection_id,
+                    write_kind = if is_media { "media" } else { "control" },
+                    error_class = websocket_write_error_class(&error),
+                    consecutive_media_timeouts,
+                    message_bytes,
+                    completed_media_messages,
+                    "Vapi WebSocket write failed"
+                );
                 let _ = faults
                     .send(if is_media {
                         WriterFault::Failed
@@ -1033,6 +1108,14 @@ async fn run_socket_writer(
             }
             Err(_) => {
                 if !is_media {
+                    tracing::warn!(
+                        connection_id = %route.connection_id,
+                        timeout_ms = deadline.as_millis() as u64,
+                        consecutive_media_timeouts,
+                        message_bytes,
+                        completed_media_messages,
+                        "Vapi WebSocket control write exceeded its deadline"
+                    );
                     let _ = faults.send(WriterFault::ControlFailed).await;
                     break;
                 }
@@ -1043,7 +1126,16 @@ async fn run_socket_writer(
                 metrics::counter!("rvoip_vapi_media_write_timeouts_total").increment(1);
                 if consecutive_media_timeouts == 1 {
                     tracing::warn!(
+                        connection_id = %route.connection_id,
                         timeout_ms = config.media_write_timeout.as_millis() as u64,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        message_bytes,
+                        attempted_media_messages,
+                        attempted_media_bytes,
+                        completed_media_messages,
+                        largest_media_message_bytes,
+                        media_queue_messages = media.len(),
+                        control_queue_messages = control.len(),
                         "a Vapi audio write exceeded its deadline; dropping the frame"
                     );
                 }
@@ -1052,6 +1144,21 @@ async fn run_socket_writer(
                     break;
                 }
             }
+        }
+        if last_report.elapsed() >= std::time::Duration::from_secs(5) {
+            last_report = tokio::time::Instant::now();
+            tracing::debug!(
+                connection_id = %route.connection_id,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                attempted_media_messages,
+                attempted_media_bytes,
+                completed_media_messages,
+                largest_media_message_bytes,
+                consecutive_media_timeouts,
+                media_queue_messages = media.len(),
+                control_queue_messages = control.len(),
+                "Vapi socket writer progress"
+            );
         }
     }
     sink
@@ -1395,6 +1502,11 @@ async fn run_websocket_session(
                             }
                             stale = stale.saturating_add(route.stream.request_flush());
                             if let Some(orchestrator) = orchestrator.and_then(Weak::upgrade) {
+                                let flush_started = tokio::time::Instant::now();
+                                tracing::debug!(
+                                    connection_id = %route.connection_id,
+                                    "Vapi barge-in graph flush started"
+                                );
                                 match orchestrator.flush_media_graph(&route.connection_id).await {
                                     Some(graph_stale) => {
                                         stale = stale.saturating_add(graph_stale);
@@ -1405,6 +1517,11 @@ async fn run_websocket_session(
                                         );
                                     }
                                 }
+                                tracing::debug!(
+                                    connection_id = %route.connection_id,
+                                    elapsed_ms = flush_started.elapsed().as_millis() as u64,
+                                    "Vapi barge-in graph flush finished"
+                                );
                             }
                             if stale > 0 {
                                 let stale = stale as u64;

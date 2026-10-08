@@ -2382,11 +2382,15 @@ impl DialogManager {
         } else {
             // Event for transaction not associated with any dialog. Check if
             // this is a new incoming request that should create a dialog.
-            if let Err(_error) = self
+            if let Err(error) = self
                 .handle_unassociated_transaction_event(&transaction_id, event)
                 .await
             {
-                error!("Failed to handle unassociated transaction event");
+                error!(
+                    error_class = error.diagnostic_class(),
+                    error_reason = error.diagnostic_reason(),
+                    "Failed to handle unassociated transaction event"
+                );
             }
         }
     }
