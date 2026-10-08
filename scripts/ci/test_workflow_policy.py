@@ -24,6 +24,33 @@ class WorkflowPolicyTests(unittest.TestCase):
                 uses = [line for line in text.splitlines() if "uses:" in line]
                 self.assertTrue(all(SHA_ACTION.search(line) for line in uses))
 
+    def test_every_runner_job_declares_a_timeout(self) -> None:
+        # GitHub's default job timeout is six hours; every hosted job sets
+        # its own bound so a hung step cannot hold a runner that long.
+        job_header = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
+        for workflow in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            lines = workflow.read_text().splitlines()
+            start = lines.index("jobs:") + 1
+            jobs: dict[str, list[str]] = {}
+            current = None
+            for line in lines[start:]:
+                if line and not line.startswith(" "):
+                    break
+                match = job_header.match(line)
+                if match:
+                    current = match.group(1)
+                    jobs[current] = []
+                elif current:
+                    jobs[current].append(line)
+            self.assertTrue(jobs, workflow.name)
+            for job, body in jobs.items():
+                if not any(line.strip().startswith("runs-on:") for line in body):
+                    continue  # reusable-workflow call
+                with self.subTest(workflow=workflow.name, job=job):
+                    self.assertTrue(
+                        any(line.strip().startswith("timeout-minutes:") for line in body)
+                    )
+
     def test_pr_gate_has_no_secret_or_write_permission_surface(self) -> None:
         text = (ROOT / ".github/workflows/pr-gate.yml").read_text()
         self.assertNotIn("secrets.", text)

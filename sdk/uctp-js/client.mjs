@@ -46,6 +46,10 @@ function validEnvelope(frame) {
 }
 
 export class UctpClient {
+  // Private so the bearer credential never appears in JSON.stringify,
+  // Object.keys/entries, structuredClone or console/util.inspect output.
+  #token;
+
   constructor(url, token, {
     WebSocketImpl = globalThis.WebSocket, timeoutMs = 10000,
     maxPending = 128, maxFrameBytes = 131072, applicationProfile,
@@ -67,7 +71,7 @@ export class UctpClient {
       throw new Error('Application profile must be a nonempty string');
     }
     this.url = parsed.href;
-    this.token = token;
+    this.#token = token;
     this.WebSocketImpl = WebSocketImpl;
     this.timeoutMs = timeoutMs;
     this.maxPending = maxPending;
@@ -149,7 +153,7 @@ export class UctpClient {
         throw new UctpError('Server did not advertise the requested application profile');
       }
       const auth = await this.#send(envelope('auth.response', {
-        method: 'bearer', credential: this.token,
+        method: 'bearer', credential: this.#token,
       }, { in_reply_to: hello.id }));
       if (auth.type !== 'auth.session') throw new UctpError('Authentication did not establish a session');
       // A peer may close immediately after a correlated auth.session.

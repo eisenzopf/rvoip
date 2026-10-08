@@ -308,6 +308,30 @@ version = "2.0.0"
         self.assertEqual(plan["mode"], "targeted")
         self.assertEqual(plan["selected_crates"], ["delta"])
 
+    def test_repository_policy_maps_javascript_client_and_gitignore(self) -> None:
+        # The JavaScript client has its own workflow; with the repository's
+        # real policy its files and the .gitignore exception for its lockfile
+        # must not be treated as unknown inputs that force a full workspace.
+        policy = json.loads(SCRIPT.with_name("policy.json").read_text())
+        plan = pr_plan.make_plan(
+            root=self.root,
+            metadata=self.metadata,
+            policy=policy,
+            paths=[
+                ".gitignore",
+                "sdk/uctp-js/README.md",
+                "sdk/uctp-js/client.mjs",
+                "sdk/uctp-js/package-lock.json",
+                "sdk/uctp-js/test/types.ts",
+            ],
+            base="base",
+            head="head",
+            job_mode="combined",
+        )
+        self.assertEqual(plan["mode"], "policy")
+        self.assertEqual(plan["selected_crates"], [])
+        self.assertEqual(plan["shards"], [])
+
     def test_unmapped_source_path_fails_safe_to_full(self) -> None:
         plan = self.plan("crates/removed-crate/src/lib.rs")
         self.assertEqual(plan["mode"], "full")

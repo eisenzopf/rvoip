@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { inspect } from 'node:util';
 import { UctpClient, UctpError, envelope, redactEnvelope } from '../client.mjs';
 
 function fixture({ profiles = ['example/1'], authError = false, stalled = false } = {}) {
@@ -194,4 +195,18 @@ test('redaction preserves negotiation while removing nested credentials, signatu
   assert.ok(!JSON.stringify(redacted).includes('CANARY'));
   assert.ok(JSON.stringify(original).includes('CANARY'));
   assert.ok(redacted.payload.substrate_setup.sdp.includes('m=audio'));
+});
+
+test('bearer credential is not exposed through enumerable, serialized or inspected state', async () => {
+  const Socket = fixture();
+  const client = new UctpClient('ws://localhost:1', 'CANARY_BEARER', { WebSocketImpl: Socket });
+  assert.equal(client.token, undefined);
+  assert.ok(!Object.values(client).includes('CANARY_BEARER'));
+  assert.ok(!JSON.stringify(client).includes('CANARY_BEARER'));
+  assert.ok(!inspect(client, { depth: 5, showHidden: true }).includes('CANARY_BEARER'));
+  await client.connect();
+  // The private credential is still what authenticates the peer.
+  const response = Socket.instances[0].sent.find(frame => frame.type === 'auth.response');
+  assert.equal(response.payload.credential, 'CANARY_BEARER');
+  client.close();
 });
