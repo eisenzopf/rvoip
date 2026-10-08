@@ -62,6 +62,10 @@ pub struct Dialog {
     #[serde(default)]
     pub secure_transport_required: bool,
 
+    /// Pinned only by an opted-in initial INVITE on an observed TLS transaction.
+    #[serde(default)]
+    pub allow_tls_contact_on_sips: bool,
+
     /// Route set for this dialog
     pub route_set: Vec<Uri>,
 
@@ -197,6 +201,7 @@ impl Dialog {
             remote_cseq: 0,
             remote_target: remote_uri, // Initially same as remote URI
             secure_transport_required,
+            allow_tls_contact_on_sips: false,
             route_set: Vec::new(),
             is_initiator,
             last_known_remote_addr: None,
@@ -402,6 +407,7 @@ impl Dialog {
             remote_cseq: if is_initiator { 0 } else { cseq_number },
             remote_target,
             secure_transport_required,
+            allow_tls_contact_on_sips: false,
             route_set,
             is_initiator,
             last_known_remote_addr: None,
@@ -519,6 +525,7 @@ impl Dialog {
             remote_cseq: if is_initiator { 0 } else { cseq_number },
             remote_target,
             secure_transport_required,
+            allow_tls_contact_on_sips: false,
             route_set,
             is_initiator,
             last_known_remote_addr: None,
@@ -695,7 +702,8 @@ impl Dialog {
                     TypedHeader::Contact(contacts) => contacts.0.first(),
                     _ => None,
                 })
-                .and_then(|contact| extract_uri_from_contact(contact).ok());
+                .and_then(|contact| extract_uri_from_contact(contact).ok())
+                .map(|uri| self.normalize_tls_contact(uri));
             if refreshed_target.as_ref().is_some_and(|uri| {
                 self.secure_transport_required && !matches!(uri.scheme(), Scheme::Sips)
             }) {
@@ -734,10 +742,28 @@ impl Dialog {
         }
     }
 
+    /// Map an explicit `sip:...;transport=tls` Contact to SIPS when this
+    /// dialog opted in to TLS Contact compatibility; other targets are unchanged.
+    fn normalize_tls_contact(&self, mut remote_target: Uri) -> Uri {
+        if self.secure_transport_required
+            && self.allow_tls_contact_on_sips
+            && matches!(remote_target.scheme(), Scheme::Sip)
+            && remote_target
+                .transport()
+                .is_some_and(|value| value.eq_ignore_ascii_case("tls"))
+        {
+            // Preserve explicit host, port, user and URI parameters. Only the
+            // internal routing target changes; captured wire messages stay original.
+            remote_target.scheme = Scheme::Sips;
+        }
+        remote_target
+    }
+
     /// Update the remote target while preserving the dialog-forming SIPS
     /// requirement. Returns `false` when the target would downgrade a secure
     /// dialog and leaves the existing target unchanged.
     pub fn update_remote_target(&mut self, remote_target: Uri) -> bool {
+        let remote_target = self.normalize_tls_contact(remote_target);
         if self.secure_transport_required && !matches!(remote_target.scheme(), Scheme::Sips) {
             return false;
         }

@@ -546,6 +546,19 @@ impl DialogLookup for DialogManager {
             false,      // is_initiator = false (we're UAS)
         );
         dialog.secure_transport_required |= matches!(request.uri().scheme(), Scheme::Sips);
+        // A Via header is not proof of transport. Use transaction-core's
+        // retained ingress route, and keep direct/offline callers strict.
+        dialog.allow_tls_contact_on_sips = self
+            .config()
+            .is_some_and(|config| config.dialog_config().allow_tls_contact_on_sips)
+            && crate::transaction::TransactionKey::from_request(request)
+                .and_then(|key| {
+                    self.transaction_manager()
+                        .server_transaction_response_route(&key)
+                })
+                .is_some_and(|route| {
+                    route.transport_type == Some(rvoip_sip_transport::transport::TransportType::Tls)
+                });
         if let Some(remote_target) = remote_target_from_request(request) {
             if !dialog.update_remote_target(remote_target) {
                 return Err(DialogError::protocol_error(

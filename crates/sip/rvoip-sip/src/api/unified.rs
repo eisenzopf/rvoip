@@ -2134,6 +2134,12 @@ pub struct Config {
     /// expected on the existing outbound registration flow.
     pub sip_contact_mode: SipContactMode,
 
+    /// Opt-in compatibility for explicit SIP TLS Contacts on inbound SIPS calls.
+    /// Requires an observed TLS transaction and preserves SIPS remote routing.
+    /// Defaults to `false`. This field is the only switch: the library reads no
+    /// environment variable for it, so embedders map deployment settings here.
+    pub sip_allow_tls_contact_on_sips: bool,
+
     /// Optional local SIP TLS listener address. Used for
     /// [`SipTlsMode::ServerOnly`] and [`SipTlsMode::ClientAndServer`].
     /// When unset, rvoip-sip-dialog retains its legacy default of deriving the
@@ -3002,6 +3008,7 @@ impl Config {
             unregister_on_shutdown_timeout_secs: 3,
             sip_tls_mode: SipTlsMode::Disabled,
             sip_contact_mode: SipContactMode::ReachableContact,
+            sip_allow_tls_contact_on_sips: false,
             tls_bind_addr: None,
             tls_advertised_addr: None,
             contact_uri: None,
@@ -3124,6 +3131,7 @@ impl Config {
             unregister_on_shutdown_timeout_secs: 3,
             sip_tls_mode: SipTlsMode::Disabled,
             sip_contact_mode: SipContactMode::ReachableContact,
+            sip_allow_tls_contact_on_sips: false,
             tls_bind_addr: None,
             tls_advertised_addr: None,
             contact_uri: None,
@@ -12043,6 +12051,7 @@ impl UnifiedCoordinator {
             .with_dialog_config(|mut dialog| {
                 dialog.advertised_local_address = config.sip_advertised_addr;
                 dialog.local_contact_uri = config.contact_uri.clone();
+                dialog.allow_tls_contact_on_sips = config.sip_allow_tls_contact_on_sips;
                 dialog.tls_local_address = dialog_tls_local_address;
                 dialog.tls_advertised_local_address = config.tls_advertised_addr;
                 dialog.max_dialogs = Some(config.dialog_index_capacity_hint());
