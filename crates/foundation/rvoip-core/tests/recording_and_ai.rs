@@ -569,7 +569,7 @@ async fn playback_reports_completion_and_delivery_failure() {
     orch.drain_playback_tasks().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn pcm_playback_paces_wire_frames_and_completes() {
     let (orch, _tx, stream, conn) = setup().await;
     let (mut input, source) = rvoip_core::playback::PcmPlaybackSource::channel(8_000, 2).unwrap();
@@ -581,6 +581,7 @@ async fn pcm_playback_paces_wire_frames_and_completes() {
         .await
         .unwrap()
         .unwrap();
+    let a_at = tokio::time::Instant::now();
     let b = tokio::time::timeout(Duration::from_secs(1), output.recv())
         .await
         .unwrap()
@@ -589,7 +590,7 @@ async fn pcm_playback_paces_wire_frames_and_completes() {
     assert_eq!(a.stream_id, stream.id);
     assert_eq!(a.payload_type, Some(0));
     assert_eq!(b.timestamp_rtp.wrapping_sub(a.timestamp_rtp), 160);
-    assert!((b.captured_at - a.captured_at).num_milliseconds() >= 20);
+    assert_eq!(a_at.elapsed(), Duration::from_millis(20), "paced delivery");
     assert_eq!(
         handle.wait().await.unwrap(),
         rvoip_core::adapter::PlaybackOutcome::Completed
