@@ -353,3 +353,173 @@ async fn attach_ai_emits_ai_attached_and_detach_cleanly() {
         .await
         .unwrap();
 }
+
+struct ObservedTts {
+    requested: Arc<tokio::sync::Notify>,
+    cancelled: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl rvoip_harness::TtsProvider for ObservedTts {
+    async fn synthesize(
+        &self,
+        _: rvoip_harness::TtsRequest,
+    ) -> RvResult<Box<dyn rvoip_harness::TtsPlayback>> {
+        Ok(Box::new(ObservedPlayback {
+            requested: self.requested.clone(),
+            cancelled: self.cancelled.clone(),
+        }))
+    }
+}
+struct ObservedPlayback {
+    requested: Arc<tokio::sync::Notify>,
+    cancelled: Arc<tokio::sync::Notify>,
+}
+#[async_trait::async_trait]
+impl rvoip_harness::TtsPlayback for ObservedPlayback {
+    async fn next_frame(&self) -> Option<MediaFrame> {
+        self.requested.notify_one();
+        Some(playback_test_frame())
+    }
+    async fn cancel(&self) -> RvResult<()> {
+        self.cancelled.notify_one();
+        Ok(())
+    }
+}
+fn playback_test_frame() -> MediaFrame {
+    MediaFrame {
+        stream_id: StreamId::new(),
+        kind: StreamKind::Audio,
+        payload: Bytes::from_static(&[0xff]),
+        timestamp_rtp: 0,
+        captured_at: Utc::now(),
+        payload_type: Some(0),
+    }
+}
+async fn blocked_playback(
+    orch: &Orchestrator,
+    stream: &TestStream,
+    conn: ConnectionId,
+) -> (
+    rvoip_core::adapter::PlaybackHandle,
+    Arc<tokio::sync::Notify>,
+) {
+    // Fill the bounded queue before starting the provider: its first frame
+    // must block on output, rather than relying on a timing-sensitive sleep.
+    for _ in 0..stream.outbound_tx.max_capacity() {
+        stream.outbound_tx.try_send(playback_test_frame()).unwrap();
+    }
+    let requested = Arc::new(tokio::sync::Notify::new());
+    let cancelled = Arc::new(tokio::sync::Notify::new());
+    orch.register_tts_provider(
+        "observed",
+        Arc::new(ObservedTts {
+            requested: requested.clone(),
+            cancelled: cancelled.clone(),
+        }),
+    );
+    let handle = orch
+        .play_audio(
+            conn,
+            rvoip_core::commands::AudioSource::TtsRequest {
+                provider_ref: "observed".into(),
+                text: "test".into(),
+                voice: None,
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), requested.notified())
+        .await
+        .unwrap();
+    (handle, cancelled)
+}
+#[tokio::test]
+async fn playback_cancel_interrupts_a_full_output_queue() {
+    let (orch, _tx, stream, conn) = setup().await;
+    let (handle, cancelled) = blocked_playback(&orch, &stream, conn).await;
+    handle.cancel().unwrap();
+    tokio::time::timeout(Duration::from_secs(1), cancelled.notified())
+        .await
+        .unwrap();
+    orch.drain_playback_tasks().await;
+    assert_eq!(orch.playback_task_count(), 0);
+}
+#[tokio::test]
+async fn playback_terminal_connection_cancels_blocked_output() {
+    let (orch, tx, stream, conn) = setup().await;
+    let (handle, cancelled) = blocked_playback(&orch, &stream, conn.clone()).await;
+    tx.send(AdapterEvent::Ended {
+        connection_id: conn,
+        reason: EndReason::Normal,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), handle.wait())
+            .await
+            .unwrap()
+            .unwrap(),
+        rvoip_core::adapter::PlaybackOutcome::Cancelled
+    );
+    tokio::time::timeout(Duration::from_secs(1), cancelled.notified())
+        .await
+        .unwrap();
+    orch.drain_playback_tasks().await;
+    assert_eq!(orch.playback_task_count(), 0);
+}
+#[tokio::test]
+async fn playback_drain_joins_workers_and_rejects_restart() {
+    let (orch, _tx, stream, conn) = setup().await;
+    let (handle, cancelled) = blocked_playback(&orch, &stream, conn.clone()).await;
+    orch.drain_playback_tasks().await;
+    assert_eq!(
+        handle.wait().await.unwrap(),
+        rvoip_core::adapter::PlaybackOutcome::Cancelled
+    );
+    tokio::time::timeout(Duration::from_secs(1), cancelled.notified())
+        .await
+        .unwrap();
+    assert_eq!(orch.playback_task_count(), 0);
+    assert!(orch
+        .play_audio(
+            conn,
+            rvoip_core::commands::AudioSource::TtsRequest {
+                provider_ref: "observed".into(),
+                text: "test".into(),
+                voice: None,
+            }
+        )
+        .await
+        .is_err());
+}
+#[tokio::test]
+async fn playback_reports_completion_and_delivery_failure() {
+    let (orch, _tx, stream, conn) = setup().await;
+    orch.register_tts_provider("counted", Arc::new(CountedTts { frames: 5 }));
+    let source = || rvoip_core::commands::AudioSource::TtsRequest {
+        provider_ref: "counted".into(),
+        text: "test".into(),
+        voice: None,
+    };
+    assert_eq!(
+        orch.play_audio(conn.clone(), source())
+            .await
+            .unwrap()
+            .wait()
+            .await
+            .unwrap(),
+        rvoip_core::adapter::PlaybackOutcome::Completed
+    );
+    drop(stream.outbound_rx.lock().unwrap().take());
+    assert_eq!(
+        orch.play_audio(conn, source())
+            .await
+            .unwrap()
+            .wait()
+            .await
+            .unwrap(),
+        rvoip_core::adapter::PlaybackOutcome::Failed
+    );
+    orch.drain_playback_tasks().await;
+}
