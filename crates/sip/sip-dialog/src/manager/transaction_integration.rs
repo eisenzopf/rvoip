@@ -5958,18 +5958,24 @@ impl DialogManager {
         // Direct-peer compatibility keeps in-dialog requests on the exact
         // TLS flow that formed this dialog. A dead flow fails explicitly;
         // never silently reconnect or downgrade, and never override Route.
+        // Off by default, so check the manager-wide opt-in before touching the
+        // dialog map. The map guard is dropped before any await, and a dialog
+        // removed concurrently (e.g. BYE racing teardown) keeps normal routing.
         let mut candidates = candidates;
-        if !is_initial_invite {
-            if let Some(dialog_id) = tx_to_dialog {
-                let dialog = self.get_dialog(dialog_id)?;
-                if let Some(route) = dialog.compatible_tls_contact_route(&request) {
-                    let mut target = candidates[0].clone();
-                    target.addr = route.destination;
-                    target.transport = rvoip_sip_transport::transport::TransportType::Tls;
-                    target.flow_id = route.flow_id;
-                    candidates = vec![target];
-                }
+        let pinned_route = match tx_to_dialog {
+            Some(dialog_id) if !is_initial_invite && self.tls_contact_compatibility_enabled() => {
+                self.dialogs
+                    .get(dialog_id)
+                    .and_then(|dialog| dialog.compatible_tls_contact_route(&request))
             }
+            _ => None,
+        };
+        if let Some(route) = pinned_route {
+            let mut target = candidates[0].clone();
+            target.addr = route.destination;
+            target.transport = rvoip_sip_transport::transport::TransportType::Tls;
+            target.flow_id = route.flow_id;
+            candidates = vec![target];
         }
 
         let total = candidates.len();

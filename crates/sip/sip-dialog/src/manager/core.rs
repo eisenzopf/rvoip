@@ -4033,6 +4033,19 @@ impl DialogManager {
         self.config.read().ok().and_then(|g| g.clone())
     }
 
+    /// Whether the opt-in TLS Contact compatibility is enabled for this
+    /// manager. Reads the shared config without cloning it.
+    pub(crate) fn tls_contact_compatibility_enabled(&self) -> bool {
+        self.config
+            .read()
+            .ok()
+            .and_then(|g| {
+                g.as_ref()
+                    .map(|c| c.dialog_config().allow_tls_contact_on_sips)
+            })
+            .unwrap_or(false)
+    }
+
     /// Check if auto-response to OPTIONS requests is enabled
     pub fn should_auto_respond_to_options(&self) -> bool {
         self.config
