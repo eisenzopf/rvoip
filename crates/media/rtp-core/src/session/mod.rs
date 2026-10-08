@@ -644,6 +644,10 @@ pub struct RtpSession {
     /// Session bandwidth (bits per second)
     bandwidth_bps: u32,
 
+    /// Whether periodic RTCP reports may go to the peer. This session has a
+    /// single socket, so reports share the RTP port; see [`Self::set_rtcp_mux`].
+    rtcp_mux: Arc<AtomicBool>,
+
     /// RFC 3611 quality-report cadence for this session.
     xr_quality: RtcpXrQualityConfig,
 
@@ -782,6 +786,7 @@ impl RtpSession {
         let rtcp_generator = crate::stats::reports::RtcpReportGenerator::new(ssrc, cname);
 
         let clock_rate = Arc::new(AtomicU32::new(config.clock_rate));
+        let rtcp_mux = Arc::new(AtomicBool::new(config.remote_addr.is_some()));
         let mut session = Self {
             config,
             clock_rate,
@@ -802,6 +807,7 @@ impl RtpSession {
             rtcp_generator: Some(rtcp_generator),
             rtcp_task: None,
             bandwidth_bps: 64000, // Default bandwidth: 64 kbps
+            rtcp_mux,
             xr_quality,
             #[cfg(feature = "memory-diagnostics")]
             _memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
@@ -1230,6 +1236,7 @@ impl RtpSession {
             let sender_octets = self.sender_octets.clone();
             let report_streams = self.streams.clone();
             let report_sender = self.packet_sender.clone();
+            let rtcp_mux = self.rtcp_mux.clone();
             let active_state = Arc::new(tokio::sync::Mutex::new(true));
             let _active_state_clone = active_state.clone();
             let bandwidth = self.bandwidth_bps;
@@ -1255,6 +1262,11 @@ impl RtpSession {
                         break;
                     }
 
+                    // RFC 5761 §5.1.1: reports leave from the RTP socket, so a
+                    // peer that did not agree to multiplexing gets none.
+                    if !rtcp_mux.load(Ordering::Acquire) {
+                        continue;
+                    }
                     let remote_addr =
                         if let Some(udp) = transport.as_any().downcast_ref::<UdpRtpTransport>() {
                             udp.remote_rtcp_addr()
@@ -1893,6 +1905,23 @@ impl RtpSession {
         self.media_sync.clone()
     }
 
+    /// Allow or stop periodic RTCP reports.
+    ///
+    /// This session sends RTCP from its single RTP socket to the peer's RTP
+    /// address, which RFC 5761 §5.1.1 permits only after `a=rtcp-mux` was
+    /// both offered and answered. A session constructed with its peer already
+    /// known reports by default, as it always has. A session whose peer
+    /// arrives later through SDP stays silent until the signalling layer
+    /// confirms multiplexing here.
+    pub fn set_rtcp_mux(&self, negotiated: bool) {
+        self.rtcp_mux.store(negotiated, Ordering::Release);
+    }
+
+    /// Whether periodic RTCP reports may currently be sent.
+    pub fn rtcp_mux(&self) -> bool {
+        self.rtcp_mux.load(Ordering::Acquire)
+    }
+
     /// Set the session bandwidth in bits per second
     ///
     /// This affects the RTCP report interval calculation.
@@ -2006,6 +2035,8 @@ mod tests {
                 .await
                 .is_err()
         );
+        // The signalling layer reports a negotiated a=rtcp-mux.
+        session.set_rtcp_mux(true);
         session.set_remote_addr(first.local_addr().unwrap()).await;
         let (n, _) = tokio::time::timeout(Duration::from_secs(4), first.recv_from(&mut bytes))
             .await
@@ -2032,6 +2063,36 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn late_sdp_peer_gets_no_periodic_rtcp_until_mux_is_negotiated() {
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut session = RtpSession::new(RtpSessionConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            remote_addr: None,
+            ..RtpSessionConfig::default()
+        })
+        .await
+        .unwrap();
+        assert!(!session.rtcp_mux());
+        session.set_remote_addr(peer.local_addr().unwrap()).await;
+        let mut bytes = [0u8; 2048];
+        // Several 1 s report intervals pass; nothing may reach the RTP port.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(3500), peer.recv_from(&mut bytes))
+                .await
+                .is_err(),
+            "periodic RTCP reached a peer that never agreed to rtcp-mux"
+        );
+        session.set_rtcp_mux(true);
+        let (n, _) = tokio::time::timeout(Duration::from_secs(4), peer.recv_from(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        let report = crate::packet::rtcp::RtcpCompoundPacket::parse(&bytes[..n]).unwrap();
+        assert_eq!(report.get_sr().unwrap().ssrc, session.ssrc);
+        session.close().await.unwrap();
     }
 
     async fn next_packet_event(events: &mut broadcast::Receiver<RtpSessionEvent>) -> RtpPacket {

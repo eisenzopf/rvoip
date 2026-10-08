@@ -645,6 +645,7 @@ pub use bridge::{BridgeError, BridgeHandle};
 pub use types::{
     AdvancedProcessorConfig, AdvancedProcessorSet, MediaConfig, MediaSessionEvent,
     MediaSessionInfo, MediaSessionStatus, AMR_DTX_PARAMETER, NEGOTIATED_FMTP_PARAMETER,
+    RTCP_MUX_PARAMETER,
 };
 
 use types::RtpSessionWrapper;
@@ -2042,6 +2043,7 @@ impl MediaSessionController {
             None
         };
         let remote_changed = config.remote_addr != old_config.remote_addr;
+        let rtcp_mux_changed = config.rtcp_mux() != old_config.rtcp_mux();
 
         let rtp_session_arc = self
             .rtp_sessions
@@ -2075,6 +2077,10 @@ impl MediaSessionController {
 
         {
             let mut rtp_session = rtp_session_arc.lock().await;
+            // Before the peer address: a non-mux peer must never see a report.
+            if rtcp_mux_changed {
+                rtp_session.set_rtcp_mux(config.rtcp_mux());
+            }
             if let Some(remote_addr) = config.remote_addr.filter(|_| remote_changed) {
                 rtp_session.set_remote_addr(remote_addr).await;
             }

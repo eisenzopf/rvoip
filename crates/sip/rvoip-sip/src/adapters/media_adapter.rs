@@ -1019,6 +1019,9 @@ struct StagedMediaNegotiation {
     config: NegotiatedConfig,
     stable_local_direction: crate::types::MediaDirection,
     srtp_negotiated: bool,
+    /// `a=rtcp-mux` was both offered and answered (RFC 5761 §5.1.1). Only
+    /// then may periodic RTCP share the single RTP socket and port.
+    rtcp_mux: bool,
     #[cfg(feature = "dtls-srtp")]
     dtls: Option<StagedDtlsHandshake>,
 }
@@ -1870,6 +1873,7 @@ impl MediaAdapter {
         &self,
         dialog_id: &DialogId,
         negotiated: &NegotiatedConfig,
+        rtcp_mux: bool,
     ) -> Result<()> {
         let mut config = self
             .controller
@@ -1893,7 +1897,8 @@ impl MediaAdapter {
             // session learns it is AMR, and media-core reads both out of the
             // one configuration when it builds the codec.
             .with_amr_dtx(self.amr_dtx)
-            .with_amr_auto_cmr(self.amr_auto_cmr);
+            .with_amr_auto_cmr(self.amr_auto_cmr)
+            .with_rtcp_mux(rtcp_mux);
 
         self.controller
             .update_media(dialog_id.clone(), config)
@@ -2524,6 +2529,7 @@ impl MediaAdapter {
                 config: config.clone(),
                 stable_local_direction: session.local_media_direction,
                 srtp_negotiated,
+                rtcp_mux: audio_rtcp_mux(&parsed_offer) && audio_rtcp_mux(&parsed_answer),
                 #[cfg(feature = "dtls-srtp")]
                 dtls: staged_dtls,
             },
@@ -2817,6 +2823,7 @@ impl MediaAdapter {
                     config: config.clone(),
                     stable_local_direction,
                     srtp_negotiated: false,
+                    rtcp_mux: false,
                     #[cfg(feature = "dtls-srtp")]
                     dtls: None,
                 },
@@ -3016,6 +3023,7 @@ impl MediaAdapter {
             .build()
             .map_err(|_| bounded_sdp_failure("answer-build", "builder"))?;
         let sdp_answer = session.to_string();
+        let rtcp_mux = audio_rtcp_mux(&parsed_offer) && audio_rtcp_mux(&session);
 
         let config = NegotiatedConfig {
             local_addr: SocketAddr::new(self.local_ip, local_port),
@@ -3044,6 +3052,7 @@ impl MediaAdapter {
                 config: config.clone(),
                 stable_local_direction,
                 srtp_negotiated,
+                rtcp_mux,
                 #[cfg(feature = "dtls-srtp")]
                 dtls: staged_dtls,
             },
@@ -3251,7 +3260,7 @@ impl MediaAdapter {
                         ))
                     })?;
             }
-            self.apply_negotiated_media_config(&dialog_id, &staged.config)
+            self.apply_negotiated_media_config(&dialog_id, &staged.config, staged.rtcp_mux)
                 .await?;
 
             if let Some((_, pair)) = self.negotiated_srtp.remove(&negotiation_key) {
@@ -6331,6 +6340,97 @@ mod sdp_format_tests {
     }
 
     #[tokio::test]
+    async fn periodic_rtcp_reaches_the_rtp_port_only_after_rtcp_mux_is_negotiated() {
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use std::net::Ipv4Addr;
+
+        // True when an RTCP packet (PT 200-204) reaches `peer` within `window`.
+        async fn rtcp_arrives(peer: &tokio::net::UdpSocket, window: Duration) -> bool {
+            let mut bytes = [0u8; 2048];
+            tokio::time::timeout(window, async {
+                loop {
+                    let (n, _) = peer.recv_from(&mut bytes).await.expect("peer receive");
+                    if n >= 2 && (200..=204).contains(&bytes[1]) {
+                        return;
+                    }
+                }
+            })
+            .await
+            .is_ok()
+        }
+
+        // The default offer has no a=rtcp-mux, so a plain answer means no
+        // multiplexing (RFC 5761 §5.1.1); a required-mux offer answered with
+        // a=rtcp-mux negotiates it.
+        for (case, mux) in [("plain", false), ("mux", true)] {
+            let controller = Arc::new(MediaSessionController::new());
+            let store = Arc::new(SessionStore::new());
+            let session_id = SessionId(format!("late-sdp-rtcp-{case}"));
+            store
+                .create_session(session_id.clone(), Role::UAC, false)
+                .await
+                .expect("create exact session");
+            let mut adapter = MediaAdapter::new(
+                controller,
+                Arc::clone(&store),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                17_400,
+                17_500,
+            );
+            adapter.set_rtcp_mux_required(mux);
+            let dialog_id = adapter
+                .create_session(&session_id)
+                .await
+                .expect("create managed media");
+            let handle = store
+                .lifecycle_handle(&session_id)
+                .expect("exact lifecycle handle");
+            let mut working = store
+                .get_session_exact(&handle)
+                .await
+                .expect("load exact session");
+            working.media_session_id = Some(dialog_id);
+            working.media_session_ready = true;
+            working.local_media_direction = crate::types::MediaDirection::SendRecv;
+            let offer = adapter
+                .generate_local_sdp_offer_lane_owned(
+                    &mut working,
+                    crate::types::MediaDirection::SendRecv,
+                )
+                .await
+                .expect("local offer");
+            assert_eq!(audio_rtcp_mux(&offer.parse().unwrap()), mux);
+            working.local_sdp = Some(offer);
+
+            let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let mut answer = build_answer("peer", "127.0.0.1", peer.local_addr().unwrap().port());
+            if mux {
+                answer.push_str("a=rtcp-mux\r\n");
+            }
+            adapter
+                .negotiate_sdp_as_uac_lane_owned(&mut working, &answer)
+                .await
+                .expect("answer negotiates");
+            adapter
+                .commit_staged_media_negotiation_lane_owned(&mut working)
+                .await
+                .expect("commit negotiated media");
+
+            // Reports run on a 1 s floor; 3.5 s spans several intervals.
+            let arrived = rtcp_arrives(&peer, Duration::from_millis(3_500)).await;
+            assert_eq!(
+                arrived, mux,
+                "{case}: periodic RTCP to the peer's RTP port requires negotiated rtcp-mux"
+            );
+            adapter
+                .cleanup_session(&session_id)
+                .await
+                .expect("cleanup managed media");
+        }
+    }
+
+    #[tokio::test]
     async fn malformed_sdes_answer_preserves_offer_state_for_valid_retry() {
         use crate::state_table::types::Role;
         use rvoip_media_core::relay::controller::MediaSessionController;
@@ -8930,6 +9030,7 @@ a=fmtp:101 0-15\r\n";
             },
             stable_local_direction: crate::types::MediaDirection::SendRecv,
             srtp_negotiated: false,
+            rtcp_mux: false,
             #[cfg(feature = "dtls-srtp")]
             dtls: None,
         };
@@ -9002,6 +9103,7 @@ a=fmtp:101 0-15\r\n";
             },
             stable_local_direction: crate::types::MediaDirection::SendRecv,
             srtp_negotiated: false,
+            rtcp_mux: false,
             #[cfg(feature = "dtls-srtp")]
             dtls: None,
         };
@@ -9106,6 +9208,7 @@ a=fmtp:101 0-15\r\n";
                 },
                 stable_local_direction: crate::types::MediaDirection::SendRecv,
                 srtp_negotiated: true,
+                rtcp_mux: false,
                 #[cfg(feature = "dtls-srtp")]
                 dtls: None,
             },
@@ -9305,6 +9408,7 @@ a=fmtp:101 0-15\r\n";
                 },
                 stable_local_direction: crate::types::MediaDirection::SendRecv,
                 srtp_negotiated: true,
+                rtcp_mux: false,
                 #[cfg(feature = "dtls-srtp")]
                 dtls: None,
             },
