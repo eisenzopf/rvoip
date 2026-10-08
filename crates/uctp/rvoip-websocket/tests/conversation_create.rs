@@ -1,6 +1,6 @@
 //! UP-3 — `conversation.create` over WebSocket without a pre-opened Conversation.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -27,7 +27,7 @@ use url::Url;
 async fn auth_client(
     client: &UctpWsClient,
     inbound: &mut tokio::sync::mpsc::Receiver<UctpEnvelope>,
-) {
+) -> serde_json::Value {
     client
         .send(UctpEnvelope {
             v: 1,
@@ -58,6 +58,7 @@ async fn auth_client(
         .expect("challenge timeout")
         .expect("challenge");
     assert_eq!(challenge.msg_type, MessageType::AuthChallenge);
+    let capabilities = challenge.payload["server_capabilities"].clone();
     client
         .send(UctpEnvelope {
             v: 1,
@@ -83,6 +84,26 @@ async fn auth_client(
         .expect("auth.session timeout")
         .expect("auth.session");
     assert_eq!(session.msg_type, MessageType::AuthSession);
+    capabilities
+}
+
+#[derive(Default)]
+struct ProfileHandler(Mutex<Option<rvoip_auth_core::AuthenticatedPrincipal>>);
+
+#[async_trait::async_trait]
+impl rvoip_uctp::application::ApplicationHandler for ProfileHandler {
+    fn profile(&self) -> &'static str {
+        "example/control-v1"
+    }
+
+    async fn handle(
+        &self,
+        context: rvoip_uctp::application::ApplicationContext,
+        request: UctpEnvelope,
+    ) -> Result<UctpEnvelope, rvoip_uctp::application::ApplicationError> {
+        *self.0.lock().unwrap() = Some(context.principal);
+        Ok(UctpEnvelope::new(MessageType::Ack, request.payload))
+    }
 }
 
 #[tokio::test]
@@ -90,8 +111,11 @@ async fn conversation_create_then_invite_reuses_open_conversation() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let server_addr = listener.local_addr().expect("local_addr");
     let orchestrator = Orchestrator::new(Config::default());
+    let handler = Arc::new(ProfileHandler::default());
     let adapter = UctpWsAdapter::new(
-        UctpWsConfig::new(listener, bearer_stub()).with_orchestrator(Arc::clone(&orchestrator)),
+        UctpWsConfig::new(listener, bearer_stub())
+            .with_orchestrator(Arc::clone(&orchestrator))
+            .with_application_handler(handler.clone()),
     )
     .await
     .expect("adapter");
@@ -103,7 +127,25 @@ async fn conversation_create_then_invite_reuses_open_conversation() {
     let url = Url::parse(&format!("ws://{server_addr}")).expect("url");
     let client = UctpWsClient::connect(&url).await.expect("connect");
     let mut inbound = client.take_inbound().expect("inbound");
-    auth_client(&client, &mut inbound).await;
+    let caps = auth_client(&client, &mut inbound).await;
+    assert_eq!(
+        caps["application_profiles"],
+        serde_json::json!(["example/control-v1"])
+    );
+    let command = UctpEnvelope::new(
+        MessageType::MessageSend,
+        serde_json::json!({
+            "profile": "example/control-v1", "to": ["part_fixture"], "body": "fixture"
+        }),
+    );
+    client.send(command.clone()).await.expect("profile command");
+    let reply = tokio::time::timeout(Duration::from_secs(5), inbound.recv())
+        .await
+        .expect("profile timeout")
+        .expect("profile reply");
+    assert_eq!(reply.msg_type, MessageType::Ack);
+    assert_eq!(reply.in_reply_to.as_deref(), Some(command.id.as_str()));
+    assert_eq!(reply.payload, command.payload);
 
     client
         .send(UctpEnvelope {
@@ -190,6 +232,32 @@ async fn conversation_create_then_invite_reuses_open_conversation() {
             _ => continue,
         }
     };
+
+    let owner = handler
+        .0
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("authenticated owner");
+    assert_eq!(
+        adapter.inbound_context(&connection_id, &owner),
+        Some((Some(cid.clone()), "sess_widget_1".into(), "voice".into()))
+    );
+    let other_owner = bearer_stub()
+        .validate_principal("different-peer")
+        .await
+        .unwrap();
+    assert!(adapter
+        .inbound_context(&connection_id, &other_owner)
+        .is_none());
+    let mut other_tenant = owner.clone();
+    other_tenant.tenant = Some("different-tenant".into());
+    assert!(adapter
+        .inbound_context(&connection_id, &other_tenant)
+        .is_none());
+    assert!(adapter
+        .inbound_context(&rvoip_core::ids::ConnectionId::new(), &owner)
+        .is_none());
 
     let conversation_id = ConversationId::from_string(cid.clone());
     let session_id = orchestrator
