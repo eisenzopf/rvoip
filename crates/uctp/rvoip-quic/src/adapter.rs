@@ -81,6 +81,9 @@ pub(crate) struct Route {
 }
 
 pub struct UctpQuicConfig {
+    /// Opt-in authenticated application profile, installed before signaling ingress.
+    /// The shared coordinator retains authentication, scope, signature and replay gates.
+    pub application_handler: Option<Arc<dyn rvoip_uctp::application::ApplicationHandler>>,
     pub endpoint: Arc<quinn::Endpoint>,
     /// ALPN-filtered stream of established connections from the dispatcher.
     pub accept_rx: mpsc::Receiver<quinn::Connection>,
@@ -128,12 +131,23 @@ pub struct UctpQuicConfig {
 }
 
 impl UctpQuicConfig {
+    /// Install the same application handler used by other UCTP substrates.
+    /// Profile-free envelopes continue through the existing media/control dispatch.
+    pub fn with_application_handler(
+        mut self,
+        handler: Arc<dyn rvoip_uctp::application::ApplicationHandler>,
+    ) -> Self {
+        self.application_handler = Some(handler);
+        self
+    }
+
     pub fn new(
         endpoint: Arc<quinn::Endpoint>,
         accept_rx: mpsc::Receiver<quinn::Connection>,
         bearer_validator: Arc<dyn BearerValidator>,
     ) -> Self {
         Self {
+            application_handler: None,
             endpoint,
             accept_rx,
             bearer_validator,
@@ -295,6 +309,7 @@ impl UctpQuicAdapter {
             config.coordinator_caps,
             config.sig9421,
             ingress_observer,
+            config.application_handler,
         );
 
         Ok(Arc::new(Self {

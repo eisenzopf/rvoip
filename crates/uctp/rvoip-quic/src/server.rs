@@ -58,6 +58,7 @@ impl UctpQuicServer {
         coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
         sig9421: Option<rvoip_uctp::state::Sig9421Config>,
         rtp_ingress_observer: Option<mpsc::Sender<rvoip_uctp::substrate::RtpIngressObservation>>,
+        application_handler: Option<Arc<dyn rvoip_uctp::application::ApplicationHandler>>,
     ) -> Arc<Self> {
         let admission_cancel = CancellationToken::new();
         let accept_cancel = admission_cancel.clone();
@@ -87,6 +88,7 @@ impl UctpQuicServer {
                         continue;
                     }
                 };
+                let application_handler = application_handler.clone();
                 let bearer = bearer.clone();
                 let events_tx = events_tx.clone();
                 let lifecycle_sink = lifecycle_sink.clone();
@@ -120,6 +122,7 @@ impl UctpQuicServer {
                         caps,
                         sig9421,
                         rtp_ingress_observer,
+                        application_handler,
                     )
                     .await;
                     metrics::gauge!("uctp_active_connections", "transport" => "quic")
@@ -374,6 +377,7 @@ async fn spawn_peer_session(
     coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
     sig9421: Option<rvoip_uctp::state::Sig9421Config>,
     rtp_ingress_observer: Option<mpsc::Sender<rvoip_uctp::substrate::RtpIngressObservation>>,
+    application_handler: Option<Arc<dyn rvoip_uctp::application::ApplicationHandler>>,
 ) {
     // Wire Session IDs are peer-controlled and need only be unique within one
     // authenticated substrate peer. Never resolve them through the adapter-
@@ -465,6 +469,9 @@ async fn spawn_peer_session(
             coordinator_caps,
         )
     };
+    if let Some(handler) = application_handler {
+        coord.set_application_handler(handler);
+    }
     if let Err(error) = coord.set_resource_bindings(Arc::clone(&resource_bindings)) {
         warn!(%error, "rvoip-quic: failed to install coordinator resource authority");
         media_cancel.cancel();
