@@ -248,18 +248,35 @@ async fn recording_collects_frames_and_stop_produces_artifact() {
     assert_eq!(sink.bytes().len(), 8);
 }
 
-/// TTS provider emitting a fixed number of one-byte frames, so a test can
-/// assert exactly what `play_audio` pumped into the stream.
+/// TTS provider emitting a fixed number of destination-encoded frames, so a
+/// test can assert exactly what `play_audio` pumped into the stream. It
+/// records the request so tests can check what the provider was told.
 struct CountedTts {
     frames: usize,
+    request_seen: Arc<Mutex<Option<rvoip_harness::TtsRequest>>>,
+}
+
+impl CountedTts {
+    fn new(frames: usize) -> Self {
+        Self {
+            frames,
+            request_seen: Arc::default(),
+        }
+    }
 }
 
 struct CountedPlayback {
     remaining: Mutex<usize>,
+    codec: CodecInfo,
 }
 
 #[async_trait::async_trait]
 impl rvoip_harness::TtsPlayback for CountedPlayback {
+    fn audio_format(&self) -> rvoip_harness::TtsAudioFormat {
+        rvoip_harness::TtsAudioFormat::Encoded {
+            codec: self.codec.clone(),
+        }
+    }
     async fn next_frame(&self) -> Option<MediaFrame> {
         let mut remaining = self.remaining.lock().unwrap();
         if *remaining == 0 {
@@ -284,10 +301,16 @@ impl rvoip_harness::TtsPlayback for CountedPlayback {
 impl rvoip_harness::TtsProvider for CountedTts {
     async fn synthesize(
         &self,
-        _request: rvoip_harness::TtsRequest,
+        request: rvoip_harness::TtsRequest,
     ) -> RvResult<Box<dyn rvoip_harness::TtsPlayback>> {
+        let codec = request
+            .destination_codec
+            .clone()
+            .expect("play_audio names the destination codec");
+        *self.request_seen.lock().unwrap() = Some(request);
         Ok(Box::new(CountedPlayback {
             remaining: Mutex::new(self.frames),
+            codec,
         }))
     }
 }
@@ -299,7 +322,9 @@ impl rvoip_harness::TtsProvider for CountedTts {
 #[tokio::test]
 async fn play_audio_tts_pumps_synthesized_frames_into_the_stream() {
     let (orch, _tx, stream, connid) = setup().await;
-    orch.register_tts_provider("counted", Arc::new(CountedTts { frames: 5 }));
+    let tts = Arc::new(CountedTts::new(5));
+    let request_seen = Arc::clone(&tts.request_seen);
+    orch.register_tts_provider("counted", tts);
 
     let _handle = orch
         .play_audio(
@@ -322,6 +347,15 @@ async fn play_audio_tts_pumps_synthesized_frames_into_the_stream() {
         }
     }
     assert_eq!(received, 5, "all synthesized frames reach the stream");
+    let request = request_seen.lock().unwrap().take().expect("synthesized");
+    let codec = request.destination_codec.expect("destination codec");
+    assert_eq!(codec.name, "PCMU");
+    assert_eq!(codec.clock_rate_hz, 8_000);
+    assert_eq!(codec.channels, 1);
+    assert_eq!(
+        request.sample_rate_hz, None,
+        "an RTP clock rate is never passed off as a PCM rate"
+    );
 }
 
 #[tokio::test]
@@ -377,6 +411,17 @@ struct ObservedPlayback {
 }
 #[async_trait::async_trait]
 impl rvoip_harness::TtsPlayback for ObservedPlayback {
+    fn audio_format(&self) -> rvoip_harness::TtsAudioFormat {
+        rvoip_harness::TtsAudioFormat::Encoded {
+            codec: CodecInfo {
+                name: "PCMU".into(),
+                clock_rate_hz: 8_000,
+                channels: 1,
+                fmtp: None,
+                payload_type: None,
+            },
+        }
+    }
     async fn next_frame(&self) -> Option<MediaFrame> {
         self.requested.notify_one();
         Some(playback_test_frame())
@@ -496,7 +541,7 @@ async fn playback_drain_joins_workers_and_rejects_restart() {
 #[tokio::test]
 async fn playback_reports_completion_and_delivery_failure() {
     let (orch, _tx, stream, conn) = setup().await;
-    orch.register_tts_provider("counted", Arc::new(CountedTts { frames: 5 }));
+    orch.register_tts_provider("counted", Arc::new(CountedTts::new(5)));
     let source = || rvoip_core::commands::AudioSource::TtsRequest {
         provider_ref: "counted".into(),
         text: "test".into(),
@@ -522,4 +567,82 @@ async fn playback_reports_completion_and_delivery_failure() {
         rvoip_core::adapter::PlaybackOutcome::Failed
     );
     orch.drain_playback_tasks().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn pcm_playback_paces_wire_frames_and_completes() {
+    let (orch, _tx, stream, conn) = setup().await;
+    let (mut input, source) = rvoip_core::playback::PcmPlaybackSource::channel(8_000, 2).unwrap();
+    let handle = orch.play_pcm(conn, source).await.unwrap();
+    input.send(&[1000; 160]).await.unwrap();
+    input.finish(&[1000; 160]).await.unwrap();
+    let mut output = stream.outbound_rx.lock().unwrap().take().unwrap();
+    let a = tokio::time::timeout(Duration::from_secs(1), output.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let a_at = tokio::time::Instant::now();
+    let b = tokio::time::timeout(Duration::from_secs(1), output.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(a.payload.as_ref(), &[0xce; 160]);
+    assert_eq!(a.stream_id, stream.id);
+    assert_eq!(a.payload_type, Some(0));
+    assert_eq!(b.timestamp_rtp.wrapping_sub(a.timestamp_rtp), 160);
+    assert_eq!(a_at.elapsed(), Duration::from_millis(20), "paced delivery");
+    assert_eq!(
+        handle.wait().await.unwrap(),
+        rvoip_core::adapter::PlaybackOutcome::Completed
+    );
+    orch.drain_playback_tasks().await;
+    assert_eq!(orch.playback_task_count(), 0);
+}
+
+#[tokio::test]
+async fn pcm_playback_teardown_cancels_an_idle_source_and_closes_its_producer() {
+    let (orch, tx, _stream, conn) = setup().await;
+    let (mut input, source) = rvoip_core::playback::PcmPlaybackSource::channel(8_000, 1).unwrap();
+    let handle = orch.play_pcm(conn.clone(), source).await.unwrap();
+    tx.send(AdapterEvent::Ended {
+        connection_id: conn,
+        reason: EndReason::Normal,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), handle.wait())
+            .await
+            .unwrap()
+            .unwrap(),
+        rvoip_core::adapter::PlaybackOutcome::Cancelled
+    );
+    assert!(input.send(&[0; 160]).await.is_err());
+    orch.drain_playback_tasks().await;
+}
+
+#[tokio::test]
+async fn pcm_playback_cancel_interrupts_blocked_delivery() {
+    let (orch, _tx, stream, conn) = setup().await;
+    for _ in 0..stream.outbound_tx.max_capacity() {
+        stream.outbound_tx.try_send(playback_test_frame()).unwrap();
+    }
+    let (mut input, source) = rvoip_core::playback::PcmPlaybackSource::channel(8_000, 1).unwrap();
+    input.send(&[0; 160]).await.unwrap();
+    let handle = orch.play_pcm(conn, source).await.unwrap();
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    handle.cancel().unwrap();
+    // Admission of a new chunk may race cancellation, so wait for receiver
+    // closure rather than assuming the cancellation send joins the task.
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while input.send(&[0; 160]).await.is_ok() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    orch.drain_playback_tasks().await;
+    assert_eq!(orch.playback_task_count(), 0);
 }

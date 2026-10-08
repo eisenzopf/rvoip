@@ -1832,6 +1832,31 @@ impl Drop for PlaybackRouteGuard {
     }
 }
 
+enum StreamPlaybackSource {
+    Tts {
+        source: TtsPlaybackCancelGuard,
+        frames: crate::playback::TtsFrameAdapter,
+    },
+    Pcm(crate::playback::PcmFrameProducer),
+}
+impl StreamPlaybackSource {
+    async fn next_frame(&mut self) -> Result<Option<crate::stream::MediaFrame>> {
+        match self {
+            Self::Tts { source, frames } => frames.next_frame(source.playback()).await,
+            Self::Pcm(source) => source.next_frame().await,
+        }
+    }
+    async fn finish(&mut self, outcome: PlaybackOutcome) {
+        if let Self::Tts { source, .. } = self {
+            if outcome == PlaybackOutcome::Completed {
+                source.complete();
+            } else {
+                source.cancel().await;
+            }
+        }
+    }
+}
+
 struct TtsPlaybackCancelGuard {
     playback: Arc<dyn crate::harness::TtsPlayback>,
     completed: bool,
@@ -10070,11 +10095,24 @@ impl Orchestrator {
                         crate::harness::DialogAction::Listen => continue,
                         crate::harness::DialogAction::End => break,
                         crate::harness::DialogAction::Say { text, voice } => {
+                            // Resolve the destination first so synthesis
+                            // targets its negotiated codec.
+                            let destination = match me.adapter_for(&connection_id) {
+                                Ok(adapter) => adapter
+                                    .streams(connection_id.clone())
+                                    .await
+                                    .ok()
+                                    .and_then(|streams| {
+                                        streams.into_iter().find(|s| s.kind() == StreamKind::Audio)
+                                    }),
+                                Err(_) => None,
+                            };
                             let playback = match tts
                                 .synthesize(crate::harness::TtsRequest {
                                     voice,
                                     text,
                                     sample_rate_hz: None,
+                                    destination_codec: destination.as_ref().map(|a| a.codec()),
                                 })
                                 .await
                             {
@@ -10088,35 +10126,43 @@ impl Orchestrator {
 
                             let mut playback_completed = false;
                             'playback: {
-                                let Ok(adapter) = me.adapter_for(&connection_id) else {
-                                    break 'playback;
-                                };
-                                let Ok(streams) = adapter.streams(connection_id.clone()).await
-                                else {
-                                    break 'playback;
-                                };
-                                let Some(audio) =
-                                    streams.into_iter().find(|s| s.kind() == StreamKind::Audio)
-                                else {
+                                let Some(audio) = destination else {
                                     break 'playback;
                                 };
                                 let Ok(tx) = audio.try_frames_out() else {
                                     break 'playback;
                                 };
+                                let Ok(mut frames) = crate::playback::TtsFrameAdapter::new(
+                                    playback.playback().audio_format(),
+                                    audio.id(),
+                                    audio.codec(),
+                                ) else {
+                                    break 'playback;
+                                };
+                                let mut pacer = crate::playback::FramePacer::default();
                                 loop {
-                                    tokio::select! {
-                                        _ = &mut cancel_rx => {
+                                    let frame = tokio::select! {
+                                        _ = &mut cancel_rx => break 'playback,
+                                        frame = frames.next_frame(playback.playback()) => frame,
+                                    };
+                                    let frame = match frame {
+                                        Ok(Some(frame)) => frame,
+                                        Ok(None) => {
+                                            playback_completed = true;
                                             break 'playback;
                                         }
-                                        frame_opt = playback.playback().next_frame() => {
-                                            let Some(frame) = frame_opt else {
-                                                playback_completed = true;
-                                                break 'playback;
-                                            };
-                                            if tx.send(frame).await.is_err() {
-                                                break 'playback;
-                                            }
-                                        }
+                                        Err(_) => break 'playback,
+                                    };
+                                    let release = pacer.next_release();
+                                    let sent = tokio::select! {
+                                        _ = &mut cancel_rx => break 'playback,
+                                        sent = async {
+                                            tokio::time::sleep_until(release).await;
+                                            tx.send(frame).await
+                                        } => sent,
+                                    };
+                                    if sent.is_err() {
+                                        break 'playback;
                                     }
                                 }
                             }
@@ -10467,6 +10513,19 @@ impl Orchestrator {
     /// P2 — start playback of `source` toward the peer on
     /// `connection_id`. The returned [`PlaybackHandle`] cancels
     /// playback on `.cancel()`.
+    ///
+    /// For [`AudioSource::TtsRequest`] the provider receives the audio
+    /// stream's negotiated codec as [`TtsRequest::destination_codec`]
+    /// (`sample_rate_hz` stays `None`). Its declared
+    /// [`TtsAudioFormat`] decides delivery: PCM is re-framed to 20 ms and
+    /// encoded through the same encoder as [`Self::play_pcm`] (PCMU, PCMA,
+    /// feature-enabled Opus); destination-encoded packets are re-stamped
+    /// with the stream id, negotiated payload type and RTP timestamps. Both
+    /// are paced at one 20 ms frame per 20 ms on a fixed schedule. Output
+    /// the destination cannot carry fails here and cancels the provider.
+    ///
+    /// [`TtsRequest::destination_codec`]: crate::harness::TtsRequest::destination_codec
+    /// [`TtsAudioFormat`]: crate::harness::TtsAudioFormat
     pub async fn play_audio(
         &self,
         connection_id: ConnectionId,
@@ -10504,22 +10563,69 @@ impl Orchestrator {
                 "play_audio: connection has no audio stream",
             ))?;
         let frames_out = audio.try_frames_out()?;
+        let codec = audio.codec();
+        // The provider learns the destination codec; the PCM-rate preference
+        // stays unset because an RTP clock rate is not a PCM rate.
         let playback = tts
             .synthesize(crate::harness::TtsRequest {
                 voice,
                 text,
                 sample_rate_hz: None,
+                destination_codec: Some(codec.clone()),
             })
             .await?;
-        let playback = TtsPlaybackCancelGuard::new(playback);
-        self.start_stream_playback(&lifecycle_tickets, connection_id, playback, frames_out)
+        // The guard cancels the provider if its declared output cannot be
+        // delivered to this destination.
+        let source = TtsPlaybackCancelGuard::new(playback);
+        let frames = crate::playback::TtsFrameAdapter::new(
+            source.playback().audio_format(),
+            audio.id(),
+            codec,
+        )?;
+        self.start_stream_playback(
+            &lifecycle_tickets,
+            connection_id,
+            StreamPlaybackSource::Tts { source, frames },
+            frames_out,
+        )
+    }
+
+    /// Play caller-fed mono PCM through the negotiated audio stream. Supports
+    /// PCMU/PCMA and feature-enabled Opus; resamples/upmixes with media-core,
+    /// paces 20 ms frames on a fixed schedule, and reports acceptance by the
+    /// transport queue.
+    /// Completion does not prove peer playout. Negotiation is fixed for this
+    /// playback; cancel before renegotiating the connection's audio codec.
+    pub async fn play_pcm(
+        &self,
+        connection_id: ConnectionId,
+        source: crate::playback::PcmPlaybackSource,
+    ) -> Result<PlaybackHandle> {
+        let tickets = self.capture_connection_lifecycles(std::slice::from_ref(&connection_id))?;
+        let adapter = self.adapter_for(&connection_id)?;
+        let audio = adapter
+            .streams(connection_id.clone())
+            .await?
+            .into_iter()
+            .find(|stream| stream.kind() == StreamKind::Audio)
+            .ok_or(RvoipError::AdmissionRejected(
+                "play_pcm: connection has no audio stream",
+            ))?;
+        let output = audio.try_frames_out()?;
+        let producer = crate::playback::PcmFrameProducer::new(source, audio.id(), audio.codec())?;
+        self.start_stream_playback(
+            &tickets,
+            connection_id,
+            StreamPlaybackSource::Pcm(producer),
+            output,
+        )
     }
 
     fn start_stream_playback(
         &self,
         tickets: &[ConnectionLifecycleTicket],
         connection_id: ConnectionId,
-        mut playback: TtsPlaybackCancelGuard,
+        mut playback: StreamPlaybackSource,
         frames_out: mpsc::Sender<crate::stream::MediaFrame>,
     ) -> Result<PlaybackHandle> {
         let (handle, mut cancel_rx, completion) =
@@ -10533,31 +10639,34 @@ impl Orchestrator {
             completion: Some(completion),
         };
         let task = async move {
+            let mut pacer = crate::playback::FramePacer::default();
             let outcome = loop {
                 let frame = tokio::select! {
                     biased;
                     _ = &mut cancel_rx => break PlaybackOutcome::Cancelled,
                     _ = worker_terminal.cancelled() => break PlaybackOutcome::Cancelled,
-                    frame = playback.playback().next_frame() => frame,
+                    frame = playback.next_frame() => frame,
                 };
-                let Some(frame) = frame else {
-                    break PlaybackOutcome::Completed;
+                let frame = match frame {
+                    Ok(Some(frame)) => frame,
+                    Ok(None) => break PlaybackOutcome::Completed,
+                    Err(_) => break PlaybackOutcome::Failed,
                 };
+                let release = pacer.next_release();
                 let delivered = tokio::select! {
                     biased;
                     _ = &mut cancel_rx => break PlaybackOutcome::Cancelled,
                     _ = worker_terminal.cancelled() => break PlaybackOutcome::Cancelled,
-                    result = frames_out.send(frame) => result,
+                    result = async {
+                        tokio::time::sleep_until(release).await;
+                        frames_out.send(frame).await
+                    } => result,
                 };
                 if delivered.is_err() {
                     break PlaybackOutcome::Failed;
                 }
             };
-            if outcome == PlaybackOutcome::Completed {
-                playback.complete();
-            } else {
-                playback.cancel().await;
-            }
+            playback.finish(outcome).await;
             route.finish(outcome);
         };
         // Fence installation against terminal teardown after asynchronous
