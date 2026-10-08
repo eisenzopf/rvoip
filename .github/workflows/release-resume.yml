@@ -25,7 +25,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Check out trusted resume tooling
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
           fetch-depth: 0
@@ -203,12 +203,12 @@ jobs:
           PY
 
       - name: Attest the existing passing aggregate
-        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
           subject-path: target/release-resume/evidence/release-qualification/aggregate.json
 
       - name: Upload resumed release evidence
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-gate-evidence
           path: target/release-resume/evidence/

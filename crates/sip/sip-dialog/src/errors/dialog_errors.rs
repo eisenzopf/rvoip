@@ -50,6 +50,26 @@ pub enum DialogError {
 }
 
 impl DialogError {
+    /// Fixed diagnostic vocabulary only: arbitrary peer strings and opaque
+    /// provider errors never become operational log data.
+    pub fn diagnostic_reason(&self) -> &'static str {
+        match self {
+            Self::ProtocolError { message } => match message.as_str() {
+                "Secure INVITE contains a non-SIPS Contact" => "secure_contact_required",
+                "INVITE missing Call-ID header" => "missing_call_id",
+                "INVITE missing From header" => "missing_from",
+                "INVITE missing To header" => "missing_to",
+                _ => "protocol_failure",
+            },
+            Self::TransactionError { message }
+                if message == "INVITE server transaction had no dialog setup owner" =>
+            {
+                "missing_dialog_setup_owner"
+            }
+            _ => "operation_failure",
+        }
+    }
+
     pub const fn diagnostic_class(&self) -> &'static str {
         match self {
             Self::DialogNotFound { .. } => "dialog-not-found",
@@ -70,6 +90,28 @@ impl DialogError {
 #[cfg(test)]
 mod diagnostic_tests {
     use super::*;
+
+    #[test]
+    fn incoming_setup_reason_is_an_exact_allowlist_not_peer_text() {
+        let secure_contact = DialogError::ProtocolError {
+            message: "Secure INVITE contains a non-SIPS Contact".into(),
+        };
+        assert_eq!(
+            secure_contact.diagnostic_reason(),
+            "secure_contact_required"
+        );
+        let injected = DialogError::ProtocolError {
+            message: "Secure INVITE contains a non-SIPS Contact secret-canary".into(),
+        };
+        assert_eq!(injected.diagnostic_reason(), "protocol_failure");
+        let missing_owner = DialogError::TransactionError {
+            message: "INVITE server transaction had no dialog setup owner".into(),
+        };
+        assert_eq!(
+            missing_owner.diagnostic_reason(),
+            "missing_dialog_setup_owner"
+        );
+    }
 
     #[test]
     fn every_dialog_error_variant_is_payload_free() {
@@ -119,6 +161,7 @@ mod diagnostic_tests {
             let rendered = format!("{error:?} {error}");
             assert!(!rendered.contains(CANARY), "payload leaked: {rendered}");
             assert!(!error.diagnostic_class().is_empty());
+            assert!(!error.diagnostic_reason().contains(CANARY));
             assert!(std::error::Error::source(&error).is_none());
         }
         assert!(!format!("{context:?}").contains(CANARY));

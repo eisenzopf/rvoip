@@ -31,6 +31,30 @@ No features are enabled by default; the default build is signaling-only.
 - `wss` — TLS (`wss://`) support via `tokio-rustls`/`rustls` and
   `tokio-tungstenite`'s `rustls-tls-webpki-roots`.
 
+## Listener lifecycle
+
+The adapter owns its inbound listener and peer-task registry. Use
+`adapter.begin_drain()` to stop admission and release the listening port while
+existing peers finish naturally. `adapter.is_draining()` reports this state.
+
+`adapter.shutdown(budget).await` stops admission, cancels unfinished TLS/WS
+upgrades and active inbound peers, and waits for coordinator and route cleanup.
+It returns `true` only after the listener and peer tasks finish. `false` means
+the caller's wait budget elapsed; cleanup continues under the listener's
+ownership, and another call may wait again. Concurrent calls are idempotent.
+The coordinator's signaling timeout still bounds its graceful drain before the
+existing supervisor aborts a stalled driver. Dropping the adapter requests the
+same cancellation but cannot await cleanup; use explicit shutdown when completion
+matters. Outbound clients created by `originate` are outside this inbound-listener
+lifecycle. Application callback completion remains subject to its own contract.
+
+```rust,ignore
+adapter.begin_drain(); // Keep established peers usable during a rollout.
+if !adapter.shutdown(std::time::Duration::from_secs(5)).await {
+    // Do not report complete shutdown: keep waiting or record incomplete cleanup.
+}
+```
+
 ## License
 
 Licensed under the MIT License — see [LICENSE](https://github.com/eisenzopf/rvoip/blob/main/LICENSE).
