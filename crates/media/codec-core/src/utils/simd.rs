@@ -242,154 +242,26 @@ pub fn encode_alaw_optimized(samples: &[i16], output: &mut [u8]) {
 /// Scalar μ-law conversion (ITU-T G.711)
 #[must_use]
 pub const fn linear_to_mulaw_scalar(sample: i16) -> u8 {
-    const CLIP: i16 = 32635;
-    const BIAS: i16 = 0x84;
-    const MULAW_MAX: u8 = 0x7F;
-
-    let mut sample = sample;
-    let sign = if sample < 0 {
-        // Handle i16::MIN case to avoid overflow
-        sample = if sample == i16::MIN {
-            i16::MAX
-        } else {
-            -sample
-        };
-        0x80
-    } else {
-        0x00
-    };
-
-    if sample > CLIP {
-        sample = CLIP;
-    }
-
-    sample += BIAS;
-
-    let exponent = if sample <= 0x1F {
-        0
-    } else if sample <= 0x3F {
-        1
-    } else if sample <= 0x7F {
-        2
-    } else if sample <= 0xFF {
-        3
-    } else if sample <= 0x1FF {
-        4
-    } else if sample <= 0x3FF {
-        5
-    } else if sample <= 0x7FF {
-        6
-    } else {
-        7
-    };
-
-    let mantissa = (sample >> (exponent + 3)) & 0x0F;
-    let mulaw = ((exponent << 4) | mantissa).to_le_bytes()[0];
-
-    (mulaw ^ MULAW_MAX) | sign
+    crate::codecs::g711_reference::ulaw_compress(sample)
 }
 
 /// Scalar A-law conversion (ITU-T G.711)
 #[must_use]
 pub const fn linear_to_alaw_scalar(sample: i16) -> u8 {
-    const CLIP: i16 = 32635;
-    const ALAW_MAX: u8 = 0x7F;
-
-    let mut sample = sample;
-    let sign = if sample < 0 {
-        // Handle i16::MIN case to avoid overflow
-        sample = if sample == i16::MIN {
-            i16::MAX
-        } else {
-            -sample
-        };
-        0x80
-    } else {
-        0x00
-    };
-
-    if sample > CLIP {
-        sample = CLIP;
-    }
-
-    let alaw = if sample < 256 {
-        sample >> 4
-    } else {
-        let exponent = if sample < 512 {
-            1
-        } else if sample < 1024 {
-            2
-        } else if sample < 2048 {
-            3
-        } else if sample < 4096 {
-            4
-        } else if sample < 8192 {
-            5
-        } else if sample < 16384 {
-            6
-        } else {
-            7
-        };
-
-        let mantissa = (sample >> (exponent + 3)) & 0x0F;
-        ((exponent << 4) | mantissa) + 16
-    };
-
-    (alaw.to_le_bytes()[0] ^ ALAW_MAX) | sign
+    crate::codecs::g711_reference::alaw_compress(sample)
 }
 
 /// Scalar μ-law to linear conversion
 #[must_use]
 #[allow(clippy::cast_lossless)]
 pub const fn mulaw_to_linear_scalar(mulaw: u8) -> i16 {
-    const BIAS: i16 = 0x84;
-    const MULAW_MAX: u8 = 0x7F;
-
-    let mulaw = mulaw ^ MULAW_MAX;
-    let sign = mulaw & 0x80;
-    let exponent = (mulaw >> 4) & 0x07;
-    let mantissa = mulaw & 0x0F;
-
-    let mut sample = ((mantissa as i16) << (exponent + 3)) + BIAS;
-
-    if exponent > 0 {
-        sample += 1i16 << (exponent + 2);
-    }
-
-    if sign != 0 {
-        -sample
-    } else {
-        sample
-    }
+    crate::codecs::g711_reference::ulaw_expand(mulaw)
 }
 
 /// Scalar A-law to linear conversion
 #[must_use]
-pub fn alaw_to_linear_scalar(alaw: u8) -> i16 {
-    const ALAW_MAX: u8 = 0x7F;
-
-    let alaw = alaw ^ ALAW_MAX;
-    let sign = alaw & 0x80;
-    let magnitude = alaw & 0x7F;
-
-    let sample = if magnitude < 16 {
-        u16::from(magnitude) << 4
-    } else {
-        let exponent = (magnitude >> 4) & 0x07;
-        let mantissa = magnitude & 0x0F;
-
-        // Prevent overflow by clamping shift amounts and using wider types
-        let exp_shift = u32::from(exponent + 3).min(15);
-        let gain_shift = u32::from(exponent + 2).min(15);
-
-        (u16::from(mantissa) << exp_shift) + (1_u16 << gain_shift)
-    } + 8;
-
-    if sign != 0 {
-        -sample.cast_signed()
-    } else {
-        sample.cast_signed()
-    }
+pub const fn alaw_to_linear_scalar(alaw: u8) -> i16 {
+    crate::codecs::g711_reference::alaw_expand(alaw)
 }
 
 #[cfg(test)]

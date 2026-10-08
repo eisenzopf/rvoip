@@ -75,6 +75,7 @@ pub(crate) struct Route {
     /// Exact peer-selected Conversation ID from the authenticated invite.
     pub cid: Option<String>,
     pub sid: String,
+    pub medium: String,
     pub binding: rvoip_uctp::adapter_helpers::AuthenticatedConnectionBinding,
     pub out_tx: mpsc::Sender<UctpEnvelope>,
     /// Gap plan §4.2 v1 punch list — see rvoip-quic Route doc.
@@ -108,6 +109,7 @@ pub struct UctpWsConfig {
     /// Optional identity-match hook run before `conversation.create` is
     /// fulfilled. Returning `Some(cid)` forces `open_conversation_with_id`.
     pub conversation_create_hook: Option<Arc<dyn ConversationCreateHook>>,
+    pub application_handler: Option<Arc<dyn rvoip_uctp::application::ApplicationHandler>>,
     /// Optional `rustls::ServerConfig` for TLS-terminating WSS. When
     /// `Some`, the accept loop wraps each `TcpStream` in
     /// `tokio_rustls::TlsAcceptor::accept(...)` before running the
@@ -128,9 +130,18 @@ impl UctpWsConfig {
             sig9421: None,
             orchestrator: None,
             conversation_create_hook: None,
+            application_handler: None,
             #[cfg(feature = "wss")]
             tls: None,
         }
+    }
+
+    pub fn with_application_handler(
+        mut self,
+        handler: Arc<dyn rvoip_uctp::application::ApplicationHandler>,
+    ) -> Self {
+        self.application_handler = Some(handler);
+        self
     }
 
     pub fn with_outbound_url(mut self, url: Url) -> Self {
@@ -221,6 +232,7 @@ impl UctpWsAdapter {
             config.sig9421,
             config.orchestrator,
             config.conversation_create_hook,
+            config.application_handler,
             #[cfg(feature = "wss")]
             config.tls,
         );
@@ -238,8 +250,40 @@ impl UctpWsAdapter {
         }))
     }
 
+    /// Stop accepting new peers while existing peers finish naturally.
+    pub fn begin_drain(&self) {
+        self._server.begin_drain();
+    }
+
+    pub fn is_draining(&self) -> bool {
+        self._server.is_draining()
+    }
+
+    /// Cancel the listener and all inbound peers, then wait up to `budget`.
+    /// Returns true only when their cleanup is complete. On timeout cleanup
+    /// continues under the listener's ownership; calling again is safe.
+    /// Outbound clients created by `originate` are not owned by this listener.
+    pub async fn shutdown(&self, budget: std::time::Duration) -> bool {
+        self._server.shutdown(budget).await
+    }
+
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// Peer-selected routing context, only for its authenticated owner.
+    /// These IDs are hints, not authorization: the host must authorize the
+    /// principal against its Conversation before admitting this connection.
+    pub fn inbound_context(
+        &self,
+        connection_id: &ConnectionId,
+        principal: &rvoip_auth_core::AuthenticatedPrincipal,
+    ) -> Option<(Option<String>, String, String)> {
+        let route = self.routes.get(connection_id)?;
+        route
+            .binding
+            .is_owned_by(principal)
+            .then(|| (route.cid.clone(), route.sid.clone(), route.medium.clone()))
     }
 
     fn route(&self, conn: &ConnectionId) -> Option<Route> {

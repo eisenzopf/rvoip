@@ -2425,6 +2425,9 @@ impl DialogManager {
                         "Outbound request contains an unusable Route header",
                     )
                 })?;
+            let observed_source = dialog.last_known_remote_addr;
+            let route_set_is_empty = template.route_set.is_empty();
+            drop(dialog);
             let mut candidates = self.resolve_uri_to_candidates(&next_hop).await;
 
             // When an inbound peer supplied an unspecified Contact, dialog
@@ -2433,11 +2436,7 @@ impl DialogManager {
             // preserve the Contact-derived URI on the wire as Request-URI.
             // Reusing the resolved candidate's transport also preserves UDP,
             // TCP, or TLS selection without inventing transport state here.
-            apply_observed_source(
-                dialog.last_known_remote_addr,
-                template.route_set.is_empty(),
-                &mut candidates,
-            );
+            apply_observed_source(observed_source, route_set_is_empty, &mut candidates);
 
             if candidates.is_empty() {
                 return Err(crate::errors::DialogError::routing_error(
@@ -4901,6 +4900,7 @@ impl DialogManager {
                         "Initial INVITE contains an unusable Route header",
                     )
                 })?;
+            drop(dialog);
             let candidates = if opts.registered_flow_routes.is_empty() {
                 self.resolve_uri_to_candidates(&next_hop).await
             } else {
@@ -7681,6 +7681,7 @@ impl DialogManager {
                         "PRACK contains an unusable Route header",
                     )
                 })?;
+            drop(dialog);
             let candidates = self.resolve_uri_to_candidates(&next_hop).await;
             if candidates.is_empty() {
                 return Err(crate::errors::DialogError::routing_error(

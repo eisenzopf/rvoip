@@ -37,7 +37,7 @@ async fn loopback_auth_handshake_over_wss() {
     let server_addr = listener.local_addr().expect("local_addr");
 
     let cfg = UctpWsConfig::new(listener, bearer_stub()).with_tls(server_tls);
-    let _adapter = UctpWsAdapter::new(cfg).await.expect("adapter");
+    let adapter = UctpWsAdapter::new(cfg).await.expect("adapter");
 
     // --- Client (wss://, pinning the server cert) ---
     let client_tls = dev_client_config_trusting(&cert).expect("client tls cfg");
@@ -83,4 +83,9 @@ async fn loopback_auth_handshake_over_wss() {
         "expected auth.challenge from server over wss; got {:?}",
         reply.msg_type
     );
+    assert!(adapter.shutdown(Duration::from_secs(2)).await);
+    assert!(tokio::time::timeout(Duration::from_secs(2), inbound.recv())
+        .await
+        .expect("WSS peer close timeout")
+        .is_none());
 }
