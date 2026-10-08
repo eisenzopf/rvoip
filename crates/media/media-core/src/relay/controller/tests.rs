@@ -466,13 +466,11 @@ mod tests {
     }
 
     /// The intended improvement: a direct peer replaces its SSRC with an
-    /// independent RTP clock and an independent Opus encoder. The callback
-    /// must see (1) a continuous timeline, not the new source's raw epoch,
-    /// and (2) audio decoded by fresh decoder state, not the old source's
-    /// prediction/overlap state.
+    /// independent RTP clock and an independent Opus encoder. Returns the
+    /// frames delivered to the application callback, how many came from the
+    /// first source, and a fresh decoder's output for each new-source packet.
     #[cfg(feature = "opus")]
-    #[tokio::test]
-    async fn opus_ssrc_replacement_is_normalized_and_freshly_decoded() {
+    async fn opus_ssrc_replacement() -> (Vec<AudioFrame>, usize, Vec<Vec<i16>>) {
         let mut parameters = HashMap::new();
         parameters.insert(types::RTP_PAYLOAD_TYPE_PARAMETER.into(), "111".into());
         parameters.insert(types::RTP_CLOCK_RATE_PARAMETER.into(), "48000".into());
@@ -524,13 +522,24 @@ mod tests {
             ));
         }
         let frames = receive_through_handler("opus", parameters, 111, packets).await;
+        let mut fresh = Vec::new();
+        for payload in &b {
+            let decoder = codec_runtime::DialogCodecRuntime::new(format.clone()).unwrap();
+            fresh.push(decoder.decode(payload, 0).await.unwrap().samples);
+        }
+        (frames, a.len(), fresh)
+    }
+
+    /// The callback sees a continuous timeline, not the new source's raw epoch.
+    #[cfg(feature = "opus")]
+    #[tokio::test]
+    async fn opus_ssrc_replacement_keeps_a_continuous_timeline() {
+        let (frames, first_source_frames, _) = opus_ssrc_replacement().await;
         let timestamps: Vec<u32> = frames.iter().map(|frame| frame.timestamp).collect();
         assert!(
-            frames.len() > a.len(),
+            frames.len() > first_source_frames,
             "replacement source must be played: {timestamps:?}"
         );
-
-        // (1) No artificial clock jump reaches the application.
         for pair in timestamps.windows(2) {
             assert_eq!(
                 pair[1].wrapping_sub(pair[0]),
@@ -538,17 +547,21 @@ mod tests {
                 "artificial timestamp jump passed downstream: {timestamps:?}"
             );
         }
+    }
 
-        // (2) The first frame of the new source is what a fresh decoder
-        // produces for one of the new source's packets.
-        let first_b = &frames[a.len()];
-        let mut fresh = Vec::new();
-        for payload in &b {
-            let decoder = codec_runtime::DialogCodecRuntime::new(format.clone()).unwrap();
-            fresh.push(decoder.decode(payload, 0).await.unwrap().samples);
-        }
+    /// The first new-source frame the callback sees is what a fresh decoder
+    /// produces for a new-source packet, not the output of a decoder still
+    /// carrying the previous source's prediction and overlap state.
+    #[cfg(feature = "opus")]
+    #[tokio::test]
+    async fn opus_ssrc_replacement_is_decoded_with_fresh_state() {
+        let (frames, first_source_frames, fresh) = opus_ssrc_replacement().await;
+        let first_new = &frames
+            .get(first_source_frames)
+            .expect("replacement source must be played")
+            .samples;
         assert!(
-            fresh.iter().any(|samples| *samples == first_b.samples),
+            fresh.iter().any(|samples| samples == first_new),
             "replacement source was decoded with the previous source's decoder state"
         );
     }
