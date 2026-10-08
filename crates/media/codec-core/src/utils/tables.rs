@@ -12,9 +12,9 @@ const fn decode_table(mulaw: bool) -> [i16; 256] {
     while index < table.len() {
         let encoded = index.to_le_bytes()[0];
         table[index] = if mulaw {
-            crate::codecs::g711::ulaw_expand(encoded)
+            crate::codecs::g711_reference::ulaw_expand(encoded)
         } else {
-            crate::codecs::g711::alaw_expand(encoded)
+            crate::codecs::g711_reference::alaw_expand(encoded)
         };
         index += 1;
     }

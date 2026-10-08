@@ -242,26 +242,26 @@ pub fn encode_alaw_optimized(samples: &[i16], output: &mut [u8]) {
 /// Scalar μ-law conversion (ITU-T G.711)
 #[must_use]
 pub const fn linear_to_mulaw_scalar(sample: i16) -> u8 {
-    crate::codecs::g711::ulaw_compress(sample)
+    crate::codecs::g711_reference::ulaw_compress(sample)
 }
 
 /// Scalar A-law conversion (ITU-T G.711)
 #[must_use]
 pub const fn linear_to_alaw_scalar(sample: i16) -> u8 {
-    crate::codecs::g711::alaw_compress(sample)
+    crate::codecs::g711_reference::alaw_compress(sample)
 }
 
 /// Scalar μ-law to linear conversion
 #[must_use]
 #[allow(clippy::cast_lossless)]
 pub const fn mulaw_to_linear_scalar(mulaw: u8) -> i16 {
-    crate::codecs::g711::ulaw_expand(mulaw)
+    crate::codecs::g711_reference::ulaw_expand(mulaw)
 }
 
 /// Scalar A-law to linear conversion
 #[must_use]
 pub const fn alaw_to_linear_scalar(alaw: u8) -> i16 {
-    crate::codecs::g711::alaw_expand(alaw)
+    crate::codecs::g711_reference::alaw_expand(alaw)
 }
 
 #[cfg(test)]
