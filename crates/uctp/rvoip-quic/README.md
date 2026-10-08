@@ -20,8 +20,11 @@ identity, required scope and configured signatures, then dispatches commands wit
 an explicit `payload.profile`. Replies retain correlation and resource IDs.
 Duplicate requests invoke the handler's replay hook instead of repeating effects.
 The handler owns object authorization and durable idempotency; this adapter does
-not supply a persistence backend. Profile-free signaling/media remains unchanged,
-and missing or unknown profiles return an explicit capability error.
+not supply a persistence backend. Profile-free signaling/media remains unchanged.
+With a handler installed, unknown profiles return an explicit capability error;
+without one, `payload.profile` is ordinary data and dispatch is unchanged. Each
+handler call is bounded by `UctpCoordinatorCaps::application_handler_timeout`
+(set through `UctpQuicConfig::coordinator_caps`).
 
 ```rust,ignore
 let config = rvoip_quic::UctpQuicConfig::new(endpoint, accept_rx, bearer_validator)

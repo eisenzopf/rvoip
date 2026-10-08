@@ -276,7 +276,14 @@ async fn absent_or_unknown_profiles_do_not_reach_an_application_handler() {
         let mut command = request();
         command.payload["profile"] = json!("uninstalled/control-v1");
         input.send(command).await.unwrap();
-        assert_eq!(receive(&mut output).await.payload["code"], 501);
+        let reply = receive(&mut output).await;
+        if installed {
+            assert_eq!(reply.payload["code"], 501);
+        } else {
+            // Without an installed handler the profile branch never runs; a
+            // `profile` field is ordinary payload data on legacy dispatch.
+            assert_eq!(reply.payload["reason"], "malformed-data-message");
+        }
         // A profile-free envelope still follows legacy message dispatch.
         let mut legacy = request();
         legacy.payload.as_object_mut().unwrap().remove("profile");
