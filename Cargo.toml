@@ -317,6 +317,7 @@ chromiumoxide = { version = "0.7", default-features = false, features = ["tokio-
 sha2 = "0.10"
 sha1 = "0.10"
 zeroize = "1.9"
+subtle = "2.6"
 hmac = "0.12"
 aes = "0.8"
 md-5 = "0.10"

@@ -13,6 +13,7 @@ use rvoip_uctp::{
 };
 use rvoip_websocket::{UctpWsAdapter, UctpWsClient, UctpWsConfig};
 use serde_json::json;
+use subtle::ConstantTimeEq;
 use tokio::{net::TcpListener, sync::mpsc};
 use url::Url;
 
@@ -32,7 +33,10 @@ impl BearerValidator for DemoBearer {
         &self,
         token: &str,
     ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
-        if token != self.0 {
+        // Constant-time comparison so response timing does not reveal how many
+        // leading bytes of a guessed credential matched. (`ct_eq` on slices of
+        // different lengths returns false immediately; only length can leak.)
+        if !bool::from(token.as_bytes().ct_eq(self.0.as_bytes())) {
             return Err(BearerAuthError::Invalid(
                 "invalid example credential".into(),
             ));
@@ -218,7 +222,9 @@ mod tests {
     #[tokio::test]
     async fn example_accepts_only_its_configured_credential() {
         let bearer = DemoBearer("configured".into());
-        assert!(bearer.validate_principal("wrong").await.is_err());
+        for wrong in ["wrong", "", "configure", "configured!", "Configured"] {
+            assert!(bearer.validate_principal(wrong).await.is_err(), "{wrong:?}");
+        }
         assert!(bearer
             .validate_principal("configured")
             .await
