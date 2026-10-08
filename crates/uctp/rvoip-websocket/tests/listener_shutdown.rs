@@ -222,3 +222,67 @@ async fn shutdown_cancels_an_incomplete_tls_handshake() {
     assert!(adapter.shutdown(Duration::from_secs(2)).await);
     let _replacement = rebind(address).await;
 }
+
+#[tokio::test]
+async fn shutdown_retires_inbound_route_and_reports_its_terminal_event() {
+    use rvoip_core::adapter::{AdapterEvent, ConnectionAdapter, OrchestratorAdapterEvent};
+    use rvoip_uctp::payloads::session::SessionInvite;
+    let (adapter, address) = listener().await;
+    let mut events = adapter.subscribe_orchestrator_events();
+    let client = UctpWsClient::connect(&Url::parse(&format!("ws://{address}")).unwrap())
+        .await
+        .unwrap();
+    let mut inbound = client.take_inbound().unwrap();
+    let challenge = hello(&client, &mut inbound).await;
+    client.send(response(&challenge)).await.unwrap();
+    assert_eq!(
+        receive(&mut inbound).await.msg_type,
+        MessageType::AuthSession
+    );
+    client
+        .send(
+            UctpEnvelope::new(
+                MessageType::SessionInvite,
+                serde_json::to_value(SessionInvite {
+                    from: "untrusted-peer".into(),
+                    to: vec!["server".into()],
+                    medium: "voice".into(),
+                    intent: "synchronous-engagement".into(),
+                    capabilities_offer: serde_json::json!({}),
+                })
+                .unwrap(),
+            )
+            .with_sid("sess_shutdown")
+            .with_cid("conv_shutdown"),
+        )
+        .await
+        .unwrap();
+    let connection_id = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let OrchestratorAdapterEvent::AuthenticatedInboundConnection { connection, .. } =
+                events.recv().await.unwrap()
+            {
+                return connection.id;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(adapter.is_connection_live(&connection_id));
+    assert!(adapter.shutdown(Duration::from_secs(2)).await);
+    assert!(!adapter.is_connection_live(&connection_id));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let OrchestratorAdapterEvent::Public(AdapterEvent::Ended {
+                connection_id: ended,
+                ..
+            }) = events.recv().await.unwrap()
+            {
+                assert_eq!(ended, connection_id);
+                return;
+            }
+        }
+    })
+    .await
+    .expect("shutdown must deliver a terminal event for the exact retired route");
+}
