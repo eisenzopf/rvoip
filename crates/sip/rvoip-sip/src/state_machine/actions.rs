@@ -1819,7 +1819,16 @@ pub(crate) async fn execute_action(
             );
             #[cfg(feature = "perf-call-setup-diagnostics")]
             let started = std::time::Instant::now();
-            let media_id = media_adapter.create_session(&session.session_id).await?;
+            // An inbound call answers the INVITE's offer when it carried one;
+            // every other new session makes the offer itself.
+            let remote_offer = if session.role == crate::state_table::Role::UAS {
+                session.remote_sdp.as_deref()
+            } else {
+                None
+            };
+            let media_id = media_adapter
+                .create_session_for_offer(&session.session_id, remote_offer)
+                .await?;
             #[cfg(feature = "perf-call-setup-diagnostics")]
             crate::call_setup_diag::record_stage(
                 &session.session_id,

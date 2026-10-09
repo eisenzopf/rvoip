@@ -465,6 +465,81 @@ async fn rtcp_keeps_a_silent_call_alive_only_when_it_counts_as_media() {
     );
 }
 
+/// Two peers that never multiplex RTP and RTCP: the caller offers no
+/// a=rtcp-mux and sends no RTP. Its RTCP keeps the UAS's no-media watchdog
+/// quiet only if it reaches the UAS's separate RTCP socket. Returns whether
+/// the watchdog ended the call.
+async fn non_mux_call_without_rtp_ended_by_watchdog(
+    alice_port: u16,
+    bob_port: u16,
+    rtcp_non_mux: bool,
+) -> bool {
+    let _ = tracing_subscriber::fmt::try_init();
+    let name = if rtcp_non_mux { "on" } else { "off" };
+    let bob_cfg = cfg(&format!("bob-rtcp-non-mux-{name}"), bob_port)
+        .with_active_call_no_media_timeout_secs(5)
+        .with_active_call_media_idle_timeout_secs(0)
+        .with_active_call_rtcp_counts_as_media(true)
+        .with_rtcp_non_mux(rtcp_non_mux);
+    let bob = CallbackPeer::new(AcceptAll, bob_cfg).await.expect("bob");
+    let bob_shutdown = bob.shutdown_handle();
+    let bob_task = tokio::spawn(async move {
+        let _ = bob.run().await;
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // A PBX-style caller: no a=rtcp-mux in its offer.
+    let mut alice_cfg =
+        cfg(&format!("alice-rtcp-non-mux-{name}"), alice_port).with_rtcp_non_mux(rtcp_non_mux);
+    alice_cfg.offer_rtcp_mux = false;
+    let alice = UnifiedCoordinator::new(alice_cfg).await.expect("alice");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let call_id = alice
+        .invite(
+            Some(format!("sip:alice@127.0.0.1:{alice_port}")),
+            format!("sip:bob@127.0.0.1:{bob_port}"),
+        )
+        .send()
+        .await
+        .expect("invite");
+    let call = alice.session(&call_id);
+    call.wait_for_answered(Some(Duration::from_secs(8)))
+        .await
+        .expect("call should be active");
+
+    let ended = call
+        .wait_for_end(Some(Duration::from_secs(8)))
+        .await
+        .is_ok();
+    if !ended {
+        let _ = call.hangup_and_wait(Some(Duration::from_secs(2))).await;
+    }
+    let _ = wait_for_no_sessions(&alice, Duration::from_secs(3)).await;
+    bob_shutdown.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(2), bob_task).await;
+    let _ = alice
+        .shutdown_gracefully(Some(Duration::from_secs(2)))
+        .await;
+    ended
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rtcp_non_mux_carries_rtcp_between_peers_that_decline_mux() {
+    let (with_option, without_option) = tokio::join!(
+        non_mux_call_without_rtp_ended_by_watchdog(17956, 17957, true),
+        non_mux_call_without_rtp_ended_by_watchdog(17958, 17959, false),
+    );
+    assert!(
+        !with_option,
+        "with Config::rtcp_non_mux the caller's RTCP must reach the callee's RTCP port"
+    );
+    assert!(
+        without_option,
+        "without Config::rtcp_non_mux a non-mux call carries no RTCP"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn server_call_admission_limit_rejects_with_503_retry_after_on_wire() {
     let _ = tracing_subscriber::fmt::try_init();

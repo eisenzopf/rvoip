@@ -2272,9 +2272,68 @@ pub struct Config {
     /// Default: `true`.
     pub offer_rtcp_mux: bool,
 
-    /// Require SDP negotiation of RTP/RTCP multiplexing for the single media socket.
-    /// Peers declining it fail negotiation instead of silently losing RTCP.
+    /// Require SDP negotiation of RTP/RTCP multiplexing (RFC 5761).
+    ///
+    /// When `true`, every offer carries `a=rtcp-mux` and `a=rtcp-mux-only`
+    /// (RFC 8858), and an offer or answer without `a=rtcp-mux` fails
+    /// negotiation, so no call runs without RTCP.
+    ///
+    /// RTCP reaches a peer in one of two ways:
+    /// - **Multiplexed** (the default path): offer and answer both carry
+    ///   `a=rtcp-mux` and RTCP shares the RTP port. See
+    ///   [`Config::offer_rtcp_mux`].
+    /// - **Separate RTCP port**: with [`Config::rtcp_non_mux`] on, a peer
+    ///   that declines mux gets RTCP from our RTP port + 1 to its RTCP port.
+    ///
+    /// With neither, a peer that declines mux gets no RTCP at all; nothing
+    /// is ever sent to its RTP port. Strict mode wins over
+    /// [`Config::rtcp_non_mux`]: no RTCP port is reserved, and no `a=rtcp:`
+    /// accompanies `a=rtcp-mux-only` (RFC 8858 §5.3).
+    ///
+    /// Default: `false`.
     pub rtcp_mux_required: bool,
+
+    /// Send and receive RTCP on a separate port for peers that decline
+    /// RTP/RTCP multiplexing.
+    ///
+    /// Many PBXes (Asterisk with its default pjsip settings, for example)
+    /// and carriers do not do `a=rtcp-mux`. Without this option their calls
+    /// carry no RTCP, so neither side gets loss, jitter or round-trip
+    /// reports. With it:
+    /// - Each call reserves an even RTP port and the port above it for RTCP
+    ///   (RFC 3550 §11), together, so concurrent calls never share one.
+    ///   Calls rvoip offers (outbound INVITEs, late-SDP 200 OKs) reserve the
+    ///   pair up front, because the answer may decline mux; inbound calls
+    ///   reserve it only when the offer lacks `a=rtcp-mux`.
+    /// - Offers carry `a=rtcp:<port>` (RFC 3605) next to `a=rtcp-mux`, and
+    ///   answers to non-mux offers carry it too.
+    /// - When the peer declines mux, periodic SR/RR reports and the
+    ///   close-time BYE go from our RTCP port to the peer's `a=rtcp:`
+    ///   address, or its RTP port + 1 when it names none. Reports arriving
+    ///   on our RTCP port are accepted only from the call's peer, and
+    ///   SRTCP protects them whenever SDES-SRTP is in use.
+    /// - When the peer accepts mux, RTCP shares the RTP port as usual and
+    ///   the RTCP port is released as soon as the negotiation commits.
+    ///
+    /// Behind NAT, a peer's RTCP is learned from the source it actually
+    /// arrives from (symmetric RTCP, following the symmetric-RTP policy in
+    /// [`SipNatConfig`]), but only from a report carrying the SSRC of the RTP
+    /// stream already latched, from the same IP. A static public address
+    /// whose port differs from the local RTP port gets no `a=rtcp:`, and a
+    /// NAT that does not keep RTP + 1 adjacent may lose RTCP the peer sends
+    /// before it hears from us.
+    ///
+    /// Cost: a call that keeps its RTCP port uses two ports, so a media port
+    /// range filled with such calls holds half as many calls (size
+    /// [`Config::media_port_start`]..=[`Config::media_port_end`]
+    /// accordingly). Ignored, and no port reserved, when ICE is enabled
+    /// (ICE here negotiates RTP's component only), with DTLS-SRTP keying
+    /// (RFC 5764 §4.1 would need a second DTLS handshake on the RTCP port),
+    /// in strict [`Config::rtcp_mux_required`] mode, and in signalling-only
+    /// media mode.
+    ///
+    /// Default: `false` — RTCP flows only to peers that multiplex.
+    pub rtcp_non_mux: bool,
 
     /// Send RFC 3611 VoIP-metrics extended reports (RTCP XR) to peers that
     /// ask for them.
@@ -2918,6 +2977,7 @@ impl std::fmt::Debug for Config {
             .field("offer_srtp", &self.offer_srtp)
             .field("offer_rtcp_mux", &self.offer_rtcp_mux)
             .field("rtcp_mux_required", &self.rtcp_mux_required)
+            .field("rtcp_non_mux", &self.rtcp_non_mux)
             .field("srtp_keying", &self.srtp_keying)
             .field("dtls_setup_role", &self.dtls_setup_role)
             .field("ice", &self.ice)
@@ -3087,6 +3147,7 @@ impl Config {
             offer_srtp: false,
             offer_rtcp_mux: true,
             rtcp_mux_required: false,
+            rtcp_non_mux: false,
             rtcp_xr_voip_metrics: false,
             rtcp_reduced_minimum_interval: false,
             srtp_keying: SrtpKeyingMode::Sdes,
@@ -3214,6 +3275,7 @@ impl Config {
             offer_srtp: false,
             offer_rtcp_mux: true,
             rtcp_mux_required: false,
+            rtcp_non_mux: false,
             rtcp_xr_voip_metrics: false,
             rtcp_reduced_minimum_interval: false,
             srtp_keying: SrtpKeyingMode::Sdes,
@@ -3872,6 +3934,13 @@ impl Config {
     /// media watchdogs. See [`Config::active_call_rtcp_counts_as_media`].
     pub fn with_active_call_rtcp_counts_as_media(mut self, enabled: bool) -> Self {
         self.active_call_rtcp_counts_as_media = enabled;
+        self
+    }
+
+    /// Send RTCP on a separate port (RTP + 1) to peers that decline
+    /// rtcp-mux. See [`Config::rtcp_non_mux`].
+    pub fn with_rtcp_non_mux(mut self, enabled: bool) -> Self {
+        self.rtcp_non_mux = enabled;
         self
     }
 
@@ -9061,6 +9130,7 @@ impl UnifiedCoordinator {
         media_adapter_inner.set_media_mode(config.media_mode);
         media_adapter_inner.set_offer_rtcp_mux(config.offer_rtcp_mux);
         media_adapter_inner.set_rtcp_mux_required(config.rtcp_mux_required);
+        media_adapter_inner.set_rtcp_non_mux(config.rtcp_non_mux);
         media_adapter_inner.set_rtcp_reporting_policy(
             config.rtcp_xr_voip_metrics,
             config.rtcp_reduced_minimum_interval,
