@@ -4427,10 +4427,14 @@ mod tests {
             .as_any()
             .downcast_ref::<UdpRtpTransport>()
             .unwrap();
+        // A fresh random master key per run: both directions share it, and
+        // nothing here depends on particular key bytes.
+        let key: [u8; 16] = rand::thread_rng().gen();
+        let salt: [u8; 14] = rand::thread_rng().gen();
         let context = || {
             crate::srtp::SrtpContext::new(
                 crate::srtp::SRTP_AES128_CM_SHA1_80,
-                crate::srtp::SrtpCryptoKey::new(vec![0x11; 16], vec![0x22; 14]),
+                crate::srtp::SrtpCryptoKey::new(key.to_vec(), salt.to_vec()),
             )
             .unwrap()
         };
