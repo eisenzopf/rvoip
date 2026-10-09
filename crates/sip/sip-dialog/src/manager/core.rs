@@ -7794,6 +7794,76 @@ mod outbound_flow_handler_tests {
         );
     }
 
+    /// A first-write failure reaches the plan twice: as the sender's error,
+    /// which hands the INVITE to the wire-unknown supervisor, and as a
+    /// `TransportError` event. When the event wins it closes the plan, which
+    /// refuses the supervisor's CANCEL; the supervisor must accept the closed
+    /// plan as the INVITE's terminal failure instead of waiting forever.
+    #[tokio::test]
+    async fn transport_error_closed_plan_settles_wire_unknown_teardown() {
+        use crate::manager::transaction_integration::{CandidateWirePlan, InviteFailoverPlanPhase};
+
+        let (manager, _rx) = make_manager().await;
+        let dialog_id = DialogId::new();
+        let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("alice-closed-plan"))
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5060", None)
+            .call_id("retained-plan-transport-error-closed")
+            .cseq(1)
+            .via(
+                "127.0.0.1:5060",
+                "UDP",
+                Some("z9hG4bK-closed-plan-template"),
+            )
+            .max_forwards(70)
+            .build();
+        let (transaction, _) = manager
+            .send_request_with_candidate_wire_plan(
+                request,
+                vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                    dest_addr(5102),
+                    rvoip_sip_transport::transport::TransportType::Udp,
+                )],
+                Some(&dialog_id),
+                CandidateWirePlan::default(),
+            )
+            .await
+            .expect("initial INVITE");
+        assert!(
+            !manager
+                .wire_unknown_invite_has_terminal_failure(&dialog_id)
+                .await,
+            "an INVITE still in flight is not terminal"
+        );
+
+        manager
+            .process_global_transaction_event(TransactionEvent::TransportError {
+                transaction_id: transaction.clone(),
+            })
+            .await;
+        let plan_id = manager
+            .invite_failover_attempts
+            .get(&transaction)
+            .expect("attempt remains indexed")
+            .plan_id;
+        let plan = manager
+            .invite_failover_plans
+            .get(&plan_id)
+            .expect("closed plan retained")
+            .value()
+            .clone();
+        assert_eq!(plan.lock().await.phase, InviteFailoverPlanPhase::Closed);
+
+        assert!(
+            manager
+                .wire_unknown_invite_has_terminal_failure(&dialog_id)
+                .await,
+            "a plan closed by the INVITE's transport error is terminal"
+        );
+    }
+
     #[tokio::test]
     async fn cancel_and_timer_b_serialize_on_one_exact_current_attempt() {
         use crate::manager::transaction_integration::{CandidateWirePlan, InviteFailoverPlanPhase};

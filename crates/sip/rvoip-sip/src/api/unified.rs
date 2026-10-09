@@ -1098,6 +1098,9 @@ impl SetupTeardownDeadlineCancellation {
 const SETUP_TEARDOWN_DEADLINE_BATCH: usize = 2_048;
 const SETUP_TEARDOWN_TIMEOUT_CONCURRENCY: usize = 64;
 const SETUP_TEARDOWN_SCHEDULER_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+/// Longest an `OutboundCallBuilder::send` that failed after allocating a
+/// session waits for that session's local release before returning its error.
+const OUTBOUND_SETUP_ROLLBACK_WAIT: Duration = Duration::from_secs(5);
 const EXACT_RESPONSE_OWNER_DEADLINE: Duration = Duration::from_secs(5);
 const EXACT_RESPONSE_RETRY_DELAY: Duration = Duration::from_millis(100);
 const EXACT_RESPONSE_SLOW_RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -11046,12 +11049,54 @@ impl UnifiedCoordinator {
     /// before `OutboundCallBuilder::send` could return a usable call id.
     /// Cleanup is deliberately best-effort and idempotent; the original
     /// dispatch error remains the public result.
+    ///
+    /// Release waits for the session's teardown, which waits for protocol
+    /// cleanup of a possibly-sent INVITE and, if that never drains, for a
+    /// fail-closed quarantine that never ends. The caller waits at most
+    /// [`OUTBOUND_SETUP_ROLLBACK_WAIT`]; the release keeps running as a
+    /// retained lifecycle task, so a slow drain is never cut short and
+    /// `send` never hangs on it.
     pub(crate) async fn rollback_outbound_setup(&self, session_id: &SessionId) {
         tracing::debug!(
             session_id = %session_id,
             "rolling back partially allocated outbound setup"
         );
-        self.release_after_observed_terminal(session_id).await;
+        let (released_tx, released_rx) = tokio::sync::oneshot::channel();
+        let admitted = self
+            .self_weak
+            .get()
+            .and_then(Weak::upgrade)
+            .is_some_and(|coordinator| {
+                let release_session = session_id.clone();
+                self.setup_teardown_scheduler
+                    .spawn_lifecycle_task(async move {
+                        coordinator
+                            .release_after_observed_terminal(&release_session)
+                            .await;
+                        let _ = released_tx.send(());
+                    })
+            });
+        let finished = if admitted {
+            tokio::time::timeout(OUTBOUND_SETUP_ROLLBACK_WAIT, released_rx)
+                .await
+                .is_ok()
+        } else {
+            // Shutdown has closed lifecycle admission: release inline, still
+            // bounded.
+            tokio::time::timeout(
+                OUTBOUND_SETUP_ROLLBACK_WAIT,
+                self.release_after_observed_terminal(session_id),
+            )
+            .await
+            .is_ok()
+        };
+        if !finished {
+            tracing::warn!(
+                session_id = %session_id,
+                wait_ms = OUTBOUND_SETUP_ROLLBACK_WAIT.as_millis() as u64,
+                "outbound setup rollback is still draining; returning the setup error"
+            );
+        }
     }
 
     pub(crate) async fn schedule_outbound_setup_timeout(&self, session_id: &SessionId) {
