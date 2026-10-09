@@ -706,6 +706,109 @@ def validate_live_dependency_examples(root: Path, version: str) -> None:
         )
 
 
+CHANGELOG_PATH = Path("CHANGELOG.md")
+CHANGELOG_UNRELEASED_HEADING = "## Unreleased"
+CHANGELOG_SECTION_HEADING = re.compile(r"(?m)^## (?P<title>[^\n]+?)[ \t]*$")
+CHANGELOG_VERSION_TITLE = re.compile(
+    r"^(?P<version>\d+\.\d+\.\d+)(?: \u2014 \d{4}-\d{2}-\d{2})?$"
+)
+
+
+def changelog_sections(text: str) -> list[tuple[str, int, int]]:
+    """Return (title, body start, body end) for each level-two section."""
+    headings = list(CHANGELOG_SECTION_HEADING.finditer(text))
+    return [
+        (
+            match.group("title"),
+            match.end(),
+            headings[index + 1].start() if index + 1 < len(headings) else len(text),
+        )
+        for index, match in enumerate(headings)
+    ]
+
+
+def changelog_body_has_entries(body: str) -> bool:
+    """A section counts only if it says something beyond subsection headings."""
+    body = re.sub(r"(?s)<!--.*?-->", "", body)
+    return any(
+        line.strip() and not line.lstrip().startswith("#")
+        for line in body.splitlines()
+    )
+
+
+def changelog_version_section(text: str, version: str) -> tuple[int, int] | None:
+    matches = [
+        (start, end)
+        for title, start, end in changelog_sections(text)
+        if (found := CHANGELOG_VERSION_TITLE.match(title))
+        and found.group("version") == version
+    ]
+    if len(matches) > 1:
+        raise ReleaseError(f"{CHANGELOG_PATH} has more than one {version} section")
+    return matches[0] if matches else None
+
+
+def planned_changelog_edits(
+    root: Path, version: str, today: dt.date | None = None
+) -> dict[Path, bytes]:
+    """Move the Unreleased entries under the release heading.
+
+    Every release must say what changed. Preparation refuses to bump versions
+    while `## Unreleased` is empty, unless the release section was already
+    written by hand, and never leaves entries in both places.
+    """
+    path = root / CHANGELOG_PATH
+    text = path.read_text(encoding="utf-8")
+    unreleased = [
+        (start, end)
+        for title, start, end in changelog_sections(text)
+        if title == CHANGELOG_UNRELEASED_HEADING[3:]
+    ]
+    if len(unreleased) != 1:
+        raise ReleaseError(
+            f"{CHANGELOG_PATH} must have exactly one '{CHANGELOG_UNRELEASED_HEADING}' section"
+        )
+    start, end = unreleased[0]
+    pending = changelog_body_has_entries(text[start:end])
+    existing = changelog_version_section(text, version)
+    if existing is not None:
+        if pending:
+            raise ReleaseError(
+                f"{CHANGELOG_PATH} has entries under both "
+                f"'{CHANGELOG_UNRELEASED_HEADING}' and '## {version}'; "
+                "move them into one section"
+            )
+        return {}
+    if not pending:
+        raise ReleaseError(
+            f"{CHANGELOG_PATH} has no entries under '{CHANGELOG_UNRELEASED_HEADING}'; "
+            f"describe what changed in {version} before preparing the release"
+        )
+    date = (today or dt.datetime.now(dt.timezone.utc).date()).isoformat()
+    updated = (
+        text[:start]
+        + f"\n\n## {version} \u2014 {date}\n"
+        + "\n"
+        + text[start:end].strip("\n")
+        + ("\n\n" if end < len(text) else "\n")
+        + text[end:]
+    )
+    return {path: updated.encode()}
+
+
+def validate_changelog_release(root: Path, version: str) -> None:
+    """Reject a release whose changelog does not describe it."""
+    path = root / CHANGELOG_PATH
+    if not path.is_file():
+        raise ReleaseError(f"{CHANGELOG_PATH} is missing")
+    text = path.read_text(encoding="utf-8")
+    section = changelog_version_section(text, version)
+    if section is None:
+        raise ReleaseError(f"{CHANGELOG_PATH} has no '## {version}' section")
+    if not changelog_body_has_entries(text[section[0] : section[1]]):
+        raise ReleaseError(f"{CHANGELOG_PATH} section '## {version}' is empty")
+
+
 def validate_release_notes_final(root: Path, version: str) -> None:
     """Reject publication while candidate-only documentation is unresolved."""
     path = root / "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md"
@@ -798,6 +901,7 @@ def validate_workspace(
             raise ReleaseError(
                 f"{package['name']} does not inherit version.workspace"
             )
+    validate_changelog_release(root, version)
     ordered = topological_order(packages)
     return packages, ordered
 
@@ -881,6 +985,7 @@ def prepare(root: Path, version: str) -> None:
     ]["package"]["version"]
     edits = planned_version_edits(root, packages, version)
     edits.update(planned_release_metadata_edits(root, current_version, version))
+    edits.update(planned_changelog_edits(root, version))
     lock_paths = release_lock_paths(root)
     originals = {
         path: path.read_bytes() if path.exists() else None

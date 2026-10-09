@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Release process
+
+- Every release must now have a `CHANGELOG.md` entry. **Prepare release PR**
+  refuses to run while `## Unreleased` is empty and moves its entries under
+  the new `## X.Y.Z — YYYY-MM-DD` heading. Verification and publication
+  reject a release without a non-empty section for its version.
+
 ### Breaking changes
 
 - The public configuration structs are now `#[non_exhaustive]`, so later
