@@ -71,19 +71,7 @@ impl MediaSessionController {
             if stats.packets_received == 0 {
                 return None;
             }
-            Some(QualityMetrics {
-                packet_loss_percent: if stats.packets_received > 0 {
-                    (stats.packets_lost as f32
-                        / (stats.packets_received + stats.packets_lost) as f32)
-                        * 100.0
-                } else {
-                    0.0
-                },
-                jitter_ms: stats.jitter_ms,
-                rtt_ms: stats.rtt_ms,
-                mos_score: Self::calculate_mos_from_stats(stats),
-                network_quality: Self::calculate_network_quality(stats),
-            })
+            Some(QualityMetrics::from_rtp_stats(stats))
         });
 
         // Build comprehensive statistics
@@ -107,40 +95,90 @@ impl MediaSessionController {
         })
     }
 
-    /// Helper to estimate MOS score from RTP statistics
-    pub(super) fn calculate_mos_from_stats(stats: &RtpSessionStats) -> Option<f32> {
-        if stats.packets_received == 0 {
-            return None;
-        }
-        let packet_loss_percent = if stats.packets_received > 0 {
-            (stats.packets_lost as f32 / (stats.packets_received + stats.packets_lost) as f32)
-                * 100.0
-        } else {
-            0.0
-        };
-
-        Some(crate::quality::metrics::QualityMetrics::calculate_mos(
-            packet_loss_percent,
-            stats.jitter_ms as f32,
-            stats.rtt_ms.unwrap_or(0.0) as f32,
-        ))
+    /// Current quality metrics for one dialog's media: local measurements
+    /// of the received stream plus the peer's latest RTCP reception report
+    /// about our stream (the `remote_*` fields, `None` without RTCP).
+    ///
+    /// Returns `None` when the dialog has no RTP session. Unlike
+    /// [`get_media_statistics`](Self::get_media_statistics) this returns
+    /// metrics even before the first packet is received, so a send-only
+    /// call still reports its sent count and the peer's view of it.
+    pub async fn get_media_quality(&self, dialog_id: &DialogId) -> Option<QualityMetrics> {
+        let stats = self.get_rtp_statistics(dialog_id).await?;
+        Some(QualityMetrics::from_rtp_stats(&stats))
     }
 
-    /// Helper to calculate network quality score
-    pub(super) fn calculate_network_quality(stats: &RtpSessionStats) -> u8 {
-        let packet_loss_percent = if stats.packets_received > 0 {
-            (stats.packets_lost as f32 / (stats.packets_received + stats.packets_lost) as f32)
-                * 100.0
-        } else {
-            0.0
+    /// Sample every RTP session that is mapped to a session-layer call and
+    /// publish one `MediaToSessionEvent::MediaQualityUpdate` per call through
+    /// the installed [`MediaEventHub`](crate::events::MediaEventHub).
+    ///
+    /// Sessions that have neither sent nor received RTP yet are skipped, so
+    /// an update always carries a measurement. Returns the number of updates
+    /// published; `0` when no event hub is installed. Call this on a timer
+    /// to get periodic per-call quality (rvoip-sip does so when
+    /// `Config::media_quality_interval` is set).
+    pub async fn publish_media_quality_updates(&self) -> usize {
+        let Some(hub) = self.event_hub.read().await.clone() else {
+            return 0;
         };
+        // Snapshot the targets so no DashMap shard guard is held across an
+        // await; sessions torn down mid-sweep are simply skipped below.
+        let targets: Vec<(DialogId, Instant, std::sync::Arc<tokio::sync::Mutex<_>>)> = self
+            .rtp_sessions
+            .iter()
+            .map(|entry| {
+                (
+                    entry.key().clone(),
+                    entry.value().created_at,
+                    entry.value().session.clone(),
+                )
+            })
+            .collect();
 
-        // Score based on packet loss and jitter
-        let mut score: f32 = 100.0;
-        score -= packet_loss_percent * 5.0; // 5 points per percent loss
-        score -= (stats.jitter_ms as f32).min(100.0) * 0.5; // 0.5 points per ms jitter
-
-        score.max(0.0).min(100.0) as u8
+        let mut published = 0usize;
+        for (dialog_id, created_at, rtp_session) in targets {
+            if self
+                .get_session_id(&MediaSessionId::from_dialog(&dialog_id))
+                .is_none()
+            {
+                continue;
+            }
+            let stats = rtp_session.lock().await.get_stats();
+            if stats.packets_sent == 0 && stats.packets_received == 0 {
+                continue;
+            }
+            let quality = QualityMetrics::from_rtp_stats(&stats);
+            let current_codec = self
+                .sessions
+                .get(&dialog_id)
+                .and_then(|info| info.config.preferred_codec.clone());
+            let event = MediaSessionEvent::StatisticsUpdated {
+                dialog_id: dialog_id.clone(),
+                stats: MediaStatistics {
+                    session_id: MediaSessionId::from_dialog(&dialog_id),
+                    dialog_id,
+                    // Per-stream detail is left to `get_stream_statistics`;
+                    // the periodic sample carries the session aggregate.
+                    stream_stats: Vec::new(),
+                    media_stats: MediaProcessingStats {
+                        packets_processed: stats.packets_received,
+                        current_codec,
+                        ..MediaProcessingStats::default()
+                    },
+                    rtp_stats: Some(stats),
+                    quality_metrics: Some(quality),
+                    session_start: created_at,
+                    session_duration: created_at.elapsed(),
+                },
+            };
+            match hub.publish_media_event(event).await {
+                Ok(()) => published += 1,
+                Err(error) => {
+                    debug!("Media quality update was not published: {}", error);
+                }
+            }
+        }
+        published
     }
 
     /// Start statistics monitoring for a dialog
@@ -197,13 +235,7 @@ impl MediaSessionController {
                     0.0
                 };
 
-                let quality_metrics = QualityMetrics {
-                    packet_loss_percent,
-                    jitter_ms: stats.jitter_ms,
-                    rtt_ms: stats.rtt_ms,
-                    mos_score: MediaSessionController::calculate_mos_from_stats(&stats),
-                    network_quality: MediaSessionController::calculate_network_quality(&stats),
-                };
+                let quality_metrics = QualityMetrics::from_rtp_stats(&stats);
 
                 // Get stream statistics
                 let stream_stats = {
@@ -286,10 +318,8 @@ mod tests {
 
     #[test]
     fn mos_requires_packets_and_uses_measured_rtt() {
-        assert_eq!(
-            MediaSessionController::calculate_mos_from_stats(&RtpSessionStats::default()),
-            None
-        );
+        let mos = |stats: &RtpSessionStats| QualityMetrics::from_rtp_stats(stats).mos_score;
+        assert_eq!(mos(&RtpSessionStats::default()), None);
         let low_latency = RtpSessionStats {
             packets_received: 100,
             rtt_ms: Some(20.0),
@@ -299,10 +329,125 @@ mod tests {
             rtt_ms: Some(400.0),
             ..low_latency.clone()
         };
-        assert!(
-            MediaSessionController::calculate_mos_from_stats(&high_latency)
-                < MediaSessionController::calculate_mos_from_stats(&low_latency)
+        assert!(mos(&high_latency) < mos(&low_latency));
+    }
+
+    #[tokio::test]
+    async fn quality_sweep_publishes_real_session_ids_and_values_through_the_hub() {
+        use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
+        use rvoip_infra_common::events::cross_crate::{MediaToSessionEvent, RvoipCrossCrateEvent};
+        use rvoip_infra_common::events::EventCoordinatorConfig;
+        use std::sync::Arc;
+
+        let coordinator = Arc::new(
+            GlobalEventCoordinator::new(EventCoordinatorConfig::monolithic())
+                .await
+                .unwrap(),
         );
+        let controller = Arc::new(MediaSessionController::new());
+        let mut media_events = coordinator.subscribe("media_to_session").await.unwrap();
+        // Without a hub nothing is published.
+        assert_eq!(controller.publish_media_quality_updates().await, 0);
+        let hub = crate::events::MediaEventHub::new(coordinator.clone(), controller.clone())
+            .await
+            .unwrap();
+        controller.set_event_hub(hub).await;
+
+        let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+        let receiver = DialogId::new("quality-receiver");
+        controller
+            .start_media(
+                receiver.clone(),
+                MediaConfig {
+                    local_addr: local,
+                    remote_addr: None,
+                    preferred_codec: Some("PCMU".to_string()),
+                    parameters: HashMap::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let receiver_port = controller
+            .get_session_info(&receiver)
+            .await
+            .and_then(|info| info.rtp_port)
+            .unwrap();
+        let sender = DialogId::new("quality-sender");
+        controller
+            .start_media(
+                sender.clone(),
+                MediaConfig {
+                    local_addr: local,
+                    remote_addr: Some(SocketAddr::new(
+                        IpAddr::V4(Ipv4Addr::LOCALHOST),
+                        receiver_port,
+                    )),
+                    preferred_codec: Some("PCMU".to_string()),
+                    parameters: HashMap::new(),
+                },
+            )
+            .await
+            .unwrap();
+        // Idle sessions carry no measurement and are skipped.
+        assert_eq!(controller.publish_media_quality_updates().await, 0);
+        // Unmapped sessions have no session-layer owner and are skipped.
+        for i in 0..10u32 {
+            controller
+                .encode_and_send_audio_frame(&sender, vec![0i16; 160], i * 160)
+                .await
+                .unwrap();
+        }
+        assert_eq!(controller.publish_media_quality_updates().await, 0);
+
+        controller
+            .store_session_mapping("call-sender".into(), MediaSessionId::from_dialog(&sender));
+        controller.store_session_mapping(
+            "call-receiver".into(),
+            MediaSessionId::from_dialog(&receiver),
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while controller
+                .get_media_quality(&receiver)
+                .await
+                .map_or(true, |q| q.packets_received == 0)
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("receiver never saw RTP");
+
+        assert_eq!(controller.publish_media_quality_updates().await, 2);
+        let mut seen = HashMap::new();
+        while seen.len() < 2 {
+            let event = tokio::time::timeout(Duration::from_secs(2), media_events.recv())
+                .await
+                .expect("quality update was not published")
+                .expect("media_to_session closed");
+            let Some(RvoipCrossCrateEvent::MediaToSession(
+                MediaToSessionEvent::MediaQualityUpdate {
+                    session_id,
+                    quality_metrics,
+                },
+            )) = event
+                .as_any()
+                .downcast_ref::<RvoipCrossCrateEvent>()
+                .cloned()
+            else {
+                continue;
+            };
+            seen.insert(session_id, quality_metrics);
+        }
+        let sent = &seen["call-sender"];
+        assert!(sent.packets_sent >= 10, "{sent:?}");
+        let received = &seen["call-receiver"];
+        assert!(received.packets_received > 0, "{received:?}");
+        assert!(received.mos_score > 0.0, "{received:?}");
+        // No RTCP has been exchanged in this harness.
+        assert_eq!(received.remote_packet_loss, None);
+
+        controller.stop_media(&sender).await.unwrap();
+        controller.stop_media(&receiver).await.unwrap();
     }
 
     #[tokio::test]

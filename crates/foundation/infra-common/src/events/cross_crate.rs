@@ -2367,12 +2367,50 @@ pub enum RecordingFormat {
     Flac,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Per-call media quality carried by
+/// [`MediaToSessionEvent::MediaQualityUpdate`] and
+/// [`MediaToSessionEvent::MediaQualityDegraded`].
+///
+/// "Local" values describe the stream this endpoint *receives* (measured
+/// from arriving RTP). `remote_*` values are what the peer reported, in RTCP
+/// receiver/sender report blocks, about the stream this endpoint *sends*;
+/// they are `None` until such a report arrives, and stay `None` for a call
+/// whose RTCP never reaches this endpoint.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MediaQualityMetrics {
+    /// Estimated MOS (1.0–5.0) of the received stream. `0.0` means no
+    /// estimate is available yet (nothing has been received).
     pub mos_score: f64,
+    /// Locally observed loss on the received stream, as a fraction
+    /// (`0.0..=1.0`).
     pub packet_loss: f64,
+    /// Locally measured interarrival jitter of the received stream, ms.
     pub jitter_ms: f64,
+    /// One-way delay estimate in ms (half the RTCP round-trip time), or `0`
+    /// when no RTT has been measured.
     pub delay_ms: u64,
+    /// RTP packets sent on this call.
+    #[serde(default)]
+    pub packets_sent: u64,
+    /// RTP packets received on this call.
+    #[serde(default)]
+    pub packets_received: u64,
+    /// RTP packets missing from the received stream (sequence gaps).
+    #[serde(default)]
+    pub packets_lost: u64,
+    /// RTCP round-trip time in ms (from a report block's LSR/DLSR).
+    #[serde(default)]
+    pub rtt_ms: Option<f64>,
+    /// Loss the peer reported on our sent stream, as a fraction
+    /// (`0.0..=1.0`) over the peer's last reporting interval.
+    #[serde(default)]
+    pub remote_packet_loss: Option<f64>,
+    /// Cumulative number of our packets the peer reported lost.
+    #[serde(default)]
+    pub remote_packets_lost: Option<i64>,
+    /// Interarrival jitter the peer reported on our sent stream, ms.
+    #[serde(default)]
+    pub remote_jitter_ms: Option<f64>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
