@@ -250,13 +250,13 @@ jobs:
 
       - name: Install cargo-fuzz
         if: matrix.needs_nightly
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
+        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
         with:
           tool: cargo-fuzz@0.13.2
 
       - name: Install cargo-deny
         if: matrix.needs_cargo_deny
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
+        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
         with:
           tool: cargo-deny@0.20.2
 
@@ -1199,7 +1199,7 @@ jobs:
 
       - name: Attest release qualification bundle
         if: inputs.profile != 'remote-diagnostic'
-        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: target/release-qualification/aggregate.json
 
