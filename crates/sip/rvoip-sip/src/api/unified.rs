@@ -2022,8 +2022,10 @@ pub struct Config {
 
     /// Test-only escape hatch: accept `session_timer_secs` and
     /// `session_timer_min_se` below the RFC 4028 §5 floor of 90 seconds so
-    /// refresh and expiry behavior can be exercised in seconds. Never set
-    /// this on a real deployment. Default: `false`.
+    /// refresh and expiry behavior can be exercised in seconds. Exists only
+    /// with the `test-hooks` feature, so no production build can set it.
+    /// Default: `false`.
+    #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub session_timer_allow_short_intervals_for_testing: bool,
 
@@ -2978,10 +2980,6 @@ impl std::fmt::Debug for Config {
             )
             .field("session_timer_secs", &self.session_timer_secs)
             .field("session_timer_min_se", &self.session_timer_min_se)
-            .field(
-                "session_timer_allow_short_intervals_for_testing",
-                &self.session_timer_allow_short_intervals_for_testing,
-            )
             .field("credentials_configured", &self.credentials.is_some())
             .field("auth_configured", &self.auth.is_some())
             .field("pai_configured", &self.pai_uri.is_some())
@@ -3164,6 +3162,7 @@ impl Config {
             active_call_media_idle_timeout_secs: 0,
             session_timer_secs: None,
             session_timer_min_se: 90,
+            #[cfg(feature = "test-hooks")]
             session_timer_allow_short_intervals_for_testing: false,
             credentials: None,
             auth: None,
@@ -3288,6 +3287,7 @@ impl Config {
             active_call_media_idle_timeout_secs: 0,
             session_timer_secs: None,
             session_timer_min_se: 90,
+            #[cfg(feature = "test-hooks")]
             session_timer_allow_short_intervals_for_testing: false,
             credentials: None,
             auth: None,
@@ -4530,7 +4530,11 @@ impl Config {
         }
         // RFC 4028 §5: Min-SE MUST NOT be less than 90 seconds, and the
         // interval we propose can be no shorter than the Min-SE we demand.
-        if !self.session_timer_allow_short_intervals_for_testing {
+        #[cfg(feature = "test-hooks")]
+        let enforce_floor = !self.session_timer_allow_short_intervals_for_testing;
+        #[cfg(not(feature = "test-hooks"))]
+        let enforce_floor = true;
+        if enforce_floor {
             if self.session_timer_min_se < RFC4028_MIN_SE_FLOOR_SECS {
                 return Err(SessionError::ConfigError(format!(
                     "session_timer_min_se must be at least {RFC4028_MIN_SE_FLOOR_SECS} seconds (RFC 4028 §5)"

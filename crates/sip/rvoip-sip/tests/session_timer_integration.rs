@@ -9,6 +9,11 @@
 //! — it requires session-core wiring to drop incoming UPDATEs, which
 //! is not currently exposed by the public API.
 
+// Second-scale session timers need `Config::session_timer_allow_short_intervals_for_testing`,
+// which exists only with the `test-hooks` feature (`cargo test -p rvoip-sip
+// --features test-hooks`; every rvoip-sip CI lane enables it).
+#![cfg(feature = "test-hooks")]
+
 mod support;
 
 use std::process::{Command, Stdio};

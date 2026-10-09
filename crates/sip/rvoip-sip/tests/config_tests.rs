@@ -626,6 +626,7 @@ fn session_timer_values_below_the_rfc4028_floor_are_rejected() {
     ));
 }
 
+#[cfg(feature = "test-hooks")]
 #[test]
 fn short_session_timers_need_the_test_escape_hatch() {
     let mut config = Config::local("alice", 5060);

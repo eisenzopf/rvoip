@@ -15,6 +15,11 @@
 //!    `BYE` with `Reason: SIP;cause=408` at
 //!    `interval - min(32, interval / 3)` (§10), not at the full interval.
 
+// The second-scale tests need the `test-hooks` escape hatch; without it only
+// the production-config (Min-SE 90) tests compile, leaving shared helpers
+// unused.
+#![cfg_attr(not(feature = "test-hooks"), allow(dead_code, unused_imports))]
+
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -187,6 +192,8 @@ impl RawUac {
     }
 }
 
+/// Second-scale timers need the `test-hooks` escape hatch.
+#[cfg(feature = "test-hooks")]
 async fn answering_peer(session_secs: u32) -> (StreamPeer, SocketAddr) {
     answering_peer_with(session_secs, Some(2)).await
 }
@@ -213,8 +220,11 @@ async fn answering_peer_with(
         config.session_timer_min_se = min_se;
         // Seconds-scale intervals keep the test fast; RFC 4028 §5 forbids
         // them in production, so `Config::validate` needs the test escape
-        // hatch.
-        config.session_timer_allow_short_intervals_for_testing = true;
+        // hatch (only present with the `test-hooks` feature).
+        #[cfg(feature = "test-hooks")]
+        {
+            config.session_timer_allow_short_intervals_for_testing = true;
+        }
     }
     let peer = StreamPeer::with_config(config).await.expect("peer");
     (peer, format!("127.0.0.1:{port}").parse().unwrap())
@@ -254,6 +264,7 @@ fn session_expires(headers: &[TypedHeader]) -> Option<String> {
         .map(|value| value.to_ascii_lowercase().replace(' ', ""))
 }
 
+#[cfg(feature = "test-hooks")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn caller_without_timer_support_gets_no_require_timer_and_rvoip_refreshes() {
     const SESSION_SECS: u32 = 4;
@@ -313,6 +324,7 @@ async fn caller_without_timer_support_gets_no_require_timer_and_rvoip_refreshes(
     peer.shutdown().await.expect("shutdown");
 }
 
+#[cfg(feature = "test-hooks")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn caller_with_timer_support_keeps_require_timer() {
     const SESSION_SECS: u32 = 30;
@@ -344,6 +356,7 @@ async fn caller_with_timer_support_keeps_require_timer() {
     peer.shutdown().await.expect("shutdown");
 }
 
+#[cfg(feature = "test-hooks")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn non_refresher_sends_408_bye_before_the_session_expires() {
     // 12 s interval: RFC 4028 §10 BYE at 12 - min(32, 4) = 8 s.
@@ -386,6 +399,7 @@ async fn non_refresher_sends_408_bye_before_the_session_expires() {
     peer.shutdown().await.expect("shutdown");
 }
 
+#[cfg(feature = "test-hooks")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn incoming_refresh_interval_and_refresher_are_answered_and_applied() {
     // RFC 4028 §9: a refresh is negotiated like the initial INVITE. The 2xx

@@ -437,7 +437,7 @@ Operational references:
 | `perf-tests` | Opt-in performance gate and benchmark support. |
 | `dhat` | Heap profiling support for `examples/profiling/dhat_*.rs`. |
 | `tokio-console` | Tokio console support for profiling examples; requires `RUSTFLAGS="--cfg tokio_unstable"`. |
-| `test-hooks` | Test-only fault injection (`SipAdapter::inject_media_failure_for_test`); absent from ordinary builds. |
+| `test-hooks` | Test-only fault injection (`SipAdapter::inject_media_failure_for_test`) and second-scale RFC 4028 session timers (`Config::session_timer_allow_short_intervals_for_testing`); absent from ordinary builds. |
 | `perf-infra-memory-diagnostics` | `perf-tests` plus `rvoip-infra-common` memory diagnostics for targeted investigation runs. |
 | `perf-media-diagnostics` | `perf-tests` plus `rvoip-media-core` perf diagnostics. |
 | `perf-media-memory-diagnostics` | `perf-tests` plus `rvoip-media-core` memory diagnostics. |

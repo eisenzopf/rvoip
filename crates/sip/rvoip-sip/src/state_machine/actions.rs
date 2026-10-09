@@ -160,9 +160,15 @@ pub(crate) fn session_peer_expiry_secs(interval_secs: u32) -> u32 {
         .max(1)
 }
 
-/// Retries (491 glare plus 422 Min-SE) allowed within one session interval
-/// before a rejected refresh is left to expire.
+/// Retries (491 glare, 422 Min-SE and the one extra attempt after another
+/// rejection) allowed within one session interval before a rejected refresh
+/// is left to expire.
 const MAX_SESSION_REFRESH_RETRIES: u8 = 4;
+
+/// The extra attempt after a rejected refresh is skipped when less than this
+/// remains before it would be due; the session is then left to expire.
+const MIN_SESSION_REFRESH_EXTRA_ATTEMPT_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(500);
 
 /// RFC 3261 §14.1 glare backoff: the Call-ID owner (the dialog's UAC) waits
 /// 2.1–4 s, the other side 0–2 s, both in 10 ms units.
@@ -183,10 +189,12 @@ fn session_refresh_glare_backoff(role: crate::state_table::Role) -> std::time::D
 ///   glare backoff.
 /// - 422 Session Interval Too Small: retry at once with the response's
 ///   `Min-SE` as both the floor and the minimum interval (§7.4).
-/// - anything else (488, 403, 500, …), or retries exhausted: the session was
-///   simply not refreshed this time. It stays up and expires at the end of
-///   the current interval unless something refreshes it first (a peer
-///   refresh or any successful re-INVITE/UPDATE re-arms the timer).
+/// - anything else (488, 403, 500, …): the session was simply not refreshed
+///   this time. It stays up; one more refresh is attempted halfway to the
+///   BYE deadline (once per interval), and if that also fails, or retries
+///   are exhausted, the session expires at the end of the current interval
+///   unless something refreshes it first (a peer refresh or any successful
+///   re-INVITE/UPDATE re-arms the timer).
 fn handle_session_refresh_rejection(
     session: &mut SessionState,
     dialog_adapter: &DialogAdapter,
@@ -272,6 +280,33 @@ fn handle_session_refresh_rejection(
             .map(|armed_at| armed_at.elapsed())
             .unwrap_or_default(),
     );
+    // One more attempt per interval, halfway to the BYE deadline, so a
+    // transient rejection (a 500 from a busy SBC) does not cost the call.
+    // A rejection of that attempt too leaves the session to expire.
+    let retry_delay = delay / 2;
+    if retry_allowed
+        && !session.session_refresh_extra_attempt_used
+        && retry_delay >= MIN_SESSION_REFRESH_EXTRA_ATTEMPT_DELAY
+    {
+        session.session_refresh_extra_attempt_used = true;
+        session.session_refresh_retries += 1;
+        warn!(
+            session_id = %session.session_id,
+            method = ?rejection.method,
+            status = rejection.status_code,
+            retry_in = ?retry_delay,
+            expires_in = ?delay,
+            "RFC 4028 session refresh was rejected; keeping the session and retrying once before it expires"
+        );
+        let generation = next_session_refresh_generation(session);
+        return Ok(ActionOutcome::with_deferred_effect(
+            DeferredActionEffect::SessionRefreshTimer(SessionRefreshTimerEffect {
+                generation,
+                delay: retry_delay,
+                kind: due,
+            }),
+        ));
+    }
     warn!(
         session_id = %session.session_id,
         method = ?rejection.method,
@@ -3371,6 +3406,7 @@ pub(crate) async fn execute_action(
                     session.session_refresh_armed_at = Some(std::time::Instant::now());
                     session.session_refresh_rejection = None;
                     session.session_refresh_retries = 0;
+                    session.session_refresh_extra_attempt_used = false;
                     let delay_secs = if local_refresher {
                         session_refresh_due_secs(interval_secs)
                     } else {

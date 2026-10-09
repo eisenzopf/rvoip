@@ -14,17 +14,17 @@ BOB_PORT="${BOB_PORT:-35084}"
 export ALICE_PORT BOB_PORT
 
 echo -e "${GREEN}Building...${NC}"
-cargo build -p rvoip-sip \
+cargo build -p rvoip-sip --features test-hooks \
   --example regression_session_timer_alice \
   --example regression_session_timer_bob 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
 
 echo -e "${CYAN}[BOB]${NC} Listening on port $BOB_PORT"
-cargo run -p rvoip-sip --example regression_session_timer_bob --quiet \
+cargo run -p rvoip-sip --features test-hooks --example regression_session_timer_bob --quiet \
   2>&1 | sed "s/^/$(printf '\033[0;36m')[BOB]$(printf '\033[0m') /" &
 sleep 1
 
 echo -e "${GREEN}[ALICE]${NC} Calling Bob from $ALICE_PORT (expects SessionRefreshed ≤ 12s)"
-cargo run -p rvoip-sip --example regression_session_timer_alice --quiet \
+cargo run -p rvoip-sip --features test-hooks --example regression_session_timer_alice --quiet \
   2>&1 | sed "s/^/$(printf '\033[0;32m')[ALICE]$(printf '\033[0m') /"
 ALICE_EXIT=$?
 

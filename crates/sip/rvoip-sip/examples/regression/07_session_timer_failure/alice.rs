@@ -37,8 +37,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     config.session_timer_secs = Some(4);
     config.session_timer_min_se = 2;
     // Seconds-scale intervals keep the test fast; RFC 4028 §5 forbids them in
-    // production, so `Config::validate` needs the test escape hatch.
-    config.session_timer_allow_short_intervals_for_testing = true;
+    // production, so `Config::validate` needs the test escape hatch, which
+    // exists only with `--features test-hooks` (the fixture tests build these
+    // examples with it). Without it the peer refuses to start.
+    #[cfg(feature = "test-hooks")]
+    {
+        config.session_timer_allow_short_intervals_for_testing = true;
+    }
 
     let mut alice = StreamPeer::with_config(config).await?;
     let mut events = alice.control().subscribe_events().await?;

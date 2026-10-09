@@ -12,6 +12,11 @@
 //!    as refresher (`refresher=uas`) with the negotiated interval, not
 //!    re-propose the configured interval with `refresher=uac`.
 
+// Second-scale session timers need `Config::session_timer_allow_short_intervals_for_testing`,
+// which exists only with the `test-hooks` feature (`cargo test -p rvoip-sip
+// --features test-hooks`; every rvoip-sip CI lane enables it).
+#![cfg(feature = "test-hooks")]
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 

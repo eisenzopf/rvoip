@@ -42,6 +42,8 @@ class RunChecksTests(unittest.TestCase):
                 "--locked",
                 "-p",
                 "rvoip-sip",
+                "--features",
+                "test-hooks",
                 "--test",
                 "alpha",
                 "--test",
@@ -75,6 +77,22 @@ class RunChecksTests(unittest.TestCase):
             commands[1][2]["RVOIP_SIP_PREBUILT_EXAMPLE_DIR"],
             "/workspace/target/debug/examples",
         )
+
+    def test_every_sip_lane_builds_with_test_hooks(self) -> None:
+        # Test-hooks-gated SIP tests and fixtures are compiled out otherwise.
+        root = Path("/workspace")
+        commands = [
+            *run_checks.sip_core_commands(),
+            *run_checks.sip_clippy_commands(),
+            *run_checks.sip_integration_commands("alpha"),
+            *run_checks.sip_fixture_commands("alpha", "alpha_example", root),
+        ]
+        for argv, _, _ in commands:
+            self.assertIn("test-hooks", argv[argv.index("--features") + 1], argv)
+        shard = run_checks.shard_test_commands("rvoip-sip,rvoip-sip-dialog")[0][0]
+        self.assertIn("rvoip-sip/test-hooks", shard)
+        other = run_checks.shard_test_commands("rvoip-sip-dialog")[0][0]
+        self.assertNotIn("--features", other)
 
     def test_sip_target_arguments_reject_shell_metacharacters(self) -> None:
         with self.assertRaises(run_checks.CheckError):

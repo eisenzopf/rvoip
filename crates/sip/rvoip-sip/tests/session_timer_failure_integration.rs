@@ -16,6 +16,11 @@
 //! send-to-dead-port is silent, so we can't rely on ICMP port
 //! unreachable and need the transaction-layer timeout to do the work.
 
+// Second-scale session timers need `Config::session_timer_allow_short_intervals_for_testing`,
+// which exists only with the `test-hooks` feature (`cargo test -p rvoip-sip
+// --features test-hooks`; every rvoip-sip CI lane enables it).
+#![cfg(feature = "test-hooks")]
+
 mod support;
 
 use std::process::{Command, Stdio};

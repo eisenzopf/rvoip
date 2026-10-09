@@ -260,6 +260,9 @@ pub struct SessionStateCold {
     pub(crate) session_refresh_rejection: Option<SessionRefreshRejection>,
     /// 491/422 retries spent in the current session interval.
     pub(crate) session_refresh_retries: u8,
+    /// Whether this interval's one extra attempt after a rejected refresh
+    /// has been spent.
+    pub(crate) session_refresh_extra_attempt_used: bool,
     pub transfer_state: TransferState,
     pub transfer_notify_dialog: Option<DialogId>,
     pub replaces_header: Option<String>,
@@ -1025,6 +1028,7 @@ impl SessionState {
                 session_refresh_armed_at: None,
                 session_refresh_rejection: None,
                 session_refresh_retries: 0,
+                session_refresh_extra_attempt_used: false,
                 transfer_state: TransferState::None,
                 transfer_notify_dialog: None,
                 replaces_header: None,
@@ -1285,6 +1289,7 @@ impl SessionState {
         cold.session_refresh_armed_at = None;
         cold.session_refresh_rejection = None;
         cold.session_refresh_retries = 0;
+        cold.session_refresh_extra_attempt_used = false;
     }
 
     /// Clear authentication coordination only when the completing transaction

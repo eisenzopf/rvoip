@@ -8,12 +8,18 @@
 //! - §10: only a refresh that times out or draws 408/481 ends the session
 //!   (BYE with `Reason: SIP;cause=408`). 491 is retried after the RFC 3261
 //!   §14.1 backoff, 422 is retried with the peer's `Min-SE` (§7.4), and any
-//!   other rejection (488, 403, 5xx) keeps the call until the session
-//!   expires unless something refreshes it first.
+//!   other rejection (488, 403, 5xx) keeps the call, retries once halfway to
+//!   the BYE deadline, and otherwise lets the session expire unless
+//!   something refreshes it first.
 //! - §7.2/§7.4: the 2xx to a refresh renegotiates the interval and the
 //!   refresher; a 2xx without `Session-Expires` turns the timer off.
 //! - RFC 3261 §20.5: a peer whose `Allow` omits UPDATE is refreshed with
 //!   re-INVITE only.
+
+// Second-scale session timers need `Config::session_timer_allow_short_intervals_for_testing`,
+// which exists only with the `test-hooks` feature (`cargo test -p rvoip-sip
+// --features test-hooks`; every rvoip-sip CI lane enables it).
+#![cfg(feature = "test-hooks")]
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, Once};
@@ -445,6 +451,91 @@ async fn reinvite_refresh_answered_488_keeps_the_call_until_the_session_expires(
             && after_answer < Duration::from_millis(10_000),
         "BYE at session expiry (~8 s), got {after_answer:?} ({:?} after the 488)",
         bye.at - rejected_at
+    );
+    assert!(
+        bye.reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("cause=408")),
+        "{bye:?}"
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejected_refresh_is_retried_once_and_a_2xx_rearms_the_timer() {
+    // 12 s interval: the 6 s refresh draws 500. The BYE deadline is 8 s, so
+    // the one extra attempt goes out halfway there (~7 s). It succeeds, the
+    // timer re-arms, and the next refresh follows 6 s later (~13 s).
+    let mut h = start_call(
+        12,
+        Some(ALLOW_NO_UPDATE),
+        vec![Reply::Status(500, vec![])],
+        default_ok(12),
+        47600,
+    )
+    .await;
+
+    h.wait_until(Duration::from_secs(16), "the re-armed refresh", |mock| {
+        mock.refreshes().len() >= 3
+    })
+    .await;
+    let refreshes = h.mock.refreshes();
+    let retry_gap = refreshes[1].at - refreshes[0].at;
+    assert!(
+        retry_gap >= Duration::from_millis(600) && retry_gap < Duration::from_millis(1_800),
+        "one retry halfway to the 8 s deadline (~1 s after the 500), got {retry_gap:?}"
+    );
+    let rearmed_gap = refreshes[2].at - refreshes[1].at;
+    assert!(
+        rearmed_gap >= Duration::from_millis(5_400) && rearmed_gap < Duration::from_millis(7_000),
+        "the successful retry re-armed the 12 s interval (refresh 6 s later), got {rearmed_gap:?}"
+    );
+    assert!(h.mock.byes().is_empty(), "{:#?}", h.mock.seen());
+    assert!(h.handle.is_active().await);
+    assert!(
+        h.event(Duration::from_millis(200), |event| {
+            matches!(event, Event::SessionRefreshFailed { .. })
+        })
+        .await
+        .is_none(),
+        "no refresh failure was reported"
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejected_refresh_and_rejected_retry_end_the_call_at_the_deadline() {
+    // 500 to the 6 s refresh and 500 to the ~7 s retry: no third attempt,
+    // and the session expires with a BYE at the 8 s deadline.
+    let h = start_call(
+        12,
+        Some(ALLOW_NO_UPDATE),
+        vec![],
+        Reply::Status(500, vec![]),
+        47700,
+    )
+    .await;
+
+    h.wait_until(Duration::from_secs(11), "the expiry BYE", |mock| {
+        !mock.byes().is_empty()
+    })
+    .await;
+    let refreshes = h.mock.refreshes();
+    assert_eq!(
+        refreshes.len(),
+        2,
+        "the refresh plus exactly one retry: {refreshes:#?}"
+    );
+    let bye = &h.mock.byes()[0];
+    let after_answer = bye.at - h.answered;
+    assert!(
+        after_answer >= Duration::from_millis(7_400)
+            && after_answer < Duration::from_millis(10_000),
+        "BYE at the 8 s deadline, got {after_answer:?}"
+    );
+    assert!(
+        bye.at > refreshes[1].at,
+        "the BYE follows the rejected retry"
     );
     assert!(
         bye.reason

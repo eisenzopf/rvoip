@@ -91,6 +91,10 @@ pub fn build_examples(names: &[&str]) {
     let target_dir = isolated_example_target_dir();
     let mut command = Command::new(cargo_bin());
     command.args(["build", "--quiet", "-p", "rvoip-sip"]);
+    // Fixtures that need test-only knobs (second-scale session timers)
+    // are built with the same `test-hooks` feature as this test binary.
+    #[cfg(feature = "test-hooks")]
+    command.args(["--features", "test-hooks"]);
     for name in names {
         command.args(["--example", name]);
     }
