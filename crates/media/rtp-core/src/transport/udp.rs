@@ -1248,6 +1248,12 @@ impl UdpRtpTransport {
         self.remote_rtcp_addr.store(Some(Arc::new(addr)));
     }
 
+    /// The current (signalled or latched) remote RTP address, without
+    /// awaiting; the load is atomic.
+    pub(crate) fn current_remote_rtp_addr(&self) -> Option<SocketAddr> {
+        self.remote_rtp_addr.load().as_deref().copied()
+    }
+
     /// Set the remote RTCP address without awaiting; the store is atomic.
     pub(crate) fn store_remote_rtcp_addr(&self, addr: SocketAddr) {
         self.remote_rtcp_addr.store(Some(Arc::new(addr)));
@@ -1604,8 +1610,12 @@ impl RtpTransport for UdpRtpTransport {
     }
 
     /// Get the local RTCP address
+    /// The bound RTCP socket's address while one is open; otherwise the
+    /// configured `local_rtcp_addr`, as before separate sockets could close.
     fn local_rtcp_addr(&self) -> Result<Option<SocketAddr>> {
-        Ok(self.local_rtcp_socket_addr())
+        Ok(self
+            .local_rtcp_socket_addr()
+            .or(self.config.local_rtcp_addr))
     }
 
     async fn send_rtp(&self, packet: &RtpPacket, dest: SocketAddr) -> Result<()> {
@@ -2154,11 +2164,13 @@ mod tests {
             buffer_config: Default::default(),
         };
         let transport = UdpRtpTransport::new(config).await.unwrap();
-        assert_eq!(transport.receiver_tasks.lock().await.len(), 2);
+        assert_eq!(transport.receiver_tasks.lock().await.len(), 1);
+        assert!(transport.rtcp_receiver_task.lock().is_some());
 
         transport.close().await.unwrap();
 
         assert!(transport.receiver_tasks.lock().await.is_empty());
+        assert!(transport.rtcp_receiver_task.lock().is_none());
         assert!(!transport.active.load(Ordering::Acquire));
     }
 

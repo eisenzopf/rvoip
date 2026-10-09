@@ -1819,7 +1819,8 @@ impl RtpSession {
                 },
             }
         } else {
-            rtp_peer
+            // Multiplexed RTCP follows the RTP destination, latched or not.
+            udp.current_remote_rtp_addr().unwrap_or(rtp_peer)
         };
         udp.store_remote_rtcp_addr(destination);
     }
@@ -2280,10 +2281,14 @@ impl RtpSession {
     /// when it is.
     pub fn set_rtcp_mux(&self, negotiated: bool) {
         self.rtcp_mux.store(negotiated, Ordering::Release);
+        // Only a separate RTCP socket changes where reports go; a
+        // single-socket session keeps its (possibly latched) destination.
         if let Some(udp) = self.transport.as_any().downcast_ref::<UdpRtpTransport>() {
-            udp.set_rtcp_mux(negotiated);
+            if udp.local_rtcp_socket_addr().is_some() {
+                udp.set_rtcp_mux(negotiated);
+                self.refresh_remote_rtcp_addr();
+            }
         }
-        self.refresh_remote_rtcp_addr();
     }
 
     /// Whether periodic RTCP reports may currently be sent.
