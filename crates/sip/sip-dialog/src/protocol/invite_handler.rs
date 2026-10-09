@@ -26,7 +26,9 @@ use crate::diagnostics::safe_log::SafeTransactionKey;
 use crate::dialog::DialogId;
 use crate::errors::{DialogError, DialogResult};
 use crate::events::SessionCoordinationEvent;
-use crate::manager::transaction_integration::detect_peer_100rel_support;
+use crate::manager::transaction_integration::{
+    detect_peer_100rel_support, negotiate_uas_session_timer, UasSessionTimerDecision,
+};
 use crate::manager::{DialogLookup, DialogManager};
 use crate::transaction::utils::response_builders;
 use crate::transaction::TransactionKey;
@@ -211,36 +213,25 @@ impl DialogManager {
             return Ok(None);
         }
 
-        // RFC 4028 §6: If the peer's `Min-SE:` exceeds our configured
-        // `session_timer_secs`, respond 422 Session Interval Too Small with
-        // our own Min-SE so the peer can retry with a valid value. Only
-        // enforced when session timers are enabled on our side.
-        if let Some((our_session_secs, our_min_se)) = self.config_session_timer_settings() {
-            let peer_min_se = request.headers.iter().find_map(|h| {
-                if let TypedHeader::MinSE(min) = h {
-                    Some(min.delta_seconds)
-                } else {
-                    None
-                }
-            });
-            if let Some(peer_min) = peer_min_se {
-                if peer_min > our_session_secs {
-                    warn!(
-                        "Peer's Min-SE {} exceeds our Session-Expires {} — rejecting with 422",
-                        peer_min, our_session_secs
-                    );
-                    let mut response = response_builders::create_response(
-                        &request,
-                        StatusCode::SessionIntervalTooSmall,
-                    );
-                    response
-                        .headers
-                        .push(TypedHeader::MinSE(MinSE::new(our_min_se)));
-                    self.send_unowned_final_response_classified(&transaction_id, response)
-                        .await?;
-                    return Ok(None);
-                }
-            }
+        // RFC 4028 §9: negotiate the session interval and refresher before
+        // creating the dialog. A UAC that advertised `timer` but proposed an
+        // interval below our Min-SE gets 422 Session Interval Too Small with
+        // our Min-SE so it can retry (§6/§7.3).
+        let session_timer =
+            negotiate_uas_session_timer(&request, self.config_session_timer_settings());
+        if let UasSessionTimerDecision::Reject422 { min_se } = session_timer {
+            warn!(
+                "Peer's Session-Expires is below our Min-SE {} — rejecting with 422",
+                min_se
+            );
+            let mut response =
+                response_builders::create_response(&request, StatusCode::SessionIntervalTooSmall);
+            response
+                .headers
+                .push(TypedHeader::MinSE(MinSE::new(min_se)));
+            self.send_unowned_final_response_classified(&transaction_id, response)
+                .await?;
+            return Ok(None);
         }
 
         // Create early dialog
@@ -274,30 +265,13 @@ impl DialogManager {
                 None
             }
         });
-        // RFC 4028: parse peer's Session-Expires and compute negotiated
-        // interval. UAS is refresher when peer's Session-Expires had
-        // `refresher=uas` or when peer didn't name a refresher and our
-        // config has session timers enabled.
-        let peer_session_expires = request.headers.iter().find_map(|h| {
-            if let TypedHeader::SessionExpires(se) = h {
-                Some(se.clone())
-            } else {
-                None
-            }
-        });
-        let (negotiated_session_secs, uas_is_refresher) =
-            match (peer_session_expires, self.config_session_timer_settings()) {
-                (Some(peer_se), Some((our_secs, _))) => {
-                    let secs = peer_se.delta_seconds.min(our_secs);
-                    let uas = matches!(
-                        peer_se.refresher,
-                        Some(rvoip_sip_core::types::session_expires::Refresher::Uas)
-                    );
-                    (Some(secs), uas)
-                }
-                (None, Some((our_secs, _))) => (Some(our_secs), true),
-                _ => (None, false),
-            };
+        let (negotiated_session_secs, uas_is_refresher) = match session_timer {
+            UasSessionTimerDecision::Accept {
+                session_secs,
+                uas_refreshes,
+            } => (session_secs, uas_refreshes),
+            UasSessionTimerDecision::Reject422 { .. } => (None, false),
+        };
 
         if let Ok(mut dialog) = self.get_dialog_mut(&dialog_id) {
             dialog.peer_supports_100rel = peer_supports_100rel;

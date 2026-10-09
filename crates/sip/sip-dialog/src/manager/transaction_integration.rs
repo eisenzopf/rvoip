@@ -2405,6 +2405,20 @@ impl DialogManager {
             })?;
 
             let mut request = request;
+            // RFC 3261 §12.2.1.1: an in-dialog request's Request-URI is the
+            // remote target (the peer's Contact), not the peer's AOR. The
+            // re-INVITE and UPDATE builders take the AOR; correct it so a
+            // session refresh (RFC 4028 §7.4) reaches the peer that
+            // answered rather than the host in its From/To URI.
+            let in_dialog_session_request = matches!(method, Method::Update)
+                || (method == Method::Invite
+                    && dialog
+                        .remote_tag
+                        .as_deref()
+                        .is_some_and(|tag| !tag.is_empty()));
+            if in_dialog_session_request {
+                request.uri = template.target_uri.clone();
+            }
             // RFC 3262: advertise or demand the `100rel` extension on outgoing
             // INVITEs per dialog config. Applies to both initial and re-INVITE.
             if method == Method::Invite {
@@ -2412,7 +2426,21 @@ impl DialogManager {
                 // RFC 4028: advertise session timers. Only emitted when the
                 // config has `session_timer_secs = Some(_)`.
                 if let Some((secs, min_se)) = self.config_session_timer_settings() {
-                    inject_session_timer_headers(&mut request, secs, min_se);
+                    let in_dialog = dialog
+                        .remote_tag
+                        .as_deref()
+                        .is_some_and(|tag| !tag.is_empty());
+                    if in_dialog {
+                        // §7.4: a re-INVITE keeps the negotiated interval and
+                        // the current refresher instead of re-proposing the
+                        // configured interval with `refresher=uac`.
+                        let negotiated = dialog
+                            .session_expires_secs
+                            .map(|secs| (secs, dialog.is_session_refresher));
+                        inject_in_dialog_session_timer_headers(&mut request, negotiated, min_se);
+                    } else {
+                        inject_session_timer_headers(&mut request, secs, min_se);
+                    }
                 }
             }
 
@@ -2489,42 +2517,41 @@ impl DialogManager {
     ) -> DialogResult<()> {
         debug!(status=response.status_code(), transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), "Sending response");
 
-        // RFC 4028: echo Session-Expires on 2xx to INVITE so the UAC learns
-        // the negotiated interval + refresher assignment.
-        if response.status_code() == 200 {
-            if let Some(dialog_id_ref) = self.transaction_to_dialog.get(transaction_id) {
-                let dialog_id = dialog_id_ref.clone();
-                drop(dialog_id_ref);
-                if let Ok(dialog) = self.get_dialog(&dialog_id) {
-                    if let Some(secs) = dialog.session_expires_secs {
-                        let refresher = if dialog.is_session_refresher {
-                            rvoip_sip_core::types::session_expires::Refresher::Uas
-                        } else {
-                            rvoip_sip_core::types::session_expires::Refresher::Uac
-                        };
-                        let already_has = response.headers.iter().any(|h| {
-                            matches!(h, rvoip_sip_core::types::TypedHeader::SessionExpires(_))
-                        });
-                        if !already_has {
-                            response.headers.push(
-                                rvoip_sip_core::types::TypedHeader::SessionExpires(
-                                    rvoip_sip_core::types::session_expires::SessionExpires::new(
-                                        secs,
-                                        Some(refresher),
-                                    ),
-                                ),
-                            );
-                        }
-                        let supports_has_timer = response.headers.iter().any(|h| matches!(h, rvoip_sip_core::types::TypedHeader::Require(r) if r.requires("timer")));
-                        if !supports_has_timer {
-                            response
-                                .headers
-                                .push(rvoip_sip_core::types::TypedHeader::Require(
-                                    rvoip_sip_core::types::Require::with_tag("timer"),
-                                ));
-                        }
-                    }
-                }
+        // RFC 4028 §9: a 2xx to a session refresh request (INVITE or UPDATE)
+        // carries the negotiated Session-Expires so the UAC learns the
+        // interval and refresher. Responses to other methods (BYE, INFO, …)
+        // are not session refreshes and carry neither header.
+        let session_refresh_method =
+            matches!(transaction_id.method(), Method::Invite | Method::Update);
+        if response.status().is_success() && session_refresh_method {
+            let negotiated = self
+                .transaction_to_dialog
+                .get(transaction_id)
+                .map(|entry| entry.value().clone())
+                .and_then(|dialog_id| self.get_dialog(&dialog_id).ok())
+                .and_then(|dialog| {
+                    dialog
+                        .session_expires_secs
+                        .map(|secs| (secs, dialog.is_session_refresher))
+                });
+            if let Some((secs, uas_refreshes)) = negotiated {
+                // §9: `Require: timer` is mandatory when the UAC refreshes and
+                // recommended when the UAS does, but only for a UAC that
+                // advertised `timer`: a response must not require an
+                // extension the request did not list as supported.
+                let peer_supports_timer = self
+                    .transaction_manager
+                    .original_request(transaction_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|request| detect_peer_timer_support(&request));
+                apply_uas_session_timer_headers(
+                    &mut response,
+                    secs,
+                    uas_refreshes,
+                    peer_supports_timer,
+                );
             }
         }
 
@@ -6128,19 +6155,83 @@ pub fn should_send_reliably(response: &Response) -> bool {
 pub fn inject_session_timer_headers(request: &mut Request, secs: u32, min_se: u32) {
     use rvoip_sip_core::types::min_se::MinSE;
     use rvoip_sip_core::types::session_expires::{Refresher, SessionExpires};
-    use rvoip_sip_core::types::{Supported, TypedHeader};
+    use rvoip_sip_core::types::TypedHeader;
 
     if secs == 0 {
         return;
     }
 
-    request
+    // Headers already staged by the caller (a 422 retry or an explicit
+    // refresh) are authoritative; never emit a second copy.
+    if !request
         .headers
-        .push(TypedHeader::SessionExpires(SessionExpires::new(
-            secs,
-            Some(Refresher::Uac),
-        )));
-    request.headers.push(TypedHeader::MinSE(MinSE::new(min_se)));
+        .iter()
+        .any(|h| matches!(h, TypedHeader::SessionExpires(_)))
+    {
+        request
+            .headers
+            .push(TypedHeader::SessionExpires(SessionExpires::new(
+                secs,
+                Some(Refresher::Uac),
+            )));
+    }
+    if !request
+        .headers
+        .iter()
+        .any(|h| matches!(h, TypedHeader::MinSE(_)))
+    {
+        request.headers.push(TypedHeader::MinSE(MinSE::new(min_se)));
+    }
+    ensure_supported_timer(request);
+}
+
+/// RFC 4028 §7.4 headers for an in-dialog re-INVITE. With a negotiated
+/// timer the request carries the current interval and keeps the current
+/// refresher (`uac` when this side refreshes, `uas` when the peer does);
+/// without one it only advertises `timer`. Headers already staged by the
+/// caller (an explicit refresh) win.
+pub fn inject_in_dialog_session_timer_headers(
+    request: &mut Request,
+    negotiated: Option<(u32, bool)>,
+    min_se: u32,
+) {
+    use rvoip_sip_core::types::min_se::MinSE;
+    use rvoip_sip_core::types::session_expires::{Refresher, SessionExpires};
+    use rvoip_sip_core::types::TypedHeader;
+
+    if let Some((secs, local_refreshes)) = negotiated {
+        if !request
+            .headers
+            .iter()
+            .any(|h| matches!(h, TypedHeader::SessionExpires(_)))
+        {
+            let refresher = if local_refreshes {
+                Refresher::Uac
+            } else {
+                Refresher::Uas
+            };
+            request
+                .headers
+                .push(TypedHeader::SessionExpires(SessionExpires::new(
+                    secs,
+                    Some(refresher),
+                )));
+        }
+        if !request
+            .headers
+            .iter()
+            .any(|h| matches!(h, TypedHeader::MinSE(_)))
+        {
+            request
+                .headers
+                .push(TypedHeader::MinSE(MinSE::new(min_se.min(secs))));
+        }
+    }
+    ensure_supported_timer(request);
+}
+
+fn ensure_supported_timer(request: &mut Request) {
+    use rvoip_sip_core::types::{Supported, TypedHeader};
 
     let mut found = false;
     for header in request.headers.iter_mut() {
@@ -6158,6 +6249,147 @@ pub fn inject_session_timer_headers(request: &mut Request, secs: u32, min_se: u3
             .push(TypedHeader::Supported(Supported::new(vec![
                 "timer".to_string()
             ])));
+    }
+}
+
+/// Whether a request advertises the RFC 4028 `timer` extension, in either
+/// `Supported` or `Require`. RFC 4028 §9 keys both the refresher choice and
+/// the `Require: timer` answer on this.
+pub fn detect_peer_timer_support(request: &Request) -> bool {
+    use rvoip_sip_core::types::TypedHeader;
+
+    request.headers.iter().any(|header| match header {
+        TypedHeader::Supported(sup) => sup
+            .option_tags
+            .iter()
+            .any(|tag| tag.eq_ignore_ascii_case("timer")),
+        TypedHeader::Require(req) => req
+            .option_tags
+            .iter()
+            .any(|tag| tag.eq_ignore_ascii_case("timer")),
+        _ => false,
+    })
+}
+
+/// Add the RFC 4028 §9 UAS headers to a 2xx answering a session refresh
+/// request: `Session-Expires` with the refresher named, plus `Require: timer`
+/// only when the request advertised `timer`. An existing `Session-Expires` set
+/// by the application is preserved.
+pub fn apply_uas_session_timer_headers(
+    response: &mut Response,
+    session_secs: u32,
+    uas_refreshes: bool,
+    peer_supports_timer: bool,
+) {
+    use rvoip_sip_core::types::session_expires::{Refresher, SessionExpires};
+    use rvoip_sip_core::types::{Require, TypedHeader};
+
+    let refresher = if uas_refreshes {
+        Refresher::Uas
+    } else {
+        Refresher::Uac
+    };
+    if !response
+        .headers
+        .iter()
+        .any(|h| matches!(h, TypedHeader::SessionExpires(_)))
+    {
+        response
+            .headers
+            .push(TypedHeader::SessionExpires(SessionExpires::new(
+                session_secs,
+                Some(refresher),
+            )));
+    }
+    if !peer_supports_timer {
+        return;
+    }
+    let mut has_timer = false;
+    for header in response.headers.iter_mut() {
+        if let TypedHeader::Require(require) = header {
+            if !require.requires("timer") {
+                require.option_tags.push("timer".to_string());
+            }
+            has_timer = true;
+            break;
+        }
+    }
+    if !has_timer {
+        response
+            .headers
+            .push(TypedHeader::Require(Require::with_tag("timer")));
+    }
+}
+
+/// UAS-side RFC 4028 §9 decision for a dialog-creating INVITE.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UasSessionTimerDecision {
+    /// Accept the INVITE. `session_secs` is the interval to answer with in
+    /// the 2xx `Session-Expires` (or `None` when no timer applies), and
+    /// `uas_refreshes` is whether this UAS is the refresher.
+    Accept {
+        session_secs: Option<u32>,
+        uas_refreshes: bool,
+    },
+    /// Reject with 422 Session Interval Too Small carrying `Min-SE: min_se`.
+    Reject422 { min_se: u32 },
+}
+
+/// Negotiate the session interval and refresher for an inbound initial INVITE
+/// per RFC 4028 §9 (Table 2).
+///
+/// - A UAC that did not advertise `timer` cannot refresh and cannot parse a
+///   422, so the UAS may still run the timer but must be the refresher.
+/// - A UAC that advertised `timer` and asked for an interval below the local
+///   `min_se` is rejected with 422 + `Min-SE`.
+/// - The answered interval may be reduced to the local preference but never
+///   below the request's `Min-SE`.
+/// - An explicit `refresher=` from a supporting UAC is honored; without one
+///   the UAC refreshes when it proposed an interval, the UAS when it did not.
+pub fn negotiate_uas_session_timer(
+    request: &Request,
+    local: Option<(u32, u32)>,
+) -> UasSessionTimerDecision {
+    use rvoip_sip_core::types::session_expires::Refresher;
+    use rvoip_sip_core::types::TypedHeader;
+
+    let Some((local_secs, local_min_se)) = local else {
+        return UasSessionTimerDecision::Accept {
+            session_secs: None,
+            uas_refreshes: false,
+        };
+    };
+    let peer_supports = detect_peer_timer_support(request);
+    let peer_session_expires = request.headers.iter().find_map(|h| match h {
+        TypedHeader::SessionExpires(se) => Some(se),
+        _ => None,
+    });
+    let peer_min_se = request
+        .headers
+        .iter()
+        .find_map(|h| match h {
+            TypedHeader::MinSE(min) => Some(min.delta_seconds),
+            _ => None,
+        })
+        .unwrap_or(0);
+
+    match peer_session_expires {
+        Some(se) => {
+            if peer_supports && se.delta_seconds < local_min_se {
+                return UasSessionTimerDecision::Reject422 {
+                    min_se: local_min_se,
+                };
+            }
+            let uas_refreshes = !peer_supports || matches!(se.refresher, Some(Refresher::Uas));
+            UasSessionTimerDecision::Accept {
+                session_secs: Some(se.delta_seconds.min(local_secs).max(peer_min_se)),
+                uas_refreshes,
+            }
+        }
+        None => UasSessionTimerDecision::Accept {
+            session_secs: Some(local_secs.max(peer_min_se)),
+            uas_refreshes: true,
+        },
     }
 }
 
@@ -7763,5 +7995,295 @@ impl DialogManager {
         }
 
         orphaned_count
+    }
+}
+
+#[cfg(test)]
+mod rfc4028_uas_session_timer_tests {
+    use super::{
+        apply_uas_session_timer_headers, detect_peer_timer_support, negotiate_uas_session_timer,
+        UasSessionTimerDecision,
+    };
+    use rvoip_sip_core::builder::SimpleRequestBuilder;
+    use rvoip_sip_core::types::min_se::MinSE;
+    use rvoip_sip_core::types::session_expires::{Refresher, SessionExpires};
+    use rvoip_sip_core::types::{Require, Supported, TypedHeader};
+    use rvoip_sip_core::{Method, Request, Response, StatusCode};
+
+    fn invite(headers: Vec<TypedHeader>) -> Request {
+        let mut request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("a1"))
+            .to("Bob", "sip:bob@example.com", None)
+            .call_id("rfc4028-uas")
+            .cseq(1)
+            .via("127.0.0.1:5060", "UDP", Some("z9hG4bK-rfc4028"))
+            .max_forwards(70)
+            .build();
+        request.headers.extend(headers);
+        request
+    }
+
+    fn supported_timer() -> TypedHeader {
+        TypedHeader::Supported(Supported::new(vec!["timer".to_string()]))
+    }
+
+    fn se(secs: u32, refresher: Option<Refresher>) -> TypedHeader {
+        TypedHeader::SessionExpires(SessionExpires::new(secs, refresher))
+    }
+
+    const LOCAL: Option<(u32, u32)> = Some((1800, 90));
+
+    fn accept(secs: u32, uas_refreshes: bool) -> UasSessionTimerDecision {
+        UasSessionTimerDecision::Accept {
+            session_secs: Some(secs),
+            uas_refreshes,
+        }
+    }
+
+    #[test]
+    fn timer_support_is_read_from_supported_or_require() {
+        assert!(!detect_peer_timer_support(&invite(vec![])));
+        assert!(detect_peer_timer_support(&invite(vec![supported_timer()])));
+        assert!(detect_peer_timer_support(&invite(vec![
+            TypedHeader::Require(Require::with_tag("timer"))
+        ])));
+        assert!(!detect_peer_timer_support(&invite(vec![
+            TypedHeader::Supported(Supported::new(vec!["100rel".to_string()]))
+        ])));
+    }
+
+    #[test]
+    fn uac_without_timer_support_makes_the_uas_the_refresher() {
+        // RFC 4028 §9 Table 2: UAC supports = N  ->  refresher = uas.
+        assert_eq!(
+            negotiate_uas_session_timer(&invite(vec![]), LOCAL),
+            accept(1800, true)
+        );
+        // A proxy-inserted Session-Expires, even one naming the UAC, cannot
+        // make a UAC that never advertised `timer` refresh.
+        assert_eq!(
+            negotiate_uas_session_timer(&invite(vec![se(600, Some(Refresher::Uac))]), LOCAL),
+            accept(600, true)
+        );
+        // Nor can it be rejected with a 422 the UAC cannot understand.
+        assert_eq!(
+            negotiate_uas_session_timer(&invite(vec![se(60, None)]), LOCAL),
+            accept(60, true)
+        );
+    }
+
+    #[test]
+    fn supporting_uac_refresher_choice_is_honored() {
+        let with = |refresher| invite(vec![supported_timer(), se(1200, refresher)]);
+        assert_eq!(
+            negotiate_uas_session_timer(&with(Some(Refresher::Uac)), LOCAL),
+            accept(1200, false)
+        );
+        assert_eq!(
+            negotiate_uas_session_timer(&with(Some(Refresher::Uas)), LOCAL),
+            accept(1200, true)
+        );
+        assert_eq!(
+            negotiate_uas_session_timer(&with(None), LOCAL),
+            accept(1200, false)
+        );
+        // Supported: timer but no Session-Expires: the UAS may request a timer.
+        assert_eq!(
+            negotiate_uas_session_timer(&invite(vec![supported_timer()]), LOCAL),
+            accept(1800, true)
+        );
+    }
+
+    #[test]
+    fn answered_interval_is_reduced_but_never_below_request_min_se() {
+        assert_eq!(
+            negotiate_uas_session_timer(&invite(vec![supported_timer(), se(7200, None)]), LOCAL),
+            accept(1800, false)
+        );
+        // A peer floor above our preference raises the interval instead of
+        // rejecting the call.
+        assert_eq!(
+            negotiate_uas_session_timer(
+                &invite(vec![
+                    supported_timer(),
+                    se(7200, None),
+                    TypedHeader::MinSE(MinSE::new(3600))
+                ]),
+                LOCAL
+            ),
+            accept(3600, false)
+        );
+        assert_eq!(
+            negotiate_uas_session_timer(
+                &invite(vec![
+                    supported_timer(),
+                    TypedHeader::MinSE(MinSE::new(3600))
+                ]),
+                LOCAL
+            ),
+            accept(3600, true)
+        );
+    }
+
+    #[test]
+    fn supporting_uac_below_local_min_se_gets_422() {
+        assert_eq!(
+            negotiate_uas_session_timer(&invite(vec![supported_timer(), se(60, None)]), LOCAL),
+            UasSessionTimerDecision::Reject422 { min_se: 90 }
+        );
+    }
+
+    #[test]
+    fn disabled_local_timers_never_negotiate() {
+        assert_eq!(
+            negotiate_uas_session_timer(&invite(vec![supported_timer(), se(1800, None)]), None),
+            UasSessionTimerDecision::Accept {
+                session_secs: None,
+                uas_refreshes: false,
+            }
+        );
+    }
+
+    fn header_values(request: &Request) -> (Vec<(u32, Option<Refresher>)>, Vec<u32>, usize) {
+        let se = request
+            .headers
+            .iter()
+            .filter_map(|h| match h {
+                TypedHeader::SessionExpires(se) => Some((se.delta_seconds, se.refresher)),
+                _ => None,
+            })
+            .collect();
+        let min_se = request
+            .headers
+            .iter()
+            .filter_map(|h| match h {
+                TypedHeader::MinSE(min) => Some(min.delta_seconds),
+                _ => None,
+            })
+            .collect();
+        let supported_timer = request
+            .headers
+            .iter()
+            .filter(|h| matches!(h, TypedHeader::Supported(s) if s.supports("timer")))
+            .count();
+        (se, min_se, supported_timer)
+    }
+
+    #[test]
+    fn initial_invite_injection_never_duplicates_staged_headers() {
+        // A refresh or 422 retry stages its own Session-Expires/Min-SE; the
+        // config injection must not add a second copy (which made the
+        // refresh re-INVITE unbuildable).
+        let mut request = invite(vec![
+            se(120, Some(Refresher::Uac)),
+            TypedHeader::MinSE(MinSE::new(120)),
+            supported_timer(),
+        ]);
+        super::inject_session_timer_headers(&mut request, 1800, 90);
+        assert_eq!(
+            header_values(&request),
+            (vec![(120, Some(Refresher::Uac))], vec![120], 1)
+        );
+
+        let mut request = invite(vec![]);
+        super::inject_session_timer_headers(&mut request, 1800, 90);
+        assert_eq!(
+            header_values(&request),
+            (vec![(1800, Some(Refresher::Uac))], vec![90], 1)
+        );
+    }
+
+    #[test]
+    fn reinvite_keeps_negotiated_interval_and_current_refresher() {
+        // RFC 4028 §7.4.
+        let mut request = invite(vec![]);
+        super::inject_in_dialog_session_timer_headers(&mut request, Some((600, false)), 90);
+        assert_eq!(
+            header_values(&request),
+            (vec![(600, Some(Refresher::Uas))], vec![90], 1)
+        );
+
+        let mut request = invite(vec![]);
+        super::inject_in_dialog_session_timer_headers(&mut request, Some((600, true)), 90);
+        assert_eq!(
+            header_values(&request),
+            (vec![(600, Some(Refresher::Uac))], vec![90], 1)
+        );
+
+        // No negotiated timer: only advertise support, never start one.
+        let mut request = invite(vec![]);
+        super::inject_in_dialog_session_timer_headers(&mut request, None, 90);
+        assert_eq!(header_values(&request), (vec![], vec![], 1));
+
+        // An explicit refresh's headers win.
+        let mut request = invite(vec![se(600, Some(Refresher::Uac)), supported_timer()]);
+        super::inject_in_dialog_session_timer_headers(&mut request, Some((600, false)), 90);
+        assert_eq!(
+            header_values(&request),
+            (vec![(600, Some(Refresher::Uac))], vec![90], 1)
+        );
+    }
+
+    fn ok() -> Response {
+        Response::new(StatusCode::Ok)
+    }
+
+    fn requires_timer(response: &Response) -> bool {
+        response
+            .headers
+            .iter()
+            .any(|h| matches!(h, TypedHeader::Require(r) if r.requires("timer")))
+    }
+
+    fn session_expires(response: &Response) -> Option<(u32, Option<Refresher>)> {
+        response.headers.iter().find_map(|h| match h {
+            TypedHeader::SessionExpires(se) => Some((se.delta_seconds, se.refresher)),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn response_to_uac_without_timer_support_omits_require_timer() {
+        let mut response = ok();
+        apply_uas_session_timer_headers(&mut response, 1800, true, false);
+        assert_eq!(
+            session_expires(&response),
+            Some((1800, Some(Refresher::Uas)))
+        );
+        assert!(!requires_timer(&response));
+    }
+
+    #[test]
+    fn response_to_supporting_uac_requires_timer() {
+        for uas_refreshes in [true, false] {
+            let mut response = ok();
+            apply_uas_session_timer_headers(&mut response, 900, uas_refreshes, true);
+            let refresher = if uas_refreshes {
+                Refresher::Uas
+            } else {
+                Refresher::Uac
+            };
+            assert_eq!(session_expires(&response), Some((900, Some(refresher))));
+            assert!(requires_timer(&response));
+        }
+        // An existing Require gains the tag instead of a second header.
+        let mut response = ok();
+        response
+            .headers
+            .push(TypedHeader::Require(Require::with_tag("100rel")));
+        apply_uas_session_timer_headers(&mut response, 900, true, true);
+        let requires: Vec<_> = response
+            .headers
+            .iter()
+            .filter_map(|h| match h {
+                TypedHeader::Require(r) => Some(r.option_tags.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            requires,
+            vec![vec!["100rel".to_string(), "timer".to_string()]]
+        );
     }
 }
