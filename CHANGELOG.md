@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+### Breaking changes
+
+- The public configuration structs are now `#[non_exhaustive]`, so later
+  releases can add fields without a semver break:
+  `rvoip_core::Config`, `rvoip_core::TenantQuotas`, `rvoip_sip::Config`,
+  `rvoip_sip_dialog::api::DialogConfig`, `rvoip_websocket::UctpWsConfig`,
+  `rvoip_quic::UctpQuicConfig`, and
+  `rvoip_uctp::state::UctpCoordinatorCaps`.
+- Code outside the defining crate can no longer build these with a struct
+  literal, including the `..Default::default()` form. Start from a
+  constructor and then set fields or call builder methods:
+
+  ```rust
+  // Before
+  let config = Config { max_concurrent_setups: 64, ..Config::default() };
+
+  // After
+  let mut config = Config::default();
+  config.max_concurrent_setups = 64;
+  ```
+
+  Use `Config::default()` (core), `Config::local` / `Config::on` or a
+  profile constructor (SIP), `DialogConfig::new` or `Default`,
+  `UctpWsConfig::new`, `UctpQuicConfig::new`, and
+  `UctpCoordinatorCaps::default()`. `TenantQuotas` gains
+  `with_max_concurrent_sessions`, `with_max_concurrent_recordings`, and
+  `with_max_concurrent_ai_sessions`, so
+  `TenantQuotas::default().with_max_concurrent_sessions(1)` replaces the
+  literal. Reading fields and assigning to them is unchanged.
+
 ## 0.3.12
 
 ### 0.3.12 release recovery

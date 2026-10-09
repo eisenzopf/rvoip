@@ -80,6 +80,7 @@ pub(crate) struct Route {
     pub coordinator: Arc<rvoip_uctp::state::UctpCoordinator>,
 }
 
+#[non_exhaustive]
 pub struct UctpQuicConfig {
     /// Opt-in authenticated application profile, installed before signaling ingress.
     /// The shared coordinator retains authentication, scope, signature and replay gates.

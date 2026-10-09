@@ -9,10 +9,31 @@ use crate::store::{
 
 /// P6 — per-tenant quota envelope. Each `None` means "unlimited".
 #[derive(Clone, Copy, Debug, Default)]
+#[non_exhaustive]
 pub struct TenantQuotas {
     pub max_concurrent_sessions: Option<usize>,
     pub max_concurrent_recordings: Option<usize>,
     pub max_concurrent_ai_sessions: Option<usize>,
+}
+
+impl TenantQuotas {
+    /// Cap concurrent Sessions for the tenant.
+    pub fn with_max_concurrent_sessions(mut self, max: usize) -> Self {
+        self.max_concurrent_sessions = Some(max);
+        self
+    }
+
+    /// Cap concurrent recordings for the tenant.
+    pub fn with_max_concurrent_recordings(mut self, max: usize) -> Self {
+        self.max_concurrent_recordings = Some(max);
+        self
+    }
+
+    /// Cap concurrent AI sessions for the tenant.
+    pub fn with_max_concurrent_ai_sessions(mut self, max: usize) -> Self {
+        self.max_concurrent_ai_sessions = Some(max);
+        self
+    }
 }
 
 /// Orchestrator configuration.
@@ -20,6 +41,7 @@ pub struct TenantQuotas {
 /// Phase-2 admission semaphore default per `PERFORMANCE_PLAN.md`:
 /// `max_concurrent_setups = 256 * available_parallelism()`.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct Config {
     pub max_concurrent_setups: usize,
     /// Maximum number of distinct direct-media subscriber Connections

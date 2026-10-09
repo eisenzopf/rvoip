@@ -90,6 +90,7 @@ pub(crate) struct Route {
         Arc<parking_lot::Mutex<Option<rvoip_uctp::payloads::connection::WebRtcSubstrateSetup>>>,
 }
 
+#[non_exhaustive]
 pub struct UctpWsConfig {
     pub listener: TcpListener,
     pub bearer_validator: Arc<dyn BearerValidator>,

@@ -1135,10 +1135,8 @@ async fn session_invite_over_cap_emits_429() {
     let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
     let (events_tx, mut events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
 
-    let caps = UctpCoordinatorCaps {
-        max_sessions_per_peer: 2,
-        ..Default::default()
-    };
+    let mut caps = UctpCoordinatorCaps::default();
+    caps.max_sessions_per_peer = 2;
     let _coord = UctpCoordinator::start_full_with_caps(
         "quic",
         in_rx,
@@ -1194,10 +1192,8 @@ async fn session_invite_retransmit_is_idempotent_and_does_not_count_against_cap(
     let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
     let (events_tx, mut events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
 
-    let caps = UctpCoordinatorCaps {
-        max_sessions_per_peer: 1,
-        ..Default::default()
-    };
+    let mut caps = UctpCoordinatorCaps::default();
+    caps.max_sessions_per_peer = 1;
     let coord = UctpCoordinator::start_full_with_caps(
         "quic",
         in_rx,
@@ -1248,10 +1244,8 @@ async fn connection_cap_rejects_excess_state_machines() {
     let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
     let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
     let (events_tx, mut events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
-    let caps = UctpCoordinatorCaps {
-        max_connections_per_peer: 1,
-        ..Default::default()
-    };
+    let mut caps = UctpCoordinatorCaps::default();
+    caps.max_connections_per_peer = 1;
     let _coord = UctpCoordinator::start_full_with_caps(
         "quic",
         in_rx,
@@ -1292,10 +1286,8 @@ async fn stream_offer_cap_rejects_oversized_negotiation() {
     let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
     let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
     let (events_tx, mut events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
-    let caps = UctpCoordinatorCaps {
-        max_streams_per_connection: 1,
-        ..Default::default()
-    };
+    let mut caps = UctpCoordinatorCaps::default();
+    caps.max_streams_per_connection = 1;
     let _coord = UctpCoordinator::start_full_with_caps(
         "quic",
         in_rx,
@@ -1333,10 +1325,8 @@ async fn stream_offer_cap_is_cumulative_across_reoffers() {
     let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
     let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
     let (events_tx, mut events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
-    let caps = UctpCoordinatorCaps {
-        max_streams_per_connection: 2,
-        ..Default::default()
-    };
+    let mut caps = UctpCoordinatorCaps::default();
+    caps.max_streams_per_connection = 2;
     let coord = UctpCoordinator::start_full_with_caps(
         "quic",
         in_rx,
