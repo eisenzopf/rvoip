@@ -144,6 +144,23 @@ pub struct Dialog {
     /// negotiated `Session-Expires` header). Only meaningful when
     /// `session_expires_secs.is_some()`.
     pub is_session_refresher: bool,
+
+    /// Whether the peer listed `UPDATE` in the `Allow` header of its last
+    /// INVITE, re-INVITE, UPDATE or 2xx to one. `None` until the peer sends
+    /// an `Allow` header: RFC 3261 §20.5 makes its absence uninformative, so
+    /// only an explicit list without UPDATE rules UPDATE out (RFC 4028 §7.4
+    /// refreshes then go straight to re-INVITE).
+    pub peer_allows_update: Option<bool>,
+
+    /// Largest `Min-SE` the peer sent in a 422 to an in-dialog session
+    /// refresh (RFC 4028 §7.4). Later refreshes must not go below it.
+    pub session_timer_peer_min_se: Option<u32>,
+
+    /// CSeq numbers of this side's in-flight INVITE/UPDATE requests that
+    /// carried `Session-Expires`. A 2xx to one of them without
+    /// `Session-Expires` turns the session timer off (RFC 4028 §7.2, §7.4);
+    /// a 2xx to a request that never proposed a timer leaves it alone.
+    pub session_timer_request_cseqs: Vec<u32>,
 }
 
 impl fmt::Debug for Dialog {
@@ -176,6 +193,9 @@ impl fmt::Debug for Dialog {
             .field("max_refresh_failures", &self.max_refresh_failures)
             .field("invite_cseq", &self.invite_cseq)
             .field("last_rseq_acked", &self.last_rseq_acked)
+            .field("session_expires_secs", &self.session_expires_secs)
+            .field("is_session_refresher", &self.is_session_refresher)
+            .field("peer_allows_update", &self.peer_allows_update)
             .finish_non_exhaustive()
     }
 }
@@ -227,6 +247,9 @@ impl Dialog {
             peer_supports_100rel: false,
             session_expires_secs: None,
             is_session_refresher: false,
+            peer_allows_update: None,
+            session_timer_peer_min_se: None,
+            session_timer_request_cseqs: Vec::new(),
         }
     }
 
@@ -434,6 +457,9 @@ impl Dialog {
             peer_supports_100rel: false,
             session_expires_secs: None,
             is_session_refresher: false,
+            peer_allows_update: None,
+            session_timer_peer_min_se: None,
+            session_timer_request_cseqs: Vec::new(),
         })
     }
 
@@ -553,6 +579,9 @@ impl Dialog {
             peer_supports_100rel: false,
             session_expires_secs: None,
             is_session_refresher: false,
+            peer_allows_update: None,
+            session_timer_peer_min_se: None,
+            session_timer_request_cseqs: Vec::new(),
         })
     }
 
