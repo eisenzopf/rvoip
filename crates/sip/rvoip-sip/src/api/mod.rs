@@ -302,6 +302,7 @@ pub mod handlers; // Built-in CallHandler impls: AutoAnswerHandler, RejectAllHan
 pub mod headers; // SipHeaderView, SipRequestOptions, HeaderPolicy (SIP_API_DESIGN_2)
 pub mod incoming; // IncomingCall, IncomingCallGuard, IncomingRequest, IncomingResponse, IncomingRegister
 pub mod lifecycle;
+mod options_keepalive; // Config::options_keepalive_targets pinger
 pub mod performance;
 pub mod proxy_coordinator; // Stateful SIP proxy entry point (Phase 6)
 pub mod respond; // Response builders (SIP_API_DESIGN_2 Phase D)

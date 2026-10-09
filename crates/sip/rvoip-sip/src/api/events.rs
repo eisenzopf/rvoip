@@ -856,6 +856,24 @@ pub enum Event {
         reason: String,
     },
 
+    /// An [`OPTIONS` keep-alive](crate::Config::options_keepalive_targets)
+    /// target's reachability was first learned or changed.
+    ///
+    /// Published once for each target's first ping outcome and again
+    /// whenever it flips, never for a repeat of the same outcome. Use it to
+    /// mark a trunk or SBC peer up or down.
+    PeerReachabilityChanged {
+        /// The configured target URI, exactly as it appears in
+        /// [`Config::options_keepalive_targets`](crate::Config::options_keepalive_targets).
+        target: String,
+        /// Whether the target answered with a final response other than
+        /// `408` or `503`.
+        reachable: bool,
+        /// Status code of the response, or `None` when the ping timed out
+        /// or failed at the transport.
+        status_code: Option<u16>,
+    },
+
     // ===== Diagnostics Events =====
     /// SIP message observed at the transport boundary.
     SipTrace(SipTrace),
@@ -1156,6 +1174,16 @@ impl std::fmt::Debug for Event {
                 .field("registrar_bytes", &registrar.len())
                 .field("reason_bytes", &reason.len())
                 .finish(),
+            Self::PeerReachabilityChanged {
+                target,
+                reachable,
+                status_code,
+            } => formatter
+                .debug_struct("PeerReachabilityChanged")
+                .field("target_bytes", &target.len())
+                .field("reachable", reachable)
+                .field("status_code", status_code)
+                .finish(),
             Self::SipTrace(trace) => formatter.debug_tuple("SipTrace").field(trace).finish(),
             Self::NetworkError { error, .. } => formatter
                 .debug_struct("NetworkError")
@@ -1231,7 +1259,8 @@ impl Event {
             | Event::RegistrationFailed { .. }
             | Event::UnregistrationSuccess { .. }
             | Event::UnregistrationFailed { .. }
-            | Event::IncomingRegister { .. } => None,
+            | Event::IncomingRegister { .. }
+            | Event::PeerReachabilityChanged { .. } => None,
         }
     }
 

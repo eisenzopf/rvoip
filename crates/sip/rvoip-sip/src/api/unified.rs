@@ -1883,6 +1883,25 @@ impl Drop for RetainedHangupTaskCompletion {
 /// points for common interop targets; they do not imply carrier certification
 /// or full RFC 5626 multi-flow behavior.
 ///
+/// # Deployment profiles
+///
+/// Each profile is a constructor that fills in documented defaults for one
+/// way of deploying; every value it sets stays a public field you can
+/// change afterwards.
+///
+/// | Deployment | Profile |
+/// | --- | --- |
+/// | Loopback examples and tests | [`Config::local`] ([`Config::local_lab`] is an alias) |
+/// | Endpoint on a PBX's LAN | [`Config::lan_pbx`] |
+/// | TLS registration to Asterisk | [`Config::asterisk_tls_registered_flow`] |
+/// | TLS + SRTP to FreeSWITCH | [`Config::freeswitch_tls_srtp_reachable_contact`] |
+/// | Carrier/SBC you register with over TLS | [`Config::carrier_sbc`] |
+/// | IP-authenticated UDP SIP trunk | [`Config::carrier_trunk_udp`] |
+/// | Server on a public or 1:1-NAT IP | [`Config::public_server`] |
+/// | Endpoint behind NAT | [`Config::behind_nat`] |
+/// | Behind a SIP proxy + RTPengine | [`Config::proxy_rtpengine`] |
+/// | mTLS SBC peering (Teams Direct Routing shape) | [`Config::tls_direct_routing`] |
+///
 /// # Media options
 ///
 /// Two media settings change what a listener hears and what the far end
@@ -1890,7 +1909,9 @@ impl Drop for RetainedHangupTaskCompletion {
 ///
 /// - [`Config::playout`] — the inbound jitter buffer and packet-loss
 ///   concealment. `None` (pass-through) by default; turn it on for any route
-///   over the public internet. [`Config::carrier_sbc`] turns it on.
+///   over the public internet. The internet-facing deployment profiles
+///   ([`Config::carrier_sbc`], [`Config::public_server`] and the others
+///   listed under "Deployment profiles" below) turn it on.
 /// - [`Config::rtcp_mux_required`] — the reference for RTCP behavior.
 ///   Periodic RTCP SR/RR is sent only on calls that negotiate `a=rtcp-mux`;
 ///   set this to refuse peers that do not.
@@ -2120,6 +2141,35 @@ pub struct Config {
     /// enabled with a stable [`Config::sip_instance`].
     pub outbound_keepalive_interval_secs: u64,
 
+    /// Peers to probe with periodic out-of-dialog `OPTIONS` (RFC 3261 §11).
+    ///
+    /// SIP trunks and SBC peering arrangements — Microsoft Teams Direct
+    /// Routing among them — expect the SBC side to ping each peer with
+    /// `OPTIONS` so both ends know the trunk is up. When this list is
+    /// non-empty and [`Config::options_keepalive_interval_secs`] is non-zero,
+    /// the coordinator sends one `OPTIONS` to every target one second after
+    /// it starts (sooner if the interval is shorter) and then once per
+    /// interval until shutdown.
+    ///
+    /// Each entry is a SIP URI such as
+    /// `sip:sip.pstnhub.microsoft.com:5061;transport=tls`. The ping carries
+    /// [`Config::contact_uri`] as its `Contact` when one is set, because
+    /// some peers check the SBC FQDN there.
+    ///
+    /// A target is *reachable* when it answers with any final response other
+    /// than `408` or `503` — even a `404` proves its SIP stack is up. A
+    /// timeout, a transport error, `408` or `503` marks it *unreachable*.
+    /// [`Event::PeerReachabilityChanged`](crate::api::events::Event::PeerReachabilityChanged)
+    /// is published for each target's first outcome and whenever it flips.
+    ///
+    /// Default: empty (no pings).
+    pub options_keepalive_targets: Vec<String>,
+
+    /// Seconds between [`Config::options_keepalive_targets`] pings. `0`
+    /// disables them. Each ping waits up to the smaller of this interval and
+    /// 8 seconds for a response. Default: `60`.
+    pub options_keepalive_interval_secs: u64,
+
     /// Automatically refresh successful registrations before they expire.
     ///
     /// When enabled, rvoip-sip schedules a re-REGISTER after a successful
@@ -2254,9 +2304,25 @@ pub struct Config {
     /// See [`Config::srtp_required`] for the strict-mode variant.
     pub offer_srtp: bool,
 
-    // TODO(rtcp-mux offer default): when rvoip starts offering a=rtcp-mux by
-    // default (with its own opt-out field), name that field in the
-    // "Who negotiates mux" paragraph below and in the README's Media options.
+    /// Offer RTP/RTCP multiplexing (`a=rtcp-mux`, RFC 5761) in every SDP offer.
+    ///
+    /// The media stack runs RTP and RTCP on one socket, so periodic RTCP
+    /// reports flow only when the offer and the answer both carry
+    /// `a=rtcp-mux`. With this on, every offer rvoip generates (initial
+    /// INVITE, re-INVITE/UPDATE, hold/resume, late-SDP offers in 200 OK)
+    /// carries it. A peer that answers without it simply gets no periodic
+    /// RTCP: nothing is sent to the RTP port or to RTP port + 1
+    /// (RFC 5761 §5.1.1). Answers are unaffected: they echo `a=rtcp-mux`
+    /// only when the peer's offer had it.
+    ///
+    /// Set to `false` for an interop-sensitive peer that mishandles the
+    /// attribute; offers then omit it, as releases before 0.4.0 did, and
+    /// those calls carry no periodic RTCP. Ignored when
+    /// [`Config::rtcp_mux_required`] is `true`, which always offers mux.
+    ///
+    /// Default: `true`.
+    pub offer_rtcp_mux: bool,
+
     /// Require SDP negotiation of RTP/RTCP multiplexing (`a=rtcp-mux`,
     /// RFC 5761) for the call's single media socket. Default: `false`.
     ///
@@ -2275,10 +2341,11 @@ pub struct Config {
     /// # Who negotiates mux
     ///
     /// When rvoip answers, it accepts mux whenever the offer carries
-    /// `a=rtcp-mux`. Whether rvoip's own offers carry it is offer policy:
-    /// with this field `true` they always do (together with
-    /// `a=rtcp-mux-only`), and the peer must echo it. Inspect the negotiated
-    /// SDP if you need to know what a given call ended up with.
+    /// `a=rtcp-mux`. rvoip's own offers carry `a=rtcp-mux` by default
+    /// ([`Config::offer_rtcp_mux`]), so RTCP flows with any peer that echoes
+    /// it. With this field `true` offers also carry `a=rtcp-mux-only` and the
+    /// peer must echo it. Inspect the negotiated SDP if you need to know what
+    /// a given call ended up with.
     ///
     /// # Strict mode
     ///
@@ -2350,9 +2417,11 @@ pub struct Config {
     /// order, no pacing, and a gap wherever a packet was lost.
     ///
     /// **Default: `None`** from [`Config::local`], [`Config::on`],
-    /// [`Config::local_lab`], [`Config::lan_pbx`], [`Config::proxy_rtpengine`]
-    /// and the Asterisk/FreeSWITCH profiles. [`Config::carrier_sbc`] sets
-    /// `Some(PlayoutConfig::default())`.
+    /// [`Config::local_lab`], [`Config::lan_pbx`] and the Asterisk/FreeSWITCH
+    /// profiles. The internet-facing profiles — [`Config::carrier_sbc`],
+    /// [`Config::carrier_trunk_udp`], [`Config::public_server`],
+    /// [`Config::behind_nat`], [`Config::proxy_rtpengine`] and
+    /// [`Config::tls_direct_routing`] — set `Some(PlayoutConfig::default())`.
     ///
     /// # Knobs
     ///
@@ -2986,6 +3055,14 @@ impl std::fmt::Debug for Config {
             )
             .field("sip_outbound_enabled", &self.sip_outbound_enabled)
             .field("sip_instance_configured", &self.sip_instance.is_some())
+            .field(
+                "options_keepalive_target_count",
+                &self.options_keepalive_targets.len(),
+            )
+            .field(
+                "options_keepalive_interval_secs",
+                &self.options_keepalive_interval_secs,
+            )
             .field("sip_tls_mode", &self.sip_tls_mode)
             .field("sip_contact_mode", &self.sip_contact_mode)
             .field("tls_bind_configured", &self.tls_bind_addr.is_some())
@@ -3010,6 +3087,8 @@ impl std::fmt::Debug for Config {
                 &self.tls_server_client_auth.mode,
             )
             .field("offer_srtp", &self.offer_srtp)
+            .field("offer_rtcp_mux", &self.offer_rtcp_mux)
+            .field("rtcp_mux_required", &self.rtcp_mux_required)
             .field("srtp_keying", &self.srtp_keying)
             .field("dtls_setup_role", &self.dtls_setup_role)
             .field("ice", &self.ice)
@@ -3099,6 +3178,17 @@ impl Config {
     /// dialog-core terminal events.
     pub const DEFAULT_SETUP_TEARDOWN_TIMEOUT_SECS: u64 = 120;
 
+    /// Default interval between [`Config::options_keepalive_targets`] pings.
+    pub const DEFAULT_OPTIONS_KEEPALIVE_INTERVAL_SECS: u64 = 60;
+
+    /// RFC 4028 `Session-Expires` the deployment profiles advertise: 30
+    /// minutes, the value most carriers and SBCs use.
+    pub const PROFILE_SESSION_TIMER_SECS: u32 = 1800;
+
+    /// RFC 4028 `Min-SE` the deployment profiles accept: the RFC's 90-second
+    /// floor, so a peer may negotiate any interval it is allowed to.
+    pub const PROFILE_SESSION_TIMER_MIN_SE: u32 = 90;
+
     /// Explicitly allow verbatim SIP trace headers and any included bodies for
     /// controlled development/operator diagnostics.
     ///
@@ -3157,6 +3247,8 @@ impl Config {
             sip_outbound_enabled: false,
             sip_instance: None,
             outbound_keepalive_interval_secs: 25,
+            options_keepalive_targets: Vec::new(),
+            options_keepalive_interval_secs: Self::DEFAULT_OPTIONS_KEEPALIVE_INTERVAL_SECS,
             registration_auto_refresh: true,
             registration_refresh_jitter_percent: 5,
             unregister_on_shutdown_timeout_secs: 3,
@@ -3176,6 +3268,7 @@ impl Config {
             #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
             offer_srtp: false,
+            offer_rtcp_mux: true,
             rtcp_mux_required: false,
             srtp_keying: SrtpKeyingMode::Sdes,
             dtls_setup_role: DtlsSetupRole::Actpass,
@@ -3280,6 +3373,8 @@ impl Config {
             sip_outbound_enabled: false,
             sip_instance: None,
             outbound_keepalive_interval_secs: 25,
+            options_keepalive_targets: Vec::new(),
+            options_keepalive_interval_secs: Self::DEFAULT_OPTIONS_KEEPALIVE_INTERVAL_SECS,
             registration_auto_refresh: true,
             registration_refresh_jitter_percent: 5,
             unregister_on_shutdown_timeout_secs: 3,
@@ -3299,6 +3394,7 @@ impl Config {
             #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
             offer_srtp: false,
+            offer_rtcp_mux: true,
             rtcp_mux_required: false,
             srtp_keying: SrtpKeyingMode::Sdes,
             dtls_setup_role: DtlsSetupRole::Actpass,
@@ -3360,20 +3456,45 @@ impl Config {
         }
     }
 
-    /// Deployment profile for local examples and integration tests.
+    /// Alias of [`Config::local`] for examples and integration tests.
+    ///
+    /// Sets exactly what [`Config::local`] sets — loopback signaling and
+    /// media, no TLS, no SRTP, no session timers, no playout buffer. The name
+    /// exists so lab code reads as lab code; prefer [`Config::local`] in new
+    /// code.
     ///
     /// # Examples
     ///
     /// ```
     /// # use rvoip_sip::Config;
-    /// let config = Config::local_lab("alice", 5060);
+    /// let mut config = Config::local_lab("alice", 5060);
     /// assert_eq!(config.local_uri, "sip:alice@127.0.0.1:5060");
+    /// config.session_timer_secs = Some(90); // every field stays overridable
     /// ```
     pub fn local_lab(name: &str, port: u16) -> Self {
         Self::local(name, port)
     }
 
-    /// Deployment profile for a directly reachable LAN PBX endpoint.
+    /// Deployment profile for an endpoint on the same LAN as its PBX
+    /// (Asterisk, FreeSWITCH, 3CX and similar) where both sides reach each
+    /// other directly.
+    ///
+    /// Use it when signaling and media stay on a switched network. For a
+    /// PBX across the internet use [`Config::carrier_trunk_udp`] or
+    /// [`Config::public_server`]; for TLS registration to Asterisk use
+    /// [`Config::asterisk_tls_registered_flow`].
+    ///
+    /// Starts from [`Config::on`] and sets:
+    ///
+    /// | Field | Value |
+    /// | --- | --- |
+    /// | [`bind_addr`](Config::bind_addr) | `bind_addr` (may be `0.0.0.0`) |
+    /// | [`sip_advertised_addr`](Config::sip_advertised_addr) | `Some(advertised_addr)` |
+    /// | [`media_public_addr`](Config::media_public_addr) | `Some(advertised_addr.ip():0)` — the allocated RTP port is filled in per call |
+    ///
+    /// Left at the [`Config::on`] defaults on purpose: no playout buffer (a
+    /// LAN has no jitter to smooth), no session timers, no TLS or SRTP,
+    /// strict codec matching on, ICE off.
     ///
     /// # Examples
     ///
@@ -3381,8 +3502,10 @@ impl Config {
     /// # use rvoip_sip::Config;
     /// let bind = "0.0.0.0:5060".parse().unwrap();
     /// let advertised = "192.168.1.50:5060".parse().unwrap();
-    /// let config = Config::lan_pbx("alice", bind, advertised);
+    /// let mut config = Config::lan_pbx("alice", bind, advertised);
     /// assert_eq!(config.sip_advertised_addr, Some(advertised));
+    /// // Override afterwards: this PBX's dialplan wants RFC 4028 timers.
+    /// config.session_timer_secs = Some(1800);
     /// ```
     pub fn lan_pbx(name: &str, bind_addr: SocketAddr, advertised_addr: SocketAddr) -> Self {
         let mut config = Self::on(name, bind_addr.ip(), bind_addr.port());
@@ -3395,18 +3518,29 @@ impl Config {
     /// Deployment profile for Asterisk TLS + SDES-SRTP with registered-flow
     /// reuse over the outbound registration connection.
     ///
+    /// Starts from [`Config::on`] and sets:
+    ///
+    /// | Field | Value |
+    /// | --- | --- |
+    /// | [`bind_addr`](Config::bind_addr) | `bind_addr` |
+    /// | [`sip_tls_mode`](Config::sip_tls_mode) | [`SipTlsMode::ClientOnly`] |
+    /// | [`sip_contact_mode`](Config::sip_contact_mode) | [`SipContactMode::RegisteredFlowSymmetric`] |
+    /// | [`sip_instance`](Config::sip_instance) | `Some(sip_instance)` |
+    /// | [`offer_srtp`](Config::offer_srtp) / [`srtp_required`](Config::srtp_required) | `true` / `true` |
+    ///
     /// # Examples
     ///
     /// ```
     /// # use rvoip_sip::{Config, SipTlsMode};
     /// let bind = "0.0.0.0:5061".parse().unwrap();
-    /// let config = Config::asterisk_tls_registered_flow(
+    /// let mut config = Config::asterisk_tls_registered_flow(
     ///     "alice",
     ///     bind,
     ///     "urn:uuid:00000000-0000-0000-0000-000000000001",
     /// );
     /// assert_eq!(config.sip_tls_mode, SipTlsMode::ClientOnly);
     /// assert!(config.srtp_required);
+    /// config.playout = Some(rvoip_sip::PlayoutConfig::default()); // remote site
     /// ```
     pub fn asterisk_tls_registered_flow(
         name: &str,
@@ -3421,16 +3555,27 @@ impl Config {
         config
     }
 
-    /// Deployment profile for FreeSWITCH/Sofia's internal LAN profile.
+    /// Former FreeSWITCH/Sofia internal-profile constructor.
+    ///
+    /// It only set [`Config::strict_codec_matching`], which every constructor
+    /// already enables, so it is [`Config::on`] with `bind_addr` applied. Use
+    /// [`Config::lan_pbx`] (which also advertises a reachable address) for a
+    /// LAN PBX endpoint, FreeSWITCH included.
     ///
     /// # Examples
     ///
     /// ```
     /// # use rvoip_sip::Config;
-    /// let bind = "192.168.1.50:5060".parse().unwrap();
-    /// let config = Config::freeswitch_internal("alice", bind);
+    /// let bind = "0.0.0.0:5060".parse().unwrap();
+    /// let advertised = "192.168.1.50:5060".parse().unwrap();
+    /// let mut config = Config::lan_pbx("alice", bind, advertised);
     /// assert!(config.strict_codec_matching);
+    /// config.strict_codec_matching = false; // still overridable
     /// ```
+    #[deprecated(
+        since = "0.4.0",
+        note = "use Config::lan_pbx; freeswitch_internal only set strict_codec_matching, which every constructor already enables"
+    )]
     pub fn freeswitch_internal(name: &str, bind_addr: SocketAddr) -> Self {
         let mut config = Self::on(name, bind_addr.ip(), bind_addr.port());
         config.bind_addr = bind_addr;
@@ -3469,20 +3614,55 @@ impl Config {
         cert_path: impl Into<std::path::PathBuf>,
         key_path: impl Into<std::path::PathBuf>,
     ) -> Self {
-        let mut config = Self::freeswitch_internal(name, bind_addr)
+        let mut config = Self::on(name, bind_addr.ip(), bind_addr.port())
             .tls_reachable_contact(tls_bind_addr, cert_path, key_path)
             .with_srtp_suite_policy(SrtpSuitePolicy::FreeSwitchCompatible);
+        config.bind_addr = bind_addr;
+        config.strict_codec_matching = true;
         config.offer_srtp = true;
         config.srtp_required = true;
         config
     }
 
-    /// Deployment profile for carrier/SBC style outbound proxy operation.
+    /// Turn on RFC 4028 session timers at the profile defaults
+    /// ([`Config::PROFILE_SESSION_TIMER_SECS`] /
+    /// [`Config::PROFILE_SESSION_TIMER_MIN_SE`]).
+    fn with_profile_session_timers(mut self) -> Self {
+        self.session_timer_secs = Some(Self::PROFILE_SESSION_TIMER_SECS);
+        self.session_timer_min_se = Self::PROFILE_SESSION_TIMER_MIN_SE;
+        self
+    }
+
+    /// Deployment profile for a carrier or SBC that this endpoint *registers*
+    /// with over TLS, using RFC 5626 SIP Outbound so inbound calls arrive on
+    /// the registration connection.
     ///
-    /// This is a conservative starting point: TLS client mode, registered-flow
-    /// Contact behavior, mandatory SDES-SRTP, explicit public media address,
-    /// and a preloaded outbound proxy route for INVITEs. REGISTER proxy,
-    /// Service-Route/Path, SRV/NAPTR, and ICE remain separate hardening work.
+    /// Use it for cloud carriers and hosted SBCs that issue credentials and
+    /// expect a TLS REGISTER. For a trunk authenticated by source IP (no
+    /// REGISTER, plain UDP) use [`Config::carrier_trunk_udp`].
+    ///
+    /// Starts from [`Config::on`] and sets:
+    ///
+    /// | Field | Value |
+    /// | --- | --- |
+    /// | [`bind_addr`](Config::bind_addr) | `bind_addr` |
+    /// | [`sip_tls_mode`](Config::sip_tls_mode) | [`SipTlsMode::ClientOnly`] |
+    /// | [`sip_contact_mode`](Config::sip_contact_mode) | [`SipContactMode::RegisteredFlowRfc5626`] |
+    /// | [`sip_outbound_enabled`](Config::sip_outbound_enabled) / [`sip_instance`](Config::sip_instance) | `true` / `Some(sip_instance)` — CRLF keep-alives every [`outbound_keepalive_interval_secs`](Config::outbound_keepalive_interval_secs) (25 s) |
+    /// | [`sip_advertised_addr`](Config::sip_advertised_addr) / [`tls_advertised_addr`](Config::tls_advertised_addr) | `Some(public_addr)` |
+    /// | [`media_public_addr`](Config::media_public_addr) | `Some(public_addr.ip():0)` |
+    /// | [`outbound_proxy_uri`](Config::outbound_proxy_uri) | `Some(outbound_proxy_uri)` |
+    /// | [`offer_srtp`](Config::offer_srtp) / [`srtp_required`](Config::srtp_required) | `true` / `true` (SDES) |
+    /// | [`playout`](Config::playout) | `Some(PlayoutConfig::default())` |
+    /// | [`session_timer_secs`](Config::session_timer_secs) / [`session_timer_min_se`](Config::session_timer_min_se) | `Some(1800)` / `90` |
+    ///
+    /// Session timers make a call whose far end vanished without a BYE end
+    /// within 30 minutes instead of holding a carrier channel forever:
+    /// rvoip refreshes with UPDATE (re-INVITE fallback) when it is the
+    /// refresher, and sends `BYE` with `Reason: SIP;cause=408` when a refresh
+    /// fails or the peer's refresh never arrives.
+    ///
+    /// Not covered here: Service-Route/Path, SRV/NAPTR failover and ICE.
     ///
     /// # Examples
     ///
@@ -3490,7 +3670,7 @@ impl Config {
     /// # use rvoip_sip::{Config, SipContactMode};
     /// let bind = "0.0.0.0:5061".parse().unwrap();
     /// let public = "203.0.113.10:5061".parse().unwrap();
-    /// let config = Config::carrier_sbc(
+    /// let mut config = Config::carrier_sbc(
     ///     "alice",
     ///     bind,
     ///     public,
@@ -3499,7 +3679,9 @@ impl Config {
     /// );
     /// assert_eq!(config.sip_contact_mode, SipContactMode::RegisteredFlowRfc5626);
     /// assert!(config.srtp_required);
-    /// assert!(config.playout.is_some());
+    /// assert_eq!(config.session_timer_secs, Some(1800));
+    /// // Override afterwards: this carrier wants 10-minute session timers.
+    /// config.session_timer_secs = Some(600);
     /// ```
     pub fn carrier_sbc(
         name: &str,
@@ -3509,7 +3691,8 @@ impl Config {
         sip_instance: impl Into<String>,
     ) -> Self {
         let mut config = Self::on(name, bind_addr.ip(), bind_addr.port())
-            .tls_registered_flow_rfc5626(sip_instance);
+            .tls_registered_flow_rfc5626(sip_instance)
+            .with_profile_session_timers();
         config.bind_addr = bind_addr;
         config.sip_advertised_addr = Some(public_addr);
         config.tls_advertised_addr = Some(public_addr);
@@ -3521,11 +3704,199 @@ impl Config {
         config
     }
 
-    /// Placeholder deployment profile for a SIP proxy plus RTPengine lab.
+    /// Deployment profile for a plain UDP SIP trunk that authenticates this
+    /// server by source IP — the classic carrier or SBC interconnect with no
+    /// REGISTER and no TLS.
     ///
-    /// The signaling side preloads the outbound proxy route; media relay
-    /// integration remains explicit because RTPengine control belongs above
-    /// rvoip-sip.
+    /// Every outgoing INVITE is routed through `trunk_proxy_uri` (the
+    /// carrier's SBC), so call targets can be plain numbers such as
+    /// `sip:+15551234567@carrier.example`. The carrier sends inbound calls to
+    /// `public_addr`, which it has allow-listed.
+    ///
+    /// Starts from [`Config::on`] and sets:
+    ///
+    /// | Field | Value |
+    /// | --- | --- |
+    /// | [`bind_addr`](Config::bind_addr) | `bind_addr` (may be a private or `0.0.0.0` address) |
+    /// | [`sip_advertised_addr`](Config::sip_advertised_addr) | `Some(public_addr)` — Via and Contact carry the allow-listed address |
+    /// | [`media_public_addr`](Config::media_public_addr) | `Some(public_addr.ip():0)` |
+    /// | [`outbound_proxy_uri`](Config::outbound_proxy_uri) | `Some(trunk_proxy_uri)`; include `;lr` |
+    /// | [`playout`](Config::playout) | `Some(PlayoutConfig::default())` |
+    /// | [`session_timer_secs`](Config::session_timer_secs) / [`session_timer_min_se`](Config::session_timer_min_se) | `Some(1800)` / `90` |
+    ///
+    /// Left at the defaults on purpose: TLS off, SRTP not offered (most IP
+    /// trunks are RTP/AVP only), no registration, ICE off, codec list
+    /// PCMU/PCMA/telephone-event. To monitor the trunk, add its SBC to
+    /// [`Config::options_keepalive_targets`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_sip::Config;
+    /// let bind = "10.0.0.5:5060".parse().unwrap();
+    /// let public = "203.0.113.10:5060".parse().unwrap();
+    /// let mut config = Config::carrier_trunk_udp(
+    ///     "pbx",
+    ///     bind,
+    ///     public,
+    ///     "sip:sbc.carrier.example:5060;lr",
+    /// );
+    /// assert_eq!(config.sip_advertised_addr, Some(public));
+    /// assert!(!config.offer_srtp);
+    /// // Override afterwards: watch the trunk with OPTIONS pings.
+    /// config
+    ///     .options_keepalive_targets
+    ///     .push("sip:sbc.carrier.example:5060".to_string());
+    /// ```
+    pub fn carrier_trunk_udp(
+        name: &str,
+        bind_addr: SocketAddr,
+        public_addr: SocketAddr,
+        trunk_proxy_uri: impl Into<String>,
+    ) -> Self {
+        let mut config =
+            Self::on(name, bind_addr.ip(), bind_addr.port()).with_profile_session_timers();
+        config.bind_addr = bind_addr;
+        config.sip_advertised_addr = Some(public_addr);
+        config.media_public_addr = Some(SocketAddr::new(public_addr.ip(), 0));
+        config.outbound_proxy_uri = Some(trunk_proxy_uri.into());
+        config.playout = Some(crate::PlayoutConfig::default());
+        config
+    }
+
+    /// Deployment profile for a SIP server on a public IP, or behind a 1:1
+    /// NAT that forwards its ports — an IVR, voice-bot gateway, conferencing
+    /// or contact-centre server that internet peers call directly.
+    ///
+    /// Starts from [`Config::on`] and sets:
+    ///
+    /// | Field | Value |
+    /// | --- | --- |
+    /// | [`bind_addr`](Config::bind_addr) | `bind_addr` (the private address under 1:1 NAT) |
+    /// | [`sip_advertised_addr`](Config::sip_advertised_addr) | `Some(public_addr)` |
+    /// | [`media_public_addr`](Config::media_public_addr) | `Some(public_addr.ip():0)` |
+    /// | [`ice`](Config::ice) | [`SipIcePolicy::Lite`](crate::SipIcePolicy::Lite) — answers ICE checks from WebRTC gateways and ICE-capable SBCs; peers without ICE are unaffected |
+    /// | [`playout`](Config::playout) | `Some(PlayoutConfig::default())` |
+    /// | [`session_timer_secs`](Config::session_timer_secs) / [`session_timer_min_se`](Config::session_timer_min_se) | `Some(1800)` / `90` |
+    ///
+    /// For a TLS listener, chain [`Config::tls_reachable_contact`]: with
+    /// [`Config::sip_advertised_addr`] already set it advertises the public
+    /// IP with the TLS port. Then set [`Config::contact_uri`] if peers must
+    /// see an FQDN that matches the certificate.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_sip::{Config, SipIcePolicy, SipTlsMode};
+    /// let bind = "10.0.0.5:5060".parse().unwrap();
+    /// let public = "203.0.113.10:5060".parse().unwrap();
+    /// let mut config = Config::public_server("ivr", bind, public)
+    ///     .tls_reachable_contact("10.0.0.5:5061".parse().unwrap(), "cert.pem", "key.pem");
+    /// assert_eq!(config.ice, SipIcePolicy::Lite);
+    /// assert_eq!(config.sip_tls_mode, SipTlsMode::ClientAndServer);
+    /// assert_eq!(config.tls_advertised_addr, Some("203.0.113.10:5061".parse().unwrap()));
+    /// // Override afterwards: require rtcp-mux from every peer.
+    /// config.rtcp_mux_required = true;
+    /// ```
+    pub fn public_server(name: &str, bind_addr: SocketAddr, public_addr: SocketAddr) -> Self {
+        let mut config =
+            Self::on(name, bind_addr.ip(), bind_addr.port()).with_profile_session_timers();
+        config.bind_addr = bind_addr;
+        config.sip_advertised_addr = Some(public_addr);
+        config.media_public_addr = Some(SocketAddr::new(public_addr.ip(), 0));
+        config.ice = crate::adapters::ice_adapter::SipIcePolicy::Lite;
+        config.playout = Some(crate::PlayoutConfig::default());
+        config
+    }
+
+    /// Deployment profile for an endpoint behind a NAT it does not control —
+    /// a softphone, a remote agent, a bot running in a home or office
+    /// network — that registers with a PBX or carrier over TLS.
+    ///
+    /// Signaling uses RFC 5626 SIP Outbound over a TLS connection the
+    /// endpoint opens, so inbound calls come back on that connection and CRLF
+    /// keep-alives hold the NAT binding open. Media uses full ICE with
+    /// STUN-discovered server-reflexive candidates.
+    ///
+    /// Starts from [`Config::on`] and sets:
+    ///
+    /// | Field | Value |
+    /// | --- | --- |
+    /// | [`bind_addr`](Config::bind_addr) | `bind_addr` |
+    /// | [`sip_tls_mode`](Config::sip_tls_mode) | [`SipTlsMode::ClientOnly`] |
+    /// | [`sip_contact_mode`](Config::sip_contact_mode) | [`SipContactMode::RegisteredFlowRfc5626`] |
+    /// | [`sip_outbound_enabled`](Config::sip_outbound_enabled) / [`sip_instance`](Config::sip_instance) | `true` / `Some(sip_instance)` |
+    /// | [`outbound_keepalive_interval_secs`](Config::outbound_keepalive_interval_secs) | `25` (RFC 5626 CRLF ping on the registration flow) |
+    /// | [`stun_server`](Config::stun_server) | `Some(stun_server)` |
+    /// | [`ice`](Config::ice) | [`SipIcePolicy::Full`](crate::SipIcePolicy::Full) |
+    /// | [`rtcp_mux_required`](Config::rtcp_mux_required) | `true` — one media port to traverse the NAT |
+    /// | [`playout`](Config::playout) | `Some(PlayoutConfig::default())` |
+    ///
+    /// The registered-flow keep-alive needs a connection-oriented transport,
+    /// which is why this profile uses TLS; there is no UDP STUN keep-alive
+    /// for SIP signaling. Register with [`crate::Registration`] after
+    /// startup. Session timers stay off; set
+    /// [`Config::session_timer_secs`] if the PBX wants them.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_sip::{Config, SipIcePolicy, PlayoutConfig};
+    /// let bind = "0.0.0.0:5061".parse().unwrap();
+    /// let mut config = Config::behind_nat(
+    ///     "alice",
+    ///     bind,
+    ///     "stun.l.google.com:19302",
+    ///     "urn:uuid:00000000-0000-0000-0000-000000000001",
+    /// );
+    /// assert_eq!(config.ice, SipIcePolicy::Full);
+    /// assert!(config.rtcp_mux_required);
+    /// // Override afterwards: mobile data needs a deeper jitter buffer.
+    /// config.playout = Some(PlayoutConfig {
+    ///     target_depth_frames: 4,
+    ///     ..PlayoutConfig::default()
+    /// });
+    /// ```
+    pub fn behind_nat(
+        name: &str,
+        bind_addr: SocketAddr,
+        stun_server: impl Into<String>,
+        sip_instance: impl Into<String>,
+    ) -> Self {
+        let mut config = Self::on(name, bind_addr.ip(), bind_addr.port())
+            .tls_registered_flow_rfc5626(sip_instance);
+        config.bind_addr = bind_addr;
+        config.outbound_keepalive_interval_secs = 25;
+        config.stun_server = Some(stun_server.into());
+        config.ice = crate::adapters::ice_adapter::SipIcePolicy::Full;
+        config.rtcp_mux_required = true;
+        config.playout = Some(crate::PlayoutConfig::default());
+        config
+    }
+
+    /// Deployment profile for an endpoint behind a SIP proxy (Kamailio,
+    /// OpenSIPS) whose media is anchored by an RTPengine relay.
+    ///
+    /// Every outgoing INVITE is routed through `outbound_proxy_uri`. The
+    /// proxy drives RTPengine and rewrites SDP, so this endpoint sees the
+    /// relay's address as its peer and needs no RTPengine knowledge.
+    /// **rvoip-sip does not speak the RTPengine `ng` control protocol**; if
+    /// your design needs the endpoint itself to allocate relay ports, that
+    /// control belongs in your application, above rvoip-sip.
+    ///
+    /// Starts from [`Config::lan_pbx`] and sets:
+    ///
+    /// | Field | Value |
+    /// | --- | --- |
+    /// | [`bind_addr`](Config::bind_addr) | `bind_addr` |
+    /// | [`sip_advertised_addr`](Config::sip_advertised_addr) | `Some(advertised_addr)` |
+    /// | [`media_public_addr`](Config::media_public_addr) | `Some(advertised_addr.ip():0)` |
+    /// | [`outbound_proxy_uri`](Config::outbound_proxy_uri) | `Some(outbound_proxy_uri)`; include `;lr` |
+    /// | [`playout`](Config::playout) | `Some(PlayoutConfig::default())` — relayed media often crosses the internet |
+    /// | [`session_timer_secs`](Config::session_timer_secs) / [`session_timer_min_se`](Config::session_timer_min_se) | `Some(1800)` / `90` — a dead call releases its relay ports |
+    ///
+    /// RTPengine supports rtcp-mux; set [`Config::rtcp_mux_required`] when
+    /// the proxy's `rtpengine_offer` flags enable it.
     ///
     /// # Examples
     ///
@@ -3533,13 +3904,15 @@ impl Config {
     /// # use rvoip_sip::Config;
     /// let bind = "0.0.0.0:5060".parse().unwrap();
     /// let advertised = "192.168.1.50:5060".parse().unwrap();
-    /// let config = Config::proxy_rtpengine(
+    /// let mut config = Config::proxy_rtpengine(
     ///     "alice",
     ///     bind,
     ///     advertised,
     ///     "sip:proxy.example.com;lr",
     /// );
     /// assert_eq!(config.outbound_proxy_uri.as_deref(), Some("sip:proxy.example.com;lr"));
+    /// // Override afterwards: the relay and the endpoint share a LAN.
+    /// config.playout = None;
     /// ```
     pub fn proxy_rtpengine(
         name: &str,
@@ -3547,8 +3920,108 @@ impl Config {
         advertised_addr: SocketAddr,
         outbound_proxy_uri: impl Into<String>,
     ) -> Self {
-        let mut config = Self::lan_pbx(name, bind_addr, advertised_addr);
+        let mut config =
+            Self::lan_pbx(name, bind_addr, advertised_addr).with_profile_session_timers();
         config.outbound_proxy_uri = Some(outbound_proxy_uri.into());
+        config.playout = Some(crate::PlayoutConfig::default());
+        config
+    }
+
+    /// Deployment profile for an SBC that peers over mutual TLS with a
+    /// cloud calling platform: TLS-only signaling addressed by FQDN, SDES-SRTP
+    /// media, ICE Lite for media bypass, and OPTIONS keep-alive pings.
+    ///
+    /// Modelled on Microsoft Teams Direct Routing's SBC requirements; not
+    /// certified or tested against Teams. Other platforms with the same
+    /// shape (mTLS SIP trunk, FQDN identity, SRTP) can use it too.
+    ///
+    /// The SBC listens for TLS on `tls_bind_addr`, presents `cert_path` /
+    /// `key_path` both as server and as client (the certificate must name
+    /// `sbc_fqdn`), requires peers connecting to it to present a certificate
+    /// that chains to `client_ca_path`, and pings `peer_uri` with `OPTIONS`.
+    ///
+    /// Starts from [`Config::on`] and sets:
+    ///
+    /// | Field | Value |
+    /// | --- | --- |
+    /// | [`bind_addr`](Config::bind_addr) | `tls_bind_addr.ip():0` — the always-on UDP/TCP listener gets an OS-assigned port; Direct Routing uses TLS only |
+    /// | [`local_uri`](Config::local_uri) | `sip:{name}@{sbc_fqdn}` |
+    /// | [`contact_uri`](Config::contact_uri) | `Some("sip:{sbc_fqdn}:{tls port};transport=tls")` — on INVITEs, 2xx answers and OPTIONS |
+    /// | [`sip_tls_mode`](Config::sip_tls_mode) | [`SipTlsMode::ClientAndServer`] |
+    /// | [`sip_contact_mode`](Config::sip_contact_mode) | [`SipContactMode::ReachableContact`] |
+    /// | [`tls_bind_addr`](Config::tls_bind_addr) / [`tls_advertised_addr`](Config::tls_advertised_addr) | `Some(tls_bind_addr)` / `Some(public_ip:tls port)` |
+    /// | [`tls_cert_path`](Config::tls_cert_path) / [`tls_key_path`](Config::tls_key_path) | `cert_path` / `key_path` |
+    /// | [`tls_client_cert_path`](Config::tls_client_cert_path) / [`tls_client_key_path`](Config::tls_client_key_path) | `cert_path` / `key_path` (mutual TLS on connections the SBC opens) |
+    /// | [`tls_server_client_auth`](Config::tls_server_client_auth) | required, CA bundle `client_ca_path` |
+    /// | [`offer_srtp`](Config::offer_srtp) / [`srtp_required`](Config::srtp_required) | `true` / `true` (SDES, `AES_CM_128_HMAC_SHA1_80` first) |
+    /// | [`media_public_addr`](Config::media_public_addr) | `Some(public_ip:0)` |
+    /// | [`ice`](Config::ice) | [`SipIcePolicy::Lite`](crate::SipIcePolicy::Lite) (media bypass) |
+    /// | [`playout`](Config::playout) | `Some(PlayoutConfig::default())` |
+    /// | [`session_timer_secs`](Config::session_timer_secs) / [`session_timer_min_se`](Config::session_timer_min_se) | `Some(1800)` / `90` |
+    /// | [`options_keepalive_targets`](Config::options_keepalive_targets) / [`options_keepalive_interval_secs`](Config::options_keepalive_interval_secs) | `[peer_uri]` / `60` |
+    ///
+    /// No REGISTER is sent: the peer trusts the certificate. rvoip-sip is a
+    /// user agent, so it does not insert `Record-Route`; the FQDN travels in
+    /// `Contact`. `Via` carries the public IP, not the FQDN. Teams publishes
+    /// three SIP proxy FQDNs; push the others onto
+    /// [`Config::options_keepalive_targets`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_sip::{Config, SipIcePolicy, SipTlsMode};
+    /// let mut config = Config::tls_direct_routing(
+    ///     "sbc",
+    ///     "sbc1.example.com",
+    ///     "10.0.0.5:5061".parse().unwrap(),
+    ///     "203.0.113.10".parse().unwrap(),
+    ///     "sbc1.example.com.crt",
+    ///     "sbc1.example.com.key",
+    ///     "trusted-roots.pem",
+    ///     "sip:sip.pstnhub.microsoft.com:5061;transport=tls",
+    /// );
+    /// assert_eq!(config.sip_tls_mode, SipTlsMode::ClientAndServer);
+    /// assert_eq!(
+    ///     config.contact_uri.as_deref(),
+    ///     Some("sip:sbc1.example.com:5061;transport=tls")
+    /// );
+    /// assert_eq!(config.ice, SipIcePolicy::Lite);
+    /// // Override afterwards: ping the backup proxies too.
+    /// config.options_keepalive_targets.extend([
+    ///     "sip:sip2.pstnhub.microsoft.com:5061;transport=tls".to_string(),
+    ///     "sip:sip3.pstnhub.microsoft.com:5061;transport=tls".to_string(),
+    /// ]);
+    /// ```
+    #[allow(clippy::too_many_arguments)]
+    pub fn tls_direct_routing(
+        name: &str,
+        sbc_fqdn: &str,
+        tls_bind_addr: SocketAddr,
+        public_ip: IpAddr,
+        cert_path: impl Into<std::path::PathBuf>,
+        key_path: impl Into<std::path::PathBuf>,
+        client_ca_path: impl Into<std::path::PathBuf>,
+        peer_uri: impl Into<String>,
+    ) -> Self {
+        let cert_path = cert_path.into();
+        let key_path = key_path.into();
+        let tls_port = tls_bind_addr.port();
+        let mut config = Self::on(name, tls_bind_addr.ip(), 0)
+            .with_profile_session_timers()
+            .tls_reachable_contact(tls_bind_addr, cert_path.clone(), key_path.clone())
+            .require_tls_client_certificate(client_ca_path);
+        config.local_uri = format!("sip:{name}@{sbc_fqdn}");
+        config.contact_uri = Some(format!("sip:{sbc_fqdn}:{tls_port};transport=tls"));
+        config.tls_advertised_addr = Some(SocketAddr::new(public_ip, tls_port));
+        config.tls_client_cert_path = Some(cert_path);
+        config.tls_client_key_path = Some(key_path);
+        config.offer_srtp = true;
+        config.srtp_required = true;
+        config.media_public_addr = Some(SocketAddr::new(public_ip, 0));
+        config.ice = crate::adapters::ice_adapter::SipIcePolicy::Lite;
+        config.playout = Some(crate::PlayoutConfig::default());
+        config.options_keepalive_targets = vec![peer_uri.into()];
+        config.options_keepalive_interval_secs = Self::DEFAULT_OPTIONS_KEEPALIVE_INTERVAL_SECS;
         config
     }
 
@@ -4328,6 +4801,11 @@ impl Config {
     /// The UA will both dial outbound TLS and listen on `tls_bind_addr` for
     /// inbound TLS requests sent to its advertised Contact.
     ///
+    /// When [`Config::tls_advertised_addr`] is unset it is filled in: with
+    /// [`Config::sip_advertised_addr`] set (a public or NAT-mapped address)
+    /// the TLS listener is advertised on that IP with `tls_bind_addr`'s
+    /// port; otherwise a concrete `tls_bind_addr` is advertised as-is.
+    ///
     /// # Examples
     ///
     /// ```
@@ -4347,8 +4825,14 @@ impl Config {
         self.sip_tls_mode = SipTlsMode::ClientAndServer;
         self.sip_contact_mode = SipContactMode::ReachableContact;
         self.tls_bind_addr = Some(tls_bind_addr);
-        if self.tls_advertised_addr.is_none() && !tls_bind_addr.ip().is_unspecified() {
-            self.tls_advertised_addr = Some(tls_bind_addr);
+        if self.tls_advertised_addr.is_none() {
+            self.tls_advertised_addr = match self.sip_advertised_addr {
+                Some(advertised) if tls_bind_addr.port() != 0 => {
+                    Some(SocketAddr::new(advertised.ip(), tls_bind_addr.port()))
+                }
+                _ if !tls_bind_addr.ip().is_unspecified() => Some(tls_bind_addr),
+                _ => None,
+            };
         }
         self.tls_cert_path = Some(cert_path.into());
         self.tls_key_path = Some(key_path.into());
@@ -4509,6 +4993,21 @@ impl Config {
             return Err(SessionError::ConfigError(
                 "TLS client certificate and key must be provided together".to_string(),
             ));
+        }
+        if let Some(session_secs) = self.session_timer_secs {
+            if session_secs < self.session_timer_min_se {
+                return Err(SessionError::ConfigError(format!(
+                    "session_timer_secs ({session_secs}) must be >= session_timer_min_se ({})",
+                    self.session_timer_min_se
+                )));
+            }
+        }
+        for target in &self.options_keepalive_targets {
+            if target.parse::<rvoip_sip_core::Uri>().is_err() {
+                return Err(SessionError::ConfigError(
+                    "options_keepalive_targets entries must be valid SIP URIs".to_string(),
+                ));
+            }
         }
         if self.registration_refresh_jitter_percent > 50 {
             return Err(SessionError::ConfigError(
@@ -9100,6 +9599,7 @@ impl UnifiedCoordinator {
             config.media_port_end,
         );
         media_adapter_inner.set_media_mode(config.media_mode);
+        media_adapter_inner.set_offer_rtcp_mux(config.offer_rtcp_mux);
         media_adapter_inner.set_rtcp_mux_required(config.rtcp_mux_required);
         media_adapter_inner.set_ice_policy(config.ice);
         // Apply RFC 4568 SDES-SRTP policy from Config (Step 2B.1).
@@ -9303,7 +9803,28 @@ impl UnifiedCoordinator {
 
         causal_ingress_guard.disarm();
         construction_guard.disarm();
+        coordinator.start_options_keepalive();
         Ok(coordinator)
+    }
+
+    /// Start the [`Config::options_keepalive_targets`] pinger when configured.
+    /// The task keeps only a weak reference and exits on shutdown.
+    fn start_options_keepalive(self: &Arc<Self>) {
+        let Some(settings) =
+            crate::api::options_keepalive::KeepaliveSettings::from_config(&self.config)
+        else {
+            return;
+        };
+        tokio::spawn(crate::api::options_keepalive::run(
+            Arc::downgrade(self),
+            settings,
+            self.shutdown_tx.subscribe(),
+        ));
+    }
+
+    /// Publish a coordinator-scoped (not call-scoped) application event.
+    pub(crate) fn publish_app_event(&self, event: crate::api::events::Event) {
+        self.app_event_publisher.publish(event);
     }
 
     pub(crate) fn fast_auto_accept_incoming_calls(&self) -> bool {

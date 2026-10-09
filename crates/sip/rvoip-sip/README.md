@@ -163,8 +163,10 @@ config.playout = Some(PlayoutConfig {
 config.playout = None; // LAN / lab: pass-through
 ```
 
-`Config::carrier_sbc` enables the default policy; every other constructor
-leaves it off. The buffer is applied to the SIP leg's `MediaStream` (the
+The internet-facing profiles (`Config::carrier_sbc`,
+`Config::carrier_trunk_udp`, `Config::public_server`, `Config::behind_nat`,
+`Config::proxy_rtpengine`, `Config::tls_direct_routing`) enable the default
+policy; `Config::local`, `Config::on` and the LAN profiles leave it off. The buffer is applied to the SIP leg's `MediaStream` (the
 `SipAdapter` / `rvoip-core` orchestrator path, which bridges and the `rvoip`
 facade use). Direct PCM subscriptions such as
 `UnifiedCoordinator::subscribe_to_audio` receive frames as decoded.
@@ -178,6 +180,10 @@ RFC 5761 forbids RTCP on the RTP port and there is no second socket for
 RTP port + 1, so rvoip sends no periodic RTCP. RTP is unaffected.
 
 - As answerer, rvoip accepts mux whenever the offer carries `a=rtcp-mux`.
+- As offerer, rvoip offers `a=rtcp-mux` by default (`Config::offer_rtcp_mux`,
+  default `true`), so RTCP flows with any peer that echoes it. Set it to
+  `false` only for a peer that mishandles the attribute; those calls then
+  carry no periodic RTCP.
 - `rtcp_mux_required = true` is the strict mode: rvoip's offers carry
   `a=rtcp-mux` and `a=rtcp-mux-only`, and a peer that declines mux fails
   negotiation instead of silently running without RTCP.
@@ -187,20 +193,39 @@ RTP port + 1, so rvoip sends no periodic RTCP. RTP is unaffected.
   for dead-media detection may tear down a healthy call. Use its RTP
   inactivity timer instead, or require mux.
 
-<!-- TODO(rtcp-mux offer default): when rvoip offers a=rtcp-mux by default,
-     name the opt-out field here and in the Config::rtcp_mux_required docs. -->
-
 ### Choosing settings by deployment
 
-| Deployment | Start from | `playout` | `rtcp_mux_required` | Notes |
-| --- | --- | --- | --- | --- |
-| Lab, CI, local dev | `Config::local` / `Config::local_lab` | `None` | `false` | Deterministic pass-through for packet-level assertions; no added latency. |
-| LAN PBX endpoint (Asterisk, FreeSWITCH) | `Config::lan_pbx`, `Config::freeswitch_internal`, `Config::asterisk_tls_registered_flow` | `None` | `false` | A switched LAN has nothing to smooth. Many PBXes default to no mux, so expect no RTCP unless the PBX offers mux. |
-| SIP proxy + RTPengine | `Config::proxy_rtpengine` | `None` on a LAN; `Some(default)` if the media path crosses the internet | `true` if RTPengine is configured for mux | RTPengine supports rtcp-mux; requiring it keeps RTCP flowing. |
-| Carrier trunk via SBC | `Config::carrier_sbc` | `Some(default)` (set by the profile) | `true` if the carrier supports mux; otherwise `false` and disable RTCP-based media timeouts on the trunk | Carrier routes are bursty and lossy. Confirm the carrier's mux support before requiring it. |
-| TLS/SRTP-required trunk (e.g. Teams Direct Routing) | No dedicated profile: `Config::on` + `tls_reachable_contact(...)`, then `offer_srtp = true` and `srtp_required = true` (`Config::carrier_sbc` if the trunk registers) | `Some(default)` | `true` where the far end supports mux | Public-internet media; Teams media bypass also needs `Config::ice = SipIcePolicy::Lite`. |
-| Public-internet server (public or 1:1-NAT IP) | `Config::on` with `sip_advertised_addr` / `media_public_addr` | `Some(default)` | `true` if your peers support mux | Set `Config::ice` to `SipIcePolicy::Lite` when peers run ICE. |
-| Endpoint behind NAT, remote softphone | `Config::on` + `Config::stun_server` | `Some(default)`; raise `target_depth_frames` to 3–4 on mobile/Wi-Fi | `true` when the peer runs ICE (ICE peers support mux) | `SipIcePolicy::Full` for NAT traversal; registered-flow TLS keeps the NAT binding alive. |
+Each row names a profile constructor on `Config`. A profile only fills in
+documented defaults: every value it sets is a public field you can change
+afterwards, and its rustdoc lists each field it sets.
+
+| Deployment | Profile | `playout` | Session timers (RFC 4028) | Media / NAT | Signaling |
+| --- | --- | --- | --- | --- | --- |
+| Lab, CI, local dev | `Config::local` (`Config::local_lab` is an alias) | `None` | off | loopback | UDP/TCP |
+| LAN PBX endpoint (Asterisk, FreeSWITCH) | `Config::lan_pbx` (`Config::freeswitch_internal` is deprecated in its favour) | `None` | off | advertised LAN address | UDP/TCP |
+| TLS registration to Asterisk / TLS+SRTP to FreeSWITCH | `Config::asterisk_tls_registered_flow`, `Config::freeswitch_tls_srtp_reachable_contact` | `None` | off | SDES-SRTP required | TLS |
+| Carrier/SBC you register with | `Config::carrier_sbc` | `Some(default)` | 1800 s, Min-SE 90 | public address, SDES-SRTP required | TLS client, RFC 5626 registered flow, outbound proxy |
+| IP-authenticated SIP trunk | `Config::carrier_trunk_udp` | `Some(default)` | 1800 s, Min-SE 90 | public address, plain RTP | UDP, no REGISTER, outbound proxy = trunk SBC |
+| Public-internet server (public or 1:1-NAT IP) | `Config::public_server` (chain `tls_reachable_contact` for TLS) | `Some(default)` | 1800 s, Min-SE 90 | public address, ICE Lite | UDP/TCP (+ TLS listener) |
+| Endpoint behind NAT, remote softphone | `Config::behind_nat` | `Some(default)` | off | STUN, ICE Full, `rtcp_mux_required = true` | TLS client, RFC 5626 registered flow with CRLF keep-alive |
+| SIP proxy + RTPengine | `Config::proxy_rtpengine` | `Some(default)` | 1800 s, Min-SE 90 | advertised address; the proxy drives RTPengine | outbound proxy |
+| mTLS SBC peering (modelled on Teams Direct Routing; not certified or tested against Teams) | `Config::tls_direct_routing` | `Some(default)` | 1800 s, Min-SE 90 | public address, ICE Lite, SDES-SRTP required | TLS listener, mutual TLS, FQDN Contact, OPTIONS keep-alive every 60 s, no REGISTER |
+
+`rtcp_mux_required` is `false` everywhere except `Config::behind_nat`. Set
+it to `true` when the far end supports mux (RTPengine, ICE peers, most
+carriers) so RTCP keeps flowing; with `false`, a peer that declines mux gets
+no RTCP from rvoip, so disable RTCP-based media timeouts on that trunk. On
+mobile or Wi-Fi routes raise `PlayoutConfig::target_depth_frames` to 3–4.
+
+Session timers end a call whose far end disappeared without a BYE: as the
+refresher rvoip re-sends UPDATE (re-INVITE if UPDATE fails) at half the
+interval, and when a refresh fails or the peer's refresh never arrives it
+sends `BYE` with `Reason: SIP;cause=408`. To watch a trunk or SBC peer,
+list it in `Config::options_keepalive_targets`; `Event::PeerReachabilityChanged`
+reports when it goes up or down.
+
+rvoip-sip does not speak RTPengine's `ng` control protocol: with
+`Config::proxy_rtpengine` the proxy anchors media and rewrites SDP.
 
 The `rvoip` facade's `SipConfig` exposes the same buffer through `.playout()`
 and `.disable_playout()`, and turns it on automatically for
