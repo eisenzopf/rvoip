@@ -2238,6 +2238,25 @@ pub struct Config {
     /// See [`Config::srtp_required`] for the strict-mode variant.
     pub offer_srtp: bool,
 
+    /// Offer RTP/RTCP multiplexing (`a=rtcp-mux`, RFC 5761) in every SDP offer.
+    ///
+    /// The media stack runs RTP and RTCP on one socket, so periodic RTCP
+    /// reports flow only when the offer and the answer both carry
+    /// `a=rtcp-mux`. With this on, every offer rvoip generates (initial
+    /// INVITE, re-INVITE/UPDATE, hold/resume, late-SDP offers in 200 OK)
+    /// carries it. A peer that answers without it simply gets no periodic
+    /// RTCP: nothing is sent to the RTP port or to RTP port + 1
+    /// (RFC 5761 §5.1.1). Answers are unaffected: they echo `a=rtcp-mux`
+    /// only when the peer's offer had it.
+    ///
+    /// Set to `false` for an interop-sensitive peer that mishandles the
+    /// attribute; offers then omit it, as releases before 0.4.0 did, and
+    /// those calls carry no periodic RTCP. Ignored when
+    /// [`Config::rtcp_mux_required`] is `true`, which always offers mux.
+    ///
+    /// Default: `true`.
+    pub offer_rtcp_mux: bool,
+
     /// Require SDP negotiation of RTP/RTCP multiplexing for the single media socket.
     /// Peers declining it fail negotiation instead of silently losing RTCP.
     pub rtcp_mux_required: bool,
@@ -2856,6 +2875,8 @@ impl std::fmt::Debug for Config {
                 &self.tls_server_client_auth.mode,
             )
             .field("offer_srtp", &self.offer_srtp)
+            .field("offer_rtcp_mux", &self.offer_rtcp_mux)
+            .field("rtcp_mux_required", &self.rtcp_mux_required)
             .field("srtp_keying", &self.srtp_keying)
             .field("dtls_setup_role", &self.dtls_setup_role)
             .field("ice", &self.ice)
@@ -3022,6 +3043,7 @@ impl Config {
             #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
             offer_srtp: false,
+            offer_rtcp_mux: true,
             rtcp_mux_required: false,
             srtp_keying: SrtpKeyingMode::Sdes,
             dtls_setup_role: DtlsSetupRole::Actpass,
@@ -3145,6 +3167,7 @@ impl Config {
             #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
             offer_srtp: false,
+            offer_rtcp_mux: true,
             rtcp_mux_required: false,
             srtp_keying: SrtpKeyingMode::Sdes,
             dtls_setup_role: DtlsSetupRole::Actpass,
@@ -8946,6 +8969,7 @@ impl UnifiedCoordinator {
             config.media_port_end,
         );
         media_adapter_inner.set_media_mode(config.media_mode);
+        media_adapter_inner.set_offer_rtcp_mux(config.offer_rtcp_mux);
         media_adapter_inner.set_rtcp_mux_required(config.rtcp_mux_required);
         media_adapter_inner.set_ice_policy(config.ice);
         // Apply RFC 4568 SDES-SRTP policy from Config (Step 2B.1).

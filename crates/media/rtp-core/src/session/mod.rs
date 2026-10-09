@@ -1483,8 +1483,10 @@ impl RtpSession {
 
     /// Close the session and clean up resources
     pub async fn close(&mut self) -> Result<()> {
-        // Send BYE packet if we have a remote address
-        if let Some(remote_addr) = self.config.remote_addr {
+        // Send BYE packet if we have a remote address. Like periodic reports
+        // it leaves from the RTP socket, so a peer that did not agree to
+        // rtcp-mux gets none (RFC 5761 §5.1.1).
+        if let Some(remote_addr) = self.config.remote_addr.filter(|_| self.rtcp_mux()) {
             // Create BYE packet
             let bye = crate::packet::rtcp::RtcpGoodbye::new_with_reason(
                 self.ssrc,
@@ -2093,6 +2095,28 @@ mod tests {
         let report = crate::packet::rtcp::RtcpCompoundPacket::parse(&bytes[..n]).unwrap();
         assert_eq!(report.get_sr().unwrap().ssrc, session.ssrc);
         session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn close_sends_no_rtcp_bye_to_a_peer_without_rtcp_mux() {
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut session = RtpSession::new(RtpSessionConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            remote_addr: None,
+            ..RtpSessionConfig::default()
+        })
+        .await
+        .unwrap();
+        session.set_remote_addr(peer.local_addr().unwrap()).await;
+        assert!(!session.rtcp_mux());
+        session.close().await.unwrap();
+        let mut bytes = [0u8; 2048];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), peer.recv_from(&mut bytes))
+                .await
+                .is_err(),
+            "RTCP BYE reached the RTP port of a peer that never agreed to rtcp-mux"
+        );
     }
 
     async fn next_packet_event(events: &mut broadcast::Receiver<RtpSessionEvent>) -> RtpPacket {
