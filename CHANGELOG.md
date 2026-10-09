@@ -222,6 +222,41 @@
 - `Event` gains the `PeerReachabilityChanged` variant; exhaustive matches on
   `Event` need an arm for it.
 
+### SIP
+
+- RFC 4028 session timers, as the UAS: a 2xx no longer carries
+  `Require: timer` when the INVITE did not advertise `timer` in `Supported`
+  or `Require` (§9). rvoip still runs the timer for such callers and names
+  itself the refresher (`refresher=uas`), including when a proxy inserted
+  `Session-Expires`. A caller that supports timers but proposes an interval
+  below the local Min-SE gets 422 with `Min-SE`. The answered interval is
+  never below the request's `Min-SE`; a large peer Min-SE now raises the
+  interval instead of rejecting the call with 422.
+- Session-timer headers are added only to 2xx answers to INVITE and UPDATE.
+  A 2xx to BYE, INFO or another method no longer carries `Session-Expires`
+  or `Require: timer`.
+- The non-refresher now sends its `BYE` (`Reason: SIP;cause=408`) at
+  `interval - min(32, interval / 3)`, as RFC 4028 §10 recommends, instead of
+  at the full interval. The refresher still refreshes at half the interval.
+- Refresh requests now always carry `refresher=uac`. The parameter names a
+  role in the refresh transaction, so a refresher that answered the call
+  used to send `refresher=uas` and hand the job to its peer (§5, §7.4).
+  Refreshes also carry the largest `Min-SE` received in a 422 on the dialog.
+- When the peer rejects the refresh UPDATE (for example 405 from a peer that
+  does not support UPDATE), the re-INVITE fallback now reaches the wire. It
+  used to carry a second `Session-Expires` and `Min-SE` and have no offer, so
+  it never got built and the call was torn down with a 408 BYE at the first
+  refresh. The refresh re-INVITE now re-offers the current local SDP
+  unchanged (§7.4).
+- Other re-INVITEs (hold, resume, renegotiation) now carry the negotiated
+  interval and keep the current refresher. They used to propose the
+  configured interval with `refresher=uac`, which could hand the refresh to
+  the side that was not running a refresh timer.
+- In-dialog UPDATE and re-INVITE now use the remote target (the peer's
+  `Contact`) as the Request-URI, as RFC 3261 §12.2.1.1 requires. They used
+  the peer's From/To URI, so a refresh sent by rvoip as the called party
+  could go to the wrong host.
+
 ## 0.3.12
 
 ### 0.3.12 release recovery
