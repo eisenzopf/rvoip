@@ -116,6 +116,149 @@ mod tests {
         assert!(!session.rtcp_reduced_minimum());
     }
 
+    fn loopback_config() -> MediaConfig {
+        MediaConfig {
+            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            remote_addr: None,
+            preferred_codec: None,
+            parameters: HashMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn separate_rtcp_ports_are_paired_released_and_never_collide() {
+        // An odd range start: pairs still begin on an even port.
+        let controller = Arc::new(MediaSessionController::with_port_range(24_101, 24_180));
+        let mut starts = Vec::new();
+        for index in 0..30 {
+            let controller = controller.clone();
+            starts.push(tokio::spawn(async move {
+                let dialog = DialogId::new(format!("pair-{index}"));
+                // Every third call multiplexes and takes a single port.
+                let separate = index % 3 != 0;
+                controller
+                    .start_media(
+                        dialog.clone(),
+                        loopback_config().with_rtcp_separate_port(separate),
+                    )
+                    .await
+                    .expect("start media");
+                let info = controller.get_session_info(&dialog).await.unwrap();
+                (dialog, separate, info.rtp_port.unwrap(), info.rtcp_port)
+            }));
+        }
+        let mut ports = std::collections::HashSet::new();
+        let mut sessions = Vec::new();
+        for start in starts {
+            let (dialog, separate, rtp, rtcp) = start.await.unwrap();
+            assert!(ports.insert(rtp), "RTP port {rtp} handed out twice");
+            if separate {
+                assert_eq!(rtp % 2, 0, "paired RTP port {rtp} is odd");
+                assert_eq!(rtcp, Some(rtp + 1));
+                assert!(ports.insert(rtp + 1), "RTCP port {} handed out twice", rtp + 1);
+            } else {
+                assert_eq!(rtcp, None);
+            }
+            sessions.push((dialog, separate, rtcp));
+        }
+        assert_eq!(controller.allocated_port_count().await, 20 * 2 + 10);
+
+        // Releasing the RTCP half after mux frees exactly that port, once.
+        let (dialog, _, rtcp) = sessions
+            .iter()
+            .find(|(_, separate, _)| *separate)
+            .cloned()
+            .unwrap();
+        assert!(controller.release_rtcp_port(&dialog).await.unwrap());
+        assert!(!controller.release_rtcp_port(&dialog).await.unwrap());
+        assert_eq!(
+            controller.get_session_info(&dialog).await.unwrap().rtcp_port,
+            None
+        );
+        std::net::UdpSocket::bind(("127.0.0.1", rtcp.unwrap())).expect("RTCP port is still bound");
+        assert_eq!(controller.allocated_port_count().await, 20 * 2 + 10 - 1);
+
+        for (dialog, _, _) in &sessions {
+            controller.stop_media(dialog).await.unwrap();
+        }
+        assert_eq!(controller.allocated_port_count().await, 0, "ports leaked");
+    }
+
+    #[tokio::test]
+    async fn separate_rtcp_bind_failure_moves_to_the_next_pair_and_leaks_nothing() {
+        let controller = MediaSessionController::with_port_range(24_200, 24_203);
+        // Someone else holds the first pair's RTCP port.
+        let squatter = StdUdpSocket::bind(("127.0.0.1", 24_201)).unwrap();
+        let dialog = DialogId::new("rtcp-bind-retry");
+        controller
+            .start_media(dialog.clone(), loopback_config().with_rtcp_separate_port(true))
+            .await
+            .expect("the next pair is free");
+        let info = controller.get_session_info(&dialog).await.unwrap();
+        assert_eq!((info.rtp_port, info.rtcp_port), (Some(24_202), Some(24_203)));
+        controller.stop_media(&dialog).await.unwrap();
+        assert_eq!(controller.allocated_port_count().await, 0);
+
+        // With every pair blocked the start fails and holds no port.
+        let squatter_two = StdUdpSocket::bind(("127.0.0.1", 24_203)).unwrap();
+        let blocked = DialogId::new("rtcp-bind-blocked");
+        controller
+            .start_media(blocked.clone(), loopback_config().with_rtcp_separate_port(true))
+            .await
+            .expect_err("no bindable pair");
+        assert!(controller.get_session_info(&blocked).await.is_none());
+        assert_eq!(controller.allocated_port_count().await, 0, "failed start leaked");
+        drop((squatter, squatter_two));
+    }
+
+    #[tokio::test]
+    async fn separate_rtcp_session_reports_to_the_signalled_rtcp_address() {
+        let controller = MediaSessionController::with_port_range(24_300, 24_309);
+        let dialog = DialogId::new("rtcp-signalled");
+        controller
+            .start_media(dialog.clone(), loopback_config().with_rtcp_separate_port(true))
+            .await
+            .unwrap();
+        let session = controller.get_rtp_session(&dialog).await.unwrap();
+        {
+            let mut session = session.lock().await;
+            session.set_bandwidth(2_000_000);
+            session.set_rtcp_reduced_minimum(true);
+        }
+        let peer_rtp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer_rtcp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let current = controller.get_session_info(&dialog).await.unwrap();
+        let local_rtcp = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            current.rtcp_port.unwrap(),
+        );
+        let mut config = current.config;
+        config.remote_addr = Some(peer_rtp.local_addr().unwrap());
+        controller
+            .update_media(
+                dialog.clone(),
+                config.with_remote_rtcp_addr(Some(peer_rtcp.local_addr().unwrap())),
+            )
+            .await
+            .unwrap();
+        let mut bytes = [0u8; 2048];
+        let (_, source) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            peer_rtcp.recv_from(&mut bytes),
+        )
+        .await
+        .expect("no RTCP at the a=rtcp: address")
+        .unwrap();
+        assert_eq!(source, local_rtcp);
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(600),
+            peer_rtp.recv_from(&mut bytes)
+        )
+        .await
+        .is_err());
+        controller.stop_media(&dialog).await.unwrap();
+    }
+
     #[tokio::test]
     async fn cancelled_start_releases_reserved_port_for_reuse() {
         let allocator = Arc::new(PortAllocator::with_config(PortAllocatorConfig {
