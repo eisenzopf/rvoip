@@ -203,6 +203,109 @@ pub struct RtpSessionStats {
 
     /// Remote address of the most recent packet
     pub remote_addr: Option<SocketAddr>,
+
+    /// The most recent RTCP reception report a peer sent about *this*
+    /// session's outbound stream (an SR or RR report block whose SSRC is
+    /// ours). `None` until such a block arrives — in particular, always
+    /// `None` when RTCP never reaches this session (for example when
+    /// rtcp-mux was not negotiated and nothing listens on the RTCP port).
+    ///
+    /// When several remote sources report on us, the most recently received
+    /// block wins; [`PeerReceptionReport::reporter_ssrc`] says which source
+    /// sent it. Blocks about other SSRCs are ignored.
+    pub peer_report: Option<PeerReceptionReport>,
+
+    /// Set when the peer announced it is leaving with an RTCP BYE.
+    pub peer_bye: Option<PeerRtcpBye>,
+}
+
+/// One RTCP reception report block (RFC 3550 §6.4.1) that a remote source
+/// sent about this session's outbound stream, as retained by
+/// [`RtpSessionStats::peer_report`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PeerReceptionReport {
+    /// SSRC of the remote source that sent the SR/RR carrying this block.
+    pub reporter_ssrc: RtpSsrc,
+    /// Fraction of our packets the peer lost since its previous report,
+    /// as the raw RFC 3550 8-bit fixed-point value (`fraction / 256`).
+    pub fraction_lost: u8,
+    /// Cumulative number of our packets the peer lost, sign-extended from
+    /// the 24-bit wire field. Negative when duplicates outnumber losses.
+    pub cumulative_lost: i32,
+    /// Extended highest sequence number the peer received from us.
+    pub extended_highest_sequence: u32,
+    /// Interarrival jitter the peer measured on our stream, in RTP
+    /// timestamp units.
+    pub jitter: u32,
+    /// [`Self::jitter`] converted to milliseconds with the session's RTP
+    /// clock rate at the time the report arrived.
+    pub jitter_ms: f64,
+    /// Round-trip time computed from this block's LSR/DLSR, when the peer
+    /// reflected one of our sender reports (`None` when LSR is zero).
+    pub rtt_ms: Option<f64>,
+    /// When this block was received.
+    pub received_at: Instant,
+}
+
+impl PeerReceptionReport {
+    /// Build the retained view of a report block about our SSRC.
+    pub fn from_report_block(
+        reporter_ssrc: RtpSsrc,
+        block: &crate::packet::rtcp::RtcpReportBlock,
+        clock_rate: u32,
+        received_at: Instant,
+    ) -> Self {
+        // The wire field is a signed 24-bit integer.
+        let cumulative_lost = (((block.cumulative_lost & 0x00ff_ffff) << 8) as i32) >> 8;
+        let jitter_ms = if clock_rate == 0 {
+            0.0
+        } else {
+            f64::from(block.jitter) * 1_000.0 / f64::from(clock_rate)
+        };
+        Self {
+            reporter_ssrc,
+            fraction_lost: block.fraction_lost,
+            cumulative_lost,
+            extended_highest_sequence: block.highest_seq,
+            jitter: block.jitter,
+            jitter_ms,
+            rtt_ms: compact_ntp_rtt_ms(block.last_sr, block.delay_since_last_sr),
+            received_at,
+        }
+    }
+
+    /// [`Self::fraction_lost`] as a fraction in `0.0..=1.0`.
+    pub fn fraction_lost_ratio(&self) -> f64 {
+        f64::from(self.fraction_lost) / 256.0
+    }
+}
+
+/// An RTCP BYE received from a remote source, retained by
+/// [`RtpSessionStats::peer_bye`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PeerRtcpBye {
+    /// First SSRC listed in the BYE.
+    pub ssrc: RtpSsrc,
+    /// Optional reason text carried by the BYE.
+    pub reason: Option<String>,
+    /// When the BYE was received.
+    pub received_at: Instant,
+}
+
+/// Retain a report block about our own SSRC and its RTT measurement.
+fn record_peer_reception_report(
+    stats: &parking_lot::Mutex<RtpSessionStats>,
+    reporter_ssrc: RtpSsrc,
+    block: &crate::packet::rtcp::RtcpReportBlock,
+    clock_rate: u32,
+) {
+    let report =
+        PeerReceptionReport::from_report_block(reporter_ssrc, block, clock_rate, Instant::now());
+    let mut stats = stats.lock();
+    if let Some(rtt_ms) = report.rtt_ms {
+        stats.rtt_ms = Some(rtt_ms);
+    }
+    stats.peer_report = Some(report);
 }
 
 /// Cadence for RFC 3611 VoIP-metrics reports emitted by an RTP session.
@@ -925,6 +1028,12 @@ impl RtpSession {
                                             if !bye.sources.is_empty() {
                                                 let source_ssrc = bye.sources[0];
 
+                                                stats_recv.lock().peer_bye = Some(PeerRtcpBye {
+                                                    ssrc: source_ssrc,
+                                                    reason: bye.reason.clone(),
+                                                    received_at: Instant::now(),
+                                                });
+
                                                 // Broadcast BYE event
                                                 let _ = event_tx_recv.send(RtpSessionEvent::Bye {
                                                     ssrc: source_ssrc,
@@ -988,12 +1097,12 @@ impl RtpSession {
                                             // quality RTT despite reflecting our timestamps.
                                             for block in &sr.report_blocks {
                                                 if block.ssrc == ssrc {
-                                                    if let Some(rtt_ms) = compact_ntp_rtt_ms(
-                                                        block.last_sr,
-                                                        block.delay_since_last_sr,
-                                                    ) {
-                                                        stats_recv.lock().rtt_ms = Some(rtt_ms);
-                                                    }
+                                                    record_peer_reception_report(
+                                                        &stats_recv,
+                                                        report_ssrc,
+                                                        block,
+                                                        clock_rate.load(Ordering::Relaxed),
+                                                    );
                                                 }
                                             }
 
@@ -1039,12 +1148,12 @@ impl RtpSession {
                                                         block.fraction_lost,
                                                         block.cumulative_lost
                                                     );
-                                                    if let Some(rtt_ms) = compact_ntp_rtt_ms(
-                                                        block.last_sr,
-                                                        block.delay_since_last_sr,
-                                                    ) {
-                                                        stats_recv.lock().rtt_ms = Some(rtt_ms);
-                                                    }
+                                                    record_peer_reception_report(
+                                                        &stats_recv,
+                                                        report_ssrc,
+                                                        block,
+                                                        clock_rate.load(Ordering::Relaxed),
+                                                    );
                                                 }
                                             }
 
@@ -2592,6 +2701,127 @@ mod tests {
         .await
         .expect("known RTCP members after an unknown member were not processed");
         assert_eq!(session.get_stats().packets_lost, 0);
+    }
+
+    #[tokio::test]
+    async fn peer_reception_reports_about_our_ssrc_and_bye_are_retained_as_state() {
+        use crate::packet::rtcp::{
+            RtcpCompoundPacket, RtcpGoodbye, RtcpPacket, RtcpReceiverReport, RtcpReportBlock,
+        };
+
+        let local_ssrc = 0x4444_4444;
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let session = RtpSession::new(RtpSessionConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            ssrc: Some(local_ssrc),
+            clock_rate: 8_000,
+            ..RtpSessionConfig::default()
+        })
+        .await
+        .unwrap();
+        let mut events = session.subscribe();
+        let local_addr = session.local_addr().unwrap();
+        assert!(session.get_stats().peer_report.is_none());
+        assert!(session.get_stats().peer_bye.is_none());
+
+        async fn send_and_wait(
+            peer: &UdpSocket,
+            to: SocketAddr,
+            events: &mut broadcast::Receiver<RtpSessionEvent>,
+            packets: Vec<RtcpPacket>,
+        ) {
+            let want_bye = matches!(packets.last(), Some(RtcpPacket::Goodbye(_)));
+            let compound = RtcpCompoundPacket { packets };
+            peer.send_to(&compound.serialize().unwrap(), to)
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    match events.recv().await.unwrap() {
+                        RtpSessionEvent::Bye { .. } if want_bye => return,
+                        RtpSessionEvent::RtcpReceiverReport { .. } if !want_bye => return,
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("RTCP was not processed");
+        }
+
+        // One reporter describes our stream and an unrelated source. Only
+        // the block about our SSRC is retained.
+        let first_reporter = 0x5555_5555;
+        let mut rr = RtcpReceiverReport::new(first_reporter);
+        let mut about_other = RtcpReportBlock::new(0x9999_9999);
+        about_other.fraction_lost = 200;
+        rr.add_report_block(about_other);
+        let mut about_us = RtcpReportBlock::new(local_ssrc);
+        about_us.fraction_lost = 64; // 25 percent
+        about_us.cumulative_lost = 0x00ff_fffe; // -2 as a signed 24-bit value
+        about_us.highest_seq = 0x0001_0010;
+        about_us.jitter = 160; // 20 ms at 8 kHz
+        rr.add_report_block(about_us);
+        send_and_wait(
+            &peer,
+            local_addr,
+            &mut events,
+            vec![RtcpPacket::ReceiverReport(rr)],
+        )
+        .await;
+
+        let report = session
+            .get_stats()
+            .peer_report
+            .expect("block about our SSRC is retained");
+        assert_eq!(report.reporter_ssrc, first_reporter);
+        assert_eq!(report.fraction_lost, 64);
+        assert!((report.fraction_lost_ratio() - 0.25).abs() < f64::EPSILON);
+        assert_eq!(report.cumulative_lost, -2);
+        assert_eq!(report.extended_highest_sequence, 0x0001_0010);
+        assert_eq!(report.jitter, 160);
+        assert!((report.jitter_ms - 20.0).abs() < 1e-9);
+        // LSR zero: the peer has not seen one of our SRs, so no RTT.
+        assert_eq!(report.rtt_ms, None);
+        assert_eq!(session.get_stats().rtt_ms, None);
+        // A remote-reported loss never inflates our local inbound loss.
+        assert_eq!(session.get_stats().packets_lost, 0);
+
+        // A second reporter's newer block replaces the first one.
+        let second_reporter = 0x6666_6666;
+        let mut rr = RtcpReceiverReport::new(second_reporter);
+        let mut about_us = RtcpReportBlock::new(local_ssrc);
+        about_us.fraction_lost = 0;
+        about_us.cumulative_lost = 3;
+        rr.add_report_block(about_us);
+        send_and_wait(
+            &peer,
+            local_addr,
+            &mut events,
+            vec![RtcpPacket::ReceiverReport(rr)],
+        )
+        .await;
+        let report = session.get_stats().peer_report.unwrap();
+        assert_eq!(report.reporter_ssrc, second_reporter);
+        assert_eq!(report.cumulative_lost, 3);
+
+        let mut bye = RtcpGoodbye::new_for_source(second_reporter);
+        bye.reason = Some("done".to_string());
+        send_and_wait(
+            &peer,
+            local_addr,
+            &mut events,
+            vec![
+                // A compound packet must lead with a report.
+                RtcpPacket::ReceiverReport(RtcpReceiverReport::new(second_reporter)),
+                RtcpPacket::Goodbye(bye),
+            ],
+        )
+        .await;
+        let bye = session.get_stats().peer_bye.expect("BYE is retained");
+        assert_eq!(bye.ssrc, second_reporter);
+        assert_eq!(bye.reason.as_deref(), Some("done"));
+        // The last reception report survives the BYE.
+        assert!(session.get_stats().peer_report.is_some());
     }
 
     #[tokio::test]
