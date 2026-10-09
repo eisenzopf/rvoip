@@ -334,6 +334,14 @@
 //! use, Asterisk TLS registered-flow, FreeSWITCH internal profile, and
 //! carrier/SBC starting points.
 //!
+//! Media options: [`Config::playout`] enables the inbound jitter buffer and
+//! packet-loss concealment ([`PlayoutConfig`], off by default, ~40 ms of
+//! added latency at its default depth; turn it on for routes over the public
+//! internet). [`Config::rtcp_mux_required`] documents RTCP: periodic SR/RR is
+//! sent only when `a=rtcp-mux` is negotiated, because each call's media uses
+//! a single socket. The README's "Media options" section has a decision table
+//! by deployment shape.
+//!
 //! PBX interop examples live under `examples/pbx`. That unified runner drives
 //! the same Asterisk and FreeSWITCH scenarios through `Endpoint`, `StreamPeer`,
 //! and `CallbackPeer::builder`.

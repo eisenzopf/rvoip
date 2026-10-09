@@ -1883,6 +1883,21 @@ impl Drop for RetainedHangupTaskCompletion {
 /// points for common interop targets; they do not imply carrier certification
 /// or full RFC 5626 multi-flow behavior.
 ///
+/// # Media options
+///
+/// Two media settings change what a listener hears and what the far end
+/// can measure, and both default to the LAN/lab-friendly choice:
+///
+/// - [`Config::playout`] — the inbound jitter buffer and packet-loss
+///   concealment. `None` (pass-through) by default; turn it on for any route
+///   over the public internet. [`Config::carrier_sbc`] turns it on.
+/// - [`Config::rtcp_mux_required`] — the reference for RTCP behavior.
+///   Periodic RTCP SR/RR is sent only on calls that negotiate `a=rtcp-mux`;
+///   set this to refuse peers that do not.
+///
+/// The crate README's "Media options" section has a decision table by
+/// deployment shape.
+///
 /// # Examples
 ///
 /// ```rust
@@ -2258,8 +2273,63 @@ pub struct Config {
     /// Default: `true`.
     pub offer_rtcp_mux: bool,
 
-    /// Require SDP negotiation of RTP/RTCP multiplexing for the single media socket.
-    /// Peers declining it fail negotiation instead of silently losing RTCP.
+    /// Require SDP negotiation of RTP/RTCP multiplexing (`a=rtcp-mux`,
+    /// RFC 5761) for the call's single media socket. Default: `false`.
+    ///
+    /// This field is the reference for how rvoip sends RTCP.
+    ///
+    /// # RTCP is sent only over a negotiated rtcp-mux
+    ///
+    /// The media layer opens **one UDP socket per call**, for RTP. Periodic
+    /// RTCP sender/receiver reports (SR/RR) therefore go out only on a call
+    /// where `a=rtcp-mux` was negotiated — present in both the offer and the
+    /// answer — and are then multiplexed onto the RTP port. Without mux,
+    /// RFC 5761 forbids sending RTCP to the peer's RTP port, and there is no
+    /// second socket to send it from on RTP port + 1, so no periodic RTCP is
+    /// sent at all. RTP itself is unaffected either way.
+    ///
+    /// # Who negotiates mux
+    ///
+    /// When rvoip answers, it accepts mux whenever the offer carries
+    /// `a=rtcp-mux`. rvoip's own offers carry `a=rtcp-mux` by default
+    /// ([`Config::offer_rtcp_mux`]), so RTCP flows with any peer that echoes
+    /// it. With this field `true` offers also carry `a=rtcp-mux-only` and the
+    /// peer must echo it. Inspect the negotiated SDP if you need to know what
+    /// a given call ended up with.
+    ///
+    /// # Strict mode
+    ///
+    /// With `rtcp_mux_required = true` a peer that declines mux fails
+    /// negotiation instead of silently running without RTCP: an inbound
+    /// offer without `a=rtcp-mux` is refused, and an outbound call whose
+    /// answer omits it fails. Turn it on when you control both ends, or know
+    /// the peer supports mux (WebRTC gateways, modern SBCs and softphones),
+    /// and RTCP matters to you.
+    ///
+    /// # What a peer that declines mux loses
+    ///
+    /// With the default `false`, a peer that declines mux still gets a
+    /// working call, but rvoip sends it **no periodic RTCP**. Operationally
+    /// that means:
+    ///
+    /// - **No RTCP quality statistics**: the peer receives no SR/RR from
+    ///   rvoip, so its loss, jitter and round-trip figures for the call are
+    ///   empty, and reports built on RTCP (carrier QoS dashboards, RTCP-XR
+    ///   style monitoring) show nothing for these calls.
+    /// - **RTCP-based dead-media detection can misfire**: an SBC or PBX that
+    ///   tears calls down when RTCP stops arriving (an RTCP inactivity or
+    ///   "media timeout on RTCP" setting) may hang up a healthy call. Use the
+    ///   SBC's RTP inactivity timer instead, or require mux.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use rvoip_sip::Config;
+    ///
+    /// // Insist on RTCP: peers that cannot multiplex RTCP are refused.
+    /// let mut config = Config::on("alice", "203.0.113.10".parse().unwrap(), 5060);
+    /// config.rtcp_mux_required = true;
+    /// ```
     pub rtcp_mux_required: bool,
 
     /// Select how SRTP keys are established when [`Config::offer_srtp`] is
@@ -2276,17 +2346,98 @@ pub struct Config {
     /// media path by sending the first DTLS packet.
     pub dtls_setup_role: DtlsSetupRole,
 
-    /// Playout smoothing and packet-loss concealment for inbound audio.
+    /// Inbound jitter buffer: playout smoothing and packet-loss concealment
+    /// for received audio.
     ///
-    /// `None` forwards frames exactly as they arrive, gaps included — the
-    /// behaviour of every release before this, and the right choice for a LAN
-    /// or a lab where reordering only adds latency. Local and generic configs
-    /// retain that compatibility default; [`Config::carrier_sbc`] enables the
-    /// production playout policy automatically.
+    /// With `Some(config)`, each call's decoded inbound frames go through a
+    /// [`PlayoutBuffer`](rvoip_media_core::processing::audio::playout::PlayoutBuffer)
+    /// that:
     ///
-    /// Set it on any route crossing the public internet: a carrier trunk
-    /// delivers audio in bursts and loses packets, and without a buffer
-    /// those arrive as clicks and dropouts a listener hears directly.
+    /// - holds a short backlog so frames arriving in bursts are played out
+    ///   evenly on a local media clock;
+    /// - reorders frames by RTP timestamp, and drops a frame that arrives
+    ///   after its playout moment rather than playing audio out of order;
+    /// - conceals a missing frame by replaying the previous one with a fading
+    ///   gain, then plays silence once the loss runs past
+    ///   [`PlayoutConfig::max_consecutive_concealed`](crate::PlayoutConfig::max_consecutive_concealed);
+    /// - tracks remote clock skew and drains excess depth, so a burst does
+    ///   not become permanent latency.
+    ///
+    /// With `None`, frames are forwarded exactly as they arrive: arrival
+    /// order, no pacing, and a gap wherever a packet was lost.
+    ///
+    /// **Default: `None`** from [`Config::local`], [`Config::on`],
+    /// [`Config::local_lab`], [`Config::lan_pbx`], [`Config::proxy_rtpengine`]
+    /// and the Asterisk/FreeSWITCH profiles. [`Config::carrier_sbc`] sets
+    /// `Some(PlayoutConfig::default())`.
+    ///
+    /// # Knobs
+    ///
+    /// Depths are in frames: one decoded RTP packet, 20 ms at the usual
+    /// telephony ptime. See [`PlayoutConfig`](crate::PlayoutConfig) for the
+    /// full description.
+    ///
+    /// | Field | Default | Meaning |
+    /// | --- | --- | --- |
+    /// | `target_depth_frames` | `2` (~40 ms) | Backlog held before and during playout. |
+    /// | `max_depth_frames` | `10` (~200 ms) | Ceiling on the backlog; older frames are dropped beyond it. |
+    /// | `max_consecutive_concealed` | `5` (~100 ms) | Lost frames concealed before switching to silence. |
+    /// | `adaptive` | `true` | Grow the depth with measured jitter, up to `max_depth_frames`. |
+    ///
+    /// # Latency cost
+    ///
+    /// The buffer adds about `target_depth_frames × ptime` of mouth-to-ear
+    /// delay: ~40 ms at the default depth and 20 ms ptime, more while the
+    /// adaptive depth has grown on a jittery route (bounded by
+    /// `max_depth_frames`, ~200 ms). The first inbound frame is delivered
+    /// that much later than it would be without the buffer.
+    ///
+    /// # When to turn it on
+    ///
+    /// On any route that crosses the public internet — carrier trunks,
+    /// SBCs, remote softphones, mobile or Wi-Fi endpoints. Those routes
+    /// deliver audio in bursts and lose packets, and without a buffer a
+    /// listener (or a speech recognizer) hears them directly as clicks and
+    /// dropouts.
+    ///
+    /// # When to leave it off
+    ///
+    /// On a LAN, and in labs and tests. A clean switched network has
+    /// nothing to smooth, so the buffer only adds latency, and packet-level
+    /// tests that assert on exact arrival order, first-frame timing or raw
+    /// gaps need frames passed through untouched.
+    ///
+    /// # Scope
+    ///
+    /// The buffer is applied on the inbound side of the per-call
+    /// [`MediaStream`](rvoip_core::stream::MediaStream) that
+    /// [`SipAdapter`](crate::SipAdapter) exposes to the `rvoip-core`
+    /// orchestrator (and therefore to bridges and the `rvoip` facade).
+    /// Direct PCM subscriptions such as
+    /// [`UnifiedCoordinator::subscribe_to_audio`] receive frames as decoded;
+    /// wrap them in a `PlayoutBuffer` yourself if you need smoothing there.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rvoip_sip::{Config, PlayoutConfig};
+    ///
+    /// // A carrier trunk on a public address: production default (~40 ms).
+    /// let mut trunk = Config::on("trunk", "203.0.113.10".parse().unwrap(), 5060);
+    /// trunk.playout = Some(PlayoutConfig::default());
+    ///
+    /// // A jittery mobile route: trade more delay for fewer dropouts.
+    /// let mut mobile = Config::on("mobile", "203.0.113.11".parse().unwrap(), 5060);
+    /// mobile.playout = Some(PlayoutConfig {
+    ///     target_depth_frames: 4, // ~80 ms
+    ///     max_depth_frames: 15,   // ~300 ms ceiling
+    ///     ..PlayoutConfig::default()
+    /// });
+    ///
+    /// // LAN or lab: forward frames as they arrive (the default).
+    /// let lab = Config::local("alice", 5060);
+    /// assert!(lab.playout.is_none());
+    /// ```
     pub playout: Option<crate::PlayoutConfig>,
 
     /// ICE posture (RFC 8445). `Disabled` is today's behavior exactly.

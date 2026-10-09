@@ -27,24 +27,77 @@ use std::time::{Duration, Instant};
 
 use crate::types::AudioFrame;
 
-/// How the buffer trades latency against loss.
+/// How a [`PlayoutBuffer`] trades latency against loss.
+///
+/// Every depth is counted in **frames**: one decoded RTP packet, which is
+/// 20 ms of audio at the usual telephony packetization (G.711, G.722, Opus
+/// and AMR all default to 20 ms ptime). Convert to time by multiplying by
+/// the negotiated ptime.
+///
+/// | Field | Default | Unit | Effect |
+/// | --- | --- | --- | --- |
+/// | [`target_depth_frames`](Self::target_depth_frames) | `2` | frames (~40 ms) | Backlog held before playout starts; the steady-state added latency. |
+/// | [`max_depth_frames`](Self::max_depth_frames) | `10` | frames (~200 ms) | Hard ceiling on the backlog; adaptive growth stops here and older frames are dropped beyond it. |
+/// | [`max_consecutive_concealed`](Self::max_consecutive_concealed) | `5` | frames (~100 ms) | Consecutive lost frames concealed by fading repeats before the buffer emits silence. |
+/// | [`adaptive`](Self::adaptive) | `true` | — | Grow the target above `target_depth_frames` (up to `max_depth_frames`) as measured jitter rises. |
+///
+/// The default is the production starting point for carrier trunks and other
+/// routes over the public internet: about 40 ms of added latency on a clean
+/// route, growing only when the route is actually jittery. Raise
+/// `target_depth_frames` (3–4) for mobile or Wi-Fi heavy routes where
+/// dropouts matter more than delay; lower it to `1` only on a route you know
+/// to be clean.
+///
+/// ```
+/// use rvoip_media_core::processing::audio::playout::PlayoutConfig;
+///
+/// let default = PlayoutConfig::default();
+/// assert_eq!(default.target_depth_frames, 2);
+///
+/// // A jittery mobile route: start deeper, allow more growth.
+/// let tuned = PlayoutConfig {
+///     target_depth_frames: 4,
+///     max_depth_frames: 15,
+///     ..PlayoutConfig::default()
+/// };
+/// assert!(tuned.adaptive);
+/// ```
 #[derive(Clone, Copy, Debug)]
 pub struct PlayoutConfig {
-    /// Depth the buffer fills to before it starts emitting.
+    /// Depth, in frames, the buffer fills to before it starts emitting.
+    /// Default `2` (~40 ms at 20 ms ptime).
     ///
-    /// This is added latency in exchange for absorbing jitter. Two frames
-    /// (~40 ms at the usual 20 ms packetization) is the customary floor for
-    /// telephony; a route with visible jitter wants more.
+    /// This is added latency in exchange for absorbing jitter: the first
+    /// sample plays `target_depth_frames` frame-times after the first frame
+    /// arrives, and the backlog is held at roughly this depth for the rest of
+    /// the call. Two frames is the customary floor for telephony; a route
+    /// with visible jitter wants more. With [`adaptive`](Self::adaptive) on
+    /// this is the floor the adaptive target grows from.
     pub target_depth_frames: usize,
-    /// Ceiling the adaptive depth may grow to.
-    pub max_depth_frames: usize,
-    /// How many consecutive frames may be concealed before the buffer stops
-    /// synthesizing and emits silence.
+    /// Ceiling, in frames, on the buffer's depth. Default `10` (~200 ms).
     ///
-    /// Repeating a frame indefinitely turns a dropped call into a buzzing
-    /// loop, which sounds like a fault in Thelve rather than in the network.
+    /// The adaptive target never grows past it, and when more frames than
+    /// this are pending the oldest is discarded (counted as
+    /// [`PlayoutStats::frames_late`]) rather than letting latency grow
+    /// without bound. Keep it at or above `target_depth_frames`: a ceiling below
+    /// the target means a non-adaptive buffer never fills and never plays.
+    pub max_depth_frames: usize,
+    /// How many consecutive missing frames are concealed before the buffer
+    /// stops synthesizing and emits silence. Default `5` (~100 ms).
+    ///
+    /// Concealment replays the last frame with a decaying gain (1/2, 1/3,
+    /// 1/4, ...), so a short loss is heard as a brief fade rather than a click.
+    /// Repeating a frame indefinitely would turn a dropped call into a
+    /// buzzing loop, so past this count the buffer plays silence until real
+    /// frames return.
     pub max_consecutive_concealed: usize,
-    /// Whether the depth tracks observed jitter.
+    /// Whether the depth tracks observed jitter. Default `true`.
+    ///
+    /// When on, the buffer keeps an RFC 3550-style smoothed inter-arrival
+    /// jitter estimate and adds that many frames to
+    /// [`target_depth_frames`](Self::target_depth_frames), capped at
+    /// [`max_depth_frames`](Self::max_depth_frames). When off, the depth is
+    /// fixed at `target_depth_frames`.
     pub adaptive: bool,
 }
 
@@ -62,6 +115,7 @@ impl Default for PlayoutConfig {
 /// What the buffer did, for quality reporting.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PlayoutStats {
+    /// Frames emitted, real and concealed.
     pub frames_emitted: u64,
     /// Frames that arrived after their playout point had passed. They are
     /// dropped: inserting them would play audio out of order.
