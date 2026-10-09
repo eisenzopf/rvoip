@@ -2598,11 +2598,18 @@ impl DialogAdapter {
     /// the previous inline REGISTER-auth shortcut (`handle_401_challenge`) was
     /// retired when INVITE auth landed. See `default.yaml`'s `Initiating` /
     /// `Registering` + `AuthRequired` transitions.
+    ///
+    /// `learned_min_se` is the largest `Min-SE` a 422 has already returned
+    /// for this INVITE. RFC 4028 §7.4 requires every later attempt to carry
+    /// it, so when present the authenticated retry uses it as both
+    /// `Session-Expires` and `Min-SE` (exactly as the 422 retry did) instead
+    /// of falling back to the configured interval the peer already rejected.
     pub async fn resend_invite_with_auth(
         &self,
         session_id: &SessionId,
         mut opts: rvoip_sip_dialog::api::unified::InviteAuthRetryOptions,
         apply_global_proxy: bool,
+        learned_min_se: Option<u32>,
     ) -> Result<()> {
         let dialog_id = resolve_exact_invite_retry_dialog(self.store.as_ref(), session_id)?;
 
@@ -2612,12 +2619,21 @@ impl DialogAdapter {
         if apply_global_proxy && opts.outbound_proxy_uri.is_none() {
             opts.outbound_proxy_uri = self.outbound_proxy_uri.clone();
         }
-        self.dialog_api
-            .send_invite_with_auth_options(&dialog_id, opts)
-            .await
-            .map_err(|error| {
-                redacted_invite_dispatch_error(InviteDispatchFailure::AuthRetry, error)
-            })?;
+        let dispatched = match learned_min_se {
+            Some(min_se) => {
+                self.dialog_api
+                    .send_invite_with_session_timer_options(&dialog_id, opts, min_se, min_se)
+                    .await
+            }
+            None => {
+                self.dialog_api
+                    .send_invite_with_auth_options(&dialog_id, opts)
+                    .await
+            }
+        };
+        dispatched.map_err(|error| {
+            redacted_invite_dispatch_error(InviteDispatchFailure::AuthRetry, error)
+        })?;
         Ok(())
     }
 

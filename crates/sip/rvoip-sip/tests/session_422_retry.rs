@@ -13,6 +13,16 @@
 //!    UAC stops after the second retry (3 INVITEs total: initial + 2
 //!    retries) and surfaces `CallFailed(422, "… Min-SE: 120s")`.
 //!
+//! 3. **422 interleaved with 401/407 authentication** — a policy UAS that,
+//!    like FreeSWITCH, rejects any INVITE whose `Session-Expires` is below
+//!    its Min-SE and challenges any INVITE without credentials. RFC 4028
+//!    §7.4 requires every later attempt to carry the largest Min-SE received
+//!    in a 422, so the authenticated retry must not fall back to the
+//!    configured 90 s interval (which costs a second 422 round trip and burns
+//!    the 422 retry cap). Covered in both orders (422 → 407, 407 → 422), for
+//!    401 as well as 407, and with a stale-nonce re-challenge that used to
+//!    exhaust the cap.
+//!
 //! The retry logic under test lives in:
 //! - `src/adapters/session_event_handler.rs::handle_session_interval_too_small`
 //!   (cap check + event dispatch)
@@ -29,6 +39,7 @@ use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout};
 
 use rvoip_sip::api::unified::Config;
+use rvoip_sip::types::Credentials;
 use rvoip_sip::{Event, StreamPeer};
 
 use rvoip_sip_core::parser::parse_message;
@@ -332,6 +343,322 @@ async fn invite_422_retry_cap_surfaces_call_failed() {
     }
 
     uas_handle.abort();
+}
+
+// --- 422 interleaved with 401/407 authentication ----------------------------
+
+/// Which challenge the policy UAS issues to an unauthenticated INVITE.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Challenge {
+    /// 407 + `Proxy-Authenticate`; credentials come back in
+    /// `Proxy-Authorization`.
+    Proxy,
+    /// 401 + `WWW-Authenticate`; credentials come back in `Authorization`.
+    Origin,
+}
+
+impl Challenge {
+    fn credential_header(self) -> HeaderName {
+        match self {
+            Self::Proxy => HeaderName::ProxyAuthorization,
+            Self::Origin => HeaderName::Authorization,
+        }
+    }
+}
+
+/// A UAS that decides each INVITE on policy rather than on attempt number,
+/// the way a real PBX (FreeSWITCH with `minimum-session-expires=120`) does:
+/// any INVITE whose `Session-Expires` is below the floor gets 422, any
+/// INVITE without acceptable credentials gets challenged, everything else
+/// is answered.
+struct PolicyUas {
+    challenge: Challenge,
+    /// Check authentication before the session timer (407 → 422 order)
+    /// instead of after it (422 → 407 order, FreeSWITCH's behaviour).
+    auth_first: bool,
+    /// Treat the first nonce as expired: credentials computed from it get a
+    /// `stale=true` re-challenge carrying a fresh nonce (RFC 7616 §3.3), as
+    /// when a nonce times out mid-setup.
+    stale_once: bool,
+    invites: Mutex<Vec<SeenInvite>>,
+}
+
+#[derive(Clone, Debug)]
+struct SeenInvite {
+    cseq: Option<String>,
+    session_expires: Option<u32>,
+    min_se: Option<u32>,
+    credentials: Option<String>,
+}
+
+const FIRST_NONCE: &str = "minse-nonce-1";
+const FRESH_NONCE: &str = "minse-nonce-2";
+
+fn build_challenge(request: &Request, challenge: Challenge, nonce: &str, stale: bool) -> Vec<u8> {
+    let (status, header) = match challenge {
+        Challenge::Proxy => (
+            StatusCode::ProxyAuthenticationRequired,
+            HeaderName::ProxyAuthenticate,
+        ),
+        Challenge::Origin => (StatusCode::Unauthorized, HeaderName::WwwAuthenticate),
+    };
+    let mut resp = create_response(request, status);
+    let stale = if stale { ", stale=true" } else { "" };
+    resp.headers.push(TypedHeader::Other(
+        header,
+        HeaderValue::Raw(
+            format!(r#"Digest realm="pbx", nonce="{nonce}", algorithm=MD5, qop="auth"{stale}"#)
+                .into_bytes(),
+        ),
+    ));
+    Message::Response(resp).to_bytes()
+}
+
+async fn run_policy_uas(sock: Arc<UdpSocket>, uas: Arc<PolicyUas>, uas_rtp_port: u16) {
+    let mut buf = vec![0u8; 8192];
+    loop {
+        let (n, from) = match sock.recv_from(&mut buf).await {
+            Ok(pair) => pair,
+            Err(_) => return,
+        };
+        let Ok(Message::Request(request)) = parse_message(&buf[..n]) else {
+            continue;
+        };
+        match request.method() {
+            Method::Invite => {
+                let seen = SeenInvite {
+                    cseq: request.raw_header_value(&HeaderName::CSeq),
+                    session_expires: extract_u32_header(&request, &HeaderName::SessionExpires),
+                    min_se: extract_u32_header(&request, &HeaderName::MinSE),
+                    credentials: request.raw_header_value(&uas.challenge.credential_header()),
+                };
+                uas.invites.lock().await.push(seen.clone());
+
+                let timer_too_small = seen.session_expires.is_some_and(|se| se < UAS_MIN_SE);
+                let auth_reply = match seen.credentials.as_deref() {
+                    None => Some(build_challenge(&request, uas.challenge, FIRST_NONCE, false)),
+                    Some(credentials) if uas.stale_once && credentials.contains(FIRST_NONCE) => {
+                        Some(build_challenge(&request, uas.challenge, FRESH_NONCE, true))
+                    }
+                    Some(_) => None,
+                };
+                let timer_reply = timer_too_small.then(|| build_422(&request, UAS_MIN_SE));
+                let reply = if uas.auth_first {
+                    auth_reply.or(timer_reply)
+                } else {
+                    timer_reply.or(auth_reply)
+                }
+                .unwrap_or_else(|| build_200(&request, uas_rtp_port));
+                let _ = sock.send_to(&reply, from).await;
+            }
+            Method::Bye => {
+                let resp = create_response(&request, StatusCode::Ok);
+                let _ = sock
+                    .send_to(&Message::Response(resp).to_bytes(), from)
+                    .await;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Place one call against a [`PolicyUas`] and return its outcome plus every
+/// INVITE the UAS saw, in order.
+async fn call_policy_uas(
+    challenge: Challenge,
+    auth_first: bool,
+    stale_once: bool,
+) -> (Outcome, Vec<SeenInvite>) {
+    let _ = tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_max_level(tracing::Level::WARN)
+        .try_init();
+
+    let sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("mock uas bind"));
+    let uas_port = sock.local_addr().expect("mock uas address").port();
+    let uas_rtp_sink = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("mock uas RTP bind");
+    let uas_rtp_port = uas_rtp_sink
+        .local_addr()
+        .expect("mock uas RTP address")
+        .port();
+
+    let uas = Arc::new(PolicyUas {
+        challenge,
+        auth_first,
+        stale_once,
+        invites: Mutex::new(Vec::new()),
+    });
+    let uas_handle = tokio::spawn(run_policy_uas(sock.clone(), uas.clone(), uas_rtp_port));
+
+    let mut peer = StreamPeer::with_config(client_config())
+        .await
+        .expect("peer");
+    let call_id = peer
+        .invite(format!("sip:bob@127.0.0.1:{}", uas_port))
+        .with_credentials(Credentials::new("alice", "secret"))
+        .send()
+        .await
+        .expect("invite.send()");
+
+    let outcome = timeout(
+        Duration::from_secs(10),
+        wait_for_terminal(&mut peer, &call_id),
+    )
+    .await
+    .expect("call settled within 10s");
+    // Let any in-flight retry land before the INVITE count is asserted.
+    sleep(Duration::from_millis(200)).await;
+    uas_handle.abort();
+
+    let invites = uas.invites.lock().await.clone();
+    (outcome, invites)
+}
+
+/// The authenticated INVITE that follows a 422 must keep the learned floor:
+/// `Session-Expires` at least the 422's Min-SE and `Min-SE` equal to it.
+fn assert_carries_learned_min_se(invite: &SeenInvite, label: &str) {
+    assert!(
+        invite.session_expires.is_some_and(|se| se >= UAS_MIN_SE),
+        "{label} must carry Session-Expires >= {UAS_MIN_SE} (RFC 4028 §7.4), got {invite:?}"
+    );
+    assert_eq!(
+        invite.min_se,
+        Some(UAS_MIN_SE),
+        "{label} must carry Min-SE = {UAS_MIN_SE} (RFC 4028 §7.4), got {invite:?}"
+    );
+}
+
+fn assert_distinct_ascending_cseq(invites: &[SeenInvite]) {
+    let numbers: Vec<u32> = invites
+        .iter()
+        .map(|invite| {
+            invite
+                .cseq
+                .as_deref()
+                .and_then(|cseq| cseq.split_whitespace().next())
+                .and_then(|n| n.parse().ok())
+                .unwrap_or_else(|| panic!("INVITE without a numeric CSeq: {invite:?}"))
+        })
+        .collect();
+    assert!(
+        numbers.windows(2).all(|pair| pair[0] < pair[1]),
+        "each retry must take a new, larger CSeq: {numbers:?}"
+    );
+}
+
+/// FreeSWITCH order: 422 first, then the proxy challenge. The authenticated
+/// INVITE must keep Session-Expires/Min-SE at the 422's floor, so the call
+/// completes in three INVITEs instead of drawing a second 422.
+#[tokio::test]
+async fn invite_422_then_407_auth_retry_keeps_learned_min_se() {
+    let (outcome, invites) = call_policy_uas(Challenge::Proxy, false, false).await;
+
+    assert_eq!(
+        invites.len(),
+        3,
+        "expected INVITE(SE {CLIENT_SESSION_EXPIRES}) → 422, INVITE(SE {UAS_MIN_SE}) → 407, \
+         authenticated INVITE → 200; saw {invites:#?}"
+    );
+    assert_eq!(invites[0].session_expires, Some(CLIENT_SESSION_EXPIRES));
+    assert!(invites[0].credentials.is_none());
+    assert_carries_learned_min_se(&invites[1], "422 retry");
+    assert!(invites[1].credentials.is_none());
+    assert!(
+        invites[2].credentials.is_some(),
+        "third INVITE must carry Proxy-Authorization: {:?}",
+        invites[2]
+    );
+    assert_carries_learned_min_se(&invites[2], "authenticated INVITE after 422");
+    assert_distinct_ascending_cseq(&invites);
+    assert!(
+        matches!(outcome, Outcome::Answered),
+        "expected CallAnswered, got {outcome:?}"
+    );
+}
+
+/// Same as above for an origin (401 / WWW-Authenticate) challenge.
+#[tokio::test]
+async fn invite_422_then_401_auth_retry_keeps_learned_min_se() {
+    let (outcome, invites) = call_policy_uas(Challenge::Origin, false, false).await;
+
+    assert_eq!(
+        invites.len(),
+        3,
+        "expected 422 → 401 → 200 in three INVITEs; saw {invites:#?}"
+    );
+    assert_carries_learned_min_se(&invites[1], "422 retry");
+    assert!(
+        invites[2].credentials.is_some(),
+        "third INVITE must carry Authorization: {:?}",
+        invites[2]
+    );
+    assert_carries_learned_min_se(&invites[2], "authenticated INVITE after 422");
+    assert_distinct_ascending_cseq(&invites);
+    assert!(
+        matches!(outcome, Outcome::Answered),
+        "expected CallAnswered, got {outcome:?}"
+    );
+}
+
+/// Reverse order: 407 first, then 422. The 422 retry must keep the proxy
+/// credentials and raise the timer to the floor.
+#[tokio::test]
+async fn invite_407_then_422_retry_keeps_credentials_and_min_se() {
+    let (outcome, invites) = call_policy_uas(Challenge::Proxy, true, false).await;
+
+    assert_eq!(
+        invites.len(),
+        3,
+        "expected 407 → 422 → 200 in three INVITEs; saw {invites:#?}"
+    );
+    assert!(invites[0].credentials.is_none());
+    assert_eq!(invites[1].session_expires, Some(CLIENT_SESSION_EXPIRES));
+    assert!(invites[1].credentials.is_some());
+    assert!(
+        invites[2].credentials.is_some(),
+        "422 retry must keep Proxy-Authorization: {:?}",
+        invites[2]
+    );
+    assert_carries_learned_min_se(&invites[2], "422 retry after 407");
+    assert_distinct_ascending_cseq(&invites);
+    assert!(
+        matches!(outcome, Outcome::Answered),
+        "expected CallAnswered, got {outcome:?}"
+    );
+}
+
+/// 422 → 407 → stale 407 → 200. Before the fix each authenticated retry fell
+/// back to the configured interval and drew another 422, so a single
+/// stale-nonce re-challenge exhausted the 422 retry cap (2) and failed the
+/// call. Auth retries must neither lose the floor nor consume that budget.
+#[tokio::test]
+async fn invite_422_then_stale_407_rechallenge_does_not_exhaust_422_cap() {
+    let (outcome, invites) = call_policy_uas(Challenge::Proxy, false, true).await;
+
+    assert!(
+        matches!(outcome, Outcome::Answered),
+        "a stale-nonce re-challenge after a 422 must not fail the call, got {outcome:?}; \
+         INVITEs: {invites:#?}"
+    );
+    assert_eq!(
+        invites.len(),
+        4,
+        "expected 422 → 407 → 407(stale) → 200 in four INVITEs; saw {invites:#?}"
+    );
+    for (index, invite) in invites.iter().enumerate().skip(1) {
+        assert_carries_learned_min_se(invite, &format!("INVITE #{}", index + 1));
+    }
+    assert!(invites[2]
+        .credentials
+        .as_deref()
+        .is_some_and(|credentials| credentials.contains(FIRST_NONCE)));
+    assert!(invites[3]
+        .credentials
+        .as_deref()
+        .is_some_and(|credentials| credentials.contains(FRESH_NONCE)));
+    assert_distinct_ascending_cseq(&invites);
 }
 
 // --- Test helpers ----------------------------------------------------------

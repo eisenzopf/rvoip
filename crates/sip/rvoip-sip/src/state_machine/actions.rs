@@ -3912,6 +3912,11 @@ pub(crate) async fn execute_action(
                             registered_flow_routes: invite_opts.registered_flow_routes,
                         },
                         apply_global_proxy,
+                        // RFC 4028 §7.4: a 422 earlier in this INVITE's
+                        // retry chain raised the floor; the authenticated
+                        // retry must keep it rather than revert to the
+                        // configured interval the peer already rejected.
+                        session.session_timer_min_se,
                     )
                     .await?;
                 info!(

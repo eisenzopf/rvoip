@@ -242,6 +242,13 @@
   role in the refresh transaction, so a refresher that answered the call
   used to send `refresher=uas` and hand the job to its peer (§5, §7.4).
   Refreshes also carry the largest `Min-SE` received in a 422 on the dialog.
+- An INVITE that is authenticated after a 422 now keeps the interval the 422
+  asked for (RFC 4028 §7.4). The 401/407 retry used to fall back to the
+  configured `Session-Expires`, so a PBX with a higher Min-SE (FreeSWITCH
+  with Min-SE 120 behind proxy auth) answered it with a second 422. That
+  cost a round trip and spent the two-retry 422 budget, and one more
+  challenge, such as a stale nonce, failed the call with 422. A later 422
+  with a smaller `Min-SE` no longer lowers the floor already learned.
 - When the peer rejects the refresh UPDATE (for example 405 from a peer that
   does not support UPDATE), the re-INVITE fallback now reaches the wire. It
   used to carry a second `Session-Expires` and `Min-SE` and have no offer, so

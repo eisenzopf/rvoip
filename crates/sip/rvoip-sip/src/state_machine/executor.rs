@@ -3329,13 +3329,14 @@ impl StateMachine {
             }
             EventType::SessionIntervalTooSmall { min_se_secs } => {
                 // RFC 4028 §6 — stash the peer's required floor for the
-                // retry action to consume. Normalize 0 / missing to None so
-                // the action's "no Min-SE cached" guard fires cleanly.
-                session.session_timer_min_se = if *min_se_secs > 0 {
-                    Some(*min_se_secs)
-                } else {
-                    None
-                };
+                // retry action to consume. §7.4: later requests carry the
+                // *largest* Min-SE received, so a smaller (or missing) value
+                // from a later 422 never lowers a floor already learned.
+                // A 0 / missing value with nothing learned stays None so the
+                // action's "no Min-SE cached" guard fires cleanly.
+                session.session_timer_min_se = session
+                    .session_timer_min_se
+                    .max((*min_se_secs > 0).then_some(*min_se_secs));
             }
             EventType::Dialog3xxRedirect { targets, .. } => {
                 // Append to any existing targets (keeps earlier hops' fallbacks
