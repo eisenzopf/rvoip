@@ -2120,6 +2120,35 @@ pub struct Config {
     /// enabled with a stable [`Config::sip_instance`].
     pub outbound_keepalive_interval_secs: u64,
 
+    /// Peers to probe with periodic out-of-dialog `OPTIONS` (RFC 3261 §11).
+    ///
+    /// SIP trunks and SBC peering arrangements — Microsoft Teams Direct
+    /// Routing among them — expect the SBC side to ping each peer with
+    /// `OPTIONS` so both ends know the trunk is up. When this list is
+    /// non-empty and [`Config::options_keepalive_interval_secs`] is non-zero,
+    /// the coordinator sends one `OPTIONS` to every target one second after
+    /// it starts (sooner if the interval is shorter) and then once per
+    /// interval until shutdown.
+    ///
+    /// Each entry is a SIP URI such as
+    /// `sip:sip.pstnhub.microsoft.com:5061;transport=tls`. The ping carries
+    /// [`Config::contact_uri`] as its `Contact` when one is set, because
+    /// some peers check the SBC FQDN there.
+    ///
+    /// A target is *reachable* when it answers with any final response other
+    /// than `408` or `503` — even a `404` proves its SIP stack is up. A
+    /// timeout, a transport error, `408` or `503` marks it *unreachable*.
+    /// [`Event::PeerReachabilityChanged`](crate::api::events::Event::PeerReachabilityChanged)
+    /// is published for each target's first outcome and whenever it flips.
+    ///
+    /// Default: empty (no pings).
+    pub options_keepalive_targets: Vec<String>,
+
+    /// Seconds between [`Config::options_keepalive_targets`] pings. `0`
+    /// disables them. Each ping waits up to the smaller of this interval and
+    /// 8 seconds for a response. Default: `60`.
+    pub options_keepalive_interval_secs: u64,
+
     /// Automatically refresh successful registrations before they expire.
     ///
     /// When enabled, rvoip-sip schedules a re-REGISTER after a successful
@@ -3003,6 +3032,14 @@ impl std::fmt::Debug for Config {
             )
             .field("sip_outbound_enabled", &self.sip_outbound_enabled)
             .field("sip_instance_configured", &self.sip_instance.is_some())
+            .field(
+                "options_keepalive_target_count",
+                &self.options_keepalive_targets.len(),
+            )
+            .field(
+                "options_keepalive_interval_secs",
+                &self.options_keepalive_interval_secs,
+            )
             .field("sip_tls_mode", &self.sip_tls_mode)
             .field("sip_contact_mode", &self.sip_contact_mode)
             .field("tls_bind_configured", &self.tls_bind_addr.is_some())
@@ -3118,6 +3155,9 @@ impl Config {
     /// dialog-core terminal events.
     pub const DEFAULT_SETUP_TEARDOWN_TIMEOUT_SECS: u64 = 120;
 
+    /// Default interval between [`Config::options_keepalive_targets`] pings.
+    pub const DEFAULT_OPTIONS_KEEPALIVE_INTERVAL_SECS: u64 = 60;
+
     /// Explicitly allow verbatim SIP trace headers and any included bodies for
     /// controlled development/operator diagnostics.
     ///
@@ -3176,6 +3216,8 @@ impl Config {
             sip_outbound_enabled: false,
             sip_instance: None,
             outbound_keepalive_interval_secs: 25,
+            options_keepalive_targets: Vec::new(),
+            options_keepalive_interval_secs: Self::DEFAULT_OPTIONS_KEEPALIVE_INTERVAL_SECS,
             registration_auto_refresh: true,
             registration_refresh_jitter_percent: 5,
             unregister_on_shutdown_timeout_secs: 3,
@@ -3300,6 +3342,8 @@ impl Config {
             sip_outbound_enabled: false,
             sip_instance: None,
             outbound_keepalive_interval_secs: 25,
+            options_keepalive_targets: Vec::new(),
+            options_keepalive_interval_secs: Self::DEFAULT_OPTIONS_KEEPALIVE_INTERVAL_SECS,
             registration_auto_refresh: true,
             registration_refresh_jitter_percent: 5,
             unregister_on_shutdown_timeout_secs: 3,
@@ -4530,6 +4574,13 @@ impl Config {
             return Err(SessionError::ConfigError(
                 "TLS client certificate and key must be provided together".to_string(),
             ));
+        }
+        for target in &self.options_keepalive_targets {
+            if target.parse::<rvoip_sip_core::Uri>().is_err() {
+                return Err(SessionError::ConfigError(
+                    "options_keepalive_targets entries must be valid SIP URIs".to_string(),
+                ));
+            }
         }
         if self.registration_refresh_jitter_percent > 50 {
             return Err(SessionError::ConfigError(
@@ -9325,7 +9376,28 @@ impl UnifiedCoordinator {
 
         causal_ingress_guard.disarm();
         construction_guard.disarm();
+        coordinator.start_options_keepalive();
         Ok(coordinator)
+    }
+
+    /// Start the [`Config::options_keepalive_targets`] pinger when configured.
+    /// The task keeps only a weak reference and exits on shutdown.
+    fn start_options_keepalive(self: &Arc<Self>) {
+        let Some(settings) =
+            crate::api::options_keepalive::KeepaliveSettings::from_config(&self.config)
+        else {
+            return;
+        };
+        tokio::spawn(crate::api::options_keepalive::run(
+            Arc::downgrade(self),
+            settings,
+            self.shutdown_tx.subscribe(),
+        ));
+    }
+
+    /// Publish a coordinator-scoped (not call-scoped) application event.
+    pub(crate) fn publish_app_event(&self, event: crate::api::events::Event) {
+        self.app_event_publisher.publish(event);
     }
 
     pub(crate) fn fast_auto_accept_incoming_calls(&self) -> bool {
