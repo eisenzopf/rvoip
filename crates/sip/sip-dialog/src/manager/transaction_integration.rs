@@ -4751,41 +4751,34 @@ impl DialogManager {
         })?;
         self.send_invite_with_auth_options(
             dialog_id,
-            body,
-            vec![authorization],
-            extras,
-            from_display,
-            contact_override,
-            None,
-            false,
+            crate::api::unified::InviteAuthRetryOptions {
+                sdp: body.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
+                authorization_headers: vec![authorization],
+                extra_headers: extras,
+                from_display,
+                contact_uri: contact_override,
+                ..Default::default()
+            },
         )
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// RFC 3261 §22.2 — authenticated retry of an initial INVITE.
+    ///
+    /// The caller's retained request options pass through unchanged, so the
+    /// retry keeps every structural choice of the first attempt: body,
+    /// application headers, Contact, outbound proxy, 100rel and the exact
+    /// RFC 5626 registered-flow routes. A challenged INVITE to a registered
+    /// contact must leave on the same flow as the original; re-resolving the
+    /// Request-URI would send it to an address behind the client's NAT.
     pub async fn send_invite_with_auth_options(
         &self,
         dialog_id: &DialogId,
-        body: Option<bytes::Bytes>,
-        authorization_headers: Vec<TypedHeader>,
-        extras: Vec<TypedHeader>,
-        from_display: Option<String>,
-        contact_override: Option<String>,
-        outbound_proxy_uri: Option<rvoip_sip_core::types::uri::Uri>,
-        supported_100rel: bool,
+        opts: crate::api::unified::InviteAuthRetryOptions,
     ) -> DialogResult<TransactionKey> {
         self.send_initial_invite_attempt_with_options(
             dialog_id,
-            crate::api::unified::InviteAuthRetryOptions {
-                sdp: body.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
-                authorization_headers,
-                extra_headers: extras,
-                from_display,
-                contact_uri: contact_override,
-                outbound_proxy_uri,
-                supported_100rel,
-                registered_flow_routes: Vec::new(),
-            },
+            opts,
             InitialInviteTimerPolicy::Configured,
         )
         .await

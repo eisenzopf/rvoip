@@ -249,6 +249,21 @@
   cost a round trip and spent the two-retry 422 budget, and one more
   challenge, such as a stale nonce, failed the call with 422. A later 422
   with a smaller `Min-SE` no longer lowers the floor already learned.
+- A 401/407 retry of an INVITE to a registered contact (RFC 5626, as used by
+  the `carrier_sbc` and `behind_nat` profiles) now goes out on the same
+  registered flow as the original INVITE. dialog-core's
+  `send_invite_with_auth_options` used to drop the flow routes and resolve
+  the contact address instead, which sits behind the client's NAT. The
+  core method now takes the retained `InviteAuthRetryOptions` and passes
+  them through unchanged. In-dialog and REGISTER retries already reused
+  their stored request options.
+- Digest credentials retained across INVITE retries are re-signed rather
+  than resent (RFC 7616 §3.4). The 422 retry, and a 401 retry that keeps an
+  earlier proxy credential, now carry the next `nc` for that nonce and a new
+  `cnonce`. They used to repeat `nc=00000001`, which registrars and proxies
+  that track nonce counts reject as a replay. A new nonce, including one
+  from a `stale=true` challenge, still starts at 1. REGISTER refreshes
+  already counted correctly and now have a test.
 - When the peer rejects the refresh UPDATE (for example 405 from a peer that
   does not support UPDATE), the re-INVITE fallback now reaches the wire. It
   used to carry a second `Session-Expires` and `Min-SE` and have no offer, so

@@ -803,6 +803,201 @@ async fn manual_refresh_auth_and_stale_retry_preserve_one_request_snapshot() {
     registrar_handle.abort();
 }
 
+/// RFC 7616 §3.4 across REGISTER refreshes. Each refresh goes out without
+/// credentials and is challenged; a registrar that keeps issuing the same
+/// nonce sees the next `nc` (and a new `cnonce`) on every authenticated
+/// REGISTER, never a repeat of `nc=00000001`. When the registrar rotates the
+/// nonce with a `stale=true` challenge, the count starts again at 1.
+#[tokio::test]
+async fn register_refreshes_count_up_nonce_and_stale_nonce_resets_count() {
+    #[derive(Clone, Debug)]
+    struct SeenRegister {
+        nonce: Option<String>,
+        nc: Option<u32>,
+        cnonce: Option<String>,
+        valid: bool,
+    }
+
+    let sock = Arc::new(
+        UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("nonce-count registrar bind"),
+    );
+    let registrar_port = sock.local_addr().expect("registrar addr").port();
+    let seen = Arc::new(Mutex::new(Vec::<SeenRegister>::new()));
+    // (current nonce, rotate on the next authenticated REGISTER)
+    let nonce_state = Arc::new(Mutex::new(("reg-nonce-1".to_string(), false)));
+
+    let sock_task = Arc::clone(&sock);
+    let seen_task = Arc::clone(&seen);
+    let nonce_task = Arc::clone(&nonce_state);
+    let registrar_handle = tokio::spawn(async move {
+        let mut buf = vec![0u8; 8192];
+        loop {
+            let (n, from) = match sock_task.recv_from(&mut buf).await {
+                Ok(pair) => pair,
+                Err(_) => return,
+            };
+            let Ok(Message::Request(request)) = parse_message(&buf[..n]) else {
+                continue;
+            };
+            if request.method() != Method::Register {
+                continue;
+            }
+            let parsed = request
+                .raw_header_value(&HeaderName::Authorization)
+                .map(|header| {
+                    DigestAuthenticator::parse_authorization(&header)
+                        .expect("REGISTER Authorization should parse")
+                });
+            let entry = SeenRegister {
+                nonce: parsed.as_ref().map(|parsed| parsed.nonce.clone()),
+                nc: parsed
+                    .as_ref()
+                    .and_then(|parsed| parsed.nc.as_deref())
+                    .and_then(|nc| u32::from_str_radix(nc, 16).ok()),
+                cnonce: parsed.as_ref().and_then(|parsed| parsed.cnonce.clone()),
+                valid: parsed.as_ref().is_some_and(|parsed| {
+                    DigestAuthenticator::new("reg-realm")
+                        .validate_response(parsed, "REGISTER", "password")
+                        .unwrap_or(false)
+                }),
+            };
+            seen_task.lock().await.push(entry.clone());
+
+            let challenge = {
+                let mut state = nonce_task.lock().await;
+                let (nonce, rotate) = &mut *state;
+                match entry.nonce.as_deref() {
+                    None => Some((nonce.clone(), false)),
+                    Some(presented) if presented == nonce.as_str() && *rotate => {
+                        *nonce = "reg-nonce-2".to_string();
+                        *rotate = false;
+                        Some((nonce.clone(), true))
+                    }
+                    Some(presented) if presented == nonce.as_str() => None,
+                    Some(_) => Some((nonce.clone(), true)),
+                }
+            };
+            let response = match challenge {
+                None => response_with_contact_and_expires(&request, 300),
+                Some((nonce, stale)) => {
+                    let stale = if stale { ", stale=true" } else { "" };
+                    let mut response = create_response(&request, StatusCode::Unauthorized);
+                    response.headers.push(TypedHeader::Other(
+                        HeaderName::WwwAuthenticate,
+                        HeaderValue::Raw(
+                            format!(
+                                r#"Digest realm="reg-realm", nonce="{nonce}", algorithm=MD5, qop="auth"{stale}"#
+                            )
+                            .into_bytes(),
+                        ),
+                    ));
+                    Message::Response(response)
+                }
+            };
+            let _ = sock_task.send_to(&response.to_bytes(), from).await;
+        }
+    });
+
+    async fn wait_for_registers(seen: &Mutex<Vec<SeenRegister>>, count: usize) {
+        timeout(Duration::from_secs(5), async {
+            while seen.lock().await.len() < count {
+                sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("registrar never saw {count} REGISTERs"));
+        // Give an unexpected extra attempt the chance to show up.
+        sleep(Duration::from_millis(150)).await;
+    }
+
+    let mut config = Config::local("alice", 0);
+    config.media_port_start = 40320;
+    config.media_port_end = 40330;
+    config.registration_auto_refresh = false;
+    let peer = StreamPeer::with_config(config).await.expect("peer");
+    let handle = peer
+        .register(
+            format!("sip:127.0.0.1:{registrar_port}"),
+            "alice",
+            "password",
+        )
+        .with_contact_uri("sip:alice@127.0.0.1:40320")
+        .with_expires(300)
+        .send()
+        .await
+        .expect("initial register");
+    wait_for_registers(&seen, 2).await;
+
+    for expected in [4, 6] {
+        peer.control()
+            .coordinator()
+            .refresh(&handle)
+            .send()
+            .await
+            .expect("refresh under the same nonce");
+        wait_for_registers(&seen, expected).await;
+    }
+
+    nonce_state.lock().await.1 = true;
+    peer.control()
+        .coordinator()
+        .refresh(&handle)
+        .send()
+        .await
+        .expect("refresh across a stale nonce rotation");
+    wait_for_registers(&seen, 9).await;
+
+    let captured = seen.lock().await.clone();
+    assert_eq!(
+        captured
+            .iter()
+            .map(|entry| entry.nonce.as_deref().zip(entry.nc))
+            .collect::<Vec<_>>(),
+        vec![
+            None,
+            Some(("reg-nonce-1", 1)),
+            None,
+            Some(("reg-nonce-1", 2)),
+            None,
+            Some(("reg-nonce-1", 3)),
+            None,
+            Some(("reg-nonce-1", 4)),
+            Some(("reg-nonce-2", 1)),
+        ],
+        "each REGISTER under one nonce takes the next nc; a new nonce restarts at 1"
+    );
+    let authenticated: Vec<_> = captured
+        .iter()
+        .filter(|entry| entry.nonce.is_some())
+        .collect();
+    assert!(
+        authenticated.iter().all(|entry| entry.valid),
+        "every Authorization must verify for its own nc/cnonce: {captured:?}"
+    );
+    let cnonces: std::collections::HashSet<_> = authenticated
+        .iter()
+        .map(|entry| entry.cnonce.clone())
+        .collect();
+    assert_eq!(
+        cnonces.len(),
+        authenticated.len(),
+        "every REGISTER needs its own cnonce"
+    );
+    assert!(peer
+        .is_registered(&handle)
+        .await
+        .expect("registered after the stale recovery"));
+
+    peer.control()
+        .coordinator()
+        .shutdown_gracefully(Some(Duration::from_secs(0)))
+        .await
+        .expect("shutdown");
+    registrar_handle.abort();
+}
+
 #[tokio::test]
 async fn challenged_unregister_retries_proxy_auth_and_stale_with_expires_zero() {
     let sock = Arc::new(

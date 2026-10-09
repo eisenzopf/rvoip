@@ -1788,3 +1788,90 @@ async fn opted_in_dialog_pins_admitted_tls_flow_and_default_does_not() {
         }
     }
 }
+
+/// RFC 5626 — an initial INVITE to a registered contact leaves on the exact
+/// registered flow (the connection the UA registered over), never on a fresh
+/// resolution of its Contact, which sits behind the UA's NAT. A 401/407 or
+/// 422 retry is the same INVITE again and must keep that flow: the stored
+/// `registered_flow_routes` pass through the retry options untouched.
+#[tokio::test]
+async fn initial_invite_retries_keep_the_registered_flow() {
+    use rvoip_sip_core::types::header::HeaderName;
+    use rvoip_sip_dialog::api::unified::{InviteAuthRetryOptions, UnifiedDialogApi};
+
+    let local_addr: SocketAddr = "127.0.0.1:5060".parse().unwrap();
+    let flow = TransportFlowId::from_process_local_value(57).unwrap();
+    let registered = TransportRoute::new("192.0.2.10:40123".parse().unwrap())
+        .with_transport_type(TransportType::Tcp)
+        .with_flow_id(flow);
+
+    for retry in ["auth", "session-timer"] {
+        let transport = Arc::new(ProgrammableTransport::new(local_addr));
+        let (_tx, transport_rx) = mpsc::channel(8);
+        let (transaction_manager, mut event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(16))
+                .await
+                .expect("TransactionManager::new");
+        tokio::spawn(async move { while event_rx.recv().await.is_some() {} });
+        let api = UnifiedDialogApi::new(
+            Arc::new(transaction_manager),
+            rvoip_sip_dialog::DialogManagerConfig::hybrid(local_addr).build(),
+        )
+        .await
+        .expect("UnifiedDialogApi::new");
+
+        // The registered contact is not resolvable: only the flow reaches it.
+        let call_id = format!("registered-flow-{retry}-retry");
+        let dialog_id = api
+            .dialog_manager()
+            .core()
+            .create_outgoing_dialog(
+                "sip:alice@127.0.0.1:5060".parse().unwrap(),
+                "sip:bob@registered-contact.invalid;transport=tcp"
+                    .parse()
+                    .unwrap(),
+                Some(call_id.clone()),
+            )
+            .await
+            .expect("create outgoing dialog");
+        api.dialog_manager()
+            .core()
+            .get_dialog_mut(&dialog_id)
+            .expect("dialog")
+            .local_tag = Some(format!("local-{retry}"));
+
+        let opts = InviteAuthRetryOptions {
+            authorization_headers: vec![
+                rvoip_sip_core::validation::validated_authorization_header(
+                    HeaderName::ProxyAuthorization,
+                    r#"Digest username="alice", realm="pbx", nonce="n", uri="sip:bob@registered-contact.invalid", response="00000000000000000000000000000000""#
+                        .to_string(),
+                )
+                .expect("valid Proxy-Authorization"),
+            ],
+            registered_flow_routes: vec![registered.clone()],
+            ..Default::default()
+        };
+        match retry {
+            "auth" => api.send_invite_with_auth_options(&dialog_id, opts).await,
+            _ => {
+                api.send_invite_with_session_timer_options(&dialog_id, opts, 120, 120)
+                    .await
+            }
+        }
+        .unwrap_or_else(|error| panic!("{retry} retry must dispatch on the flow: {error}"));
+
+        let routes = transport.routes();
+        assert_eq!(routes.len(), 1, "{retry} retry: one transmission");
+        assert_eq!(
+            routes[0].destination, registered.destination,
+            "{retry} retry"
+        );
+        assert_eq!(routes[0].flow_id, Some(flow), "{retry} retry");
+        assert_eq!(
+            routes[0].transport_type,
+            Some(TransportType::Tcp),
+            "{retry} retry"
+        );
+    }
+}

@@ -1674,36 +1674,94 @@ fn invite_proxy_protection_target(
     }
 }
 
+/// What a retained INVITE credential is re-signed against on a resend.
+struct InviteResendAuthorization<'a> {
+    auth: Option<&'a crate::auth::SipClientAuth>,
+    request_uri: &'a str,
+    body: Option<&'a [u8]>,
+    transport: &'a crate::auth::SipTransportSecurityContext,
+}
+
+/// Authorization headers for a resend of the initial INVITE (a 401/407 retry
+/// that adds another protection space, or a 422 retry).
+///
+/// RFC 7616 §3.4 (RFC 2617 §3.2.2): every request sent under the same nonce
+/// carries a larger `nc` and its own `cnonce`, so a retained Digest
+/// credential is re-signed with the next count for its (realm, nonce) rather
+/// than resent verbatim — servers that track nonce counts reject a repeated
+/// `nc`. Bearer, Basic and AKA credentials carry no nonce count and are
+/// resent as they are. `fresh` names the credential the caller has just
+/// computed for this very request; it is already current and is not signed
+/// twice.
 fn retained_invite_authorization_headers(
-    session: &SessionState,
+    session: &mut SessionState,
     origin_target: &str,
     proxy_target: &str,
+    resend: &InviteResendAuthorization<'_>,
+    fresh: Option<usize>,
 ) -> Result<Vec<TypedHeader>, crate::errors::SessionError> {
     use crate::session_store::state::InviteCredentialKind;
 
-    session
-        .invite_authorization_credentials
-        .iter()
-        .filter(|credential| match credential.kind {
+    let mut headers = Vec::new();
+    for index in 0..session.invite_authorization_credentials.len() {
+        let credential = &session.invite_authorization_credentials[index];
+        let applies = match credential.kind {
             InviteCredentialKind::Origin => credential.protection_target == origin_target,
             InviteCredentialKind::Proxy => credential.protection_target == proxy_target,
-        })
-        .map(|credential| {
-            let name = match credential.kind {
-                InviteCredentialKind::Origin => HeaderName::Authorization,
-                InviteCredentialKind::Proxy => HeaderName::ProxyAuthorization,
-            };
-            rvoip_sip_core::validation::validated_authorization_header(
-                name,
-                credential.value.clone(),
-            )
-            .map_err(|_| {
-                crate::errors::SessionError::ProtocolError(
-                    "retained INVITE authorization failed validation".to_string(),
+        };
+        if !applies {
+            continue;
+        }
+        let name = match credential.kind {
+            InviteCredentialKind::Origin => HeaderName::Authorization,
+            InviteCredentialKind::Proxy => HeaderName::ProxyAuthorization,
+        };
+        if let (Some(nonce), true) = (credential.nonce.clone(), fresh != Some(index)) {
+            let auth = resend
+                .auth
+                .ok_or(crate::errors::SessionError::MissingCredentialsForInviteAuth)?;
+            let key = (credential.realm.clone(), nonce);
+            let challenge_raw = credential.challenge_raw.clone();
+            let nonce_count = *session
+                .digest_nc
+                .entry(key.clone())
+                .and_modify(|count| *count = count.saturating_add(1))
+                .or_insert(1);
+            let resigned = auth
+                .authorization_for_challenge_with_transport_context(
+                    &challenge_raw,
+                    "INVITE",
+                    resend.request_uri,
+                    nonce_count,
+                    resend.body,
+                    resend.transport,
                 )
-            })
-        })
-        .collect()
+                .map_err(redacted_invite_auth_error)?;
+            if resigned
+                .digest_challenge
+                .as_ref()
+                .is_none_or(|challenge| (&challenge.realm, &challenge.nonce) != (&key.0, &key.1))
+            {
+                return Err(crate::errors::SessionError::ProtocolError(
+                    "retained INVITE credential no longer matches its challenge".to_string(),
+                ));
+            }
+            session.invite_authorization_credentials[index].value = resigned.value;
+        }
+        let value = session.invite_authorization_credentials[index]
+            .value
+            .clone();
+        headers.push(
+            rvoip_sip_core::validation::validated_authorization_header(name, value).map_err(
+                |_| {
+                    crate::errors::SessionError::ProtocolError(
+                        "retained INVITE authorization failed validation".to_string(),
+                    )
+                },
+            )?,
+        );
+    }
+    Ok(headers)
 }
 
 pub(crate) fn materialize_invite_options(
@@ -3827,11 +3885,13 @@ pub(crate) async fn execute_action(
                     stale_refreshes,
                     value: header_value,
                 };
-                if let Some(index) = existing_credential {
+                let fresh_credential = if let Some(index) = existing_credential {
                     session.invite_authorization_credentials[index] = credential;
+                    index
                 } else {
                     session.invite_authorization_credentials.push(credential);
-                }
+                    session.invite_authorization_credentials.len() - 1
+                };
 
                 session.pending_auth.take();
                 session.pending_auth_transport = None;
@@ -3850,8 +3910,21 @@ pub(crate) async fn execute_action(
                 // is what used to drop with_pai / with_subject / with_from_display /
                 // with_contact_uri on the 401/407 retry that actually completes the
                 // call. Transfer-leg / internal paths leave the stash empty.
-                let mut authorization_headers =
-                    retained_invite_authorization_headers(session, &request_uri, &proxy_target)?;
+                // Credentials retained from earlier challenges on this INVITE
+                // (a proxy credential when an origin 401 follows a 407) are
+                // re-signed with the next nonce count.
+                let mut authorization_headers = retained_invite_authorization_headers(
+                    session,
+                    &request_uri,
+                    &proxy_target,
+                    &InviteResendAuthorization {
+                        auth: Some(&auth),
+                        request_uri: &request_uri,
+                        body: body_bytes,
+                        transport: &transport_context,
+                    },
+                    Some(fresh_credential),
+                )?;
 
                 let invite_opts = match invite_snapshot.as_ref() {
                     Some(snapshot) => {
@@ -4453,8 +4526,25 @@ pub(crate) async fn execute_action(
             });
             let proxy_target =
                 invite_proxy_protection_target(snapshot.as_ref(), dialog_adapter, &request_uri);
-            let mut authorization_headers =
-                retained_invite_authorization_headers(session, &request_uri, &proxy_target)?;
+            // The 422 retry is a new request under the same nonces: every
+            // retained Digest credential is re-signed with the next count.
+            let resend_auth = session
+                .auth
+                .clone()
+                .or_else(|| session.credentials.clone().map(Into::into));
+            let transport_context = dialog_adapter.outbound_transport_context_for_uri(&request_uri);
+            let mut authorization_headers = retained_invite_authorization_headers(
+                session,
+                &request_uri,
+                &proxy_target,
+                &InviteResendAuthorization {
+                    auth: resend_auth.as_ref(),
+                    request_uri: &request_uri,
+                    body: body.as_deref().map(str::as_bytes),
+                    transport: &transport_context,
+                },
+                None,
+            )?;
             let invite_opts = if let Some(snapshot) = snapshot.as_ref() {
                 if !session
                     .invite_authorization_credentials
