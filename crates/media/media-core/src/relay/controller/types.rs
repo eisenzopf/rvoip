@@ -60,6 +60,23 @@ pub const AMR_AUTO_CMR_PARAMETER: &str = "amr_auto_cmr";
 /// session that was created with a known peer reporting as before.
 pub const RTCP_MUX_PARAMETER: &str = "rtcp_mux";
 
+/// Whether periodic RTCP carries RFC 3611 VoIP-metrics extended reports.
+///
+/// `"true"` enables it; anything else, or absence, leaves it off. XR is an
+/// extension the peer asks for with SDP `a=rtcp-xr` (RFC 3611 §5.1), so the
+/// signalling layer sets this only when negotiation shows it. Applied when
+/// the session is created and whenever an update changes it.
+pub const RTCP_XR_PARAMETER: &str = "rtcp_xr";
+
+/// Whether the RTCP report interval may use the RFC 3550 §6.2 reduced
+/// minimum (360 divided by the session bandwidth in kbit/s, when that is
+/// under five seconds) instead of the fixed five-second minimum.
+///
+/// `"true"` enables it; anything else, or absence, keeps five seconds. Local
+/// policy, not negotiated. Applied when the session is created and whenever
+/// an update changes it.
+pub const RTCP_REDUCED_MINIMUM_PARAMETER: &str = "rtcp_reduced_minimum";
+
 /// Media configuration for a session
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaConfig {
@@ -159,6 +176,50 @@ impl MediaConfig {
     pub fn rtcp_mux(&self) -> bool {
         self.parameters
             .get(RTCP_MUX_PARAMETER)
+            .is_some_and(|value| value == "true")
+    }
+
+    /// Set or clear RFC 3611 VoIP-metrics reporting ([`RTCP_XR_PARAMETER`]).
+    /// Cleared rather than falsified, for the same reason as
+    /// [`Self::with_amr_dtx`].
+    #[must_use]
+    pub fn with_rtcp_xr(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.parameters
+                .insert(RTCP_XR_PARAMETER.to_string(), "true".to_string());
+        } else {
+            self.parameters.remove(RTCP_XR_PARAMETER);
+        }
+        self
+    }
+
+    /// Whether [`RTCP_XR_PARAMETER`] is set.
+    pub fn rtcp_xr(&self) -> bool {
+        self.parameters
+            .get(RTCP_XR_PARAMETER)
+            .is_some_and(|value| value == "true")
+    }
+
+    /// Set or clear the reduced minimum RTCP interval
+    /// ([`RTCP_REDUCED_MINIMUM_PARAMETER`]). Cleared rather than falsified,
+    /// for the same reason as [`Self::with_amr_dtx`].
+    #[must_use]
+    pub fn with_rtcp_reduced_minimum(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.parameters.insert(
+                RTCP_REDUCED_MINIMUM_PARAMETER.to_string(),
+                "true".to_string(),
+            );
+        } else {
+            self.parameters.remove(RTCP_REDUCED_MINIMUM_PARAMETER);
+        }
+        self
+    }
+
+    /// Whether [`RTCP_REDUCED_MINIMUM_PARAMETER`] is set.
+    pub fn rtcp_reduced_minimum(&self) -> bool {
+        self.parameters
+            .get(RTCP_REDUCED_MINIMUM_PARAMETER)
             .is_some_and(|value| value == "true")
     }
 

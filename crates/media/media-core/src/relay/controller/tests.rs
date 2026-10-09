@@ -58,6 +58,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rtcp_xr_and_reduced_minimum_parameters_reach_the_rtp_session() {
+        let controller = MediaSessionController::new();
+        let dialog = DialogId::new("rtcp-policy");
+        let base = MediaConfig {
+            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            remote_addr: None,
+            preferred_codec: None,
+            parameters: HashMap::new(),
+        };
+        // Defaults: neither is on, and an absent key means off.
+        assert!(!base.rtcp_xr() && !base.rtcp_reduced_minimum());
+        controller
+            .start_media(
+                dialog.clone(),
+                base.clone()
+                    .with_rtcp_xr(true)
+                    .with_rtcp_reduced_minimum(true),
+            )
+            .await
+            .unwrap();
+        let session = controller.get_rtp_session(&dialog).await.unwrap();
+        {
+            let session = session.lock().await;
+            assert!(session.rtcp_xr_enabled());
+            assert!(session.rtcp_reduced_minimum());
+        }
+
+        let current = controller.get_session_info(&dialog).await.unwrap().config;
+        controller
+            .update_media(
+                dialog.clone(),
+                current.with_rtcp_xr(false).with_rtcp_reduced_minimum(false),
+            )
+            .await
+            .unwrap();
+        {
+            let session = session.lock().await;
+            assert!(!session.rtcp_xr_enabled());
+            assert!(!session.rtcp_reduced_minimum());
+        }
+        let current = controller.get_session_info(&dialog).await.unwrap().config;
+        assert!(!current.parameters.contains_key(RTCP_XR_PARAMETER));
+        controller
+            .update_media(dialog.clone(), current.with_rtcp_xr(true))
+            .await
+            .unwrap();
+        assert!(session.lock().await.rtcp_xr_enabled());
+        controller.stop_media(&dialog).await.unwrap();
+
+        // A session created without the parameters keeps both off.
+        let plain = DialogId::new("rtcp-policy-plain");
+        controller.start_media(plain.clone(), base).await.unwrap();
+        let session = controller.get_rtp_session(&plain).await.unwrap();
+        let session = session.lock().await;
+        assert!(!session.rtcp_xr_enabled());
+        assert!(!session.rtcp_reduced_minimum());
+    }
+
+    #[tokio::test]
     async fn cancelled_start_releases_reserved_port_for_reuse() {
         let allocator = Arc::new(PortAllocator::with_config(PortAllocatorConfig {
             port_range_start: 15_500,
