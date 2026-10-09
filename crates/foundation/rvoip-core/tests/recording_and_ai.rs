@@ -833,10 +833,9 @@ async fn resource_snapshot_zero_budget_skips_hooks() {
 
 #[tokio::test]
 async fn resource_snapshot_zero_admission_capacity_has_zero_reservations() {
-    let orch = Orchestrator::new(Config {
-        max_concurrent_setups: 0,
-        ..Config::default()
-    });
+    let mut config = Config::default();
+    config.max_concurrent_setups = 0;
+    let orch = Orchestrator::new(config);
     let snapshot = orch.resource_snapshot(Duration::ZERO).await.unwrap();
     assert_eq!(snapshot.core.prepared_outbound_reservations, 0);
     assert_eq!(snapshot.core.connection_routes, 0);

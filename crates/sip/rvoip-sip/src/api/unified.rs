@@ -1900,6 +1900,7 @@ impl Drop for RetainedHangupTaskCompletion {
 /// );
 /// ```
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct Config {
     /// Local IP address for media
     pub local_ip: IpAddr,

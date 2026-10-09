@@ -290,10 +290,8 @@ async fn stalled_application_handler_times_out_without_wedging_the_peer() {
     let (input, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
     let (output, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
     let (events, _events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
-    let caps = UctpCoordinatorCaps {
-        application_handler_timeout: Duration::from_millis(200),
-        ..Default::default()
-    };
+    let mut caps = UctpCoordinatorCaps::default();
+    caps.application_handler_timeout = Duration::from_millis(200);
     let coordinator = UctpCoordinator::start_full_with_caps(
         "websocket",
         in_rx,

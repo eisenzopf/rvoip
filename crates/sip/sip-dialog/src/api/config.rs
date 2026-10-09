@@ -180,6 +180,7 @@ impl Default for RelUsage {
 /// assert_eq!(high_load_config.auto_cleanup, false);
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct DialogConfig {
     /// Local bind address for SIP communication
     ///

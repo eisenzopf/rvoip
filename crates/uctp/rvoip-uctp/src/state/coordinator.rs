@@ -193,6 +193,7 @@ impl UctpScopePolicy {
 /// that don't care can keep using the existing `start` /
 /// `start_full` entry points.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct UctpCoordinatorCaps {
     /// Soft timeout for outbound signaling sends. See [`SIGNALING_SEND_TIMEOUT`].
     pub signaling_send_timeout: Duration,
