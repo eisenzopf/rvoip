@@ -452,6 +452,193 @@ impl PortAllocator {
         }
     }
 
+    /// Reserve an RFC 3550 §11 RTP/RTCP port pair for one session: an even
+    /// RTP port and the odd port above it for RTCP, whatever this
+    /// allocator's [`PairingStrategy`].
+    ///
+    /// Both ports are claimed atomically: either the session owns both or
+    /// neither. They are tracked under `session_id`, so
+    /// [`Self::release_session`] and [`Self::quarantine_session`] cover the
+    /// pair, and [`Self::release_session_port`] hands back the RTCP port
+    /// alone once RTP/RTCP multiplexing makes it unnecessary.
+    ///
+    /// A pair takes two ports from the range, so a range filled with pairs
+    /// holds half as many sessions.
+    pub async fn allocate_rtp_rtcp_pair(
+        &self,
+        session_id: &str,
+        ip: Option<IpAddr>,
+    ) -> Result<(SocketAddr, SocketAddr)> {
+        let ip = ip.unwrap_or(self.config.default_ip);
+
+        if self.indexed_state.is_some() {
+            return self.allocate_indexed_rtp_rtcp_pair(session_id, ip);
+        }
+
+        self.cleanup_released_ports().await;
+        let first_even = self.config.port_range_start + (self.config.port_range_start % 2);
+        if first_even >= self.config.port_range_end {
+            return Err(Error::Transport(
+                "RTP port range is too small for an RTP/RTCP port pair".to_string(),
+            ));
+        }
+        let mut bind_collisions = 0;
+        for _ in 0..self.config.allocation_retries.max(1) {
+            let candidate = match self.config.allocation_strategy {
+                AllocationStrategy::Sequential => self.get_next_sequential_port().await,
+                AllocationStrategy::Random => self.get_random_port().await,
+                AllocationStrategy::Incremental => self.get_next_incremental_port().await,
+            };
+            let rtp_port = (candidate & !1).max(first_even);
+            let Some(rtcp_port) = rtp_port.checked_add(1) else {
+                continue;
+            };
+            if rtcp_port > self.config.port_range_end {
+                continue;
+            }
+            match self.claim_port(ip, rtp_port).await {
+                PortClaimOutcome::Claimed => {}
+                PortClaimOutcome::BindCollision => {
+                    bind_collisions += 1;
+                    continue;
+                }
+                PortClaimOutcome::Unavailable => continue,
+            }
+            match self.claim_port(ip, rtcp_port).await {
+                PortClaimOutcome::Claimed => {}
+                outcome => {
+                    if outcome == PortClaimOutcome::BindCollision {
+                        bind_collisions += 1;
+                    }
+                    // Undo the RTP half without offering it for reuse.
+                    self.allocated_ports.lock().await.remove(&rtp_port);
+                    continue;
+                }
+            }
+            self.track_allocation(session_id, ip, rtp_port).await?;
+            self.track_allocation(session_id, ip, rtcp_port).await?;
+            debug!(
+                "Allocated RTP/RTCP pair {} and {} for session {}",
+                rtp_port, rtcp_port, session_id
+            );
+            return Ok((SocketAddr::new(ip, rtp_port), SocketAddr::new(ip, rtcp_port)));
+        }
+
+        Err(Error::Transport(format!(
+            "RTP port pool exhausted: no free RTP/RTCP port pair after {} attempts ({} OS bind collisions)",
+            self.config.allocation_retries, bind_collisions
+        )))
+    }
+
+    fn allocate_indexed_rtp_rtcp_pair(
+        &self,
+        session_id: &str,
+        ip: IpAddr,
+    ) -> Result<(SocketAddr, SocketAddr)> {
+        let local_state = self
+            .indexed_state
+            .as_ref()
+            .ok_or_else(|| Error::Transport("Indexed port pool is not configured".to_string()))?;
+        let mut local_state = local_state
+            .lock()
+            .map_err(|_| Error::Transport("Indexed port pool lock poisoned".to_string()))?;
+        let pool = self.indexed_pool_for(&mut local_state, ip)?;
+        let mut pool = pool
+            .lock()
+            .map_err(|_| Error::Transport("Shared port pool lock poisoned".to_string()))?;
+        self.release_expired_indexed_quarantine(&mut pool);
+
+        let start = self.config.port_range_start;
+        let end = self.config.port_range_end;
+        let first_even = start + (start % 2);
+        // Even ports whose odd neighbour is still in range.
+        let pair_count = if first_even >= end {
+            0
+        } else {
+            usize::from((end - first_even - 1) / 2) + 1
+        };
+        let cursor = pool.last_port.clamp(first_even, end);
+        let mut candidate = (cursor + (cursor % 2)).min(end);
+        let mut process_conflicts = 0usize;
+        for _ in 0..pair_count {
+            if candidate >= end || candidate < first_even {
+                candidate = first_even;
+            }
+            let rtp_port = candidate;
+            let rtcp_port = rtp_port + 1;
+            candidate = rtp_port.saturating_add(2);
+
+            let free = |port: u16| {
+                pool.available_ports.contains(&port) && !pool.allocated_ports.contains_key(&port)
+            };
+            if !free(rtp_port) || !free(rtcp_port) {
+                continue;
+            }
+            if !self.try_claim_authoritative_port(ip, rtp_port)? {
+                process_conflicts += 1;
+                continue;
+            }
+            if !self.try_claim_authoritative_port(ip, rtcp_port)? {
+                self.release_authoritative_port(ip, rtp_port)?;
+                process_conflicts += 1;
+                continue;
+            }
+
+            for port in [rtp_port, rtcp_port] {
+                pool.available_ports.remove(&port);
+                pool.allocated_ports.insert(port, self.allocator_id);
+                self.track_indexed_allocation(&mut local_state, session_id, ip, port);
+            }
+            pool.last_port = if rtcp_port >= end { start } else { rtcp_port + 1 };
+            return Ok((SocketAddr::new(ip, rtp_port), SocketAddr::new(ip, rtcp_port)));
+        }
+
+        Err(Error::Transport(format!(
+            "RTP port pool exhausted: no free RTP/RTCP port pair ({} active reservations, {} temporarily quarantined, {} process bind conflicts)",
+            pool.allocated_ports.len(),
+            pool.quarantined_ports.len(),
+            process_conflicts
+        )))
+    }
+
+    /// Release one port of a session and stop tracking it, leaving the
+    /// session's other ports reserved.
+    ///
+    /// Used to hand back the RTCP half of an
+    /// [`allocate_rtp_rtcp_pair`](Self::allocate_rtp_rtcp_pair) reservation
+    /// once RTP/RTCP multiplexing is agreed. A port the session does not own
+    /// is left alone, so a repeated or late call cannot free a port that has
+    /// since gone to another session.
+    pub async fn release_session_port(&self, session_id: &str, ip: IpAddr, port: u16) -> bool {
+        let owned = if let Some(local_state) = &self.indexed_state {
+            let Ok(mut local_state) = local_state.lock() else {
+                return false;
+            };
+            let Some(ports) = local_state.session_ports.get_mut(session_id) else {
+                return false;
+            };
+            let Some(index) = ports.iter().position(|entry| *entry == (ip, port)) else {
+                return false;
+            };
+            ports.swap_remove(index);
+            true
+        } else {
+            let mut sessions = self.session_ports.lock().await;
+            let Some(ports) = sessions.get_mut(session_id) else {
+                return false;
+            };
+            let Some(index) = ports.iter().position(|entry| *entry == (ip, port)) else {
+                return false;
+            };
+            ports.swap_remove(index);
+            true
+        };
+        if owned {
+            self.release_port(ip, port).await;
+        }
+        owned
+    }
+
     /// Allocate a single port for generic usage
     pub async fn allocate_port(&self, ip: IpAddr) -> Result<u16> {
         if self.indexed_state.is_some() {
@@ -1366,6 +1553,149 @@ mod tests {
             validate_ports: false,
             capacity_hint: usize::from(port_range_end - port_range_start) + 1,
         }
+    }
+
+    #[test]
+    fn rtp_rtcp_pairs_are_even_odd_atomic_and_coexist_with_single_ports() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let ip = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+            // An odd start: the first pair must still begin on an even port.
+            let allocator = Arc::new(PortAllocator::with_config(indexed_test_config(
+                21_001,
+                21_100,
+                PairingStrategy::Muxed,
+                ip,
+            )));
+
+            // Single (multiplexed) reservations and pairs share one pool.
+            let mut tasks = Vec::new();
+            for index in 0..24 {
+                let allocator = allocator.clone();
+                tasks.push(tokio::spawn(async move {
+                    let session = format!("pair-{index}");
+                    let (rtp, rtcp) = allocator
+                        .allocate_rtp_rtcp_pair(&session, Some(ip))
+                        .await
+                        .expect("pair reservation");
+                    let single = allocator
+                        .allocate_port_pair(&format!("single-{index}"), Some(ip))
+                        .await
+                        .expect("single reservation")
+                        .0;
+                    (session, rtp.port(), rtcp.port(), single.port())
+                }));
+            }
+            let mut seen = HashSet::new();
+            let mut pairs = Vec::new();
+            for task in tasks {
+                let (session, rtp, rtcp, single) = task.await.unwrap();
+                assert_eq!(rtp % 2, 0, "RTP port {rtp} is not even");
+                assert_eq!(rtcp, rtp + 1);
+                for port in [rtp, rtcp, single] {
+                    assert!((21_001..=21_100).contains(&port));
+                    assert!(seen.insert(port), "port {port} was handed out twice");
+                }
+                pairs.push((session, rtp, rtcp));
+            }
+            assert_eq!(allocator.allocated_count().await, 24 * 3);
+
+            // The RTCP half alone goes back; a repeat or foreign release is
+            // a no-op.
+            let (session, rtp, rtcp) = pairs[0].clone();
+            assert!(allocator.release_session_port(&session, ip, rtcp).await);
+            assert!(!allocator.release_session_port(&session, ip, rtcp).await);
+            assert!(!allocator.release_session_port("single-1", ip, rtp).await);
+            assert_eq!(allocator.allocated_count().await, 24 * 3 - 1);
+
+            for (session, _, _) in &pairs {
+                allocator.release_session(session).await.unwrap();
+            }
+            for index in 0..24 {
+                allocator
+                    .release_session(&format!("single-{index}"))
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(allocator.allocated_count().await, 0, "ports leaked");
+        });
+    }
+
+    #[test]
+    fn rtp_rtcp_pair_exhaustion_fails_closed_and_quarantine_covers_both() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let ip = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+            let allocator = PortAllocator::with_config(indexed_test_config(
+                21_200,
+                21_203,
+                PairingStrategy::Muxed,
+                ip,
+            ));
+            // A single reservation on 21200 leaves 21200/21201 unusable as a
+            // pair, so the pair lands on 21202/21203.
+            let single = allocator
+                .allocate_port_pair("single", Some(ip))
+                .await
+                .unwrap()
+                .0;
+            assert_eq!(single.port(), 21_200);
+            let (rtp, rtcp) = allocator
+                .allocate_rtp_rtcp_pair("pair", Some(ip))
+                .await
+                .unwrap();
+            assert_eq!((rtp.port(), rtcp.port()), (21_202, 21_203));
+            let error = allocator
+                .allocate_rtp_rtcp_pair("too-many", Some(ip))
+                .await
+                .expect_err("no pair left");
+            assert!(error.to_string().contains("RTP port pool exhausted"));
+            // The failed attempt reserved nothing.
+            assert_eq!(allocator.allocated_count().await, 2 + 1);
+
+            // A bind failure quarantines the whole pair.
+            allocator.quarantine_session("pair").await.unwrap();
+            assert_eq!(allocator.allocated_count().await, 1);
+            allocator.release_session("single").await.unwrap();
+            assert_eq!(allocator.allocated_count().await, 0);
+        });
+    }
+
+    #[test]
+    fn validated_allocator_reserves_rtp_rtcp_pairs() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let ip = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+            let allocator = PortAllocator::with_config(PortAllocatorConfig {
+                port_range_start: 21_300,
+                port_range_end: 21_339,
+                allocation_strategy: AllocationStrategy::Random,
+                pairing_strategy: PairingStrategy::Muxed,
+                prefer_port_reuse: true,
+                default_ip: ip,
+                allocation_retries: 200,
+                validate_ports: true,
+                capacity_hint: 0,
+            });
+            let mut seen = HashSet::new();
+            for index in 0..8 {
+                let (rtp, rtcp) = allocator
+                    .allocate_rtp_rtcp_pair(&format!("pair-{index}"), Some(ip))
+                    .await
+                    .expect("pair reservation");
+                assert_eq!(rtp.port() % 2, 0);
+                assert_eq!(rtcp.port(), rtp.port() + 1);
+                assert!(seen.insert(rtp.port()) && seen.insert(rtcp.port()));
+            }
+            assert_eq!(allocator.allocated_count().await, 16);
+            for index in 0..8 {
+                allocator
+                    .release_session(&format!("pair-{index}"))
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(allocator.allocated_count().await, 0);
+        });
     }
 
     #[test]

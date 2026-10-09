@@ -316,12 +316,32 @@ pub struct SrtpContextRollback {
     installed_generation: u64,
 }
 
+/// `latched_rtp_ssrc` value before any RTP stream has latched. Outside the
+/// 32-bit SSRC space, so it never equals a real sender.
+const NO_LATCHED_SSRC: u64 = u64::MAX;
+
 pub struct UdpRtpTransport {
     /// RTP socket
     rtp_socket: Arc<UdpSocket>,
 
-    /// RTCP socket (if separate from RTP)
-    rtcp_socket: Option<Arc<UdpSocket>>,
+    /// RTCP socket (if separate from RTP). Swappable so a session that
+    /// negotiates RTP/RTCP multiplexing after creation can close it and hand
+    /// its port back; see [`Self::release_rtcp_socket`].
+    rtcp_socket: ArcSwapOption<UdpSocket>,
+
+    /// Whether RTCP shares the RTP socket. Starts as `config.rtcp_mux`; a
+    /// transport with a separate RTCP socket switches to the RTP socket when
+    /// [`Self::set_rtcp_mux`] reports negotiated multiplexing.
+    rtcp_mux: Arc<AtomicBool>,
+
+    /// Receive task of the separate RTCP socket, kept apart from
+    /// `receiver_tasks` so the socket can be closed on its own.
+    rtcp_receiver_task: parking_lot::Mutex<Option<JoinHandle<()>>>,
+
+    /// SSRC of the RTP stream from the latched source, or
+    /// [`NO_LATCHED_SSRC`]. The separate RTCP socket learns its peer's RTCP
+    /// source only from reports sent by that stream.
+    latched_rtp_ssrc: Arc<AtomicU64>,
 
     /// Transport configuration
     config: RtpTransportConfig,
@@ -565,7 +585,10 @@ impl UdpRtpTransport {
 
         let transport = Self {
             rtp_socket: Arc::new(socket_rtp),
-            rtcp_socket: socket_rtcp.map(Arc::new),
+            rtcp_socket: ArcSwapOption::from(socket_rtcp.map(Arc::new)),
+            rtcp_mux: Arc::new(AtomicBool::new(config.rtcp_mux)),
+            rtcp_receiver_task: parking_lot::Mutex::new(None),
+            latched_rtp_ssrc: Arc::new(AtomicU64::new(NO_LATCHED_SSRC)),
             config,
             symmetric_rtp_policy: policy,
             symmetric_rtp_counters: Arc::new(SymmetricRtpCounters::default()),
@@ -629,7 +652,8 @@ impl UdpRtpTransport {
         let symmetric_rtp_generation = self.symmetric_rtp_generation.clone();
         let remote_rtp_addr = self.remote_rtp_addr.clone();
         let remote_rtcp_addr = self.remote_rtcp_addr.clone();
-        let rtcp_mux = self.config.rtcp_mux;
+        let rtcp_mux = self.rtcp_mux.clone();
+        let latched_rtp_ssrc = self.latched_rtp_ssrc.clone();
         #[cfg(feature = "dtls-webrtc")]
         let dtls_tx = self.dtls_tx.clone();
         let srtp_diagnostics = srtp_diagnostics_enabled();
@@ -728,7 +752,7 @@ impl UdpRtpTransport {
                                 // tuple earns trust through RTP probation,
                                 // never through a single unauthenticated RTCP
                                 // packet.
-                                if rtcp_mux
+                                if rtcp_mux.load(Ordering::Acquire)
                                     && symmetric_rtp_policy.enabled
                                     && symmetric_rtp_latched.load(Ordering::Acquire)
                                     && remote_rtp_addr
@@ -832,12 +856,26 @@ impl UdpRtpTransport {
                                             symmetric_rtp.reset();
                                             observed_symmetric_generation = generation;
                                         }
-                                        match symmetric_rtp.observe(
+                                        let decision = symmetric_rtp.observe(
                                             addr,
                                             packet.header.ssrc,
                                             packet.header.sequence_number,
                                             Instant::now(),
-                                        ) {
+                                        );
+                                        if matches!(
+                                            decision,
+                                            SymmetricRtpDecision::Accept
+                                                | SymmetricRtpDecision::LatchInitial
+                                                | SymmetricRtpDecision::Rebind
+                                        ) && latched_rtp_ssrc.load(Ordering::Relaxed)
+                                            != u64::from(packet.header.ssrc)
+                                        {
+                                            latched_rtp_ssrc.store(
+                                                u64::from(packet.header.ssrc),
+                                                Ordering::Release,
+                                            );
+                                        }
+                                        match decision {
                                             SymmetricRtpDecision::Accept => {}
                                             SymmetricRtpDecision::LatchInitial => {
                                                 // Publish the guard first so an
@@ -847,7 +885,7 @@ impl UdpRtpTransport {
                                                 symmetric_rtp_latched
                                                     .store(true, Ordering::Release);
                                                 remote_rtp_addr.store(Some(Arc::new(addr)));
-                                                if rtcp_mux {
+                                                if rtcp_mux.load(Ordering::Acquire) {
                                                     remote_rtcp_addr.store(Some(Arc::new(addr)));
                                                 }
                                                 symmetric_rtp_counters
@@ -856,7 +894,7 @@ impl UdpRtpTransport {
                                             }
                                             SymmetricRtpDecision::Rebind => {
                                                 remote_rtp_addr.store(Some(Arc::new(addr)));
-                                                if rtcp_mux {
+                                                if rtcp_mux.load(Ordering::Acquire) {
                                                     remote_rtcp_addr.store(Some(Arc::new(addr)));
                                                 }
                                                 symmetric_rtp_counters
@@ -1012,93 +1050,187 @@ impl UdpRtpTransport {
         let mut receiver_tasks = self.receiver_tasks.lock().await;
         receiver_tasks.push(rtp_receiver);
 
+        drop(receiver_tasks);
+
         // If we have a separate RTCP socket, start that receiver too
-        if let Some(rtcp_socket) = &self.rtcp_socket {
-            let rtcp_socket = rtcp_socket.clone();
-            let event_tx = self.event_tx.clone();
-            let active_state = self.active.clone();
-            let srtp_recv = self.srtp_recv.clone();
-            let secure_media_required = self.secure_media_required.clone();
-            let rtcp_recv_buffer_size = self.config.buffer_config.rtcp_recv_buffer_size;
-
-            let rtcp_receiver = spawn_memory_tracked(
-                "rtp_core.udp_transport.rtcp_receiver_task",
-                async move {
-                    loop {
-                        // Check if we should continue running
-                        if !active_state.load(Ordering::Acquire) {
-                            break;
-                        }
-
-                        let mut buffer = vec![0u8; rtcp_recv_buffer_size];
-
-                        // Receive packet
-                        match rtcp_socket.recv_from(&mut buffer).await {
-                            Ok((size, addr)) => {
-                                let rtcp_data = if secure_media_required.load(Ordering::Acquire) {
-                                    let mut guard = srtp_recv.lock();
-                                    let Some(context) = guard.as_mut() else {
-                                        trace!("SRTCP is required but no receive context is installed; dropping packet");
-                                        continue;
-                                    };
-                                    match context.unprotect_rtcp(&buffer[..size]) {
-                                        Ok(plaintext) => plaintext,
-                                        Err(error) => {
-                                            trace!(
-                                                "SRTCP unprotect failed; dropping packet: {error}"
-                                            );
-                                            continue;
-                                        }
-                                    }
-                                } else {
-                                    Bytes::copy_from_slice(&buffer[..size])
-                                };
-                                let event = RtpEvent::RtcpReceived {
-                                    data: rtcp_data,
-                                    source: addr,
-                                };
-
-                                // Only log errors if there are receivers
-                                if event_tx.receiver_count() > 0 {
-                                    if let Err(e) = event_tx.send(event) {
-                                        warn!("Failed to send RTCP event: {}", e);
-                                    }
-                                } else {
-                                    // Still send the event but ignore errors if no one is listening
-                                    let _ = event_tx.send(event);
-                                }
-                            }
-                            Err(e) => {
-                                error!("Error receiving RTCP packet: {}", e);
-
-                                // Send error event
-                                let err_event = RtpEvent::Error(Error::Transport(format!(
-                                    "RTCP socket error: {}",
-                                    e
-                                )));
-                                if event_tx.receiver_count() > 0 {
-                                    let _ = event_tx.send(err_event);
-                                }
-
-                                // Short delay before retrying
-                                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-                            }
-                        }
-                    }
-                },
-            );
-
-            receiver_tasks.push(rtcp_receiver);
+        if let Some(rtcp_socket) = self.rtcp_socket.load_full() {
+            let task = self.spawn_rtcp_receiver(rtcp_socket);
+            *self.rtcp_receiver_task.lock() = Some(task);
         }
 
         info!("Started UDP transport receiver tasks");
         Ok(())
     }
 
+    /// Receive loop for the separate RTCP socket.
+    ///
+    /// Symmetric RTCP (the RTCP counterpart of symmetric RTP): once inbound
+    /// RTP has latched a source, a report from that stream's SSRC arriving
+    /// from the same IP address (any IP when the policy allows IP changes)
+    /// moves the RTCP destination to the report's source. A peer behind NAT
+    /// whose RTCP leaves from a mapped port therefore gets its reports back
+    /// through the mapping. The destination never moves onto the peer's RTP
+    /// address, moves at most `1 + max_rebindings` times per signalled
+    /// destination, and does not move at all with the policy disabled.
+    /// Every datagram still goes to the session, which drops reports that
+    /// are not from its peer.
+    fn spawn_rtcp_receiver(&self, rtcp_socket: Arc<UdpSocket>) -> JoinHandle<()> {
+        let event_tx = self.event_tx.clone();
+        let active_state = self.active.clone();
+        let srtp_recv = self.srtp_recv.clone();
+        let secure_media_required = self.secure_media_required.clone();
+        let rtcp_recv_buffer_size = self.config.buffer_config.rtcp_recv_buffer_size;
+        let policy = self.symmetric_rtp_policy;
+        let symmetric_rtp_latched = self.symmetric_rtp_latched.clone();
+        let symmetric_rtp_generation = self.symmetric_rtp_generation.clone();
+        let remote_rtp_addr = self.remote_rtp_addr.clone();
+        let remote_rtcp_addr = self.remote_rtcp_addr.clone();
+        let latched_rtp_ssrc = self.latched_rtp_ssrc.clone();
+
+        spawn_memory_tracked(
+            "rtp_core.udp_transport.rtcp_receiver_task",
+            async move {
+                let mut observed_generation = symmetric_rtp_generation.load(Ordering::Acquire);
+                let mut rtcp_moves = 0_u8;
+                loop {
+                    // Check if we should continue running
+                    if !active_state.load(Ordering::Acquire) {
+                        break;
+                    }
+
+                    let mut buffer = vec![0u8; rtcp_recv_buffer_size];
+
+                    // Receive packet
+                    match rtcp_socket.recv_from(&mut buffer).await {
+                        Ok((size, addr)) => {
+                            let rtcp_data = if secure_media_required.load(Ordering::Acquire) {
+                                let mut guard = srtp_recv.lock();
+                                let Some(context) = guard.as_mut() else {
+                                    trace!("SRTCP is required but no receive context is installed; dropping packet");
+                                    continue;
+                                };
+                                match context.unprotect_rtcp(&buffer[..size]) {
+                                    Ok(plaintext) => plaintext,
+                                    Err(error) => {
+                                        trace!("SRTCP unprotect failed; dropping packet: {error}");
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                Bytes::copy_from_slice(&buffer[..size])
+                            };
+
+                            if policy.enabled {
+                                let generation = symmetric_rtp_generation.load(Ordering::Acquire);
+                                if generation != observed_generation {
+                                    observed_generation = generation;
+                                    rtcp_moves = 0;
+                                }
+                                let rtp_peer = remote_rtp_addr.load().as_deref().copied();
+                                let sender_ssrc = rtcp_data
+                                    .get(4..8)
+                                    .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+                                    .map(|bytes| u64::from(u32::from_be_bytes(bytes)));
+                                let learn = remote_rtcp_addr.load().as_deref().copied()
+                                    != Some(addr)
+                                    && symmetric_rtp_latched.load(Ordering::Acquire)
+                                    && sender_ssrc.is_some_and(|ssrc| {
+                                        ssrc == latched_rtp_ssrc.load(Ordering::Acquire)
+                                    })
+                                    && rtp_peer.is_some_and(|peer| {
+                                        peer != addr
+                                            && (policy.allow_ip_change || peer.ip() == addr.ip())
+                                    })
+                                    && rtcp_moves <= policy.max_rebindings;
+                                if learn {
+                                    rtcp_moves = rtcp_moves.saturating_add(1);
+                                    remote_rtcp_addr.store(Some(Arc::new(addr)));
+                                    debug!("Symmetric RTCP learned the peer's RTCP source");
+                                }
+                            }
+
+                            let event = RtpEvent::RtcpReceived {
+                                data: rtcp_data,
+                                source: addr,
+                            };
+                            let _ = event_tx.send(event);
+                        }
+                        Err(e) => {
+                            error!("Error receiving RTCP packet: {}", e);
+
+                            // Send error event
+                            let err_event = RtpEvent::Error(Error::Transport(format!(
+                                "RTCP socket error: {}",
+                                e
+                            )));
+                            if event_tx.receiver_count() > 0 {
+                                let _ = event_tx.send(err_event);
+                            }
+
+                            // Short delay before retrying
+                            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                        }
+                    }
+                }
+            },
+        )
+    }
+
+    /// Whether RTCP currently travels on the RTP socket: the transport was
+    /// built for RTP/RTCP multiplexing, multiplexing was negotiated later, or
+    /// the separate RTCP socket was released.
+    pub fn rtcp_mux(&self) -> bool {
+        self.rtcp_mux.load(Ordering::Acquire)
+    }
+
+    /// Report whether RTP/RTCP multiplexing (RFC 5761) is negotiated.
+    ///
+    /// Only a transport that owns a separate RTCP socket changes behaviour:
+    /// with `true` it sends and accepts RTCP on the RTP socket, with `false`
+    /// it sends RTCP from the RTCP socket. A transport built for
+    /// multiplexing ignores the call.
+    pub fn set_rtcp_mux(&self, negotiated: bool) {
+        if self.rtcp_socket.load().is_some() {
+            self.rtcp_mux.store(negotiated, Ordering::Release);
+        }
+    }
+
+    /// Close the separate RTCP socket and stop its receive task, switching
+    /// RTCP to the RTP socket for good. Returns the address the socket was
+    /// bound to, so a caller that reserved the port can hand it back; `None`
+    /// when there was no separate socket. The socket is closed when this
+    /// returns.
+    pub async fn release_rtcp_socket(&self) -> Option<SocketAddr> {
+        self.rtcp_mux.store(true, Ordering::Release);
+        let socket = self.rtcp_socket.swap(None)?;
+        let task = self.rtcp_receiver_task.lock().take();
+        if let Some(task) = task {
+            task.abort();
+            let _ = task.await;
+        }
+        let local = socket.local_addr().ok();
+        drop(socket);
+        local
+    }
+
+    /// Local address of the separate RTCP socket, if one is open.
+    pub fn local_rtcp_socket_addr(&self) -> Option<SocketAddr> {
+        self.rtcp_socket
+            .load()
+            .as_deref()
+            .and_then(|socket| socket.local_addr().ok())
+    }
+
     /// Stop the receiver task
     pub async fn stop_receiver(&self) -> Result<()> {
         // Set inactive state
         self.active.store(false, Ordering::Release);
+
+        let rtcp_task = self.rtcp_receiver_task.lock().take();
+        if let Some(task) = rtcp_task {
+            task.abort();
+            let _ = task.await;
+        }
 
         // Wait for receiver task to complete
         let mut receiver_tasks = self.receiver_tasks.lock().await;
@@ -1119,6 +1251,11 @@ impl UdpRtpTransport {
 
     /// Set the remote RTCP address
     pub async fn set_remote_rtcp_addr(&self, addr: SocketAddr) {
+        self.remote_rtcp_addr.store(Some(Arc::new(addr)));
+    }
+
+    /// Set the remote RTCP address without awaiting; the store is atomic.
+    pub(crate) fn store_remote_rtcp_addr(&self, addr: SocketAddr) {
         self.remote_rtcp_addr.store(Some(Arc::new(addr)));
     }
 
@@ -1191,7 +1328,7 @@ impl UdpRtpTransport {
 
     /// Get the separate raw RTCP socket, when RTCP mux is disabled.
     pub(crate) fn get_rtcp_socket(&self) -> Option<Arc<UdpSocket>> {
-        self.rtcp_socket.clone()
+        self.rtcp_socket.load_full()
     }
 
     /// Install per-direction SRTP contexts (RFC 4568 §6.1, RFC 3711).
@@ -1412,14 +1549,14 @@ impl UdpRtpTransport {
         if self.config.symmetric_rtp && !self.symmetric_rtp_latched.load(Ordering::Acquire) {
             self.remote_rtcp_addr.store(Some(Arc::new(dest)));
         }
-        let socket = if self.config.rtcp_mux {
-            &self.rtp_socket
-        } else if let Some(rtcp_socket) = &self.rtcp_socket {
-            rtcp_socket
+        let rtcp_socket = if self.rtcp_mux.load(Ordering::Acquire) {
+            None
         } else {
-            &self.rtp_socket
+            self.rtcp_socket.load_full()
         };
-        socket
+        rtcp_socket
+            .as_deref()
+            .unwrap_or(&self.rtp_socket)
             .send_to(bytes, dest)
             .await
             .map_err(|e| Error::Transport(format!("Failed to send RTCP packet: {}", e)))?;
@@ -1474,7 +1611,7 @@ impl RtpTransport for UdpRtpTransport {
 
     /// Get the local RTCP address
     fn local_rtcp_addr(&self) -> Result<Option<SocketAddr>> {
-        Ok(self.config.local_rtcp_addr)
+        Ok(self.local_rtcp_socket_addr())
     }
 
     async fn send_rtp(&self, packet: &RtpPacket, dest: SocketAddr) -> Result<()> {
@@ -1613,6 +1750,9 @@ impl Drop for UdpRtpTransport {
             for task in tasks.drain(..) {
                 task.abort();
             }
+        }
+        if let Some(task) = self.rtcp_receiver_task.get_mut().take() {
+            task.abort();
         }
 
         if self.config.use_port_allocator
@@ -1781,12 +1921,12 @@ mod tests {
         // For non-muxed connections, we should get assigned a real RTCP socket
         assert_ne!(rtp_addr.port(), 0);
         assert!(
-            transport.rtcp_socket.is_some(),
+            transport.rtcp_socket.load().is_some(),
             "RTCP socket should exist when rtcp_mux is false"
         );
 
         // Check the actual RTCP socket address, not just the config value
-        if let Some(rtcp_socket) = &transport.rtcp_socket {
+        if let Some(rtcp_socket) = transport.rtcp_socket.load_full() {
             let rtcp_addr = rtcp_socket.local_addr().unwrap();
             assert_ne!(rtcp_addr.port(), 0);
             assert_ne!(rtp_addr.port(), rtcp_addr.port());
@@ -1815,7 +1955,7 @@ mod tests {
 
         // With RTCP-MUX, no separate RTCP socket should be created
         assert!(
-            transport.rtcp_socket.is_none(),
+            transport.rtcp_socket.load().is_none(),
             "RTCP socket should be None with rtcp_mux enabled"
         );
 
@@ -2253,12 +2393,12 @@ mod tests {
 
         // Check that a separate RTCP socket was created
         assert!(
-            transport.rtcp_socket.is_some(),
+            transport.rtcp_socket.load().is_some(),
             "RTCP socket should be created"
         );
 
         // Check the actual RTCP socket address, not just the config value
-        if let Some(rtcp_socket) = &transport.rtcp_socket {
+        if let Some(rtcp_socket) = transport.rtcp_socket.load_full() {
             let rtcp_addr = rtcp_socket.local_addr().unwrap();
             assert_ne!(rtcp_addr.port(), 0, "RTCP port should not be 0");
             assert_ne!(
@@ -2284,7 +2424,7 @@ mod tests {
         let transport = UdpRtpTransport::new(config).await.unwrap();
         let rtcp_addr = transport
             .rtcp_socket
-            .as_ref()
+            .load_full()
             .expect("separate RTCP socket")
             .local_addr()
             .unwrap();
@@ -2330,7 +2470,7 @@ mod tests {
 
         // With RTCP mux, no separate RTCP socket should be created
         assert!(
-            transport.rtcp_socket.is_none(),
+            transport.rtcp_socket.load().is_none(),
             "No RTCP socket should be created with rtcp_mux"
         );
 
@@ -2658,7 +2798,7 @@ mod tests {
             } else {
                 transport_b
                     .rtcp_socket
-                    .as_ref()
+                    .load_full()
                     .unwrap()
                     .local_addr()
                     .unwrap()
@@ -2715,7 +2855,7 @@ mod tests {
             } else {
                 transport_b
                     .rtcp_socket
-                    .as_ref()
+                    .load_full()
                     .unwrap()
                     .local_addr()
                     .unwrap()

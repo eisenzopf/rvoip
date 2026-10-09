@@ -149,6 +149,36 @@ async fn rtcp_destination(
     }
 }
 
+/// Where periodic reports and the close-time BYE go, or `None` when they
+/// may not be sent.
+///
+/// With multiplexing negotiated they share the RTP socket and go to the
+/// peer's (latched) RTP address. Without it they go only from a separate
+/// RTCP socket to the peer's RTCP address, and never to an address the RTP
+/// stream uses: RFC 5761 §5.1.1 forbids multiplexing a peer did not agree
+/// to. A session without a separate socket sends nothing until mux is
+/// negotiated.
+async fn rtcp_report_destination(
+    transport: &Arc<dyn RtpTransport>,
+    packet_sender: &RtpPacketSender,
+    rtcp_mux: bool,
+) -> Option<SocketAddr> {
+    if rtcp_mux {
+        return rtcp_destination(transport, packet_sender).await;
+    }
+    let udp = transport.as_any().downcast_ref::<UdpRtpTransport>()?;
+    if udp.rtcp_mux() || udp.local_rtcp_socket_addr().is_none() {
+        return None;
+    }
+    let destination = udp.remote_rtcp_addr().await?;
+    if Some(destination) == udp.remote_rtp_addr().await
+        || Some(destination) == *packet_sender.remote_addr.read()
+    {
+        return None;
+    }
+    Some(destination)
+}
+
 /// Whether inbound RTCP from `source` belongs to this session.
 ///
 /// Only the session's expected peer may feed its reports, statistics, and
@@ -909,9 +939,13 @@ pub struct RtpSession {
     /// it follows the payload type.
     bandwidth_explicit: bool,
 
-    /// Whether periodic RTCP reports may go to the peer. This session has a
-    /// single socket, so reports share the RTP port; see [`Self::set_rtcp_mux`].
+    /// Whether RTP/RTCP multiplexing is in force, so reports share the RTP
+    /// port; see [`Self::set_rtcp_mux`].
     rtcp_mux: Arc<AtomicBool>,
+
+    /// The peer's RTCP address from SDP `a=rtcp:` (RFC 3605), used instead
+    /// of RTP port + 1 when reports leave from a separate RTCP socket.
+    signalled_remote_rtcp_addr: parking_lot::Mutex<Option<SocketAddr>>,
 
     #[cfg(feature = "memory-diagnostics")]
     _memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard,
@@ -966,11 +1000,48 @@ impl RtpSession {
         Self::new_with_receive_queue(config, false, policy, Some(xr_quality)).await
     }
 
+    /// Create an event-driven session that also binds a separate RTCP
+    /// socket on `local_rtcp_addr`, for peers that do not multiplex RTP and
+    /// RTCP (RFC 3550 §11 puts it on the RTP port + 1).
+    ///
+    /// Until [`Self::set_rtcp_mux`] reports negotiated multiplexing, periodic
+    /// reports and the close-time BYE leave from this socket to the peer's
+    /// RTCP address: [`Self::set_remote_rtcp_addr`] when SDP named one with
+    /// `a=rtcp:` (RFC 3605), otherwise the peer's RTP port + 1. Reports
+    /// arriving on the socket pass the same peer filter as multiplexed ones,
+    /// and SRTCP protects both directions once SRTP contexts are installed.
+    /// When multiplexing is negotiated instead, [`Self::release_rtcp_socket`]
+    /// closes the socket so its port can be reused.
+    pub async fn new_event_driven_with_rtcp_socket(
+        config: RtpSessionConfig,
+        policy: SymmetricRtpPolicy,
+        local_rtcp_addr: SocketAddr,
+    ) -> Result<Self> {
+        Self::new_session(config, false, policy, None, Some(local_rtcp_addr)).await
+    }
+
     async fn new_with_receive_queue(
         config: RtpSessionConfig,
         receive_queue_enabled: bool,
         symmetric_rtp_policy: SymmetricRtpPolicy,
         xr_quality: Option<RtcpXrQualityConfig>,
+    ) -> Result<Self> {
+        Self::new_session(
+            config,
+            receive_queue_enabled,
+            symmetric_rtp_policy,
+            xr_quality,
+            None,
+        )
+        .await
+    }
+
+    async fn new_session(
+        config: RtpSessionConfig,
+        receive_queue_enabled: bool,
+        symmetric_rtp_policy: SymmetricRtpPolicy,
+        xr_quality: Option<RtcpXrQualityConfig>,
+        local_rtcp_addr: Option<SocketAddr>,
     ) -> Result<Self> {
         let session_buffer_config = config.session_buffer_config;
         let transport_buffer_config = config.transport_buffer_config;
@@ -984,9 +1055,11 @@ impl RtpSession {
         // Create transport config - respect provided ports!
         let transport_config = RtpTransportConfig {
             local_rtp_addr: config.local_addr,
-            local_rtcp_addr: None, // RTCP on same port for now
+            // A separate RTCP socket only when the caller reserved a port
+            // for it; otherwise RTCP shares the RTP socket.
+            local_rtcp_addr,
             symmetric_rtp: true,
-            rtcp_mux: true, // Enable RTCP multiplexing by default
+            rtcp_mux: local_rtcp_addr.is_none(),
             session_id: Some(format!("rtp-session-{}", ssrc)),
             // Don't allocate a new port - use the one provided in config
             use_port_allocator: false,
@@ -1053,7 +1126,11 @@ impl RtpSession {
             reschedule: tokio::sync::Notify::new(),
         });
 
-        let rtcp_mux = Arc::new(AtomicBool::new(config.remote_addr.is_some()));
+        // A session with a separate RTCP socket was built for a peer that may
+        // not multiplex, so it never assumes multiplexing.
+        let rtcp_mux = Arc::new(AtomicBool::new(
+            config.remote_addr.is_some() && local_rtcp_addr.is_none(),
+        ));
         let mut session = Self {
             config,
             clock_rate,
@@ -1075,6 +1152,7 @@ impl RtpSession {
             rtcp_task: None,
             bandwidth_explicit: false,
             rtcp_mux,
+            signalled_remote_rtcp_addr: parking_lot::Mutex::new(None),
             #[cfg(feature = "memory-diagnostics")]
             _memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
                 "rtp_core.rtp_session",
@@ -1134,9 +1212,9 @@ impl RtpSession {
             // Set the remote RTP address on the UDP transport
             if let Some(t) = transport.as_any().downcast_ref::<UdpRtpTransport>() {
                 t.set_remote_rtp_addr(addr).await;
-                t.set_remote_rtcp_addr(addr).await;
             }
         }
+        self.refresh_remote_rtcp_addr();
 
         // Prepare the scheduler's timestamp state, but do not start its
         // millisecond polling task. Session sends use the single ordered
@@ -1539,15 +1617,17 @@ impl RtpSession {
                     }
                     previous = deadline;
 
-                    // RFC 5761 §5.1.1: reports leave from the RTP socket, so a
-                    // peer that did not agree to multiplexing gets none.
-                    if !rtcp_mux.load(Ordering::Acquire) {
-                        continue;
-                    }
-                    let Some(remote_addr) =
-                        rtcp_destination(&transport, &reporter.packet_sender).await
+                    // RFC 5761 §5.1.1: reports share the RTP socket only with
+                    // negotiated multiplexing; otherwise they need a separate
+                    // RTCP socket, or are not sent at all.
+                    let Some(remote_addr) = rtcp_report_destination(
+                        &transport,
+                        &reporter.packet_sender,
+                        rtcp_mux.load(Ordering::Acquire),
+                    )
+                    .await
                     else {
-                        continue; // SDP has not supplied a peer yet.
+                        continue; // No peer yet, or no RTCP path to it.
                     };
 
                     let compound = reporter.build(None, true);
@@ -1684,8 +1764,64 @@ impl RtpSession {
         self.packet_sender.set_remote_addr(addr);
         if let Some(t) = self.transport.as_any().downcast_ref::<UdpRtpTransport>() {
             t.set_remote_rtp_addr(addr).await;
-            t.set_remote_rtcp_addr(addr).await;
         }
+        self.refresh_remote_rtcp_addr();
+    }
+
+    /// Set the peer's RTCP address from SDP `a=rtcp:` (RFC 3605), or clear
+    /// it with `None` to fall back to the peer's RTP port + 1. Only a
+    /// session with a separate RTCP socket that has not negotiated
+    /// multiplexing sends there; a multiplexing session reports to the
+    /// peer's RTP address whatever this says.
+    pub fn set_remote_rtcp_addr(&self, addr: Option<SocketAddr>) {
+        *self.signalled_remote_rtcp_addr.lock() = addr;
+        self.refresh_remote_rtcp_addr();
+    }
+
+    /// Local address of the separate RTCP socket, while one is open.
+    pub fn local_rtcp_addr(&self) -> Option<SocketAddr> {
+        self.transport
+            .as_any()
+            .downcast_ref::<UdpRtpTransport>()
+            .and_then(UdpRtpTransport::local_rtcp_socket_addr)
+    }
+
+    /// Close the separate RTCP socket, once RTP/RTCP multiplexing makes it
+    /// unnecessary, and return the address it was bound to so the caller can
+    /// hand the port back. RTCP uses the RTP socket from then on. `None`
+    /// when the session had no separate socket.
+    pub async fn release_rtcp_socket(&self) -> Option<SocketAddr> {
+        let udp = self.transport.as_any().downcast_ref::<UdpRtpTransport>()?;
+        let released = udp.release_rtcp_socket().await;
+        self.refresh_remote_rtcp_addr();
+        released
+    }
+
+    /// Point the transport's RTCP destination at the right place for the
+    /// current multiplexing state: the peer's RTP address when RTCP shares
+    /// the RTP socket, otherwise the signalled `a=rtcp:` address or the
+    /// peer's RTP port + 1 (RFC 3550 §11).
+    fn refresh_remote_rtcp_addr(&self) {
+        let Some(udp) = self.transport.as_any().downcast_ref::<UdpRtpTransport>() else {
+            return;
+        };
+        let Some(rtp_peer) = self.config.remote_addr else {
+            return;
+        };
+        let separate = udp.local_rtcp_socket_addr().is_some() && !udp.rtcp_mux();
+        let destination = if separate {
+            let signalled = *self.signalled_remote_rtcp_addr.lock();
+            match signalled {
+                Some(addr) => addr,
+                None => match rtp_peer.port().checked_add(1) {
+                    Some(port) => SocketAddr::new(rtp_peer.ip(), port),
+                    None => return,
+                },
+            }
+        } else {
+            rtp_peer
+        };
+        udp.store_remote_rtcp_addr(destination);
     }
 
     /// Get the local address
@@ -1701,9 +1837,14 @@ impl RtpSession {
     /// Close the session and clean up resources
     pub async fn close(&mut self) -> Result<()> {
         // Send BYE packet if we have a remote address. Like periodic reports
-        // it leaves from the RTP socket, so a peer that did not agree to
-        // rtcp-mux gets none (RFC 5761 §5.1.1).
-        if let Some(remote_addr) = self.config.remote_addr.filter(|_| self.rtcp_mux()) {
+        // it shares the RTP socket only with negotiated rtcp-mux, and
+        // otherwise needs a separate RTCP socket (RFC 5761 §5.1.1).
+        let bye_destination = if self.config.remote_addr.is_some() {
+            rtcp_report_destination(&self.transport, &self.packet_sender, self.rtcp_mux()).await
+        } else {
+            None
+        };
+        if let Some(remote_addr) = bye_destination {
             // Create BYE packet
             let bye = crate::packet::rtcp::RtcpGoodbye::new_with_reason(
                 self.ssrc,
@@ -2132,8 +2273,17 @@ impl RtpSession {
     /// known reports by default, as it always has. A session whose peer
     /// arrives later through SDP stays silent until the signalling layer
     /// confirms multiplexing here.
+    ///
+    /// A session built with [`Self::new_event_driven_with_rtcp_socket`]
+    /// sends from its separate RTCP socket to the peer's RTCP address while
+    /// multiplexing is not negotiated, and moves RTCP onto the RTP socket
+    /// when it is.
     pub fn set_rtcp_mux(&self, negotiated: bool) {
         self.rtcp_mux.store(negotiated, Ordering::Release);
+        if let Some(udp) = self.transport.as_any().downcast_ref::<UdpRtpTransport>() {
+            udp.set_rtcp_mux(negotiated);
+        }
+        self.refresh_remote_rtcp_addr();
     }
 
     /// Whether periodic RTCP reports may currently be sent.
@@ -3764,5 +3914,296 @@ mod tests {
         let stats = session.get_stats();
         assert_eq!(stats.rtcp_packets_received, 1);
         assert_eq!(stats.rtcp_packets_rejected, 1);
+    }
+
+    /// Bind an RTP socket and the RTCP socket on the port above it, the way
+    /// a peer that does not multiplex lays out its ports (RFC 3550 §11).
+    async fn bind_port_pair() -> (UdpSocket, UdpSocket) {
+        for _ in 0..64 {
+            let rtp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let Some(next) = rtp.local_addr().unwrap().port().checked_add(1) else {
+                continue;
+            };
+            if let Ok(rtcp) = UdpSocket::bind(("127.0.0.1", next)).await {
+                return (rtp, rtcp);
+            }
+        }
+        panic!("no adjacent UDP port pair available");
+    }
+
+    async fn non_mux_session(policy: SymmetricRtpPolicy, ssrc: RtpSsrc) -> RtpSession {
+        let mut session = RtpSession::new_event_driven_with_rtcp_socket(
+            RtpSessionConfig {
+                local_addr: "127.0.0.1:0".parse().unwrap(),
+                ssrc: Some(ssrc),
+                ..RtpSessionConfig::default()
+            },
+            policy,
+            "127.0.0.1:0".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+        fast_rtcp(&mut session);
+        session
+    }
+
+    /// Wait for one compound RTCP datagram, returning it and its source.
+    async fn recv_rtcp(socket: &UdpSocket) -> (Vec<u8>, SocketAddr) {
+        let mut bytes = [0u8; 2048];
+        let (n, source) =
+            tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut bytes))
+                .await
+                .expect("no RTCP arrived")
+                .unwrap();
+        (bytes[..n].to_vec(), source)
+    }
+
+    async fn assert_silent(socket: &UdpSocket, what: &str) {
+        let mut bytes = [0u8; 2048];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(800), socket.recv_from(&mut bytes))
+                .await
+                .is_err(),
+            "{what}"
+        );
+    }
+
+    /// An SR from `sender` with a report block about `about` that yields an
+    /// RTT sample.
+    fn sender_report_about(sender: RtpSsrc, about: RtpSsrc) -> Vec<u8> {
+        use crate::packet::rtcp::{
+            NtpTimestamp, RtcpCompoundPacket, RtcpReportBlock, RtcpSenderReport,
+        };
+        let mut sr = RtcpSenderReport::new(sender);
+        sr.ntp_timestamp = NtpTimestamp::now();
+        let mut block = RtcpReportBlock::new(about);
+        block.last_sr = NtpTimestamp::now().to_u32().wrapping_sub(0x0001_0000);
+        sr.report_blocks.push(block);
+        RtcpCompoundPacket::new_with_sr(sr).serialize().unwrap().to_vec()
+    }
+
+    async fn next_sender_report(events: &mut broadcast::Receiver<RtpSessionEvent>) -> RtpSsrc {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let RtpSessionEvent::RtcpSenderReport { ssrc, .. } = events.recv().await.unwrap()
+                {
+                    break ssrc;
+                }
+            }
+        })
+        .await
+        .expect("the peer's RTCP was dropped")
+    }
+
+    #[tokio::test]
+    async fn non_mux_rtcp_uses_the_separate_socket_and_the_peers_rtp_port_plus_one() {
+        let (peer_rtp, peer_rtcp) = bind_port_pair().await;
+        let local_ssrc = 0x5151_5151;
+        let mut session = non_mux_session(SymmetricRtpPolicy::default(), local_ssrc).await;
+        let local_rtcp = session.local_rtcp_addr().expect("separate RTCP socket");
+        assert_ne!(local_rtcp, session.local_addr().unwrap());
+        session.set_remote_addr(peer_rtp.local_addr().unwrap()).await;
+        assert!(!session.rtcp_mux());
+
+        // Periodic reports reach RTP + 1 from our RTCP socket.
+        let (report, source) = recv_rtcp(&peer_rtcp).await;
+        assert_eq!(source, local_rtcp);
+        let report = crate::packet::rtcp::RtcpCompoundPacket::parse(&report).unwrap();
+        assert_eq!(report.get_rr().unwrap().ssrc, local_ssrc);
+
+        // The peer's RTCP to our RTCP port is parsed and yields an RTT.
+        let mut events = session.subscribe();
+        peer_rtcp
+            .send_to(&sender_report_about(0x6262_6262, local_ssrc), local_rtcp)
+            .await
+            .unwrap();
+        assert_eq!(next_sender_report(&mut events).await, 0x6262_6262);
+        let stats = session.get_stats();
+        assert!(stats.rtt_ms.is_some(), "no RTT from the peer's report");
+        assert_eq!(stats.rtcp_packets_received, 1);
+
+        // Nothing ever reached the RTP port.
+        assert_silent(&peer_rtp, "RTCP reached the RTP port of a non-mux peer").await;
+
+        session.close().await.unwrap();
+        let bye = loop {
+            let (data, source) = recv_rtcp(&peer_rtcp).await;
+            assert_eq!(source, local_rtcp);
+            let compound = crate::packet::rtcp::RtcpCompoundPacket::parse(&data).unwrap();
+            if compound
+                .packets
+                .iter()
+                .any(|p| matches!(p, crate::packet::rtcp::RtcpPacket::Goodbye(_)))
+            {
+                break data;
+            }
+        };
+        assert_compound_bye(&bye, local_ssrc, "Session closed");
+        assert_silent(&peer_rtp, "the close-time BYE reached the RTP port").await;
+    }
+
+    #[tokio::test]
+    async fn non_mux_rtcp_follows_the_peers_a_rtcp_address() {
+        let peer_rtp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer_rtcp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut session = non_mux_session(SymmetricRtpPolicy::default(), 0x0102_0304).await;
+        session.set_remote_addr(peer_rtp.local_addr().unwrap()).await;
+        session.set_remote_rtcp_addr(Some(peer_rtcp.local_addr().unwrap()));
+        let (_, source) = recv_rtcp(&peer_rtcp).await;
+        assert_eq!(Some(source), session.local_rtcp_addr());
+        assert_silent(&peer_rtp, "RTCP reached the RTP port of a non-mux peer").await;
+
+        // An a=rtcp: naming the RTP port itself would be multiplexing the
+        // peer never agreed to; nothing is sent.
+        session.set_remote_rtcp_addr(Some(peer_rtp.local_addr().unwrap()));
+        let mut bytes = [0u8; 2048];
+        while tokio::time::timeout(Duration::from_millis(300), peer_rtcp.recv_from(&mut bytes))
+            .await
+            .is_ok()
+        {}
+        assert_silent(&peer_rtp, "RTCP was sent to an a=rtcp: naming the RTP port").await;
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn negotiated_mux_moves_rtcp_to_the_rtp_socket_and_frees_the_rtcp_port() {
+        let (peer_rtp, peer_rtcp) = bind_port_pair().await;
+        let session = non_mux_session(SymmetricRtpPolicy::default(), 0x0a0a_0a0a).await;
+        let local_rtcp = session.local_rtcp_addr().unwrap();
+        let local_rtp = session.local_addr().unwrap();
+        let mut session = session;
+        session.set_remote_addr(peer_rtp.local_addr().unwrap()).await;
+        session.set_rtcp_mux(true);
+        assert_eq!(session.release_rtcp_socket().await, Some(local_rtcp));
+        assert_eq!(session.local_rtcp_addr(), None);
+        assert_eq!(session.release_rtcp_socket().await, None);
+        // The port is closed: it can be bound again at once.
+        drop(UdpSocket::bind(local_rtcp).await.expect("RTCP port was not released"));
+
+        let mut bytes = [0u8; 2048];
+        // Drain anything sent to RTP + 1 before the switch.
+        while tokio::time::timeout(Duration::from_millis(50), peer_rtcp.recv_from(&mut bytes))
+            .await
+            .is_ok()
+        {}
+        let (_, source) = recv_rtcp(&peer_rtp).await;
+        assert_eq!(source, local_rtp);
+        assert_silent(&peer_rtcp, "RTCP still reached RTP + 1 after mux").await;
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn neighbouring_rtcp_on_the_separate_rtcp_socket_is_rejected() {
+        let (peer_rtp, _peer_rtcp) = bind_port_pair().await;
+        let neighbour = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let local_ssrc = 0x7373_7373;
+        let mut session = non_mux_session(SymmetricRtpPolicy::default(), local_ssrc).await;
+        session.set_remote_addr(peer_rtp.local_addr().unwrap()).await;
+        let local_rtcp = session.local_rtcp_addr().unwrap();
+        let mut events = session.subscribe();
+        neighbour
+            .send_to(&sender_report_about(0x0e0e_0e0e, local_ssrc), local_rtcp)
+            .await
+            .unwrap();
+        assert_no_rtcp_event(&mut events).await;
+        let stats = session.get_stats();
+        assert_eq!(stats.rtt_ms, None, "a stranger's report set our RTT");
+        assert_eq!(stats.rtcp_packets_received, 0);
+        assert_eq!(stats.rtcp_packets_rejected, 1);
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn symmetric_rtcp_latches_the_peers_mapped_rtcp_source_only() {
+        // A peer behind NAT: its RTP arrives from the signalled address, its
+        // RTCP from a mapped port that is not RTP + 1.
+        let (peer_rtp, peer_rtcp_signalled) = bind_port_pair().await;
+        let peer_rtcp_mapped = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let stranger = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let local_ssrc = 0x3434_3434;
+        let remote_ssrc = 0x4545_4545;
+        let mut session = non_mux_session(SymmetricRtpPolicy::default(), local_ssrc).await;
+        session.set_remote_addr(peer_rtp.local_addr().unwrap()).await;
+        let local_rtcp = session.local_rtcp_addr().unwrap();
+        let mut events = session.subscribe();
+        send_raw_rtp(
+            &peer_rtp,
+            session.local_addr().unwrap(),
+            1,
+            160,
+            remote_ssrc,
+        )
+        .await;
+        next_packet_event(&mut events).await;
+
+        // A stranger's report does not move the destination.
+        stranger
+            .send_to(&sender_report_about(0x0e0e_0e0e, local_ssrc), local_rtcp)
+            .await
+            .unwrap();
+        assert_no_rtcp_event(&mut events).await;
+
+        peer_rtcp_mapped
+            .send_to(&sender_report_about(remote_ssrc, local_ssrc), local_rtcp)
+            .await
+            .unwrap();
+        assert_eq!(next_sender_report(&mut events).await, remote_ssrc);
+        let mut bytes = [0u8; 2048];
+        while tokio::time::timeout(
+            Duration::from_millis(50),
+            peer_rtcp_signalled.recv_from(&mut bytes),
+        )
+        .await
+        .is_ok()
+        {}
+        let (_, source) = recv_rtcp(&peer_rtcp_mapped).await;
+        assert_eq!(source, local_rtcp);
+        assert_silent(&peer_rtcp_signalled, "RTCP kept going to RTP + 1").await;
+        assert_silent(&stranger, "RTCP went to a stranger").await;
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn non_mux_rtcp_is_srtcp_protected_both_ways() {
+        let (peer_rtp, peer_rtcp) = bind_port_pair().await;
+        let local_ssrc = 0x1919_1919;
+        let mut session = non_mux_session(SymmetricRtpPolicy::default(), local_ssrc).await;
+        let transport = session.transport();
+        let udp = transport
+            .as_any()
+            .downcast_ref::<UdpRtpTransport>()
+            .unwrap();
+        let context = || {
+            crate::srtp::SrtpContext::new(
+                crate::srtp::SRTP_AES128_CM_SHA1_80,
+                crate::srtp::SrtpCryptoKey::new(vec![0x11; 16], vec![0x22; 14]),
+            )
+            .unwrap()
+        };
+        udp.set_srtp_contexts(context(), context()).await.unwrap();
+        session.set_remote_addr(peer_rtp.local_addr().unwrap()).await;
+
+        let (wire, _) = recv_rtcp(&peer_rtcp).await;
+        let plaintext = context().unprotect_rtcp(&wire).unwrap();
+        assert_ne!(wire, plaintext.as_ref());
+        let report = crate::packet::rtcp::RtcpCompoundPacket::parse(&plaintext).unwrap();
+        assert_eq!(report.get_rr().unwrap().ssrc, local_ssrc);
+
+        let mut events = session.subscribe();
+        let local_rtcp = session.local_rtcp_addr().unwrap();
+        // Plain RTCP is refused on a secure session; SRTCP is accepted.
+        peer_rtcp
+            .send_to(&sender_report_about(0x2727_2727, local_ssrc), local_rtcp)
+            .await
+            .unwrap();
+        assert_no_rtcp_event(&mut events).await;
+        let protected = context()
+            .protect_rtcp(&sender_report_about(0x2727_2727, local_ssrc))
+            .unwrap();
+        peer_rtcp.send_to(&protected, local_rtcp).await.unwrap();
+        assert_eq!(next_sender_report(&mut events).await, 0x2727_2727);
+        assert!(session.get_stats().rtt_ms.is_some());
+        assert_silent(&peer_rtp, "SRTCP reached the RTP port of a non-mux peer").await;
+        session.close().await.unwrap();
     }
 }
