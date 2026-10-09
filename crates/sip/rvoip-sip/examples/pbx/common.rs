@@ -1102,10 +1102,7 @@ impl EndpointConfig {
     pub fn stream_config(&self) -> Config {
         let mut config = match self.provider {
             PbxProvider::Asterisk => Config::on(&self.username, self.local_ip, self.local_port),
-            PbxProvider::FreeSwitch => Config::freeswitch_internal(
-                &self.username,
-                SocketAddr::new(self.local_ip, self.local_port),
-            ),
+            PbxProvider::FreeSwitch => Config::on(&self.username, self.local_ip, self.local_port),
             PbxProvider::Jambonz => Config::on(&self.username, self.local_ip, self.local_port),
             // Plain config: the proxies impose no FreeSWITCH-shaped quirks.
             PbxProvider::Kamailio | PbxProvider::OpenSips => {
