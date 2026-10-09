@@ -68,6 +68,7 @@ required-features = ["wss"]
 [dev-dependencies]
 rvoip-webrtc.workspace = true
 rustls.workspace = true
+subtle.workspace = true
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber.workspace = true
 uuid = { workspace = true, features = ["v4"] }
