@@ -67,9 +67,11 @@
   for the other). 422 is retried at once with the response's `Min-SE` as both
   the floor and the minimum interval (§7.4). A rejected UPDATE still falls
   back to re-INVITE. Any other rejection of the re-INVITE (488, 403, 5xx, …)
-  keeps the call and logs a warning: the session was not refreshed this time
-  and expires at the end of the current interval, unless the peer refreshes
-  it or another re-INVITE or UPDATE succeeds first.
+  keeps the call and logs a warning. One more refresh is attempted halfway to
+  the BYE deadline (at most once per interval, within the four-retry cap);
+  if that is rejected too, the session expires at the end of the current
+  interval unless the peer refreshes it or another re-INVITE or UPDATE
+  succeeds first.
 - In-dialog REFER, MESSAGE, INFO, NOTIFY, OPTIONS and every other in-dialog
   request now use the remote target (the peer's `Contact`) as the
   Request-URI, as RFC 3261 §12.2.1.1 requires; the To header keeps the
@@ -96,8 +98,10 @@
   without timer support whose request carries a proxy-inserted
   `Session-Expires` below the local Min-SE is answered with the Min-SE
   instead of the smaller value; a timer-capable caller still gets 422.
-  Tests that need second-scale intervals set the hidden
-  `Config::session_timer_allow_short_intervals_for_testing`.
+  Tests that need second-scale intervals set
+  `Config::session_timer_allow_short_intervals_for_testing`, which exists
+  only with the `test-hooks` feature; every rvoip-sip CI lane now builds with
+  `test-hooks` so those tests and process fixtures run.
 
 ## 0.3.12
 
