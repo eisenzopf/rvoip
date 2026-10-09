@@ -1445,6 +1445,7 @@ pub struct Orchestrator {
     /// Bounds the number of provisional outbound routes that may await a
     /// durable application bind at once.
     prepared_outbound_capacity: Arc<Semaphore>,
+    prepared_outbound_capacity_total: usize,
     /// One lazily-started owner for preparation deadlines and bounded adapter
     /// cleanup tasks. Tickets enqueue decisions; they never detach cleanup
     /// work themselves.
@@ -1943,6 +1944,7 @@ impl Orchestrator {
             replacement_preparation_test_gate: OnceLock::new(),
             admission,
             prepared_outbound_capacity: Arc::new(Semaphore::new(setup_capacity)),
+            prepared_outbound_capacity_total: setup_capacity,
             prepared_outbound_supervisor: PreparedOutboundSupervisor::new(setup_capacity),
             prepared_outbound_draining: AtomicBool::new(false),
             prepared_outbound_drained: AtomicBool::new(false),
@@ -2025,6 +2027,7 @@ impl Orchestrator {
             replacement_preparation_test_gate: OnceLock::new(),
             admission,
             prepared_outbound_capacity: Arc::new(Semaphore::new(setup_capacity)),
+            prepared_outbound_capacity_total: setup_capacity,
             prepared_outbound_supervisor: PreparedOutboundSupervisor::new(setup_capacity),
             prepared_outbound_draining: AtomicBool::new(false),
             prepared_outbound_drained: AtomicBool::new(false),
@@ -5469,6 +5472,120 @@ impl Orchestrator {
             admission_in_use,
             at: Utc::now(),
         }
+    }
+
+    /// Observe core ownership and concurrently query adapters under one
+    /// overall deadline. No observation tasks are spawned. Pending adapter
+    /// futures are dropped on timeout; failed hooks expose no error text.
+    ///
+    /// The budget applies to asynchronous adapter collection; the preceding
+    /// synchronous core census scans bounded ownership registries. Timeout
+    /// relies on adapters obeying the cooperative, cancellation-safe hook
+    /// contract. Zero budget skips adapter hooks and marks them TimedOut.
+    pub async fn resource_snapshot(
+        &self,
+        adapter_budget: std::time::Duration,
+    ) -> Result<crate::resources::ResourceSnapshot> {
+        use crate::resources::*;
+        let mut core = CoreResourceCounts::default();
+        for entry in self.conversations.iter() {
+            let conversation = entry.value().read().unwrap_or_else(|p| p.into_inner());
+            if conversation.state == ConversationState::Closed {
+                core.conversations.retained_terminal += 1;
+            } else {
+                core.conversations.live += 1;
+            }
+        }
+        for entry in self.sessions.iter() {
+            let session = entry.value().read().unwrap_or_else(|p| p.into_inner());
+            if matches!(session.state, SessionState::Ended | SessionState::Failed) {
+                core.sessions.retained_terminal += 1;
+            } else {
+                core.sessions.live += 1;
+            }
+        }
+        core.connection_routes = self.connections.len();
+        for entry in self.connection_lifecycles.iter() {
+            core.retained_connection_ids += 1;
+            if entry
+                .value()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .retired
+            {
+                core.retired_connection_ids += 1;
+            }
+        }
+        core.adapter_cleanup_quarantines = self.adapter_cleanup_quarantines.len();
+        core.media_graphs = self.media_graphs.len();
+        core.cross_bridges = self.cross_bridges.len();
+        core.recordings = self.recordings.len();
+        core.ai_attachments = self.ai_attachments.len();
+        core.direct_listeners = self.active_direct_listener_count();
+        core.prepared_outbound_reservations = self
+            .prepared_outbound_capacity_total
+            .saturating_sub(self.prepared_outbound_capacity.available_permits());
+        core.lifecycle_workers = self.connection_lifecycle_task_count();
+        core.periodic_workers = self.periodic_task_count();
+
+        type ObservationFuture =
+            std::pin::Pin<Box<dyn Future<Output = AdapterResourceObservation> + Send>>;
+        let mut pending: Vec<(
+            Transport,
+            Option<ObservationFuture>,
+            Option<AdapterResourceObservation>,
+        )> = self
+            .adapters
+            .iter()
+            .map(|entry| {
+                let transport = *entry.key();
+                let adapter = Arc::clone(entry.value());
+                let future: ObservationFuture = Box::pin(async move {
+                    match adapter.resource_snapshot().await {
+                        Ok(Some(counts)) => AdapterResourceObservation::Reported(counts),
+                        Ok(None) => AdapterResourceObservation::Unsupported,
+                        Err(_) => AdapterResourceObservation::Failed,
+                    }
+                });
+                (transport, Some(future), None)
+            })
+            .collect();
+        if !adapter_budget.is_zero() {
+            let deadline = tokio::time::Instant::now()
+                .checked_add(adapter_budget)
+                .ok_or(RvoipError::InvalidState(
+                    "resource snapshot deadline overflow",
+                ))?;
+            let collection = std::future::poll_fn(|cx| {
+                let mut complete = true;
+                for (_, future, result) in &mut pending {
+                    if let Some(worker) = future {
+                        if let std::task::Poll::Ready(observation) = worker.as_mut().poll(cx) {
+                            *result = Some(observation);
+                            *future = None;
+                        } else {
+                            complete = false;
+                        }
+                    }
+                }
+                if complete {
+                    std::task::Poll::Ready(())
+                } else {
+                    std::task::Poll::Pending
+                }
+            });
+            let _ = tokio::time::timeout_at(deadline, collection).await;
+        }
+        let adapters = pending
+            .into_iter()
+            .map(|(transport, _, observation)| {
+                AdapterResourceSnapshot::new(
+                    transport,
+                    observation.unwrap_or(AdapterResourceObservation::TimedOut),
+                )
+            })
+            .collect();
+        Ok(ResourceSnapshot { core, adapters })
     }
 
     /// P9 — sample current `QualitySnapshot` for every active

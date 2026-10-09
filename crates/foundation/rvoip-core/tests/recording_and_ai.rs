@@ -30,6 +30,10 @@ use tokio::sync::mpsc;
 struct OneStreamAdapter {
     inbound: Mutex<Option<mpsc::Receiver<AdapterEvent>>>,
     stream: Arc<TestStream>,
+    transport: Transport,
+    snapshot_mode: std::sync::atomic::AtomicUsize,
+    snapshot_calls: std::sync::atomic::AtomicUsize,
+    snapshot_inflight: std::sync::atomic::AtomicUsize,
 }
 
 struct TestStream {
@@ -98,6 +102,10 @@ impl OneStreamAdapter {
         let a = Arc::new(Self {
             inbound: Mutex::new(Some(rx)),
             stream: stream.clone(),
+            transport: Transport::Sip,
+            snapshot_mode: std::sync::atomic::AtomicUsize::new(0),
+            snapshot_calls: std::sync::atomic::AtomicUsize::new(0),
+            snapshot_inflight: std::sync::atomic::AtomicUsize::new(0),
         });
         (a, tx, stream)
     }
@@ -106,7 +114,33 @@ impl OneStreamAdapter {
 #[async_trait::async_trait]
 impl ConnectionAdapter for OneStreamAdapter {
     fn transport(&self) -> Transport {
-        Transport::Sip
+        self.transport
+    }
+    async fn resource_snapshot(
+        &self,
+    ) -> RvResult<Option<rvoip_core::resources::AdapterResourceCounts>> {
+        use std::sync::atomic::Ordering;
+        self.snapshot_calls.fetch_add(1, Ordering::SeqCst);
+        match self.snapshot_mode.load(Ordering::SeqCst) {
+            1 => {
+                let mut counts = rvoip_core::resources::AdapterResourceCounts::default();
+                counts.registered_connections = Some(0);
+                Ok(Some(counts))
+            }
+            2 => {
+                struct Inflight<'a>(&'a std::sync::atomic::AtomicUsize);
+                impl Drop for Inflight<'_> {
+                    fn drop(&mut self) {
+                        self.0.fetch_sub(1, Ordering::SeqCst);
+                    }
+                }
+                self.snapshot_inflight.fetch_add(1, Ordering::SeqCst);
+                let _guard = Inflight(&self.snapshot_inflight);
+                std::future::pending().await
+            }
+            3 => Err(RvoipError::InvalidState("private adapter failure detail")),
+            _ => Ok(None),
+        }
     }
     fn kind(&self) -> AdapterKind {
         AdapterKind::Interop
@@ -645,4 +679,167 @@ async fn pcm_playback_cancel_interrupts_blocked_delivery() {
     .unwrap();
     orch.drain_playback_tasks().await;
     assert_eq!(orch.playback_task_count(), 0);
+}
+
+#[tokio::test]
+async fn resource_snapshot_separates_live_objects_from_retained_terminal_state() {
+    use rvoip_core::resources::AdapterResourceObservation;
+    let (orch, tx, _stream, conn) = setup().await;
+    let session = orch.session_of(&conn).unwrap();
+    let conversation = orch
+        .session(&session)
+        .unwrap()
+        .read()
+        .unwrap()
+        .conversation_id
+        .clone();
+    let before = orch
+        .resource_snapshot(Duration::from_millis(50))
+        .await
+        .unwrap();
+    assert_eq!(before.core.conversations.live, 1);
+    assert_eq!(before.core.sessions.live, 1);
+    assert_eq!(before.core.connection_routes, 1);
+    assert_eq!(before.core.retained_connection_ids, 1);
+    assert_eq!(before.core.retired_connection_ids, 0);
+    assert_eq!(
+        before.adapters[0].observation,
+        AdapterResourceObservation::Unsupported
+    );
+    tx.send(AdapterEvent::Ended {
+        connection_id: conn.clone(),
+        reason: EndReason::Normal,
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while orch
+            .resource_snapshot(Duration::ZERO)
+            .await
+            .unwrap()
+            .core
+            .connection_routes
+            != 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    orch.end_session(session.clone(), EndReason::Normal)
+        .await
+        .unwrap();
+    orch.close_conversation(conversation.clone(), false)
+        .await
+        .unwrap();
+    orch.spawn_media_quality_sampler(Duration::from_secs(60));
+    let after = orch
+        .resource_snapshot(Duration::from_millis(50))
+        .await
+        .unwrap();
+    assert_eq!(after.core.conversations.live, 0);
+    assert_eq!(after.core.conversations.retained_terminal, 1);
+    assert_eq!(after.core.sessions.live, 0);
+    assert_eq!(after.core.sessions.retained_terminal, 1);
+    assert_eq!(after.core.retained_connection_ids, 1);
+    assert_eq!(after.core.retired_connection_ids, 1);
+    assert_eq!(after.core.periodic_workers, 1);
+    let json = serde_json::to_string(&after).unwrap();
+    for id in [
+        conn.to_string(),
+        session.to_string(),
+        conversation.to_string(),
+    ] {
+        assert!(!json.contains(&id));
+    }
+    orch.drain_connection_lifecycle_tasks().await;
+    assert_eq!(
+        orch.resource_snapshot(Duration::ZERO)
+            .await
+            .unwrap()
+            .core
+            .periodic_workers,
+        0
+    );
+}
+
+#[tokio::test]
+async fn resource_snapshot_collects_concurrently_and_drops_timed_out_hooks() {
+    use rvoip_core::resources::AdapterResourceObservation;
+    use std::sync::atomic::Ordering;
+    let orch = Orchestrator::new(Config::default());
+    let mut adapters = Vec::new();
+    for (transport, mode) in [
+        (Transport::Sip, 1),
+        (Transport::WebRtc, 2),
+        (Transport::Vapi, 3),
+    ] {
+        let (mut adapter, _events, _stream) = OneStreamAdapter::new();
+        Arc::get_mut(&mut adapter).unwrap().transport = transport;
+        adapter.snapshot_mode.store(mode, Ordering::SeqCst);
+        orch.register(adapter.clone()).unwrap();
+        adapters.push(adapter);
+    }
+    let snapshot = tokio::time::timeout(
+        Duration::from_secs(1),
+        orch.resource_snapshot(Duration::from_millis(30)),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let observation = |transport| {
+        &snapshot
+            .adapters
+            .iter()
+            .find(|item| item.transport == transport)
+            .unwrap()
+            .observation
+    };
+    let AdapterResourceObservation::Reported(counts) = observation(Transport::Sip) else {
+        panic!("fast hook must complete despite another pending hook");
+    };
+    assert_eq!(counts.registered_connections, Some(0));
+    assert_eq!(counts.allocated_media_ports, None);
+    assert_eq!(
+        observation(Transport::WebRtc),
+        &AdapterResourceObservation::TimedOut
+    );
+    assert_eq!(
+        observation(Transport::Vapi),
+        &AdapterResourceObservation::Failed
+    );
+    assert_eq!(adapters[1].snapshot_inflight.load(Ordering::SeqCst), 0);
+    assert!(!serde_json::to_string(&snapshot)
+        .unwrap()
+        .contains("private adapter failure detail"));
+    orch.drain_connection_lifecycle_tasks().await;
+}
+
+#[tokio::test]
+async fn resource_snapshot_zero_budget_skips_hooks() {
+    use std::sync::atomic::Ordering;
+    let orch = Orchestrator::new(Config::default());
+    let (adapter, _events, _stream) = OneStreamAdapter::new();
+    adapter.snapshot_mode.store(2, Ordering::SeqCst);
+    orch.register(adapter.clone()).unwrap();
+    let snapshot = orch.resource_snapshot(Duration::ZERO).await.unwrap();
+    assert_eq!(
+        snapshot.adapters[0].observation,
+        rvoip_core::resources::AdapterResourceObservation::TimedOut
+    );
+    assert_eq!(adapter.snapshot_calls.load(Ordering::SeqCst), 0);
+    orch.drain_connection_lifecycle_tasks().await;
+}
+
+#[tokio::test]
+async fn resource_snapshot_zero_admission_capacity_has_zero_reservations() {
+    let orch = Orchestrator::new(Config {
+        max_concurrent_setups: 0,
+        ..Config::default()
+    });
+    let snapshot = orch.resource_snapshot(Duration::ZERO).await.unwrap();
+    assert_eq!(snapshot.core.prepared_outbound_reservations, 0);
+    assert_eq!(snapshot.core.connection_routes, 0);
+    assert_eq!(snapshot.core.retired_connection_ids, 0);
+    assert!(snapshot.adapters.is_empty());
 }
