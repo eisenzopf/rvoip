@@ -128,20 +128,36 @@ fn session_refresh_headers(session: &SessionState) -> crate::errors::Result<Vec<
             "RFC 4028 refresh has no negotiated Session-Expires interval".to_string(),
         )
     })?;
-    let refresher = match session.role {
-        crate::state_table::Role::UAC => Refresher::Uac,
-        crate::state_table::Role::UAS => Refresher::Uas,
-        crate::state_table::Role::Both => {
-            return Err(crate::errors::SessionError::InvalidTransition(
-                "RFC 4028 refresh requires a concrete dialog role".to_string(),
-            ));
-        }
-    };
+    // RFC 4028 §5: `refresher` names a role in *this* transaction, not the
+    // dialog. Only the local refresher sends refreshes, and §7.4 recommends
+    // `uac` when the sender is the one performing refreshes — so it stays
+    // `uac` whether this side created the dialog as UAC or UAS.
+    // RFC 4028 §7.4: once a 422 raised the floor on this dialog, every later
+    // refresh carries the largest Min-SE received.
+    let base_min_se = interval.clamp(1, 90);
+    let min_se = session
+        .session_timer_min_se
+        .map_or(base_min_se, |received| received.max(base_min_se));
     Ok(vec![
-        TypedHeader::SessionExpires(SessionExpires::new(interval, Some(refresher))),
-        TypedHeader::MinSE(MinSE::new(interval.clamp(1, 90))),
+        TypedHeader::SessionExpires(SessionExpires::new(interval, Some(Refresher::Uac))),
+        TypedHeader::MinSE(MinSE::new(min_se)),
         TypedHeader::Supported(Supported::new(vec!["timer".to_string()])),
     ])
+}
+
+/// RFC 4028 §10: the refresher sends its refresh at half the session
+/// interval.
+pub(crate) fn session_refresh_due_secs(interval_secs: u32) -> u32 {
+    (interval_secs / 2).max(1)
+}
+
+/// RFC 4028 §10: when no refresh arrives, the non-refresher sends BYE
+/// "slightly before the session expiration", recommended at
+/// `interval - min(32, interval / 3)`.
+pub(crate) fn session_peer_expiry_secs(interval_secs: u32) -> u32 {
+    interval_secs
+        .saturating_sub(32.min(interval_secs / 3))
+        .max(1)
 }
 
 fn prepare_session_refresh_update(
@@ -194,8 +210,15 @@ fn prepare_session_refresh_reinvite(
             SessionRefreshDeadlineKind::ReinviteDue,
         ));
     }
+    // RFC 4028 §7.4: a refresh re-INVITE SHOULD carry an offer even when
+    // nothing changed. Re-offering the current local description unchanged
+    // (same o= version, RFC 3264 §8) keeps media as it is; dialog-core
+    // refuses to build an offerless re-INVITE.
     session.pending_reinvite_options = Some(Arc::new(ReInviteRequestOptions {
-        sdp: None,
+        sdp: session
+            .local_sdp
+            .clone()
+            .filter(|sdp| !sdp.trim().is_empty()),
         session_timer_refresh: true,
         precomputed_authorization: None,
         extra_headers: session_refresh_headers(session)?,
@@ -3187,9 +3210,9 @@ pub(crate) async fn execute_action(
                     session.session_refresh_local_refresher = local_refresher;
                     session.session_refresh_phase = SessionRefreshPhase::Idle;
                     let delay_secs = if local_refresher {
-                        (interval_secs / 2).max(1)
+                        session_refresh_due_secs(interval_secs)
                     } else {
-                        interval_secs.max(1)
+                        session_peer_expiry_secs(interval_secs)
                     };
                     let kind = if local_refresher {
                         SessionRefreshDeadlineKind::UpdateDue
@@ -6526,5 +6549,77 @@ mod invite_option_diagnostic_tests {
                         && details.qop.as_deref() == Some("auth")
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod rfc4028_session_timer_tests {
+    use super::{session_peer_expiry_secs, session_refresh_due_secs, session_refresh_headers};
+    use crate::session_store::state::SessionState;
+    use crate::state_table::{Role, SessionId};
+    use rvoip_sip_core::types::session_expires::Refresher;
+    use rvoip_sip_core::types::TypedHeader;
+
+    #[test]
+    fn non_refresher_expires_before_the_full_interval() {
+        // RFC 4028 §10: interval - min(32, interval / 3).
+        assert_eq!(session_peer_expiry_secs(1800), 1768);
+        assert_eq!(session_peer_expiry_secs(90), 60);
+        assert_eq!(session_peer_expiry_secs(96), 64);
+        assert_eq!(session_peer_expiry_secs(9), 6);
+        assert_eq!(session_peer_expiry_secs(4), 3);
+        assert_eq!(session_peer_expiry_secs(1), 1);
+        assert_eq!(session_peer_expiry_secs(0), 1);
+        // The refresher still refreshes at half the interval, always before
+        // the non-refresher gives up.
+        for interval in [2, 4, 10, 90, 1800, 7200] {
+            assert_eq!(session_refresh_due_secs(interval), interval / 2);
+            assert!(session_refresh_due_secs(interval) < session_peer_expiry_secs(interval));
+        }
+    }
+
+    fn refresh_header_parts(session: &SessionState) -> (Option<Refresher>, u32, u32) {
+        let headers = session_refresh_headers(session).expect("refresh headers");
+        let (refresher, interval) = headers
+            .iter()
+            .find_map(|h| match h {
+                TypedHeader::SessionExpires(se) => Some((se.refresher, se.delta_seconds)),
+                _ => None,
+            })
+            .expect("Session-Expires");
+        let min_se = headers
+            .iter()
+            .find_map(|h| match h {
+                TypedHeader::MinSE(min) => Some(min.delta_seconds),
+                _ => None,
+            })
+            .expect("Min-SE");
+        (refresher, interval, min_se)
+    }
+
+    #[test]
+    fn refresh_names_the_sender_as_refresher_for_either_dialog_role() {
+        // RFC 4028 §5/§7.4: `refresher` is relative to the refresh
+        // transaction, so the refreshing side always sends `uac`.
+        for role in [Role::UAC, Role::UAS] {
+            let mut session = SessionState::new(SessionId::new(), role);
+            session.session_refresh_interval_secs = Some(1800);
+            let (refresher, interval, min_se) = refresh_header_parts(&session);
+            assert_eq!(refresher, Some(Refresher::Uac), "{role:?}");
+            assert_eq!(interval, 1800);
+            assert_eq!(min_se, 90);
+        }
+    }
+
+    #[test]
+    fn refresh_carries_the_largest_min_se_received_in_a_422() {
+        // RFC 4028 §7.4.
+        let mut session = SessionState::new(SessionId::new(), Role::UAC);
+        session.session_refresh_interval_secs = Some(300);
+        session.session_timer_min_se = Some(300);
+        assert_eq!(
+            refresh_header_parts(&session),
+            (Some(Refresher::Uac), 300, 300)
+        );
     }
 }
