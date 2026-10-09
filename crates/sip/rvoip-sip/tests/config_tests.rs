@@ -466,6 +466,17 @@ fn rtcp_mux_offer_is_default_on_for_every_profile_and_can_be_disabled() {
 }
 
 #[test]
+fn rtcp_non_mux_is_default_off_for_every_profile_and_has_a_builder() {
+    for config in [Config::default(), Config::local("alice", 5060)] {
+        assert!(!config.rtcp_non_mux);
+        assert!(format!("{config:?}").contains("rtcp_non_mux: false"));
+    }
+    let config = Config::local("alice", 5060).with_rtcp_non_mux(true);
+    assert!(config.rtcp_non_mux);
+    assert!(format!("{config:?}").contains("rtcp_non_mux: true"));
+}
+
+#[test]
 fn dtls_setup_role_builder_selects_active() {
     let config = Config::local("alice", 5060).with_dtls_setup_role(DtlsSetupRole::Active);
     assert_eq!(config.dtls_setup_role, DtlsSetupRole::Active);

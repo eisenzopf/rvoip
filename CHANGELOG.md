@@ -86,6 +86,29 @@
 - New `Config::active_call_rtcp_counts_as_media` (default `false`) lets RTCP
   from the call's peer count as activity for the active-call no-media and
   media-idle watchdogs, so held or silent calls that still report are kept.
+- RTCP for peers that decline rtcp-mux. New `Config::rtcp_non_mux` (default
+  `false`) gives each call an even RTP port and RTP port + 1 for a separate
+  RTCP socket (RFC 3550 §11), reserved together so concurrent calls never
+  collide. Calls rvoip offers reserve the pair up front; inbound calls only
+  when the offer lacks `a=rtcp-mux`. Offers carry `a=rtcp:<port>` (RFC 3605)
+  beside `a=rtcp-mux` (never beside `a=rtcp-mux-only`), and answers to
+  non-mux offers carry it too. When the peer declines mux, periodic SR/RR and
+  the close-time BYE go from the RTCP port to the peer's `a=rtcp:` address
+  or its RTP port + 1, never to its RTP port; inbound RTCP on the port gets
+  the same peer filter, SRTCP covers it under SDES-SRTP, and a NAT-mapped
+  peer RTCP source is learned only from the latched RTP stream's SSRC on the
+  same IP. When the peer accepts mux, the RTCP port is released when the
+  negotiation commits. A call that keeps its RTCP port uses two ports, which
+  halves capacity per media port range. Not used with ICE, DTLS-SRTP keying,
+  strict `rtcp_mux_required`, or signalling-only media. Enables PBXes such as
+  Asterisk with default pjsip settings, and carriers without mux, to get RTCP.
+- rtp-core: `PortAllocator::allocate_rtp_rtcp_pair` and
+  `release_session_port`; `RtpSession::new_event_driven_with_rtcp_socket`,
+  `set_remote_rtcp_addr`, `local_rtcp_addr` and `release_rtcp_socket`;
+  `UdpRtpTransport::set_rtcp_mux`, `release_rtcp_socket` and
+  `local_rtcp_socket_addr`. media-core: `RTCP_SEPARATE_PORT_PARAMETER`,
+  `REMOTE_RTCP_ADDR_PARAMETER`, `MediaSessionInfo::rtcp_port` (new public
+  field) and `MediaSessionController::release_rtcp_port`.
 
 ### SIP
 

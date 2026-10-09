@@ -171,27 +171,39 @@ policy; `Config::local`, `Config::on` and the LAN profiles leave it off. The buf
 facade use). Direct PCM subscriptions such as
 `UnifiedCoordinator::subscribe_to_audio` receive frames as decoded.
 
-### RTCP and `a=rtcp-mux` (`Config::rtcp_mux_required`)
+### RTCP (`Config::offer_rtcp_mux`, `Config::rtcp_non_mux`, `Config::rtcp_mux_required`)
 
-Each call's media uses a single UDP socket, so periodic RTCP sender/receiver
-reports are sent only when `a=rtcp-mux` (RFC 5761) is negotiated — present in
-both offer and answer — and are multiplexed onto the RTP port. Without mux,
-RFC 5761 forbids RTCP on the RTP port and there is no second socket for
-RTP port + 1, so rvoip sends no periodic RTCP. RTP is unaffected.
+Periodic RTCP sender/receiver reports reach a peer in one of two ways:
 
-- As answerer, rvoip accepts mux whenever the offer carries `a=rtcp-mux`.
-- As offerer, rvoip offers `a=rtcp-mux` by default (`Config::offer_rtcp_mux`,
-  default `true`), so RTCP flows with any peer that echoes it. Set it to
-  `false` only for a peer that mishandles the attribute; those calls then
-  carry no periodic RTCP.
-- `rtcp_mux_required = true` is the strict mode: rvoip's offers carry
-  `a=rtcp-mux` and `a=rtcp-mux-only`, and a peer that declines mux fails
-  negotiation instead of silently running without RTCP.
-- With the default `false`, a peer that declines mux gets a working call but
-  **no RTCP from rvoip**: no RTCP quality statistics (loss, jitter,
-  round-trip) on the far side, and an SBC or PBX that uses RTCP inactivity
-  for dead-media detection may tear down a healthy call. Use its RTP
-  inactivity timer instead, or require mux.
+- **Multiplexed** (default): the offer and answer both carry `a=rtcp-mux`
+  (RFC 5761) and RTCP shares the call's RTP port. rvoip offers `a=rtcp-mux`
+  by default (`Config::offer_rtcp_mux`, default `true`) and accepts it
+  whenever an offer carries it, so RTCP flows with every peer that supports
+  mux. Set `offer_rtcp_mux = false` only for a peer that mishandles the
+  attribute.
+- **Separate RTCP port** (opt-in): with `Config::rtcp_non_mux = true`, a peer
+  that declines mux gets RTCP from our RTP port + 1 to its RTCP port
+  (`a=rtcp:` per RFC 3605, otherwise its RTP port + 1). Use it for PBXes and
+  carriers without mux, such as Asterisk on default pjsip settings. It
+  reserves a port pair per offered call, so a port range holds half as many
+  calls, and it is ignored with ICE, DTLS-SRTP, strict mode and
+  signalling-only media.
+
+With neither, a peer that declines mux gets a working call but **no RTCP
+from rvoip**: no RTCP quality statistics on either side, and an SBC or PBX
+that uses RTCP inactivity for dead-media detection may tear down a healthy
+call. Nothing is ever sent to a peer's RTP port without negotiated mux.
+
+`rtcp_mux_required = true` is the strict mode: offers carry `a=rtcp-mux` and
+`a=rtcp-mux-only`, and a peer that declines mux fails negotiation.
+
+RTCP reporting itself follows RFC 3550 (randomised interval with a
+five-second minimum; `rtcp_reduced_minimum_interval` opts into the §6.2
+reduced minimum), uses a random per-call CNAME, accepts reports only from the
+call's peer, and sends VoIP-metrics XR only when `rtcp_xr_voip_metrics` is on
+and the peer asked for it. Per-call quality, including the peer-reported
+fields, is available from `UnifiedCoordinator::media_quality`; see
+[`docs/MEDIA_QUALITY.md`](docs/MEDIA_QUALITY.md).
 
 ### Choosing settings by deployment
 
@@ -211,11 +223,12 @@ afterwards, and its rustdoc lists each field it sets.
 | SIP proxy + RTPengine | `Config::proxy_rtpengine` | `Some(default)` | 1800 s, Min-SE 90 | advertised address; the proxy drives RTPengine | outbound proxy |
 | mTLS SBC peering (modelled on Teams Direct Routing; not certified or tested against Teams) | `Config::tls_direct_routing` | `Some(default)` | 1800 s, Min-SE 90 | public address, ICE Lite, SDES-SRTP required | TLS listener, mutual TLS, FQDN Contact, OPTIONS keep-alive every 60 s, no REGISTER |
 
-`rtcp_mux_required` is `false` everywhere except `Config::behind_nat`. Set
-it to `true` when the far end supports mux (RTPengine, ICE peers, most
-carriers) so RTCP keeps flowing; with `false`, a peer that declines mux gets
-no RTCP from rvoip, so disable RTCP-based media timeouts on that trunk. On
-mobile or Wi-Fi routes raise `PlayoutConfig::target_depth_frames` to 3–4.
+Every profile offers `a=rtcp-mux`. `rtcp_mux_required` is `false` everywhere
+except `Config::behind_nat`, and `rtcp_non_mux` is off everywhere. If the far
+end declines mux (common for LAN PBXes and some carriers), set
+`rtcp_non_mux = true` to keep RTCP flowing, or disable RTCP-based media
+timeouts on that trunk. On mobile or Wi-Fi routes raise
+`PlayoutConfig::target_depth_frames` to 3–4.
 
 Session timers end a call whose far end disappeared without a BYE: as the
 refresher rvoip re-sends UPDATE (re-INVITE if UPDATE fails) at half the

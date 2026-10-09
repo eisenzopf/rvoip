@@ -93,13 +93,13 @@ present.
 
 ### When peer-reported values appear
 
-- RTCP must reach this endpoint. rvoip-sip uses one media socket per call,
-  so that requires negotiated RTP/RTCP multiplexing (`a=rtcp-mux`, RFC 5761).
-  rvoip offers it by default (`Config::offer_rtcp_mux`) and accepts it when a
-  peer offers it, so any peer that supports mux qualifies. Set
-  `Config::rtcp_mux_required = true` to refuse peers that decline. On a call
-  without mux, local values work normally and every `rtt_ms` / `remote_*`
-  field stays `None`.
+- RTCP must reach this endpoint. That happens over negotiated RTP/RTCP
+  multiplexing (`a=rtcp-mux`, RFC 5761), which rvoip offers by default
+  (`Config::offer_rtcp_mux`) and accepts when a peer offers it, or, for peers
+  that decline mux, over a separate RTCP port when `Config::rtcp_non_mux` is
+  on. Set `Config::rtcp_mux_required = true` to refuse peers that decline
+  mux. On a call with neither, local values work normally and every
+  `rtt_ms` / `remote_*` field stays `None`.
 - The peer sends reports on the RFC 3550 interval, so allow a few seconds of
   media for the first one.
 - `rtt_ms` additionally needs the peer to echo one of our sender reports,
@@ -115,6 +115,7 @@ present.
 | `Config::media_quality_interval` | `None` | Period of `Event::MediaQualityChanged`. `Some(Duration::ZERO)` is rejected by `Config::validate`. Builder: `Config::with_media_quality_interval`. |
 | `Config::offer_rtcp_mux` | `true` | Offer `a=rtcp-mux`; a peer that accepts it sends RTCP, which feeds the peer-reported fields. |
 | `Config::rtcp_mux_required` | `false` | Refuse peers that decline `a=rtcp-mux`, so peer-reported fields are always available. |
+| `Config::rtcp_non_mux` | `false` | Exchange RTCP on a separate port with peers that decline mux, so their reports arrive too. |
 
 Periodic events are opt-in because they add one event per active call per
 interval to the shared application event stream, which also carries call
