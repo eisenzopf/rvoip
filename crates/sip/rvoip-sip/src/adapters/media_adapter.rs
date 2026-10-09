@@ -1385,6 +1385,12 @@ pub struct MediaAdapter {
     /// answer with `RTP/SAVP` when peer offers SRTP. When `false`,
     /// the adapter behaves like the pre-2B baseline (plain RTP/AVP).
     offer_srtp: bool,
+    /// Offer `a=rtcp-mux` (RFC 5761) on every outgoing offer so periodic
+    /// RTCP flows on the single media socket when the peer accepts it.
+    /// From [`Config::offer_rtcp_mux`](crate::api::unified::Config::offer_rtcp_mux).
+    offer_rtcp_mux: bool,
+    /// Strict mode: offers also carry `a=rtcp-mux-only` (RFC 8858) and an
+    /// offer or answer without `a=rtcp-mux` fails negotiation.
     rtcp_mux_required: bool,
     /// Send RFC 3611 VoIP-metrics XR to peers whose SDP asks for it.
     rtcp_xr_voip_metrics: bool,
@@ -1589,6 +1595,7 @@ impl MediaAdapter {
             media_port_end: port_end,
             media_mode: MediaMode::Enabled,
             offer_srtp: false,
+            offer_rtcp_mux: true,
             rtcp_mux_required: false,
             rtcp_xr_voip_metrics: false,
             rtcp_reduced_minimum_interval: false,
@@ -2290,6 +2297,34 @@ impl MediaAdapter {
     ) {
         self.rtcp_xr_voip_metrics = xr_voip_metrics;
         self.rtcp_reduced_minimum_interval = reduced_minimum;
+    }
+
+    pub(crate) fn set_offer_rtcp_mux(&mut self, offer: bool) {
+        self.offer_rtcp_mux = offer;
+    }
+
+    /// Add the RTP/RTCP multiplexing attributes every local offer carries.
+    ///
+    /// `a=rtcp-mux` is offered by default (RFC 5761 §5.1.1) and whenever
+    /// mux is required. Strict mode adds `a=rtcp-mux-only` (RFC 8858 §4.2).
+    /// No `a=rtcp:` line is emitted: the stack has one media socket, and a
+    /// fallback RTCP port would either name a port nothing listens on or
+    /// point a non-mux peer's RTCP at the RTP port, which RFC 5761 §5.1.1
+    /// forbids once the answer declines mux (RFC 8858 §5.3 likewise forbids
+    /// a fallback `a=rtcp:` alongside `a=rtcp-mux-only`).
+    fn with_offer_rtcp_mux_attributes<P>(
+        &self,
+        media_builder: rvoip_sip_core::sdp::builder::MediaBuilder<P>,
+    ) -> rvoip_sip_core::sdp::builder::MediaBuilder<P> {
+        if self.rtcp_mux_required {
+            media_builder
+                .rtcp_mux()
+                .attribute("rtcp-mux-only", None::<String>)
+        } else if self.offer_rtcp_mux {
+            media_builder.rtcp_mux()
+        } else {
+            media_builder
+        }
     }
 
     /// Process SDP answer and negotiate (for UAC)
@@ -4616,11 +4651,7 @@ impl MediaAdapter {
         let mut media_builder = sdp_builder
             .media_audio(port, transport)
             .formats(&formats_ref);
-        if self.rtcp_mux_required {
-            media_builder = media_builder
-                .rtcp_mux()
-                .attribute("rtcp-mux-only", None::<String>);
-        }
+        media_builder = self.with_offer_rtcp_mux_attributes(media_builder);
         if dtls_offer_attrs.is_some() {
             media_builder = media_builder.setup(self.dtls_setup_role.as_str());
         }
@@ -4977,12 +5008,14 @@ impl MediaAdapter {
         } else {
             &["0", "8", "101"]
         };
-        let mut media_builder = SdpBuilder::new("Session")
+        let media_builder = SdpBuilder::new("Session")
             .origin("-", "0", "0", "IN", "IP4", &local_ip)
             .connection("IN", "IP4", &local_ip)
             .time("0", "0")
             .media_audio(self.media_port_start, "RTP/AVP")
-            .formats(formats)
+            .formats(formats);
+        let mut media_builder = self
+            .with_offer_rtcp_mux_attributes(media_builder)
             .rtpmap("0", "PCMU/8000")
             .rtpmap("8", "PCMA/8000");
         if self.comfort_noise_enabled {
@@ -5519,11 +5552,7 @@ impl MediaAdapter {
             .time("0", "0")
             .media_audio(port, transport)
             .formats(&formats_ref);
-        if self.rtcp_mux_required {
-            media_builder = media_builder
-                .rtcp_mux()
-                .attribute("rtcp-mux-only", None::<String>);
-        }
+        media_builder = self.with_offer_rtcp_mux_attributes(media_builder);
         for (pt, pt_str) in format_pts.iter().zip(format_strings.iter()) {
             if let Some(rtpmap) = rtpmap_for_pt(*pt) {
                 media_builder = media_builder.rtpmap(pt_str.as_str(), rtpmap);
@@ -5726,6 +5755,7 @@ impl Clone for MediaAdapter {
             media_port_end: self.media_port_end,
             media_mode: self.media_mode,
             offer_srtp: self.offer_srtp,
+            offer_rtcp_mux: self.offer_rtcp_mux,
             rtcp_mux_required: self.rtcp_mux_required,
             rtcp_xr_voip_metrics: self.rtcp_xr_voip_metrics,
             rtcp_reduced_minimum_interval: self.rtcp_reduced_minimum_interval,
@@ -6374,6 +6404,7 @@ mod sdp_format_tests {
         );
         adapter.set_media_mode(MediaMode::SignalingOnly { sdp_rtp_port: 9 });
         let mut uac = SessionState::new(SessionId("rtcp-mux-uac".into()), Role::UAC);
+        adapter.set_offer_rtcp_mux(false);
         let legacy = adapter
             .generate_local_sdp_offer_lane_owned(&mut uac, crate::types::MediaDirection::SendRecv)
             .await
@@ -6413,96 +6444,267 @@ mod sdp_format_tests {
             .unwrap();
     }
 
-    #[tokio::test]
-    async fn periodic_rtcp_reaches_the_rtp_port_only_after_rtcp_mux_is_negotiated() {
+    /// Bind a peer RTP socket whose RTP port + 1 is also free, so a test can
+    /// prove nothing reaches a legacy (RFC 3550 port-pair) RTCP port either.
+    async fn bind_peer_port_pair() -> (tokio::net::UdpSocket, tokio::net::UdpSocket) {
+        for _ in 0..64 {
+            let rtp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let rtp_port = rtp.local_addr().unwrap().port();
+            let Some(rtcp_port) = rtp_port.checked_add(1) else {
+                continue;
+            };
+            if let Ok(rtcp) = tokio::net::UdpSocket::bind(("127.0.0.1", rtcp_port)).await {
+                return (rtp, rtcp);
+            }
+        }
+        panic!("no free RTP/RTCP port pair on loopback");
+    }
+
+    /// True when an RTCP packet (PT 200-204) reaches `peer` within `window`.
+    async fn rtcp_arrives(peer: &tokio::net::UdpSocket, window: Duration) -> bool {
+        let mut bytes = [0u8; 2048];
+        tokio::time::timeout(window, async {
+            loop {
+                let (n, _) = peer.recv_from(&mut bytes).await.expect("peer receive");
+                if n >= 2 && (200..=204).contains(&bytes[1]) {
+                    return;
+                }
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    /// What a peer observed of one call's RTCP, on its RTP port and on the
+    /// RTP port + 1 a non-mux RFC 3550 peer would listen on.
+    struct RtcpObservation {
+        offer: String,
+        reports_on_rtp_port: bool,
+        rtcp_on_rtp_port_plus_one: bool,
+        bye_on_rtp_port: bool,
+    }
+
+    /// Run one real-media UAC call: generate the local offer, take the
+    /// peer's answer (with or without `a=rtcp-mux`), commit it, watch the
+    /// peer's sockets across several report intervals and through teardown.
+    async fn observe_uac_rtcp(
+        case: &str,
+        port_base: u16,
+        configure: impl FnOnce(&mut MediaAdapter),
+        answer_mux: bool,
+    ) -> RtcpObservation {
         use crate::state_table::types::Role;
         use rvoip_media_core::relay::controller::MediaSessionController;
         use std::net::Ipv4Addr;
 
-        // True when an RTCP packet (PT 200-204) reaches `peer` within `window`.
-        async fn rtcp_arrives(peer: &tokio::net::UdpSocket, window: Duration) -> bool {
-            let mut bytes = [0u8; 2048];
-            tokio::time::timeout(window, async {
-                loop {
-                    let (n, _) = peer.recv_from(&mut bytes).await.expect("peer receive");
-                    if n >= 2 && (200..=204).contains(&bytes[1]) {
-                        return;
-                    }
-                }
-            })
+        let controller = Arc::new(MediaSessionController::new());
+        let store = Arc::new(SessionStore::new());
+        let session_id = SessionId(format!("uac-rtcp-{case}"));
+        store
+            .create_session(session_id.clone(), Role::UAC, false)
             .await
-            .is_ok()
+            .expect("create exact session");
+        let mut adapter = MediaAdapter::new(
+            controller,
+            Arc::clone(&store),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            port_base,
+            port_base + 90,
+        );
+        configure(&mut adapter);
+        let dialog_id = adapter
+            .create_session(&session_id)
+            .await
+            .expect("create managed media");
+        let handle = store
+            .lifecycle_handle(&session_id)
+            .expect("exact lifecycle handle");
+        let mut working = store
+            .get_session_exact(&handle)
+            .await
+            .expect("load exact session");
+        working.media_session_id = Some(dialog_id);
+        working.media_session_ready = true;
+        working.local_media_direction = crate::types::MediaDirection::SendRecv;
+        let offer = adapter
+            .generate_local_sdp_offer_lane_owned(
+                &mut working,
+                crate::types::MediaDirection::SendRecv,
+            )
+            .await
+            .expect("local offer");
+        working.local_sdp = Some(offer.clone());
+
+        let (peer_rtp, peer_rtcp) = bind_peer_port_pair().await;
+        let mut answer = build_answer("peer", "127.0.0.1", peer_rtp.local_addr().unwrap().port());
+        if answer_mux {
+            answer.push_str("a=rtcp-mux\r\n");
+        }
+        adapter
+            .negotiate_sdp_as_uac_lane_owned(&mut working, &answer)
+            .await
+            .expect("answer negotiates");
+        adapter
+            .commit_staged_media_negotiation_lane_owned(&mut working)
+            .await
+            .expect("commit negotiated media");
+
+        // Reports run on a 1 s floor; 3.5 s spans several intervals.
+        let (reports_on_rtp_port, during_call_plus_one) = tokio::join!(
+            rtcp_arrives(&peer_rtp, Duration::from_millis(3_500)),
+            rtcp_arrives(&peer_rtcp, Duration::from_millis(3_500)),
+        );
+        // Drain anything queued so the teardown window sees only the BYE.
+        let mut drain = [0u8; 2048];
+        while peer_rtp.try_recv_from(&mut drain).is_ok() {}
+        adapter
+            .cleanup_session(&session_id)
+            .await
+            .expect("cleanup managed media");
+        let (bye_on_rtp_port, teardown_plus_one) = tokio::join!(
+            rtcp_arrives(&peer_rtp, Duration::from_millis(750)),
+            rtcp_arrives(&peer_rtcp, Duration::from_millis(750)),
+        );
+        RtcpObservation {
+            offer,
+            reports_on_rtp_port,
+            rtcp_on_rtp_port_plus_one: during_call_plus_one || teardown_plus_one,
+            bye_on_rtp_port,
+        }
+    }
+
+    #[tokio::test]
+    async fn default_offer_carries_rtcp_mux_and_periodic_rtcp_reaches_a_muxing_peer() {
+        let seen = observe_uac_rtcp("default-mux", 17_400, |_| {}, true).await;
+        assert!(
+            audio_rtcp_mux(&seen.offer.parse().unwrap()),
+            "the default offer must carry a=rtcp-mux:\n{}",
+            seen.offer
+        );
+        assert!(
+            seen.reports_on_rtp_port,
+            "periodic RTCP must reach the RTP port of a peer that answered a=rtcp-mux"
+        );
+        assert!(
+            seen.bye_on_rtp_port,
+            "teardown sends RTCP BYE to a muxing peer"
+        );
+        assert!(!seen.rtcp_on_rtp_port_plus_one);
+    }
+
+    #[tokio::test]
+    async fn default_offer_sends_no_rtcp_anywhere_when_the_answer_declines_mux() {
+        let seen = observe_uac_rtcp("default-plain", 17_500, |_| {}, false).await;
+        assert!(audio_rtcp_mux(&seen.offer.parse().unwrap()));
+        // RFC 5761 §5.1.1: the answer declined, so no RTCP on the RTP port,
+        // and the single-socket stack has no RTCP port to send from either.
+        assert!(
+            !seen.reports_on_rtp_port,
+            "periodic RTCP reached a non-mux peer"
+        );
+        assert!(!seen.bye_on_rtp_port, "RTCP BYE reached a non-mux peer");
+        assert!(
+            !seen.rtcp_on_rtp_port_plus_one,
+            "RTCP reached the peer's RTP port + 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn rtcp_mux_opt_out_restores_the_plain_offer_and_sends_no_rtcp() {
+        // Even a peer that wrongly echoes a=rtcp-mux gets none: mux needs
+        // both sides (RFC 5761 §5.1.1).
+        let seen = observe_uac_rtcp(
+            "opt-out",
+            17_600,
+            |adapter| adapter.set_offer_rtcp_mux(false),
+            true,
+        )
+        .await;
+        assert!(
+            !audio_rtcp_mux(&seen.offer.parse().unwrap()),
+            "offer_rtcp_mux = false must omit a=rtcp-mux:\n{}",
+            seen.offer
+        );
+        assert!(!seen.reports_on_rtp_port);
+        assert!(!seen.bye_on_rtp_port);
+        assert!(!seen.rtcp_on_rtp_port_plus_one);
+    }
+
+    #[tokio::test]
+    async fn required_rtcp_mux_offer_still_carries_mux_only_and_reports_flow() {
+        // Strict mode wins over the opt-out.
+        let seen = observe_uac_rtcp(
+            "required",
+            17_700,
+            |adapter| {
+                adapter.set_offer_rtcp_mux(false);
+                adapter.set_rtcp_mux_required(true);
+            },
+            true,
+        )
+        .await;
+        assert!(audio_rtcp_mux(&seen.offer.parse().unwrap()));
+        assert!(seen.offer.contains("a=rtcp-mux-only\r\n"), "{}", seen.offer);
+        assert!(seen.reports_on_rtp_port);
+        assert!(!seen.rtcp_on_rtp_port_plus_one);
+    }
+
+    #[tokio::test]
+    async fn every_offer_path_carries_rtcp_mux_by_default_without_a_fallback_rtcp_port() {
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+
+        let mut adapter = MediaAdapter::new(
+            Arc::new(MediaSessionController::new()),
+            Arc::new(SessionStore::new()),
+            "127.0.0.1".parse().unwrap(),
+            16000,
+            16100,
+        );
+        adapter.set_media_mode(MediaMode::SignalingOnly { sdp_rtp_port: 9 });
+        let mut uac = SessionState::new(SessionId("default-offer-mux".into()), Role::UAC);
+        let mut offers = Vec::new();
+        for direction in [
+            crate::types::MediaDirection::SendRecv,
+            crate::types::MediaDirection::SendOnly,
+            crate::types::MediaDirection::RecvOnly,
+            crate::types::MediaDirection::Inactive,
+        ] {
+            offers.push(
+                adapter
+                    .generate_local_sdp_offer_lane_owned(&mut uac, direction)
+                    .await
+                    .expect("signaling-only offer"),
+            );
+        }
+        offers.push(
+            adapter
+                .create_hold_sdp()
+                .await
+                .expect("fallback hold offer"),
+        );
+        offers.push(
+            adapter
+                .create_active_sdp()
+                .await
+                .expect("fallback active offer"),
+        );
+        for offer in &offers {
+            assert!(audio_rtcp_mux(&offer.parse().unwrap()), "{offer}");
+            assert_eq!(offer.matches("a=rtcp-mux\r\n").count(), 1, "{offer}");
+            // Plain offer: no RFC 8858 mux-only, no RFC 3605 fallback port.
+            assert!(!offer.contains("a=rtcp-mux-only"), "{offer}");
+            assert!(!offer.contains("a=rtcp:"), "{offer}");
         }
 
-        // The default offer has no a=rtcp-mux, so a plain answer means no
-        // multiplexing (RFC 5761 §5.1.1); a required-mux offer answered with
-        // a=rtcp-mux negotiates it.
-        for (case, mux) in [("plain", false), ("mux", true)] {
-            let controller = Arc::new(MediaSessionController::new());
-            let store = Arc::new(SessionStore::new());
-            let session_id = SessionId(format!("late-sdp-rtcp-{case}"));
-            store
-                .create_session(session_id.clone(), Role::UAC, false)
-                .await
-                .expect("create exact session");
-            let mut adapter = MediaAdapter::new(
-                controller,
-                Arc::clone(&store),
-                IpAddr::V4(Ipv4Addr::LOCALHOST),
-                17_400,
-                17_500,
-            );
-            adapter.set_rtcp_mux_required(mux);
-            let dialog_id = adapter
-                .create_session(&session_id)
-                .await
-                .expect("create managed media");
-            let handle = store
-                .lifecycle_handle(&session_id)
-                .expect("exact lifecycle handle");
-            let mut working = store
-                .get_session_exact(&handle)
-                .await
-                .expect("load exact session");
-            working.media_session_id = Some(dialog_id);
-            working.media_session_ready = true;
-            working.local_media_direction = crate::types::MediaDirection::SendRecv;
-            let offer = adapter
-                .generate_local_sdp_offer_lane_owned(
-                    &mut working,
-                    crate::types::MediaDirection::SendRecv,
-                )
-                .await
-                .expect("local offer");
-            assert_eq!(audio_rtcp_mux(&offer.parse().unwrap()), mux);
-            working.local_sdp = Some(offer);
-
-            let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-            let mut answer = build_answer("peer", "127.0.0.1", peer.local_addr().unwrap().port());
-            if mux {
-                answer.push_str("a=rtcp-mux\r\n");
-            }
-            adapter
-                .negotiate_sdp_as_uac_lane_owned(&mut working, &answer)
-                .await
-                .expect("answer negotiates");
-            adapter
-                .commit_staged_media_negotiation_lane_owned(&mut working)
-                .await
-                .expect("commit negotiated media");
-
-            // The first RFC 3550 report waits half the five-second minimum,
-            // randomised: at most 2.5 s * 1.5 / (e - 3/2), about 3.1 s.
-            let arrived = rtcp_arrives(&peer, Duration::from_millis(3_500)).await;
-            assert_eq!(
-                arrived, mux,
-                "{case}: periodic RTCP to the peer's RTP port requires negotiated rtcp-mux"
-            );
-            adapter
-                .cleanup_session(&session_id)
-                .await
-                .expect("cleanup managed media");
-        }
+        adapter.set_offer_rtcp_mux(false);
+        let plain = adapter
+            .generate_local_sdp_offer_lane_owned(&mut uac, crate::types::MediaDirection::SendRecv)
+            .await
+            .unwrap();
+        assert!(!plain.contains("a=rtcp"), "{plain}");
+        let fallback = adapter.create_hold_sdp().await.unwrap();
+        assert!(!fallback.contains("a=rtcp"), "{fallback}");
     }
 
     #[test]
@@ -7028,6 +7230,7 @@ a=fmtp:101 0-15\r\n";
             .time("0", "0")
             .media_audio(port, "RTP/AVP")
             .formats(&["0", "8", "101"])
+            .rtcp_mux()
             .rtpmap("0", "PCMU/8000")
             .rtpmap("8", "PCMA/8000")
             .rtpmap("101", "telephone-event/8000")
@@ -7062,7 +7265,8 @@ a=fmtp:101 0-15\r\n";
     /// PCMA + telephone-event on every offer regardless of SRTP. Pre-P2
     /// the non-SRTP path emitted only `0 8` (no DTMF) and the SRTP path
     /// only `0 101` (no PCMA); both have been merged into the unified
-    /// shape below.
+    /// shape below. Since 0.4.0 every offer also carries `a=rtcp-mux`
+    /// (RFC 5761) and no `a=rtcp:` fallback port.
     fn legacy_offer(dialog_id: &str, elapsed_secs: u64, ip: &str, port: u16) -> String {
         let origin_session_id = sdp_origin_session_id(dialog_id);
         format!(
@@ -7072,6 +7276,7 @@ a=fmtp:101 0-15\r\n";
              c=IN IP4 {}\r\n\
              t=0 0\r\n\
              m=audio {} RTP/AVP 0 8 101\r\n\
+             a=rtcp-mux\r\n\
              a=rtpmap:0 PCMU/8000\r\n\
              a=rtpmap:8 PCMA/8000\r\n\
              a=rtpmap:101 telephone-event/8000\r\n\
@@ -7110,6 +7315,29 @@ a=fmtp:101 0-15\r\n";
             new, old,
             "SdpBuilder offer drifted from legacy format-string output"
         );
+    }
+
+    /// The production generator, not a builder mirror: the default offer
+    /// equals the reference fixture byte for byte, `a=rtcp-mux` included.
+    #[tokio::test]
+    async fn default_production_offer_matches_reference_fixture_byte_for_byte() {
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+
+        let mut adapter = MediaAdapter::new(
+            Arc::new(MediaSessionController::new()),
+            Arc::new(SessionStore::new()),
+            "127.0.0.1".parse().unwrap(),
+            16000,
+            16100,
+        );
+        adapter.set_media_mode(MediaMode::SignalingOnly { sdp_rtp_port: 9 });
+        let mut uac = SessionState::new(SessionId("fixture-dialog".into()), Role::UAC);
+        let offer = adapter
+            .generate_local_sdp_offer_lane_owned(&mut uac, crate::types::MediaDirection::SendRecv)
+            .await
+            .expect("default offer");
+        assert_eq!(offer, legacy_offer("fixture-dialog", 1, "127.0.0.1", 9));
     }
 
     #[test]
@@ -7205,6 +7433,7 @@ a=fmtp:101 0-15\r\n";
             .time("0", "0")
             .media_audio(port, "RTP/SAVP")
             .formats(&["0", "8", "101"])
+            .rtcp_mux()
             .rtpmap("0", "PCMU/8000")
             .rtpmap("8", "PCMA/8000")
             .rtpmap("101", "telephone-event/8000")

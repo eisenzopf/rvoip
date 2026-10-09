@@ -2387,6 +2387,28 @@ mod tests {
         session.set_rtcp_reduced_minimum(true);
     }
 
+    #[tokio::test]
+    async fn close_sends_no_rtcp_bye_to_a_peer_without_rtcp_mux() {
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut session = RtpSession::new(RtpSessionConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            remote_addr: None,
+            ..RtpSessionConfig::default()
+        })
+        .await
+        .unwrap();
+        session.set_remote_addr(peer.local_addr().unwrap()).await;
+        assert!(!session.rtcp_mux());
+        session.close().await.unwrap();
+        let mut bytes = [0u8; 2048];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), peer.recv_from(&mut bytes))
+                .await
+                .is_err(),
+            "RTCP BYE reached the RTP port of a peer that never agreed to rtcp-mux"
+        );
+    }
+
     async fn next_packet_event(events: &mut broadcast::Receiver<RtpSessionEvent>) -> RtpPacket {
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {

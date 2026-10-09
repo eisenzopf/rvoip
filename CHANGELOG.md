@@ -46,6 +46,23 @@
   from the call's peer count as activity for the active-call no-media and
   media-idle watchdogs, so held or silent calls that still report are kept.
 
+### SIP
+
+- rvoip-sip now offers RTP/RTCP multiplexing by default. Every SDP offer it
+  generates (initial INVITE, re-INVITE and UPDATE, hold and resume, and
+  late-SDP offers in a 200 OK) carries `a=rtcp-mux` (RFC 5761), so periodic
+  RTCP reports flow on the single media socket whenever the peer answers
+  with `a=rtcp-mux`. Before this, offers omitted it and RTCP never flowed on
+  calls rvoip originated. Answers are unchanged: they echo `a=rtcp-mux` only
+  when the offer had it.
+- When the answer declines mux, the call carries no RTCP at all, per RFC 5761
+  §5.1.1: no periodic reports, and no RTCP BYE at teardown, either to the RTP
+  port or to RTP port + 1. rtp-core's `RtpSession::close` now sends its BYE
+  only when mux was negotiated. Offers carry no `a=rtcp:` fallback port.
+- Opt out with `Config::offer_rtcp_mux = false` for a peer that mishandles
+  the attribute; offers then match 0.3.x. `Config::rtcp_mux_required` keeps
+  its strict meaning and always offers mux.
+
 ## 0.3.12
 
 ### 0.3.12 release recovery

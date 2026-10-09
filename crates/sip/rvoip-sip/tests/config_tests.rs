@@ -91,6 +91,9 @@ fn test_config_default() {
     assert!(!c.rtp_diagnostics);
     assert!(!c.media_sdp_diagnostics);
     assert_eq!(c.media_mode, MediaMode::Enabled);
+    // 0.4.0: offers carry a=rtcp-mux by default; strict mode stays opt-in.
+    assert!(c.offer_rtcp_mux);
+    assert!(!c.rtcp_mux_required);
     assert_eq!(
         c.rtp_session_buffer_config,
         RtpSessionBufferConfig::default()
@@ -448,6 +451,18 @@ fn srtp_keying_builder_selects_dtls_without_changing_offer_policy() {
     assert_eq!(config.srtp_keying, SrtpKeyingMode::DtlsSrtp);
     assert!(!config.offer_srtp);
     assert!(!config.srtp_required);
+}
+
+#[test]
+fn rtcp_mux_offer_is_default_on_for_every_profile_and_can_be_disabled() {
+    for config in [Config::default(), Config::local("alice", 5060)] {
+        assert!(config.offer_rtcp_mux);
+        assert!(!config.rtcp_mux_required);
+        assert!(format!("{config:?}").contains("offer_rtcp_mux: true"));
+    }
+    let mut config = Config::local("alice", 5060);
+    config.offer_rtcp_mux = false;
+    assert!(format!("{config:?}").contains("offer_rtcp_mux: false"));
 }
 
 #[test]
