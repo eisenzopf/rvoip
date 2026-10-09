@@ -120,17 +120,91 @@ Applications composing `SipAdapter` through `rvoip-core` may request a
 per-connection codec change with `Orchestrator::renegotiate_media`. The SIP
 adapter translates that request into a one-shot re-INVITE offer for the exact
 dialog generation and returns only after the peer's SDP answer is committed.
-
-Carrier-facing configurations can enable `PlayoutConfig` to place inbound
-audio on a local media clock. The buffer reorders RTP timestamps, emits
-repeat-with-fade PLC for missing G.711 frames, tracks remote clock skew, and
-drains excess depth so burst jitter does not become permanent latency.
-`Config::carrier_sbc` enables the production default; generic/local configs
-remain unbuffered for compatibility and deterministic packet-level labs.
 The call's stable media and stream descriptor remain unchanged on rejection;
 on success the existing stream updates both media pumps without changing its
 identity or application channels. Codec preferences never mutate coordinator-
 wide offer policy and therefore cannot bleed into concurrent calls.
+
+## Media options
+
+Two `Config` settings decide what a listener hears and what the far end can
+measure about a call. Both default to the LAN/lab-friendly choice; the rustdoc
+on `Config::playout` and `Config::rtcp_mux_required` is the full reference.
+
+### Inbound jitter buffer (`Config::playout`)
+
+`Config::playout: Option<PlayoutConfig>` puts each call's decoded inbound
+audio on a local media clock. The buffer holds a short backlog, reorders
+frames by RTP timestamp, conceals a lost frame by replaying the previous one
+with a fading gain (then silence after a few frames), tracks remote clock
+skew, and drains excess depth so burst jitter does not become permanent
+latency. `None` forwards frames exactly as they arrive, gaps included.
+
+| `PlayoutConfig` field | Default | Meaning |
+| --- | --- | --- |
+| `target_depth_frames` | `2` (~40 ms) | Backlog held before and during playout. |
+| `max_depth_frames` | `10` (~200 ms) | Ceiling; older frames are dropped beyond it. |
+| `max_consecutive_concealed` | `5` (~100 ms) | Lost frames concealed before switching to silence. |
+| `adaptive` | `true` | Grow the depth with measured jitter, up to the ceiling. |
+
+Depths are in frames (one RTP packet, 20 ms at the usual ptime). The cost is
+added delay: about `target_depth_frames × ptime`, so ~40 ms at the default,
+more while the adaptive depth has grown on a jittery route.
+
+```rust
+use rvoip_sip::{Config, PlayoutConfig};
+
+let mut config = Config::on("trunk", "203.0.113.10".parse().unwrap(), 5060);
+config.playout = Some(PlayoutConfig::default()); // production default
+config.playout = Some(PlayoutConfig {
+    target_depth_frames: 4, // ~80 ms for a jittery mobile route
+    ..PlayoutConfig::default()
+});
+config.playout = None; // LAN / lab: pass-through
+```
+
+`Config::carrier_sbc` enables the default policy; every other constructor
+leaves it off. The buffer is applied to the SIP leg's `MediaStream` (the
+`SipAdapter` / `rvoip-core` orchestrator path, which bridges and the `rvoip`
+facade use). Direct PCM subscriptions such as
+`UnifiedCoordinator::subscribe_to_audio` receive frames as decoded.
+
+### RTCP and `a=rtcp-mux` (`Config::rtcp_mux_required`)
+
+Each call's media uses a single UDP socket, so periodic RTCP sender/receiver
+reports are sent only when `a=rtcp-mux` (RFC 5761) is negotiated — present in
+both offer and answer — and are multiplexed onto the RTP port. Without mux,
+RFC 5761 forbids RTCP on the RTP port and there is no second socket for
+RTP port + 1, so rvoip sends no periodic RTCP. RTP is unaffected.
+
+- As answerer, rvoip accepts mux whenever the offer carries `a=rtcp-mux`.
+- `rtcp_mux_required = true` is the strict mode: rvoip's offers carry
+  `a=rtcp-mux` and `a=rtcp-mux-only`, and a peer that declines mux fails
+  negotiation instead of silently running without RTCP.
+- With the default `false`, a peer that declines mux gets a working call but
+  **no RTCP from rvoip**: no RTCP quality statistics (loss, jitter,
+  round-trip) on the far side, and an SBC or PBX that uses RTCP inactivity
+  for dead-media detection may tear down a healthy call. Use its RTP
+  inactivity timer instead, or require mux.
+
+<!-- TODO(rtcp-mux offer default): when rvoip offers a=rtcp-mux by default,
+     name the opt-out field here and in the Config::rtcp_mux_required docs. -->
+
+### Choosing settings by deployment
+
+| Deployment | Start from | `playout` | `rtcp_mux_required` | Notes |
+| --- | --- | --- | --- | --- |
+| Lab, CI, local dev | `Config::local` / `Config::local_lab` | `None` | `false` | Deterministic pass-through for packet-level assertions; no added latency. |
+| LAN PBX endpoint (Asterisk, FreeSWITCH) | `Config::lan_pbx`, `Config::freeswitch_internal`, `Config::asterisk_tls_registered_flow` | `None` | `false` | A switched LAN has nothing to smooth. Many PBXes default to no mux, so expect no RTCP unless the PBX offers mux. |
+| SIP proxy + RTPengine | `Config::proxy_rtpengine` | `None` on a LAN; `Some(default)` if the media path crosses the internet | `true` if RTPengine is configured for mux | RTPengine supports rtcp-mux; requiring it keeps RTCP flowing. |
+| Carrier trunk via SBC | `Config::carrier_sbc` | `Some(default)` (set by the profile) | `true` if the carrier supports mux; otherwise `false` and disable RTCP-based media timeouts on the trunk | Carrier routes are bursty and lossy. Confirm the carrier's mux support before requiring it. |
+| TLS/SRTP-required trunk (e.g. Teams Direct Routing) | No dedicated profile: `Config::on` + `tls_reachable_contact(...)`, then `offer_srtp = true` and `srtp_required = true` (`Config::carrier_sbc` if the trunk registers) | `Some(default)` | `true` where the far end supports mux | Public-internet media; Teams media bypass also needs `Config::ice = SipIcePolicy::Lite`. |
+| Public-internet server (public or 1:1-NAT IP) | `Config::on` with `sip_advertised_addr` / `media_public_addr` | `Some(default)` | `true` if your peers support mux | Set `Config::ice` to `SipIcePolicy::Lite` when peers run ICE. |
+| Endpoint behind NAT, remote softphone | `Config::on` + `Config::stun_server` | `Some(default)`; raise `target_depth_frames` to 3–4 on mobile/Wi-Fi | `true` when the peer runs ICE (ICE peers support mux) | `SipIcePolicy::Full` for NAT traversal; registered-flow TLS keeps the NAT binding alive. |
+
+The `rvoip` facade's `SipConfig` exposes the same buffer through `.playout()`
+and `.disable_playout()`, and turns it on automatically for
+`.trusted_trunk(...)` listeners.
 
 ## Examples
 
