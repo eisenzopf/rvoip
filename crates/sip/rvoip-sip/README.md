@@ -196,6 +196,12 @@ do not imply carrier certification or untested peer-version/topology coverage.
   `Passive`) through `Config::with_dtls_setup_role`. The exact supported and
   fail-closed boundaries are documented in
   [Crypto capability boundaries](docs/CRYPTO_CAPABILITIES.md).
+- Per-call media quality: `UnifiedCoordinator::media_quality` and
+  `SessionHandle::media_quality` return `MediaQualityStats` (local receive
+  loss, jitter and MOS estimate, plus RTCP round-trip time and the peer's
+  reported loss and jitter for our stream once RTCP flows), and
+  `Config::media_quality_interval` publishes it periodically as
+  `Event::MediaQualityChanged`. See [Media quality](docs/MEDIA_QUALITY.md).
 - STUN-discovered RTP mapping: `Config::stun_server` runs an RFC 8489 probe
   from the call's own RTP socket (rtp-core `TransportStunClient`) so the
   public IP and port rendered in SDP match the media path. Discovery failure

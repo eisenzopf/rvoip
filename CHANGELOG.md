@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+### Media quality
+
+- Per-call media quality now reaches the application. `rvoip-sip` adds
+  `UnifiedCoordinator::media_quality(&SessionId)` and
+  `SessionHandle::media_quality()`, returning `MediaQualityStats`: packets
+  sent/received/lost, local loss percent, jitter (ms) and MOS estimate for
+  the received stream, plus `rtt_ms`, `remote_packet_loss_percent`,
+  `remote_packets_lost` and `remote_jitter_ms` from the peer's RTCP reports
+  about the stream we send. Peer-reported fields are `None` until RTCP
+  arrives and stay `None` for calls without negotiated `a=rtcp-mux`.
+- New `Config::media_quality_interval` (`with_media_quality_interval`),
+  default `None`: when set, every call with media publishes
+  `Event::MediaQualityChanged` on that cadence. Previously that event had no
+  production source. The event gains a `quality: MediaQualityStats` field
+  (breaking for exhaustive patterns); its existing integer fields are kept.
+  A zero interval fails `Config::validate`.
+- `rvoip-core`: `QualitySnapshot` gains `rtt_ms`, `remote_packet_loss_pct`
+  and `remote_jitter_ms` (`Option`s; breaking for struct literals — add
+  `..Default::default()`). With the SIP sampler on, SIP media streams report
+  `has_quality_measurement() == true`, `Event::MediaQuality` fires for SIP
+  connections, and `spawn_media_quality_sampler` averages the optional fields
+  only over streams that carry them. `RvoipAppBuilder::media_quality_interval`
+  now also enables the SIP sampler at the same cadence.
+- `rtp-core`: `RtpSessionStats::peer_report` retains the latest RTCP report
+  block a peer sent about our SSRC (`PeerReceptionReport`: reporter SSRC,
+  fraction and sign-extended cumulative loss, extended highest sequence,
+  jitter in timestamp units and ms, LSR/DLSR RTT, receive time), and
+  `RtpSessionStats::peer_bye` records an inbound RTCP BYE. Previously these
+  were only logged.
+- `media-core`: `QualityMetrics` gains packet counters and `remote_*`
+  fields (`QualityMetrics::from_rtp_stats`), the cross-crate
+  `MediaQualityMetrics` gains counters, `rtt_ms` and `remote_*`, and
+  `MediaSessionController::get_media_quality` /
+  `publish_media_quality_updates` sample calls. `MediaEventHub` now maps
+  `StatisticsUpdated` and `QualityDegraded` to
+  `MediaQualityUpdate` / `MediaQualityDegraded` with the real session id,
+  and the legacy `MediaEventAdapter` no longer publishes a fabricated MOS
+  for an `"unknown_session"`.
+
 ### Release process
 
 - Every release must now have a `CHANGELOG.md` entry. **Prepare release PR**
