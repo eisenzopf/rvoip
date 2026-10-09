@@ -569,8 +569,21 @@ bus drops messages for receivers that lag past its capacity, so size
 
 ## RTCP Reporting
 
-The media session sends RTCP from its single RTP socket, so reports flow only
-on calls whose SDP negotiated `a=rtcp-mux` (RFC 5761). On those calls rvoip
+RTCP reaches the peer in one of two ways:
+
+- **Multiplexed** (default): rvoip offers `a=rtcp-mux` (RFC 5761) and, when
+  the answer agrees, RTCP shares the RTP socket and port.
+- **Separate RTCP port** (`Config::rtcp_non_mux = true`): for peers that
+  decline mux, such as Asterisk with default pjsip settings and many
+  carriers. Each call reserves an even RTP port and RTP port + 1 for RTCP
+  (RFC 3550 §11) and advertises the latter with `a=rtcp:` (RFC 3605). Reports
+  go from that port to the peer's `a=rtcp:` address, or its RTP port + 1.
+  Calls rvoip offers reserve the pair before the answer is known and release
+  the RTCP port as soon as a mux answer commits; inbound calls reserve it
+  only for offers without `a=rtcp-mux`.
+
+Without either, a peer that declines mux gets no RTCP: rvoip never sends
+RTCP to a peer's RTP port unless mux was negotiated. On calls with RTCP rvoip
 follows RFC 3550 without further configuration:
 
 - Reports go out on average every 5 / (e − 3/2) ≈ 4.1 s, randomised between
@@ -587,9 +600,23 @@ follows RFC 3550 without further configuration:
   latched address, or an SSRC it already sends RTP from). RTCP from anywhere
   else — for example a neighbouring call's peer that sends RTCP to its RTP
   port plus one — is dropped and counted in `RtpSessionStats::rtcp_packets_rejected`.
+  The separate RTCP port applies the same rule. Behind NAT it learns the
+  peer's RTCP source from a report that carries the SSRC of the RTP stream
+  already latched and comes from the same IP (symmetric RTCP); it never
+  learns the peer's RTP address as an RTCP destination.
+
+Capacity: every call that keeps a separate RTCP port uses two ports, so a
+media port range filled with such calls holds half as many calls. Size
+`media_port_start..=media_port_end` for twice the concurrent non-mux calls.
+The option is ignored with ICE (component 1 only), DTLS-SRTP keying (RFC 5764
+§4.1 would need a second DTLS handshake on the RTCP port), strict
+`rtcp_mux_required`, and signalling-only media. With a static public address
+whose port differs from the local RTP port, no `a=rtcp:` is advertised.
 
 | Config field | Default | When to change it |
 | --- | --- | --- |
+| `rtcp_non_mux` | `false` | Peers that decline `a=rtcp-mux` (PBXes with default settings, carriers) should still get SR/RR reports and the RTT/loss they carry. Costs a second port per such call. |
+| `rtcp_mux_required` | `false` | Refuse peers that decline mux instead of running calls without RTCP. Wins over `rtcp_non_mux`. |
 | `rtcp_reduced_minimum_interval` | `false` | Faster RTT/loss feedback: the 5 s minimum becomes 360 / session kbit/s when smaller (about 4.5 s for G.711, less for wideband). |
 | `rtcp_xr_voip_metrics` | `false` | Carriers or monitoring that collect RFC 3611 VoIP metrics. XR is sent only to peers whose SDP has `a=rtcp-xr` naming `voip-metrics`. |
 | `active_call_rtcp_counts_as_media` | `false` | Media watchdogs enabled and calls that may go silent or on hold: RTCP from the peer keeps the call alive. |
@@ -621,6 +648,7 @@ follows RFC 3550 without further configuration:
 | `Config::with_active_call_no_media_timeout_secs(N)` | YAML recipe `activeCallNoMediaTimeoutSecs` | None | `0` disabled | Auto-answer server guard that releases inbound `Active` calls when no RTP packets arrive after answer. |
 | `Config::with_active_call_media_idle_timeout_secs(N)` | YAML recipe `activeCallMediaIdleTimeoutSecs` | None | `0` disabled | Auto-answer server guard that releases inbound `Active` calls when RTP stops advancing and remote BYE never arrives. |
 | `Config::with_active_call_rtcp_counts_as_media(true)` | None | None | `false` | Let RTCP from the call's peer count as activity for both media watchdogs, so held or silent calls that still report are kept. |
+| `Config::with_rtcp_non_mux(true)` | None | None | `false` | RTCP on RTP port + 1 for peers that decline `a=rtcp-mux`; reserves a second port per such call. |
 | `Config::with_rtcp_reduced_minimum_interval(true)` | None | None | `false` | RFC 3550 §6.2 reduced minimum RTCP interval (360 / session kbit/s) for faster quality feedback. |
 | `Config::with_rtcp_xr_voip_metrics(true)` | None | None | `false` | Send RFC 3611 VoIP-metrics RTCP XR to peers whose SDP asks with `a=rtcp-xr`. |
 | `Config::with_sip_udp_parse_workers(N)` | `--udp-parse-workers N` | `RVOIP_SHARDING_UDP_WORKERS` | Transport default | Add UDP parse parallelism when parse/dispatch work backs up. |
