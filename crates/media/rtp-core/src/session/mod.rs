@@ -3038,7 +3038,7 @@ mod tests {
 
         let local_ssrc = 0x4444_4444;
         let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let session = RtpSession::new(RtpSessionConfig {
+        let mut session = RtpSession::new(RtpSessionConfig {
             local_addr: "127.0.0.1:0".parse().unwrap(),
             ssrc: Some(local_ssrc),
             clock_rate: 8_000,
@@ -3046,6 +3046,8 @@ mod tests {
         })
         .await
         .unwrap();
+        // RTCP is accepted only from the call's signalled peer, as in a call.
+        session.set_remote_addr(peer.local_addr().unwrap()).await;
         let mut events = session.subscribe();
         let local_addr = session.local_addr().unwrap();
         assert!(session.get_stats().peer_report.is_none());

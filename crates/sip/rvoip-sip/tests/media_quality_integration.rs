@@ -158,6 +158,8 @@ fn config(
         .with_media_ports(media.0, media.1)
         .with_media_quality_interval(Duration::from_secs(1));
     config.rtcp_mux_required = rtcp_mux;
+    // rvoip offers a=rtcp-mux by default; the no-mux case has to opt out.
+    config.offer_rtcp_mux = rtcp_mux;
     config.media_public_addr = advertised_media;
     config
 }
