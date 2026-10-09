@@ -1680,3 +1680,111 @@ async fn resolve_uri_to_candidates_returns_empty_on_resolver_error() {
     let candidates = manager.resolve_uri_to_candidates(&uri).await;
     assert!(candidates.is_empty());
 }
+
+async fn build_manager_with_tls_contact_compatibility(
+    enabled: bool,
+) -> (Arc<DialogManager>, Arc<ProgrammableTransport>) {
+    let local_addr: SocketAddr = "127.0.0.1:5060".parse().unwrap();
+    let transport = Arc::new(ProgrammableTransport::new(local_addr));
+    let (_tx, transport_rx) = mpsc::channel(8);
+    let (transaction_manager, event_rx) =
+        TransactionManager::new(transport.clone(), transport_rx, Some(16))
+            .await
+            .expect("TransactionManager::new");
+    let config = rvoip_sip_dialog::DialogManagerConfig::hybrid(local_addr)
+        .with_dialog_config(|mut dialog| {
+            dialog.allow_tls_contact_on_sips = enabled;
+            dialog
+        })
+        .build();
+    let manager = Arc::new(
+        DialogManager::with_global_events_and_index_capacity_and_config(
+            Arc::new(transaction_manager),
+            event_rx,
+            local_addr,
+            16,
+            Some(config),
+        )
+        .await
+        .expect("DialogManager with config"),
+    );
+    (manager, transport)
+}
+
+fn in_dialog_bye(target: &str, call_id: &str) -> Request {
+    use rvoip_sip_core::builder::SimpleRequestBuilder;
+    SimpleRequestBuilder::new(Method::Bye, target)
+        .unwrap()
+        .from("local", "sips:local@127.0.0.1", Some("local-tag"))
+        .to("peer", "sips:peer@127.0.0.1", Some("peer-tag"))
+        .call_id(call_id)
+        .cseq(2)
+        .max_forwards(70)
+        .via("127.0.0.1:5061", "TLS", Some("z9hG4bK-in-dialog"))
+        .build()
+}
+
+#[tokio::test]
+async fn in_dialog_request_still_sends_when_dialog_lookup_misses() {
+    // A BYE racing dialog teardown must still go out on normal routing,
+    // whether or not TLS Contact compatibility is enabled.
+    for enabled in [false, true] {
+        let (manager, transport) = build_manager_with_tls_contact_compatibility(enabled).await;
+        let removed = rvoip_sip_dialog::DialogId::new();
+        let destination: SocketAddr = "10.0.0.7:5061".parse().unwrap();
+        manager
+            .send_request_with_candidate_failover(
+                in_dialog_bye("sips:peer@10.0.0.7:5061", &format!("missing-{enabled}")),
+                vec![ResolvedTarget::immediate(destination, TransportType::Tls)],
+                Some(&removed),
+            )
+            .await
+            .expect("a missing dialog does not block an in-dialog request");
+        assert_eq!(transport.sends(), vec![destination]);
+        assert_eq!(transport.routes()[0].flow_id, None);
+    }
+}
+
+#[tokio::test]
+async fn opted_in_dialog_pins_admitted_tls_flow_and_default_does_not() {
+    use rvoip_sip_dialog::dialog::Dialog;
+    let pinned_target = "sips:peer@127.0.0.1:5061;transport=tls";
+    let flow = TransportFlowId::from_process_local_value(17).unwrap();
+    let admitted: SocketAddr = "127.0.0.1:43210".parse().unwrap();
+    let resolved: SocketAddr = "127.0.0.1:5061".parse().unwrap();
+    for enabled in [true, false] {
+        let (manager, transport) = build_manager_with_tls_contact_compatibility(enabled).await;
+        let mut dialog = Dialog::new_early(
+            format!("pinned-{enabled}"),
+            "sips:local@127.0.0.1".parse().unwrap(),
+            pinned_target.parse().unwrap(),
+            Some("local-tag".into()),
+            Some("peer-tag".into()),
+            false,
+        );
+        // The dialog was formed while opted in; the manager setting decides.
+        dialog.allow_tls_contact_on_sips = true;
+        let mut admitted_route =
+            TransportRoute::new(admitted).with_transport_type(TransportType::Tls);
+        admitted_route.flow_id = Some(flow);
+        dialog.tls_contact_flow = Some((pinned_target.parse().unwrap(), admitted_route));
+        let dialog_id = dialog.id.clone();
+        manager.store_dialog(dialog).await.expect("store dialog");
+        manager
+            .send_request_with_candidate_failover(
+                in_dialog_bye(pinned_target, &format!("pinned-{enabled}")),
+                vec![ResolvedTarget::immediate(resolved, TransportType::Tls)],
+                Some(&dialog_id),
+            )
+            .await
+            .expect("in-dialog BYE sends");
+        let route = transport.routes()[0].clone();
+        if enabled {
+            assert_eq!(route.destination, admitted);
+            assert_eq!(route.flow_id, Some(flow));
+        } else {
+            assert_eq!(route.destination, resolved);
+            assert_eq!(route.flow_id, None);
+        }
+    }
+}
