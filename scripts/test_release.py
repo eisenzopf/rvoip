@@ -519,6 +519,81 @@ rvoip-rtc = { path = "../rvoip-rtc" }
             ):
                 release.validate_release_notes_final(root, "0.3.10")
 
+    def write_changelog(self, root: Path, text: str) -> Path:
+        path = root / "CHANGELOG.md"
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_prepare_moves_unreleased_entries_under_the_release_heading(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = self.write_changelog(
+                root,
+                "# Changelog\n\n## Unreleased\n\n### Media\n\n- Fixed tones.\n\n"
+                "## 0.3.12\n\n- Older.\n",
+            )
+            edits = release.planned_changelog_edits(
+                root, "0.4.0", today=release.dt.date(2026, 10, 8)
+            )
+            self.assertEqual(
+                edits[path].decode(),
+                "# Changelog\n\n## Unreleased\n\n## 0.4.0 \u2014 2026-10-08\n\n"
+                "### Media\n\n- Fixed tones.\n\n## 0.3.12\n\n- Older.\n",
+            )
+            path.write_bytes(edits[path])
+            release.validate_changelog_release(root, "0.4.0")
+            # Preparing again finds the section already written.
+            self.assertEqual(release.planned_changelog_edits(root, "0.4.0"), {})
+
+    def test_prepare_refuses_an_empty_unreleased_section(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for body in ("", "### Media\n\n", "<!-- add entries here -->\n"):
+                self.write_changelog(
+                    root, f"# Changelog\n\n## Unreleased\n\n{body}## 0.3.12\n\n- Older.\n"
+                )
+                with self.assertRaisesRegex(release.ReleaseError, "no entries under"):
+                    release.planned_changelog_edits(root, "0.4.0")
+
+    def test_prepare_accepts_a_hand_written_release_section(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_changelog(
+                root, "# Changelog\n\n## Unreleased\n\n## 0.4.0\n\n- Done.\n"
+            )
+            self.assertEqual(release.planned_changelog_edits(root, "0.4.0"), {})
+
+    def test_prepare_refuses_entries_in_both_places(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_changelog(
+                root,
+                "# Changelog\n\n## Unreleased\n\n- New.\n\n## 0.4.0\n\n- Done.\n",
+            )
+            with self.assertRaisesRegex(release.ReleaseError, "both"):
+                release.planned_changelog_edits(root, "0.4.0")
+
+    def test_release_validation_requires_a_described_version(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_changelog(root, "# Changelog\n\n## Unreleased\n\n- New.\n")
+            with self.assertRaisesRegex(release.ReleaseError, "no '## 0.4.0' section"):
+                release.validate_changelog_release(root, "0.4.0")
+            self.write_changelog(
+                root, "# Changelog\n\n## 0.4.0 \u2014 2026-10-08\n\n### Media\n\n## 0.3.12\n- x\n"
+            )
+            with self.assertRaisesRegex(release.ReleaseError, "is empty"):
+                release.validate_changelog_release(root, "0.4.0")
+            # A section for a different release does not satisfy this one.
+            with self.assertRaisesRegex(release.ReleaseError, "no '## 0.3.1' section"):
+                release.validate_changelog_release(root, "0.3.1")
+
+    def test_repository_changelog_describes_the_workspace_version(self) -> None:
+        version = tomllib.loads((SCRIPT.parent.parent / "Cargo.toml").read_text(encoding="utf-8"))[
+            "workspace"
+        ]["package"]["version"]
+        release.validate_changelog_release(SCRIPT.parent.parent, version)
+
     def test_release_notes_accept_final_protected_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

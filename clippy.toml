@@ -1,0 +1,11 @@
+# ConnectionId and ConversationId carry an Arc'd one-use lifecycle fence with
+# atomic interior state, but their Hash, Eq and Ord implementations use only
+# the immutable correlation string. Mutating the fence can therefore never
+# change a map key, so `mutable_key_type` is a false positive for them.
+# bytes::Bytes is clippy's default entry; it is listed because this setting
+# replaces the default rather than extending it.
+ignore-interior-mutability = [
+    "bytes::Bytes",
+    "rvoip_core_traits::ids::ConnectionId",
+    "rvoip_core_traits::ids::ConversationId",
+]

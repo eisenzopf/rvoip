@@ -986,7 +986,16 @@ async fn dispatch_without_adapter_returns_no_adapter_error() {
 
 #[tokio::test]
 async fn outbound_terminal_before_return_tombstones_id_without_publication() {
+    exercise_outbound_terminal_before_return_tombstones_id_without_publication(false).await;
+}
+
+async fn exercise_outbound_terminal_before_return_tombstones_id_without_publication(bounded: bool) {
     let orchestrator = Orchestrator::new(Config::default());
+    if bounded {
+        orchestrator
+            .configure_bounded_connection_lifecycles(64)
+            .unwrap();
+    }
     let (adapter, _, counts) = StubAdapter::new();
     orchestrator.register(adapter.clone()).unwrap();
     let session_id = start_voice_session(&orchestrator).await;
@@ -1188,7 +1197,16 @@ async fn inbound_accept_failure_conditionally_rolls_back_session_binding() {
 
 #[tokio::test]
 async fn terminal_during_inbound_accept_cannot_leave_stale_binding() {
+    exercise_terminal_during_inbound_accept_cannot_leave_stale_binding(false).await;
+}
+
+async fn exercise_terminal_during_inbound_accept_cannot_leave_stale_binding(bounded: bool) {
     let orchestrator = Orchestrator::new(Config::default());
+    if bounded {
+        orchestrator
+            .configure_bounded_connection_lifecycles(64)
+            .unwrap();
+    }
     let (adapter, sender, _) = StubAdapter::new();
     orchestrator.register(adapter.clone()).unwrap();
     let session_id = start_voice_session(&orchestrator).await;
@@ -1424,7 +1442,14 @@ async fn direct_terminal_fallback_cleans_routes_and_emits_once() {
 
 #[tokio::test]
 async fn queued_nonterminal_events_cannot_resurrect_an_ended_route() {
+    exercise_queued_nonterminal_events_cannot_resurrect_an_ended_route(false).await;
+}
+
+async fn exercise_queued_nonterminal_events_cannot_resurrect_an_ended_route(bounded: bool) {
     let orch = Orchestrator::new(Config::default());
+    if bounded {
+        orch.configure_bounded_connection_lifecycles(64).unwrap();
+    }
     let (adapter, adapter_tx, _) = StubAdapter::new();
     orch.register(adapter.clone()).expect("register adapter");
     let mut events = orch.subscribe_events();
@@ -1805,9 +1830,18 @@ async fn prepared_outbound_explicit_abort_and_drop_fail_closed_before_bind() {
 
 #[tokio::test]
 async fn prepared_outbound_timeout_makes_stale_commit_fail_closed() {
+    exercise_prepared_outbound_timeout_makes_stale_commit_fail_closed(false).await;
+}
+
+async fn exercise_prepared_outbound_timeout_makes_stale_commit_fail_closed(bounded: bool) {
     let mut config = Config::default();
     config.outbound_preparation_timeout = Duration::from_millis(25);
     let orchestrator = Orchestrator::new(config);
+    if bounded {
+        orchestrator
+            .configure_bounded_connection_lifecycles(64)
+            .unwrap();
+    }
     let (adapter, _, counts) = StubAdapter::new();
     orchestrator.register(adapter).unwrap();
     let session_id = start_voice_session(&orchestrator).await;
@@ -2565,7 +2599,18 @@ async fn admission_terminal_watch_is_nonblocking_for_unpolled_observers() {
 
 #[tokio::test]
 async fn admission_confirmation_terminal_and_stale_decisions_are_generation_safe() {
+    exercise_admission_confirmation_terminal_and_stale_decisions_are_generation_safe(false).await;
+}
+
+async fn exercise_admission_confirmation_terminal_and_stale_decisions_are_generation_safe(
+    bounded: bool,
+) {
     let orchestrator = Orchestrator::new(Config::default());
+    if bounded {
+        orchestrator
+            .configure_bounded_connection_lifecycles(64)
+            .unwrap();
+    }
     let mut admissions = orchestrator
         .install_inbound_admission_gate(1, Duration::from_secs(2))
         .unwrap();
@@ -2616,10 +2661,19 @@ async fn admission_confirmation_terminal_and_stale_decisions_are_generation_safe
     );
     announce_atomic_inbound(&sender, replacement, replacement_principal).await;
     wait_for_count(&counts.reject, 1).await;
-    wait_for_admission_outcomes(&adapter, 2).await;
+    if bounded {
+        // A retired capability cannot acquire a second lifecycle generation.
+        assert_eq!(orchestrator.connection_id_budget_usage(), (0, 64));
+    } else {
+        wait_for_admission_outcomes(&adapter, 2).await;
+    }
     assert_eq!(
         adapter.admission_outcomes(),
-        vec![(connection_id.clone(), 1, false), (connection_id, 2, false)]
+        if bounded {
+            vec![(connection_id.clone(), 1, false)]
+        } else {
+            vec![(connection_id.clone(), 1, false), (connection_id, 2, false)]
+        }
     );
     assert_eq!(
         *stale_terminal.borrow(),
@@ -2904,7 +2958,16 @@ async fn closed_receiver_and_capacity_exhaustion_reject_without_task_growth() {
 
 #[tokio::test]
 async fn terminal_race_invalidates_ticket_and_late_accept_cannot_resurrect() {
+    exercise_terminal_race_invalidates_ticket_and_late_accept_cannot_resurrect(false).await;
+}
+
+async fn exercise_terminal_race_invalidates_ticket_and_late_accept_cannot_resurrect(bounded: bool) {
     let orchestrator = Orchestrator::new(Config::default());
+    if bounded {
+        orchestrator
+            .configure_bounded_connection_lifecycles(64)
+            .unwrap();
+    }
     let mut admissions = orchestrator
         .install_inbound_admission_gate(1, Duration::from_secs(1))
         .unwrap();
@@ -3628,11 +3691,22 @@ async fn operational_events_before_admission_fail_closed_without_publication() {
 
 #[tokio::test]
 async fn cleanup_timeouts_erase_core_state_and_quarantine_only_adapter_routes() {
+    exercise_cleanup_timeouts_erase_core_state_and_quarantine_only_adapter_routes(false).await;
+}
+
+async fn exercise_cleanup_timeouts_erase_core_state_and_quarantine_only_adapter_routes(
+    bounded: bool,
+) {
     for (case, reject_behavior, end_behavior, rejection_succeeds) in [
         ("reject-timeout", CLEANUP_HANG, CLEANUP_SUCCEED, true),
         ("end-timeout", CLEANUP_FAIL, CLEANUP_HANG, false),
     ] {
         let orchestrator = Orchestrator::new(Config::default());
+        if bounded {
+            orchestrator
+                .configure_bounded_connection_lifecycles(64)
+                .unwrap();
+        }
         let mut admissions = orchestrator
             .install_inbound_admission_gate(1, Duration::from_secs(5))
             .unwrap();
@@ -3838,7 +3912,18 @@ async fn accept_and_operational_event_race_has_one_linearized_outcome() {
 
 #[tokio::test]
 async fn retired_connection_id_cannot_be_reused_or_revived_by_stale_timeout() {
+    exercise_retired_connection_id_cannot_be_reused_or_revived_by_stale_timeout(false).await;
+}
+
+async fn exercise_retired_connection_id_cannot_be_reused_or_revived_by_stale_timeout(
+    bounded: bool,
+) {
     let orchestrator = Orchestrator::new(Config::default());
+    if bounded {
+        orchestrator
+            .configure_bounded_connection_lifecycles(64)
+            .unwrap();
+    }
     let mut admissions = orchestrator
         .install_inbound_admission_gate(2, Duration::from_millis(500))
         .unwrap();
@@ -4830,4 +4915,91 @@ async fn core_lifecycle_failure_is_authoritative_and_sanitized() {
         }
     ));
     assert!(!format!("{event:?}").contains("inbound accept failed"));
+}
+
+#[tokio::test]
+async fn bounded_terminal_during_inbound_accept_cannot_leave_stale_binding() {
+    exercise_terminal_during_inbound_accept_cannot_leave_stale_binding(true).await;
+}
+
+#[tokio::test]
+async fn bounded_outbound_terminal_before_return_tombstones_id_without_publication() {
+    exercise_outbound_terminal_before_return_tombstones_id_without_publication(true).await;
+}
+
+#[tokio::test]
+async fn bounded_terminal_race_invalidates_ticket_and_late_accept_cannot_resurrect() {
+    exercise_terminal_race_invalidates_ticket_and_late_accept_cannot_resurrect(true).await;
+}
+
+#[tokio::test]
+async fn bounded_retired_connection_id_cannot_be_reused_or_revived_by_stale_timeout() {
+    exercise_retired_connection_id_cannot_be_reused_or_revived_by_stale_timeout(true).await;
+}
+
+#[tokio::test]
+async fn bounded_queued_nonterminal_events_cannot_resurrect_an_ended_route() {
+    exercise_queued_nonterminal_events_cannot_resurrect_an_ended_route(true).await;
+}
+
+#[tokio::test]
+async fn bounded_cleanup_timeouts_erase_core_state_and_quarantine_only_adapter_routes() {
+    exercise_cleanup_timeouts_erase_core_state_and_quarantine_only_adapter_routes(true).await;
+}
+
+#[tokio::test]
+async fn bounded_prepared_outbound_timeout_makes_stale_commit_fail_closed() {
+    exercise_prepared_outbound_timeout_makes_stale_commit_fail_closed(true).await;
+}
+
+#[tokio::test]
+async fn bounded_admission_confirmation_terminal_and_stale_decisions_are_generation_safe() {
+    exercise_admission_confirmation_terminal_and_stale_decisions_are_generation_safe(true).await;
+}
+
+#[tokio::test]
+async fn bounded_lookup_terminal_cleans_existing_route_but_cannot_create_or_revive() {
+    let core = Orchestrator::new(Config::default());
+    core.configure_bounded_connection_lifecycles(4).unwrap();
+    let (adapter, sender, counts) = StubAdapter::new();
+    core.register(adapter.clone()).unwrap();
+    let mut events = core.subscribe_events();
+    let conn = fake_inbound_connection();
+    let id = conn.id.clone();
+    adapter.mark_live(id.clone());
+    sender
+        .send(AdapterEvent::InboundConnection { connection: conn })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let lookup = ConnectionId::from_string(id.as_str());
+    adapter.mark_ended(&id);
+    sender
+        .send(AdapterEvent::Ended {
+            connection_id: lookup.clone(),
+            reason: EndReason::Normal,
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while core.connection_id_budget_usage().0 != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(id.lifecycle_retired());
+    let mut forged = fake_inbound_connection();
+    forged.id = lookup;
+    adapter.mark_live(forged.id.clone());
+    sender
+        .send(AdapterEvent::InboundConnection { connection: forged })
+        .await
+        .unwrap();
+    wait_for_count(&counts.reject, 1).await;
+    assert_eq!(core.connection_id_budget_usage(), (0, 4));
+    assert!(core.connection_transport(&id).is_err());
 }

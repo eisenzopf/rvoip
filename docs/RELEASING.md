@@ -25,6 +25,21 @@ trees, missing internal dependency versions, and a workspace inventory other
 than the expected 46 publishable packages. It updates package inheritance and
 the lockfile transactionally.
 
+### Changelog
+
+Every release must describe itself in `CHANGELOG.md`. Add entries under
+`## Unreleased` as changes land, or at the latest before running **Prepare
+release PR**. Preparation moves those entries under a new
+`## X.Y.Z — YYYY-MM-DD` heading in the release commit and refuses to run while
+`## Unreleased` is empty. A hand-written `## X.Y.Z` section is accepted
+instead, as long as `## Unreleased` is then empty. Subsection headings and
+HTML comments alone do not count as entries.
+
+Verification and publication enforce the same rule: they reject a release
+whose `CHANGELOG.md` has no non-empty `## X.Y.Z` section. An edit to
+`CHANGELOG.md` invalidates reuse of earlier qualification evidence, so write
+the entries before qualification rather than after it.
+
 ## Verify
 
 After the preparation PR merges, run **Release qualification** for that exact
