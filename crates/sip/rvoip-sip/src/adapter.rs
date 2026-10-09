@@ -3114,10 +3114,7 @@ impl SipAdapter {
                 );
             }
             ApiEvent::MediaQualityChanged {
-                call_id,
-                packet_loss_percent,
-                jitter_ms,
-                mos,
+                call_id, quality, ..
             } => {
                 // P12.8 — surface per-Connection media quality (RTCP
                 // RR / XR, distilled by media-core) into the
@@ -3129,11 +3126,7 @@ impl SipAdapter {
                 let Some(epoch) = self.existing_mapped_epoch(&call_id) else {
                     return;
                 };
-                let snapshot = rvoip_core::stream::QualitySnapshot {
-                    jitter_ms: jitter_ms as f32,
-                    packet_loss_pct: packet_loss_percent as f32,
-                    mos,
-                };
+                let snapshot = sip_quality_snapshot(&quality);
                 // Retain it on the stream as well as publishing it, so a
                 // caller polling `quality_snapshot` sees the same measurement
                 // the event carried rather than a default that reads as
@@ -4741,6 +4734,23 @@ impl ConnectionAdapter for SipAdapter {
         // Anonymous unless the peer presents an HTTP-mediated AAuth/OAuth
         // surface. For v1 SIP we always return Anonymous.
         Ok(IdentityAssurance::Anonymous)
+    }
+}
+
+/// Project one rvoip-sip quality sample onto the transport-neutral snapshot
+/// the orchestrator aggregates. Full precision is kept (the event's legacy
+/// integer fields are truncated), and the RTCP-derived values stay `None`
+/// when the call has no peer report.
+fn sip_quality_snapshot(
+    quality: &crate::api::events::MediaQualityStats,
+) -> rvoip_core::stream::QualitySnapshot {
+    rvoip_core::stream::QualitySnapshot {
+        jitter_ms: quality.jitter_ms,
+        packet_loss_pct: quality.packet_loss_percent,
+        mos: quality.mos,
+        rtt_ms: quality.rtt_ms,
+        remote_packet_loss_pct: quality.remote_packet_loss_percent,
+        remote_jitter_ms: quality.remote_jitter_ms,
     }
 }
 

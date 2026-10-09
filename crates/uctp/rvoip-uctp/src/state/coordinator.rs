@@ -3292,6 +3292,7 @@ impl UctpCoordinator {
                 jitter_ms: stream.jitter_ms as f32,
                 packet_loss_pct: stream.loss_pct,
                 mos: Some(stream.mos),
+                ..Default::default()
             };
             self.emit_event(UctpSessionEvent::Quality {
                 connid: connid.clone(),

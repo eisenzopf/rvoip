@@ -1070,6 +1070,7 @@ impl WebRtcAdapter {
                         jitter_ms: jitter_sum / count as f32,
                         packet_loss_pct: loss_sum / count as f32,
                         mos: None,
+                        ..Default::default()
                     };
                     let _ = Self::publish_or_stage_to(
                         &outbound_event_stages,

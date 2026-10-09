@@ -1187,6 +1187,11 @@ impl RvoipAppBuilder {
     ///
     /// Connections that have never been measured are skipped rather than
     /// averaged in as zeros, so the cadence never invents a perfect score.
+    ///
+    /// For SIP this also turns on the SIP layer's per-call sampler at the
+    /// same cadence (`rvoip_sip::Config::media_quality_interval`), so SIP
+    /// calls are measured and their RTCP-derived RTT and peer-reported loss
+    /// and jitter reach `Event::MediaQuality` snapshots.
     #[must_use]
     pub const fn media_quality_interval(mut self, every: Duration) -> Self {
         self.media_quality_interval = Some(every);
@@ -1317,7 +1322,13 @@ impl RvoipAppBuilder {
             }
             validate_remote_endpoint_profile(&sip)?;
             let sip_addr = resolve_udp_bind_addr(sip_addr)?;
-            let low_sip = make_low_sip_config(&sip, sip_addr);
+            let mut low_sip = make_low_sip_config(&sip, sip_addr);
+            // The core heartbeat averages what each SIP media stream last
+            // reported, and SIP streams report only when the SIP layer
+            // samples them; without this the heartbeat skips every SIP call.
+            if let Some(every) = self.media_quality_interval {
+                low_sip.media_quality_interval = Some(every);
+            }
 
             // A listener auth policy is what gives an inbound INVITE a
             // principal, and the SIP adapter captures no inbound context

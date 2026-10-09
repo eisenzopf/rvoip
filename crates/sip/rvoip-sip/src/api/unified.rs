@@ -2027,6 +2027,21 @@ pub struct Config {
     /// server resources indefinitely. `0` disables the watchdog.
     pub active_call_media_idle_timeout_secs: u64,
 
+    /// Count RTCP from the call's peer as media activity for the two
+    /// active-call media watchdogs above.
+    ///
+    /// Both watchdogs normally watch the RTP packet count only, so a call on
+    /// hold, or a peer that suppresses silence, is torn down even while its
+    /// RTCP reports show the far end is alive. Set this to `true` to treat
+    /// each accepted RTCP report as activity too. Only RTCP from the call's
+    /// own peer counts: reports from any other source are dropped before
+    /// they reach the session. RTCP flows only when `a=rtcp-mux` was
+    /// negotiated (see [`Config::rtcp_mux_required`]).
+    ///
+    /// Default: `false` — RTP only. Has no effect while both watchdog
+    /// timeouts are `0`.
+    pub active_call_rtcp_counts_as_media: bool,
+
     /// RFC 4028 `Session-Expires` value in seconds to advertise on outgoing
     /// INVITEs. `None` disables session timers entirely. Common carrier
     /// value is 1800 (30 min).
@@ -2370,6 +2385,10 @@ pub struct Config {
     ///   tears calls down when RTCP stops arriving (an RTCP inactivity or
     ///   "media timeout on RTCP" setting) may hang up a healthy call. Use the
     ///   SBC's RTP inactivity timer instead, or require mux.
+    /// - **No peer-reported quality here either**: rvoip receives no RTCP
+    ///   from the peer, so the `rtt_ms` and `remote_*` fields of
+    ///   [`MediaQualityStats`](crate::MediaQualityStats) stay `None`; local
+    ///   statistics still work.
     ///
     /// # Example
     ///
@@ -2381,6 +2400,51 @@ pub struct Config {
     /// config.rtcp_mux_required = true;
     /// ```
     pub rtcp_mux_required: bool,
+
+    /// How often to sample per-call media quality and publish
+    /// [`Event::MediaQualityChanged`](crate::Event::MediaQualityChanged) for
+    /// every call that has sent or received RTP.
+    ///
+    /// Default: `None` — no periodic events. Quality is still available on
+    /// demand from [`UnifiedCoordinator::media_quality`], which needs no
+    /// configuration. Periodic emission is opt-in because on a busy server it
+    /// adds one event per call per interval to the shared application event
+    /// stream, where it competes with call-lifecycle events for every
+    /// subscriber's buffer. `Some(Duration::from_secs(5))` is a reasonable
+    /// cadence: RTCP reports, which feed the `remote_*` fields, arrive on a
+    /// multi-second interval themselves. A zero interval is rejected by
+    /// [`Config::validate`].
+    ///
+    /// The sampler also feeds `rvoip-core`: with it on, SIP media streams
+    /// report `has_quality_measurement() == true` and the orchestrator emits
+    /// `Event::MediaQuality` for SIP connections.
+    pub media_quality_interval: Option<Duration>,
+
+    /// Send RFC 3611 VoIP-metrics extended reports (RTCP XR) to peers that
+    /// ask for them.
+    ///
+    /// When `true`, a call whose remote SDP carries `a=rtcp-xr` naming
+    /// `voip-metrics` (RFC 3611 §5.1) appends a VoIP-metrics block — loss,
+    /// discard rate, round-trip delay, R-factor and MOS for the stream it
+    /// receives — to each periodic RTCP report. Calls whose peer did not ask
+    /// get none. rvoip does not itself advertise `a=rtcp-xr`.
+    ///
+    /// Enable it for carriers or monitoring systems that collect per-call
+    /// quality from RTCP XR. Default: `false` — no XR is ever sent.
+    pub rtcp_xr_voip_metrics: bool,
+
+    /// Let the RTCP report interval use the RFC 3550 §6.2 reduced minimum.
+    ///
+    /// RTCP reports go out on average every 5 / (e − 3/2) ≈ 4.1 seconds,
+    /// randomised between about 2 and 6 seconds, as RFC 3550 recommends. When
+    /// `true`, the five-second minimum becomes 360 divided by the session
+    /// bandwidth in kbit/s whenever that is smaller: about 4.5 s for G.711
+    /// (80 kbit/s with headers), less for wideband sessions. Narrowband
+    /// codecs below 72 kbit/s keep five seconds.
+    ///
+    /// Enable it when you need RTT and loss feedback sooner, at the cost of
+    /// more RTCP traffic. Default: `false` — the fixed five-second minimum.
+    pub rtcp_reduced_minimum_interval: bool,
 
     /// Select how SRTP keys are established when [`Config::offer_srtp`] is
     /// enabled. SDES remains the compatibility default. DTLS-SRTP requires
@@ -3102,6 +3166,8 @@ impl std::fmt::Debug for Config {
                 &self.media_public_addr.is_some(),
             )
             .field("media_mode", &self.media_mode)
+            .field("rtcp_mux_required", &self.rtcp_mux_required)
+            .field("media_quality_interval", &self.media_quality_interval)
             .field("media_session_capacity", &self.media_session_capacity)
             .field("stun_configured", &self.stun_server.is_some())
             .field("offered_codec_count", &self.offered_codecs.len())
@@ -3236,6 +3302,7 @@ impl Config {
             setup_teardown_timeout_secs: Self::DEFAULT_SETUP_TEARDOWN_TIMEOUT_SECS,
             active_call_no_media_timeout_secs: 0,
             active_call_media_idle_timeout_secs: 0,
+            active_call_rtcp_counts_as_media: false,
             session_timer_secs: None,
             session_timer_min_se: 90,
             credentials: None,
@@ -3270,6 +3337,10 @@ impl Config {
             offer_srtp: false,
             offer_rtcp_mux: true,
             rtcp_mux_required: false,
+            media_quality_interval: None,
+
+            rtcp_xr_voip_metrics: false,
+            rtcp_reduced_minimum_interval: false,
             srtp_keying: SrtpKeyingMode::Sdes,
             dtls_setup_role: DtlsSetupRole::Actpass,
             srtp_required: false,
@@ -3362,6 +3433,7 @@ impl Config {
             setup_teardown_timeout_secs: Self::DEFAULT_SETUP_TEARDOWN_TIMEOUT_SECS,
             active_call_no_media_timeout_secs: 0,
             active_call_media_idle_timeout_secs: 0,
+            active_call_rtcp_counts_as_media: false,
             session_timer_secs: None,
             session_timer_min_se: 90,
             credentials: None,
@@ -3396,6 +3468,10 @@ impl Config {
             offer_srtp: false,
             offer_rtcp_mux: true,
             rtcp_mux_required: false,
+            media_quality_interval: None,
+
+            rtcp_xr_voip_metrics: false,
+            rtcp_reduced_minimum_interval: false,
             srtp_keying: SrtpKeyingMode::Sdes,
             dtls_setup_role: DtlsSetupRole::Actpass,
             srtp_required: false,
@@ -4425,9 +4501,38 @@ impl Config {
         self
     }
 
+    /// Count RTCP from the call's peer as media activity for the active-call
+    /// media watchdogs. See [`Config::active_call_rtcp_counts_as_media`].
+    pub fn with_active_call_rtcp_counts_as_media(mut self, enabled: bool) -> Self {
+        self.active_call_rtcp_counts_as_media = enabled;
+        self
+    }
+
+    /// Send RFC 3611 VoIP-metrics RTCP XR to peers whose SDP asks for it.
+    /// See [`Config::rtcp_xr_voip_metrics`].
+    pub fn with_rtcp_xr_voip_metrics(mut self, enabled: bool) -> Self {
+        self.rtcp_xr_voip_metrics = enabled;
+        self
+    }
+
+    /// Use the RFC 3550 §6.2 reduced minimum RTCP interval. See
+    /// [`Config::rtcp_reduced_minimum_interval`].
+    pub fn with_rtcp_reduced_minimum_interval(mut self, enabled: bool) -> Self {
+        self.rtcp_reduced_minimum_interval = enabled;
+        self
+    }
+
     /// Set media allocation behavior.
     pub fn with_media_mode(mut self, mode: MediaMode) -> Self {
         self.media_mode = mode;
+        self
+    }
+
+    /// Publish [`Event::MediaQualityChanged`](crate::Event::MediaQualityChanged)
+    /// for every call with media, every `interval`. See
+    /// [`Config::media_quality_interval`].
+    pub fn with_media_quality_interval(mut self, interval: Duration) -> Self {
+        self.media_quality_interval = Some(interval);
         self
     }
 
@@ -4949,6 +5054,14 @@ impl Config {
                         .to_string(),
                 ));
             }
+        }
+        if self
+            .media_quality_interval
+            .is_some_and(|every| every.is_zero())
+        {
+            return Err(SessionError::ConfigError(
+                "media_quality_interval must be nonzero; use None to disable it".to_string(),
+            ));
         }
         if self
             .media_public_addr
@@ -7646,12 +7759,34 @@ mod config_tests {
         assert_eq!(config.active_call_no_media_timeout_secs, 0);
         assert_eq!(config.active_call_media_idle_timeout_secs, 0);
 
+        assert!(!config.active_call_rtcp_counts_as_media);
+
         let config = config
             .with_active_call_no_media_timeout_secs(60)
-            .with_active_call_media_idle_timeout_secs(90);
+            .with_active_call_media_idle_timeout_secs(90)
+            .with_active_call_rtcp_counts_as_media(true);
         assert_eq!(config.active_call_no_media_timeout_secs, 60);
         assert_eq!(config.active_call_media_idle_timeout_secs, 90);
+        assert!(config.active_call_rtcp_counts_as_media);
         config.validate().expect("valid media watchdog timeouts");
+    }
+
+    #[test]
+    fn rtcp_reporting_options_are_off_by_default_and_configurable() {
+        for config in [
+            Config::local("alice", 5060),
+            Config::on("alice", "127.0.0.1".parse().unwrap(), 5060),
+        ] {
+            assert!(!config.rtcp_xr_voip_metrics);
+            assert!(!config.rtcp_reduced_minimum_interval);
+            assert!(!config.active_call_rtcp_counts_as_media);
+        }
+        let config = Config::local("alice", 5060)
+            .with_rtcp_xr_voip_metrics(true)
+            .with_rtcp_reduced_minimum_interval(true);
+        assert!(config.rtcp_xr_voip_metrics);
+        assert!(config.rtcp_reduced_minimum_interval);
+        config.validate().expect("valid RTCP reporting options");
     }
 
     #[test]
@@ -8028,6 +8163,39 @@ pub struct UnifiedCoordinator {
     /// detaching. The retained task then owns one strong coordinator reference
     /// through dispatch, final-response confirmation, and exact finalization.
     self_weak: OnceLock<Weak<UnifiedCoordinator>>,
+}
+
+/// Periodically publish one media-quality sample per call with media
+/// (`Config::media_quality_interval`). Holds only a weak controller
+/// reference, and exits on coordinator shutdown.
+async fn run_media_quality_sampler(
+    controller: Weak<rvoip_media_core::relay::controller::MediaSessionController>,
+    every: Duration,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut tick = tokio::time::interval(every);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The first tick completes immediately; a call has no media to report
+    // at that point, so start sampling one interval in.
+    tick.tick().await;
+    loop {
+        if *shutdown.borrow() {
+            break;
+        }
+        tokio::select! {
+            _ = tick.tick() => {}
+            result = shutdown.changed() => {
+                if result.is_err() || *shutdown.borrow() {
+                    break;
+                }
+                continue;
+            }
+        }
+        let Some(controller) = controller.upgrade() else {
+            break;
+        };
+        controller.publish_media_quality_updates().await;
+    }
 }
 
 async fn run_setup_teardown_deadline_scheduler(
@@ -9601,6 +9769,10 @@ impl UnifiedCoordinator {
         media_adapter_inner.set_media_mode(config.media_mode);
         media_adapter_inner.set_offer_rtcp_mux(config.offer_rtcp_mux);
         media_adapter_inner.set_rtcp_mux_required(config.rtcp_mux_required);
+        media_adapter_inner.set_rtcp_reporting_policy(
+            config.rtcp_xr_voip_metrics,
+            config.rtcp_reduced_minimum_interval,
+        );
         media_adapter_inner.set_ice_policy(config.ice);
         // Apply RFC 4568 SDES-SRTP policy from Config (Step 2B.1).
         media_adapter_inner.set_srtp_policy(
@@ -9680,6 +9852,7 @@ impl UnifiedCoordinator {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let setup_teardown_shutdown_rx = shutdown_rx.clone();
         let exact_response_shutdown_rx = shutdown_rx.clone();
+        let media_quality_shutdown_rx = shutdown_rx.clone();
         let lifecycle = config
             .server_call_capacity
             .map(LifecycleIndex::with_capacity)
@@ -9745,6 +9918,15 @@ impl UnifiedCoordinator {
                 exact_response_shutdown_rx,
             ));
         debug_assert!(exact_response_runner_started);
+        if let Some(every) = coordinator.config.media_quality_interval {
+            let media_quality_sampler_started =
+                setup_teardown_tasks.spawn(run_media_quality_sampler(
+                    Arc::downgrade(&coordinator.media_adapter.controller),
+                    every,
+                    media_quality_shutdown_rx,
+                ));
+            debug_assert!(media_quality_sampler_started);
+        }
         // Start the dialog adapter. The scheduler runner is already retained;
         // join it explicitly on constructor failure rather than relying on a
         // later last-owner drop to wake and detach it.
@@ -10796,6 +10978,7 @@ impl UnifiedCoordinator {
         let no_media_timeout = Duration::from_secs(self.config.active_call_no_media_timeout_secs);
         let media_idle_timeout =
             Duration::from_secs(self.config.active_call_media_idle_timeout_secs);
+        let rtcp_counts_as_media = self.config.active_call_rtcp_counts_as_media;
         if no_media_timeout.is_zero() && media_idle_timeout.is_zero() {
             return;
         }
@@ -10829,8 +11012,9 @@ impl UnifiedCoordinator {
         let watchdog_scheduler = Arc::clone(&self.setup_teardown_scheduler);
         let task_scheduler = Arc::clone(&watchdog_scheduler);
         let _ = watchdog_scheduler.spawn_lifecycle_task(async move {
-            let Some(initial_packets_received) =
-                media_adapter.rtp_packets_received(&session_id).await
+            let Some(initial_packets_received) = media_adapter
+                .media_activity_count(&session_id, rtcp_counts_as_media)
+                .await
             else {
                 return;
             };
@@ -10865,7 +11049,9 @@ impl UnifiedCoordinator {
                     return;
                 }
 
-                let Some(packets_received) = media_adapter.rtp_packets_received(&session_id).await
+                let Some(packets_received) = media_adapter
+                    .media_activity_count(&session_id, rtcp_counts_as_media)
+                    .await
                 else {
                     return;
                 };
@@ -11558,6 +11744,48 @@ impl UnifiedCoordinator {
         self.media_adapter
             .request_peer_codec_mode(session, mode_index)
             .await
+    }
+
+    /// Current media quality for one call, or `None` when the call has no
+    /// active media session (unknown or ended call, signaling-only media).
+    ///
+    /// Local values (packet counters, loss, jitter, MOS estimate) are
+    /// available as soon as RTP flows. Peer-reported values (`rtt_ms`,
+    /// `remote_*`) appear once the peer's first RTCP report about our stream
+    /// arrives, and stay `None` for calls without RTCP — see
+    /// [`MediaQualityStats`](crate::MediaQualityStats) for units and when
+    /// each field is present. Needs no configuration; for periodic
+    /// [`Event::MediaQualityChanged`](crate::Event::MediaQualityChanged)
+    /// events set [`Config::media_quality_interval`].
+    ///
+    /// ```rust,no_run
+    /// # async fn example(
+    /// #     coordinator: std::sync::Arc<rvoip_sip::UnifiedCoordinator>,
+    /// #     call: rvoip_sip::SessionId,
+    /// # ) {
+    /// if let Some(quality) = coordinator.media_quality(&call).await {
+    ///     println!(
+    ///         "rx loss {:.1}% jitter {:.1} ms, peer sees loss {:?}% rtt {:?} ms",
+    ///         quality.packet_loss_percent,
+    ///         quality.jitter_ms,
+    ///         quality.remote_packet_loss_percent,
+    ///         quality.rtt_ms,
+    ///     );
+    /// }
+    /// # }
+    /// ```
+    pub async fn media_quality(
+        &self,
+        session: &SessionId,
+    ) -> Option<crate::api::events::MediaQualityStats> {
+        self.media_adapter.media_quality(session).await
+    }
+
+    pub(crate) async fn media_quality_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Option<crate::api::events::MediaQualityStats> {
+        self.media_adapter.media_quality_exact(handle).await
     }
 
     /// The codec mode of the last speech frame decoded from `session`'s peer,

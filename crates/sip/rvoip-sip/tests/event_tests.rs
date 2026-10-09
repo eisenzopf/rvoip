@@ -309,8 +309,10 @@ fn test_media_quality_changed_event() {
         packet_loss_percent: 5,
         jitter_ms: 30,
         mos: Some(3.9),
+        quality: rvoip_sip::MediaQualityStats::default(),
     };
     assert!(e.is_media_event());
+    assert_eq!(e.call_id(), Some(&id));
 }
 
 #[test]

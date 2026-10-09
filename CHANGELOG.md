@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+### Media quality
+
+- Per-call media quality now reaches the application. `rvoip-sip` adds
+  `UnifiedCoordinator::media_quality(&SessionId)` and
+  `SessionHandle::media_quality()`, returning `MediaQualityStats`: packets
+  sent/received/lost, local loss percent, jitter (ms) and MOS estimate for
+  the received stream, plus `rtt_ms`, `remote_packet_loss_percent`,
+  `remote_packets_lost` and `remote_jitter_ms` from the peer's RTCP reports
+  about the stream we send. Peer-reported fields are `None` until RTCP
+  arrives and stay `None` for calls without negotiated `a=rtcp-mux`.
+- New `Config::media_quality_interval` (`with_media_quality_interval`),
+  default `None`: when set, every call with media publishes
+  `Event::MediaQualityChanged` on that cadence. Previously that event had no
+  production source. The event gains a `quality: MediaQualityStats` field
+  (breaking for exhaustive patterns); its existing integer fields are kept.
+  A zero interval fails `Config::validate`.
+- `rvoip-core`: `QualitySnapshot` gains `rtt_ms`, `remote_packet_loss_pct`
+  and `remote_jitter_ms` (`Option`s; breaking for struct literals — add
+  `..Default::default()`). With the SIP sampler on, SIP media streams report
+  `has_quality_measurement() == true`, `Event::MediaQuality` fires for SIP
+  connections, and `spawn_media_quality_sampler` averages the optional fields
+  only over streams that carry them. `RvoipAppBuilder::media_quality_interval`
+  now also enables the SIP sampler at the same cadence.
+- `rtp-core`: `RtpSessionStats::peer_report` retains the latest RTCP report
+  block a peer sent about our SSRC (`PeerReceptionReport`: reporter SSRC,
+  fraction and sign-extended cumulative loss, extended highest sequence,
+  jitter in timestamp units and ms, LSR/DLSR RTT, receive time), and
+  `RtpSessionStats::peer_bye` records an inbound RTCP BYE. Previously these
+  were only logged.
+- `media-core`: `QualityMetrics` gains packet counters and `remote_*`
+  fields (`QualityMetrics::from_rtp_stats`), the cross-crate
+  `MediaQualityMetrics` gains counters, `rtt_ms` and `remote_*`, and
+  `MediaSessionController::get_media_quality` /
+  `publish_media_quality_updates` sample calls. `MediaEventHub` now maps
+  `StatisticsUpdated` and `QualityDegraded` to
+  `MediaQualityUpdate` / `MediaQualityDegraded` with the real session id,
+  and the legacy `MediaEventAdapter` no longer publishes a fabricated MOS
+  for an `"unknown_session"`.
+
 ### Release process
 
 - Every release must now have a `CHANGELOG.md` entry. **Prepare release PR**
@@ -10,6 +49,43 @@
   reject a release without a non-empty section for its version.
 
 
+
+### RTP / RTCP
+
+- Sender Reports carry the RTP timestamp of the stream's media clock at the
+  report's NTP time — the last sent media timestamp extrapolated at the clock
+  rate (RFC 3550 §6.4.1) — instead of wall-clock milliseconds (periodic) or a
+  frozen scheduler value (`send_sender_report`). Telephone-event packets do
+  not move the anchor.
+- A session that has not sent RTP in the last two report intervals sends a
+  Receiver Report with its report blocks instead of an SR with zero counts
+  (RFC 3550 §6.4).
+- The periodic report interval follows RFC 3550 §6.2/§6.3 and Appendix A.7:
+  5% of the session bandwidth (derived from static payload types, else
+  80 kbit/s; `RtpSession::set_bandwidth` overrides), members and senders from
+  observed SSRCs, a five-second minimum halved before the first report,
+  randomisation over [0.5, 1.5] and the e − 3/2 compensation. Reports
+  previously went out every second. `RTCP_MIN_INTERVAL` is now five seconds.
+  New `Config::rtcp_reduced_minimum_interval` (default `false`) enables the
+  §6.2 reduced minimum (360 / session kbit/s).
+- Every report and the close-time BYE carry an SDES CNAME. The CNAME is a
+  random 96-bit base64 value per session (RFC 7022) rather than
+  `$USER@hostname`; `RtpSession::cname()` returns it.
+- RFC 3611 VoIP-metrics XR is no longer appended to every report. It is off
+  by default; `RtpSession::set_rtcp_xr_enabled` switches it per session, and
+  new `Config::rtcp_xr_voip_metrics` (default `false`) enables it for calls
+  whose peer SDP carries `a=rtcp-xr` naming `voip-metrics`. Media-core
+  carries both policies as `RTCP_XR_PARAMETER` and
+  `RTCP_REDUCED_MINIMUM_PARAMETER`.
+- Inbound RTCP is accepted only from the call's expected peer: its signalled
+  or latched address, or a remote SSRC already sending RTP. A neighbouring
+  call's non-mux peer sending RTCP to its RTP port + 1 — this session's RTP
+  port under consecutive allocation — no longer feeds this call's reports,
+  RTT, or BYE handling. `RtpSessionStats` gains `rtcp_packets_received` and
+  `rtcp_packets_rejected`.
+- New `Config::active_call_rtcp_counts_as_media` (default `false`) lets RTCP
+  from the call's peer count as activity for the active-call no-media and
+  media-idle watchdogs, so held or silent calls that still report are kept.
 
 ### SIP
 

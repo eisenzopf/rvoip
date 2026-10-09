@@ -157,6 +157,7 @@ async fn session_ended_carries_aggregated_quality_report() {
                 jitter_ms: j,
                 packet_loss_pct: l,
                 mos: Some(4.0),
+                ..Default::default()
             },
         })
         .await

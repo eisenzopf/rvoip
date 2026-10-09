@@ -741,7 +741,7 @@ pub use bridge::{BridgeError, BridgeHandle};
 pub use types::{
     AdvancedProcessorConfig, AdvancedProcessorSet, MediaConfig, MediaSessionEvent,
     MediaSessionInfo, MediaSessionStatus, AMR_DTX_PARAMETER, NEGOTIATED_FMTP_PARAMETER,
-    RTCP_MUX_PARAMETER,
+    RTCP_MUX_PARAMETER, RTCP_REDUCED_MINIMUM_PARAMETER, RTCP_XR_PARAMETER,
 };
 
 use types::RtpSessionWrapper;
@@ -1703,6 +1703,15 @@ impl MediaSessionController {
 
         let rtp_port = local_rtp_addr.port();
 
+        // RTCP policy carried in the configuration. Both default off in the
+        // RTP session, so only an explicit opt-in needs applying.
+        if config.rtcp_xr() {
+            rtp_session.set_rtcp_xr_enabled(true);
+        }
+        if config.rtcp_reduced_minimum() {
+            rtp_session.set_rtcp_reduced_minimum(true);
+        }
+
         // Subscribe to RTP session events before wrapping
         let subscribe_started = Instant::now();
         let rtp_events = rtp_session.subscribe();
@@ -2157,6 +2166,9 @@ impl MediaSessionController {
         };
         let remote_changed = config.remote_addr != old_config.remote_addr;
         let rtcp_mux_changed = config.rtcp_mux() != old_config.rtcp_mux();
+        let rtcp_xr_changed = config.rtcp_xr() != old_config.rtcp_xr();
+        let rtcp_reduced_minimum_changed =
+            config.rtcp_reduced_minimum() != old_config.rtcp_reduced_minimum();
 
         let rtp_session_arc = self
             .rtp_sessions
@@ -2193,6 +2205,12 @@ impl MediaSessionController {
             // Before the peer address: a non-mux peer must never see a report.
             if rtcp_mux_changed {
                 rtp_session.set_rtcp_mux(config.rtcp_mux());
+            }
+            if rtcp_xr_changed {
+                rtp_session.set_rtcp_xr_enabled(config.rtcp_xr());
+            }
+            if rtcp_reduced_minimum_changed {
+                rtp_session.set_rtcp_reduced_minimum(config.rtcp_reduced_minimum());
             }
             if let Some(remote_addr) = config.remote_addr.filter(|_| remote_changed) {
                 rtp_session.set_remote_addr(remote_addr).await;

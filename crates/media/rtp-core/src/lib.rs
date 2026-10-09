@@ -132,8 +132,8 @@ pub use packet::rtp::RtpPacket;
 
 // Re-export session types
 pub use session::{
-    RtpSendHandle, RtpSession, RtpSessionBufferConfig, RtpSessionConfig, RtpSessionEvent,
-    RtpSessionStats, RtpStream, RtpStreamStats,
+    PeerReceptionReport, PeerRtcpBye, RtpSendHandle, RtpSession, RtpSessionBufferConfig,
+    RtpSessionConfig, RtpSessionEvent, RtpSessionStats, RtpStream, RtpStreamStats,
 };
 
 // Re-export transport types

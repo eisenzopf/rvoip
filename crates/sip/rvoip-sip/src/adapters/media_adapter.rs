@@ -161,6 +161,29 @@ fn audio_rtcp_mux(session: &SdpSession) -> bool {
         })
 }
 
+/// Whether an SDP description asks for RFC 3611 VoIP-metrics reports:
+/// `a=rtcp-xr` naming `voip-metrics`, at session level or on the audio
+/// media (RFC 3611 §5.1).
+fn sdp_requests_voip_metrics_xr(session: &SdpSession) -> bool {
+    fn names_voip_metrics(attribute: &ParsedAttribute) -> bool {
+        match attribute {
+            ParsedAttribute::Value(name, value) | ParsedAttribute::Other(name, Some(value)) => {
+                name.eq_ignore_ascii_case("rtcp-xr")
+                    && value
+                        .split_ascii_whitespace()
+                        .any(|format| format.eq_ignore_ascii_case("voip-metrics"))
+            }
+            _ => false,
+        }
+    }
+    session.generic_attributes.iter().any(names_voip_metrics)
+        || session
+            .media_descriptions
+            .iter()
+            .find(|m| m.media == "audio")
+            .is_some_and(|m| m.generic_attributes.iter().any(names_voip_metrics))
+}
+
 fn validate_rtcp_mux(session: &SdpSession, required: bool) -> SrtpDetailedResult<()> {
     if required && !audio_rtcp_mux(session) {
         return Err(bounded_sdp_failure("rtcp-mux", "required").into());
@@ -1022,6 +1045,8 @@ struct StagedMediaNegotiation {
     /// `a=rtcp-mux` was both offered and answered (RFC 5761 §5.1.1). Only
     /// then may periodic RTCP share the single RTP socket and port.
     rtcp_mux: bool,
+    /// The peer's SDP asked for RFC 3611 VoIP-metrics XR (`a=rtcp-xr`).
+    rtcp_xr: bool,
     #[cfg(feature = "dtls-srtp")]
     dtls: Option<StagedDtlsHandshake>,
 }
@@ -1367,6 +1392,10 @@ pub struct MediaAdapter {
     /// Strict mode: offers also carry `a=rtcp-mux-only` (RFC 8858) and an
     /// offer or answer without `a=rtcp-mux` fails negotiation.
     rtcp_mux_required: bool,
+    /// Send RFC 3611 VoIP-metrics XR to peers whose SDP asks for it.
+    rtcp_xr_voip_metrics: bool,
+    /// Allow the RFC 3550 §6.2 reduced minimum RTCP interval.
+    rtcp_reduced_minimum_interval: bool,
     /// ICE posture, from [`Config::ice`](crate::api::unified::Config::ice).
     ice_policy: crate::adapters::ice_adapter::SipIcePolicy,
     /// One ICE runtime (agent + pump task) per media session.
@@ -1568,6 +1597,8 @@ impl MediaAdapter {
             offer_srtp: false,
             offer_rtcp_mux: true,
             rtcp_mux_required: false,
+            rtcp_xr_voip_metrics: false,
+            rtcp_reduced_minimum_interval: false,
             ice_policy: crate::adapters::ice_adapter::SipIcePolicy::Disabled,
             ice: Arc::new(crate::adapters::ice_adapter::IceRuntimes::default()),
             srtp_required: false,
@@ -1733,16 +1764,67 @@ impl MediaAdapter {
 
     /// Return the current RTP receive packet count for a SIP session, when a
     /// media-core RTP session exists for it.
-    pub(crate) async fn rtp_packets_received(&self, session_id: &SessionId) -> Option<u64> {
+    /// Media activity counter for the active-call media watchdogs: RTP
+    /// packets received, plus — when `include_rtcp` — compound RTCP packets
+    /// accepted from the call's peer. RTCP from any other source is dropped
+    /// by the RTP session and never counts.
+    pub(crate) async fn media_activity_count(
+        &self,
+        session_id: &SessionId,
+        include_rtcp: bool,
+    ) -> Option<u64> {
         let exact = self.current_media(session_id)?;
         let packets = self
             .controller
             .get_session_info(&exact.dialog_id)
             .await
-            .and_then(|info| info.rtp_stats.map(|stats| stats.packets_received));
+            .and_then(|info| {
+                info.rtp_stats.map(|stats| {
+                    let rtcp = if include_rtcp {
+                        stats.rtcp_packets_received
+                    } else {
+                        0
+                    };
+                    stats.packets_received.saturating_add(rtcp)
+                })
+            });
         self.media_is_still_exact(&exact)
             .then_some(packets)
             .flatten()
+    }
+
+    /// Current media quality for a SIP session, when it owns a live
+    /// media-core RTP session. Converted through the same cross-crate
+    /// representation the periodic `MediaQualityChanged` event uses, so the
+    /// getter and the event agree on units and rounding.
+    pub(crate) async fn media_quality(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<crate::api::events::MediaQualityStats> {
+        self.media_quality_of(self.current_media(session_id)?).await
+    }
+
+    /// [`Self::media_quality`] for one exact session lifetime, so a stale
+    /// handle never reads a later call that reused its Call-ID.
+    pub(crate) async fn media_quality_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Option<crate::api::events::MediaQualityStats> {
+        self.media_quality_of(self.media_for_handle_exact(handle)?)
+            .await
+    }
+
+    async fn media_quality_of(
+        &self,
+        exact: ExactMediaSession,
+    ) -> Option<crate::api::events::MediaQualityStats> {
+        let quality = self.controller.get_media_quality(&exact.dialog_id).await;
+        if !self.media_is_still_exact(&exact) {
+            return None;
+        }
+        quality.map(|quality| {
+            crate::api::events::MediaQualityStats::from(&quality.to_session_metrics())
+        })
     }
 
     /// Sprint 3.5 C2 swap — enable strict RFC 3264 §6 SDP-answer
@@ -1881,6 +1963,7 @@ impl MediaAdapter {
         dialog_id: &DialogId,
         negotiated: &NegotiatedConfig,
         rtcp_mux: bool,
+        peer_requested_rtcp_xr: bool,
     ) -> Result<()> {
         let mut config = self
             .controller
@@ -1905,7 +1988,11 @@ impl MediaAdapter {
             // one configuration when it builds the codec.
             .with_amr_dtx(self.amr_dtx)
             .with_amr_auto_cmr(self.amr_auto_cmr)
-            .with_rtcp_mux(rtcp_mux);
+            .with_rtcp_mux(rtcp_mux)
+            // XR only to a peer that asked for it, and only when the
+            // application opted in; the interval floor is local policy.
+            .with_rtcp_xr(self.rtcp_xr_voip_metrics && peer_requested_rtcp_xr)
+            .with_rtcp_reduced_minimum(self.rtcp_reduced_minimum_interval);
 
         self.controller
             .update_media(dialog_id.clone(), config)
@@ -2233,6 +2320,17 @@ impl MediaAdapter {
 
     pub(crate) fn set_rtcp_mux_required(&mut self, required: bool) {
         self.rtcp_mux_required = required;
+    }
+
+    /// RTCP reporting policy, wired from `Config::rtcp_xr_voip_metrics` and
+    /// `Config::rtcp_reduced_minimum_interval` at coordinator boot.
+    pub(crate) fn set_rtcp_reporting_policy(
+        &mut self,
+        xr_voip_metrics: bool,
+        reduced_minimum: bool,
+    ) {
+        self.rtcp_xr_voip_metrics = xr_voip_metrics;
+        self.rtcp_reduced_minimum_interval = reduced_minimum;
     }
 
     pub(crate) fn set_offer_rtcp_mux(&mut self, offer: bool) {
@@ -2565,6 +2663,7 @@ impl MediaAdapter {
                 stable_local_direction: session.local_media_direction,
                 srtp_negotiated,
                 rtcp_mux: audio_rtcp_mux(&parsed_offer) && audio_rtcp_mux(&parsed_answer),
+                rtcp_xr: sdp_requests_voip_metrics_xr(&parsed_answer),
                 #[cfg(feature = "dtls-srtp")]
                 dtls: staged_dtls,
             },
@@ -2859,6 +2958,7 @@ impl MediaAdapter {
                     stable_local_direction,
                     srtp_negotiated: false,
                     rtcp_mux: false,
+                    rtcp_xr: false,
                     #[cfg(feature = "dtls-srtp")]
                     dtls: None,
                 },
@@ -3088,6 +3188,7 @@ impl MediaAdapter {
                 stable_local_direction,
                 srtp_negotiated,
                 rtcp_mux,
+                rtcp_xr: sdp_requests_voip_metrics_xr(&parsed_offer),
                 #[cfg(feature = "dtls-srtp")]
                 dtls: staged_dtls,
             },
@@ -3295,8 +3396,13 @@ impl MediaAdapter {
                         ))
                     })?;
             }
-            self.apply_negotiated_media_config(&dialog_id, &staged.config, staged.rtcp_mux)
-                .await?;
+            self.apply_negotiated_media_config(
+                &dialog_id,
+                &staged.config,
+                staged.rtcp_mux,
+                staged.rtcp_xr,
+            )
+            .await?;
 
             if let Some((_, pair)) = self.negotiated_srtp.remove(&negotiation_key) {
                 let suite = pair.suite;
@@ -5685,6 +5791,8 @@ impl Clone for MediaAdapter {
             offer_srtp: self.offer_srtp,
             offer_rtcp_mux: self.offer_rtcp_mux,
             rtcp_mux_required: self.rtcp_mux_required,
+            rtcp_xr_voip_metrics: self.rtcp_xr_voip_metrics,
+            rtcp_reduced_minimum_interval: self.rtcp_reduced_minimum_interval,
             ice_policy: self.ice_policy,
             ice: Arc::clone(&self.ice),
             srtp_required: self.srtp_required,
@@ -6631,6 +6739,109 @@ mod sdp_format_tests {
         assert!(!plain.contains("a=rtcp"), "{plain}");
         let fallback = adapter.create_hold_sdp().await.unwrap();
         assert!(!fallback.contains("a=rtcp"), "{fallback}");
+    }
+
+    #[test]
+    fn rtcp_xr_request_is_read_from_session_or_audio_level_voip_metrics() {
+        let base = build_answer("peer", "127.0.0.1", 18_000);
+        let parse = |sdp: &str| SdpSession::from_str(sdp).expect("valid SDP");
+        assert!(!sdp_requests_voip_metrics_xr(&parse(&base)));
+        let media_level = format!("{base}a=rtcp-xr:rcvr-rtt=all voip-metrics\r\n");
+        assert!(sdp_requests_voip_metrics_xr(&parse(&media_level)));
+        let other_blocks = format!("{base}a=rtcp-xr:rcvr-rtt=all stat-summary=loss\r\n");
+        assert!(!sdp_requests_voip_metrics_xr(&parse(&other_blocks)));
+        let session_level = base.replacen("t=0 0\r\n", "t=0 0\r\na=rtcp-xr:voip-metrics\r\n", 1);
+        assert_ne!(session_level, base, "fixture has a t= line");
+        assert!(sdp_requests_voip_metrics_xr(&parse(&session_level)));
+    }
+
+    #[tokio::test]
+    async fn rtcp_xr_is_enabled_only_when_configured_and_requested_by_the_peer() {
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use std::net::Ipv4Addr;
+
+        // (config opt-in, peer asks with a=rtcp-xr, expected XR)
+        for (case, (opt_in, peer_asks, expected)) in [
+            (false, false, false),
+            (false, true, false),
+            (true, false, false),
+            (true, true, true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let controller = Arc::new(MediaSessionController::new());
+            let store = Arc::new(SessionStore::new());
+            let session_id = SessionId(format!("rtcp-xr-{case}"));
+            store
+                .create_session(session_id.clone(), Role::UAC, false)
+                .await
+                .expect("create exact session");
+            let mut adapter = MediaAdapter::new(
+                Arc::clone(&controller),
+                Arc::clone(&store),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                17_600,
+                17_700,
+            );
+            adapter.set_rtcp_reporting_policy(opt_in, opt_in);
+            let dialog_id = adapter
+                .create_session(&session_id)
+                .await
+                .expect("create managed media");
+            let handle = store
+                .lifecycle_handle(&session_id)
+                .expect("exact lifecycle handle");
+            let mut working = store
+                .get_session_exact(&handle)
+                .await
+                .expect("load exact session");
+            working.media_session_id = Some(dialog_id.clone());
+            working.media_session_ready = true;
+            working.local_media_direction = crate::types::MediaDirection::SendRecv;
+            let offer = adapter
+                .generate_local_sdp_offer_lane_owned(
+                    &mut working,
+                    crate::types::MediaDirection::SendRecv,
+                )
+                .await
+                .expect("local offer");
+            // rvoip does not advertise XR itself.
+            assert!(!offer.contains("rtcp-xr"));
+            working.local_sdp = Some(offer);
+            let mut answer = build_answer("peer", "127.0.0.1", 18_100);
+            if peer_asks {
+                answer.push_str("a=rtcp-xr:voip-metrics\r\n");
+            }
+            adapter
+                .negotiate_sdp_as_uac_lane_owned(&mut working, &answer)
+                .await
+                .expect("answer negotiates");
+            adapter
+                .commit_staged_media_negotiation_lane_owned(&mut working)
+                .await
+                .expect("commit negotiated media");
+
+            let rtp = controller
+                .get_rtp_session(&dialog_id)
+                .await
+                .expect("RTP session");
+            {
+                let rtp = rtp.lock().await;
+                assert_eq!(
+                    rtp.rtcp_xr_enabled(),
+                    expected,
+                    "opt_in={opt_in} peer_asks={peer_asks}"
+                );
+                // The interval floor is local policy, not negotiated.
+                assert_eq!(rtp.rtcp_reduced_minimum(), opt_in);
+            }
+            adapter
+                .cleanup_session(&session_id)
+                .await
+                .expect("cleanup managed media");
+        }
     }
 
     #[tokio::test]
@@ -9261,6 +9472,7 @@ a=fmtp:101 0-15\r\n";
             stable_local_direction: crate::types::MediaDirection::SendRecv,
             srtp_negotiated: false,
             rtcp_mux: false,
+            rtcp_xr: false,
             #[cfg(feature = "dtls-srtp")]
             dtls: None,
         };
@@ -9334,6 +9546,7 @@ a=fmtp:101 0-15\r\n";
             stable_local_direction: crate::types::MediaDirection::SendRecv,
             srtp_negotiated: false,
             rtcp_mux: false,
+            rtcp_xr: false,
             #[cfg(feature = "dtls-srtp")]
             dtls: None,
         };
@@ -9439,6 +9652,7 @@ a=fmtp:101 0-15\r\n";
                 stable_local_direction: crate::types::MediaDirection::SendRecv,
                 srtp_negotiated: true,
                 rtcp_mux: false,
+                rtcp_xr: false,
                 #[cfg(feature = "dtls-srtp")]
                 dtls: None,
             },
@@ -9639,6 +9853,7 @@ a=fmtp:101 0-15\r\n";
                 stable_local_direction: crate::types::MediaDirection::SendRecv,
                 srtp_negotiated: true,
                 rtcp_mux: false,
+                rtcp_xr: false,
                 #[cfg(feature = "dtls-srtp")]
                 dtls: None,
             },
