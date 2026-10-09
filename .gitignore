@@ -105,6 +105,8 @@ osx_trace.sh
 node_modules
 package-lock.json
 package.json
+!sdk/uctp-js/package.json
+!sdk/uctp-js/package-lock.json
 !tests/browser-smoke/package-lock.json
 !tests/browser-smoke/package.json
 
