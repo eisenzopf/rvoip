@@ -32,13 +32,16 @@ features and config diagnostic flags are not production defaults.
 | Workload | Starting point | Notes |
 | --- | --- | --- |
 | Client / UA | `PerformanceConfig::endpoint()` or omitted performance config | Keep default auto `180`, Timer `100`, media, queue sizes, and socket buffers. |
-| Local examples/tests | `Config::local_lab(...)` | Alias for local loopback examples and integration tests. |
-| Normal LAN server / PBX | `Config::lan_pbx(...)` | Directly reachable SIP and media address. Add capacity sizing only when expected concurrency requires it. |
+| Local examples/tests | `Config::local(...)` / `Config::local_lab(...)` | Loopback examples and integration tests; `local_lab` is an alias. |
+| Normal LAN server / PBX | `Config::lan_pbx(...)` | Directly reachable SIP and media address. Add capacity sizing only when expected concurrency requires it. Replaces the deprecated `Config::freeswitch_internal(...)`. |
 | Asterisk TLS registered-flow client | `Config::asterisk_tls_registered_flow(...)` | TLS client mode, registered-flow reuse, mandatory SDES-SRTP. |
-| FreeSWITCH internal LAN | `Config::freeswitch_internal(...)` | Direct LAN profile with strict codec matching. |
 | FreeSWITCH TLS/SRTP | `Config::freeswitch_tls_srtp_reachable_contact(...)` | Directly reachable TLS Contact, mandatory SRTP, FreeSWITCH-compatible suite policy. |
-| Carrier/SBC | `Config::carrier_sbc(...)` | TLS client mode, registered-flow Contact, mandatory SRTP, public signaling/media address, outbound proxy route. |
-| SIP proxy plus RTPengine lab | `Config::proxy_rtpengine(...)` | Signaling route helper; RTPengine control remains above `rvoip-sip`. |
+| Carrier/SBC (registered) | `Config::carrier_sbc(...)` | TLS client mode, registered-flow Contact, mandatory SRTP, public signaling/media address, outbound proxy route, playout, 1800 s session timers. |
+| IP-authenticated SIP trunk | `Config::carrier_trunk_udp(...)` | Plain UDP, no REGISTER, outbound proxy to the trunk SBC, public signaling/media address, playout, 1800 s session timers. |
+| Public-internet server | `Config::public_server(...)` | Public or 1:1-NAT address, ICE Lite, playout, 1800 s session timers; chain `tls_reachable_contact(...)` for TLS. |
+| Endpoint behind NAT | `Config::behind_nat(...)` | TLS RFC 5626 registered flow with CRLF keep-alive, STUN, ICE Full, required rtcp-mux, playout. |
+| SIP proxy plus RTPengine | `Config::proxy_rtpengine(...)` | Outbound proxy route, playout, 1800 s session timers; the proxy drives RTPengine, rvoip-sip does not speak its `ng` protocol. |
+| mTLS SBC peering | `Config::tls_direct_routing(...)` | Modelled on Teams Direct Routing (not certified or tested against Teams): TLS listener, mutual TLS, FQDN Contact, SDES-SRTP, ICE Lite, OPTIONS keep-alive, 1800 s session timers. |
 | PBX media server | `PerformanceConfig::pbx_media_server(capacity)` | UDP auto-answer server profile with media allocation enabled. |
 | Signaling-only high-performance server | `PerformanceConfig::signaling_only_server_high_performance(capacity)` | SIP signaling throughput profile that intentionally skips RTP allocation. |
 | Legacy high-CPS UDP auto-answer | `Config::with_high_cps_udp_auto_answer(capacity)` | Conservative low-level modifier for immediate-answer UDP servers and SIPp experiments. |

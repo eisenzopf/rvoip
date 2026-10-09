@@ -71,6 +71,54 @@
 - The rvoip-sip README gains a "Media options" section with a decision table
   naming the profile and settings to start from for each deployment shape.
 
+### SIP deployment profiles
+
+- `rvoip_sip::Config` has a profile constructor for each common way to
+  deploy a SIP server or endpoint. A profile only fills in documented
+  defaults: everything it sets stays a public field you can change
+  afterwards, and each profile's rustdoc lists the fields it sets.
+- New `Config::carrier_trunk_udp(name, bind, public, trunk_proxy_uri)`: a
+  plain UDP trunk authenticated by source IP. Public signaling and media
+  address, outbound proxy to the trunk SBC, playout buffer, 1800 s session
+  timers; no TLS, no SRTP, no REGISTER.
+- New `Config::public_server(name, bind, public)`: a server on a public or
+  1:1-NAT address. Advertised SIP and media addresses, ICE Lite, playout
+  buffer, 1800 s session timers. Chain `tls_reachable_contact(...)` for a
+  TLS listener.
+- New `Config::behind_nat(name, bind, stun_server, sip_instance)`: an
+  endpoint behind NAT. TLS RFC 5626 registered flow with CRLF keep-alive,
+  STUN, ICE Full, `rtcp_mux_required = true`, playout buffer.
+- New `Config::tls_direct_routing(...)`: an SBC peering over mutual TLS,
+  modelled on Microsoft Teams Direct Routing's SBC requirements (not
+  certified or tested against Teams). TLS listener with an FQDN Contact,
+  required client certificates, SDES-SRTP required, ICE Lite, OPTIONS
+  keep-alive to the peer, 1800 s session timers, no REGISTER.
+- `Config::carrier_sbc` now turns on RFC 4028 session timers
+  (`session_timer_secs = Some(1800)`, `session_timer_min_se = 90`), so a
+  call whose far end vanished without a BYE ends within 30 minutes.
+- `Config::proxy_rtpengine` is no longer a placeholder: it adds the playout
+  buffer and 1800 s session timers. Its docs now say plainly that rvoip-sip
+  does not speak RTPengine's `ng` control protocol; the proxy anchors media.
+- `Config::freeswitch_internal` is deprecated in favour of
+  `Config::lan_pbx`. It only set `strict_codec_matching`, which every
+  constructor already enables. `Config::local_lab` stays, documented as an
+  alias of `Config::local`.
+- New `Config::options_keepalive_targets` and
+  `Config::options_keepalive_interval_secs` (default 60): the coordinator
+  pings each target with an out-of-dialog `OPTIONS` once per interval,
+  carrying `Config::contact_uri` as its Contact, and publishes the new
+  `Event::PeerReachabilityChanged { target, reachable, status_code }` on the
+  first outcome and on every change. Off unless targets are listed.
+- `Config::tls_reachable_contact` now advertises the TLS listener on
+  `Config::sip_advertised_addr`'s IP when that is set and
+  `Config::tls_advertised_addr` is not, instead of leaving a wildcard bind
+  unadvertised or advertising a private bind address.
+- `Config::validate` rejects `session_timer_secs` below
+  `session_timer_min_se` and `options_keepalive_targets` entries that are not
+  SIP URIs.
+- `Event` gains the `PeerReachabilityChanged` variant; exhaustive matches on
+  `Event` need an arm for it.
+
 ## 0.3.12
 
 ### 0.3.12 release recovery
