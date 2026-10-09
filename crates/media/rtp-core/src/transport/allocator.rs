@@ -521,7 +521,10 @@ impl PortAllocator {
                 "Allocated RTP/RTCP pair {} and {} for session {}",
                 rtp_port, rtcp_port, session_id
             );
-            return Ok((SocketAddr::new(ip, rtp_port), SocketAddr::new(ip, rtcp_port)));
+            return Ok((
+                SocketAddr::new(ip, rtp_port),
+                SocketAddr::new(ip, rtcp_port),
+            ));
         }
 
         Err(Error::Transport(format!(
@@ -589,8 +592,15 @@ impl PortAllocator {
                 pool.allocated_ports.insert(port, self.allocator_id);
                 self.track_indexed_allocation(&mut local_state, session_id, ip, port);
             }
-            pool.last_port = if rtcp_port >= end { start } else { rtcp_port + 1 };
-            return Ok((SocketAddr::new(ip, rtp_port), SocketAddr::new(ip, rtcp_port)));
+            pool.last_port = if rtcp_port >= end {
+                start
+            } else {
+                rtcp_port + 1
+            };
+            return Ok((
+                SocketAddr::new(ip, rtp_port),
+                SocketAddr::new(ip, rtcp_port),
+            ));
         }
 
         Err(Error::Transport(format!(

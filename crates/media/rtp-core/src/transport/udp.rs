@@ -1087,93 +1087,87 @@ impl UdpRtpTransport {
         let remote_rtcp_addr = self.remote_rtcp_addr.clone();
         let latched_rtp_ssrc = self.latched_rtp_ssrc.clone();
 
-        spawn_memory_tracked(
-            "rtp_core.udp_transport.rtcp_receiver_task",
-            async move {
-                let mut observed_generation = symmetric_rtp_generation.load(Ordering::Acquire);
-                let mut rtcp_moves = 0_u8;
-                loop {
-                    // Check if we should continue running
-                    if !active_state.load(Ordering::Acquire) {
-                        break;
-                    }
+        spawn_memory_tracked("rtp_core.udp_transport.rtcp_receiver_task", async move {
+            let mut observed_generation = symmetric_rtp_generation.load(Ordering::Acquire);
+            let mut rtcp_moves = 0_u8;
+            loop {
+                // Check if we should continue running
+                if !active_state.load(Ordering::Acquire) {
+                    break;
+                }
 
-                    let mut buffer = vec![0u8; rtcp_recv_buffer_size];
+                let mut buffer = vec![0u8; rtcp_recv_buffer_size];
 
-                    // Receive packet
-                    match rtcp_socket.recv_from(&mut buffer).await {
-                        Ok((size, addr)) => {
-                            let rtcp_data = if secure_media_required.load(Ordering::Acquire) {
-                                let mut guard = srtp_recv.lock();
-                                let Some(context) = guard.as_mut() else {
-                                    trace!("SRTCP is required but no receive context is installed; dropping packet");
+                // Receive packet
+                match rtcp_socket.recv_from(&mut buffer).await {
+                    Ok((size, addr)) => {
+                        let rtcp_data = if secure_media_required.load(Ordering::Acquire) {
+                            let mut guard = srtp_recv.lock();
+                            let Some(context) = guard.as_mut() else {
+                                trace!("SRTCP is required but no receive context is installed; dropping packet");
+                                continue;
+                            };
+                            match context.unprotect_rtcp(&buffer[..size]) {
+                                Ok(plaintext) => plaintext,
+                                Err(error) => {
+                                    trace!("SRTCP unprotect failed; dropping packet: {error}");
                                     continue;
-                                };
-                                match context.unprotect_rtcp(&buffer[..size]) {
-                                    Ok(plaintext) => plaintext,
-                                    Err(error) => {
-                                        trace!("SRTCP unprotect failed; dropping packet: {error}");
-                                        continue;
-                                    }
-                                }
-                            } else {
-                                Bytes::copy_from_slice(&buffer[..size])
-                            };
-
-                            if policy.enabled {
-                                let generation = symmetric_rtp_generation.load(Ordering::Acquire);
-                                if generation != observed_generation {
-                                    observed_generation = generation;
-                                    rtcp_moves = 0;
-                                }
-                                let rtp_peer = remote_rtp_addr.load().as_deref().copied();
-                                let sender_ssrc = rtcp_data
-                                    .get(4..8)
-                                    .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
-                                    .map(|bytes| u64::from(u32::from_be_bytes(bytes)));
-                                let learn = remote_rtcp_addr.load().as_deref().copied()
-                                    != Some(addr)
-                                    && symmetric_rtp_latched.load(Ordering::Acquire)
-                                    && sender_ssrc.is_some_and(|ssrc| {
-                                        ssrc == latched_rtp_ssrc.load(Ordering::Acquire)
-                                    })
-                                    && rtp_peer.is_some_and(|peer| {
-                                        peer != addr
-                                            && (policy.allow_ip_change || peer.ip() == addr.ip())
-                                    })
-                                    && rtcp_moves <= policy.max_rebindings;
-                                if learn {
-                                    rtcp_moves = rtcp_moves.saturating_add(1);
-                                    remote_rtcp_addr.store(Some(Arc::new(addr)));
-                                    debug!("Symmetric RTCP learned the peer's RTCP source");
                                 }
                             }
+                        } else {
+                            Bytes::copy_from_slice(&buffer[..size])
+                        };
 
-                            let event = RtpEvent::RtcpReceived {
-                                data: rtcp_data,
-                                source: addr,
-                            };
-                            let _ = event_tx.send(event);
-                        }
-                        Err(e) => {
-                            error!("Error receiving RTCP packet: {}", e);
-
-                            // Send error event
-                            let err_event = RtpEvent::Error(Error::Transport(format!(
-                                "RTCP socket error: {}",
-                                e
-                            )));
-                            if event_tx.receiver_count() > 0 {
-                                let _ = event_tx.send(err_event);
+                        if policy.enabled {
+                            let generation = symmetric_rtp_generation.load(Ordering::Acquire);
+                            if generation != observed_generation {
+                                observed_generation = generation;
+                                rtcp_moves = 0;
                             }
-
-                            // Short delay before retrying
-                            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                            let rtp_peer = remote_rtp_addr.load().as_deref().copied();
+                            let sender_ssrc = rtcp_data
+                                .get(4..8)
+                                .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+                                .map(|bytes| u64::from(u32::from_be_bytes(bytes)));
+                            let learn = remote_rtcp_addr.load().as_deref().copied() != Some(addr)
+                                && symmetric_rtp_latched.load(Ordering::Acquire)
+                                && sender_ssrc.is_some_and(|ssrc| {
+                                    ssrc == latched_rtp_ssrc.load(Ordering::Acquire)
+                                })
+                                && rtp_peer.is_some_and(|peer| {
+                                    peer != addr
+                                        && (policy.allow_ip_change || peer.ip() == addr.ip())
+                                })
+                                && rtcp_moves <= policy.max_rebindings;
+                            if learn {
+                                rtcp_moves = rtcp_moves.saturating_add(1);
+                                remote_rtcp_addr.store(Some(Arc::new(addr)));
+                                debug!("Symmetric RTCP learned the peer's RTCP source");
+                            }
                         }
+
+                        let event = RtpEvent::RtcpReceived {
+                            data: rtcp_data,
+                            source: addr,
+                        };
+                        let _ = event_tx.send(event);
+                    }
+                    Err(e) => {
+                        error!("Error receiving RTCP packet: {}", e);
+
+                        // Send error event
+                        let err_event =
+                            RtpEvent::Error(Error::Transport(format!("RTCP socket error: {}", e)));
+                        if event_tx.receiver_count() > 0 {
+                            let _ = event_tx.send(err_event);
+                        }
+
+                        // Short delay before retrying
+                        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                     }
                 }
-            },
-        )
+            }
+        })
     }
 
     /// Whether RTCP currently travels on the RTP socket: the transport was

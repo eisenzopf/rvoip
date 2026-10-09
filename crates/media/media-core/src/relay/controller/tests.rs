@@ -155,7 +155,11 @@ mod tests {
             if separate {
                 assert_eq!(rtp % 2, 0, "paired RTP port {rtp} is odd");
                 assert_eq!(rtcp, Some(rtp + 1));
-                assert!(ports.insert(rtp + 1), "RTCP port {} handed out twice", rtp + 1);
+                assert!(
+                    ports.insert(rtp + 1),
+                    "RTCP port {} handed out twice",
+                    rtp + 1
+                );
             } else {
                 assert_eq!(rtcp, None);
             }
@@ -172,7 +176,11 @@ mod tests {
         assert!(controller.release_rtcp_port(&dialog).await.unwrap());
         assert!(!controller.release_rtcp_port(&dialog).await.unwrap());
         assert_eq!(
-            controller.get_session_info(&dialog).await.unwrap().rtcp_port,
+            controller
+                .get_session_info(&dialog)
+                .await
+                .unwrap()
+                .rtcp_port,
             None
         );
         std::net::UdpSocket::bind(("127.0.0.1", rtcp.unwrap())).expect("RTCP port is still bound");
@@ -191,11 +199,17 @@ mod tests {
         let squatter = StdUdpSocket::bind(("127.0.0.1", 24_201)).unwrap();
         let dialog = DialogId::new("rtcp-bind-retry");
         controller
-            .start_media(dialog.clone(), loopback_config().with_rtcp_separate_port(true))
+            .start_media(
+                dialog.clone(),
+                loopback_config().with_rtcp_separate_port(true),
+            )
             .await
             .expect("the next pair is free");
         let info = controller.get_session_info(&dialog).await.unwrap();
-        assert_eq!((info.rtp_port, info.rtcp_port), (Some(24_202), Some(24_203)));
+        assert_eq!(
+            (info.rtp_port, info.rtcp_port),
+            (Some(24_202), Some(24_203))
+        );
         controller.stop_media(&dialog).await.unwrap();
         assert_eq!(controller.allocated_port_count().await, 0);
 
@@ -203,11 +217,18 @@ mod tests {
         let squatter_two = StdUdpSocket::bind(("127.0.0.1", 24_203)).unwrap();
         let blocked = DialogId::new("rtcp-bind-blocked");
         controller
-            .start_media(blocked.clone(), loopback_config().with_rtcp_separate_port(true))
+            .start_media(
+                blocked.clone(),
+                loopback_config().with_rtcp_separate_port(true),
+            )
             .await
             .expect_err("no bindable pair");
         assert!(controller.get_session_info(&blocked).await.is_none());
-        assert_eq!(controller.allocated_port_count().await, 0, "failed start leaked");
+        assert_eq!(
+            controller.allocated_port_count().await,
+            0,
+            "failed start leaked"
+        );
         drop((squatter, squatter_two));
     }
 
@@ -216,7 +237,10 @@ mod tests {
         let controller = MediaSessionController::with_port_range(24_300, 24_309);
         let dialog = DialogId::new("rtcp-signalled");
         controller
-            .start_media(dialog.clone(), loopback_config().with_rtcp_separate_port(true))
+            .start_media(
+                dialog.clone(),
+                loopback_config().with_rtcp_separate_port(true),
+            )
             .await
             .unwrap();
         let session = controller.get_rtp_session(&dialog).await.unwrap();
@@ -228,10 +252,8 @@ mod tests {
         let peer_rtp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let peer_rtcp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let current = controller.get_session_info(&dialog).await.unwrap();
-        let local_rtcp = SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
-            current.rtcp_port.unwrap(),
-        );
+        let local_rtcp =
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), current.rtcp_port.unwrap());
         let mut config = current.config;
         config.remote_addr = Some(peer_rtp.local_addr().unwrap());
         controller

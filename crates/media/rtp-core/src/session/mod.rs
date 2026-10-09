@@ -3979,7 +3979,10 @@ mod tests {
         let mut block = RtcpReportBlock::new(about);
         block.last_sr = NtpTimestamp::now().to_u32().wrapping_sub(0x0001_0000);
         sr.report_blocks.push(block);
-        RtcpCompoundPacket::new_with_sr(sr).serialize().unwrap().to_vec()
+        RtcpCompoundPacket::new_with_sr(sr)
+            .serialize()
+            .unwrap()
+            .to_vec()
     }
 
     async fn next_sender_report(events: &mut broadcast::Receiver<RtpSessionEvent>) -> RtpSsrc {
@@ -4002,7 +4005,9 @@ mod tests {
         let mut session = non_mux_session(SymmetricRtpPolicy::default(), local_ssrc).await;
         let local_rtcp = session.local_rtcp_addr().expect("separate RTCP socket");
         assert_ne!(local_rtcp, session.local_addr().unwrap());
-        session.set_remote_addr(peer_rtp.local_addr().unwrap()).await;
+        session
+            .set_remote_addr(peer_rtp.local_addr().unwrap())
+            .await;
         assert!(!session.rtcp_mux());
 
         // Periodic reports reach RTP + 1 from our RTCP socket.
@@ -4047,7 +4052,9 @@ mod tests {
         let peer_rtp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let peer_rtcp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut session = non_mux_session(SymmetricRtpPolicy::default(), 0x0102_0304).await;
-        session.set_remote_addr(peer_rtp.local_addr().unwrap()).await;
+        session
+            .set_remote_addr(peer_rtp.local_addr().unwrap())
+            .await;
         session.set_remote_rtcp_addr(Some(peer_rtcp.local_addr().unwrap()));
         let (_, source) = recv_rtcp(&peer_rtcp).await;
         assert_eq!(Some(source), session.local_rtcp_addr());
@@ -4072,13 +4079,19 @@ mod tests {
         let local_rtcp = session.local_rtcp_addr().unwrap();
         let local_rtp = session.local_addr().unwrap();
         let mut session = session;
-        session.set_remote_addr(peer_rtp.local_addr().unwrap()).await;
+        session
+            .set_remote_addr(peer_rtp.local_addr().unwrap())
+            .await;
         session.set_rtcp_mux(true);
         assert_eq!(session.release_rtcp_socket().await, Some(local_rtcp));
         assert_eq!(session.local_rtcp_addr(), None);
         assert_eq!(session.release_rtcp_socket().await, None);
         // The port is closed: it can be bound again at once.
-        drop(UdpSocket::bind(local_rtcp).await.expect("RTCP port was not released"));
+        drop(
+            UdpSocket::bind(local_rtcp)
+                .await
+                .expect("RTCP port was not released"),
+        );
 
         let mut bytes = [0u8; 2048];
         // Drain anything sent to RTP + 1 before the switch.
@@ -4098,7 +4111,9 @@ mod tests {
         let neighbour = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let local_ssrc = 0x7373_7373;
         let mut session = non_mux_session(SymmetricRtpPolicy::default(), local_ssrc).await;
-        session.set_remote_addr(peer_rtp.local_addr().unwrap()).await;
+        session
+            .set_remote_addr(peer_rtp.local_addr().unwrap())
+            .await;
         let local_rtcp = session.local_rtcp_addr().unwrap();
         let mut events = session.subscribe();
         neighbour
@@ -4123,7 +4138,9 @@ mod tests {
         let local_ssrc = 0x3434_3434;
         let remote_ssrc = 0x4545_4545;
         let mut session = non_mux_session(SymmetricRtpPolicy::default(), local_ssrc).await;
-        session.set_remote_addr(peer_rtp.local_addr().unwrap()).await;
+        session
+            .set_remote_addr(peer_rtp.local_addr().unwrap())
+            .await;
         let local_rtcp = session.local_rtcp_addr().unwrap();
         let mut events = session.subscribe();
         send_raw_rtp(
@@ -4181,7 +4198,9 @@ mod tests {
             .unwrap()
         };
         udp.set_srtp_contexts(context(), context()).await.unwrap();
-        session.set_remote_addr(peer_rtp.local_addr().unwrap()).await;
+        session
+            .set_remote_addr(peer_rtp.local_addr().unwrap())
+            .await;
 
         let (wire, _) = recv_rtcp(&peer_rtcp).await;
         let plaintext = context().unprotect_rtcp(&wire).unwrap();
