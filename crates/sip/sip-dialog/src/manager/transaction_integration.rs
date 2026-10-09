@@ -3248,15 +3248,79 @@ impl DialogManager {
         Some(removed.1)
     }
 
-    /// True only when the exact retained wire-unknown INVITE transaction has
-    /// received a terminal non-2xx response. A CANCEL transaction's own final
-    /// response is not sufficient: RFC 3261 teardown completes when the
-    /// original INVITE resolves (normally 487), while a late 2xx requires the
-    /// separate ACK+BYE path.
+    /// True only when the exact retained wire-unknown INVITE has ended
+    /// without a 2xx. A CANCEL transaction's own final response is not
+    /// sufficient: RFC 3261 teardown completes when the original INVITE
+    /// resolves (normally 487), while a late 2xx requires the separate
+    /// ACK+BYE path.
+    ///
+    /// The plan can also settle before the upper layer hands the INVITE to
+    /// this supervisor. When the first write fails, the transaction layer
+    /// reports `TransportError` on its event stream as well as returning the
+    /// error to the sender. If the event wins, the plan closes on that
+    /// terminal outcome (RFC 3261 §8.1.3.1 treats it as a 503) and drops its
+    /// current transaction before the sender can retain it as wire-unknown.
+    /// The sender still reports the dispatch as wire-unknown, but no CANCEL
+    /// can target a closed plan, and no response can arrive to settle it, so
+    /// a closed or exhausted plan with no live successor is terminal too.
+    /// Without this the supervisor, the exact owner, and every session
+    /// teardown waiting on that owner would wait forever.
     pub(crate) async fn wire_unknown_invite_has_terminal_failure(
         &self,
         dialog_id: &DialogId,
     ) -> bool {
+        let mut settled_without_success = false;
+        let mut unresolved = false;
+        for plan_id in self.invite_failover_plan_ids_for_dialog(dialog_id) {
+            let Some(plan) = self
+                .invite_failover_plans
+                .get(&plan_id)
+                .map(|entry| entry.value().clone())
+            else {
+                continue;
+            };
+            let transaction_id = {
+                let plan = plan.lock().await;
+                if plan.id != plan_id || &plan.dialog_id != dialog_id {
+                    continue;
+                }
+                match plan.phase {
+                    InviteFailoverPlanPhase::WireUnknown => plan.current_transaction.clone(),
+                    InviteFailoverPlanPhase::Closed | InviteFailoverPlanPhase::Exhausted => {
+                        settled_without_success = true;
+                        continue;
+                    }
+                    InviteFailoverPlanPhase::Active
+                    | InviteFailoverPlanPhase::Accepted
+                    | InviteFailoverPlanPhase::Cancelled => {
+                        unresolved = true;
+                        continue;
+                    }
+                }
+            };
+            let Some(transaction_id) = transaction_id else {
+                unresolved = true;
+                continue;
+            };
+            if self
+                .transaction_manager
+                .last_response(&transaction_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|response| response.status().as_u16() >= 300)
+            {
+                return true;
+            }
+            unresolved = true;
+        }
+        settled_without_success && !unresolved
+    }
+
+    /// True when the retained wire-unknown INVITE went out on a stream flow
+    /// that has since closed. Its CANCEL must reuse that flow, so it can
+    /// never be sent, and retrying the zero-wire failure would never end.
+    pub(crate) async fn wire_unknown_invite_flow_is_closed(&self, dialog_id: &DialogId) -> bool {
         for plan_id in self.invite_failover_plan_ids_for_dialog(dialog_id) {
             let Some(plan) = self
                 .invite_failover_plans
@@ -3275,18 +3339,14 @@ impl DialogManager {
                 }
                 plan.current_transaction.clone()
             };
-            let Some(transaction_id) = transaction_id else {
-                continue;
-            };
-            if self
-                .transaction_manager
-                .last_response(&transaction_id)
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|response| response.status().as_u16() >= 300)
-            {
-                return true;
+            if let Some(transaction_id) = transaction_id {
+                if self
+                    .transaction_manager
+                    .transaction_flow_is_closed(&transaction_id)
+                    .await
+                {
+                    return true;
+                }
             }
         }
         false
