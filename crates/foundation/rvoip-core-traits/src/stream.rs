@@ -213,11 +213,26 @@ impl fmt::Debug for MediaFrame {
     }
 }
 
+/// One media-quality reading for a stream.
+///
+/// `jitter_ms`, `packet_loss_pct` and `mos` describe what this endpoint
+/// *receives*. The `rtt_ms` and `remote_*` fields come from the peer's RTCP
+/// reports about what this endpoint *sends*; they are `None` until such a
+/// report arrives and stay `None` on transports or calls without RTCP.
 #[derive(Clone, Debug, Default)]
 pub struct QualitySnapshot {
+    /// Interarrival jitter of the received stream, milliseconds.
     pub jitter_ms: f32,
+    /// Loss on the received stream, percent (0–100).
     pub packet_loss_pct: f32,
+    /// Estimated MOS (1.0–5.0) of the received stream, when available.
     pub mos: Option<f32>,
+    /// Round-trip time measured from RTCP, milliseconds.
+    pub rtt_ms: Option<f32>,
+    /// Loss the peer reported on our sent stream, percent (0–100).
+    pub remote_packet_loss_pct: Option<f32>,
+    /// Interarrival jitter the peer reported on our sent stream, ms.
+    pub remote_jitter_ms: Option<f32>,
 }
 
 /// Synchronous decision made for one application data message crossing a

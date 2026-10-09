@@ -93,6 +93,7 @@ impl MediaStream for TestStream {
             jitter_ms: 0.0,
             packet_loss_pct: 0.0,
             mos: None,
+            ..Default::default()
         }
     }
     async fn close(self: Arc<Self>) -> RvResult<()> {
