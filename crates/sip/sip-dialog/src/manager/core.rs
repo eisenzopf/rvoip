@@ -5252,6 +5252,86 @@ mod outbound_flow_handler_tests {
         );
     }
 
+    /// RFC 3261 §12.2.1.1: every request inside a dialog (and PRACK inside
+    /// an early dialog, RFC 3262 §7.2) uses the remote target (the peer's
+    /// Contact) as Request-URI and next hop. The peer's From/To AOR stays in
+    /// the To header only. The AOR host here does not resolve, so a request
+    /// still addressed to it fails to send at all.
+    #[tokio::test]
+    async fn every_in_dialog_request_targets_the_remote_target_not_the_aor() {
+        const AOR: &str = "sip:bob@peer-aor.invalid";
+        const CONTACT: &str = "sip:bob@127.0.0.1:5093";
+        let (manager, transport) = make_recording_manager().await;
+        let mut dialog = Dialog::new(
+            "remote-target-call".to_string(),
+            "sip:alice@127.0.0.1:5060".parse().unwrap(),
+            AOR.parse().unwrap(),
+            Some("alice-tag".to_string()),
+            Some("bob-tag".to_string()),
+            true,
+        );
+        dialog.remote_target = CONTACT.parse().unwrap();
+        dialog.state = DialogState::Confirmed;
+        dialog.invite_cseq = Some(1);
+        let dialog_id = dialog.id.clone();
+        manager.store_dialog(dialog).await.expect("store dialog");
+
+        let sdp = bytes::Bytes::from_static(
+            b"v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n",
+        );
+        let requests = [
+            (
+                Method::Refer,
+                Some(bytes::Bytes::from_static(b"sip:carol@127.0.0.1:5094")),
+            ),
+            (Method::Message, Some(bytes::Bytes::from_static(b"hello"))),
+            (Method::Info, Some(bytes::Bytes::from_static(b"Signal=5"))),
+            (
+                Method::Notify,
+                Some(bytes::Bytes::from_static(b"SIP/2.0 200 OK")),
+            ),
+            (Method::Options, None),
+            (Method::Update, None),
+            (Method::Invite, Some(sdp)),
+        ];
+        for (method, body) in requests {
+            manager
+                .send_request(&dialog_id, method.clone(), body)
+                .await
+                .unwrap_or_else(|error| panic!("send in-dialog {method}: {error}"));
+        }
+        manager.send_prack(&dialog_id, 1).await.expect("send PRACK");
+
+        let sent = transport.sent.lock().await;
+        for method in [
+            Method::Refer,
+            Method::Message,
+            Method::Info,
+            Method::Notify,
+            Method::Options,
+            Method::Update,
+            Method::Invite,
+            Method::Prack,
+        ] {
+            let (request, destination) = sent
+                .iter()
+                .find_map(|(message, destination)| match message {
+                    rvoip_sip_core::Message::Request(request) if request.method() == method => {
+                        Some((request, destination))
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{method} was not sent"));
+            assert_eq!(request.uri().to_string(), CONTACT, "{method} Request-URI");
+            assert_eq!(destination.port(), 5093, "{method} next hop");
+            assert_eq!(
+                request.to().map(|to| to.address().uri.to_string()),
+                Some(AOR.to_string()),
+                "{method} keeps the AOR in To"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn wildcard_contact_uses_observed_source_for_reason_bye() {
         let (manager, transport) = make_recording_manager().await;

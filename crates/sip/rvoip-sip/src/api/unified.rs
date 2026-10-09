@@ -98,6 +98,8 @@ pub use rvoip_sip_dialog::api::RelUsage;
 
 const MAX_INBOUND_INVITE_OBSERVERS: usize = 16;
 const OUTBOUND_DISPATCH_JOIN_FAILURE: &str = "SIP outbound dispatch task failed (class=join)";
+/// RFC 4028 §5: the smallest permitted `Min-SE` (and so session interval).
+const RFC4028_MIN_SE_FLOOR_SECS: u32 = 90;
 
 type OutboundDispatchResult =
     std::result::Result<ProcessEventResult, Box<dyn std::error::Error + Send + Sync>>;
@@ -2044,12 +2046,25 @@ pub struct Config {
 
     /// RFC 4028 `Session-Expires` value in seconds to advertise on outgoing
     /// INVITEs. `None` disables session timers entirely. Common carrier
-    /// value is 1800 (30 min).
+    /// value is 1800 (30 min). [`Config::validate`] rejects values below
+    /// 90 seconds and below [`session_timer_min_se`](Self::session_timer_min_se).
     pub session_timer_secs: Option<u32>,
 
     /// Minimum-session-expires (`Min-SE:`) we're willing to accept, in
-    /// seconds. Default 90 per RFC 4028 §5.
+    /// seconds. Default 90, which is also the floor: RFC 4028 §5 forbids a
+    /// Min-SE below 90 seconds, so [`Config::validate`] rejects smaller
+    /// values. A timer-capable caller that proposes a shorter interval gets
+    /// `422 Session Interval Too Small` with this value.
     pub session_timer_min_se: u32,
+
+    /// Test-only escape hatch: accept `session_timer_secs` and
+    /// `session_timer_min_se` below the RFC 4028 §5 floor of 90 seconds so
+    /// refresh and expiry behavior can be exercised in seconds. Exists only
+    /// with the `test-hooks` feature, so no production build can set it.
+    /// Default: `false`.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub session_timer_allow_short_intervals_for_testing: bool,
 
     /// Default Digest credentials for UAC 401/407 retry.
     ///
@@ -3356,6 +3371,8 @@ impl Config {
             active_call_rtcp_counts_as_media: false,
             session_timer_secs: None,
             session_timer_min_se: 90,
+            #[cfg(feature = "test-hooks")]
+            session_timer_allow_short_intervals_for_testing: false,
             credentials: None,
             auth: None,
             pai_uri: None,
@@ -3487,6 +3504,8 @@ impl Config {
             active_call_rtcp_counts_as_media: false,
             session_timer_secs: None,
             session_timer_min_se: 90,
+            #[cfg(feature = "test-hooks")]
+            session_timer_allow_short_intervals_for_testing: false,
             credentials: None,
             auth: None,
             pai_uri: None,
@@ -5165,13 +5184,34 @@ impl Config {
                 "TLS client certificate and key must be provided together".to_string(),
             ));
         }
-        if let Some(session_secs) = self.session_timer_secs {
-            if session_secs < self.session_timer_min_se {
+        // RFC 4028 §5: Min-SE MUST NOT be less than 90 seconds, and the
+        // interval we propose can be no shorter than the Min-SE we demand.
+        #[cfg(feature = "test-hooks")]
+        let enforce_floor = !self.session_timer_allow_short_intervals_for_testing;
+        #[cfg(not(feature = "test-hooks"))]
+        let enforce_floor = true;
+        if enforce_floor {
+            if self.session_timer_min_se < RFC4028_MIN_SE_FLOOR_SECS {
                 return Err(SessionError::ConfigError(format!(
-                    "session_timer_secs ({session_secs}) must be >= session_timer_min_se ({})",
-                    self.session_timer_min_se
+                    "session_timer_min_se must be at least {RFC4028_MIN_SE_FLOOR_SECS} seconds (RFC 4028 §5)"
                 )));
             }
+            if self
+                .session_timer_secs
+                .is_some_and(|secs| secs < RFC4028_MIN_SE_FLOOR_SECS)
+            {
+                return Err(SessionError::ConfigError(format!(
+                    "session_timer_secs must be at least {RFC4028_MIN_SE_FLOOR_SECS} seconds (RFC 4028 §5); use None to disable session timers"
+                )));
+            }
+        }
+        if self
+            .session_timer_secs
+            .is_some_and(|secs| secs == 0 || secs < self.session_timer_min_se)
+        {
+            return Err(SessionError::ConfigError(
+                "session_timer_secs must be nonzero and at least session_timer_min_se".to_string(),
+            ));
         }
         for target in &self.options_keepalive_targets {
             if target.parse::<rvoip_sip_core::Uri>().is_err() {

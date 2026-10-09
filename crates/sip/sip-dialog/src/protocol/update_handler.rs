@@ -22,9 +22,13 @@ use tracing::debug;
 use crate::dialog::DialogId;
 use crate::errors::{DialogError, DialogResult};
 use crate::events::SessionCoordinationEvent;
+use crate::manager::transaction_integration::{
+    allow_lists_update, negotiate_uas_refresh_session_timer, UasSessionTimerDecision,
+};
 use crate::manager::{DialogManager, SessionCoordinator, SourceExtractor};
 use crate::transaction::utils::response_builders;
-use rvoip_sip_core::{Request, StatusCode};
+use rvoip_sip_core::types::min_se::MinSE;
+use rvoip_sip_core::{Request, StatusCode, TypedHeader};
 
 /// UPDATE-specific handling operations
 pub trait UpdateHandler {
@@ -82,10 +86,16 @@ impl DialogManager {
         debug!("Processing UPDATE for dialog {}", dialog_id);
 
         // Update dialog sequence number
-        {
+        let current_session_timer = {
             let mut dialog = self.get_dialog_mut(&dialog_id)?;
             dialog.update_remote_sequence(&request)?;
-        }
+            if let Some(allows) = allow_lists_update(&request.headers) {
+                dialog.peer_allows_update = Some(allows);
+            }
+            dialog
+                .session_expires_secs
+                .map(|secs| (secs, dialog.is_session_refresher))
+        };
 
         // Create server transaction and forward to session layer
         let source = SourceExtractor::extract_from_request(&request);
@@ -98,6 +108,27 @@ impl DialogManager {
             })?;
 
         let transaction_id = server_transaction.id().clone();
+
+        // RFC 4028 §9: a timer-capable peer whose refresh asks for less than
+        // our Min-SE gets 422 with our Min-SE.
+        if let UasSessionTimerDecision::Reject422 { min_se } = negotiate_uas_refresh_session_timer(
+            &request,
+            self.config_session_timer_settings(),
+            current_session_timer,
+        ) {
+            debug!(
+                "UPDATE Session-Expires is below our Min-SE {} — rejecting with 422",
+                min_se
+            );
+            let mut response =
+                response_builders::create_response(&request, StatusCode::SessionIntervalTooSmall);
+            response
+                .headers
+                .push(TypedHeader::MinSE(MinSE::new(min_se)));
+            self.send_unowned_final_response_classified(&transaction_id, response)
+                .await?;
+            return Ok(());
+        }
 
         // Associate the new UAS transaction with the dialog so the session
         // layer's `send_response_for_session` can route its 200 OK (or 4xx)
@@ -137,11 +168,14 @@ mod exact_update_response_tests {
             .expect("UPDATE implementation source");
         assert!(source.contains("StatusCode::CallOrTransactionDoesNotExist"));
         assert!(source.contains("StatusCode::ServiceUnavailable"));
+        // RFC 4028 §9: the 422 for a refresh below our Min-SE is the third
+        // exact, classified final response this handler authors itself.
+        assert!(source.contains("StatusCode::SessionIntervalTooSmall"));
         assert_eq!(
             source
                 .matches("send_unowned_final_response_classified")
                 .count(),
-            2
+            3
         );
         let dispatch_failure = source
             .split("if self.notify_session_layer(event).await.is_err()")

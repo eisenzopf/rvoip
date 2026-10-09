@@ -1386,27 +1386,87 @@ transitions:
       - type: "ArmSessionRefreshTimer"
     description: "Held fallback re-INVITE 2xx rearms deadline"
 
+  # RFC 4028 section 10: only a refresh that times out (or whose transport
+  # fails) or draws 408/481 ends the session. Any other rejection is handled
+  # by the InternalSessionRefreshRejected rows below and keeps the call up.
   - role: "Both"
     state: "Active"
     event:
-      type: "InternalSessionRefreshReinviteFailed"
+      type: "InternalSessionRefreshTimedOut"
     next_state: "Terminating"
     actions:
       - type: "ClearPendingReinvite"
       - type: "PrepareSessionRefreshExpiry"
       - type: "SendBYE"
-    description: "RFC 4028 section 10 expires session after both refresh methods fail"
+    description: "RFC 4028 section 10 refresh timeout/408/481 terminates with cause 408"
 
   - role: "Both"
     state: "OnHold"
     event:
-      type: "InternalSessionRefreshReinviteFailed"
+      type: "InternalSessionRefreshTimedOut"
     next_state: "Terminating"
     actions:
       - type: "ClearPendingReinvite"
       - type: "PrepareSessionRefreshExpiry"
       - type: "SendBYE"
-    description: "RFC 4028 expiration terminates a held session exactly once"
+    description: "RFC 4028 refresh timeout terminates a held session exactly once"
+
+  - role: "Both"
+    state: "HoldPending"
+    event:
+      type: "InternalSessionRefreshTimedOut"
+    next_state: "Terminating"
+    actions:
+      - type: "ClearPendingReinvite"
+      - type: "PrepareSessionRefreshExpiry"
+      - type: "SendBYE"
+    description: "Refresh timeout supersedes a pending hold re-INVITE"
+
+  - role: "Both"
+    state: "Resuming"
+    event:
+      type: "InternalSessionRefreshTimedOut"
+    next_state: "Terminating"
+    actions:
+      - type: "ClearPendingReinvite"
+      - type: "PrepareSessionRefreshExpiry"
+      - type: "SendBYE"
+    description: "Refresh timeout supersedes a pending resume re-INVITE"
+
+  # Any other non-2xx refresh response (491, 422, 488, 403, 5xx, ...): retry
+  # 491 after the RFC 3261 section 14.1 backoff, retry 422 with the peer's
+  # Min-SE, otherwise keep the session and let it expire normally.
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "InternalSessionRefreshRejected"
+    actions:
+      - type: "HandleSessionRefreshRejection"
+    description: "RFC 4028 section 10 rejected refresh does not end the session"
+
+  - role: "Both"
+    state: "OnHold"
+    event:
+      type: "InternalSessionRefreshRejected"
+    actions:
+      - type: "HandleSessionRefreshRejection"
+    description: "Rejected refresh of a held session keeps the session"
+
+  - role: "Both"
+    state: "HoldPending"
+    event:
+      type: "InternalSessionRefreshRejected"
+    actions:
+      - type: "HandleSessionRefreshRejection"
+    description: "Rejected refresh while a hold re-INVITE is pending keeps the session"
+
+  - role: "Both"
+    state: "Resuming"
+    event:
+      type: "InternalSessionRefreshRejected"
+    actions:
+      - type: "HandleSessionRefreshRejection"
+    description: "Rejected refresh while a resume re-INVITE is pending keeps the session"
 
   - role: "Both"
     state: "Active"
@@ -1416,7 +1476,7 @@ transitions:
     actions:
       - type: "PrepareSessionRefreshExpiry"
       - type: "SendBYE"
-    description: "Peer refresher missed Session-Expires; terminate with cause 408"
+    description: "Session expired without a refresh; terminate with cause 408"
 
   - role: "Both"
     state: "OnHold"
@@ -2170,6 +2230,17 @@ transitions:
     actions:
       - type: "SendReINVITEWithOptions"
     description: "Builder-staged re-INVITE dispatch (UAS)"
+
+  # RFC 4028 section 7.4: a held call is still refreshed. A peer whose Allow
+  # omits UPDATE (or that rejected the UPDATE) gets the re-INVITE refresh,
+  # which re-offers the held description unchanged.
+  - role: "Both"
+    state: "OnHold"
+    event:
+      type: "SendOutboundReInvite"
+    actions:
+      - type: "SendReINVITEWithOptions"
+    description: "Builder-staged re-INVITE dispatch while locally held"
 
   - role: "UAC"
     state: "Active"

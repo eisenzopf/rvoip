@@ -108,6 +108,33 @@ pub(crate) enum SessionRefreshPhase {
     ReinviteInFlight,
 }
 
+/// Which RFC 4028 refresh request a completion belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SessionRefreshMethod {
+    Update,
+    Reinvite,
+}
+
+impl SessionRefreshMethod {
+    /// The refresh phase while a request of this method is in flight.
+    pub(crate) fn in_flight_phase(self) -> SessionRefreshPhase {
+        match self {
+            Self::Update => SessionRefreshPhase::UpdateInFlight,
+            Self::Reinvite => SessionRefreshPhase::ReinviteInFlight,
+        }
+    }
+}
+
+/// A non-2xx final response to a refresh that does not by itself end the
+/// session (RFC 4028 §10 tears down only on timeout, 408 or 481). The
+/// state-table action decides between a 491 glare retry, a 422 Min-SE retry
+/// and keeping the session until it expires.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SessionRefreshRejection {
+    pub(crate) method: SessionRefreshMethod,
+    pub(crate) status_code: u16,
+}
+
 impl fmt::Debug for PendingReinvite {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
@@ -226,6 +253,16 @@ pub struct SessionStateCold {
     pub(crate) session_refresh_local_refresher: bool,
     /// Exact refresh request currently awaiting a final response.
     pub(crate) session_refresh_phase: SessionRefreshPhase,
+    /// When the current session interval started (the last committed
+    /// refresh); the session expires one interval later.
+    pub(crate) session_refresh_armed_at: Option<Instant>,
+    /// Rejection staged for `HandleSessionRefreshRejection`.
+    pub(crate) session_refresh_rejection: Option<SessionRefreshRejection>,
+    /// 491/422 retries spent in the current session interval.
+    pub(crate) session_refresh_retries: u8,
+    /// Whether this interval's one extra attempt after a rejected refresh
+    /// has been spent.
+    pub(crate) session_refresh_extra_attempt_used: bool,
     pub transfer_state: TransferState,
     pub transfer_notify_dialog: Option<DialogId>,
     pub replaces_header: Option<String>,
@@ -988,6 +1025,10 @@ impl SessionState {
                 session_refresh_interval_secs: None,
                 session_refresh_local_refresher: false,
                 session_refresh_phase: SessionRefreshPhase::Idle,
+                session_refresh_armed_at: None,
+                session_refresh_rejection: None,
+                session_refresh_retries: 0,
+                session_refresh_extra_attempt_used: false,
                 transfer_state: TransferState::None,
                 transfer_notify_dialog: None,
                 replaces_header: None,
@@ -1245,6 +1286,10 @@ impl SessionState {
         cold.session_refresh_interval_secs = None;
         cold.session_refresh_local_refresher = false;
         cold.session_refresh_phase = SessionRefreshPhase::Idle;
+        cold.session_refresh_armed_at = None;
+        cold.session_refresh_rejection = None;
+        cold.session_refresh_retries = 0;
+        cold.session_refresh_extra_attempt_used = false;
     }
 
     /// Clear authentication coordination only when the completing transaction

@@ -376,15 +376,26 @@ fn every_profile_field_stays_overridable() {
 
 #[test]
 fn validate_rejects_session_interval_below_min_se() {
+    // The proposed interval may not undercut our own Min-SE.
     let mut c = Config::local("alice", 5060);
-    c.session_timer_secs = Some(60);
-    let error = c.validate().expect_err("60 < Min-SE 90");
+    c.session_timer_min_se = 600;
+    c.session_timer_secs = Some(300);
+    let error = c.validate().expect_err("300 < Min-SE 600");
     assert!(
         matches!(&error, SessionError::ConfigError(message) if message.contains("session_timer_min_se")),
         "{error:?}"
     );
-    c.session_timer_min_se = 60;
+    c.session_timer_secs = Some(600);
     c.validate().unwrap();
+
+    // And neither value may go below the RFC 4028 §5 floor of 90 seconds.
+    c.session_timer_min_se = 60;
+    c.session_timer_secs = Some(60);
+    let error = c.validate().expect_err("below the 90 s floor");
+    assert!(
+        matches!(&error, SessionError::ConfigError(message) if message.contains("90")),
+        "{error:?}"
+    );
 }
 
 #[test]

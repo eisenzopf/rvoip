@@ -43,6 +43,16 @@ NON_PERF_SIP_FEATURES = (
 )
 
 
+# Every rvoip-sip lane builds with `test-hooks`. Integration tests and process
+# fixtures that need test-only knobs (second-scale RFC 4028 session timers via
+# `Config::session_timer_allow_short_intervals_for_testing`) are compiled out
+# of a default-feature build, so a lane without the feature would pass while
+# running none of them. The feature only adds test hooks; it never changes
+# production behavior, so enabling it everywhere loses no default coverage.
+SIP_LANE_FEATURES = ["--features", "test-hooks"]
+SIP_SHARD_FEATURES = ["--features", "rvoip-sip/test-hooks"]
+
+
 class CheckError(RuntimeError):
     """Invalid CI input or environment."""
 
@@ -99,7 +109,10 @@ def package_args(packages_csv: str) -> list[str]:
     packages = sorted(set(filter(None, packages_csv.split(","))))
     if not packages or any(not PACKAGE.fullmatch(package) for package in packages):
         raise CheckError(f"invalid package selection: {packages_csv!r}")
-    return [value for package in packages for value in ("-p", package)]
+    selected = [value for package in packages for value in ("-p", package)]
+    if "rvoip-sip" in packages:
+        selected.extend(SIP_SHARD_FEATURES)
+    return selected
 
 
 def policy_commands() -> list[tuple[list[str], Path | None, dict[str, str] | None]]:
@@ -192,6 +205,7 @@ def sip_core_commands() -> list[tuple[list[str], Path | None, dict[str, str] | N
                 "--locked",
                 "-p",
                 "rvoip-sip",
+                *SIP_LANE_FEATURES,
                 "--lib",
                 "--bins",
                 "--examples",
@@ -205,7 +219,15 @@ def sip_core_commands() -> list[tuple[list[str], Path | None, dict[str, str] | N
 def sip_clippy_commands() -> list[tuple[list[str], Path | None, dict[str, str] | None]]:
     return [
         (
-            ["cargo", "clippy", "--locked", "-p", "rvoip-sip", "--all-targets"],
+            [
+                "cargo",
+                "clippy",
+                "--locked",
+                "-p",
+                "rvoip-sip",
+                *SIP_LANE_FEATURES,
+                "--all-targets",
+            ],
             None,
             None,
         )
@@ -218,7 +240,7 @@ def sip_integration_commands(
     targets = sorted(set(filter(None, targets_csv.split(","))))
     if not targets or any(not TARGET.fullmatch(target) for target in targets):
         raise CheckError(f"invalid SIP integration target selection: {targets_csv!r}")
-    argv = ["cargo", "test", "--locked", "-p", "rvoip-sip"]
+    argv = ["cargo", "test", "--locked", "-p", "rvoip-sip", *SIP_LANE_FEATURES]
     for target in targets:
         argv.extend(("--test", target))
     return [(argv, None, None)]
@@ -245,10 +267,10 @@ def sip_fixture_commands(
         "RVOIP_SIP_PREBUILT_EXAMPLE_DIR": str(prebuilt_dir),
     }
 
-    build = ["cargo", "build", "--locked", "-p", "rvoip-sip"]
+    build = ["cargo", "build", "--locked", "-p", "rvoip-sip", *SIP_LANE_FEATURES]
     for example in examples:
         build.extend(("--example", example))
-    test = ["cargo", "test", "--locked", "-p", "rvoip-sip"]
+    test = ["cargo", "test", "--locked", "-p", "rvoip-sip", *SIP_LANE_FEATURES]
     for target in targets:
         test.extend(("--test", target))
     return [(build, None, None), (test, None, fixture_env)]
