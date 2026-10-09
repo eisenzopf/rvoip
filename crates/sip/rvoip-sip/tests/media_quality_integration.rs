@@ -90,7 +90,7 @@ impl LossyRelay {
                     let datagram = &buf[..n];
                     if !is_rtcp(datagram) {
                         rtp_seen += 1;
-                        if rtp_seen % DROP_EVERY == 0 {
+                        if rtp_seen.is_multiple_of(DROP_EVERY) {
                             dropped.fetch_add(1, Ordering::Relaxed);
                             continue;
                         }
