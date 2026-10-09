@@ -491,6 +491,15 @@ impl ConnectionLifecycleTaskSupervisor {
     }
 
     fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) -> bool {
+        self.spawn_abortable(task).is_some()
+    }
+
+    /// Like [`Self::spawn`], but returns the task's abort handle so callers
+    /// can observe whether that specific task is still running.
+    fn spawn_abortable(
+        &self,
+        task: impl Future<Output = ()> + Send + 'static,
+    ) -> Option<tokio::task::AbortHandle> {
         let mut tasks = self
             .tasks
             .lock()
@@ -501,7 +510,7 @@ impl ConnectionLifecycleTaskSupervisor {
             }
         }
         if self.draining.load(Ordering::Acquire) {
-            return false;
+            return None;
         }
         if tasks.len() >= self.capacity {
             metrics::counter!(
@@ -509,10 +518,9 @@ impl ConnectionLifecycleTaskSupervisor {
                 "reason" => "capacity"
             )
             .increment(1);
-            return false;
+            return None;
         }
-        tasks.spawn(task);
-        true
+        Some(tasks.spawn(task))
     }
 
     /// Execute a synchronous ownership commit and install its lifecycle task
@@ -1399,6 +1407,18 @@ fn directional_bridge_media_graph_policy(left: Transport, right: Transport) -> M
     policy
 }
 
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+enum PeriodicTaskKind {
+    MediaQuality,
+    IdleCloser,
+    Capacity,
+}
+
+/// One live worker per [`PeriodicTaskKind`], plus room for one finished
+/// (exited or panicked) worker per kind that the supervisor has not reaped
+/// yet, so restarting a dead worker never trips the capacity bound.
+const PERIODIC_TASK_CAPACITY: usize = 6;
+
 pub struct Orchestrator {
     pub config: Config,
     pub bridges: BridgeManager,
@@ -1434,6 +1454,11 @@ pub struct Orchestrator {
     /// Owns adapter normalizers and asynchronous connection side effects so
     /// shutdown can abort and join them deterministically.
     connection_lifecycle_tasks: ConnectionLifecycleTaskSupervisor,
+    periodic_tasks: ConnectionLifecycleTaskSupervisor,
+    /// Abort handle of the most recent worker per periodic kind. A kind is
+    /// running only while its handle reports unfinished, so a worker that
+    /// exits or panics can be started again.
+    periodic_workers: Mutex<HashMap<PeriodicTaskKind, tokio::task::AbortHandle>>,
     playback_tasks: ConnectionLifecycleTaskSupervisor,
     playback_routes:
         Arc<DashMap<crate::ids::PlaybackId, (ConnectionId, tokio_util::sync::CancellationToken)>>,
@@ -1928,6 +1953,8 @@ impl Orchestrator {
             connection_lifecycle_tasks: ConnectionLifecycleTaskSupervisor::new(
                 setup_capacity.saturating_mul(4).max(64),
             ),
+            periodic_tasks: ConnectionLifecycleTaskSupervisor::new(PERIODIC_TASK_CAPACITY),
+            periodic_workers: Mutex::new(HashMap::new()),
             self_weak: OnceLock::new(),
             adapters: Arc::new(DashMap::new()),
             adapter_registrations: Mutex::new(HashSet::new()),
@@ -2008,6 +2035,8 @@ impl Orchestrator {
             connection_lifecycle_tasks: ConnectionLifecycleTaskSupervisor::new(
                 setup_capacity.saturating_mul(4).max(64),
             ),
+            periodic_tasks: ConnectionLifecycleTaskSupervisor::new(PERIODIC_TASK_CAPACITY),
+            periodic_workers: Mutex::new(HashMap::new()),
             self_weak: OnceLock::new(),
             adapters: Arc::new(DashMap::new()),
             adapter_registrations: Mutex::new(HashSet::new()),
@@ -2263,6 +2292,7 @@ impl Orchestrator {
     /// be normalized before calling this method.
     pub async fn drain_connection_lifecycle_tasks(&self) {
         self.drain_playback_tasks().await;
+        self.drain_periodic_tasks().await;
         self.connection_lifecycle_tasks.drain().await;
     }
 
@@ -2280,6 +2310,45 @@ impl Orchestrator {
     #[must_use]
     pub fn playback_task_count(&self) -> usize {
         self.playback_tasks.task_count()
+    }
+
+    fn start_periodic_task(
+        &self,
+        kind: PeriodicTaskKind,
+        task: impl Future<Output = ()> + Send + 'static,
+    ) -> Result<()> {
+        let mut workers = self
+            .periodic_workers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if self.periodic_tasks.draining.load(Ordering::Acquire) {
+            return Err(RvoipError::InvalidState("periodic supervisor is draining"));
+        }
+        if workers
+            .get(&kind)
+            .is_some_and(|worker| !worker.is_finished())
+        {
+            return Ok(());
+        }
+        let Some(worker) = self.periodic_tasks.spawn_abortable(task) else {
+            return Err(RvoipError::InvalidState(
+                "periodic supervisor is unavailable",
+            ));
+        };
+        workers.insert(kind, worker);
+        Ok(())
+    }
+
+    /// Cancel and join the SDK periodic workers. Terminal and idempotent;
+    /// ordinary connection lifecycle consumers remain running.
+    pub async fn drain_periodic_tasks(&self) {
+        self.periodic_tasks.drain().await;
+    }
+
+    /// Number of retained SDK periodic workers, excluding completed tasks.
+    #[must_use]
+    pub fn periodic_task_count(&self) -> usize {
+        self.periodic_tasks.task_count()
     }
 
     /// Number of retained adapter-normalizer and connection-side-effect
@@ -5406,12 +5475,33 @@ impl Orchestrator {
     /// Connection at the configured cadence and emit
     /// `Event::MediaQuality`. Spawns one task that ticks `every`.
     pub fn spawn_media_quality_sampler(self: &Arc<Self>, every: std::time::Duration) {
-        let me = Arc::clone(self);
-        tokio::spawn(async move {
+        if let Err(error) = self.try_spawn_media_quality_sampler(every) {
+            warn!(%error, "periodic worker was not started");
+        }
+    }
+
+    /// Start this periodic worker once. Repeated requests while the worker is
+    /// running retain the original cadence; if the previous worker exited
+    /// (for example by panicking), a replacement starts with this request's
+    /// cadence. Zero intervals and startup after shutdown return an error.
+    pub fn try_spawn_media_quality_sampler(
+        self: &Arc<Self>,
+        every: std::time::Duration,
+    ) -> Result<()> {
+        if every.is_zero() {
+            return Err(RvoipError::InvalidState(
+                "periodic interval must be nonzero",
+            ));
+        }
+        let owner = Arc::downgrade(self);
+        self.start_periodic_task(PeriodicTaskKind::MediaQuality, async move {
             let mut tick = tokio::time::interval(every);
             tick.tick().await;
             loop {
                 tick.tick().await;
+                let Some(me) = owner.upgrade() else {
+                    break;
+                };
                 // Snapshot connections.
                 let conns: Vec<(ConnectionId, Transport)> = me
                     .connections
@@ -5458,20 +5548,44 @@ impl Orchestrator {
                     });
                 }
             }
-        });
+        })
     }
 
     /// P10 — drive idle-close of `Ephemeral` Conversations. Spawns
-    /// one task that ticks `every` and force-closes any Conversation
-    /// whose `last_activity_at` is older than its policy's
-    /// `idle_close_secs` AND has no `Active` Sessions.
+    /// one task that ticks `every` and closes (without `force`) any
+    /// Conversation whose `last_activity_at` is older than its policy's
+    /// `idle_close_secs` AND has no `Active` Sessions. Conversations that
+    /// still hold any non-terminal Session are left open.
+    ///
+    /// Shutdown safety: periodic drain aborts this worker, but only at an
+    /// `.await`. A non-forcing `close_conversation` never awaits (it does not
+    /// end Sessions), so each close either completes atomically within one
+    /// poll or is not started; drain cannot leave a Conversation half-closed.
     pub fn spawn_idle_closer(self: &Arc<Self>, every: std::time::Duration) {
-        let me = Arc::clone(self);
-        tokio::spawn(async move {
+        if let Err(error) = self.try_spawn_idle_closer(every) {
+            warn!(%error, "periodic worker was not started");
+        }
+    }
+
+    /// Start this periodic worker once. Repeated requests while the worker is
+    /// running retain the original cadence; if the previous worker exited
+    /// (for example by panicking), a replacement starts with this request's
+    /// cadence. Zero intervals and startup after shutdown return an error.
+    pub fn try_spawn_idle_closer(self: &Arc<Self>, every: std::time::Duration) -> Result<()> {
+        if every.is_zero() {
+            return Err(RvoipError::InvalidState(
+                "periodic interval must be nonzero",
+            ));
+        }
+        let owner = Arc::downgrade(self);
+        self.start_periodic_task(PeriodicTaskKind::IdleCloser, async move {
             let mut tick = tokio::time::interval(every);
             tick.tick().await;
             loop {
                 tick.tick().await;
+                let Some(me) = owner.upgrade() else {
+                    break;
+                };
                 let now = Utc::now();
                 let mut to_close: Vec<ConversationId> = Vec::new();
                 for entry in me.conversations.iter() {
@@ -5502,32 +5616,53 @@ impl Orchestrator {
                     to_close.push(entry.key().clone());
                 }
                 for cid in to_close {
+                    // `force = false` keeps this close free of await points,
+                    // which is what makes aborting the worker during drain
+                    // safe. Do not switch to a forcing close here without
+                    // moving it off the abortable periodic worker.
                     let _ = me.close_conversation(cid, false).await;
                 }
             }
-        });
+        })
     }
 
     /// P6 — start the periodic capacity-report emitter using the
     /// cadence in `Config::capacity_report_interval`. Returns
-    /// immediately; the scheduler task is owned by the Orchestrator
-    /// and aborts when the Orchestrator is dropped (best-effort —
-    /// real teardown semantics ship with P11 graceful-shutdown).
+    /// immediately. The task is supervised, holds only a weak owner between
+    /// ticks, and is cancelled by periodic drain or Orchestrator drop.
     pub fn spawn_capacity_scheduler(self: &Arc<Self>) {
+        if let Err(error) = self.try_spawn_capacity_scheduler() {
+            warn!(%error, "periodic worker was not started");
+        }
+    }
+
+    /// Start this periodic worker once. Repeated requests while the worker is
+    /// running retain the original cadence; if the previous worker exited
+    /// (for example by panicking), a replacement starts with this request's
+    /// cadence. Zero intervals and startup after shutdown return an error.
+    pub fn try_spawn_capacity_scheduler(self: &Arc<Self>) -> Result<()> {
         let Some(interval) = self.config.capacity_report_interval else {
-            return;
+            return Ok(());
         };
-        let me = Arc::clone(self);
-        tokio::spawn(async move {
+        if interval.is_zero() {
+            return Err(RvoipError::InvalidState(
+                "periodic interval must be nonzero",
+            ));
+        }
+        let owner = Arc::downgrade(self);
+        self.start_periodic_task(PeriodicTaskKind::Capacity, async move {
             let mut tick = tokio::time::interval(interval);
             // Skip the immediate tick — first emit happens after one
             // interval.
             tick.tick().await;
             loop {
                 tick.tick().await;
+                let Some(me) = owner.upgrade() else {
+                    break;
+                };
                 me.emit(me.capacity_report());
             }
-        });
+        })
     }
 
     fn check_session_quota(&self, conv_id: &ConversationId) -> Result<()> {
@@ -12879,6 +13014,141 @@ mod cross_crate_publisher_tests {
             orchestrator.validate_stream_wait_lifecycle(&lifecycle),
             Err(StreamWaitError::GenerationReplaced)
         );
+    }
+}
+
+#[cfg(test)]
+mod periodic_worker_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn duplicate_startup_is_bounded_and_drain_is_terminal() {
+        let core = Orchestrator::new(Config::default());
+        for _ in 0..10 {
+            core.try_spawn_media_quality_sampler(Duration::from_secs(60))
+                .unwrap();
+            core.try_spawn_idle_closer(Duration::from_secs(60)).unwrap();
+            core.try_spawn_capacity_scheduler().unwrap();
+        }
+        assert_eq!(core.periodic_task_count(), 3);
+        core.drain_periodic_tasks().await;
+        assert_eq!(core.periodic_task_count(), 0);
+        core.drain_periodic_tasks().await;
+        assert!(core.try_spawn_capacity_scheduler().is_err());
+    }
+
+    #[tokio::test]
+    async fn periodic_tasks_do_not_keep_the_orchestrator_alive() {
+        let core = Orchestrator::new(Config::default());
+        core.try_spawn_media_quality_sampler(Duration::from_secs(60))
+            .unwrap();
+        core.try_spawn_idle_closer(Duration::from_secs(60)).unwrap();
+        core.try_spawn_capacity_scheduler().unwrap();
+        let weak = Arc::downgrade(&core);
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        drop(core);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn zero_intervals_are_rejected_without_spawning() {
+        let core = Orchestrator::new(Config {
+            capacity_report_interval: Some(Duration::ZERO),
+            ..Config::default()
+        });
+        assert!(core
+            .try_spawn_media_quality_sampler(Duration::ZERO)
+            .is_err());
+        assert!(core.try_spawn_idle_closer(Duration::ZERO).is_err());
+        assert!(core.try_spawn_capacity_scheduler().is_err());
+        assert_eq!(core.periodic_task_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn exited_periodic_worker_is_restarted_by_the_next_start_request() {
+        let core = Orchestrator::new(Config {
+            capacity_report_interval: Some(Duration::from_millis(10)),
+            ..Config::default()
+        });
+        // A capacity worker that dies (here: panics) must not leave the kind
+        // marked as running forever.
+        core.start_periodic_task(PeriodicTaskKind::Capacity, async {
+            panic!("simulated periodic worker panic");
+        })
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while core.periodic_task_count() != 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("panicking periodic worker should finish");
+
+        let mut events = core.subscribe_events();
+        core.try_spawn_capacity_scheduler().unwrap();
+        assert_eq!(core.periodic_task_count(), 1, "replacement worker runs");
+        let report = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(Event::CapacityReport { .. }) = events.recv().await {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(report.is_ok(), "restarted capacity worker must emit");
+        core.drain_periodic_tasks().await;
+    }
+
+    /// The idle closer is aborted by periodic drain. That is only safe while
+    /// a non-forcing close completes within a single poll, so an abort can
+    /// never interleave with it. Pin that invariant.
+    #[tokio::test]
+    async fn non_forcing_close_completes_in_one_poll_so_idle_closer_abort_is_safe() {
+        use std::future::Future as _;
+        use std::task::{Context, Poll, Waker};
+
+        let core = Orchestrator::new(Config::default());
+        let idle = core
+            .open_conversation(
+                TenantId::new(),
+                ConversationPolicy::Ephemeral { idle_close_secs: 0 },
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        let busy = core
+            .open_conversation(
+                TenantId::new(),
+                ConversationPolicy::Ephemeral { idle_close_secs: 0 },
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        core.start_session(busy.clone(), SessionMedium::Voice, Vec::new())
+            .await
+            .unwrap();
+
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut close_idle = std::pin::pin!(core.close_conversation(idle.clone(), false));
+        assert!(matches!(
+            close_idle.as_mut().poll(&mut cx),
+            Poll::Ready(Ok(()))
+        ));
+        let mut close_busy = std::pin::pin!(core.close_conversation(busy, false));
+        assert!(matches!(
+            close_busy.as_mut().poll(&mut cx),
+            Poll::Ready(Err(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_shutdown_also_joins_periodic_tasks() {
+        let core = Orchestrator::new(Config::default());
+        core.try_spawn_capacity_scheduler().unwrap();
+        core.drain_connection_lifecycle_tasks().await;
+        assert_eq!(core.periodic_task_count(), 0);
     }
 }
 
