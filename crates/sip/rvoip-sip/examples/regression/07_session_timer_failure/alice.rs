@@ -3,8 +3,8 @@
 //! Alice calls Bob with a short (4 s) Session-Expires and expects an
 //! `Event::SessionRefreshFailed` within 15 s. Bob is configured to accept
 //! the call and then exit the process before the refresh fires — Alice's
-//! UPDATE lands on a dead peer and the transaction times out; the fallback
-//! re-INVITE also fails; dialog-core then sends BYE with
+//! UPDATE lands on a dead peer and the transaction times out, which ends the
+//! session (RFC 4028 §10); rvoip-sip then sends BYE with
 //! `Reason: SIP ;cause=408 ;text="Session expired"` and surfaces
 //! `SessionRefreshFailed` up to the session layer.
 //!
@@ -36,6 +36,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = Config::local("alice", alice_port);
     config.session_timer_secs = Some(4);
     config.session_timer_min_se = 2;
+    // Seconds-scale intervals keep the test fast; RFC 4028 §5 forbids them in
+    // production, so `Config::validate` needs the test escape hatch.
+    config.session_timer_allow_short_intervals_for_testing = true;
 
     let mut alice = StreamPeer::with_config(config).await?;
     let mut events = alice.control().subscribe_events().await?;

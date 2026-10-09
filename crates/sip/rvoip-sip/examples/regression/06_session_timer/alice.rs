@@ -27,6 +27,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = Config::local("alice", alice_port);
     config.session_timer_secs = Some(10);
     config.session_timer_min_se = 5;
+    // Seconds-scale intervals keep the test fast; RFC 4028 §5 forbids them in
+    // production, so `Config::validate` needs the test escape hatch.
+    config.session_timer_allow_short_intervals_for_testing = true;
 
     let mut alice = StreamPeer::with_config(config).await?;
     let mut events = alice.control().subscribe_events().await?;

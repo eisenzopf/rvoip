@@ -4,7 +4,7 @@
 //! exits the process. This simulates the "remote peer crashed" scenario:
 //! Alice's UPDATE lands on a dead UDP port, the transaction times out, and
 //! rvoip-sip's exact-lifecycle state-machine path tears the dialog down with a
-//! `Reason: SIP ;cause=408` BYE after its fallback also fails.
+//! `Reason: SIP ;cause=408` BYE (RFC 4028 §10).
 
 use rvoip_sip::{Config, StreamPeer};
 use tokio::time::{sleep, Duration};
@@ -29,6 +29,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = Config::local("bob", bob_port);
     config.session_timer_secs = Some(4);
     config.session_timer_min_se = 2;
+    // Seconds-scale intervals keep the test fast; RFC 4028 §5 forbids them in
+    // production, so `Config::validate` needs the test escape hatch.
+    config.session_timer_allow_short_intervals_for_testing = true;
 
     let mut bob = StreamPeer::with_config(config).await?;
     println!("[BOB] Listening on {} (session timer = 4s)", bob_port);

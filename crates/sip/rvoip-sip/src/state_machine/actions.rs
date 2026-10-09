@@ -160,12 +160,151 @@ pub(crate) fn session_peer_expiry_secs(interval_secs: u32) -> u32 {
         .max(1)
 }
 
+/// Retries (491 glare plus 422 Min-SE) allowed within one session interval
+/// before a rejected refresh is left to expire.
+const MAX_SESSION_REFRESH_RETRIES: u8 = 4;
+
+/// RFC 3261 §14.1 glare backoff: the Call-ID owner (the dialog's UAC) waits
+/// 2.1–4 s, the other side 0–2 s, both in 10 ms units.
+fn session_refresh_glare_backoff(role: crate::state_table::Role) -> std::time::Duration {
+    let units = match role {
+        crate::state_table::Role::UAS => rand::random::<u64>() % 201,
+        crate::state_table::Role::UAC | crate::state_table::Role::Both => {
+            210 + rand::random::<u64>() % 191
+        }
+    };
+    std::time::Duration::from_millis(units * 10)
+}
+
+/// Decide what a non-2xx, non-terminal refresh response means (RFC 4028
+/// §10: only a timeout, 408 or 481 ends the session):
+///
+/// - 491 Request Pending: retry the same method after the RFC 3261 §14.1
+///   glare backoff.
+/// - 422 Session Interval Too Small: retry at once with the response's
+///   `Min-SE` as both the floor and the minimum interval (§7.4).
+/// - anything else (488, 403, 500, …), or retries exhausted: the session was
+///   simply not refreshed this time. It stays up and expires at the end of
+///   the current interval unless something refreshes it first (a peer
+///   refresh or any successful re-INVITE/UPDATE re-arms the timer).
+fn handle_session_refresh_rejection(
+    session: &mut SessionState,
+    dialog_adapter: &DialogAdapter,
+    media_adapter: &MediaAdapter,
+) -> crate::errors::Result<ActionOutcome> {
+    use crate::session_store::state::SessionRefreshMethod;
+
+    let Some(rejection) = session.session_refresh_rejection else {
+        return Ok(ActionOutcome::default());
+    };
+    if rejection.method == SessionRefreshMethod::Reinvite {
+        // The re-offer did not take effect; restore the stable description
+        // exactly as a failed application re-INVITE would.
+        rollback_reinvite_with_media(session, media_adapter);
+        session.pending_reinvite = None;
+        session.reinvite_retry_attempts = 0;
+    }
+    let due = match rejection.method {
+        SessionRefreshMethod::Update => SessionRefreshDeadlineKind::UpdateDue,
+        SessionRefreshMethod::Reinvite => SessionRefreshDeadlineKind::ReinviteDue,
+    };
+    let retry_allowed = session.session_refresh_retries < MAX_SESSION_REFRESH_RETRIES;
+    match rejection.status_code {
+        491 if retry_allowed => {
+            session.session_refresh_retries += 1;
+            let backoff = session_refresh_glare_backoff(session.role);
+            info!(
+                session_id = %session.session_id,
+                method = ?rejection.method,
+                ?backoff,
+                "RFC 4028 refresh met 491 glare; retrying after RFC 3261 §14.1 backoff"
+            );
+            let generation = next_session_refresh_generation(session);
+            return Ok(ActionOutcome::with_deferred_effect(
+                DeferredActionEffect::SessionRefreshTimer(SessionRefreshTimerEffect {
+                    generation,
+                    delay: backoff,
+                    kind: due,
+                }),
+            ));
+        }
+        422 if retry_allowed => {
+            let peer_min_se = dialog_adapter
+                .session_refresh_peer_policy_lane_owned(session)?
+                .min_se;
+            if let Some(min_se) = peer_min_se {
+                session.session_refresh_retries += 1;
+                session.session_timer_min_se = Some(
+                    session
+                        .session_timer_min_se
+                        .map_or(min_se, |seen| seen.max(min_se)),
+                );
+                session.session_refresh_interval_secs = session
+                    .session_refresh_interval_secs
+                    .map(|interval| interval.max(min_se));
+                info!(
+                    session_id = %session.session_id,
+                    method = ?rejection.method,
+                    min_se,
+                    "RFC 4028 refresh met 422; retrying with the peer's Min-SE"
+                );
+                let generation = next_session_refresh_generation(session);
+                return Ok(ActionOutcome::with_deferred_effect(
+                    DeferredActionEffect::SessionRefreshTimer(SessionRefreshTimerEffect {
+                        generation,
+                        delay: std::time::Duration::ZERO,
+                        kind: due,
+                    }),
+                ));
+            }
+        }
+        _ => {}
+    }
+
+    let Some(interval_secs) = session.session_refresh_interval_secs else {
+        return Ok(ActionOutcome::default());
+    };
+    let expires_after =
+        std::time::Duration::from_secs(u64::from(session_peer_expiry_secs(interval_secs)));
+    let delay = expires_after.saturating_sub(
+        session
+            .session_refresh_armed_at
+            .map(|armed_at| armed_at.elapsed())
+            .unwrap_or_default(),
+    );
+    warn!(
+        session_id = %session.session_id,
+        method = ?rejection.method,
+        status = rejection.status_code,
+        expires_in = ?delay,
+        "RFC 4028 session refresh was rejected; keeping the session until it expires"
+    );
+    let generation = next_session_refresh_generation(session);
+    Ok(ActionOutcome::with_deferred_effect(
+        DeferredActionEffect::SessionRefreshTimer(SessionRefreshTimerEffect {
+            generation,
+            delay,
+            kind: SessionRefreshDeadlineKind::RefreshExpired,
+        }),
+    ))
+}
+
 fn prepare_session_refresh_update(
     session: &mut SessionState,
     dialog_adapter: &DialogAdapter,
 ) -> crate::errors::Result<ActionOutcome> {
     use crate::session_store::state::SessionRefreshPhase;
 
+    // RFC 4028 §7.4 / RFC 3261 §20.5: only refresh with UPDATE when the
+    // peer has not ruled it out in its `Allow` header; otherwise go straight
+    // to re-INVITE, which every UA supports.
+    if dialog_adapter
+        .session_refresh_peer_policy_lane_owned(session)?
+        .allows_update
+        == Some(false)
+    {
+        return prepare_session_refresh_reinvite(session, dialog_adapter);
+    }
     let handle = exact_request_tracker_handle(session)?;
     if session.pending_reinvite.is_some()
         || session.pending_reinvite_options.is_some()
@@ -200,10 +339,17 @@ fn response_sdp_for_event(event: &EventType, local_sdp: &Option<String>) -> Opti
 
 fn prepare_session_refresh_reinvite(
     session: &mut SessionState,
+    dialog_adapter: &DialogAdapter,
 ) -> crate::errors::Result<ActionOutcome> {
     use crate::session_store::state::SessionRefreshPhase;
 
-    if session.pending_reinvite.is_some() || session.pending_reinvite_options.is_some() {
+    let handle = exact_request_tracker_handle(session)?;
+    if session.pending_reinvite.is_some()
+        || session.pending_reinvite_options.is_some()
+        || dialog_adapter
+            .outbound_request_tracker
+            .has_request(handle, TrackedInDialogMethod::Reinvite)
+    {
         session.session_refresh_phase = SessionRefreshPhase::Idle;
         return Ok(session_refresh_retry_effect(
             session,
@@ -1041,9 +1187,21 @@ impl AuthRetryObservation {
 pub(crate) enum SessionRefreshDeadlineKind {
     UpdateDue,
     ReinviteDue,
+    /// The peer refresher missed its refresh (RFC 4028 §10).
     PeerExpired,
-    UpdateFailed,
-    ReinviteFailed,
+    /// This side refreshes, but every refresh this interval was rejected and
+    /// the session has now expired.
+    RefreshExpired,
+    /// The refresh UPDATE could not be sent; fall back to re-INVITE.
+    UpdateSendFailed,
+    /// The refresh re-INVITE could not be sent.
+    ReinviteSendFailed,
+    /// No final response to the refresh UPDATE within the transaction
+    /// timeout (plus grace).
+    UpdateTimedOut,
+    /// No final response to the refresh re-INVITE within the transaction
+    /// timeout (plus grace).
+    ReinviteTimedOut,
 }
 
 /// One generation-qualified RFC 4028 deadline admitted only after the YAML
@@ -2239,8 +2397,7 @@ pub(crate) async fn execute_action(
                     rollback_reinvite_with_media(session, media_adapter);
                 }
                 EventType::MediaEvent(name)
-                    if name
-                        == crate::state_machine::executor::SESSION_REFRESH_REINVITE_FAILED_EVENT =>
+                    if name == crate::state_machine::executor::SESSION_REFRESH_TIMED_OUT_EVENT =>
                 {
                     rollback_reinvite_with_media(session, media_adapter);
                 }
@@ -3209,6 +3366,11 @@ pub(crate) async fn execute_action(
                     session.session_refresh_interval_secs = Some(interval_secs);
                     session.session_refresh_local_refresher = local_refresher;
                     session.session_refresh_phase = SessionRefreshPhase::Idle;
+                    // A new interval starts now (RFC 4028 §10); earlier
+                    // rejections and retries belonged to the old one.
+                    session.session_refresh_armed_at = Some(std::time::Instant::now());
+                    session.session_refresh_rejection = None;
+                    session.session_refresh_retries = 0;
                     let delay_secs = if local_refresher {
                         session_refresh_due_secs(interval_secs)
                     } else {
@@ -3231,7 +3393,14 @@ pub(crate) async fn execute_action(
                     return Ok(prepare_session_refresh_update(session, dialog_adapter)?);
                 }
                 "PrepareSessionRefreshReinvite" => {
-                    return Ok(prepare_session_refresh_reinvite(session)?);
+                    return Ok(prepare_session_refresh_reinvite(session, dialog_adapter)?);
+                }
+                "HandleSessionRefreshRejection" => {
+                    return Ok(handle_session_refresh_rejection(
+                        session,
+                        dialog_adapter,
+                        media_adapter,
+                    )?);
                 }
                 "PrepareSessionRefreshExpiry" => {
                     use crate::session_store::state::SessionRefreshPhase;
@@ -4806,7 +4975,7 @@ pub(crate) async fn execute_action(
                     rollback_reinvite_with_media(session, media_adapter);
                     return Ok(session_refresh_immediate_effect(
                         session,
-                        SessionRefreshDeadlineKind::UpdateFailed,
+                        SessionRefreshDeadlineKind::UpdateSendFailed,
                     ));
                 }
                 Err(error) => {
@@ -4831,7 +5000,7 @@ pub(crate) async fn execute_action(
                     dialog_adapter
                         .non_invite_transaction_timeout()
                         .saturating_add(std::time::Duration::from_secs(2)),
-                    SessionRefreshDeadlineKind::UpdateFailed,
+                    SessionRefreshDeadlineKind::UpdateTimedOut,
                 ));
             }
         }
@@ -4886,7 +5055,7 @@ pub(crate) async fn execute_action(
                     session.pending_reinvite = None;
                     return Ok(session_refresh_immediate_effect(
                         session,
-                        SessionRefreshDeadlineKind::ReinviteFailed,
+                        SessionRefreshDeadlineKind::ReinviteSendFailed,
                     ));
                 }
                 Err(error) => {
@@ -4914,7 +5083,7 @@ pub(crate) async fn execute_action(
                     dialog_adapter
                         .non_invite_transaction_timeout()
                         .saturating_add(std::time::Duration::from_secs(2)),
-                    SessionRefreshDeadlineKind::ReinviteFailed,
+                    SessionRefreshDeadlineKind::ReinviteTimedOut,
                 ));
             }
         }
@@ -6608,6 +6777,92 @@ mod rfc4028_session_timer_tests {
             assert_eq!(refresher, Some(Refresher::Uac), "{role:?}");
             assert_eq!(interval, 1800);
             assert_eq!(min_se, 90);
+        }
+    }
+
+    #[test]
+    fn only_timeout_408_and_481_end_the_session() {
+        // RFC 4028 §10.
+        use crate::session_store::state::SessionRefreshMethod::{Reinvite, Update};
+        use crate::state_machine::executor::{
+            classify_session_refresh_outcome, classify_session_refresh_status,
+            SessionRefreshStateInput as Input,
+        };
+        use rvoip_infra_common::events::cross_crate::OutboundRequestOutcome;
+
+        for method in [Update, Reinvite] {
+            for status in [408, 481] {
+                assert_eq!(
+                    classify_session_refresh_status(method, status),
+                    Input::TimedOut {
+                        method,
+                        timer_generation: None
+                    },
+                    "{method:?} {status}"
+                );
+            }
+            for outcome in [
+                OutboundRequestOutcome::Timeout,
+                OutboundRequestOutcome::TransportFailure,
+            ] {
+                assert!(matches!(
+                    classify_session_refresh_outcome(method, outcome),
+                    Input::TimedOut { .. }
+                ));
+            }
+            // Glare and Min-SE retries keep the method.
+            for status in [491, 422] {
+                assert_eq!(
+                    classify_session_refresh_status(method, status),
+                    Input::Rejected {
+                        method,
+                        status_code: status
+                    }
+                );
+            }
+        }
+        assert_eq!(
+            classify_session_refresh_status(Update, 200),
+            Input::UpdateSucceeded
+        );
+        assert_eq!(
+            classify_session_refresh_status(Reinvite, 202),
+            Input::ReinviteSucceeded
+        );
+        // Other UPDATE rejections (405, 501, 488, ...) fall back to re-INVITE;
+        // other re-INVITE rejections keep the session until it expires.
+        for status in [403, 405, 488, 500, 501, 503, 603] {
+            assert_eq!(
+                classify_session_refresh_status(Update, status),
+                Input::UpdateFailed
+            );
+            assert_eq!(
+                classify_session_refresh_status(Reinvite, status),
+                Input::Rejected {
+                    method: Reinvite,
+                    status_code: status
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn glare_backoff_follows_rfc3261_section_14_1() {
+        use super::session_refresh_glare_backoff;
+        for _ in 0..200 {
+            let owner = session_refresh_glare_backoff(Role::UAC);
+            assert!(
+                owner >= std::time::Duration::from_millis(2_100)
+                    && owner <= std::time::Duration::from_millis(4_000),
+                "{owner:?}"
+            );
+            assert_eq!(owner.as_millis() % 10, 0);
+            let other = session_refresh_glare_backoff(Role::UAS);
+            assert!(
+                other <= std::time::Duration::from_millis(2_000),
+                "{other:?}"
+            );
+            assert_eq!(other.as_millis() % 10, 0);
         }
     }
 

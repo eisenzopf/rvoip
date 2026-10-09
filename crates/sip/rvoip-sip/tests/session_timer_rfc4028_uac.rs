@@ -70,11 +70,10 @@ impl MockPeer {
                 HeaderName::Contact,
                 HeaderValue::Raw(format!("<sip:peer@127.0.0.1:{}>", self.port).into_bytes()),
             ));
-            // No UPDATE in Allow: a peer that refreshes only with re-INVITE.
-            response.headers.push(TypedHeader::Other(
-                HeaderName::Allow,
-                HeaderValue::Raw(b"INVITE, ACK, BYE, CANCEL, OPTIONS".to_vec()),
-            ));
+            // No `Allow` header: rvoip cannot tell whether UPDATE works, so
+            // it tries UPDATE first and must fall back on the 405. (A peer
+            // whose `Allow` omits UPDATE is refreshed with re-INVITE from
+            // the start; see session_timer_refresh_outcomes.rs.)
         }
         if with_sdp {
             let body = format!(
@@ -175,6 +174,9 @@ async fn start_call(refresher: &'static str, media_ports: (u16, u16)) -> Harness
     config.media_port_end = media_ports.1;
     config.session_timer_secs = Some(SESSION_SECS);
     config.session_timer_min_se = 2;
+    // Seconds-scale intervals keep the test fast; RFC 4028 §5 forbids them in
+    // production, so `Config::validate` needs the test escape hatch.
+    config.session_timer_allow_short_intervals_for_testing = true;
     let mut peer = StreamPeer::with_config(config).await.expect("peer");
     let call_id = peer
         .invite(format!("sip:bob@127.0.0.1:{port}"))

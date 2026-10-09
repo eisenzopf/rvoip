@@ -1,4 +1,5 @@
 use crate::session_lifecycle::{OwnedOperation, OwnedOperationCompletion, SessionOperationKind};
+pub(crate) use crate::session_store::state::SessionRefreshMethod;
 use crate::state_table::SessionId;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -34,8 +35,11 @@ pub(crate) const SESSION_REFRESH_UPDATE_FAILED_EVENT: &str =
     "__rvoip_internal.session_refresh.update_failed";
 pub(crate) const SESSION_REFRESH_REINVITE_OK_EVENT: &str =
     "__rvoip_internal.session_refresh.reinvite_ok";
-pub(crate) const SESSION_REFRESH_REINVITE_FAILED_EVENT: &str =
-    "__rvoip_internal.session_refresh.reinvite_failed";
+/// RFC 4028 §10: the refresh timed out or drew 408/481; the session ends.
+pub(crate) const SESSION_REFRESH_TIMED_OUT_EVENT: &str =
+    "__rvoip_internal.session_refresh.timed_out";
+/// Any other non-2xx to a refresh: retry (491, 422) or keep the session.
+pub(crate) const SESSION_REFRESH_REJECTED_EVENT: &str = "__rvoip_internal.session_refresh.rejected";
 pub(crate) const SESSION_REFRESH_PEER_EXPIRED_EVENT: &str =
     "__rvoip_internal.session_refresh.peer_expired";
 
@@ -105,9 +109,29 @@ async fn run_deferred_session_refresh(
         actions::SessionRefreshDeadlineKind::PeerExpired => SessionRefreshStateInput::PeerExpired {
             timer_generation: effect.generation,
         },
-        actions::SessionRefreshDeadlineKind::UpdateFailed => SessionRefreshStateInput::UpdateFailed,
-        actions::SessionRefreshDeadlineKind::ReinviteFailed => {
-            SessionRefreshStateInput::ReinviteFailed
+        actions::SessionRefreshDeadlineKind::RefreshExpired => {
+            SessionRefreshStateInput::RefreshExpired {
+                timer_generation: effect.generation,
+            }
+        }
+        actions::SessionRefreshDeadlineKind::UpdateSendFailed => {
+            SessionRefreshStateInput::UpdateFailed
+        }
+        actions::SessionRefreshDeadlineKind::ReinviteSendFailed => {
+            SessionRefreshStateInput::TimedOut {
+                method: SessionRefreshMethod::Reinvite,
+                timer_generation: None,
+            }
+        }
+        actions::SessionRefreshDeadlineKind::UpdateTimedOut => SessionRefreshStateInput::TimedOut {
+            method: SessionRefreshMethod::Update,
+            timer_generation: Some(effect.generation),
+        },
+        actions::SessionRefreshDeadlineKind::ReinviteTimedOut => {
+            SessionRefreshStateInput::TimedOut {
+                method: SessionRefreshMethod::Reinvite,
+                timer_generation: Some(effect.generation),
+            }
         }
     };
     let current = match state_machine.store.get_session_snapshot_exact(&handle) {
@@ -506,13 +530,87 @@ impl ResponseStateInput {
 /// completion and is validated again after acquiring the session lane.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SessionRefreshStateInput {
-    UpdateDue { timer_generation: u64 },
-    ReinviteDue { timer_generation: u64 },
+    UpdateDue {
+        timer_generation: u64,
+    },
+    ReinviteDue {
+        timer_generation: u64,
+    },
     UpdateSucceeded,
+    /// The peer rejected the refresh UPDATE; fall back to re-INVITE.
     UpdateFailed,
     ReinviteSucceeded,
-    ReinviteFailed,
-    PeerExpired { timer_generation: u64 },
+    /// RFC 4028 §10: the refresh transaction timed out (or its transport
+    /// failed) or drew 408/481, so the session is over. A deadline-driven
+    /// timeout carries the generation it was armed under.
+    TimedOut {
+        method: SessionRefreshMethod,
+        timer_generation: Option<u64>,
+    },
+    /// Any other non-2xx final response to a refresh (491, 422, 488, 403,
+    /// 500…). The session is not torn down for it.
+    Rejected {
+        method: SessionRefreshMethod,
+        status_code: u16,
+    },
+    PeerExpired {
+        timer_generation: u64,
+    },
+    /// The local refresher could not refresh before the session expired.
+    RefreshExpired {
+        timer_generation: u64,
+    },
+}
+
+/// RFC 3261 §8.1.3.1 / RFC 4028 §10 classification of one refresh
+/// transaction outcome. A 2xx refreshed the session. Timeout, transport
+/// failure (treated like a timeout: nothing reached the peer), 408 and 481
+/// end it. Every other final response leaves it running: UPDATE rejections
+/// fall back to re-INVITE (§7.4, e.g. 405/501 from a peer without UPDATE);
+/// re-INVITE rejections are handled by `HandleSessionRefreshRejection`.
+pub(crate) fn classify_session_refresh_outcome(
+    method: SessionRefreshMethod,
+    outcome: rvoip_infra_common::events::cross_crate::OutboundRequestOutcome,
+) -> SessionRefreshStateInput {
+    use rvoip_infra_common::events::cross_crate::OutboundRequestOutcome;
+
+    match outcome {
+        OutboundRequestOutcome::FinalResponse { status_code } => {
+            classify_session_refresh_status(method, status_code)
+        }
+        OutboundRequestOutcome::Timeout | OutboundRequestOutcome::TransportFailure => {
+            SessionRefreshStateInput::TimedOut {
+                method,
+                timer_generation: None,
+            }
+        }
+    }
+}
+
+/// [`classify_session_refresh_outcome`] for a known final status code.
+pub(crate) fn classify_session_refresh_status(
+    method: SessionRefreshMethod,
+    status_code: u16,
+) -> SessionRefreshStateInput {
+    match (method, status_code) {
+        (SessionRefreshMethod::Update, 200..=299) => SessionRefreshStateInput::UpdateSucceeded,
+        (SessionRefreshMethod::Reinvite, 200..=299) => SessionRefreshStateInput::ReinviteSucceeded,
+        (_, 408 | 481) => SessionRefreshStateInput::TimedOut {
+            method,
+            timer_generation: None,
+        },
+        // RFC 3261 §14.1 glare and RFC 4028 §7.4 Min-SE: retry the same
+        // method rather than switching to re-INVITE.
+        (_, 491 | 422) => SessionRefreshStateInput::Rejected {
+            method,
+            status_code,
+        },
+        (SessionRefreshMethod::Update, _) => SessionRefreshStateInput::UpdateFailed,
+        (SessionRefreshMethod::Reinvite, _) => SessionRefreshStateInput::Rejected {
+            method,
+            status_code,
+        },
+    }
 }
 
 impl SessionRefreshStateInput {
@@ -523,8 +621,11 @@ impl SessionRefreshStateInput {
             Self::UpdateSucceeded => SESSION_REFRESH_UPDATE_OK_EVENT,
             Self::UpdateFailed => SESSION_REFRESH_UPDATE_FAILED_EVENT,
             Self::ReinviteSucceeded => SESSION_REFRESH_REINVITE_OK_EVENT,
-            Self::ReinviteFailed => SESSION_REFRESH_REINVITE_FAILED_EVENT,
-            Self::PeerExpired { .. } => SESSION_REFRESH_PEER_EXPIRED_EVENT,
+            Self::TimedOut { .. } => SESSION_REFRESH_TIMED_OUT_EVENT,
+            Self::Rejected { .. } => SESSION_REFRESH_REJECTED_EVENT,
+            Self::PeerExpired { .. } | Self::RefreshExpired { .. } => {
+                SESSION_REFRESH_PEER_EXPIRED_EVENT
+            }
         };
         EventType::MediaEvent(tag.to_string())
     }
@@ -548,12 +649,30 @@ impl SessionRefreshStateInput {
             Self::UpdateSucceeded | Self::UpdateFailed => {
                 session.session_refresh_phase == SessionRefreshPhase::UpdateInFlight
             }
-            Self::ReinviteSucceeded | Self::ReinviteFailed => {
+            Self::ReinviteSucceeded => {
                 session.session_refresh_phase == SessionRefreshPhase::ReinviteInFlight
+            }
+            Self::TimedOut {
+                method,
+                timer_generation,
+            } => {
+                session.session_refresh_phase == method.in_flight_phase()
+                    && timer_generation.is_none_or(|generation| {
+                        generation == session.session_refresh_timer_generation
+                    })
+            }
+            Self::Rejected { method, .. } => {
+                session.session_refresh_phase == method.in_flight_phase()
             }
             Self::PeerExpired { timer_generation } => {
                 *timer_generation == session.session_refresh_timer_generation
                     && !session.session_refresh_local_refresher
+                    && session.session_refresh_interval_secs.is_some()
+                    && session.session_refresh_phase == SessionRefreshPhase::Idle
+            }
+            Self::RefreshExpired { timer_generation } => {
+                *timer_generation == session.session_refresh_timer_generation
+                    && session.session_refresh_local_refresher
                     && session.session_refresh_interval_secs.is_some()
                     && session.session_refresh_phase == SessionRefreshPhase::Idle
             }
@@ -569,13 +688,27 @@ impl SessionRefreshStateInput {
         use crate::session_store::state::SessionRefreshPhase;
 
         match self {
-            Self::UpdateSucceeded | Self::UpdateFailed => {
+            Self::UpdateSucceeded
+            | Self::UpdateFailed
+            | Self::ReinviteSucceeded
+            | Self::TimedOut { .. } => {
                 session.session_refresh_phase = SessionRefreshPhase::Idle;
             }
-            Self::ReinviteSucceeded | Self::ReinviteFailed => {
+            Self::Rejected {
+                method,
+                status_code,
+            } => {
                 session.session_refresh_phase = SessionRefreshPhase::Idle;
+                session.session_refresh_rejection =
+                    Some(crate::session_store::state::SessionRefreshRejection {
+                        method,
+                        status_code,
+                    });
             }
-            Self::UpdateDue { .. } | Self::ReinviteDue { .. } | Self::PeerExpired { .. } => {}
+            Self::UpdateDue { .. }
+            | Self::ReinviteDue { .. }
+            | Self::PeerExpired { .. }
+            | Self::RefreshExpired { .. } => {}
         }
     }
 }
@@ -2917,8 +3050,9 @@ impl StateMachine {
                                     }
                                 }
                             }
-                            SessionRefreshStateInput::ReinviteFailed
-                            | SessionRefreshStateInput::PeerExpired { .. } => {
+                            SessionRefreshStateInput::TimedOut { .. }
+                            | SessionRefreshStateInput::PeerExpired { .. }
+                            | SessionRefreshStateInput::RefreshExpired { .. } => {
                                 publisher.publish_exact(
                                     handle,
                                     crate::api::events::Event::SessionRefreshFailed {
@@ -2930,7 +3064,8 @@ impl StateMachine {
                             }
                             SessionRefreshStateInput::UpdateDue { .. }
                             | SessionRefreshStateInput::ReinviteDue { .. }
-                            | SessionRefreshStateInput::UpdateFailed => {}
+                            | SessionRefreshStateInput::UpdateFailed
+                            | SessionRefreshStateInput::Rejected { .. } => {}
                         }
                     }
                 }

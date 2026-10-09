@@ -581,3 +581,72 @@ fn test_config_carrier_sbc_profile() {
     assert!(c.offer_srtp);
     assert!(c.srtp_required);
 }
+
+// ── RFC 4028 session-timer floor ────────────────────────────────────────────
+
+#[test]
+fn session_timer_values_below_the_rfc4028_floor_are_rejected() {
+    // RFC 4028 §5: Min-SE MUST NOT be less than 90 seconds.
+    let mut config = Config::local("alice", 5060);
+    config.session_timer_secs = Some(1800);
+    config
+        .validate()
+        .expect("1800 s with the default 90 s Min-SE is valid");
+
+    config.session_timer_min_se = 89;
+    assert!(matches!(
+        config.validate(),
+        Err(SessionError::ConfigError(_))
+    ));
+    config.session_timer_min_se = 90;
+
+    config.session_timer_secs = Some(89);
+    assert!(matches!(
+        config.validate(),
+        Err(SessionError::ConfigError(_))
+    ));
+    config.session_timer_secs = Some(90);
+    config.validate().expect("90 s is the floor itself");
+
+    // The proposed interval may not undercut our own Min-SE.
+    config.session_timer_min_se = 600;
+    config.session_timer_secs = Some(300);
+    assert!(matches!(
+        config.validate(),
+        Err(SessionError::ConfigError(_))
+    ));
+
+    // Disabled timers carry no interval to check, but Min-SE still governs
+    // what an incoming request may ask for.
+    config.session_timer_secs = None;
+    config.session_timer_min_se = 30;
+    assert!(matches!(
+        config.validate(),
+        Err(SessionError::ConfigError(_))
+    ));
+}
+
+#[test]
+fn short_session_timers_need_the_test_escape_hatch() {
+    let mut config = Config::local("alice", 5060);
+    config.session_timer_secs = Some(4);
+    config.session_timer_min_se = 2;
+    assert!(matches!(
+        config.validate(),
+        Err(SessionError::ConfigError(_))
+    ));
+    config.session_timer_allow_short_intervals_for_testing = true;
+    config.validate().expect("test-only short intervals");
+    // Even then the interval may not undercut Min-SE, and 0 is not an interval.
+    config.session_timer_secs = Some(1);
+    assert!(matches!(
+        config.validate(),
+        Err(SessionError::ConfigError(_))
+    ));
+    config.session_timer_secs = Some(0);
+    config.session_timer_min_se = 0;
+    assert!(matches!(
+        config.validate(),
+        Err(SessionError::ConfigError(_))
+    ));
+}

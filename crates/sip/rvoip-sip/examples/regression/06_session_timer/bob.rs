@@ -24,6 +24,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = Config::local("bob", bob_port);
     config.session_timer_secs = Some(10);
     config.session_timer_min_se = 5;
+    // Seconds-scale intervals keep the test fast; RFC 4028 §5 forbids them in
+    // production, so `Config::validate` needs the test escape hatch.
+    config.session_timer_allow_short_intervals_for_testing = true;
 
     let mut bob = StreamPeer::with_config(config).await?;
     println!("[BOB] Listening on {} (session timer = 10s)", bob_port);

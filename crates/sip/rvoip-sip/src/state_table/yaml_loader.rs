@@ -821,8 +821,11 @@ impl YamlTableLoader {
             "InternalSessionRefreshReinviteSucceeded" => Ok(EventType::MediaEvent(
                 crate::state_machine::executor::SESSION_REFRESH_REINVITE_OK_EVENT.to_string(),
             )),
-            "InternalSessionRefreshReinviteFailed" => Ok(EventType::MediaEvent(
-                crate::state_machine::executor::SESSION_REFRESH_REINVITE_FAILED_EVENT.to_string(),
+            "InternalSessionRefreshTimedOut" => Ok(EventType::MediaEvent(
+                crate::state_machine::executor::SESSION_REFRESH_TIMED_OUT_EVENT.to_string(),
+            )),
+            "InternalSessionRefreshRejected" => Ok(EventType::MediaEvent(
+                crate::state_machine::executor::SESSION_REFRESH_REJECTED_EVENT.to_string(),
             )),
             "InternalSessionRefreshPeerExpired" => Ok(EventType::MediaEvent(
                 crate::state_machine::executor::SESSION_REFRESH_PEER_EXPIRED_EVENT.to_string(),
@@ -1090,6 +1093,9 @@ impl YamlTableLoader {
             }
             "PrepareSessionRefreshExpiry" => {
                 Ok(Action::Custom("PrepareSessionRefreshExpiry".to_string()))
+            }
+            "HandleSessionRefreshRejection" => {
+                Ok(Action::Custom("HandleSessionRefreshRejection".to_string()))
             }
 
             // SIP_API_DESIGN_2 §7.1 — unified outbound dispatch through

@@ -4,14 +4,15 @@
 //! Alice calls Bob with a 4-second `Session-Expires`. Bob accepts the
 //! call and then exits its process at t≈1.5 s — before Alice's first
 //! refresh at t≈2 s. Alice's UPDATE then lands on a closed UDP port;
-//! rvoip-sip's exact-lifecycle timer observes the transaction timeout,
-//! drives the YAML-owned re-INVITE fallback, and tears the dialog down with a
-//! `Reason: SIP ;cause=408` BYE when that fallback also times out. The session
-//! layer surfaces `Event::SessionRefreshFailed`.
+//! rvoip-sip's exact-lifecycle timer observes the transaction timeout and,
+//! as RFC 4028 §10 requires for a timed-out refresh, tears the dialog down
+//! with a `Reason: SIP ;cause=408` BYE. (A rejected UPDATE would fall back to
+//! re-INVITE; a timed-out one does not.) The session layer surfaces
+//! `Event::SessionRefreshFailed`.
 //!
 //! Alice's binary asserts it sees `SessionRefreshFailed` within 15 s.
 //! `RVOIP_TEST_TRANSACTION_TIMEOUT_MS=2500` shortens Timer F (default
-//! 32 s) so each UPDATE/re-INVITE fails within ~2.5 s — on macOS UDP
+//! 32 s) so the UPDATE fails within ~2.5 s — on macOS UDP
 //! send-to-dead-port is silent, so we can't rely on ICMP port
 //! unreachable and need the transaction-layer timeout to do the work.
 
