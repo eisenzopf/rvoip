@@ -13,6 +13,10 @@
 //! The refresher-side failure path (UPDATE and re-INVITE both time out) is
 //! covered by `session_timer_failure_integration.rs`.
 
+// Second-scale intervals are below the RFC 4028 §5 floor and need the
+// test-only escape hatch, which exists only with the `test-hooks` feature.
+#![cfg(feature = "test-hooks")]
+
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -183,6 +187,7 @@ async fn start_call(refresher: Refresher, media_ports: (u16, u16)) -> Harness {
     // Loopback test: no public address, and a short interval.
     config.sip_advertised_addr = None;
     config.media_public_addr = None;
+    config.session_timer_allow_short_intervals_for_testing = true;
     config.session_timer_secs = Some(SESSION_SECS);
     config.session_timer_min_se = 2;
     config.media_port_start = media_ports.0;
