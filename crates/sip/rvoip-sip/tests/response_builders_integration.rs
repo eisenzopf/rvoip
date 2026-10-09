@@ -391,6 +391,80 @@ async fn active_media_watchdog_uses_confirmed_exact_bye_before_release() {
     let _ = tokio::time::timeout(Duration::from_secs(2), bob_task).await;
 }
 
+/// A UAS whose caller never sends RTP but does send RTCP over negotiated
+/// rtcp-mux. Returns whether the UAS's no-media watchdog ended the call.
+async fn no_rtp_call_with_rtcp_ended_by_watchdog(
+    alice_port: u16,
+    bob_port: u16,
+    rtcp_counts_as_media: bool,
+) -> bool {
+    let _ = tracing_subscriber::fmt::try_init();
+    let name = if rtcp_counts_as_media { "on" } else { "off" };
+    let bob_cfg = cfg(&format!("bob-rtcp-liveness-{name}"), bob_port)
+        .with_active_call_no_media_timeout_secs(5)
+        .with_active_call_media_idle_timeout_secs(0)
+        .with_active_call_rtcp_counts_as_media(rtcp_counts_as_media);
+    let bob = CallbackPeer::new(AcceptAll, bob_cfg).await.expect("bob");
+    let bob_shutdown = bob.shutdown_handle();
+    let bob_task = tokio::spawn(async move {
+        let _ = bob.run().await;
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // The caller offers a=rtcp-mux, so its periodic RTCP reaches bob's RTP
+    // port; it sends no RTP at all.
+    let mut alice_cfg = cfg(&format!("alice-rtcp-liveness-{name}"), alice_port);
+    alice_cfg.rtcp_mux_required = true;
+    let alice = UnifiedCoordinator::new(alice_cfg).await.expect("alice");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let call_id = alice
+        .invite(
+            Some(format!("sip:alice@127.0.0.1:{alice_port}")),
+            format!("sip:bob@127.0.0.1:{bob_port}"),
+        )
+        .send()
+        .await
+        .expect("invite");
+    let call = alice.session(&call_id);
+    call.wait_for_answered(Some(Duration::from_secs(8)))
+        .await
+        .expect("call should be active");
+
+    // The watchdog checks five seconds after answer; RTCP's first report
+    // lands within about three.
+    let ended = call
+        .wait_for_end(Some(Duration::from_secs(8)))
+        .await
+        .is_ok();
+    if !ended {
+        let _ = call.hangup_and_wait(Some(Duration::from_secs(2))).await;
+    }
+    let _ = wait_for_no_sessions(&alice, Duration::from_secs(3)).await;
+    bob_shutdown.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(2), bob_task).await;
+    let _ = alice
+        .shutdown_gracefully(Some(Duration::from_secs(2)))
+        .await;
+    ended
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rtcp_keeps_a_silent_call_alive_only_when_it_counts_as_media() {
+    let (counted, ignored) = tokio::join!(
+        no_rtp_call_with_rtcp_ended_by_watchdog(17952, 17953, true),
+        no_rtp_call_with_rtcp_ended_by_watchdog(17954, 17955, false),
+    );
+    assert!(
+        !counted,
+        "the watchdog released a call whose peer kept sending RTCP"
+    );
+    assert!(
+        ignored,
+        "with RTCP not counted, a call without RTP must still be released"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn server_call_admission_limit_rejects_with_503_retry_after_on_wire() {
     let _ = tracing_subscriber::fmt::try_init();

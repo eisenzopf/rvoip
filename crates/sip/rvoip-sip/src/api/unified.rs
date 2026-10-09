@@ -1990,6 +1990,21 @@ pub struct Config {
     /// server resources indefinitely. `0` disables the watchdog.
     pub active_call_media_idle_timeout_secs: u64,
 
+    /// Count RTCP from the call's peer as media activity for the two
+    /// active-call media watchdogs above.
+    ///
+    /// Both watchdogs normally watch the RTP packet count only, so a call on
+    /// hold, or a peer that suppresses silence, is torn down even while its
+    /// RTCP reports show the far end is alive. Set this to `true` to treat
+    /// each accepted RTCP report as activity too. Only RTCP from the call's
+    /// own peer counts: reports from any other source are dropped before
+    /// they reach the session. RTCP flows only when `a=rtcp-mux` was
+    /// negotiated (see [`Config::rtcp_mux_required`]).
+    ///
+    /// Default: `false` — RTP only. Has no effect while both watchdog
+    /// timeouts are `0`.
+    pub active_call_rtcp_counts_as_media: bool,
+
     /// RFC 4028 `Session-Expires` value in seconds to advertise on outgoing
     /// INVITEs. `None` disables session timers entirely. Common carrier
     /// value is 1800 (30 min).
@@ -2238,6 +2253,25 @@ pub struct Config {
     /// See [`Config::srtp_required`] for the strict-mode variant.
     pub offer_srtp: bool,
 
+    /// Offer RTP/RTCP multiplexing (`a=rtcp-mux`, RFC 5761) in every SDP offer.
+    ///
+    /// The media stack runs RTP and RTCP on one socket, so periodic RTCP
+    /// reports flow only when the offer and the answer both carry
+    /// `a=rtcp-mux`. With this on, every offer rvoip generates (initial
+    /// INVITE, re-INVITE/UPDATE, hold/resume, late-SDP offers in 200 OK)
+    /// carries it. A peer that answers without it simply gets no periodic
+    /// RTCP: nothing is sent to the RTP port or to RTP port + 1
+    /// (RFC 5761 §5.1.1). Answers are unaffected: they echo `a=rtcp-mux`
+    /// only when the peer's offer had it.
+    ///
+    /// Set to `false` for an interop-sensitive peer that mishandles the
+    /// attribute; offers then omit it, as releases before 0.4.0 did, and
+    /// those calls carry no periodic RTCP. Ignored when
+    /// [`Config::rtcp_mux_required`] is `true`, which always offers mux.
+    ///
+    /// Default: `true`.
+    pub offer_rtcp_mux: bool,
+
     /// Require SDP negotiation of RTP/RTCP multiplexing for the single media socket.
     /// Peers declining it fail negotiation instead of silently losing RTCP.
     ///
@@ -2264,6 +2298,32 @@ pub struct Config {
     /// report `has_quality_measurement() == true` and the orchestrator emits
     /// `Event::MediaQuality` for SIP connections.
     pub media_quality_interval: Option<Duration>,
+
+    /// Send RFC 3611 VoIP-metrics extended reports (RTCP XR) to peers that
+    /// ask for them.
+    ///
+    /// When `true`, a call whose remote SDP carries `a=rtcp-xr` naming
+    /// `voip-metrics` (RFC 3611 §5.1) appends a VoIP-metrics block — loss,
+    /// discard rate, round-trip delay, R-factor and MOS for the stream it
+    /// receives — to each periodic RTCP report. Calls whose peer did not ask
+    /// get none. rvoip does not itself advertise `a=rtcp-xr`.
+    ///
+    /// Enable it for carriers or monitoring systems that collect per-call
+    /// quality from RTCP XR. Default: `false` — no XR is ever sent.
+    pub rtcp_xr_voip_metrics: bool,
+
+    /// Let the RTCP report interval use the RFC 3550 §6.2 reduced minimum.
+    ///
+    /// RTCP reports go out on average every 5 / (e − 3/2) ≈ 4.1 seconds,
+    /// randomised between about 2 and 6 seconds, as RFC 3550 recommends. When
+    /// `true`, the five-second minimum becomes 360 divided by the session
+    /// bandwidth in kbit/s whenever that is smaller: about 4.5 s for G.711
+    /// (80 kbit/s with headers), less for wideband sessions. Narrowband
+    /// codecs below 72 kbit/s keep five seconds.
+    ///
+    /// Enable it when you need RTT and loss feedback sooner, at the cost of
+    /// more RTCP traffic. Default: `false` — the fixed five-second minimum.
+    pub rtcp_reduced_minimum_interval: bool,
 
     /// Select how SRTP keys are established when [`Config::offer_srtp`] is
     /// enabled. SDES remains the compatibility default. DTLS-SRTP requires
@@ -2879,6 +2939,8 @@ impl std::fmt::Debug for Config {
                 &self.tls_server_client_auth.mode,
             )
             .field("offer_srtp", &self.offer_srtp)
+            .field("offer_rtcp_mux", &self.offer_rtcp_mux)
+            .field("rtcp_mux_required", &self.rtcp_mux_required)
             .field("srtp_keying", &self.srtp_keying)
             .field("dtls_setup_role", &self.dtls_setup_role)
             .field("ice", &self.ice)
@@ -3017,6 +3079,7 @@ impl Config {
             setup_teardown_timeout_secs: Self::DEFAULT_SETUP_TEARDOWN_TIMEOUT_SECS,
             active_call_no_media_timeout_secs: 0,
             active_call_media_idle_timeout_secs: 0,
+            active_call_rtcp_counts_as_media: false,
             session_timer_secs: None,
             session_timer_min_se: 90,
             credentials: None,
@@ -3047,8 +3110,12 @@ impl Config {
             #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
             offer_srtp: false,
+            offer_rtcp_mux: true,
             rtcp_mux_required: false,
             media_quality_interval: None,
+
+            rtcp_xr_voip_metrics: false,
+            rtcp_reduced_minimum_interval: false,
             srtp_keying: SrtpKeyingMode::Sdes,
             dtls_setup_role: DtlsSetupRole::Actpass,
             srtp_required: false,
@@ -3141,6 +3208,7 @@ impl Config {
             setup_teardown_timeout_secs: Self::DEFAULT_SETUP_TEARDOWN_TIMEOUT_SECS,
             active_call_no_media_timeout_secs: 0,
             active_call_media_idle_timeout_secs: 0,
+            active_call_rtcp_counts_as_media: false,
             session_timer_secs: None,
             session_timer_min_se: 90,
             credentials: None,
@@ -3171,8 +3239,12 @@ impl Config {
             #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
             offer_srtp: false,
+            offer_rtcp_mux: true,
             rtcp_mux_required: false,
             media_quality_interval: None,
+
+            rtcp_xr_voip_metrics: false,
+            rtcp_reduced_minimum_interval: false,
             srtp_keying: SrtpKeyingMode::Sdes,
             dtls_setup_role: DtlsSetupRole::Actpass,
             srtp_required: false,
@@ -3822,6 +3894,27 @@ impl Config {
     /// if the packet count stops advancing for the configured interval.
     pub fn with_active_call_media_idle_timeout_secs(mut self, seconds: u64) -> Self {
         self.active_call_media_idle_timeout_secs = seconds;
+        self
+    }
+
+    /// Count RTCP from the call's peer as media activity for the active-call
+    /// media watchdogs. See [`Config::active_call_rtcp_counts_as_media`].
+    pub fn with_active_call_rtcp_counts_as_media(mut self, enabled: bool) -> Self {
+        self.active_call_rtcp_counts_as_media = enabled;
+        self
+    }
+
+    /// Send RFC 3611 VoIP-metrics RTCP XR to peers whose SDP asks for it.
+    /// See [`Config::rtcp_xr_voip_metrics`].
+    pub fn with_rtcp_xr_voip_metrics(mut self, enabled: bool) -> Self {
+        self.rtcp_xr_voip_metrics = enabled;
+        self
+    }
+
+    /// Use the RFC 3550 §6.2 reduced minimum RTCP interval. See
+    /// [`Config::rtcp_reduced_minimum_interval`].
+    pub fn with_rtcp_reduced_minimum_interval(mut self, enabled: bool) -> Self {
+        self.rtcp_reduced_minimum_interval = enabled;
         self
     }
 
@@ -7036,12 +7129,34 @@ mod config_tests {
         assert_eq!(config.active_call_no_media_timeout_secs, 0);
         assert_eq!(config.active_call_media_idle_timeout_secs, 0);
 
+        assert!(!config.active_call_rtcp_counts_as_media);
+
         let config = config
             .with_active_call_no_media_timeout_secs(60)
-            .with_active_call_media_idle_timeout_secs(90);
+            .with_active_call_media_idle_timeout_secs(90)
+            .with_active_call_rtcp_counts_as_media(true);
         assert_eq!(config.active_call_no_media_timeout_secs, 60);
         assert_eq!(config.active_call_media_idle_timeout_secs, 90);
+        assert!(config.active_call_rtcp_counts_as_media);
         config.validate().expect("valid media watchdog timeouts");
+    }
+
+    #[test]
+    fn rtcp_reporting_options_are_off_by_default_and_configurable() {
+        for config in [
+            Config::local("alice", 5060),
+            Config::on("alice", "127.0.0.1".parse().unwrap(), 5060),
+        ] {
+            assert!(!config.rtcp_xr_voip_metrics);
+            assert!(!config.rtcp_reduced_minimum_interval);
+            assert!(!config.active_call_rtcp_counts_as_media);
+        }
+        let config = Config::local("alice", 5060)
+            .with_rtcp_xr_voip_metrics(true)
+            .with_rtcp_reduced_minimum_interval(true);
+        assert!(config.rtcp_xr_voip_metrics);
+        assert!(config.rtcp_reduced_minimum_interval);
+        config.validate().expect("valid RTCP reporting options");
     }
 
     #[test]
@@ -9022,7 +9137,12 @@ impl UnifiedCoordinator {
             config.media_port_end,
         );
         media_adapter_inner.set_media_mode(config.media_mode);
+        media_adapter_inner.set_offer_rtcp_mux(config.offer_rtcp_mux);
         media_adapter_inner.set_rtcp_mux_required(config.rtcp_mux_required);
+        media_adapter_inner.set_rtcp_reporting_policy(
+            config.rtcp_xr_voip_metrics,
+            config.rtcp_reduced_minimum_interval,
+        );
         media_adapter_inner.set_ice_policy(config.ice);
         // Apply RFC 4568 SDES-SRTP policy from Config (Step 2B.1).
         media_adapter_inner.set_srtp_policy(
@@ -10207,6 +10327,7 @@ impl UnifiedCoordinator {
         let no_media_timeout = Duration::from_secs(self.config.active_call_no_media_timeout_secs);
         let media_idle_timeout =
             Duration::from_secs(self.config.active_call_media_idle_timeout_secs);
+        let rtcp_counts_as_media = self.config.active_call_rtcp_counts_as_media;
         if no_media_timeout.is_zero() && media_idle_timeout.is_zero() {
             return;
         }
@@ -10240,8 +10361,9 @@ impl UnifiedCoordinator {
         let watchdog_scheduler = Arc::clone(&self.setup_teardown_scheduler);
         let task_scheduler = Arc::clone(&watchdog_scheduler);
         let _ = watchdog_scheduler.spawn_lifecycle_task(async move {
-            let Some(initial_packets_received) =
-                media_adapter.rtp_packets_received(&session_id).await
+            let Some(initial_packets_received) = media_adapter
+                .media_activity_count(&session_id, rtcp_counts_as_media)
+                .await
             else {
                 return;
             };
@@ -10276,7 +10398,9 @@ impl UnifiedCoordinator {
                     return;
                 }
 
-                let Some(packets_received) = media_adapter.rtp_packets_received(&session_id).await
+                let Some(packets_received) = media_adapter
+                    .media_activity_count(&session_id, rtcp_counts_as_media)
+                    .await
                 else {
                     return;
                 };

@@ -10,7 +10,10 @@ pub mod rtt;
 
 pub use jitter::JitterEstimator;
 pub use loss::{PacketLossResult, PacketLossStats, PacketLossTracker};
-pub use reports::{RtcpReportGenerator, RTCP_BANDWIDTH_FRACTION, RTCP_MIN_INTERVAL};
+pub use reports::{
+    session_bandwidth_for_payload_type, RtcpIntervalParams, RtcpReportGenerator,
+    DEFAULT_SESSION_BANDWIDTH_BPS, RTCP_BANDWIDTH_FRACTION, RTCP_MIN_INTERVAL,
+};
 pub use rtt::{RttEstimator, RttStats};
 
 use std::sync::{Arc, Mutex};
