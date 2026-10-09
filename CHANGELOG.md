@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### SIP media options documentation
+
+- `rvoip_sip::Config::playout` now documents the inbound jitter buffer in
+  full: what it does, the `PlayoutConfig` knobs with defaults and units, its
+  latency cost (~40 ms at the default depth), when to enable it (routes over
+  the public internet, carrier trunks) and when to leave it off (LAN, lab),
+  with compiled examples. `PlayoutConfig` and its fields in
+  `rvoip-media-core` are documented to match. No defaults changed.
+- `Config::rtcp_mux_required` is now the reference for RTCP behavior:
+  periodic SR/RR is sent only when `a=rtcp-mux` is negotiated, and peers that
+  decline mux get no RTCP quality statistics and may trip RTCP-based
+  dead-media detection on SBCs.
+- The rvoip-sip README gains a "Media options" section with a decision table
+  naming the profile and settings to start from for each deployment shape.
+
 ## 0.3.12
 
 ### 0.3.12 release recovery
