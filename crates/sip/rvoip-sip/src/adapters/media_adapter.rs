@@ -1738,6 +1738,40 @@ impl MediaAdapter {
             .flatten()
     }
 
+    /// Current media quality for a SIP session, when it owns a live
+    /// media-core RTP session. Converted through the same cross-crate
+    /// representation the periodic `MediaQualityChanged` event uses, so the
+    /// getter and the event agree on units and rounding.
+    pub(crate) async fn media_quality(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<crate::api::events::MediaQualityStats> {
+        self.media_quality_of(self.current_media(session_id)?).await
+    }
+
+    /// [`Self::media_quality`] for one exact session lifetime, so a stale
+    /// handle never reads a later call that reused its Call-ID.
+    pub(crate) async fn media_quality_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Option<crate::api::events::MediaQualityStats> {
+        self.media_quality_of(self.media_for_handle_exact(handle)?)
+            .await
+    }
+
+    async fn media_quality_of(
+        &self,
+        exact: ExactMediaSession,
+    ) -> Option<crate::api::events::MediaQualityStats> {
+        let quality = self.controller.get_media_quality(&exact.dialog_id).await;
+        if !self.media_is_still_exact(&exact) {
+            return None;
+        }
+        quality.map(|quality| {
+            crate::api::events::MediaQualityStats::from(&quality.to_session_metrics())
+        })
+    }
+
     /// Sprint 3.5 C2 swap — enable strict RFC 3264 §6 SDP-answer
     /// matching. Wired from `Config::strict_codec_matching` at
     /// coordinator boot.

@@ -630,9 +630,10 @@ pub use api::dialog_package::{
 };
 pub use api::dialog_subscription::DialogSubscriptionHandle;
 pub use api::events::{
-    CallAuthRetryDetails, DiagnosticEvent, Event, MediaSecurityKeying, MediaSecurityProfile,
-    MediaSecurityState, RenegotiationFailure, SdesNegotiationFailure, SipTrace, SipTraceConfig,
-    SipTraceDirection, SubscriptionState, TransferKind, TransferTargetEvidence,
+    CallAuthRetryDetails, DiagnosticEvent, Event, MediaQualityStats, MediaSecurityKeying,
+    MediaSecurityProfile, MediaSecurityState, RenegotiationFailure, SdesNegotiationFailure,
+    SipTrace, SipTraceConfig, SipTraceDirection, SubscriptionState, TransferKind,
+    TransferTargetEvidence,
 };
 
 // Errors

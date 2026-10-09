@@ -1435,12 +1435,16 @@ fn media_observation_api_event(event: &MediaToSessionEvent) -> Option<crate::api
             session_id,
             metrics: quality_metrics,
             ..
-        } => Some(crate::api::events::Event::MediaQualityChanged {
-            call_id: SessionId(session_id.clone()),
-            packet_loss_percent: (quality_metrics.packet_loss * 100.0) as u32,
-            jitter_ms: quality_metrics.jitter_ms as u32,
-            mos: Some(quality_metrics.mos_score as f32),
-        }),
+        } => {
+            let quality = crate::api::events::MediaQualityStats::from(quality_metrics);
+            Some(crate::api::events::Event::MediaQualityChanged {
+                call_id: SessionId(session_id.clone()),
+                packet_loss_percent: quality.packet_loss_percent as u32,
+                jitter_ms: quality.jitter_ms as u32,
+                mos: quality.mos,
+                quality,
+            })
+        }
         _ => None,
     }
 }
@@ -7037,6 +7041,13 @@ mod tests {
             packet_loss: 0.125,
             jitter_ms: 17.9,
             delay_ms: 42,
+            packets_sent: 300,
+            packets_received: 280,
+            packets_lost: 40,
+            rtt_ms: Some(84.0),
+            remote_packet_loss: Some(0.25),
+            remote_packets_lost: Some(-2),
+            remote_jitter_ms: Some(6.5),
         }
     }
 
@@ -7060,6 +7071,7 @@ mod tests {
                     packet_loss_percent,
                     jitter_ms,
                     mos,
+                    quality,
                 }) => {
                     assert_eq!(call_id, SessionId("media-reporting".to_string()));
                     assert_eq!(packet_loss_percent, 12);
@@ -7067,6 +7079,14 @@ mod tests {
                     // media-core's estimate now survives the projection
                     // instead of being dropped at this boundary.
                     assert_eq!(mos, Some(3.8));
+                    assert_eq!(quality.packets_sent, 300);
+                    assert_eq!(quality.packets_received, 280);
+                    assert_eq!(quality.packets_lost, 40);
+                    assert_eq!(quality.rtt_ms, Some(84.0));
+                    assert_eq!(quality.remote_packet_loss_percent, Some(25.0));
+                    assert_eq!(quality.remote_packets_lost, Some(-2));
+                    assert_eq!(quality.remote_jitter_ms, Some(6.5));
+                    assert!(quality.has_peer_report());
                 }
                 other => panic!("unexpected media quality projection: {other:?}"),
             }

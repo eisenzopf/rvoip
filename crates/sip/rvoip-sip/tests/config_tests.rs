@@ -581,3 +581,22 @@ fn test_config_carrier_sbc_profile() {
     assert!(c.offer_srtp);
     assert!(c.srtp_required);
 }
+
+// ── Media quality sampling ─────────────────────────────────────────────────
+
+#[test]
+fn media_quality_interval_is_off_by_default_and_rejects_zero() {
+    use std::time::Duration;
+
+    let default = Config::local("alice", 5060);
+    assert_eq!(default.media_quality_interval, None);
+    assert!(default.validate().is_ok());
+
+    let every = Duration::from_secs(5);
+    let enabled = Config::local("alice", 5060).with_media_quality_interval(every);
+    assert_eq!(enabled.media_quality_interval, Some(every));
+    assert!(enabled.validate().is_ok());
+
+    let zero = Config::local("alice", 5060).with_media_quality_interval(Duration::ZERO);
+    assert!(matches!(zero.validate(), Err(SessionError::ConfigError(_))));
+}

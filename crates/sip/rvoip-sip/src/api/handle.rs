@@ -1405,6 +1405,29 @@ impl SessionHandle {
         Ok(self.lifecycle().await?.media_security)
     }
 
+    /// Current media quality for this call: local receive statistics plus,
+    /// once the peer's RTCP arrives, what the peer reports about our stream.
+    /// `None` when the call has no active media session.
+    ///
+    /// Same values as
+    /// [`UnifiedCoordinator::media_quality`](crate::UnifiedCoordinator::media_quality),
+    /// bound to this exact call so a reused Call-ID is never read.
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_sip::SessionHandle) {
+    /// if let Some(quality) = call.media_quality().await {
+    ///     println!("rx {} pkts, peer-reported loss {:?}%",
+    ///         quality.packets_received, quality.remote_packet_loss_percent);
+    /// }
+    /// # }
+    /// ```
+    pub async fn media_quality(&self) -> Option<crate::api::events::MediaQualityStats> {
+        match &self.lifecycle_handle {
+            Some(handle) => self.coordinator.media_quality_exact(handle).await,
+            None => self.coordinator.media_quality(&self.call_id).await,
+        }
+    }
+
     /// Get the current event-bus-backed lifecycle snapshot for this call.
     ///
     /// This is a typed inspection view used by the wait helpers. It combines
