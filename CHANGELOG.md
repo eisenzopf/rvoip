@@ -58,6 +58,46 @@
   `Contact`) as the Request-URI, as RFC 3261 §12.2.1.1 requires. They used
   the peer's From/To URI, so a refresh sent by rvoip as the called party
   could go to the wrong host.
+- A rejected session refresh no longer ends the call (RFC 4028 §10). Only a
+  refresh that times out, whose transport fails, or that draws 408 or 481
+  ends the session with a `Reason: SIP;cause=408` BYE; such an UPDATE no
+  longer tries a re-INVITE first. Any other non-2xx used to tear the call
+  down too. Now 491 Request Pending is retried with the same method after the
+  RFC 3261 §14.1 backoff (2.1–4 s for the side that placed the call, 0–2 s
+  for the other). 422 is retried at once with the response's `Min-SE` as both
+  the floor and the minimum interval (§7.4). A rejected UPDATE still falls
+  back to re-INVITE. Any other rejection of the re-INVITE (488, 403, 5xx, …)
+  keeps the call and logs a warning: the session was not refreshed this time
+  and expires at the end of the current interval, unless the peer refreshes
+  it or another re-INVITE or UPDATE succeeds first.
+- In-dialog REFER, MESSAGE, INFO, NOTIFY, OPTIONS and every other in-dialog
+  request now use the remote target (the peer's `Contact`) as the
+  Request-URI, as RFC 3261 §12.2.1.1 requires; the To header keeps the
+  peer's address. Blind and attended transfers used to send the REFER to the
+  host in the peer's From/To URI. PRACK now targets the early dialog's
+  remote target, which is taken from the reliable 18x `Contact`.
+- The 2xx to a session refresh now renegotiates the timer (RFC 4028 §7.2,
+  §7.4). Its `Session-Expires` interval and refresher replace the old ones,
+  so a peer can lengthen the interval or take over refreshing. A 2xx without
+  `Session-Expires` to a refresh that proposed one turns the timer off. Both
+  used to be ignored.
+- An incoming refresh is answered with its own interval and refresher
+  (§9), within the local Min-SE, and the new values take effect. The 2xx used
+  to echo the dialog's previous values. A timer-capable peer whose refresh
+  asks for less than the local Min-SE now gets 422 with `Min-SE`, as on the
+  initial INVITE.
+- Refreshes use UPDATE only when the peer has not ruled it out: a peer whose
+  `Allow` header (from its INVITE, re-INVITE, UPDATE or 2xx) omits UPDATE is
+  refreshed with re-INVITE from the start. A held call can now be refreshed
+  with re-INVITE; that refresh used to be dropped and the call expired.
+- RFC 4028 §5 floor: `Config::validate` (and so peer construction) rejects
+  `session_timer_min_se` below 90 seconds, `session_timer_secs` below 90
+  seconds, and a `session_timer_secs` below `session_timer_min_se`. A caller
+  without timer support whose request carries a proxy-inserted
+  `Session-Expires` below the local Min-SE is answered with the Min-SE
+  instead of the smaller value; a timer-capable caller still gets 422.
+  Tests that need second-scale intervals set the hidden
+  `Config::session_timer_allow_short_intervals_for_testing`.
 
 ## 0.3.12
 
