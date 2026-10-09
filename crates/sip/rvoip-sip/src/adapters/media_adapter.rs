@@ -149,6 +149,25 @@ fn direction_attribute(direction: crate::types::MediaDirection) -> &'static str 
     }
 }
 
+fn audio_rtcp_mux(session: &SdpSession) -> bool {
+    session
+        .media_descriptions
+        .iter()
+        .find(|m| m.media == "audio")
+        .is_some_and(|m| {
+            m.generic_attributes
+                .iter()
+                .any(|a| matches!(a, ParsedAttribute::RtcpMux))
+        })
+}
+
+fn validate_rtcp_mux(session: &SdpSession, required: bool) -> SrtpDetailedResult<()> {
+    if required && !audio_rtcp_mux(session) {
+        return Err(bounded_sdp_failure("rtcp-mux", "required").into());
+    }
+    Ok(())
+}
+
 fn audio_direction(session: &SdpSession) -> Option<rvoip_sip_core::MediaDirection> {
     session
         .media_descriptions
@@ -1000,6 +1019,9 @@ struct StagedMediaNegotiation {
     config: NegotiatedConfig,
     stable_local_direction: crate::types::MediaDirection,
     srtp_negotiated: bool,
+    /// `a=rtcp-mux` was both offered and answered (RFC 5761 §5.1.1). Only
+    /// then may periodic RTCP share the single RTP socket and port.
+    rtcp_mux: bool,
     #[cfg(feature = "dtls-srtp")]
     dtls: Option<StagedDtlsHandshake>,
 }
@@ -1338,6 +1360,7 @@ pub struct MediaAdapter {
     /// answer with `RTP/SAVP` when peer offers SRTP. When `false`,
     /// the adapter behaves like the pre-2B baseline (plain RTP/AVP).
     offer_srtp: bool,
+    rtcp_mux_required: bool,
     /// ICE posture, from [`Config::ice`](crate::api::unified::Config::ice).
     ice_policy: crate::adapters::ice_adapter::SipIcePolicy,
     /// One ICE runtime (agent + pump task) per media session.
@@ -1537,6 +1560,7 @@ impl MediaAdapter {
             media_port_end: port_end,
             media_mode: MediaMode::Enabled,
             offer_srtp: false,
+            rtcp_mux_required: false,
             ice_policy: crate::adapters::ice_adapter::SipIcePolicy::Disabled,
             ice: Arc::new(crate::adapters::ice_adapter::IceRuntimes::default()),
             srtp_required: false,
@@ -1849,6 +1873,7 @@ impl MediaAdapter {
         &self,
         dialog_id: &DialogId,
         negotiated: &NegotiatedConfig,
+        rtcp_mux: bool,
     ) -> Result<()> {
         let mut config = self
             .controller
@@ -1872,7 +1897,8 @@ impl MediaAdapter {
             // session learns it is AMR, and media-core reads both out of the
             // one configuration when it builds the codec.
             .with_amr_dtx(self.amr_dtx)
-            .with_amr_auto_cmr(self.amr_auto_cmr);
+            .with_amr_auto_cmr(self.amr_auto_cmr)
+            .with_rtcp_mux(rtcp_mux);
 
         self.controller
             .update_media(dialog_id.clone(), config)
@@ -2198,6 +2224,10 @@ impl MediaAdapter {
             .unwrap_or_default()
     }
 
+    pub(crate) fn set_rtcp_mux_required(&mut self, required: bool) {
+        self.rtcp_mux_required = required;
+    }
+
     /// Process SDP answer and negotiate (for UAC)
     pub async fn negotiate_sdp_as_uac(
         &self,
@@ -2290,12 +2320,14 @@ impl MediaAdapter {
         let (remote_ip, remote_port) = self.parse_sdp_connection(remote_sdp)?;
         let parsed_answer = SdpSession::from_str(remote_sdp)
             .map_err(|_| bounded_sdp_failure("remote-answer", "syntax"))?;
+        validate_rtcp_mux(&parsed_answer, self.rtcp_mux_required)?;
         let parsed_offer = exact_initial_uac_offer(session)
             .ok_or_else(|| bounded_sdp_failure("remote-answer", "missing-local-offer"))
             .and_then(|offer| {
                 SdpSession::from_str(offer)
                     .map_err(|_| bounded_sdp_failure("remote-answer", "invalid-local-offer"))
             })?;
+        validate_rtcp_mux(&parsed_offer, self.rtcp_mux_required)?;
         let (payload_type, negotiated_codec, clock_rate, channels) =
             validate_uac_audio_answer(&parsed_offer, &parsed_answer, self.g729_annex_b)?;
         let answer_direction = audio_direction(&parsed_answer);
@@ -2497,6 +2529,7 @@ impl MediaAdapter {
                 config: config.clone(),
                 stable_local_direction: session.local_media_direction,
                 srtp_negotiated,
+                rtcp_mux: audio_rtcp_mux(&parsed_offer) && audio_rtcp_mux(&parsed_answer),
                 #[cfg(feature = "dtls-srtp")]
                 dtls: staged_dtls,
             },
@@ -2530,6 +2563,7 @@ impl MediaAdapter {
     pub(crate) fn validate_inbound_sdp_offer(&self, remote_sdp: &str) -> SrtpDetailedResult<()> {
         let parsed_offer = SdpSession::from_str(remote_sdp)
             .map_err(|_| bounded_sdp_failure("remote-offer", "syntax"))?;
+        validate_rtcp_mux(&parsed_offer, self.rtcp_mux_required)?;
         self.parse_sdp_connection(remote_sdp)?;
 
         let offered_crypto = Self::extract_audio_crypto(&parsed_offer);
@@ -2629,6 +2663,7 @@ impl MediaAdapter {
         // and SDES handling.
         let parsed_offer = SdpSession::from_str(remote_sdp)
             .map_err(|_| bounded_sdp_failure("remote-offer", "syntax"))?;
+        validate_rtcp_mux(&parsed_offer, self.rtcp_mux_required)?;
         let (remote_ip, remote_port) = self.parse_sdp_connection(remote_sdp)?;
         // ICE (RFC 8839): honor the peer's offer when policy allows. A
         // detected mismatch means a middlebox rewrote the SDP after the
@@ -2788,6 +2823,7 @@ impl MediaAdapter {
                     config: config.clone(),
                     stable_local_direction,
                     srtp_negotiated: false,
+                    rtcp_mux: false,
                     #[cfg(feature = "dtls-srtp")]
                     dtls: None,
                 },
@@ -2943,6 +2979,10 @@ impl MediaAdapter {
         let mut media_builder = sdp_builder
             .media_audio(advertised_port, answer_transport)
             .formats(&formats_str);
+        // The controller has one socket; agree to multiplexing when offered.
+        if audio_rtcp_mux(&parsed_offer) {
+            media_builder = media_builder.rtcp_mux();
+        }
         #[cfg(feature = "dtls-srtp")]
         if let Some((_, _, role)) = &dtls_answer_attrs {
             media_builder = media_builder.setup(role.as_str());
@@ -2983,6 +3023,7 @@ impl MediaAdapter {
             .build()
             .map_err(|_| bounded_sdp_failure("answer-build", "builder"))?;
         let sdp_answer = session.to_string();
+        let rtcp_mux = audio_rtcp_mux(&parsed_offer) && audio_rtcp_mux(&session);
 
         let config = NegotiatedConfig {
             local_addr: SocketAddr::new(self.local_ip, local_port),
@@ -3011,6 +3052,7 @@ impl MediaAdapter {
                 config: config.clone(),
                 stable_local_direction,
                 srtp_negotiated,
+                rtcp_mux,
                 #[cfg(feature = "dtls-srtp")]
                 dtls: staged_dtls,
             },
@@ -3218,7 +3260,7 @@ impl MediaAdapter {
                         ))
                     })?;
             }
-            self.apply_negotiated_media_config(&dialog_id, &staged.config)
+            self.apply_negotiated_media_config(&dialog_id, &staged.config, staged.rtcp_mux)
                 .await?;
 
             if let Some((_, pair)) = self.negotiated_srtp.remove(&negotiation_key) {
@@ -4502,6 +4544,11 @@ impl MediaAdapter {
         let mut media_builder = sdp_builder
             .media_audio(port, transport)
             .formats(&formats_ref);
+        if self.rtcp_mux_required {
+            media_builder = media_builder
+                .rtcp_mux()
+                .attribute("rtcp-mux-only", None::<String>);
+        }
         if dtls_offer_attrs.is_some() {
             media_builder = media_builder.setup(self.dtls_setup_role.as_str());
         }
@@ -5400,6 +5447,11 @@ impl MediaAdapter {
             .time("0", "0")
             .media_audio(port, transport)
             .formats(&formats_ref);
+        if self.rtcp_mux_required {
+            media_builder = media_builder
+                .rtcp_mux()
+                .attribute("rtcp-mux-only", None::<String>);
+        }
         for (pt, pt_str) in format_pts.iter().zip(format_strings.iter()) {
             if let Some(rtpmap) = rtpmap_for_pt(*pt) {
                 media_builder = media_builder.rtpmap(pt_str.as_str(), rtpmap);
@@ -5602,6 +5654,7 @@ impl Clone for MediaAdapter {
             media_port_end: self.media_port_end,
             media_mode: self.media_mode,
             offer_srtp: self.offer_srtp,
+            rtcp_mux_required: self.rtcp_mux_required,
             ice_policy: self.ice_policy,
             ice: Arc::clone(&self.ice),
             srtp_required: self.srtp_required,
@@ -6231,6 +6284,149 @@ mod sdp_format_tests {
                     .is_none(),
                 "rendering a rejected/unanswered offer must not replace stable negotiated media"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn required_rtcp_mux_negotiates_and_refuses_separate_port_peers() {
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        let mut adapter = MediaAdapter::new(
+            Arc::new(MediaSessionController::new()),
+            Arc::new(SessionStore::new()),
+            "127.0.0.1".parse().unwrap(),
+            16000,
+            16100,
+        );
+        adapter.set_media_mode(MediaMode::SignalingOnly { sdp_rtp_port: 9 });
+        let mut uac = SessionState::new(SessionId("rtcp-mux-uac".into()), Role::UAC);
+        let legacy = adapter
+            .generate_local_sdp_offer_lane_owned(&mut uac, crate::types::MediaDirection::SendRecv)
+            .await
+            .unwrap();
+        assert!(!audio_rtcp_mux(&legacy.parse().unwrap()));
+        adapter.set_rtcp_mux_required(true);
+        let offer = adapter
+            .generate_local_sdp_offer_lane_owned(&mut uac, crate::types::MediaDirection::SendRecv)
+            .await
+            .unwrap();
+        assert!(audio_rtcp_mux(&offer.parse().unwrap()));
+        assert!(offer.contains("a=rtcp-mux-only\r\n"));
+        uac.local_sdp = Some(offer.clone());
+        let separate = build_answer("peer", "127.0.0.1", 18000);
+        assert!(adapter
+            .negotiate_sdp_as_uac_lane_owned(&mut uac, &separate)
+            .await
+            .is_err());
+        assert!(adapter.staged_media_negotiations.is_empty());
+        assert_eq!(uac.local_sdp.as_deref(), Some(offer.as_str()));
+        let mut uas = SessionState::new(SessionId("rtcp-mux-uas".into()), Role::UAS);
+        assert!(adapter
+            .negotiate_sdp_as_uas_lane_owned(&mut uas, &separate)
+            .await
+            .is_err());
+        // A compatible peer echoes mux even when its own default is permissive.
+        adapter.set_rtcp_mux_required(false);
+        let (answer, _) = adapter
+            .negotiate_sdp_as_uas_lane_owned(&mut uas, &offer)
+            .await
+            .unwrap();
+        assert!(audio_rtcp_mux(&answer.parse().unwrap()));
+        adapter.set_rtcp_mux_required(true);
+        adapter
+            .negotiate_sdp_as_uac_lane_owned(&mut uac, &answer)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn periodic_rtcp_reaches_the_rtp_port_only_after_rtcp_mux_is_negotiated() {
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use std::net::Ipv4Addr;
+
+        // True when an RTCP packet (PT 200-204) reaches `peer` within `window`.
+        async fn rtcp_arrives(peer: &tokio::net::UdpSocket, window: Duration) -> bool {
+            let mut bytes = [0u8; 2048];
+            tokio::time::timeout(window, async {
+                loop {
+                    let (n, _) = peer.recv_from(&mut bytes).await.expect("peer receive");
+                    if n >= 2 && (200..=204).contains(&bytes[1]) {
+                        return;
+                    }
+                }
+            })
+            .await
+            .is_ok()
+        }
+
+        // The default offer has no a=rtcp-mux, so a plain answer means no
+        // multiplexing (RFC 5761 §5.1.1); a required-mux offer answered with
+        // a=rtcp-mux negotiates it.
+        for (case, mux) in [("plain", false), ("mux", true)] {
+            let controller = Arc::new(MediaSessionController::new());
+            let store = Arc::new(SessionStore::new());
+            let session_id = SessionId(format!("late-sdp-rtcp-{case}"));
+            store
+                .create_session(session_id.clone(), Role::UAC, false)
+                .await
+                .expect("create exact session");
+            let mut adapter = MediaAdapter::new(
+                controller,
+                Arc::clone(&store),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                17_400,
+                17_500,
+            );
+            adapter.set_rtcp_mux_required(mux);
+            let dialog_id = adapter
+                .create_session(&session_id)
+                .await
+                .expect("create managed media");
+            let handle = store
+                .lifecycle_handle(&session_id)
+                .expect("exact lifecycle handle");
+            let mut working = store
+                .get_session_exact(&handle)
+                .await
+                .expect("load exact session");
+            working.media_session_id = Some(dialog_id);
+            working.media_session_ready = true;
+            working.local_media_direction = crate::types::MediaDirection::SendRecv;
+            let offer = adapter
+                .generate_local_sdp_offer_lane_owned(
+                    &mut working,
+                    crate::types::MediaDirection::SendRecv,
+                )
+                .await
+                .expect("local offer");
+            assert_eq!(audio_rtcp_mux(&offer.parse().unwrap()), mux);
+            working.local_sdp = Some(offer);
+
+            let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let mut answer = build_answer("peer", "127.0.0.1", peer.local_addr().unwrap().port());
+            if mux {
+                answer.push_str("a=rtcp-mux\r\n");
+            }
+            adapter
+                .negotiate_sdp_as_uac_lane_owned(&mut working, &answer)
+                .await
+                .expect("answer negotiates");
+            adapter
+                .commit_staged_media_negotiation_lane_owned(&mut working)
+                .await
+                .expect("commit negotiated media");
+
+            // Reports run on a 1 s floor; 3.5 s spans several intervals.
+            let arrived = rtcp_arrives(&peer, Duration::from_millis(3_500)).await;
+            assert_eq!(
+                arrived, mux,
+                "{case}: periodic RTCP to the peer's RTP port requires negotiated rtcp-mux"
+            );
+            adapter
+                .cleanup_session(&session_id)
+                .await
+                .expect("cleanup managed media");
         }
     }
 
@@ -8834,6 +9030,7 @@ a=fmtp:101 0-15\r\n";
             },
             stable_local_direction: crate::types::MediaDirection::SendRecv,
             srtp_negotiated: false,
+            rtcp_mux: false,
             #[cfg(feature = "dtls-srtp")]
             dtls: None,
         };
@@ -8906,6 +9103,7 @@ a=fmtp:101 0-15\r\n";
             },
             stable_local_direction: crate::types::MediaDirection::SendRecv,
             srtp_negotiated: false,
+            rtcp_mux: false,
             #[cfg(feature = "dtls-srtp")]
             dtls: None,
         };
@@ -9010,6 +9208,7 @@ a=fmtp:101 0-15\r\n";
                 },
                 stable_local_direction: crate::types::MediaDirection::SendRecv,
                 srtp_negotiated: true,
+                rtcp_mux: false,
                 #[cfg(feature = "dtls-srtp")]
                 dtls: None,
             },
@@ -9209,6 +9408,7 @@ a=fmtp:101 0-15\r\n";
                 },
                 stable_local_direction: crate::types::MediaDirection::SendRecv,
                 srtp_negotiated: true,
+                rtcp_mux: false,
                 #[cfg(feature = "dtls-srtp")]
                 dtls: None,
             },

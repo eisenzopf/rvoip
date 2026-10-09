@@ -14,6 +14,7 @@
   ],
   "known_policy_paths": [
     ".config/nextest.toml",
+    ".gitignore",
     ".github/CODEOWNERS",
     ".github/dependabot.yml",
     ".github/pull_request_template.md",
@@ -21,6 +22,7 @@
     ".github/workflows/**",
     "scripts/ci/**",
     "scripts/test_all.sh",
+    "sdk/uctp-js/**",
     "CONTRIBUTING.md",
     "SECURITY.md",
     "LICENSE",

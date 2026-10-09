@@ -2425,6 +2425,9 @@ impl DialogManager {
                         "Outbound request contains an unusable Route header",
                     )
                 })?;
+            let observed_source = dialog.last_known_remote_addr;
+            let route_set_is_empty = template.route_set.is_empty();
+            drop(dialog);
             let mut candidates = self.resolve_uri_to_candidates(&next_hop).await;
 
             // When an inbound peer supplied an unspecified Contact, dialog
@@ -2433,11 +2436,7 @@ impl DialogManager {
             // preserve the Contact-derived URI on the wire as Request-URI.
             // Reusing the resolved candidate's transport also preserves UDP,
             // TCP, or TLS selection without inventing transport state here.
-            apply_observed_source(
-                dialog.last_known_remote_addr,
-                template.route_set.is_empty(),
-                &mut candidates,
-            );
+            apply_observed_source(observed_source, route_set_is_empty, &mut candidates);
 
             if candidates.is_empty() {
                 return Err(crate::errors::DialogError::routing_error(
@@ -4901,6 +4900,7 @@ impl DialogManager {
                         "Initial INVITE contains an unusable Route header",
                     )
                 })?;
+            drop(dialog);
             let candidates = if opts.registered_flow_routes.is_empty() {
                 self.resolve_uri_to_candidates(&next_hop).await
             } else {
@@ -5955,6 +5955,29 @@ impl DialogManager {
             .map(|(transaction_id, destination)| (transaction_id, destination, None));
         }
 
+        // Direct-peer compatibility keeps in-dialog requests on the exact
+        // TLS flow that formed this dialog. A dead flow fails explicitly;
+        // never silently reconnect or downgrade, and never override Route.
+        // Off by default, so check the manager-wide opt-in before touching the
+        // dialog map. The map guard is dropped before any await, and a dialog
+        // removed concurrently (e.g. BYE racing teardown) keeps normal routing.
+        let mut candidates = candidates;
+        let pinned_route = match tx_to_dialog {
+            Some(dialog_id) if !is_initial_invite && self.tls_contact_compatibility_enabled() => {
+                self.dialogs
+                    .get(dialog_id)
+                    .and_then(|dialog| dialog.compatible_tls_contact_route(&request))
+            }
+            _ => None,
+        };
+        if let Some(route) = pinned_route {
+            let mut target = candidates[0].clone();
+            target.addr = route.destination;
+            target.transport = rvoip_sip_transport::transport::TransportType::Tls;
+            target.flow_id = route.flow_id;
+            candidates = vec![target];
+        }
+
         let total = candidates.len();
         let mut last_err: Option<crate::errors::DialogError> = None;
 
@@ -5976,6 +5999,7 @@ impl DialogManager {
             if let Some(authority) = target.authority.clone() {
                 request_route.authority = Some(authority);
             }
+            request_route.flow_id = target.flow_id;
             let tx_result = self
                 .transaction_manager
                 .create_client_transaction_on_route_with_completion(req, request_route)
@@ -7681,6 +7705,7 @@ impl DialogManager {
                         "PRACK contains an unusable Route header",
                     )
                 })?;
+            drop(dialog);
             let candidates = self.resolve_uri_to_candidates(&next_hop).await;
             if candidates.is_empty() {
                 return Err(crate::errors::DialogError::routing_error(

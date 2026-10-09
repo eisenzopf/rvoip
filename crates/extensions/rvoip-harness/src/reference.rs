@@ -13,8 +13,8 @@ use bytes::Bytes;
 use chrono::Utc;
 use rvoip_core_traits::error::{Result, RvoipError};
 use rvoip_core_traits::harness::{
-    AsrConfig, AsrProvider, AsrResult, AsrStream, DialogAction, DialogManager, TtsPlayback,
-    TtsProvider, TtsRequest,
+    AsrConfig, AsrProvider, AsrResult, AsrStream, DialogAction, DialogManager, TtsAudioFormat,
+    TtsPlayback, TtsProvider, TtsRequest,
 };
 use rvoip_core_traits::ids::{ConnectionId, StreamId};
 use rvoip_core_traits::stream::{MediaFrame, StreamKind};
@@ -361,6 +361,11 @@ struct ReferenceTtsPlayback {
 
 #[async_trait]
 impl TtsPlayback for ReferenceTtsPlayback {
+    fn audio_format(&self) -> TtsAudioFormat {
+        TtsAudioFormat::PcmS16Le {
+            sample_rate_hz: REFERENCE_SAMPLE_RATE_HZ,
+        }
+    }
     async fn next_frame(&self) -> Option<MediaFrame> {
         if self.cancelled.load(Ordering::Acquire) || self.emitted.swap(true, Ordering::AcqRel) {
             return None;
@@ -479,6 +484,7 @@ mod tests {
                         voice,
                         text,
                         sample_rate_hz: Some(REFERENCE_SAMPLE_RATE_HZ),
+                        destination_codec: None,
                     })
                     .await?;
                 let output = tokio::select! {

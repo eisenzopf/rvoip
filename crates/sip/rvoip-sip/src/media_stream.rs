@@ -1210,6 +1210,85 @@ async fn run_media_driver(
     }
 }
 
+/// Converts decoded packets to the fixed frame size of the configured encoder.
+/// Buffering is per pump/generation and never joins samples across an RTP gap.
+struct InboundPcmFramer {
+    samples_per_frame: Option<usize>,
+    sample_rate: u32,
+    channels: u8,
+    pending: Vec<i16>,
+    timestamp: u32,
+    expected_input: Option<u32>,
+}
+
+impl InboundPcmFramer {
+    fn new(config: &crate::session_store::state::NegotiatedConfig) -> Self {
+        let spec = rvoip_media_core::codec::spec::AudioCodecSpec::new(
+            &config.codec,
+            0,
+            config.sample_rate,
+            config.channels,
+        );
+        Self {
+            samples_per_frame: config
+                .codec
+                .eq_ignore_ascii_case("opus")
+                .then(|| spec.frame_samples_20ms()),
+            sample_rate: config.sample_rate,
+            channels: config.channels,
+            pending: Vec::new(),
+            timestamp: 0,
+            expected_input: None,
+        }
+    }
+
+    fn push(&mut self, frame: AudioFrame) -> Vec<AudioFrame> {
+        let Some(required) = self.samples_per_frame else {
+            return vec![frame];
+        };
+        let channels = usize::from(self.channels);
+        // Opus allows up to 120 ms in one decoded packet. Reject malformed
+        // shapes before growing the buffer; retain less than one 20 ms frame.
+        if required == 0
+            || channels == 0
+            || frame.sample_rate != self.sample_rate
+            || frame.channels != self.channels
+            || frame.samples.is_empty()
+            || !frame.samples.len().is_multiple_of(channels)
+            || frame.samples.len() > required * 6
+        {
+            self.pending.clear();
+            self.expected_input = None;
+            return Vec::new();
+        }
+        if self.expected_input != Some(frame.timestamp) {
+            self.pending.clear();
+        }
+        if self.pending.is_empty() {
+            self.timestamp = frame.timestamp;
+        }
+        self.expected_input = Some(
+            frame
+                .timestamp
+                .wrapping_add((frame.samples.len() / channels) as u32),
+        );
+        self.pending.extend_from_slice(&frame.samples);
+        let mut result = Vec::new();
+        while self.pending.len() >= required {
+            let rest = self.pending.split_off(required);
+            let samples = std::mem::replace(&mut self.pending, rest);
+            result.push(AudioFrame::new(
+                samples,
+                self.sample_rate,
+                self.channels,
+                self.timestamp,
+            ));
+            self.timestamp = self.timestamp.wrapping_add((required / channels) as u32);
+        }
+        result
+    }
+}
+
 async fn run_inbound_pump(
     mut subscriber: crate::types::AudioFrameSubscriber,
     mut runtime: SipMediaCodecRuntime,
@@ -1224,6 +1303,7 @@ async fn run_inbound_pump(
     // media clock and losses are concealed rather than heard as clicks.
     let playout_policy = playout;
     let mut playout = playout_policy.map(PlayoutBuffer::new);
+    let mut framer = InboundPcmFramer::new(&runtime.negotiated);
     let mut encoder =
         match SipPayloadCodec::from_negotiated(&runtime.negotiated, runtime.payload_type) {
             Ok(codec) => codec,
@@ -1261,6 +1341,7 @@ async fn run_inbound_pump(
                 };
                 runtime = updated;
                 playout = playout_policy.map(PlayoutBuffer::new);
+                framer = InboundPcmFramer::new(&runtime.negotiated);
                 continue;
             }
             InboundPumpEvent::Audio(Some(audio_frame)) => match playout.as_mut() {
@@ -1305,7 +1386,7 @@ async fn run_inbound_pump(
             }
         }
 
-        for frame in ready {
+        for frame in ready.into_iter().flat_map(|frame| framer.push(frame)) {
             let encoded_frames = match encoder.encode_graph_frames(&frame) {
                 Ok(frames) => frames,
                 Err(error) => {
@@ -1872,6 +1953,147 @@ mod negotiated_codec_tests {
 
         drop(audio_tx);
         assert_eq!(pump.await.expect("pump task"), "sip-audio-source-closed");
+    }
+
+    #[test]
+    fn inbound_pcm_framing_preserves_samples_and_wrapping_channel_timestamps() {
+        for channels in [1, 2] {
+            for samples_per_channel in [120, 240, 480, 960, 1920, 2880, 5760] {
+                let mut framer = InboundPcmFramer::new(&negotiated("opus", 48_000, channels));
+                let start = u32::MAX - 300;
+                let mut input = Vec::new();
+                let mut output = Vec::new();
+                let count = if samples_per_channel < 960 {
+                    960 / samples_per_channel
+                } else {
+                    1
+                };
+                for packet in 0..count {
+                    let samples = (0..samples_per_channel * usize::from(channels))
+                        .map(|i| (i + packet * 31) as i16)
+                        .collect::<Vec<_>>();
+                    input.extend_from_slice(&samples);
+                    output.extend(framer.push(AudioFrame::new(
+                        samples,
+                        48_000,
+                        channels,
+                        start.wrapping_add((packet * samples_per_channel) as u32),
+                    )));
+                }
+                assert_eq!(output.len(), count * samples_per_channel / 960);
+                let actual = output
+                    .iter()
+                    .flat_map(|frame| frame.samples.iter().copied())
+                    .collect::<Vec<_>>();
+                assert_eq!(actual, input);
+                for (index, frame) in output.iter().enumerate() {
+                    assert_eq!(frame.timestamp, start.wrapping_add(index as u32 * 960));
+                    assert_eq!(frame.samples.len(), 960 * usize::from(channels));
+                }
+                assert!(framer.pending.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn inbound_pcm_framing_drops_partial_audio_across_gaps_and_invalid_shapes() {
+        let mut framer = InboundPcmFramer::new(&negotiated("opus", 48_000, 2));
+        assert!(framer
+            .push(AudioFrame::new(vec![1; 960], 48_000, 2, 0))
+            .is_empty());
+        assert!(framer
+            .push(AudioFrame::new(vec![2; 960], 48_000, 2, 48_000))
+            .is_empty());
+        let emitted = framer.push(AudioFrame::new(vec![3; 960], 48_000, 2, 48_480));
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted[0].timestamp, 48_000);
+        assert_eq!(&emitted[0].samples[..960], &[2; 960]);
+        assert_eq!(&emitted[0].samples[960..], &[3; 960]);
+        for (samples, rate, channels) in [
+            (vec![1; 11], 48_000, 2),
+            (vec![1; 960], 16_000, 2),
+            (vec![1; 960], 48_000, 1),
+            (vec![1; 1920 * 7], 48_000, 2),
+            (Vec::new(), 48_000, 2),
+        ] {
+            assert!(framer
+                .push(AudioFrame::new(vec![1; 960], 48_000, 2, 0))
+                .is_empty());
+            assert!(framer
+                .push(AudioFrame::new(samples, rate, channels, 480))
+                .is_empty());
+            assert!(framer.pending.is_empty());
+            assert_eq!(framer.expected_input, None);
+        }
+    }
+
+    #[cfg(feature = "opus")]
+    #[tokio::test]
+    async fn inbound_pump_encodes_variable_opus_packets_as_audible_twenty_ms_frames() {
+        for (packet_samples, clocked) in [120, 240, 480, 960, 1920, 2880, 5760]
+            .into_iter()
+            .flat_map(|samples| [(samples, false), (samples, true)])
+        {
+            let config = negotiated("opus", 48_000, 2);
+            let runtime = SipMediaCodecRuntime {
+                negotiated: config.clone(),
+                payload_type: 102,
+            };
+            let (_codec_tx, codec_rx) = watch::channel(Some(runtime.clone()));
+            let (audio_tx, audio_rx) = mpsc::channel(16);
+            let (frames_tx, mut frames_rx) = mpsc::channel(16);
+            let pump = tokio::spawn(run_inbound_pump(
+                crate::types::AudioFrameSubscriber::new(SessionId::new(), audio_rx),
+                runtime,
+                codec_rx,
+                StreamId::new(),
+                frames_tx,
+                clocked.then_some(PlayoutConfig {
+                    adaptive: false,
+                    ..PlayoutConfig::default()
+                }),
+            ));
+            // Clocked playout needs at least two input packets to prime.
+            let count = (960 / packet_samples).max(1) * 2;
+            for index in 0..count {
+                let samples = (0..packet_samples)
+                    .flat_map(|i| {
+                        let value = ((i + index * packet_samples) as f32 * 0.0576).sin() * 10_000.0;
+                        [value as i16; 2]
+                    })
+                    .collect();
+                audio_tx
+                    .send(AudioFrame::new(
+                        samples,
+                        48_000,
+                        2,
+                        (index * packet_samples) as u32,
+                    ))
+                    .await
+                    .unwrap();
+            }
+            let mut decoder = SipPayloadCodec::from_negotiated(&config, 102).unwrap();
+            for index in 0..(count * packet_samples / 960) {
+                let frame =
+                    tokio::time::timeout(std::time::Duration::from_secs(2), frames_rx.recv())
+                        .await
+                        .unwrap_or_else(|error| {
+                            panic!(
+                        "packet_samples={packet_samples} clocked={clocked} index={index}: {error}"
+                    )
+                        })
+                        .unwrap();
+                assert_eq!(frame.timestamp_rtp, index as u32 * 960);
+                assert_eq!(frame.payload_type, Some(102));
+                let decoded = decoder.decode(&frame.payload).unwrap();
+                assert_eq!(decoded.samples.len(), 1920);
+                let energy: f64 = decoded.samples.iter().map(|v| f64::from(*v).powi(2)).sum();
+                assert!(energy / decoded.samples.len() as f64 > 100_000.0);
+            }
+            drop(audio_tx);
+            assert_eq!(pump.await.unwrap(), "sip-audio-source-closed");
+            assert!(frames_rx.recv().await.is_none());
+        }
     }
 
     #[test]

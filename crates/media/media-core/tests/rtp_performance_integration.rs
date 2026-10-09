@@ -311,18 +311,11 @@ fn create_test_rtp_packet(sequence: u16, timestamp: u32, payload_size: usize) ->
         let sample =
             (32767.0 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 8000.0).sin()) as i16;
         // Encode to μ-law
-        let mulaw_byte = encode_mulaw_simple(sample);
+        let mulaw_byte = codec_core::utils::linear_to_mulaw_scalar(sample);
         payload.push(mulaw_byte);
     }
 
     RtpPacket::new(header, Bytes::from(payload))
-}
-
-/// Simplified μ-law encoding for test data
-fn encode_mulaw_simple(sample: i16) -> u8 {
-    // Very simplified μ-law encoding for test purposes
-    let value = (sample / 256) as i8;
-    (value as u8) ^ 0x55
 }
 
 #[tokio::test]

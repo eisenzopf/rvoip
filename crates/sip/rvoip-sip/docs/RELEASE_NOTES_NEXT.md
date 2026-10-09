@@ -1,16 +1,15 @@
-# rvoip 0.3.11 Release Notes
+# rvoip 0.3.12 Release Notes
 
-These notes describe the coordinated 45-crate `0.3.11` release. It was
-published from the exact source commit accepted by the protected release
-qualification and publication workflows. The signed qualification artifact
-and GitHub release identify that immutable commit, workflow run, complete gate
-inventory, measured performance, and publication result. This evidence-only
-follow-up copies those generated reports into the repository without changing
-the released tag.
+These notes describe the coordinated 46-crate `0.3.12` release. Protected
+publication requires qualification of its exact source commit. The signed
+qualification artifact and GitHub release identify that commit, workflow run,
+complete gate inventory, measured performance, and publication result. The
+generated reports can be copied into the repository after publication without
+changing the released tag.
 
 ## Headline
 
-`0.3.11` is a patch release that hardens the `0.3.9` feature set and adds
+`0.3.12` is a patch release that hardens the `0.3.9` feature set and adds
 Jambonz OSS as a mandatory external SIP interoperability peer. It corrects
 REFER/NOTIFY ordering under concurrent transfer progress, preserves an
 optional `Referred-By` header across a Jambonz-mediated transfer, closes
@@ -79,11 +78,11 @@ documented SIP, SDP, RTP, codec, and facade profiles.
 
 ## Performance evaluation
 
-The protected `0.3.11` qualification executed three clean canonical 2,000-CPS
+The protected `0.3.12` qualification requires three clean canonical 2,000-CPS
 passes, the full performance and resiliency matrix, the 160-CPS high-density
 full-media burst, a one-hour
 30-call monolithic soak, a one-hour 500-call split soak, teardown/churn tests,
-and regression comparison. It publishes structured JSON and Markdown metrics
+and regression comparison. It produces structured JSON and Markdown metrics
 plus a SHA-256 index of all current-run performance artifacts. July results
 remain historical baselines; they cannot qualify this release.
 
@@ -106,20 +105,20 @@ is no Telnyx- or Jambonz-specific runtime dependency in RVoIP and no provider
 REST API in the SIP stack.
 
 The `0.3.9` tag, crates, and qualification evidence remain immutable release
-history; none of that evidence is reused to qualify `0.3.11`.
+history; none of that evidence is reused to qualify `0.3.12`.
 
 ## Qualification record
 
-The protected Release Qualification workflow ran from a clean `main` commit
-and recorded every selected gate exactly once as PASS, including the full
-45-crate matrix, feature bundles, CodeQL policy, Asterisk, FreeSWITCH, Jambonz,
+The protected Release Qualification workflow runs from a clean `main` commit
+and must record every selected gate as PASS, including the full
+46-crate matrix, feature bundles, CodeQL policy, Asterisk, FreeSWITCH, Jambonz,
 Kamailio, OpenSIPS, SIPp, strict-UA, security, performance, resiliency, soak,
 regression, source-fence, and cleanup gates. It produces a signed aggregate
 bound to the exact source SHA and immutable artifact hashes.
 
-The protected Release Publish workflow accepted that aggregate after verifying
-that its source SHA was still `main`, its version was exactly `0.3.11`, its
-evidence was fresh and complete, and the dry-run and live publication inputs
-resolved to the same commit. The resulting GitHub release is the durable link
-to the exact qualification run and measured reports; the protected `v0.3.11`
-tag identifies the source without a self-referential documentation commit.
+The protected Release Publish workflow accepts that aggregate only after
+verifying that its source SHA is on `main`, its version is exactly `0.3.12`, its
+evidence is fresh and complete, and the dry-run and live publication inputs
+resolve to the same commit. The resulting GitHub release links the exact
+qualification run and measured reports; the protected `v0.3.12` tag identifies
+the source without a self-referential documentation commit.

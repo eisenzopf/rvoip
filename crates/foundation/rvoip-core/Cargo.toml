@@ -63,9 +63,12 @@ quinn = { workspace = true }
 rustls = { workspace = true }
 parking_lot = { workspace = true }
 # P5 tests use no-op providers + VecRecordingSink from rvoip-harness to
-# exercise the AI / recording dispatch.
-rvoip-harness.workspace = true
+# exercise the AI / recording dispatch. This forward dev-dependency must stay
+# path-only so packaging rvoip-core does not require an unpublished harness.
+rvoip-harness = { path = "../../extensions/rvoip-harness" }
 tracing-subscriber.workspace = true
+# Paused-clock tests prove real-time playback pacing deterministically.
+tokio = { workspace = true, features = ["test-util"] }
 
 [[example]]
 name = "sip_only_orchestrator"

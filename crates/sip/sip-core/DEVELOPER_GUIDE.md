@@ -26,7 +26,7 @@ To use `rvoip-sip-core`, add it to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rvoip-sip-core = "0.3.11"
+rvoip-sip-core = "0.3.12"
 bytes = "1.4"  # Needed for handling raw message data
 ```
 

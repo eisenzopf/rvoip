@@ -255,6 +255,14 @@ pub trait ConnectionAdapter: Send + Sync {
     fn transport(&self) -> Transport;
     fn kind(&self) -> AdapterKind;
 
+    /// Optional identifier-free measurements of local resource ownership.
+    /// `None` means unsupported, not zero. The core may drop this future at
+    /// its collection deadline: implementations must be cancellation-safe,
+    /// avoid detached observation tasks, and keep synchronous work bounded.
+    async fn resource_snapshot(&self) -> Result<Option<crate::resources::AdapterResourceCounts>> {
+        Ok(None)
+    }
+
     /// Explicit lifecycle guarantees implemented by this adapter.
     ///
     /// The default advertises no guarantees. In particular, overriding only

@@ -2382,11 +2382,15 @@ impl DialogManager {
         } else {
             // Event for transaction not associated with any dialog. Check if
             // this is a new incoming request that should create a dialog.
-            if let Err(_error) = self
+            if let Err(error) = self
                 .handle_unassociated_transaction_event(&transaction_id, event)
                 .await
             {
-                error!("Failed to handle unassociated transaction event");
+                error!(
+                    error_class = error.diagnostic_class(),
+                    error_reason = error.diagnostic_reason(),
+                    "Failed to handle unassociated transaction event"
+                );
             }
         }
     }
@@ -4027,6 +4031,19 @@ impl DialogManager {
     /// Get a clone of the current configuration (if any).
     pub fn config(&self) -> Option<DialogManagerConfig> {
         self.config.read().ok().and_then(|g| g.clone())
+    }
+
+    /// Whether the opt-in TLS Contact compatibility is enabled for this
+    /// manager. Reads the shared config without cloning it.
+    pub(crate) fn tls_contact_compatibility_enabled(&self) -> bool {
+        self.config
+            .read()
+            .ok()
+            .and_then(|g| {
+                g.as_ref()
+                    .map(|c| c.dialog_config().allow_tls_contact_on_sips)
+            })
+            .unwrap_or(false)
     }
 
     /// Check if auto-response to OPTIONS requests is enabled

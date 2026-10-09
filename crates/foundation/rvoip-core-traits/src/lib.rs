@@ -46,6 +46,7 @@ pub mod error;
 pub mod harness;
 pub mod identity;
 pub mod ids;
+pub mod resources;
 pub mod stream;
 
 pub use adapter::{

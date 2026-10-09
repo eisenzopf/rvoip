@@ -246,6 +246,326 @@ mod tests {
         assert_eq!(frame.timestamp, timestamp);
     }
 
+    /// Exercise the actual RTP event handler, decode and callback, not just
+    /// timestamp arithmetic. Both G.711 and the failing Opus path use it.
+    #[cfg(feature = "opus")]
+    #[tokio::test]
+    async fn source_handoff_delivers_continuous_audible_frames() {
+        use crate::codec::audio::common::AudioCodec;
+        use crate::codec::audio::{G711Codec, OpusCodec, OpusConfig};
+        use crate::types::SampleRate;
+
+        for (opus, use_udp) in [(false, false), (true, false), (false, true), (true, true)] {
+            let controller = MediaSessionController::new();
+            let dialog = DialogId::new("source-handoff");
+            let rate = if opus { 48_000 } else { 8_000 };
+            let ticks = rate / 50;
+            let pt = if opus { 102 } else { 0 };
+            let mut parameters = HashMap::new();
+            parameters.insert(types::RTP_PAYLOAD_TYPE_PARAMETER.into(), pt.to_string());
+            parameters.insert(types::RTP_CLOCK_RATE_PARAMETER.into(), rate.to_string());
+            parameters.insert(types::AUDIO_CHANNELS_PARAMETER.into(), "1".into());
+            let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let config = MediaConfig {
+                local_addr: "127.0.0.1:0".parse().unwrap(),
+                remote_addr: Some(udp.local_addr().unwrap()),
+                preferred_codec: Some(if opus { "opus" } else { "PCMU" }.into()),
+                parameters,
+            };
+            let (rtp_tx, rtp_rx) = tokio::sync::broadcast::channel(16);
+            let mut udp_port = 0;
+            if use_udp {
+                controller
+                    .start_media(dialog.clone(), config)
+                    .await
+                    .unwrap();
+                udp_port = controller
+                    .get_session_info(&dialog)
+                    .await
+                    .unwrap()
+                    .rtp_port
+                    .unwrap();
+            } else {
+                let format = codec_runtime::resolve_codec(&config).unwrap();
+                controller.codec_runtimes.insert(
+                    dialog.clone(),
+                    Arc::new(codec_runtime::DialogCodecRuntime::new(format).unwrap()),
+                );
+                controller.spawn_rtp_event_handler(dialog.clone(), rtp_rx, pt);
+            }
+            let samples = (0..ticks)
+                .map(|i| {
+                    (8000.0 * (i as f64 * 440.0 * std::f64::consts::TAU / rate as f64).sin()) as i16
+                })
+                .collect();
+            let frame = AudioFrame::new(samples, rate, 1, 0);
+            let payload = if opus {
+                OpusCodec::new(SampleRate::Rate48000, 1, OpusConfig::default())
+                    .unwrap()
+                    .encode(&frame)
+                    .unwrap()
+            } else {
+                G711Codec::mu_law(rate, 1).unwrap().encode(&frame).unwrap()
+            };
+            let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel(16);
+            controller
+                .set_audio_frame_callback(dialog.clone(), audio_tx)
+                .await
+                .unwrap();
+            // Independent clock origins and old-source packets after cutover.
+            for (ssrc, seq, timestamp) in [
+                (1, 10, 14_560),
+                (1, 11, 14_560 + ticks),
+                (2, 80, 456_000),
+                (1, 12, 14_560 + 2 * ticks),
+                (2, 81, 456_000 + ticks),
+                (1, 13, 14_560 + 3 * ticks),
+                (2, 82, 456_000 + 2 * ticks),
+                (1, 14, 14_560 + 4 * ticks),
+            ] {
+                let packet = RtpPacket::new_with_payload(
+                    pt,
+                    seq,
+                    timestamp,
+                    ssrc,
+                    Bytes::from(payload.clone()),
+                );
+                if use_udp {
+                    udp.send_to(&packet.serialize().unwrap(), ("127.0.0.1", udp_port))
+                        .await
+                        .unwrap();
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                } else {
+                    rtp_tx
+                        .send(RtpSessionEvent::PacketReceived(packet))
+                        .unwrap();
+                }
+            }
+            drop(rtp_tx); // Handler drains events, then closes its callback clone.
+            let mut previous = None;
+            for _ in 0..5 {
+                let frame =
+                    tokio::time::timeout(std::time::Duration::from_secs(2), audio_rx.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(frame.sample_rate, rate);
+                assert_eq!(frame.samples.len(), ticks as usize);
+                let energy = frame
+                    .samples
+                    .iter()
+                    .map(|s| f64::from(*s).powi(2))
+                    .sum::<f64>()
+                    / frame.samples.len() as f64;
+                assert!(energy > 100_000.0, "decoded speech must not become silence");
+                if let Some(previous) = previous {
+                    let step = frame.timestamp.wrapping_sub(previous);
+                    assert!(
+                        step >= ticks && step < rate / 5,
+                        "artificial timestamp jump: {step}"
+                    );
+                }
+                previous = Some(frame.timestamp);
+            }
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(50), audio_rx.recv())
+                    .await
+                    .is_err(),
+                "probation and retired-source packets must not reach the callback"
+            );
+            if use_udp {
+                controller.stop_media(&dialog).await.unwrap();
+            }
+        }
+    }
+
+    /// Drive RTP packets through the real receive handler (reorder, source
+    /// timeline, decode, paced playout, callback) and collect every frame
+    /// that reaches the application callback.
+    async fn receive_through_handler(
+        codec: &str,
+        parameters: HashMap<String, String>,
+        payload_type: u8,
+        packets: Vec<(u32, u16, u32, Vec<u8>)>,
+    ) -> Vec<AudioFrame> {
+        let controller = MediaSessionController::new();
+        let dialog = DialogId::new("receive-through-handler");
+        let format = codec_runtime::resolve_codec(&MediaConfig {
+            local_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            remote_addr: None,
+            preferred_codec: Some(codec.to_string()),
+            parameters,
+        })
+        .expect("resolve codec");
+        controller.codec_runtimes.insert(
+            dialog.clone(),
+            Arc::new(codec_runtime::DialogCodecRuntime::new(format).expect("codec runtime")),
+        );
+        let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel(64);
+        controller
+            .set_audio_frame_callback(dialog.clone(), audio_tx)
+            .await
+            .expect("set audio callback");
+        let (rtp_tx, rtp_rx) = tokio::sync::broadcast::channel(64);
+        controller.spawn_rtp_event_handler(dialog.clone(), rtp_rx, payload_type);
+        for (ssrc, sequence, timestamp, payload) in packets {
+            rtp_tx
+                .send(RtpSessionEvent::PacketReceived(
+                    RtpPacket::new_with_payload(
+                        payload_type,
+                        sequence,
+                        timestamp,
+                        ssrc,
+                        Bytes::from(payload),
+                    ),
+                ))
+                .expect("send RTP event");
+        }
+        let mut frames = Vec::new();
+        while let Ok(Some(frame)) =
+            tokio::time::timeout(std::time::Duration::from_millis(300), audio_rx.recv()).await
+        {
+            frames.push(frame);
+        }
+        drop(rtp_tx);
+        frames
+    }
+
+    /// Regression: a sender that keeps its SSRC and sequence continuity but
+    /// resets its RTP clock must not lose audio until the old clock catches
+    /// up. Every packet is played and the delivered timeline stays continuous.
+    #[tokio::test]
+    async fn same_ssrc_timestamp_reset_keeps_audio_flowing() {
+        let mut packets = Vec::new();
+        for k in 0..5u16 {
+            packets.push((
+                0x1111,
+                10 + k,
+                3_000_000 + u32::from(k) * 160,
+                vec![0x90; 160],
+            ));
+        }
+        // Same SSRC, sequence continues, timestamp restarts near zero.
+        for k in 0..10u16 {
+            packets.push((0x1111, 15 + k, 320 + u32::from(k) * 160, vec![0x90; 160]));
+        }
+        let frames = receive_through_handler("PCMU", HashMap::new(), 0, packets).await;
+        let timestamps: Vec<u32> = frames.iter().map(|frame| frame.timestamp).collect();
+        assert_eq!(
+            frames.len(),
+            15,
+            "every packet after the clock reset must be played: {timestamps:?}"
+        );
+        for pair in timestamps.windows(2) {
+            assert_eq!(
+                pair[1].wrapping_sub(pair[0]),
+                160,
+                "delivered timeline must stay continuous: {timestamps:?}"
+            );
+        }
+    }
+
+    /// The intended improvement: a direct peer replaces its SSRC with an
+    /// independent RTP clock and an independent Opus encoder. Returns the
+    /// frames delivered to the application callback, how many came from the
+    /// first source, and a fresh decoder's output for each new-source packet.
+    #[cfg(feature = "opus")]
+    async fn opus_ssrc_replacement() -> (Vec<AudioFrame>, usize, Vec<Vec<i16>>) {
+        let mut parameters = HashMap::new();
+        parameters.insert(types::RTP_PAYLOAD_TYPE_PARAMETER.into(), "111".into());
+        parameters.insert(types::RTP_CLOCK_RATE_PARAMETER.into(), "48000".into());
+        parameters.insert(types::AUDIO_CHANNELS_PARAMETER.into(), "1".into());
+        let format = codec_runtime::resolve_codec(&MediaConfig {
+            local_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            remote_addr: None,
+            preferred_codec: Some("opus".to_string()),
+            parameters: parameters.clone(),
+        })
+        .expect("resolve opus");
+        let tone = |hz: f64, frame: u32| {
+            let samples = (0..960u32)
+                .flat_map(|i| {
+                    let n = f64::from(frame * 960 + i);
+                    let sample =
+                        (8000.0 * (n * hz * std::f64::consts::TAU / 48_000.0).sin()) as i16;
+                    vec![sample; usize::from(format.channels)]
+                })
+                .collect();
+            AudioFrame::new(samples, 48_000, format.channels, 0)
+        };
+        // Two independent senders, each with its own encoder.
+        let sender_a = codec_runtime::DialogCodecRuntime::new(format.clone()).unwrap();
+        let sender_b = codec_runtime::DialogCodecRuntime::new(format.clone()).unwrap();
+        let mut a = Vec::new();
+        for k in 0..6 {
+            a.push(sender_a.encode(&tone(440.0, k)).await.unwrap());
+        }
+        let mut b = Vec::new();
+        for k in 0..4 {
+            b.push(sender_b.encode(&tone(880.0, k)).await.unwrap());
+        }
+        let mut packets = Vec::new();
+        for (k, payload) in a.iter().enumerate() {
+            packets.push((
+                0xaaaa,
+                10 + k as u16,
+                14_560 + k as u32 * 960,
+                payload.clone(),
+            ));
+        }
+        for (k, payload) in b.iter().enumerate() {
+            packets.push((
+                0xbbbb,
+                80 + k as u16,
+                456_000 + k as u32 * 960,
+                payload.clone(),
+            ));
+        }
+        let frames = receive_through_handler("opus", parameters, 111, packets).await;
+        let mut fresh = Vec::new();
+        for payload in &b {
+            let decoder = codec_runtime::DialogCodecRuntime::new(format.clone()).unwrap();
+            fresh.push(decoder.decode(payload, 0).await.unwrap().samples);
+        }
+        (frames, a.len(), fresh)
+    }
+
+    /// The callback sees a continuous timeline, not the new source's raw epoch.
+    #[cfg(feature = "opus")]
+    #[tokio::test]
+    async fn opus_ssrc_replacement_keeps_a_continuous_timeline() {
+        let (frames, first_source_frames, _) = opus_ssrc_replacement().await;
+        let timestamps: Vec<u32> = frames.iter().map(|frame| frame.timestamp).collect();
+        assert!(
+            frames.len() > first_source_frames,
+            "replacement source must be played: {timestamps:?}"
+        );
+        for pair in timestamps.windows(2) {
+            assert_eq!(
+                pair[1].wrapping_sub(pair[0]),
+                960,
+                "artificial timestamp jump passed downstream: {timestamps:?}"
+            );
+        }
+    }
+
+    /// The first new-source frame the callback sees is what a fresh decoder
+    /// produces for a new-source packet, not the output of a decoder still
+    /// carrying the previous source's prediction and overlap state.
+    #[cfg(feature = "opus")]
+    #[tokio::test]
+    async fn opus_ssrc_replacement_is_decoded_with_fresh_state() {
+        let (frames, first_source_frames, fresh) = opus_ssrc_replacement().await;
+        let first_new = &frames
+            .get(first_source_frames)
+            .expect("replacement source must be played")
+            .samples;
+        assert!(
+            fresh.iter().any(|samples| samples == first_new),
+            "replacement source was decoded with the previous source's decoder state"
+        );
+    }
+
     #[tokio::test]
     async fn test_dynamic_port_allocation() {
         println!("🧪 Testing dynamic port allocation integration");

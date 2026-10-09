@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.3.12
+
+### 0.3.12 release recovery
+
+- The protected 0.3.11 publication stopped after 25 of 46 crates reached
+  crates.io. No `v0.3.11` tag or GitHub release was created.
+- `rvoip-core` now keeps its forward `rvoip-harness` test dependency path-only,
+  so Cargo can package core before harness exists on crates.io. Release
+  planning detects cycles involving versioned test dependencies before the
+  first upload.
+
 ### Release workers move to AWS
 
 - The `remote-release`, `remote-preflight`, and `remote-diagnostic` profiles

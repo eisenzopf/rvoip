@@ -8,7 +8,7 @@ use rvoip_core_traits::ids::{ConnectionId, ParticipantId, StreamId};
 use rvoip_core_traits::stream::{MediaFrame, StreamKind};
 use rvoip_harness::{
     AsrConfig, AsrProvider, AsrResult, AsrStream, DialogAction, DialogManager, RecordingSink,
-    TtsPlayback, TtsProvider, TtsRequest, VecRecordingSink,
+    TtsAudioFormat, TtsPlayback, TtsProvider, TtsRequest, VecRecordingSink,
 };
 use rvoip_vcon::{DialogKind, Party, VconBuilder};
 
@@ -103,6 +103,11 @@ impl TtsProvider for FakeTtsProvider {
 
 #[async_trait]
 impl TtsPlayback for FakeTtsPlayback {
+    fn audio_format(&self) -> TtsAudioFormat {
+        TtsAudioFormat::PcmS16Le {
+            sample_rate_hz: 8_000,
+        }
+    }
     async fn next_frame(&self) -> Option<MediaFrame> {
         self.next
             .lock()
@@ -141,6 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     voice,
                     text: text.clone(),
                     sample_rate_hz: Some(8_000),
+                    destination_codec: None,
                 })
                 .await?;
             let sink = VecRecordingSink::new("memory://ai-harness-demo.raw");

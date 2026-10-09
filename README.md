@@ -7,10 +7,10 @@
 
 [![Rust 1.91+](https://img.shields.io/badge/rust-1.91%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#license)
-[![rvoip](https://img.shields.io/crates/v/rvoip.svg?label=rvoip&release=0.3.11)](https://crates.io/crates/rvoip/0.3.11)
-[![rvoip-sip](https://img.shields.io/crates/v/rvoip-sip.svg?label=rvoip-sip&release=0.3.11)](https://crates.io/crates/rvoip-sip/0.3.11)
-[![Facade API](https://img.shields.io/docsrs/rvoip/0.3.11?label=Facade%20API)](https://docs.rs/rvoip/0.3.11/rvoip/)
-[![SIP API](https://img.shields.io/docsrs/rvoip-sip/0.3.11?label=SIP%20API)](https://docs.rs/rvoip-sip/0.3.11/rvoip_sip/)
+[![rvoip](https://img.shields.io/crates/v/rvoip.svg?label=rvoip&release=0.3.12)](https://crates.io/crates/rvoip/0.3.12)
+[![rvoip-sip](https://img.shields.io/crates/v/rvoip-sip.svg?label=rvoip-sip&release=0.3.12)](https://crates.io/crates/rvoip-sip/0.3.12)
+[![Facade API](https://img.shields.io/docsrs/rvoip/0.3.12?label=Facade%20API)](https://docs.rs/rvoip/0.3.12/rvoip/)
+[![SIP API](https://img.shields.io/docsrs/rvoip-sip/0.3.12?label=SIP%20API)](https://docs.rs/rvoip-sip/0.3.12/rvoip_sip/)
 
 [**Five-minute start**](#five-minute-start) · [**For carriers**](docs/CARRIERS.md) · [**Which crate?**](#you-need-one-crate) · [**Pick a path**](#pick-your-path) · [**How it fits together**](#how-it-fits-together) · [**What ships**](#what-ships-today) · [**Interop evidence**](#sip-interoperability-and-release-evidence) · [**Changes**](CHANGELOG.md)
 
@@ -35,7 +35,7 @@ performance, and reliability should start with [For carriers](docs/CARRIERS.md).
 
 ```toml
 [dependencies]
-rvoip-sip = "0.3.11"
+rvoip-sip = "0.3.12"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -125,6 +125,11 @@ SIEM sinks, SAML, SCIM, WebAuthn, STIR/SHAKEN, IMS AKA) are separate
 
 ## Pick your path
 
+For JavaScript UCTP control, see the [experimental browser/Node WebSocket
+client](sdk/uctp-js/README.md). It is available as source with TypeScript
+declarations; the package is not yet published to npm. Application-profile
+dispatch is a separate opt-in server extension that stock servers do not enable.
+
 ### Path 1 — SIP telephony (`rvoip-sip`)
 
 Four API surfaces, from simplest to most control. Most applications use the
@@ -205,7 +210,7 @@ and Opus behind Cargo features. The full surface is documented in the
 runs SIP, WebRTC, and UCTP listeners on the shared `Orchestrator`:
 
 ```toml
-rvoip = { version = "0.3.11", features = ["app"] }
+rvoip = { version = "0.3.12", features = ["app"] }
 ```
 
 ```rust,no_run
@@ -396,7 +401,7 @@ RTP-over-QUIC has shipped.
 
 ## Extensions
 
-All 14 extension crates ship at `0.3.11`. They stay optional so protocol
+All 14 extension crates ship at `0.3.12`. They stay optional so protocol
 crates depend on provider contracts, never on a deployment backend.
 
 | Group | Extensions | Available capability |
@@ -412,10 +417,10 @@ identity surface; `vapi` and `sip-stir-shaken` are their own facade features;
 everything else is a direct dependency.
 
 ```toml
-rvoip = { version = "0.3.11", features = ["sip", "vapi", "sip-stir-shaken"] }
-rvoip-keycloak = "0.3.11"
-rvoip-redis = "0.3.11"
-rvoip-audit = "0.3.11"
+rvoip = { version = "0.3.12", features = ["sip", "vapi", "sip-stir-shaken"] }
+rvoip-keycloak = "0.3.12"
+rvoip-redis = "0.3.12"
+rvoip-audit = "0.3.12"
 ```
 
 The contracts they implement live in
@@ -539,6 +544,6 @@ Licensed under the [MIT License](LICENSE).
 
 ---
 
-**Built in Rust** · [Facade API](https://docs.rs/rvoip/0.3.11/rvoip/) · [SIP API](https://docs.rs/rvoip-sip/0.3.11/rvoip_sip/) · [Examples](examples/) · [Issues](https://github.com/eisenzopf/rvoip/issues) · [Discussions](https://github.com/eisenzopf/rvoip/discussions)
+**Built in Rust** · [Facade API](https://docs.rs/rvoip/0.3.12/rvoip/) · [SIP API](https://docs.rs/rvoip-sip/0.3.12/rvoip_sip/) · [Examples](examples/) · [Issues](https://github.com/eisenzopf/rvoip/issues) · [Discussions](https://github.com/eisenzopf/rvoip/discussions)
 
 </div>

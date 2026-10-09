@@ -50,6 +50,16 @@ pub const AMR_DTX_PARAMETER: &str = "amr_dtx";
 /// worse than never asking at all.
 pub const AMR_AUTO_CMR_PARAMETER: &str = "amr_auto_cmr";
 
+/// Whether RTP/RTCP multiplexing (RFC 5761) was negotiated for the session.
+///
+/// `"true"` enables it; anything else, or absence, leaves it off. The RTP
+/// session has one socket, so periodic RTCP reports share the RTP port and
+/// may only flow once SDP offered and answered `a=rtcp-mux`. Applied by
+/// [`MediaSessionController::update_media`](super::MediaSessionController::update_media)
+/// only when the value changes, so a configuration without the key leaves a
+/// session that was created with a known peer reporting as before.
+pub const RTCP_MUX_PARAMETER: &str = "rtcp_mux";
+
 /// Media configuration for a session
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaConfig {
@@ -129,6 +139,27 @@ impl MediaConfig {
             self.parameters.remove(AMR_DTX_PARAMETER);
         }
         self
+    }
+
+    /// Set or clear the negotiated RTP/RTCP multiplexing flag
+    /// ([`RTCP_MUX_PARAMETER`]). Cleared rather than falsified, for the same
+    /// reason as [`Self::with_amr_dtx`].
+    #[must_use]
+    pub fn with_rtcp_mux(mut self, negotiated: bool) -> Self {
+        if negotiated {
+            self.parameters
+                .insert(RTCP_MUX_PARAMETER.to_string(), "true".to_string());
+        } else {
+            self.parameters.remove(RTCP_MUX_PARAMETER);
+        }
+        self
+    }
+
+    /// Whether [`RTCP_MUX_PARAMETER`] is set.
+    pub fn rtcp_mux(&self) -> bool {
+        self.parameters
+            .get(RTCP_MUX_PARAMETER)
+            .is_some_and(|value| value == "true")
     }
 
     /// Set or clear automatic codec mode requests

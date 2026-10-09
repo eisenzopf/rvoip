@@ -491,6 +491,15 @@ impl ConnectionLifecycleTaskSupervisor {
     }
 
     fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) -> bool {
+        self.spawn_abortable(task).is_some()
+    }
+
+    /// Like [`Self::spawn`], but returns the task's abort handle so callers
+    /// can observe whether that specific task is still running.
+    fn spawn_abortable(
+        &self,
+        task: impl Future<Output = ()> + Send + 'static,
+    ) -> Option<tokio::task::AbortHandle> {
         let mut tasks = self
             .tasks
             .lock()
@@ -501,7 +510,7 @@ impl ConnectionLifecycleTaskSupervisor {
             }
         }
         if self.draining.load(Ordering::Acquire) {
-            return false;
+            return None;
         }
         if tasks.len() >= self.capacity {
             metrics::counter!(
@@ -509,10 +518,9 @@ impl ConnectionLifecycleTaskSupervisor {
                 "reason" => "capacity"
             )
             .increment(1);
-            return false;
+            return None;
         }
-        tasks.spawn(task);
-        true
+        Some(tasks.spawn(task))
     }
 
     /// Execute a synchronous ownership commit and install its lifecycle task
@@ -1399,6 +1407,18 @@ fn directional_bridge_media_graph_policy(left: Transport, right: Transport) -> M
     policy
 }
 
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+enum PeriodicTaskKind {
+    MediaQuality,
+    IdleCloser,
+    Capacity,
+}
+
+/// One live worker per [`PeriodicTaskKind`], plus room for one finished
+/// (exited or panicked) worker per kind that the supervisor has not reaped
+/// yet, so restarting a dead worker never trips the capacity bound.
+const PERIODIC_TASK_CAPACITY: usize = 6;
+
 pub struct Orchestrator {
     pub config: Config,
     pub bridges: BridgeManager,
@@ -1425,6 +1445,7 @@ pub struct Orchestrator {
     /// Bounds the number of provisional outbound routes that may await a
     /// durable application bind at once.
     prepared_outbound_capacity: Arc<Semaphore>,
+    prepared_outbound_capacity_total: usize,
     /// One lazily-started owner for preparation deadlines and bounded adapter
     /// cleanup tasks. Tickets enqueue decisions; they never detach cleanup
     /// work themselves.
@@ -1434,6 +1455,14 @@ pub struct Orchestrator {
     /// Owns adapter normalizers and asynchronous connection side effects so
     /// shutdown can abort and join them deterministically.
     connection_lifecycle_tasks: ConnectionLifecycleTaskSupervisor,
+    periodic_tasks: ConnectionLifecycleTaskSupervisor,
+    /// Abort handle of the most recent worker per periodic kind. A kind is
+    /// running only while its handle reports unfinished, so a worker that
+    /// exits or panics can be started again.
+    periodic_workers: Mutex<HashMap<PeriodicTaskKind, tokio::task::AbortHandle>>,
+    playback_tasks: ConnectionLifecycleTaskSupervisor,
+    playback_routes:
+        Arc<DashMap<crate::ids::PlaybackId, (ConnectionId, tokio_util::sync::CancellationToken)>>,
     /// Safe self-reference used by opaque tickets without requiring every
     /// existing command method to change its `&self` receiver to `&Arc<Self>`.
     self_weak: OnceLock<Weak<Orchestrator>>,
@@ -1570,6 +1599,7 @@ pub struct Orchestrator {
     /// and is released by Drop on `stop_recording`. Absent entry =
     /// unlimited (no admission check). Replaces the DashMap-shard-
     /// contention-bound check-then-increment from v1.
+    tenant_quota_update_lock: Mutex<()>,
     recording_sems: Arc<DashMap<TenantId, Arc<Semaphore>>>,
     ai_sems: Arc<DashMap<TenantId, Arc<Semaphore>>>,
 }
@@ -1808,6 +1838,54 @@ pub(crate) struct AiAttachmentHandle {
     pub _permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
+/// Removes the route even when a worker is aborted before its first poll.
+struct PlaybackRouteGuard {
+    routes:
+        Arc<DashMap<crate::ids::PlaybackId, (ConnectionId, tokio_util::sync::CancellationToken)>>,
+    id: crate::ids::PlaybackId,
+    completion: Option<crate::adapter::PlaybackCompletionSender>,
+}
+
+impl PlaybackRouteGuard {
+    fn finish(&mut self, outcome: PlaybackOutcome) {
+        if let Some(completion) = self.completion.take() {
+            completion.finish(outcome);
+        }
+    }
+}
+
+impl Drop for PlaybackRouteGuard {
+    fn drop(&mut self) {
+        self.routes.remove(&self.id);
+        self.finish(PlaybackOutcome::Cancelled);
+    }
+}
+
+enum StreamPlaybackSource {
+    Tts {
+        source: TtsPlaybackCancelGuard,
+        frames: crate::playback::TtsFrameAdapter,
+    },
+    Pcm(crate::playback::PcmFrameProducer),
+}
+impl StreamPlaybackSource {
+    async fn next_frame(&mut self) -> Result<Option<crate::stream::MediaFrame>> {
+        match self {
+            Self::Tts { source, frames } => frames.next_frame(source.playback()).await,
+            Self::Pcm(source) => source.next_frame().await,
+        }
+    }
+    async fn finish(&mut self, outcome: PlaybackOutcome) {
+        if let Self::Tts { source, .. } = self {
+            if outcome == PlaybackOutcome::Completed {
+                source.complete();
+            } else {
+                source.cancel().await;
+            }
+        }
+    }
+}
+
 struct TtsPlaybackCancelGuard {
     playback: Arc<dyn crate::harness::TtsPlayback>,
     completed: bool,
@@ -1869,12 +1947,19 @@ impl Orchestrator {
             replacement_preparation_test_gate: OnceLock::new(),
             admission,
             prepared_outbound_capacity: Arc::new(Semaphore::new(setup_capacity)),
+            prepared_outbound_capacity_total: setup_capacity,
             prepared_outbound_supervisor: PreparedOutboundSupervisor::new(setup_capacity),
             prepared_outbound_draining: AtomicBool::new(false),
             prepared_outbound_drained: AtomicBool::new(false),
+            playback_tasks: ConnectionLifecycleTaskSupervisor::new(
+                setup_capacity.saturating_mul(4).max(64),
+            ),
+            playback_routes: Arc::new(DashMap::new()),
             connection_lifecycle_tasks: ConnectionLifecycleTaskSupervisor::new(
                 setup_capacity.saturating_mul(4).max(64),
             ),
+            periodic_tasks: ConnectionLifecycleTaskSupervisor::new(PERIODIC_TASK_CAPACITY),
+            periodic_workers: Mutex::new(HashMap::new()),
             self_weak: OnceLock::new(),
             adapters: Arc::new(DashMap::new()),
             adapter_registrations: Mutex::new(HashSet::new()),
@@ -1916,6 +2001,7 @@ impl Orchestrator {
             session_quality: Arc::new(DashMap::new()),
             tenant_quotas: Arc::new(DashMap::new()),
             conversations_by_tenant: Arc::new(DashMap::new()),
+            tenant_quota_update_lock: Mutex::new(()),
             recording_sems: Arc::new(DashMap::new()),
             ai_sems: Arc::new(DashMap::new()),
         });
@@ -1954,12 +2040,19 @@ impl Orchestrator {
             replacement_preparation_test_gate: OnceLock::new(),
             admission,
             prepared_outbound_capacity: Arc::new(Semaphore::new(setup_capacity)),
+            prepared_outbound_capacity_total: setup_capacity,
             prepared_outbound_supervisor: PreparedOutboundSupervisor::new(setup_capacity),
             prepared_outbound_draining: AtomicBool::new(false),
             prepared_outbound_drained: AtomicBool::new(false),
+            playback_tasks: ConnectionLifecycleTaskSupervisor::new(
+                setup_capacity.saturating_mul(4).max(64),
+            ),
+            playback_routes: Arc::new(DashMap::new()),
             connection_lifecycle_tasks: ConnectionLifecycleTaskSupervisor::new(
                 setup_capacity.saturating_mul(4).max(64),
             ),
+            periodic_tasks: ConnectionLifecycleTaskSupervisor::new(PERIODIC_TASK_CAPACITY),
+            periodic_workers: Mutex::new(HashMap::new()),
             self_weak: OnceLock::new(),
             adapters: Arc::new(DashMap::new()),
             adapter_registrations: Mutex::new(HashSet::new()),
@@ -2001,6 +2094,7 @@ impl Orchestrator {
             session_quality: Arc::new(DashMap::new()),
             tenant_quotas: Arc::new(DashMap::new()),
             conversations_by_tenant: Arc::new(DashMap::new()),
+            tenant_quota_update_lock: Mutex::new(()),
             recording_sems: Arc::new(DashMap::new()),
             ai_sems: Arc::new(DashMap::new()),
         });
@@ -2216,7 +2310,64 @@ impl Orchestrator {
     /// prepared outbound connections first so their cleanup events can still
     /// be normalized before calling this method.
     pub async fn drain_connection_lifecycle_tasks(&self) {
+        self.drain_playback_tasks().await;
+        self.drain_periodic_tasks().await;
         self.connection_lifecycle_tasks.drain().await;
+    }
+
+    /// Cancel and join core-owned stream playback workers. Terminal and
+    /// idempotent. Aborted TTS providers receive best-effort asynchronous
+    /// cancellation through their existing cancellation guard.
+    pub async fn drain_playback_tasks(&self) {
+        for route in self.playback_routes.iter() {
+            route.value().1.cancel();
+        }
+        self.playback_tasks.drain().await;
+    }
+
+    /// Number of retained playback workers, after reaping completed workers.
+    #[must_use]
+    pub fn playback_task_count(&self) -> usize {
+        self.playback_tasks.task_count()
+    }
+
+    fn start_periodic_task(
+        &self,
+        kind: PeriodicTaskKind,
+        task: impl Future<Output = ()> + Send + 'static,
+    ) -> Result<()> {
+        let mut workers = self
+            .periodic_workers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if self.periodic_tasks.draining.load(Ordering::Acquire) {
+            return Err(RvoipError::InvalidState("periodic supervisor is draining"));
+        }
+        if workers
+            .get(&kind)
+            .is_some_and(|worker| !worker.is_finished())
+        {
+            return Ok(());
+        }
+        let Some(worker) = self.periodic_tasks.spawn_abortable(task) else {
+            return Err(RvoipError::InvalidState(
+                "periodic supervisor is unavailable",
+            ));
+        };
+        workers.insert(kind, worker);
+        Ok(())
+    }
+
+    /// Cancel and join the SDK periodic workers. Terminal and idempotent;
+    /// ordinary connection lifecycle consumers remain running.
+    pub async fn drain_periodic_tasks(&self) {
+        self.periodic_tasks.drain().await;
+    }
+
+    /// Number of retained SDK periodic workers, excluding completed tasks.
+    #[must_use]
+    pub fn periodic_task_count(&self) -> usize {
+        self.periodic_tasks.task_count()
     }
 
     /// Number of retained adapter-normalizer and connection-side-effect
@@ -5064,7 +5215,17 @@ impl Orchestrator {
         });
     }
 
+    fn cancel_connection_playbacks(&self, conn: &ConnectionId) {
+        for route in self.playback_routes.iter() {
+            if &route.value().0 == conn {
+                route.value().1.cancel();
+            }
+        }
+    }
+
     fn cleanup_media_attachments_for_connection(&self, conn: &ConnectionId) {
+        self.cancel_connection_playbacks(conn);
+
         let recording_ids: Vec<_> = self
             .recordings
             .iter()
@@ -5163,6 +5324,7 @@ impl Orchestrator {
             }
             self.connections.remove(conn)
         };
+        self.cancel_connection_playbacks(conn);
         if let Some(staged) = removed
             .as_ref()
             .and_then(|(_, entry)| entry.staged_inbound_data.as_ref())
@@ -5229,6 +5391,7 @@ impl Orchestrator {
             lifecycle.generation = lifecycle.generation.saturating_add(1);
             removed
         };
+        self.cancel_connection_playbacks(&claimed.connection_id);
         debug_assert!(matches!(
             removed.1.inbound_publication,
             InboundPublicationState::Rejecting(_)
@@ -5431,70 +5594,67 @@ impl Orchestrator {
         self.conversations.iter().map(|e| e.key().clone()).collect()
     }
 
-    /// P6 — install/replace per-tenant quotas. V2.B provisions the
-    /// per-tenant admission semaphores from the quota config: each
-    /// `max_concurrent_*` slot gets an `Arc<Semaphore>` with that
-    /// capacity. Resize-up is supported (extra permits added via
-    /// `Semaphore::add_permits`); resize-down with live permits would
-    /// require revoking issued permits and is intentionally rejected
-    /// — call sites that want to shrink a quota should drain the
-    /// active sessions first.
+    /// Install or replace per-tenant quotas. Repeating a configured limit is
+    /// idempotent even while permits are held. Increases apply to total
+    /// capacity; decreases or removal require all affected permits to drain.
+    /// Validation precedes every mutation, so a rejected update is atomic.
     pub fn set_tenant_quotas(
         &self,
         tenant: TenantId,
         quotas: crate::config::TenantQuotas,
     ) -> Result<()> {
-        // Provision / resize recording semaphore.
-        if let Some(new_cap) = quotas.max_concurrent_recordings {
-            match self.recording_sems.entry(tenant.clone()) {
-                dashmap::mapref::entry::Entry::Vacant(v) => {
-                    v.insert(Arc::new(Semaphore::new(new_cap)));
-                }
-                dashmap::mapref::entry::Entry::Occupied(o) => {
-                    // Compare against an implicit "total issued" — we
-                    // can't directly read total capacity from a tokio
-                    // Semaphore, so we track resize-up by checking if
-                    // new_cap exceeds current available + outstanding.
-                    // Outstanding = total - available. We approximate
-                    // by using the Semaphore's add_permits which always
-                    // adds (no resize-down possible).
-                    let sem = o.get();
-                    let available = sem.available_permits();
-                    // For resize-up: add (new - available) permits when
-                    // new > available. This is conservative — if the
-                    // existing cap was already higher than `available`,
-                    // we may end up adding too few permits (loss of
-                    // capacity that's currently held). Documented as
-                    // a v2.B.1 caveat — call sites that mix shrink and
-                    // expand on the same tenant need explicit drain
-                    // semantics.
-                    if new_cap > available {
-                        sem.add_permits(new_cap - available);
-                    } else if new_cap < available {
-                        return Err(RvoipError::InvalidState(
-                            "set_tenant_quotas: shrinking recording quota \
-                             not supported while permits are held; drain first",
-                        ));
-                    }
+        let _update = self
+            .tenant_quota_update_lock
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let previous = self
+            .tenant_quotas
+            .get(&tenant)
+            .map(|q| *q)
+            .unwrap_or_default();
+        let changes = [
+            (
+                &self.recording_sems,
+                previous.max_concurrent_recordings,
+                quotas.max_concurrent_recordings,
+            ),
+            (
+                &self.ai_sems,
+                previous.max_concurrent_ai_sessions,
+                quotas.max_concurrent_ai_sessions,
+            ),
+        ];
+        for (semaphores, old, new) in changes {
+            if new.is_some_and(|capacity| capacity > Semaphore::MAX_PERMITS) {
+                return Err(RvoipError::InvalidState(
+                    "tenant quota exceeds semaphore capacity",
+                ));
+            }
+            if let Some(old) = old {
+                if new.is_none_or(|new| new < old)
+                    && semaphores
+                        .get(&tenant)
+                        .is_some_and(|sem| sem.available_permits() != old)
+                {
+                    return Err(RvoipError::InvalidState(
+                        "tenant quota decrease or removal requires drained permits",
+                    ));
                 }
             }
         }
-        if let Some(new_cap) = quotas.max_concurrent_ai_sessions {
-            match self.ai_sems.entry(tenant.clone()) {
-                dashmap::mapref::entry::Entry::Vacant(v) => {
-                    v.insert(Arc::new(Semaphore::new(new_cap)));
+        for (semaphores, old, new) in changes {
+            match new {
+                None => {
+                    semaphores.remove(&tenant);
                 }
-                dashmap::mapref::entry::Entry::Occupied(o) => {
-                    let sem = o.get();
-                    let available = sem.available_permits();
-                    if new_cap > available {
-                        sem.add_permits(new_cap - available);
-                    } else if new_cap < available {
-                        return Err(RvoipError::InvalidState(
-                            "set_tenant_quotas: shrinking AI quota not \
-                             supported while permits are held; drain first",
-                        ));
+                Some(new) => {
+                    if let Some(old) = old.filter(|old| new >= *old) {
+                        if let Some(sem) = semaphores.get(&tenant) {
+                            sem.add_permits(new - old);
+                            continue;
+                        }
                     }
+                    semaphores.insert(tenant.clone(), Arc::new(Semaphore::new(new)));
                 }
             }
         }
@@ -5533,16 +5693,151 @@ impl Orchestrator {
         }
     }
 
+    /// Observe core ownership and concurrently query adapters under one
+    /// overall deadline. No observation tasks are spawned. Pending adapter
+    /// futures are dropped on timeout; failed hooks expose no error text.
+    ///
+    /// The budget applies to asynchronous adapter collection; the preceding
+    /// synchronous core census scans bounded ownership registries. Timeout
+    /// relies on adapters obeying the cooperative, cancellation-safe hook
+    /// contract. Zero budget skips adapter hooks and marks them TimedOut.
+    pub async fn resource_snapshot(
+        &self,
+        adapter_budget: std::time::Duration,
+    ) -> Result<crate::resources::ResourceSnapshot> {
+        use crate::resources::*;
+        let mut core = CoreResourceCounts::default();
+        for entry in self.conversations.iter() {
+            let conversation = entry.value().read().unwrap_or_else(|p| p.into_inner());
+            if conversation.state == ConversationState::Closed {
+                core.conversations.retained_terminal += 1;
+            } else {
+                core.conversations.live += 1;
+            }
+        }
+        for entry in self.sessions.iter() {
+            let session = entry.value().read().unwrap_or_else(|p| p.into_inner());
+            if matches!(session.state, SessionState::Ended | SessionState::Failed) {
+                core.sessions.retained_terminal += 1;
+            } else {
+                core.sessions.live += 1;
+            }
+        }
+        core.connection_routes = self.connections.len();
+        for entry in self.connection_lifecycles.iter() {
+            core.retained_connection_ids += 1;
+            if entry
+                .value()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .retired
+            {
+                core.retired_connection_ids += 1;
+            }
+        }
+        core.adapter_cleanup_quarantines = self.adapter_cleanup_quarantines.len();
+        core.media_graphs = self.media_graphs.len();
+        core.cross_bridges = self.cross_bridges.len();
+        core.recordings = self.recordings.len();
+        core.ai_attachments = self.ai_attachments.len();
+        core.direct_listeners = self.active_direct_listener_count();
+        core.prepared_outbound_reservations = self
+            .prepared_outbound_capacity_total
+            .saturating_sub(self.prepared_outbound_capacity.available_permits());
+        core.lifecycle_workers = self.connection_lifecycle_task_count();
+        core.periodic_workers = self.periodic_task_count();
+
+        type ObservationFuture =
+            std::pin::Pin<Box<dyn Future<Output = AdapterResourceObservation> + Send>>;
+        let mut pending: Vec<(
+            Transport,
+            Option<ObservationFuture>,
+            Option<AdapterResourceObservation>,
+        )> = self
+            .adapters
+            .iter()
+            .map(|entry| {
+                let transport = *entry.key();
+                let adapter = Arc::clone(entry.value());
+                let future: ObservationFuture = Box::pin(async move {
+                    match adapter.resource_snapshot().await {
+                        Ok(Some(counts)) => AdapterResourceObservation::Reported(counts),
+                        Ok(None) => AdapterResourceObservation::Unsupported,
+                        Err(_) => AdapterResourceObservation::Failed,
+                    }
+                });
+                (transport, Some(future), None)
+            })
+            .collect();
+        if !adapter_budget.is_zero() {
+            let deadline = tokio::time::Instant::now()
+                .checked_add(adapter_budget)
+                .ok_or(RvoipError::InvalidState(
+                    "resource snapshot deadline overflow",
+                ))?;
+            let collection = std::future::poll_fn(|cx| {
+                let mut complete = true;
+                for (_, future, result) in &mut pending {
+                    if let Some(worker) = future {
+                        if let std::task::Poll::Ready(observation) = worker.as_mut().poll(cx) {
+                            *result = Some(observation);
+                            *future = None;
+                        } else {
+                            complete = false;
+                        }
+                    }
+                }
+                if complete {
+                    std::task::Poll::Ready(())
+                } else {
+                    std::task::Poll::Pending
+                }
+            });
+            let _ = tokio::time::timeout_at(deadline, collection).await;
+        }
+        let adapters = pending
+            .into_iter()
+            .map(|(transport, _, observation)| {
+                AdapterResourceSnapshot::new(
+                    transport,
+                    observation.unwrap_or(AdapterResourceObservation::TimedOut),
+                )
+            })
+            .collect();
+        Ok(ResourceSnapshot { core, adapters })
+    }
+
     /// P9 — sample current `QualitySnapshot` for every active
     /// Connection at the configured cadence and emit
     /// `Event::MediaQuality`. Spawns one task that ticks `every`.
     pub fn spawn_media_quality_sampler(self: &Arc<Self>, every: std::time::Duration) {
-        let me = Arc::clone(self);
-        tokio::spawn(async move {
+        if let Err(error) = self.try_spawn_media_quality_sampler(every) {
+            warn!(%error, "periodic worker was not started");
+        }
+    }
+
+    /// Start this periodic worker once. Repeated requests while the worker is
+    /// running retain the original cadence; if the previous worker exited
+    /// (for example by panicking), a replacement starts with this request's
+    /// cadence. Zero intervals and startup after shutdown return an error.
+    pub fn try_spawn_media_quality_sampler(
+        self: &Arc<Self>,
+        every: std::time::Duration,
+    ) -> Result<()> {
+        if every.is_zero() {
+            return Err(RvoipError::InvalidState(
+                "periodic interval must be nonzero",
+            ));
+        }
+        let owner = Arc::downgrade(self);
+        self.start_periodic_task(PeriodicTaskKind::MediaQuality, async move {
             let mut tick = tokio::time::interval(every);
             tick.tick().await;
             loop {
                 tick.tick().await;
+                let Some(me) = owner.upgrade() else {
+                    break;
+                };
                 // Snapshot connections.
                 let conns: Vec<(ConnectionId, Transport)> = me
                     .connections
@@ -5589,20 +5884,44 @@ impl Orchestrator {
                     });
                 }
             }
-        });
+        })
     }
 
     /// P10 — drive idle-close of `Ephemeral` Conversations. Spawns
-    /// one task that ticks `every` and force-closes any Conversation
-    /// whose `last_activity_at` is older than its policy's
-    /// `idle_close_secs` AND has no `Active` Sessions.
+    /// one task that ticks `every` and closes (without `force`) any
+    /// Conversation whose `last_activity_at` is older than its policy's
+    /// `idle_close_secs` AND has no `Active` Sessions. Conversations that
+    /// still hold any non-terminal Session are left open.
+    ///
+    /// Shutdown safety: periodic drain aborts this worker, but only at an
+    /// `.await`. A non-forcing `close_conversation` never awaits (it does not
+    /// end Sessions), so each close either completes atomically within one
+    /// poll or is not started; drain cannot leave a Conversation half-closed.
     pub fn spawn_idle_closer(self: &Arc<Self>, every: std::time::Duration) {
-        let me = Arc::clone(self);
-        tokio::spawn(async move {
+        if let Err(error) = self.try_spawn_idle_closer(every) {
+            warn!(%error, "periodic worker was not started");
+        }
+    }
+
+    /// Start this periodic worker once. Repeated requests while the worker is
+    /// running retain the original cadence; if the previous worker exited
+    /// (for example by panicking), a replacement starts with this request's
+    /// cadence. Zero intervals and startup after shutdown return an error.
+    pub fn try_spawn_idle_closer(self: &Arc<Self>, every: std::time::Duration) -> Result<()> {
+        if every.is_zero() {
+            return Err(RvoipError::InvalidState(
+                "periodic interval must be nonzero",
+            ));
+        }
+        let owner = Arc::downgrade(self);
+        self.start_periodic_task(PeriodicTaskKind::IdleCloser, async move {
             let mut tick = tokio::time::interval(every);
             tick.tick().await;
             loop {
                 tick.tick().await;
+                let Some(me) = owner.upgrade() else {
+                    break;
+                };
                 let now = Utc::now();
                 let mut to_close: Vec<ConversationId> = Vec::new();
                 for entry in me.conversations.iter() {
@@ -5633,32 +5952,53 @@ impl Orchestrator {
                     to_close.push(entry.key().clone());
                 }
                 for cid in to_close {
+                    // `force = false` keeps this close free of await points,
+                    // which is what makes aborting the worker during drain
+                    // safe. Do not switch to a forcing close here without
+                    // moving it off the abortable periodic worker.
                     let _ = me.close_conversation(cid, false).await;
                 }
             }
-        });
+        })
     }
 
     /// P6 — start the periodic capacity-report emitter using the
     /// cadence in `Config::capacity_report_interval`. Returns
-    /// immediately; the scheduler task is owned by the Orchestrator
-    /// and aborts when the Orchestrator is dropped (best-effort —
-    /// real teardown semantics ship with P11 graceful-shutdown).
+    /// immediately. The task is supervised, holds only a weak owner between
+    /// ticks, and is cancelled by periodic drain or Orchestrator drop.
     pub fn spawn_capacity_scheduler(self: &Arc<Self>) {
+        if let Err(error) = self.try_spawn_capacity_scheduler() {
+            warn!(%error, "periodic worker was not started");
+        }
+    }
+
+    /// Start this periodic worker once. Repeated requests while the worker is
+    /// running retain the original cadence; if the previous worker exited
+    /// (for example by panicking), a replacement starts with this request's
+    /// cadence. Zero intervals and startup after shutdown return an error.
+    pub fn try_spawn_capacity_scheduler(self: &Arc<Self>) -> Result<()> {
         let Some(interval) = self.config.capacity_report_interval else {
-            return;
+            return Ok(());
         };
-        let me = Arc::clone(self);
-        tokio::spawn(async move {
+        if interval.is_zero() {
+            return Err(RvoipError::InvalidState(
+                "periodic interval must be nonzero",
+            ));
+        }
+        let owner = Arc::downgrade(self);
+        self.start_periodic_task(PeriodicTaskKind::Capacity, async move {
             let mut tick = tokio::time::interval(interval);
             // Skip the immediate tick — first emit happens after one
             // interval.
             tick.tick().await;
             loop {
                 tick.tick().await;
+                let Some(me) = owner.upgrade() else {
+                    break;
+                };
                 me.emit(me.capacity_report());
             }
-        });
+        })
     }
 
     fn check_session_quota(&self, conv_id: &ConversationId) -> Result<()> {
@@ -9964,6 +10304,11 @@ impl Orchestrator {
         // permit is stored in `RecordingHandle._permit` and released
         // by Drop when the handle is removed.
         let permit = if let Some(ref tid) = tenant_id {
+            // Serialize reservation with quota validation and replacement.
+            let _update = self
+                .tenant_quota_update_lock
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
             self.recording_sems
                 .get(tid)
                 .map(|s| Arc::clone(s.value()))
@@ -10248,6 +10593,11 @@ impl Orchestrator {
         // V2.B — per-tenant Semaphore admission. Permit stored in the
         // AiAttachmentHandle and released by Drop on detach.
         let ai_permit = if let Some(ref tid) = tenant_id {
+            // Serialize reservation with quota validation and replacement.
+            let _update = self
+                .tenant_quota_update_lock
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
             self.ai_sems
                 .get(tid)
                 .map(|s| Arc::clone(s.value()))
@@ -10352,11 +10702,24 @@ impl Orchestrator {
                         crate::harness::DialogAction::Listen => continue,
                         crate::harness::DialogAction::End => break,
                         crate::harness::DialogAction::Say { text, voice } => {
+                            // Resolve the destination first so synthesis
+                            // targets its negotiated codec.
+                            let destination = match me.adapter_for(&connection_id) {
+                                Ok(adapter) => adapter
+                                    .streams(connection_id.clone())
+                                    .await
+                                    .ok()
+                                    .and_then(|streams| {
+                                        streams.into_iter().find(|s| s.kind() == StreamKind::Audio)
+                                    }),
+                                Err(_) => None,
+                            };
                             let playback = match tts
                                 .synthesize(crate::harness::TtsRequest {
                                     voice,
                                     text,
                                     sample_rate_hz: None,
+                                    destination_codec: destination.as_ref().map(|a| a.codec()),
                                 })
                                 .await
                             {
@@ -10370,35 +10733,43 @@ impl Orchestrator {
 
                             let mut playback_completed = false;
                             'playback: {
-                                let Ok(adapter) = me.adapter_for(&connection_id) else {
-                                    break 'playback;
-                                };
-                                let Ok(streams) = adapter.streams(connection_id.clone()).await
-                                else {
-                                    break 'playback;
-                                };
-                                let Some(audio) =
-                                    streams.into_iter().find(|s| s.kind() == StreamKind::Audio)
-                                else {
+                                let Some(audio) = destination else {
                                     break 'playback;
                                 };
                                 let Ok(tx) = audio.try_frames_out() else {
                                     break 'playback;
                                 };
+                                let Ok(mut frames) = crate::playback::TtsFrameAdapter::new(
+                                    playback.playback().audio_format(),
+                                    audio.id(),
+                                    audio.codec(),
+                                ) else {
+                                    break 'playback;
+                                };
+                                let mut pacer = crate::playback::FramePacer::default();
                                 loop {
-                                    tokio::select! {
-                                        _ = &mut cancel_rx => {
+                                    let frame = tokio::select! {
+                                        _ = &mut cancel_rx => break 'playback,
+                                        frame = frames.next_frame(playback.playback()) => frame,
+                                    };
+                                    let frame = match frame {
+                                        Ok(Some(frame)) => frame,
+                                        Ok(None) => {
+                                            playback_completed = true;
                                             break 'playback;
                                         }
-                                        frame_opt = playback.playback().next_frame() => {
-                                            let Some(frame) = frame_opt else {
-                                                playback_completed = true;
-                                                break 'playback;
-                                            };
-                                            if tx.send(frame).await.is_err() {
-                                                break 'playback;
-                                            }
-                                        }
+                                        Err(_) => break 'playback,
+                                    };
+                                    let release = pacer.next_release();
+                                    let sent = tokio::select! {
+                                        _ = &mut cancel_rx => break 'playback,
+                                        sent = async {
+                                            tokio::time::sleep_until(release).await;
+                                            tx.send(frame).await
+                                        } => sent,
+                                    };
+                                    if sent.is_err() {
+                                        break 'playback;
                                     }
                                 }
                             }
@@ -10749,6 +11120,19 @@ impl Orchestrator {
     /// P2 — start playback of `source` toward the peer on
     /// `connection_id`. The returned [`PlaybackHandle`] cancels
     /// playback on `.cancel()`.
+    ///
+    /// For [`AudioSource::TtsRequest`] the provider receives the audio
+    /// stream's negotiated codec as [`TtsRequest::destination_codec`]
+    /// (`sample_rate_hz` stays `None`). Its declared
+    /// [`TtsAudioFormat`] decides delivery: PCM is re-framed to 20 ms and
+    /// encoded through the same encoder as [`Self::play_pcm`] (PCMU, PCMA,
+    /// feature-enabled Opus); destination-encoded packets are re-stamped
+    /// with the stream id, negotiated payload type and RTP timestamps. Both
+    /// are paced at one 20 ms frame per 20 ms on a fixed schedule. Output
+    /// the destination cannot carry fails here and cancels the provider.
+    ///
+    /// [`TtsRequest::destination_codec`]: crate::harness::TtsRequest::destination_codec
+    /// [`TtsAudioFormat`]: crate::harness::TtsAudioFormat
     pub async fn play_audio(
         &self,
         connection_id: ConnectionId,
@@ -10776,6 +11160,8 @@ impl Orchestrator {
             .ok_or(RvoipError::AdmissionRejected(
                 "play_audio: TTS provider not registered",
             ))?;
+        let lifecycle_tickets =
+            self.capture_connection_lifecycles(std::slice::from_ref(&connection_id))?;
         let streams = adapter.streams(connection_id.clone()).await?;
         let audio = streams
             .into_iter()
@@ -10784,41 +11170,120 @@ impl Orchestrator {
                 "play_audio: connection has no audio stream",
             ))?;
         let frames_out = audio.try_frames_out()?;
+        let codec = audio.codec();
+        // The provider learns the destination codec; the PCM-rate preference
+        // stays unset because an RTP clock rate is not a PCM rate.
         let playback = tts
             .synthesize(crate::harness::TtsRequest {
                 voice,
                 text,
                 sample_rate_hz: None,
+                destination_codec: Some(codec.clone()),
             })
             .await?;
+        // The guard cancels the provider if its declared output cannot be
+        // delivered to this destination.
+        let source = TtsPlaybackCancelGuard::new(playback);
+        let frames = crate::playback::TtsFrameAdapter::new(
+            source.playback().audio_format(),
+            audio.id(),
+            codec,
+        )?;
+        self.start_stream_playback(
+            &lifecycle_tickets,
+            connection_id,
+            StreamPlaybackSource::Tts { source, frames },
+            frames_out,
+        )
+    }
+
+    /// Play caller-fed mono PCM through the negotiated audio stream. Supports
+    /// PCMU/PCMA and feature-enabled Opus; resamples/upmixes with media-core,
+    /// paces 20 ms frames on a fixed schedule, and reports acceptance by the
+    /// transport queue.
+    /// Completion does not prove peer playout. Negotiation is fixed for this
+    /// playback; cancel before renegotiating the connection's audio codec.
+    pub async fn play_pcm(
+        &self,
+        connection_id: ConnectionId,
+        source: crate::playback::PcmPlaybackSource,
+    ) -> Result<PlaybackHandle> {
+        let tickets = self.capture_connection_lifecycles(std::slice::from_ref(&connection_id))?;
+        let adapter = self.adapter_for(&connection_id)?;
+        let audio = adapter
+            .streams(connection_id.clone())
+            .await?
+            .into_iter()
+            .find(|stream| stream.kind() == StreamKind::Audio)
+            .ok_or(RvoipError::AdmissionRejected(
+                "play_pcm: connection has no audio stream",
+            ))?;
+        let output = audio.try_frames_out()?;
+        let producer = crate::playback::PcmFrameProducer::new(source, audio.id(), audio.codec())?;
+        self.start_stream_playback(
+            &tickets,
+            connection_id,
+            StreamPlaybackSource::Pcm(producer),
+            output,
+        )
+    }
+
+    fn start_stream_playback(
+        &self,
+        tickets: &[ConnectionLifecycleTicket],
+        connection_id: ConnectionId,
+        mut playback: StreamPlaybackSource,
+        frames_out: mpsc::Sender<crate::stream::MediaFrame>,
+    ) -> Result<PlaybackHandle> {
         let (handle, mut cancel_rx, completion) =
             PlaybackHandle::new_tracked(crate::ids::PlaybackId::new());
-        tokio::spawn(async move {
-            let mut playback = TtsPlaybackCancelGuard::new(playback);
+        let id = handle.id().clone();
+        let terminal = tokio_util::sync::CancellationToken::new();
+        let worker_terminal = terminal.clone();
+        let mut route = PlaybackRouteGuard {
+            routes: Arc::clone(&self.playback_routes),
+            id: id.clone(),
+            completion: Some(completion),
+        };
+        let task = async move {
+            let mut pacer = crate::playback::FramePacer::default();
             let outcome = loop {
-                tokio::select! {
+                let frame = tokio::select! {
+                    biased;
                     _ = &mut cancel_rx => break PlaybackOutcome::Cancelled,
-                    frame_opt = playback.playback().next_frame() => {
-                        let Some(frame) = frame_opt else {
-                            break PlaybackOutcome::Completed;
-                        };
-                        if frames_out.send(frame).await.is_err() {
-                            break PlaybackOutcome::Failed;
-                        }
-                    }
+                    _ = worker_terminal.cancelled() => break PlaybackOutcome::Cancelled,
+                    frame = playback.next_frame() => frame,
+                };
+                let frame = match frame {
+                    Ok(Some(frame)) => frame,
+                    Ok(None) => break PlaybackOutcome::Completed,
+                    Err(_) => break PlaybackOutcome::Failed,
+                };
+                let release = pacer.next_release();
+                let delivered = tokio::select! {
+                    biased;
+                    _ = &mut cancel_rx => break PlaybackOutcome::Cancelled,
+                    _ = worker_terminal.cancelled() => break PlaybackOutcome::Cancelled,
+                    result = async {
+                        tokio::time::sleep_until(release).await;
+                        frames_out.send(frame).await
+                    } => result,
+                };
+                if delivered.is_err() {
+                    break PlaybackOutcome::Failed;
                 }
             };
-            // Every exit other than the provider's natural end-of-stream
-            // must cancel the provider explicitly: `TtsPlayback` has no
-            // Drop-cancels contract, so merely dropping it can leave remote
-            // synthesis work running.
-            if outcome == PlaybackOutcome::Completed {
-                playback.complete();
-            } else {
-                playback.cancel().await;
-            }
-            completion.finish(outcome);
-        });
+            playback.finish(outcome).await;
+            route.finish(outcome);
+        };
+        // Fence installation against terminal teardown after asynchronous
+        // stream lookup and synthesis, and against supervisor drain.
+        let guards = self.lock_connection_lifecycles(tickets)?;
+        self.playback_tasks.spawn_with_commit(task, || {
+            self.playback_routes.insert(id, (connection_id, terminal));
+            Ok(())
+        })?;
+        drop(guards);
         Ok(handle)
     }
 
@@ -13021,6 +13486,268 @@ mod cross_crate_publisher_tests {
             orchestrator.validate_stream_wait_lifecycle(&lifecycle),
             Err(StreamWaitError::GenerationReplaced)
         );
+    }
+}
+
+#[cfg(test)]
+mod periodic_worker_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn duplicate_startup_is_bounded_and_drain_is_terminal() {
+        let core = Orchestrator::new(Config::default());
+        for _ in 0..10 {
+            core.try_spawn_media_quality_sampler(Duration::from_secs(60))
+                .unwrap();
+            core.try_spawn_idle_closer(Duration::from_secs(60)).unwrap();
+            core.try_spawn_capacity_scheduler().unwrap();
+        }
+        assert_eq!(core.periodic_task_count(), 3);
+        core.drain_periodic_tasks().await;
+        assert_eq!(core.periodic_task_count(), 0);
+        core.drain_periodic_tasks().await;
+        assert!(core.try_spawn_capacity_scheduler().is_err());
+    }
+
+    #[tokio::test]
+    async fn periodic_tasks_do_not_keep_the_orchestrator_alive() {
+        let core = Orchestrator::new(Config::default());
+        core.try_spawn_media_quality_sampler(Duration::from_secs(60))
+            .unwrap();
+        core.try_spawn_idle_closer(Duration::from_secs(60)).unwrap();
+        core.try_spawn_capacity_scheduler().unwrap();
+        let weak = Arc::downgrade(&core);
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        drop(core);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn zero_intervals_are_rejected_without_spawning() {
+        let core = Orchestrator::new(Config {
+            capacity_report_interval: Some(Duration::ZERO),
+            ..Config::default()
+        });
+        assert!(core
+            .try_spawn_media_quality_sampler(Duration::ZERO)
+            .is_err());
+        assert!(core.try_spawn_idle_closer(Duration::ZERO).is_err());
+        assert!(core.try_spawn_capacity_scheduler().is_err());
+        assert_eq!(core.periodic_task_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn exited_periodic_worker_is_restarted_by_the_next_start_request() {
+        let core = Orchestrator::new(Config {
+            capacity_report_interval: Some(Duration::from_millis(10)),
+            ..Config::default()
+        });
+        // A capacity worker that dies (here: panics) must not leave the kind
+        // marked as running forever.
+        core.start_periodic_task(PeriodicTaskKind::Capacity, async {
+            panic!("simulated periodic worker panic");
+        })
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while core.periodic_task_count() != 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("panicking periodic worker should finish");
+
+        let mut events = core.subscribe_events();
+        core.try_spawn_capacity_scheduler().unwrap();
+        assert_eq!(core.periodic_task_count(), 1, "replacement worker runs");
+        let report = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(Event::CapacityReport { .. }) = events.recv().await {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(report.is_ok(), "restarted capacity worker must emit");
+        core.drain_periodic_tasks().await;
+    }
+
+    /// The idle closer is aborted by periodic drain. That is only safe while
+    /// a non-forcing close completes within a single poll, so an abort can
+    /// never interleave with it. Pin that invariant.
+    #[tokio::test]
+    async fn non_forcing_close_completes_in_one_poll_so_idle_closer_abort_is_safe() {
+        use std::future::Future as _;
+        use std::task::{Context, Poll, Waker};
+
+        let core = Orchestrator::new(Config::default());
+        let idle = core
+            .open_conversation(
+                TenantId::new(),
+                ConversationPolicy::Ephemeral { idle_close_secs: 0 },
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        let busy = core
+            .open_conversation(
+                TenantId::new(),
+                ConversationPolicy::Ephemeral { idle_close_secs: 0 },
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        core.start_session(busy.clone(), SessionMedium::Voice, Vec::new())
+            .await
+            .unwrap();
+
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut close_idle = std::pin::pin!(core.close_conversation(idle.clone(), false));
+        assert!(matches!(
+            close_idle.as_mut().poll(&mut cx),
+            Poll::Ready(Ok(()))
+        ));
+        let mut close_busy = std::pin::pin!(core.close_conversation(busy, false));
+        assert!(matches!(
+            close_busy.as_mut().poll(&mut cx),
+            Poll::Ready(Err(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_shutdown_also_joins_periodic_tasks() {
+        let core = Orchestrator::new(Config::default());
+        core.try_spawn_capacity_scheduler().unwrap();
+        core.drain_connection_lifecycle_tasks().await;
+        assert_eq!(core.periodic_task_count(), 0);
+    }
+}
+
+#[cfg(test)]
+mod tenant_quota_reconciliation_tests {
+    use super::*;
+    use crate::config::TenantQuotas;
+
+    fn limits(n: usize) -> TenantQuotas {
+        TenantQuotas {
+            max_concurrent_recordings: Some(n),
+            max_concurrent_ai_sessions: Some(n),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn repeated_limits_and_growth_account_for_held_permits() {
+        let core = Orchestrator::new(Config::default());
+        let tenant = TenantId::new();
+        core.set_tenant_quotas(tenant.clone(), limits(10)).unwrap();
+        let recording = core.recording_sems.get(&tenant).unwrap().clone();
+        let ai = core.ai_sems.get(&tenant).unwrap().clone();
+        let _recording = recording.clone().try_acquire_many_owned(3).unwrap();
+        let _ai = ai.clone().try_acquire_many_owned(3).unwrap();
+        for _ in 0..10 {
+            core.set_tenant_quotas(tenant.clone(), limits(10)).unwrap();
+        }
+        assert_eq!(recording.available_permits(), 7);
+        assert_eq!(ai.available_permits(), 7);
+        core.set_tenant_quotas(tenant, limits(12)).unwrap();
+        assert_eq!(recording.available_permits(), 9);
+        assert_eq!(ai.available_permits(), 9);
+    }
+
+    #[test]
+    fn shrink_is_rejected_even_when_requested_limit_exceeds_available_permits() {
+        let core = Orchestrator::new(Config::default());
+        let tenant = TenantId::new();
+        core.set_tenant_quotas(tenant.clone(), limits(10)).unwrap();
+        let sem = core.ai_sems.get(&tenant).unwrap().clone();
+        let _held = sem.clone().try_acquire_many_owned(8).unwrap();
+        assert!(core.set_tenant_quotas(tenant.clone(), limits(5)).is_err());
+        assert_eq!(sem.available_permits(), 2);
+        assert_eq!(
+            core.tenant_quotas
+                .get(&tenant)
+                .unwrap()
+                .max_concurrent_ai_sessions,
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn rejected_second_limit_does_not_partially_grow_the_first() {
+        let core = Orchestrator::new(Config::default());
+        let tenant = TenantId::new();
+        core.set_tenant_quotas(tenant.clone(), limits(10)).unwrap();
+        let _held = core
+            .ai_sems
+            .get(&tenant)
+            .unwrap()
+            .clone()
+            .try_acquire_owned()
+            .unwrap();
+        let result = core.set_tenant_quotas(
+            tenant.clone(),
+            TenantQuotas {
+                max_concurrent_recordings: Some(20),
+                max_concurrent_ai_sessions: Some(5),
+                ..Default::default()
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            core.recording_sems
+                .get(&tenant)
+                .unwrap()
+                .available_permits(),
+            10
+        );
+        assert!(core
+            .set_tenant_quotas(tenant, limits(Semaphore::MAX_PERMITS + 1))
+            .is_err());
+    }
+
+    #[test]
+    fn drained_limits_can_shrink_and_be_removed() {
+        let core = Orchestrator::new(Config::default());
+        let tenant = TenantId::new();
+        core.set_tenant_quotas(tenant.clone(), limits(10)).unwrap();
+        core.set_tenant_quotas(tenant.clone(), limits(2)).unwrap();
+        assert_eq!(
+            core.recording_sems
+                .get(&tenant)
+                .unwrap()
+                .available_permits(),
+            2
+        );
+        core.set_tenant_quotas(tenant.clone(), TenantQuotas::default())
+            .unwrap();
+        assert!(!core.recording_sems.contains_key(&tenant));
+        assert!(!core.ai_sems.contains_key(&tenant));
+    }
+
+    #[test]
+    fn concurrent_identical_updates_do_not_inflate_capacity() {
+        let core = Orchestrator::new(Config::default());
+        let tenant = TenantId::new();
+        core.set_tenant_quotas(tenant.clone(), limits(10)).unwrap();
+        let sem = core.recording_sems.get(&tenant).unwrap().clone();
+        let _held = sem.clone().try_acquire_many_owned(3).unwrap();
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let core = core.clone();
+                let tenant = tenant.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..100 {
+                        core.set_tenant_quotas(tenant.clone(), limits(10)).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(sem.available_permits(), 7);
     }
 }
 

@@ -398,7 +398,10 @@ rand = "0.8"
 # `parse_action_by_name`).
 strum = { version = "0.26", features = ["derive"] }
 
+url = "2.5"
+
 [dev-dependencies]
+tokio-rustls = { workspace = true }
 tokio = { version = "1.40", features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy = "0.15"
@@ -722,3 +725,7 @@ optional = true
 [package.metadata.cargo-semver-checks.lints]
 constructible_struct_adds_field = "warn"
 constructible_struct_adds_private_field = "warn"
+
+[[test]]
+name = "tls_contact_compatibility"
+path = "tests/tls_contact_compatibility.rs"

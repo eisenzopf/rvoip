@@ -320,29 +320,9 @@ impl AudioGenerator {
         result
     }
 
-    /// Convert linear PCM to μ-law (G.711)
+    /// Convert linear PCM to μ-law (G.711) using the ITU-T reference encoder.
     pub fn linear_to_ulaw(pcm: i16) -> u8 {
-        // Simplified μ-law encoding
-        let sign = if pcm < 0 { 0x80u8 } else { 0x00u8 };
-        let magnitude = pcm.abs() as u16;
-
-        // Find the segment
-        let mut segment = 0u8;
-        let mut temp = magnitude >> 5;
-        while temp != 0 && segment < 7 {
-            segment += 1;
-            temp >>= 1;
-        }
-
-        // Calculate quantization value
-        let quantization = if segment == 0 {
-            (magnitude >> 1) as u8
-        } else {
-            (((magnitude >> (segment + 1)) & 0x0F) + 0x10) as u8
-        };
-
-        // Combine sign, segment, and quantization
-        sign | (segment << 4) | (quantization & 0x0F)
+        codec_core::utils::linear_to_mulaw_scalar(pcm)
     }
 
     /// Convert PCM samples to μ-law
@@ -975,6 +955,35 @@ mod tests {
     }
 
     #[test]
+    fn generated_tone_pcm_tracks_the_requested_sine() {
+        // Regression: the tone cache was built with a hand-rolled μ-law encoder
+        // that mapped silence to full-scale negative and loud samples to near
+        // zero, so every negotiated codec carried distorted tone audio.
+        let (rate, frequency, amplitude) = (8000u32, 400.0f64, 0.5f64);
+        let mut generator = AudioGenerator::new_with_source(
+            rate,
+            AudioSource::Tone {
+                frequency,
+                amplitude,
+            },
+        );
+        let pcm = generator.generate_pcm_frame(160, 1);
+        assert_eq!(pcm.len(), 160);
+        let mut error_energy = 0.0f64;
+        let mut signal_energy = 0.0f64;
+        for (index, &sample) in pcm.iter().enumerate() {
+            let phase = 2.0 * std::f64::consts::PI * frequency * index as f64 / rate as f64;
+            let ideal = phase.sin() * amplitude * 32767.0;
+            signal_energy += ideal * ideal;
+            error_energy += (f64::from(sample) - ideal).powi(2);
+        }
+        let snr_db = 10.0 * (signal_energy / error_energy).log10();
+        // G.711 quantization alone yields roughly 35-38 dB on a half-scale sine.
+        assert!(snr_db > 30.0, "tone SNR {snr_db:.1} dB");
+        assert_eq!(AudioGenerator::linear_to_ulaw(0), 0xFF);
+    }
+
+    #[test]
     fn generate_pcmu_samples_returns_requested_length() {
         let mut generator = AudioGenerator::new(8000, 440.0, 0.5);
         let output = generator.generate_pcmu_samples(160);
@@ -1030,14 +1039,15 @@ mod tests {
             48_000,
             8_000,
             AudioSource::CustomSamples {
-                samples: vec![0xff, 0x7f],
+                samples: vec![0xff, 0x80],
                 repeat: false,
             },
         );
         let output = generator.generate_pcm_frame(12, 1);
-        assert!(output[..6].iter().all(|sample| *sample == output[0]));
-        assert!(output[6..].iter().all(|sample| *sample == output[6]));
-        assert_ne!(output[0], output[6]);
+        // 0xff and 0x7f are both G.711 silence. Use a nonzero codeword
+        // to verify rate conversion, with independent wire expectations.
+        assert_eq!(&output[..6], &[0; 6]);
+        assert_eq!(&output[6..], &[32_124; 6]);
     }
 
     #[tokio::test]

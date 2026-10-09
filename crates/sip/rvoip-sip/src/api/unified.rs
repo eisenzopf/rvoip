@@ -2134,6 +2134,12 @@ pub struct Config {
     /// expected on the existing outbound registration flow.
     pub sip_contact_mode: SipContactMode,
 
+    /// Opt-in compatibility for explicit SIP TLS Contacts on inbound SIPS calls.
+    /// Requires an observed TLS transaction and preserves SIPS remote routing.
+    /// Defaults to `false`. This field is the only switch: the library reads no
+    /// environment variable for it, so embedders map deployment settings here.
+    pub sip_allow_tls_contact_on_sips: bool,
+
     /// Optional local SIP TLS listener address. Used for
     /// [`SipTlsMode::ServerOnly`] and [`SipTlsMode::ClientAndServer`].
     /// When unset, rvoip-sip-dialog retains its legacy default of deriving the
@@ -2231,6 +2237,10 @@ pub struct Config {
     ///
     /// See [`Config::srtp_required`] for the strict-mode variant.
     pub offer_srtp: bool,
+
+    /// Require SDP negotiation of RTP/RTCP multiplexing for the single media socket.
+    /// Peers declining it fail negotiation instead of silently losing RTCP.
+    pub rtcp_mux_required: bool,
 
     /// Select how SRTP keys are established when [`Config::offer_srtp`] is
     /// enabled. SDES remains the compatibility default. DTLS-SRTP requires
@@ -2998,6 +3008,7 @@ impl Config {
             unregister_on_shutdown_timeout_secs: 3,
             sip_tls_mode: SipTlsMode::Disabled,
             sip_contact_mode: SipContactMode::ReachableContact,
+            sip_allow_tls_contact_on_sips: false,
             tls_bind_addr: None,
             tls_advertised_addr: None,
             contact_uri: None,
@@ -3011,6 +3022,7 @@ impl Config {
             #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
             offer_srtp: false,
+            rtcp_mux_required: false,
             srtp_keying: SrtpKeyingMode::Sdes,
             dtls_setup_role: DtlsSetupRole::Actpass,
             srtp_required: false,
@@ -3119,6 +3131,7 @@ impl Config {
             unregister_on_shutdown_timeout_secs: 3,
             sip_tls_mode: SipTlsMode::Disabled,
             sip_contact_mode: SipContactMode::ReachableContact,
+            sip_allow_tls_contact_on_sips: false,
             tls_bind_addr: None,
             tls_advertised_addr: None,
             contact_uri: None,
@@ -3132,6 +3145,7 @@ impl Config {
             #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
             offer_srtp: false,
+            rtcp_mux_required: false,
             srtp_keying: SrtpKeyingMode::Sdes,
             dtls_setup_role: DtlsSetupRole::Actpass,
             srtp_required: false,
@@ -8932,6 +8946,7 @@ impl UnifiedCoordinator {
             config.media_port_end,
         );
         media_adapter_inner.set_media_mode(config.media_mode);
+        media_adapter_inner.set_rtcp_mux_required(config.rtcp_mux_required);
         media_adapter_inner.set_ice_policy(config.ice);
         // Apply RFC 4568 SDES-SRTP policy from Config (Step 2B.1).
         media_adapter_inner.set_srtp_policy(
@@ -12036,6 +12051,7 @@ impl UnifiedCoordinator {
             .with_dialog_config(|mut dialog| {
                 dialog.advertised_local_address = config.sip_advertised_addr;
                 dialog.local_contact_uri = config.contact_uri.clone();
+                dialog.allow_tls_contact_on_sips = config.sip_allow_tls_contact_on_sips;
                 dialog.tls_local_address = dialog_tls_local_address;
                 dialog.tls_advertised_local_address = config.tls_advertised_addr;
                 dialog.max_dialogs = Some(config.dialog_index_capacity_hint());
