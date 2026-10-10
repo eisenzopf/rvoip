@@ -14,7 +14,7 @@ use dashmap::DashMap;
 use rand::Rng;
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
@@ -106,6 +106,107 @@ fn compact_ntp_rtt_ms(last_sender_report: u32, delay_since_last_report: u32) -> 
     Some(f64::from(elapsed) * 1_000.0 / 65_536.0)
 }
 
+/// RTP timestamp of "now" derived from the wall clock. Only used when a
+/// sender report must be produced before any media packet anchored the
+/// session's RTP clock.
+fn wallclock_rtp_timestamp(clock_rate: u32) -> RtpTimestamp {
+    let since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let ticks = since_epoch.as_secs() * u64::from(clock_rate)
+        + u64::from(since_epoch.subsec_nanos()) * u64::from(clock_rate) / 1_000_000_000;
+    ticks as RtpTimestamp
+}
+
+/// A fresh RFC 7022 §4.2 short-term persistent CNAME: 96 random bits,
+/// base64-encoded. It identifies the session without revealing the local
+/// user or host name, and stays fixed for the session's lifetime.
+fn random_cname() -> String {
+    use base64::Engine;
+    let bytes: [u8; 12] = rand::thread_rng().gen();
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// SSRC of the first packet in a compound RTCP datagram: the report or
+/// description's sender.
+fn rtcp_sender_ssrc(data: &[u8]) -> Option<RtpSsrc> {
+    let bytes: [u8; 4] = data.get(4..8)?.try_into().ok()?;
+    Some(u32::from_be_bytes(bytes))
+}
+
+/// Where this session's RTCP goes: the transport's (possibly latched) peer,
+/// falling back to the signalled address.
+async fn rtcp_destination(
+    transport: &Arc<dyn RtpTransport>,
+    packet_sender: &RtpPacketSender,
+) -> Option<SocketAddr> {
+    if let Some(udp) = transport.as_any().downcast_ref::<UdpRtpTransport>() {
+        udp.remote_rtcp_addr()
+            .await
+            .or_else(|| *packet_sender.remote_addr.read())
+    } else {
+        *packet_sender.remote_addr.read()
+    }
+}
+
+/// Where periodic reports and the close-time BYE go, or `None` when they
+/// may not be sent.
+///
+/// With multiplexing negotiated they share the RTP socket and go to the
+/// peer's (latched) RTP address. Without it they go only from a separate
+/// RTCP socket to the peer's RTCP address, and never to an address the RTP
+/// stream uses: RFC 5761 §5.1.1 forbids multiplexing a peer did not agree
+/// to. A session without a separate socket sends nothing until mux is
+/// negotiated.
+async fn rtcp_report_destination(
+    transport: &Arc<dyn RtpTransport>,
+    packet_sender: &RtpPacketSender,
+    rtcp_mux: bool,
+) -> Option<SocketAddr> {
+    if rtcp_mux {
+        return rtcp_destination(transport, packet_sender).await;
+    }
+    let udp = transport.as_any().downcast_ref::<UdpRtpTransport>()?;
+    if udp.rtcp_mux() || udp.local_rtcp_socket_addr().is_none() {
+        return None;
+    }
+    let destination = udp.remote_rtcp_addr().await?;
+    if Some(destination) == udp.remote_rtp_addr().await
+        || Some(destination) == *packet_sender.remote_addr.read()
+    {
+        return None;
+    }
+    Some(destination)
+}
+
+/// Whether inbound RTCP from `source` belongs to this session.
+///
+/// Only the session's expected peer may feed its reports, statistics, and
+/// BYE handling: the (latched or signalled) remote address, or a sender SSRC
+/// this session already receives RTP from. With consecutive port allocation
+/// a peer of a neighbouring call that does not multiplex sends its RTCP to
+/// its RTP port plus one, which is this session's RTP port; that traffic
+/// matches neither and is dropped.
+async fn rtcp_source_is_expected(
+    transport: &Arc<dyn RtpTransport>,
+    packet_sender: &RtpPacketSender,
+    streams: &DashMap<RtpSsrc, RtpStream>,
+    source: SocketAddr,
+    data: &[u8],
+) -> bool {
+    if *packet_sender.remote_addr.read() == Some(source) {
+        return true;
+    }
+    if let Some(udp) = transport.as_any().downcast_ref::<UdpRtpTransport>() {
+        if udp.remote_rtp_addr().await == Some(source)
+            || udp.remote_rtcp_addr().await == Some(source)
+        {
+            return true;
+        }
+    }
+    rtcp_sender_ssrc(data).is_some_and(|ssrc| streams.contains_key(&ssrc))
+}
+
 fn build_voip_metrics_xr(
     sender_ssrc: RtpSsrc,
     report_blocks: &[crate::packet::rtcp::RtcpReportBlock],
@@ -194,6 +295,15 @@ pub struct RtpSessionStats {
     /// Packets discarded by jitter buffer (too old)
     pub packets_discarded_by_jitter: u64,
 
+    /// Compound RTCP packets accepted from this session's expected peer.
+    pub rtcp_packets_received: u64,
+
+    /// Compound RTCP packets dropped because they came from neither the
+    /// session's expected remote address nor a remote SSRC it receives RTP
+    /// from — for example a neighbouring call's peer sending RTCP to its RTP
+    /// port plus one.
+    pub rtcp_packets_rejected: u64,
+
     /// Current jitter estimate (in milliseconds)
     pub jitter_ms: f64,
 
@@ -203,6 +313,109 @@ pub struct RtpSessionStats {
 
     /// Remote address of the most recent packet
     pub remote_addr: Option<SocketAddr>,
+
+    /// The most recent RTCP reception report a peer sent about *this*
+    /// session's outbound stream (an SR or RR report block whose SSRC is
+    /// ours). `None` until such a block arrives — in particular, always
+    /// `None` when RTCP never reaches this session (for example when
+    /// rtcp-mux was not negotiated and nothing listens on the RTCP port).
+    ///
+    /// When several remote sources report on us, the most recently received
+    /// block wins; [`PeerReceptionReport::reporter_ssrc`] says which source
+    /// sent it. Blocks about other SSRCs are ignored.
+    pub peer_report: Option<PeerReceptionReport>,
+
+    /// Set when the peer announced it is leaving with an RTCP BYE.
+    pub peer_bye: Option<PeerRtcpBye>,
+}
+
+/// One RTCP reception report block (RFC 3550 §6.4.1) that a remote source
+/// sent about this session's outbound stream, as retained by
+/// [`RtpSessionStats::peer_report`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PeerReceptionReport {
+    /// SSRC of the remote source that sent the SR/RR carrying this block.
+    pub reporter_ssrc: RtpSsrc,
+    /// Fraction of our packets the peer lost since its previous report,
+    /// as the raw RFC 3550 8-bit fixed-point value (`fraction / 256`).
+    pub fraction_lost: u8,
+    /// Cumulative number of our packets the peer lost, sign-extended from
+    /// the 24-bit wire field. Negative when duplicates outnumber losses.
+    pub cumulative_lost: i32,
+    /// Extended highest sequence number the peer received from us.
+    pub extended_highest_sequence: u32,
+    /// Interarrival jitter the peer measured on our stream, in RTP
+    /// timestamp units.
+    pub jitter: u32,
+    /// [`Self::jitter`] converted to milliseconds with the session's RTP
+    /// clock rate at the time the report arrived.
+    pub jitter_ms: f64,
+    /// Round-trip time computed from this block's LSR/DLSR, when the peer
+    /// reflected one of our sender reports (`None` when LSR is zero).
+    pub rtt_ms: Option<f64>,
+    /// When this block was received.
+    pub received_at: Instant,
+}
+
+impl PeerReceptionReport {
+    /// Build the retained view of a report block about our SSRC.
+    pub fn from_report_block(
+        reporter_ssrc: RtpSsrc,
+        block: &crate::packet::rtcp::RtcpReportBlock,
+        clock_rate: u32,
+        received_at: Instant,
+    ) -> Self {
+        // The wire field is a signed 24-bit integer.
+        let cumulative_lost = (((block.cumulative_lost & 0x00ff_ffff) << 8) as i32) >> 8;
+        let jitter_ms = if clock_rate == 0 {
+            0.0
+        } else {
+            f64::from(block.jitter) * 1_000.0 / f64::from(clock_rate)
+        };
+        Self {
+            reporter_ssrc,
+            fraction_lost: block.fraction_lost,
+            cumulative_lost,
+            extended_highest_sequence: block.highest_seq,
+            jitter: block.jitter,
+            jitter_ms,
+            rtt_ms: compact_ntp_rtt_ms(block.last_sr, block.delay_since_last_sr),
+            received_at,
+        }
+    }
+
+    /// [`Self::fraction_lost`] as a fraction in `0.0..=1.0`.
+    pub fn fraction_lost_ratio(&self) -> f64 {
+        f64::from(self.fraction_lost) / 256.0
+    }
+}
+
+/// An RTCP BYE received from a remote source, retained by
+/// [`RtpSessionStats::peer_bye`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PeerRtcpBye {
+    /// First SSRC listed in the BYE.
+    pub ssrc: RtpSsrc,
+    /// Optional reason text carried by the BYE.
+    pub reason: Option<String>,
+    /// When the BYE was received.
+    pub received_at: Instant,
+}
+
+/// Retain a report block about our own SSRC and its RTT measurement.
+fn record_peer_reception_report(
+    stats: &parking_lot::Mutex<RtpSessionStats>,
+    reporter_ssrc: RtpSsrc,
+    block: &crate::packet::rtcp::RtcpReportBlock,
+    clock_rate: u32,
+) {
+    let report =
+        PeerReceptionReport::from_report_block(reporter_ssrc, block, clock_rate, Instant::now());
+    let mut stats = stats.lock();
+    if let Some(rtt_ms) = report.rtt_ms {
+        stats.rtt_ms = Some(rtt_ms);
+    }
+    stats.peer_report = Some(report);
 }
 
 /// Cadence for RFC 3611 VoIP-metrics reports emitted by an RTP session.
@@ -210,6 +423,11 @@ pub struct RtpSessionStats {
 /// The report rides the existing compound RTCP schedule, so it does not add a
 /// timer or a detached task per call. A value of one emits XR beside every
 /// regular report; larger values reduce reporting bandwidth deterministically.
+///
+/// XR is off unless asked for: a session built with
+/// [`RtpSession::new_event_driven_with_quality_reporting`] starts with it on,
+/// and [`RtpSession::set_rtcp_xr_enabled`] switches it per session, for
+/// example once SDP shows the peer wants `a=rtcp-xr` (RFC 3611 §5.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RtcpXrQualityConfig {
     pub every_n_rtcp_reports: NonZeroU32,
@@ -306,7 +524,26 @@ struct RtpPacketSender {
     slots: Arc<Semaphore>,
     capacity: usize,
     closed: AtomicBool,
+    /// The session's media payload type. Only media (and comfort noise)
+    /// timestamps advance with the sampling clock; RFC 4733 events hold
+    /// their start timestamp for the whole tone.
+    media_payload_type: AtomicU8,
+    /// Live RTP clock rate of the media stream.
+    clock_rate: Arc<AtomicU32>,
+    /// RTP timestamp and wall time of the last media packet actually sent,
+    /// the anchor a sender report extrapolates from (RFC 3550 §6.4.1).
+    send_clock: parking_lot::Mutex<Option<SendClockAnchor>>,
 }
+
+#[derive(Debug, Clone, Copy)]
+struct SendClockAnchor {
+    rtp_timestamp: RtpTimestamp,
+    sent_at: Instant,
+    clock_rate: u32,
+}
+
+/// Static comfort-noise payload type (RFC 3389); it shares the media clock.
+const COMFORT_NOISE_PAYLOAD_TYPE: u8 = 13;
 
 struct RtpPacketSenderState {
     send_buffer: BytesMut,
@@ -322,6 +559,8 @@ impl RtpPacketSender {
         sender_octets: Arc<AtomicU64>,
         event_tx: broadcast::Sender<RtpSessionEvent>,
         capacity: usize,
+        media_payload_type: u8,
+        clock_rate: Arc<AtomicU32>,
     ) -> Self {
         let capacity = capacity.max(1);
         Self {
@@ -338,7 +577,21 @@ impl RtpPacketSender {
             slots: Arc::new(Semaphore::new(capacity)),
             capacity,
             closed: AtomicBool::new(false),
+            media_payload_type: AtomicU8::new(media_payload_type),
+            clock_rate,
+            send_clock: parking_lot::Mutex::new(None),
         }
+    }
+
+    /// The RTP timestamp that corresponds to wall time `at` on this session's
+    /// media clock: the last sent media timestamp advanced by the elapsed
+    /// time at the stream clock rate (RFC 3550 §6.4.1). `None` until a media
+    /// packet has been sent.
+    fn sr_rtp_timestamp(&self, at: Instant) -> Option<RtpTimestamp> {
+        let anchor = (*self.send_clock.lock())?;
+        let elapsed = at.saturating_duration_since(anchor.sent_at);
+        let ticks = (elapsed.as_secs_f64() * f64::from(anchor.clock_rate)).round() as u64;
+        Some(anchor.rtp_timestamp.wrapping_add(ticks as u32))
     }
 
     async fn send_payload(
@@ -397,6 +650,15 @@ impl RtpPacketSender {
 
         match send_result {
             Ok(()) => {
+                if payload_type == self.media_payload_type.load(Ordering::Relaxed)
+                    || payload_type == COMFORT_NOISE_PAYLOAD_TYPE
+                {
+                    *self.send_clock.lock() = Some(SendClockAnchor {
+                        rtp_timestamp: timestamp,
+                        sent_at: Instant::now(),
+                        clock_rate: self.clock_rate.load(Ordering::Relaxed),
+                    });
+                }
                 let mut stats = self.stats.lock();
                 stats.packets_sent += 1;
                 stats.bytes_sent += packet.size() as u64;
@@ -426,6 +688,141 @@ impl RtpPacketSender {
     fn close(&self) {
         self.closed.store(true, Ordering::Release);
         self.slots.close();
+    }
+}
+
+/// Upper bound on remote SSRCs remembered from RTCP alone, for the
+/// member count in the report interval.
+const MAX_RTCP_ONLY_MEMBERS: usize = 64;
+
+/// RTCP state shared by the periodic report task, manual reports, and the
+/// close-time BYE: interval timing, sender state, CNAME, and XR policy.
+struct RtcpReporter {
+    ssrc: RtpSsrc,
+    generator: parking_lot::Mutex<crate::stats::reports::RtcpReportGenerator>,
+    stats: Arc<parking_lot::Mutex<RtpSessionStats>>,
+    sender_octets: Arc<AtomicU64>,
+    streams: Arc<DashMap<RtpSsrc, RtpStream>>,
+    packet_sender: Arc<RtpPacketSender>,
+    clock_rate: Arc<AtomicU32>,
+    /// Remote SSRCs seen only through accepted RTCP (receive-only peers).
+    rtcp_members: DashMap<RtpSsrc, ()>,
+    xr_enabled: AtomicBool,
+    xr_quality: RtcpXrQualityConfig,
+    periodic_reports: AtomicU64,
+    /// Wakes the report task to redraw a pending interval after the
+    /// bandwidth or minimum-interval policy changed.
+    reschedule: tokio::sync::Notify,
+}
+
+impl RtcpReporter {
+    /// Refresh sender totals and session membership, then draw the next
+    /// RFC 3550 report interval.
+    fn next_interval(&self) -> Duration {
+        let (packets, octets) = sender_report_totals(&self.stats, &self.sender_octets);
+        let remote_senders = self.streams.len() as u32;
+        let rtcp_only = self
+            .rtcp_members
+            .iter()
+            .filter(|entry| !self.streams.contains_key(entry.key()))
+            .count() as u32;
+        let mut generator = self.generator.lock();
+        generator.set_sent_totals(packets, octets);
+        let senders = remote_senders + u32::from(generator.we_sent());
+        let members = 1 + remote_senders + rtcp_only;
+        generator.update_members(senders, members - senders);
+        generator.calculate_interval()
+    }
+
+    /// Note an accepted inbound compound RTCP datagram.
+    fn observe_received(&self, data: &[u8]) {
+        self.generator.lock().on_report_received(data.len());
+        if let Some(ssrc) = rtcp_sender_ssrc(data) {
+            if ssrc != self.ssrc && self.rtcp_members.len() < MAX_RTCP_ONLY_MEMBERS {
+                self.rtcp_members.insert(ssrc, ());
+            }
+        }
+    }
+
+    /// Build one compound report: SR when this session sent RTP in the last
+    /// two report intervals and RR otherwise (RFC 3550 §6.4), always with an
+    /// SDES CNAME (§6.1), then XR when enabled on a periodic report, then an
+    /// optional BYE last.
+    fn build(
+        &self,
+        bye: Option<crate::packet::rtcp::RtcpGoodbye>,
+        periodic: bool,
+    ) -> crate::packet::rtcp::RtcpCompoundPacket {
+        use crate::packet::rtcp::{
+            NtpTimestamp, RtcpCompoundPacket, RtcpReceiverReport, RtcpSenderReport,
+        };
+
+        let (packets, octets) = sender_report_totals(&self.stats, &self.sender_octets);
+        let report_blocks = take_rtcp_report_blocks(&self.streams);
+        let mut generator = self.generator.lock();
+        generator.set_sent_totals(packets, octets);
+        let mut compound = if generator.we_sent() {
+            // Capture the wall clock once so the NTP and RTP timestamps
+            // describe the same instant.
+            let at = Instant::now();
+            let ntp_timestamp = NtpTimestamp::now();
+            let rtp_timestamp = self.packet_sender.sr_rtp_timestamp(at).unwrap_or_else(|| {
+                wallclock_rtp_timestamp(self.clock_rate.load(Ordering::Relaxed))
+            });
+            RtcpCompoundPacket::new_with_sr(RtcpSenderReport {
+                ssrc: self.ssrc,
+                ntp_timestamp,
+                rtp_timestamp,
+                sender_packet_count: packets,
+                sender_octet_count: octets,
+                report_blocks: report_blocks.clone(),
+            })
+        } else {
+            RtcpCompoundPacket::new_with_rr(RtcpReceiverReport {
+                ssrc: self.ssrc,
+                report_blocks: report_blocks.clone(),
+            })
+        };
+        compound.add_sdes(generator.generate_sdes());
+        drop(generator);
+
+        if periodic {
+            let index = self
+                .periodic_reports
+                .fetch_add(1, Ordering::Relaxed)
+                .saturating_add(1);
+            if self.xr_enabled.load(Ordering::Relaxed)
+                && index % u64::from(self.xr_quality.every_n_rtcp_reports.get()) == 0
+            {
+                let stats_snapshot = self.stats.lock().clone();
+                if let Some(xr) = build_voip_metrics_xr(
+                    self.ssrc,
+                    &report_blocks,
+                    &stats_snapshot,
+                    self.clock_rate.load(Ordering::Relaxed),
+                ) {
+                    compound.add_xr(xr);
+                }
+            }
+        }
+        if let Some(bye) = bye {
+            compound.add_bye(bye);
+        }
+        compound
+    }
+
+    /// Serialize and send a compound report, recording it for the interval
+    /// and sender-state calculation when it leaves.
+    async fn send(
+        &self,
+        transport: &Arc<dyn RtpTransport>,
+        compound: &crate::packet::rtcp::RtcpCompoundPacket,
+        destination: SocketAddr,
+    ) -> Result<()> {
+        let data = compound.serialize()?;
+        transport.send_rtcp_bytes(&data, destination).await?;
+        self.generator.lock().on_report_sent(data.len());
+        Ok(())
     }
 }
 
@@ -635,21 +1032,23 @@ pub struct RtpSession {
     /// Whether the session is active
     active: bool,
 
-    /// RTCP report generator
-    rtcp_generator: Option<crate::stats::reports::RtcpReportGenerator>,
+    /// RTCP report state shared with the periodic report task.
+    rtcp_reporter: Arc<RtcpReporter>,
 
     /// RTCP sender task
     rtcp_task: Option<JoinHandle<()>>,
 
-    /// Session bandwidth (bits per second)
-    bandwidth_bps: u32,
+    /// Whether [`Self::set_bandwidth`] fixed the session bandwidth; otherwise
+    /// it follows the payload type.
+    bandwidth_explicit: bool,
 
-    /// Whether periodic RTCP reports may go to the peer. This session has a
-    /// single socket, so reports share the RTP port; see [`Self::set_rtcp_mux`].
+    /// Whether RTP/RTCP multiplexing is in force, so reports share the RTP
+    /// port; see [`Self::set_rtcp_mux`].
     rtcp_mux: Arc<AtomicBool>,
 
-    /// RFC 3611 quality-report cadence for this session.
-    xr_quality: RtcpXrQualityConfig,
+    /// The peer's RTCP address from SDP `a=rtcp:` (RFC 3605), used instead
+    /// of RTP port + 1 when reports leave from a separate RTCP socket.
+    signalled_remote_rtcp_addr: parking_lot::Mutex<Option<SocketAddr>>,
 
     #[cfg(feature = "memory-diagnostics")]
     _memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard,
@@ -664,13 +1063,7 @@ pub struct RtpSession {
 impl RtpSession {
     /// Create a new RTP session
     pub async fn new(config: RtpSessionConfig) -> Result<Self> {
-        Self::new_with_receive_queue(
-            config,
-            true,
-            SymmetricRtpPolicy::default(),
-            RtcpXrQualityConfig::default(),
-        )
-        .await
+        Self::new_with_receive_queue(config, true, SymmetricRtpPolicy::default(), None).await
     }
 
     /// Create a new RTP session with an explicit symmetric-RTP policy.
@@ -678,7 +1071,7 @@ impl RtpSession {
         config: RtpSessionConfig,
         policy: SymmetricRtpPolicy,
     ) -> Result<Self> {
-        Self::new_with_receive_queue(config, true, policy, RtcpXrQualityConfig::default()).await
+        Self::new_with_receive_queue(config, true, policy, None).await
     }
 
     /// Create a new RTP session for event-driven consumers.
@@ -687,13 +1080,7 @@ impl RtpSession {
     /// but they are not duplicated into the polling queue used by
     /// [`RtpSession::receive_packet`].
     pub async fn new_event_driven(config: RtpSessionConfig) -> Result<Self> {
-        Self::new_with_receive_queue(
-            config,
-            false,
-            SymmetricRtpPolicy::default(),
-            RtcpXrQualityConfig::default(),
-        )
-        .await
+        Self::new_with_receive_queue(config, false, SymmetricRtpPolicy::default(), None).await
     }
 
     /// Create an event-driven RTP session with an explicit symmetric-RTP
@@ -702,24 +1089,62 @@ impl RtpSession {
         config: RtpSessionConfig,
         policy: SymmetricRtpPolicy,
     ) -> Result<Self> {
-        Self::new_with_receive_queue(config, false, policy, RtcpXrQualityConfig::default()).await
+        Self::new_with_receive_queue(config, false, policy, None).await
     }
 
     /// Create an event-driven session with explicit symmetric-RTP and RTCP XR
-    /// quality-reporting policy.
+    /// quality-reporting policy. RFC 3611 VoIP-metrics reports start enabled;
+    /// [`Self::set_rtcp_xr_enabled`] can switch them off again.
     pub async fn new_event_driven_with_quality_reporting(
         config: RtpSessionConfig,
         policy: SymmetricRtpPolicy,
         xr_quality: RtcpXrQualityConfig,
     ) -> Result<Self> {
-        Self::new_with_receive_queue(config, false, policy, xr_quality).await
+        Self::new_with_receive_queue(config, false, policy, Some(xr_quality)).await
+    }
+
+    /// Create an event-driven session that also binds a separate RTCP
+    /// socket on `local_rtcp_addr`, for peers that do not multiplex RTP and
+    /// RTCP (RFC 3550 §11 puts it on the RTP port + 1).
+    ///
+    /// Until [`Self::set_rtcp_mux`] reports negotiated multiplexing, periodic
+    /// reports and the close-time BYE leave from this socket to the peer's
+    /// RTCP address: [`Self::set_remote_rtcp_addr`] when SDP named one with
+    /// `a=rtcp:` (RFC 3605), otherwise the peer's RTP port + 1. Reports
+    /// arriving on the socket pass the same peer filter as multiplexed ones,
+    /// and SRTCP protects both directions once SRTP contexts are installed.
+    /// When multiplexing is negotiated instead, [`Self::release_rtcp_socket`]
+    /// closes the socket so its port can be reused.
+    pub async fn new_event_driven_with_rtcp_socket(
+        config: RtpSessionConfig,
+        policy: SymmetricRtpPolicy,
+        local_rtcp_addr: SocketAddr,
+    ) -> Result<Self> {
+        Self::new_session(config, false, policy, None, Some(local_rtcp_addr)).await
     }
 
     async fn new_with_receive_queue(
         config: RtpSessionConfig,
         receive_queue_enabled: bool,
         symmetric_rtp_policy: SymmetricRtpPolicy,
-        xr_quality: RtcpXrQualityConfig,
+        xr_quality: Option<RtcpXrQualityConfig>,
+    ) -> Result<Self> {
+        Self::new_session(
+            config,
+            receive_queue_enabled,
+            symmetric_rtp_policy,
+            xr_quality,
+            None,
+        )
+        .await
+    }
+
+    async fn new_session(
+        config: RtpSessionConfig,
+        receive_queue_enabled: bool,
+        symmetric_rtp_policy: SymmetricRtpPolicy,
+        xr_quality: Option<RtcpXrQualityConfig>,
+        local_rtcp_addr: Option<SocketAddr>,
     ) -> Result<Self> {
         let session_buffer_config = config.session_buffer_config;
         let transport_buffer_config = config.transport_buffer_config;
@@ -733,9 +1158,11 @@ impl RtpSession {
         // Create transport config - respect provided ports!
         let transport_config = RtpTransportConfig {
             local_rtp_addr: config.local_addr,
-            local_rtcp_addr: None, // RTCP on same port for now
+            // A separate RTCP socket only when the caller reserved a port
+            // for it; otherwise RTCP shares the RTP socket.
+            local_rtcp_addr,
             symmetric_rtp: true,
-            rtcp_mux: true, // Enable RTCP multiplexing by default
+            rtcp_mux: local_rtcp_addr.is_none(),
             session_id: Some(format!("rtp-session-{}", ssrc)),
             // Don't allocate a new port - use the one provided in config
             use_port_allocator: false,
@@ -761,6 +1188,7 @@ impl RtpSession {
         ));
         let stats = Arc::new(parking_lot::Mutex::new(RtpSessionStats::default()));
         let sender_octets = Arc::new(AtomicU64::new(0));
+        let clock_rate = Arc::new(AtomicU32::new(config.clock_rate));
         let packet_sender = Arc::new(RtpPacketSender::new(
             transport.clone(),
             config.remote_addr,
@@ -773,26 +1201,45 @@ impl RtpSession {
             sender_octets.clone(),
             event_tx.clone(),
             session_buffer_config.sender_channel_capacity,
+            config.payload_type,
+            clock_rate.clone(),
         ));
 
-        // Create RTCP report generator
-        let hostname = hostname::get().unwrap_or_else(|_| "unknown".into());
-        let hostname_str = hostname.to_string_lossy();
-        let cname = format!(
-            "{}@{}",
-            std::env::var("USER").unwrap_or_else(|_| "user".to_string()),
-            hostname_str
+        // RTCP reporting state. The CNAME is random per session (RFC 7022)
+        // so reports never disclose the local user or host name.
+        let mut rtcp_generator =
+            crate::stats::reports::RtcpReportGenerator::new(ssrc, random_cname());
+        rtcp_generator.set_bandwidth(
+            crate::stats::reports::session_bandwidth_for_payload_type(config.payload_type)
+                .unwrap_or(crate::stats::reports::DEFAULT_SESSION_BANDWIDTH_BPS),
         );
-        let rtcp_generator = crate::stats::reports::RtcpReportGenerator::new(ssrc, cname);
+        let streams = Arc::new(DashMap::new());
+        let rtcp_reporter = Arc::new(RtcpReporter {
+            ssrc,
+            generator: parking_lot::Mutex::new(rtcp_generator),
+            stats: stats.clone(),
+            sender_octets: sender_octets.clone(),
+            streams: Arc::clone(&streams),
+            packet_sender: packet_sender.clone(),
+            clock_rate: clock_rate.clone(),
+            rtcp_members: DashMap::new(),
+            xr_enabled: AtomicBool::new(xr_quality.is_some()),
+            xr_quality: xr_quality.unwrap_or_default(),
+            periodic_reports: AtomicU64::new(0),
+            reschedule: tokio::sync::Notify::new(),
+        });
 
-        let clock_rate = Arc::new(AtomicU32::new(config.clock_rate));
-        let rtcp_mux = Arc::new(AtomicBool::new(config.remote_addr.is_some()));
+        // A session with a separate RTCP socket was built for a peer that may
+        // not multiplex, so it never assumes multiplexing.
+        let rtcp_mux = Arc::new(AtomicBool::new(
+            config.remote_addr.is_some() && local_rtcp_addr.is_none(),
+        ));
         let mut session = Self {
             config,
             clock_rate,
             ssrc,
             transport,
-            streams: Arc::new(DashMap::new()),
+            streams,
             received_sender_reports: Arc::new(DashMap::new()),
             scheduler,
             receiver: receiver_rx,
@@ -804,11 +1251,11 @@ impl RtpSession {
             sender_octets,
             media_sync: None,
             active: false,
-            rtcp_generator: Some(rtcp_generator),
+            rtcp_reporter,
             rtcp_task: None,
-            bandwidth_bps: 64000, // Default bandwidth: 64 kbps
+            bandwidth_explicit: false,
             rtcp_mux,
-            xr_quality,
+            signalled_remote_rtcp_addr: parking_lot::Mutex::new(None),
             #[cfg(feature = "memory-diagnostics")]
             _memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
                 "rtp_core.rtp_session",
@@ -849,7 +1296,6 @@ impl RtpSession {
         let remote_addr = self.config.remote_addr;
         let event_tx_recv = self.event_tx.clone();
         let clock_rate = self.clock_rate.clone();
-        let report_clock_rate = self.clock_rate.clone();
         let _payload_type = self.config.payload_type;
         let ssrc = self.ssrc;
         let streams_map = self.streams.clone();
@@ -858,7 +1304,9 @@ impl RtpSession {
         let _jitter_size = self.config.jitter_buffer_size.unwrap_or(50);
         let _max_age_ms = self.config.max_packet_age_ms.unwrap_or(200);
         let receive_queue_enabled = self.receive_queue_enabled;
-        let xr_quality = self.xr_quality;
+        let rtcp_ingress_transport = self.transport.clone();
+        let rtcp_ingress_sender = self.packet_sender.clone();
+        let rtcp_ingress_reporter = self.rtcp_reporter.clone();
 
         let media_sync = self.media_sync.clone();
 
@@ -867,9 +1315,9 @@ impl RtpSession {
             // Set the remote RTP address on the UDP transport
             if let Some(t) = transport.as_any().downcast_ref::<UdpRtpTransport>() {
                 t.set_remote_rtp_addr(addr).await;
-                t.set_remote_rtcp_addr(addr).await;
             }
         }
+        self.refresh_remote_rtcp_addr();
 
         // Prepare the scheduler's timestamp state, but do not start its
         // millisecond polling task. Session sends use the single ordered
@@ -898,12 +1346,30 @@ impl RtpSession {
                     // STUN belongs to the ICE agent subscribed on the same
                     // bus, not to the RTP session.
                     Ok(crate::traits::RtpEvent::StunPacket { .. }) => continue,
-                    Ok(crate::traits::RtpEvent::RtcpReceived { data, source: _ }) => {
+                    Ok(crate::traits::RtpEvent::RtcpReceived { data, source }) => {
+                        if !rtcp_source_is_expected(
+                            &rtcp_ingress_transport,
+                            &rtcp_ingress_sender,
+                            &streams_map,
+                            source,
+                            &data,
+                        )
+                        .await
+                        {
+                            stats_recv.lock().rtcp_packets_rejected += 1;
+                            debug!(
+                                "Dropping RTCP from {} that is not this session's peer",
+                                source
+                            );
+                            continue;
+                        }
                         // Parse the complete compound packet. Unknown but
                         // well-formed members are retained by the tolerant
                         // parser and ignored by the production handler.
                         match crate::packet::rtcp::RtcpCompoundPacket::parse_tolerant(&data) {
                             Ok(compound) => {
+                                stats_recv.lock().rtcp_packets_received += 1;
+                                rtcp_ingress_reporter.observe_received(&data);
                                 for rtcp_member in compound.packets {
                                     let rtcp_packet = match rtcp_member {
                                         crate::packet::rtcp::RtcpCompoundMember::Known(packet) => {
@@ -924,6 +1390,12 @@ impl RtpSession {
                                             // Extract the SSRC and reason
                                             if !bye.sources.is_empty() {
                                                 let source_ssrc = bye.sources[0];
+
+                                                stats_recv.lock().peer_bye = Some(PeerRtcpBye {
+                                                    ssrc: source_ssrc,
+                                                    reason: bye.reason.clone(),
+                                                    received_at: Instant::now(),
+                                                });
 
                                                 // Broadcast BYE event
                                                 let _ = event_tx_recv.send(RtpSessionEvent::Bye {
@@ -988,12 +1460,12 @@ impl RtpSession {
                                             // quality RTT despite reflecting our timestamps.
                                             for block in &sr.report_blocks {
                                                 if block.ssrc == ssrc {
-                                                    if let Some(rtt_ms) = compact_ntp_rtt_ms(
-                                                        block.last_sr,
-                                                        block.delay_since_last_sr,
-                                                    ) {
-                                                        stats_recv.lock().rtt_ms = Some(rtt_ms);
-                                                    }
+                                                    record_peer_reception_report(
+                                                        &stats_recv,
+                                                        report_ssrc,
+                                                        block,
+                                                        clock_rate.load(Ordering::Relaxed),
+                                                    );
                                                 }
                                             }
 
@@ -1039,12 +1511,12 @@ impl RtpSession {
                                                         block.fraction_lost,
                                                         block.cumulative_lost
                                                     );
-                                                    if let Some(rtt_ms) = compact_ntp_rtt_ms(
-                                                        block.last_sr,
-                                                        block.delay_since_last_sr,
-                                                    ) {
-                                                        stats_recv.lock().rtt_ms = Some(rtt_ms);
-                                                    }
+                                                    record_peer_reception_report(
+                                                        &stats_recv,
+                                                        report_ssrc,
+                                                        block,
+                                                        clock_rate.load(Ordering::Relaxed),
+                                                    );
                                                 }
                                             }
 
@@ -1228,113 +1700,49 @@ impl RtpSession {
         // Outbound offer/answer sessions start before their SDP peer is known.
         // Keep one report task alive and resolve the current destination at each
         // tick; taking the generator only when a peer existed stranded late SDP.
-        if let Some(mut rtcp_generator) = self.rtcp_generator.take() {
+        {
             let transport = self.transport.clone();
             let ssrc = self.ssrc;
             let event_tx = self.event_tx.clone();
-            let stats = self.stats.clone();
-            let sender_octets = self.sender_octets.clone();
-            let report_streams = self.streams.clone();
-            let report_sender = self.packet_sender.clone();
+            let reporter = self.rtcp_reporter.clone();
             let rtcp_mux = self.rtcp_mux.clone();
-            let active_state = Arc::new(tokio::sync::Mutex::new(true));
-            let _active_state_clone = active_state.clone();
-            let bandwidth = self.bandwidth_bps;
 
-            // Set bandwidth in the generator
-            rtcp_generator.set_bandwidth(bandwidth);
-
-            // Start the RTCP task
             let rtcp_task = spawn_memory_tracked("rtp_core.rtp_session.rtcp_task", async move {
                 debug!("RTCP scheduling task started");
 
-                // Initial interval calculation
-                let mut interval = rtcp_generator.calculate_interval();
-                let mut report_index = 0_u64;
-                debug!("Initial RTCP interval: {:?}", interval);
-
-                while *active_state.lock().await {
-                    // Wait for the calculated interval
-                    tokio::time::sleep(interval).await;
-
-                    // Check if we should continue
-                    if !*active_state.lock().await {
-                        break;
+                let mut previous = tokio::time::Instant::now();
+                loop {
+                    // RFC 3550 §6.3: the interval follows session bandwidth
+                    // and membership, starts at half the minimum until the
+                    // first report leaves, and is randomised every time.
+                    let interval = reporter.next_interval();
+                    trace!("Next RTCP report in {:?}", interval);
+                    let deadline = previous + interval;
+                    tokio::select! {
+                        _ = tokio::time::sleep_until(deadline) => {}
+                        // A policy change redraws the pending interval from
+                        // the same starting point.
+                        _ = reporter.reschedule.notified() => continue,
                     }
+                    previous = deadline;
 
-                    // RFC 5761 §5.1.1: reports leave from the RTP socket, so a
-                    // peer that did not agree to multiplexing gets none.
-                    if !rtcp_mux.load(Ordering::Acquire) {
-                        continue;
-                    }
-                    let remote_addr =
-                        if let Some(udp) = transport.as_any().downcast_ref::<UdpRtpTransport>() {
-                            udp.remote_rtcp_addr()
-                                .await
-                                .or_else(|| *report_sender.remote_addr.read())
-                        } else {
-                            *report_sender.remote_addr.read()
-                        };
-                    let Some(remote_addr) = remote_addr else {
-                        continue; // SDP has not supplied a peer yet.
+                    // RFC 5761 §5.1.1: reports share the RTP socket only with
+                    // negotiated multiplexing; otherwise they need a separate
+                    // RTCP socket, or are not sent at all.
+                    let Some(remote_addr) = rtcp_report_destination(
+                        &transport,
+                        &reporter.packet_sender,
+                        rtcp_mux.load(Ordering::Acquire),
+                    )
+                    .await
+                    else {
+                        continue; // No peer yet, or no RTCP path to it.
                     };
 
-                    // Update RTP statistics before sending the report
-                    let (sender_packet_count, sender_octet_count) =
-                        sender_report_totals(&stats, &sender_octets);
-                    rtcp_generator.set_sent_totals(sender_packet_count, sender_octet_count);
-
-                    // Log the current stats for debugging
-                    debug!(
-                        "Current stats for RTCP report: packets={}, payload_octets={}",
-                        sender_packet_count, sender_octet_count
-                    );
-
-                    // Send an RTCP report regardless of should_send_report logic for this example
-                    // We'll send a compound packet with SR and SDES
-                    debug!("Sending RTCP report");
-
-                    // Generate sender report
-                    let rtp_timestamp = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u32;
-
-                    let mut sr = rtcp_generator.generate_sender_report(rtp_timestamp);
-                    sr.report_blocks = take_rtcp_report_blocks(&report_streams);
-                    let report_blocks = sr.report_blocks.clone();
-                    let sdes = rtcp_generator.generate_sdes();
-
-                    // Create compound packet
-                    let mut compound = crate::packet::rtcp::RtcpCompoundPacket::new_with_sr(sr);
-                    compound.add_sdes(sdes);
-                    report_index = report_index.saturating_add(1);
-                    if report_index % u64::from(xr_quality.every_n_rtcp_reports.get()) == 0 {
-                        let stats_snapshot = stats.lock().clone();
-                        if let Some(xr) = build_voip_metrics_xr(
-                            ssrc,
-                            &report_blocks,
-                            &stats_snapshot,
-                            report_clock_rate.load(Ordering::Relaxed),
-                        ) {
-                            compound.add_xr(xr);
-                        }
-                    }
-
-                    // Send the compound packet
-                    if let Ok(data) = compound.serialize() {
-                        if let Err(e) = transport.send_rtcp_bytes(&data, remote_addr).await {
-                            if matches!(e, Error::UnsupportedFeature(_)) {
-                                trace!(
-                                    "Skipping RTCP report while authenticated SRTCP is unavailable"
-                                );
-                            } else {
-                                warn!("Failed to send RTCP compound packet: {}", e);
-                            }
-                        } else {
-                            info!("Sent RTCP compound packet of {} bytes", data.len());
-
-                            // Emit SR event
+                    let compound = reporter.build(None, true);
+                    match reporter.send(&transport, &compound, remote_addr).await {
+                        Ok(()) => {
+                            debug!("Sent periodic RTCP compound report to {}", remote_addr);
                             if let Some(sr) = compound.get_sr() {
                                 let _ = event_tx.send(RtpSessionEvent::RtcpSenderReport {
                                     ssrc,
@@ -1346,14 +1754,12 @@ impl RtpSession {
                                 });
                             }
                         }
+                        Err(Error::UnsupportedFeature(_)) => {
+                            trace!("Skipping RTCP report while authenticated SRTCP is unavailable");
+                        }
+                        Err(e) => warn!("Failed to send RTCP compound packet: {}", e),
                     }
-
-                    // Recalculate interval for next report
-                    interval = rtcp_generator.calculate_interval();
-                    debug!("Next RTCP report in {:?}", interval);
                 }
-
-                debug!("RTCP scheduling task ended");
             });
 
             self.rtcp_task = Some(rtcp_task);
@@ -1467,8 +1873,65 @@ impl RtpSession {
         self.packet_sender.set_remote_addr(addr);
         if let Some(t) = self.transport.as_any().downcast_ref::<UdpRtpTransport>() {
             t.set_remote_rtp_addr(addr).await;
-            t.set_remote_rtcp_addr(addr).await;
         }
+        self.refresh_remote_rtcp_addr();
+    }
+
+    /// Set the peer's RTCP address from SDP `a=rtcp:` (RFC 3605), or clear
+    /// it with `None` to fall back to the peer's RTP port + 1. Only a
+    /// session with a separate RTCP socket that has not negotiated
+    /// multiplexing sends there; a multiplexing session reports to the
+    /// peer's RTP address whatever this says.
+    pub fn set_remote_rtcp_addr(&self, addr: Option<SocketAddr>) {
+        *self.signalled_remote_rtcp_addr.lock() = addr;
+        self.refresh_remote_rtcp_addr();
+    }
+
+    /// Local address of the separate RTCP socket, while one is open.
+    pub fn local_rtcp_addr(&self) -> Option<SocketAddr> {
+        self.transport
+            .as_any()
+            .downcast_ref::<UdpRtpTransport>()
+            .and_then(UdpRtpTransport::local_rtcp_socket_addr)
+    }
+
+    /// Close the separate RTCP socket, once RTP/RTCP multiplexing makes it
+    /// unnecessary, and return the address it was bound to so the caller can
+    /// hand the port back. RTCP uses the RTP socket from then on. `None`
+    /// when the session had no separate socket.
+    pub async fn release_rtcp_socket(&self) -> Option<SocketAddr> {
+        let udp = self.transport.as_any().downcast_ref::<UdpRtpTransport>()?;
+        let released = udp.release_rtcp_socket().await;
+        self.refresh_remote_rtcp_addr();
+        released
+    }
+
+    /// Point the transport's RTCP destination at the right place for the
+    /// current multiplexing state: the peer's RTP address when RTCP shares
+    /// the RTP socket, otherwise the signalled `a=rtcp:` address or the
+    /// peer's RTP port + 1 (RFC 3550 §11).
+    fn refresh_remote_rtcp_addr(&self) {
+        let Some(udp) = self.transport.as_any().downcast_ref::<UdpRtpTransport>() else {
+            return;
+        };
+        let Some(rtp_peer) = self.config.remote_addr else {
+            return;
+        };
+        let separate = udp.local_rtcp_socket_addr().is_some() && !udp.rtcp_mux();
+        let destination = if separate {
+            let signalled = *self.signalled_remote_rtcp_addr.lock();
+            match signalled {
+                Some(addr) => addr,
+                None => match rtp_peer.port().checked_add(1) {
+                    Some(port) => SocketAddr::new(rtp_peer.ip(), port),
+                    None => return,
+                },
+            }
+        } else {
+            // Multiplexed RTCP follows the RTP destination, latched or not.
+            udp.current_remote_rtp_addr().unwrap_or(rtp_peer)
+        };
+        udp.store_remote_rtcp_addr(destination);
     }
 
     /// Get the local address
@@ -1483,36 +1946,36 @@ impl RtpSession {
 
     /// Close the session and clean up resources
     pub async fn close(&mut self) -> Result<()> {
-        // Send BYE packet if we have a remote address
-        if let Some(remote_addr) = self.config.remote_addr {
+        // Send BYE packet if we have a remote address. Like periodic reports
+        // it shares the RTP socket only with negotiated rtcp-mux, and
+        // otherwise needs a separate RTCP socket (RFC 5761 §5.1.1).
+        let bye_destination = if self.config.remote_addr.is_some() {
+            rtcp_report_destination(&self.transport, &self.packet_sender, self.rtcp_mux()).await
+        } else {
+            None
+        };
+        if let Some(remote_addr) = bye_destination {
             // Create BYE packet
             let bye = crate::packet::rtcp::RtcpGoodbye::new_with_reason(
                 self.ssrc,
                 "Session closed".to_string(),
             );
 
-            // RFC 3550 compound RTCP starts with SR or RR. A standalone BYE is
-            // reduced-size RTCP and is only valid when that profile has been
-            // negotiated (RFC 5506), which this session does not do.
-            let rr = crate::packet::rtcp::RtcpReceiverReport::new(self.ssrc);
-            let mut rtcp_packet = crate::packet::rtcp::RtcpCompoundPacket::new_with_rr(rr);
-            rtcp_packet.add_bye(bye);
-
-            // Serialize and send
-            match rtcp_packet.serialize() {
-                Ok(data) => {
-                    // Send using transport (through RTCP port if available)
-                    if let Err(e) = self.transport.send_rtcp_bytes(&data, remote_addr).await {
-                        if matches!(e, Error::UnsupportedFeature(_)) {
-                            trace!("Skipping RTCP BYE while authenticated SRTCP is unavailable");
-                        } else {
-                            warn!("Failed to send RTCP BYE: {}", e);
-                        }
-                    }
+            // RFC 3550 §6.1: a BYE travels in a compound packet that starts
+            // with SR or RR and carries the SDES CNAME. A standalone BYE is
+            // reduced-size RTCP, which needs RFC 5506 negotiation this
+            // session does not do.
+            let compound = self.rtcp_reporter.build(Some(bye), false);
+            match self
+                .rtcp_reporter
+                .send(&self.transport, &compound, remote_addr)
+                .await
+            {
+                Ok(()) => {}
+                Err(Error::UnsupportedFeature(_)) => {
+                    trace!("Skipping RTCP BYE while authenticated SRTCP is unavailable");
                 }
-                Err(e) => {
-                    warn!("Failed to serialize RTCP BYE: {}", e);
-                }
+                Err(e) => warn!("Failed to send RTCP BYE: {}", e),
             }
         }
 
@@ -1618,6 +2081,16 @@ impl RtpSession {
     /// Set the payload type
     pub fn set_payload_type(&mut self, payload_type: u8) {
         self.config.payload_type = payload_type;
+        self.packet_sender
+            .media_payload_type
+            .store(payload_type, Ordering::Relaxed);
+        if !self.bandwidth_explicit {
+            self.rtcp_reporter.generator.lock().set_bandwidth(
+                crate::stats::reports::session_bandwidth_for_payload_type(payload_type)
+                    .unwrap_or(crate::stats::reports::DEFAULT_SESSION_BANDWIDTH_BPS),
+            );
+            self.rtcp_reporter.reschedule.notify_one();
+        }
     }
 
     /// Set the RTP clock after a completed codec renegotiation.
@@ -1753,23 +2226,16 @@ impl RtpSession {
             reason.unwrap_or_else(|| "Session terminated".to_string()),
         );
 
-        // Send BYE as standards-compliant compound RTCP. A standalone BYE is
-        // reduced-size RTCP and requires separate RFC 5506 negotiation.
-        let rr = crate::packet::rtcp::RtcpReceiverReport::new(self.ssrc);
-        let mut rtcp_packet = crate::packet::rtcp::RtcpCompoundPacket::new_with_rr(rr);
-        rtcp_packet.add_bye(bye);
-
-        // Serialize and send
-        match rtcp_packet.serialize() {
-            Ok(data) => {
-                // Send using transport
-                self.transport.send_rtcp_bytes(&data, remote_addr).await
-            }
-            Err(e) => Err(Error::SerializationError(format!(
-                "Failed to serialize RTCP BYE: {}",
-                e
-            ))),
-        }
+        // Send BYE as standards-compliant compound RTCP: SR or RR, SDES
+        // CNAME, then BYE (RFC 3550 §6.1). A standalone BYE is reduced-size
+        // RTCP and requires separate RFC 5506 negotiation.
+        let destination = rtcp_destination(&self.transport, &self.packet_sender)
+            .await
+            .unwrap_or(remote_addr);
+        let compound = self.rtcp_reporter.build(Some(bye), false);
+        self.rtcp_reporter
+            .send(&self.transport, &compound, destination)
+            .await
     }
 
     /// Send an RTCP Sender Report (SR) packet
@@ -1803,11 +2269,15 @@ impl RtpSession {
         // Create a new SR packet
         let mut sr = crate::packet::rtcp::RtcpSenderReport::new(self.ssrc);
 
-        // Set current NTP timestamp
+        // RFC 3550 §6.4.1: the RTP timestamp names the same instant as the
+        // NTP timestamp, on the media clock — the last sent media timestamp
+        // extrapolated to now. Capture the wall clock once for both.
+        let at = Instant::now();
         sr.ntp_timestamp = crate::packet::rtcp::NtpTimestamp::now();
-
-        // Set current RTP timestamp (convert from NTP time)
-        sr.rtp_timestamp = self.get_timestamp();
+        sr.rtp_timestamp = self
+            .packet_sender
+            .sr_rtp_timestamp(at)
+            .unwrap_or_else(|| self.get_timestamp());
 
         // Set packet and octet count from session stats
         sr.sender_packet_count = sender_packet_count;
@@ -1913,8 +2383,21 @@ impl RtpSession {
     /// known reports by default, as it always has. A session whose peer
     /// arrives later through SDP stays silent until the signalling layer
     /// confirms multiplexing here.
+    ///
+    /// A session built with [`Self::new_event_driven_with_rtcp_socket`]
+    /// sends from its separate RTCP socket to the peer's RTCP address while
+    /// multiplexing is not negotiated, and moves RTCP onto the RTP socket
+    /// when it is.
     pub fn set_rtcp_mux(&self, negotiated: bool) {
         self.rtcp_mux.store(negotiated, Ordering::Release);
+        // Only a separate RTCP socket changes where reports go; a
+        // single-socket session keeps its (possibly latched) destination.
+        if let Some(udp) = self.transport.as_any().downcast_ref::<UdpRtpTransport>() {
+            if udp.local_rtcp_socket_addr().is_some() {
+                udp.set_rtcp_mux(negotiated);
+                self.refresh_remote_rtcp_addr();
+            }
+        }
     }
 
     /// Whether periodic RTCP reports may currently be sent.
@@ -1924,10 +2407,63 @@ impl RtpSession {
 
     /// Set the session bandwidth in bits per second
     ///
-    /// This affects the RTCP report interval calculation.
-    /// Higher bandwidth means more frequent RTCP packets.
+    /// This is the RFC 3550 §6.2 session bandwidth — the codec bitrate plus
+    /// IP/UDP/RTP header overhead — and drives the RTCP report interval: 5%
+    /// of it is shared by the session's members. Without a call here the
+    /// session derives it from a static payload type, or assumes
+    /// [`DEFAULT_SESSION_BANDWIDTH_BPS`](crate::stats::reports::DEFAULT_SESSION_BANDWIDTH_BPS).
+    /// A pending report interval is redrawn with the new value.
     pub fn set_bandwidth(&mut self, bandwidth_bps: u32) {
-        self.bandwidth_bps = bandwidth_bps;
+        self.bandwidth_explicit = true;
+        self.rtcp_reporter
+            .generator
+            .lock()
+            .set_bandwidth(bandwidth_bps);
+        self.rtcp_reporter.reschedule.notify_one();
+    }
+
+    /// Session bandwidth in bits per second used for the RTCP interval.
+    pub fn bandwidth(&self) -> u32 {
+        self.rtcp_reporter.generator.lock().bandwidth()
+    }
+
+    /// Use the RFC 3550 §6.2 reduced minimum RTCP interval — 360 divided by
+    /// the session bandwidth in kbit/s, when that is under five seconds —
+    /// instead of the fixed five-second minimum. Off by default. A pending
+    /// report interval is redrawn with the new minimum.
+    pub fn set_rtcp_reduced_minimum(&self, enabled: bool) {
+        self.rtcp_reporter
+            .generator
+            .lock()
+            .set_reduced_minimum(enabled);
+        self.rtcp_reporter.reschedule.notify_one();
+    }
+
+    /// Whether the reduced minimum RTCP interval is in use.
+    pub fn rtcp_reduced_minimum(&self) -> bool {
+        self.rtcp_reporter.generator.lock().reduced_minimum()
+    }
+
+    /// Append RFC 3611 VoIP-metrics XR blocks to periodic reports.
+    ///
+    /// Off by default: XR is an extension the peer signals interest in with
+    /// SDP `a=rtcp-xr` (RFC 3611 §5.1), so the signalling layer enables it
+    /// per session once negotiation shows it.
+    pub fn set_rtcp_xr_enabled(&self, enabled: bool) {
+        self.rtcp_reporter
+            .xr_enabled
+            .store(enabled, Ordering::Relaxed);
+    }
+
+    /// Whether periodic reports carry RFC 3611 VoIP-metrics XR blocks.
+    pub fn rtcp_xr_enabled(&self) -> bool {
+        self.rtcp_reporter.xr_enabled.load(Ordering::Relaxed)
+    }
+
+    /// The SDES CNAME this session reports: random per session (RFC 7022
+    /// §4.2) and stable for its lifetime.
+    pub fn cname(&self) -> String {
+        self.rtcp_reporter.generator.lock().cname().to_string()
     }
 
     /// Create a sender handle for this session
@@ -2029,6 +2565,7 @@ mod tests {
         })
         .await
         .unwrap();
+        fast_rtcp(&mut session);
         let mut bytes = [0u8; 2048];
         assert!(
             tokio::time::timeout(Duration::from_millis(1100), first.recv_from(&mut bytes))
@@ -2038,28 +2575,39 @@ mod tests {
         // The signalling layer reports a negotiated a=rtcp-mux.
         session.set_rtcp_mux(true);
         session.set_remote_addr(first.local_addr().unwrap()).await;
-        let (n, _) = tokio::time::timeout(Duration::from_secs(4), first.recv_from(&mut bytes))
+        let (n, _) = tokio::time::timeout(Duration::from_secs(2), first.recv_from(&mut bytes))
             .await
             .unwrap()
             .unwrap();
         let report = crate::packet::rtcp::RtcpCompoundPacket::parse(&bytes[..n]).unwrap();
-        assert_eq!(report.get_sr().unwrap().ssrc, session.ssrc);
+        assert_eq!(report.get_rr().unwrap().ssrc, session.ssrc);
         session.set_remote_addr(second.local_addr().unwrap()).await;
-        let (n, _) = tokio::time::timeout(Duration::from_secs(4), second.recv_from(&mut bytes))
+        let (n, _) = tokio::time::timeout(Duration::from_secs(2), second.recv_from(&mut bytes))
             .await
             .unwrap()
             .unwrap();
         let report = crate::packet::rtcp::RtcpCompoundPacket::parse(&bytes[..n]).unwrap();
-        assert_eq!(report.get_sr().unwrap().ssrc, session.ssrc);
+        assert_eq!(report.get_rr().unwrap().ssrc, session.ssrc);
         session.close().await.unwrap();
-        // Drain the synchronous compound BYE, then require the report task to stop.
-        let (n, _) = tokio::time::timeout(Duration::from_secs(1), second.recv_from(&mut bytes))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_compound_bye(&bytes[..n], session.ssrc, "Session closed");
+        // Drain any report already in flight and the synchronous compound
+        // BYE, then require the report task to stop.
+        let bye = loop {
+            let (n, _) = tokio::time::timeout(Duration::from_secs(1), second.recv_from(&mut bytes))
+                .await
+                .unwrap()
+                .unwrap();
+            let compound = crate::packet::rtcp::RtcpCompoundPacket::parse(&bytes[..n]).unwrap();
+            if compound
+                .packets
+                .iter()
+                .any(|p| matches!(p, crate::packet::rtcp::RtcpPacket::Goodbye(_)))
+            {
+                break bytes[..n].to_vec();
+            }
+        };
+        assert_compound_bye(&bye, session.ssrc, "Session closed");
         assert!(
-            tokio::time::timeout(Duration::from_millis(1600), second.recv_from(&mut bytes))
+            tokio::time::timeout(Duration::from_secs(1), second.recv_from(&mut bytes))
                 .await
                 .is_err()
         );
@@ -2076,23 +2624,53 @@ mod tests {
         .await
         .unwrap();
         assert!(!session.rtcp_mux());
+        fast_rtcp(&mut session);
         session.set_remote_addr(peer.local_addr().unwrap()).await;
         let mut bytes = [0u8; 2048];
-        // Several 1 s report intervals pass; nothing may reach the RTP port.
+        // Several report intervals pass; nothing may reach the RTP port.
         assert!(
-            tokio::time::timeout(Duration::from_millis(3500), peer.recv_from(&mut bytes))
+            tokio::time::timeout(Duration::from_millis(1500), peer.recv_from(&mut bytes))
                 .await
                 .is_err(),
             "periodic RTCP reached a peer that never agreed to rtcp-mux"
         );
         session.set_rtcp_mux(true);
-        let (n, _) = tokio::time::timeout(Duration::from_secs(4), peer.recv_from(&mut bytes))
+        let (n, _) = tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut bytes))
             .await
             .unwrap()
             .unwrap();
         let report = crate::packet::rtcp::RtcpCompoundPacket::parse(&bytes[..n]).unwrap();
-        assert_eq!(report.get_sr().unwrap().ssrc, session.ssrc);
+        assert_eq!(report.get_rr().unwrap().ssrc, session.ssrc);
         session.close().await.unwrap();
+    }
+
+    /// Report fast for wall-clock tests: the RFC 3550 §6.2 reduced minimum at
+    /// 2 Mbit/s is 0.18 s, so intervals fall in about [0.07, 0.22] s.
+    fn fast_rtcp(session: &mut RtpSession) {
+        session.set_bandwidth(2_000_000);
+        session.set_rtcp_reduced_minimum(true);
+    }
+
+    #[tokio::test]
+    async fn close_sends_no_rtcp_bye_to_a_peer_without_rtcp_mux() {
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut session = RtpSession::new(RtpSessionConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            remote_addr: None,
+            ..RtpSessionConfig::default()
+        })
+        .await
+        .unwrap();
+        session.set_remote_addr(peer.local_addr().unwrap()).await;
+        assert!(!session.rtcp_mux());
+        session.close().await.unwrap();
+        let mut bytes = [0u8; 2048];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), peer.recv_from(&mut bytes))
+                .await
+                .is_err(),
+            "RTCP BYE reached the RTP port of a peer that never agreed to rtcp-mux"
+        );
     }
 
     async fn next_packet_event(events: &mut broadcast::Receiver<RtpSessionEvent>) -> RtpPacket {
@@ -2130,22 +2708,33 @@ mod tests {
         }
     }
 
-    fn assert_compound_bye(data: &[u8], expected_ssrc: RtpSsrc, expected_reason: &str) {
+    /// Assert an RFC 3550 §6.1 compound BYE: SR or RR first, then SDES with
+    /// the CNAME, then BYE. Returns the CNAME.
+    fn assert_compound_bye(data: &[u8], expected_ssrc: RtpSsrc, expected_reason: &str) -> String {
         use crate::packet::rtcp::{RtcpCompoundPacket, RtcpPacket};
 
         let compound = RtcpCompoundPacket::parse(data).expect("BYE must be valid compound RTCP");
-        assert_eq!(compound.packets.len(), 2);
+        assert_eq!(compound.packets.len(), 3, "{compound:?}");
         match &compound.packets[0] {
             RtcpPacket::ReceiverReport(report) => assert_eq!(report.ssrc, expected_ssrc),
-            packet => panic!("expected RR before BYE, got {packet:?}"),
+            RtcpPacket::SenderReport(report) => assert_eq!(report.ssrc, expected_ssrc),
+            packet => panic!("expected SR or RR before BYE, got {packet:?}"),
         }
-        match &compound.packets[1] {
+        let cname = match &compound.packets[1] {
+            RtcpPacket::SourceDescription(sdes) => sdes
+                .find_cname(expected_ssrc)
+                .expect("SDES carries the CNAME")
+                .to_string(),
+            packet => panic!("expected SDES before BYE, got {packet:?}"),
+        };
+        match &compound.packets[2] {
             RtcpPacket::Goodbye(bye) => {
                 assert_eq!(bye.sources, vec![expected_ssrc]);
                 assert_eq!(bye.reason.as_deref(), Some(expected_reason));
             }
-            packet => panic!("expected BYE after RR, got {packet:?}"),
+            packet => panic!("expected BYE last, got {packet:?}"),
         }
+        cname
     }
 
     #[tokio::test]
@@ -2539,13 +3128,15 @@ mod tests {
         };
 
         let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let session = RtpSession::new(RtpSessionConfig {
+        let mut session = RtpSession::new(RtpSessionConfig {
             local_addr: "127.0.0.1:0".parse().unwrap(),
             ssrc: Some(0x4444_4444),
             ..RtpSessionConfig::default()
         })
         .await
         .unwrap();
+        // Only the session's peer may feed its RTCP handling.
+        session.set_remote_addr(peer.local_addr().unwrap()).await;
         let mut events = session.subscribe();
         let remote_ssrc = 0x5555_5555;
         let mut receiver_report = RtcpReceiverReport::new(remote_ssrc);
@@ -2592,6 +3183,129 @@ mod tests {
         .await
         .expect("known RTCP members after an unknown member were not processed");
         assert_eq!(session.get_stats().packets_lost, 0);
+    }
+
+    #[tokio::test]
+    async fn peer_reception_reports_about_our_ssrc_and_bye_are_retained_as_state() {
+        use crate::packet::rtcp::{
+            RtcpCompoundPacket, RtcpGoodbye, RtcpPacket, RtcpReceiverReport, RtcpReportBlock,
+        };
+
+        let local_ssrc = 0x4444_4444;
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut session = RtpSession::new(RtpSessionConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            ssrc: Some(local_ssrc),
+            clock_rate: 8_000,
+            ..RtpSessionConfig::default()
+        })
+        .await
+        .unwrap();
+        // RTCP is accepted only from the call's signalled peer, as in a call.
+        session.set_remote_addr(peer.local_addr().unwrap()).await;
+        let mut events = session.subscribe();
+        let local_addr = session.local_addr().unwrap();
+        assert!(session.get_stats().peer_report.is_none());
+        assert!(session.get_stats().peer_bye.is_none());
+
+        async fn send_and_wait(
+            peer: &UdpSocket,
+            to: SocketAddr,
+            events: &mut broadcast::Receiver<RtpSessionEvent>,
+            packets: Vec<RtcpPacket>,
+        ) {
+            let want_bye = matches!(packets.last(), Some(RtcpPacket::Goodbye(_)));
+            let compound = RtcpCompoundPacket { packets };
+            peer.send_to(&compound.serialize().unwrap(), to)
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    match events.recv().await.unwrap() {
+                        RtpSessionEvent::Bye { .. } if want_bye => return,
+                        RtpSessionEvent::RtcpReceiverReport { .. } if !want_bye => return,
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("RTCP was not processed");
+        }
+
+        // One reporter describes our stream and an unrelated source. Only
+        // the block about our SSRC is retained.
+        let first_reporter = 0x5555_5555;
+        let mut rr = RtcpReceiverReport::new(first_reporter);
+        let mut about_other = RtcpReportBlock::new(0x9999_9999);
+        about_other.fraction_lost = 200;
+        rr.add_report_block(about_other);
+        let mut about_us = RtcpReportBlock::new(local_ssrc);
+        about_us.fraction_lost = 64; // 25 percent
+        about_us.cumulative_lost = 0x00ff_fffe; // -2 as a signed 24-bit value
+        about_us.highest_seq = 0x0001_0010;
+        about_us.jitter = 160; // 20 ms at 8 kHz
+        rr.add_report_block(about_us);
+        send_and_wait(
+            &peer,
+            local_addr,
+            &mut events,
+            vec![RtcpPacket::ReceiverReport(rr)],
+        )
+        .await;
+
+        let report = session
+            .get_stats()
+            .peer_report
+            .expect("block about our SSRC is retained");
+        assert_eq!(report.reporter_ssrc, first_reporter);
+        assert_eq!(report.fraction_lost, 64);
+        assert!((report.fraction_lost_ratio() - 0.25).abs() < f64::EPSILON);
+        assert_eq!(report.cumulative_lost, -2);
+        assert_eq!(report.extended_highest_sequence, 0x0001_0010);
+        assert_eq!(report.jitter, 160);
+        assert!((report.jitter_ms - 20.0).abs() < 1e-9);
+        // LSR zero: the peer has not seen one of our SRs, so no RTT.
+        assert_eq!(report.rtt_ms, None);
+        assert_eq!(session.get_stats().rtt_ms, None);
+        // A remote-reported loss never inflates our local inbound loss.
+        assert_eq!(session.get_stats().packets_lost, 0);
+
+        // A second reporter's newer block replaces the first one.
+        let second_reporter = 0x6666_6666;
+        let mut rr = RtcpReceiverReport::new(second_reporter);
+        let mut about_us = RtcpReportBlock::new(local_ssrc);
+        about_us.fraction_lost = 0;
+        about_us.cumulative_lost = 3;
+        rr.add_report_block(about_us);
+        send_and_wait(
+            &peer,
+            local_addr,
+            &mut events,
+            vec![RtcpPacket::ReceiverReport(rr)],
+        )
+        .await;
+        let report = session.get_stats().peer_report.unwrap();
+        assert_eq!(report.reporter_ssrc, second_reporter);
+        assert_eq!(report.cumulative_lost, 3);
+
+        let mut bye = RtcpGoodbye::new_for_source(second_reporter);
+        bye.reason = Some("done".to_string());
+        send_and_wait(
+            &peer,
+            local_addr,
+            &mut events,
+            vec![
+                // A compound packet must lead with a report.
+                RtcpPacket::ReceiverReport(RtcpReceiverReport::new(second_reporter)),
+                RtcpPacket::Goodbye(bye),
+            ],
+        )
+        .await;
+        let bye = session.get_stats().peer_bye.expect("BYE is retained");
+        assert_eq!(bye.ssrc, second_reporter);
+        assert_eq!(bye.reason.as_deref(), Some("done"));
+        // The last reception report survives the BYE.
+        assert!(session.get_stats().peer_report.is_some());
     }
 
     #[tokio::test]
@@ -2739,21 +3453,29 @@ mod tests {
         assert_eq!(manual.report_blocks[0].last_sr, 0x1234_5678);
         assert!(manual.report_blocks[0].delay_since_last_sr > 0);
 
-        let (size, _) = tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut buffer))
+        // The first report waits half the RFC 3550 minimum, randomised:
+        // at most 2.5 s * 1.5 / (e - 3/2), about 3.1 s.
+        let (size, _) = tokio::time::timeout(Duration::from_secs(4), peer.recv_from(&mut buffer))
             .await
             .expect("periodic RTCP report was not sent")
             .unwrap();
         let periodic = RtcpCompoundPacket::parse_tolerant(&buffer[..size]).unwrap();
-        let periodic_sr = periodic
+        // Nothing was sent, so the periodic report is an RR (RFC 3550 §6.4).
+        let periodic_blocks = periodic
             .packets
             .iter()
             .find_map(|member| match member {
-                RtcpCompoundMember::Known(RtcpPacket::SenderReport(report)) => Some(report),
+                RtcpCompoundMember::Known(RtcpPacket::ReceiverReport(report)) => {
+                    Some(report.report_blocks.clone())
+                }
+                RtcpCompoundMember::Known(RtcpPacket::SenderReport(report)) => {
+                    Some(report.report_blocks.clone())
+                }
                 _ => None,
             })
-            .expect("periodic compound packet did not contain a sender report");
-        assert_eq!(periodic_sr.report_blocks[0].last_sr, 0x1234_5678);
-        assert!(periodic_sr.report_blocks[0].delay_since_last_sr > 0);
+            .expect("periodic compound packet did not contain a report");
+        assert_eq!(periodic_blocks[0].last_sr, 0x1234_5678);
+        assert!(periodic_blocks[0].delay_since_last_sr > 0);
     }
 
     #[tokio::test]
@@ -2896,5 +3618,852 @@ mod tests {
         assert!(
             build_voip_metrics_xr(0x1122_3344, &[], &RtpSessionStats::default(), 8_000,).is_none()
         );
+    }
+
+    // ---- RFC 3550 sender/receiver report correctness ----------------------
+
+    /// Receive datagrams at `peer` until a compound RTCP packet arrives,
+    /// skipping RTP. `None` when `window` passes first.
+    async fn next_rtcp(
+        peer: &UdpSocket,
+        window: Duration,
+    ) -> Option<crate::packet::rtcp::RtcpCompoundPacket> {
+        let mut bytes = [0u8; 2048];
+        tokio::time::timeout(window, async {
+            loop {
+                let (n, _) = peer.recv_from(&mut bytes).await.unwrap();
+                if n >= 2 && (200..=207).contains(&bytes[1]) {
+                    return crate::packet::rtcp::RtcpCompoundPacket::parse(&bytes[..n])
+                        .expect("valid compound RTCP");
+                }
+            }
+        })
+        .await
+        .ok()
+    }
+
+    fn ntp_secs(ntp: crate::packet::rtcp::NtpTimestamp) -> f64 {
+        ntp.to_duration_since_unix_epoch().as_secs_f64()
+    }
+
+    /// The SR's RTP timestamp must be the last sent media timestamp advanced
+    /// by the time between that send and the SR's own NTP timestamp at the
+    /// 8 kHz media clock (RFC 3550 §6.4.1). `sent_window` brackets the send.
+    fn assert_sr_extrapolates(
+        sr: &crate::packet::rtcp::RtcpSenderReport,
+        media_timestamp: u32,
+        sent_window: (f64, f64),
+    ) {
+        let ticks = f64::from(sr.rtp_timestamp.wrapping_sub(media_timestamp));
+        let sr_time = ntp_secs(sr.ntp_timestamp);
+        let earliest = (sr_time - sent_window.1) * 8_000.0;
+        let latest = (sr_time - sent_window.0) * 8_000.0;
+        // One tick of rounding either side.
+        assert!(
+            ticks >= earliest - 1.0 && ticks <= latest + 1.0,
+            "SR RTP timestamp is {ticks} ticks past the last media packet; \
+             the sender clock says {earliest:.1}..={latest:.1}"
+        );
+    }
+
+    async fn send_media_bracketed(session: &RtpSession, timestamp: u32) -> (f64, f64) {
+        let before = ntp_secs(crate::packet::rtcp::NtpTimestamp::now());
+        session
+            .send_packet(timestamp, Bytes::from_static(&[0xff; 160]), false)
+            .await
+            .unwrap();
+        let after = ntp_secs(crate::packet::rtcp::NtpTimestamp::now());
+        (before, after)
+    }
+
+    #[tokio::test]
+    async fn manual_sender_report_extrapolates_the_last_sent_media_timestamp() {
+        use crate::packet::rtcp::RtcpPacket;
+
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut session = RtpSession::new(RtpSessionConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            ..RtpSessionConfig::default()
+        })
+        .await
+        .unwrap();
+        session.set_remote_addr(peer.local_addr().unwrap()).await;
+
+        // Near the wrap point, so the extrapolation must wrap too.
+        let media_timestamp = 0xffff_ff00;
+        let window = send_media_bracketed(&session, media_timestamp).await;
+        // A telephone-event packet keeps its tone's start timestamp; it must
+        // not move the media clock anchor.
+        session
+            .send_packet_with_pt(
+                0x1234_5678,
+                Bytes::from_static(&[1, 0x8a, 0, 160]),
+                true,
+                101,
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        session.send_sender_report().await.unwrap();
+        let mut buffer = [0u8; 2048];
+        let sr = loop {
+            let (n, _) = tokio::time::timeout(Duration::from_secs(1), peer.recv_from(&mut buffer))
+                .await
+                .unwrap()
+                .unwrap();
+            if buffer[1] == 200 {
+                match RtcpPacket::parse(&buffer[..n]).unwrap() {
+                    RtcpPacket::SenderReport(report) => break report,
+                    packet => panic!("expected SR, got {packet:?}"),
+                }
+            }
+        };
+        assert_sr_extrapolates(&sr, media_timestamp, window);
+        // About 2000 ticks for 250 ms; nowhere near the event timestamp.
+        assert!(sr.rtp_timestamp.wrapping_sub(media_timestamp) >= 1_900);
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn periodic_sender_report_extrapolates_the_last_sent_media_timestamp() {
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let session = RtpSession::new(RtpSessionConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            remote_addr: Some(peer.local_addr().unwrap()),
+            ..RtpSessionConfig::default()
+        })
+        .await
+        .unwrap();
+        let media_timestamp = 0x0102_0304;
+        let window = send_media_bracketed(&session, media_timestamp).await;
+
+        // First report: half the five-second minimum, randomised, < 3.1 s.
+        let report = next_rtcp(&peer, Duration::from_secs(4))
+            .await
+            .expect("periodic report");
+        let sr = report.get_sr().expect("a session that sent RTP reports SR");
+        assert_eq!(sr.sender_packet_count, 1);
+        assert_sr_extrapolates(sr, media_timestamp, window);
+    }
+
+    #[tokio::test]
+    async fn silent_session_reports_rr_and_sender_state_lasts_two_intervals() {
+        use crate::packet::rtcp::RtcpPacket;
+
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut session = RtpSession::new(RtpSessionConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            remote_addr: Some(peer.local_addr().unwrap()),
+            ..RtpSessionConfig::default()
+        })
+        .await
+        .unwrap();
+        fast_rtcp(&mut session);
+        let window = Duration::from_secs(2);
+
+        // Nothing sent yet: RR + SDES, never an SR with zero counts.
+        let first = next_rtcp(&peer, window).await.expect("first report");
+        assert!(first.get_sr().is_none(), "silent session sent {first:?}");
+        assert_eq!(first.get_rr().unwrap().ssrc, session.get_ssrc());
+        assert!(matches!(first.packets[1], RtcpPacket::SourceDescription(_)));
+
+        session
+            .send_packet(160, Bytes::from_static(&[0xff; 160]), false)
+            .await
+            .unwrap();
+        // Sent during this interval, and the one before the next report.
+        for _ in 0..2 {
+            let report = next_rtcp(&peer, window).await.expect("sender report");
+            assert_eq!(
+                report
+                    .get_sr()
+                    .expect("SR after sending")
+                    .sender_packet_count,
+                1
+            );
+        }
+        // Two whole intervals without RTP: a receiver again.
+        let report = next_rtcp(&peer, window).await.expect("receiver report");
+        assert!(report.get_sr().is_none(), "{report:?}");
+        assert!(report.get_rr().is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn periodic_report_interval_follows_rfc3550_under_paused_time() {
+        let _local = crate::task_runtime::MediaTasksOnCurrentRuntime::enter();
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let session = RtpSession::new(RtpSessionConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            remote_addr: Some(peer.local_addr().unwrap()),
+            ..RtpSessionConfig::default()
+        })
+        .await
+        .unwrap();
+        let started = tokio::time::Instant::now();
+        let ssrc = session.get_ssrc();
+        let mut events = session.subscribe();
+        // Keep the session a sender so every report is an SR, which the
+        // session also announces locally the moment it leaves.
+        let sender = session.send_handle().unwrap();
+        let pump = tokio::spawn(async move {
+            let mut timestamp = 0_u32;
+            loop {
+                let _ = sender
+                    .send_packet(timestamp, Bytes::from_static(&[0xff; 160]), false)
+                    .await;
+                timestamp = timestamp.wrapping_add(4_000);
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        });
+
+        let mut sent_at = Vec::new();
+        while sent_at.len() < 16 {
+            if let RtpSessionEvent::RtcpSenderReport { ssrc: from, .. } =
+                events.recv().await.unwrap()
+            {
+                if from == ssrc {
+                    sent_at.push(tokio::time::Instant::now());
+                }
+            }
+        }
+        pump.abort();
+
+        let compensation = std::f64::consts::E - 1.5;
+        // First report: the 5 s minimum halved, then [0.5, 1.5] / (e - 3/2).
+        let first = (sent_at[0] - started).as_secs_f64();
+        assert!(
+            first >= 2.5 * 0.5 / compensation - 0.01 && first <= 2.5 * 1.5 / compensation + 0.01,
+            "first report after {first} s"
+        );
+        let gaps: Vec<f64> = sent_at
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).as_secs_f64())
+            .collect();
+        let (lower, upper) = (5.0 * 0.5 / compensation, 5.0 * 1.5 / compensation);
+        for gap in &gaps {
+            assert!(
+                *gap >= lower - 0.01 && *gap <= upper + 0.01,
+                "report gap {gap} s outside [{lower}, {upper}]"
+            );
+        }
+        // Mean 5 / (e - 3/2) = 4.10 s; 15 uniform draws keep it within ±1 s.
+        let mean = gaps.iter().sum::<f64>() / gaps.len() as f64;
+        assert!((mean - 5.0 / compensation).abs() < 1.0, "mean gap {mean} s");
+        // Randomised, not a fixed period.
+        let spread = gaps.iter().cloned().fold(0.0, f64::max)
+            - gaps.iter().cloned().fold(f64::INFINITY, f64::min);
+        assert!(spread > 0.5, "report gaps barely vary: {gaps:?}");
+    }
+
+    #[tokio::test]
+    async fn reduced_minimum_interval_is_a_per_session_opt_in() {
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut session = RtpSession::new(RtpSessionConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            remote_addr: Some(peer.local_addr().unwrap()),
+            ..RtpSessionConfig::default()
+        })
+        .await
+        .unwrap();
+        // PCMU: 64 kbit/s plus 16 kbit/s of headers.
+        assert_eq!(session.bandwidth(), 80_000);
+        assert!(!session.rtcp_reduced_minimum());
+        let started = tokio::time::Instant::now();
+        session.set_bandwidth(1_000_000);
+        session.set_rtcp_reduced_minimum(true);
+        assert!(session.rtcp_reduced_minimum());
+        // 360 / 1000 kbit/s = 0.36 s minimum, halved for the first report:
+        // five reports within 0.22 + 4 * 0.44 s. The five-second floor would
+        // need at least 1.03 + 4 * 2.05 s.
+        for _ in 0..5 {
+            next_rtcp(&peer, Duration::from_secs(2)).await.unwrap();
+        }
+        let elapsed = started.elapsed().as_secs_f64();
+        assert!(elapsed < 2.5, "five reports took {elapsed} s");
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn close_bye_carries_the_sdes_cname() {
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut session = RtpSession::new(RtpSessionConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            remote_addr: Some(peer.local_addr().unwrap()),
+            ..RtpSessionConfig::default()
+        })
+        .await
+        .unwrap();
+        let cname = session.cname();
+        let ssrc = session.get_ssrc();
+        session.close().await.unwrap();
+        let report = next_rtcp(&peer, Duration::from_secs(1))
+            .await
+            .expect("close sends a compound BYE");
+        let wire = report.serialize().unwrap();
+        assert_eq!(assert_compound_bye(&wire, ssrc, "Session closed"), cname);
+    }
+
+    #[tokio::test]
+    async fn cname_is_random_per_session_and_names_no_user_or_host() {
+        use crate::packet::rtcp::RtcpPacket;
+        use base64::Engine;
+
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut session = RtpSession::new(RtpSessionConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            remote_addr: Some(peer.local_addr().unwrap()),
+            ..RtpSessionConfig::default()
+        })
+        .await
+        .unwrap();
+        fast_rtcp(&mut session);
+        let other = RtpSession::new(RtpSessionConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            ..RtpSessionConfig::default()
+        })
+        .await
+        .unwrap();
+
+        let mut wire_cnames = Vec::new();
+        for _ in 0..2 {
+            let report = next_rtcp(&peer, Duration::from_secs(2)).await.unwrap();
+            let cname = report
+                .packets
+                .iter()
+                .find_map(|packet| match packet {
+                    RtcpPacket::SourceDescription(sdes) => {
+                        sdes.find_cname(session.get_ssrc()).map(str::to_string)
+                    }
+                    _ => None,
+                })
+                .expect("every report carries SDES CNAME");
+            wire_cnames.push(cname);
+        }
+        // Stable for the session, and what the session says it is.
+        assert_eq!(wire_cnames[0], wire_cnames[1]);
+        assert_eq!(wire_cnames[0], session.cname());
+        // RFC 7022 §4.2: 96 random bits, base64.
+        let cname = &wire_cnames[0];
+        assert_eq!(cname.len(), 16);
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(cname)
+            .expect("base64 CNAME");
+        assert_eq!(decoded.len(), 12);
+        assert!(!cname.contains('@'), "CNAME {cname} looks like user@host");
+        if let Ok(user) = std::env::var("USER") {
+            assert!(user.is_empty() || !cname.contains(&user));
+        }
+        assert_ne!(session.cname(), other.cname());
+    }
+
+    #[tokio::test]
+    async fn rtcp_xr_is_absent_by_default_and_follows_the_session_switch() {
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut session = RtpSession::new(RtpSessionConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            remote_addr: Some(peer.local_addr().unwrap()),
+            ..RtpSessionConfig::default()
+        })
+        .await
+        .unwrap();
+        fast_rtcp(&mut session);
+        let destination = session.local_addr().unwrap();
+        let mut events = session.subscribe();
+        let has_xr = |report: &crate::packet::rtcp::RtcpCompoundPacket| {
+            report
+                .packets
+                .iter()
+                .any(|p| matches!(p, crate::packet::rtcp::RtcpPacket::ExtendedReport(_)))
+        };
+        assert!(!session.rtcp_xr_enabled());
+
+        // Receive media so reports carry a block XR could describe.
+        send_raw_rtp(&peer, destination, 1, 160, 0x9999_0001).await;
+        next_packet_event(&mut events).await;
+        // A report may already be in flight at each switch, so judge a few
+        // reports at each step.
+        let window = Duration::from_secs(2);
+        let mut with_blocks = 0;
+        for _ in 0..3 {
+            let report = next_rtcp(&peer, window).await.unwrap();
+            with_blocks += report.get_rr().unwrap().report_blocks.len();
+            assert!(!has_xr(&report), "XR sent without being negotiated");
+        }
+        assert!(
+            with_blocks > 0,
+            "reports never described the received stream"
+        );
+
+        session.set_rtcp_xr_enabled(true);
+        let mut xr_seen = false;
+        for _ in 0..2 {
+            xr_seen |= has_xr(&next_rtcp(&peer, window).await.unwrap());
+        }
+        assert!(xr_seen, "XR missing once enabled");
+
+        session.set_rtcp_xr_enabled(false);
+        next_rtcp(&peer, window).await.unwrap();
+        for _ in 0..2 {
+            assert!(!has_xr(&next_rtcp(&peer, window).await.unwrap()));
+        }
+    }
+
+    // ---- Inbound RTCP hygiene --------------------------------------------
+
+    async fn assert_no_rtcp_event(events: &mut broadcast::Receiver<RtpSessionEvent>) {
+        let outcome = tokio::time::timeout(Duration::from_millis(300), async {
+            loop {
+                match events.recv().await {
+                    Ok(event @ RtpSessionEvent::RtcpSenderReport { .. })
+                    | Ok(event @ RtpSessionEvent::RtcpReceiverReport { .. })
+                    | Ok(event @ RtpSessionEvent::Bye { .. }) => return event,
+                    Ok(_) => {}
+                    Err(error) => panic!("event stream failed: {error}"),
+                }
+            }
+        })
+        .await;
+        if let Ok(event) = outcome {
+            panic!("RTCP from a stranger reached the session: {event:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn neighbouring_calls_rtcp_is_dropped_and_leaves_stats_untouched() {
+        use crate::packet::rtcp::{
+            NtpTimestamp, RtcpCompoundPacket, RtcpGoodbye, RtcpReportBlock, RtcpSenderReport,
+        };
+
+        // Our call's peer, and the peer of the call on the neighbouring port
+        // pair. Without rtcp-mux that neighbour sends RTCP to its RTP port
+        // plus one: our RTP port.
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let neighbour = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let local_ssrc = 0x0a0b_0c0d;
+        let mut session = RtpSession::new(RtpSessionConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            ssrc: Some(local_ssrc),
+            ..RtpSessionConfig::default()
+        })
+        .await
+        .unwrap();
+        session.set_remote_addr(peer.local_addr().unwrap()).await;
+        let destination = session.local_addr().unwrap();
+        let mut events = session.subscribe();
+
+        let compound = |sender: RtpSsrc| {
+            let mut sr = RtcpSenderReport::new(sender);
+            sr.ntp_timestamp = NtpTimestamp::now();
+            // A block about our SSRC that would produce an RTT sample.
+            let mut block = RtcpReportBlock::new(local_ssrc);
+            block.last_sr = NtpTimestamp::now().to_u32().wrapping_sub(0x0001_0000);
+            block.fraction_lost = 200;
+            sr.report_blocks.push(block);
+            let mut compound = RtcpCompoundPacket::new_with_sr(sr);
+            compound.add_bye(RtcpGoodbye::new_for_source(sender));
+            compound.serialize().unwrap()
+        };
+
+        neighbour
+            .send_to(&compound(0x0e0e_0e0e), destination)
+            .await
+            .unwrap();
+        assert_no_rtcp_event(&mut events).await;
+        let stats = session.get_stats();
+        assert_eq!(stats.rtt_ms, None, "a stranger's report set our RTT");
+        assert_eq!(stats.rtcp_packets_received, 0);
+        assert_eq!(stats.rtcp_packets_rejected, 1);
+        assert!(session.received_sender_reports.is_empty());
+
+        // The call's own peer is still heard.
+        peer.send_to(&compound(0x0f0f_0f0f), destination)
+            .await
+            .unwrap();
+        let saw_peer_report = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let RtpSessionEvent::RtcpSenderReport { ssrc, .. } = events.recv().await.unwrap()
+                {
+                    break ssrc;
+                }
+            }
+        })
+        .await
+        .expect("the peer's RTCP was dropped");
+        assert_eq!(saw_peer_report, 0x0f0f_0f0f);
+        let stats = session.get_stats();
+        assert_eq!(stats.rtcp_packets_received, 1);
+        assert_eq!(stats.rtcp_packets_rejected, 1);
+        assert!(stats.rtt_ms.is_some());
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rtcp_with_a_known_remote_ssrc_is_accepted_from_another_port() {
+        // Symmetric RTP off: nothing is latched, and the peer's RTCP leaves
+        // from a different port than its RTP. Its SSRC identifies it.
+        let rtp_peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let rtcp_peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let stranger = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let session = RtpSession::new_with_symmetric_rtp_policy(
+            RtpSessionConfig {
+                local_addr: "127.0.0.1:0".parse().unwrap(),
+                ..RtpSessionConfig::default()
+            },
+            SymmetricRtpPolicy::disabled(),
+        )
+        .await
+        .unwrap();
+        let destination = session.local_addr().unwrap();
+        let mut events = session.subscribe();
+        let remote_ssrc = 0x1357_9bdf;
+        send_raw_rtp(&rtp_peer, destination, 1, 160, remote_ssrc).await;
+        next_packet_event(&mut events).await;
+
+        let rr = |ssrc| {
+            crate::packet::rtcp::RtcpCompoundPacket::new_with_rr(
+                crate::packet::rtcp::RtcpReceiverReport::new(ssrc),
+            )
+            .serialize()
+            .unwrap()
+        };
+        stranger
+            .send_to(&rr(0x2468_ace0), destination)
+            .await
+            .unwrap();
+        assert_no_rtcp_event(&mut events).await;
+        rtcp_peer
+            .send_to(&rr(remote_ssrc), destination)
+            .await
+            .unwrap();
+        let ssrc = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let RtpSessionEvent::RtcpReceiverReport { ssrc, .. } =
+                    events.recv().await.unwrap()
+                {
+                    break ssrc;
+                }
+            }
+        })
+        .await
+        .expect("RTCP from a known remote SSRC was dropped");
+        assert_eq!(ssrc, remote_ssrc);
+        let stats = session.get_stats();
+        assert_eq!(stats.rtcp_packets_received, 1);
+        assert_eq!(stats.rtcp_packets_rejected, 1);
+    }
+
+    /// Bind an RTP socket and the RTCP socket on the port above it, the way
+    /// a peer that does not multiplex lays out its ports (RFC 3550 §11).
+    async fn bind_port_pair() -> (UdpSocket, UdpSocket) {
+        for _ in 0..64 {
+            let rtp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let Some(next) = rtp.local_addr().unwrap().port().checked_add(1) else {
+                continue;
+            };
+            if let Ok(rtcp) = UdpSocket::bind(("127.0.0.1", next)).await {
+                return (rtp, rtcp);
+            }
+        }
+        panic!("no adjacent UDP port pair available");
+    }
+
+    async fn non_mux_session(policy: SymmetricRtpPolicy, ssrc: RtpSsrc) -> RtpSession {
+        let mut session = RtpSession::new_event_driven_with_rtcp_socket(
+            RtpSessionConfig {
+                local_addr: "127.0.0.1:0".parse().unwrap(),
+                ssrc: Some(ssrc),
+                ..RtpSessionConfig::default()
+            },
+            policy,
+            "127.0.0.1:0".parse().unwrap(),
+        )
+        .await
+        .unwrap();
+        fast_rtcp(&mut session);
+        session
+    }
+
+    /// Wait for one compound RTCP datagram, returning it and its source.
+    async fn recv_rtcp(socket: &UdpSocket) -> (Vec<u8>, SocketAddr) {
+        let mut bytes = [0u8; 2048];
+        let (n, source) =
+            tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut bytes))
+                .await
+                .expect("no RTCP arrived")
+                .unwrap();
+        (bytes[..n].to_vec(), source)
+    }
+
+    async fn assert_silent(socket: &UdpSocket, what: &str) {
+        let mut bytes = [0u8; 2048];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(800), socket.recv_from(&mut bytes))
+                .await
+                .is_err(),
+            "{what}"
+        );
+    }
+
+    /// An SR from `sender` with a report block about `about` that yields an
+    /// RTT sample.
+    fn sender_report_about(sender: RtpSsrc, about: RtpSsrc) -> Vec<u8> {
+        use crate::packet::rtcp::{
+            NtpTimestamp, RtcpCompoundPacket, RtcpReportBlock, RtcpSenderReport,
+        };
+        let mut sr = RtcpSenderReport::new(sender);
+        sr.ntp_timestamp = NtpTimestamp::now();
+        let mut block = RtcpReportBlock::new(about);
+        block.last_sr = NtpTimestamp::now().to_u32().wrapping_sub(0x0001_0000);
+        sr.report_blocks.push(block);
+        RtcpCompoundPacket::new_with_sr(sr)
+            .serialize()
+            .unwrap()
+            .to_vec()
+    }
+
+    async fn next_sender_report(events: &mut broadcast::Receiver<RtpSessionEvent>) -> RtpSsrc {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let RtpSessionEvent::RtcpSenderReport { ssrc, .. } = events.recv().await.unwrap()
+                {
+                    break ssrc;
+                }
+            }
+        })
+        .await
+        .expect("the peer's RTCP was dropped")
+    }
+
+    #[tokio::test]
+    async fn non_mux_rtcp_uses_the_separate_socket_and_the_peers_rtp_port_plus_one() {
+        let (peer_rtp, peer_rtcp) = bind_port_pair().await;
+        let local_ssrc = 0x5151_5151;
+        let mut session = non_mux_session(SymmetricRtpPolicy::default(), local_ssrc).await;
+        let local_rtcp = session.local_rtcp_addr().expect("separate RTCP socket");
+        assert_ne!(local_rtcp, session.local_addr().unwrap());
+        session
+            .set_remote_addr(peer_rtp.local_addr().unwrap())
+            .await;
+        assert!(!session.rtcp_mux());
+
+        // Periodic reports reach RTP + 1 from our RTCP socket.
+        let (report, source) = recv_rtcp(&peer_rtcp).await;
+        assert_eq!(source, local_rtcp);
+        let report = crate::packet::rtcp::RtcpCompoundPacket::parse(&report).unwrap();
+        assert_eq!(report.get_rr().unwrap().ssrc, local_ssrc);
+
+        // The peer's RTCP to our RTCP port is parsed and yields an RTT.
+        let mut events = session.subscribe();
+        peer_rtcp
+            .send_to(&sender_report_about(0x6262_6262, local_ssrc), local_rtcp)
+            .await
+            .unwrap();
+        assert_eq!(next_sender_report(&mut events).await, 0x6262_6262);
+        let stats = session.get_stats();
+        assert!(stats.rtt_ms.is_some(), "no RTT from the peer's report");
+        assert_eq!(stats.rtcp_packets_received, 1);
+
+        // Nothing ever reached the RTP port.
+        assert_silent(&peer_rtp, "RTCP reached the RTP port of a non-mux peer").await;
+
+        session.close().await.unwrap();
+        let bye = loop {
+            let (data, source) = recv_rtcp(&peer_rtcp).await;
+            assert_eq!(source, local_rtcp);
+            let compound = crate::packet::rtcp::RtcpCompoundPacket::parse(&data).unwrap();
+            if compound
+                .packets
+                .iter()
+                .any(|p| matches!(p, crate::packet::rtcp::RtcpPacket::Goodbye(_)))
+            {
+                break data;
+            }
+        };
+        assert_compound_bye(&bye, local_ssrc, "Session closed");
+        assert_silent(&peer_rtp, "the close-time BYE reached the RTP port").await;
+    }
+
+    #[tokio::test]
+    async fn non_mux_rtcp_follows_the_peers_a_rtcp_address() {
+        let peer_rtp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer_rtcp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut session = non_mux_session(SymmetricRtpPolicy::default(), 0x0102_0304).await;
+        session
+            .set_remote_addr(peer_rtp.local_addr().unwrap())
+            .await;
+        session.set_remote_rtcp_addr(Some(peer_rtcp.local_addr().unwrap()));
+        let (_, source) = recv_rtcp(&peer_rtcp).await;
+        assert_eq!(Some(source), session.local_rtcp_addr());
+        assert_silent(&peer_rtp, "RTCP reached the RTP port of a non-mux peer").await;
+
+        // An a=rtcp: naming the RTP port itself would be multiplexing the
+        // peer never agreed to; nothing is sent.
+        session.set_remote_rtcp_addr(Some(peer_rtp.local_addr().unwrap()));
+        let mut bytes = [0u8; 2048];
+        while tokio::time::timeout(Duration::from_millis(300), peer_rtcp.recv_from(&mut bytes))
+            .await
+            .is_ok()
+        {}
+        assert_silent(&peer_rtp, "RTCP was sent to an a=rtcp: naming the RTP port").await;
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn negotiated_mux_moves_rtcp_to_the_rtp_socket_and_frees_the_rtcp_port() {
+        let (peer_rtp, peer_rtcp) = bind_port_pair().await;
+        let session = non_mux_session(SymmetricRtpPolicy::default(), 0x0a0a_0a0a).await;
+        let local_rtcp = session.local_rtcp_addr().unwrap();
+        let local_rtp = session.local_addr().unwrap();
+        let mut session = session;
+        session
+            .set_remote_addr(peer_rtp.local_addr().unwrap())
+            .await;
+        session.set_rtcp_mux(true);
+        assert_eq!(session.release_rtcp_socket().await, Some(local_rtcp));
+        assert_eq!(session.local_rtcp_addr(), None);
+        assert_eq!(session.release_rtcp_socket().await, None);
+        // The port is closed: it can be bound again at once.
+        drop(
+            UdpSocket::bind(local_rtcp)
+                .await
+                .expect("RTCP port was not released"),
+        );
+
+        let mut bytes = [0u8; 2048];
+        // Drain anything sent to RTP + 1 before the switch.
+        while tokio::time::timeout(Duration::from_millis(50), peer_rtcp.recv_from(&mut bytes))
+            .await
+            .is_ok()
+        {}
+        let (_, source) = recv_rtcp(&peer_rtp).await;
+        assert_eq!(source, local_rtp);
+        assert_silent(&peer_rtcp, "RTCP still reached RTP + 1 after mux").await;
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn neighbouring_rtcp_on_the_separate_rtcp_socket_is_rejected() {
+        let (peer_rtp, _peer_rtcp) = bind_port_pair().await;
+        let neighbour = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let local_ssrc = 0x7373_7373;
+        let mut session = non_mux_session(SymmetricRtpPolicy::default(), local_ssrc).await;
+        session
+            .set_remote_addr(peer_rtp.local_addr().unwrap())
+            .await;
+        let local_rtcp = session.local_rtcp_addr().unwrap();
+        let mut events = session.subscribe();
+        neighbour
+            .send_to(&sender_report_about(0x0e0e_0e0e, local_ssrc), local_rtcp)
+            .await
+            .unwrap();
+        assert_no_rtcp_event(&mut events).await;
+        let stats = session.get_stats();
+        assert_eq!(stats.rtt_ms, None, "a stranger's report set our RTT");
+        assert_eq!(stats.rtcp_packets_received, 0);
+        assert_eq!(stats.rtcp_packets_rejected, 1);
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn symmetric_rtcp_latches_the_peers_mapped_rtcp_source_only() {
+        // A peer behind NAT: its RTP arrives from the signalled address, its
+        // RTCP from a mapped port that is not RTP + 1.
+        let (peer_rtp, peer_rtcp_signalled) = bind_port_pair().await;
+        let peer_rtcp_mapped = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let stranger = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let local_ssrc = 0x3434_3434;
+        let remote_ssrc = 0x4545_4545;
+        let mut session = non_mux_session(SymmetricRtpPolicy::default(), local_ssrc).await;
+        session
+            .set_remote_addr(peer_rtp.local_addr().unwrap())
+            .await;
+        let local_rtcp = session.local_rtcp_addr().unwrap();
+        let mut events = session.subscribe();
+        send_raw_rtp(
+            &peer_rtp,
+            session.local_addr().unwrap(),
+            1,
+            160,
+            remote_ssrc,
+        )
+        .await;
+        next_packet_event(&mut events).await;
+
+        // A stranger's report does not move the destination.
+        stranger
+            .send_to(&sender_report_about(0x0e0e_0e0e, local_ssrc), local_rtcp)
+            .await
+            .unwrap();
+        assert_no_rtcp_event(&mut events).await;
+
+        peer_rtcp_mapped
+            .send_to(&sender_report_about(remote_ssrc, local_ssrc), local_rtcp)
+            .await
+            .unwrap();
+        assert_eq!(next_sender_report(&mut events).await, remote_ssrc);
+        let mut bytes = [0u8; 2048];
+        while tokio::time::timeout(
+            Duration::from_millis(50),
+            peer_rtcp_signalled.recv_from(&mut bytes),
+        )
+        .await
+        .is_ok()
+        {}
+        let (_, source) = recv_rtcp(&peer_rtcp_mapped).await;
+        assert_eq!(source, local_rtcp);
+        assert_silent(&peer_rtcp_signalled, "RTCP kept going to RTP + 1").await;
+        assert_silent(&stranger, "RTCP went to a stranger").await;
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn non_mux_rtcp_is_srtcp_protected_both_ways() {
+        let (peer_rtp, peer_rtcp) = bind_port_pair().await;
+        let local_ssrc = 0x1919_1919;
+        let mut session = non_mux_session(SymmetricRtpPolicy::default(), local_ssrc).await;
+        let transport = session.transport();
+        let udp = transport
+            .as_any()
+            .downcast_ref::<UdpRtpTransport>()
+            .unwrap();
+        // A fresh random master key per run: both directions share it, and
+        // nothing here depends on particular key bytes.
+        let key: [u8; 16] = rand::thread_rng().gen();
+        let salt: [u8; 14] = rand::thread_rng().gen();
+        let context = || {
+            crate::srtp::SrtpContext::new(
+                crate::srtp::SRTP_AES128_CM_SHA1_80,
+                crate::srtp::SrtpCryptoKey::new(key.to_vec(), salt.to_vec()),
+            )
+            .unwrap()
+        };
+        udp.set_srtp_contexts(context(), context()).await.unwrap();
+        session
+            .set_remote_addr(peer_rtp.local_addr().unwrap())
+            .await;
+
+        let (wire, _) = recv_rtcp(&peer_rtcp).await;
+        let plaintext = context().unprotect_rtcp(&wire).unwrap();
+        assert_ne!(wire, plaintext.as_ref());
+        let report = crate::packet::rtcp::RtcpCompoundPacket::parse(&plaintext).unwrap();
+        assert_eq!(report.get_rr().unwrap().ssrc, local_ssrc);
+
+        let mut events = session.subscribe();
+        let local_rtcp = session.local_rtcp_addr().unwrap();
+        // Plain RTCP is refused on a secure session; SRTCP is accepted.
+        peer_rtcp
+            .send_to(&sender_report_about(0x2727_2727, local_ssrc), local_rtcp)
+            .await
+            .unwrap();
+        assert_no_rtcp_event(&mut events).await;
+        let protected = context()
+            .protect_rtcp(&sender_report_about(0x2727_2727, local_ssrc))
+            .unwrap();
+        peer_rtcp.send_to(&protected, local_rtcp).await.unwrap();
+        assert_eq!(next_sender_report(&mut events).await, 0x2727_2727);
+        assert!(session.get_stats().rtt_ms.is_some());
+        assert_silent(&peer_rtp, "SRTCP reached the RTP port of a non-mux peer").await;
+        session.close().await.unwrap();
     }
 }

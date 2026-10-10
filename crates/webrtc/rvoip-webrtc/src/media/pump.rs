@@ -301,6 +301,7 @@ impl InboundStats {
             jitter_ms,
             packet_loss_pct: webrtc_loss,
             mos: Some(estimate_mos(jitter_ms, webrtc_loss)),
+            ..Default::default()
         }
     }
 

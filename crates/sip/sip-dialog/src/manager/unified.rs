@@ -2922,18 +2922,8 @@ impl UnifiedDialogManager {
         dialog_id: &DialogId,
         opts: crate::api::unified::InviteAuthRetryOptions,
     ) -> ApiResult<TransactionKey> {
-        let body = opts.sdp.map(bytes::Bytes::from);
         self.core
-            .send_invite_with_auth_options(
-                dialog_id,
-                body,
-                opts.authorization_headers,
-                opts.extra_headers,
-                opts.from_display,
-                opts.contact_uri,
-                opts.outbound_proxy_uri,
-                opts.supported_100rel,
-            )
+            .send_invite_with_auth_options(dialog_id, opts)
             .await
             .map_err(ApiError::from)
     }

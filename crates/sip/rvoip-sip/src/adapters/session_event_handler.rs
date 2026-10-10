@@ -25,9 +25,9 @@ use crate::session_lifecycle::{
 use crate::session_registry::{PendingInboundBundle, SessionRegistry, SessionRegistryHandle};
 use crate::session_store::SessionStateSnapshot;
 use crate::state_machine::executor::{
-    AuthRequiredProcessOutcome, AuthRequiredStateInput, InboundResponseStateInput,
-    Invite2xxAckStateInput, ReferNotifyInput, ReferNotifyOutcome, SessionRefreshStateInput,
-    TransferRequestStateInput,
+    classify_session_refresh_outcome, classify_session_refresh_status, AuthRequiredProcessOutcome,
+    AuthRequiredStateInput, InboundResponseStateInput, Invite2xxAckStateInput, ReferNotifyInput,
+    ReferNotifyOutcome, SessionRefreshMethod, SessionRefreshStateInput, TransferRequestStateInput,
 };
 use crate::state_machine::{
     ProcessEventResult, StateMachine as StateMachineExecutor, StateMachineHelpers,
@@ -1435,12 +1435,16 @@ fn media_observation_api_event(event: &MediaToSessionEvent) -> Option<crate::api
             session_id,
             metrics: quality_metrics,
             ..
-        } => Some(crate::api::events::Event::MediaQualityChanged {
-            call_id: SessionId(session_id.clone()),
-            packet_loss_percent: (quality_metrics.packet_loss * 100.0) as u32,
-            jitter_ms: quality_metrics.jitter_ms as u32,
-            mos: Some(quality_metrics.mos_score as f32),
-        }),
+        } => {
+            let quality = crate::api::events::MediaQualityStats::from(quality_metrics);
+            Some(crate::api::events::Event::MediaQualityChanged {
+                call_id: SessionId(session_id.clone()),
+                packet_loss_percent: quality.packet_loss_percent as u32,
+                jitter_ms: quality.jitter_ms as u32,
+                mos: quality.mos,
+                quality,
+            })
+        }
         _ => None,
     }
 }
@@ -4837,15 +4841,19 @@ impl SessionCrossCrateEventHandler {
                 self.clear_tracked_request_auth_state(&handle, tracked_method, transaction)
                     .await;
                 if is_session_refresh_request {
-                    let input = match tracked_method {
-                        TrackedInDialogMethod::Update => SessionRefreshStateInput::UpdateFailed,
-                        TrackedInDialogMethod::Reinvite => SessionRefreshStateInput::ReinviteFailed,
+                    // An unanswerable challenge is a rejection, not a
+                    // timeout: UPDATE falls back to re-INVITE and a
+                    // rejected re-INVITE leaves the session to expire.
+                    let method = match tracked_method {
+                        TrackedInDialogMethod::Update => SessionRefreshMethod::Update,
+                        TrackedInDialogMethod::Reinvite => SessionRefreshMethod::Reinvite,
                         TrackedInDialogMethod::Refer
                         | TrackedInDialogMethod::Notify
                         | TrackedInDialogMethod::Info => {
                             unreachable!("only RFC 4028 tracker methods set the refresh marker")
                         }
                     };
+                    let input = classify_session_refresh_status(method, status);
                     if let Err(error) = self
                         .state_machine
                         .process_session_refresh_exact(&handle, input)
@@ -5036,55 +5044,25 @@ impl SessionCrossCrateEventHandler {
             outcome = outbound_request_outcome_label(outcome),
             "Released exact in-dialog request snapshot"
         );
-        let refresh_input = if is_session_timer_update {
-            Some(match outcome {
-                OutboundRequestOutcome::FinalResponse { status_code }
-                    if (200..300).contains(&status_code) =>
-                {
-                    SessionRefreshStateInput::UpdateSucceeded
-                }
-                OutboundRequestOutcome::FinalResponse { .. }
-                | OutboundRequestOutcome::Timeout
-                | OutboundRequestOutcome::TransportFailure => {
-                    SessionRefreshStateInput::UpdateFailed
-                }
-            })
+        // RFC 4028 §10: classify the refresh outcome. Only a timeout,
+        // transport failure, 408 or 481 ends the session.
+        let refresh_method = if is_session_timer_update {
+            Some(SessionRefreshMethod::Update)
         } else if is_session_timer_reinvite {
-            Some(match outcome {
-                OutboundRequestOutcome::FinalResponse { status_code }
-                    if (200..300).contains(&status_code) =>
-                {
-                    SessionRefreshStateInput::ReinviteSucceeded
-                }
-                OutboundRequestOutcome::FinalResponse { .. }
-                | OutboundRequestOutcome::Timeout
-                | OutboundRequestOutcome::TransportFailure => {
-                    SessionRefreshStateInput::ReinviteFailed
-                }
-            })
+            Some(SessionRefreshMethod::Reinvite)
         } else {
             None
         };
-        if let Some(input) = refresh_input {
-            let phase_matches =
-                self.state_machine
-                    .store
-                    .get_session_snapshot_exact(&handle)
-                    .ok()
-                    .is_some_and(|snapshot| match input {
-                        SessionRefreshStateInput::UpdateSucceeded
-                        | SessionRefreshStateInput::UpdateFailed => {
-                            snapshot.session_refresh_phase
-                                == crate::session_store::state::SessionRefreshPhase::UpdateInFlight
-                        }
-                        SessionRefreshStateInput::ReinviteSucceeded
-                        | SessionRefreshStateInput::ReinviteFailed => snapshot
-                            .session_refresh_phase
-                            == crate::session_store::state::SessionRefreshPhase::ReinviteInFlight,
-                        SessionRefreshStateInput::UpdateDue { .. }
-                        | SessionRefreshStateInput::ReinviteDue { .. }
-                        | SessionRefreshStateInput::PeerExpired { .. } => false,
-                    });
+        if let Some(refresh_method) = refresh_method {
+            let input = classify_session_refresh_outcome(refresh_method, outcome);
+            let phase_matches = self
+                .state_machine
+                .store
+                .get_session_snapshot_exact(&handle)
+                .ok()
+                .is_some_and(|snapshot| {
+                    snapshot.session_refresh_phase == refresh_method.in_flight_phase()
+                });
             if phase_matches {
                 if let Err(error) = self
                     .state_machine
@@ -5311,9 +5289,12 @@ impl SessionCrossCrateEventHandler {
         if initial_snapshot.session_refresh_phase
             == crate::session_store::state::SessionRefreshPhase::ReinviteInFlight
         {
+            // RFC 4028 §10: 408/481 end the session; any other rejection
+            // of the refresh re-INVITE (488, 403, 5xx, ...) does not.
+            let input = classify_session_refresh_status(SessionRefreshMethod::Reinvite, status);
             if let Err(error) = self
                 .state_machine
-                .process_session_refresh_exact(handle, SessionRefreshStateInput::ReinviteFailed)
+                .process_session_refresh_exact(handle, input)
                 .await
             {
                 debug!(
@@ -5611,9 +5592,17 @@ impl SessionCrossCrateEventHandler {
         if snapshot.session_refresh_phase
             == crate::session_store::state::SessionRefreshPhase::ReinviteInFlight
         {
+            // RFC 3261 §14.1: a refresh re-INVITE that meets glare is retried
+            // after the randomized backoff; it never ends the session.
             if let Err(error) = self
                 .state_machine
-                .process_session_refresh_exact(handle, SessionRefreshStateInput::ReinviteFailed)
+                .process_session_refresh_exact(
+                    handle,
+                    SessionRefreshStateInput::Rejected {
+                        method: SessionRefreshMethod::Reinvite,
+                        status_code: 491,
+                    },
+                )
                 .await
             {
                 debug!(
@@ -5622,6 +5611,17 @@ impl SessionCrossCrateEventHandler {
                     "stale RFC 4028 glare failure was suppressed"
                 );
             }
+            return Ok(());
+        }
+        // The refresh completion may have classified this 491 first; its
+        // retry is already scheduled and no application re-INVITE is pending.
+        if snapshot.pending_reinvite.is_none()
+            && snapshot.session_refresh_rejection
+                == Some(crate::session_store::state::SessionRefreshRejection {
+                    method: SessionRefreshMethod::Reinvite,
+                    status_code: 491,
+                })
+        {
             return Ok(());
         }
 
@@ -7037,6 +7037,13 @@ mod tests {
             packet_loss: 0.125,
             jitter_ms: 17.9,
             delay_ms: 42,
+            packets_sent: 300,
+            packets_received: 280,
+            packets_lost: 40,
+            rtt_ms: Some(84.0),
+            remote_packet_loss: Some(0.25),
+            remote_packets_lost: Some(-2),
+            remote_jitter_ms: Some(6.5),
         }
     }
 
@@ -7060,6 +7067,7 @@ mod tests {
                     packet_loss_percent,
                     jitter_ms,
                     mos,
+                    quality,
                 }) => {
                     assert_eq!(call_id, SessionId("media-reporting".to_string()));
                     assert_eq!(packet_loss_percent, 12);
@@ -7067,6 +7075,14 @@ mod tests {
                     // media-core's estimate now survives the projection
                     // instead of being dropped at this boundary.
                     assert_eq!(mos, Some(3.8));
+                    assert_eq!(quality.packets_sent, 300);
+                    assert_eq!(quality.packets_received, 280);
+                    assert_eq!(quality.packets_lost, 40);
+                    assert_eq!(quality.rtt_ms, Some(84.0));
+                    assert_eq!(quality.remote_packet_loss_percent, Some(25.0));
+                    assert_eq!(quality.remote_packets_lost, Some(-2));
+                    assert_eq!(quality.remote_jitter_ms, Some(6.5));
+                    assert!(quality.has_peer_report());
                 }
                 other => panic!("unexpected media quality projection: {other:?}"),
             }

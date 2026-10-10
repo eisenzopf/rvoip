@@ -7,7 +7,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use rvoip_infra_common::events::coordinator::{CrossCrateEventHandler, GlobalEventCoordinator};
 use rvoip_infra_common::events::cross_crate::{
-    CrossCrateEvent, MediaToSessionEvent, RvoipCrossCrateEvent,
+    CrossCrateEvent, MediaToSessionEvent, QualitySeverity, RvoipCrossCrateEvent,
 };
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -145,6 +145,43 @@ impl MediaEventHub {
                 } else {
                     None
                 }
+            }
+
+            MediaSessionEvent::StatisticsUpdated { dialog_id, stats } => {
+                let session_id = self
+                    .media_controller
+                    .get_session_id(&MediaSessionId::from_dialog(&dialog_id))?;
+                let quality = stats.quality_metrics.as_ref()?;
+                Some(RvoipCrossCrateEvent::MediaToSession(
+                    MediaToSessionEvent::MediaQualityUpdate {
+                        session_id,
+                        quality_metrics: quality.to_session_metrics(),
+                    },
+                ))
+            }
+
+            MediaSessionEvent::QualityDegraded {
+                dialog_id, metrics, ..
+            } => {
+                let session_id = self
+                    .media_controller
+                    .get_session_id(&MediaSessionId::from_dialog(&dialog_id))?;
+                let severity = if metrics.packet_loss_percent >= 20.0 {
+                    QualitySeverity::Critical
+                } else if metrics.packet_loss_percent >= 10.0 {
+                    QualitySeverity::High
+                } else if metrics.packet_loss_percent >= 5.0 || metrics.jitter_ms >= 50.0 {
+                    QualitySeverity::Medium
+                } else {
+                    QualitySeverity::Low
+                };
+                Some(RvoipCrossCrateEvent::MediaToSession(
+                    MediaToSessionEvent::MediaQualityDegraded {
+                        session_id,
+                        metrics: metrics.to_session_metrics(),
+                        severity,
+                    },
+                ))
             }
 
             _ => None, // Other events are internal only

@@ -5252,6 +5252,86 @@ mod outbound_flow_handler_tests {
         );
     }
 
+    /// RFC 3261 §12.2.1.1: every request inside a dialog (and PRACK inside
+    /// an early dialog, RFC 3262 §7.2) uses the remote target (the peer's
+    /// Contact) as Request-URI and next hop. The peer's From/To AOR stays in
+    /// the To header only. The AOR host here does not resolve, so a request
+    /// still addressed to it fails to send at all.
+    #[tokio::test]
+    async fn every_in_dialog_request_targets_the_remote_target_not_the_aor() {
+        const AOR: &str = "sip:bob@peer-aor.invalid";
+        const CONTACT: &str = "sip:bob@127.0.0.1:5093";
+        let (manager, transport) = make_recording_manager().await;
+        let mut dialog = Dialog::new(
+            "remote-target-call".to_string(),
+            "sip:alice@127.0.0.1:5060".parse().unwrap(),
+            AOR.parse().unwrap(),
+            Some("alice-tag".to_string()),
+            Some("bob-tag".to_string()),
+            true,
+        );
+        dialog.remote_target = CONTACT.parse().unwrap();
+        dialog.state = DialogState::Confirmed;
+        dialog.invite_cseq = Some(1);
+        let dialog_id = dialog.id.clone();
+        manager.store_dialog(dialog).await.expect("store dialog");
+
+        let sdp = bytes::Bytes::from_static(
+            b"v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0\r\n",
+        );
+        let requests = [
+            (
+                Method::Refer,
+                Some(bytes::Bytes::from_static(b"sip:carol@127.0.0.1:5094")),
+            ),
+            (Method::Message, Some(bytes::Bytes::from_static(b"hello"))),
+            (Method::Info, Some(bytes::Bytes::from_static(b"Signal=5"))),
+            (
+                Method::Notify,
+                Some(bytes::Bytes::from_static(b"SIP/2.0 200 OK")),
+            ),
+            (Method::Options, None),
+            (Method::Update, None),
+            (Method::Invite, Some(sdp)),
+        ];
+        for (method, body) in requests {
+            manager
+                .send_request(&dialog_id, method.clone(), body)
+                .await
+                .unwrap_or_else(|error| panic!("send in-dialog {method}: {error}"));
+        }
+        manager.send_prack(&dialog_id, 1).await.expect("send PRACK");
+
+        let sent = transport.sent.lock().await;
+        for method in [
+            Method::Refer,
+            Method::Message,
+            Method::Info,
+            Method::Notify,
+            Method::Options,
+            Method::Update,
+            Method::Invite,
+            Method::Prack,
+        ] {
+            let (request, destination) = sent
+                .iter()
+                .find_map(|(message, destination)| match message {
+                    rvoip_sip_core::Message::Request(request) if request.method() == method => {
+                        Some((request, destination))
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{method} was not sent"));
+            assert_eq!(request.uri().to_string(), CONTACT, "{method} Request-URI");
+            assert_eq!(destination.port(), 5093, "{method} next hop");
+            assert_eq!(
+                request.to().map(|to| to.address().uri.to_string()),
+                Some(AOR.to_string()),
+                "{method} keeps the AOR in To"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn wildcard_contact_uses_observed_source_for_reason_bye() {
         let (manager, transport) = make_recording_manager().await;
@@ -7711,6 +7791,188 @@ mod outbound_flow_handler_tests {
                 .invite_failover_plan_reservations
                 .load(Ordering::Acquire),
             0
+        );
+    }
+
+    /// Fails every route preparation, so no INVITE ever crosses the
+    /// transaction layer's wire boundary.
+    #[derive(Debug)]
+    struct PrepareFailureTransport {
+        addr: SocketAddr,
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for PrepareFailureTransport {
+        fn local_addr(&self) -> TransportResult<SocketAddr> {
+            Ok(self.addr)
+        }
+
+        async fn prepare_message_route(
+            &self,
+            _message: &rvoip_sip_core::Message,
+            _route: rvoip_sip_transport::TransportRoute,
+        ) -> TransportResult<rvoip_sip_transport::TransportRoute> {
+            Err(rvoip_sip_transport::Error::InvalidState(
+                "peer closed the connection during route preparation".into(),
+            ))
+        }
+
+        async fn send_message(
+            &self,
+            _message: rvoip_sip_core::Message,
+            _destination: SocketAddr,
+        ) -> TransportResult<()> {
+            Ok(())
+        }
+
+        async fn close(&self) -> TransportResult<()> {
+            Ok(())
+        }
+
+        fn is_closed(&self) -> bool {
+            false
+        }
+    }
+
+    /// The plan marks an INVITE wire-unknown as soon as it hands it to the
+    /// transaction layer, but the transaction layer retains it only once the
+    /// wire boundary is crossed. A TLS peer that rejects the handshake during
+    /// route preparation leaves a wire-unknown plan whose INVITE the
+    /// transaction layer has forgotten: no response or CANCEL can ever match
+    /// it, so the supervisor must treat it as settled rather than wait.
+    #[tokio::test]
+    async fn wire_unknown_plan_for_a_forgotten_invite_is_terminal() {
+        use crate::manager::transaction_integration::{CandidateWirePlan, InviteFailoverPlanPhase};
+
+        let manager = make_manager_with_transport_and_setup_timeout(
+            Arc::new(PrepareFailureTransport {
+                addr: SocketAddr::from_str("127.0.0.1:5060").unwrap(),
+            }),
+            Duration::from_secs(32),
+        )
+        .await;
+        let dialog_id = DialogId::new();
+        let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("alice-forgotten"))
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5060", None)
+            .call_id("retained-plan-forgotten-invite")
+            .cseq(1)
+            .via("127.0.0.1:5060", "UDP", Some("z9hG4bK-forgotten-template"))
+            .max_forwards(70)
+            .build();
+        manager
+            .send_request_with_candidate_wire_plan(
+                request,
+                vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                    dest_addr(5103),
+                    rvoip_sip_transport::transport::TransportType::Udp,
+                )],
+                Some(&dialog_id),
+                CandidateWirePlan::default(),
+            )
+            .await
+            .expect_err("route preparation fails");
+        let plan = manager
+            .invite_failover_plans
+            .iter()
+            .next()
+            .expect("wire-unknown plan retained")
+            .value()
+            .clone();
+        let invite = {
+            let plan = plan.lock().await;
+            assert_eq!(plan.phase, InviteFailoverPlanPhase::WireUnknown);
+            plan.current_transaction
+                .clone()
+                .expect("wire-unknown INVITE transaction retained")
+        };
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !manager
+                .wire_unknown_invite_has_terminal_failure(&dialog_id)
+                .await
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("a forgotten wire-unknown INVITE settles");
+        assert!(manager
+            .transaction_manager
+            .transaction_route(&invite)
+            .await
+            .is_none());
+    }
+
+    /// A first-write failure reaches the plan twice: as the sender's error,
+    /// which hands the INVITE to the wire-unknown supervisor, and as a
+    /// `TransportError` event. When the event wins it closes the plan, which
+    /// refuses the supervisor's CANCEL; the supervisor must accept the closed
+    /// plan as the INVITE's terminal failure instead of waiting forever.
+    #[tokio::test]
+    async fn transport_error_closed_plan_settles_wire_unknown_teardown() {
+        use crate::manager::transaction_integration::{CandidateWirePlan, InviteFailoverPlanPhase};
+
+        let (manager, _rx) = make_manager().await;
+        let dialog_id = DialogId::new();
+        let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("alice-closed-plan"))
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5060", None)
+            .call_id("retained-plan-transport-error-closed")
+            .cseq(1)
+            .via(
+                "127.0.0.1:5060",
+                "UDP",
+                Some("z9hG4bK-closed-plan-template"),
+            )
+            .max_forwards(70)
+            .build();
+        let (transaction, _) = manager
+            .send_request_with_candidate_wire_plan(
+                request,
+                vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                    dest_addr(5102),
+                    rvoip_sip_transport::transport::TransportType::Udp,
+                )],
+                Some(&dialog_id),
+                CandidateWirePlan::default(),
+            )
+            .await
+            .expect("initial INVITE");
+        assert!(
+            !manager
+                .wire_unknown_invite_has_terminal_failure(&dialog_id)
+                .await,
+            "an INVITE still in flight is not terminal"
+        );
+
+        manager
+            .process_global_transaction_event(TransactionEvent::TransportError {
+                transaction_id: transaction.clone(),
+            })
+            .await;
+        let plan_id = manager
+            .invite_failover_attempts
+            .get(&transaction)
+            .expect("attempt remains indexed")
+            .plan_id;
+        let plan = manager
+            .invite_failover_plans
+            .get(&plan_id)
+            .expect("closed plan retained")
+            .value()
+            .clone();
+        assert_eq!(plan.lock().await.phase, InviteFailoverPlanPhase::Closed);
+
+        assert!(
+            manager
+                .wire_unknown_invite_has_terminal_failure(&dialog_id)
+                .await,
+            "a plan closed by the INVITE's transport error is terminal"
         );
     }
 

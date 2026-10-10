@@ -2620,6 +2620,7 @@ impl<H: CallHandler> CallbackPeer<H> {
                 | Event::MediaQualityChanged { .. }
                 | Event::NetworkError { .. }
                 | Event::AuthenticationRequired { .. }
+                | Event::PeerReachabilityChanged { .. }
                 // SIP_API_DESIGN_2 Phase A: detailed-response events are
                 // an additive surface alongside the legacy `CallProgress`
                 // / `CallEnded` / `CallFailed` variants. The callback

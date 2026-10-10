@@ -529,6 +529,7 @@ async fn quality_reaches_the_authoritative_stream_with_its_mos() {
                 jitter_ms: 17.5,
                 packet_loss_pct: 2.25,
                 mos: Some(3.75),
+                ..Default::default()
             },
         })
         .await;
@@ -589,6 +590,7 @@ async fn a_negative_or_absent_reading_reports_zero_rather_than_wrapping() {
                 jitter_ms: -1.0,
                 packet_loss_pct: f32::NAN,
                 mos: None,
+                ..Default::default()
             },
         })
         .await;

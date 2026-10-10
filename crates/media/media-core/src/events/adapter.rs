@@ -8,8 +8,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use rvoip_infra_common::events::coordinator::{CrossCrateEventHandler, GlobalEventCoordinator};
 use rvoip_infra_common::events::cross_crate::{
-    CrossCrateEvent, MediaQualityMetrics, MediaToRtpEvent, MediaToSessionEvent,
-    RvoipCrossCrateEvent, SessionToMediaEvent,
+    CrossCrateEvent, MediaToRtpEvent, MediaToSessionEvent, RvoipCrossCrateEvent,
+    SessionToMediaEvent,
 };
 use rvoip_infra_common::planes::LayerTaskManager;
 use std::sync::Arc;
@@ -17,7 +17,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 
 use crate::integration::events::IntegrationEventType;
-use crate::session::events::{MediaSessionEventType, QualitySeverity};
+use crate::session::events::MediaSessionEventType;
 
 /// Media Event Adapter that bridges local media events with global cross-crate events
 pub struct MediaEventAdapter {
@@ -186,29 +186,12 @@ impl MediaEventAdapter {
                 },
             )),
 
-            MediaSessionEventType::QualityIssue {
-                metrics: _,
-                severity,
-            } => {
-                let mos_score = match severity {
-                    QualitySeverity::Minor => 3.5,
-                    QualitySeverity::Moderate => 3.0,
-                    QualitySeverity::Severe => 2.5,
-                    QualitySeverity::Critical => 1.5,
-                };
-
-                Some(RvoipCrossCrateEvent::MediaToSession(
-                    MediaToSessionEvent::MediaQualityUpdate {
-                        session_id: "unknown_session".to_string(),
-                        quality_metrics: MediaQualityMetrics {
-                            mos_score,
-                            packet_loss: 0.0, // TODO: Extract from metrics
-                            jitter_ms: 0.0,   // TODO: Extract from metrics
-                            delay_ms: 0,      // TODO: Extract from metrics
-                        },
-                    },
-                ))
-            }
+            // This legacy event names neither a session nor measured values,
+            // so publishing it would put a fabricated MOS on an
+            // "unknown_session". Per-call quality reaches session layers from
+            // `MediaSessionController::publish_media_quality_updates` through
+            // the `MediaEventHub` instead.
+            MediaSessionEventType::QualityIssue { .. } => None,
 
             MediaSessionEventType::ProcessingError {
                 error_type,

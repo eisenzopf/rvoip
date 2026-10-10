@@ -1773,6 +1773,29 @@ impl std::fmt::Debug for QualityAggregator {
     }
 }
 
+/// Average per-stream readings into one per-connection reading. Optional
+/// fields average only over the streams that carry them, so a stream without
+/// RTCP neither hides nor dilutes another stream's RTT or peer report.
+fn average_quality_snapshots(
+    snapshots: &[crate::stream::QualitySnapshot],
+) -> Option<crate::stream::QualitySnapshot> {
+    if snapshots.is_empty() {
+        return None;
+    }
+    fn mean(values: impl Iterator<Item = f32>) -> Option<f32> {
+        let (sum, n) = values.fold((0.0f32, 0usize), |(sum, n), v| (sum + v, n + 1));
+        (n > 0).then(|| sum / n as f32)
+    }
+    Some(crate::stream::QualitySnapshot {
+        jitter_ms: mean(snapshots.iter().map(|s| s.jitter_ms)).unwrap_or_default(),
+        packet_loss_pct: mean(snapshots.iter().map(|s| s.packet_loss_pct)).unwrap_or_default(),
+        mos: mean(snapshots.iter().filter_map(|s| s.mos)),
+        rtt_ms: mean(snapshots.iter().filter_map(|s| s.rtt_ms)),
+        remote_packet_loss_pct: mean(snapshots.iter().filter_map(|s| s.remote_packet_loss_pct)),
+        remote_jitter_ms: mean(snapshots.iter().filter_map(|s| s.remote_jitter_ms)),
+    })
+}
+
 impl QualityAggregator {
     pub fn add(&mut self, snap: &crate::stream::QualitySnapshot, codec: Option<String>) {
         self.samples += 1;
@@ -5851,32 +5874,18 @@ impl Orchestrator {
                     let Ok(streams) = adapter.streams(cid.clone()).await else {
                         continue;
                     };
-                    let mut totaled = crate::stream::QualitySnapshot {
-                        jitter_ms: 0.0,
-                        packet_loss_pct: 0.0,
-                        mos: None,
-                    };
-                    let mut n = 0usize;
+                    let mut snapshots = Vec::new();
                     for s in streams {
                         // A stream that has never reported would contribute
                         // zeros, and zeros read as flawless.
                         if !s.has_quality_measurement() {
                             continue;
                         }
-                        let snap = s.quality_snapshot();
-                        totaled.jitter_ms += snap.jitter_ms;
-                        totaled.packet_loss_pct += snap.packet_loss_pct;
-                        if let Some(m) = snap.mos {
-                            totaled.mos = Some(totaled.mos.map_or(m, |a| a + m));
-                        }
-                        n += 1;
+                        snapshots.push(s.quality_snapshot());
                     }
-                    if n == 0 {
+                    let Some(totaled) = average_quality_snapshots(&snapshots) else {
                         continue;
-                    }
-                    totaled.jitter_ms /= n as f32;
-                    totaled.packet_loss_pct /= n as f32;
-                    totaled.mos = totaled.mos.map(|m| m / n as f32);
+                    };
                     me.emit(Event::MediaQuality {
                         connection_id: cid,
                         snapshot: totaled,
@@ -13522,6 +13531,35 @@ mod periodic_worker_tests {
         }
         drop(core);
         assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn quality_averages_optional_rtcp_fields_only_over_streams_that_carry_them() {
+        use crate::stream::QualitySnapshot;
+        assert!(average_quality_snapshots(&[]).is_none());
+        let with_rtcp = QualitySnapshot {
+            jitter_ms: 10.0,
+            packet_loss_pct: 2.0,
+            mos: Some(4.0),
+            rtt_ms: Some(40.0),
+            remote_packet_loss_pct: Some(5.0),
+            remote_jitter_ms: Some(8.0),
+        };
+        let local_only = QualitySnapshot {
+            jitter_ms: 20.0,
+            packet_loss_pct: 4.0,
+            ..QualitySnapshot::default()
+        };
+        let averaged = average_quality_snapshots(&[with_rtcp, local_only]).unwrap();
+        assert_eq!(averaged.jitter_ms, 15.0);
+        assert_eq!(averaged.packet_loss_pct, 3.0);
+        assert_eq!(averaged.mos, Some(4.0));
+        assert_eq!(averaged.rtt_ms, Some(40.0));
+        assert_eq!(averaged.remote_packet_loss_pct, Some(5.0));
+        assert_eq!(averaged.remote_jitter_ms, Some(8.0));
+        let none = average_quality_snapshots(&[QualitySnapshot::default()]).unwrap();
+        assert_eq!(none.rtt_ms, None);
+        assert_eq!(none.remote_packet_loss_pct, None);
     }
 
     #[tokio::test]

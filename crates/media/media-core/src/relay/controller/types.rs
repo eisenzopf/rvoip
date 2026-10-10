@@ -60,6 +60,45 @@ pub const AMR_AUTO_CMR_PARAMETER: &str = "amr_auto_cmr";
 /// session that was created with a known peer reporting as before.
 pub const RTCP_MUX_PARAMETER: &str = "rtcp_mux";
 
+/// Whether [`MediaSessionController::start_media`](super::MediaSessionController::start_media)
+/// reserves a separate RTCP port for a peer that may not multiplex RTP and
+/// RTCP.
+///
+/// `"true"` reserves an even RTP port and the odd port above it (RFC 3550
+/// §11) as one atomic pair and binds an RTCP socket on the odd port;
+/// anything else, or absence, reserves the RTP port alone. While
+/// [`RTCP_MUX_PARAMETER`] is unset, periodic reports and the close-time BYE
+/// leave from that socket to the peer's RTCP address
+/// ([`REMOTE_RTCP_ADDR_PARAMETER`], or the peer's RTP port + 1). Read only
+/// when the session starts; [`MediaSessionController::release_rtcp_port`](super::MediaSessionController::release_rtcp_port)
+/// hands the RTCP port back once multiplexing is agreed. Each pair takes two
+/// ports, so a port range filled with pairs holds half as many calls.
+pub const RTCP_SEPARATE_PORT_PARAMETER: &str = "rtcp_separate_port";
+
+/// The peer's RTCP address from SDP `a=rtcp:` (RFC 3605), as
+/// `ip:port`. Used only by a session with a separate RTCP socket
+/// ([`RTCP_SEPARATE_PORT_PARAMETER`]) while multiplexing is not negotiated;
+/// absence means the peer's RTP port + 1. Applied when the session starts
+/// and whenever an update changes it.
+pub const REMOTE_RTCP_ADDR_PARAMETER: &str = "remote_rtcp_addr";
+
+/// Whether periodic RTCP carries RFC 3611 VoIP-metrics extended reports.
+///
+/// `"true"` enables it; anything else, or absence, leaves it off. XR is an
+/// extension the peer asks for with SDP `a=rtcp-xr` (RFC 3611 §5.1), so the
+/// signalling layer sets this only when negotiation shows it. Applied when
+/// the session is created and whenever an update changes it.
+pub const RTCP_XR_PARAMETER: &str = "rtcp_xr";
+
+/// Whether the RTCP report interval may use the RFC 3550 §6.2 reduced
+/// minimum (360 divided by the session bandwidth in kbit/s, when that is
+/// under five seconds) instead of the fixed five-second minimum.
+///
+/// `"true"` enables it; anything else, or absence, keeps five seconds. Local
+/// policy, not negotiated. Applied when the session is created and whenever
+/// an update changes it.
+pub const RTCP_REDUCED_MINIMUM_PARAMETER: &str = "rtcp_reduced_minimum";
+
 /// Media configuration for a session
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaConfig {
@@ -162,6 +201,95 @@ impl MediaConfig {
             .is_some_and(|value| value == "true")
     }
 
+    /// Ask for or stop asking for a separate RTCP port
+    /// ([`RTCP_SEPARATE_PORT_PARAMETER`]). Cleared rather than falsified,
+    /// for the same reason as [`Self::with_amr_dtx`].
+    #[must_use]
+    pub fn with_rtcp_separate_port(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.parameters
+                .insert(RTCP_SEPARATE_PORT_PARAMETER.to_string(), "true".to_string());
+        } else {
+            self.parameters.remove(RTCP_SEPARATE_PORT_PARAMETER);
+        }
+        self
+    }
+
+    /// Whether [`RTCP_SEPARATE_PORT_PARAMETER`] is set.
+    pub fn rtcp_separate_port(&self) -> bool {
+        self.parameters
+            .get(RTCP_SEPARATE_PORT_PARAMETER)
+            .is_some_and(|value| value == "true")
+    }
+
+    /// Set or clear the peer's `a=rtcp:` address
+    /// ([`REMOTE_RTCP_ADDR_PARAMETER`]).
+    #[must_use]
+    pub fn with_remote_rtcp_addr(mut self, addr: Option<SocketAddr>) -> Self {
+        match addr {
+            Some(addr) => {
+                self.parameters
+                    .insert(REMOTE_RTCP_ADDR_PARAMETER.to_string(), addr.to_string());
+            }
+            None => {
+                self.parameters.remove(REMOTE_RTCP_ADDR_PARAMETER);
+            }
+        }
+        self
+    }
+
+    /// The peer's `a=rtcp:` address ([`REMOTE_RTCP_ADDR_PARAMETER`]), if
+    /// set and well formed.
+    pub fn remote_rtcp_addr(&self) -> Option<SocketAddr> {
+        self.parameters
+            .get(REMOTE_RTCP_ADDR_PARAMETER)
+            .and_then(|value| value.parse().ok())
+    }
+
+    /// Set or clear RFC 3611 VoIP-metrics reporting ([`RTCP_XR_PARAMETER`]).
+    /// Cleared rather than falsified, for the same reason as
+    /// [`Self::with_amr_dtx`].
+    #[must_use]
+    pub fn with_rtcp_xr(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.parameters
+                .insert(RTCP_XR_PARAMETER.to_string(), "true".to_string());
+        } else {
+            self.parameters.remove(RTCP_XR_PARAMETER);
+        }
+        self
+    }
+
+    /// Whether [`RTCP_XR_PARAMETER`] is set.
+    pub fn rtcp_xr(&self) -> bool {
+        self.parameters
+            .get(RTCP_XR_PARAMETER)
+            .is_some_and(|value| value == "true")
+    }
+
+    /// Set or clear the reduced minimum RTCP interval
+    /// ([`RTCP_REDUCED_MINIMUM_PARAMETER`]). Cleared rather than falsified,
+    /// for the same reason as [`Self::with_amr_dtx`].
+    #[must_use]
+    pub fn with_rtcp_reduced_minimum(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.parameters.insert(
+                RTCP_REDUCED_MINIMUM_PARAMETER.to_string(),
+                "true".to_string(),
+            );
+        } else {
+            self.parameters.remove(RTCP_REDUCED_MINIMUM_PARAMETER);
+        }
+        self
+    }
+
+    /// Whether [`RTCP_REDUCED_MINIMUM_PARAMETER`] is set.
+    pub fn rtcp_reduced_minimum(&self) -> bool {
+        self.parameters
+            .get(RTCP_REDUCED_MINIMUM_PARAMETER)
+            .is_some_and(|value| value == "true")
+    }
+
     /// Set or clear automatic codec mode requests
     /// ([`AMR_AUTO_CMR_PARAMETER`]). Cleared rather than falsified, for the
     /// same reason as [`Self::with_amr_dtx`].
@@ -228,6 +356,10 @@ pub struct MediaSessionInfo {
     pub config: MediaConfig,
     /// RTP port allocated for this session
     pub rtp_port: Option<u16>,
+    /// Separate RTCP port, while one is reserved and bound
+    /// ([`RTCP_SEPARATE_PORT_PARAMETER`]); `None` when RTCP shares the RTP
+    /// port.
+    pub rtcp_port: Option<u16>,
     /// RTP/RTCP statistics (if available)
     pub rtp_stats: Option<RtpSessionStats>,
     /// Last statistics update time
@@ -248,6 +380,7 @@ impl Default for MediaSessionInfo {
                 parameters: HashMap::new(),
             },
             rtp_port: None,
+            rtcp_port: None,
             rtp_stats: None,
             stats_updated_at: None,
             created_at: Instant::now(),

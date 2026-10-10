@@ -91,6 +91,9 @@ fn test_config_default() {
     assert!(!c.rtp_diagnostics);
     assert!(!c.media_sdp_diagnostics);
     assert_eq!(c.media_mode, MediaMode::Enabled);
+    // 0.4.0: offers carry a=rtcp-mux by default; strict mode stays opt-in.
+    assert!(c.offer_rtcp_mux);
+    assert!(!c.rtcp_mux_required);
     assert_eq!(
         c.rtp_session_buffer_config,
         RtpSessionBufferConfig::default()
@@ -451,6 +454,29 @@ fn srtp_keying_builder_selects_dtls_without_changing_offer_policy() {
 }
 
 #[test]
+fn rtcp_mux_offer_is_default_on_for_every_profile_and_can_be_disabled() {
+    for config in [Config::default(), Config::local("alice", 5060)] {
+        assert!(config.offer_rtcp_mux);
+        assert!(!config.rtcp_mux_required);
+        assert!(format!("{config:?}").contains("offer_rtcp_mux: true"));
+    }
+    let mut config = Config::local("alice", 5060);
+    config.offer_rtcp_mux = false;
+    assert!(format!("{config:?}").contains("offer_rtcp_mux: false"));
+}
+
+#[test]
+fn rtcp_non_mux_is_default_off_for_every_profile_and_has_a_builder() {
+    for config in [Config::default(), Config::local("alice", 5060)] {
+        assert!(!config.rtcp_non_mux);
+        assert!(format!("{config:?}").contains("rtcp_non_mux: false"));
+    }
+    let config = Config::local("alice", 5060).with_rtcp_non_mux(true);
+    assert!(config.rtcp_non_mux);
+    assert!(format!("{config:?}").contains("rtcp_non_mux: true"));
+}
+
+#[test]
 fn dtls_setup_role_builder_selects_active() {
     let config = Config::local("alice", 5060).with_dtls_setup_role(DtlsSetupRole::Active);
     assert_eq!(config.dtls_setup_role, DtlsSetupRole::Active);
@@ -580,4 +606,93 @@ fn test_config_carrier_sbc_profile() {
     );
     assert!(c.offer_srtp);
     assert!(c.srtp_required);
+}
+
+// ── Media quality sampling ─────────────────────────────────────────────────
+
+#[test]
+fn media_quality_interval_is_off_by_default_and_rejects_zero() {
+    use std::time::Duration;
+
+    let default = Config::local("alice", 5060);
+    assert_eq!(default.media_quality_interval, None);
+    assert!(default.validate().is_ok());
+
+    let every = Duration::from_secs(5);
+    let enabled = Config::local("alice", 5060).with_media_quality_interval(every);
+    assert_eq!(enabled.media_quality_interval, Some(every));
+    assert!(enabled.validate().is_ok());
+
+    let zero = Config::local("alice", 5060).with_media_quality_interval(Duration::ZERO);
+    assert!(matches!(zero.validate(), Err(SessionError::ConfigError(_))));
+}
+
+// ── RFC 4028 session-timer floor ────────────────────────────────────────────
+
+#[test]
+fn session_timer_values_below_the_rfc4028_floor_are_rejected() {
+    // RFC 4028 §5: Min-SE MUST NOT be less than 90 seconds.
+    let mut config = Config::local("alice", 5060);
+    config.session_timer_secs = Some(1800);
+    config
+        .validate()
+        .expect("1800 s with the default 90 s Min-SE is valid");
+
+    config.session_timer_min_se = 89;
+    assert!(matches!(
+        config.validate(),
+        Err(SessionError::ConfigError(_))
+    ));
+    config.session_timer_min_se = 90;
+
+    config.session_timer_secs = Some(89);
+    assert!(matches!(
+        config.validate(),
+        Err(SessionError::ConfigError(_))
+    ));
+    config.session_timer_secs = Some(90);
+    config.validate().expect("90 s is the floor itself");
+
+    // The proposed interval may not undercut our own Min-SE.
+    config.session_timer_min_se = 600;
+    config.session_timer_secs = Some(300);
+    assert!(matches!(
+        config.validate(),
+        Err(SessionError::ConfigError(_))
+    ));
+
+    // Disabled timers carry no interval to check, but Min-SE still governs
+    // what an incoming request may ask for.
+    config.session_timer_secs = None;
+    config.session_timer_min_se = 30;
+    assert!(matches!(
+        config.validate(),
+        Err(SessionError::ConfigError(_))
+    ));
+}
+
+#[cfg(feature = "test-hooks")]
+#[test]
+fn short_session_timers_need_the_test_escape_hatch() {
+    let mut config = Config::local("alice", 5060);
+    config.session_timer_secs = Some(4);
+    config.session_timer_min_se = 2;
+    assert!(matches!(
+        config.validate(),
+        Err(SessionError::ConfigError(_))
+    ));
+    config.session_timer_allow_short_intervals_for_testing = true;
+    config.validate().expect("test-only short intervals");
+    // Even then the interval may not undercut Min-SE, and 0 is not an interval.
+    config.session_timer_secs = Some(1);
+    assert!(matches!(
+        config.validate(),
+        Err(SessionError::ConfigError(_))
+    ));
+    config.session_timer_secs = Some(0);
+    config.session_timer_min_se = 0;
+    assert!(matches!(
+        config.validate(),
+        Err(SessionError::ConfigError(_))
+    ));
 }

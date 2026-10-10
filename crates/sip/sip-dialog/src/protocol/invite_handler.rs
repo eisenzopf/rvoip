@@ -27,7 +27,8 @@ use crate::dialog::DialogId;
 use crate::errors::{DialogError, DialogResult};
 use crate::events::SessionCoordinationEvent;
 use crate::manager::transaction_integration::{
-    detect_peer_100rel_support, negotiate_uas_session_timer, UasSessionTimerDecision,
+    allow_lists_update, detect_peer_100rel_support, negotiate_uas_refresh_session_timer,
+    negotiate_uas_session_timer, UasSessionTimerDecision,
 };
 use crate::manager::{DialogLookup, DialogManager};
 use crate::transaction::utils::response_builders;
@@ -278,6 +279,7 @@ impl DialogManager {
             dialog.invite_cseq = invite_cseq;
             dialog.session_expires_secs = negotiated_session_secs;
             dialog.is_session_refresher = uas_is_refresher;
+            dialog.peer_allows_update = allow_lists_update(&request.headers);
         }
 
         // Associate transaction with dialog
@@ -365,9 +367,37 @@ impl DialogManager {
         self.associate_transaction_with_dialog(&transaction_id, &dialog_id);
 
         // Update dialog sequence number
-        {
+        let current_session_timer = {
             let mut dialog = self.get_dialog_mut(&dialog_id)?;
             dialog.update_remote_sequence(&request)?;
+            if let Some(allows) = allow_lists_update(&request.headers) {
+                dialog.peer_allows_update = Some(allows);
+            }
+            dialog
+                .session_expires_secs
+                .map(|secs| (secs, dialog.is_session_refresher))
+        };
+
+        // RFC 4028 §9: a timer-capable peer whose refresh asks for less than
+        // our Min-SE gets 422 with our Min-SE, as on the initial INVITE.
+        if let UasSessionTimerDecision::Reject422 { min_se } = negotiate_uas_refresh_session_timer(
+            &request,
+            self.config_session_timer_settings(),
+            current_session_timer,
+        ) {
+            warn!(
+                "re-INVITE Session-Expires is below our Min-SE {} — rejecting with 422",
+                min_se
+            );
+            let mut response =
+                response_builders::create_response(&request, StatusCode::SessionIntervalTooSmall);
+            response
+                .headers
+                .push(TypedHeader::MinSE(MinSE::new(min_se)));
+            self.send_unowned_final_response_classified(&transaction_id, response)
+                .await?;
+            self.retire_unowned_response_indexes(&dialog_id, &transaction_id);
+            return Ok(None);
         }
 
         if owner == InviteCausalOwner::AcknowledgedSession {

@@ -1807,7 +1807,8 @@ pub enum EndpointProfile {
     AsteriskUdp,
     /// Asterisk TLS + mandatory SDES-SRTP with symmetric registered-flow reuse.
     AsteriskTlsSrtpRegisteredFlow,
-    /// FreeSWITCH/Sofia internal LAN profile.
+    /// FreeSWITCH/Sofia internal LAN profile: [`Config::lan_pbx`] when an
+    /// advertised address is set, otherwise [`Config::on`] at the bind address.
     FreeSwitchInternal,
     /// FreeSWITCH TLS + mandatory SDES-SRTP with a directly reachable TLS Contact.
     FreeSwitchTlsSrtpReachableContact,
@@ -2692,7 +2693,13 @@ impl EndpointBuilder {
             }
             EndpointProfile::FreeSwitchInternal => {
                 let bind = self.bind_addr.unwrap_or_else(default_udp_bind);
-                Ok(Config::freeswitch_internal(name, bind))
+                if let Some(advertised) = self.advertised_addr {
+                    Ok(Config::lan_pbx(name, bind, advertised))
+                } else {
+                    let mut config = Config::on(name, bind.ip(), bind.port());
+                    config.bind_addr = bind;
+                    Ok(config)
+                }
             }
             EndpointProfile::FreeSwitchTlsSrtpReachableContact => {
                 let bind = self.bind_addr.unwrap_or_else(default_udp_bind);

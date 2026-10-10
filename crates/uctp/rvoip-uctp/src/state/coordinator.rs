@@ -193,6 +193,7 @@ impl UctpScopePolicy {
 /// that don't care can keep using the existing `start` /
 /// `start_full` entry points.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct UctpCoordinatorCaps {
     /// Soft timeout for outbound signaling sends. See [`SIGNALING_SEND_TIMEOUT`].
     pub signaling_send_timeout: Duration,
@@ -3291,6 +3292,7 @@ impl UctpCoordinator {
                 jitter_ms: stream.jitter_ms as f32,
                 packet_loss_pct: stream.loss_pct,
                 mos: Some(stream.mos),
+                ..Default::default()
             };
             self.emit_event(UctpSessionEvent::Quality {
                 connid: connid.clone(),

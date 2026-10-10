@@ -241,6 +241,83 @@ pub struct MediaSecurityState {
     pub contexts_installed: bool,
 }
 
+/// Per-call media quality, as returned by
+/// [`UnifiedCoordinator::media_quality`](crate::UnifiedCoordinator::media_quality)
+/// and carried by [`Event::MediaQualityChanged`].
+///
+/// Two viewpoints are reported:
+///
+/// - **Local** fields (`packets_received`, `packets_lost`,
+///   `packet_loss_percent`, `jitter_ms`, `mos`) describe the stream this
+///   endpoint *receives*, measured from arriving RTP. They need no RTCP.
+/// - **Peer-reported** fields (`rtt_ms`, `remote_*`) come from the RTCP
+///   sender/receiver reports the peer sends about the stream this endpoint
+///   *sends*. They are `None` until the first such report arrives (allow a
+///   few seconds of media for the first RTCP interval), and stay `None`
+///   for a call whose RTCP never reaches this endpoint — in practice, a call
+///   that did not negotiate RTCP multiplexing (`a=rtcp-mux`, see
+///   [`Config::rtcp_mux_required`](crate::Config::rtcp_mux_required)).
+///
+/// `rtt_ms` additionally needs the peer to reflect one of our RTCP sender
+/// reports, so it appears only once this endpoint has sent media.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
+pub struct MediaQualityStats {
+    /// RTP packets sent on this call.
+    pub packets_sent: u64,
+    /// RTP packets received on this call.
+    pub packets_received: u64,
+    /// Packets missing from the received stream (sequence-number gaps).
+    pub packets_lost: u64,
+    /// Locally observed loss on the received stream, percent (0–100).
+    pub packet_loss_percent: f32,
+    /// Interarrival jitter of the received stream (RFC 3550 §6.4.1), ms.
+    pub jitter_ms: f32,
+    /// Estimated MOS (1.0–5.0) of the received stream, derived from loss,
+    /// jitter and RTT. An estimate, not a perceptual measurement. `None`
+    /// until packets have been received.
+    pub mos: Option<f32>,
+    /// Round-trip time from RTCP LSR/DLSR, ms.
+    pub rtt_ms: Option<f32>,
+    /// Loss the peer reported on our sent stream over its last RTCP
+    /// interval, percent (0–100).
+    pub remote_packet_loss_percent: Option<f32>,
+    /// Cumulative number of our packets the peer reported lost. Can be
+    /// negative when the peer received duplicates (RFC 3550 §6.4.1).
+    pub remote_packets_lost: Option<i64>,
+    /// Interarrival jitter the peer reported on our sent stream, ms.
+    pub remote_jitter_ms: Option<f32>,
+}
+
+impl MediaQualityStats {
+    /// Whether any peer-reported (RTCP) value is present.
+    pub fn has_peer_report(&self) -> bool {
+        self.remote_packet_loss_percent.is_some()
+            || self.remote_packets_lost.is_some()
+            || self.remote_jitter_ms.is_some()
+    }
+}
+
+impl From<&rvoip_infra_common::events::cross_crate::MediaQualityMetrics> for MediaQualityStats {
+    fn from(metrics: &rvoip_infra_common::events::cross_crate::MediaQualityMetrics) -> Self {
+        Self {
+            packets_sent: metrics.packets_sent,
+            packets_received: metrics.packets_received,
+            packets_lost: metrics.packets_lost,
+            packet_loss_percent: (metrics.packet_loss * 100.0) as f32,
+            jitter_ms: metrics.jitter_ms as f32,
+            // media-core reports 0.0 when it has no estimate yet.
+            mos: (metrics.mos_score > 0.0).then_some(metrics.mos_score as f32),
+            rtt_ms: metrics.rtt_ms.map(|rtt| rtt as f32),
+            remote_packet_loss_percent: metrics
+                .remote_packet_loss
+                .map(|fraction| (fraction * 100.0) as f32),
+            remote_packets_lost: metrics.remote_packets_lost,
+            remote_jitter_ms: metrics.remote_jitter_ms.map(|jitter| jitter as f32),
+        }
+    }
+}
+
 /// Detailed Digest retry observation emitted alongside the source-compatible
 /// [`Event::CallAuthRetrying`] event.
 #[derive(Clone, PartialEq, Eq)]
@@ -781,13 +858,19 @@ pub enum Event {
         digit: char,
     },
 
-    /// Media quality changed
+    /// Periodic per-call media quality sample.
+    ///
+    /// Emitted every [`Config::media_quality_interval`](crate::Config::media_quality_interval)
+    /// for each call that has sent or received RTP (off by default). The
+    /// same values are available on demand from
+    /// [`UnifiedCoordinator::media_quality`](crate::UnifiedCoordinator::media_quality).
     MediaQualityChanged {
         /// Session identifier for the media stream.
         call_id: CallId,
-        /// Packet loss percentage, rounded to an integer.
+        /// Local packet loss percentage on the received stream, truncated
+        /// to an integer. See [`MediaQualityStats::packet_loss_percent`].
         packet_loss_percent: u32,
-        /// Jitter in milliseconds, rounded to an integer.
+        /// Local jitter in milliseconds, truncated to an integer.
         jitter_ms: u32,
         /// Estimated Mean Opinion Score, when media-core produced one.
         ///
@@ -795,6 +878,9 @@ pub enum Event {
         /// jitter, and latency rather than measuring perceived quality, so
         /// it tracks trends well and should not be quoted as a measurement.
         mos: Option<f32>,
+        /// The full sample: packet counters, RTT and the peer-reported
+        /// (`remote_*`) values, which are `None` without RTCP.
+        quality: MediaQualityStats,
     },
 
     /// SRTP media security was negotiated and installed.
@@ -854,6 +940,24 @@ pub enum Event {
         registrar: String,
         /// Human-readable failure reason.
         reason: String,
+    },
+
+    /// An [`OPTIONS` keep-alive](crate::Config::options_keepalive_targets)
+    /// target's reachability was first learned or changed.
+    ///
+    /// Published once for each target's first ping outcome and again
+    /// whenever it flips, never for a repeat of the same outcome. Use it to
+    /// mark a trunk or SBC peer up or down.
+    PeerReachabilityChanged {
+        /// The configured target URI, exactly as it appears in
+        /// [`Config::options_keepalive_targets`](crate::Config::options_keepalive_targets).
+        target: String,
+        /// Whether the target answered with a final response other than
+        /// `408` or `503`.
+        reachable: bool,
+        /// Status code of the response, or `None` when the ping timed out
+        /// or failed at the transport.
+        status_code: Option<u16>,
     },
 
     // ===== Diagnostics Events =====
@@ -1108,11 +1212,13 @@ impl std::fmt::Debug for Event {
             Self::MediaQualityChanged {
                 packet_loss_percent,
                 jitter_ms,
+                quality,
                 ..
             } => formatter
                 .debug_struct("MediaQualityChanged")
                 .field("packet_loss_percent", packet_loss_percent)
                 .field("jitter_ms", jitter_ms)
+                .field("quality", quality)
                 .finish(),
             Self::MediaSecurityNegotiated {
                 keying,
@@ -1155,6 +1261,16 @@ impl std::fmt::Debug for Event {
                 .debug_struct("UnregistrationFailed")
                 .field("registrar_bytes", &registrar.len())
                 .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::PeerReachabilityChanged {
+                target,
+                reachable,
+                status_code,
+            } => formatter
+                .debug_struct("PeerReachabilityChanged")
+                .field("target_bytes", &target.len())
+                .field("reachable", reachable)
+                .field("status_code", status_code)
                 .finish(),
             Self::SipTrace(trace) => formatter.debug_tuple("SipTrace").field(trace).finish(),
             Self::NetworkError { error, .. } => formatter
@@ -1231,7 +1347,8 @@ impl Event {
             | Event::RegistrationFailed { .. }
             | Event::UnregistrationSuccess { .. }
             | Event::UnregistrationFailed { .. }
-            | Event::IncomingRegister { .. } => None,
+            | Event::IncomingRegister { .. }
+            | Event::PeerReachabilityChanged { .. } => None,
         }
     }
 

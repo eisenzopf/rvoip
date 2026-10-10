@@ -16,10 +16,7 @@ async fn tenant_quota_rejects_exceeding_start_session() {
     let tenant = TenantId::new();
     orch.set_tenant_quotas(
         tenant.clone(),
-        TenantQuotas {
-            max_concurrent_sessions: Some(1),
-            ..Default::default()
-        },
+        TenantQuotas::default().with_max_concurrent_sessions(1),
     )
     .expect("set_tenant_quotas");
 

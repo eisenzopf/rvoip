@@ -169,10 +169,7 @@ async fn semaphore_admission_under_concurrent_load_respects_quota() {
 
     orch.set_tenant_quotas(
         tenant.clone(),
-        TenantQuotas {
-            max_concurrent_recordings: Some(QUOTA),
-            ..Default::default()
-        },
+        TenantQuotas::default().with_max_concurrent_recordings(QUOTA),
     )
     .expect("set quota");
 
@@ -227,10 +224,7 @@ async fn shrinking_quota_with_held_permits_is_rejected() {
     let tenant = TenantId::new();
     orch.set_tenant_quotas(
         tenant.clone(),
-        TenantQuotas {
-            max_concurrent_recordings: Some(10),
-            ..Default::default()
-        },
+        TenantQuotas::default().with_max_concurrent_recordings(10),
     )
     .unwrap();
 
@@ -254,10 +248,7 @@ async fn shrinking_quota_with_held_permits_is_rejected() {
     let err = orch
         .set_tenant_quotas(
             tenant.clone(),
-            TenantQuotas {
-                max_concurrent_recordings: Some(5),
-                ..Default::default()
-            },
+            TenantQuotas::default().with_max_concurrent_recordings(5),
         )
         .expect_err("shrink with live permits must reject");
     assert!(matches!(err, RvoipError::InvalidState(_)));
@@ -265,10 +256,7 @@ async fn shrinking_quota_with_held_permits_is_rejected() {
     // Resize-up still works.
     orch.set_tenant_quotas(
         tenant,
-        TenantQuotas {
-            max_concurrent_recordings: Some(20),
-            ..Default::default()
-        },
+        TenantQuotas::default().with_max_concurrent_recordings(20),
     )
     .expect("resize-up succeeds");
 

@@ -32,13 +32,16 @@ features and config diagnostic flags are not production defaults.
 | Workload | Starting point | Notes |
 | --- | --- | --- |
 | Client / UA | `PerformanceConfig::endpoint()` or omitted performance config | Keep default auto `180`, Timer `100`, media, queue sizes, and socket buffers. |
-| Local examples/tests | `Config::local_lab(...)` | Alias for local loopback examples and integration tests. |
-| Normal LAN server / PBX | `Config::lan_pbx(...)` | Directly reachable SIP and media address. Add capacity sizing only when expected concurrency requires it. |
+| Local examples/tests | `Config::local(...)` / `Config::local_lab(...)` | Loopback examples and integration tests; `local_lab` is an alias. |
+| Normal LAN server / PBX | `Config::lan_pbx(...)` | Directly reachable SIP and media address. Add capacity sizing only when expected concurrency requires it. Replaces the deprecated `Config::freeswitch_internal(...)`. |
 | Asterisk TLS registered-flow client | `Config::asterisk_tls_registered_flow(...)` | TLS client mode, registered-flow reuse, mandatory SDES-SRTP. |
-| FreeSWITCH internal LAN | `Config::freeswitch_internal(...)` | Direct LAN profile with strict codec matching. |
 | FreeSWITCH TLS/SRTP | `Config::freeswitch_tls_srtp_reachable_contact(...)` | Directly reachable TLS Contact, mandatory SRTP, FreeSWITCH-compatible suite policy. |
-| Carrier/SBC | `Config::carrier_sbc(...)` | TLS client mode, registered-flow Contact, mandatory SRTP, public signaling/media address, outbound proxy route. |
-| SIP proxy plus RTPengine lab | `Config::proxy_rtpengine(...)` | Signaling route helper; RTPengine control remains above `rvoip-sip`. |
+| Carrier/SBC (registered) | `Config::carrier_sbc(...)` | TLS client mode, registered-flow Contact, mandatory SRTP, public signaling/media address, outbound proxy route, playout, 1800 s session timers. |
+| IP-authenticated SIP trunk | `Config::carrier_trunk_udp(...)` | Plain UDP, no REGISTER, outbound proxy to the trunk SBC, public signaling/media address, playout, 1800 s session timers. |
+| Public-internet server | `Config::public_server(...)` | Public or 1:1-NAT address, ICE Lite, playout, 1800 s session timers; chain `tls_reachable_contact(...)` for TLS. |
+| Endpoint behind NAT | `Config::behind_nat(...)` | TLS RFC 5626 registered flow with CRLF keep-alive, STUN, ICE Full, required rtcp-mux, playout. |
+| SIP proxy plus RTPengine | `Config::proxy_rtpengine(...)` | Outbound proxy route, playout, 1800 s session timers; the proxy drives RTPengine, rvoip-sip does not speak its `ng` protocol. |
+| mTLS SBC peering | `Config::tls_direct_routing(...)` | Modelled on Teams Direct Routing (not certified or tested against Teams): TLS listener, mutual TLS, FQDN Contact, SDES-SRTP, ICE Lite, OPTIONS keep-alive, 1800 s session timers. |
 | PBX media server | `PerformanceConfig::pbx_media_server(capacity)` | UDP auto-answer server profile with media allocation enabled. |
 | Signaling-only high-performance server | `PerformanceConfig::signaling_only_server_high_performance(capacity)` | SIP signaling throughput profile that intentionally skips RTP allocation. |
 | Legacy high-CPS UDP auto-answer | `Config::with_high_cps_udp_auto_answer(capacity)` | Conservative low-level modifier for immediate-answer UDP servers and SIPp experiments. |
@@ -567,6 +570,60 @@ lower-level (transport / transaction / global / session) queues to `N * 10`. Use
 bus drops messages for receivers that lag past its capacity, so size
 `global_event_channel_capacity` for the server's active-call / event burst.
 
+## RTCP Reporting
+
+RTCP reaches the peer in one of two ways:
+
+- **Multiplexed** (default): rvoip offers `a=rtcp-mux` (RFC 5761) and, when
+  the answer agrees, RTCP shares the RTP socket and port.
+- **Separate RTCP port** (`Config::rtcp_non_mux = true`): for peers that
+  decline mux, such as Asterisk with default pjsip settings and many
+  carriers. Each call reserves an even RTP port and RTP port + 1 for RTCP
+  (RFC 3550 §11) and advertises the latter with `a=rtcp:` (RFC 3605). Reports
+  go from that port to the peer's `a=rtcp:` address, or its RTP port + 1.
+  Calls rvoip offers reserve the pair before the answer is known and release
+  the RTCP port as soon as a mux answer commits; inbound calls reserve it
+  only for offers without `a=rtcp-mux`.
+
+Without either, a peer that declines mux gets no RTCP: rvoip never sends
+RTCP to a peer's RTP port unless mux was negotiated. On calls with RTCP rvoip
+follows RFC 3550 without further configuration:
+
+- Reports go out on average every 5 / (e − 3/2) ≈ 4.1 s, randomised between
+  about 2 s and 6 s; the first one waits half that. The interval grows with
+  the number of session members and shrinks with session bandwidth (codec
+  bitrate plus headers: 80 kbit/s for G.711, 24 kbit/s for G.729, 80 kbit/s
+  assumed for dynamic payload types).
+- A session that sent RTP in the last two report intervals sends a Sender
+  Report whose RTP timestamp is its media clock at the report's NTP time;
+  otherwise it sends a Receiver Report. Every report, and the closing BYE,
+  carries an SDES CNAME that is random per call (RFC 7022) and names no user
+  or host.
+- Inbound RTCP is accepted only from the call's peer (its signalled or
+  latched address, or an SSRC it already sends RTP from). RTCP from anywhere
+  else — for example a neighbouring call's peer that sends RTCP to its RTP
+  port plus one — is dropped and counted in `RtpSessionStats::rtcp_packets_rejected`.
+  The separate RTCP port applies the same rule. Behind NAT it learns the
+  peer's RTCP source from a report that carries the SSRC of the RTP stream
+  already latched and comes from the same IP (symmetric RTCP); it never
+  learns the peer's RTP address as an RTCP destination.
+
+Capacity: every call that keeps a separate RTCP port uses two ports, so a
+media port range filled with such calls holds half as many calls. Size
+`media_port_start..=media_port_end` for twice the concurrent non-mux calls.
+The option is ignored with ICE (component 1 only), DTLS-SRTP keying (RFC 5764
+§4.1 would need a second DTLS handshake on the RTCP port), strict
+`rtcp_mux_required`, and signalling-only media. With a static public address
+whose port differs from the local RTP port, no `a=rtcp:` is advertised.
+
+| Config field | Default | When to change it |
+| --- | --- | --- |
+| `rtcp_non_mux` | `false` | Peers that decline `a=rtcp-mux` (PBXes with default settings, carriers) should still get SR/RR reports and the RTT/loss they carry. Costs a second port per such call. |
+| `rtcp_mux_required` | `false` | Refuse peers that decline mux instead of running calls without RTCP. Wins over `rtcp_non_mux`. |
+| `rtcp_reduced_minimum_interval` | `false` | Faster RTT/loss feedback: the 5 s minimum becomes 360 / session kbit/s when smaller (about 4.5 s for G.711, less for wideband). |
+| `rtcp_xr_voip_metrics` | `false` | Carriers or monitoring that collect RFC 3611 VoIP metrics. XR is sent only to peers whose SDP has `a=rtcp-xr` naming `voip-metrics`. |
+| `active_call_rtcp_counts_as_media` | `false` | Media watchdogs enabled and calls that may go silent or on hold: RTCP from the peer keeps the call alive. |
+
 ## Config Knob Matrix
 
 | Config API | `perf_listener` flag | SIPp matrix env | Default when unset | When to use |
@@ -593,6 +650,10 @@ bus drops messages for receivers that lag past its capacity, so size
 | `Config::with_server_overload_retry_after_secs(N)` | YAML recipe / app Config | YAML recipe / app Config | `Some(1)` | Set the `Retry-After` value on Config-owned overload rejections. |
 | `Config::with_active_call_no_media_timeout_secs(N)` | YAML recipe `activeCallNoMediaTimeoutSecs` | None | `0` disabled | Auto-answer server guard that releases inbound `Active` calls when no RTP packets arrive after answer. |
 | `Config::with_active_call_media_idle_timeout_secs(N)` | YAML recipe `activeCallMediaIdleTimeoutSecs` | None | `0` disabled | Auto-answer server guard that releases inbound `Active` calls when RTP stops advancing and remote BYE never arrives. |
+| `Config::with_active_call_rtcp_counts_as_media(true)` | None | None | `false` | Let RTCP from the call's peer count as activity for both media watchdogs, so held or silent calls that still report are kept. |
+| `Config::with_rtcp_non_mux(true)` | None | None | `false` | RTCP on RTP port + 1 for peers that decline `a=rtcp-mux`; reserves a second port per such call. |
+| `Config::with_rtcp_reduced_minimum_interval(true)` | None | None | `false` | RFC 3550 §6.2 reduced minimum RTCP interval (360 / session kbit/s) for faster quality feedback. |
+| `Config::with_rtcp_xr_voip_metrics(true)` | None | None | `false` | Send RFC 3611 VoIP-metrics RTCP XR to peers whose SDP asks with `a=rtcp-xr`. |
 | `Config::with_sip_udp_parse_workers(N)` | `--udp-parse-workers N` | `RVOIP_SHARDING_UDP_WORKERS` | Transport default | Add UDP parse parallelism when parse/dispatch work backs up. |
 | `Config::with_sip_udp_parse_queue_capacity(N)` | `--udp-parse-queue-capacity N` | `RVOIP_SHARDING_UDP_QUEUE_CAPACITY` | SIP transport channel capacity | Bound per-worker UDP parse queue for bursty tests. |
 | `Config::with_sip_udp_parse_dispatch(UdpParseDispatch::RoundRobin)` | `--udp-parse-round-robin` | Always enabled by sharding runner | Source-hash | SIPp sidecar tests where all calls share one source socket. |

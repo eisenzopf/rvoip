@@ -741,7 +741,8 @@ pub use bridge::{BridgeError, BridgeHandle};
 pub use types::{
     AdvancedProcessorConfig, AdvancedProcessorSet, MediaConfig, MediaSessionEvent,
     MediaSessionInfo, MediaSessionStatus, AMR_DTX_PARAMETER, NEGOTIATED_FMTP_PARAMETER,
-    RTCP_MUX_PARAMETER,
+    REMOTE_RTCP_ADDR_PARAMETER, RTCP_MUX_PARAMETER, RTCP_REDUCED_MINIMUM_PARAMETER,
+    RTCP_SEPARATE_PORT_PARAMETER, RTCP_XR_PARAMETER,
 };
 
 use types::RtpSessionWrapper;
@@ -1604,13 +1605,24 @@ impl MediaSessionController {
         // without either failing after an arbitrary eight ports or looping
         // forever when the host has no usable port left.
         let bind_attempt_limit = allocator.configured_port_capacity().max(1);
+        // RFC 3550 §11 pair for a peer that may decline rtcp-mux: even RTP
+        // port, RTCP on the port above, reserved together.
+        let separate_rtcp = config.rtcp_separate_port();
         for attempt in 1..=bind_attempt_limit {
             let allocate_started = Instant::now();
-            let allocation = allocator
-                .allocate_port_pair(&dialog_session_id, Some(config.local_addr.ip()))
-                .await;
+            let allocation = if separate_rtcp {
+                allocator
+                    .allocate_rtp_rtcp_pair(&dialog_session_id, Some(config.local_addr.ip()))
+                    .await
+                    .map(|(rtp, rtcp)| (rtp, Some(rtcp)))
+            } else {
+                allocator
+                    .allocate_port_pair(&dialog_session_id, Some(config.local_addr.ip()))
+                    .await
+                    .map(|(rtp, _)| (rtp, None))
+            };
             diagnostics::record_rtp_port_allocate(allocate_started.elapsed());
-            let (local_rtp_addr, _) = match allocation {
+            let (local_rtp_addr, local_rtcp_addr) = match allocation {
                 Ok(allocation) => allocation,
                 Err(e) => {
                     let failure_kind = if last_bind_error.is_some() {
@@ -1642,12 +1654,24 @@ impl MediaSessionController {
             };
 
             let session_started = Instant::now();
-            match RtpSession::new_event_driven_with_symmetric_rtp_policy(
-                rtp_config,
-                self.symmetric_rtp_policy,
-            )
-            .await
-            {
+            let created = match local_rtcp_addr {
+                Some(local_rtcp_addr) => {
+                    RtpSession::new_event_driven_with_rtcp_socket(
+                        rtp_config,
+                        self.symmetric_rtp_policy,
+                        local_rtcp_addr,
+                    )
+                    .await
+                }
+                None => {
+                    RtpSession::new_event_driven_with_symmetric_rtp_policy(
+                        rtp_config,
+                        self.symmetric_rtp_policy,
+                    )
+                    .await
+                }
+            };
+            match created {
                 Ok(rtp_session) => {
                     diagnostics::record_rtp_session_new(session_started.elapsed());
                     created_session = Some((local_rtp_addr, rtp_session, reservation_guard));
@@ -1702,6 +1726,24 @@ impl MediaSessionController {
             })?;
 
         let rtp_port = local_rtp_addr.port();
+        let rtcp_port = rtp_session.local_rtcp_addr().map(|addr| addr.port());
+        if rtcp_port.is_some() {
+            if config.remote_rtcp_addr().is_some() {
+                rtp_session.set_remote_rtcp_addr(config.remote_rtcp_addr());
+            }
+            if config.rtcp_mux() {
+                rtp_session.set_rtcp_mux(true);
+            }
+        }
+
+        // RTCP policy carried in the configuration. Both default off in the
+        // RTP session, so only an explicit opt-in needs applying.
+        if config.rtcp_xr() {
+            rtp_session.set_rtcp_xr_enabled(true);
+        }
+        if config.rtcp_reduced_minimum() {
+            rtp_session.set_rtcp_reduced_minimum(true);
+        }
 
         // Subscribe to RTP session events before wrapping
         let subscribe_started = Instant::now();
@@ -1733,6 +1775,7 @@ impl MediaSessionController {
             status: MediaSessionStatus::Active,
             config: config.clone(),
             rtp_port: Some(rtp_port),
+            rtcp_port,
             rtp_stats: None,
             stats_updated_at: None,
             created_at: std::time::Instant::now(),
@@ -2109,6 +2152,52 @@ impl MediaSessionController {
         Ok(())
     }
 
+    /// Close a dialog's separate RTCP socket and hand its port back to the
+    /// allocator, once RTP/RTCP multiplexing makes it unnecessary. RTCP uses
+    /// the RTP socket from then on. Returns whether a port was released;
+    /// `false` when the session has none (already released, or started
+    /// without [`RTCP_SEPARATE_PORT_PARAMETER`]).
+    ///
+    /// Call it only after multiplexing is committed: the port cannot be
+    /// reserved again for this session, so a negotiation that may still roll
+    /// back to a non-mux answer must keep it.
+    pub async fn release_rtcp_port(&self, dialog_id: &DialogId) -> Result<bool> {
+        let update_lock = self
+            .rtp_sessions
+            .get(dialog_id)
+            .map(|entry| Arc::clone(&entry.value().update_lock))
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+        let _update_guard = update_lock.lock().await;
+        let rtp_session_arc = self
+            .rtp_sessions
+            .get(dialog_id)
+            .map(|entry| entry.value().session.clone())
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+        let released = rtp_session_arc.lock().await.release_rtcp_socket().await;
+        let Some(released) = released else {
+            return Ok(false);
+        };
+        if let Some(mut entry) = self.sessions.get_mut(dialog_id) {
+            entry.value_mut().rtcp_port = None;
+        }
+        let allocator = if let Some(ref port_alloc) = self.port_allocator {
+            port_alloc.clone()
+        } else {
+            GlobalPortAllocator::instance().await
+        };
+        let dialog_session_id = format!("dialog_{}", dialog_id);
+        if !allocator
+            .release_session_port(&dialog_session_id, released.ip(), released.port())
+            .await
+        {
+            warn!(
+                "RTCP port of dialog {} was not tracked by the allocator",
+                dialog_id
+            );
+        }
+        Ok(true)
+    }
+
     /// Update media configuration (e.g., when remote address becomes known or codec changes during re-INVITE).
     ///
     /// Restructured for DashMap: each shard guard is acquired,
@@ -2157,6 +2246,10 @@ impl MediaSessionController {
         };
         let remote_changed = config.remote_addr != old_config.remote_addr;
         let rtcp_mux_changed = config.rtcp_mux() != old_config.rtcp_mux();
+        let remote_rtcp_changed = config.remote_rtcp_addr() != old_config.remote_rtcp_addr();
+        let rtcp_xr_changed = config.rtcp_xr() != old_config.rtcp_xr();
+        let rtcp_reduced_minimum_changed =
+            config.rtcp_reduced_minimum() != old_config.rtcp_reduced_minimum();
 
         let rtp_session_arc = self
             .rtp_sessions
@@ -2193,6 +2286,15 @@ impl MediaSessionController {
             // Before the peer address: a non-mux peer must never see a report.
             if rtcp_mux_changed {
                 rtp_session.set_rtcp_mux(config.rtcp_mux());
+            }
+            if remote_rtcp_changed {
+                rtp_session.set_remote_rtcp_addr(config.remote_rtcp_addr());
+            }
+            if rtcp_xr_changed {
+                rtp_session.set_rtcp_xr_enabled(config.rtcp_xr());
+            }
+            if rtcp_reduced_minimum_changed {
+                rtp_session.set_rtcp_reduced_minimum(config.rtcp_reduced_minimum());
             }
             if let Some(remote_addr) = config.remote_addr.filter(|_| remote_changed) {
                 rtp_session.set_remote_addr(remote_addr).await;

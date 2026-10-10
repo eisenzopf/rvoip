@@ -2,12 +2,160 @@
 
 ## Unreleased
 
+### Media quality
+
+- Per-call media quality now reaches the application. `rvoip-sip` adds
+  `UnifiedCoordinator::media_quality(&SessionId)` and
+  `SessionHandle::media_quality()`, returning `MediaQualityStats`: packets
+  sent/received/lost, local loss percent, jitter (ms) and MOS estimate for
+  the received stream, plus `rtt_ms`, `remote_packet_loss_percent`,
+  `remote_packets_lost` and `remote_jitter_ms` from the peer's RTCP reports
+  about the stream we send. Peer-reported fields are `None` until RTCP
+  arrives and stay `None` for calls without negotiated `a=rtcp-mux`.
+- New `Config::media_quality_interval` (`with_media_quality_interval`),
+  default `None`: when set, every call with media publishes
+  `Event::MediaQualityChanged` on that cadence. Previously that event had no
+  production source. The event gains a `quality: MediaQualityStats` field
+  (breaking for exhaustive patterns); its existing integer fields are kept.
+  A zero interval fails `Config::validate`.
+- `rvoip-core`: `QualitySnapshot` gains `rtt_ms`, `remote_packet_loss_pct`
+  and `remote_jitter_ms` (`Option`s; breaking for struct literals — add
+  `..Default::default()`). With the SIP sampler on, SIP media streams report
+  `has_quality_measurement() == true`, `Event::MediaQuality` fires for SIP
+  connections, and `spawn_media_quality_sampler` averages the optional fields
+  only over streams that carry them. `RvoipAppBuilder::media_quality_interval`
+  now also enables the SIP sampler at the same cadence.
+- `rtp-core`: `RtpSessionStats::peer_report` retains the latest RTCP report
+  block a peer sent about our SSRC (`PeerReceptionReport`: reporter SSRC,
+  fraction and sign-extended cumulative loss, extended highest sequence,
+  jitter in timestamp units and ms, LSR/DLSR RTT, receive time), and
+  `RtpSessionStats::peer_bye` records an inbound RTCP BYE. Previously these
+  were only logged.
+- `media-core`: `QualityMetrics` gains packet counters and `remote_*`
+  fields (`QualityMetrics::from_rtp_stats`), the cross-crate
+  `MediaQualityMetrics` gains counters, `rtt_ms` and `remote_*`, and
+  `MediaSessionController::get_media_quality` /
+  `publish_media_quality_updates` sample calls. `MediaEventHub` now maps
+  `StatisticsUpdated` and `QualityDegraded` to
+  `MediaQualityUpdate` / `MediaQualityDegraded` with the real session id,
+  and the legacy `MediaEventAdapter` no longer publishes a fabricated MOS
+  for an `"unknown_session"`.
+
 ### Release process
 
 - Every release must now have a `CHANGELOG.md` entry. **Prepare release PR**
   refuses to run while `## Unreleased` is empty and moves its entries under
   the new `## X.Y.Z — YYYY-MM-DD` heading. Verification and publication
   reject a release without a non-empty section for its version.
+
+
+
+### RTP / RTCP
+
+- Sender Reports carry the RTP timestamp of the stream's media clock at the
+  report's NTP time — the last sent media timestamp extrapolated at the clock
+  rate (RFC 3550 §6.4.1) — instead of wall-clock milliseconds (periodic) or a
+  frozen scheduler value (`send_sender_report`). Telephone-event packets do
+  not move the anchor.
+- A session that has not sent RTP in the last two report intervals sends a
+  Receiver Report with its report blocks instead of an SR with zero counts
+  (RFC 3550 §6.4).
+- The periodic report interval follows RFC 3550 §6.2/§6.3 and Appendix A.7:
+  5% of the session bandwidth (derived from static payload types, else
+  80 kbit/s; `RtpSession::set_bandwidth` overrides), members and senders from
+  observed SSRCs, a five-second minimum halved before the first report,
+  randomisation over [0.5, 1.5] and the e − 3/2 compensation. Reports
+  previously went out every second. `RTCP_MIN_INTERVAL` is now five seconds.
+  New `Config::rtcp_reduced_minimum_interval` (default `false`) enables the
+  §6.2 reduced minimum (360 / session kbit/s).
+- Every report and the close-time BYE carry an SDES CNAME. The CNAME is a
+  random 96-bit base64 value per session (RFC 7022) rather than
+  `$USER@hostname`; `RtpSession::cname()` returns it.
+- RFC 3611 VoIP-metrics XR is no longer appended to every report. It is off
+  by default; `RtpSession::set_rtcp_xr_enabled` switches it per session, and
+  new `Config::rtcp_xr_voip_metrics` (default `false`) enables it for calls
+  whose peer SDP carries `a=rtcp-xr` naming `voip-metrics`. Media-core
+  carries both policies as `RTCP_XR_PARAMETER` and
+  `RTCP_REDUCED_MINIMUM_PARAMETER`.
+- Inbound RTCP is accepted only from the call's expected peer: its signalled
+  or latched address, or a remote SSRC already sending RTP. A neighbouring
+  call's non-mux peer sending RTCP to its RTP port + 1 — this session's RTP
+  port under consecutive allocation — no longer feeds this call's reports,
+  RTT, or BYE handling. `RtpSessionStats` gains `rtcp_packets_received` and
+  `rtcp_packets_rejected`.
+- New `Config::active_call_rtcp_counts_as_media` (default `false`) lets RTCP
+  from the call's peer count as activity for the active-call no-media and
+  media-idle watchdogs, so held or silent calls that still report are kept.
+- RTCP for peers that decline rtcp-mux. New `Config::rtcp_non_mux` (default
+  `false`) gives each call an even RTP port and RTP port + 1 for a separate
+  RTCP socket (RFC 3550 §11), reserved together so concurrent calls never
+  collide. Calls rvoip offers reserve the pair up front; inbound calls only
+  when the offer lacks `a=rtcp-mux`. Offers carry `a=rtcp:<port>` (RFC 3605)
+  beside `a=rtcp-mux` (never beside `a=rtcp-mux-only`), and answers to
+  non-mux offers carry it too. When the peer declines mux, periodic SR/RR and
+  the close-time BYE go from the RTCP port to the peer's `a=rtcp:` address
+  or its RTP port + 1, never to its RTP port; inbound RTCP on the port gets
+  the same peer filter, SRTCP covers it under SDES-SRTP, and a NAT-mapped
+  peer RTCP source is learned only from the latched RTP stream's SSRC on the
+  same IP. When the peer accepts mux, the RTCP port is released when the
+  negotiation commits. A call that keeps its RTCP port uses two ports, which
+  halves capacity per media port range. Not used with ICE, DTLS-SRTP keying,
+  strict `rtcp_mux_required`, or signalling-only media. Enables PBXes such as
+  Asterisk with default pjsip settings, and carriers without mux, to get RTCP.
+- rtp-core: `PortAllocator::allocate_rtp_rtcp_pair` and
+  `release_session_port`; `RtpSession::new_event_driven_with_rtcp_socket`,
+  `set_remote_rtcp_addr`, `local_rtcp_addr` and `release_rtcp_socket`;
+  `UdpRtpTransport::set_rtcp_mux`, `release_rtcp_socket` and
+  `local_rtcp_socket_addr`. media-core: `RTCP_SEPARATE_PORT_PARAMETER`,
+  `REMOTE_RTCP_ADDR_PARAMETER`, `MediaSessionInfo::rtcp_port` (new public
+  field) and `MediaSessionController::release_rtcp_port`.
+
+### SIP
+
+- rvoip-sip now offers RTP/RTCP multiplexing by default. Every SDP offer it
+  generates (initial INVITE, re-INVITE and UPDATE, hold and resume, and
+  late-SDP offers in a 200 OK) carries `a=rtcp-mux` (RFC 5761), so periodic
+  RTCP reports flow on the single media socket whenever the peer answers
+  with `a=rtcp-mux`. Before this, offers omitted it and RTCP never flowed on
+  calls rvoip originated. Answers are unchanged: they echo `a=rtcp-mux` only
+  when the offer had it.
+- When the answer declines mux, the call carries no RTCP at all, per RFC 5761
+  §5.1.1: no periodic reports, and no RTCP BYE at teardown, either to the RTP
+  port or to RTP port + 1. rtp-core's `RtpSession::close` now sends its BYE
+  only when mux was negotiated. Offers carry no `a=rtcp:` fallback port.
+- Opt out with `Config::offer_rtcp_mux = false` for a peer that mishandles
+  the attribute; offers then match 0.3.x. `Config::rtcp_mux_required` keeps
+  its strict meaning and always offers mux.
+
+### Breaking changes
+
+- The public configuration structs are now `#[non_exhaustive]`, so later
+  releases can add fields without a semver break:
+  `rvoip_core::Config`, `rvoip_core::TenantQuotas`, `rvoip_sip::Config`,
+  `rvoip_sip_dialog::api::DialogConfig`, `rvoip_websocket::UctpWsConfig`,
+  `rvoip_quic::UctpQuicConfig`, and
+  `rvoip_uctp::state::UctpCoordinatorCaps`.
+- Code outside the defining crate can no longer build these with a struct
+  literal, including the `..Default::default()` form. Start from a
+  constructor and then set fields or call builder methods:
+
+  ```rust
+  // Before
+  let config = Config { max_concurrent_setups: 64, ..Config::default() };
+
+  // After
+  let mut config = Config::default();
+  config.max_concurrent_setups = 64;
+  ```
+
+  Use `Config::default()` (core), `Config::local` / `Config::on` or a
+  profile constructor (SIP), `DialogConfig::new` or `Default`,
+  `UctpWsConfig::new`, `UctpQuicConfig::new`, and
+  `UctpCoordinatorCaps::default()`. `TenantQuotas` gains
+  `with_max_concurrent_sessions`, `with_max_concurrent_recordings`, and
+  `with_max_concurrent_ai_sessions`, so
+  `TenantQuotas::default().with_max_concurrent_sessions(1)` replaces the
+  literal. Reading fields and assigning to them is unchanged.
 
 ### SIP media options documentation
 
@@ -23,6 +171,56 @@
   dead-media detection on SBCs.
 - The rvoip-sip README gains a "Media options" section with a decision table
   naming the profile and settings to start from for each deployment shape.
+
+
+
+### SIP deployment profiles
+
+- `rvoip_sip::Config` has a profile constructor for each common way to
+  deploy a SIP server or endpoint. A profile only fills in documented
+  defaults: everything it sets stays a public field you can change
+  afterwards, and each profile's rustdoc lists the fields it sets.
+- New `Config::carrier_trunk_udp(name, bind, public, trunk_proxy_uri)`: a
+  plain UDP trunk authenticated by source IP. Public signaling and media
+  address, outbound proxy to the trunk SBC, playout buffer, 1800 s session
+  timers; no TLS, no SRTP, no REGISTER.
+- New `Config::public_server(name, bind, public)`: a server on a public or
+  1:1-NAT address. Advertised SIP and media addresses, ICE Lite, playout
+  buffer, 1800 s session timers. Chain `tls_reachable_contact(...)` for a
+  TLS listener.
+- New `Config::behind_nat(name, bind, stun_server, sip_instance)`: an
+  endpoint behind NAT. TLS RFC 5626 registered flow with CRLF keep-alive,
+  STUN, ICE Full, `rtcp_mux_required = true`, playout buffer.
+- New `Config::tls_direct_routing(...)`: an SBC peering over mutual TLS,
+  modelled on Microsoft Teams Direct Routing's SBC requirements (not
+  certified or tested against Teams). TLS listener with an FQDN Contact,
+  required client certificates, SDES-SRTP required, ICE Lite, OPTIONS
+  keep-alive to the peer, 1800 s session timers, no REGISTER.
+- `Config::carrier_sbc` now turns on RFC 4028 session timers
+  (`session_timer_secs = Some(1800)`, `session_timer_min_se = 90`), so a
+  call whose far end vanished without a BYE ends within 30 minutes.
+- `Config::proxy_rtpengine` is no longer a placeholder: it adds the playout
+  buffer and 1800 s session timers. Its docs now say plainly that rvoip-sip
+  does not speak RTPengine's `ng` control protocol; the proxy anchors media.
+- `Config::freeswitch_internal` is deprecated in favour of
+  `Config::lan_pbx`. It only set `strict_codec_matching`, which every
+  constructor already enables. `Config::local_lab` stays, documented as an
+  alias of `Config::local`.
+- New `Config::options_keepalive_targets` and
+  `Config::options_keepalive_interval_secs` (default 60): the coordinator
+  pings each target with an out-of-dialog `OPTIONS` once per interval,
+  carrying `Config::contact_uri` as its Contact, and publishes the new
+  `Event::PeerReachabilityChanged { target, reachable, status_code }` on the
+  first outcome and on every change. Off unless targets are listed.
+- `Config::tls_reachable_contact` now advertises the TLS listener on
+  `Config::sip_advertised_addr`'s IP when that is set and
+  `Config::tls_advertised_addr` is not, instead of leaving a wildcard bind
+  unadvertised or advertising a private bind address.
+- `Config::validate` rejects `session_timer_secs` below
+  `session_timer_min_se` and `options_keepalive_targets` entries that are not
+  SIP URIs.
+- `Event` gains the `PeerReachabilityChanged` variant; exhaustive matches on
+  `Event` need an arm for it.
 
 ### SIP
 
@@ -44,6 +242,28 @@
   role in the refresh transaction, so a refresher that answered the call
   used to send `refresher=uas` and hand the job to its peer (§5, §7.4).
   Refreshes also carry the largest `Min-SE` received in a 422 on the dialog.
+- An INVITE that is authenticated after a 422 now keeps the interval the 422
+  asked for (RFC 4028 §7.4). The 401/407 retry used to fall back to the
+  configured `Session-Expires`, so a PBX with a higher Min-SE (FreeSWITCH
+  with Min-SE 120 behind proxy auth) answered it with a second 422. That
+  cost a round trip and spent the two-retry 422 budget, and one more
+  challenge, such as a stale nonce, failed the call with 422. A later 422
+  with a smaller `Min-SE` no longer lowers the floor already learned.
+- A 401/407 retry of an INVITE to a registered contact (RFC 5626, as used by
+  the `carrier_sbc` and `behind_nat` profiles) now goes out on the same
+  registered flow as the original INVITE. dialog-core's
+  `send_invite_with_auth_options` used to drop the flow routes and resolve
+  the contact address instead, which sits behind the client's NAT. The
+  core method now takes the retained `InviteAuthRetryOptions` and passes
+  them through unchanged. In-dialog and REGISTER retries already reused
+  their stored request options.
+- Digest credentials retained across INVITE retries are re-signed rather
+  than resent (RFC 7616 §3.4). The 422 retry, and a 401 retry that keeps an
+  earlier proxy credential, now carry the next `nc` for that nonce and a new
+  `cnonce`. They used to repeat `nc=00000001`, which registrars and proxies
+  that track nonce counts reject as a replay. A new nonce, including one
+  from a `stale=true` challenge, still starts at 1. REGISTER refreshes
+  already counted correctly and now have a test.
 - When the peer rejects the refresh UPDATE (for example 405 from a peer that
   does not support UPDATE), the re-INVITE fallback now reaches the wire. It
   used to carry a second `Session-Expires` and `Min-SE` and have no offer, so
@@ -58,6 +278,50 @@
   `Contact`) as the Request-URI, as RFC 3261 §12.2.1.1 requires. They used
   the peer's From/To URI, so a refresh sent by rvoip as the called party
   could go to the wrong host.
+- A rejected session refresh no longer ends the call (RFC 4028 §10). Only a
+  refresh that times out, whose transport fails, or that draws 408 or 481
+  ends the session with a `Reason: SIP;cause=408` BYE; such an UPDATE no
+  longer tries a re-INVITE first. Any other non-2xx used to tear the call
+  down too. Now 491 Request Pending is retried with the same method after the
+  RFC 3261 §14.1 backoff (2.1–4 s for the side that placed the call, 0–2 s
+  for the other). 422 is retried at once with the response's `Min-SE` as both
+  the floor and the minimum interval (§7.4). A rejected UPDATE still falls
+  back to re-INVITE. Any other rejection of the re-INVITE (488, 403, 5xx, …)
+  keeps the call and logs a warning. One more refresh is attempted halfway to
+  the BYE deadline (at most once per interval, within the four-retry cap);
+  if that is rejected too, the session expires at the end of the current
+  interval unless the peer refreshes it or another re-INVITE or UPDATE
+  succeeds first.
+- In-dialog REFER, MESSAGE, INFO, NOTIFY, OPTIONS and every other in-dialog
+  request now use the remote target (the peer's `Contact`) as the
+  Request-URI, as RFC 3261 §12.2.1.1 requires; the To header keeps the
+  peer's address. Blind and attended transfers used to send the REFER to the
+  host in the peer's From/To URI. PRACK now targets the early dialog's
+  remote target, which is taken from the reliable 18x `Contact`.
+- The 2xx to a session refresh now renegotiates the timer (RFC 4028 §7.2,
+  §7.4). Its `Session-Expires` interval and refresher replace the old ones,
+  so a peer can lengthen the interval or take over refreshing. A 2xx without
+  `Session-Expires` to a refresh that proposed one turns the timer off. Both
+  used to be ignored.
+- An incoming refresh is answered with its own interval and refresher
+  (§9), within the local Min-SE, and the new values take effect. The 2xx used
+  to echo the dialog's previous values. A timer-capable peer whose refresh
+  asks for less than the local Min-SE now gets 422 with `Min-SE`, as on the
+  initial INVITE.
+- Refreshes use UPDATE only when the peer has not ruled it out: a peer whose
+  `Allow` header (from its INVITE, re-INVITE, UPDATE or 2xx) omits UPDATE is
+  refreshed with re-INVITE from the start. A held call can now be refreshed
+  with re-INVITE; that refresh used to be dropped and the call expired.
+- RFC 4028 §5 floor: `Config::validate` (and so peer construction) rejects
+  `session_timer_min_se` below 90 seconds, `session_timer_secs` below 90
+  seconds, and a `session_timer_secs` below `session_timer_min_se`. A caller
+  without timer support whose request carries a proxy-inserted
+  `Session-Expires` below the local Min-SE is answered with the Min-SE
+  instead of the smaller value; a timer-capable caller still gets 422.
+  Tests that need second-scale intervals set
+  `Config::session_timer_allow_short_intervals_for_testing`, which exists
+  only with the `test-hooks` feature; every rvoip-sip CI lane now builds with
+  `test-hooks` so those tests and process fixtures run.
 
 ## 0.3.12
 

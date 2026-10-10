@@ -213,6 +213,16 @@ impl Drop for RegistrationRefreshCompletion {
     }
 }
 
+/// Peer facts dialog-core retains for RFC 4028 refresh decisions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SessionRefreshPeerPolicy {
+    /// RFC 3261 §20.5 `Allow` lists UPDATE; `None` when the peer sent no
+    /// `Allow` header.
+    pub(crate) allows_update: Option<bool>,
+    /// Largest `Min-SE` from a 422 to an in-dialog refresh (RFC 4028 §7.4).
+    pub(crate) min_se: Option<u32>,
+}
+
 #[cfg(test)]
 struct RegistrationRefreshDispatchPause {
     entered: std::sync::atomic::AtomicBool,
@@ -2588,11 +2598,18 @@ impl DialogAdapter {
     /// the previous inline REGISTER-auth shortcut (`handle_401_challenge`) was
     /// retired when INVITE auth landed. See `default.yaml`'s `Initiating` /
     /// `Registering` + `AuthRequired` transitions.
+    ///
+    /// `learned_min_se` is the largest `Min-SE` a 422 has already returned
+    /// for this INVITE. RFC 4028 §7.4 requires every later attempt to carry
+    /// it, so when present the authenticated retry uses it as both
+    /// `Session-Expires` and `Min-SE` (exactly as the 422 retry did) instead
+    /// of falling back to the configured interval the peer already rejected.
     pub async fn resend_invite_with_auth(
         &self,
         session_id: &SessionId,
         mut opts: rvoip_sip_dialog::api::unified::InviteAuthRetryOptions,
         apply_global_proxy: bool,
+        learned_min_se: Option<u32>,
     ) -> Result<()> {
         let dialog_id = resolve_exact_invite_retry_dialog(self.store.as_ref(), session_id)?;
 
@@ -2602,12 +2619,21 @@ impl DialogAdapter {
         if apply_global_proxy && opts.outbound_proxy_uri.is_none() {
             opts.outbound_proxy_uri = self.outbound_proxy_uri.clone();
         }
-        self.dialog_api
-            .send_invite_with_auth_options(&dialog_id, opts)
-            .await
-            .map_err(|error| {
-                redacted_invite_dispatch_error(InviteDispatchFailure::AuthRetry, error)
-            })?;
+        let dispatched = match learned_min_se {
+            Some(min_se) => {
+                self.dialog_api
+                    .send_invite_with_session_timer_options(&dialog_id, opts, min_se, min_se)
+                    .await
+            }
+            None => {
+                self.dialog_api
+                    .send_invite_with_auth_options(&dialog_id, opts)
+                    .await
+            }
+        };
+        dispatched.map_err(|error| {
+            redacted_invite_dispatch_error(InviteDispatchFailure::AuthRetry, error)
+        })?;
         Ok(())
     }
 
@@ -4769,6 +4795,31 @@ impl DialogAdapter {
             .session_expires_secs
             .filter(|interval| *interval > 0)
             .map(|interval| (interval, dialog.is_session_refresher)))
+    }
+
+    /// What dialog-core learned about the peer that shapes the next RFC 4028
+    /// refresh for the lane-held exact session: whether its `Allow` header
+    /// lists UPDATE (`None` when it sent none) and the largest `Min-SE` it
+    /// returned in a 422 to an earlier refresh.
+    pub(crate) fn session_refresh_peer_policy_lane_owned(
+        &self,
+        session: &SessionState,
+    ) -> Result<SessionRefreshPeerPolicy> {
+        let dialog_id = resolve_dialog_for_lane_owned_session(self.store.as_ref(), session)?;
+        let dialog = self
+            .dialog_api
+            .dialog_manager()
+            .core()
+            .get_dialog(&dialog_id)
+            .map_err(|_| {
+                SessionError::InvalidTransition(
+                    "RFC 4028 refresh requires the exact dialog owner".to_string(),
+                )
+            })?;
+        Ok(SessionRefreshPeerPolicy {
+            allows_update: dialog.peer_allows_update,
+            min_se: dialog.session_timer_peer_min_se,
+        })
     }
 
     /// Fetch the SIP-level dialog identity (`Call-ID`, `local_tag`, `remote_tag`)

@@ -41,6 +41,32 @@ fn media_runtime() -> &'static Runtime {
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    static SPAWN_ON_CURRENT_RUNTIME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// While alive, media tasks spawned from this thread run on the caller's
+/// runtime instead of the dedicated media executor, so a
+/// `#[tokio::test(start_paused = true)]` clock drives their timers too.
+#[cfg(test)]
+pub(crate) struct MediaTasksOnCurrentRuntime(());
+
+#[cfg(test)]
+impl MediaTasksOnCurrentRuntime {
+    pub(crate) fn enter() -> Self {
+        SPAWN_ON_CURRENT_RUNTIME.with(|flag| flag.set(true));
+        Self(())
+    }
+}
+
+#[cfg(test)]
+impl Drop for MediaTasksOnCurrentRuntime {
+    fn drop(&mut self) {
+        SPAWN_ON_CURRENT_RUNTIME.with(|flag| flag.set(false));
+    }
+}
+
 /// Spawn a lifecycle-owned media task without consuming signaling-executor
 /// scheduling budget. The returned handle remains the sole join/cancel owner.
 #[doc(hidden)]
@@ -49,6 +75,10 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
+    #[cfg(test)]
+    if SPAWN_ON_CURRENT_RUNTIME.with(std::cell::Cell::get) {
+        return tokio::spawn(future);
+    }
     media_runtime().spawn(future)
 }
 

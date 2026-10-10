@@ -218,6 +218,9 @@ struct InDialogRequestMaterializationContext {
     local_tag: String,
     remote_uri: String,
     remote_tag: String,
+    /// RFC 3261 §12.2.1.1 Request-URI: the dialog's remote target (the
+    /// peer's Contact), never its From/To AOR.
+    remote_target: rvoip_sip_core::Uri,
     cseq: u32,
     local_address: SocketAddr,
     route_set: Vec<rvoip_sip_core::Uri>,
@@ -250,6 +253,10 @@ fn materialize_info_request_snapshot(
         context: None,
     })?;
 
+    // The quick builder addresses the AOR; an in-dialog request goes to the
+    // remote target (RFC 3261 §12.2.1.1).
+    let mut request = request;
+    request.uri = context.remote_target.clone();
     // The quick builder remains String-shaped. Restore the same immutable
     // byte entity used by the caller and Digest auth-int calculation.
     Ok(request.with_body(snapshot.body.clone()))
@@ -271,7 +278,7 @@ fn materialize_notify_request_snapshot(
         .body
         .as_ref()
         .map(|body| String::from_utf8_lossy(body).into_owned());
-    let request = dialog_quick::notify_for_dialog_with_extras(
+    let mut request = dialog_quick::notify_for_dialog_with_extras(
         context.call_id.clone(),
         context.local_uri.clone(),
         context.local_tag.clone(),
@@ -294,6 +301,8 @@ fn materialize_notify_request_snapshot(
         ),
         context: None,
     })?;
+    // RFC 3261 §12.2.1.1: the remote target, not the subscriber's AOR.
+    request.uri = context.remote_target.clone();
 
     // Preserve arbitrary bytes, Content-Length and Digest auth-int identity.
     Ok(match &snapshot.body {
@@ -1892,6 +1901,7 @@ impl DialogManager {
                 local_tag,
                 remote_uri: template.remote_uri.to_string(),
                 remote_tag,
+                remote_target: template.target_uri.clone(),
                 cseq: template.cseq_number,
                 local_address: self
                     .local_address_for_target_and_routes(&template.target_uri, &template.route_set),
@@ -1973,6 +1983,7 @@ impl DialogManager {
                 local_tag,
                 remote_uri: template.remote_uri.to_string(),
                 remote_tag,
+                remote_target: template.target_uri.clone(),
                 cseq: template.cseq_number,
                 local_address: self
                     .local_address_for_target_and_routes(&template.target_uri, &template.route_set),
@@ -2405,18 +2416,19 @@ impl DialogManager {
             })?;
 
             let mut request = request;
-            // RFC 3261 §12.2.1.1: an in-dialog request's Request-URI is the
-            // remote target (the peer's Contact), not the peer's AOR. The
-            // re-INVITE and UPDATE builders take the AOR; correct it so a
-            // session refresh (RFC 4028 §7.4) reaches the peer that
-            // answered rather than the host in its From/To URI.
-            let in_dialog_session_request = matches!(method, Method::Update)
-                || (method == Method::Invite
-                    && dialog
-                        .remote_tag
-                        .as_deref()
-                        .is_some_and(|tag| !tag.is_empty()));
-            if in_dialog_session_request {
+            // RFC 3261 §12.2.1.1: every in-dialog request's Request-URI is
+            // the remote target (the peer's Contact), not the peer's AOR.
+            // The REFER, MESSAGE, UPDATE and re-INVITE quick builders take
+            // the AOR; correct it so a transfer, message or session refresh
+            // (RFC 4028 §7.4) reaches the peer that answered rather than the
+            // host in its From/To URI. The route set (Route headers) is
+            // unchanged, and the candidate send path re-derives the top Via
+            // transport from the resolved next hop.
+            let in_dialog = dialog
+                .remote_tag
+                .as_deref()
+                .is_some_and(|tag| !tag.is_empty());
+            if in_dialog {
                 request.uri = template.target_uri.clone();
             }
             // RFC 3262: advertise or demand the `100rel` extension on outgoing
@@ -2442,6 +2454,24 @@ impl DialogManager {
                         inject_session_timer_headers(&mut request, secs, min_se);
                     }
                 }
+            }
+            // RFC 4028 §7.2/§7.4: remember which in-dialog INVITE/UPDATE
+            // proposed a timer so a 2xx without Session-Expires to *that*
+            // request can turn the timer off.
+            if in_dialog
+                && matches!(method, Method::Invite | Method::Update)
+                && request
+                    .headers
+                    .iter()
+                    .any(|h| matches!(h, TypedHeader::SessionExpires(_)))
+            {
+                const MAX_TRACKED_REFRESHES: usize = 8;
+                if dialog.session_timer_request_cseqs.len() >= MAX_TRACKED_REFRESHES {
+                    dialog.session_timer_request_cseqs.remove(0);
+                }
+                dialog
+                    .session_timer_request_cseqs
+                    .push(template.cseq_number);
             }
 
             let next_hop =
@@ -2524,10 +2554,40 @@ impl DialogManager {
         let session_refresh_method =
             matches!(transaction_id.method(), Method::Invite | Method::Update);
         if response.status().is_success() && session_refresh_method {
-            let negotiated = self
+            let dialog_id = self
                 .transaction_to_dialog
                 .get(transaction_id)
-                .map(|entry| entry.value().clone())
+                .map(|entry| entry.value().clone());
+            let request = self
+                .transaction_manager
+                .original_request(transaction_id)
+                .await
+                .ok()
+                .flatten();
+            // §9: a 2xx to an in-dialog refresh renegotiates from *that*
+            // request — its interval, Min-SE and refresher — instead of
+            // echoing the dialog's previous values. The dialog-creating
+            // INVITE was negotiated when it arrived.
+            if let (Some(dialog_id), Some(request)) = (dialog_id.as_ref(), request.as_ref()) {
+                let in_dialog = request.to().is_some_and(|to| to.tag().is_some());
+                if in_dialog {
+                    let local = self.config_session_timer_settings();
+                    if let Ok(mut dialog) = self.get_dialog_mut(dialog_id) {
+                        let current = dialog
+                            .session_expires_secs
+                            .map(|secs| (secs, dialog.is_session_refresher));
+                        if let UasSessionTimerDecision::Accept {
+                            session_secs,
+                            uas_refreshes,
+                        } = negotiate_uas_refresh_session_timer(request, local, current)
+                        {
+                            dialog.session_expires_secs = session_secs;
+                            dialog.is_session_refresher = session_secs.is_some() && uas_refreshes;
+                        }
+                    }
+                }
+            }
+            let negotiated = dialog_id
                 .and_then(|dialog_id| self.get_dialog(&dialog_id).ok())
                 .and_then(|dialog| {
                     dialog
@@ -2539,13 +2599,7 @@ impl DialogManager {
                 // recommended when the UAS does, but only for a UAC that
                 // advertised `timer`: a response must not require an
                 // extension the request did not list as supported.
-                let peer_supports_timer = self
-                    .transaction_manager
-                    .original_request(transaction_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_some_and(|request| detect_peer_timer_support(&request));
+                let peer_supports_timer = request.as_ref().is_some_and(detect_peer_timer_support);
                 apply_uas_session_timer_headers(
                     &mut response,
                     secs,
@@ -2914,6 +2968,7 @@ mod outward_error_redaction_tests {
             local_tag: "alice-tag".to_string(),
             remote_uri: "sip:bob@example.test".to_string(),
             remote_tag: "bob-tag".to_string(),
+            remote_target: "sip:bob@192.0.2.7:5070".parse().unwrap(),
             cseq: 42,
             local_address: "127.0.0.1:5060".parse().unwrap(),
             route_set: Vec::new(),
@@ -3193,15 +3248,38 @@ impl DialogManager {
         Some(removed.1)
     }
 
-    /// True only when the exact retained wire-unknown INVITE transaction has
-    /// received a terminal non-2xx response. A CANCEL transaction's own final
-    /// response is not sufficient: RFC 3261 teardown completes when the
-    /// original INVITE resolves (normally 487), while a late 2xx requires the
-    /// separate ACK+BYE path.
+    /// True only when the exact retained wire-unknown INVITE has ended
+    /// without a 2xx. A CANCEL transaction's own final response is not
+    /// sufficient: RFC 3261 teardown completes when the original INVITE
+    /// resolves (normally 487), while a late 2xx requires the separate
+    /// ACK+BYE path.
+    ///
+    /// The plan can also settle before the upper layer hands the INVITE to
+    /// this supervisor. When the first write fails, the transaction layer
+    /// reports `TransportError` on its event stream as well as returning the
+    /// error to the sender. If the event wins, the plan closes on that
+    /// terminal outcome (RFC 3261 §8.1.3.1 treats it as a 503) and drops its
+    /// current transaction before the sender can retain it as wire-unknown.
+    /// The sender still reports the dispatch as wire-unknown, but no CANCEL
+    /// can target a closed plan, and no response can arrive to settle it, so
+    /// a closed or exhausted plan with no live successor is terminal too.
+    ///
+    /// The plan also marks an INVITE wire-unknown as soon as it hands it to
+    /// the transaction layer, which is deliberately conservative; the
+    /// transaction layer retains the INVITE only once its write boundary is
+    /// crossed. A TLS peer that rejects the handshake while the route is
+    /// being prepared leaves a wire-unknown INVITE that the transaction layer
+    /// has already forgotten, and an INVITE whose stream flow has closed can
+    /// receive no response either. Such an INVITE is settled too.
+    ///
+    /// Without these the supervisor, the exact owner, and every session
+    /// teardown waiting on that owner would wait forever.
     pub(crate) async fn wire_unknown_invite_has_terminal_failure(
         &self,
         dialog_id: &DialogId,
     ) -> bool {
+        let mut settled_without_success = false;
+        let mut unresolved = false;
         for plan_id in self.invite_failover_plan_ids_for_dialog(dialog_id) {
             let Some(plan) = self
                 .invite_failover_plans
@@ -3212,15 +3290,25 @@ impl DialogManager {
             };
             let transaction_id = {
                 let plan = plan.lock().await;
-                if plan.id != plan_id
-                    || &plan.dialog_id != dialog_id
-                    || plan.phase != InviteFailoverPlanPhase::WireUnknown
-                {
+                if plan.id != plan_id || &plan.dialog_id != dialog_id {
                     continue;
                 }
-                plan.current_transaction.clone()
+                match plan.phase {
+                    InviteFailoverPlanPhase::WireUnknown => plan.current_transaction.clone(),
+                    InviteFailoverPlanPhase::Closed | InviteFailoverPlanPhase::Exhausted => {
+                        settled_without_success = true;
+                        continue;
+                    }
+                    InviteFailoverPlanPhase::Active
+                    | InviteFailoverPlanPhase::Accepted
+                    | InviteFailoverPlanPhase::Cancelled => {
+                        unresolved = true;
+                        continue;
+                    }
+                }
             };
             let Some(transaction_id) = transaction_id else {
+                unresolved = true;
                 continue;
             };
             if self
@@ -3233,8 +3321,20 @@ impl DialogManager {
             {
                 return true;
             }
+            if self
+                .transaction_manager
+                .client_transaction_is_unreachable(&transaction_id)
+                .await
+            {
+                // No final response can ever be accepted for this INVITE and
+                // no CANCEL can be built for it, so nothing is left to wait
+                // for (see `client_transaction_is_unreachable`).
+                settled_without_success = true;
+                continue;
+            }
+            unresolved = true;
         }
-        false
+        settled_without_success && !unresolved
     }
 
     /// Whether the exact dialog has emitted, or may have emitted, its sole
@@ -4696,41 +4796,34 @@ impl DialogManager {
         })?;
         self.send_invite_with_auth_options(
             dialog_id,
-            body,
-            vec![authorization],
-            extras,
-            from_display,
-            contact_override,
-            None,
-            false,
+            crate::api::unified::InviteAuthRetryOptions {
+                sdp: body.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
+                authorization_headers: vec![authorization],
+                extra_headers: extras,
+                from_display,
+                contact_uri: contact_override,
+                ..Default::default()
+            },
         )
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// RFC 3261 §22.2 — authenticated retry of an initial INVITE.
+    ///
+    /// The caller's retained request options pass through unchanged, so the
+    /// retry keeps every structural choice of the first attempt: body,
+    /// application headers, Contact, outbound proxy, 100rel and the exact
+    /// RFC 5626 registered-flow routes. A challenged INVITE to a registered
+    /// contact must leave on the same flow as the original; re-resolving the
+    /// Request-URI would send it to an address behind the client's NAT.
     pub async fn send_invite_with_auth_options(
         &self,
         dialog_id: &DialogId,
-        body: Option<bytes::Bytes>,
-        authorization_headers: Vec<TypedHeader>,
-        extras: Vec<TypedHeader>,
-        from_display: Option<String>,
-        contact_override: Option<String>,
-        outbound_proxy_uri: Option<rvoip_sip_core::types::uri::Uri>,
-        supported_100rel: bool,
+        opts: crate::api::unified::InviteAuthRetryOptions,
     ) -> DialogResult<TransactionKey> {
         self.send_initial_invite_attempt_with_options(
             dialog_id,
-            crate::api::unified::InviteAuthRetryOptions {
-                sdp: body.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
-                authorization_headers,
-                extra_headers: extras,
-                from_display,
-                contact_uri: contact_override,
-                outbound_proxy_uri,
-                supported_100rel,
-                registered_flow_routes: Vec::new(),
-            },
+            opts,
             InitialInviteTimerPolicy::Configured,
         )
         .await
@@ -6381,16 +6474,132 @@ pub fn negotiate_uas_session_timer(
                 };
             }
             let uas_refreshes = !peer_supports || matches!(se.refresher, Some(Refresher::Uas));
+            // §9: the answer may reduce the interval but never below the
+            // request's Min-SE, and never below this UAS's own floor (§5:
+            // at least 90 s; `local_min_se` is validated against it). A
+            // caller without timer support cannot be sent a 422, so a
+            // proxy-inserted interval below the floor is raised instead.
             UasSessionTimerDecision::Accept {
-                session_secs: Some(se.delta_seconds.min(local_secs).max(peer_min_se)),
+                session_secs: Some(
+                    se.delta_seconds
+                        .min(local_secs)
+                        .max(peer_min_se)
+                        .max(local_min_se),
+                ),
                 uas_refreshes,
             }
         }
         None => UasSessionTimerDecision::Accept {
-            session_secs: Some(local_secs.max(peer_min_se)),
+            session_secs: Some(local_secs.max(peer_min_se).max(local_min_se)),
             uas_refreshes: true,
         },
     }
+}
+
+/// UAS-side RFC 4028 §9 decision for an in-dialog session refresh
+/// (re-INVITE or UPDATE) received on a dialog whose current timer is
+/// `current` (`(interval, this side refreshes)`).
+///
+/// A refresh that carries `Session-Expires` is negotiated exactly like the
+/// dialog-creating INVITE, so the 2xx answers the *request's* interval and
+/// refresher and a timer-capable peer asking for less than the local Min-SE
+/// gets 422. A refresh without `Session-Expires` keeps a running timer at its
+/// current interval: a timer-capable peer that was refreshing stays the
+/// refresher, otherwise this UAS takes the job (`refresher=uas`). Such a
+/// request never starts a timer the dialog did not have.
+pub fn negotiate_uas_refresh_session_timer(
+    request: &Request,
+    local: Option<(u32, u32)>,
+    current: Option<(u32, bool)>,
+) -> UasSessionTimerDecision {
+    use rvoip_sip_core::types::TypedHeader;
+
+    let has_session_expires = request
+        .headers
+        .iter()
+        .any(|h| matches!(h, TypedHeader::SessionExpires(_)));
+    if has_session_expires {
+        return negotiate_uas_session_timer(request, local);
+    }
+    match current {
+        Some((secs, local_refreshes)) => UasSessionTimerDecision::Accept {
+            session_secs: Some(secs),
+            uas_refreshes: local_refreshes || !detect_peer_timer_support(request),
+        },
+        None => UasSessionTimerDecision::Accept {
+            session_secs: None,
+            uas_refreshes: false,
+        },
+    }
+}
+
+/// RFC 4028 §7.2/§7.4 UAC-side result of a 2xx to this side's in-dialog
+/// INVITE or UPDATE: `(interval, this side refreshes)`, or `None` when the
+/// session timer is now off.
+///
+/// The 2xx `Session-Expires` is authoritative: its interval replaces the
+/// negotiated one and `refresher=uac` names this side (the refresh
+/// transaction's UAC), `refresher=uas` the peer. A 2xx without
+/// `Session-Expires` to a request that proposed one means "no session
+/// expiration"; a 2xx to a request that never proposed a timer leaves the
+/// current timer as it was.
+pub fn uac_refresh_response_session_timer(
+    response: &Response,
+    request_proposed_timer: bool,
+    current: Option<(u32, bool)>,
+) -> Option<(u32, bool)> {
+    use rvoip_sip_core::types::session_expires::Refresher;
+    use rvoip_sip_core::types::TypedHeader;
+
+    let session_expires = response.headers.iter().find_map(|h| match h {
+        TypedHeader::SessionExpires(se) => Some(se),
+        _ => None,
+    });
+    match session_expires {
+        Some(se) if se.delta_seconds > 0 => Some((
+            se.delta_seconds,
+            !matches!(se.refresher, Some(Refresher::Uas)),
+        )),
+        Some(_) => None,
+        None if request_proposed_timer => None,
+        None => current,
+    }
+}
+
+/// RFC 3261 §20.5: whether a message's `Allow` header lists UPDATE, or
+/// `None` when it carries no `Allow` header (which says nothing about what
+/// the sender supports).
+pub fn allow_lists_update(headers: &[TypedHeader]) -> Option<bool> {
+    let mut seen = false;
+    let mut allows = false;
+    for header in headers {
+        if let TypedHeader::Allow(allow) = header {
+            seen = true;
+            allows |= allow.allows(&Method::Update);
+        }
+    }
+    seen.then_some(allows)
+}
+
+/// The `Min-SE` value of a 422 response (RFC 4028 §6).
+pub fn response_min_se(response: &Response) -> Option<u32> {
+    response.headers.iter().find_map(|h| match h {
+        TypedHeader::MinSE(min) => Some(min.delta_seconds),
+        _ => None,
+    })
+}
+
+/// Retire the tracked RFC 4028 proposal matching a final response's CSeq,
+/// returning whether that request carried `Session-Expires`.
+fn take_session_timer_request(dialog: &mut crate::dialog::Dialog, response: &Response) -> bool {
+    let Some(seq) = response.cseq().map(|cseq| cseq.seq) else {
+        return false;
+    };
+    let before = dialog.session_timer_request_cseqs.len();
+    dialog
+        .session_timer_request_cseqs
+        .retain(|tracked| *tracked != seq);
+    dialog.session_timer_request_cseqs.len() != before
 }
 
 /// Append `Require: 100rel` and `RSeq: <rseq>` to an outgoing 18x. Creates
@@ -6809,6 +7018,48 @@ impl DialogManager {
                 }
             }
 
+            // RFC 3261 §20.5: track whether the peer allows UPDATE so RFC
+            // 4028 refreshes can skip straight to re-INVITE (§7.4).
+            if response.status().is_success()
+                && matches!(
+                    transaction_id.method(),
+                    rvoip_sip_core::Method::Invite | rvoip_sip_core::Method::Update
+                )
+            {
+                if let Some(allows) = allow_lists_update(&response.headers) {
+                    dialog.peer_allows_update = Some(allows);
+                }
+            }
+
+            // RFC 4028 §7.2/§7.4: a 2xx to this side's in-dialog re-INVITE or
+            // UPDATE renegotiates the session timer. The dialog-creating
+            // INVITE's 2xx is handled with the confirmation below.
+            let in_dialog_refresh_response = response.status().is_success()
+                && match transaction_id.method() {
+                    rvoip_sip_core::Method::Update => true,
+                    rvoip_sip_core::Method::Invite => {
+                        dialog.state == crate::dialog::DialogState::Confirmed
+                    }
+                    _ => false,
+                };
+            if in_dialog_refresh_response {
+                let proposed_timer = take_session_timer_request(&mut dialog, &response);
+                let current = dialog
+                    .session_expires_secs
+                    .map(|secs| (secs, dialog.is_session_refresher));
+                let next = uac_refresh_response_session_timer(&response, proposed_timer, current);
+                if next != current {
+                    info!(
+                        dialog=%dialog_id,
+                        expires=?next.map(|(secs, _)| secs),
+                        we_refresh=next.is_some_and(|(_, local)| local),
+                        "RFC 4028 refresh response renegotiated the session timer"
+                    );
+                }
+                dialog.session_expires_secs = next.map(|(secs, _)| secs);
+                dialog.is_session_refresher = next.is_some_and(|(_, local)| local);
+            }
+
             // Update dialog state based on response status and current state
             let state_changed = if response.status().is_success()
                 && transaction_id.method() == &rvoip_sip_core::Method::Invite
@@ -7044,6 +7295,28 @@ impl DialogManager {
             None
         };
 
+        // RFC 4028 §7.4: a 422 to an in-dialog refresh names the peer's
+        // floor; every later refresh must carry at least that Min-SE.
+        if matches!(
+            transaction_id.method(),
+            rvoip_sip_core::Method::Invite | rvoip_sip_core::Method::Update
+        ) {
+            if let Ok(mut dialog) = self.get_dialog_mut(dialog_id) {
+                take_session_timer_request(&mut dialog, &response);
+                if response.status_code() == 422
+                    && dialog.state == crate::dialog::DialogState::Confirmed
+                {
+                    if let Some(min_se) = response_min_se(&response) {
+                        dialog.session_timer_peer_min_se = Some(
+                            dialog
+                                .session_timer_peer_min_se
+                                .map_or(min_se, |seen| seen.max(min_se)),
+                        );
+                    }
+                }
+            }
+        }
+
         // Handle specific failure cases and emit appropriate events
         match response.status_code() {
             487 if transaction_id.method() == &rvoip_sip_core::Method::Invite => {
@@ -7156,6 +7429,26 @@ impl DialogManager {
                 if let Some(to_tag) = to_header.tag() {
                     if dialog.remote_tag.is_none() {
                         dialog.set_remote_tag(to_tag.to_string());
+                        // RFC 3261 §12.1.2: the early dialog's remote target
+                        // is the 18x Contact, so PRACK (RFC 3262) and early
+                        // UPDATE reach the UA that answered. A 2xx Contact
+                        // replaces it again on confirmation.
+                        if let Some(TypedHeader::Contact(contacts)) =
+                            response.header(&HeaderName::Contact)
+                        {
+                            if let Some(remote_target) = contacts
+                                .0
+                                .first()
+                                .and_then(|contact| extract_uri_from_contact(contact).ok())
+                            {
+                                if !dialog.update_remote_target(remote_target) {
+                                    debug!(
+                                        dialog=%dialog_id,
+                                        "Rejected insecure early-dialog Contact target"
+                                    );
+                                }
+                            }
+                        }
                         if dialog.state == crate::dialog::DialogState::Initial {
                             dialog.state = crate::dialog::DialogState::Early;
                             Some((old_state, dialog.state.clone()))
@@ -7903,11 +8196,14 @@ impl DialogManager {
             let route_set = dialog.route_set.clone();
             let call_id = dialog.call_id.clone();
             let local_uri = dialog.local_uri.to_string();
-            let target_uri = dialog.remote_uri.clone();
+            // RFC 3262 §7.2 / RFC 3261 §12.2.1.1: PRACK is sent within the
+            // early dialog, so it targets the reliable 18x's Contact (the
+            // remote target), not the callee's AOR.
+            let target_uri = dialog.remote_target.clone();
             let remote_uri = dialog.remote_uri.to_string();
             let local_address = self.local_address_for_target_and_routes(&target_uri, &route_set);
 
-            let request = crate::transaction::dialog::prack_for_dialog(
+            let mut request = crate::transaction::dialog::prack_for_dialog(
                 call_id,
                 local_uri,
                 local_tag,
@@ -7927,6 +8223,7 @@ impl DialogManager {
                 message: safe_operation_failure("prack_build", "builder_error"),
                 context: None,
             })?;
+            request.uri = target_uri;
 
             let next_hop =
                 crate::transaction::transport::multiplexed::exact_next_hop_uri_for_request(
@@ -8066,10 +8363,12 @@ mod rfc4028_uas_session_timer_tests {
             negotiate_uas_session_timer(&invite(vec![se(600, Some(Refresher::Uac))]), LOCAL),
             accept(600, true)
         );
-        // Nor can it be rejected with a 422 the UAC cannot understand.
+        // Nor can it be rejected with a 422 the UAC cannot understand; an
+        // interval below the local Min-SE (never below 90 s, §5) is raised
+        // to it instead.
         assert_eq!(
             negotiate_uas_session_timer(&invite(vec![se(60, None)]), LOCAL),
-            accept(60, true)
+            accept(90, true)
         );
     }
 
@@ -8131,6 +8430,114 @@ mod rfc4028_uas_session_timer_tests {
         assert_eq!(
             negotiate_uas_session_timer(&invite(vec![supported_timer(), se(60, None)]), LOCAL),
             UasSessionTimerDecision::Reject422 { min_se: 90 }
+        );
+    }
+
+    #[test]
+    fn in_dialog_refresh_answers_the_requests_interval_and_refresher() {
+        use super::negotiate_uas_refresh_session_timer;
+        // RFC 4028 §9: the 2xx answers *this* refresh, not the old values.
+        let current = Some((1800, true));
+        assert_eq!(
+            negotiate_uas_refresh_session_timer(
+                &invite(vec![supported_timer(), se(600, Some(Refresher::Uac))]),
+                LOCAL,
+                current
+            ),
+            accept(600, false)
+        );
+        assert_eq!(
+            negotiate_uas_refresh_session_timer(
+                &invite(vec![supported_timer(), se(900, Some(Refresher::Uas))]),
+                LOCAL,
+                Some((600, false))
+            ),
+            accept(900, true)
+        );
+        // A timer-capable peer below the floor gets 422 mid-dialog too.
+        assert_eq!(
+            negotiate_uas_refresh_session_timer(
+                &invite(vec![supported_timer(), se(60, None)]),
+                LOCAL,
+                current
+            ),
+            UasSessionTimerDecision::Reject422 { min_se: 90 }
+        );
+        // No Session-Expires: keep the running interval. A timer-capable
+        // refresher stays the refresher; otherwise this UAS takes over.
+        assert_eq!(
+            negotiate_uas_refresh_session_timer(
+                &invite(vec![supported_timer()]),
+                LOCAL,
+                Some((600, false))
+            ),
+            accept(600, false)
+        );
+        assert_eq!(
+            negotiate_uas_refresh_session_timer(&invite(vec![]), LOCAL, Some((600, false))),
+            accept(600, true)
+        );
+        // ...and never starts a timer the dialog did not have.
+        assert_eq!(
+            negotiate_uas_refresh_session_timer(&invite(vec![supported_timer()]), LOCAL, None),
+            UasSessionTimerDecision::Accept {
+                session_secs: None,
+                uas_refreshes: false,
+            }
+        );
+    }
+
+    #[test]
+    fn refresh_response_renegotiates_or_disables_the_timer() {
+        use super::uac_refresh_response_session_timer;
+        let with_se = |secs, refresher| {
+            let mut response = ok();
+            response.headers.push(se(secs, refresher));
+            response
+        };
+        let current = Some((1800, true));
+        // RFC 4028 §7.4: the 2xx interval and refresher replace the old ones;
+        // `uac` names this side (the sender of the refresh).
+        assert_eq!(
+            uac_refresh_response_session_timer(&with_se(600, Some(Refresher::Uac)), true, current),
+            Some((600, true))
+        );
+        assert_eq!(
+            uac_refresh_response_session_timer(&with_se(600, Some(Refresher::Uas)), true, current),
+            Some((600, false))
+        );
+        // §7.2: a 2xx without Session-Expires to a request that proposed
+        // one means there is no session expiration any more.
+        assert_eq!(
+            uac_refresh_response_session_timer(&ok(), true, current),
+            None
+        );
+        // A 2xx to a request that never proposed a timer changes nothing.
+        assert_eq!(
+            uac_refresh_response_session_timer(&ok(), false, current),
+            current
+        );
+    }
+
+    #[test]
+    fn allow_header_decides_whether_update_is_usable() {
+        use super::allow_lists_update;
+        use rvoip_sip_core::types::Allow;
+        assert_eq!(allow_lists_update(&[]), None);
+        assert_eq!(
+            allow_lists_update(&[TypedHeader::Allow(Allow::from_methods([
+                Method::Invite,
+                Method::Ack,
+                Method::Bye,
+            ]))]),
+            Some(false)
+        );
+        assert_eq!(
+            allow_lists_update(&[TypedHeader::Allow(Allow::from_methods([
+                Method::Invite,
+                Method::Update,
+            ]))]),
+            Some(true)
         );
     }
 
