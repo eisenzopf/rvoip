@@ -334,12 +334,16 @@ has before/after code for each.
 - An outbound INVITE whose first TLS write failed could hang
   `OutboundCallBuilder::send()` forever, for example when a TLS 1.3 server
   rejects the client certificate with `certificate_required` just after the
-  handshake. A closed or exhausted failover plan with no live plan now counts
-  as the INVITE's terminal failure (RFC 3261 §8.1.3.1), a zero-wire CANCEL
-  on a flow the transport no longer holds is permanent rather than retried,
-  and `send()` waits at most 5 s for rollback while release continues as a
-  retained lifecycle task. Such a call can still take until Timer B (32 s)
-  to report failure; see Known issues.
+  handshake. Three cleanup races are fixed. A closed or exhausted failover
+  plan with no live plan now counts as the INVITE's terminal failure
+  (RFC 3261 §8.1.3.1). An INVITE the transaction layer dropped before its
+  first write began, or whose route is pinned to a connection that has
+  closed, is treated as unreachable, so no CANCEL is attempted or awaited
+  for it. Under CPU contention such failures now settle in about 300 ms.
+  As a backstop, `send()` waits at most 5 s for rollback while release
+  continues as a retained lifecycle task. A call whose INVITE did reach the
+  wire before the connection closed can still take until Timer B (32 s) to
+  report failure; see Known issues.
 - Outbound SIP resolution no longer holds a dialog shard write lock while
   awaiting DNS (#264). A slow resolver used to block dialog lookups on that
   shard during BYE, initial INVITE, PRACK, and initial or refreshed
