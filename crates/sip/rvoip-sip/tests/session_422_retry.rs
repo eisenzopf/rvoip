@@ -59,10 +59,18 @@ fn test_password() -> &'static str {
     PASSWORD.get_or_init(|| format!("pw-{:016x}", rand::random::<u64>()))
 }
 
-/// Per-process random component of the test nonces.
-fn nonce_salt() -> u32 {
-    static SALT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *SALT.get_or_init(rand::random::<u32>)
+/// Random test nonces, fixed per process: one per protection space
+/// (`challenge`) and issue (`generation`), so nonces stay distinct and none is
+/// a literal.
+fn random_nonce(challenge: usize, generation: usize) -> String {
+    static NONCES: std::sync::OnceLock<[[u64; 2]; 2]> = std::sync::OnceLock::new();
+    let nonces = NONCES.get_or_init(|| {
+        [
+            [rand::random(), rand::random()],
+            [rand::random(), rand::random()],
+        ]
+    });
+    format!("{:016x}", nonces[challenge][generation])
 }
 
 const UAS_MIN_SE: u32 = 120;
@@ -391,12 +399,12 @@ impl Challenge {
 
     /// The nonce first issued in this protection space.
     fn first_nonce(self) -> String {
-        format!("{}-nonce-1-{:08x}", self.realm(), nonce_salt())
+        random_nonce(self as usize, 0)
     }
 
     /// The nonce issued with a `stale=true` re-challenge.
     fn fresh_nonce(self) -> String {
-        format!("{}-nonce-2-{:08x}", self.realm(), nonce_salt())
+        random_nonce(self as usize, 1)
     }
 }
 
