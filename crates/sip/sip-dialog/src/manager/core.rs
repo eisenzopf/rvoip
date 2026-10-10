@@ -7794,6 +7794,118 @@ mod outbound_flow_handler_tests {
         );
     }
 
+    /// Fails every route preparation, so no INVITE ever crosses the
+    /// transaction layer's wire boundary.
+    #[derive(Debug)]
+    struct PrepareFailureTransport {
+        addr: SocketAddr,
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for PrepareFailureTransport {
+        fn local_addr(&self) -> TransportResult<SocketAddr> {
+            Ok(self.addr)
+        }
+
+        async fn prepare_message_route(
+            &self,
+            _message: &rvoip_sip_core::Message,
+            _route: rvoip_sip_transport::TransportRoute,
+        ) -> TransportResult<rvoip_sip_transport::TransportRoute> {
+            Err(rvoip_sip_transport::Error::InvalidState(
+                "peer closed the connection during route preparation".into(),
+            ))
+        }
+
+        async fn send_message(
+            &self,
+            _message: rvoip_sip_core::Message,
+            _destination: SocketAddr,
+        ) -> TransportResult<()> {
+            Ok(())
+        }
+
+        async fn close(&self) -> TransportResult<()> {
+            Ok(())
+        }
+
+        fn is_closed(&self) -> bool {
+            false
+        }
+    }
+
+    /// The plan marks an INVITE wire-unknown as soon as it hands it to the
+    /// transaction layer, but the transaction layer retains it only once the
+    /// wire boundary is crossed. A TLS peer that rejects the handshake during
+    /// route preparation leaves a wire-unknown plan whose INVITE the
+    /// transaction layer has forgotten: no response or CANCEL can ever match
+    /// it, so the supervisor must treat it as settled rather than wait.
+    #[tokio::test]
+    async fn wire_unknown_plan_for_a_forgotten_invite_is_terminal() {
+        use crate::manager::transaction_integration::{CandidateWirePlan, InviteFailoverPlanPhase};
+
+        let manager = make_manager_with_transport_and_setup_timeout(
+            Arc::new(PrepareFailureTransport {
+                addr: SocketAddr::from_str("127.0.0.1:5060").unwrap(),
+            }),
+            Duration::from_secs(32),
+        )
+        .await;
+        let dialog_id = DialogId::new();
+        let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("alice-forgotten"))
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5060", None)
+            .call_id("retained-plan-forgotten-invite")
+            .cseq(1)
+            .via("127.0.0.1:5060", "UDP", Some("z9hG4bK-forgotten-template"))
+            .max_forwards(70)
+            .build();
+        manager
+            .send_request_with_candidate_wire_plan(
+                request,
+                vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                    dest_addr(5103),
+                    rvoip_sip_transport::transport::TransportType::Udp,
+                )],
+                Some(&dialog_id),
+                CandidateWirePlan::default(),
+            )
+            .await
+            .expect_err("route preparation fails");
+        let plan = manager
+            .invite_failover_plans
+            .iter()
+            .next()
+            .expect("wire-unknown plan retained")
+            .value()
+            .clone();
+        let invite = {
+            let plan = plan.lock().await;
+            assert_eq!(plan.phase, InviteFailoverPlanPhase::WireUnknown);
+            plan.current_transaction
+                .clone()
+                .expect("wire-unknown INVITE transaction retained")
+        };
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !manager
+                .wire_unknown_invite_has_terminal_failure(&dialog_id)
+                .await
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("a forgotten wire-unknown INVITE settles");
+        assert!(manager
+            .transaction_manager
+            .transaction_route(&invite)
+            .await
+            .is_none());
+    }
+
     /// A first-write failure reaches the plan twice: as the sender's error,
     /// which hands the INVITE to the wire-unknown supervisor, and as a
     /// `TransportError` event. When the event wins it closes the plan, which

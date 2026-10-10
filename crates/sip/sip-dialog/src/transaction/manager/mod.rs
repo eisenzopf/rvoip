@@ -5791,16 +5791,23 @@ impl TransactionManager {
         self.with_client_response_route_state(transaction_id, |state| state.route().clone())
     }
 
-    /// True when a client transaction is bound to a stream flow that the
-    /// transport no longer holds open.
+    /// True when the transaction layer can never deliver a response for this
+    /// client transaction, nor build a CANCEL for it.
     ///
-    /// A flow-bound request (and its CANCEL, which reuses the complete route)
-    /// can never be sent again once the flow is gone, so a zero-wire failure on
-    /// it is permanent rather than retryable. Unbound routes, such as UDP,
-    /// always report `false`.
-    pub(crate) async fn transaction_flow_is_closed(&self, transaction_id: &TransactionKey) -> bool {
+    /// Both need the request and its complete route, held by the live
+    /// transaction or by its retired record. Only a request that crossed the
+    /// write boundary is retired, so one that is neither live nor retired
+    /// never reached the wire, or its retirement has expired. A route bound to
+    /// a stream flow the transport no longer holds is just as dead: responses
+    /// are authenticated against that flow and a CANCEL must reuse it. An
+    /// unbound route, such as UDP, stays reachable for as long as its live
+    /// transaction or retired record exists.
+    pub(crate) async fn client_transaction_is_unreachable(
+        &self,
+        transaction_id: &TransactionKey,
+    ) -> bool {
         let Some(route) = self.transaction_route(transaction_id).await else {
-            return false;
+            return !self.client_transactions.contains_key(transaction_id);
         };
         route.flow_id.is_some()
             && self
