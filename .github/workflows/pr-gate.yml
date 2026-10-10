@@ -185,7 +185,7 @@ jobs:
 
       - name: Install cargo-fuzz for release fuzz validation
         if: matrix.gate == 'release-tooling'
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2
+        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
         with:
           tool: cargo-fuzz@0.13.2
 
