@@ -4644,6 +4644,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn zero_wire_invite_is_unreachable_but_a_retired_one_is_not() -> Result<()> {
+        // A failed first write crosses the wire boundary: the INVITE is
+        // retired and can still take a CANCEL or a late response.
+        let transport = Arc::new(WireBoundaryMockTransport::first_write_failure());
+        let (_transport_tx, transport_rx) = mpsc::channel(8);
+        let (manager, _events) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(8)).await?;
+        let request = create_test_invite_with_identity(
+            "unreachable-retired",
+            "z9hG4bK.unreachable-retired",
+            "UDP",
+        )
+        .map_err(|error| Error::Other(error.to_string()))?;
+        let retired = manager
+            .create_client_transaction(request, "192.0.2.54:5060".parse().unwrap())
+            .await?;
+        assert!(!manager.client_transaction_is_unreachable(&retired).await);
+        assert!(manager.send_request(&retired).await.is_err());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while manager.retired_client_transaction(&retired).is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("wire-attempted INVITE is retired");
+        assert!(!manager.client_transaction_is_unreachable(&retired).await);
+        manager.shutdown().await;
+
+        // Route preparation fails before the wire boundary: the INVITE is
+        // forgotten, so no response or CANCEL can ever be matched to it.
+        let transport = Arc::new(WireBoundaryMockTransport::prepare_failure());
+        let (_transport_tx, transport_rx) = mpsc::channel(8);
+        let (manager, _events) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(8)).await?;
+        let request = create_test_invite_with_identity(
+            "unreachable-zero-wire",
+            "z9hG4bK.unreachable-zero-wire",
+            "UDP",
+        )
+        .map_err(|error| Error::Other(error.to_string()))?;
+        let forgotten = manager
+            .create_client_transaction(request, "192.0.2.55:5060".parse().unwrap())
+            .await?;
+        assert!(!manager.client_transaction_is_unreachable(&forgotten).await);
+        assert!(manager.send_request(&forgotten).await.is_err());
+        assert_eq!(transport.wire_attempts(), 0);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !manager.client_transaction_is_unreachable(&forgotten).await {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("zero-wire INVITE becomes unreachable");
+        assert!(manager.retired_client_transaction(&forgotten).is_none());
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn first_write_error_retires_exact_invite_and_allows_cancel() -> Result<()> {
         let transport = Arc::new(WireBoundaryMockTransport::first_write_failure());
         let (_transport_tx, transport_rx) = mpsc::channel(8);

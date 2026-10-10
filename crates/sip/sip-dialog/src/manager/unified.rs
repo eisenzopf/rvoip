@@ -1802,23 +1802,10 @@ impl UnifiedDialogManager {
                         // Only a transaction-classified zero-wire failure may
                         // return the shared author to Idle and be retried. A
                         // write-started error remains fenced at at-most-once.
-                        let retryable = self
+                        *cancel_attempted = !self
                             .core
                             .invite_cancel_is_retryable(owner.dialog_id())
                             .await;
-                        // The INVITE went out on a stream flow that has since
-                        // closed. Its CANCEL may only use that flow, so this
-                        // zero-wire failure is permanent: no teardown can
-                        // ever be sent for this INVITE.
-                        if retryable
-                            && self
-                                .core
-                                .wire_unknown_invite_flow_is_closed(owner.dialog_id())
-                                .await
-                        {
-                            return true;
-                        }
-                        *cancel_attempted = !retryable;
                     }
                 }
                 // A 200 response to CANCEL only settles the CANCEL transaction;
