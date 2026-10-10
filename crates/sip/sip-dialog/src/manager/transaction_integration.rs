@@ -3263,7 +3263,16 @@ impl DialogManager {
     /// The sender still reports the dispatch as wire-unknown, but no CANCEL
     /// can target a closed plan, and no response can arrive to settle it, so
     /// a closed or exhausted plan with no live successor is terminal too.
-    /// Without this the supervisor, the exact owner, and every session
+    ///
+    /// The plan also marks an INVITE wire-unknown as soon as it hands it to
+    /// the transaction layer, which is deliberately conservative; the
+    /// transaction layer retains the INVITE only once its write boundary is
+    /// crossed. A TLS peer that rejects the handshake while the route is
+    /// being prepared leaves a wire-unknown INVITE that the transaction layer
+    /// has already forgotten, and an INVITE whose stream flow has closed can
+    /// receive no response either. Such an INVITE is settled too.
+    ///
+    /// Without these the supervisor, the exact owner, and every session
     /// teardown waiting on that owner would wait forever.
     pub(crate) async fn wire_unknown_invite_has_terminal_failure(
         &self,
@@ -3312,44 +3321,20 @@ impl DialogManager {
             {
                 return true;
             }
+            if self
+                .transaction_manager
+                .client_transaction_is_unreachable(&transaction_id)
+                .await
+            {
+                // No final response can ever be accepted for this INVITE and
+                // no CANCEL can be built for it, so nothing is left to wait
+                // for (see `client_transaction_is_unreachable`).
+                settled_without_success = true;
+                continue;
+            }
             unresolved = true;
         }
         settled_without_success && !unresolved
-    }
-
-    /// True when the retained wire-unknown INVITE went out on a stream flow
-    /// that has since closed. Its CANCEL must reuse that flow, so it can
-    /// never be sent, and retrying the zero-wire failure would never end.
-    pub(crate) async fn wire_unknown_invite_flow_is_closed(&self, dialog_id: &DialogId) -> bool {
-        for plan_id in self.invite_failover_plan_ids_for_dialog(dialog_id) {
-            let Some(plan) = self
-                .invite_failover_plans
-                .get(&plan_id)
-                .map(|entry| entry.value().clone())
-            else {
-                continue;
-            };
-            let transaction_id = {
-                let plan = plan.lock().await;
-                if plan.id != plan_id
-                    || &plan.dialog_id != dialog_id
-                    || plan.phase != InviteFailoverPlanPhase::WireUnknown
-                {
-                    continue;
-                }
-                plan.current_transaction.clone()
-            };
-            if let Some(transaction_id) = transaction_id {
-                if self
-                    .transaction_manager
-                    .transaction_flow_is_closed(&transaction_id)
-                    .await
-                {
-                    return true;
-                }
-            }
-        }
-        false
     }
 
     /// Whether the exact dialog has emitted, or may have emitted, its sole

@@ -53,6 +53,26 @@ use rvoip_sip_core::types::headers::{HeaderAccess, HeaderValue};
 use rvoip_auth_core::DigestAuthenticator;
 use rvoip_sip_dialog::transaction::utils::response_builders::create_response;
 
+/// A per-process random test secret, so no credential is a fixed literal.
+fn test_password() -> &'static str {
+    static PASSWORD: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PASSWORD.get_or_init(|| format!("pw-{:016x}", rand::random::<u64>()))
+}
+
+/// Random test nonces, fixed per process: one per protection space
+/// (`challenge`) and issue (`generation`), so nonces stay distinct and none is
+/// a literal.
+fn random_nonce(challenge: usize, generation: usize) -> String {
+    static NONCES: std::sync::OnceLock<[[u64; 2]; 2]> = std::sync::OnceLock::new();
+    let nonces = NONCES.get_or_init(|| {
+        [
+            [rand::random(), rand::random()],
+            [rand::random(), rand::random()],
+        ]
+    });
+    format!("{:016x}", nonces[challenge][generation])
+}
+
 const UAS_MIN_SE: u32 = 120;
 // Client's default Session-Expires — deliberately below the UAS's required
 // floor so the first INVITE gets 422'd.
@@ -379,16 +399,14 @@ impl Challenge {
 
     /// The nonce first issued in this protection space.
     fn first_nonce(self) -> String {
-        format!("{}-nonce-1", self.realm())
+        random_nonce(self as usize, 0)
     }
 
     /// The nonce issued with a `stale=true` re-challenge.
     fn fresh_nonce(self) -> String {
-        format!("{}-nonce-2", self.realm())
+        random_nonce(self as usize, 1)
     }
 }
-
-const PASSWORD: &str = "secret";
 
 /// A UAS that decides each INVITE on policy rather than on attempt number,
 /// the way a real PBX (FreeSWITCH with `minimum-session-expires=120`) does:
@@ -444,7 +462,7 @@ fn seen_digest(request: &Request, challenge: Challenge) -> Option<SeenDigest> {
     let raw = request.raw_header_value(&challenge.credential_header())?;
     let parsed = DigestAuthenticator::parse_authorization(&raw).expect("Digest credentials parse");
     let valid = DigestAuthenticator::new(challenge.realm())
-        .validate_response_with_body(&parsed, "INVITE", PASSWORD, Some(request.body()))
+        .validate_response_with_body(&parsed, "INVITE", test_password(), Some(request.body()))
         .unwrap_or(false);
     Some(SeenDigest {
         nc: parsed
@@ -592,7 +610,7 @@ async fn call_policy_uas(
         .expect("peer");
     let call_id = peer
         .invite(format!("sip:bob@127.0.0.1:{}", uas_port))
-        .with_credentials(Credentials::new("alice", PASSWORD))
+        .with_credentials(Credentials::new("alice", test_password()))
         .send()
         .await
         .expect("invite.send()");
