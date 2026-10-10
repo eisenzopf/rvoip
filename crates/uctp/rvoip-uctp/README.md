@@ -1,6 +1,6 @@
 # rvoip-uctp
 
-> ⚠️ **Experimental surface** (unified `0.3.x` release) — API-unstable; expect breaking changes before `1.0`.
+> ⚠️ **Experimental surface** (unified `0.4.x` release) — API-unstable; expect breaking changes before `1.0`.
 
 UCTP (Universal Conversation Transport Protocol) — envelopes, state machine, capability negotiation, and substrate helpers shared by rvoip-quic, rvoip-webtransport, and rvoip-websocket
 

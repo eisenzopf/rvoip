@@ -1,11 +1,11 @@
 # rvoip-vcon
 
-> ⚠️ **Experimental surface** (unified `0.3.x` release) — API-unstable; expect breaking changes before `1.0`.
+> ⚠️ **Experimental surface** (unified `0.4.x` release) — API-unstable; expect breaking changes before `1.0`.
 
 vCon (Virtualized Conversation) document model, builder, signer, validator, and
 store, pinned to `draft-ietf-vcon-vcon-core` working-group commit `2342aba`.
 Core Session finalization exposes persisted documents through `VconReady`.
-`RecordingComplete.vcon_ref` wiring remains outside the current 0.3.12 scope.
+`RecordingComplete.vcon_ref` wiring remains outside the current release scope.
 
 Part of the [**rvoip**](https://github.com/eisenzopf/rvoip) workspace (the "rvoip 3"
 unified real-time-communications stack). Published so the

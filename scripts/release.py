@@ -29,10 +29,14 @@ COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 USER_AGENT = "rvoip-unified-release/1.0"
 DEFAULT_POLL_SECONDS = 15
 DEFAULT_TIMEOUT_SECONDS = 900
+# Files whose rvoip version references preparation rewrites. A file that
+# mentions an unrelated version string that could equal a release (the vCon
+# wire format's `vcon: "0.4.0"`, for example) must not be listed: preparation
+# rewrites every occurrence of the workspace version in a file that does not
+# yet name the target.
 ACTIVE_RELEASE_METADATA_FILES = (
     Path("README.md"),
     Path("crates/rvoip/README.md"),
-    Path("crates/extensions/rvoip-vcon/README.md"),
     Path("crates/foundation/rvoip-core/README.md"),
     Path("crates/foundation/rvoip-core-traits/README.md"),
     Path("crates/foundation/infra-common/README.md"),
@@ -74,6 +78,8 @@ ACTIVE_RELEASE_METADATA_FILES = (
     Path("examples/13-sip-to-amazon-connect/Cargo.toml"),
     Path("examples/14-vapi-agent/Cargo.toml"),
     Path("crates/sip/rvoip-sip/scripts/full_beta_release.sh"),
+    Path("crates/sip/sip-dialog/README.md"),
+    Path("crates/sip/sip-registrar/README.md"),
 )
 # These locations are immutable release history and are deliberately excluded
 # from version preparation. A current policy/status document must be listed in
@@ -82,18 +88,35 @@ HISTORICAL_RELEASE_METADATA_PREFIXES = (
     Path("crates/sip/rvoip-sip/docs/releases"),
     Path("docs/RELEASE_0_3_9_PLAN.md"),
     Path("docs/RELEASE_0_3_9_THELVE_ASSESSMENT.md"),
+    Path("crates/uctp/rvoip-uctp/UCTP_IMPLEMENTATION_PLAN.md"),
 )
+# A migration guide named for a release (MIGRATING_0.4.md, MIGRATION_0.3.5.md,
+# MIGRATION-0.2.md) pins its dependency snippets to that release by design.
+VERSIONED_MIGRATION_GUIDE = re.compile(
+    r"^MIGRAT(?:ING|ION)[-_][0-9]+(?:[._][0-9]+){1,2}\.md$"
+)
+# An rvoip dependency line in a manifest or a documentation snippet: a bare
+# `rvoip` / `rvoip-*` key or a key renamed with `package = "rvoip-*"`, with a
+# plain or table version requirement. The line may sit in a Rust doc comment,
+# a TOML or shell comment, or a Markdown quote. Partial (`"0.3"`) and
+# operator-prefixed (`"=0.3.12"`) requirements are captured so that they can
+# be rejected: every live snippet must name the exact workspace version.
+_DEPENDENCY_REQUIREMENT = r'[=^~]?[0-9]+(?:\.[0-9]+){0,2}'
 DEPENDENCY_EXAMPLE_VERSION = re.compile(
-    r'(?m)^\s*rvoip(?:-[A-Za-z0-9_-]+)?\s*=\s*'
-    r'(?:"(?P<plain>[0-9]+\.[0-9]+\.[0-9]+)"|'
-    r'\{[^\n}]*\bversion\s*=\s*"(?P<table>[0-9]+\.[0-9]+\.[0-9]+)"[^\n}]*\})'
+    r'(?m)^[ \t]*(?:(?://[/!]?|#|>|\*)[ \t]*)?'
+    r'(?:rvoip(?:-[A-Za-z0-9_-]+)?[ \t]*=[ \t]*'
+    rf'(?:"(?P<plain>{_DEPENDENCY_REQUIREMENT})"|'
+    rf'\{{[^\n}}]*\bversion[ \t]*=[ \t]*"(?P<table>{_DEPENDENCY_REQUIREMENT})"[^\n}}]*\}})'
+    r'|[A-Za-z0-9_-]+[ \t]*=[ \t]*\{'
+    r'(?=[^\n}]*\bpackage[ \t]*=[ \t]*"rvoip(?:-[A-Za-z0-9_-]+)?")'
+    rf'[^\n}}]*\bversion[ \t]*=[ \t]*"(?P<renamed>{_DEPENDENCY_REQUIREMENT})"[^\n}}]*\}})'
 )
 CURRENT_WORKSPACE_RELEASE_VERSION = re.compile(
     r"(?m)^(?P<prefix>Current workspace runtime crate version:\s*`)"
     r"[0-9]+\.[0-9]+\.[0-9]+(?P<suffix>`\.)$"
 )
-LIVE_DEPENDENCY_SCAN_SUFFIXES = frozenset({".toml"})
-LIVE_DEPENDENCY_SCAN_IGNORED_DIRS = frozenset({".git", "target"})
+LIVE_DEPENDENCY_SCAN_SUFFIXES = frozenset({".md", ".rs", ".toml"})
+LIVE_DEPENDENCY_SCAN_IGNORED_DIRS = frozenset({".git", "node_modules", "target"})
 VERIFICATION_RECEIPT_SCHEMA = "rvoip-unified-release-verification-v4"
 REMOTE_QUALIFICATION_SCHEMA = "rvoip-release-qualification-v1"
 REMOTE_GATE_CATALOG_SCHEMA = "rvoip-release-gate-catalog-v1"
@@ -661,9 +684,9 @@ def validate_active_release_metadata(root: Path, version: str) -> None:
             )
         stale_examples = sorted(
             {
-                match.group("plain") or match.group("table")
+                found
                 for match in DEPENDENCY_EXAMPLE_VERSION.finditer(text)
-                if (match.group("plain") or match.group("table")) != version
+                if (found := dependency_example_version(match)) != version
             }
         )
         if stale_examples:
@@ -675,34 +698,64 @@ def validate_active_release_metadata(root: Path, version: str) -> None:
     validate_live_dependency_examples(root, version)
 
 
+def dependency_example_version(match: re.Match[str]) -> str:
+    """The version a DEPENDENCY_EXAMPLE_VERSION match pins.
+
+    A leading `=`, `^` or `~` operator is dropped; a partial requirement is
+    returned as written so that it never equals a full workspace version.
+    """
+    found = match.group("plain") or match.group("table") or match.group("renamed")
+    return found.lstrip("=^~")
+
+
+def live_dependency_scan_exempt(relative_path: Path) -> bool:
+    """History that keeps the versions it was written for."""
+    return (
+        relative_path == CHANGELOG_PATH
+        or VERSIONED_MIGRATION_GUIDE.match(relative_path.name) is not None
+        or any(
+            relative_path == prefix or prefix in relative_path.parents
+            for prefix in HISTORICAL_RELEASE_METADATA_PREFIXES
+        )
+    )
+
+
 def validate_live_dependency_examples(root: Path, version: str) -> None:
-    """Reject stale RVoIP dependency pins in every live Cargo manifest."""
+    """Reject stale RVoIP dependency pins in every live manifest and document.
+
+    Cargo manifests, Markdown documentation and Rust sources (whose doc
+    comments render on docs.rs) are scanned. A snippet must name exactly the
+    workspace version, so that preparation can move it to the next release;
+    a partial requirement such as "0.3" is stale as well. Only the changelog,
+    versioned migration guides and HISTORICAL_RELEASE_METADATA_PREFIXES keep
+    older versions.
+    """
     stale: list[str] = []
     for directory, names, files in os.walk(root):
-        names[:] = [
+        names[:] = sorted(
             name for name in names if name not in LIVE_DEPENDENCY_SCAN_IGNORED_DIRS
-        ]
+        )
         base = Path(directory)
-        for filename in files:
+        for filename in sorted(files):
             path = base / filename
             if path.suffix not in LIVE_DEPENDENCY_SCAN_SUFFIXES:
                 continue
             relative_path = path.relative_to(root)
-            if relative_path == Path("CHANGELOG.md") or any(
-                relative_path == prefix or prefix in relative_path.parents
-                for prefix in HISTORICAL_RELEASE_METADATA_PREFIXES
-            ):
+            if live_dependency_scan_exempt(relative_path):
                 continue
-            text = path.read_text(encoding="utf-8")
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
             for match in DEPENDENCY_EXAMPLE_VERSION.finditer(text):
-                found = match.group("plain") or match.group("table")
+                found = dependency_example_version(match)
                 if found != version:
                     line = text.count("\n", 0, match.start()) + 1
                     stale.append(f"{relative_path}:{line}={found}")
     if stale:
         raise ReleaseError(
-            "live Cargo manifests contain stale rvoip dependency versions; "
-            f"expected {version}: {stale}"
+            "live manifests and documentation contain stale rvoip dependency "
+            f"versions; expected {version}: {stale}"
         )
 
 
@@ -997,6 +1050,9 @@ def prepare(root: Path, version: str) -> None:
         refresh_release_lockfiles(root)
         validate_release_lockfiles(root)
         validate_workspace(root, version, locked=True)
+        # Every dependency snippet must have moved with the release, including
+        # ones in files preparation does not rewrite.
+        validate_active_release_metadata(root, version)
         run(
             ["cargo", "check", "--workspace", "--all-targets", "--locked"],
             cwd=root,

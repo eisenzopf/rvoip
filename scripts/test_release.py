@@ -491,6 +491,54 @@ rvoip-rtc = { path = "../rvoip-rtc" }
                 ):
                     release.validate_active_release_metadata(root, "0.3.9")
 
+    def test_live_dependency_scan_covers_documentation_and_doc_comments(
+        self,
+    ) -> None:
+        stale_snippets = {
+            Path("crates/a/README.md"): 'rvoip-a = { version = "0.3.10" }\n',
+            Path("crates/b/src/lib.rs"): '//! rvoip-b = "0.3.11"\n',
+            Path("crates/c/README.md"): 'rvoip-c = { version = "0.3", features = [] }\n',
+            Path("docs/GUIDE.md"): (
+                'codec = { package = "rvoip-codec-core", version = "0.3.9" }\n'
+            ),
+        }
+        for relative_path, body in stale_snippets.items():
+            with self.subTest(path=str(relative_path)):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    path = root / relative_path
+                    path.parent.mkdir(parents=True)
+                    path.write_text(body, encoding="utf-8")
+                    with self.assertRaisesRegex(
+                        release.ReleaseError, f"{relative_path}:1="
+                    ):
+                        release.validate_live_dependency_examples(root, "0.3.12")
+
+    def test_live_dependency_scan_accepts_current_and_frozen_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = {
+                Path("README.md"): (
+                    'rvoip = { version = "0.3.12", features = ["sip"] }\n'
+                    'rvoip-sip = "=0.3.12"\n'
+                    "rvoip-core = { workspace = true }\n"
+                ),
+                Path("crates/a/src/lib.rs"): '/// rvoip-a = "0.3.12"\n',
+                Path("CHANGELOG.md"): 'rvoip-sip = "0.3.1"\n',
+                Path("crates/a/MIGRATION_0.3.5.md"): 'rvoip-a = "0.3.5"\n',
+                Path("docs/MIGRATING_0.4.md"): 'rvoip-sip = "0.4"\n',
+                Path("crates/sip/rvoip-sip/docs/releases/0.3.9.md"): (
+                    'rvoip-sip = "0.3.9"\n'
+                ),
+                Path("target/doc/README.md"): 'rvoip-sip = "0.1.0"\n',
+                Path("sdk/node_modules/x/README.md"): 'rvoip-sip = "0.1.0"\n',
+            }
+            for relative_path, body in files.items():
+                path = root / relative_path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(body, encoding="utf-8")
+            release.validate_live_dependency_examples(root, "0.3.12")
+
     def test_active_release_metadata_rejects_duplicate_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

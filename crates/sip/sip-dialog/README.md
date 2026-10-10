@@ -357,7 +357,7 @@ Disable default features and enable only what you need:
 
 ```toml
 [dependencies]
-rvoip-sip-dialog = { version = "0.3.10", default-features = false, features = ["recovery"] }
+rvoip-sip-dialog = { version = "0.3.12", default-features = false, features = ["recovery"] }
 ```
 
 ## Examples
