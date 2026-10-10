@@ -23,7 +23,7 @@ without a cycle.
 
 ## Status
 
-**Release-gated SIP dependency** — published in the unified `0.3.x` workspace release. Trait
+**Release-gated SIP dependency** — published in the unified `0.4.x` workspace release. Trait
 signatures are stable; new traits may be added but existing ones
 won't change shape without a 0.3 bump.
 

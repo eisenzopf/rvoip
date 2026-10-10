@@ -5,7 +5,7 @@ For a minimal authenticated application-control host and client, run the
 profile negotiation, scoped commands, correlation and duplicate-ID refusal
 without allocating media or using live providers.
 
-> ⚠️ **Experimental surface** (unified `0.3.x` release) — API-unstable; expect breaking changes before `1.0`.
+> ⚠️ **Experimental surface** (unified `0.4.x` release) — API-unstable; expect breaking changes before `1.0`.
 
 rvoip-core ConnectionAdapter implementation over WebSocket (signaling) for the
 UCTP application protocol, with an optional co-located WebRTC PeerConnection

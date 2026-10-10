@@ -34,7 +34,8 @@ to the host. The client does not prescribe the experimental Parley
 `applicationProfile` for profile-free UCTP controls. When a profile is supplied,
 the client requires it in the correlated `auth.challenge` before submitting the
 bearer credential and adds it to commands. Rvoip's opt-in application dispatch
-is introduced by PR #262; stock 0.3.12 does not advertise application profiles.
+was introduced in rvoip 0.4.0 (PR #262); a host advertises a profile only when
+it installs an application handler.
 QUIC and WebTransport are separate clients, outside this package.
 
 ## Recover a lost response

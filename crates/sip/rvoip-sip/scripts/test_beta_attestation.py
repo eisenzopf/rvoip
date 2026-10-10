@@ -1409,9 +1409,16 @@ class BetaAttestationTests(unittest.TestCase):
         self.assertIsNotNone(candidate)
         workspace = tuple(int(value) for value in self.workspace_version.split("."))
         candidate_version = tuple(int(value) for value in candidate.groups())
+        # The notes describe the workspace release or the next patch, minor
+        # (a breaking 0.x release) or major candidate.
         self.assertIn(
             candidate_version,
-            {workspace, (workspace[0], workspace[1], workspace[2] + 1)},
+            {
+                workspace,
+                (workspace[0], workspace[1], workspace[2] + 1),
+                (workspace[0], workspace[1] + 1, 0),
+                (workspace[0] + 1, 0, 0),
+            },
         )
         readme = (WORKSPACE_ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("](CHANGELOG.md)", readme)

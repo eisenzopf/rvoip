@@ -15,7 +15,7 @@ workspace_dir=$(CDPATH= cd -- "$crate_dir/../../.." && pwd)
 baseline="$crate_dir/public-api/rvoip-sip.txt"
 # Latest published tag. Advance after each release so the comparison measures
 # the next candidate's drift, not additions that already shipped.
-baseline_rev=${RVOIP_SIP_API_BASELINE_REV:-v0.3.7}
+baseline_rev=${RVOIP_SIP_API_BASELINE_REV:-v0.3.12}
 require_tools=${RVOIP_REQUIRE_API_TOOLS:-0}
 public_api_version=cargo-public-api\ 0.52.0
 semver_checks_version=cargo-semver-checks\ 0.49.0

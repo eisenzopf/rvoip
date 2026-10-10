@@ -12,7 +12,7 @@ beta-tier SIP profile requires (RFC 3551), and the optional codecs above it.
 
 ## Status
 
-**Release-gated SIP dependency** — published in the unified `0.3.x` workspace
+**Release-gated SIP dependency** — published in the unified `0.4.x` workspace
 release. The G.711 implementation is RFC-compliant and table-driven, and is the
 only codec in the default build; everything else is feature-gated.
 

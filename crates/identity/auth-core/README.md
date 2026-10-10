@@ -20,7 +20,7 @@ is what makes that direct dependency possible.
 
 ## Status
 
-**Release-gated SIP dependency** — published in the unified `0.3.x` workspace
+**Release-gated SIP dependency** — published in the unified `0.4.x` workspace
 release. API may adjust for incoming review feedback before `1.0`, but no
 restructure is planned.
 

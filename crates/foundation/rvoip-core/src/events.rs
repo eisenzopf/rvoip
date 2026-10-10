@@ -243,7 +243,7 @@ pub enum Event {
         sink: String,
         /// Reserved for future recording-level linkage.
         ///
-        /// This remains `None` in 0.3.3; session-level vCons are announced
+        /// This is always `None` for now; session-level vCons are announced
         /// separately through [`Self::VconReady`].
         vcon_ref: Option<VconRef>,
         at: DateTime<Utc>,
