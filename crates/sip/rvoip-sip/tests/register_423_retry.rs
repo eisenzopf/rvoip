@@ -33,6 +33,12 @@ use rvoip_sip_core::types::headers::{HeaderAccess, HeaderValue};
 use rvoip_auth_core::DigestAuthenticator;
 use rvoip_sip_dialog::transaction::utils::response_builders::create_response;
 
+/// A per-process random test secret, so no credential is a fixed literal.
+fn test_password() -> &'static str {
+    static PASSWORD: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PASSWORD.get_or_init(|| format!("pw-{:016x}", rand::random::<u64>()))
+}
+
 const REGISTRAR_PORT: u16 = 35180;
 const CLIENT_PORT: u16 = 35181;
 const SERVER_MIN_EXPIRES: u32 = 1800;
@@ -218,7 +224,7 @@ async fn register_423_retry_bumps_expires_and_succeeds() {
         .register(
             format!("sip:127.0.0.1:{}", REGISTRAR_PORT),
             "alice",
-            "password",
+            test_password(),
         )
         .with_contact_uri(CLIENT_CONTACT)
         .with_expires(CLIENT_INITIAL_EXPIRES)
@@ -363,7 +369,7 @@ async fn register_401_retry_reuses_call_id_and_increments_cseq() {
                 let parsed = DigestAuthenticator::parse_authorization(header)
                     .expect("Authorization should parse");
                 let valid = DigestAuthenticator::new("testrealm")
-                    .validate_response(&parsed, "REGISTER", "password")
+                    .validate_response(&parsed, "REGISTER", test_password())
                     .expect("Authorization should validate");
                 (valid, parsed.uri)
             });
@@ -418,7 +424,7 @@ async fn register_401_retry_reuses_call_id_and_increments_cseq() {
         .register(
             format!("sip:127.0.0.1:{}", AUTH_REGISTRAR_PORT),
             "alice",
-            "password",
+            test_password(),
         )
         .with_contact_uri(AUTH_CLIENT_CONTACT)
         .send()
@@ -542,7 +548,7 @@ async fn register_407_retry_uses_proxy_authorization() {
                 let parsed = DigestAuthenticator::parse_authorization(header)
                     .expect("Proxy-Authorization should parse");
                 let valid = DigestAuthenticator::new("testrealm")
-                    .validate_response(&parsed, "REGISTER", "password")
+                    .validate_response(&parsed, "REGISTER", test_password())
                     .expect("Proxy-Authorization should validate");
                 (valid, parsed.uri)
             });
@@ -589,7 +595,7 @@ async fn register_407_retry_uses_proxy_authorization() {
         .register(
             format!("sip:127.0.0.1:{}", PROXY_AUTH_REGISTRAR_PORT),
             "alice",
-            "password",
+            test_password(),
         )
         .with_contact_uri(PROXY_AUTH_CLIENT_CONTACT)
         .send()
@@ -735,7 +741,7 @@ async fn manual_refresh_auth_and_stale_retry_preserve_one_request_snapshot() {
         .register(
             format!("sip:127.0.0.1:{registrar_port}"),
             "alice",
-            "password",
+            test_password(),
         )
         .with_contact_uri("sip:alice@127.0.0.1:40300")
         .with_expires(300)
@@ -859,7 +865,7 @@ async fn register_refreshes_count_up_nonce_and_stale_nonce_resets_count() {
                 cnonce: parsed.as_ref().and_then(|parsed| parsed.cnonce.clone()),
                 valid: parsed.as_ref().is_some_and(|parsed| {
                     DigestAuthenticator::new("reg-realm")
-                        .validate_response(parsed, "REGISTER", "password")
+                        .validate_response(parsed, "REGISTER", test_password())
                         .unwrap_or(false)
                 }),
             };
@@ -921,7 +927,7 @@ async fn register_refreshes_count_up_nonce_and_stale_nonce_resets_count() {
         .register(
             format!("sip:127.0.0.1:{registrar_port}"),
             "alice",
-            "password",
+            test_password(),
         )
         .with_contact_uri("sip:alice@127.0.0.1:40320")
         .with_expires(300)
@@ -1096,7 +1102,7 @@ async fn challenged_unregister_retries_proxy_auth_and_stale_with_expires_zero() 
         .register(
             format!("sip:127.0.0.1:{registrar_port}"),
             "alice",
-            "password",
+            test_password(),
         )
         .with_contact_uri("sip:alice@127.0.0.1:40320")
         .with_expires(300)
@@ -1214,7 +1220,7 @@ async fn registration_info_tracks_success_refresh_shape_and_unregister_wait() {
         .register(
             format!("sip:127.0.0.1:{}", INFO_REGISTRAR_PORT),
             "alice",
-            "password",
+            test_password(),
         )
         .with_contact_uri(INFO_CLIENT_CONTACT)
         .with_expires(300)
@@ -1463,7 +1469,7 @@ async fn registration_info_uses_contact_expires_and_exposes_route_and_gruu() {
         .register(
             format!("sip:127.0.0.1:{}", registrar_port),
             "alice",
-            "password",
+            test_password(),
         )
         .with_contact_uri("sip:alice@127.0.0.1:40170")
         .with_expires(300)
@@ -1559,7 +1565,7 @@ async fn registration_accepted_expiry_falls_back_to_header_then_request() {
             .register(
                 format!("sip:127.0.0.1:{}", registrar_port),
                 "alice",
-                "password",
+                test_password(),
             )
             .with_contact_uri("sip:alice@127.0.0.1:40190")
             .with_expires(requested)
@@ -1648,7 +1654,7 @@ async fn automatic_registration_refresh_reuses_call_id_and_increments_cseq() {
         .register(
             format!("sip:127.0.0.1:{}", registrar_port),
             "alice",
-            "password",
+            test_password(),
         )
         .with_contact_uri("sip:alice@127.0.0.1:40210")
         .with_expires(2)
@@ -1755,7 +1761,7 @@ async fn manual_refresh_serializes_with_due_automatic_refresh_and_advances_cseq_
         .register(
             format!("sip:127.0.0.1:{registrar_port}"),
             "alice",
-            "password",
+            test_password(),
         )
         .with_contact_uri("sip:alice@127.0.0.1:40221")
         .with_expires(2)
@@ -1869,7 +1875,7 @@ async fn unregister_aborts_pending_automatic_refresh() {
         .register(
             format!("sip:127.0.0.1:{}", registrar_port),
             "alice",
-            "password",
+            test_password(),
         )
         .with_contact_uri("sip:alice@127.0.0.1:40230")
         .with_expires(2)
@@ -1951,7 +1957,7 @@ async fn stream_peer_shutdown_gracefully_unregisters_active_registration() {
         .register(
             format!("sip:127.0.0.1:{}", registrar_port),
             "alice",
-            "password",
+            test_password(),
         )
         .with_contact_uri("sip:alice@127.0.0.1:40250")
         .with_expires(300)
@@ -2022,7 +2028,7 @@ async fn register_uses_outbound_proxy_as_destination_and_route_header() {
     config.outbound_proxy_uri = Some(outbound_proxy_uri.clone());
     let peer = StreamPeer::with_config(config).await.expect("peer");
     let handle = peer
-        .register(registrar_uri, "alice", "password")
+        .register(registrar_uri, "alice", test_password())
         .with_contact_uri("sip:alice@127.0.0.1:40270")
         .with_expires(300)
         .send()
