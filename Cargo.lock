@@ -6832,7 +6832,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -6862,7 +6862,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-amazon-connect"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -6895,7 +6895,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-audio-device"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "cpal",
@@ -6906,7 +6906,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-audio-send-queue"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "thiserror 1.0.69",
  "tokio",
@@ -6914,7 +6914,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-audit"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "reqwest 0.12.28",
@@ -6928,7 +6928,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-auth-core"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6960,7 +6960,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-client"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -6982,7 +6982,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-codec-core"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "criterion",
  "opus",
@@ -6994,7 +6994,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-core"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -7029,7 +7029,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-core-traits"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -7045,7 +7045,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-harness"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -7059,7 +7059,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-ice-core"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "hmac 0.12.1",
  "rand 0.8.7",
@@ -7071,7 +7071,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-identity"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "rvoip-core",
@@ -7080,7 +7080,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-ims-aka"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "aes",
  "async-trait",
@@ -7099,7 +7099,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-infra-common"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7127,7 +7127,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-keycloak"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "reqwest 0.12.28",
@@ -7141,7 +7141,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-ldap"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "ldap3",
@@ -7153,7 +7153,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-media-core"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "apodize",
@@ -7187,7 +7187,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-moq"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -7219,7 +7219,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-moq-native"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -7247,7 +7247,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-moq-relay"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7273,7 +7273,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-moq-transport"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "futures",
@@ -7291,7 +7291,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-oidc"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "reqwest 0.12.28",
@@ -7305,7 +7305,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-quic"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -7331,7 +7331,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-redis"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -7347,7 +7347,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-rtc"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -7386,7 +7386,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-rtp-core"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -7425,7 +7425,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-saml"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -7440,7 +7440,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-scim"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -7459,7 +7459,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-sip"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -7529,7 +7529,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-sip-core"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -7548,7 +7548,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-sip-dialog"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -7575,7 +7575,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-sip-proxy"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "dashmap",
@@ -7592,7 +7592,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-sip-registrar"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -7613,7 +7613,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-sip-transport"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7645,7 +7645,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-stir-shaken"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -7670,7 +7670,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-uctp"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -7709,7 +7709,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-users-core"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -7751,7 +7751,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-vapi"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -7776,7 +7776,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-vcon"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -7797,7 +7797,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-vcon-postgres"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -7814,7 +7814,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-webauthn"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "parking_lot",
@@ -7831,7 +7831,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-webrtc"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -7888,7 +7888,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-webrtc-stack"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7909,7 +7909,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-websocket"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -7939,7 +7939,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-webtransport"
-version = "0.3.12"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "bytes",

@@ -30,7 +30,7 @@ protocol-agnostic.
 
 ```toml
 [dependencies]
-rvoip-infra-common = "0.3.12"
+rvoip-infra-common = "0.4.0"
 ```
 
 ## Cargo features

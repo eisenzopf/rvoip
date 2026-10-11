@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.0 — 2026-10-11
+
 ### Highlights
 
 0.4.0 is a breaking minor release. RTCP is now fully wired: rvoip offers

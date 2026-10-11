@@ -25,7 +25,7 @@ for the higher-level operation.
 
 ```toml
 [dependencies]
-rvoip-audio-send-queue = "0.3.12"
+rvoip-audio-send-queue = "0.4.0"
 ```
 
 Licensed under the [MIT License](../../../LICENSE).

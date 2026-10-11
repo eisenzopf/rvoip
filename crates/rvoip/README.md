@@ -1,7 +1,7 @@
 # rvoip — universal real-time gateway facade
 
-[![Crates.io](https://img.shields.io/crates/v/rvoip.svg?release=0.3.12)](https://crates.io/crates/rvoip/0.3.12)
-[![Documentation](https://img.shields.io/docsrs/rvoip/0.3.12?label=docs)](https://docs.rs/rvoip/0.3.12/rvoip/)
+[![Crates.io](https://img.shields.io/crates/v/rvoip.svg?release=0.4.0)](https://crates.io/crates/rvoip/0.4.0)
+[![Documentation](https://img.shields.io/docsrs/rvoip/0.4.0?label=docs)](https://docs.rs/rvoip/0.4.0/rvoip/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../LICENSE)
 
 `rvoip` is the facade for the workspace's shared conversation model and
@@ -11,11 +11,11 @@ transport adapters. It always provides the transport-independent
 applications opt into WebRTC, UCTP, Vapi voice agents, client,
 application-builder, and conversation-extension surfaces.
 
-> **Unified `0.3.12` release train.** The `sip` feature is the release-gated beta
+> **Unified `0.4.0` release train.** The `sip` feature is the release-gated beta
 > surface. Other facade features are available today as developer previews:
 > they are implemented and published, but API-unstable or outside the SIP beta
 > attestation. Publication requires fresh strict full-beta evidence bound to
-> the exact clean `0.3.12` release source; historical exception and
+> the exact clean `0.4.0` release source; historical exception and
 > carry-forward reports do not qualify this train.
 > Breaking changes remain possible before `1.0`.
 >
@@ -29,7 +29,7 @@ The default feature is `sip`:
 
 ```toml
 [dependencies]
-rvoip = "0.3.12"
+rvoip = "0.4.0"
 ```
 
 The shared orchestrator is available with every feature combination:
@@ -97,13 +97,13 @@ Examples:
 
 ```toml
 # Shared conversation model plus SIP, WebRTC, UCTP, vCon, identity, and AI.
-rvoip = { version = "0.3.12", features = ["voip-3"] }
+rvoip = { version = "0.4.0", features = ["voip-3"] }
 
 # High-level cross-transport application builder.
-rvoip = { version = "0.3.12", features = ["app"] }
+rvoip = { version = "0.4.0", features = ["app"] }
 
 # Every pure-Rust facade feature and codec.
-rvoip = { version = "0.3.12", default-features = false, features = ["bundle-full-pure-rust"] }
+rvoip = { version = "0.4.0", default-features = false, features = ["bundle-full-pure-rust"] }
 ```
 
 The high-level SIP listener exposes the same fail-closed signalling, media,
@@ -175,15 +175,15 @@ For example:
 
 ```toml
 [dependencies]
-rvoip = { version = "0.3.12", features = ["sip"] }
-rvoip-keycloak = "0.3.12"
-rvoip-redis = "0.3.12"
-rvoip-audit = "0.3.12"
+rvoip = { version = "0.4.0", features = ["sip"] }
+rvoip-keycloak = "0.4.0"
+rvoip-redis = "0.4.0"
+rvoip-audit = "0.4.0"
 ```
 
 ## Specialized workspace products
 
-These products ship in the unified `0.3.12` train but are intentionally not
+These products ship in the unified `0.4.0` train but are intentionally not
 facade feature flags:
 
 | Product | Crate | Why it stays separate |
@@ -199,7 +199,7 @@ Enable `app` to declare transports, roles, assignment, and callbacks through
 one builder:
 
 ```toml
-rvoip = { version = "0.3.12", features = ["app"] }
+rvoip = { version = "0.4.0", features = ["app"] }
 ```
 
 ```rust,no_run
@@ -248,8 +248,8 @@ example for a complete cross-transport application.
 ## Documentation
 
 - [Workspace overview and complete extension catalog](../../README.md)
-- [Facade API](https://docs.rs/rvoip/0.3.12/rvoip/)
-- [SIP API](https://docs.rs/rvoip-sip/0.3.12/rvoip_sip/)
+- [Facade API](https://docs.rs/rvoip/0.4.0/rvoip/)
+- [SIP API](https://docs.rs/rvoip-sip/0.4.0/rvoip_sip/)
 - [SIP beta evidence](../sip/rvoip-sip/docs/)
 - [Architecture and protocol design](../../docs/)
 - [Changelog](../../CHANGELOG.md), [release notes](../sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md)
