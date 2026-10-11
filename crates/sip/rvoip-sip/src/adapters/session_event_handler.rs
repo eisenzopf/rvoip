@@ -4249,6 +4249,13 @@ impl SessionCrossCrateEventHandler {
         raw_response: Option<bytes::Bytes>,
     ) -> Result<()> {
         let session_id = handle.session_id().clone();
+        let parsed_response = response_from_bytes(raw_response.as_ref());
+        let response_transaction = parsed_response
+            .as_ref()
+            .and_then(rvoip_sip_dialog::transaction::TransactionKey::from_response);
+        self.await_reinvite_sender_publication(handle, response_transaction.as_ref())
+            .await;
+
         let initial_snapshot = match self.state_machine.store.get_session_snapshot_exact(handle) {
             Ok(snapshot) => snapshot,
             Err(_) => {
@@ -4259,11 +4266,6 @@ impl SessionCrossCrateEventHandler {
                 return Ok(());
             }
         };
-
-        let parsed_response = response_from_bytes(raw_response.as_ref());
-        let response_transaction = parsed_response
-            .as_ref()
-            .and_then(rvoip_sip_dialog::transaction::TransactionKey::from_response);
         let pending_offer = initial_snapshot.pending_offer_answer.as_ref();
         let pending_correlation = correlate_pending_offer_transaction(
             pending_offer.map(|pending| &pending.method),
@@ -4982,6 +4984,15 @@ impl SessionCrossCrateEventHandler {
                 ExactTransactionLookup::Matched => {}
             }
         }
+        if matches!(
+            tracked_method,
+            TrackedInDialogMethod::Update | TrackedInDialogMethod::Reinvite
+        ) {
+            // A matched or replayed completion can run between the sending
+            // lane's tracker activation and its store commit; read the offer
+            // correlation only after that lane has published.
+            self.await_sending_lane_publication(&handle).await;
+        }
         let is_session_timer_update = tracked_method == TrackedInDialogMethod::Update
             && self
                 .dialog_adapter
@@ -5214,6 +5225,47 @@ impl SessionCrossCrateEventHandler {
         Ok(())
     }
 
+    /// Wait until the state-machine lane that may have sent an exact
+    /// in-dialog request has published its state.
+    ///
+    /// The sending lane binds the request's transaction to its pending offer
+    /// and activates the tracker after the transport write returns, and
+    /// commits that state to the store only when it releases the lane. A
+    /// loopback or LAN peer can answer inside that window, and an answer
+    /// correlated against the pre-send store image looks like a stray
+    /// retransmission: it is ACKed or rolled back but never reported, leaving
+    /// the renegotiation caller to time out. Callers hold this response in
+    /// their ordered shard until the lane is free. The lane is released
+    /// immediately because the handlers re-enter it through the state
+    /// machine; this adds no lock order they did not already take.
+    async fn await_sending_lane_publication(&self, handle: &SessionRegistryHandle) {
+        if let Some(lane) = self.state_machine.store.state_machine_lane_exact(handle) {
+            drop(lane.lock_owned().await);
+        }
+    }
+
+    /// [`Self::await_sending_lane_publication`] for a final response to a
+    /// client INVITE while this dialog has a re-INVITE in flight. Initial
+    /// INVITE responses never have a tracked re-INVITE and pass straight
+    /// through.
+    async fn await_reinvite_sender_publication(
+        &self,
+        handle: &SessionRegistryHandle,
+        response_transaction: Option<&rvoip_sip_dialog::transaction::TransactionKey>,
+    ) {
+        let client_invite = response_transaction.is_some_and(|transaction| {
+            !transaction.is_server() && transaction.method() == &rvoip_sip_core::Method::Invite
+        });
+        if client_invite
+            && self
+                .dialog_adapter
+                .outbound_request_tracker
+                .has_request(handle, TrackedInDialogMethod::Reinvite)
+        {
+            self.await_sending_lane_publication(handle).await;
+        }
+    }
+
     async fn clear_tracked_request_auth_state(
         &self,
         handle: &SessionRegistryHandle,
@@ -5254,6 +5306,11 @@ impl SessionCrossCrateEventHandler {
         raw_response: Option<bytes::Bytes>,
     ) -> Result<()> {
         let session_id = handle.session_id().clone();
+        let response_transaction = response_from_bytes(raw_response.as_ref())
+            .as_ref()
+            .and_then(rvoip_sip_dialog::transaction::TransactionKey::from_response);
+        self.await_reinvite_sender_publication(handle, response_transaction.as_ref())
+            .await;
         let Ok(initial_snapshot) = self.state_machine.store.get_session_snapshot_exact(handle)
         else {
             debug!(
@@ -5262,10 +5319,6 @@ impl SessionCrossCrateEventHandler {
             );
             return Ok(());
         };
-
-        let response_transaction = response_from_bytes(raw_response.as_ref())
-            .as_ref()
-            .and_then(rvoip_sip_dialog::transaction::TransactionKey::from_response);
         let pending_offer = initial_snapshot.pending_offer_answer.as_ref();
         let pending_correlation = correlate_pending_offer_transaction(
             pending_offer.map(|pending| &pending.method),
@@ -7434,6 +7487,50 @@ mod tests {
             );
         }
         assert!(stale_dialog_dispatch_result("bye_received").is_ok());
+    }
+
+    #[test]
+    fn reinvite_final_responses_wait_for_the_sending_lane_before_correlating() {
+        // A peer can answer a re-INVITE between the sending lane's transport
+        // write and its store commit. Correlating against that pre-send image
+        // classified a 2xx as a retransmission (ACKed, never reported) and a
+        // 488 as foreign to the pending offer, so `renegotiate_media` waited
+        // out its deadline (adapter_renegotiate under load, 0.4.0
+        // qualification).
+        let source = include_str!("session_event_handler.rs");
+        for (handler, barrier, correlation) in [
+            (
+                "async fn handle_call_established_parts(",
+                "self.await_reinvite_sender_publication(",
+                "self.state_machine.store.get_session_snapshot_exact(handle)",
+            ),
+            (
+                "async fn handle_call_failed_parts(",
+                "self.await_reinvite_sender_publication(",
+                "self.state_machine.store.get_session_snapshot_exact(handle)",
+            ),
+            (
+                "async fn handle_outbound_request_completed_parts(",
+                "self.await_sending_lane_publication(&handle)",
+                "let pending_offer_correlation = self",
+            ),
+        ] {
+            let body = source
+                .split(handler)
+                .nth(1)
+                .and_then(|tail| tail.split("\n    async fn ").next())
+                .unwrap_or_else(|| panic!("missing {handler} source"));
+            let barrier_at = body
+                .find(barrier)
+                .unwrap_or_else(|| panic!("{handler} must wait for the sending lane"));
+            let correlation_at = body
+                .find(correlation)
+                .unwrap_or_else(|| panic!("{handler} offer correlation read"));
+            assert!(
+                barrier_at < correlation_at,
+                "{handler} must wait for the sending lane before reading offer state"
+            );
+        }
     }
 
     #[test]
