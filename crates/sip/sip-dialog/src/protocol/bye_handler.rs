@@ -323,6 +323,24 @@ impl ByeCleanupTaskRegistry {
         }
     }
 
+    /// Close admission and wait until every admitted cleanup has finished,
+    /// without stopping the workers. Shutdown runs this while the session
+    /// layer can still accept the `ByeReceived` each cleanup delivers;
+    /// [`Self::close_all`] later joins the idle workers.
+    pub(crate) async fn quiesce(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), ByeCleanupError> {
+        self.begin_close();
+        if self.wait_empty_until(deadline).await {
+            Ok(())
+        } else if self.failed.load(Ordering::Acquire) || !self.quarantined.is_empty() {
+            Err(ByeCleanupError::TaskFailed)
+        } else {
+            Err(ByeCleanupError::CompletionTimeout)
+        }
+    }
+
     pub(crate) async fn close_all(&self) -> Result<(), ByeCleanupError> {
         self.begin_close();
         let sender = {
@@ -1065,6 +1083,68 @@ mod tests {
                 Arc::new(AtomicBool::new(false)),
             )
             .expect("test cleanup registration")
+    }
+
+    #[tokio::test]
+    async fn quiesce_waits_for_admitted_cleanup_and_keeps_workers_for_close_all() {
+        // Shutdown drains answered BYEs while the session layer still accepts
+        // their ByeReceived: quiesce must wait for an admitted cleanup, refuse
+        // new BYE admission, and leave close_all able to join the workers.
+        let registry = ByeCleanupTaskRegistry::with_capacity(2);
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        install_test_cleanup(
+            Arc::clone(&registry),
+            DialogId::new(),
+            Some(Arc::clone(&gate)),
+        )
+        .await
+        .activate();
+
+        let quiesce_registry = Arc::clone(&registry);
+        let quiesce = tokio::spawn(async move {
+            quiesce_registry
+                .quiesce(tokio::time::Instant::now() + Duration::from_secs(5))
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !quiesce.is_finished(),
+            "quiesce returned before the cleanup ran"
+        );
+        assert_eq!(
+            registry.reserve_capacity().await.err(),
+            Some(ByeCleanupError::RegistryClosed),
+            "a BYE arriving after quiesce must not be admitted"
+        );
+
+        gate.add_permits(1);
+        quiesce
+            .await
+            .expect("quiesce task joined")
+            .expect("admitted cleanup drained");
+        assert_eq!(registry.len(), 0);
+        registry.close_all().await.expect("idle workers joined");
+    }
+
+    #[tokio::test]
+    async fn quiesce_reports_a_cleanup_that_outlives_its_deadline() {
+        let registry = ByeCleanupTaskRegistry::with_capacity(1);
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        install_test_cleanup(
+            Arc::clone(&registry),
+            DialogId::new(),
+            Some(Arc::clone(&gate)),
+        )
+        .await
+        .activate();
+        assert_eq!(
+            registry
+                .quiesce(tokio::time::Instant::now() + Duration::from_millis(20))
+                .await,
+            Err(ByeCleanupError::CompletionTimeout)
+        );
+        assert_eq!(registry.len(), 1, "the stranded job stays registered");
+        gate.add_permits(1);
     }
 
     #[tokio::test]

@@ -1423,6 +1423,20 @@ impl UnifiedDialogApi {
         self.manager.start().await.map_err(ApiError::from)
     }
 
+    /// Stop admitting inbound BYE teardown and wait, up to `timeout`, until
+    /// every BYE already answered has delivered `ByeReceived` to the session
+    /// layer. Call it before closing the session-side event ingress during
+    /// shutdown, then call [`Self::stop`].
+    pub async fn drain_bye_cleanup_before_shutdown(
+        &self,
+        timeout: std::time::Duration,
+    ) -> ApiResult<()> {
+        self.manager
+            .drain_bye_cleanup_before_shutdown(timeout)
+            .await
+            .map_err(ApiError::from)
+    }
+
     /// Stop the dialog API
     ///
     /// Gracefully shuts down the API and all active dialogs.

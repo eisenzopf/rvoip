@@ -1101,6 +1101,8 @@ impl SetupTeardownDeadlineCancellation {
 const SETUP_TEARDOWN_DEADLINE_BATCH: usize = 2_048;
 const SETUP_TEARDOWN_TIMEOUT_CONCURRENCY: usize = 64;
 const SETUP_TEARDOWN_SCHEDULER_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+/// Bound for answered inbound BYEs to reach the session layer during shutdown.
+const BYE_CLEANUP_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// Longest an `OutboundCallBuilder::send` that failed after allocating a
 /// session waits for that session's local release before returning its error.
 const OUTBOUND_SETUP_ROLLBACK_WAIT: Duration = Duration::from_secs(5);
@@ -10349,6 +10351,21 @@ impl UnifiedCoordinator {
                 error
             );
             return CoordinatorShutdownOutcome::RegistrationRefreshDrainFailed;
+        }
+        // A BYE is answered before its cleanup tells the session layer, which
+        // the shutdown signal below stops accepting. Finish those deliveries
+        // first: a stranded cleanup would make the dialog stop fail closed.
+        // On error the stranded job stays registered and the dialog stop
+        // below reports it.
+        if let Err(error) = self
+            .dialog_adapter
+            .drain_bye_cleanup_before_shutdown(BYE_CLEANUP_SHUTDOWN_DRAIN_TIMEOUT)
+            .await
+        {
+            tracing::warn!(
+                "Inbound BYE cleanup did not drain before session ingress closed: {}",
+                error
+            );
         }
         // Stop admitting new application-control work while dialog/transport
         // resources are still available. The strong registry owns queued or

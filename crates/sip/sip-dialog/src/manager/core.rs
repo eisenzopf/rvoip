@@ -3252,6 +3252,41 @@ impl DialogManager {
         Ok(())
     }
 
+    /// Stop admitting inbound BYE teardown and wait until every BYE already
+    /// answered has delivered its `ByeReceived` to the session layer.
+    ///
+    /// A BYE is answered with 200 OK before its cleanup job notifies the
+    /// session owner. An application that closes its session ingress for
+    /// shutdown while such a job is queued can never accept the
+    /// notification, and [`Self::stop`] then fails closed on the stranded
+    /// job. Call this first, while the session layer still accepts events.
+    /// A BYE arriving afterwards is left untouched, exactly as one arriving
+    /// during [`Self::stop`]. Bounded by `timeout`; an error leaves the
+    /// cleanup jobs registered for `stop` to report.
+    pub async fn drain_bye_cleanup_before_shutdown(&self, timeout: Duration) -> DialogResult<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        self.bye_cleanup_tasks.begin_close();
+        // A handler that reserved capacity before the close registers its
+        // cleanup before leaving the operation fence; wait for it so the
+        // registry check below cannot miss that job.
+        if tokio::time::timeout_at(deadline, self.bye_cleanup_operations.wait_idle())
+            .await
+            .is_err()
+        {
+            return Err(DialogError::InternalError {
+                message: "BYE handlers did not settle before shutdown".to_string(),
+                context: None,
+            });
+        }
+        self.bye_cleanup_tasks
+            .quiesce(deadline)
+            .await
+            .map_err(|_error| DialogError::InternalError {
+                message: "BYE cleanup did not reach the session layer before shutdown".to_string(),
+                context: None,
+            })
+    }
+
     /// Stop the dialog manager
     ///
     /// Gracefully shuts down the dialog manager in BOTTOM-UP order
