@@ -333,6 +333,22 @@ has before/after code for each.
 
 #### Transport, TLS and dialog robustness
 
+- Re-INVITE answers could be lost to a race on fast networks. The state
+  lane that sends a re-INVITE stores the pending offer when the lane is
+  released, after the transport write returns, and a peer on a LAN or
+  loopback could answer inside that window. A 200 OK was then taken for a
+  retransmission (ACKed and dropped), and a 488 was rolled back unreported,
+  so `renegotiate_media` waited until its deadline. Final responses to a
+  client re-INVITE, and matched UPDATE/re-INVITE completions, now wait for
+  the sending lane before correlating with the pending offer.
+- Shutdown no longer fails when a BYE was answered just before it.
+  dialog-core answers a BYE with 200 OK and then delivers `ByeReceived` to
+  the session layer from a cleanup job; shutdown closed the session layer's
+  event intake first, so that delivery was quarantined and dialog stop
+  failed permanently with `dialog-stop`. `run_shutdown_sequence` now calls
+  the new `drain_bye_cleanup_before_shutdown` (bounded at 5 s): it stops
+  accepting BYEs, waits for in-progress BYE handlers and their cleanup, then
+  closes the session layer.
 - An outbound INVITE whose first TLS write failed could hang
   `OutboundCallBuilder::send()` forever, for example when a TLS 1.3 server
   rejects the client certificate with `certificate_required` just after the
