@@ -6056,6 +6056,16 @@ impl DialogAdapter {
     }
 
     /// Stop the dialog API and release its transaction transports.
+    /// Close inbound BYE admission and wait until every answered BYE has
+    /// delivered `ByeReceived`; see
+    /// `UnifiedDialogApi::drain_bye_cleanup_before_shutdown`.
+    pub(crate) async fn drain_bye_cleanup_before_shutdown(&self, timeout: Duration) -> Result<()> {
+        self.dialog_api
+            .drain_bye_cleanup_before_shutdown(timeout)
+            .await
+            .map_err(|e| SessionError::DialogError(format!("BYE cleanup drain failed: {}", e)))
+    }
+
     pub async fn stop(&self) -> Result<()> {
         self.dialog_api
             .stop()

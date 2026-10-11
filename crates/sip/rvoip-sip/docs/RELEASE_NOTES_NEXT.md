@@ -197,7 +197,7 @@ release.
   media anchor using the same PBX runner and the same `Endpoint`, `StreamPeer`,
   and `CallbackPeer` APIs used for Asterisk and FreeSWITCH.
 - The release profile pins the latest reviewed open-source component line,
-  currently Jambonz OSS `0.9.11`. Source archives and every container are
+  currently Jambonz OSS `0.9.14`. Source archives and every container are
   digest-verified, and qualification fails if the component pins are no
   longer the selected upstream heads.
 - The mandatory UDP/plain-RTP matrix covers authenticated registration,

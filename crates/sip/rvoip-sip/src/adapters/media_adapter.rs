@@ -4142,8 +4142,9 @@ impl MediaAdapter {
     /// Create a new media session.
     ///
     /// With [`Config::rtcp_non_mux`](crate::api::unified::Config::rtcp_non_mux)
-    /// on, the session reserves a separate RTCP port as an offerer would;
-    /// [`Self::create_session_for_offer`] decides from the peer's offer.
+    /// on, the session reserves a separate RTCP port as an offerer would; an
+    /// answerer instead decides from the peer's offer (see the crate-internal
+    /// `create_session_for_offer`).
     pub async fn create_session(
         &self,
         session_id: &SessionId,

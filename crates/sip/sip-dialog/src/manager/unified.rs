@@ -859,6 +859,14 @@ impl UnifiedDialogManager {
         Ok(())
     }
 
+    /// See [`DialogManager::drain_bye_cleanup_before_shutdown`].
+    pub async fn drain_bye_cleanup_before_shutdown(
+        &self,
+        timeout: std::time::Duration,
+    ) -> DialogResult<()> {
+        self.core.drain_bye_cleanup_before_shutdown(timeout).await
+    }
+
     /// Stop the unified dialog manager
     ///
     /// Gracefully shuts down the manager and all active dialogs.
