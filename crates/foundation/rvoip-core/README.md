@@ -17,7 +17,7 @@ crates. SIP, WebRTC, QUIC, WebTransport, and WebSocket all sit *above*
 
 ## Status
 
-**Release-gated SIP dependency** — published in the unified `0.3.x` workspace release. The
+**Release-gated SIP dependency** — published in the unified `0.4.x` workspace release. The
 type surface and `Orchestrator` are stable for the SIP path; the optional
 `vcon-signing` feature (vCon JWS signing) is alpha-quality and may evolve.
 

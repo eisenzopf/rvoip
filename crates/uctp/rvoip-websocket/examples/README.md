@@ -1,8 +1,7 @@
 # Authenticated UCTP application profile
 
 `application_profile.rs` is a small control-only host and client using the
-experimental `ApplicationHandler` interface. It requires the application-profile
-change in PR #262; it does not run on unpatched rvoip 0.3.12.
+experimental `ApplicationHandler` interface, introduced in rvoip 0.4.0 (PR #262).
 
 From the repository root, build once:
 

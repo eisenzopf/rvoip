@@ -395,7 +395,7 @@ impl std::fmt::Debug for SdesNegotiationFailure {
 }
 
 /// Bounded, opt-in diagnostic stream for details that cannot be added to the
-/// exhaustive 0.3.x [`Event`] enum without breaking existing callers.
+/// exhaustive [`Event`] enum without breaking existing callers.
 #[derive(Clone)]
 #[non_exhaustive]
 pub enum DiagnosticEvent {

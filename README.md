@@ -12,7 +12,7 @@
 [![Facade API](https://img.shields.io/docsrs/rvoip/0.3.12?label=Facade%20API)](https://docs.rs/rvoip/0.3.12/rvoip/)
 [![SIP API](https://img.shields.io/docsrs/rvoip-sip/0.3.12?label=SIP%20API)](https://docs.rs/rvoip-sip/0.3.12/rvoip_sip/)
 
-[**Five-minute start**](#five-minute-start) · [**For carriers**](docs/CARRIERS.md) · [**Which crate?**](#you-need-one-crate) · [**Pick a path**](#pick-your-path) · [**How it fits together**](#how-it-fits-together) · [**What ships**](#what-ships-today) · [**Interop evidence**](#sip-interoperability-and-release-evidence) · [**Changes**](CHANGELOG.md)
+[**Five-minute start**](#five-minute-start) · [**For carriers**](docs/CARRIERS.md) · [**Which crate?**](#you-need-one-crate) · [**Pick a path**](#pick-your-path) · [**How it fits together**](#how-it-fits-together) · [**What ships**](#what-ships-today) · [**Interop evidence**](#sip-interoperability-and-release-evidence) · [**Changes**](CHANGELOG.md) · [**Upgrading from 0.3**](docs/MIGRATING_0.4.md)
 
 </div>
 
@@ -38,6 +38,10 @@ performance, and reliability should start with [For carriers](docs/CARRIERS.md).
 rvoip-sip = "0.3.12"
 tokio = { version = "1", features = ["full"] }
 ```
+
+Upgrading an existing application from 0.3? The
+[0.4 migration guide](docs/MIGRATING_0.4.md) has before/after code for every
+breaking change.
 
 **2. Make a call.** Bob answers, Alice dials, Alice hangs up. Everything runs
 on loopback, so this works on a laptop with no PBX, no account, and no network
@@ -485,7 +489,7 @@ The current release's authority documents:
 - [Performance report](crates/sip/rvoip-sip/docs/BETA_PERFORMANCE_REPORT.md).
 - [RFC evidence matrix](crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md) and [security posture](crates/sip/rvoip-sip/docs/SECURITY_POSTURE.md).
 - [Interop plan](crates/sip/rvoip-sip/docs/INTEROP_CI_PLAN.md) — the evidence boundaries.
-- [Changelog](CHANGELOG.md) and [release notes](crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md) — what changed in this release.
+- [Changelog](CHANGELOG.md), [release notes](crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md) and the [0.4 migration guide](docs/MIGRATING_0.4.md) — what changed in this release and how to upgrade from 0.3.
 
 This is bounded interoperability evidence, not a claim of compatibility with
 every version, module, configuration, transport, codec, or SIP extension, and

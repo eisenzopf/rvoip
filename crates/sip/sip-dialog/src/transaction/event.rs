@@ -121,7 +121,7 @@ pub enum TransactionEvent {
     /// Transaction-stateful proxy users consume [`Self::CancelRequest`], which
     /// carries both the independently allocated CANCEL server transaction and
     /// its exact target INVITE transaction. This legacy observation remains
-    /// part of the `0.3.x` compatibility surface.
+    /// part of the public compatibility surface.
     CancelReceived {
         /// The unique identifier for the server transaction for which the CANCEL was received.
         transaction_id: TransactionKey,

@@ -449,8 +449,11 @@ impl SipNatConfig {
     }
 }
 
-/// Construction-time options that cannot be added to the literal-friendly
-/// [`Config`] struct without breaking existing 0.3.x callers.
+/// Construction-time options kept outside [`Config`].
+///
+/// They were split out while `Config` could still be built with a struct
+/// literal (before 0.4, which made it `#[non_exhaustive]`), so that adding
+/// them did not break existing callers.
 ///
 /// The default preserves the existing bounded NAT policy and accepts canonical
 /// SDES Base64 plus the interoperable form that omits trailing padding.
@@ -2692,9 +2695,9 @@ pub struct Config {
     ///
     /// Ignored by every codec but AMR. Default: `false`.
     ///
-    /// Private with a builder on purpose: `Config`'s constructible shape is
-    /// frozen for the 0.3.x line, and this is media policy, not signaling —
-    /// set it with [`Config::with_amr_dtx`].
+    /// Private with a builder on purpose: it was added while `Config`'s
+    /// constructible shape was frozen, and this is media policy, not
+    /// signaling — set it with [`Config::with_amr_dtx`].
     amr_dtx: bool,
 
     /// Let AMR sessions ask the peer to change rate on their own.
@@ -10471,8 +10474,8 @@ impl UnifiedCoordinator {
     /// Subscribe to bounded, opt-in security and renegotiation diagnostics.
     ///
     /// This stream carries details that cannot be added to the exhaustive
-    /// 0.3.x [`Event`](crate::api::events::Event) enum without breaking
-    /// existing pattern matches. Lagging receivers may lose observations;
+    /// [`Event`](crate::api::events::Event) enum without breaking existing
+    /// pattern matches. Lagging receivers may lose observations;
     /// diagnostics never block signaling or call-state transitions.
     pub fn subscribe_diagnostics(
         &self,

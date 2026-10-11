@@ -38,7 +38,7 @@ SIP Client → rvoip-sip → rvoip-sip-registrar
 
 ```toml
 [dependencies]
-rvoip-sip-registrar = "0.3.10"
+rvoip-sip-registrar = "0.3.12"
 ```
 
 A runnable server is in [`examples/registrar_server.rs`](examples/registrar_server.rs):

@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 /// Opaque reference to a vCon document.
 ///
-/// `RecordingComplete.vcon_ref` is not wired in 0.3.3 and remains `None`;
+/// `RecordingComplete.vcon_ref` is not wired yet and remains `None`;
 /// finalized documents are announced separately through `VconReady`.
 /// These variants preserve the planned reference shape without claiming
 /// that recording completion owns Session-level vCon finalization.

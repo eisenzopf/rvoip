@@ -22,6 +22,12 @@ report](docs/BETA_PERFORMANCE_REPORT.md) identify the source commit they cover;
 the [immutable qualification history](docs/releases/qualification/README.md)
 retains prior releases.
 
+What changed in this release: the [release notes](docs/RELEASE_NOTES_NEXT.md)
+and the [changelog](../../../CHANGELOG.md). Upgrading from 0.3? The
+[0.4 migration guide](../../../docs/MIGRATING_0.4.md) covers the breaking
+changes, including `#[non_exhaustive]` `Config`, the new `Event` variant and
+the RTCP defaults.
+
 ## At a glance
 
 | Need | Start with |
@@ -460,6 +466,9 @@ Operational references:
   tuning guidance.
 - [`docs/INTEROP_CI_PLAN.md`](docs/INTEROP_CI_PLAN.md) for PBX, SIPp, and
   strict-UA runner expectations.
+- [`docs/RELEASE_NOTES_NEXT.md`](docs/RELEASE_NOTES_NEXT.md) and the
+  [0.4 migration guide](../../../docs/MIGRATING_0.4.md) for what changed in
+  this release and how to upgrade.
 
 ## Feature flags
 

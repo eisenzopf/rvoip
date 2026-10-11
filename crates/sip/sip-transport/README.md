@@ -331,7 +331,7 @@ Disable default features and enable only what you need:
 
 ```toml
 [dependencies]
-rvoip-sip-transport = { version = "0.3", default-features = false, features = ["udp", "tcp"] }
+rvoip-sip-transport = { version = "0.3.12", default-features = false, features = ["udp", "tcp"] }
 ```
 
 ## Performance Characteristics

@@ -12,7 +12,7 @@ remain experimental.
 ## Prepare
 
 Use the **Prepare release PR** workflow with the next version, for example
-`0.3.10`. It checks out the current `main`, runs the unified preparation and
+`0.4.0`. It checks out the current `main`, runs the unified preparation and
 release-tooling tests, runs the evidence-helper suite against the generated
 tree, and opens a draft release pull request. Atomic preparation preserves
 existing file permission modes, including executable release wrappers. The
@@ -24,6 +24,21 @@ strings, version downgrades, versions already present on crates.io, dirty
 trees, missing internal dependency versions, and a workspace inventory other
 than the expected 46 publishable packages. It updates package inheritance and
 the lockfile transactionally.
+
+### Version references
+
+Preparation rewrites the workspace version in the files listed in
+`ACTIVE_RELEASE_METADATA_FILES` (`scripts/release.py`). Before and after the
+rewrite it scans every Cargo manifest, Markdown file and Rust source outside
+`target/`, `.git/` and `node_modules/` for rvoip dependency snippets, such as
+`rvoip-sip = "X.Y.Z"`, a table with `version = "X.Y.Z"`, a key renamed with
+`package = "rvoip-…"`, or the same lines inside doc comments. Every snippet must
+name exactly the workspace version; a partial requirement like `"0.3"` fails
+too. A file that carries such a snippet therefore belongs in the active list
+so that preparation moves it. `CHANGELOG.md`, migration guides named for a
+release (`MIGRATING_0.4.md`, `MIGRATION_0.3.5.md`), and the paths in
+`HISTORICAL_RELEASE_METADATA_PREFIXES` keep the versions they were written
+for.
 
 ### Changelog
 

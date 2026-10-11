@@ -1,6 +1,6 @@
 # rvoip-harness
 
-> ⚠️ **Experimental surface** (unified `0.3.x` release) — API-unstable; expect breaking changes before `1.0`.
+> ⚠️ **Experimental surface** (unified `0.4.x` release) — API-unstable; expect breaking changes before `1.0`.
 
 Pluggable provider trait surfaces for ASR, TTS, `DialogManager`, and
 `RecordingSink`, plus a first-party in-process AI connection adapter.

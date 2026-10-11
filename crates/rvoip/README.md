@@ -18,6 +18,10 @@ application-builder, and conversation-extension surfaces.
 > the exact clean `0.3.12` release source; historical exception and
 > carry-forward reports do not qualify this train.
 > Breaking changes remain possible before `1.0`.
+>
+> Upgrading from 0.3? Read the [0.4 migration guide](../../docs/MIGRATING_0.4.md),
+> the [changelog](../../CHANGELOG.md) and the
+> [release notes](../sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md).
 
 ## Quick start
 
@@ -248,6 +252,8 @@ example for a complete cross-transport application.
 - [SIP API](https://docs.rs/rvoip-sip/0.3.12/rvoip_sip/)
 - [SIP beta evidence](../sip/rvoip-sip/docs/)
 - [Architecture and protocol design](../../docs/)
+- [Changelog](../../CHANGELOG.md), [release notes](../sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md)
+  and the [0.4 migration guide](../../docs/MIGRATING_0.4.md)
 
 ## License
 
