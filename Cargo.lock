@@ -848,28 +848,6 @@ dependencies = [
 
 [[package]]
 name = "axum-server"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1ab4a3ec9ea8a657c72d99a03a824af695bd0fb5ec639ccbd9cd3543b41a5f9"
-dependencies = [
- "arc-swap",
- "bytes",
- "fs-err",
- "http 1.5.0",
- "http-body 1.1.0",
- "hyper 1.11.0",
- "hyper-util",
- "pin-project-lite",
- "rustls",
- "rustls-pemfile",
- "rustls-pki-types",
- "tokio",
- "tokio-rustls",
- "tower-service",
-]
-
-[[package]]
-name = "axum-server"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1df331683d982a0b9492b38127151e6453639cd34926eb9c07d4cd8c6d22bfc"
@@ -6298,7 +6276,7 @@ dependencies = [
  "tokio-native-tls",
  "tokio-rustls",
  "tower",
- "tower-http",
+ "tower-http 0.6.11",
  "tower-service",
  "url",
  "wasm-bindgen",
@@ -6330,7 +6308,7 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tower",
- "tower-http",
+ "tower-http 0.6.11",
  "tower-service",
  "url",
  "wasm-bindgen",
@@ -7098,7 +7076,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tracing",
- "webpki-roots 0.26.11",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -7349,13 +7327,13 @@ dependencies = [
  "http 1.5.0",
  "quinn",
  "rand 0.8.7",
- "rcgen 0.13.2",
+ "rcgen 0.14.8",
  "ring",
  "rustls",
- "rustls-native-certs 0.7.3",
+ "rustls-native-certs 0.8.4",
  "rustls-pemfile",
  "rvoip-moq-transport",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "tempfile",
  "time",
  "tokio",
@@ -7376,7 +7354,7 @@ dependencies = [
  "hex",
  "metrics",
  "metrics-exporter-prometheus",
- "rcgen 0.13.2",
+ "rcgen 0.14.8",
  "ring",
  "rvoip-moq-native",
  "rvoip-moq-transport",
@@ -7753,7 +7731,7 @@ dependencies = [
  "rvoip-infra-common",
  "rvoip-sip-core",
  "sha2 0.10.9",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
@@ -7761,7 +7739,7 @@ dependencies = [
  "tokio-tungstenite 0.29.0",
  "tracing",
  "tracing-subscriber",
- "webpki-roots 0.26.11",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -7836,7 +7814,7 @@ dependencies = [
  "argon2",
  "async-trait",
  "axum 0.7.9",
- "axum-server 0.8.0",
+ "axum-server",
  "base64 0.23.1",
  "chrono",
  "config",
@@ -7863,7 +7841,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tower",
- "tower-http",
+ "tower-http 0.7.1",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -7956,7 +7934,7 @@ version = "0.4.0"
 dependencies = [
  "async-trait",
  "axum 0.7.9",
- "axum-server 0.7.3",
+ "axum-server",
  "base64 0.23.1",
  "bytes",
  "chromiumoxide",
@@ -7996,13 +7974,13 @@ dependencies = [
  "tokio-tungstenite 0.29.0",
  "tokio-util",
  "tower",
- "tower-http",
+ "tower-http 0.7.1",
  "tracing",
  "tracing-subscriber",
  "turn",
  "url",
  "vpx-encode",
- "webpki-roots 0.26.11",
+ "webpki-roots 1.0.9",
  "webrtc-util 0.12.0",
  "zeroize",
 ]
@@ -9459,8 +9437,24 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
- "tracing",
  "url",
+]
+
+[[package]]
+name = "tower-http"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08a05a66a4fdd61cbbe0a1d755ffe0ca6aba159dd4820936a0ff8a8278245b9c"
+dependencies = [
+ "bitflags 2.13.1",
+ "bytes",
+ "http 1.5.0",
+ "http-body 1.1.0",
+ "percent-encoding",
+ "pin-project-lite",
+ "tower-layer",
+ "tower-service",
+ "tracing",
 ]
 
 [[package]]

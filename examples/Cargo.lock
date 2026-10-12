@@ -4373,13 +4373,13 @@ dependencies = [
  "rvoip-infra-common",
  "rvoip-sip-core",
  "sha2",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "thiserror 2.0.19",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
  "tracing",
- "webpki-roots 0.26.11",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]
