@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### RTP / RTCP
+
+- `Config::rtcp_non_mux` now works with DTLS-SRTP keying
+  (`SrtpKeyingMode::DtlsSrtp`). When the peer declines `a=rtcp-mux`, the RTCP
+  port runs its own DTLS handshake, as RFC 5764 §4.1 requires, concurrently
+  with the RTP one: same `a=setup` role, same certificate and
+  `a=fingerprint`, and SRTCP on that port uses that handshake's keys. The
+  RTCP port sends nothing and drops everything until its keys are installed.
+  Behind NAT the RTCP handshake answers the port it arrives from on the RTP
+  peer's IP, under the symmetric-RTP policy. A failed RTCP handshake leaves
+  the call's SRTP media working without RTCP and logs a warning. Previously
+  such calls reserved no RTCP port and carried no RTCP.
+- rtp-core: `UdpRtpTransport::require_rtcp_component_keying`,
+  `install_rtcp_component_srtp_contexts`, `rtcp_component_keying_required`,
+  `rtcp_component_srtp_enabled` and (`dtls-webrtc`) `dtls_rtcp_conn_adapter`;
+  `DtlsIdentity` is now `Clone`. media-core (`dtls-srtp`):
+  `MediaSessionController::require_rtcp_component_keying` and
+  `run_rtcp_dtls_handshake_and_install`.
+
 ## 0.4.0 — 2026-10-11
 
 ### Highlights

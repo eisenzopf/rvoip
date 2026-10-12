@@ -2469,9 +2469,21 @@ pub struct Config {
     ///   close-time BYE go from our RTCP port to the peer's `a=rtcp:`
     ///   address, or its RTP port + 1 when it names none. Reports arriving
     ///   on our RTCP port are accepted only from the call's peer, and
-    ///   SRTCP protects them whenever SDES-SRTP is in use.
+    ///   SRTCP protects them whenever SRTP is in use.
     /// - When the peer accepts mux, RTCP shares the RTP port as usual and
     ///   the RTCP port is released as soon as the negotiation commits.
+    ///
+    /// # With SRTP
+    ///
+    /// SDES-SRTP (`a=crypto`) keys both ports from the one negotiated key.
+    /// DTLS-SRTP ([`SrtpKeyingMode::DtlsSrtp`]) runs a second DTLS handshake
+    /// on the RTCP port, as RFC 5764 §4.1 requires when RTP and RTCP are not
+    /// multiplexed: same `a=setup` role, same certificate and
+    /// `a=fingerprint`, its own SRTCP keys. The two handshakes run at the
+    /// same time once the answer commits. Until the RTCP handshake finishes
+    /// the RTCP port sends nothing and drops everything it receives. If it
+    /// fails (timeout, or a certificate the SDP did not name), the call
+    /// keeps its SRTP media and simply has no RTCP; a warning is logged.
     ///
     /// Behind NAT, a peer's RTCP is learned from the source it actually
     /// arrives from (symmetric RTCP, following the symmetric-RTP policy in
@@ -2485,10 +2497,9 @@ pub struct Config {
     /// range filled with such calls holds half as many calls (size
     /// [`Config::media_port_start`]..=[`Config::media_port_end`]
     /// accordingly). Ignored, and no port reserved, when ICE is enabled
-    /// (ICE here negotiates RTP's component only), with DTLS-SRTP keying
-    /// (RFC 5764 §4.1 would need a second DTLS handshake on the RTCP port),
-    /// in strict [`Config::rtcp_mux_required`] mode, and in signalling-only
-    /// media mode.
+    /// (ICE here negotiates RTP's component only), in strict
+    /// [`Config::rtcp_mux_required`] mode, and in signalling-only media
+    /// mode.
     ///
     /// Default: `false` — RTCP flows only to peers that multiplex.
     pub rtcp_non_mux: bool,
