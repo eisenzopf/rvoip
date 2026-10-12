@@ -15,13 +15,6 @@ changes: none of the crates below has a type in a published rvoip API.
   per-stage error messages; new tests pin both. Upstream, 0.15 drops 0.14's
   case folding of file keys, so TOML keys match case-sensitively again;
   environment variable keys are still lowercased.
-- **opentelemetry**, **opentelemetry_sdk**, **opentelemetry-otlp** 0.32 → 0.33
-  and **tracing-opentelemetry** 0.33 → 0.34 (`otel` feature). The OTLP
-  exporter now retries failed exports by default.
-- **metrics** 0.23 → 0.24. Every rvoip crate now reports to the same recorder
-  as `rvoip-moq-relay`, which was already on 0.24; install a metrics
-  0.24-based exporter to collect them. **metrics-exporter-prometheus**
-  0.16 → 0.18.
 - **socket2** 0.5 → 0.6, **webpki-roots** 0.26 → 1.0, **rustls-native-certs**
   0.7 → 0.8 (`rvoip-moq-native` still fails on any platform-certificate load
   error), **tower-http** 0.6 → 0.7.
@@ -32,10 +25,21 @@ changes: none of the crates below has a type in a published rvoip API.
 - Dev and bench only: **criterion** 0.5 → 0.8 (benches use
   `std::hint::black_box`), **chromiumoxide** 0.7 → 0.8, **jsonschema**
   0.33 → 0.58, **rcgen** 0.13 → 0.14 in the MoQ test PKI,
-  **console-subscriber** 0.4 → 0.5 (`perf-tests`).
+  **console-subscriber** 0.4 → 0.5 (rvoip-sip `tokio-console` feature, used
+  only by the profiling examples).
 - Patch releases: tokio 1.53.2, uuid 1.27.0, futures 0.3.34, clap 4.6.7,
   quinn 0.11.12, tokio-rustls 0.26.6, http 1.5.0, hickory-server 0.26.3,
   serde_with 3.24.0, moka 0.12.16 and others in #298.
+
+Deferred to 0.5.0, coordinated with downstream applications: **metrics**
+0.23 → 0.24 with **metrics-exporter-prometheus** 0.16 → 0.18, and
+**opentelemetry** / **opentelemetry_sdk** / **opentelemetry-otlp** 0.32 → 0.33
+with **tracing-opentelemetry** 0.33 → 0.34. rvoip emits into whatever metrics
+recorder and OpenTelemetry global provider the application installs, and those
+are keyed to the crate's semver line. Moving rvoip alone in a patch release would
+make its metrics silently disappear for applications whose recorder is still on
+metrics 0.23, and the OpenTelemetry globals have the same coupling. Both move in
+0.5.0 together with the applications that consume them.
 
 Held back for their own changes: nom 8, the aes / ctr / aes-gcm SRTP stack
 and axum 0.8 / tower 0.5, as planned. Also held back:
