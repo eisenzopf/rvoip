@@ -50,7 +50,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 
 # SIP Digest authentication
-md5 = "0.7"
+md5 = "0.8"
 sha2 = "0.10"
 hex = "0.4"
 rand = "0.8"
