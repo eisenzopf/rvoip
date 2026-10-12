@@ -631,6 +631,31 @@ fn verify_dtls_fingerprint(actual: [u8; 32], expected: [u8; 32]) -> Result<()> {
     Ok(())
 }
 
+/// Directional SRTP contexts from one completed DTLS-SRTP handshake
+/// (RFC 5764 §4.2): the DTLS client protects with the client write key and
+/// the server with the server write key; each side opens the other's.
+#[cfg(feature = "dtls-srtp")]
+fn dtls_srtp_contexts(
+    result: &rtp_core::dtls_srtp::DtlsSrtpHandshakeResult,
+    role: DtlsRole,
+) -> Result<(rtp_core::srtp::SrtpContext, rtp_core::srtp::SrtpContext)> {
+    let (send_key, recv_key) = match role {
+        DtlsRole::Client => (
+            result.client_write_key.clone(),
+            result.server_write_key.clone(),
+        ),
+        DtlsRole::Server => (
+            result.server_write_key.clone(),
+            result.client_write_key.clone(),
+        ),
+    };
+    let send_ctx = rtp_core::srtp::SrtpContext::new(result.profile.clone(), send_key)
+        .map_err(|e| Error::config(format!("building DTLS-SRTP send context: {e}")))?;
+    let recv_ctx = rtp_core::srtp::SrtpContext::new(result.profile.clone(), recv_key)
+        .map_err(|e| Error::config(format!("building DTLS-SRTP recv context: {e}")))?;
+    Ok((send_ctx, recv_ctx))
+}
+
 /// Releases a media-controller port reservation if `start_media` is cancelled
 /// before ownership is committed to the controller maps.
 struct MediaPortReservationGuard {
@@ -2018,25 +2043,136 @@ impl MediaSessionController {
             expected_remote_fingerprint_sha256,
         )?;
 
-        let (send_key, recv_key) = match role {
-            DtlsRole::Client => (
-                result.client_write_key.clone(),
-                result.server_write_key.clone(),
-            ),
-            DtlsRole::Server => (
-                result.server_write_key.clone(),
-                result.client_write_key.clone(),
-            ),
-        };
-        let send_ctx = rtp_core::srtp::SrtpContext::new(result.profile.clone(), send_key)
-            .map_err(|e| Error::config(format!("building DTLS-SRTP send context: {e}")))?;
-        let recv_ctx = rtp_core::srtp::SrtpContext::new(result.profile.clone(), recv_key)
-            .map_err(|e| Error::config(format!("building DTLS-SRTP recv context: {e}")))?;
+        let (send_ctx, recv_ctx) = dtls_srtp_contexts(&result, role)?;
 
         self.install_srtp_contexts(dialog_id, send_ctx, recv_ctx)
             .await?;
         info!("Installed DTLS-SRTP contexts on dialog {}", dialog_id);
 
+        Ok(result)
+    }
+
+    /// Latch a dialog's separate RTCP socket into keying of its own, for
+    /// DTLS-SRTP without RTP/RTCP multiplexing (RFC 5764 §4.1). From here on
+    /// RTCP on that socket passes only under the keys
+    /// [`Self::run_rtcp_dtls_handshake_and_install`] installs, and is
+    /// dropped until then. Also latches secure media.
+    ///
+    /// Returns `false`, changing nothing, when the session has no separate
+    /// RTCP socket (it multiplexes, or was started without
+    /// [`RTCP_SEPARATE_PORT_PARAMETER`]).
+    #[cfg(feature = "dtls-srtp")]
+    pub async fn require_rtcp_component_keying(&self, dialog_id: &DialogId) -> Result<bool> {
+        let session_arc = self
+            .rtp_sessions
+            .get(dialog_id)
+            .map(|entry| entry.value().session.clone())
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+        let session_guard = session_arc.lock().await;
+        let transport = session_guard.transport();
+        let udp_transport = transport
+            .as_any()
+            .downcast_ref::<rtp_core::transport::UdpRtpTransport>()
+            .ok_or_else(|| {
+                Error::config(
+                    "require_rtcp_component_keying: RTP session is not a UdpRtpTransport"
+                        .to_string(),
+                )
+            })?;
+        Ok(udp_transport.require_rtcp_component_keying())
+    }
+
+    /// Run the RTCP component's own DTLS-SRTP handshake on a dialog's
+    /// separate RTCP socket and install the SRTCP keys it derives there
+    /// (RFC 5764 §4.1).
+    ///
+    /// Without RTP/RTCP multiplexing each component carries its own DTLS
+    /// association on its own 5-tuple. This one runs from the local RTCP
+    /// port to the peer's RTCP address (its `a=rtcp:` address, or its RTP
+    /// port + 1), with the same `role` and certificate (`identity`, a clone
+    /// of the one the RTP handshake uses) and the same expected
+    /// fingerprint, because one `a=setup` and one `a=fingerprint` cover the
+    /// whole media section. Keys map to directions as for RTP: the DTLS
+    /// client sends under the client write key. Call
+    /// [`Self::require_rtcp_component_keying`] first.
+    ///
+    /// On error nothing is installed and the RTCP port stays closed to
+    /// RTCP; RTP keyed by [`Self::run_dtls_handshake_and_install`] is not
+    /// affected.
+    #[cfg(feature = "dtls-srtp")]
+    pub async fn run_rtcp_dtls_handshake_and_install(
+        &self,
+        dialog_id: &DialogId,
+        identity: rtp_core::dtls_srtp::DtlsIdentity,
+        role: DtlsRole,
+        expected_remote_fingerprint_sha256: [u8; 32],
+        srtp_profiles: Vec<rtp_core::dtls_srtp::SrtpProtectionProfile>,
+        timeout: std::time::Duration,
+    ) -> Result<rtp_core::dtls_srtp::DtlsSrtpHandshakeResult> {
+        let session_arc = self
+            .rtp_sessions
+            .get(dialog_id)
+            .map(|entry| entry.value().session.clone())
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+        let conn = {
+            let session_guard = session_arc.lock().await;
+            let transport = session_guard.transport();
+            let udp_transport = transport
+                .as_any()
+                .downcast_ref::<rtp_core::transport::UdpRtpTransport>()
+                .ok_or_else(|| {
+                    Error::config(
+                        "run_rtcp_dtls_handshake_and_install: RTP session is not a UdpRtpTransport"
+                            .to_string(),
+                    )
+                })?;
+            if !udp_transport.rtcp_component_keying_required() {
+                return Err(Error::config(
+                    "the RTCP component is not latched for its own DTLS-SRTP keys".to_string(),
+                ));
+            }
+            udp_transport
+                .dtls_rtcp_conn_adapter()
+                .map_err(|e| Error::config(format!("dtls_rtcp_conn_adapter: {e}")))?
+        };
+
+        let handshake = async {
+            match role {
+                DtlsRole::Client => {
+                    rtp_core::dtls_srtp::handshake_client(conn, identity, srtp_profiles).await
+                }
+                DtlsRole::Server => {
+                    rtp_core::dtls_srtp::handshake_server(conn, identity, srtp_profiles).await
+                }
+            }
+        };
+        let result = tokio::time::timeout(timeout, handshake)
+            .await
+            .map_err(|_| Error::config("RTCP DTLS-SRTP handshake timed out".to_string()))?
+            .map_err(|e| Error::config(format!("RTCP DTLS-SRTP handshake failed: {e}")))?;
+        verify_dtls_fingerprint(
+            result.remote_fingerprint_sha256,
+            expected_remote_fingerprint_sha256,
+        )?;
+        let (send_ctx, recv_ctx) = dtls_srtp_contexts(&result, role)?;
+
+        let session_guard = session_arc.lock().await;
+        session_guard
+            .transport()
+            .as_any()
+            .downcast_ref::<rtp_core::transport::UdpRtpTransport>()
+            .ok_or_else(|| {
+                Error::config(
+                    "run_rtcp_dtls_handshake_and_install: RTP session is not a UdpRtpTransport"
+                        .to_string(),
+                )
+            })?
+            .install_rtcp_component_srtp_contexts(send_ctx, recv_ctx)
+            .map_err(|e| Error::config(format!("installing RTCP component SRTCP keys: {e}")))?;
+        info!(
+            "Installed RTCP-component DTLS-SRTP contexts on dialog {}",
+            dialog_id
+        );
         Ok(result)
     }
 
