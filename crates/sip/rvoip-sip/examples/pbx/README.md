@@ -43,7 +43,7 @@ Options:
   are unchanged; `proxies` is the two registrar-proxy labs; `all` is every
   provider)
 - `--api endpoint|stream_peer|callback|all`
-- `--scenario registration|basic_call|g729_call|amr_call|amr_transcode_call|b2bua_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all`
+- `--scenario registration|basic_call|g729_call|amr_call|amr_transcode_call|b2bua_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|rtcp_mux|rtcp_non_mux|rtcp_mux_declined|session_timer|all`
 
 The runner builds the PBX Cargo examples and stores logs/WAV evidence under
 `examples/pbx/output/<provider>/<api>/<scenario>/<transport>/` by default. Set
@@ -90,6 +90,51 @@ overridable with `PBX_B2BUA_PROFILES`. Endpoint API only — the other two APIs
 record no rows for it. Evidence under `.../b2bua_call/<profile>/<transport>/`; the
 b2bua middle node records nothing, so 880 Hz appearing anywhere would itself be a
 fault.
+
+## RTCP and Session-Timer Cells
+
+Four scenarios check 0.4.0's RTCP and RFC 4028 wire behaviour against the
+real PBXes (issue #318). They are part of `--scenario all`, so both PBX
+release gates run them. They test the stack, not an API surface, so they run
+through the `Endpoint` API only, like `b2bua_call`.
+
+| Scenario | Asterisk | FreeSWITCH | What must hold |
+|---|---|---|---|
+| `rtcp_mux` | UDP and TLS/SDES (SRTCP); endpoints `x101`/`x102` with `rtcp_mux = yes` | UDP; profile `rvoip_udp_rtcp_timer` (port 5069, `rtcp-audio-interval-msec=5000`) | Both legs negotiate `a=rtcp-mux`; reports flow both ways on the RTP port; rvoip's `media_quality()` has `rtt_ms` and `remote_*`; Asterisk computes an RTT from rvoip's reports, and FreeSWITCH's `RECV_RTCP_MESSAGE` events show rvoip's reports echoing its SRs on both channels |
+| `rtcp_non_mux` | UDP and TLS; endpoints `x201`/`x202` with `rtcp_mux = no`; rvoip `rtcp_non_mux = true` | — | RTCP flows both ways between the RTP + 1 ports; the same rvoip and Asterisk RTT requirements |
+| `rtcp_mux_declined` | UDP and TLS; the same `x2yy` endpoints; `rtcp_non_mux` off | — | No reports either way, and Asterisk's RTP debug sees no RTCP payload type (200-204) arrive on its RTP port (RFC 5761 §5.1.1) |
+| `session_timer` | UDP; endpoints `2301`/`2302` with `timers = yes`, `timers_sess_expires = 90` | UDP; profile `rvoip_udp_rtcp_timer` (`session-timeout` and `minimum-session-expires` 120) | rvoip offers 90 s (FreeSWITCH answers 422 Min-SE 120 and rvoip retries); rvoip refreshes the leg it originated, the PBX refreshes the leg toward rvoip, and the call outlives the RFC 4028 §10 deadline on both |
+
+The dedicated endpoints and profile leave every other cell's PBX behaviour
+unchanged. Asterisk's `xNyy` users borrow user `x0yy`'s ports and password;
+FreeSWITCH keeps its users and switches profile through
+`FREESWITCH_RTCP_TIMER_UDP_ADDR` (default: the `FREESWITCH_UDP_ADDR` host on
+port 5069). The local labs need the same additions as
+`infra/release-runners/pbx/{asterisk,freeswitch}`: the endpoints in
+`pjsip.conf`/`extensions.conf`, and the profile plus a published 5069/udp.
+
+Each cell records three rows: `caller` and `callee` (rvoip's verdict), and
+`pbx`, the PBX's own view checked by `pbx_evidence.sh`. The evidence sits in
+the cell directory:
+
+- `{caller,callee}_rtcp_evidence.json`: the peer SDP's `m=audio` and RTCP
+  lines (never the full SDP, which carries SDES keys) and the
+  `media_quality()` snapshot the verdict used.
+- `{caller,callee}_sip_trace.txt`: rvoip's SIP trace under its default
+  redaction (no Request-URIs, bodies or credentials; CSeq and the
+  session-timer headers kept) plus `SessionRefreshed` events.
+- `pbx-log.txt`: the PBX console for the cell with the relevant debugging on
+  (Asterisk `rtcp set debug`, `rtp set debug` for the declined cell,
+  `pjsip set logger` for timers; FreeSWITCH `sofia global siptrace`).
+  Digest credential headers are redacted before it is written.
+- `pbx-snapshot.txt`: `pjsip show channelstats` / `uuid_dump` taken while the
+  call is up, `pbx-rtcp-events.txt`: FreeSWITCH's `RECV_RTCP_MESSAGE` events,
+  `pbx-sip-summary.tsv`: the SIP transactions the timer verdict used.
+
+The session-timer cells hold their call past expiry, so they take about
+80 s (Asterisk) and 105 s (FreeSWITCH); the RTCP cells take 15-30 s each.
+Together they add roughly four minutes to the Asterisk gate and two to the
+FreeSWITCH gate.
 
 Each run also writes release-audit artifacts at the output root:
 
