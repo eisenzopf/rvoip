@@ -18,6 +18,18 @@
   gates it has a 45-minute budget, its own Rust cache key and a
   `specialty-rustdoc` receipt that the PR Gate reconciles; the job installs
   `libvpx-dev` because `--all-features` builds rvoip-webrtc's VP8 bindings.
+- The rvoip-sip release gates now build with the `test-hooks` feature, as
+  the PR and main lanes have since 0.4.0. The 0.4.0 RFC 4028 work gated the
+  session-timer tests and fixtures on that feature, and `test.sip-integration`
+  built without it, so in the 0.4.0 qualification it ran 0 tests in five
+  session-timer targets and 3 of 7 in a sixth (they still ran, and passed, in
+  `core.rvoip-sip`). `test.sip-unit`, `test.sip-integration`,
+  `test.sip-doctest`, `build.sip-all-targets` and `build.sip-examples` add the
+  feature, and so do the matching stages of the local `beta_gate.sh`. A new
+  release-tooling test fails when a gate selects rvoip-sip targets broadly
+  without `test-hooks`, or names a test or example whose source is gated on
+  it. The performance gates name targets that need no hooks and keep their
+  measured executables unchanged.
 
 ### Documentation
 

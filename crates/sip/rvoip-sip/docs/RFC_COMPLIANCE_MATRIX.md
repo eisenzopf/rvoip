@@ -23,8 +23,13 @@ and environment were unchanged.
 Release gates run whole test targets, not individual `T-*` tests. Every
 rvoip-sip `T-*` test below runs in the fresh `core.rvoip-sip` gate, which
 builds with the `test-hooks` feature that the second-scale session-timer
-targets need; `test.sip-integration` builds without it and compiles those
-targets out. Tests in other crates run in that crate's `core.<crate>` gate.
+targets need. In the `0.4.0` qualification `test.sip-integration` built
+without it and compiled those targets out; after `0.4.0` the rvoip-sip unit,
+integration, doctest, all-target, and example gates build with `test-hooks`
+too, so from the next release the session-timer targets are also covered by
+`test.sip-integration`. `scripts/test_release_gates.py` fails if a gate
+selects a `test-hooks`-gated target without the feature. Tests in other
+crates run in that crate's `core.<crate>` gate.
 
 ## Status and evidence rules
 
