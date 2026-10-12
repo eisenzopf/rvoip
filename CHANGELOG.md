@@ -19,6 +19,31 @@
   `specialty-rustdoc` receipt that the PR Gate reconciles; the job installs
   `libvpx-dev` because `--all-features` builds rvoip-webrtc's VP8 bindings.
 
+### Documentation
+
+- The published 0.4.0 qualification evidence is now in the repository. The
+  release, gate, and performance reports of protected run 38195041080 (PASS,
+  214/214 gates, 108/108 legacy requirements, tag `v0.4.0` at `f4d528eaa`)
+  are promoted into `crates/sip/rvoip-sip/docs/` and archived with the
+  performance evaluation under
+  `docs/releases/qualification/20261012T042041Z-38195041080`, rendered with
+  the evidence artifact's id and digest instead of `pending-upload`.
+- Documents that cited 0.3.9 or 0.3.10 evidence now cite that run: the
+  rvoip-sip README, release checklist, compatibility and RFC evidence
+  matrices, topology profiles, security posture, `docs/CARRIERS.md`, and the
+  PBX lab README. They say which 92 gates were reused from the `d89c1bc34`
+  candidate run (only the release notes changed between the two), so no
+  reused gate reads as a fresh 0.4.0 run.
+- The Jambonz OSS 0.9.14 profile, previously listed as a pending candidate, is
+  now cited as protected evidence (`interop.jambonz-matrix`, 63/63 cells).
+- New 0.4.0 behaviour appears in the matrices with its evidence: RTCP
+  multiplexing and separate-port RTCP (`RTP-5761-MUX`, `RTP-3605-NONMUX`),
+  RFC 4028 session-timer conformance (`SIP-4028-TIMER`, now covering
+  `422`/Min-SE), in-dialog Request-URIs (`SIP-3261-CORE`), OPTIONS
+  keep-alive, and the deployment profiles. Each is marked as covered by unit
+  and integration tests only: no release gate runs them against an
+  independent peer.
+
 ## 0.4.0 — 2026-10-11
 
 ### Highlights
