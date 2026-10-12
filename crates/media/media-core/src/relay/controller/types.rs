@@ -528,9 +528,32 @@ pub struct RtpSessionWrapper {
     /// replaced with silence. This maintains RTP flow for NAT traversal
     /// and prevents remote endpoint timeouts.
     pub is_muted: bool,
+    /// Where asynchronous media keying (DTLS-SRTP) stands; gates outbound
+    /// audio frames before they reach the secure-only transport.
+    pub(super) secure_keying: SecureKeyingState,
 
     #[cfg(feature = "memory-diagnostics")]
     pub memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard,
+}
+
+/// Progress of the media keys a dialog's outbound audio waits for.
+///
+/// SDES-SRTP and plain RTP never leave [`Self::Ready`]: their keys (or
+/// their absence) are settled before media starts. DTLS-SRTP latches the
+/// transport secure-only before its handshake, so outbound audio frames
+/// that arrive in between cannot be protected.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(not(feature = "dtls-srtp"), allow(dead_code))]
+pub(crate) enum SecureKeyingState {
+    /// Nothing to wait for: frames go to the transport.
+    #[default]
+    Ready,
+    /// A key-agreement handshake is in flight. Outbound audio frames are
+    /// dropped (real-time audio is stale by the time keys exist) rather
+    /// than reported as errors.
+    Pending,
+    /// Key agreement failed; this dialog can never send protected media.
+    Failed(String),
 }
 
 #[cfg(test)]

@@ -10,6 +10,8 @@
 
 #![deny(missing_docs)]
 
+use std::sync::{Arc, OnceLock};
+
 use crate::errors::{Result, SessionError};
 use rvoip_media_core::types::AudioFrame;
 use tokio::sync::mpsc;
@@ -86,21 +88,65 @@ impl AudioStream {
 ///
 /// Cheap to clone — both clones share the same underlying channel to the
 /// media layer.
+///
+/// # Before media keys exist
+///
+/// With DTLS-SRTP the call's keys come from a handshake that finishes
+/// shortly after the answer. Frames sent before then are accepted and
+/// dropped, as stale real-time audio would be; media starts flowing as soon
+/// as the keys are installed, with no action from the application.
+///
+/// # When the call can no longer send
+///
+/// If the media layer fails for good (the session's media is gone, or DTLS
+/// key agreement failed), the stream stops: a warning is logged, every later
+/// [`send`](Self::send) returns [`SessionError::MediaError`], and
+/// [`failure_reason`](Self::failure_reason) says why.
 #[derive(Clone)]
 pub struct AudioSender {
     tx: rvoip_audio_send_queue::Sender<AudioFrame>,
+    failure: AudioSendFailure,
+}
+
+/// Where the media pump behind an [`AudioSender`] records why it stopped.
+#[derive(Clone, Default)]
+pub(crate) struct AudioSendFailure(Arc<OnceLock<String>>);
+
+impl AudioSendFailure {
+    /// Record the first fatal reason; later ones are ignored.
+    pub(crate) fn record(&self, reason: String) {
+        let _ = self.0.set(reason);
+    }
+
+    fn reason(&self) -> Option<&str> {
+        self.0.get().map(String::as_str)
+    }
 }
 
 impl AudioSender {
     pub(crate) fn channel(capacity: usize) -> (Self, rvoip_audio_send_queue::Receiver<AudioFrame>) {
         let (tx, rx) = rvoip_audio_send_queue::channel(capacity);
-        (Self { tx }, rx)
+        (
+            Self {
+                tx,
+                failure: AudioSendFailure::default(),
+            },
+            rx,
+        )
+    }
+
+    /// Handle the media pump uses to report a fatal stop.
+    pub(crate) fn failure_slot(&self) -> AudioSendFailure {
+        self.failure.clone()
     }
 
     /// Send an audio frame to the remote party.
     ///
-    /// Returns `Err` if the session ended or the bounded outbound queue entered
-    /// its terminal overload state.
+    /// Returns `Err` if the session ended, the bounded outbound queue entered
+    /// its terminal overload state, or the media layer failed for good
+    /// ([`SessionError::MediaError`]; see
+    /// [`failure_reason`](Self::failure_reason)). Frames sent while
+    /// DTLS-SRTP keys are still being agreed succeed and are dropped.
     ///
     /// # Examples
     ///
@@ -113,7 +159,19 @@ impl AudioSender {
     /// ```
     pub async fn send(&self, frame: AudioFrame) -> Result<()> {
         self.try_send_generation(self.current_generation(), frame)
-            .map_err(|error| SessionError::Other(error.to_string()))
+            .map_err(|error| match (error, self.failure.reason()) {
+                (AudioSendError::Closed, Some(reason)) => {
+                    SessionError::MediaError(reason.to_string())
+                }
+                (error, _) => SessionError::Other(error.to_string()),
+            })
+    }
+
+    /// Why the media layer stopped accepting this stream's audio, once it
+    /// has failed for good; `None` while the stream is healthy or after an
+    /// ordinary close (hang-up, [`close_and_flush`](Self::close_and_flush)).
+    pub fn failure_reason(&self) -> Option<String> {
+        self.failure.reason().map(str::to_string)
     }
 
     /// Submit a frame for an exact response generation without waiting.
@@ -203,5 +261,51 @@ impl AudioReceiver {
     /// ```
     pub fn try_recv(&mut self) -> Option<AudioFrame> {
         self.rx.try_recv().ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame() -> AudioFrame {
+        AudioFrame::new(vec![0i16; 160], 8_000, 1, 0)
+    }
+
+    #[tokio::test]
+    async fn a_pump_that_fails_for_good_surfaces_its_reason_to_the_application() {
+        let (sender, receiver) = AudioSender::channel(4);
+        sender
+            .send(frame())
+            .await
+            .expect("live stream accepts audio");
+        assert_eq!(sender.failure_reason(), None);
+
+        sender
+            .failure_slot()
+            .record("the call can no longer send audio".to_string());
+        drop(receiver); // the pump exits
+        assert!(!sender.is_open());
+        match sender.send(frame()).await {
+            Err(SessionError::MediaError(reason)) => {
+                assert_eq!(reason, "the call can no longer send audio")
+            }
+            other => panic!("expected the pump's failure, got {other:?}"),
+        }
+        assert_eq!(
+            sender.failure_reason().as_deref(),
+            Some("the call can no longer send audio")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_close_is_not_reported_as_a_media_failure() {
+        let (sender, receiver) = AudioSender::channel(4);
+        drop(receiver);
+        assert!(matches!(
+            sender.send(frame()).await,
+            Err(SessionError::Other(_))
+        ));
+        assert_eq!(sender.failure_reason(), None);
     }
 }

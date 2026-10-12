@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### SIP
+
+- `SessionHandle::audio()` (and the `StreamPeer` and `Endpoint` audio built
+  on it) no longer stops sending for good when the application sends audio
+  before a DTLS-SRTP call's keys exist. Frames sent while the handshake is in
+  flight are dropped, as stale real-time audio would be, and media flows as
+  soon as the keys are installed; previously the first such frame ended the
+  stream and every later send failed with a generic closed-queue error.
+  The same gate in media-core covers `UnifiedCoordinator::send_audio` and the
+  `rvoip-core` SIP media stream. A failure that does end the stream (the
+  call's media is gone, or DTLS key agreement failed) now logs a warning and
+  makes later sends return `SessionError::MediaError`; the new
+  `AudioSender::failure_reason` says why. SDES-SRTP and plain RTP calls are
+  unchanged.
+
 ### RTP / RTCP
 
 - `Config::rtcp_non_mux` now works with DTLS-SRTP keying

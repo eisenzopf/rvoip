@@ -770,7 +770,7 @@ pub use types::{
     RTCP_SEPARATE_PORT_PARAMETER, RTCP_XR_PARAMETER,
 };
 
-use types::RtpSessionWrapper;
+use types::{RtpSessionWrapper, SecureKeyingState};
 
 #[cfg(feature = "memory-diagnostics")]
 fn spawn_memory_tracked<F>(kind: &'static str, future: F) -> tokio::task::JoinHandle<F::Output>
@@ -1785,6 +1785,7 @@ impl MediaSessionController {
             audio_transmitter: None,
             transmission_enabled: true, // Enable transmission by default
             is_muted: false,
+            secure_keying: SecureKeyingState::Ready,
             #[cfg(feature = "memory-diagnostics")]
             memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
                 "media_core.rtp_session_wrapper",
@@ -1970,7 +1971,23 @@ impl MediaSessionController {
                 )
             })?;
         udp_transport.require_secure_media();
+        // Outbound audio waits for the handshake's keys. A re-negotiation of
+        // a call that already has keys keeps sending under them.
+        let keys_installed = udp_transport.srtp_enabled().await;
+        drop(session_guard);
+        if !keys_installed {
+            self.set_secure_keying(dialog_id, SecureKeyingState::Pending);
+        }
         Ok(())
+    }
+
+    /// Record where a dialog's media keying stands for the outbound audio
+    /// gate in [`Self::encode_and_send_audio`].
+    #[cfg(feature = "dtls-srtp")]
+    fn set_secure_keying(&self, dialog_id: &DialogId, state: SecureKeyingState) {
+        if let Some(mut wrapper) = self.rtp_sessions.get_mut(dialog_id) {
+            wrapper.secure_keying = state;
+        }
     }
 
     /// Run a real DTLS-SRTP handshake (RFC 5764) for a dialog's RTP session
@@ -1986,6 +2003,42 @@ impl MediaSessionController {
     /// by SIP/SDP. It is checked before any SRTP context is installed.
     #[cfg(feature = "dtls-srtp")]
     pub async fn run_dtls_handshake_and_install(
+        &self,
+        dialog_id: &DialogId,
+        identity: rtp_core::dtls_srtp::DtlsIdentity,
+        role: DtlsRole,
+        remote_addr: std::net::SocketAddr,
+        expected_remote_fingerprint_sha256: [u8; 32],
+        srtp_profiles: Vec<rtp_core::dtls_srtp::SrtpProtectionProfile>,
+        timeout: std::time::Duration,
+    ) -> Result<rtp_core::dtls_srtp::DtlsSrtpHandshakeResult> {
+        let outcome = self
+            .run_dtls_handshake_and_install_inner(
+                dialog_id,
+                identity,
+                role,
+                remote_addr,
+                expected_remote_fingerprint_sha256,
+                srtp_profiles,
+                timeout,
+            )
+            .await;
+        // Outbound audio was waiting on this handshake: release it, or make
+        // every later send fail with the reason instead of dropping frames
+        // forever.
+        self.set_secure_keying(
+            dialog_id,
+            match &outcome {
+                Ok(_) => SecureKeyingState::Ready,
+                Err(error) => SecureKeyingState::Failed(error.to_string()),
+            },
+        );
+        outcome
+    }
+
+    #[cfg(feature = "dtls-srtp")]
+    #[allow(clippy::too_many_arguments)]
+    async fn run_dtls_handshake_and_install_inner(
         &self,
         dialog_id: &DialogId,
         identity: rtp_core::dtls_srtp::DtlsIdentity,

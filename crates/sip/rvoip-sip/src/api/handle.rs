@@ -1297,6 +1297,7 @@ impl SessionHandle {
         let send_handle = lifecycle_handle.clone();
         let mut send_cancellation = cancellation;
         let (send_tx, mut send_rx) = AudioSender::channel(AUDIO_SEND_PENDING_FRAMES);
+        let send_failure = send_tx.failure_slot();
         let mut send_generation = send_rx.generation_changes();
         tokio::spawn(async move {
             loop {
@@ -1334,8 +1335,19 @@ impl SessionHandle {
                         }
                     }
                     result = coordinator.send_audio_exact(&send_handle, frame) => {
-                        if let Err(e) = result {
-                            tracing::debug!("[SessionHandle] audio send error for {}: {}", call_id, e);
+                        // Frames sent before DTLS-SRTP keys exist come back
+                        // Ok (the media layer drops them), so an error here
+                        // is fatal for this stream. Record it before the
+                        // queue closes so the application's next send
+                        // reports it instead of a bare "closed".
+                        if let Err(error) = result {
+                            tracing::warn!(
+                                call_id = %call_id,
+                                "audio send stream stopped; the call can no longer send audio: {error}"
+                            );
+                            send_failure.record(format!(
+                                "the call can no longer send audio: {error}"
+                            ));
                             break;
                         }
                         delivery.mark_submitted();

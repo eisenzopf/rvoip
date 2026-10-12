@@ -18,7 +18,7 @@
 use bytes::Bytes;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::error::{Error, Result};
 use crate::types::{AudioFrame, DialogId, MediaDirection};
@@ -26,6 +26,7 @@ use rvoip_rtp_core::RtpSession;
 
 use super::{
     audio_generation::{AudioSource, AudioTransmitter, AudioTransmitterConfig},
+    types::SecureKeyingState,
     MediaSessionController,
 };
 
@@ -826,7 +827,7 @@ impl MediaSessionController {
         // Check if transmission is enabled and if audio is muted.
         // DashMap shard guard is held only for the synchronous bool
         // reads + dropped via the `map` closure.
-        let (is_muted, is_enabled) = self
+        let (is_muted, is_enabled, keying) = self
             .rtp_sessions
             .get(dialog_id)
             .map(|r| {
@@ -835,15 +836,34 @@ impl MediaSessionController {
                     "✅ Found RTP session for dialog: {}, muted={}, enabled={}",
                     dialog_id, w.is_muted, w.transmission_enabled
                 );
-                (w.is_muted, w.transmission_enabled)
+                (w.is_muted, w.transmission_enabled, w.secure_keying.clone())
             })
             .unwrap_or_else(|| {
                 warn!(
                     "⚠️ No RTP session found for dialog: {} - using defaults",
                     dialog_id
                 );
-                (false, true)
+                (false, true, SecureKeyingState::Ready)
             });
+
+        match keying {
+            SecureKeyingState::Ready => {}
+            SecureKeyingState::Pending => {
+                // DTLS-SRTP keys are still being agreed. The transport would
+                // refuse the packet; a real-time frame is worthless by the
+                // time keys exist, so drop it and keep the caller running.
+                trace!(
+                    "Dropping outbound audio for dialog {} until its DTLS-SRTP keys are installed",
+                    dialog_id
+                );
+                return Ok(());
+            }
+            SecureKeyingState::Failed(reason) => {
+                return Err(Error::config(format!(
+                    "media keying failed for dialog {dialog_id}; no audio can be sent: {reason}"
+                )));
+            }
+        }
 
         if !is_enabled {
             // Transmission is disabled, don't send anything
