@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Release process and CI
+
+- The PR Gate now runs the release qualification's rustdoc check (#315).
+  A new `rustdoc` specialty gate runs `RUSTDOCFLAGS=-D warnings cargo doc
+  --locked --workspace --all-features --no-deps`, the exact command of the
+  release gate `build.rustdoc`; a CI policy test fails if the two drift.
+  Before, no PR check built documentation, so a broken intra-doc link
+  passed every PR check and first failed 0.4.0 qualification (run
+  38125328677). The gate is selected when Rust sources, Cargo manifests or
+  the lockfile, the toolchain, `.cargo/` configuration, or a document pulled
+  into rustdoc with `doc = include_str!(...)` changes (the rvoip-vapi README
+  and sip-core's `builder.md` today; a policy test fails if a new include is
+  not listed). Main CI runs it unconditionally. Like the other specialty
+  gates it has a 45-minute budget, its own Rust cache key and a
+  `specialty-rustdoc` receipt that the PR Gate reconciles; the job installs
+  `libvpx-dev` because `--all-features` builds rvoip-webrtc's VP8 bindings.
+
 ## 0.4.0 — 2026-10-11
 
 ### Highlights

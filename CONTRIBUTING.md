@@ -35,6 +35,14 @@ and AMR are all optional — a specialty gate repeats the run with
 `--all-features`. If you add an optional feature that carries tests, put it
 behind a gate; otherwise the tests exist and nothing executes them.
 
+No shard builds documentation, so a `rustdoc` specialty gate runs the release
+qualification's exact `RUSTDOCFLAGS=-D warnings cargo doc --locked --workspace
+--all-features --no-deps` whenever Rust sources, Cargo manifests, the
+toolchain, or Markdown pulled into rustdoc with `doc = include_str!(...)`
+change. Main runs it unconditionally. If you include a new document into
+rustdoc, add its path to the gate's patterns in `scripts/ci/policy.json`; the
+CI policy tests fail until you do.
+
 ## Pull request expectations
 
 Complete the pull request template, including:

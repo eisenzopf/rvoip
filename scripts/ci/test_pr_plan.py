@@ -373,6 +373,64 @@ version = "2.0.0"
         self.assertEqual(plan["mode"], "full")
         self.assertIn("harness/run.sh", plan["reason"])
 
+    def repository_policy_plan(self, *paths: str):
+        policy = json.loads(SCRIPT.with_name("policy.json").read_text())
+        return pr_plan.make_plan(
+            root=self.root,
+            metadata=self.metadata,
+            policy=policy,
+            paths=list(paths),
+            base="base",
+            head="head",
+            candidate=None,
+            job_mode="combined",
+        )
+
+    def test_rust_sources_and_manifests_select_the_rustdoc_gate(self) -> None:
+        # #315: rustdoc renders every crate's Rust source under the manifest's
+        # features, so any of these can break `cargo doc -D warnings`.
+        for path in (
+            "crates/alpha/src/lib.rs",
+            "crates/alpha/src/nested/module.rs",
+            "crates/alpha/build.rs",
+            "crates/alpha/Cargo.toml",
+            "Cargo.toml",
+            "Cargo.lock",
+            "rust-toolchain.toml",
+            ".cargo/config.toml",
+            "scripts/ci/run_checks.py",
+        ):
+            with self.subTest(path=path):
+                self.assertIn("rustdoc", self.repository_policy_plan(path)["specialty_gates"])
+
+    def test_markdown_rendered_by_rustdoc_selects_the_gate_in_docs_mode(self) -> None:
+        # Crate docs pulled in with `#![doc = include_str!(...)]` are rustdoc
+        # input: a broken intra-doc link there fails the release gate. The
+        # change stays docs-only, so no crate shard runs alongside it.
+        for path in (
+            "crates/extensions/rvoip-vapi/README.md",
+            "crates/sip/sip-core/src/builder/builder.md",
+        ):
+            with self.subTest(path=path):
+                plan = self.repository_policy_plan(path)
+                self.assertEqual(plan["mode"], "docs")
+                self.assertEqual(plan["shard_jobs"], [])
+                self.assertIn("rustdoc", plan["specialty_gates"])
+
+    def test_documentation_rustdoc_never_reads_skips_the_gate(self) -> None:
+        for path in (
+            "docs/CARRIERS.md",
+            "crates/sip/rvoip-sip/docs/COMPATIBILITY_MATRIX.md",
+            "crates/alpha/README.md",
+            "CHANGELOG.md",
+            ".github/workflows/pr-gate.yml",
+            "examples/one/src/main.rs",
+        ):
+            with self.subTest(path=path):
+                self.assertNotIn(
+                    "rustdoc", self.repository_policy_plan(path)["specialty_gates"]
+                )
+
     def test_rename_records_old_and_new_paths(self) -> None:
         payload = b"R100\0crates/alpha/old.rs\0crates/beta/new.rs\0D\0crates/delta/gone.rs\0"
         self.assertEqual(

@@ -50,6 +50,22 @@ NON_PERF_SIP_FEATURES = (
 # running none of them. The feature only adds test hooks; it never changes
 # production behavior, so enabling it everywhere loses no default coverage.
 SIP_LANE_FEATURES = ["--features", "test-hooks"]
+
+# The release catalog's `build.rustdoc` gate (scripts/release/gates.json),
+# verbatim. No shard builds documentation, so before this gate a broken
+# intra-doc link passed every PR check and first failed the 0.4.0 release
+# qualification (#315). The accompanying test fails if this argv drifts from
+# the release gate's, so a PR runs exactly what qualification will run.
+RUSTDOC_COMMAND = (
+    "env",
+    "RUSTDOCFLAGS=-D warnings",
+    "cargo",
+    "doc",
+    "--locked",
+    "--workspace",
+    "--all-features",
+    "--no-deps",
+)
 SIP_SHARD_FEATURES = ["--features", "rvoip-sip/test-hooks"]
 
 
@@ -581,6 +597,8 @@ def specialty_commands(
                 None,
             ),
         ]
+    if gate == "rustdoc":
+        return [(list(RUSTDOC_COMMAND), None, None)]
     if gate == "amazon-connect-aws-control":
         return [
             (
