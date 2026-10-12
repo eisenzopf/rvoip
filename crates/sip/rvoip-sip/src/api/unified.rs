@@ -335,6 +335,18 @@ pub enum SrtpKeyingMode {
     #[default]
     Sdes,
     /// DTLS-SRTP with SDP fingerprint binding (RFC 5763/5764).
+    ///
+    /// Keys come from a DTLS handshake on the media port after the
+    /// offer/answer commits. If that handshake fails (it times out after
+    /// 10 s, the peer presents a certificate its `a=fingerprint` does not
+    /// name, or it fails otherwise), the call cannot carry secure media and
+    /// rvoip ends it: [`Event::MediaSecurityFailed`](crate::Event::MediaSecurityFailed)
+    /// first, then BYE once answered, CANCEL before an outbound call is
+    /// answered, or `488 Not Acceptable Here` before an inbound call is
+    /// answered, each with `Reason: SIP;cause=488;text="DTLS-SRTP handshake
+    /// failed"` (RFC 3326), then the usual terminal event. A failed handshake
+    /// on a separate RTCP port ([`Config::rtcp_non_mux`]) only leaves the
+    /// call without RTCP.
     DtlsSrtp,
 }
 
@@ -2074,6 +2086,14 @@ pub struct Config {
     #[doc(hidden)]
     pub session_timer_allow_short_intervals_for_testing: bool,
 
+    /// Test-only: present a certificate other than the advertised one on
+    /// the RTP component's DTLS-SRTP handshake, so the peer's
+    /// `a=fingerprint` check fails. Exists only with the `test-hooks`
+    /// feature. Default: `false`.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub dtls_present_unadvertised_rtp_certificate_for_testing: bool,
+
     /// Default Digest credentials for UAC 401/407 retry.
     ///
     /// This is the Digest shorthand. When a supported outbound request is
@@ -2469,9 +2489,21 @@ pub struct Config {
     ///   close-time BYE go from our RTCP port to the peer's `a=rtcp:`
     ///   address, or its RTP port + 1 when it names none. Reports arriving
     ///   on our RTCP port are accepted only from the call's peer, and
-    ///   SRTCP protects them whenever SDES-SRTP is in use.
+    ///   SRTCP protects them whenever SRTP is in use.
     /// - When the peer accepts mux, RTCP shares the RTP port as usual and
     ///   the RTCP port is released as soon as the negotiation commits.
+    ///
+    /// # With SRTP
+    ///
+    /// SDES-SRTP (`a=crypto`) keys both ports from the one negotiated key.
+    /// DTLS-SRTP ([`SrtpKeyingMode::DtlsSrtp`]) runs a second DTLS handshake
+    /// on the RTCP port, as RFC 5764 §4.1 requires when RTP and RTCP are not
+    /// multiplexed: same `a=setup` role, same certificate and
+    /// `a=fingerprint`, its own SRTCP keys. The two handshakes run at the
+    /// same time once the answer commits. Until the RTCP handshake finishes
+    /// the RTCP port sends nothing and drops everything it receives. If it
+    /// fails (timeout, or a certificate the SDP did not name), the call
+    /// keeps its SRTP media and simply has no RTCP; a warning is logged.
     ///
     /// Behind NAT, a peer's RTCP is learned from the source it actually
     /// arrives from (symmetric RTCP, following the symmetric-RTP policy in
@@ -2485,10 +2517,9 @@ pub struct Config {
     /// range filled with such calls holds half as many calls (size
     /// [`Config::media_port_start`]..=[`Config::media_port_end`]
     /// accordingly). Ignored, and no port reserved, when ICE is enabled
-    /// (ICE here negotiates RTP's component only), with DTLS-SRTP keying
-    /// (RFC 5764 §4.1 would need a second DTLS handshake on the RTCP port),
-    /// in strict [`Config::rtcp_mux_required`] mode, and in signalling-only
-    /// media mode.
+    /// (ICE here negotiates RTP's component only), in strict
+    /// [`Config::rtcp_mux_required`] mode, and in signalling-only media
+    /// mode.
     ///
     /// Default: `false` — RTCP flows only to peers that multiplex.
     pub rtcp_non_mux: bool,
@@ -2522,7 +2553,8 @@ pub struct Config {
     /// Select how SRTP keys are established when [`Config::offer_srtp`] is
     /// enabled. SDES remains the compatibility default. DTLS-SRTP requires
     /// the `dtls-srtp` Cargo feature and full media mode; configuration fails
-    /// closed when either requirement is missing.
+    /// closed when either requirement is missing. A call whose DTLS-SRTP
+    /// handshake fails is ended; see [`SrtpKeyingMode::DtlsSrtp`].
     pub srtp_keying: SrtpKeyingMode,
 
     /// DTLS role to advertise on outgoing offers when
@@ -3381,6 +3413,8 @@ impl Config {
             session_timer_min_se: 90,
             #[cfg(feature = "test-hooks")]
             session_timer_allow_short_intervals_for_testing: false,
+            #[cfg(feature = "test-hooks")]
+            dtls_present_unadvertised_rtp_certificate_for_testing: false,
             credentials: None,
             auth: None,
             pai_uri: None,
@@ -3514,6 +3548,8 @@ impl Config {
             session_timer_min_se: 90,
             #[cfg(feature = "test-hooks")]
             session_timer_allow_short_intervals_for_testing: false,
+            #[cfg(feature = "test-hooks")]
+            dtls_present_unadvertised_rtp_certificate_for_testing: false,
             credentials: None,
             auth: None,
             pai_uri: None,
@@ -9876,6 +9912,10 @@ impl UnifiedCoordinator {
         media_adapter_inner.set_offer_rtcp_mux(config.offer_rtcp_mux);
         media_adapter_inner.set_rtcp_mux_required(config.rtcp_mux_required);
         media_adapter_inner.set_rtcp_non_mux(config.rtcp_non_mux);
+        #[cfg(all(feature = "test-hooks", feature = "dtls-srtp"))]
+        media_adapter_inner.set_dtls_wrong_rtp_certificate_for_testing(
+            config.dtls_present_unadvertised_rtp_certificate_for_testing,
+        );
         media_adapter_inner.set_rtcp_reporting_policy(
             config.rtcp_xr_voip_metrics,
             config.rtcp_reduced_minimum_interval,
@@ -10009,6 +10049,29 @@ impl UnifiedCoordinator {
             .setup_teardown_scheduler
             .attach_session_store(&store);
         let _ = coordinator.self_weak.set(Arc::downgrade(&coordinator));
+        {
+            // A failed RTP-component DTLS handshake ends its call. The handler
+            // holds only a weak reference so it cannot keep a shut-down
+            // coordinator alive.
+            let weak = Arc::downgrade(&coordinator);
+            coordinator
+                .media_adapter
+                .set_media_security_failure_handler(Arc::new(move |handle, failure| {
+                    let Some(coordinator) = weak.upgrade() else {
+                        return;
+                    };
+                    let task_coordinator = Arc::downgrade(&coordinator);
+                    let _ = coordinator
+                        .setup_teardown_scheduler
+                        .spawn_lifecycle_task(async move {
+                            if let Some(coordinator) = task_coordinator.upgrade() {
+                                coordinator
+                                    .end_call_after_media_security_failure(handle, failure)
+                                    .await;
+                            }
+                        });
+                }));
+        }
         let mut construction_guard = CoordinatorConstructionGuard::new(Arc::clone(&coordinator));
         let setup_teardown_scheduler = Arc::clone(&coordinator.setup_teardown_scheduler);
         let setup_teardown_tasks = Arc::clone(&setup_teardown_scheduler.tasks);
@@ -10883,6 +10946,115 @@ impl UnifiedCoordinator {
 
     pub(crate) async fn hangup_exact(&self, handle: &SessionRegistryHandle) -> Result<()> {
         self.hangup_exact_with_reason(handle, "Local hangup").await
+    }
+
+    /// Publish [`Event::MediaSecurityFailed`] for a call whose RTP-component
+    /// key agreement failed, then end the call with an RFC 3326 `Reason`
+    /// naming the failure.
+    ///
+    /// The teardown follows the call's state, through the same exact
+    /// authorities as an application hangup or rejection: BYE for an
+    /// answered call (an inbound call still waiting for its ACK sends BYE
+    /// once the ACK arrives), CANCEL for an outbound call that is not
+    /// answered yet, and `488 Not Acceptable Here` for an inbound call that
+    /// is not answered yet. A call that is already being torn down is left
+    /// alone, so this never races a second teardown.
+    async fn end_call_after_media_security_failure(
+        &self,
+        handle: SessionRegistryHandle,
+        failure: crate::api::events::MediaSecurityFailure,
+    ) {
+        const REASON_TEXT: &str = "DTLS-SRTP handshake failed";
+        let store = &self.helpers.state_machine.store;
+        let Ok(snapshot) = store.get_session_snapshot_exact(&handle) else {
+            return;
+        };
+        let (role, call_state) = {
+            let state = snapshot.state();
+            (state.role, state.call_state)
+        };
+        if matches!(
+            call_state,
+            CallState::Idle
+                | CallState::CancelPending
+                | CallState::Cancelling
+                | CallState::AnsweringHangupPending
+                | CallState::Terminating
+                | CallState::Terminated
+                | CallState::Cancelled
+                | CallState::Failed(_)
+        ) {
+            return;
+        }
+
+        self.app_event_publisher.publish_exact(
+            &handle,
+            crate::api::events::Event::MediaSecurityFailed {
+                call_id: handle.session_id().clone(),
+                keying: crate::api::events::MediaSecurityKeying::DtlsSrtp,
+                reason: failure,
+            },
+        );
+        let reason_header = || {
+            rvoip_sip_core::types::TypedHeader::Reason(rvoip_sip_core::types::reason::Reason::new(
+                "SIP",
+                488,
+                Some(REASON_TEXT.to_string()),
+            ))
+        };
+
+        let unanswered_inbound =
+            role == Role::UAS && matches!(call_state, CallState::Ringing | CallState::EarlyMedia);
+        let result = if unanswered_inbound {
+            self.reject_incoming_with_extras_exact(
+                &handle,
+                488,
+                "Not Acceptable Here",
+                vec![reason_header()],
+            )
+            .await
+        } else {
+            // Stage the Reason for whichever request the hangup sends: BYE
+            // (also after a 2xx that races a CANCEL) and CANCEL.
+            let unanswered_outbound = role == Role::UAC
+                && matches!(
+                    call_state,
+                    CallState::Initiating | CallState::Ringing | CallState::EarlyMedia
+                );
+            let mut cancel_headers = self.dialog_adapter.auto_emit_extra_headers.clone();
+            cancel_headers.push(reason_header());
+            let staged = match store.state_machine_lane_exact(&handle) {
+                Some(lane) => {
+                    let _guard = lane.lock_owned().await;
+                    store
+                        .update_session_exact_now(&handle, |session| {
+                            session.pending_bye_reason =
+                                Some(("SIP".to_string(), 488, Some(REASON_TEXT.to_string())));
+                            session.local_end_reason = Some(REASON_TEXT.to_string());
+                            if unanswered_outbound && session.pending_cancel_options.is_none() {
+                                session.pending_cancel_options = Some(Arc::new(
+                                    rvoip_sip_dialog::api::unified::CancelRequestOptions {
+                                        reason: None,
+                                        extra_headers: cancel_headers,
+                                    },
+                                ));
+                            }
+                        })
+                        .is_ok()
+                }
+                None => false,
+            };
+            if !staged {
+                return;
+            }
+            self.hangup_exact_with_reason(&handle, REASON_TEXT).await
+        };
+        if let Err(error) = result {
+            tracing::warn!(
+                session = %handle.session_id().0,
+                "ending the call after a DTLS-SRTP failure did not complete: {error}"
+            );
+        }
     }
 
     /// Join the one exact hangup authority while supplying the terminal reason

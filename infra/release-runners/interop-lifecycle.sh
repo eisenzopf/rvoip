@@ -50,7 +50,8 @@ wait_freeswitch_control_plane() {
       docker exec "$container" fs_cli -p "$password" \
         -x "sofia status" 2>&1
     )" && grep -Eq 'rvoip_udp[[:space:]].*RUNNING' <<<"$sofia_status" \
-      && grep -Eq 'rvoip_tls_srtp[[:space:]].*RUNNING' <<<"$sofia_status"; then
+      && grep -Eq 'rvoip_tls_srtp[[:space:]].*RUNNING' <<<"$sofia_status" \
+      && grep -Eq 'rvoip_udp_rtcp_timer[[:space:]].*RUNNING' <<<"$sofia_status"; then
       consecutive_ready="$((consecutive_ready + 1))"
       if [[ "$consecutive_ready" -ge 2 ]]; then
         return 0
@@ -185,6 +186,9 @@ FREESWITCH_TLS_SIP_PORT=5063
 # whose two legs share no codec -- which is exactly what that row asks for.
 FREESWITCH_XCODE_UDP_ADDR=127.0.0.1:5064
 FREESWITCH_XCODE_TLS_ADDR=127.0.0.1:5065
+# RTCP-enabled, session-timer profile (rvoip_udp_rtcp_timer): run.sh points
+# the rtcp_mux and session_timer cells here (#318).
+FREESWITCH_RTCP_TIMER_UDP_ADDR=127.0.0.1:5069
 FREESWITCH_RTP_START=16384
 FREESWITCH_RTP_END=16484
 FREESWITCH_PASSWORD=1234

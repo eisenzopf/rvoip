@@ -1181,6 +1181,13 @@ const CLIENT_TRANSACTION_COMPLETION_TTL: Duration = Duration::from_secs(90);
 // returning and the caller registering its exact waiter.
 const RELIABLE_CLIENT_COMPLETION_RACE_GRACE: Duration = Duration::from_secs(1);
 const INVITE_2XX_ACKED_RESPONSE_RETENTION: Duration = Duration::from_secs(2);
+/// How long a client transaction whose stream flow closed waits before it is
+/// failed (#311). A response the peer wrote just before closing is read ahead
+/// of the close, but it travels the message lane while the close takes the
+/// prioritised control lane, so the close can be observed first. This window
+/// lets such a response reach its transaction, which then ignores the stale
+/// transport error.
+const CLOSED_FLOW_RESPONSE_SETTLE: Duration = Duration::from_millis(200);
 #[cfg(not(test))]
 const BYE_FINAL_RESPONSE_RECOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(test)]
@@ -5815,6 +5822,120 @@ impl TransactionManager {
                 .resolve_flow_id_for_route(&route)
                 .await
                 .is_none()
+    }
+
+    /// True when this live client transaction's first write completed. Its
+    /// later transport error or timeout is then the request's outcome, not a
+    /// failed send that the sender has already reported.
+    pub(crate) fn client_initial_send_succeeded(&self, transaction_id: &TransactionKey) -> bool {
+        self.client_transactions
+            .get(transaction_id)
+            .is_some_and(|transaction| transaction.value().data().initial_send_succeeded())
+    }
+
+    /// Fail every client transaction still waiting for a response on a stream
+    /// flow that has closed (#311).
+    ///
+    /// A stream response must come back on the connection that carried the
+    /// request (RFC 3261 §18.2.2), and the transaction layer accepts one only
+    /// on that exact flow (`bind_client_response_route`). A peer may open a
+    /// new connection to the Via sent-by when the original is gone, but that
+    /// is a different flow, and its response is rejected. So once the flow
+    /// closes, no final response can ever reach the transaction, and RFC 3261
+    /// §8.1.3.1 and §17.1.4 treat that as a transport error, reported to the
+    /// TU as a 503 equivalent, instead of waiting for Timer B or F (32 s) or,
+    /// for an INVITE in Proceeding, for no timer at all.
+    ///
+    /// The runner reports `TransportError` and terminates, as it does on
+    /// Timer B, and the dialog layer fails the call with a 503. The request
+    /// may have reached the peer, but its route is bound to the dead flow, so
+    /// no CANCEL or response can follow (`client_transaction_is_unreachable`);
+    /// the peer clears its own state when it cannot deliver a response.
+    ///
+    /// The candidates are collected now and failed after
+    /// [`CLOSED_FLOW_RESPONSE_SETTLE`], so a response read before the close
+    /// still wins. A transaction that has meanwhile left its pre-final states
+    /// ignores the error (see the runner's `TransportError` handling).
+    pub(crate) fn fail_client_transactions_on_closed_flow(
+        &self,
+        flow_id: rvoip_sip_transport::TransportFlowId,
+    ) {
+        let candidates: Vec<TransactionKey> = self
+            .transaction_destinations
+            .iter()
+            .filter(|entry| {
+                !entry.key().is_server()
+                    && matches!(
+                        entry.value(),
+                        ClientResponseRouteState::Active { route, .. }
+                            if route.flow_id == Some(flow_id)
+                    )
+            })
+            .map(|entry| TransactionKey::clone(entry.key()))
+            .collect();
+        if candidates.is_empty() {
+            return;
+        }
+        debug!(
+            flow = flow_id.as_u64(),
+            transactions = candidates.len(),
+            "Stream flow closed under pending client transactions"
+        );
+        let manager = self.clone();
+        tokio::spawn(async move {
+            let Some(_operation) = manager.admission_lifecycle.try_enter_existing() else {
+                return;
+            };
+            tokio::select! {
+                _ = manager.operation_cancellation.cancelled() => {}
+                _ = async {
+                    tokio::time::sleep(CLOSED_FLOW_RESPONSE_SETTLE).await;
+                    for transaction_id in candidates {
+                        manager
+                            .fail_client_transaction_on_closed_flow(&transaction_id, flow_id)
+                            .await;
+                    }
+                } => {}
+            }
+        });
+    }
+
+    async fn fail_client_transaction_on_closed_flow(
+        &self,
+        transaction_id: &TransactionKey,
+        flow_id: rvoip_sip_transport::TransportFlowId,
+    ) {
+        let Some(transaction) = self
+            .client_transactions
+            .get(transaction_id)
+            .map(|entry| entry.value().clone())
+        else {
+            return;
+        };
+        let Some(route) = self.transaction_route(transaction_id).await else {
+            return;
+        };
+        // The exact flow must still be the one carrying the request and must
+        // really be gone from the transport.
+        if route.flow_id != Some(flow_id)
+            || self
+                .transport
+                .resolve_flow_id_for_route(&route)
+                .await
+                .is_some()
+        {
+            return;
+        }
+        debug!(
+            transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id),
+            flow = flow_id.as_u64(),
+            "Failing client transaction whose stream flow closed"
+        );
+        let _ = transaction
+            .data()
+            .cmd_tx
+            .send(InternalTransactionCommand::TransportError)
+            .await;
     }
 
     /// Read one active/retired response-route record without cloning the

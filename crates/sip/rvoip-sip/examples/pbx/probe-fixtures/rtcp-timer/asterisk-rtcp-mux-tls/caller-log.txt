@@ -1,0 +1,1 @@
+2026-10-12T08:07:02.899608Z  INFO rvoip_sip::adapters::media_adapter: ✅ Generated SDP for session session-7c140ce8-0997-41de-8793-a64e0c5d1e74 with local port 16000 direction sendrecv

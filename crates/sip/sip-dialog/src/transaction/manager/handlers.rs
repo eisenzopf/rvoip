@@ -829,6 +829,12 @@ impl TransactionManager {
                 flow_id,
                 ..
             } => {
+                // No response can arrive for a client transaction whose
+                // request went out on this flow, so fail those that are still
+                // waiting for one rather than leave them to Timer B/F.
+                if let Some(flow_id) = flow_id {
+                    self.fail_client_transactions_on_closed_flow(flow_id);
+                }
                 // Connection-oriented transport lost its flow. Forward
                 // so outbound-flow monitor can emit OutboundFlowFailed
                 // and trigger re-REGISTER.

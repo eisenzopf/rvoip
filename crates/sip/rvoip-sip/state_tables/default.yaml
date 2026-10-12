@@ -556,6 +556,22 @@ transitions:
       - "CallRejected"
     description: "Reject incoming call"
 
+  # UAS rejects after early media (for example 488 when DTLS-SRTP key
+  # agreement on the early-media stream failed). A final non-2xx after a
+  # reliable 183 ends the INVITE transaction like any other rejection.
+  - role: "UAS"
+    state: "EarlyMedia"
+    event:
+      type: "RejectCall"
+    next_state: "Terminated"
+    actions:
+      - type: "SendRejectResponse"
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+    publish:
+      - "CallRejected"
+    description: "Reject incoming call after early media"
+
   # UAS redirects call — status + contacts come from the RedirectCall event
   # (RFC 3261 §8.1.3.4 / §21.3). Valid from Ringing and EarlyMedia.
   - role: "UAS"

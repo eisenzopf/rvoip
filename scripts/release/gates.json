@@ -225,7 +225,7 @@
         "rvoip-sip",
         "--all-targets",
         "--features",
-        "generated-validation,dev-insecure-tls"
+        "generated-validation,dev-insecure-tls,test-hooks"
       ],
       "dependencies": [
         "source.clean-start"
@@ -686,7 +686,9 @@
         "--locked",
         "-p",
         "rvoip-sip",
-        "--lib"
+        "--lib",
+        "--features",
+        "test-hooks"
       ],
       "dependencies": [
         "source.clean-start"
@@ -730,7 +732,7 @@
         "rvoip-sip",
         "--tests",
         "--features",
-        "generated-validation,dev-insecure-tls"
+        "generated-validation,dev-insecure-tls,test-hooks"
       ],
       "dependencies": [
         "source.clean-start"
@@ -772,7 +774,9 @@
         "--locked",
         "-p",
         "rvoip-sip",
-        "--doc"
+        "--doc",
+        "--features",
+        "test-hooks"
       ],
       "dependencies": [
         "source.clean-start"
@@ -816,7 +820,7 @@
         "rvoip-sip",
         "--examples",
         "--features",
-        "dev-insecure-tls"
+        "dev-insecure-tls,test-hooks"
       ],
       "dependencies": [
         "source.clean-start"

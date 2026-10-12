@@ -609,6 +609,28 @@ pub async fn run_transaction_loop<D, TH, L>(
                     }
                 }
                 InternalTransactionCommand::TransportError => {
+                    // A client transaction is failed this way when the stream
+                    // flow carrying its request closes (RFC 3261 §17.1.4).
+                    // Commands are processed in order, so a final response
+                    // the runner handled first has already moved it out of
+                    // its pre-final states: the response is the outcome and
+                    // the transport error is stale.
+                    let client = matches!(
+                        logic.kind(),
+                        crate::transaction::TransactionKind::InviteClient
+                            | crate::transaction::TransactionKind::NonInviteClient
+                    );
+                    if client
+                        && (!matches!(
+                            current_state,
+                            TransactionState::Calling
+                                | TransactionState::Trying
+                                | TransactionState::Proceeding
+                        ) || data.as_ref_state().is_accepting())
+                    {
+                        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), state=?current_state, "Ignoring transport error for a client transaction that already has its outcome");
+                        continue;
+                    }
                     let retain_invite_server = logic.kind()
                         == crate::transaction::TransactionKind::InviteServer
                         && (matches!(

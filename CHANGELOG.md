@@ -2,6 +2,148 @@
 
 ## Unreleased
 
+### SIP
+
+- A TLS or TCP connection that closes after an INVITE was written now fails
+  the call in about 200 ms (#311). Before, the INVITE transaction waited for
+  Timer B (32 s), or, after a provisional response, ran no timer at all, and
+  the call failed only when the 120 s setup watchdog fired. This happens, for
+  example, when a TLS 1.3 server rejects the client certificate with a
+  `certificate_required` alert just after the handshake and the INVITE write
+  wins the race. A stream response must come back on the connection that
+  carried the request, and rvoip accepts it only on that exact flow, so once
+  the flow closes no response can arrive. The transaction layer now fails
+  every client transaction still waiting on that flow with a transport error
+  (RFC 3261 §17.1.4). It waits 200 ms first, so a response the peer wrote
+  just before closing is still reported. No CANCEL is sent, because none can
+  reach the peer; the peer clears its own state when it cannot respond.
+- A written initial INVITE that ends without a final response now fails the
+  call at once, as RFC 3261 §8.1.3.1 requires: `Event::CallFailed` carries 503
+  for a transport error and 408 for Timer B. Before, the session layer
+  ignored both and waited for the 120 s setup watchdog. An INVITE whose first
+  write failed is unchanged: `send()` still returns that error.
+- A final 3xx–6xx response is no longer lost when its ACK cannot be written.
+  A peer that answered 486 and closed the connection at once used to have its
+  response replaced by a transport error; the response is now reported.
+
+- A call whose DTLS-SRTP handshake on the media (RTP) port fails is now
+  ended instead of staying up with no media. rvoip publishes the new
+  `Event::MediaSecurityFailed { call_id, keying, reason }`, where `reason` is
+  a bounded `MediaSecurityFailure` (`HandshakeTimeout`, `FingerprintMismatch`
+  or `HandshakeError`), then sends BYE for an answered call, CANCEL for an
+  unanswered outbound call, or `488 Not Acceptable Here` for an unanswered
+  inbound call (a UAS in early media can now be rejected), each carrying
+  `Reason: SIP;cause=488;text="DTLS-SRTP handshake failed"` (RFC 3326). The
+  usual `CallEnded`, `CallCancelled` or `CallFailed` follows; `CallEnded`
+  carries the reason `DTLS-SRTP handshake failed`. Through `rvoip-core` the
+  connection ends with `EndReason::Failed` and detail
+  `media-security-failed: <class>`. A failed handshake on a separate RTCP
+  port still only leaves the call without RTCP.
+- `SessionHandle::audio()` (and the `StreamPeer` and `Endpoint` audio built
+  on it) no longer stops sending for good when the application sends audio
+  before a DTLS-SRTP call's keys exist. Frames sent while the handshake is in
+  flight are dropped, as stale real-time audio would be, and media flows as
+  soon as the keys are installed; previously the first such frame ended the
+  stream and every later send failed with a generic closed-queue error.
+  The same gate in media-core covers `UnifiedCoordinator::send_audio` and the
+  `rvoip-core` SIP media stream. A failure that does end the stream (the
+  call's media is gone, or DTLS key agreement failed) now logs a warning and
+  makes later sends return `SessionError::MediaError`; the new
+  `AudioSender::failure_reason` says why. SDES-SRTP and plain RTP calls are
+  unchanged.
+
+### Release process and CI
+
+- The PR Gate now runs the release qualification's rustdoc check (#315).
+  A new `rustdoc` specialty gate runs `RUSTDOCFLAGS=-D warnings cargo doc
+  --locked --workspace --all-features --no-deps`, the exact command of the
+  release gate `build.rustdoc`; a CI policy test fails if the two drift.
+  Before, no PR check built documentation, so a broken intra-doc link
+  passed every PR check and first failed 0.4.0 qualification (run
+  38125328677). The gate is selected when Rust sources, Cargo manifests or
+  the lockfile, the toolchain, `.cargo/` configuration, or a document pulled
+  into rustdoc with `doc = include_str!(...)` changes (the rvoip-vapi README
+  and sip-core's `builder.md` today; a policy test fails if a new include is
+  not listed). Main CI runs it unconditionally. Like the other specialty
+  gates it has a 45-minute budget, its own Rust cache key and a
+  `specialty-rustdoc` receipt that the PR Gate reconciles; the job installs
+  `libvpx-dev` because `--all-features` builds rvoip-webrtc's VP8 bindings.
+- The rvoip-sip release gates now build with the `test-hooks` feature, as
+  the PR and main lanes have since 0.4.0. The 0.4.0 RFC 4028 work gated the
+  session-timer tests and fixtures on that feature, and `test.sip-integration`
+  built without it, so in the 0.4.0 qualification it ran 0 tests in five
+  session-timer targets and 3 of 7 in a sixth (they still ran, and passed, in
+  `core.rvoip-sip`). `test.sip-unit`, `test.sip-integration`,
+  `test.sip-doctest`, `build.sip-all-targets` and `build.sip-examples` add the
+  feature, and so do the matching stages of the local `beta_gate.sh`. A new
+  release-tooling test fails when a gate selects rvoip-sip targets broadly
+  without `test-hooks`, or names a test or example whose source is gated on
+  it. The performance gates name targets that need no hooks and keep their
+  measured executables unchanged.
+- The Asterisk and FreeSWITCH PBX release gates now check 0.4.0's RTCP and
+  RFC 4028 wire behaviour against the real PBXes (#318). Four new
+  `examples/pbx` scenarios run in both matrices through the `Endpoint` API:
+  `rtcp_mux` (Asterisk UDP and SDES-SRTP, FreeSWITCH UDP), `rtcp_non_mux` and
+  `rtcp_mux_declined` (Asterisk UDP and SDES-SRTP) and `session_timer`
+  (both PBXes, UDP). Each cell requires reports both ways with `rtt_ms` and
+  `remote_*` from `media_quality()`, or no RTCP at all for the declined
+  case, and for timers a refresh in both directions plus FreeSWITCH's
+  `422`/Min-SE retry. Each cell also records a `pbx` row with the PBX's own
+  verdict from its debug output, checked by `examples/pbx/pbx_evidence.sh`.
+  A `--scenario all` run, which is what both gates execute, now fails unless
+  every one of these cells recorded a passing PBX verdict. The PBX
+  configuration is additive: Asterisk gets dedicated `rtcp_mux`/`timers`
+  endpoints (x1yy, x2yy, 2301-2302) and FreeSWITCH a `rvoip_udp_rtcp_timer`
+  profile on port 5069, so existing rows are unchanged. The cells add about
+  four minutes to the Asterisk gate and two to the FreeSWITCH gate. The
+  compatibility and RFC matrices list them as release-gated with protected
+  evidence pending the first qualification run.
+
+### Documentation
+
+- The published 0.4.0 qualification evidence is now in the repository. The
+  release, gate, and performance reports of protected run 38195041080 (PASS,
+  214/214 gates, 108/108 legacy requirements, tag `v0.4.0` at `f4d528eaa`)
+  are promoted into `crates/sip/rvoip-sip/docs/` and archived with the
+  performance evaluation under
+  `docs/releases/qualification/20261012T042041Z-38195041080`, rendered with
+  the evidence artifact's id and digest instead of `pending-upload`.
+- Documents that cited 0.3.9 or 0.3.10 evidence now cite that run: the
+  rvoip-sip README, release checklist, compatibility and RFC evidence
+  matrices, topology profiles, security posture, `docs/CARRIERS.md`, and the
+  PBX lab README. They say which 92 gates were reused from the `d89c1bc34`
+  candidate run (only the release notes changed between the two), so no
+  reused gate reads as a fresh 0.4.0 run.
+- The Jambonz OSS 0.9.14 profile, previously listed as a pending candidate, is
+  now cited as protected evidence (`interop.jambonz-matrix`, 63/63 cells).
+- New 0.4.0 behaviour appears in the matrices with its evidence: RTCP
+  multiplexing and separate-port RTCP (`RTP-5761-MUX`, `RTP-3605-NONMUX`),
+  RFC 4028 session-timer conformance (`SIP-4028-TIMER`, now covering
+  `422`/Min-SE), in-dialog Request-URIs (`SIP-3261-CORE`), OPTIONS
+  keep-alive, and the deployment profiles. Each is marked as covered by unit
+  and integration tests only: no 0.4.0 release gate ran them against an
+  independent peer. From 0.4.1 the PBX release gates do (see Release
+  process and CI); their protected evidence is pending.
+
+### RTP / RTCP
+
+- `Config::rtcp_non_mux` now works with DTLS-SRTP keying
+  (`SrtpKeyingMode::DtlsSrtp`). When the peer declines `a=rtcp-mux`, the RTCP
+  port runs its own DTLS handshake, as RFC 5764 §4.1 requires, concurrently
+  with the RTP one: same `a=setup` role, same certificate and
+  `a=fingerprint`, and SRTCP on that port uses that handshake's keys. The
+  RTCP port sends nothing and drops everything until its keys are installed.
+  Behind NAT the RTCP handshake answers the port it arrives from on the RTP
+  peer's IP, under the symmetric-RTP policy. A failed RTCP handshake leaves
+  the call's SRTP media working without RTCP and logs a warning. Previously
+  such calls reserved no RTCP port and carried no RTCP.
+- rtp-core: `UdpRtpTransport::require_rtcp_component_keying`,
+  `install_rtcp_component_srtp_contexts`, `rtcp_component_keying_required`,
+  `rtcp_component_srtp_enabled` and (`dtls-webrtc`) `dtls_rtcp_conn_adapter`;
+  `DtlsIdentity` is now `Clone`. media-core (`dtls-srtp`):
+  `MediaSessionController::require_rtcp_component_keying` and
+  `run_rtcp_dtls_handshake_and_install`.
+
 ## 0.4.0 — 2026-10-11
 
 ### Highlights
@@ -1382,7 +1524,6 @@ and protected release evidence. It incorporates the previously unpublished
   A far-future `ts` produced a negative age, passed the `age > ttl` test,
   and stayed valid for as long as the sender chose. `DEFAULT_SIG_CLOCK_SKEW`
   (30 s) is the tolerated drift; `with_ttl_and_skew` makes it explicit.
-
 
 ## 0.3.8 — 2026-08-14
 
