@@ -638,7 +638,7 @@ async fn rtcp_role(
             .join(format!("{}_rtcp_evidence.json", role_label(role))),
         serde_json::to_string_pretty(&evidence).unwrap_or_default(),
     );
-    println!("[{}] RTCP evidence: {}", cfg.username, evidence);
+    println!("[{}] RTCP evidence: {}", role_label(role), evidence);
     write_done(cfg, role, &verdict);
 
     let outcome = match role {
@@ -823,7 +823,7 @@ async fn session_timer_role(
 
     let verdict = match verdict {
         Ok(summary) => {
-            println!("[{}] session timer: PASS {summary}", cfg.username);
+            println!("[{}] session timer: PASS {summary}", role_label(role));
             Ok(())
         }
         Err(error) => Err(error),

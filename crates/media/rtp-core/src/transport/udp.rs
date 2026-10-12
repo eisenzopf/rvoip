@@ -3105,10 +3105,20 @@ mod tests {
     /// `seed`, so two pairs with different seeds cannot open each other.
     fn make_seeded_srtp_ctx_pair(seed: u8) -> (crate::srtp::SrtpContext, crate::srtp::SrtpContext) {
         use crate::srtp::{SrtpCryptoKey, SRTP_AES128_CM_SHA1_80};
+        // Keys are derived from `seed` and a per-process random salt: equal
+        // seeds still yield matching contexts within a run, and no key
+        // material is a literal.
+        static SALT: std::sync::OnceLock<[u8; 30]> = std::sync::OnceLock::new();
+        let salt = SALT.get_or_init(rand::random);
+        let key: Vec<u8> = salt[..16].iter().map(|byte| byte ^ seed).collect();
+        let master_salt: Vec<u8> = salt[16..]
+            .iter()
+            .map(|byte| byte ^ seed.wrapping_add(1))
+            .collect();
         let ctx = || {
             crate::srtp::SrtpContext::new(
                 SRTP_AES128_CM_SHA1_80,
-                SrtpCryptoKey::new(vec![seed; 16], vec![seed.wrapping_add(1); 14]),
+                SrtpCryptoKey::new(key.clone(), master_salt.clone()),
             )
             .unwrap()
         };

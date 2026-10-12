@@ -3417,7 +3417,7 @@ impl MediaAdapter {
 
     /// Present a certificate other than the advertised one on the RTP
     /// component's DTLS handshake, so the peer's fingerprint check fails.
-    #[cfg(all(feature = "dtls-srtp", any(test, feature = "test-hooks")))]
+    #[cfg(all(feature = "dtls-srtp", feature = "test-hooks"))]
     pub(crate) fn set_dtls_wrong_rtp_certificate_for_testing(&mut self, enabled: bool) {
         self.dtls_wrong_rtp_certificate_for_testing = enabled;
     }
