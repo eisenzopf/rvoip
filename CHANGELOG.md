@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### SIP
+
+- A TLS or TCP connection that closes after an INVITE was written now fails
+  the call in about 200 ms (#311). Before, the INVITE transaction waited for
+  Timer B (32 s), or, after a provisional response, ran no timer at all, and
+  the call failed only when the 120 s setup watchdog fired. This happens, for
+  example, when a TLS 1.3 server rejects the client certificate with a
+  `certificate_required` alert just after the handshake and the INVITE write
+  wins the race. A stream response must come back on the connection that
+  carried the request, and rvoip accepts it only on that exact flow, so once
+  the flow closes no response can arrive. The transaction layer now fails
+  every client transaction still waiting on that flow with a transport error
+  (RFC 3261 §17.1.4). It waits 200 ms first, so a response the peer wrote
+  just before closing is still reported. No CANCEL is sent, because none can
+  reach the peer; the peer clears its own state when it cannot respond.
+- A written initial INVITE that ends without a final response now fails the
+  call at once, as RFC 3261 §8.1.3.1 requires: `Event::CallFailed` carries 503
+  for a transport error and 408 for Timer B. Before, the session layer
+  ignored both and waited for the 120 s setup watchdog. An INVITE whose first
+  write failed is unchanged: `send()` still returns that error.
+- A final 3xx–6xx response is no longer lost when its ACK cannot be written.
+  A peer that answered 486 and closed the connection at once used to have its
+  response replaced by a transport error; the response is now reported.
+
 ## 0.4.0 — 2026-10-11
 
 ### Highlights

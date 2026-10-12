@@ -3908,6 +3908,22 @@ impl DialogManager {
         dialog_id: DialogId,
         transaction_id: TransactionKey,
     ) {
+        self.emit_invite_failure(
+            dialog_id,
+            transaction_id,
+            500,
+            "Local transaction processing failed",
+        )
+        .await;
+    }
+
+    async fn emit_invite_failure(
+        &self,
+        dialog_id: DialogId,
+        transaction_id: TransactionKey,
+        status_code: u16,
+        reason_phrase: &str,
+    ) {
         if self.get_session_id(&dialog_id).is_none() {
             return;
         }
@@ -3915,17 +3931,50 @@ impl DialogManager {
             .notify_session_layer(SessionCoordinationEvent::RequestFailed {
                 dialog_id: Some(dialog_id),
                 transaction_id,
-                status_code: 500,
-                reason_phrase: "Local transaction processing failed".to_string(),
+                status_code,
+                reason_phrase: reason_phrase.to_string(),
                 method: Method::Invite.to_string(),
             })
             .await
         {
             warn!(
                 error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&error),
-                "Failed to deliver exact initial-INVITE internal failure"
+                status_code,
+                "Failed to deliver exact initial-INVITE failure"
             );
         }
+    }
+
+    /// Report a written INVITE that ended without a final response.
+    ///
+    /// RFC 3261 §8.1.3.1: a transaction timeout (Timer B) is treated as a 408
+    /// and a transport error as a 503 received by the TU. Without this the
+    /// call learned of either only from the session layer's setup watchdog.
+    /// An INVITE whose first write failed is skipped: its sender has already
+    /// returned the error to the caller, which owns that rollback.
+    async fn emit_unanswered_invite_failure(
+        &self,
+        dialog_id: DialogId,
+        transaction_id: &TransactionKey,
+        outcome: InviteFailoverAttemptOutcome,
+    ) {
+        if !self
+            .transaction_manager
+            .client_initial_send_succeeded(transaction_id)
+        {
+            return;
+        }
+        let (status_code, reason_phrase) = match outcome {
+            InviteFailoverAttemptOutcome::TransactionTimeout => (408, "Request Timeout"),
+            _ => (503, "Service Unavailable (transport failure)"),
+        };
+        self.emit_invite_failure(
+            dialog_id,
+            transaction_id.clone(),
+            status_code,
+            reason_phrase,
+        )
+        .await;
     }
 
     fn close_active_invite_failover_plan(
@@ -4595,6 +4644,21 @@ impl DialogManager {
                     {
                         InviteFailoverEventDisposition::Consumed
                     } else {
+                        // The replacement could not be dispatched and closed
+                        // the plan: this attempt's outcome ends the call.
+                        let terminal_dialog = {
+                            let plan = plan_arc.lock().await;
+                            matches!(
+                                plan.phase,
+                                InviteFailoverPlanPhase::Closed
+                                    | InviteFailoverPlanPhase::Exhausted
+                            )
+                            .then(|| plan.dialog_id.clone())
+                        };
+                        if let Some(dialog_id) = terminal_dialog {
+                            self.emit_unanswered_invite_failure(dialog_id, transaction_id, outcome)
+                                .await;
+                        }
                         InviteFailoverEventDisposition::Continue
                     }
                 } else {
@@ -4603,6 +4667,10 @@ impl DialogManager {
                         &mut plan,
                         InviteFailoverPlanPhase::Closed,
                     );
+                    let dialog_id = plan.dialog_id.clone();
+                    drop(plan);
+                    self.emit_unanswered_invite_failure(dialog_id, transaction_id, outcome)
+                        .await;
                     InviteFailoverEventDisposition::Continue
                 }
             }

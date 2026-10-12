@@ -484,13 +484,14 @@ impl ClientInviteLogic {
         let request_guard: &Request = &data.request;
         match utils::create_ack_from_invite(&request_guard, response) {
             Ok(ack) => {
-                // Send the ACK request
+                // Send the ACK request. The final response it acknowledges
+                // has already been received and remains the transaction's
+                // outcome, so a failed ACK write must not replace it with a
+                // transport error. This happens when a stream peer answers
+                // and closes its connection at once (#311): no ACK can reach
+                // it, and its INVITE server transaction ends on Timer H.
                 if let Err(e) = data.send_on_request_route(Message::Request(ack)).await {
-                    error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send ACK");
-                    data.completion
-                        .record_failure(crate::transaction::ClientTransactionFailure::Transport);
-                    common_logic::send_transport_error_event(tx_id, &data.events_tx).await;
-                    return Err(Error::transport_error(e, "Failed to send ACK"));
+                    warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send ACK for a final response; reporting the response");
                 }
                 Ok(())
             }

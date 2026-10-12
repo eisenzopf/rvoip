@@ -8011,6 +8011,79 @@ mod outbound_flow_handler_tests {
         );
     }
 
+    /// RFC 3261 §8.1.3.1: a written INVITE that ends on Timer B is a 408 and
+    /// one whose transport failed (for example its stream flow closed, #311)
+    /// is a 503. Both reach the session layer as the call's failure instead
+    /// of leaving it to the setup watchdog.
+    #[tokio::test]
+    async fn unanswered_written_invite_reports_408_or_503_to_the_session() {
+        use crate::manager::transaction_integration::CandidateWirePlan;
+
+        for (index, (event_is_timeout, expected)) in
+            [(true, 408u16), (false, 503u16)].into_iter().enumerate()
+        {
+            let (manager, mut session_rx) = make_manager().await;
+            let dialog_id = DialogId::new();
+            manager
+                .dialog_to_session
+                .insert(dialog_id.clone(), format!("session-unanswered-{index}"));
+            let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+                .unwrap()
+                .from("Alice", "sip:alice@example.com", Some("alice-unanswered"))
+                .to("Bob", "sip:bob@example.com", None)
+                .contact("sip:alice@127.0.0.1:5060", None)
+                .call_id(&format!("unanswered-written-invite-{index}"))
+                .cseq(1)
+                .via(
+                    "127.0.0.1:5060",
+                    "UDP",
+                    Some(&format!("z9hG4bK-unanswered-{index}")),
+                )
+                .max_forwards(70)
+                .build();
+            let (transaction, _) = manager
+                .send_request_with_candidate_wire_plan(
+                    request,
+                    vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                        dest_addr(5104),
+                        rvoip_sip_transport::transport::TransportType::Udp,
+                    )],
+                    Some(&dialog_id),
+                    CandidateWirePlan::default(),
+                )
+                .await
+                .expect("initial INVITE written");
+            let event = if event_is_timeout {
+                TransactionEvent::TransactionTimeout {
+                    transaction_id: transaction.clone(),
+                }
+            } else {
+                TransactionEvent::TransportError {
+                    transaction_id: transaction.clone(),
+                }
+            };
+            manager.process_global_transaction_event(event).await;
+
+            let failure = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    match session_rx.recv().await {
+                        Some(SessionCoordinationEvent::RequestFailed {
+                            dialog_id: Some(failed_dialog),
+                            status_code,
+                            method,
+                            ..
+                        }) if failed_dialog == dialog_id => return (status_code, method),
+                        Some(_) => {}
+                        None => panic!("session coordination closed"),
+                    }
+                }
+            })
+            .await
+            .expect("the unanswered INVITE fails the call");
+            assert_eq!(failure, (expected, "INVITE".to_string()));
+        }
+    }
+
     #[tokio::test]
     async fn cancel_and_timer_b_serialize_on_one_exact_current_attempt() {
         use crate::manager::transaction_integration::{CandidateWirePlan, InviteFailoverPlanPhase};

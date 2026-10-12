@@ -583,6 +583,95 @@ mod tests {
         }
     }
 
+    /// Stream transport that binds every request to one flow, which the test
+    /// can close. Once closed, the flow no longer resolves, as with a real
+    /// TCP/TLS transport that has evicted the connection.
+    #[derive(Debug, Clone)]
+    struct ClosableFlowMockTransport {
+        local_addr: SocketAddr,
+        flow: TransportFlowId,
+        closed: Arc<AtomicBool>,
+    }
+
+    impl ClosableFlowMockTransport {
+        fn new(flow: TransportFlowId) -> Self {
+            Self {
+                local_addr: "127.0.0.1:5060".parse().unwrap(),
+                flow,
+                closed: Arc::new(AtomicBool::new(false)),
+            }
+        }
+
+        fn close_flow(&self) -> TransportEvent {
+            self.closed.store(true, Ordering::SeqCst);
+            TransportEvent::ConnectionClosed {
+                remote_addr: "192.0.2.61:5060".parse().unwrap(),
+                transport_type: TransportType::Tcp,
+                flow_id: Some(self.flow),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for ClosableFlowMockTransport {
+        fn local_addr(&self) -> std::result::Result<SocketAddr, rvoip_sip_transport::Error> {
+            Ok(self.local_addr)
+        }
+
+        async fn send_message(
+            &self,
+            _message: Message,
+            _destination: SocketAddr,
+        ) -> std::result::Result<(), rvoip_sip_transport::Error> {
+            Err(rvoip_sip_transport::Error::InvalidState(
+                "stream sends require the bound flow".into(),
+            ))
+        }
+
+        async fn send_message_via(
+            &self,
+            _message: Message,
+            route: TransportRoute,
+        ) -> std::result::Result<(), rvoip_sip_transport::Error> {
+            if route.flow_id != Some(self.flow) || self.closed.load(Ordering::SeqCst) {
+                return Err(rvoip_sip_transport::Error::TransportClosed);
+            }
+            Ok(())
+        }
+
+        async fn prepare_message_route(
+            &self,
+            _message: &Message,
+            mut route: TransportRoute,
+        ) -> std::result::Result<TransportRoute, rvoip_sip_transport::Error> {
+            if self.closed.load(Ordering::SeqCst) {
+                return Err(rvoip_sip_transport::Error::TransportClosed);
+            }
+            route.flow_id = Some(self.flow);
+            Ok(route)
+        }
+
+        async fn resolve_flow_id_for_route(
+            &self,
+            route: &TransportRoute,
+        ) -> Option<TransportFlowId> {
+            (route.flow_id == Some(self.flow) && !self.closed.load(Ordering::SeqCst))
+                .then_some(self.flow)
+        }
+
+        async fn close(&self) -> std::result::Result<(), rvoip_sip_transport::Error> {
+            Ok(())
+        }
+
+        fn is_closed(&self) -> bool {
+            false
+        }
+
+        fn supports_tcp(&self) -> bool {
+            true
+        }
+    }
+
     /// Helper to create a simple INVITE request for testing
     fn create_test_invite() -> std::result::Result<Request, Box<dyn std::error::Error>> {
         let builder = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")?;
@@ -4447,6 +4536,168 @@ mod tests {
             "response authentication observed a transient unknown route"
         );
 
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    /// Sends one INVITE over a closable stream flow and drains its setup events.
+    async fn invite_on_closable_flow(
+        call_id: &str,
+    ) -> Result<(
+        Arc<ClosableFlowMockTransport>,
+        TransactionManager,
+        mpsc::Receiver<TransactionEvent>,
+        TransactionKey,
+        Request,
+    )> {
+        let (flow, _other) = two_live_tcp_flow_ids().await;
+        let transport = Arc::new(ClosableFlowMockTransport::new(flow));
+        let (_transport_tx, transport_rx) = mpsc::channel(16);
+        let (manager, mut events) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(16)).await?;
+        let request =
+            create_test_invite_with_identity(call_id, &format!("z9hG4bK.{call_id}"), "TCP")
+                .map_err(|error| Error::Other(error.to_string()))?;
+        let transaction = manager
+            .create_client_transaction_on_route(
+                request.clone(),
+                TransportRoute::new("192.0.2.61:5060".parse().unwrap())
+                    .with_transport_type(TransportType::Tcp),
+            )
+            .await?;
+        manager.send_request(&transaction).await?;
+        while events.try_recv().is_ok() {}
+        Ok((transport, manager, events, transaction, request))
+    }
+
+    /// Collects the exact transaction's outcome events for `window`.
+    async fn transaction_outcomes(
+        events: &mut mpsc::Receiver<TransactionEvent>,
+        transaction: &TransactionKey,
+        window: Duration,
+    ) -> Vec<&'static str> {
+        let mut outcomes = Vec::new();
+        let deadline = tokio::time::Instant::now() + window;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return outcomes;
+            }
+            match tokio::time::timeout(remaining, events.recv()).await {
+                Ok(Some(TransactionEvent::TransportError { transaction_id }))
+                    if &transaction_id == transaction =>
+                {
+                    outcomes.push("transport-error")
+                }
+                Ok(Some(TransactionEvent::TransactionTimeout { transaction_id }))
+                    if &transaction_id == transaction =>
+                {
+                    outcomes.push("timeout")
+                }
+                Ok(Some(TransactionEvent::FailureResponse { transaction_id, .. }))
+                    if &transaction_id == transaction =>
+                {
+                    outcomes.push("failure-response")
+                }
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => return outcomes,
+            }
+        }
+    }
+
+    /// #311: once the stream flow carrying an INVITE closes, no response can
+    /// reach it, so the transaction reports a transport error promptly rather
+    /// than waiting for Timer B.
+    #[tokio::test]
+    async fn closed_stream_flow_fails_its_pending_invite_promptly() -> Result<()> {
+        let (transport, manager, mut events, transaction, _request) =
+            invite_on_closable_flow("closed-flow-invite").await?;
+
+        let closed_at = Instant::now();
+        manager
+            .handle_transport_event(transport.close_flow())
+            .await?;
+        let outcomes =
+            transaction_outcomes(&mut events, &transaction, Duration::from_secs(1)).await;
+        assert_eq!(outcomes, vec!["transport-error"]);
+        assert!(
+            closed_at.elapsed() >= super::super::CLOSED_FLOW_RESPONSE_SETTLE,
+            "the close must leave queued responses time to arrive first"
+        );
+        assert!(
+            manager
+                .client_transaction_is_unreachable(&transaction)
+                .await
+        );
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    /// The close can be observed before a response the peer wrote just ahead
+    /// of it, because the close takes the control lane. That response is the
+    /// outcome; the transport error must not replace it.
+    #[tokio::test]
+    async fn response_queued_behind_a_flow_close_still_wins() -> Result<()> {
+        let (transport, manager, mut events, transaction, request) =
+            invite_on_closable_flow("closed-flow-busy").await?;
+
+        let close = transport.close_flow();
+        manager.handle_transport_event(close).await?;
+        let busy = rvoip_sip_core::builder::SimpleResponseBuilder::response_from_request(
+            &request,
+            StatusCode::BusyHere,
+            Some("Busy Here"),
+        )
+        .to("Bob", "sip:bob@example.com", Some("busy-tag"))
+        .build();
+        manager
+            .handle_transport_event(dispatch_stream_event_from(
+                Message::Response(busy),
+                "192.0.2.61:5060".parse().unwrap(),
+                transport.flow,
+            ))
+            .await?;
+        let outcomes = transaction_outcomes(
+            &mut events,
+            &transaction,
+            super::super::CLOSED_FLOW_RESPONSE_SETTLE + Duration::from_millis(300),
+        )
+        .await;
+        assert_eq!(outcomes.first(), Some(&"failure-response"));
+        assert!(
+            !outcomes.contains(&"transport-error"),
+            "a stale close replaced the peer's final response: {outcomes:?}"
+        );
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    /// A close on some other flow leaves the INVITE alone.
+    #[tokio::test]
+    async fn closing_an_unrelated_flow_leaves_the_invite_pending() -> Result<()> {
+        let (transport, manager, mut events, transaction, _request) =
+            invite_on_closable_flow("unrelated-flow-close").await?;
+        let (other_flow, _) = two_live_tcp_flow_ids().await;
+        manager
+            .handle_transport_event(TransportEvent::ConnectionClosed {
+                remote_addr: "192.0.2.62:5060".parse().unwrap(),
+                transport_type: TransportType::Tcp,
+                flow_id: Some(other_flow),
+            })
+            .await?;
+        let outcomes = transaction_outcomes(
+            &mut events,
+            &transaction,
+            super::super::CLOSED_FLOW_RESPONSE_SETTLE + Duration::from_millis(300),
+        )
+        .await;
+        assert!(outcomes.is_empty(), "unexpected outcome {outcomes:?}");
+        assert!(
+            !manager
+                .client_transaction_is_unreachable(&transaction)
+                .await
+        );
+        drop(transport);
         manager.shutdown().await;
         Ok(())
     }

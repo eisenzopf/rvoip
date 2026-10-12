@@ -328,9 +328,10 @@ async fn unauthenticated_invites_fail_fast_and_release_their_sessions() {
         server_tls.port()
     );
 
-    // A write that won the race leaves a live call, which fails later on its
-    // own INVITE timer. A send that returned an error must already have
-    // released its session.
+    // A write that won the race leaves a live call. The server's alert then
+    // closes the connection, which fails that call's INVITE at once (#311)
+    // rather than on Timer B (32 s). A send that returned an error must
+    // already have released its session.
     let mut live_calls = HashSet::new();
     for attempt in 0..ATTEMPTS {
         let send = anonymous.invite(target.clone()).send();
@@ -350,6 +351,28 @@ async fn unauthenticated_invites_fail_fast_and_release_their_sessions() {
         .filter(|session| !live_calls.contains(&session.session_id))
         .count();
     assert_eq!(stranded, 0, "a failed INVITE kept its session");
+
+    // Every call whose INVITE won the race is failed by the closed
+    // connection and released, well before Timer B could fire.
+    let settled = timeout(SEND_DEADLINE, async {
+        loop {
+            if anonymous.coordinator().list_sessions().await.is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        settled.is_ok(),
+        "{} of {} live calls were still waiting on a closed TLS connection after {SEND_DEADLINE:?}",
+        anonymous.coordinator().list_sessions().await.len(),
+        live_calls.len()
+    );
+    eprintln!(
+        "{} of {ATTEMPTS} INVITEs won the write race; all settled",
+        live_calls.len()
+    );
 
     let leaked = next_matching(&mut server, Duration::from_millis(500), |event| {
         matches!(event, Event::IncomingCall { .. })
