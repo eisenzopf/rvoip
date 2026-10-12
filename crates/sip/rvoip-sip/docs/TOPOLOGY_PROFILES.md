@@ -1,16 +1,22 @@
 # rvoip-sip Beta Topology Profiles
 
-Date: 2026-09-05
+Date: 2026-10-12
 
 This document defines which deployment shapes beta is allowed to claim and
 which shapes remain post-beta or advanced tuning work.
 
-Previous published reference: [protected 0.3.9 qualification](BETA_RELEASE_REPORT.md),
-run `33969263241`, generated from clean tested commit
-`8cab44b10f872d21b304c02111d5d203ee8226da`.
+Current published reference: [protected 0.4.0 qualification](BETA_RELEASE_REPORT.md),
+`remote-release` run
+[`38195041080`](https://github.com/eisenzopf/rvoip/actions/runs/38195041080),
+generated from clean tested commit `f4d528eaabbac935bce9a6404d3ce4fdec35ed0f`
+(tag `v0.4.0`). Its performance rows ran fresh on 16-vCPU AWS `m5.4xlarge`
+workers.
 
-For `0.4.0`, the signed protected qualification artifact is authoritative
-until the generated reports are copied into the repository after publication.
+The `0.4.0` deployment profile constructors (`Config::public_server`,
+`carrier_trunk_udp`, `behind_nat`, `tls_direct_routing`) are covered by
+rvoip-sip tests only (`deployment_profiles.rs`,
+`tls_direct_routing_integration.rs`); no release gate runs a profile against an
+independent peer, so they do not widen the profiles below.
 
 ## Beta-Supported Profiles
 

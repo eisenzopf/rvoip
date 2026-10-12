@@ -137,7 +137,7 @@ Asterisk registered-flow TLS/SRTP is provider-gated: set
 ## Jambonz B2BUA Lab
 
 `infra/release-runners/pbx/jambonz` runs Jambonz as a first-class release
-peer, at the same policy level as Asterisk and FreeSWITCH. The 0.3.10 profile
+peer, at the same policy level as Asterisk and FreeSWITCH. The 0.4.0 profile
 selects the latest stable open-source component line (currently 0.9.14), checks
 that both SBC pins are still upstream HEAD, verifies source tarball hashes,
 and runs only digest-pinned containers. The test target is the actual Jambonz
@@ -157,7 +157,9 @@ rendered topology, redacted logs, matrix, media assertions, and a cleanup
 receipt. Diagnostic runs can additionally capture packets. A passing matrix
 is a claim about SIP/SDP/RTP
 interoperability with that exact open-source Jambonz profile; it is not a
-claim about the commercial Jambonz verb API or hosted jambonz.cloud.
+claim about the commercial Jambonz verb API or hosted jambonz.cloud. The
+published `0.4.0` qualification (run `38195041080`) records
+`interop.jambonz-matrix` as a fresh 63/63-cell PASS against that profile.
 
 Bring the release lab up or down with:
 
@@ -167,7 +169,7 @@ bash infra/release-runners/interop-lifecycle.sh jambonz-down
 ```
 
 The pinned Jambonz and MySQL images require an amd64 Docker engine. The
-mandatory release gate uses the repository's x86 GCP interop worker. On Apple
+mandatory release gate uses the repository's x86 AWS EC2 interop worker. On Apple
 Silicon, run this lab with a dedicated x86_64 Colima profile using the gRPC
 port forwarder (Colima's default SSH forwarder does not carry UDP):
 
@@ -186,7 +188,7 @@ path into RVoIP. It does not assume that macOS can route directly to Docker's
 private bridge. Linux release workers use the isolated bridge directly.
 
 Jambonz TLS/SRTP, WebRTC, CPaaS application verbs, hosted service, PSTN, HA,
-recording, and load are outside the 0.3.10 Jambonz profile and must not be
+recording, and load are outside the 0.4.0 Jambonz profile and must not be
 inferred from this gate.
 
 ## Registrar-Proxy Labs (Kamailio, OpenSIPS + rtpengine)

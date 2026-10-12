@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import fnmatch
 import json
 from pathlib import Path
+import re
 import shutil
 import sys
 import tempfile
@@ -28,6 +30,52 @@ builder = load_module(
 )
 fanout = load_module("release_aws_fanout", ROOT / "scripts/release/aws_fanout.py")
 run_checks = load_module("ci_run_checks", ROOT / "scripts/ci/run_checks.py")
+
+
+SIP_MANIFEST = ROOT / "crates/sip/rvoip-sip/Cargo.toml"
+TEST_HOOKS_GUARD = re.compile(r'cfg\((?:all\()?feature\s*=\s*"test-hooks"')
+BROAD_TARGET_FLAGS = {"--lib", "--tests", "--doc", "--examples", "--bins", "--all-targets"}
+
+
+def rvoip_sip_targets() -> dict[tuple[str, str], Path]:
+    """Every rvoip-sip test and example target name mapped to its source file."""
+
+    manifest = tomllib.loads(SIP_MANIFEST.read_text())
+    crate = SIP_MANIFEST.parent
+    targets: dict[tuple[str, str], Path] = {}
+    for kind, directory in (("test", "tests"), ("example", "examples")):
+        for path in (crate / directory).glob("*.rs"):
+            targets[(kind, path.stem)] = path
+        for entry in manifest.get(kind, []):
+            default = crate / directory / f"{entry['name']}.rs"
+            targets[(kind, entry["name"])] = crate / entry.get("path", default)
+    return targets
+
+
+def cargo_rvoip_sip_selection(command: list[str]) -> tuple[set[str], list[tuple[str, str]], bool] | None:
+    """Return (broad flags, explicit targets, has test-hooks) for an rvoip-sip cargo gate."""
+
+    if "cargo" not in command:
+        return None
+    argv = command[command.index("cargo") :]
+    if len(argv) < 2 or argv[1] not in {"test", "build", "check", "clippy"}:
+        return None
+    packages = {argv[index + 1] for index, value in enumerate(argv[:-1]) if value in {"-p", "--package"}}
+    if "rvoip-sip" not in packages:
+        return None
+    features: set[str] = set()
+    for index, value in enumerate(argv[:-1]):
+        if value == "--features":
+            features.update(part.split("/")[-1] for part in argv[index + 1].split(","))
+    explicit = [
+        (argv[index].removeprefix("--"), argv[index + 1])
+        for index in range(len(argv) - 1)
+        if argv[index] in {"--test", "--example"}
+    ]
+    broad = BROAD_TARGET_FLAGS.intersection(argv)
+    if not broad and not explicit:
+        broad = {"<default targets>"}
+    return broad, explicit, "test-hooks" in features or "--all-features" in argv
 
 
 class GateFrameworkTests(unittest.TestCase):
@@ -490,6 +538,70 @@ class GateFrameworkTests(unittest.TestCase):
                 lockfile = ROOT / "examples/Cargo.lock"
                 self.assertTrue(lockfile.is_file(), f"missing {lockfile}")
                 self.assertIn('rust-version = "1.91"', manifest.read_text())
+
+    def test_rvoip_sip_gates_build_the_test_hooks_their_targets_need(self) -> None:
+        # Since 0.4.0 the RFC 4028 session-timer tests and their process
+        # fixtures carry `#![cfg(feature = "test-hooks")]`. A gate that builds
+        # rvoip-sip without the feature compiles them to empty binaries and
+        # still passes: the 0.4.0 `test.sip-integration` gate ran 0 tests in
+        # five session-timer targets that way. A gate selecting rvoip-sip
+        # targets broadly must enable the feature, as the PR and main lanes
+        # do (`SIP_LANE_FEATURES`), and a gate naming a target explicitly must
+        # enable it when that target's source is gated on it.
+        targets = rvoip_sip_targets()
+        gated = {key for key, path in targets.items() if TEST_HOOKS_GUARD.search(path.read_text())}
+        # The fence must not pass vacuously: the session-timer suites exist.
+        self.assertIn(("test", "session_timer_integration"), gated)
+        self.assertGreaterEqual(sum(kind == "test" for kind, _ in gated), 6)
+        self.assertEqual(run_checks.SIP_LANE_FEATURES, ["--features", "test-hooks"])
+
+        checked = 0
+        for gate in self.catalog["gates"]:
+            selection = cargo_rvoip_sip_selection(gate.get("command") or [])
+            if selection is None:
+                continue
+            checked += 1
+            broad, explicit, has_test_hooks = selection
+            with self.subTest(gate=gate["id"]):
+                if broad:
+                    self.assertTrue(
+                        has_test_hooks,
+                        f"{gate['id']} selects rvoip-sip {sorted(broad)} without test-hooks",
+                    )
+                for kind, pattern in explicit:
+                    matched = [
+                        key for key in targets if key[0] == kind and fnmatch.fnmatchcase(key[1], pattern)
+                    ]
+                    self.assertTrue(matched, f"{gate['id']} names unknown {kind} {pattern}")
+                    needs = sorted(name for key in matched if key in gated for name in [key[1]])
+                    self.assertFalse(
+                        needs and not has_test_hooks,
+                        f"{gate['id']} builds test-hooks-gated {kind} {needs} without the feature",
+                    )
+        # Unit, integration, doctest, all-target, examples, analyzer, SIPp
+        # build, and the performance gates.
+        self.assertGreaterEqual(checked, 30)
+
+    def test_rvoip_sip_test_hooks_fence_rejects_a_gate_without_the_feature(self) -> None:
+        targets = rvoip_sip_targets()
+        self.assertEqual(
+            cargo_rvoip_sip_selection(
+                ["cargo", "test", "--locked", "-p", "rvoip-sip", "--tests"]
+            ),
+            ({"--tests"}, [], False),
+        )
+        broad, explicit, has_test_hooks = cargo_rvoip_sip_selection(
+            ["cargo", "test", "-p", "rvoip-sip", "--test", "session_timer_*"]
+        )
+        matched = [key for key in targets if key[0] == "test" and fnmatch.fnmatchcase(key[1], explicit[0][1])]
+        self.assertFalse(broad)
+        self.assertFalse(has_test_hooks)
+        self.assertTrue(
+            any(TEST_HOOKS_GUARD.search(targets[key].read_text()) for key in matched)
+        )
+        self.assertIsNone(
+            cargo_rvoip_sip_selection(["cargo", "test", "--workspace", "--exclude", "rvoip-sip"])
+        )
 
     def test_rustdoc_warning_policy_is_one_environment_argument(self) -> None:
         gate = next(

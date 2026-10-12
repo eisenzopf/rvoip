@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import json
 from pathlib import Path
 import re
@@ -127,6 +128,52 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("docs/FEATURE_BUNDLES.md", rules[gate])
         main = (ROOT / ".github/workflows/main-ci.yml").read_text()
         self.assertIn(f"--specialty-gate {gate}", main)
+
+    def test_rustdoc_gate_runs_on_prs_and_is_forced_on_main(self) -> None:
+        # #315: `build.rustdoc` was a release-only check. PRs select it from
+        # policy patterns; main runs it unconditionally, like the other
+        # all-features gates, so a miss in the patterns still surfaces there
+        # rather than at release qualification.
+        policy = json.loads((ROOT / "scripts/ci/policy.json").read_text())
+        gates = {rule["gate"] for rule in policy["specialty_rules"]}
+        self.assertIn("rustdoc", gates)
+        main = (ROOT / ".github/workflows/main-ci.yml").read_text()
+        self.assertIn("--specialty-gate rustdoc", main)
+        # `--all-features` builds rvoip-webrtc's libvpx bindings, so both
+        # specialty jobs must install the headers for this gate.
+        for workflow in ("pr-gate.yml", "main-ci.yml"):
+            text = (ROOT / ".github/workflows" / workflow).read_text()
+            specialty = text.split("\n  specialty:\n", maxsplit=1)[1]
+            step = specialty.split("Install libvpx for all-features rustdoc", 1)
+            with self.subTest(workflow=workflow):
+                self.assertEqual(len(step), 2)
+                self.assertIn("if: matrix.gate == 'rustdoc'", step[1][:200])
+                self.assertIn("libvpx-dev", step[1][:200])
+
+    def test_every_rustdoc_included_document_selects_the_rustdoc_gate(self) -> None:
+        # A file pulled into rustdoc with `doc = include_str!(...)` is rendered
+        # (and link-checked) by `cargo doc`, yet is Markdown the planner
+        # otherwise treats as docs-only. Each one must be named by the gate.
+        policy = json.loads((ROOT / "scripts/ci/policy.json").read_text())
+        patterns = next(
+            rule["patterns"]
+            for rule in policy["specialty_rules"]
+            if rule["gate"] == "rustdoc"
+        )
+        include = re.compile(r'\bdoc\s*=\s*include_str!\(\s*"([^"]+)"\s*\)')
+        included = set()
+        for source in (ROOT / "crates").rglob("*.rs"):
+            if "target" in source.relative_to(ROOT).parts:
+                continue
+            for relative in include.findall(source.read_text(errors="replace")):
+                document = (source.parent / relative).resolve()
+                included.add(document.relative_to(ROOT.resolve()).as_posix())
+        self.assertTrue(included)
+        for document in sorted(included):
+            with self.subTest(document=document):
+                self.assertTrue(
+                    any(fnmatch.fnmatchcase(document, pattern) for pattern in patterns)
+                )
 
     def test_every_sip_process_fixture_is_prebuilt_by_the_dedicated_lane(self) -> None:
         policy = json.loads((ROOT / "scripts/ci/policy.json").read_text())

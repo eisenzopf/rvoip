@@ -26,6 +26,60 @@
   A peer that answered 486 and closed the connection at once used to have its
   response replaced by a transport error; the response is now reported.
 
+### Release process and CI
+
+- The PR Gate now runs the release qualification's rustdoc check (#315).
+  A new `rustdoc` specialty gate runs `RUSTDOCFLAGS=-D warnings cargo doc
+  --locked --workspace --all-features --no-deps`, the exact command of the
+  release gate `build.rustdoc`; a CI policy test fails if the two drift.
+  Before, no PR check built documentation, so a broken intra-doc link
+  passed every PR check and first failed 0.4.0 qualification (run
+  38125328677). The gate is selected when Rust sources, Cargo manifests or
+  the lockfile, the toolchain, `.cargo/` configuration, or a document pulled
+  into rustdoc with `doc = include_str!(...)` changes (the rvoip-vapi README
+  and sip-core's `builder.md` today; a policy test fails if a new include is
+  not listed). Main CI runs it unconditionally. Like the other specialty
+  gates it has a 45-minute budget, its own Rust cache key and a
+  `specialty-rustdoc` receipt that the PR Gate reconciles; the job installs
+  `libvpx-dev` because `--all-features` builds rvoip-webrtc's VP8 bindings.
+- The rvoip-sip release gates now build with the `test-hooks` feature, as
+  the PR and main lanes have since 0.4.0. The 0.4.0 RFC 4028 work gated the
+  session-timer tests and fixtures on that feature, and `test.sip-integration`
+  built without it, so in the 0.4.0 qualification it ran 0 tests in five
+  session-timer targets and 3 of 7 in a sixth (they still ran, and passed, in
+  `core.rvoip-sip`). `test.sip-unit`, `test.sip-integration`,
+  `test.sip-doctest`, `build.sip-all-targets` and `build.sip-examples` add the
+  feature, and so do the matching stages of the local `beta_gate.sh`. A new
+  release-tooling test fails when a gate selects rvoip-sip targets broadly
+  without `test-hooks`, or names a test or example whose source is gated on
+  it. The performance gates name targets that need no hooks and keep their
+  measured executables unchanged.
+
+### Documentation
+
+- The published 0.4.0 qualification evidence is now in the repository. The
+  release, gate, and performance reports of protected run 38195041080 (PASS,
+  214/214 gates, 108/108 legacy requirements, tag `v0.4.0` at `f4d528eaa`)
+  are promoted into `crates/sip/rvoip-sip/docs/` and archived with the
+  performance evaluation under
+  `docs/releases/qualification/20261012T042041Z-38195041080`, rendered with
+  the evidence artifact's id and digest instead of `pending-upload`.
+- Documents that cited 0.3.9 or 0.3.10 evidence now cite that run: the
+  rvoip-sip README, release checklist, compatibility and RFC evidence
+  matrices, topology profiles, security posture, `docs/CARRIERS.md`, and the
+  PBX lab README. They say which 92 gates were reused from the `d89c1bc34`
+  candidate run (only the release notes changed between the two), so no
+  reused gate reads as a fresh 0.4.0 run.
+- The Jambonz OSS 0.9.14 profile, previously listed as a pending candidate, is
+  now cited as protected evidence (`interop.jambonz-matrix`, 63/63 cells).
+- New 0.4.0 behaviour appears in the matrices with its evidence: RTCP
+  multiplexing and separate-port RTCP (`RTP-5761-MUX`, `RTP-3605-NONMUX`),
+  RFC 4028 session-timer conformance (`SIP-4028-TIMER`, now covering
+  `422`/Min-SE), in-dialog Request-URIs (`SIP-3261-CORE`), OPTIONS
+  keep-alive, and the deployment profiles. Each is marked as covered by unit
+  and integration tests only: no release gate runs them against an
+  independent peer.
+
 ## 0.4.0 — 2026-10-11
 
 ### Highlights

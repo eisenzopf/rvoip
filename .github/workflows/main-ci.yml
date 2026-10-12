@@ -55,6 +55,7 @@ jobs:
             --specialty-gate facade-feature-bundles
             --specialty-gate release-tooling
             --specialty-gate rtp-interop
+            --specialty-gate rustdoc
             --specialty-gate vcon-postgres
             --specialty-gate webrtc-runtime
             --specialty-gate examples-smoke
@@ -281,6 +282,11 @@ jobs:
         run: >-
           sudo apt-get update && sudo apt-get install -y
           libasound2-dev libopus-dev libssl-dev protobuf-compiler pkg-config cmake lsof
+      # `--all-features` documents rvoip-webrtc's `client-video-vp8`, whose
+      # libvpx bindings are generated against the installed headers.
+      - name: Install libvpx for all-features rustdoc
+        if: matrix.gate == 'rustdoc'
+        run: sudo apt-get install -y libvpx-dev
       - name: Run full specialty gate
         run: >-
           python3 scripts/ci/run_checks.py specialty
