@@ -4,6 +4,19 @@
 
 ### SIP
 
+- A call whose DTLS-SRTP handshake on the media (RTP) port fails is now
+  ended instead of staying up with no media. rvoip publishes the new
+  `Event::MediaSecurityFailed { call_id, keying, reason }`, where `reason` is
+  a bounded `MediaSecurityFailure` (`HandshakeTimeout`, `FingerprintMismatch`
+  or `HandshakeError`), then sends BYE for an answered call, CANCEL for an
+  unanswered outbound call, or `488 Not Acceptable Here` for an unanswered
+  inbound call (a UAS in early media can now be rejected), each carrying
+  `Reason: SIP;cause=488;text="DTLS-SRTP handshake failed"` (RFC 3326). The
+  usual `CallEnded`, `CallCancelled` or `CallFailed` follows; `CallEnded`
+  carries the reason `DTLS-SRTP handshake failed`. Through `rvoip-core` the
+  connection ends with `EndReason::Failed` and detail
+  `media-security-failed: <class>`. A failed handshake on a separate RTCP
+  port still only leaves the call without RTCP.
 - `SessionHandle::audio()` (and the `StreamPeer` and `Endpoint` audio built
   on it) no longer stops sending for good when the application sends audio
   before a DTLS-SRTP call's keys exist. Frames sent while the handshake is in

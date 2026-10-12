@@ -343,6 +343,27 @@ fn fingerprint_hex(fingerprint: &[u8; 32]) -> String {
         .join(":")
 }
 
+/// Bounded class of a failed RTP-component handshake from media-core's
+/// error. Only the class leaves this crate; the text never does.
+#[cfg(feature = "dtls-srtp")]
+fn classify_dtls_handshake_error(
+    error: &rvoip_media_core::Error,
+) -> crate::api::events::MediaSecurityFailure {
+    use crate::api::events::MediaSecurityFailure;
+    let text = error.to_string();
+    if text.contains("handshake timed out") {
+        MediaSecurityFailure::HandshakeTimeout
+    } else if text.contains("fingerprint does not match") {
+        MediaSecurityFailure::FingerprintMismatch
+    } else {
+        MediaSecurityFailure::HandshakeError
+    }
+}
+
+/// Coordinator callback for a failed RTP-component DTLS handshake.
+pub(crate) type MediaSecurityFailureHandler =
+    Arc<dyn Fn(SessionRegistryHandle, crate::api::events::MediaSecurityFailure) + Send + Sync>;
+
 #[cfg(feature = "dtls-srtp")]
 fn setup_role_to_dtls_role(role: SetupRole) -> Result<rvoip_media_core::DtlsRole> {
     match role {
@@ -1482,6 +1503,14 @@ pub struct MediaAdapter {
     pending_dtls_identities:
         Arc<DashMap<MediaNegotiationKey, rvoip_rtp_core::dtls_srtp::DtlsIdentity>>,
 
+    /// Coordinator callback for a failed RTP-component DTLS handshake.
+    media_security_failure_handler: Arc<std::sync::OnceLock<MediaSecurityFailureHandler>>,
+
+    /// Test hook: present an unadvertised certificate on the RTP
+    /// component's DTLS handshake.
+    #[cfg(all(feature = "dtls-srtp", any(test, feature = "test-hooks")))]
+    dtls_wrong_rtp_certificate_for_testing: bool,
+
     /// SDP results that passed validation but have not crossed their exact
     /// SIP offer/answer commit boundary.
     staged_media_negotiations: Arc<DashMap<MediaNegotiationKey, StagedMediaNegotiation>>,
@@ -1648,6 +1677,9 @@ impl MediaAdapter {
             dtls_setup_role: DtlsSetupRole::Actpass,
             #[cfg(feature = "dtls-srtp")]
             pending_dtls_identities: Arc::new(DashMap::new()),
+            media_security_failure_handler: Arc::new(std::sync::OnceLock::new()),
+            #[cfg(all(feature = "dtls-srtp", any(test, feature = "test-hooks")))]
+            dtls_wrong_rtp_certificate_for_testing: false,
             staged_media_negotiations: Arc::new(DashMap::new()),
             global_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
             app_event_publisher: Arc::new(tokio::sync::RwLock::new(None)),
@@ -3346,6 +3378,50 @@ impl MediaAdapter {
         });
     }
 
+    /// Install the coordinator's handler for a failed RTP-component DTLS
+    /// handshake: it publishes [`Event::MediaSecurityFailed`] and ends the
+    /// call. Set once at coordinator boot.
+    pub(crate) fn set_media_security_failure_handler(&self, handler: MediaSecurityFailureHandler) {
+        let _ = self.media_security_failure_handler.set(handler);
+    }
+
+    /// Hand a failed media key agreement to the coordinator, unless the
+    /// media lifetime it belonged to is already gone.
+    #[cfg(feature = "dtls-srtp")]
+    fn report_media_security_failure(
+        &self,
+        handle: &SessionRegistryHandle,
+        dialog_id: &DialogId,
+        failure: crate::api::events::MediaSecurityFailure,
+    ) {
+        if !self
+            .media_resources
+            .get(handle.session_id())
+            .is_some_and(|binding| binding.matches(handle, dialog_id))
+        {
+            return;
+        }
+        tracing::warn!(
+            session = %handle.session_id().0,
+            reason = failure.as_str(),
+            "DTLS-SRTP key agreement failed on the media port; ending the call"
+        );
+        match self.media_security_failure_handler.get() {
+            Some(handler) => handler(handle.clone(), failure),
+            None => tracing::debug!(
+                session = %handle.session_id().0,
+                "no media-security failure handler installed"
+            ),
+        }
+    }
+
+    /// Present a certificate other than the advertised one on the RTP
+    /// component's DTLS handshake, so the peer's fingerprint check fails.
+    #[cfg(all(feature = "dtls-srtp", any(test, feature = "test-hooks")))]
+    pub(crate) fn set_dtls_wrong_rtp_certificate_for_testing(&mut self, enabled: bool) {
+        self.dtls_wrong_rtp_certificate_for_testing = enabled;
+    }
+
     /// Run the call's DTLS-SRTP handshake on the RTP port and, with
     /// `rtcp_component`, the RTCP component's own handshake on the separate
     /// RTCP port at the same time (RFC 5764 §4.1), both with the same role,
@@ -3365,19 +3441,54 @@ impl MediaAdapter {
         plan: StagedDtlsHandshake,
         rtcp_component: bool,
     ) -> Result<()> {
+        use crate::api::events::MediaSecurityFailure;
         const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-        let role = setup_role_to_dtls_role(plan.role)?;
-        let profiles = dtls_protection_profiles(&self.srtp_offered_suites)?;
+        let (role, profiles) = match setup_role_to_dtls_role(plan.role)
+            .and_then(|role| Ok((role, dtls_protection_profiles(&self.srtp_offered_suites)?)))
+        {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                self.report_media_security_failure(
+                    handle,
+                    dialog_id,
+                    MediaSecurityFailure::HandshakeError,
+                );
+                return Err(error);
+            }
+        };
         let rtcp_identity = rtcp_component.then(|| identity.clone());
-        let rtp = self.controller.run_dtls_handshake_and_install(
-            dialog_id,
-            identity,
-            role,
-            remote_addr,
-            plan.expected_remote_fingerprint_sha256,
-            profiles.clone(),
-            HANDSHAKE_TIMEOUT,
-        );
+        let rtp_profiles = profiles.clone();
+        #[cfg(any(test, feature = "test-hooks"))]
+        let identity = if self.dtls_wrong_rtp_certificate_for_testing {
+            rvoip_rtp_core::dtls_srtp::generate_identity()
+                .map_err(|error| SessionError::MediaError(format!("test certificate: {error}")))?
+        } else {
+            identity
+        };
+        let rtp = async {
+            let result = self
+                .controller
+                .run_dtls_handshake_and_install(
+                    dialog_id,
+                    identity,
+                    role,
+                    remote_addr,
+                    plan.expected_remote_fingerprint_sha256,
+                    rtp_profiles,
+                    HANDSHAKE_TIMEOUT,
+                )
+                .await;
+            // Report at once rather than after the RTCP handshake: the call
+            // is ended, which also stops the RTCP handshake.
+            if let Err(error) = &result {
+                self.report_media_security_failure(
+                    handle,
+                    dialog_id,
+                    classify_dtls_handshake_error(error),
+                );
+            }
+            result
+        };
         let rtcp = async {
             match rtcp_identity {
                 Some(identity) => Some(
@@ -6010,6 +6121,9 @@ impl Clone for MediaAdapter {
             dtls_setup_role: self.dtls_setup_role,
             #[cfg(feature = "dtls-srtp")]
             pending_dtls_identities: self.pending_dtls_identities.clone(),
+            media_security_failure_handler: self.media_security_failure_handler.clone(),
+            #[cfg(all(feature = "dtls-srtp", any(test, feature = "test-hooks")))]
+            dtls_wrong_rtp_certificate_for_testing: self.dtls_wrong_rtp_certificate_for_testing,
             staged_media_negotiations: self.staged_media_negotiations.clone(),
             global_coordinator: self.global_coordinator.clone(),
             app_event_publisher: self.app_event_publisher.clone(),
@@ -7682,6 +7796,11 @@ mod sdp_format_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn rtcp_non_mux_dtls_failure_on_the_rtcp_port_keeps_rtp_media() {
         let mut call = dtls_non_mux_call("dtls-fail", 27_100).await;
+        let (failures_tx, mut failures) = tokio::sync::mpsc::unbounded_channel();
+        call.adapter
+            .set_media_security_failure_handler(Arc::new(move |_, failure| {
+                let _ = failures_tx.send(failure);
+            }));
         let offer = call.offer().await;
         let (rtp_port, _) = sdp_ports(&offer);
         let local_rtp = SocketAddr::from(([127, 0, 0, 1], rtp_port));
@@ -7738,6 +7857,43 @@ mod sdp_format_tests {
         assert!(
             !on_rtp && !on_rtcp,
             "RTCP left a call whose RTCP handshake failed"
+        );
+        assert!(
+            failures.try_recv().is_err(),
+            "an RTCP-only DTLS failure must not end the call"
+        );
+        call.hang_up().await;
+    }
+
+    /// A certificate the SDP did not name on the RTP (media) component is a
+    /// media-security failure the coordinator ends the call for.
+    #[cfg(feature = "dtls-srtp")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn rtp_dtls_fingerprint_mismatch_reports_a_media_security_failure() {
+        let mut call = dtls_non_mux_call("dtls-rtp-fail", 27_200).await;
+        let (failures_tx, mut failures) = tokio::sync::mpsc::unbounded_channel();
+        call.adapter
+            .set_media_security_failure_handler(Arc::new(move |_, failure| {
+                let _ = failures_tx.send(failure);
+            }));
+        let offer = call.offer().await;
+        let (rtp_port, _) = sdp_ports(&offer);
+        let peer = RawDtlsPeer::bind().await;
+        call.accept_answer(&peer.answer()).await;
+        let impostor = rvoip_rtp_core::dtls_srtp::generate_identity().unwrap();
+        RawDtlsPeer::handshake(
+            &peer.rtp,
+            SocketAddr::from(([127, 0, 0, 1], rtp_port)),
+            impostor,
+        )
+        .await;
+        let failure = tokio::time::timeout(Duration::from_secs(3), failures.recv())
+            .await
+            .expect("the failure is reported")
+            .unwrap();
+        assert_eq!(
+            failure,
+            crate::api::events::MediaSecurityFailure::FingerprintMismatch
         );
         call.hang_up().await;
     }

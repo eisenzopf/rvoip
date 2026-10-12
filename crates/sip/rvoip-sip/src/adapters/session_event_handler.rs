@@ -5190,12 +5190,13 @@ impl SessionCrossCrateEventHandler {
             "Committing exact outbound BYE lifecycle completion"
         );
 
-        let state_before_completion = self
+        let (state_before_completion, local_end_reason) = self
             .state_machine
             .store
             .get_session_snapshot_exact(&handle)
             .ok()
-            .map(|snapshot| snapshot.call_state);
+            .map(|snapshot| (Some(snapshot.call_state), snapshot.local_end_reason.clone()))
+            .unwrap_or((None, None));
         let lifecycle = crate::api::unified::commit_local_bye_lifecycle_exact(
             Arc::clone(&self.state_machine),
             &handle,
@@ -5210,14 +5211,17 @@ impl SessionCrossCrateEventHandler {
                 }
             }
             crate::api::unified::LocalByeLifecycleCommit::Ended => {
-                let reason = if matches!(state_before_completion, Some(CallState::Terminating)) {
-                    "Local hangup"
-                } else {
-                    "Local BYE"
-                };
+                let reason = local_end_reason.unwrap_or_else(|| {
+                    if matches!(state_before_completion, Some(CallState::Terminating)) {
+                        "Local hangup"
+                    } else {
+                        "Local BYE"
+                    }
+                    .to_string()
+                });
                 crate::api::events::Event::CallEnded {
                     call_id: handle.session_id().clone(),
-                    reason: reason.to_string(),
+                    reason,
                 }
             }
         };
