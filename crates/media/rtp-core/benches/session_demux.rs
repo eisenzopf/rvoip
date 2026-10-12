@@ -16,10 +16,11 @@
 //! Pair the deltas here with the end-to-end deltas in `udp_loopback`
 //! to size up the SSRC-demux contribution.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use dashmap::DashMap;
 use rvoip_rtp_core::{RtpSsrc, RtpStream};
 use std::collections::HashMap;
+use std::hint::black_box;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::runtime::Builder;

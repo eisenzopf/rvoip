@@ -9,11 +9,12 @@
 //! receive just the header value. Neither group expects a trailing
 //! CRLF — that's stripped by `header_value_better` upstream.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rvoip_sip_core::parser::headers::via::parse_via;
 use rvoip_sip_core::parser::headers::{
     parse_call_id, parse_contact, parse_cseq, parse_from, parse_max_forwards, parse_route,
 };
+use std::hint::black_box;
 
 // Via includes the header name + HCOLON; no trailing CRLF.
 const VIA_SIMPLE: &[u8] = b"Via: SIP/2.0/UDP pc33.atlanta.example.com:5060;branch=z9hG4bK776asdhds";

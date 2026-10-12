@@ -12,11 +12,12 @@
 //! stack and in WebRTC).
 
 use bytes::Bytes;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rvoip_rtp_core::srtp::{SrtpContext, SrtpCryptoKey, SRTP_AES128_CM_SHA1_80};
 use rvoip_rtp_core::{
     RtcpApplicationDefined, RtcpCompoundPacket, RtcpReceiverReport, RtpHeader, RtpPacket,
 };
+use std::hint::black_box;
 
 const PAYLOAD_SIZES: [(&str, usize); 4] = [
     ("opus_80", 80),

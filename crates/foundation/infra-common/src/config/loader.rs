@@ -1,16 +1,10 @@
-// TODO: migrate from the deprecated `config::Config::merge` to the
-// `ConfigBuilder` API. The migration is non-trivial — the current code
-// builds the Config incrementally (file → env-file → env-vars); the
-// builder API requires assembling the source list up-front. Tracked as
-// a follow-up since it changes the loader's control flow.
-#![allow(deprecated)]
-
 use std::fmt::Debug;
 use std::path::{Path, PathBuf};
 
 use crate::config::provider::{BasicConfigProvider, ConfigSource};
 use crate::errors::types::{Error, Result};
-use config::{Config, Environment, File};
+use config::builder::DefaultState;
+use config::{Config, ConfigBuilder, Environment, File, Source};
 use serde::de::DeserializeOwned;
 
 /// Handles loading configuration from various sources
@@ -67,26 +61,24 @@ impl ConfigLoader {
         let base_path = self.resolve_path(&base_file);
         let env_path = self.resolve_path(&env_file);
 
-        let mut config = Config::default();
+        let mut builder = Config::builder();
 
         // Load base config if it exists
         if base_path.exists() {
-            config
-                .merge(File::from(base_path.clone()))
-                .map_err(|e| Error::Config(format!("Failed to load base config: {}", e)))?;
+            builder = add_checked(builder, File::from(base_path), "Failed to load base config")?;
         }
 
         // Load environment-specific config if it exists
         if env_path.exists() {
-            config
-                .merge(File::from(env_path))
-                .map_err(|e| Error::Config(format!("Failed to load env config: {}", e)))?;
+            builder = add_checked(builder, File::from(env_path), "Failed to load env config")?;
         }
 
-        // Add environment variable overrides
+        // Add environment variable overrides. The file layers above were
+        // already collected, so a failure here belongs to this stage.
         let env_prefix = name.to_uppercase();
-        config
-            .merge(Environment::with_prefix(&env_prefix).separator("__"))
+        let config = builder
+            .add_source(Environment::with_prefix(&env_prefix).separator("__"))
+            .build()
             .map_err(|e| Error::Config(format!("Failed to add env overrides: {}", e)))?;
 
         let typed_config: T = config
@@ -105,12 +97,11 @@ impl ConfigLoader {
     where
         T: DeserializeOwned + Send + Sync + Debug + 'static,
     {
-        let mut config = Config::default();
-
         // Add environment variable configuration
         let env_prefix = prefix.to_uppercase();
-        config
-            .merge(Environment::with_prefix(&env_prefix).separator("__"))
+        let config = Config::builder()
+            .add_source(Environment::with_prefix(&env_prefix).separator("__"))
+            .build()
             .map_err(|e| Error::Config(format!("Failed to load env config: {}", e)))?;
 
         let typed_config: T = config
@@ -126,19 +117,40 @@ impl ConfigLoader {
 
     // Helper to build a Config object from a path
     fn build_config(&self, path: Option<&PathBuf>) -> Result<Config> {
-        let mut config = Config::default();
+        let mut builder = Config::builder();
 
         if let Some(p) = path {
-            config
-                .merge(File::from(p.clone()))
-                .map_err(|e| Error::Config(format!("Failed to load config file: {}", e)))?;
+            builder = builder.add_source(File::from(p.clone()));
         }
 
-        Ok(config)
+        builder
+            .build()
+            .map_err(|e| Error::Config(format!("Failed to load config file: {}", e)))
     }
 
     // Helper to resolve a path relative to the base path
     fn resolve_path<P: AsRef<Path>>(&self, path: P) -> PathBuf {
         self.base_path.join(path)
     }
+}
+
+/// Add `source` to `builder` and collect the layers so far, so a failure is
+/// reported against the source that caused it.
+///
+/// This keeps the per-stage error attribution of the `Config::merge` calls
+/// the loader used before config 0.15 removed them: each `merge` collected
+/// every source added so far and failed on the first one that did not load.
+fn add_checked<S>(
+    builder: ConfigBuilder<DefaultState>,
+    source: S,
+    context: &str,
+) -> Result<ConfigBuilder<DefaultState>>
+where
+    S: Source + Send + Sync + 'static,
+{
+    let builder = builder.add_source(source);
+    builder
+        .build_cloned()
+        .map_err(|e| Error::Config(format!("{}: {}", context, e)))?;
+    Ok(builder)
 }

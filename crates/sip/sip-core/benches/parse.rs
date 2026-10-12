@@ -4,9 +4,10 @@
 //! corpus. Throughput is reported in bytes so degradation from added
 //! per-byte work (e.g. UTF-8 validation) shows up cleanly.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rvoip_sip_core::parser::message::ParseMode;
 use rvoip_sip_core::{parse_message, parse_message_with_mode};
+use std::hint::black_box;
 
 #[path = "common/fixtures.rs"]
 mod fixtures;

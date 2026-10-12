@@ -70,7 +70,7 @@ relay-runtime = [
 metrics-prometheus = ["relay-runtime", "dep:metrics-exporter-prometheus"]
 
 [dev-dependencies]
-rcgen = { version = "0.13", features = ["pem"] }
+rcgen = { version = "0.14", features = ["pem"] }
 tempfile = "3"
 time = "0.3"
 

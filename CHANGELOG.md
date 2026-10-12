@@ -2,6 +2,55 @@
 
 ## Unreleased
 
+### Dependencies
+
+The low-risk part of the grouped dependabot update (#298). No public API
+changes: none of the crates below has a type in a published rvoip API.
+
+- **thiserror** 1.0 → 2.0 across the workspace.
+- **base64** 0.22 → 0.23 and **pem** 3 → 4 (pem 4 only moves to base64 0.23).
+- **config** 0.14 → 0.15 in `rvoip-infra-common`. `ConfigLoader` moves from
+  the removed `Config::merge` to the builder API with the same layer order
+  (base file, environment file, `NAME__` environment variables) and the same
+  per-stage error messages; new tests pin both. Upstream, 0.15 drops 0.14's
+  case folding of file keys, so TOML keys match case-sensitively again;
+  environment variable keys are still lowercased.
+- **socket2** 0.5 → 0.6, **webpki-roots** 0.26 → 1.0, **rustls-native-certs**
+  0.7 → 0.8 (`rvoip-moq-native` still fails on any platform-certificate load
+  error), **tower-http** 0.6 → 0.7.
+- **axum-server** 0.7 → 0.8. The WHIPS server now switches the listener it is
+  given to non-blocking itself, since axum-server no longer does.
+- **roxmltree** 0.20 → 0.21, **strum** 0.26 → 0.28, **md5** 0.7 → 0.8,
+  **biquad** 0.4 → 0.6.
+- Dev and bench only: **criterion** 0.5 → 0.8 (benches use
+  `std::hint::black_box`), **chromiumoxide** 0.7 → 0.8, **jsonschema**
+  0.33 → 0.58, **rcgen** 0.13 → 0.14 in the MoQ test PKI,
+  **console-subscriber** 0.4 → 0.5 (rvoip-sip `tokio-console` feature, used
+  only by the profiling examples).
+- Patch releases: tokio 1.53.2, uuid 1.27.0, futures 0.3.34, clap 4.6.7,
+  quinn 0.11.12, tokio-rustls 0.26.6, http 1.5.0, hickory-server 0.26.3,
+  serde_with 3.24.0, moka 0.12.16 and others in #298.
+
+Deferred to 0.5.0, coordinated with downstream applications: **metrics**
+0.23 → 0.24 with **metrics-exporter-prometheus** 0.16 → 0.18, and
+**opentelemetry** / **opentelemetry_sdk** / **opentelemetry-otlp** 0.32 → 0.33
+with **tracing-opentelemetry** 0.33 → 0.34. rvoip emits into whatever metrics
+recorder and OpenTelemetry global provider the application installs, and those
+are keyed to the crate's semver line. Moving rvoip alone in a patch release would
+make its metrics silently disappear for applications whose recorder is still on
+metrics 0.23, and the OpenTelemetry globals have the same coupling. Both move in
+0.5.0 together with the applications that consume them.
+
+Held back for their own changes: nom 8, the aes / ctr / aes-gcm SRTP stack
+and axum 0.8 / tower 0.5, as planned. Also held back:
+jsonwebtoken 11, validator 0.21, ordered-float 5, prost 0.14, redis 1.x,
+quick-xml 0.42 and web-transport 0.13 (their types are in rvoip's public
+API); opus 0.4 and cpal 0.18 (bundled libopus 1.6 and changed audio-device
+behavior); sqlx 0.9, serial_test 4, sysinfo 0.39 and aws-smithy-types 1.8
+(they need a newer Rust than the 1.91 MSRV); password-hash 0.6 (argon2 0.5
+needs 0.5); and the webrtc-util 0.17, webrtc 0.21 and hyper 1 dev-dependency
+bumps (they break the test fixtures and examples built on the older APIs).
+
 ## 0.4.0 — 2026-10-11
 
 ### Highlights

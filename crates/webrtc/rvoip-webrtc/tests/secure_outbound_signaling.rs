@@ -573,6 +573,7 @@ async fn spawn_https(
         .expect("HTTPS fixture TLS");
     let task = tokio::spawn(async move {
         axum_server::from_tcp_rustls(listener, tls)
+            .expect("HTTPS fixture listener")
             .serve(app.into_make_service())
             .await
             .expect("serve HTTPS fixture");
