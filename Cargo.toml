@@ -338,7 +338,7 @@ quinn = { version = "0.11", default-features = false, features = ["runtime-tokio
 web-transport-quinn = { version = "0.11", default-features = false, features = ["ring"] }
 web-transport = "0.10.6"
 tokio-util = { version = "0.7", features = ["codec", "compat"] }
-metrics = "0.23"
+metrics = "0.24"
 # Qualified, attributed MOQT draft-19 forks. Package aliases retain the
 # upstream Rust crate names while the registry identities remain rvoip-owned.
 moq-transport = { package = "rvoip-moq-transport", path = "crates/moq/rvoip-moq-transport", version = "0.4.0" }
@@ -359,7 +359,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 
 
 # Optional perf-test instrumentation (rvoip-sip `perf-tests` feature).
-console-subscriber = "0.4"
+console-subscriber = "0.5"
 dhat = "0.3"
 hdrhistogram = "7.5"
 sysinfo = "0.31"
