@@ -1,10 +1,11 @@
 use async_trait::async_trait;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rvoip_infra_common::events::bus::Publisher;
 use rvoip_infra_common::events::bus::{EventBus, EventBusConfig};
 use rvoip_infra_common::events::publisher::FastPublisher;
 use rvoip_infra_common::events::types::{Event, EventHandler, EventPriority, StaticEvent};
 use serde::{Deserialize, Serialize};
+use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Runtime;
