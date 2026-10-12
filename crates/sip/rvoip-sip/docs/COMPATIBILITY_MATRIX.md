@@ -60,8 +60,8 @@ jambonz.cloud, or the Jambonz application API.
 | CANCEL | Supported | Supported | Supported | Interop tested | `cancel_integration.rs`, ring-cancel PBX rows. |
 | REGISTER | Supported | Supported | Supported | Interop tested | `registration_test.rs`, `register_423_retry.rs`, PBX registration rows. |
 | OPTIONS | Supported | Supported | Supported | Supported | `options` send/response tests, SIPp scenario, and credentialed OOB auth retry test. |
-| re-INVITE | Supported | Supported | Supported | Supported | Hold/resume PBX rows, glare retry tests. |
-| UPDATE | Supported | Supported | Supported | Supported | Update send and session-timer coverage; outbound 491 completes the exact UPDATE attempt and does not emit `ReinviteGlare`. |
+| re-INVITE | Supported | Supported | Supported | Supported | Hold/resume PBX rows, glare retry tests, RFC 4028 refresh re-INVITEs from FreeSWITCH in the `session_timer` PBX rows (release-gated from 0.4.1; protected qualification evidence is pending the next run). |
+| UPDATE | Supported | Supported | Supported | Supported | Update send and session-timer coverage; outbound 491 completes the exact UPDATE attempt and does not emit `ReinviteGlare`. RFC 4028 refresh by UPDATE in both directions with Asterisk, and 422/Min-SE retry with FreeSWITCH, are covered by the `session_timer` PBX rows (release-gated from 0.4.1; protected qualification evidence is pending the next run). |
 | PRACK | Supported | Partial | Stack managed | Partial | PRACK integration and dialog tests; broader PBX 100rel matrix pending. |
 | REFER | Supported | Supported | Supported | Interop tested | Blind-transfer PBX rows, REFER/NOTIFY progress tests, and the Jambonz candidate transfer profile. |
 | NOTIFY | Supported | Supported | Supported | Supported | REFER progress, subscription, and notify-send tests. |
@@ -111,6 +111,7 @@ Developer-facing auth API and crate-boundary guidance is in
 | SDP RFC 8866 | Supported | SDP parser/builder tests, generated validation, SDP fuzz target | WebRTC attributes are parser/carry-through only unless wired higher. |
 | SDP offer/answer RFC 3264 | Supported | Hold/resume, codec matching, glare tests | Advanced media changes are not beta-scoped. |
 | RTP/RTCP RFC 3550 | Supported | RTP steady-state perf, audio round-trip, bridge round-trip | Full RTCP feedback matrix is not a beta claim. |
+| RTCP multiplexing and separate-port RTCP (RFC 5761, RFC 3605) | Supported | rtcp-mux and `rtcp_non_mux` unit and wire tests; Asterisk `rtcp_mux`, `rtcp_non_mux` and `rtcp_mux_declined` PBX rows (UDP and SDES-SRTP); FreeSWITCH `rtcp_mux` PBX row (UDP) | Release-gated from 0.4.1; protected qualification evidence is pending the next run. Each row requires reports both ways and `rtt_ms` and `remote_*` from `media_quality()`; Asterisk must compute an RTT from rvoip's reports and FreeSWITCH must receive reports that echo its own SRs; the declined row requires that no RTCP reaches the PBX's RTP port. RTCP over DTLS-SRTP and ICE are not covered. |
 | PCMU/PCMA | Supported | Codec and RTP media tests | Available in the default build. |
 | telephone-event DTMF | Supported | DTMF tests and PBX interop | RFC 4733 behavior must stay covered. |
 | Comfort Noise PT 13 | Supported | Config validation and SDP/media tests | Requires `comfort_noise_enabled=true`. |
@@ -119,7 +120,7 @@ Developer-facing auth API and crate-boundary guidance is in
 | AMR-NB | Feature-gated | Bit-exact against the 3GPP reference plus the normative sequences; RFC 4867 framing checked against Wireshark's dissector; loopback and SRTP call tests; PBX and proxy lab rows | Requires the `amr-nb` feature. Not part of the bounded SIP beta media claim. |
 | AMR-WB | Feature-gated | Same evidence set as AMR-NB at 16 kHz, all 9 modes | Requires the `amr-wb` feature. Not part of the bounded SIP beta media claim. |
 | G.722 | Not supported | Construction/negotiation rejection tests | RTP payload parsing metadata remains available. |
-| SDES-SRTP | Partial | SRTP integration/negotiator tests and PBX rows where present | Limited to tested suites. |
+| SDES-SRTP | Partial | SRTP integration/negotiator tests and PBX rows where present | Limited to tested suites. SRTCP with Asterisk (mux and separate port) is covered by the TLS `rtcp_mux`/`rtcp_non_mux` PBX rows (release-gated from 0.4.1; protected qualification evidence is pending the next run). |
 | DTLS-SRTP | Post-beta | Explicit non-claim | Do not claim. |
 | ICE/TURN/WebRTC browser | Post-beta | Explicit non-claim | STUN remains limited address discovery. |
 | STIR/SHAKEN | Partial | STIR/SHAKEN crate tests and dialog identity tests | Library support, not certification. |

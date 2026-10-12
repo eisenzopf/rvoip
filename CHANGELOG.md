@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Release process and CI
+
+- The Asterisk and FreeSWITCH PBX release gates now check 0.4.0's RTCP and
+  RFC 4028 wire behaviour against the real PBXes (#318). Four new
+  `examples/pbx` scenarios run in both matrices through the `Endpoint` API:
+  `rtcp_mux` (Asterisk UDP and SDES-SRTP, FreeSWITCH UDP), `rtcp_non_mux` and
+  `rtcp_mux_declined` (Asterisk UDP and SDES-SRTP) and `session_timer`
+  (both PBXes, UDP). Each cell requires reports both ways with `rtt_ms` and
+  `remote_*` from `media_quality()`, or no RTCP at all for the declined
+  case, and for timers a refresh in both directions plus FreeSWITCH's
+  `422`/Min-SE retry. Each cell also records a `pbx` row with the PBX's own
+  verdict from its debug output, checked by `examples/pbx/pbx_evidence.sh`.
+  A `--scenario all` run, which is what both gates execute, now fails unless
+  every one of these cells recorded a passing PBX verdict. The PBX
+  configuration is additive: Asterisk gets dedicated `rtcp_mux`/`timers`
+  endpoints (x1yy, x2yy, 2301-2302) and FreeSWITCH a `rvoip_udp_rtcp_timer`
+  profile on port 5069, so existing rows are unchanged. The cells add about
+  four minutes to the Asterisk gate and two to the FreeSWITCH gate. The
+  compatibility and RFC matrices list them as release-gated with protected
+  evidence pending the first qualification run.
+
 ## 0.4.0 — 2026-10-11
 
 ### Highlights

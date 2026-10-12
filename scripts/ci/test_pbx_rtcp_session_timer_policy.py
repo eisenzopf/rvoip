@@ -272,6 +272,21 @@ class PbxRtcpSessionTimerPolicyTests(unittest.TestCase):
         harness = (PBX / "common.rs").read_text(encoding="utf-8")
         self.assertIn('("freeswitch-rtcp-timer", 5069)', harness)
 
+    def test_docs_mark_the_cells_release_gated_without_claiming_evidence(self) -> None:
+        documents = {
+            "compatibility matrix": ROOT / "crates/sip/rvoip-sip/docs/COMPATIBILITY_MATRIX.md",
+            "RFC matrix": ROOT / "crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md",
+            "interop plan": ROOT / "crates/sip/rvoip-sip/docs/INTEROP_CI_PLAN.md",
+        }
+        for label, path in documents.items():
+            with self.subTest(document=label):
+                text = " ".join(path.read_text(encoding="utf-8").split())
+                self.assertRegex(text, r"release-gated from 0\.4\.1")
+                self.assertRegex(text, r"(?i)pending|no protected qualification has recorded")
+        readme = (PBX / "README.md").read_text(encoding="utf-8")
+        for scenario in NEW_SCENARIOS:
+            self.assertIn(f"`{scenario}`", readme)
+
 
 FIXTURES = PBX / "probe-fixtures/rtcp-timer"
 
