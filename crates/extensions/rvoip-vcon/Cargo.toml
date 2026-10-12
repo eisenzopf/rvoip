@@ -33,7 +33,7 @@ mime = "0.3"
 # JWS cryptographic primitives; wire framing is General JSON, not JWT.
 jsonwebtoken = { version = "10.4", features = ["rust_crypto"] }
 
-thiserror = "1.0"
+thiserror = "2.0"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

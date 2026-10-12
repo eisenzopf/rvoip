@@ -23,7 +23,7 @@ workspace = true
 rvoip-infra-common.workspace = true
 
 bytes = "1.5.0"
-thiserror = "1.0.56"
+thiserror = "2.0.19"
 anyhow.workspace = true
 tokio = { version = "1.35.1", features = ["rt", "rt-multi-thread", "sync", "net", "time", "macros", "full"] }
 tracing = "0.1.40"

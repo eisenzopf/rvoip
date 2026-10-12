@@ -32,7 +32,7 @@ serde_jcs = "0.2.0"
 url = "2.5"
 
 # Error handling
-thiserror = "1.0"
+thiserror = "2.0"
 anyhow = "1.0"
 
 # Caching
