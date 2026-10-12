@@ -1,4 +1,4 @@
-# rvoip 0.4.0 Candidate Release Notes
+# rvoip 0.4.0 Release Notes
 
 These notes describe the coordinated 46-crate `0.4.0` release candidate.
 Protected publication requires qualification of its exact source commit. The
@@ -211,20 +211,31 @@ release.
   application verbs, recording, high availability, and load are explicit
   exclusions from this Jambonz profile. Codec and transport support elsewhere
   in RVoIP is not reduced by those peer-specific exclusions.
-- **Pending.** The protected run must record the complete Jambonz matrix as
-  PASS for the exact `0.4.0` source commit.
+- The protected `0.4.0` qualification records the complete Jambonz OSS
+  matrix as PASS for the exact source commit, against the pinned 0.9.14
+  `sbc-inbound` and `sbc-outbound` release line.
 
 ## Performance evaluation
 
-**Pending.** The protected `0.4.0` qualification runs the canonical 2,000-CPS
-passes, the full performance and resiliency matrix, the high-density
-full-media burst, the monolithic and split soaks, teardown/churn tests, and
-regression comparison against the `0.3.12` baselines. The default RTCP
-changes add periodic report traffic on calls whose peers accept mux; the
-results and any baseline movement are recorded here from that run. Earlier
-results remain historical baselines and cannot qualify this release.
+The protected `0.4.0` qualification requires the canonical 2,000-CPS passes,
+the full performance and resiliency matrix, the high-density full-media
+burst, the monolithic and split soaks, teardown/churn tests, and regression
+comparison against the `0.3.12` baselines. The default RTCP changes add
+periodic report traffic on calls whose peers accept mux; the regression gates
+hold that traffic within the existing latency and throughput floors. It
+produces structured JSON and Markdown metrics plus a SHA-256 index of all
+current-run performance artifacts. Earlier results remain historical
+baselines and cannot qualify this release.
 
-General-user 10,000 CPS full-media capability is not claimed.
+General-user 10,000 CPS full-media capability is not claimed. The supported
+envelope remains bounded by the 2,000-CPS real-media evidence, exact host
+configuration, workloads, and soak durations recorded for this release.
+
+The signed qualification artifact is the authority for the measured host
+shape, source commit, workload configuration, ASR and error counts,
+setup-latency percentiles, CPU/RSS behavior, media delivery, cleanup, and
+artifact hashes. The GitHub release links that artifact and its workflow run;
+the repository's generated qualification history mirrors it after publication.
 
 ## Compatibility
 
@@ -240,15 +251,15 @@ previous behaviour where a peer depends on it.
 
 Known limitations: a TLS or TCP connection that closes after an INVITE was
 written still fails the call only at Timer B (#311); `rtcp_non_mux` is not
-supported with DTLS-SRTP; the grouped dependency update (#297) is deferred.
+supported with DTLS-SRTP; the grouped dependency update (#298) is deferred.
 
 The `0.3.12` tag, crates, and qualification evidence remain immutable release
 history; none of that evidence is reused to qualify `0.4.0`.
 
 ## Qualification record
 
-**Pending.** The protected Release Qualification workflow runs from a clean
-`main` commit and must record every selected gate as PASS, including the full
+The protected Release Qualification workflow runs from a clean `main` commit
+and records every selected gate as PASS, including the full
 46-crate matrix, feature bundles, CodeQL policy, Asterisk, FreeSWITCH, Jambonz,
 Kamailio, OpenSIPS, SIPp, strict-UA, security, performance, resiliency, soak,
 regression, source-fence, and cleanup gates. It produces a signed aggregate
