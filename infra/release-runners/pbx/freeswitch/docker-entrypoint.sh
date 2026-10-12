@@ -152,6 +152,17 @@ ${secure_media_line}
 EOF
 }
 
+# Append <param name=.. value=../> settings to an already-written profile.
+add_profile_settings() {
+  file="$CONF_DIR/sip_profiles/$1.xml"
+  shift
+  for setting in "$@"; do
+    name=${setting%%=*}
+    value=${setting#*=}
+    sed -i "s#^  </settings>#    <param name=\"$name\" value=\"$value\"/>\n  </settings>#" "$file"
+  done
+}
+
 write_rvoip_profiles() {
   local_rtp_ip=$1
   external_sip_ip=$2
@@ -160,6 +171,7 @@ write_rvoip_profiles() {
   tls_port=${FS_RVOIP_TLS_SIP_PORT:-5063}
   udp_xcode_port=${FS_RVOIP_UDP_XCODE_SIP_PORT:-5064}
   tls_xcode_port=${FS_RVOIP_TLS_XCODE_SIP_PORT:-5065}
+  udp_rtcp_timer_port=${FS_RVOIP_UDP_RTCP_TIMER_SIP_PORT:-5069}
 
   write_rvoip_profile rvoip_udp "$udp_port" false false false "$tls_port" \
     "$local_rtp_ip" "$external_sip_ip" "$external_rtp_ip" true
@@ -178,6 +190,24 @@ write_rvoip_profiles() {
     "$tls_xcode_port" "$local_rtp_ip" "$external_sip_ip" "$external_rtp_ip" false
   write_rvoip_profile rvoip_tls_srtp_xcode "$tls_xcode_port" true true true \
     "$tls_xcode_port" "$local_rtp_ip" "$external_sip_ip" "$external_rtp_ip" false
+
+  # RTCP and RFC 4028 session timers (#318), on their own port so the
+  # profiles above keep FreeSWITCH's defaults and their release rows keep
+  # meaning what they meant. The rvoip_udp twin plus three settings:
+  #   - rtcp-audio-interval-msec: FreeSWITCH sends no audio RTCP unless this
+  #     is set; with it, it answers rvoip's a=rtcp-mux offer and reports.
+  #   - session-timeout / minimum-session-expires 120: rvoip's 90 s offer
+  #     meets 422 Min-SE 120 and must retry; FreeSWITCH then refreshes the
+  #     leg it originates toward rvoip.
+  # Same users (2001-2003); run.sh registers the RTCP and session-timer cells
+  # here through FREESWITCH_RTCP_TIMER_UDP_ADDR.
+  write_rvoip_profile rvoip_udp_rtcp_timer "$udp_rtcp_timer_port" false false false \
+    "$udp_rtcp_timer_port" "$local_rtp_ip" "$external_sip_ip" "$external_rtp_ip" true
+  add_profile_settings rvoip_udp_rtcp_timer \
+    rtcp-audio-interval-msec=5000 \
+    enable-timer=true \
+    session-timeout=120 \
+    minimum-session-expires=120
 }
 
 write_rvoip_user() {
