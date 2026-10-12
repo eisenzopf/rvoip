@@ -191,8 +191,11 @@ Periodic RTCP sender/receiver reports reach a peer in one of two ways:
   (`a=rtcp:` per RFC 3605, otherwise its RTP port + 1). Use it for PBXes and
   carriers without mux, such as Asterisk on default pjsip settings. It
   reserves a port pair per offered call, so a port range holds half as many
-  calls, and it is ignored with ICE, DTLS-SRTP, strict mode and
-  signalling-only media.
+  calls, and it is ignored with ICE, strict mode and signalling-only media.
+  SRTCP protects the RTCP port under SRTP; with DTLS-SRTP keying the RTCP
+  port runs its own DTLS handshake (RFC 5764 §4.1) and stays closed until it
+  completes. A failed RTCP handshake leaves the call's media running without
+  RTCP.
 
 With neither, a peer that declines mux gets a working call but **no RTCP
 from rvoip**: no RTCP quality statistics on either side, and an SBC or PBX

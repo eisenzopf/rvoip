@@ -279,6 +279,10 @@ pub struct SessionStateCold {
     pub transfer_target_progress_seen: bool,
     pub transfer_target_last_progress: Option<(u16, String)>,
     pub pending_bye_reason: Option<(String, u16, Option<String>)>,
+    /// `CallEnded` reason for a teardown rvoip started on its own (for
+    /// example after a failed DTLS-SRTP handshake), whichever completion
+    /// path publishes the terminal event.
+    pub(crate) local_end_reason: Option<String>,
     pub pending_invite_options:
         Option<Arc<crate::api::send::outbound_call::OutboundCallOptionsSnapshot>>,
     /// Exact body placed on the initial INVITE wire, retained through
@@ -1040,6 +1044,7 @@ impl SessionState {
                 transfer_target_progress_seen: false,
                 transfer_target_last_progress: None,
                 pending_bye_reason: None,
+                local_end_reason: None,
                 pending_invite_options: None,
                 initial_invite_offer_sdp: None,
                 pending_reinvite_options: None,

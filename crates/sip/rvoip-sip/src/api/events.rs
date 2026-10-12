@@ -219,6 +219,42 @@ pub enum MediaSecurityKeying {
     DtlsSrtp,
 }
 
+/// Why a call's media key agreement failed; carried by
+/// [`Event::MediaSecurityFailed`].
+///
+/// A bounded class rather than the underlying error text: it never carries
+/// certificate contents or peer details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum MediaSecurityFailure {
+    /// The DTLS handshake did not finish within its time limit (10 s).
+    HandshakeTimeout,
+    /// The peer completed the DTLS handshake with a certificate whose
+    /// SHA-256 fingerprint is not the one its SDP `a=fingerprint` named.
+    FingerprintMismatch,
+    /// The DTLS handshake failed for another reason (protocol error, no
+    /// common SRTP profile, an unresolvable `a=setup` role).
+    HandshakeError,
+}
+
+impl MediaSecurityFailure {
+    /// Stable lower-case name: `timeout`, `fingerprint-mismatch` or
+    /// `handshake-error`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::HandshakeTimeout => "timeout",
+            Self::FingerprintMismatch => "fingerprint-mismatch",
+            Self::HandshakeError => "handshake-error",
+        }
+    }
+}
+
+impl std::fmt::Display for MediaSecurityFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// RTP profile negotiated for protected media.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaSecurityProfile {
@@ -897,6 +933,26 @@ pub enum Event {
         contexts_installed: bool,
     },
 
+    /// Media key agreement failed, so the call cannot carry secure media.
+    ///
+    /// Emitted when the DTLS-SRTP handshake for the call's RTP (media)
+    /// component fails. rvoip then ends the call: BYE once it is answered,
+    /// CANCEL before an outbound call is answered, or a `488` final
+    /// response before an inbound call is answered, each with
+    /// `Reason: SIP;cause=488;text="DTLS-SRTP handshake failed"` (RFC 3326).
+    /// The ordinary terminal event (`CallEnded`, `CallCancelled` or
+    /// `CallFailed`) follows. A failed handshake on a separate RTCP port
+    /// (see `Config::rtcp_non_mux`) does not raise this event: the call keeps
+    /// its media without RTCP.
+    MediaSecurityFailed {
+        /// Session identifier for the call.
+        call_id: CallId,
+        /// Keying mechanism whose key agreement failed.
+        keying: MediaSecurityKeying,
+        /// Bounded failure class.
+        reason: MediaSecurityFailure,
+    },
+
     // ===== Registration Events =====
     /// Registration successful.
     ///
@@ -1233,6 +1289,11 @@ impl std::fmt::Debug for Event {
                 .field("profile", profile)
                 .field("contexts_installed", contexts_installed)
                 .finish(),
+            Self::MediaSecurityFailed { keying, reason, .. } => formatter
+                .debug_struct("MediaSecurityFailed")
+                .field("keying", keying)
+                .field("reason", reason)
+                .finish(),
             Self::RegistrationSuccess {
                 registrar,
                 expires,
@@ -1316,6 +1377,7 @@ impl Event {
             | Event::DtmfReceived { call_id, .. }
             | Event::MediaQualityChanged { call_id, .. }
             | Event::MediaSecurityNegotiated { call_id, .. }
+            | Event::MediaSecurityFailed { call_id, .. }
             | Event::NotifyReceived { call_id, .. }
             | Event::AuthenticationRequired { call_id, .. } => Some(call_id),
             Event::TransferTargetAnswered {
@@ -1410,6 +1472,7 @@ impl Event {
             Event::DtmfReceived { .. }
                 | Event::MediaQualityChanged { .. }
                 | Event::MediaSecurityNegotiated { .. }
+                | Event::MediaSecurityFailed { .. }
         )
     }
 

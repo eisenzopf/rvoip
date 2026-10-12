@@ -638,10 +638,10 @@ pub use api::dialog_package::{
 };
 pub use api::dialog_subscription::DialogSubscriptionHandle;
 pub use api::events::{
-    CallAuthRetryDetails, DiagnosticEvent, Event, MediaQualityStats, MediaSecurityKeying,
-    MediaSecurityProfile, MediaSecurityState, RenegotiationFailure, SdesNegotiationFailure,
-    SipTrace, SipTraceConfig, SipTraceDirection, SubscriptionState, TransferKind,
-    TransferTargetEvidence,
+    CallAuthRetryDetails, DiagnosticEvent, Event, MediaQualityStats, MediaSecurityFailure,
+    MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState, RenegotiationFailure,
+    SdesNegotiationFailure, SipTrace, SipTraceConfig, SipTraceDirection, SubscriptionState,
+    TransferKind, TransferTargetEvidence,
 };
 
 // Errors
@@ -679,7 +679,7 @@ pub mod prelude {
         EndpointNetworkConfig, EndpointProfile, EndpointProfileName, EndpointRegistrationInfo,
         EndpointRegistrationStatus, EndpointSipTrace, EndpointSrtpMode, EndpointTransport, Event,
         EventReceiver, HeaderName, IncomingCall, IncomingCallGuard, MediaMode, MediaPoolConfig,
-        MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState,
+        MediaSecurityFailure, MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState,
         MediaSessionControllerConfig, PeerControl, PerformanceConfig, PerformanceRecipeBook,
         ProfiledSipAdapter, Registration, RegistrationHandle, RegistrationInfo, RegistrationStatus,
         Result, RtpSessionBufferConfig, RtpTransportBufferConfig, SdesBase64Mode,

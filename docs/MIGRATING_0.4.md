@@ -344,7 +344,9 @@ config.offer_rtcp_mux = false; // offers match 0.3.x
 ```
 
 `rtcp_non_mux` doubles the ports a call uses and is ignored with ICE,
-DTLS-SRTP keying, `rtcp_mux_required`, and signalling-only media. If your
+`rtcp_mux_required`, and signalling-only media. In 0.4.0 it was also ignored
+with DTLS-SRTP keying; from 0.4.1 the RTCP port runs its own DTLS handshake
+(RFC 5764 §4.1), with no configuration change. If your
 dead-media watchdogs should treat RTCP as activity for held or silent calls,
 set `config.active_call_rtcp_counts_as_media = true`. rtp-core users that
 relied on `RTCP_MIN_INTERVAL` being one second should note it is now five.

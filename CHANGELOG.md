@@ -26,6 +26,32 @@
   A peer that answered 486 and closed the connection at once used to have its
   response replaced by a transport error; the response is now reported.
 
+- A call whose DTLS-SRTP handshake on the media (RTP) port fails is now
+  ended instead of staying up with no media. rvoip publishes the new
+  `Event::MediaSecurityFailed { call_id, keying, reason }`, where `reason` is
+  a bounded `MediaSecurityFailure` (`HandshakeTimeout`, `FingerprintMismatch`
+  or `HandshakeError`), then sends BYE for an answered call, CANCEL for an
+  unanswered outbound call, or `488 Not Acceptable Here` for an unanswered
+  inbound call (a UAS in early media can now be rejected), each carrying
+  `Reason: SIP;cause=488;text="DTLS-SRTP handshake failed"` (RFC 3326). The
+  usual `CallEnded`, `CallCancelled` or `CallFailed` follows; `CallEnded`
+  carries the reason `DTLS-SRTP handshake failed`. Through `rvoip-core` the
+  connection ends with `EndReason::Failed` and detail
+  `media-security-failed: <class>`. A failed handshake on a separate RTCP
+  port still only leaves the call without RTCP.
+- `SessionHandle::audio()` (and the `StreamPeer` and `Endpoint` audio built
+  on it) no longer stops sending for good when the application sends audio
+  before a DTLS-SRTP call's keys exist. Frames sent while the handshake is in
+  flight are dropped, as stale real-time audio would be, and media flows as
+  soon as the keys are installed; previously the first such frame ended the
+  stream and every later send failed with a generic closed-queue error.
+  The same gate in media-core covers `UnifiedCoordinator::send_audio` and the
+  `rvoip-core` SIP media stream. A failure that does end the stream (the
+  call's media is gone, or DTLS key agreement failed) now logs a warning and
+  makes later sends return `SessionError::MediaError`; the new
+  `AudioSender::failure_reason` says why. SDES-SRTP and plain RTP calls are
+  unchanged.
+
 ### Release process and CI
 
 - The PR Gate now runs the release qualification's rustdoc check (#315).
@@ -98,6 +124,25 @@
   and integration tests only: no 0.4.0 release gate ran them against an
   independent peer. From 0.4.1 the PBX release gates do (see Release
   process and CI); their protected evidence is pending.
+
+### RTP / RTCP
+
+- `Config::rtcp_non_mux` now works with DTLS-SRTP keying
+  (`SrtpKeyingMode::DtlsSrtp`). When the peer declines `a=rtcp-mux`, the RTCP
+  port runs its own DTLS handshake, as RFC 5764 §4.1 requires, concurrently
+  with the RTP one: same `a=setup` role, same certificate and
+  `a=fingerprint`, and SRTCP on that port uses that handshake's keys. The
+  RTCP port sends nothing and drops everything until its keys are installed.
+  Behind NAT the RTCP handshake answers the port it arrives from on the RTP
+  peer's IP, under the symmetric-RTP policy. A failed RTCP handshake leaves
+  the call's SRTP media working without RTCP and logs a warning. Previously
+  such calls reserved no RTCP port and carried no RTCP.
+- rtp-core: `UdpRtpTransport::require_rtcp_component_keying`,
+  `install_rtcp_component_srtp_contexts`, `rtcp_component_keying_required`,
+  `rtcp_component_srtp_enabled` and (`dtls-webrtc`) `dtls_rtcp_conn_adapter`;
+  `DtlsIdentity` is now `Clone`. media-core (`dtls-srtp`):
+  `MediaSessionController::require_rtcp_component_keying` and
+  `run_rtcp_dtls_handshake_and_install`.
 
 ## 0.4.0 — 2026-10-11
 
@@ -1479,7 +1524,6 @@ and protected release evidence. It incorporates the previously unpublished
   A far-future `ts` produced a negative age, passed the `age > ttl` test,
   and stayed valid for as long as the sender chose. `DEFAULT_SIG_CLOCK_SKEW`
   (30 s) is the tolerated drift; `with_ttl_and_skew` makes it explicit.
-
 
 ## 0.3.8 — 2026-08-14
 

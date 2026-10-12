@@ -343,6 +343,27 @@ fn fingerprint_hex(fingerprint: &[u8; 32]) -> String {
         .join(":")
 }
 
+/// Bounded class of a failed RTP-component handshake from media-core's
+/// error. Only the class leaves this crate; the text never does.
+#[cfg(feature = "dtls-srtp")]
+fn classify_dtls_handshake_error(
+    error: &rvoip_media_core::Error,
+) -> crate::api::events::MediaSecurityFailure {
+    use crate::api::events::MediaSecurityFailure;
+    let text = error.to_string();
+    if text.contains("handshake timed out") {
+        MediaSecurityFailure::HandshakeTimeout
+    } else if text.contains("fingerprint does not match") {
+        MediaSecurityFailure::FingerprintMismatch
+    } else {
+        MediaSecurityFailure::HandshakeError
+    }
+}
+
+/// Coordinator callback for a failed RTP-component DTLS handshake.
+pub(crate) type MediaSecurityFailureHandler =
+    Arc<dyn Fn(SessionRegistryHandle, crate::api::events::MediaSecurityFailure) + Send + Sync>;
+
 #[cfg(feature = "dtls-srtp")]
 fn setup_role_to_dtls_role(role: SetupRole) -> Result<rvoip_media_core::DtlsRole> {
     match role {
@@ -1482,6 +1503,14 @@ pub struct MediaAdapter {
     pending_dtls_identities:
         Arc<DashMap<MediaNegotiationKey, rvoip_rtp_core::dtls_srtp::DtlsIdentity>>,
 
+    /// Coordinator callback for a failed RTP-component DTLS handshake.
+    media_security_failure_handler: Arc<std::sync::OnceLock<MediaSecurityFailureHandler>>,
+
+    /// Test hook: present an unadvertised certificate on the RTP
+    /// component's DTLS handshake.
+    #[cfg(all(feature = "dtls-srtp", any(test, feature = "test-hooks")))]
+    dtls_wrong_rtp_certificate_for_testing: bool,
+
     /// SDP results that passed validation but have not crossed their exact
     /// SIP offer/answer commit boundary.
     staged_media_negotiations: Arc<DashMap<MediaNegotiationKey, StagedMediaNegotiation>>,
@@ -1648,6 +1677,9 @@ impl MediaAdapter {
             dtls_setup_role: DtlsSetupRole::Actpass,
             #[cfg(feature = "dtls-srtp")]
             pending_dtls_identities: Arc::new(DashMap::new()),
+            media_security_failure_handler: Arc::new(std::sync::OnceLock::new()),
+            #[cfg(all(feature = "dtls-srtp", any(test, feature = "test-hooks")))]
+            dtls_wrong_rtp_certificate_for_testing: false,
             staged_media_negotiations: Arc::new(DashMap::new()),
             global_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
             app_event_publisher: Arc::new(tokio::sync::RwLock::new(None)),
@@ -2386,12 +2418,11 @@ impl MediaAdapter {
     /// `None` when this side makes the offer. An offerer cannot know whether
     /// the answer will decline mux, so it reserves; an answerer reserves only
     /// for an offer without `a=rtcp-mux`. Never with ICE (component 1 only),
-    /// DTLS-SRTP (RFC 5764 §4.1 would need a second DTLS association on the
-    /// RTCP port), strict mux, or signalling-only media.
+    /// strict mux, or signalling-only media. DTLS-SRTP keys the RTCP port
+    /// with a second handshake of its own (RFC 5764 §4.1).
     fn wants_separate_rtcp_port(&self, remote_offer: Option<&str>) -> bool {
         if !self.rtcp_non_mux
             || self.rtcp_mux_required
-            || self.offer_dtls_srtp
             || self.ice_policy != crate::adapters::ice_adapter::SipIcePolicy::Disabled
             || self.signaling_only_local_port().is_some()
         {
@@ -2401,11 +2432,7 @@ impl MediaAdapter {
             return true;
         };
         match SdpSession::from_str(offer) {
-            Ok(offer) => {
-                !audio_rtcp_mux(&offer)
-                    && !audio_transport(&offer)
-                        .is_some_and(|transport| transport.to_ascii_uppercase().contains("TLS"))
-            }
+            Ok(offer) => !audio_rtcp_mux(&offer),
             Err(_) => true,
         }
     }
@@ -3317,6 +3344,9 @@ impl MediaAdapter {
         self.fail_staged_media_commit.store(true, Ordering::Release);
     }
 
+    /// `rtcp_component`: the call keeps a separate RTCP port (no mux), so
+    /// RFC 5764 §4.1 needs a second handshake there; see
+    /// [`Self::run_committed_dtls_handshake`].
     #[cfg(feature = "dtls-srtp")]
     fn spawn_committed_dtls_handshake(
         &self,
@@ -3325,11 +3355,19 @@ impl MediaAdapter {
         remote_addr: SocketAddr,
         identity: rvoip_rtp_core::dtls_srtp::DtlsIdentity,
         plan: StagedDtlsHandshake,
+        rtcp_component: bool,
     ) {
         let adapter = self.clone();
         spawn_memory_tracked("sip.media_adapter.dtls_srtp_handshake", async move {
             let result = adapter
-                .run_committed_dtls_handshake(&handle, &dialog_id, remote_addr, identity, plan)
+                .run_committed_dtls_handshake(
+                    &handle,
+                    &dialog_id,
+                    remote_addr,
+                    identity,
+                    plan,
+                    rtcp_component,
+                )
                 .await;
             if let Err(error) = result {
                 tracing::error!(
@@ -3340,6 +3378,59 @@ impl MediaAdapter {
         });
     }
 
+    /// Install the coordinator's handler for a failed RTP-component DTLS
+    /// handshake: it publishes [`Event::MediaSecurityFailed`] and ends the
+    /// call. Set once at coordinator boot.
+    pub(crate) fn set_media_security_failure_handler(&self, handler: MediaSecurityFailureHandler) {
+        let _ = self.media_security_failure_handler.set(handler);
+    }
+
+    /// Hand a failed media key agreement to the coordinator, unless the
+    /// media lifetime it belonged to is already gone.
+    #[cfg(feature = "dtls-srtp")]
+    fn report_media_security_failure(
+        &self,
+        handle: &SessionRegistryHandle,
+        dialog_id: &DialogId,
+        failure: crate::api::events::MediaSecurityFailure,
+    ) {
+        if !self
+            .media_resources
+            .get(handle.session_id())
+            .is_some_and(|binding| binding.matches(handle, dialog_id))
+        {
+            return;
+        }
+        tracing::warn!(
+            session = %handle.session_id().0,
+            reason = failure.as_str(),
+            "DTLS-SRTP key agreement failed on the media port; ending the call"
+        );
+        match self.media_security_failure_handler.get() {
+            Some(handler) => handler(handle.clone(), failure),
+            None => tracing::debug!(
+                session = %handle.session_id().0,
+                "no media-security failure handler installed"
+            ),
+        }
+    }
+
+    /// Present a certificate other than the advertised one on the RTP
+    /// component's DTLS handshake, so the peer's fingerprint check fails.
+    #[cfg(all(feature = "dtls-srtp", any(test, feature = "test-hooks")))]
+    pub(crate) fn set_dtls_wrong_rtp_certificate_for_testing(&mut self, enabled: bool) {
+        self.dtls_wrong_rtp_certificate_for_testing = enabled;
+    }
+
+    /// Run the call's DTLS-SRTP handshake on the RTP port and, with
+    /// `rtcp_component`, the RTCP component's own handshake on the separate
+    /// RTCP port at the same time (RFC 5764 §4.1), both with the same role,
+    /// certificate and expected fingerprint.
+    ///
+    /// The RTP handshake decides the call's media security. A failed RTCP
+    /// handshake does not: the call keeps its SRTP media, the RTCP port
+    /// stays closed (nothing sent, everything received dropped), and a
+    /// warning is logged, so the call simply has no RTCP.
     #[cfg(feature = "dtls-srtp")]
     async fn run_committed_dtls_handshake(
         &self,
@@ -3348,23 +3439,89 @@ impl MediaAdapter {
         remote_addr: SocketAddr,
         identity: rvoip_rtp_core::dtls_srtp::DtlsIdentity,
         plan: StagedDtlsHandshake,
+        rtcp_component: bool,
     ) -> Result<()> {
-        let role = setup_role_to_dtls_role(plan.role)?;
-        let result = self
-            .controller
-            .run_dtls_handshake_and_install(
-                dialog_id,
-                identity,
-                role,
-                remote_addr,
-                plan.expected_remote_fingerprint_sha256,
-                dtls_protection_profiles(&self.srtp_offered_suites)?,
-                Duration::from_secs(10),
-            )
-            .await
-            .map_err(|error| {
-                SessionError::MediaError(format!("DTLS-SRTP handshake failed: {error}"))
-            })?;
+        use crate::api::events::MediaSecurityFailure;
+        const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+        let (role, profiles) = match setup_role_to_dtls_role(plan.role)
+            .and_then(|role| Ok((role, dtls_protection_profiles(&self.srtp_offered_suites)?)))
+        {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                self.report_media_security_failure(
+                    handle,
+                    dialog_id,
+                    MediaSecurityFailure::HandshakeError,
+                );
+                return Err(error);
+            }
+        };
+        let rtcp_identity = rtcp_component.then(|| identity.clone());
+        let rtp_profiles = profiles.clone();
+        #[cfg(any(test, feature = "test-hooks"))]
+        let identity = if self.dtls_wrong_rtp_certificate_for_testing {
+            rvoip_rtp_core::dtls_srtp::generate_identity()
+                .map_err(|error| SessionError::MediaError(format!("test certificate: {error}")))?
+        } else {
+            identity
+        };
+        let rtp = async {
+            let result = self
+                .controller
+                .run_dtls_handshake_and_install(
+                    dialog_id,
+                    identity,
+                    role,
+                    remote_addr,
+                    plan.expected_remote_fingerprint_sha256,
+                    rtp_profiles,
+                    HANDSHAKE_TIMEOUT,
+                )
+                .await;
+            // Report at once rather than after the RTCP handshake: the call
+            // is ended, which also stops the RTCP handshake.
+            if let Err(error) = &result {
+                self.report_media_security_failure(
+                    handle,
+                    dialog_id,
+                    classify_dtls_handshake_error(error),
+                );
+            }
+            result
+        };
+        let rtcp = async {
+            match rtcp_identity {
+                Some(identity) => Some(
+                    self.controller
+                        .run_rtcp_dtls_handshake_and_install(
+                            dialog_id,
+                            identity,
+                            role,
+                            plan.expected_remote_fingerprint_sha256,
+                            profiles,
+                            HANDSHAKE_TIMEOUT,
+                        )
+                        .await,
+                ),
+                None => None,
+            }
+        };
+        let (result, rtcp_result) = tokio::join!(rtp, rtcp);
+        match rtcp_result {
+            Some(Ok(_)) => tracing::debug!(
+                session = %handle.session_id().0,
+                "DTLS-SRTP keyed the separate RTCP port"
+            ),
+            Some(Err(error)) => tracing::warn!(
+                session = %handle.session_id().0,
+                "DTLS-SRTP handshake on the separate RTCP port failed; \
+                 the call continues without RTCP: {error}"
+            ),
+            None => {}
+        }
+        let result = result.map_err(|error| {
+            SessionError::MediaError(format!("DTLS-SRTP handshake failed: {error}"))
+        })?;
 
         if !self
             .media_resources
@@ -3484,6 +3641,18 @@ impl MediaAdapter {
                             "Failed to latch DTLS-SRTP secure media: {error}"
                         ))
                     })?;
+                // Without mux the RTCP port gets its own DTLS keys (RFC 5764
+                // §4.1) and stays closed to RTCP until they arrive.
+                if !staged.rtcp_mux {
+                    self.controller
+                        .require_rtcp_component_keying(&dialog_id)
+                        .await
+                        .map_err(|error| {
+                            SessionError::MediaError(format!(
+                                "Failed to latch RTCP-component DTLS-SRTP keying: {error}"
+                            ))
+                        })?;
+                }
             }
             self.apply_negotiated_media_config(
                 &dialog_id,
@@ -3680,12 +3849,19 @@ impl MediaAdapter {
                         "DTLS-SRTP identity disappeared at the SIP commit boundary".to_string(),
                     )
                 })?;
+            let rtcp_component = !prepared.rtcp_mux
+                && self
+                    .controller
+                    .get_session_info(&dialog_id)
+                    .await
+                    .is_some_and(|info| info.rtcp_port.is_some());
             self.spawn_committed_dtls_handshake(
                 handle,
                 dialog_id,
                 prepared.remote_addr,
                 identity,
                 plan,
+                rtcp_component,
             );
         }
         tracing::info!(
@@ -5945,6 +6121,9 @@ impl Clone for MediaAdapter {
             dtls_setup_role: self.dtls_setup_role,
             #[cfg(feature = "dtls-srtp")]
             pending_dtls_identities: self.pending_dtls_identities.clone(),
+            media_security_failure_handler: self.media_security_failure_handler.clone(),
+            #[cfg(all(feature = "dtls-srtp", any(test, feature = "test-hooks")))]
+            dtls_wrong_rtp_certificate_for_testing: self.dtls_wrong_rtp_certificate_for_testing,
             staged_media_negotiations: self.staged_media_negotiations.clone(),
             global_coordinator: self.global_coordinator.clone(),
             app_event_publisher: self.app_event_publisher.clone(),
@@ -7226,7 +7405,7 @@ mod sdp_format_tests {
     }
 
     #[tokio::test]
-    async fn rtcp_non_mux_is_suppressed_by_strict_mux_ice_and_dtls() {
+    async fn rtcp_non_mux_is_suppressed_by_strict_mux_and_ice_but_not_dtls() {
         use crate::state_table::types::Role;
         // Strict mode: no a=rtcp: next to a=rtcp-mux-only (RFC 8858 §5.3).
         let mut call = non_mux_call("strict", Role::UAC, 26_400, None, |adapter| {
@@ -7253,14 +7432,17 @@ mod sdp_format_tests {
         assert!(adapter.wants_separate_rtcp_port(Some(&plain_offer)));
         let mux_offer = format!("{plain_offer}a=rtcp-mux\r\n");
         assert!(!adapter.wants_separate_rtcp_port(Some(&mux_offer)));
+        // DTLS-SRTP keys the RTCP port with its own handshake (RFC 5764
+        // §4.1), so it reserves like any other call.
         let dtls_offer = plain_offer.replace("RTP/AVP", "UDP/TLS/RTP/SAVP");
-        assert!(!adapter.wants_separate_rtcp_port(Some(&dtls_offer)));
+        assert!(adapter.wants_separate_rtcp_port(Some(&dtls_offer)));
+        adapter.set_dtls_srtp_policy(true);
+        assert!(adapter.wants_separate_rtcp_port(None));
+        assert!(!adapter.wants_separate_rtcp_port(Some(&format!("{dtls_offer}a=rtcp-mux\r\n"))));
+        adapter.set_dtls_srtp_policy(false);
         adapter.set_ice_policy(crate::adapters::ice_adapter::SipIcePolicy::Full);
         assert!(!adapter.wants_separate_rtcp_port(None));
         adapter.set_ice_policy(crate::adapters::ice_adapter::SipIcePolicy::Disabled);
-        adapter.set_dtls_srtp_policy(true);
-        assert!(!adapter.wants_separate_rtcp_port(None));
-        adapter.set_dtls_srtp_policy(false);
         adapter.set_media_mode(MediaMode::SignalingOnly { sdp_rtp_port: 9 });
         assert!(!adapter.wants_separate_rtcp_port(None));
     }
@@ -7377,6 +7559,342 @@ mod sdp_format_tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert!(!rtcp_arrives(&peer_rtp, Duration::from_millis(500)).await);
+        call.hang_up().await;
+    }
+
+    /// A raw DTLS-SRTP peer that declines mux: its own sockets, its own
+    /// handshakes (rtp-core's DTLS engine over plain connected UDP sockets,
+    /// not rvoip's transport), and its own choice of key halves.
+    #[cfg(feature = "dtls-srtp")]
+    struct RawDtlsPeer {
+        rtp: Arc<tokio::net::UdpSocket>,
+        rtcp: Arc<tokio::net::UdpSocket>,
+        identity: rvoip_rtp_core::dtls_srtp::DtlsIdentity,
+    }
+
+    #[cfg(feature = "dtls-srtp")]
+    impl RawDtlsPeer {
+        async fn bind() -> Self {
+            let (rtp, rtcp) = bind_peer_port_pair().await;
+            Self {
+                rtp: Arc::new(rtp),
+                rtcp: Arc::new(rtcp),
+                identity: rvoip_rtp_core::dtls_srtp::generate_identity().unwrap(),
+            }
+        }
+
+        /// The peer's answer: DTLS client (`a=setup:active`), no
+        /// `a=rtcp-mux`, RTCP on its RTP port + 1.
+        fn answer(&self) -> String {
+            SdpBuilder::new("Session")
+                .origin("-", "answer", "0", "IN", "IP4", "127.0.0.1")
+                .connection("IN", "IP4", "127.0.0.1")
+                .time("0", "0")
+                .fingerprint(
+                    "sha-256",
+                    fingerprint_hex(&self.identity.fingerprint_sha256),
+                )
+                .media_audio(self.rtp.local_addr().unwrap().port(), "UDP/TLS/RTP/SAVP")
+                .formats(&["0"])
+                .rtpmap("0", "PCMU/8000")
+                .setup("active")
+                .done()
+                .build()
+                .expect("answer builds")
+                .to_string()
+        }
+
+        /// Run one client handshake from `socket` to `to`.
+        async fn handshake(
+            socket: &Arc<tokio::net::UdpSocket>,
+            to: SocketAddr,
+            identity: rvoip_rtp_core::dtls_srtp::DtlsIdentity,
+        ) -> rvoip_rtp_core::dtls_srtp::DtlsSrtpHandshakeResult {
+            socket.connect(to).await.unwrap();
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                rvoip_rtp_core::dtls_srtp::handshake_client(
+                    Arc::clone(socket) as _,
+                    identity,
+                    rvoip_rtp_core::dtls_srtp::default_srtp_profiles(),
+                ),
+            )
+            .await
+            .expect("peer handshake timed out")
+            .expect("peer handshake")
+        }
+    }
+
+    /// SRTCP context for one direction of one DTLS component, built from
+    /// the key half RFC 5764 §4.2 assigns it.
+    #[cfg(feature = "dtls-srtp")]
+    fn component_ctx(
+        result: &rvoip_rtp_core::dtls_srtp::DtlsSrtpHandshakeResult,
+        client_writes: bool,
+    ) -> rvoip_rtp_core::srtp::SrtpContext {
+        let key = if client_writes {
+            result.client_write_key.clone()
+        } else {
+            result.server_write_key.clone()
+        };
+        rvoip_rtp_core::srtp::SrtpContext::new(result.profile.clone(), key).unwrap()
+    }
+
+    #[cfg(feature = "dtls-srtp")]
+    fn offer_fingerprint(offer: &str) -> [u8; 32] {
+        let hex = offer
+            .lines()
+            .find_map(|line| line.strip_prefix("a=fingerprint:sha-256 "))
+            .expect("offer carries a SHA-256 fingerprint")
+            .trim();
+        let bytes: Vec<u8> = hex
+            .split(':')
+            .map(|byte| u8::from_str_radix(byte, 16).unwrap())
+            .collect();
+        bytes.try_into().unwrap()
+    }
+
+    #[cfg(feature = "dtls-srtp")]
+    async fn dtls_non_mux_call(case: &str, port_base: u16) -> NonMuxCall {
+        use crate::state_table::types::Role;
+        non_mux_call(case, Role::UAC, port_base, None, |adapter| {
+            adapter.set_rtcp_non_mux(true);
+            adapter.set_srtp_policy(true, true, vec![CryptoSuite::AesCm128HmacSha1_80]);
+            adapter.set_dtls_srtp_policy(true);
+        })
+        .await
+    }
+
+    #[cfg(feature = "dtls-srtp")]
+    async fn rtcp_component_keyed(call: &NonMuxCall) -> (bool, bool) {
+        let rtp = call
+            .controller
+            .get_rtp_session(&call.dialog_id)
+            .await
+            .unwrap();
+        let rtp = rtp.lock().await;
+        let transport = rtp.transport();
+        let udp = transport
+            .as_any()
+            .downcast_ref::<rvoip_rtp_core::transport::UdpRtpTransport>()
+            .unwrap();
+        (
+            udp.rtcp_component_keying_required(),
+            udp.rtcp_component_srtp_enabled(),
+        )
+    }
+
+    /// RFC 5764 §4.1 against an independent peer: the RTCP port runs its own
+    /// handshake, SRTCP on it uses that handshake's keys (not the RTP
+    /// component's), reports flow both ways and give an RTT, and no RTCP
+    /// reaches the peer's RTP port.
+    #[cfg(feature = "dtls-srtp")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn rtcp_non_mux_runs_its_own_dtls_handshake_on_the_rtcp_port() {
+        let mut call = dtls_non_mux_call("dtls", 27_000).await;
+        let offer = call.offer().await;
+        let (rtp_port, rtcp_port) = sdp_ports(&offer);
+        assert!(offer.contains("UDP/TLS/RTP/SAVP"), "{offer}");
+        assert_eq!(rtcp_port, Some(rtp_port + 1), "{offer}");
+        let our_fingerprint = offer_fingerprint(&offer);
+        let local_rtp = SocketAddr::from(([127, 0, 0, 1], rtp_port));
+        let local_rtcp = SocketAddr::from(([127, 0, 0, 1], rtp_port + 1));
+
+        let peer = RawDtlsPeer::bind().await;
+        call.accept_answer(&peer.answer()).await;
+        assert_eq!(call.info().await.rtcp_port, Some(rtp_port + 1));
+        assert_eq!(rtcp_component_keyed(&call).await, (true, false));
+
+        let (rtp_keys, rtcp_keys) = tokio::join!(
+            RawDtlsPeer::handshake(&peer.rtp, local_rtp, peer.identity.clone()),
+            RawDtlsPeer::handshake(&peer.rtcp, local_rtcp, peer.identity.clone()),
+        );
+        // One certificate and fingerprint cover both components.
+        assert_eq!(rtp_keys.remote_fingerprint_sha256, our_fingerprint);
+        assert_eq!(rtcp_keys.remote_fingerprint_sha256, our_fingerprint);
+        assert_ne!(
+            rtp_keys.server_write_key.key(),
+            rtcp_keys.server_write_key.key(),
+            "each component derives its own keys"
+        );
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while rtcp_component_keyed(&call).await != (true, true) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "RTCP keys never installed"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // SRTP media from the peer is accepted under the RTP component.
+        let mut peer_rtp_send = component_ctx(&rtp_keys, true);
+        for seq in 0..5u16 {
+            let packet = rvoip_rtp_core::packet::RtpPacket::new_with_payload(
+                0,
+                seq,
+                u32::from(seq) * 160,
+                0x5eed_0001,
+                bytes::Bytes::from(vec![0xffu8; 160]),
+            );
+            let protected = peer_rtp_send.protect(&packet).unwrap().serialize().unwrap();
+            peer.rtp.send(&protected).await.unwrap();
+        }
+
+        // Our SRTCP reaches the peer's RTCP port from our RTCP port, under
+        // the RTCP component's server write key only.
+        let mut rtcp_recv = component_ctx(&rtcp_keys, false);
+        let mut wrong_component = component_ctx(&rtp_keys, false);
+        let mut bytes = [0u8; 2048];
+        let report = tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                let n = peer.rtcp.recv(&mut bytes).await.unwrap();
+                if !(128..=191).contains(&bytes[0]) {
+                    continue; // a late DTLS retransmission
+                }
+                assert!(wrong_component.unprotect_rtcp(&bytes[..n]).is_err());
+                let plaintext = rtcp_recv
+                    .unprotect_rtcp(&bytes[..n])
+                    .expect("SRTCP under the RTCP component's keys");
+                assert_ne!(&bytes[..n], plaintext.as_ref());
+                break rvoip_rtp_core::packet::rtcp::RtcpCompoundPacket::parse(&plaintext).unwrap();
+            }
+        })
+        .await
+        .expect("SRTCP must reach the peer's RTCP port");
+        let local_ssrc = report_ssrc(&report);
+
+        let mut rtcp_send = component_ctx(&rtcp_keys, true);
+        let protected = rtcp_send
+            .protect_rtcp(&peer_sender_report(local_ssrc))
+            .unwrap();
+        peer.rtcp.send(&protected).await.unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let stats = call.stats().await;
+            if stats.rtt_ms.is_some() {
+                assert!(stats.packets_received >= 1, "{stats:?}");
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "SRTCP from the peer's RTCP port was not accepted: {stats:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !rtcp_arrives(&peer.rtp, Duration::from_millis(800)).await,
+            "RTCP reached the RTP port of a non-mux peer"
+        );
+        call.hang_up().await;
+    }
+
+    /// The RTCP component fails closed: before its keys exist nothing leaves
+    /// or enters the RTCP port, and a failed RTCP handshake (here the peer
+    /// presents a certificate the SDP did not name) leaves the call's SRTP
+    /// media working and its RTCP port dark.
+    #[cfg(feature = "dtls-srtp")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn rtcp_non_mux_dtls_failure_on_the_rtcp_port_keeps_rtp_media() {
+        let mut call = dtls_non_mux_call("dtls-fail", 27_100).await;
+        let (failures_tx, mut failures) = tokio::sync::mpsc::unbounded_channel();
+        call.adapter
+            .set_media_security_failure_handler(Arc::new(move |_, failure| {
+                let _ = failures_tx.send(failure);
+            }));
+        let offer = call.offer().await;
+        let (rtp_port, _) = sdp_ports(&offer);
+        let local_rtp = SocketAddr::from(([127, 0, 0, 1], rtp_port));
+        let local_rtcp = SocketAddr::from(([127, 0, 0, 1], rtp_port + 1));
+        let peer = RawDtlsPeer::bind().await;
+        call.accept_answer(&peer.answer()).await;
+
+        let rtp_keys = RawDtlsPeer::handshake(&peer.rtp, local_rtp, peer.identity.clone()).await;
+        // Plaintext RTCP to the RTCP port is refused while it has no keys.
+        peer.rtcp.connect(local_rtcp).await.unwrap();
+        peer.rtcp.send(&peer_sender_report(1)).await.unwrap();
+        assert!(
+            !rtcp_arrives(&peer.rtcp, Duration::from_millis(1_200)).await,
+            "RTCP left an unkeyed RTCP port"
+        );
+        let impostor = rvoip_rtp_core::dtls_srtp::generate_identity().unwrap();
+        let rtcp_keys = RawDtlsPeer::handshake(&peer.rtcp, local_rtcp, impostor).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            rtcp_component_keyed(&call).await,
+            (true, false),
+            "keys from an unauthenticated RTCP handshake were installed"
+        );
+        let mut rtcp_send = component_ctx(&rtcp_keys, true);
+        peer.rtcp
+            .send(&rtcp_send.protect_rtcp(&peer_sender_report(1)).unwrap())
+            .await
+            .unwrap();
+
+        let mut peer_rtp_send = component_ctx(&rtp_keys, true);
+        for seq in 0..5u16 {
+            let packet = rvoip_rtp_core::packet::RtpPacket::new_with_payload(
+                0,
+                seq,
+                u32::from(seq) * 160,
+                0x5eed_0002,
+                bytes::Bytes::from(vec![0xffu8; 160]),
+            );
+            let protected = peer_rtp_send.protect(&packet).unwrap().serialize().unwrap();
+            peer.rtp.send(&protected).await.unwrap();
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while call.stats().await.packets_received == 0 {
+            assert!(tokio::time::Instant::now() < deadline, "SRTP media stopped");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let stats = call.stats().await;
+        assert_eq!(stats.rtt_ms, None, "{stats:?}");
+        assert_eq!(stats.rtcp_packets_received, 0, "{stats:?}");
+        let (on_rtp, on_rtcp) = tokio::join!(
+            rtcp_arrives(&peer.rtp, Duration::from_millis(800)),
+            rtcp_arrives(&peer.rtcp, Duration::from_millis(800)),
+        );
+        assert!(
+            !on_rtp && !on_rtcp,
+            "RTCP left a call whose RTCP handshake failed"
+        );
+        assert!(
+            failures.try_recv().is_err(),
+            "an RTCP-only DTLS failure must not end the call"
+        );
+        call.hang_up().await;
+    }
+
+    /// A certificate the SDP did not name on the RTP (media) component is a
+    /// media-security failure the coordinator ends the call for.
+    #[cfg(feature = "dtls-srtp")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn rtp_dtls_fingerprint_mismatch_reports_a_media_security_failure() {
+        let mut call = dtls_non_mux_call("dtls-rtp-fail", 27_200).await;
+        let (failures_tx, mut failures) = tokio::sync::mpsc::unbounded_channel();
+        call.adapter
+            .set_media_security_failure_handler(Arc::new(move |_, failure| {
+                let _ = failures_tx.send(failure);
+            }));
+        let offer = call.offer().await;
+        let (rtp_port, _) = sdp_ports(&offer);
+        let peer = RawDtlsPeer::bind().await;
+        call.accept_answer(&peer.answer()).await;
+        let impostor = rvoip_rtp_core::dtls_srtp::generate_identity().unwrap();
+        RawDtlsPeer::handshake(
+            &peer.rtp,
+            SocketAddr::from(([127, 0, 0, 1], rtp_port)),
+            impostor,
+        )
+        .await;
+        let failure = tokio::time::timeout(Duration::from_secs(3), failures.recv())
+            .await
+            .expect("the failure is reported")
+            .unwrap();
+        assert_eq!(
+            failure,
+            crate::api::events::MediaSecurityFailure::FingerprintMismatch
+        );
         call.hang_up().await;
     }
 
