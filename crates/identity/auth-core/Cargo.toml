@@ -40,7 +40,7 @@ moka = { version = "0.12", features = ["future"] }
 
 # Cryptography
 ring = "0.17"
-base64 = "0.22"
+base64 = "0.23"
 subtle = "2.6"
 
 # Time handling

@@ -60,7 +60,7 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 thiserror = "2.0"
 
 # Base64url for PASSporT JWT segments
-base64 = "0.22"
+base64 = "0.23"
 
 # Logging
 tracing = "0.1"

@@ -70,7 +70,7 @@ config = "0.14"
 
 # Cryptography
 rand = "0.8"
-base64 = "0.22"
+base64 = "0.23"
 sha2 = "0.10"
 hex = "0.4"
 md5 = "0.7"
