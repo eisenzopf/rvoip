@@ -75,7 +75,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload immutable plan input
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pr-evidence-plan
           path: target/ci-plan/plan.json
@@ -109,7 +109,7 @@ jobs:
 
       - name: Upload policy receipt
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pr-evidence-policy
           path: target/ci-receipts/policy.json
@@ -153,7 +153,7 @@ jobs:
 
       - name: Upload shard receipt
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pr-evidence-shard-${{ matrix.shard_id }}-all
           path: target/ci-receipts/shard-${{ matrix.shard_id }}-all.json
@@ -185,7 +185,7 @@ jobs:
 
       - name: Install cargo-fuzz for release fuzz validation
         if: matrix.gate == 'release-tooling'
-        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2
         with:
           tool: cargo-fuzz@0.13.2
 
@@ -196,7 +196,7 @@ jobs:
 
       - name: Set up Node.js for browser gate
         if: matrix.gate == 'browser-smoke'
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 20
           cache: npm
@@ -216,7 +216,7 @@ jobs:
 
       - name: Upload specialty receipt
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pr-evidence-specialty-${{ matrix.gate }}
           path: target/ci-receipts/specialty-${{ matrix.gate }}.json
@@ -225,7 +225,7 @@ jobs:
 
       - name: Upload browser diagnostics
         if: failure() && matrix.gate == 'browser-smoke'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: browser-diagnostics
           path: tests/browser-smoke/playwright-report/
@@ -293,7 +293,7 @@ jobs:
 
       - name: Upload SIP lane receipt
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pr-evidence-sip-${{ matrix.id }}
           path: target/ci-receipts/sip-${{ matrix.id }}.json
@@ -311,7 +311,7 @@ jobs:
 
       - name: Download all command evidence
         continue-on-error: true
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: pr-evidence-*
           path: target/pr-evidence
@@ -347,7 +347,7 @@ jobs:
 
       - name: Upload final PR test receipt
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pr-test-receipt
           path: target/pr-receipt/pr-receipt.json
