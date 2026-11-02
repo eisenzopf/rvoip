@@ -2940,7 +2940,15 @@ impl MediaAdapter {
                         )
                         .into());
                     }
-                    let role = offer.setup_role.complementary();
+                    // For a browser's actpass offer, act as the DTLS client
+                    // (answer active). The previous passive answer made this
+                    // stack the server while Chrome also selected the server
+                    // role for the caller leg, stalling its handshake. For
+                    // active/passive offers, use the complementary role.
+                    let role = match offer.setup_role {
+                        SetupRole::Actpass => SetupRole::Active,
+                        other => other.complementary(),
+                    };
                     // Reuse the identity created for this negotiation when the
                     // answer SDP is rebuilt; otherwise the advertised
                     // fingerprint and the certificate used by the handshake
