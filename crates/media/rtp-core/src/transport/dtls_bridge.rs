@@ -10,6 +10,7 @@
 //! datagram — this adapter never touches the raw socket for reads itself,
 //! only for writes (`send_to`).
 
+use arc_swap::ArcSwapOption;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -25,14 +26,17 @@ use webrtc_util::conn::Conn;
 /// same call, without needing its own dedicated socket.
 pub struct DtlsUdpConnAdapter {
     socket: Arc<UdpSocket>,
-    remote: SocketAddr,
+    // Live view of the transport's remote address. ICE nomination retargets
+    // this after SDP setup; a frozen address here would send DTLS replies to
+    // the stale SDP default.
+    remote: Arc<ArcSwapOption<SocketAddr>>,
     inbound: AsyncMutex<mpsc::Receiver<Bytes>>,
 }
 
 impl DtlsUdpConnAdapter {
     pub(crate) fn new(
         socket: Arc<UdpSocket>,
-        remote: SocketAddr,
+        remote: Arc<ArcSwapOption<SocketAddr>>,
         inbound: mpsc::Receiver<Bytes>,
     ) -> Self {
         Self {
@@ -65,7 +69,13 @@ impl Conn for DtlsUdpConnAdapter {
                 // than the caller's buffer is truncated, not an error.
                 let n = datagram.len().min(buf.len());
                 buf[..n].copy_from_slice(&datagram[..n]);
-                Ok((n, self.remote))
+                let remote = self
+                    .remote
+                    .load()
+                    .as_deref()
+                    .copied()
+                    .unwrap_or_else(|| "0.0.0.0:0".parse().expect("valid placeholder"));
+                Ok((n, remote))
             }
             None => Err(std::io::Error::other(
                 "DTLS demux channel closed (RTP transport receiver stopped)",
@@ -75,7 +85,13 @@ impl Conn for DtlsUdpConnAdapter {
     }
 
     async fn send(&self, buf: &[u8]) -> webrtc_util::Result<usize> {
-        self.send_to(buf, self.remote).await
+        let remote = self
+            .remote
+            .load()
+            .as_deref()
+            .copied()
+            .ok_or_else(|| std::io::Error::other("remote RTP address is not set"))?;
+        self.send_to(buf, remote).await
     }
 
     async fn send_to(&self, buf: &[u8], target: SocketAddr) -> webrtc_util::Result<usize> {
@@ -87,7 +103,7 @@ impl Conn for DtlsUdpConnAdapter {
     }
 
     fn remote_addr(&self) -> Option<SocketAddr> {
-        Some(self.remote)
+        self.remote.load().as_deref().copied()
     }
 
     async fn close(&self) -> webrtc_util::Result<()> {

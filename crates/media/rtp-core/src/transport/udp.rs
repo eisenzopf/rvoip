@@ -1277,7 +1277,7 @@ impl UdpRtpTransport {
     pub fn dtls_conn_adapter(
         &self,
     ) -> Result<Arc<crate::transport::dtls_bridge::DtlsUdpConnAdapter>> {
-        let remote = self
+        let _remote = self
             .remote_rtp_addr
             .load()
             .as_deref()
@@ -1294,7 +1294,7 @@ impl UdpRtpTransport {
         Ok(Arc::new(
             crate::transport::dtls_bridge::DtlsUdpConnAdapter::new(
                 self.rtp_socket.clone(),
-                remote,
+                Arc::clone(&self.remote_rtp_addr),
                 rx,
             ),
         ))
