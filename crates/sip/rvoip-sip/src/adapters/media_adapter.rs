@@ -2263,8 +2263,8 @@ impl MediaAdapter {
         // rebuild); generating a fresh certificate each time makes the
         // a=fingerprint line advertise a certificate the handshake no longer
         // uses, so Chrome aborts and retries ClientHello forever.
-        let identity = match self.pending_dtls_identities.get(negotiation_key) {
-            Some(existing) => existing.clone(),
+        let identity = match self.pending_dtls_identities.get(&negotiation_key) {
+            Some(existing) => existing.value().clone(),
             None => {
                 let generated =
                     rvoip_rtp_core::dtls_srtp::generate_identity().map_err(|error| {
@@ -2945,8 +2945,8 @@ impl MediaAdapter {
                     // answer SDP is rebuilt; otherwise the advertised
                     // fingerprint and the certificate used by the handshake
                     // diverge and Chrome retries ClientHello indefinitely.
-                    let identity = match self.pending_dtls_identities.get(negotiation_key) {
-                        Some(existing) => existing.clone(),
+                    let identity = match self.pending_dtls_identities.get(&negotiation_key) {
+                        Some(existing) => existing.value().clone(),
                         None => {
                             let generated = rvoip_rtp_core::dtls_srtp::generate_identity()
                                 .map_err(|error| {
