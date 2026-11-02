@@ -2258,12 +2258,26 @@ impl MediaAdapter {
         if !self.offer_dtls_srtp {
             return Ok(None);
         }
-        let identity = rvoip_rtp_core::dtls_srtp::generate_identity().map_err(|error| {
-            SessionError::MediaError(format!("failed to generate DTLS-SRTP identity: {error}"))
-        })?;
+        // The identity must be stable for the whole negotiation. SDP can be
+        // rendered more than once (offer retransmission, re-INVITE, answer
+        // rebuild); generating a fresh certificate each time makes the
+        // a=fingerprint line advertise a certificate the handshake no longer
+        // uses, so Chrome aborts and retries ClientHello forever.
+        let identity = match self.pending_dtls_identities.get(&negotiation_key) {
+            Some(existing) => existing.value().clone(),
+            None => {
+                let generated =
+                    rvoip_rtp_core::dtls_srtp::generate_identity().map_err(|error| {
+                        SessionError::MediaError(format!(
+                            "failed to generate DTLS-SRTP identity: {error}"
+                        ))
+                    })?;
+                self.pending_dtls_identities
+                    .insert(negotiation_key.clone(), generated.clone());
+                generated
+            }
+        };
         let fingerprint = fingerprint_hex(&identity.fingerprint_sha256);
-        self.pending_dtls_identities
-            .insert(negotiation_key.clone(), identity);
         Ok(Some(("sha-256".to_string(), fingerprint)))
     }
 
@@ -2927,15 +2941,25 @@ impl MediaAdapter {
                         .into());
                     }
                     let role = offer.setup_role.complementary();
-                    let identity =
-                        rvoip_rtp_core::dtls_srtp::generate_identity().map_err(|error| {
-                            SessionError::MediaError(format!(
-                                "failed to generate DTLS-SRTP answer identity: {error}"
-                            ))
-                        })?;
+                    // Reuse the identity created for this negotiation when the
+                    // answer SDP is rebuilt; otherwise the advertised
+                    // fingerprint and the certificate used by the handshake
+                    // diverge and Chrome retries ClientHello indefinitely.
+                    let identity = match self.pending_dtls_identities.get(&negotiation_key) {
+                        Some(existing) => existing.value().clone(),
+                        None => {
+                            let generated = rvoip_rtp_core::dtls_srtp::generate_identity()
+                                .map_err(|error| {
+                                    SessionError::MediaError(format!(
+                                        "failed to generate DTLS-SRTP answer identity: {error}"
+                                    ))
+                                })?;
+                            self.pending_dtls_identities
+                                .insert(negotiation_key.clone(), generated.clone());
+                            generated
+                        }
+                    };
                     let fingerprint = fingerprint_hex(&identity.fingerprint_sha256);
-                    self.pending_dtls_identities
-                        .insert(negotiation_key.clone(), identity);
                     (
                         Some(("sha-256".to_string(), fingerprint, role)),
                         Some(StagedDtlsHandshake {
