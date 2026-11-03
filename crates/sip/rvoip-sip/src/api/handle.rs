@@ -1405,6 +1405,69 @@ impl SessionHandle {
         Ok(self.lifecycle().await?.media_security)
     }
 
+    /// The SIP-negotiated media format for this call, or `None` until SDP
+    /// negotiation has committed.
+    ///
+    /// This is the codec/payload-type/clock-rate/channel shape the answer
+    /// actually selected — the same value the media layer encodes with — read
+    /// from the session store instead of inferred from decoded packets.
+    /// Re-INVITE renegotiation replaces the value.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_sip::SessionHandle) -> rvoip_sip::Result<()> {
+    /// if let Some(media) = call.negotiated_media().await? {
+    ///     println!("{} at {} Hz, {} ch", media.codec, media.clock_rate, media.channels);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn negotiated_media(&self) -> Result<Option<crate::api::lifecycle::NegotiatedMedia>> {
+        Ok(self.lifecycle().await?.media)
+    }
+
+    /// Wait for the SIP-negotiated media format to be available (or changed to
+    /// a different value) on this call.
+    ///
+    /// Returns immediately when the current session state already carries a
+    /// negotiated format. With `previous`, waits until the negotiated format
+    /// differs from `previous` (a re-INVITE committed). The timeout only
+    /// cancels this wait.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_sip::SessionHandle) -> rvoip_sip::Result<()> {
+    /// let media = call.wait_for_negotiated_media(None).await?;
+    /// println!("negotiated {} (PT {})", media.codec, media.payload_type);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn wait_for_negotiated_media(
+        &self,
+        timeout: Option<Duration>,
+    ) -> Result<crate::api::lifecycle::NegotiatedMedia> {
+        let handle = self.exact_lifecycle_handle()?;
+        let rx = self.coordinator.lifecycle_watcher_exact(&handle);
+        wait_for_lifecycle(
+            self,
+            rx,
+            timeout,
+            "wait_for_negotiated_media timed out",
+            |snapshot| {
+                if let Some(media) = snapshot.media.clone() {
+                    return Ok(Some(media));
+                }
+                if let Some(err) = terminal_error(snapshot, "media was negotiated") {
+                    return Err(err);
+                }
+                Ok(None)
+            },
+        )
+        .await
+    }
+
     /// Current media quality for this call: local receive statistics plus,
     /// once the peer's RTCP arrives, what the peer reports about our stream.
     /// `None` when the call has no active media session.

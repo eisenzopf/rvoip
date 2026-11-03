@@ -686,6 +686,9 @@ pub struct CallLifecycleSnapshot {
     pub answered: Option<CallAnsweredInfo>,
     /// Negotiated media-security state, if SRTP was negotiated.
     pub media_security: Option<MediaSecurityState>,
+    /// SIP-negotiated media format (codec, payload type, clock rate, channels),
+    /// present once SDP negotiation committed and updated on re-INVITE.
+    pub media: Option<NegotiatedMedia>,
     /// Terminal evidence, retained briefly after session cleanup.
     pub terminal: Option<CallTerminalInfo>,
     /// Latest typed transfer outcome observed for this call, if any.
@@ -701,10 +704,38 @@ impl std::fmt::Debug for CallLifecycleSnapshot {
             .field("progress", &self.progress)
             .field("answered", &self.answered)
             .field("media_security", &self.media_security)
+            .field("media", &self.media)
             .field("terminal", &self.terminal)
             .field("latest_transfer_outcome", &self.latest_transfer_outcome)
             .finish()
     }
+}
+
+/// The SIP-negotiated media format for one call, read from the session store.
+///
+/// This is what SDP negotiation actually committed to on the wire: the codec
+/// name, the RTP payload type, the clock/sample rate and the channel count,
+/// plus the negotiated `a=fmtp` line when the answer carried one. Applications
+/// that drive media themselves (mixers, recorders, external transcoders) need
+/// this at answer time instead of inferring it from the first decoded packet.
+///
+/// Re-INVITE renegotiation replaces the value; read it again after a
+/// renegotiation event or use
+/// [`SessionHandle::wait_for_negotiated_media`](crate::SessionHandle::wait_for_negotiated_media)
+/// to observe the change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NegotiatedMedia {
+    /// Negotiated codec name as carried in the answer (for example `PCMU`,
+    /// `PCMA`, `opus`).
+    pub codec: String,
+    /// Negotiated RTP payload type.
+    pub payload_type: u8,
+    /// RTP clock rate in hertz, which is also the PCM sample rate.
+    pub clock_rate: u32,
+    /// Negotiated channel count.
+    pub channels: u8,
+    /// Negotiated `a=fmtp` parameter string, when the answer carried one.
+    pub fmtp: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1352,6 +1383,7 @@ impl LifecycleIndex {
                     progress: active.progress.iter().cloned().collect(),
                     answered: active.answered.clone(),
                     media_security: active.media_security.clone(),
+                    media: None,
                     terminal: None,
                     latest_transfer_outcome: active.latest_transfer_outcome.as_deref().cloned(),
                 },
@@ -1373,6 +1405,7 @@ impl LifecycleIndex {
                             sdp: None,
                         }),
                         media_security: terminal.media_security.clone(),
+                        media: None,
                         terminal: (!terminal_expired).then(|| terminal.terminal.clone()),
                         latest_transfer_outcome: None,
                     }
@@ -1385,6 +1418,7 @@ impl LifecycleIndex {
                 progress: Vec::new(),
                 answered: None,
                 media_security: None,
+                media: None,
                 terminal: None,
                 latest_transfer_outcome: None,
             }
@@ -1442,6 +1476,7 @@ impl LifecycleIndex {
                     progress: active.progress.iter().cloned().collect(),
                     answered: active.answered.clone(),
                     media_security: active.media_security.clone(),
+                    media: None,
                     terminal: None,
                     latest_transfer_outcome: active.latest_transfer_outcome.as_deref().cloned(),
                 },
@@ -1459,6 +1494,7 @@ impl LifecycleIndex {
                             sdp: None,
                         }),
                         media_security: terminal.media_security.clone(),
+                        media: None,
                         terminal: (!terminal_expired).then(|| terminal.terminal.clone()),
                         latest_transfer_outcome: None,
                     }
@@ -1471,6 +1507,7 @@ impl LifecycleIndex {
                 progress: Vec::new(),
                 answered: None,
                 media_security: None,
+                media: None,
                 terminal: None,
                 latest_transfer_outcome: None,
             }
