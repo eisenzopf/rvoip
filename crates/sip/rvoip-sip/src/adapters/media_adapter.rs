@@ -2534,7 +2534,11 @@ impl MediaAdapter {
         let (remote_ip, remote_port) = self.parse_sdp_connection(remote_sdp)?;
         let parsed_answer = SdpSession::from_str(remote_sdp)
             .map_err(|_| bounded_sdp_failure("remote-answer", "syntax"))?;
-        validate_rtcp_mux(&parsed_answer, self.rtcp_mux_required)?;
+        // Plain-RTP calls (carrier trunks/legacy peers) do not negotiate RTCP
+        // mux; the requirement belongs to the secure/WebRTC profile.
+        if !session.plain_rtp_offer {
+            validate_rtcp_mux(&parsed_answer, self.rtcp_mux_required)?;
+        }
         let parsed_offer = exact_initial_uac_offer(session)
             .ok_or_else(|| bounded_sdp_failure("remote-answer", "missing-local-offer"))
             .and_then(|offer| {
@@ -2660,7 +2664,7 @@ impl MediaAdapter {
                             )
                             .into());
                         }
-                        if self.srtp_required {
+                        if self.srtp_required && !session.plain_rtp_offer {
                             return Err(SessionError::SDPNegotiationFailed(
                                 "srtp_required is set but the local SDP did not offer SRTP".into(),
                             )
@@ -4729,8 +4733,12 @@ impl MediaAdapter {
         // The classic advertise logic above stays authoritative for the
         // default `c=`/`m=` destination, so a peer without ICE lands on
         // exactly the address it always did.
+        // A per-call plain-RTP offer (carrier trunks, legacy peers) must not
+        // advertise ICE/DTLS-SRTP/SDES even when the endpoint is configured for
+        // WebRTC; the answer is validated against this offer.
+        let plain_rtp = session.plain_rtp_offer;
         let ice_material =
-            if self.ice_policy != crate::adapters::ice_adapter::SipIcePolicy::Disabled {
+            if !plain_rtp && self.ice_policy != crate::adapters::ice_adapter::SipIcePolicy::Disabled {
                 let local_port = info.rtp_port.unwrap_or(info.config.local_addr.port());
                 let host_addr = SocketAddr::new(self.local_ip, local_port);
                 let public_sock = public.map(|sa| {
@@ -4761,8 +4769,14 @@ impl MediaAdapter {
         // Profile + keying. DTLS-SRTP carries a certificate fingerprint and
         // setup role; SDES carries a=crypto key material. They are mutually
         // exclusive on the wire.
-        let dtls_offer_attrs = self.dtls_offer_identity(&negotiation_key)?;
-        let (transport, crypto_attrs) = if dtls_offer_attrs.is_some() {
+        let dtls_offer_attrs = if plain_rtp {
+            None
+        } else {
+            self.dtls_offer_identity(&negotiation_key)?
+        };
+        let (transport, crypto_attrs) = if plain_rtp {
+            ("RTP/AVP", Vec::new())
+        } else if dtls_offer_attrs.is_some() {
             ("UDP/TLS/RTP/SAVP", Vec::new())
         } else if self.offer_srtp {
             let (negotiator, attrs) = SrtpNegotiator::new_offerer_with_base64_mode(
@@ -4822,7 +4836,9 @@ impl MediaAdapter {
         // the advertised RTP port is the local one (no port translation).
         let local_rtp_port = info.rtp_port.unwrap_or(info.config.local_addr.port());
         let offer_rtcp_port = info.rtcp_port.filter(|_| port == local_rtp_port);
-        media_builder = self.with_offer_rtcp_mux_attributes(media_builder, offer_rtcp_port);
+        if !plain_rtp {
+            media_builder = self.with_offer_rtcp_mux_attributes(media_builder, offer_rtcp_port);
+        }
         if dtls_offer_attrs.is_some() {
             media_builder = media_builder.setup(self.dtls_setup_role.as_str());
         }

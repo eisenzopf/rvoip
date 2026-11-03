@@ -392,6 +392,17 @@ pub struct SessionState {
     pub local_media_direction: MediaDirection,
     /// Current remote offer direction from the peer's perspective.
     pub remote_media_direction: MediaDirection,
+    /// Offer this call's SDP as plain RTP (`RTP/AVP`) instead of the endpoint's
+    /// configured secure/WebRTC profile.
+    ///
+    /// Set per outbound call via
+    /// [`OutboundCallBuilder::with_plain_rtp`](crate::api::send::OutboundCallBuilder::with_plain_rtp).
+    /// It suppresses ICE, DTLS-SRTP and SDES attributes in the local offer and
+    /// relaxes the answer checks (RTCP mux, SRTP requirement) that belong to
+    /// the secure profile, so a WebRTC-configured endpoint can dial a plain RTP
+    /// peer — e.g. a SIP carrier trunk — on one leg while its other legs keep
+    /// the secure profile.
+    pub plain_rtp_offer: bool,
 
     // Related IDs
     pub dialog_id: Option<DialogId>,
@@ -984,6 +995,7 @@ impl SessionState {
             sdp_origin_version: 0,
             local_media_direction: MediaDirection::SendRecv,
             remote_media_direction: MediaDirection::SendRecv,
+            plain_rtp_offer: false,
             dialog_id: None,
             media_session_id: None,
             call_id: None,
