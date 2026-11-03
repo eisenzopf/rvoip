@@ -737,7 +737,7 @@ mod tests;
 
 // Re-export important types
 pub use audio_generation::{AudioSource, AudioTransmitterConfig};
-pub use bridge::{BridgeError, BridgeHandle};
+pub use bridge::{BridgeError, BridgeHandle, BridgeMode};
 pub use types::{
     AdvancedProcessorConfig, AdvancedProcessorSet, MediaConfig, MediaSessionEvent,
     MediaSessionInfo, MediaSessionStatus, AMR_DTX_PARAMETER, NEGOTIATED_FMTP_PARAMETER,
@@ -1078,6 +1078,10 @@ pub struct MediaSessionController {
     /// Both directions are stored so lookup is O(1) from either end. Cleared
     /// on `BridgeHandle` drop or `stop_media` of a bridged session.
     pub(super) bridge_partners: Arc<DashMap<DialogId, DialogId>>,
+    /// Bridge mode per bridged dialog. Only transcode bridges register here;
+    /// relay bridges are identified by the absence of an entry (relay is the
+    /// historical default and needs no guard bypass).
+    pub(super) bridge_modes: Arc<DashMap<DialogId, bridge::BridgeMode>>,
 
     /// Sprint 3.6 C1 follow-up — RFC 3389 comfort-noise gate state per
     /// dialog. Lazily populated on first audio frame for sessions
@@ -1228,6 +1232,7 @@ impl MediaSessionController {
             codec_mapper,
             rtp_bridge,
             bridge_partners: Arc::new(DashMap::with_capacity(capacity_hint)),
+            bridge_modes: Arc::new(DashMap::with_capacity(capacity_hint)),
             cn_gate_state: Arc::new(DashMap::with_capacity(capacity_hint)),
             comfort_noise_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             media_directions: Arc::new(DashMap::with_capacity(capacity_hint)),
@@ -1554,6 +1559,7 @@ impl MediaSessionController {
             codec_mapper,
             rtp_bridge,
             bridge_partners: Arc::new(DashMap::new()),
+            bridge_modes: Arc::new(DashMap::new()),
             cn_gate_state: Arc::new(DashMap::new()),
             comfort_noise_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             media_directions: Arc::new(DashMap::new()),
