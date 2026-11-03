@@ -26,7 +26,7 @@ use dashmap::DashMap;
 use rvoip_media_core::types::AudioFrame;
 use rvoip_media_core::{
     relay::controller::{
-        AudioSource, BridgeError, BridgeHandle, MediaConfig, MediaSessionController,
+        AudioSource, BridgeError, BridgeHandle, BridgeMode, MediaConfig, MediaSessionController,
         MediaSessionInfo,
     },
     DialogId,
@@ -4002,6 +4002,24 @@ impl MediaAdapter {
         session_a: &SessionId,
         session_b: &SessionId,
     ) -> std::result::Result<BridgeHandle, BridgeError> {
+        self.bridge_rtp_sessions_with_mode(session_a, session_b, BridgeMode::Relay)
+            .await
+    }
+
+    /// Bridge two sessions, choosing relay vs per-direction transcoding.
+    ///
+    /// [`BridgeMode::Relay`] forwards payloads byte-for-byte and fails with
+    /// [`BridgeError::CodecMismatch`] when the legs negotiated different
+    /// payload types. [`BridgeMode::Transcode`] decodes each direction with the
+    /// source leg's negotiated codec and re-encodes with the destination leg's
+    /// codec, so legs that agreed different codecs with their peers can still
+    /// exchange audio.
+    pub async fn bridge_rtp_sessions_with_mode(
+        &self,
+        session_a: &SessionId,
+        session_b: &SessionId,
+        mode: BridgeMode,
+    ) -> std::result::Result<BridgeHandle, BridgeError> {
         let exact_a = self
             .current_media(session_a)
             .ok_or_else(|| BridgeError::SessionNotFound(session_a.0.clone()))?;
@@ -4011,7 +4029,11 @@ impl MediaAdapter {
 
         let handle = self
             .controller
-            .bridge_sessions(exact_a.dialog_id.clone(), exact_b.dialog_id.clone())
+            .bridge_sessions_with_mode(
+                exact_a.dialog_id.clone(),
+                exact_b.dialog_id.clone(),
+                mode,
+            )
             .await?;
         if !self.media_is_still_exact(&exact_a) || !self.media_is_still_exact(&exact_b) {
             drop(handle);

@@ -39,13 +39,41 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use crate::error::Error;
-use crate::types::DialogId;
+use crate::processing::format::converter::{ConversionParams, FormatConverter};
+use crate::types::{DialogId, SampleRate};
 use rvoip_rtp_core::session::RtpSessionEvent;
+use rvoip_rtp_core::RtpSendHandle;
 use rvoip_rtp_core::RtpSession;
 
 use super::codec_runtime::normalized_codec_name;
 use super::types::{MediaConfig, NEGOTIATED_FMTP_PARAMETER};
 use super::MediaSessionController;
+
+/// RFC 4733 telephone-event payload type. Both legs of a bridged call
+/// advertise it at the 8 kHz telephone-event clock, so in transcode mode these
+/// packets are relayed verbatim (payload **and** timestamp) instead of being
+/// decoded as audio.
+pub(super) const TELEPHONE_EVENT_PAYLOAD_TYPE: u8 = 101;
+
+/// How a bridge moves payloads between its two legs.
+///
+/// [`BridgeMode::Relay`] forwards RTP payloads byte-for-byte (the historical
+/// behaviour, and the only mode when both legs negotiated the same wire
+/// format). [`BridgeMode::Transcode`] decodes each leg's payloads with that
+/// leg's negotiated codec, converts the decoded PCM to the other leg's
+/// negotiated rate/channel shape, and re-encodes with the other leg's codec —
+/// so two legs that agreed different codecs with their peers can still talk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeMode {
+    /// Forward RTP payloads unchanged (payload, timestamp and marker all
+    /// preserved). Requires both legs to share a payload type and an
+    /// interchangeable wire format.
+    Relay,
+    /// Decode → convert → re-encode per direction. Requires both codecs to be
+    /// encodable/decodable by this build (feature-gated codecs like Opus need
+    /// their feature enabled).
+    Transcode,
+}
 
 /// Errors specific to bridge creation and teardown.
 #[derive(Debug, Error)]
@@ -109,6 +137,7 @@ pub struct BridgeHandle {
     session_a: DialogId,
     session_b: DialogId,
     partner_map: Arc<DashMap<DialogId, DialogId>>,
+    mode_map: Option<Arc<DashMap<DialogId, BridgeMode>>>,
     cancel: Arc<AtomicBool>,
     tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
@@ -117,6 +146,14 @@ impl BridgeHandle {
     /// Return the two session IDs involved in this bridge.
     pub fn sessions(&self) -> (&DialogId, &DialogId) {
         (&self.session_a, &self.session_b)
+    }
+
+    /// The mode this bridge was created with.
+    pub fn mode(&self) -> BridgeMode {
+        self.mode_map
+            .as_ref()
+            .and_then(|modes| modes.get(&self.session_a).map(|m| *m.value()))
+            .unwrap_or(BridgeMode::Relay)
     }
 }
 
@@ -127,6 +164,10 @@ impl Drop for BridgeHandle {
         self.cancel.store(true, Ordering::SeqCst);
         self.partner_map.remove(&self.session_a);
         self.partner_map.remove(&self.session_b);
+        if let Some(modes) = &self.mode_map {
+            modes.remove(&self.session_a);
+            modes.remove(&self.session_b);
+        }
 
         let tasks = self.tasks.clone();
         let a = self.session_a.clone();
@@ -156,37 +197,92 @@ impl MediaSessionController {
         a: DialogId,
         b: DialogId,
     ) -> std::result::Result<BridgeHandle, BridgeError> {
+        self.bridge_sessions_with_mode(a, b, BridgeMode::Relay)
+            .await
+    }
+
+    /// Bridge two media sessions, choosing how payloads move between them.
+    ///
+    /// [`BridgeMode::Relay`] is the historical [`Self::bridge_sessions`]
+    /// behaviour: payloads are forwarded byte-for-byte and both legs must have
+    /// negotiated the same, interchangeable wire format.
+    ///
+    /// [`BridgeMode::Transcode`] relaxes the shared-codec requirement: each
+    /// direction decodes with the *source* leg's negotiated codec, converts the
+    /// decoded PCM to the *destination* leg's negotiated rate/channel shape,
+    /// and re-encodes with the destination codec. Both codecs must be
+    /// encodable/decodable in this build. RFC 4733 telephone-event packets
+    /// (payload type 101) are still relayed verbatim — both legs advertise the
+    /// 8 kHz telephone-event clock, so payload and timestamp pass through.
+    pub async fn bridge_sessions_with_mode(
+        &self,
+        a: DialogId,
+        b: DialogId,
+        mode: BridgeMode,
+    ) -> std::result::Result<BridgeHandle, BridgeError> {
         if a == b {
             return Err(BridgeError::SameSession(a.to_string()));
         }
 
-        // Preflight: both sessions exist, have remote addresses, and use
-        // matching payload types.
+        // Preflight: both sessions exist and have remote addresses.
         let (a_session_arc, a_pt, a_fmtp, a_name) = self.read_bridge_preconditions(&a).await?;
         let (b_session_arc, b_pt, b_fmtp, b_name) = self.read_bridge_preconditions(&b).await?;
 
-        if a_pt != b_pt {
-            return Err(BridgeError::CodecMismatch {
-                a: a.to_string(),
-                b: b.to_string(),
-                a_pt,
-                b_pt,
-            });
-        }
+        if mode == BridgeMode::Relay {
+            if a_pt != b_pt {
+                return Err(BridgeError::CodecMismatch {
+                    a: a.to_string(),
+                    b: b.to_string(),
+                    a_pt,
+                    b_pt,
+                });
+            }
 
-        // A matching payload type does not imply interchangeable payloads.
-        // AMR is the case that forces this: the same payload type carries
-        // either bandwidth-efficient or octet-aligned framing depending on
-        // `octet-align`, and those are different bit layouts. Relaying across
-        // the boundary would hand the far end bytes it cannot parse.
-        if !wire_formats_are_interchangeable(&a_name, &a_fmtp, &b_name, &b_fmtp) {
-            return Err(BridgeError::FormatMismatch {
-                a: a.to_string(),
-                b: b.to_string(),
-                payload_type: a_pt,
-                a_fmtp,
-                b_fmtp,
-            });
+            // A matching payload type does not imply interchangeable payloads.
+            // AMR is the case that forces this: the same payload type carries
+            // either bandwidth-efficient or octet-aligned framing depending on
+            // `octet-align`, and those are different bit layouts. Relaying across
+            // the boundary would hand the far end bytes it cannot parse.
+            if !wire_formats_are_interchangeable(&a_name, &a_fmtp, &b_name, &b_fmtp) {
+                return Err(BridgeError::FormatMismatch {
+                    a: a.to_string(),
+                    b: b.to_string(),
+                    payload_type: a_pt,
+                    a_fmtp,
+                    b_fmtp,
+                });
+            }
+        } else {
+            // Transcode: both legs must have an encodable/decodable codec
+            // runtime. Resolve both up front so an unsupported combination
+            // fails before any partnership is registered (leaving the
+            // previous state intact).
+            let a_runtime = self
+                .codec_runtimes
+                .get(&a)
+                .map(|entry| entry.value().clone())
+                .ok_or_else(|| BridgeError::SessionNotFound(a.to_string()))?;
+            let b_runtime = self
+                .codec_runtimes
+                .get(&b)
+                .map(|entry| entry.value().clone())
+                .ok_or_else(|| BridgeError::SessionNotFound(b.to_string()))?;
+            // Both directions must be convertible: the destination sample
+            // rate has to be inside the converter's supported set.
+            for (from, to) in [
+                (a_runtime.format.clock_rate, b_runtime.format.clock_rate),
+                (b_runtime.format.clock_rate, a_runtime.format.clock_rate),
+            ] {
+                if SampleRate::from_hz(to).is_none() {
+                    return Err(BridgeError::FormatMismatch {
+                        a: a.to_string(),
+                        b: b.to_string(),
+                        payload_type: a_pt,
+                        a_fmtp: format!("clock={from}"),
+                        b_fmtp: format!("clock={to}"),
+                    });
+                }
+            }
         }
 
         // Register partnership (atomic via DashMap). Error out on double-
@@ -199,6 +295,10 @@ impl MediaSessionController {
         }
         self.bridge_partners.insert(a.clone(), b.clone());
         self.bridge_partners.insert(b.clone(), a.clone());
+        if mode == BridgeMode::Transcode {
+            self.bridge_modes.insert(a.clone(), mode);
+            self.bridge_modes.insert(b.clone(), mode);
+        }
 
         // Subscribe to each session's RTP event broadcast. Subscribing
         // early (before spawning) ensures no packets are lost between
@@ -226,31 +326,68 @@ impl MediaSessionController {
             guard.send_handle()
         };
 
-        let task_ab = tokio::spawn(forward_rtp(
-            a.clone(),
-            b.clone(),
-            a_subscriber,
-            b_session_arc.clone(),
-            b_send_handle,
-            cancel.clone(),
-        ));
-        let task_ba = tokio::spawn(forward_rtp(
-            b.clone(),
-            a.clone(),
-            b_subscriber,
-            a_session_arc.clone(),
-            a_send_handle,
-            cancel.clone(),
-        ));
+        let tasks = match mode {
+            BridgeMode::Relay => {
+                let task_ab = tokio::spawn(forward_rtp(
+                    a.clone(),
+                    b.clone(),
+                    a_subscriber,
+                    b_session_arc.clone(),
+                    b_send_handle,
+                    cancel.clone(),
+                ));
+                let task_ba = tokio::spawn(forward_rtp(
+                    b.clone(),
+                    a.clone(),
+                    b_subscriber,
+                    a_session_arc.clone(),
+                    a_send_handle,
+                    cancel.clone(),
+                ));
+                vec![task_ab, task_ba]
+            }
+            BridgeMode::Transcode => {
+                let task_ab = tokio::spawn(forward_rtp_transcode(
+                    a.clone(),
+                    b.clone(),
+                    a_subscriber,
+                    b_send_handle,
+                    b_session_arc.clone(),
+                    Arc::clone(&self.codec_runtimes),
+                    cancel.clone(),
+                ));
+                let task_ba = tokio::spawn(forward_rtp_transcode(
+                    b.clone(),
+                    a.clone(),
+                    b_subscriber,
+                    a_send_handle,
+                    a_session_arc.clone(),
+                    Arc::clone(&self.codec_runtimes),
+                    cancel.clone(),
+                ));
+                vec![task_ab, task_ba]
+            }
+        };
 
-        info!("🔗 Bridged RTP sessions: {} <-> {} (PT={})", a, b, a_pt);
+        match mode {
+            BridgeMode::Relay => {
+                info!("🔗 Bridged RTP sessions: {} <-> {} (PT={})", a, b, a_pt);
+            }
+            BridgeMode::Transcode => {
+                info!(
+                    "🔗 Bridged RTP sessions with transcoding: {} ({}, PT={}) <-> {} ({}, PT={})",
+                    a, a_name, a_pt, b, b_name, b_pt
+                );
+            }
+        }
 
         Ok(BridgeHandle {
             session_a: a,
             session_b: b,
             partner_map: self.bridge_partners.clone(),
+            mode_map: (mode == BridgeMode::Transcode).then(|| Arc::clone(&self.bridge_modes)),
             cancel,
-            tasks: Arc::new(Mutex::new(vec![task_ab, task_ba])),
+            tasks: Arc::new(Mutex::new(tasks)),
         })
     }
 
@@ -355,6 +492,18 @@ impl MediaSessionController {
         else {
             return Ok(());
         };
+
+        // A transcode bridge re-encodes whatever each leg negotiates, so a
+        // codec change on one leg is absorbed by the codec-runtime rebuild in
+        // `update_media` instead of being refused. Only relay bridges need the
+        // wire-format guards below.
+        if self
+            .bridge_modes
+            .get(dialog_id)
+            .is_some_and(|mode| *mode.value() == BridgeMode::Transcode)
+        {
+            return Ok(());
+        }
 
         let shape = |config: &MediaConfig| {
             let pt = config
@@ -549,6 +698,239 @@ async fn forward_rtp(
     debug!("🔗 bridge forwarder exited: {} -> {}", src, dst);
 }
 
+/// Per-direction state for the transcoding bridge forwarder.
+struct TranscodeDirection {
+    /// Converts decoded source PCM into the destination leg's negotiated
+    /// rate/channel shape.
+    converter: FormatConverter,
+    /// Destination negotiated shape (the encoder uses the destination runtime
+    /// fetched per packet, so a re-INVITE generation change is picked up).
+    dst_clock_rate: u32,
+    dst_channels: u8,
+    /// Source negotiated shape.
+    src_payload_type: u8,
+    src_clock_rate: u32,
+    src_channels: u8,
+    /// Source RTP timestamp at the first packet; the destination timestamp is
+    /// `src_ts0 + (src_ts - src_ts0) * dst_rate / src_rate`.
+    src_ts0: Option<u32>,
+}
+
+impl TranscodeDirection {
+    /// Map a source RTP timestamp into the destination clock.
+    fn map_timestamp(&mut self, src_ts: u32) -> u32 {
+        let ts0 = *self.src_ts0.get_or_insert(src_ts);
+        let delta = (i64::from(src_ts).wrapping_sub(i64::from(ts0))) * i64::from(self.dst_clock_rate);
+        let scaled = delta / i64::from(self.src_clock_rate);
+        (i64::from(ts0) + scaled) as u32
+    }
+}
+
+/// Transcoding variant of [`forward_rtp`]: decode with the *source* leg's
+/// negotiated codec, convert the PCM to the *destination* leg's negotiated
+/// rate/channel shape, re-encode with the destination codec, and send on the
+/// destination session.
+///
+/// RFC 4733 telephone-event payloads (payload type 101, 8 kHz event clock on
+/// both legs) bypass the codec path and are relayed verbatim so DTMF survives
+/// a codec change.
+///
+/// The destination codec runtime is re-read from the controller whenever its
+/// generation changes, so a re-INVITE that renegotiates either leg's codec is
+/// absorbed without tearing the bridge down (`update_media` rebuilds the
+/// runtime; this task only observes the new generation).
+#[allow(clippy::too_many_arguments)]
+async fn forward_rtp_transcode(
+    src: DialogId,
+    dst: DialogId,
+    mut events: broadcast::Receiver<RtpSessionEvent>,
+    dst_send_handle: Option<RtpSendHandle>,
+    dst_session: Arc<Mutex<RtpSession>>,
+    codec_runtimes: Arc<DashMap<DialogId, Arc<super::codec_runtime::DialogCodecRuntime>>>,
+    cancel: Arc<AtomicBool>,
+) {
+    debug!("🔗 transcode bridge forwarder started: {} -> {}", src, dst);
+
+    // The first packet resolves both runtimes' formats; nothing can be sent
+    // before that anyway because the bridge is only created after both legs
+    // are active (remote address known).
+    let mut direction: Option<TranscodeDirection> = None;
+
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            break;
+        }
+        match events.recv().await {
+            Ok(RtpSessionEvent::PacketReceived(packet)) => {
+                if cancel.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                // Resolve/refresh the destination runtime. A generation change
+                // (re-INVITE) also resets the converter and timestamp anchor so
+                // the new rate is applied from a clean state.
+                let Some(dst_runtime) = codec_runtimes
+                    .get(&dst)
+                    .map(|entry| entry.value().clone())
+                else {
+                    debug!("🔗 transcode forward {src}->{dst}: destination runtime gone");
+                    break;
+                };
+                let Some(src_runtime) = codec_runtimes
+                    .get(&src)
+                    .map(|entry| entry.value().clone())
+                else {
+                    debug!("🔗 transcode forward {src}->{dst}: source runtime gone");
+                    break;
+                };
+
+                let shape = (
+                    dst_runtime.format.clock_rate,
+                    dst_runtime.format.channels,
+                    src_runtime.format.payload_type,
+                    src_runtime.format.clock_rate,
+                    src_runtime.format.channels,
+                );
+                let rebuild = match &direction {
+                    Some(existing) => {
+                        (existing.dst_clock_rate,
+                         existing.dst_channels,
+                         existing.src_payload_type,
+                         existing.src_clock_rate,
+                         existing.src_channels) != shape
+                    }
+                    None => true,
+                };
+                if rebuild {
+                    let (dst_clock_rate, dst_channels, src_payload_type, src_clock_rate, src_channels) =
+                        shape;
+                    direction = Some(TranscodeDirection {
+                        converter: FormatConverter::new(),
+                        dst_clock_rate,
+                        dst_channels,
+                        src_payload_type,
+                        src_clock_rate,
+                        src_channels,
+                        src_ts0: None,
+                    });
+                    debug!(
+                        "🔗 transcode forward {src}->{dst}: {}Hz/{}ch (PT {}) -> {}Hz/{}ch (PT {})",
+                        src_clock_rate, src_channels, src_payload_type,
+                        dst_clock_rate, dst_channels, dst_runtime.format.payload_type
+                    );
+                }
+                let Some(direction_state) = direction.as_mut() else {
+                    continue;
+                };
+
+                let payload = packet.payload.clone();
+                let ts = packet.header.timestamp;
+                let marker = packet.header.marker;
+                let packet_pt = packet.header.payload_type;
+
+                // DTMF (telephone-event) rides the 8 kHz event clock on both
+                // legs; relay it verbatim rather than decoding it as audio.
+                if packet_pt != direction_state.src_payload_type {
+                    let send_result = match &dst_send_handle {
+                        Some(handle) => {
+                            handle
+                                .send_packet_with_pt(ts, payload, marker, packet_pt)
+                                .await
+                        }
+                        None => {
+                            let dst_guard = dst_session.lock().await;
+                            dst_guard
+                                .send_packet_with_pt(ts, payload, marker, packet_pt)
+                                .await
+                        }
+                    };
+                    if let Err(e) = send_result {
+                        warn!(
+                            "transcode bridge {src}->{dst} relay PT={packet_pt} send failed: {}",
+                            e
+                        );
+                    }
+                    continue;
+                }
+
+                // Decode with the source codec, convert to the destination
+                // shape, and re-encode with the destination codec.
+                let decoded = match src_runtime.decode_source(&payload, ts, false).await {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        debug!("transcode bridge {src}->{dst} decode failed: {error}");
+                        continue;
+                    }
+                };
+                let Some(target_rate) = SampleRate::from_hz(direction_state.dst_clock_rate) else {
+                    // Validated at bridge creation; unreachable in practice.
+                    continue;
+                };
+                let converted = match direction_state.converter.convert_frame(
+                    &decoded,
+                    &ConversionParams::new(target_rate, direction_state.dst_channels),
+                ) {
+                    Ok(result) => result.frame,
+                    Err(error) => {
+                        debug!("transcode bridge {src}->{dst} convert failed: {error}");
+                        continue;
+                    }
+                };
+                let dst_ts = direction_state.map_timestamp(ts);
+                let encoded = match dst_runtime.encode_packets(&converted).await {
+                    Ok(packets) => packets,
+                    Err(error) => {
+                        debug!("transcode bridge {src}->{dst} encode failed: {error}");
+                        continue;
+                    }
+                };
+                // The encoder stamps its own frame timestamps in the
+                // destination clock; the bridge's mapping keeps the stream
+                // continuous across source timestamp wraps, so send with our
+                // mapped timestamp and the destination leg's default payload
+                // type. Trailing packets from one source packet (G.729
+                // fragmentation, AMR) advance the timestamp by the payload
+                // duration the encoder reported.
+                let mut sent_any = false;
+                for encoded_packet in encoded {
+                    let packet_ts = if sent_any {
+                        dst_ts.wrapping_add(encoded_packet.timestamp)
+                    } else {
+                        dst_ts
+                    };
+                    let payload_bytes = bytes::Bytes::from(encoded_packet.payload);
+                    let send_result = match &dst_send_handle {
+                        Some(handle) => {
+                            handle
+                                .send_packet(packet_ts, payload_bytes, marker)
+                                .await
+                        }
+                        None => {
+                            let dst_guard = dst_session.lock().await;
+                            dst_guard
+                                .send_packet(packet_ts, payload_bytes, marker)
+                                .await
+                        }
+                    };
+                    if let Err(e) = send_result {
+                        warn!("transcode bridge {src}->{dst} send failed: {e}");
+                    }
+                    sent_any = true;
+                }
+            }
+            Ok(_) => {}
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                warn!("transcode bridge {src}->{dst} lagged {n} events");
+            }
+            Err(broadcast::error::RecvError::Closed) => {
+                debug!("🔗 transcode bridge source closed: {src}");
+                break;
+            }
+        }
+    }
+    debug!("🔗 transcode bridge forwarder exited: {} -> {}", src, dst);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -628,6 +1010,150 @@ mod tests {
             }
             other => panic!("expected CodecMismatch, got {:?}", other),
         }
+    }
+
+    /// A PCMU leg and a PCMA leg cannot relay (different payload types) but a
+    /// transcode bridge moves audio between them: PCMU payloads decoded on the
+    /// PCMU leg arrive as PCMA payloads (PT 8) on the PCMA leg, and vice versa.
+    #[tokio::test]
+    async fn transcode_bridge_moves_audio_between_different_codecs() {
+        use bytes::Bytes;
+        use rvoip_rtp_core::packet::rtp::RtpPacket;
+        use std::net::UdpSocket as StdUdpSocket;
+
+        let controller = MediaSessionController::new();
+        let a = DialogId::new("xcode-a");
+        let b = DialogId::new("xcode-b");
+        controller
+            .start_media(a.clone(), test_config("PCMU"))
+            .await
+            .unwrap();
+        controller
+            .start_media(b.clone(), test_config("PCMA"))
+            .await
+            .unwrap();
+
+        // Peers for both legs so the sessions have remote addresses and the
+        // test can drive/observe real RTP.
+        let peer_a = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let peer_b = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        for (dialog, peer) in [(&a, &peer_a), (&b, &peer_b)] {
+            let info = controller.get_session_info(dialog).await.unwrap();
+            let mut config = info.config.clone();
+            config.remote_addr = Some(peer.local_addr().unwrap());
+            controller.update_media(dialog.clone(), config).await.unwrap();
+        }
+        let a_port = controller.get_session_info(&a).await.unwrap().rtp_port.unwrap();
+        let b_port = controller.get_session_info(&b).await.unwrap().rtp_port.unwrap();
+
+        // Relay refuses the pair; transcode accepts it.
+        let relay_error = expect_err(controller.bridge_sessions(a.clone(), b.clone()).await);
+        assert!(
+            matches!(relay_error, BridgeError::CodecMismatch { .. }),
+            "expected CodecMismatch for relay, got {relay_error:?}"
+        );
+        let handle = expect_ok(
+            controller
+                .bridge_sessions_with_mode(a.clone(), b.clone(), BridgeMode::Transcode)
+                .await,
+        );
+        assert_eq!(handle.mode(), BridgeMode::Transcode);
+
+        // Drive A → B: PCMU (PT 0) in, PCMA (PT 8) out.
+        let send_a = {
+            let peer_a = Arc::clone(&peer_a);
+            tokio::spawn(async move {
+            for i in 0..40u16 {
+                let payload = vec![0xD5u8; 160]; // mid-range A-law-adjacent pattern
+                let packet =
+                    RtpPacket::new_with_payload(0, i, u32::from(i) * 160, 0x1234_5678, Bytes::from(payload));
+                let bytes = packet.serialize().expect("serialize PCMU packet");
+                peer_a
+                    .send_to(&bytes, format!("127.0.0.1:{a_port}"))
+                    .await
+                    .expect("send PCMU toward leg A");
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        });
+        };
+
+        // Expect PCMA (PT 8) payloads on B's peer.
+        let mut received_pt8 = 0usize;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline && received_pt8 < 5 {
+            let mut buf = vec![0u8; 2048];
+            let (len, _) =
+                tokio::time::timeout(std::time::Duration::from_millis(500), peer_b.recv_from(&mut buf))
+                    .await
+                    .expect("timed out waiting for transcoded RTP on leg B")
+                    .expect("recv_from leg B peer");
+            let packet = RtpPacket::parse(&buf[..len]).expect("parse RTP from leg B");
+            if packet.header.payload_type == 8 {
+                received_pt8 += 1;
+                assert_eq!(
+                    packet.payload.len(),
+                    160,
+                    "transcoded PCMA payload must stay 20 ms at 8 kHz"
+                );
+            } else {
+                panic!("unexpected payload type {} on leg B", packet.header.payload_type);
+            }
+        }
+        assert!(
+            received_pt8 >= 5,
+            "expected several transcoded PCMA packets, got {received_pt8}"
+        );
+        drop(send_a);
+
+        // Drive B → A: PCMA (PT 8) in, PCMU (PT 0) out.
+        let send_b = {
+            let peer_b = Arc::clone(&peer_b);
+            tokio::spawn(async move {
+            for i in 0..40u16 {
+                let payload = vec![0xD5u8; 160];
+                let packet = RtpPacket::new_with_payload(
+                    8,
+                    i,
+                    u32::from(i) * 160,
+                    0x8765_4321,
+                    Bytes::from(payload),
+                );
+                let bytes = packet.serialize().expect("serialize PCMA packet");
+                peer_b
+                    .send_to(&bytes, format!("127.0.0.1:{b_port}"))
+                    .await
+                    .expect("send PCMA toward leg B");
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        });
+        };
+
+        let mut received_pt0 = 0usize;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline && received_pt0 < 5 {
+            let mut buf = vec![0u8; 2048];
+            let (len, _) =
+                tokio::time::timeout(std::time::Duration::from_millis(500), peer_a.recv_from(&mut buf))
+                    .await
+                    .expect("timed out waiting for transcoded RTP on leg A")
+                    .expect("recv_from leg A peer");
+            let packet = RtpPacket::parse(&buf[..len]).expect("parse RTP from leg A");
+            assert_eq!(
+                packet.header.payload_type, 0,
+                "unexpected payload type {} on leg A",
+                packet.header.payload_type
+            );
+            received_pt0 += 1;
+            assert_eq!(packet.payload.len(), 160);
+        }
+        assert!(
+            received_pt0 >= 5,
+            "expected several transcoded PCMU packets, got {received_pt0}"
+        );
+        drop(send_b);
+
+        drop(handle);
+        assert!(!controller.is_bridged(&a) && !controller.is_bridged(&b));
     }
 
     #[tokio::test]

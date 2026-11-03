@@ -90,7 +90,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
 
 pub use rvoip_media_core::relay::controller::{
-    AudioSource, BridgeError, BridgeHandle, MediaSessionControllerConfig,
+    AudioSource, BridgeError, BridgeHandle, BridgeMode, MediaSessionControllerConfig,
 };
 pub use rvoip_rtp_core::transport::SymmetricRtpPolicy;
 pub use rvoip_rtp_core::{RtpSessionBufferConfig, RtpTransportBufferConfig};
@@ -11887,8 +11887,26 @@ impl UnifiedCoordinator {
         session_a: &SessionId,
         session_b: &SessionId,
     ) -> std::result::Result<BridgeHandle, BridgeError> {
+        self.bridge_with_mode(session_a, session_b, BridgeMode::Relay)
+            .await
+    }
+
+    /// Bridge two calls, choosing relay vs per-direction transcoding.
+    ///
+    /// [`BridgeMode::Relay`] is the historical [`Self::bridge`] behaviour and
+    /// requires both legs to share an interchangeable payload type.
+    /// [`BridgeMode::Transcode`] decodes and re-encodes per direction with each
+    /// leg's SIP-negotiated codec, so calls whose legs negotiated different
+    /// codecs still exchange audio. Both codecs must be compiled into the
+    /// media layer (feature-gated codecs such as Opus need their feature).
+    pub async fn bridge_with_mode(
+        &self,
+        session_a: &SessionId,
+        session_b: &SessionId,
+        mode: BridgeMode,
+    ) -> std::result::Result<BridgeHandle, BridgeError> {
         self.media_adapter
-            .bridge_rtp_sessions(session_a, session_b)
+            .bridge_rtp_sessions_with_mode(session_a, session_b, mode)
             .await
     }
 
