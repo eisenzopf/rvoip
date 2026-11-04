@@ -190,8 +190,8 @@ def validate_catalog(root: Path, catalog: dict[str, Any]) -> None:
     ):
         raise GateError("remote-release legacy coverage ledger is inconsistent")
     core = [gate for gate in gates if gate["id"].startswith("core.")]
-    if len(core) != catalog.get("workspace_package_count") or len(core) != 46:
-        raise GateError("catalog must contain one core gate for each of 46 workspace crates")
+    if not core or len(core) != catalog.get("workspace_package_count"):
+        raise GateError("catalog must contain one core gate for each workspace crate")
 
 
 def tracked_files(root: Path) -> list[str]:

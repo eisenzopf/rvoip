@@ -1,0 +1,198 @@
+/*
+This file has the defintion of the common fields used in VoiceVirtualAgent.proto
+*/
+syntax = "proto3";
+
+package com.cisco.wcc.ccai.media.v1;
+import "google/protobuf/struct.proto";
+
+/*
+ Definition of textContent.This is used by VA(server) to send transcripts.
+*/
+message TextContent {
+  // The content can be either plain text or SSML.
+  oneof input_content {
+    // Plain text input.
+    string text = 1;
+
+    // Optional. SSML formatted text input.
+    string ssml = 2;
+  }
+  // Language code ofF the user input, e.g., 'en-US'.
+  string language_code = 3;
+}
+
+// Timers for controlling input collection timing.
+message InputSpeechTimers {
+  // Maximum duration of an utterance in milliseconds.
+  int32 max_speech_timeout_msec = 1;
+  // Duration of silence after an utterance before concluding it's complete.
+  int32 complete_timeout_msec = 2;
+  // Duration of silence after an utterance before concluding it's incomplete.
+  int32 incomplete_timeout_msec = 3;
+  // Maximum silence, in milliseconds, allowed while waiting for user input after recognition timers are started. A value of 0 means no timeout.
+  int32 no_input_timeout_msec = 4;
+}
+
+// Configuration for capturing DTMF tones and speech timers.
+message InputHandlingConfig {
+  // This is sent by VA(server) to inform client what dtmf configurations it is expecting from client
+  DTMFInputConfig dtmf_config = 1;
+  // Represents the timer settings for speech recognition.
+  InputSpeechTimers speech_timers = 2;
+}
+
+/* DTMF digits, including A, B, C, and D.*/
+enum DTMFDigits {
+  DTMF_EVENT_UNSPECIFIED = 0;
+  // Number: '1'.
+  DTMF_DIGIT_ONE = 1;
+
+  // Number: '2'.
+  DTMF_DIGIT_TWO = 2;
+
+  // Number: '3'.
+  DTMF_DIGIT_THREE = 3;
+
+  // Number: '4'.
+  DTMF_DIGIT_FOUR = 4;
+
+  // Number: '5'.
+  DTMF_DIGIT_FIVE = 5;
+
+  // Number: '6'.
+  DTMF_DIGIT_SIX = 6;
+
+  // Number: '7'.
+  DTMF_DIGIT_SEVEN = 7;
+
+  // Number: '8'.
+  DTMF_DIGIT_EIGHT = 8;
+
+  // Number: '9'.
+  DTMF_DIGIT_NINE = 9;
+
+  // Number: '10'.
+  DTMF_DIGIT_ZERO = 10;
+
+  // Letter: 'A'.
+  DTMF_DIGIT_A = 11;
+
+  // Letter: 'B'.
+  DTMF_DIGIT_B = 12;
+
+  // Letter: 'C'.
+  DTMF_DIGIT_C = 13;
+
+  // Letter: 'D'.
+  DTMF_DIGIT_D = 14;
+
+  // Asterisk/star: '*'.
+  DTMF_DIGIT_STAR = 15;
+
+  // Pound/diamond/hash/square/gate/octothorpe: '#'.
+  DTMF_DIGIT_POUND = 16;
+}
+
+// Configuration for DTMF inputs.
+// This is sent by VA(server) to inform client what dtmf configurations it is expecting from client
+message DTMFInputConfig {
+  // Timeout between two digits in milliseconds.
+  int32 inter_digit_timeout_msec = 1;
+  DTMFDigits termchar = 2; // Termination character for DTMF inputs (e.g., '#').
+  int32 dtmf_input_length = 3; // Maximum length of DTMF input.
+}
+
+// DTMF input digits
+message DTMFInputs {
+  repeated DTMFDigits dtmf_events = 1; // Sequence of Telephony DTMF digits.
+}
+
+/*
+ Represents the Request format for List virtual agent RPC method.
+*/
+message ListVARequest {
+
+  // Customer organization ID.
+  string customer_org_id = 1; // Mandatory for all request
+
+  //default virtual agent enabled / disabled - boolean value
+  // In case of not selecting the VA, default agent will be picked up
+  bool is_default_virtual_agent_enabled = 2;
+}
+
+/*
+ Represents the virtual agent information sent as part of ListVirtualAgent response
+*/
+message VirtualAgentInfo{
+
+  //Indicates the bots unique identifier
+  string virtual_agent_id = 1; // Mandatory for all request
+
+  //Indicates the bot name
+  string virtual_agent_name = 2; // Mandatory for all request
+
+  //Indicates whether the respective bot is a default bot for the selected provider
+  bool is_default = 3;
+
+  // optional:Any additional attributes that are required
+  map<string, string> attributes = 4;
+}
+
+/*
+ Represents the Response format for List virtual agent RPC method.
+*/
+message ListVAResponse{
+
+  //Indicates the list of bots for the selected provider
+  repeated VirtualAgentInfo virtual_agents = 1;
+
+}
+
+// Events that represent the state of the session or call. This is sent by VA(server)
+message OutputEvent {
+  //Possible types of events
+  enum EventType {
+    UNSPECIFIED_EVENT = 0;  //unspecified event
+    SESSION_END = 1;       // End of session with the virtual agent.
+    TRANSFER_TO_AGENT = 2; // Transfer the call to a human agent.
+    CUSTOM_EVENT = 3;            // Custom event based on interaction. Can be used to send any custom data.
+    /*
+    Triggers when user utter the first utterance in Voice Input mode or First DTMF is pressed in DTMF Input mode.
+    This event to be used to BargeIn the prompt based on prompt barge-in flag.
+    The event will be sent only if the current prompt being played is barge-in enabled or prompt playing is complete.
+  */
+    START_OF_INPUT = 4;
+    // Sent when user utterance Voice / DTMF is complete.
+    END_OF_INPUT = 5;
+    // Sent when utterance did not match any of the accepted input
+    NO_MATCH = 6;
+    // Sent when no audio received with in the expected timeframe
+    NO_INPUT = 7;
+  }
+  //input event type value
+  EventType event_type = 1;
+  string name = 2;                    // Optional: The identifier used to send custom data with the events like session_start,transfer_to_agent
+  google.protobuf.Struct metadata = 3; // Optional: The custom data of the event, passed as a map(key, value)
+}
+
+
+/*
+ Represents the Type of Events sent by client
+*/
+message EventInput {
+  //Possible event types
+  enum EventType {
+    UNSPECIFIED_INPUT = 0; // unspecified event
+    SESSION_START = 1;   // Event indicating the start of the interaction. for voice agent its call_start
+    SESSION_END = 2;     // Event indicating the end of the interaction.for voice agent its call_end
+    // Event indicating no input was received from the user.
+    NO_INPUT = 3;
+    START_OF_DTMF = 4;   // Event indicating start of DTMF input.
+    CUSTOM_EVENT = 5; // It can be used to send data from client to server for custom events.
+  }
+  //input event type value
+  EventType event_type = 1;
+  string name = 2;                    // Optional: The identifier used to send custom data with the events like call_start/session_start,call_end/session_end
+  google.protobuf.Struct parameters = 3; // Optional: The custom data of the event, passed as a map(key, value)
+}

@@ -491,7 +491,7 @@ def core_gate(package: dict[str, Any], root: Path, weights: dict[str, int]) -> d
     return {
         "id": f"core.{slug}",
         "name": f"{name} unit, integration, example, and Clippy checks",
-        "category": "Parallel 46-crate core",
+        "category": "Parallel workspace core",
         "kind": "cargo",
         "executor": "argv",
         "command": [
@@ -1074,8 +1074,8 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
         (package for package in metadata["packages"] if package["id"] in members),
         key=lambda package: package["name"],
     )
-    if len(package_rows) != 46:
-        raise RuntimeError(f"expected 46 workspace packages, found {len(package_rows)}")
+    if not package_rows:
+        raise RuntimeError("workspace package inventory is empty")
     package_names = [package["name"] for package in package_rows]
     weights = json.loads((root / "scripts/ci/policy.json").read_text()).get("package_weights", {})
 
@@ -1088,7 +1088,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
         ),
         synthetic_gate(
             "package.inventory",
-            "46-package release inventory audit",
+            "publishable package release inventory audit",
             executor="argv",
             command=["python3", "scripts/release.py", "audit"],
             dependencies=["source.remote-clean"],

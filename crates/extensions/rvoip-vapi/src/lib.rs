@@ -17,6 +17,7 @@ pub mod error;
 pub mod events;
 pub mod health;
 mod jitter;
+pub mod raw_session;
 pub mod types;
 
 pub use adapter::{
