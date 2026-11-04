@@ -111,3 +111,11 @@ A fresh matched built-in-agent control succeeded. Lex conversation logging
 captured the successful control but no event for the failed A2A contacts at
 collection time; absence of a conversation log is not itself a root cause.
 The default agent and temporary IAM/logging changes were restored afterward.
+
+A further control used two AWS-hosted agents, with the known-working baseline
+agent as the immediate-handoff target and no external application in the route.
+The session's recorded orchestrator version matched that control. It reproduced
+the same assistant WebSocket HTTP 404 while the rvoip endpoint was stopped.
+This rules out the external endpoint as a necessary cause of this reproduction;
+AWS A2A configuration, entitlement, and runtime behavior remain unresolved.
+The contact ended through the error flow and the original default was restored.
