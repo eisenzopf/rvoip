@@ -7,8 +7,10 @@ rvoip adapter.
 
 **Developer preview:** tested against deterministic protocol fixtures and an
 in-process Connect client, including a real rvoip media graph and the existing
-Vapi adapter with a mock Vapi WebSocket. Live Amazon Connect qualification is
-still required. This is a transport library, not a turnkey Vapi agent runner.
+Vapi adapter with a mock Vapi WebSocket. Real Connect chat initialization, text
+exchange, and hand-back were observed, but the complete live smoke test did not
+pass. Voice qualification is still required. This is a transport library, not
+a turnkey Vapi agent runner.
 
 ```text
 Connect orchestrator → A2A/WSS → AmazonA2aAdapter
@@ -68,6 +70,10 @@ provision AWS. Do not attach it to a public plaintext listener. API keys require
 at least 16 non-whitespace characters and are zeroized/redacted. Keep separate
 adapter instances/keys for different admission domains. Transcripts, history,
 DTMF and tool payloads are deliberately absent from diagnostic `Debug` output.
+
+When Connect omits `instanceArn`, the adapter resolves it from `contactArn`
+and compares it against the host's trusted `CallBinding.instance_arn`. It rejects
+conflicting explicit instance and contact bindings.
 
 ## Reuse the Vapi adapter
 

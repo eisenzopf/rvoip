@@ -644,3 +644,61 @@ async fn malformed_and_unknown_method_requests_use_json_rpc_error_codes() {
         call.closed().await;
     }
 }
+
+/// Live Connect's HANDOFF initialization carries contactArn but no instanceArn.
+/// Admission must still compare its enclosing instance against trusted policy.
+#[tokio::test]
+async fn live_init_resolves_contact_instance_and_rejects_cross_instance_binding() {
+    let instance =
+        "arn:aws:connect:us-east-1:123456789012:instance/11111111-1111-4111-8111-111111111111";
+    for allowed in [true, false] {
+        let adapter = AmazonA2aAdapter::new(config()).unwrap();
+        let _events = adapter.subscribe_events();
+        let mut bind = binding();
+        bind.instance_arn = if allowed {
+            instance.into()
+        } else {
+            "another-instance".into()
+        };
+        let (client, server) = tokio::io::duplex(256 * 1024);
+        let server_adapter = adapter.clone();
+        let task = tokio::spawn(async move { server_adapter.accept_websocket(server, bind).await });
+        let mut upgrade = "ws://localhost/a2a".into_client_request().unwrap();
+        upgrade
+            .headers_mut()
+            .insert("authorization", format!("Bearer {KEY}").parse().unwrap());
+        upgrade
+            .headers_mut()
+            .insert("a2a-extensions", EXTENSION.parse().unwrap());
+        let (mut socket, _) = tokio_tungstenite::client_async(upgrade, client)
+            .await
+            .unwrap();
+        send(
+            &mut socket,
+            request(
+                Some("INIT_SESSION"),
+                json!({"data":{"initSession":{
+            "interactionMode":"HANDOFF",
+            "contactArn":format!("{instance}/contact/22222222-2222-4222-8222-222222222222"),
+            "supportedFinishTypes":["COMPLETE","ESCALATE"],
+            "contactContext":{"systemAttributes":{"Channel":"CHAT"}}
+        }},"mediaType":"application/json"}),
+            ),
+        )
+        .await;
+        let result = task.await.unwrap();
+        if allowed {
+            let call = result.unwrap();
+            assert_eq!(call.initialization().instance_arn, instance);
+            adapter.accept(call.connection_id().clone()).await.unwrap();
+            assert_eq!(
+                recv(&mut socket).await["result"]["message"]["parts"][0]["data"]
+                    ["initSessionResponse"]["statusCode"],
+                "200"
+            );
+            call.close().await;
+        } else {
+            assert!(matches!(result, Err(A2aError::Configuration)));
+        }
+    }
+}

@@ -1,5 +1,35 @@
 # Live Connect qualification
 
+**Final status (2026-11-04):** testing stopped at the user's request and the
+dedicated AWS infrastructure was retired. The complete live smoke test did
+not pass. Real Connect chat initialization, text exchange, and hand-back were
+observed after the fixes below; voice and live Connect-to-Vapi remain unqualified.
+
+The earlier HTTP 404 was bypassed by binding the assistant session to the
+contact and explicitly selecting the published AI agent version in Lex. Binding
+the contact alone did not fix it. Add `UpdateContactData` with
+`WisdomSessionArn: $.Wisdom.SessionArn` after `CreateWisdomSession`, and pass
+the published agent version ARN as `x-amz-lex:q-in-connect:ai-agent-arn` in
+`LexSessionAttributes`. Keep the agent security profile associated with that
+exact version. Relying only on the assistant default produced the 404 in our
+test configuration. The historical failures below do not establish an AWS defect.
+
+Live Connect omitted `instanceArn` from INIT_SESSION. The adapter now resolves
+it from `contactArn` and still compares it against the host's trusted binding.
+A regression test covers admission and cross-instance rejection.
+
+Contact `ce3cef36-805b-4a64-bee7-f95512e94b50` initialized, received READY,
+echoed the unique test text and `goodbye`, emitted traces and terminal tasks,
+and sent FINISH COMPLETE. Connect resumed the main AI agent, which asked if
+further help was needed. The flow completion marker never arrived, so the
+runner correctly failed and stopped the contact. This run used a metadata-only
+diagnostic WebSocket relay in front of the Rust server. Chat opened a new
+connection with history for each customer message, as documented by AWS.
+
+A subsequent test-agent completion-instruction change did not produce a pass:
+contact `36c945f1-54c0-4214-9cf6-e8f537330ab6` ended before either echo.
+Testing ended before this last configuration was investigated further.
+
 The deterministic crate tests do not qualify Amazon Connect interoperability.
 Run a real contact through a dedicated Connect instance before claiming a live
 A2A pass. A successful `StartWebRTCContact` or media probe alone is insufficient:
@@ -64,7 +94,7 @@ For a Vapi bridge, use the existing adapter and qualify the host's event orderin
 and upstream audio drain. Do not call a caller-leg WebRTC connection, a local
 mock, or a synthetic request to the public endpoint an end-to-end A2A pass.
 
-## Qualification record: 2026-11-04
+## Earlier qualification attempts: 2026-11-04
 
 Region: `us-west-2`. A dedicated instance, assistant, Lex bot, A2A application,
 KMS-encrypted secret, security profile, and contact flow were provisioned.

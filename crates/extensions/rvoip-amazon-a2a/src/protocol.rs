@@ -52,6 +52,9 @@ pub enum InterruptionType {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InitSession {
+    /// Effective instance binding. Live Connect may omit this wire field;
+    /// in that case it is resolved from `contactArn` before admission.
+    #[serde(default)]
     pub instance_arn: String,
     pub contact_arn: String,
     #[serde(default)]
@@ -65,7 +68,21 @@ pub struct InitSession {
     pub contact_context: Option<Value>,
 }
 impl InitSession {
-    pub(crate) fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&mut self) -> Result<()> {
+        let contact_instance = self
+            .contact_arn
+            .rsplit_once("/contact/")
+            .filter(|(instance, contact)| {
+                instance.starts_with("arn:")
+                    && instance.contains(":instance/")
+                    && uuid::Uuid::parse_str(contact).is_ok()
+            })
+            .map(|(instance, _)| instance);
+        if self.instance_arn.is_empty() {
+            self.instance_arn = contact_instance.ok_or(A2aError::Protocol)?.to_owned();
+        } else if contact_instance.is_some_and(|instance| instance != self.instance_arn) {
+            return Err(A2aError::Protocol);
+        }
         if self.instance_arn.is_empty()
             || self.contact_arn.is_empty()
             || self.instance_arn.len() > 2048
