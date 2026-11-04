@@ -6838,6 +6838,7 @@ dependencies = [
  "axum",
  "bytes",
  "chrono",
+ "rvoip-amazon-a2a",
  "rvoip-auth-core",
  "rvoip-client",
  "rvoip-core",
@@ -6858,6 +6859,31 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "rvoip-amazon-a2a"
+version = "0.4.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "dashmap",
+ "futures",
+ "parking_lot",
+ "rvoip-core",
+ "rvoip-vapi",
+ "serde",
+ "serde_json",
+ "subtle",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tokio-util",
+ "url",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]

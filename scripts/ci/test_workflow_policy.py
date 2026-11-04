@@ -501,7 +501,7 @@ class WorkflowPolicyTests(unittest.TestCase):
             "RELEASE_ENVIRONMENT_ID: rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-perf16-soaklong16-interop16",
             workflow,
         )
-        self.assertIn("expected 46 publishable workspace packages", probe)
+        self.assertIn("expected 47 publishable workspace packages", probe)
         self.assertIn("ec2-performance|ec2-performance-soak-long", probe)
         self.assertIn("ec2-proxy-interop", probe)
         self.assertIn("for _ in range(4096)", probe)

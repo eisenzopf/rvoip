@@ -52,6 +52,7 @@ rvoip-harness      = { workspace = true, optional = true }
 
 # Vapi bidirectional WebSocket agent adapter — `vapi` feature.
 rvoip-vapi         = { workspace = true, optional = true }
+rvoip-amazon-a2a   = { workspace = true, optional = true }
 
 # Client SDK — `client` feature.
 rvoip-client       = { workspace = true, optional = true }
@@ -76,6 +77,7 @@ sip      = ["dep:rvoip-sip"]
 webrtc   = ["dep:rvoip-webrtc", "dep:rvoip-auth-core"]
 uctp     = ["dep:rvoip-uctp", "dep:rvoip-quic", "dep:rvoip-webtransport", "dep:rvoip-websocket"]
 vapi     = ["dep:rvoip-vapi"]
+amazon-a2a = ["dep:rvoip-amazon-a2a"]
 
 # ── SIP media add-ons ──
 dtls-srtp = ["sip", "rvoip-sip/dtls-srtp"]
@@ -121,7 +123,7 @@ app = [
 # The pure-Rust codecs are included; `opus` is not, because libopus must be
 # present on the build host and `full` should not turn a missing system
 # package into a build failure. Use `all-codecs` (or `opus`) to add it.
-full = ["voip-3", "vapi", "sip-stir-shaken", "client", "app", "dtls-srtp", "g729", "amr"]
+full = ["voip-3", "vapi", "amazon-a2a", "sip-stir-shaken", "client", "app", "dtls-srtp", "g729", "amr"]
 
 # ── Deployment-oriented bundles ──
 # Existing leaf and meta-features remain valid. These additive bundles provide
