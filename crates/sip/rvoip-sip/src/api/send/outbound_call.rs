@@ -595,6 +595,7 @@ mod tests {
                 HeaderValue::Raw(SECRET.as_bytes().to_vec()),
             )],
             topology_hiding: true,
+            plain_rtp: false,
             registered_flow_routes: Vec::new(),
         };
 

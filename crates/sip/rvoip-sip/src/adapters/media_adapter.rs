@@ -885,16 +885,25 @@ fn validate_uac_audio_answer(
 
     let mut primary_payloads = Vec::new();
     for format in &answered_audio.formats {
+        let payload_type = format
+            .parse::<u8>()
+            .map_err(|_| bounded_sdp_failure("remote-answer", "invalid-payload"))?;
         if !offered_audio
             .formats
             .iter()
             .any(|offered| offered == format)
         {
-            return Err(bounded_sdp_failure("remote-answer", "unoffered-payload"));
+            // RFC 3264 says an answer may only repeat formats from the offer,
+            // but real gateways/carriers append auxiliary formats we did not
+            // offer (commonly telephone-event, sometimes CN). Ignore those
+            // unknown formats instead of failing the call: the primary audio
+            // format still has to come from the offer (checked below).
+            tracing::debug!(
+                payload_type,
+                "ignoring answer format that was not offered"
+            );
+            continue;
         }
-        let payload_type = format
-            .parse::<u8>()
-            .map_err(|_| bounded_sdp_failure("remote-answer", "invalid-payload"))?;
         if !sdp_payload_codec_available(answer, payload_type) {
             return Err(bounded_sdp_failure("remote-answer", "unsupported-payload"));
         }
@@ -9754,6 +9763,24 @@ a=fmtp:101 0-15\r\n";
             .build()
             .unwrap();
         assert!(validate_uac_audio_answer(&offer, &unoffered, true).is_err());
+
+        // Real carriers append telephone-event (101) to an answer even when
+        // the offer did not list it; that auxiliary format must be ignored, and
+        // the offered primary format selected.
+        let carrier_answer = SdpBuilder::new("Session")
+            .origin("-", "2", "2", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16_002, "RTP/AVP")
+            .formats(&["0", "101"])
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("101", "telephone-event/8000")
+            .done()
+            .build()
+            .unwrap();
+        let (payload_type, codec, clock_rate, channels) =
+            validate_uac_audio_answer(&offer, &carrier_answer, true).expect("carrier answer");
+        assert_eq!((payload_type, codec.as_str(), clock_rate, channels), (0, "PCMU", 8_000, 1));
 
         let changed = SdpBuilder::new("Session")
             .origin("-", "3", "3", "IN", "IP4", "127.0.0.1")
