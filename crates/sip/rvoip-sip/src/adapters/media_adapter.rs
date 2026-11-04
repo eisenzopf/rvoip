@@ -2545,7 +2545,12 @@ impl MediaAdapter {
                 SdpSession::from_str(offer)
                     .map_err(|_| bounded_sdp_failure("remote-answer", "invalid-local-offer"))
             })?;
-        validate_rtcp_mux(&parsed_offer, self.rtcp_mux_required)?;
+        // A plain-RTP call deliberately does not emit a=rtcp-mux on either
+        // side, so the secure-profile requirement must not be applied to our
+        // own offer either.
+        if !session.plain_rtp_offer {
+            validate_rtcp_mux(&parsed_offer, self.rtcp_mux_required)?;
+        }
         let (payload_type, negotiated_codec, clock_rate, channels) =
             validate_uac_audio_answer(&parsed_offer, &parsed_answer, self.g729_annex_b)?;
         let answer_direction = audio_direction(&parsed_answer);
