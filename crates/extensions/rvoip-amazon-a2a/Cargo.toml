@@ -1,0 +1,40 @@
+[package]
+name = "rvoip-amazon-a2a"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+keywords.workspace = true
+description = "Amazon Connect A2A external-agent transport adapter for rvoip"
+
+[dependencies]
+rvoip-core.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+dashmap.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tokio-tungstenite.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+subtle.workspace = true
+
+[dev-dependencies]
+url.workspace = true
+rvoip-vapi.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add the developer-preview `rvoip-amazon-a2a` Connect external-agent adapter,
+  with native rvoip media bridging, bounded A2A WebSocket framing, turn traces,
+  interruption, and hand-back. Exposed by the optional `amazon-a2a` facade
+  feature. Adds `Transport::AmazonA2a`; downstream exhaustive transport matches
+  must handle the new variant. Live Connect qualification remains pending.
+
 ## 0.4.0 — 2026-10-11
 
 ### Highlights
