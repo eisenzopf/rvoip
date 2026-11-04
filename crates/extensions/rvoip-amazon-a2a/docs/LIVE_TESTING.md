@@ -102,3 +102,12 @@ control check.
 The matched `us-east-1` control, with the collaborator removed from the same
 agent configuration, received a real assistant response. Its contact was stopped
 and the A2A configuration restored afterward.
+
+Further isolation on the same date confirmed `MAX_PACKAGE=true` on both
+instances. In `us-east-1`, a temporary region-scoped `wisdom:CreateSession` grant
+on `Resource: "*"` did not change the HTTP 404 and was removed. A separate
+published agent with `immediateHandoff=false` reproduced the same failure.
+A fresh matched built-in-agent control succeeded. Lex conversation logging
+captured the successful control but no event for the failed A2A contacts at
+collection time; absence of a conversation log is not itself a root cause.
+The default agent and temporary IAM/logging changes were restored afterward.
