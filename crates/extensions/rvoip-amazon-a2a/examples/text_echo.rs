@@ -26,28 +26,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let instance = std::env::var("CONNECT_INSTANCE_ARN")?;
     let mut events = adapter.subscribe_events();
     tokio::spawn(async move { while events.recv().await.is_some() {} });
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
-    eprintln!("A2A text echo listening on loopback port 8080; production requires TLS ingress");
+    let port: u16 = std::env::var("AMAZON_A2A_PORT")
+        .unwrap_or_else(|_| "8080".into())
+        .parse()?;
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
+    eprintln!("A2A text echo listening on loopback port {port}; production requires TLS ingress");
     loop {
         tokio::select! {
             _=tokio::signal::ctrl_c()=>break,
             accepted=listener.accept()=>{
                 let (stream,_)=accepted?;let adapter=Arc::clone(&adapter);let instance=instance.clone();
+                eprintln!("A2A smoke transport accepted");
                 tokio::spawn(async move {
                     let run=async {
                         let mut call=adapter.accept_websocket(stream,CallBinding {session_id:SessionId::new(),participant_id:ParticipantId::new(),instance_arn:instance}).await?;
+                        eprintln!("A2A smoke session initialized");
                         let result=async {
                             if call.initialization().is_audio(){return Err("this example supports text collaboration only".into());}
                             // Direct acceptance is for this isolated single-tenant smoke
                             // server. Orchestrated applications use route_inbound_connection.
                             adapter.accept(call.connection_id().clone()).await?;
                             while let Some(input)=call.next_input().await {
+                                if matches!(input,InputEvent::Ready){eprintln!("A2A smoke channel ready");}
                                 if let InputEvent::Text(text)=input {
                                     let start=now()?;let response=format!("You said: {text}");
                                     call.send_text(response.clone()).await?;
                                     call.complete_turn(TurnTrace::new("text-echo",text.clone(),response,start,now()?)?).await?;
+                                    eprintln!("A2A smoke text turn completed");
                                     if text.eq_ignore_ascii_case("goodbye") {
-                                        call.finish(FinishType::Complete,"Echo smoke test complete").await?;break;
+                                        call.finish(FinishType::Complete,"Echo smoke test complete").await?;
+                                        eprintln!("A2A smoke collaboration finished");break;
                                     }
                                 }
                             }

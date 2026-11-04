@@ -161,6 +161,10 @@ cargo check -p rvoip --no-default-features --features amazon-a2a
 cargo run -p rvoip-amazon-a2a --example text_echo
 ```
 
+`AMAZON_A2A_PORT` optionally selects another loopback port. For a repeatable
+real-contact test and the current qualification results, see
+[Live testing](docs/LIVE_TESTING.md).
+
 The text-only echo example listens on `127.0.0.1:8080`. Place a public WSS
 endpoint in front of it with a TLS reverse proxy, and register it as an
 `A2A_SERVER` application. Use **text** talk-to-customer mode for this smoke
