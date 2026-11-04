@@ -35,14 +35,19 @@ class GateFrameworkTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.catalog = json.loads((ROOT / "scripts/release/gates.json").read_text())
 
-    def test_catalog_maps_108_legacy_and_46_core_gates(self) -> None:
+    def test_catalog_maps_108_legacy_and_all_workspace_core_gates(self) -> None:
         gates.validate_catalog(ROOT, self.catalog)
         self.assertEqual(
             sum(bool(gate.get("legacy")) for gate in self.catalog["gates"]), 108
         )
         self.assertEqual(
             sum(gate["id"].startswith("core.") for gate in self.catalog["gates"]),
-            46,
+            self.catalog["workspace_package_count"],
+        )
+        roots, _ = gates.workspace_graph(ROOT)
+        self.assertEqual(
+            {gate["id"].removeprefix("core.") for gate in self.catalog["gates"] if gate["id"].startswith("core.")},
+            set(roots),
         )
         self.assertEqual(
             self.catalog["remote_release_legacy_coverage"]["required_legacy_count"],
@@ -392,10 +397,11 @@ class GateFrameworkTests(unittest.TestCase):
         # Twelve standard, five nightly, one evidence, and one EC2 controller
         # stay below the twenty-job repository concurrency ceiling.
         self.assertLessEqual(len(hosted) + 1, 19)
-        # The 45th crate (rvoip-ice-core) and the 46th (rvoip-audio-send-queue)
+        # The 45th (rvoip-ice-core), 46th (rvoip-audio-send-queue), and 47th
+        # (rvoip-webex-byob) crates
         # each add one bounded two-minute core gate while the twelve-shard cap
         # preserves room below repository concurrency limits.
-        self.assertLessEqual(max(shard["estimated_seconds"] for shard in standard), 1345)
+        self.assertLessEqual(max(shard["estimated_seconds"] for shard in standard), 1347)
 
     def test_remote_diagnostic_runs_only_exact_ec2_gates_and_dependencies(self) -> None:
         requested = ["interop.remote-proxies", "perf.monolithic-soak"]

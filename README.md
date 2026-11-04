@@ -395,6 +395,7 @@ availability, not a blanket production-readiness statement.
 | Cross-transport app builder | Developer preview | Role/capability policy, assignment, callbacks, SIP/WebRTC/UCTP listeners, orchestration | [`rvoip::app`](crates/rvoip/src/app.rs) |
 | Amazon Connect | Developer preview | `StartWebRTCContact`, Amazon Chime WebRTC media, SIP-header contact attributes, G.711 ↔ Opus bridging, agent screen pops | [`13-sip-to-amazon-connect`](examples/13-sip-to-amazon-connect) |
 | Vapi voice agents | Developer preview | Native bidirectional μ-law/PCM raw-audio WebSocket sessions bridged to SIP or WebRTC legs; the agent is a distinct AI participant | [`rvoip-vapi`](crates/extensions/rvoip-vapi) |
+| Webex Contact Center BYOVA | Experimental protocol library | WebSocket sessions and optional gRPC framing; host supplies authentication, transport and reply boundaries; full `ConnectionAdapter` registration is pending | [`rvoip-webex-byob`](crates/extensions/rvoip-webex-byob) |
 | AI harness | Developer preview | Provider-neutral ASR/TTS/dialog/recording attachments with bounded, fenced lifecycle and in-process bridge handoff | [`rvoip-harness`](crates/extensions/rvoip-harness) |
 
 The WebRTC implementation of ICE and DTLS-SRTP is separate from the SIP beta

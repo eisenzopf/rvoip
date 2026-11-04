@@ -62,6 +62,7 @@ members = [
     "crates/extensions/rvoip-vcon-postgres",
     "crates/extensions/rvoip-harness",
     "crates/extensions/rvoip-vapi",
+    "crates/extensions/rvoip-webex-byob",
     "crates/extensions/rvoip-stir-shaken",
     "crates/extensions/rvoip-keycloak",
     "crates/extensions/rvoip-redis",

@@ -1,5 +1,12 @@
 # rvoip-vapi
 
+Application-protocol gateways can opt into [`raw_session::RawVapiSession`](src/raw_session.rs)
+to consume binary audio and control events in WebSocket arrival order, without
+RTP pacing or synthesized completion events. This low-level API creates a call;
+the host must explicitly close it and reconcile uncertain creation/handshake
+outcomes. It does not register an orchestrator connection or replace the managed
+adapter below. See the [Webex protocol extension](../rvoip-webex-byob) for one use.
+
 Developer-preview Vapi integration for rvoip. rvoip owns the caller-facing SIP
 or WebRTC leg; Vapi owns the full ASR, model, synthesis, and interruption
 pipeline through its bidirectional raw-audio WebSocket transport.

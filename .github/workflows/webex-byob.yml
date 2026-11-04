@@ -1,0 +1,45 @@
+name: Webex BYOVA optional profiles
+
+on:
+  pull_request:
+    paths:
+      - "crates/extensions/rvoip-webex-byob/**"
+      - "crates/media/codec-core/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/webex-byob.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: webex-byob-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+  optional-profiles:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.91.0
+          components: clippy
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+        with:
+          shared-key: webex-byob-profiles
+      # Default-profile tests and lint also run in the normal PR crate shard.
+      - name: Test WAV compatibility without gRPC
+        run: cargo test --locked -p rvoip-webex-byob --features wav-compat
+      - name: Test all profiles and the Rustdoc example
+        run: cargo test --locked -p rvoip-webex-byob --all-features
+      - name: Lint optional profiles
+        run: cargo clippy --locked -p rvoip-webex-byob --all-targets --all-features -- -D warnings
