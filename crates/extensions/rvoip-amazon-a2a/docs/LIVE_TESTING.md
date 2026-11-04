@@ -90,3 +90,15 @@ the AWS integration/runtime path before the external server; it does not establi
 whether the cause is configuration, account enablement, or AWS service behavior.
 Live A2A interoperability remains **unqualified**. No successful Connect-to-Vapi
 end-to-end call is claimed.
+
+A second independently provisioned instance in `us-east-1` reproduced the same
+HTTP 404 on a real chat contact. Its published Lex bot used the dedicated IAM
+role from its first version. Flow logs confirmed that the assistant session ARN
+was resolved and passed to Lex, and message streaming was enabled. The external
+adapter received no connection from this contact. An independent authenticated
+upgrade to that region's configured public adapter endpoint returned HTTP 101.
+The second-region test also remains a failure; endpoint reachability is only a
+control check.
+The matched `us-east-1` control, with the collaborator removed from the same
+agent configuration, received a real assistant response. Its contact was stopped
+and the A2A configuration restored afterward.
