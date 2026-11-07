@@ -15,7 +15,7 @@
 //! Exits cleanly when:
 //! - The source channel closes (peer hung up).
 //! - The destination channel closes (we hung up; `send` returns Err).
-//! - The task is aborted via the [`super::CrossBridgeHandle`] abort handle
+//! - The task is aborted by its owning [`super::CrossBridgeHandle`]
 //!   (i.e. `unbridge_connections` was called).
 
 use rvoip_media_core::codec::transcoding::Transcoder;
@@ -50,8 +50,9 @@ pub struct TranscoderSwap {
     pub ack: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
-/// Spawn a frame-pump task. Returns the `JoinHandle` so the caller can
-/// derive an `AbortHandle` and store it in a [`super::CrossBridgeHandle`].
+/// Spawn a frame-pump task. Returns the `JoinHandle`, which a
+/// [`super::CrossBridgeHandle`] owns so its teardown can await the pump's
+/// exit.
 ///
 /// `from_pt` / `to_pt` are the negotiated RTP payload types on each side.
 /// When `transcoder` is `Some(_)` AND `from_pt != to_pt`, every frame is
