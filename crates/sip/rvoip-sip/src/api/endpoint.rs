@@ -489,7 +489,9 @@ impl EndpointEvents {
                 to,
                 sdp,
             } => {
-                let incoming = IncomingCall::new_captured(
+                // Same construction as `Endpoint::wait_for_incoming`, so calls
+                // taken from the event stream keep the parsed INVITE too.
+                let incoming = IncomingCall::from_event_captured(
                     call_id,
                     from,
                     to,
@@ -927,6 +929,34 @@ impl EndpointIncomingCall {
     /// Return the called URI.
     pub fn to(&self) -> &str {
         &self.incoming.to
+    }
+
+    /// Return the value of the INVITE's first header named `name`
+    /// (case-insensitive), e.g. `X-Local-Number` or `P-Asserted-Identity`.
+    ///
+    /// Returns `None` when the header is absent or the parsed INVITE is not
+    /// available (see [`raw_request`](Self::raw_request)).
+    pub fn header(&self, name: &str) -> Option<String> {
+        use crate::api::headers::view::SipHeaderView;
+        let name = rvoip_sip_core::types::headers::HeaderName::from_str(name).ok()?;
+        let line = self.incoming.header_str(&name)?;
+        // `header_str` renders the whole header line: `Name: value`.
+        Some(
+            line.split_once(':')
+                .map_or(line.as_str(), |(_, value)| value)
+                .trim()
+                .to_string(),
+        )
+    }
+
+    /// Return the parsed inbound INVITE, e.g. to read the Request-URI user
+    /// part (the dialed number on most trunks).
+    ///
+    /// `None` only for synthesized calls, or calls built from a non-owning
+    /// [`Endpoint::events`] observer rather than [`Endpoint::wait_for_incoming`]
+    /// or the [`Endpoint::split`] event stream.
+    pub fn raw_request(&self) -> Option<&Arc<rvoip_sip_core::Request>> {
+        self.incoming.raw_request()
     }
 
     /// Return the remote SDP offer carried by the inbound INVITE, if present.
