@@ -308,9 +308,29 @@ impl RtpPlayoutBuffer {
     }
 }
 
+/// Paces frames that the reorder window releases together (a held gap and the
+/// packets queued behind it) one frame duration apart.
+///
+/// Pacing alone cannot drain a backlog while the stream keeps arriving: live
+/// frames arrive one frame duration apart and the paced head leaves one frame
+/// duration apart, so a batch of N frames would stay N - 1 frames deep, and
+/// add that latency, for the rest of the call. A playout clock downstream
+/// keeps its own schedule, so that standing delay turns every later frame
+/// into a late frame there: one lost inbound packet silenced the caller's
+/// audio for the rest of the call. A frame queued at a later instant than the
+/// previous one while a backlog is waiting is therefore live media behind
+/// paced media, and earns one extra delivery that does not move the paced
+/// schedule. A batch queued at one instant is still paced; a backlog drains
+/// at two frames per frame duration and the queue converges back to
+/// delivering every frame on arrival.
 struct DecodedPlayoutQueue {
     pending: VecDeque<AudioFrame>,
     next_delivery_at: Option<Instant>,
+    /// When the newest queued frame was pushed.
+    last_push_at: Option<Instant>,
+    /// Deliveries owed to live arrivals that found a backlog. Never more
+    /// than the frames queued ahead of them.
+    catch_up: usize,
     /// Frames dropped on overflow. The first drop is logged; the rest are
     /// counted so a burst does not flood the log.
     dropped_frames: u64,
@@ -321,6 +341,8 @@ impl DecodedPlayoutQueue {
         Self {
             pending: VecDeque::new(),
             next_delivery_at: None,
+            last_push_at: None,
+            catch_up: 0,
             dropped_frames: 0,
         }
     }
@@ -332,12 +354,28 @@ impl DecodedPlayoutQueue {
         if self.next_delivery_at.is_none() {
             self.next_delivery_at = Some(now);
         }
+        if !self.pending.is_empty() && self.last_push_at.is_some_and(|last| now > last) {
+            self.catch_up = (self.catch_up + 1).min(self.pending.len());
+        }
+        self.last_push_at = Some(now);
         self.pending.push_back(frame);
         true
     }
 
     fn pop_due(&mut self, now: Instant) -> Option<AudioFrame> {
         let deadline = self.next_delivery_at?;
+        if self.catch_up > 0 {
+            if let Some(frame) = self.pending.pop_front() {
+                // Owed to a live arrival: the paced schedule stays as it is.
+                self.catch_up -= 1;
+                if self.pending.is_empty() {
+                    self.next_delivery_at = None;
+                    self.catch_up = 0;
+                }
+                return Some(frame);
+            }
+            self.catch_up = 0;
+        }
         if now < deadline {
             return None;
         }
@@ -346,14 +384,25 @@ impl DecodedPlayoutQueue {
             .pending
             .front()
             .map(|_| now + frame.duration.max(Duration::from_millis(1)));
+        if self.pending.is_empty() {
+            self.catch_up = 0;
+        }
         Some(frame)
     }
 
-    /// When the head frame is due, while any frame is queued.
+    /// When the next frame is due, while any frame is queued. A delivery
+    /// owed to a live arrival is due as soon as that arrival was queued.
     fn next_deadline(&self) -> Option<Instant> {
-        (!self.pending.is_empty())
-            .then_some(self.next_delivery_at)
-            .flatten()
+        if self.pending.is_empty() {
+            return None;
+        }
+        if self.catch_up > 0 {
+            return match (self.next_delivery_at, self.last_push_at) {
+                (Some(paced), Some(owed)) => Some(paced.min(owed)),
+                (paced, owed) => paced.or(owed),
+            };
+        }
+        self.next_delivery_at
     }
 }
 
@@ -778,6 +827,128 @@ mod rtp_playout_tests {
                 .timestamp,
             160
         );
+    }
+
+    #[test]
+    fn decoded_playout_does_not_keep_a_reorder_batch_as_standing_latency() {
+        // One lost inbound packet. The reorder window holds the packets
+        // behind it for RTP_REORDER_HOLD and releases the gap and those
+        // packets together, while live packets keep arriving every 20 ms.
+        // Driven the way the receive loop drives it (one due frame on every
+        // packet and on every armed deadline), the batch must drain and every
+        // later frame must again leave on arrival. Pacing alone kept the batch
+        // queued for the rest of the call, so every later frame reached the
+        // application's playout clock about 60 ms late.
+        let start = Instant::now();
+        let frame_interval = Duration::from_millis(20);
+        let arrival = |sequence: u16| {
+            start + frame_interval * u32::from(sequence - 100) + Duration::from_millis(5)
+        };
+        let decoded = |item: RtpPlayoutItem| match item {
+            RtpPlayoutItem::Packet(packet) => {
+                AudioFrame::new(vec![0; 160], 8_000, 1, packet.header.timestamp)
+            }
+            RtpPlayoutItem::Gap { timestamp, .. } => {
+                AudioFrame::new(vec![0; 160], 8_000, 1, timestamp)
+            }
+        };
+        let lost = 110_u16;
+        let mut reorder = RtpPlayoutBuffer::new();
+        let mut playout = DecodedPlayoutQueue::new();
+        let mut delivered: Vec<(u32, Instant)> = Vec::new();
+        let mut now = start;
+        for sequence in 100_u16..200 {
+            let next_arrival = arrival(sequence);
+            // Serve every deadline armed before this arrival, as the timer would.
+            for _ in 0..1_000 {
+                let deadline = match (reorder.next_deadline(now), playout.next_deadline()) {
+                    (Some(reorder_at), Some(audio_at)) => Some(reorder_at.min(audio_at)),
+                    (reorder_at, audio_at) => reorder_at.or(audio_at),
+                };
+                let Some(deadline) = deadline.filter(|deadline| *deadline < next_arrival) else {
+                    break;
+                };
+                now = now.max(deadline);
+                for item in reorder.tick(now) {
+                    assert!(playout.push(decoded(item), now));
+                }
+                if let Some(frame) = playout.pop_due(now) {
+                    delivered.push((frame.timestamp, now));
+                }
+            }
+            now = next_arrival;
+            if sequence == lost {
+                continue;
+            }
+            for item in reorder.push(packet(sequence), now) {
+                assert!(playout.push(decoded(item), now));
+            }
+            if let Some(frame) = playout.pop_due(now) {
+                delivered.push((frame.timestamp, now));
+            }
+        }
+
+        // Every frame once, in order; the lost one as its concealment.
+        let timestamps: Vec<u32> = delivered.iter().map(|(timestamp, _)| *timestamp).collect();
+        let expected: Vec<u32> = (100_u32..200).map(|sequence| sequence * 160).collect();
+        assert_eq!(timestamps, expected);
+        // Once the batch is spent, frames leave on arrival again, so the
+        // stream carries no standing delay into the playout clock.
+        for (timestamp, at) in &delivered {
+            let sequence = u16::try_from(*timestamp / 160).expect("sequence");
+            if sequence >= lost + 10 {
+                assert_eq!(
+                    *at,
+                    arrival(sequence),
+                    "frame {sequence} left {:?} after it arrived",
+                    at.saturating_duration_since(arrival(sequence))
+                );
+            }
+        }
+        assert!(playout.pending.is_empty());
+    }
+
+    #[test]
+    fn decoded_playout_catch_up_never_reorders_or_outruns_the_queue() {
+        // A live arrival behind a paced batch earns one delivery; a batch
+        // queued at one instant earns none, and owed deliveries never exceed
+        // the frames queued ahead.
+        let start = Instant::now();
+        let mut playout = DecodedPlayoutQueue::new();
+        for timestamp in [0, 160, 320] {
+            assert!(playout.push(AudioFrame::new(vec![0; 160], 8_000, 1, timestamp), start));
+        }
+        assert_eq!(playout.catch_up, 0, "one batch is paced, not caught up");
+        assert_eq!(playout.pop_due(start).expect("head").timestamp, 0);
+        let live = start + Duration::from_millis(5);
+        assert!(playout.push(AudioFrame::new(vec![0; 160], 8_000, 1, 480), live));
+        assert_eq!(
+            playout.next_deadline(),
+            Some(live),
+            "an owed delivery is due now"
+        );
+        assert_eq!(playout.pop_due(live).expect("owed").timestamp, 160);
+        assert!(
+            playout.pop_due(live).is_none(),
+            "the paced schedule (start + 20 ms) is not moved by the owed delivery"
+        );
+        assert_eq!(
+            playout
+                .pop_due(start + Duration::from_millis(20))
+                .expect("paced")
+                .timestamp,
+            320
+        );
+        assert_eq!(
+            playout
+                .pop_due(start + Duration::from_millis(40))
+                .expect("paced")
+                .timestamp,
+            480
+        );
+        assert!(playout.pending.is_empty());
+        assert_eq!(playout.catch_up, 0);
+        assert_eq!(playout.next_deadline(), None);
     }
 
     #[test]
