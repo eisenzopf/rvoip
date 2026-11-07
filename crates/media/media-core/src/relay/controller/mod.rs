@@ -53,6 +53,30 @@ mod source_timeline;
 const RTP_REORDER_HOLD: Duration = Duration::from_millis(45);
 const RTP_REORDER_MAX_PACKETS: usize = 64;
 const RTP_MAX_CONCEALMENT_PACKETS: u16 = 8;
+/// Longest single concealment frame, in seconds of audio. Recovery work needs
+/// a memory bound that does not depend on peer timestamps: one second is
+/// generous for one lost packet, and a larger discontinuity keeps the media
+/// that was received without synthesizing a giant frame for it.
+const RTP_MAX_CONCEALMENT_SECONDS: usize = 1;
+/// RTP timestamp differences at or beyond half the 32-bit space are backward
+/// steps, not elapsed time.
+const RTP_TIMESTAMP_HALF_RANGE: u32 = 1 << 31;
+
+/// Interleaved sample count for one concealment frame, or `None` when the
+/// frame would be empty or longer than [`RTP_MAX_CONCEALMENT_SECONDS`].
+fn concealment_sample_count(
+    samples_per_channel: usize,
+    clock_rate: u32,
+    channels: u8,
+) -> Option<usize> {
+    let maximum = usize::try_from(clock_rate)
+        .ok()?
+        .checked_mul(RTP_MAX_CONCEALMENT_SECONDS)?;
+    if samples_per_channel == 0 || samples_per_channel > maximum || channels == 0 {
+        return None;
+    }
+    samples_per_channel.checked_mul(usize::from(channels))
+}
 
 #[derive(Debug)]
 struct PendingRtpPacket {
@@ -207,16 +231,27 @@ impl RtpPlayoutBuffer {
             }
 
             let Some(step) = self.timestamp_step.or_else(|| {
-                self.last_timestamp.map(|previous| {
-                    nearest_packet
+                self.last_timestamp.and_then(|previous| {
+                    let elapsed = nearest_packet
                         .packet
                         .header
                         .timestamp
-                        .wrapping_sub(previous)
-                        / u32::from(distance)
+                        .wrapping_sub(previous);
+                    // `distance` counts the missing packets after the last
+                    // played one; the received successor spans one more
+                    // interval than that.
+                    (elapsed < RTP_TIMESTAMP_HALF_RANGE)
+                        .then_some(elapsed / (u32::from(distance) + 1))
                 })
             }) else {
-                break;
+                // A backward or discontinuous timestamp cannot size the gap,
+                // and dividing it by the distance once asked for a ~2^32
+                // sample frame. Resume at the received media and learn the
+                // cadence again from what follows.
+                self.expected_sequence = Some(nearest_sequence);
+                self.gap_started_at = None;
+                self.last_timestamp = None;
+                continue;
             };
             if step == 0 {
                 break;
@@ -244,7 +279,7 @@ impl RtpPlayoutBuffer {
             let step = timestamp.wrapping_sub(previous);
             // A backward clock step on the same SSRC is not a frame size; a
             // concealment frame sized from it would be gigabytes of silence.
-            if step > 0 && step < (1 << 31) {
+            if step > 0 && step < RTP_TIMESTAMP_HALF_RANGE {
                 self.timestamp_step = Some(step);
             }
         }
@@ -445,6 +480,164 @@ mod rtp_playout_tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn backward_step_before_cadence_is_learned_does_not_size_a_gap() {
+        // Only one packet has played when the gap is confirmed, so no
+        // timestamp step is known yet and the gap is sized from the
+        // successor. Its timestamp is behind the last played one (a same-SSRC
+        // clock reset), and dividing that backward step by the distance asked
+        // for a concealment frame of about 2^32 samples: an 8.6 GiB zeroed
+        // allocation downstream. Inspect metadata only, so this test never
+        // allocates the frame it guards against.
+        let start = Instant::now();
+        let mut buffer = RtpPlayoutBuffer::new();
+        let mut first = packet(100);
+        first.header.timestamp = 16_000;
+        assert_eq!(
+            buffer
+                .push(first, start)
+                .iter()
+                .map(sequence)
+                .collect::<Vec<_>>(),
+            [100]
+        );
+        let mut successor = packet(102);
+        successor.header.timestamp = 0;
+        let lost_at = start + Duration::from_millis(40);
+        assert!(buffer.push(successor, lost_at).is_empty());
+        let ready = buffer.tick(lost_at + RTP_REORDER_HOLD);
+        for item in &ready {
+            if let RtpPlayoutItem::Gap {
+                samples_per_channel,
+                ..
+            } = item
+            {
+                assert!(
+                    *samples_per_channel <= 8_000,
+                    "unbounded concealment frame: {samples_per_channel} samples"
+                );
+            }
+        }
+        // Received media resumes at the successor. Nothing is synthesized for
+        // a gap whose duration the timestamps cannot establish.
+        assert_eq!(ready.iter().map(sequence).collect::<Vec<_>>(), [102]);
+        assert!(matches!(&ready[0], RtpPlayoutItem::Packet(_)));
+        // The cadence is learned again from the media that follows.
+        let mut next = packet(103);
+        next.header.timestamp = 160;
+        assert_eq!(
+            buffer
+                .push(next, lost_at + Duration::from_millis(60))
+                .iter()
+                .map(sequence)
+                .collect::<Vec<_>>(),
+            [103]
+        );
+    }
+
+    #[test]
+    fn first_gap_infers_duration_from_missing_and_received_intervals() {
+        // 101 is lost before any step is known. The received successor is two
+        // intervals after the last played packet, not one, so the concealment
+        // frame is one interval long and does not reuse the successor's
+        // timestamp.
+        let start = Instant::now();
+        let mut buffer = RtpPlayoutBuffer::new();
+        buffer.push(packet(100), start);
+        buffer.push(packet(102), start);
+        let released = buffer.tick(start + RTP_REORDER_HOLD);
+        assert_eq!(
+            released.iter().map(sequence).collect::<Vec<_>>(),
+            [101, 102]
+        );
+        assert!(matches!(
+            &released[0],
+            RtpPlayoutItem::Gap {
+                timestamp: 16_160,
+                samples_per_channel: 160,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn forward_timestamp_wrap_preserves_normal_concealment() {
+        let start = Instant::now();
+        let mut buffer = RtpPlayoutBuffer::new();
+        let mut first = packet(100);
+        first.header.timestamp = u32::MAX - 159;
+        buffer.push(first, start);
+        let mut successor = packet(102);
+        successor.header.timestamp = 160;
+        buffer.push(successor, start);
+        let released = buffer.tick(start + RTP_REORDER_HOLD);
+        assert!(matches!(
+            &released[0],
+            RtpPlayoutItem::Gap {
+                timestamp: 0,
+                samples_per_channel: 160,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn concealment_allocation_is_bounded_by_negotiated_audio_format() {
+        assert_eq!(concealment_sample_count(160, 8_000, 1), Some(160));
+        assert_eq!(concealment_sample_count(960, 48_000, 2), Some(1_920));
+        assert_eq!(concealment_sample_count(8_000, 8_000, 1), Some(8_000));
+        assert_eq!(concealment_sample_count(4_294_967_136, 8_000, 1), None);
+        assert_eq!(concealment_sample_count(1_000_000_000, 48_000, 2), None);
+        assert_eq!(concealment_sample_count(8_001, 8_000, 1), None);
+        assert_eq!(concealment_sample_count(0, 8_000, 1), None);
+        assert_eq!(concealment_sample_count(160, 8_000, 0), None);
+    }
+
+    #[tokio::test]
+    async fn oversized_gap_does_not_prevent_following_real_g711_audio() {
+        // A concealment request longer than the bound is refused without
+        // allocating it, and the received packet behind it still plays.
+        for codec in ["PCMU", "PCMA"] {
+            let config = MediaConfig {
+                local_addr: "127.0.0.1:0".parse().expect("local addr"),
+                remote_addr: None,
+                preferred_codec: Some(codec.to_string()),
+                parameters: std::collections::HashMap::new(),
+            };
+            let format = codec_runtime::resolve_codec(&config).expect("G.711 resolves");
+            let payload_type = format.payload_type;
+            let runtime =
+                Arc::new(codec_runtime::DialogCodecRuntime::new(format).expect("codec runtime"));
+            let mut real = packet(11);
+            real.header.payload_type = payload_type;
+            let mut queue = DecodedPlayoutQueue::new();
+            let now = Instant::now();
+            let terminate = enqueue_rtp_playout_items(
+                vec![
+                    RtpPlayoutItem::Gap {
+                        sequence_number: 10,
+                        timestamp: 1_600,
+                        samples_per_channel: 8_001,
+                    },
+                    RtpPlayoutItem::Packet(real),
+                ],
+                &runtime,
+                &DialogId::new("bounded-concealment"),
+                &mut queue,
+                &mut source_timeline::SourceTimeline::default(),
+                now,
+            )
+            .await;
+            assert!(!terminate, "{codec}");
+            assert_eq!(queue.pending.len(), 1, "{codec}: only received media");
+            let frame = queue
+                .pop_due(now)
+                .expect("received media survives a refused concealment");
+            assert_eq!(frame.samples.len(), 160, "{codec}");
+            assert_eq!(frame.timestamp, 1_760, "{codec}");
+        }
     }
 
     #[test]
@@ -844,6 +1037,22 @@ async fn enqueue_rtp_playout_items(
                 timestamp,
                 samples_per_channel,
             } => {
+                let Some(sample_count) = concealment_sample_count(
+                    samples_per_channel,
+                    codec_runtime.format.clock_rate,
+                    codec_runtime.format.channels,
+                ) else {
+                    warn!(
+                        %dialog_id,
+                        sequence_number,
+                        timestamp,
+                        samples_per_channel,
+                        clock_rate = codec_runtime.format.clock_rate,
+                        channels = codec_runtime.format.channels,
+                        "refusing an unbounded RTP concealment frame; received media continues"
+                    );
+                    continue;
+                };
                 warn!(
                     %dialog_id,
                     sequence_number,
@@ -852,7 +1061,7 @@ async fn enqueue_rtp_playout_items(
                     "concealing confirmed missing RTP audio packet"
                 );
                 AudioFrame::new(
-                    vec![0; samples_per_channel * usize::from(codec_runtime.format.channels)],
+                    vec![0; sample_count],
                     codec_runtime.format.clock_rate,
                     codec_runtime.format.channels,
                     timeline.map_gap(timestamp),
