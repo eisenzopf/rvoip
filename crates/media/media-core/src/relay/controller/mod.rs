@@ -281,7 +281,11 @@ impl RtpPlayoutBuffer {
             self.last_timestamp = Some(timestamp);
             self.timestamp_step = Some(step);
             self.expected_sequence = Some(expected.wrapping_add(1));
-            self.gap_started_at = None;
+            // The hold is per gap, not per missing packet: the next missing
+            // packet of the same gap has waited as long as this one, so it is
+            // concealed in this pass. Restarting the hold here held every
+            // packet behind an N-packet loss for N holds (five lost packets
+            // kept the stream 225 ms late).
             ready.push(RtpPlayoutItem::Gap {
                 sequence_number: expected,
                 timestamp,
@@ -698,6 +702,47 @@ mod rtp_playout_tests {
             assert_eq!(frame.samples.len(), 160, "{codec}");
             assert_eq!(frame.timestamp, 1_760, "{codec}");
         }
+    }
+
+    #[test]
+    fn consecutive_losses_are_concealed_after_one_hold() {
+        // 102, 103 and 104 are lost. One hold after the gap opened, the whole
+        // gap is concealed and 105 leaves with it. Restarting the hold for
+        // each missing packet made 105 wait three holds.
+        let start = Instant::now();
+        let mut buffer = RtpPlayoutBuffer::new();
+        buffer.push(packet(100), start);
+        buffer.push(packet(101), start + Duration::from_millis(20));
+        let gap_at = start + Duration::from_millis(80);
+        assert!(buffer.push(packet(105), gap_at).is_empty());
+        let ready = buffer.tick(gap_at + RTP_REORDER_HOLD);
+        assert_eq!(
+            ready.iter().map(sequence).collect::<Vec<_>>(),
+            [102, 103, 104, 105]
+        );
+        let concealed: Vec<u32> = ready
+            .iter()
+            .filter_map(|item| match item {
+                RtpPlayoutItem::Gap { timestamp, .. } => Some(*timestamp),
+                RtpPlayoutItem::Packet(_) => None,
+            })
+            .collect();
+        assert_eq!(concealed, [102 * 160, 103 * 160, 104 * 160]);
+        assert_eq!(buffer.next_deadline(gap_at + RTP_REORDER_HOLD), None);
+        // The next gap waits its own hold again.
+        let second_gap = gap_at + Duration::from_millis(100);
+        assert!(buffer.push(packet(107), second_gap).is_empty());
+        assert!(buffer
+            .tick(second_gap + Duration::from_millis(44))
+            .is_empty());
+        assert_eq!(
+            buffer
+                .tick(second_gap + RTP_REORDER_HOLD)
+                .iter()
+                .map(sequence)
+                .collect::<Vec<_>>(),
+            [106, 107]
+        );
     }
 
     #[test]
