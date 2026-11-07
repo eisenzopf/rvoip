@@ -307,6 +307,23 @@ fn datagram_refused(error: &std::io::Error) -> bool {
     false
 }
 
+/// Seed the pre-latch symmetric-RTP destination, storing only a changed one.
+///
+/// Before a validated inbound tuple latches, every outbound RTP and RTCP send
+/// seeds the SDP destination. An unconditional `ArcSwapOption::store` costs a
+/// fresh `Arc` plus `arc_swap`'s writer path (paying every thread's debt
+/// slots) per packet, and a call that never receives media (signaling-only,
+/// one-way, early teardown) pays it for every frame. Skipping an equal store
+/// is observably identical. Returns whether it stored.
+#[inline]
+fn seed_prelatch_destination(slot: &ArcSwapOption<SocketAddr>, dest: SocketAddr) -> bool {
+    if slot.load().as_deref() == Some(&dest) {
+        return false;
+    }
+    slot.store(Some(Arc::new(dest)));
+    true
+}
+
 /// Cancellation guard for the narrow interval between reserving allocator
 /// state and handing ownership to a live transport. Tokio cancellation drops
 /// the constructor future; spawning the idempotent release here prevents an
@@ -1581,7 +1598,7 @@ impl UdpRtpTransport {
             // Seed the pre-latch target for callers that send before media is
             // received. Once a validated inbound tuple is latched, outbound
             // calls must not restore a stale SDP destination.
-            self.remote_rtp_addr.store(Some(Arc::new(dest)));
+            seed_prelatch_destination(&self.remote_rtp_addr, dest);
         }
 
         let sent_bytes = match self.rtp_socket.send_to(bytes, dest).await {
@@ -1607,7 +1624,7 @@ impl UdpRtpTransport {
 
     async fn send_rtcp_wire_bytes_unchecked(&self, bytes: &[u8], dest: SocketAddr) -> Result<()> {
         if self.config.symmetric_rtp && !self.symmetric_rtp_latched.load(Ordering::Acquire) {
-            self.remote_rtcp_addr.store(Some(Arc::new(dest)));
+            seed_prelatch_destination(&self.remote_rtcp_addr, dest);
         }
         let rtcp_socket = if self.rtcp_mux.load(Ordering::Acquire) {
             None
@@ -2032,6 +2049,79 @@ mod tests {
             .expect("the next datagram arrives")
             .unwrap();
         assert_eq!(&received[..len], b"\x80\x00\x00\x02payload");
+    }
+
+    #[test]
+    fn prelatch_seed_stores_only_a_changed_destination() {
+        let slot = ArcSwapOption::<SocketAddr>::from(None);
+        let a: SocketAddr = "192.0.2.10:4000".parse().unwrap();
+        let b: SocketAddr = "192.0.2.11:4002".parse().unwrap();
+        assert!(seed_prelatch_destination(&slot, a));
+        let first = slot.load_full().expect("seeded");
+        assert!(!seed_prelatch_destination(&slot, a));
+        // The equal re-seed kept the very same allocation: no store happened.
+        assert!(Arc::ptr_eq(&first, &slot.load_full().expect("kept")));
+        assert!(seed_prelatch_destination(&slot, b));
+        assert_eq!(slot.load().as_deref(), Some(&b));
+    }
+
+    #[tokio::test]
+    async fn unlatched_sends_do_not_restore_an_equal_destination() {
+        // Before a validated inbound tuple latches, every send seeds the
+        // pre-latch destination. Re-storing an equal value cost a fresh Arc
+        // and arc_swap's writer path per packet, for the whole call when the
+        // peer never sends media.
+        let config = RtpTransportConfig {
+            local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+            local_rtcp_addr: None,
+            symmetric_rtp: true,
+            rtcp_mux: true,
+            session_id: Some("prelatch-seed".to_string()),
+            use_port_allocator: false,
+            buffer_config: Default::default(),
+        };
+        let transport = UdpRtpTransport::new(config).await.unwrap();
+        let sink = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let dest = sink.local_addr().unwrap();
+        transport.set_remote_rtp_addr(dest).await;
+        transport.set_remote_rtcp_addr(dest).await;
+        let seeded_rtp = transport
+            .remote_rtp_addr
+            .load_full()
+            .expect("SDP destination");
+        let seeded_rtcp = transport
+            .remote_rtcp_addr
+            .load_full()
+            .expect("SDP destination");
+        for _ in 0..8 {
+            transport
+                .send_rtp_bytes(b"\x80\x00\x00\x01payload", dest)
+                .await
+                .unwrap();
+            transport
+                .send_rtcp_bytes(&[0x80, 201, 0x00, 0x01, 0x11, 0x22, 0x33, 0x44], dest)
+                .await
+                .unwrap();
+        }
+        assert!(
+            Arc::ptr_eq(&seeded_rtp, &transport.remote_rtp_addr.load_full().unwrap()),
+            "an unlatched RTP send to the same destination must not re-store it"
+        );
+        assert!(
+            Arc::ptr_eq(
+                &seeded_rtcp,
+                &transport.remote_rtcp_addr.load_full().unwrap()
+            ),
+            "an unlatched RTCP send to the same destination must not re-store it"
+        );
+        // A send to another destination still seeds it, as before.
+        let other = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let other_addr = other.local_addr().unwrap();
+        transport
+            .send_rtp_bytes(b"\x80\x00\x00\x02payload", other_addr)
+            .await
+            .unwrap();
+        assert_eq!(transport.remote_rtp_addr().await, Some(other_addr));
     }
 
     #[tokio::test]
