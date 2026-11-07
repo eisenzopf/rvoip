@@ -452,6 +452,18 @@ async fn endpoint_event_stream_incoming_call_exposes_invite_headers() {
     assert_eq!(request.uri().user.as_deref(), Some("+15551230000"));
     let to_user = request.to().and_then(|to| to.address().uri.user.clone());
     assert_eq!(to_user.as_deref(), Some("+15551230000"));
+    // The rendered To keeps the E.164 `+` literal (not `%2B`) and carries no
+    // invented display name (formerly a hardcoded `User`).
+    assert!(
+        incoming.to().starts_with("<sip:+15551230000@"),
+        "rendered To should be the bare dialed URI: {}",
+        incoming.to()
+    );
+    assert!(
+        incoming.from().starts_with('<'),
+        "From must not carry a default display name: {}",
+        incoming.from()
+    );
 
     incoming.decline().await.ok();
     alice.shutdown().await.ok();
