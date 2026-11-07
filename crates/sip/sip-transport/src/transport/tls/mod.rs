@@ -55,12 +55,118 @@ struct AbortTaskOnDrop(tokio::task::AbortHandle);
 
 const TLS_ACCEPT_ERROR_BACKOFF_MIN: Duration = Duration::from_millis(10);
 const TLS_ACCEPT_ERROR_BACKOFF_MAX: Duration = Duration::from_secs(1);
+/// Longest receive wait under [`TlsReceiveBackpressurePolicy::Close`]. A
+/// shorter write timeout lowers it further.
+const TLS_RECEIVE_CLOSE_GRACE_MAX: Duration = Duration::from_secs(1);
+/// Default for [`TlsFlowConfig::receive_pause_max`].
+const DEFAULT_TLS_RECEIVE_PAUSE_MAX: Duration = Duration::from_secs(600);
+/// Stand-in for "no deadline" when a configured bound overflows `Instant`.
+const FAR_FUTURE: Duration = Duration::from_secs(86_400 * 365 * 30);
 
 fn tls_accept_error_backoff(consecutive_errors: u32) -> Duration {
     let exponent = consecutive_errors.saturating_sub(1).min(7);
     TLS_ACCEPT_ERROR_BACKOFF_MIN
         .saturating_mul(1u32 << exponent)
         .min(TLS_ACCEPT_ERROR_BACKOFF_MAX)
+}
+
+fn deadline_after(start: tokio::time::Instant, bound: Duration) -> tokio::time::Instant {
+    start
+        .checked_add(bound)
+        .unwrap_or_else(|| start + FAR_FUTURE)
+}
+
+// A signaling burst must not discard a final SIP response just because the
+// bounded writer queue is momentarily full. Wait inside the caller's own
+// future, never in a detached task, so a timeout or cancellation can never
+// enqueue the bytes later. The sender stays bound to the flow the caller
+// selected for the whole wait.
+async fn enqueue_tls_write(
+    sender: &mpsc::Sender<Bytes>,
+    data: Bytes,
+    deadline: Duration,
+) -> Result<()> {
+    let data = match sender.try_send(data) {
+        Ok(()) => return Ok(()),
+        Err(mpsc::error::TrySendError::Closed(_)) => return Err(Error::TransportClosed),
+        Err(mpsc::error::TrySendError::Full(data)) => data,
+    };
+    match tokio::time::timeout(deadline, sender.send(data)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err(Error::TransportClosed),
+        Err(_) => Err(Error::BufferCapacityExceeded),
+    }
+}
+
+// Push back on a busy signaling consumer without destroying the shared TLS
+// flow. Only this one parsed message is retained, inside the reader task; no
+// overflow queue or detached retry can outlive the connection. Writer
+// shutdown and the unchanged idle/authentication deadlines still end the
+// wait, and the policy bound releases a flow whose consumer never resumes,
+// even when no writer activity can wake the reader.
+async fn enqueue_tls_receive<T>(
+    sender: &mpsc::Sender<T>,
+    message: T,
+    writer_done: &mut watch::Receiver<bool>,
+    activity: &mut watch::Receiver<tokio::time::Instant>,
+    lifecycle: ConnectionLifecycleConfig,
+    established_at: tokio::time::Instant,
+    flow: &TlsFlowConfig,
+) -> bool {
+    if *writer_done.borrow() {
+        return false;
+    }
+    let message = match sender.try_send(message) {
+        Ok(()) => return true,
+        Err(mpsc::error::TrySendError::Closed(_)) => return false,
+        Err(mpsc::error::TrySendError::Full(message)) => message,
+    };
+    let counters = &flow.counters;
+    counters.receive_pauses.fetch_add(1, Ordering::Relaxed);
+    let paused_at = tokio::time::Instant::now();
+    let reservation = sender.reserve();
+    let capacity_wait = tokio::time::sleep_until(deadline_after(
+        paused_at,
+        flow.receive_backpressure_max(lifecycle),
+    ));
+    let lifecycle_wait = tokio::time::sleep_until(
+        lifecycle.next_deadline(*activity.borrow_and_update(), established_at),
+    );
+    tokio::pin!(reservation, capacity_wait, lifecycle_wait);
+    let delivered = loop {
+        tokio::select! {
+            biased;
+            _ = writer_done.changed() => break false,
+            _ = &mut lifecycle_wait => break false,
+            _ = &mut capacity_wait => {
+                counters
+                    .receive_backpressure_closes
+                    .fetch_add(1, Ordering::Relaxed);
+                warn!(
+                    policy = ?flow.receive_backpressure,
+                    "TLS receive queue stayed full past the backpressure bound; closing flow"
+                );
+                break false;
+            }
+            permit = &mut reservation => match permit {
+                Ok(permit) => {
+                    permit.send(message);
+                    break true;
+                }
+                Err(_) => break false,
+            },
+            changed = activity.changed() => {
+                if changed.is_err() {
+                    break false;
+                }
+                lifecycle_wait.as_mut().reset(
+                    lifecycle.next_deadline(*activity.borrow_and_update(), established_at),
+                );
+            }
+        }
+    };
+    counters.record_receive_pause(paused_at.elapsed());
+    delivered
 }
 
 impl AbortTaskOnDrop {
@@ -204,6 +310,244 @@ pub enum TlsRole {
     ClientAndServer,
 }
 
+/// How a TLS reader reacts while the transport event queue is full.
+///
+/// A full queue means the local transaction layer is momentarily slower than
+/// the peer, not that the peer misbehaved. Under either policy the reader
+/// keeps the one parsed message it holds (no overflow queue, no detached
+/// retry), stops reading from the socket, and delivers the message in order
+/// once the queue has room. The policies differ only in how long the reader
+/// waits before it gives up on the flow. The wait always ends early when the
+/// flow's writer stops or its idle/authentication deadline passes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TlsReceiveBackpressurePolicy {
+    /// Pause reads, letting TCP flow control push back on the peer, and close
+    /// the flow only when the consumer makes no room for
+    /// [`TlsFlowConfig::receive_pause_max`]. Suited to shared carrier trunks,
+    /// where closing the flow would strand every dialog routed over it.
+    #[default]
+    Pause,
+    /// Close the flow when the consumer makes no room within
+    /// `min(write timeout, 1 s)`.
+    Close,
+}
+
+/// Decision of an [`IngressAdmissionHook`] for one parsed inbound message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum IngressVerdict {
+    /// Deliver the message to the transaction layer as usual.
+    Pass,
+    /// Drop the message without a reply, for example the ACK for a stateless
+    /// rejection the hook already sent.
+    Absorb,
+    /// Queue these serialized bytes on the same TLS flow and drop the
+    /// message. The write is best effort: when the flow's writer queue is
+    /// full the reply is dropped instead of stalling reads, and the peer's
+    /// retransmission gets another chance.
+    Respond(Bytes),
+}
+
+type IngressAdmissionFn =
+    dyn Fn(&rvoip_sip_core::Message, SocketAddr) -> IngressVerdict + Send + Sync;
+
+/// Application hook the TLS reader consults for every parsed message
+/// *before* the message enters the bounded transport event queue.
+///
+/// This lets an application shed overload statelessly at read rate, even
+/// while the transaction layer is saturated. The hook runs on the
+/// connection's reader task, so it must be fast and must not block.
+#[derive(Clone)]
+pub struct IngressAdmissionHook(Arc<IngressAdmissionFn>);
+
+impl IngressAdmissionHook {
+    /// Wrap a hook. It receives each parsed message and the peer address of
+    /// the flow the message arrived on.
+    pub fn new<F>(hook: F) -> Self
+    where
+        F: Fn(&rvoip_sip_core::Message, SocketAddr) -> IngressVerdict + Send + Sync + 'static,
+    {
+        Self(Arc::new(hook))
+    }
+
+    fn verdict(&self, message: &rvoip_sip_core::Message, source: SocketAddr) -> IngressVerdict {
+        (self.0)(message, source)
+    }
+}
+
+impl fmt::Debug for IngressAdmissionHook {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("IngressAdmissionHook(..)")
+    }
+}
+
+/// Per-flow behaviour of a [`TlsTransport`]: receive backpressure, socket
+/// options, and an optional ingress admission hook.
+///
+/// Counters ([`TlsFlowConfig::stats`]) are shared by every transport built
+/// from this value or a clone of it, so an application can keep a clone and
+/// read aggregate figures without holding the transports.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct TlsFlowConfig {
+    /// Reader policy while the transport event queue is full. Default:
+    /// [`TlsReceiveBackpressurePolicy::Pause`].
+    pub receive_backpressure: TlsReceiveBackpressurePolicy,
+    /// Longest single receive pause under
+    /// [`TlsReceiveBackpressurePolicy::Pause`] before the flow is closed.
+    /// Default: 600 s. `Duration::ZERO` closes the flow as soon as the queue
+    /// is full.
+    pub receive_pause_max: Duration,
+    /// Set `TCP_NODELAY` on accepted and dialed TLS sockets. SIP messages are
+    /// small, latency-sensitive writes, and Nagle's algorithm can hold a
+    /// response until the previous segment is acknowledged. Default: `true`.
+    pub tcp_nodelay: bool,
+    /// Hook consulted for every parsed inbound message. Default: `None`.
+    pub ingress_admission: Option<IngressAdmissionHook>,
+    counters: Arc<TlsFlowCounters>,
+}
+
+impl Default for TlsFlowConfig {
+    fn default() -> Self {
+        Self {
+            receive_backpressure: TlsReceiveBackpressurePolicy::default(),
+            receive_pause_max: DEFAULT_TLS_RECEIVE_PAUSE_MAX,
+            tcp_nodelay: true,
+            ingress_admission: None,
+            counters: Arc::default(),
+        }
+    }
+}
+
+impl TlsFlowConfig {
+    /// Set the reader policy for a full transport event queue.
+    pub fn with_receive_backpressure(mut self, policy: TlsReceiveBackpressurePolicy) -> Self {
+        self.receive_backpressure = policy;
+        self
+    }
+
+    /// Set the longest single receive pause under
+    /// [`TlsReceiveBackpressurePolicy::Pause`].
+    pub fn with_receive_pause_max(mut self, max: Duration) -> Self {
+        self.receive_pause_max = max;
+        self
+    }
+
+    /// Enable or disable `TCP_NODELAY` on accepted and dialed sockets.
+    pub fn with_tcp_nodelay(mut self, enabled: bool) -> Self {
+        self.tcp_nodelay = enabled;
+        self
+    }
+
+    /// Install an ingress admission hook.
+    pub fn with_ingress_admission(mut self, hook: IngressAdmissionHook) -> Self {
+        self.ingress_admission = Some(hook);
+        self
+    }
+
+    /// Snapshot of the counters shared by every transport built from this
+    /// configuration or a clone of it.
+    pub fn stats(&self) -> TlsFlowStats {
+        self.counters.snapshot()
+    }
+
+    fn receive_backpressure_max(&self, lifecycle: ConnectionLifecycleConfig) -> Duration {
+        match self.receive_backpressure {
+            TlsReceiveBackpressurePolicy::Pause => self.receive_pause_max,
+            TlsReceiveBackpressurePolicy::Close => {
+                lifecycle.write_timeout.min(TLS_RECEIVE_CLOSE_GRACE_MAX)
+            }
+        }
+    }
+
+    /// Run the ingress admission hook, if any. Returns `true` when the
+    /// message continues to the transport event queue.
+    fn admit_ingress(
+        &self,
+        message: &rvoip_sip_core::Message,
+        source: SocketAddr,
+        writer: &mpsc::Sender<Bytes>,
+    ) -> bool {
+        let Some(hook) = self.ingress_admission.as_ref() else {
+            return true;
+        };
+        let counter = match hook.verdict(message, source) {
+            IngressVerdict::Pass => return true,
+            IngressVerdict::Absorb => &self.counters.ingress_absorbed,
+            // Best effort by design: a full writer must never stall reads.
+            IngressVerdict::Respond(response) => match writer.try_send(response) {
+                Ok(()) => &self.counters.ingress_responded,
+                Err(_) => &self.counters.ingress_responses_dropped,
+            },
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        false
+    }
+
+    fn apply_socket_options(&self, stream: &TcpStream) {
+        if self.tcp_nodelay {
+            if let Err(error) = stream.set_nodelay(true) {
+                debug!(%error, "failed to set TCP_NODELAY on TLS flow");
+            }
+        }
+    }
+}
+
+/// Snapshot of [`TlsFlowConfig`] counters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TlsFlowStats {
+    /// Reader waits that began because the transport event queue was full.
+    pub receive_pauses: u64,
+    /// Total time readers spent waiting for queue room, in microseconds.
+    pub receive_paused_micros: u64,
+    /// Longest single reader wait, in microseconds.
+    pub receive_max_pause_micros: u64,
+    /// Flows closed because the consumer made no room within the policy bound.
+    pub receive_backpressure_closes: u64,
+    /// Messages the ingress admission hook answered.
+    pub ingress_responded: u64,
+    /// Messages the ingress admission hook absorbed.
+    pub ingress_absorbed: u64,
+    /// Hook replies dropped because the flow's writer queue was full or
+    /// closed.
+    pub ingress_responses_dropped: u64,
+}
+
+#[derive(Debug, Default)]
+struct TlsFlowCounters {
+    receive_pauses: AtomicU64,
+    receive_paused_micros: AtomicU64,
+    receive_max_pause_micros: AtomicU64,
+    receive_backpressure_closes: AtomicU64,
+    ingress_responded: AtomicU64,
+    ingress_absorbed: AtomicU64,
+    ingress_responses_dropped: AtomicU64,
+}
+
+impl TlsFlowCounters {
+    fn record_receive_pause(&self, paused: Duration) {
+        let micros = u64::try_from(paused.as_micros()).unwrap_or(u64::MAX);
+        self.receive_paused_micros
+            .fetch_add(micros, Ordering::Relaxed);
+        self.receive_max_pause_micros
+            .fetch_max(micros, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> TlsFlowStats {
+        TlsFlowStats {
+            receive_pauses: self.receive_pauses.load(Ordering::Relaxed),
+            receive_paused_micros: self.receive_paused_micros.load(Ordering::Relaxed),
+            receive_max_pause_micros: self.receive_max_pause_micros.load(Ordering::Relaxed),
+            receive_backpressure_closes: self.receive_backpressure_closes.load(Ordering::Relaxed),
+            ingress_responded: self.ingress_responded.load(Ordering::Relaxed),
+            ingress_absorbed: self.ingress_absorbed.load(Ordering::Relaxed),
+            ingress_responses_dropped: self.ingress_responses_dropped.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// TLS transport implementation for SIP.
 ///
 /// A single `TlsTransport` instance handles both inbound (server) and
@@ -270,6 +614,10 @@ pub struct TlsTransport {
     inbound_established: Arc<Semaphore>,
     outbound_established: Arc<Semaphore>,
     outbound_trust_context: u64,
+
+    /// Receive backpressure, socket options and ingress admission for every
+    /// flow this transport accepts or dials.
+    flow: TlsFlowConfig,
 }
 
 impl fmt::Debug for TlsTransport {
@@ -281,6 +629,7 @@ impl fmt::Debug for TlsTransport {
             .field("connections", &self.connections)
             .field("closed", &self.closed)
             .field("handshake_admission", &self.handshake_admission)
+            .field("flow", &self.flow)
             .finish()
     }
 }
@@ -389,6 +738,7 @@ impl TlsTransport {
             server_client_auth,
             TlsRole::ClientAndServer,
             handshake_admission,
+            TlsFlowConfig::default(),
         )
         .await
     }
@@ -413,6 +763,7 @@ impl TlsTransport {
             TlsServerClientAuthConfig::default(),
             TlsRole::ServerOnly,
             HandshakeAdmissionConfig::default(),
+            TlsFlowConfig::default(),
         )
         .await
     }
@@ -436,6 +787,7 @@ impl TlsTransport {
             server_client_auth,
             TlsRole::ServerOnly,
             HandshakeAdmissionConfig::default(),
+            TlsFlowConfig::default(),
         )
         .await
     }
@@ -461,6 +813,7 @@ impl TlsTransport {
             server_client_auth,
             TlsRole::ServerOnly,
             handshake_admission,
+            TlsFlowConfig::default(),
         )
         .await
     }
@@ -487,6 +840,7 @@ impl TlsTransport {
             server_client_auth,
             TlsRole::ClientAndServer,
             HandshakeAdmissionConfig::default(),
+            TlsFlowConfig::default(),
         )
         .await
     }
@@ -513,6 +867,47 @@ impl TlsTransport {
             server_client_auth,
             TlsRole::ServerOnly,
             handshake_admission,
+            TlsFlowConfig::default(),
+        )
+        .await
+    }
+
+    /// Create a listening TLS transport with explicit handshake and flow
+    /// policies.
+    ///
+    /// `role` must be [`TlsRole::ServerOnly`] or [`TlsRole::ClientAndServer`];
+    /// use [`TlsTransport::client_only_with_flow_config`] for a client-only
+    /// transport. When `control_event_tx` is supplied, lifecycle events use
+    /// that separately reserved lane.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn bind_with_role_and_flow_config(
+        local_addr: SocketAddr,
+        cert_path: &Path,
+        key_path: &Path,
+        event_tx: Option<mpsc::Sender<TransportEvent>>,
+        control_event_tx: Option<mpsc::Sender<TransportEvent>>,
+        client_cfg: TlsClientConfig,
+        server_client_auth: TlsServerClientAuthConfig,
+        role: TlsRole,
+        handshake_admission: HandshakeAdmissionConfig,
+        flow: TlsFlowConfig,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        if role == TlsRole::ClientOnly {
+            return Err(Error::InvalidState(
+                "a client-only TLS transport has no listener; use TlsTransport::client_only_with_flow_config".into(),
+            ));
+        }
+        Self::bind_with_role_and_configs(
+            local_addr,
+            cert_path,
+            key_path,
+            event_tx,
+            control_event_tx,
+            client_cfg,
+            server_client_auth,
+            role,
+            handshake_admission,
+            flow,
         )
         .await
     }
@@ -527,6 +922,7 @@ impl TlsTransport {
         server_client_auth: TlsServerClientAuthConfig,
         role: TlsRole,
         handshake_admission: HandshakeAdmissionConfig,
+        flow: TlsFlowConfig,
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
         let handshake_admission = handshake_admission.validate("TLS")?;
         let lifecycle = ConnectionLifecycleConfig::from_handshake(handshake_admission);
@@ -586,6 +982,7 @@ impl TlsTransport {
             inbound_established: inbound_established.clone(),
             outbound_established,
             outbound_trust_context,
+            flow,
         };
 
         let started = tasks
@@ -605,6 +1002,7 @@ impl TlsTransport {
                 lifecycle,
                 inbound_established,
                 inbound_trust_context,
+                transport.flow.clone(),
             ))
             .await;
         if started.is_none() {
@@ -647,8 +1045,15 @@ impl TlsTransport {
         client_cfg: TlsClientConfig,
         handshake_admission: HandshakeAdmissionConfig,
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
-        Self::client_only_with_channels(local_addr, event_tx, None, client_cfg, handshake_admission)
-            .await
+        Self::client_only_with_channels(
+            local_addr,
+            event_tx,
+            None,
+            client_cfg,
+            handshake_admission,
+            TlsFlowConfig::default(),
+        )
+        .await
     }
 
     /// Create a client-only TLS transport with a reserved control sender.
@@ -664,8 +1069,38 @@ impl TlsTransport {
             Some(control_event_tx),
             client_cfg,
             HandshakeAdmissionConfig::default(),
+            TlsFlowConfig::default(),
         )
         .await
+    }
+
+    /// Create a client-only TLS transport with explicit handshake and flow
+    /// policies. When `control_event_tx` is supplied, lifecycle events use
+    /// that separately reserved lane.
+    pub async fn client_only_with_flow_config(
+        local_addr: SocketAddr,
+        event_tx: Option<mpsc::Sender<TransportEvent>>,
+        control_event_tx: Option<mpsc::Sender<TransportEvent>>,
+        client_cfg: TlsClientConfig,
+        handshake_admission: HandshakeAdmissionConfig,
+        flow: TlsFlowConfig,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        Self::client_only_with_channels(
+            local_addr,
+            event_tx,
+            control_event_tx,
+            client_cfg,
+            handshake_admission,
+            flow,
+        )
+        .await
+    }
+
+    /// Snapshot of the receive backpressure and ingress admission counters of
+    /// this transport's [`TlsFlowConfig`]. The counters are shared with every
+    /// transport configured from a clone of the same value.
+    pub fn flow_stats(&self) -> TlsFlowStats {
+        self.flow.stats()
     }
 
     async fn client_only_with_channels(
@@ -674,6 +1109,7 @@ impl TlsTransport {
         control_event_tx: Option<mpsc::Sender<TransportEvent>>,
         client_cfg: TlsClientConfig,
         handshake_admission: HandshakeAdmissionConfig,
+        flow: TlsFlowConfig,
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
         let handshake_admission = handshake_admission.validate("TLS")?;
         let lifecycle = ConnectionLifecycleConfig::from_handshake(handshake_admission);
@@ -718,6 +1154,7 @@ impl TlsTransport {
                     lifecycle.max_established_per_direction,
                 )),
                 outbound_trust_context: next_trust_context(),
+                flow,
             },
             rx,
         ))
@@ -737,6 +1174,7 @@ impl TlsTransport {
         lifecycle: ConnectionLifecycleConfig,
         established: Arc<Semaphore>,
         trust_context: u64,
+        flow: TlsFlowConfig,
     ) {
         let semaphore = Arc::new(Semaphore::new(handshake_admission.max_concurrent));
         let mut consecutive_accept_errors = 0u32;
@@ -749,7 +1187,9 @@ impl TlsTransport {
                 Ok((stream, remote_addr)) => {
                     consecutive_accept_errors = 0;
                     debug!("New TCP connection from {}", remote_addr);
+                    flow.apply_socket_options(&stream);
                     let acceptor = acceptor.clone();
+                    let flow = flow.clone();
                     let connections = connections.clone();
                     let event_tx = event_tx.clone();
                     let control_event_tx = control_event_tx.clone();
@@ -815,6 +1255,7 @@ impl TlsTransport {
                                         established_permit,
                                         registration_deadline,
                                         Some(permit),
+                                        flow,
                                     )
                                     .await;
                                 }
@@ -888,6 +1329,7 @@ impl TlsTransport {
         _established_permit: OwnedSemaphorePermit,
         registration_deadline: tokio::time::Instant,
         handshake_permit: Option<OwnedSemaphorePermit>,
+        flow: TlsFlowConfig,
     ) where
         S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
@@ -1031,8 +1473,12 @@ impl TlsTransport {
                         }
                         match try_parse_one(&mut buffer) {
                             Ok(Some((message, raw_bytes))) => {
-                                if event_tx
-                                    .try_send(TransportEvent::MessageReceived {
+                                if !flow.admit_ingress(&message, remote_addr, &tx_for_pong) {
+                                    continue;
+                                }
+                                if !enqueue_tls_receive(
+                                    &event_tx,
+                                    TransportEvent::MessageReceived {
                                         message,
                                         source: remote_addr,
                                         destination: local_addr,
@@ -1041,12 +1487,18 @@ impl TlsTransport {
                                         raw_bytes: Some(raw_bytes),
                                         timing: None,
                                         connection_metadata: connection_metadata.clone(),
-                                    })
-                                    .is_err()
+                                    },
+                                    &mut writer_done_rx,
+                                    &mut activity_rx,
+                                    lifecycle,
+                                    established_at,
+                                    &flow,
+                                )
+                                .await
                                 {
-                                    warn!(
+                                    debug!(
                                         source = %remote_addr,
-                                        "TLS event queue unavailable; closing flow instead of blocking lifecycle cleanup"
+                                        "TLS receive delivery ended with its consumer or connection lifecycle"
                                     );
                                     break 'connection;
                                 }
@@ -1127,10 +1579,7 @@ impl TlsTransport {
                     addr
                 ))
             })?;
-            sender.try_send(data).map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => Error::BufferCapacityExceeded,
-                mpsc::error::TrySendError::Closed(_) => Error::TransportClosed,
-            })?;
+            enqueue_tls_write(&sender, data, self.lifecycle.write_timeout).await?;
             return Ok(flow_id);
         }
         let server_name = server_name.unwrap_or_else(|| ip_to_server_name(addr));
@@ -1150,12 +1599,11 @@ impl TlsTransport {
             })
         };
         if let Some((sender, flow_id)) = existing {
-            match sender.try_send(data.clone()) {
+            match enqueue_tls_write(&sender, data.clone(), self.lifecycle.write_timeout).await {
                 Ok(()) => return Ok(flow_id),
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    return Err(Error::BufferCapacityExceeded)
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {}
+                // The pooled flow closed: dial a replacement below.
+                Err(Error::TransportClosed) => {}
+                Err(error) => return Err(error),
             }
         }
 
@@ -1182,10 +1630,7 @@ impl TlsTransport {
             })?;
             (record.sender.clone(), record.flow_id)
         };
-        sender.try_send(data).map_err(|error| match error {
-            mpsc::error::TrySendError::Full(_) => Error::BufferCapacityExceeded,
-            mpsc::error::TrySendError::Closed(_) => Error::TransportClosed,
-        })?;
+        enqueue_tls_write(&sender, data, self.lifecycle.write_timeout).await?;
         Ok(flow_id)
     }
 
@@ -1249,6 +1694,7 @@ impl TlsTransport {
         let local_addr = self.local_addr;
         let coordinator = self.outbound_dials.clone();
         let lifecycle = self.lifecycle;
+        let flow = self.flow.clone();
         let next_generation = self.next_connection_generation.clone();
         let managed_tasks = self.tasks.clone();
         let connection_tasks = self.tasks.clone();
@@ -1307,6 +1753,7 @@ impl TlsTransport {
                                 let tcp_stream = TcpStream::connect(remote_addr)
                                     .await
                                     .map_err(|e| Error::ConnectFailed(remote_addr, e))?;
+                                flow.apply_socket_options(&tcp_stream);
                                 connector
                                     .connect(server_name, tcp_stream)
                                     .await
@@ -1347,6 +1794,7 @@ impl TlsTransport {
                                     established_permit,
                                     deadline,
                                     None,
+                                    flow,
                                 )),
                             )
                             .await
@@ -1728,6 +2176,631 @@ mod auth_boundary_tests {
     use rvoip_sip_core::{CallId, Message, Method, Request, Response, StatusCode, Uri};
     use std::time::Duration;
 
+    fn receive_lifecycle() -> ConnectionLifecycleConfig {
+        ConnectionLifecycleConfig::from_handshake(HandshakeAdmissionConfig::new(
+            Duration::from_secs(1),
+            1,
+        ))
+    }
+
+    fn close_policy() -> TlsFlowConfig {
+        TlsFlowConfig::default().with_receive_backpressure(TlsReceiveBackpressurePolicy::Close)
+    }
+
+    /// Both policies must behave identically until the consumer has been
+    /// stalled past the shorter (close) bound.
+    fn both_policies() -> [TlsFlowConfig; 2] {
+        [close_policy(), TlsFlowConfig::default()]
+    }
+
+    #[test]
+    fn tls_flow_config_defaults_pause_with_nodelay_and_no_hook() {
+        let flow = TlsFlowConfig::default();
+        assert_eq!(
+            flow.receive_backpressure,
+            TlsReceiveBackpressurePolicy::Pause
+        );
+        assert_eq!(flow.receive_pause_max, Duration::from_secs(600));
+        assert!(flow.tcp_nodelay);
+        assert!(flow.ingress_admission.is_none());
+        assert_eq!(flow.stats(), TlsFlowStats::default());
+
+        let lifecycle =
+            ConnectionLifecycleConfig::from_handshake(HandshakeAdmissionConfig::default());
+        assert_eq!(
+            flow.receive_backpressure_max(lifecycle),
+            Duration::from_secs(600)
+        );
+        assert_eq!(
+            close_policy().receive_backpressure_max(lifecycle),
+            Duration::from_secs(1)
+        );
+        let short = ConnectionLifecycleConfig::from_handshake(HandshakeAdmissionConfig::new(
+            Duration::from_millis(200),
+            1,
+        ));
+        assert_eq!(
+            close_policy().receive_backpressure_max(short),
+            Duration::from_millis(200)
+        );
+
+        let configured = TlsFlowConfig::default()
+            .with_receive_pause_max(Duration::from_secs(5))
+            .with_tcp_nodelay(false)
+            .with_ingress_admission(IngressAdmissionHook::new(|_, _| IngressVerdict::Pass));
+        assert_eq!(configured.receive_pause_max, Duration::from_secs(5));
+        assert!(!configured.tcp_nodelay);
+        assert!(configured.ingress_admission.is_some());
+        assert!(format!("{configured:?}").contains("IngressAdmissionHook(..)"));
+
+        // Clones share one set of counters, so an application can keep a
+        // clone of the configuration it handed to its transports.
+        let clone = flow.clone();
+        clone
+            .counters
+            .ingress_absorbed
+            .fetch_add(1, Ordering::Relaxed);
+        assert_eq!(flow.stats().ingress_absorbed, 1);
+    }
+
+    #[tokio::test]
+    async fn tls_flow_socket_options_follow_tcp_nodelay() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        for enabled in [true, false] {
+            let stream = TcpStream::connect(address).await.unwrap();
+            let (_accepted, _) = listener.accept().await.unwrap();
+            TlsFlowConfig::default()
+                .with_tcp_nodelay(enabled)
+                .apply_socket_options(&stream);
+            assert_eq!(stream.nodelay().unwrap(), enabled);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tls_receive_backpressure_retains_fifo_without_closing_or_duplicate_delivery() {
+        for flow in both_policies() {
+            let (tx, mut rx) = mpsc::channel(1);
+            tx.send(1u8).await.unwrap();
+            let established = tokio::time::Instant::now();
+            let (_activity, mut activity_rx) = watch::channel(established);
+            let (_writer, mut writer_rx) = watch::channel(false);
+            let send = enqueue_tls_receive(
+                &tx,
+                2,
+                &mut writer_rx,
+                &mut activity_rx,
+                receive_lifecycle(),
+                established,
+                &flow,
+            );
+            tokio::pin!(send);
+            tokio::select! {
+                biased;
+                result = &mut send => panic!("busy consumer must retain the message: {result}"),
+                _ = tokio::task::yield_now() => {}
+            }
+            assert_eq!(rx.recv().await, Some(1));
+            assert!(send.await);
+            assert_eq!(rx.recv().await, Some(2));
+            assert!(rx.try_recv().is_err());
+            let stats = flow.stats();
+            assert_eq!(stats.receive_pauses, 1);
+            assert_eq!(stats.receive_backpressure_closes, 0);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tls_receive_backpressure_writer_close_and_cancellation_never_deliver_later() {
+        for flow in both_policies() {
+            let (tx, mut rx) = mpsc::channel(1);
+            tx.send(1u8).await.unwrap();
+            let established = tokio::time::Instant::now();
+            let (_activity, mut activity_rx) = watch::channel(established);
+            let (writer, mut writer_rx) = watch::channel(false);
+            {
+                let send = enqueue_tls_receive(
+                    &tx,
+                    2,
+                    &mut writer_rx,
+                    &mut activity_rx,
+                    receive_lifecycle(),
+                    established,
+                    &flow,
+                );
+                tokio::pin!(send);
+                tokio::select! {
+                    biased;
+                    result = &mut send => panic!("busy consumer must wait: {result}"),
+                    _ = tokio::task::yield_now() => {}
+                }
+                // Dropping the reader future cancels its reservation and
+                // the message it holds.
+            }
+            writer.send_replace(true);
+            assert!(
+                !enqueue_tls_receive(
+                    &tx,
+                    3,
+                    &mut writer_rx,
+                    &mut activity_rx,
+                    receive_lifecycle(),
+                    established,
+                    &flow,
+                )
+                .await
+            );
+            assert_eq!(rx.recv().await, Some(1));
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tls_receive_backpressure_observes_writer_and_consumer_shutdown_while_waiting() {
+        for flow in both_policies() {
+            for close_writer in [true, false] {
+                let (tx, mut rx) = mpsc::channel(1);
+                tx.send(1u8).await.unwrap();
+                let established = tokio::time::Instant::now();
+                let (_activity, mut activity_rx) = watch::channel(established);
+                let (writer, mut writer_rx) = watch::channel(false);
+                let send = enqueue_tls_receive(
+                    &tx,
+                    2,
+                    &mut writer_rx,
+                    &mut activity_rx,
+                    receive_lifecycle(),
+                    established,
+                    &flow,
+                );
+                tokio::pin!(send);
+                tokio::select! {
+                    biased;
+                    result = &mut send => panic!("busy consumer must wait: {result}"),
+                    _ = tokio::task::yield_now() => {}
+                }
+                if close_writer {
+                    writer.send_replace(true);
+                } else {
+                    rx.close();
+                }
+                assert!(!send.await);
+                assert_eq!(rx.recv().await, Some(1));
+                assert!(rx.try_recv().is_err());
+            }
+            // Shutdown is not a backpressure close.
+            assert_eq!(flow.stats().receive_backpressure_closes, 0);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tls_receive_backpressure_refreshes_idle_but_keeps_authentication_deadline() {
+        for flow in both_policies() {
+            for authentication_expiry in [false, true] {
+                let (tx, mut rx) = mpsc::channel(1);
+                tx.send(1u8).await.unwrap();
+                let established = tokio::time::Instant::now();
+                let (activity, mut activity_rx) = watch::channel(established);
+                let (_writer, mut writer_rx) = watch::channel(false);
+                let mut lifecycle = receive_lifecycle();
+                lifecycle.idle_timeout = Duration::from_millis(20);
+                lifecycle.authentication_lifetime = Duration::from_millis(25);
+                let send = enqueue_tls_receive(
+                    &tx,
+                    2,
+                    &mut writer_rx,
+                    &mut activity_rx,
+                    lifecycle,
+                    established,
+                    &flow,
+                );
+                tokio::pin!(send);
+                tokio::select! {
+                    biased;
+                    result = &mut send => panic!("busy consumer must wait: {result}"),
+                    _ = tokio::task::yield_now() => {}
+                }
+                if authentication_expiry {
+                    tokio::time::advance(Duration::from_millis(10)).await;
+                    activity.send_replace(tokio::time::Instant::now());
+                    tokio::select! {
+                        biased;
+                        result = &mut send => panic!("activity must refresh idle deadline: {result}"),
+                        _ = tokio::task::yield_now() => {}
+                    }
+                }
+                assert!(!send.await);
+                assert_eq!(
+                    established.elapsed(),
+                    if authentication_expiry {
+                        Duration::from_millis(25)
+                    } else {
+                        Duration::from_millis(20)
+                    }
+                );
+                assert_eq!(rx.recv().await, Some(1));
+                assert!(rx.try_recv().is_err());
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tls_receive_backpressure_survives_a_burst_longer_than_250ms() {
+        for flow in both_policies() {
+            let (tx, mut rx) = mpsc::channel(1);
+            tx.send(1u8).await.unwrap();
+            let established = tokio::time::Instant::now();
+            let (_activity, mut activity_rx) = watch::channel(established);
+            let (_writer, mut writer_rx) = watch::channel(false);
+            let send = enqueue_tls_receive(
+                &tx,
+                2,
+                &mut writer_rx,
+                &mut activity_rx,
+                receive_lifecycle(),
+                established,
+                &flow,
+            );
+            tokio::pin!(send);
+            tokio::select! {
+                biased;
+                result = &mut send => panic!("busy consumer must wait: {result}"),
+                _ = tokio::task::yield_now() => {}
+            }
+            tokio::time::advance(Duration::from_millis(300)).await;
+            tokio::select! {
+                biased;
+                result = &mut send => panic!("temporary burst must preserve the shared flow: {result}"),
+                _ = tokio::task::yield_now() => {}
+            }
+            assert_eq!(rx.recv().await, Some(1));
+            assert!(send.await);
+            assert_eq!(rx.recv().await, Some(2));
+            assert!(rx.try_recv().is_err());
+            let stats = flow.stats();
+            assert_eq!(stats.receive_pauses, 1);
+            assert_eq!(stats.receive_max_pause_micros, 300_000);
+            assert_eq!(stats.receive_paused_micros, 300_000);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tls_receive_backpressure_bounds_permanently_stalled_consumer() {
+        let flow = close_policy();
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(1u8).await.unwrap();
+        let established = tokio::time::Instant::now();
+        let (_activity, mut activity_rx) = watch::channel(established);
+        let (_writer, mut writer_rx) = watch::channel(false);
+        assert!(
+            !enqueue_tls_receive(
+                &tx,
+                2,
+                &mut writer_rx,
+                &mut activity_rx,
+                receive_lifecycle(),
+                established,
+                &flow,
+            )
+            .await
+        );
+        assert_eq!(
+            established.elapsed(),
+            receive_lifecycle()
+                .write_timeout
+                .min(TLS_RECEIVE_CLOSE_GRACE_MAX)
+        );
+        assert_eq!(rx.recv().await, Some(1));
+        assert!(rx.try_recv().is_err());
+        let stats = flow.stats();
+        assert_eq!(stats.receive_pauses, 1);
+        assert_eq!(stats.receive_backpressure_closes, 1);
+        assert_eq!(stats.receive_max_pause_micros, 1_000_000);
+    }
+
+    fn pause_lifecycle() -> ConnectionLifecycleConfig {
+        // 30 s handshake => 900 s idle window, beyond the 600 s pause bound.
+        ConnectionLifecycleConfig::from_handshake(HandshakeAdmissionConfig::new(
+            Duration::from_secs(30),
+            1,
+        ))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tls_receive_pause_policy_survives_consumer_stall_beyond_close_deadline() {
+        let flow = TlsFlowConfig::default();
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(1u8).await.unwrap();
+        let established = tokio::time::Instant::now();
+        let (_activity, mut activity_rx) = watch::channel(established);
+        let (_writer, mut writer_rx) = watch::channel(false);
+        let send = enqueue_tls_receive(
+            &tx,
+            2,
+            &mut writer_rx,
+            &mut activity_rx,
+            pause_lifecycle(),
+            established,
+            &flow,
+        );
+        tokio::pin!(send);
+        // The close policy would have given up after min(30 s, 1 s).
+        tokio::select! {
+            biased;
+            result = &mut send => panic!("pause policy closed during a 5 s stall: {result}"),
+            _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+        }
+        assert_eq!(rx.recv().await, Some(1));
+        assert!(send.await);
+        assert_eq!(rx.recv().await, Some(2));
+        assert_eq!(flow.stats().receive_backpressure_closes, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tls_receive_pause_policy_still_bounds_a_permanently_stalled_consumer() {
+        let flow = TlsFlowConfig::default();
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(1u8).await.unwrap();
+        let established = tokio::time::Instant::now();
+        let (_activity, mut activity_rx) = watch::channel(established);
+        let (_writer, mut writer_rx) = watch::channel(false);
+        assert!(
+            !enqueue_tls_receive(
+                &tx,
+                2,
+                &mut writer_rx,
+                &mut activity_rx,
+                pause_lifecycle(),
+                established,
+                &flow,
+            )
+            .await
+        );
+        assert_eq!(established.elapsed(), DEFAULT_TLS_RECEIVE_PAUSE_MAX);
+        assert_eq!(rx.recv().await, Some(1));
+        assert!(rx.try_recv().is_err());
+        assert_eq!(flow.stats().receive_backpressure_closes, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tls_receive_pause_bound_follows_configuration_without_overflow() {
+        // A zero bound closes as soon as the queue is full.
+        let flow = TlsFlowConfig::default().with_receive_pause_max(Duration::ZERO);
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(1u8).await.unwrap();
+        let established = tokio::time::Instant::now();
+        let (_activity, mut activity_rx) = watch::channel(established);
+        let (_writer, mut writer_rx) = watch::channel(false);
+        assert!(
+            !enqueue_tls_receive(
+                &tx,
+                2,
+                &mut writer_rx,
+                &mut activity_rx,
+                pause_lifecycle(),
+                established,
+                &flow,
+            )
+            .await
+        );
+        assert_eq!(established.elapsed(), Duration::ZERO);
+        assert_eq!(flow.stats().receive_backpressure_closes, 1);
+
+        // An unrepresentable bound must not panic; the lifecycle deadline
+        // still ends the wait.
+        let flow = TlsFlowConfig::default().with_receive_pause_max(Duration::MAX);
+        let mut lifecycle = pause_lifecycle();
+        lifecycle.idle_timeout = Duration::from_millis(20);
+        let established = tokio::time::Instant::now();
+        let (_activity, mut activity_rx) = watch::channel(established);
+        assert!(
+            !enqueue_tls_receive(
+                &tx,
+                2,
+                &mut writer_rx,
+                &mut activity_rx,
+                lifecycle,
+                established,
+                &flow,
+            )
+            .await
+        );
+        assert_eq!(established.elapsed(), Duration::from_millis(20));
+        assert_eq!(flow.stats().receive_backpressure_closes, 0);
+        assert_eq!(rx.recv().await, Some(1));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tls_writer_backpressure_waits_for_space_without_duplicate_write() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(Bytes::from_static(b"first")).await.unwrap();
+        let send = enqueue_tls_write(&tx, Bytes::from_static(b"second"), Duration::from_secs(1));
+        tokio::pin!(send);
+        tokio::select! {
+            biased;
+            result = &mut send => panic!("full queue must wait: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+        assert_eq!(rx.recv().await.unwrap(), b"first"[..]);
+        send.await.unwrap();
+        assert_eq!(rx.recv().await.unwrap(), b"second"[..]);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tls_writer_backpressure_timeout_never_enqueues_later() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(Bytes::from_static(b"first")).await.unwrap();
+        let started = tokio::time::Instant::now();
+        let result =
+            enqueue_tls_write(&tx, Bytes::from_static(b"second"), Duration::from_secs(1)).await;
+        assert!(matches!(result, Err(Error::BufferCapacityExceeded)));
+        assert_eq!(started.elapsed(), Duration::from_secs(1));
+        assert_eq!(rx.recv().await.unwrap(), b"first"[..]);
+        tokio::task::yield_now().await;
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tls_writer_backpressure_cancel_and_closed_do_not_enqueue() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(Bytes::from_static(b"first")).await.unwrap();
+        {
+            let send =
+                enqueue_tls_write(&tx, Bytes::from_static(b"second"), Duration::from_secs(1));
+            tokio::pin!(send);
+            tokio::select! {
+                biased;
+                result = &mut send => panic!("full queue must wait: {result:?}"),
+                _ = tokio::task::yield_now() => {}
+            }
+        }
+        assert_eq!(rx.recv().await.unwrap(), b"first"[..]);
+        assert!(rx.try_recv().is_err());
+        drop(rx);
+        assert!(matches!(
+            enqueue_tls_write(&tx, Bytes::from_static(b"third"), Duration::from_secs(1)).await,
+            Err(Error::TransportClosed)
+        ));
+    }
+
+    fn options_request(call_id: &str) -> Request {
+        SimpleRequestBuilder::new(Method::Options, "sips:service@localhost")
+            .unwrap()
+            .from("alice", "sips:alice@localhost", Some("tag"))
+            .to("service", "sips:service@localhost", None)
+            .call_id(call_id)
+            .cseq(1)
+            .build()
+    }
+
+    #[tokio::test]
+    async fn ingress_admission_hook_answers_and_absorbs_before_the_event_queue() {
+        let (_directory, cert_path, key_path) = write_test_certificate();
+        let client_config = TlsClientConfig {
+            extra_ca_path: Some(cert_path.clone()),
+            ..TlsClientConfig::default()
+        };
+        let hook = IngressAdmissionHook::new(|message, source| {
+            assert!(source.ip().is_loopback());
+            let Message::Request(request) = message else {
+                return IngressVerdict::Pass;
+            };
+            match request.call_id().map(|call_id| call_id.as_str()) {
+                Some("ingress-respond") => {
+                    let response = SimpleResponseBuilder::response_from_request(
+                        request,
+                        StatusCode::ServiceUnavailable,
+                        Some("Service Unavailable"),
+                    )
+                    .build();
+                    IngressVerdict::Respond(Bytes::from(Message::Response(response).to_bytes()))
+                }
+                Some("ingress-absorb") => IngressVerdict::Absorb,
+                _ => IngressVerdict::Pass,
+            }
+        });
+        let flow = TlsFlowConfig::default().with_ingress_admission(hook);
+        let (server, mut server_events) = TlsTransport::bind_with_role_and_flow_config(
+            "127.0.0.1:0".parse().unwrap(),
+            &cert_path,
+            &key_path,
+            None,
+            None,
+            client_config.clone(),
+            TlsServerClientAuthConfig::default(),
+            TlsRole::ServerOnly,
+            HandshakeAdmissionConfig::default(),
+            flow.clone(),
+        )
+        .await
+        .unwrap();
+        let destination = server.local_addr().unwrap();
+        let (client, mut client_events) =
+            TlsTransport::client_only("127.0.0.1:0".parse().unwrap(), None, client_config)
+                .await
+                .unwrap();
+        let route = TransportRoute::new(destination)
+            .with_transport_type(TransportType::Tls)
+            .with_authority(TransportAuthority::dns("localhost").unwrap());
+        for call_id in ["ingress-respond", "ingress-absorb", "ingress-pass"] {
+            client
+                .send_message_on_route(Message::Request(options_request(call_id)), route.clone())
+                .await
+                .unwrap();
+        }
+
+        // The stateless answer arrives on the same flow.
+        match tokio::time::timeout(Duration::from_secs(2), client_events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            TransportEvent::MessageReceived {
+                message: Message::Response(response),
+                ..
+            } => {
+                assert_eq!(response.status(), StatusCode::ServiceUnavailable);
+                assert_eq!(
+                    response.call_id().map(|call_id| call_id.as_str()),
+                    Some("ingress-respond")
+                );
+            }
+            event => panic!("expected the hook's response, got {event:?}"),
+        }
+
+        // Only the passed request reaches the transport event queue.
+        let passed = loop {
+            match tokio::time::timeout(Duration::from_secs(2), server_events.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                TransportEvent::MessageReceived {
+                    message: Message::Request(request),
+                    ..
+                } => break request,
+                TransportEvent::MessageReceived { message, .. } => {
+                    panic!("unexpected inbound message {message:?}")
+                }
+                _ => continue,
+            }
+        };
+        assert_eq!(
+            passed.call_id().map(|call_id| call_id.as_str()),
+            Some("ingress-pass")
+        );
+
+        let stats = server.flow_stats();
+        assert_eq!(stats, flow.stats());
+        assert_eq!(stats.ingress_responded, 1);
+        assert_eq!(stats.ingress_absorbed, 1);
+        assert_eq!(stats.ingress_responses_dropped, 0);
+
+        client.close().await.unwrap();
+        server.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn listening_flow_config_constructor_rejects_client_only_role() {
+        let (_directory, cert_path, key_path) = write_test_certificate();
+        let result = TlsTransport::bind_with_role_and_flow_config(
+            "127.0.0.1:0".parse().unwrap(),
+            &cert_path,
+            &key_path,
+            None,
+            None,
+            TlsClientConfig::default(),
+            TlsServerClientAuthConfig::default(),
+            TlsRole::ClientOnly,
+            HandshakeAdmissionConfig::default(),
+            TlsFlowConfig::default(),
+        )
+        .await;
+        assert!(matches!(result, Err(Error::InvalidState(_))));
+    }
+
     fn write_test_certificate() -> (tempfile::TempDir, PathBuf, PathBuf) {
         use std::io::Write;
 
@@ -1846,66 +2919,93 @@ mod auth_boundary_tests {
 
     #[tokio::test]
     async fn tls_control_close_bypasses_saturated_message_lane() {
-        let (_directory, cert_path, key_path) = write_test_certificate();
-        let client_config = TlsClientConfig {
-            extra_ca_path: Some(cert_path.clone()),
-            ..TlsClientConfig::default()
-        };
-        let (data_tx, _data_rx) = mpsc::channel(1);
-        let (control_tx, mut control_rx) = mpsc::channel(8);
-        let (server, _unused) = TlsTransport::bind_with_configs_and_control_sender(
-            "127.0.0.1:0".parse().unwrap(),
-            &cert_path,
-            &key_path,
-            Some(data_tx),
-            control_tx,
-            client_config.clone(),
-            TlsServerClientAuthConfig::default(),
-        )
-        .await
-        .unwrap();
-        let destination = server.local_addr().unwrap();
-        let (client, _events) =
-            TlsTransport::client_only("127.0.0.1:0".parse().unwrap(), None, client_config)
-                .await
-                .unwrap();
+        // The data lane below is never drained. Under the close policy the
+        // reader gives up on the flow after min(write timeout, 1 s), and that
+        // close must still reach the separately reserved control lane. Under
+        // the pause policy the saturated flow must stay open instead.
+        for policy in [
+            TlsReceiveBackpressurePolicy::Close,
+            TlsReceiveBackpressurePolicy::Pause,
+        ] {
+            let (_directory, cert_path, key_path) = write_test_certificate();
+            let client_config = TlsClientConfig {
+                extra_ca_path: Some(cert_path.clone()),
+                ..TlsClientConfig::default()
+            };
+            let flow = TlsFlowConfig::default().with_receive_backpressure(policy);
+            let (data_tx, _data_rx) = mpsc::channel(1);
+            let (control_tx, mut control_rx) = mpsc::channel(8);
+            let (server, _unused) = TlsTransport::bind_with_role_and_flow_config(
+                "127.0.0.1:0".parse().unwrap(),
+                &cert_path,
+                &key_path,
+                Some(data_tx),
+                Some(control_tx),
+                client_config.clone(),
+                TlsServerClientAuthConfig::default(),
+                TlsRole::ClientAndServer,
+                HandshakeAdmissionConfig::default(),
+                flow.clone(),
+            )
+            .await
+            .unwrap();
+            let destination = server.local_addr().unwrap();
+            let (client, _events) =
+                TlsTransport::client_only("127.0.0.1:0".parse().unwrap(), None, client_config)
+                    .await
+                    .unwrap();
 
-        for cseq in 1..=3 {
-            let request = SimpleRequestBuilder::new(Method::Options, "sips:service@localhost")
-                .unwrap()
-                .from("alice", "sips:alice@localhost", Some("tag"))
-                .to("service", "sips:service@localhost", None)
-                .call_id("saturated-live-tls")
-                .cseq(cseq)
-                .build();
-            let _ = client
-                .send_message_on_route(
-                    Message::Request(request),
-                    TransportRoute::new(destination)
-                        .with_transport_type(TransportType::Tls)
-                        .with_authority(TransportAuthority::dns("localhost").unwrap()),
-                )
-                .await;
-        }
+            for cseq in 1..=3 {
+                let request = SimpleRequestBuilder::new(Method::Options, "sips:service@localhost")
+                    .unwrap()
+                    .from("alice", "sips:alice@localhost", Some("tag"))
+                    .to("service", "sips:service@localhost", None)
+                    .call_id("saturated-live-tls")
+                    .cseq(cseq)
+                    .build();
+                let _ = client
+                    .send_message_on_route(
+                        Message::Request(request),
+                        TransportRoute::new(destination)
+                            .with_transport_type(TransportType::Tls)
+                            .with_authority(TransportAuthority::dns("localhost").unwrap()),
+                    )
+                    .await;
+            }
 
-        let closed = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if let Some(TransportEvent::ConnectionClosed {
-                    flow_id: Some(_), ..
-                }) = control_rx.recv().await
-                {
-                    break;
+            let closed = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Some(TransportEvent::ConnectionClosed {
+                        flow_id: Some(_), ..
+                    }) = control_rx.recv().await
+                    {
+                        break;
+                    }
+                }
+            })
+            .await;
+            match policy {
+                TlsReceiveBackpressurePolicy::Close => {
+                    assert!(
+                        closed.is_ok(),
+                        "control close was blocked by saturated SIP data"
+                    );
+                    assert_eq!(flow.stats().receive_backpressure_closes, 1);
+                }
+                _ => {
+                    assert!(
+                        closed.is_err(),
+                        "pause policy closed a flow whose consumer is only busy"
+                    );
+                    let stats = flow.stats();
+                    assert_eq!(stats.receive_pauses, 1);
+                    assert_eq!(stats.receive_backpressure_closes, 0);
                 }
             }
-        })
-        .await;
-        assert!(
-            closed.is_ok(),
-            "control close was blocked by saturated SIP data"
-        );
 
-        client.close().await.unwrap();
-        server.close().await.unwrap();
+            client.close().await.unwrap();
+            server.close().await.unwrap();
+        }
     }
 
     #[test]

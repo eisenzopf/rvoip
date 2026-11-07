@@ -21,7 +21,8 @@ pub use error::{Error, Result};
 pub use resolver::{select_transport_for_uri, ResolvedTarget, Resolver, ResolverError};
 pub use transport::tcp::TcpTransport;
 pub use transport::tls::{
-    TlsClientAuthMode, TlsClientConfig, TlsServerClientAuthConfig, TlsTransport,
+    IngressAdmissionHook, IngressVerdict, TlsClientAuthMode, TlsClientConfig, TlsFlowConfig,
+    TlsFlowStats, TlsReceiveBackpressurePolicy, TlsServerClientAuthConfig, TlsTransport,
 };
 pub use transport::udp::{UdpParseConfig, UdpParseDispatch, UdpSocketOptions, UdpTransport};
 pub use transport::ws::WebSocketTransport;
