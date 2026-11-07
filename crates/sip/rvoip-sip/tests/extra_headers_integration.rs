@@ -26,8 +26,8 @@ use rvoip_sip::api::headers::SipRequestOptions;
 use rvoip_sip::api::stream_peer::EventReceiver;
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
 use rvoip_sip::{
-    CallHandler, CallHandlerDecision, CallbackPeer, Endpoint, EndpointProfile, HeaderName,
-    IncomingCall, SipTraceConfig, SipTraceDirection, StreamPeer, TypedHeader,
+    CallHandler, CallHandlerDecision, CallbackPeer, Endpoint, EndpointEvent, EndpointProfile,
+    HeaderName, IncomingCall, SipTraceConfig, SipTraceDirection, StreamPeer, TypedHeader,
 };
 use rvoip_sip_core::types::header::HeaderValue;
 
@@ -37,6 +37,7 @@ const PAIR_CALLBACK: (u16, u16) = (15740, 15750);
 const PAIR_ENDPOINT: (u16, u16) = (15760, 15770);
 const PAIR_ORDERING: (u16, u16) = (15780, 15790);
 const PAIR_DEFAULT: (u16, u16) = (15800, 15810);
+const PAIR_ENDPOINT_RECEIVE: (u16, u16) = (15840, 15860);
 
 const TENANT_HEADER_INPUT_NAME: &str = "X-Tenant-ID";
 const TENANT_HEADER_WIRE_NAME: &str = "X-Tenant-Id";
@@ -383,5 +384,77 @@ async fn default_make_call_omits_extra_headers() {
 
     bob.terminate_current_session().await.ok();
     alice.terminate_current_session().await.ok();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+}
+
+/// The receiving side: an `Endpoint` that takes the call from its `split()`
+/// event stream (rather than `wait_for_incoming`) must still see the parsed
+/// INVITE, so `header()` and `raw_request()` work for X-* headers and the
+/// Request-URI (how a PBX such as Asterisk passes the dialed number).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn endpoint_event_stream_incoming_call_exposes_invite_headers() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let (alice_port, bob_port) = PAIR_ENDPOINT_RECEIVE;
+
+    let bob = Endpoint::builder()
+        .name("bob")
+        .profile(EndpointProfile::Custom(Config::local("bob", bob_port)))
+        .build()
+        .await
+        .expect("bob endpoint");
+    let (bob_control, mut bob_events) = bob.split();
+
+    let alice = Endpoint::builder()
+        .name("alice")
+        .profile(EndpointProfile::Custom(Config::local("alice", alice_port)))
+        .build()
+        .await
+        .expect("alice endpoint");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let target = format!("sip:+15551230000@127.0.0.1:{}", bob_port);
+    alice
+        .invite(&target)
+        .expect("Endpoint invite")
+        .with_headers(extra_headers_fixture())
+        .expect("staging extra headers")
+        .send()
+        .await
+        .expect("Endpoint invite.send()");
+
+    let incoming = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            match bob_events.next().await.expect("bob events") {
+                Some(EndpointEvent::IncomingCall(incoming)) => return incoming,
+                Some(_) => continue,
+                None => panic!("bob event stream closed before the INVITE"),
+            }
+        }
+    })
+    .await
+    .expect("bob did not receive the incoming call");
+
+    // Header names are case-insensitive.
+    assert_eq!(
+        incoming.header("x-tenant-id").as_deref(),
+        Some(TENANT_HEADER_VALUE)
+    );
+    assert_eq!(
+        incoming.header(TENANT_HEADER_INPUT_NAME).as_deref(),
+        Some(TENANT_HEADER_VALUE)
+    );
+    assert_eq!(incoming.header("Call-Info").as_deref(), Some(CALL_INFO_URI));
+    assert_eq!(incoming.header("X-Not-Sent"), None);
+
+    let request = incoming
+        .raw_request()
+        .expect("event-stream incoming call must retain the parsed INVITE");
+    assert_eq!(request.uri().user.as_deref(), Some("+15551230000"));
+    let to_user = request.to().and_then(|to| to.address().uri.user.clone());
+    assert_eq!(to_user.as_deref(), Some("+15551230000"));
+
+    incoming.decline().await.ok();
+    alice.shutdown().await.ok();
+    bob_control.shutdown().await.ok();
     tokio::time::sleep(Duration::from_millis(150)).await;
 }
