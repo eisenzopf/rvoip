@@ -175,6 +175,23 @@ impl RtpPlayoutBuffer {
         self.drain_ready(now)
     }
 
+    /// When a startup hold or a gap hold expires, if one is pending after
+    /// `after`. An expired gap that cannot advance (for example, one with no
+    /// timestamp progression) needs another packet to supply information;
+    /// polling it again cannot help, so it arms nothing.
+    fn next_deadline(&self, after: Instant) -> Option<Instant> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        let started = if self.expected_sequence.is_none() {
+            self.startup_started_at
+        } else {
+            self.gap_started_at
+        }?;
+        let deadline = started + RTP_REORDER_HOLD;
+        (deadline > after).then_some(deadline)
+    }
+
     /// True when the pending packets form one unbroken sequence run.
     fn pending_is_contiguous(&self) -> bool {
         let Some(oldest) = self.oldest_pending_sequence() else {
@@ -327,6 +344,13 @@ impl DecodedPlayoutQueue {
             .map(|_| now + frame.duration.max(Duration::from_millis(1)));
         Some(frame)
     }
+
+    /// When the head frame is due, while any frame is queued.
+    fn next_deadline(&self) -> Option<Instant> {
+        (!self.pending.is_empty())
+            .then_some(self.next_delivery_at)
+            .flatten()
+    }
 }
 
 #[cfg(test)]
@@ -372,6 +396,42 @@ mod rtp_playout_tests {
                 sequence_number, ..
             } => *sequence_number,
         }
+    }
+
+    #[test]
+    fn reorder_deadline_exists_only_while_a_gap_can_wait() {
+        let start = Instant::now();
+        let mut buffer = RtpPlayoutBuffer::new();
+        assert_eq!(buffer.next_deadline(start), None);
+        buffer.push(packet(100), start);
+        buffer.push(packet(101), start + Duration::from_millis(20));
+        assert_eq!(
+            buffer.next_deadline(start + Duration::from_millis(20)),
+            None
+        );
+        let gap_at = start + Duration::from_millis(40);
+        assert!(buffer.push(packet(103), gap_at).is_empty());
+        assert_eq!(
+            buffer.next_deadline(gap_at),
+            Some(gap_at + RTP_REORDER_HOLD)
+        );
+        let ready = buffer.tick(gap_at + RTP_REORDER_HOLD);
+        assert_eq!(ready.iter().map(sequence).collect::<Vec<_>>(), [102, 103]);
+        assert_eq!(buffer.next_deadline(gap_at + RTP_REORDER_HOLD), None);
+    }
+
+    #[test]
+    fn expired_gap_without_timestamp_progress_does_not_rearm_a_busy_timer() {
+        let start = Instant::now();
+        let mut buffer = RtpPlayoutBuffer::new();
+        let mut first = packet(100);
+        first.header.timestamp = 0;
+        buffer.push(first, start);
+        let mut next = packet(102);
+        next.header.timestamp = 0;
+        assert!(buffer.push(next, start).is_empty());
+        assert!(buffer.tick(start + RTP_REORDER_HOLD).is_empty());
+        assert_eq!(buffer.next_deadline(start + RTP_REORDER_HOLD), None);
     }
 
     #[test]
@@ -659,7 +719,12 @@ mod rtp_playout_tests {
         for timestamp in [0, 160, 320] {
             assert!(playout.push(AudioFrame::new(vec![0; 160], 8_000, 1, timestamp), start,));
         }
+        assert_eq!(playout.next_deadline(), Some(start));
         assert_eq!(playout.pop_due(start).expect("first frame").timestamp, 0);
+        assert_eq!(
+            playout.next_deadline(),
+            Some(start + Duration::from_millis(20))
+        );
         assert!(playout.pop_due(start + Duration::from_millis(19)).is_none());
         assert_eq!(
             playout
@@ -2708,48 +2773,69 @@ impl MediaSessionController {
             let mut metrics_ssrc = None;
             let mut decoded_playout = DecodedPlayoutQueue::new();
             let mut delivery_state = RtpDeliveryState::default();
-            let mut playout_tick = tokio::time::interval(Duration::from_millis(5));
-            playout_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // A fixed 5 ms poll woke every session 200 times per second, even
+            // before its first audio packet and after its queue emptied. Keep
+            // one reusable timer and arm it only at the next reorder or audio
+            // deadline. Channel closure and lifecycle cancellation still own
+            // termination of this task.
+            let playout_timer = tokio::time::sleep(Duration::from_secs(86_400));
+            tokio::pin!(playout_timer);
+            let mut armed_deadline = None;
 
             'events: loop {
-                let received = tokio::select! {
-                    event = rtp_events.recv() => Some(event),
-                    _ = playout_tick.tick() => None,
-                };
-                if received.is_none() {
-                    let now = Instant::now();
-                    let items = rtp_playout.tick(now);
-                    if !items.is_empty() {
-                        if let Some(codec_runtime) = codec_runtimes
-                            .get(&dialog_id)
-                            .map(|entry| entry.value().clone())
+                let now = Instant::now();
+                let items = rtp_playout.tick(now);
+                if !items.is_empty() {
+                    if let Some(codec_runtime) = codec_runtimes
+                        .get(&dialog_id)
+                        .map(|entry| entry.value().clone())
+                    {
+                        if enqueue_rtp_playout_items(
+                            items,
+                            &codec_runtime,
+                            &dialog_id,
+                            &mut decoded_playout,
+                            &mut source_timeline,
+                            now,
+                        )
+                        .await
                         {
-                            if enqueue_rtp_playout_items(
-                                items,
-                                &codec_runtime,
-                                &dialog_id,
-                                &mut decoded_playout,
-                                &mut source_timeline,
-                                now,
-                            )
-                            .await
-                            {
-                                break 'events;
-                            }
+                            break 'events;
                         }
                     }
-                    if deliver_due_audio_frame(
-                        now,
-                        &mut decoded_playout,
-                        &dialog_id,
-                        &media_directions,
-                        &audio_frame_callbacks,
-                        collect_audio_quality,
-                        skip_audio_frame_delivery,
-                        &mut delivery_state,
-                    ) {
-                        break 'events;
+                }
+                if deliver_due_audio_frame(
+                    now,
+                    &mut decoded_playout,
+                    &dialog_id,
+                    &media_directions,
+                    &audio_frame_callbacks,
+                    collect_audio_quality,
+                    skip_audio_frame_delivery,
+                    &mut delivery_state,
+                ) {
+                    break 'events;
+                }
+                let deadline = match (
+                    rtp_playout.next_deadline(now),
+                    decoded_playout.next_deadline(),
+                ) {
+                    (Some(reorder), Some(audio)) => Some(reorder.min(audio)),
+                    (reorder, audio) => reorder.or(audio),
+                };
+                if deadline != armed_deadline {
+                    if let Some(deadline) = deadline {
+                        playout_timer
+                            .as_mut()
+                            .reset(tokio::time::Instant::from_std(deadline));
                     }
+                    armed_deadline = deadline;
+                }
+                let received = tokio::select! {
+                    event = rtp_events.recv() => Some(event),
+                    _ = &mut playout_timer, if deadline.is_some() => None,
+                };
+                if received.is_none() {
                     continue;
                 }
                 match received.expect("received event checked above") {
