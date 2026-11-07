@@ -271,6 +271,42 @@ impl SymmetricRtpCounters {
     }
 }
 
+/// Whether a failed RTP `sendto` refused only this datagram, on a socket that
+/// stays usable: the local stack dropped it (`EPERM`/`EACCES` from a netfilter
+/// rule or a full conntrack table, `ENOBUFS`, `ENOMEM`), or an ICMP error for
+/// an earlier datagram was reported on this one (`ECONNREFUSED`, host or
+/// network unreachable or down).
+///
+/// Such a datagram is lost, exactly as if the network had dropped it. Its
+/// sequence number and SRTP index are consumed, so the far end sees a
+/// one-packet gap and the stream goes on. Reported as send errors, these
+/// ended a call's outbound audio at the first one: callers such as the SIP
+/// outbound media pump stop sending on a failed send. Errors that mean the
+/// socket itself is unusable (`EBADF`, `EINVAL`, `EMSGSIZE`, ...) still fail
+/// the send.
+fn datagram_refused(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    if matches!(
+        error.kind(),
+        ErrorKind::PermissionDenied
+            | ErrorKind::ConnectionRefused
+            | ErrorKind::HostUnreachable
+            | ErrorKind::NetworkUnreachable
+            | ErrorKind::NetworkDown
+            | ErrorKind::OutOfMemory
+    ) {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        if matches!(error.raw_os_error(), Some(code) if code == libc::ENOBUFS || code == libc::EHOSTDOWN)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Cancellation guard for the narrow interval between reserving allocator
 /// state and handing ownership to a live transport. Tokio cancellation drops
 /// the constructor future; spawning the idempotent release here prevents an
@@ -399,6 +435,10 @@ pub struct UdpRtpTransport {
 
     /// Makes allocator release idempotent across explicit close and Drop.
     allocator_release_started: AtomicBool,
+
+    /// RTP datagrams the local network stack refused and that were counted
+    /// as lost (see [`datagram_refused`]).
+    refused_rtp_datagrams: AtomicU64,
 
     /// Outbound SRTP context (RFC 4568 / RFC 3711). When `Some`, every
     /// outbound RTP packet is wrapped with `SrtpContext::protect`
@@ -603,6 +643,7 @@ impl UdpRtpTransport {
             srtp_context_generation: Arc::new(AtomicU64::new(0)),
             srtp_context_update: Arc::new(parking_lot::Mutex::new(())),
             allocator_release_started: AtomicBool::new(false),
+            refused_rtp_datagrams: AtomicU64::new(0),
             srtp_send: Arc::new(parking_lot::Mutex::new(None)),
             srtp_recv: Arc::new(parking_lot::Mutex::new(None)),
             dtmf_seen: Arc::new(DashMap::new()),
@@ -1311,6 +1352,14 @@ impl UdpRtpTransport {
         self.symmetric_rtp_counters.snapshot()
     }
 
+    /// RTP datagrams the local network stack refused, each treated as a
+    /// packet lost on the wire rather than a failed send (a firewall rule
+    /// that drops egress, a full conntrack table, `ENOBUFS`, or an ICMP error
+    /// reported on a later send).
+    pub fn refused_rtp_datagrams(&self) -> u64 {
+        self.refused_rtp_datagrams.load(Ordering::Relaxed)
+    }
+
     /// Subscribe to transport events
     pub fn subscribe(&self) -> broadcast::Receiver<RtpEvent> {
         self.event_tx.subscribe()
@@ -1535,11 +1584,22 @@ impl UdpRtpTransport {
             self.remote_rtp_addr.store(Some(Arc::new(dest)));
         }
 
-        let sent_bytes = self
-            .rtp_socket
-            .send_to(bytes, dest)
-            .await
-            .map_err(|e| Error::Transport(format!("Failed to send RTP packet: {}", e)))?;
+        let sent_bytes = match self.rtp_socket.send_to(bytes, dest).await {
+            Ok(sent_bytes) => sent_bytes,
+            // The sequence number and SRTP index are already consumed, so the
+            // far end sees exactly one lost packet, as on the wire.
+            Err(error) if datagram_refused(&error) => {
+                self.refused_rtp_datagrams.fetch_add(1, Ordering::Relaxed);
+                debug!(%error, %dest, "RTP datagram refused by the local network stack; counted as lost");
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(Error::Transport(format!(
+                    "Failed to send RTP packet: {}",
+                    e
+                )))
+            }
+        };
 
         debug!("UDP send_to sent {} bytes to {}", sent_bytes, dest);
         Ok(())
@@ -1902,6 +1962,76 @@ mod tests {
                 "ASCII SIP methods begin in the RFC 7983 TURN ChannelData range and must not be parsed as RTP"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_per_datagram_refusals_count_as_loss() {
+        for refused in [
+            std::io::Error::from_raw_os_error(libc::EPERM),
+            std::io::Error::from_raw_os_error(libc::EACCES),
+            std::io::Error::from_raw_os_error(libc::ENOBUFS),
+            std::io::Error::from_raw_os_error(libc::ECONNREFUSED),
+            std::io::Error::from_raw_os_error(libc::EHOSTUNREACH),
+            std::io::Error::from_raw_os_error(libc::ENETUNREACH),
+            std::io::Error::from_raw_os_error(libc::EHOSTDOWN),
+        ] {
+            assert!(datagram_refused(&refused), "{refused:?}");
+        }
+        for fatal in [
+            std::io::Error::from_raw_os_error(libc::EBADF),
+            std::io::Error::from_raw_os_error(libc::EINVAL),
+            std::io::Error::from_raw_os_error(libc::EMSGSIZE),
+            std::io::Error::from(std::io::ErrorKind::WouldBlock),
+        ] {
+            assert!(!datagram_refused(&fatal), "{fatal:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_rtp_datagram_is_lost_not_a_send_error() {
+        // The local stack refuses this one datagram. A broadcast destination
+        // without SO_BROADCAST is refused with EACCES, the same errno a
+        // netfilter DROP rule in OUTPUT returns. Its sequence number is
+        // already consumed, so the far end sees one lost packet; failing the
+        // send instead ended the caller's outbound audio for the rest of the
+        // call. Skip where the host does not refuse the probe.
+        let refused: SocketAddr = "255.255.255.255:9".parse().unwrap();
+        let probe = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        match probe.send_to(b"probe", refused) {
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {}
+            other => {
+                eprintln!("skipping: this host does not refuse the broadcast probe ({other:?})");
+                return;
+            }
+        }
+        let config = RtpTransportConfig {
+            local_rtp_addr: "0.0.0.0:0".parse().unwrap(),
+            local_rtcp_addr: None,
+            symmetric_rtp: false,
+            rtcp_mux: true,
+            session_id: Some("refused-datagram".to_string()),
+            use_port_allocator: false,
+            buffer_config: Default::default(),
+        };
+        let transport = UdpRtpTransport::new(config).await.unwrap();
+        transport
+            .send_rtp_bytes(b"\x80\x00\x00\x01payload", refused)
+            .await
+            .expect("a refused datagram is lost on the wire, not a failed send");
+        assert_eq!(transport.refused_rtp_datagrams(), 1);
+        // The stream goes on: the next datagram leaves normally.
+        let sink = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        transport
+            .send_rtp_bytes(b"\x80\x00\x00\x02payload", sink.local_addr().unwrap())
+            .await
+            .unwrap();
+        let mut received = [0u8; 64];
+        let (len, _) = tokio::time::timeout(Duration::from_secs(1), sink.recv_from(&mut received))
+            .await
+            .expect("the next datagram arrives")
+            .unwrap();
+        assert_eq!(&received[..len], b"\x80\x00\x00\x02payload");
     }
 
     #[tokio::test]
