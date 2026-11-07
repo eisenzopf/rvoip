@@ -929,6 +929,17 @@ impl EndpointIncomingCall {
         &self.incoming.to
     }
 
+    /// Return the value of the INVITE's first header named `name`
+    /// (case-insensitive), e.g. `X-Remote-Number` or `P-Asserted-Identity`.
+    pub fn header(&self, name: &str) -> Option<String> {
+        use crate::api::headers::view::SipHeaderView;
+        let line = self
+            .incoming
+            .header_str(&rvoip_sip_core::types::headers::HeaderName::Other(name.to_string()))?;
+        // `header_str` renders the whole header line: `Name: value`.
+        Some(line.split_once(':').map_or(line.as_str(), |(_, value)| value).trim().to_string())
+    }
+    
     /// Return the remote SDP offer carried by the inbound INVITE, if present.
     pub fn offer_sdp(&self) -> Option<&str> {
         self.incoming.sdp.as_deref()
