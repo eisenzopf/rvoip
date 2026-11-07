@@ -627,7 +627,9 @@ mod tests {
         let uri = Uri {
             scheme: Scheme::Sip,
             user: Some("user".to_string()),
+            user_wire: None,
             password: None,
+            password_wire: None,
             host: Host::Domain("example.com".to_string()),
             port: None,
             parameters: Vec::new(),
@@ -645,7 +647,9 @@ mod tests {
         let uri2 = Uri {
             scheme: Scheme::Sip,
             user: Some("user".to_string()),
+            user_wire: None,
             password: None,
+            password_wire: None,
             host: Host::Domain("example.com".to_string()),
             port: None,
             parameters: Vec::new(),
@@ -673,7 +677,9 @@ mod tests {
         let uri = Uri {
             scheme: Scheme::Sip,
             user: Some("support".to_string()),
+            user_wire: None,
             password: None,
+            password_wire: None,
             host: Host::Domain("example.com".to_string()),
             port: None,
             parameters: Vec::new(),
@@ -824,7 +830,9 @@ mod tests {
         let uri = Uri {
             scheme: Scheme::Http,
             user: None,
+            user_wire: None,
             password: None,
+            password_wire: None,
             host: Host::Domain("example.com".to_string()),
             port: None,
             parameters: Vec::new(),

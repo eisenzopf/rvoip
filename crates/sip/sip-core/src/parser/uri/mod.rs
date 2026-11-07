@@ -19,7 +19,7 @@ pub use absolute::parse_absolute_uri;
 pub use headers::uri_headers;
 pub use host::{host, hostport, port};
 pub use params::uri_parameters;
-pub use userinfo::userinfo;
+pub use userinfo::{userinfo, userinfo_with_wire, UserInfoWithWire};
 
 // Add imports for combinators and types
 use nom::{
@@ -34,12 +34,36 @@ use crate::parser::ParseResult;
 use crate::types::uri::Scheme;
 use crate::types::uri::{Host, Uri};
 
+/// Parsed userinfo as `Uri` fields: `(user, user_wire, password, password_wire)`.
+/// An empty user is treated as absent.
+type UriUserFields = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+fn uri_user_fields(info: Option<UserInfoWithWire>) -> UriUserFields {
+    let Some(((user, user_wire), password)) = info else {
+        return (None, None, None, None);
+    };
+    let (password, password_wire) = match password {
+        Some((password, wire)) => (Some(password), Some(wire)),
+        None => (None, None),
+    };
+    if user.is_empty() {
+        (None, None, password, password_wire)
+    } else {
+        (Some(user), Some(user_wire), password, password_wire)
+    }
+}
+
 // SIP-URI = "sip:" [ userinfo ] hostport uri-parameters [ headers ]
 pub fn parse_sip_uri(bytes: &[u8]) -> ParseResult<'_, Uri> {
     let bytes_slice = bytes;
     let res = tuple((
         tag_no_case(b"sip:"),
-        opt(userinfo),
+        opt(userinfo_with_wire),
         hostport,
         opt(uri_parameters),
         opt(uri_headers),
@@ -47,13 +71,14 @@ pub fn parse_sip_uri(bytes: &[u8]) -> ParseResult<'_, Uri> {
 
     match res {
         Ok((remaining, (_, user_info_opt, (host, port_opt), params_opt, headers_opt))) => {
-            // user_info is already (String, Option<String>)
-            let (user, password) = user_info_opt.unwrap_or((String::new(), None));
+            let (user, user_wire, password, password_wire) = uri_user_fields(user_info_opt);
 
             let uri = Uri {
                 scheme: Scheme::Sip,
-                user: if user.is_empty() { None } else { Some(user) },
+                user,
+                user_wire,
                 password,
+                password_wire,
                 host,
                 port: port_opt,
                 parameters: params_opt.unwrap_or_default(),
@@ -73,7 +98,7 @@ pub fn parse_sips_uri(bytes: &[u8]) -> ParseResult<'_, Uri> {
     let bytes_slice = bytes;
     let res = tuple((
         tag_no_case(b"sips:"),
-        opt(userinfo),
+        opt(userinfo_with_wire),
         hostport,
         opt(uri_parameters),
         opt(uri_headers),
@@ -81,13 +106,14 @@ pub fn parse_sips_uri(bytes: &[u8]) -> ParseResult<'_, Uri> {
 
     match res {
         Ok((remaining, (_, user_info_opt, (host, port_opt), params_opt, headers_opt))) => {
-            // user_info is already (String, Option<String>)
-            let (user, password) = user_info_opt.unwrap_or((String::new(), None));
+            let (user, user_wire, password, password_wire) = uri_user_fields(user_info_opt);
 
             let uri = Uri {
                 scheme: Scheme::Sips,
-                user: if user.is_empty() { None } else { Some(user) },
+                user,
+                user_wire,
                 password,
+                password_wire,
                 host,
                 port: port_opt,
                 parameters: params_opt.unwrap_or_default(),
@@ -150,7 +176,9 @@ fn parse_generic_uri(input: &[u8]) -> ParseResult<'_, Uri> {
             let uri = Uri {
                 scheme,
                 user: None,
+                user_wire: None,
                 password: None,
+                password_wire: None,
                 host: Host::domain("example.com"), // Default host
                 port: None,
                 parameters: Vec::new(),
@@ -179,7 +207,7 @@ fn parse_sip_uri_fixed(input: &[u8]) -> ParseResult<'_, Uri> {
     // Check if @ symbol exists in input
     if let Some(at_pos) = input.iter().position(|&c| c == b'@') {
         userinfo_present = true;
-        match userinfo(&input[..at_pos + 1]) {
+        match userinfo_with_wire(&input[..at_pos + 1]) {
             Ok((_, parsed_userinfo)) => {
                 user_info = Some(parsed_userinfo);
             }
@@ -315,11 +343,13 @@ fn parse_sip_uri_fixed(input: &[u8]) -> ParseResult<'_, Uri> {
             }
 
             // Create URI
-            let (user, password) = user_info.unwrap_or((String::new(), None));
+            let (user, user_wire, password, password_wire) = uri_user_fields(user_info);
             let uri = Uri {
                 scheme: Scheme::Sip,
-                user: if user.is_empty() { None } else { Some(user) },
+                user,
+                user_wire,
                 password,
+                password_wire,
                 host,
                 port,
                 parameters: params,
@@ -348,7 +378,7 @@ fn parse_sips_uri_fixed(input: &[u8]) -> ParseResult<'_, Uri> {
     // Check if @ symbol exists in input
     if let Some(at_pos) = input.iter().position(|&c| c == b'@') {
         userinfo_present = true;
-        match userinfo(&input[..at_pos + 1]) {
+        match userinfo_with_wire(&input[..at_pos + 1]) {
             Ok((_, parsed_userinfo)) => {
                 user_info = Some(parsed_userinfo);
             }
@@ -483,11 +513,13 @@ fn parse_sips_uri_fixed(input: &[u8]) -> ParseResult<'_, Uri> {
             }
 
             // Create URI
-            let (user, password) = user_info.unwrap_or((String::new(), None));
+            let (user, user_wire, password, password_wire) = uri_user_fields(user_info);
             let uri = Uri {
                 scheme: Scheme::Sips,
-                user: if user.is_empty() { None } else { Some(user) },
+                user,
+                user_wire,
                 password,
+                password_wire,
                 host,
                 port,
                 parameters: params,
@@ -544,6 +576,8 @@ fn parse_tel_uri(input: &[u8]) -> ParseResult<'_, Uri> {
         scheme: Scheme::Tel,
         user: None, // TEL URI doesn't have a user component in our model
         password: None,
+        password_wire: None,
+        user_wire: None,
         host: Host::Domain(number_str), // Store the phone number as domain
         port: None,                     // TEL URI doesn't have a port
         parameters: params,
