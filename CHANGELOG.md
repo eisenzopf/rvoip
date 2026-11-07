@@ -14,6 +14,16 @@
   response is written, the state hook (Timer G/H/J/K) has run and the event
   holds its place in the queue; the event is still delivered losslessly and
   in order.
+- `terminate_transaction` no longer waits for its own terminal events to be
+  consumed. It used to publish `StateChanged(Terminated)` and
+  `TransactionTerminated` before completing, so a handler that called it
+  with a full queue stalled for one second, after which the manager closed
+  admission for every new transaction. It now completes once the runner is
+  joined and the transaction is removed from the manager and its timers; the
+  manager keeps delivering the terminal events in order and keeps the
+  transaction key reserved until they are queued. A second, concurrent
+  termination of the same transaction now also waits for the runner join
+  instead of proceeding as if the runner had already stopped.
 
 ## 0.4.0 — 2026-10-11
 

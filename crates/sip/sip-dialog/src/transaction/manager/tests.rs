@@ -8100,6 +8100,178 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_termination_commits_before_full_primary_queue_is_drained() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(8);
+        let (manager, mut events) =
+            TransactionManager::new(transport, transport_rx, Some(1)).await?;
+        let request = create_dispatch_request(Method::Options, "z9hG4bK-terminal-cycle", 1)
+            .map_err(|error| Error::Other(error.to_string()))?;
+        let route = TransportRoute::new("192.0.2.118:5060".parse().unwrap())
+            .with_transport_type(TransportType::Tcp);
+        let key = manager
+            .create_client_transaction_on_route(request.clone(), route.clone())
+            .await?;
+        let live = manager.client_transactions.get(&key).unwrap().clone();
+        manager
+            .events_tx
+            .try_send(TransactionEvent::Error {
+                transaction_id: None,
+                error: "terminal-cycle-capacity-blocker".into(),
+            })
+            .unwrap();
+
+        // The TU cannot drain its own queue until this operation returns.
+        // Permit the existing one-second supervised runner join, but not the
+        // additional terminal-publication timeout that closes all admission.
+        tokio::time::timeout(
+            Duration::from_millis(1500),
+            manager.terminate_transaction(&key),
+        )
+        .await
+        .expect("quiesced termination must complete before the TU drains its queue")?;
+        assert_eq!(live.state(), TransactionState::Terminated);
+        assert!(!manager.client_transactions.contains_key(&key));
+        assert!(live.data().event_loop_handle.lock().await.is_none());
+        assert_eq!(
+            manager.admission_lifecycle.state(),
+            super::super::MANAGER_ADMISSION_RUNNING
+        );
+        assert!(!live.data().terminal_event_publication.is_delivered());
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(25),
+                manager.admission_lifecycle.wait_idle(),
+            )
+            .await
+            .is_err(),
+            "publication must retain manager shutdown admission after the public waiter completes"
+        );
+        let publication = Arc::clone(&live.data().terminal_event_publication);
+        drop(live);
+        assert!(
+            matches!(
+                manager
+                    .create_client_transaction_on_route(request, route)
+                    .await,
+                Err(Error::TransactionExists { .. })
+            ),
+            "pending terminal delivery must retain its exact admission owner"
+        );
+
+        assert!(
+            matches!(events.recv().await, Some(TransactionEvent::Error { error, .. })
+            if error == "terminal-cycle-capacity-blocker")
+        );
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), events.recv()).await,
+            Ok(Some(TransactionEvent::StateChanged { transaction_id, new_state: TransactionState::Terminated, .. }))
+                if transaction_id == key
+        ));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), events.recv()).await,
+            Ok(Some(TransactionEvent::TransactionTerminated { transaction_id })) if transaction_id == key
+        ));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !publication.is_delivered() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("retained terminal publication completes after the consumer resumes");
+        assert_eq!(
+            manager.admission_lifecycle.state(),
+            super::super::MANAGER_ADMISSION_RUNNING
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_termination_waiters_both_observe_the_exact_runner_join() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(8);
+        let (manager, mut events) =
+            TransactionManager::new(transport, transport_rx, Some(1)).await?;
+        let request = create_dispatch_request(Method::Options, "z9hG4bK-terminal-concurrent", 1)
+            .map_err(|error| Error::Other(error.to_string()))?;
+        let key = manager
+            .create_client_transaction_on_route(
+                request,
+                TransportRoute::new("192.0.2.119:5060".parse().unwrap())
+                    .with_transport_type(TransportType::Tcp),
+            )
+            .await?;
+        let live = manager.client_transactions.get(&key).unwrap().clone();
+        let runner = live
+            .data()
+            .event_loop_handle
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .abort_handle();
+        manager
+            .events_tx
+            .try_send(TransactionEvent::Error {
+                transaction_id: None,
+                error: "concurrent-terminal-capacity-blocker".into(),
+            })
+            .unwrap();
+
+        // Both requests enter the manager queue during one parent poll, so
+        // the same cleanup batch supervises them concurrently. Neither may
+        // complete while the other still owns a running protocol producer.
+        let terminate = || async {
+            manager.terminate_transaction(&key).await?;
+            assert!(
+                runner.is_finished(),
+                "public completion preceded the exact runner join"
+            );
+            Ok::<(), Error>(())
+        };
+        let (first, second) = tokio::time::timeout(Duration::from_millis(1500), async {
+            tokio::join!(terminate(), terminate())
+        })
+        .await
+        .expect("concurrent quiesced waiters must not require their own queue to drain");
+        first?;
+        second?;
+        assert_eq!(
+            manager.admission_lifecycle.state(),
+            super::super::MANAGER_ADMISSION_RUNNING
+        );
+        assert!(
+            matches!(events.recv().await, Some(TransactionEvent::Error { error, .. })
+            if error == "concurrent-terminal-capacity-blocker")
+        );
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), events.recv()).await,
+            Ok(Some(TransactionEvent::StateChanged { transaction_id, new_state: TransactionState::Terminated, .. })) if transaction_id == key
+        ));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), events.recv()).await,
+            Ok(Some(TransactionEvent::TransactionTerminated { transaction_id })) if transaction_id == key
+        ));
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            manager.admission_lifecycle.wait_idle(),
+        )
+        .await
+        .expect("both manager-owned jobs must finish after terminal delivery");
+        assert!(matches!(
+            events.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn forced_termination_resumes_blocked_prefix_and_cleans_exact_runner() -> Result<()> {
         let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
         let (_transport_tx, transport_rx) = mpsc::channel(10);
