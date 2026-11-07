@@ -7550,6 +7550,101 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn compact_timer_j_expiry_cannot_overtake_backpressured_response_state() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (manager, mut events) = TransactionManager::new_with_config(
+            transport.clone(),
+            transport_rx,
+            Some(1),
+            Some(crate::transaction::timer::TimerSettings {
+                wait_time_j: Duration::ZERO,
+                ..Default::default()
+            }),
+        )
+        .await?;
+        let request = SimpleRequestBuilder::new(Method::Bye, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("fromtag"))
+            .to("Bob", "sip:bob@example.com", Some("totag"))
+            .call_id("backpressured-compact-j-expiry")
+            .cseq(2)
+            .via(
+                "127.0.0.1:5070",
+                "UDP",
+                Some("z9hG4bK.backpressured-compact-j-expiry"),
+            )
+            .build();
+        let transaction = manager
+            .create_server_transaction(request.clone(), "127.0.0.1:5070".parse().unwrap())
+            .await?;
+        while events.try_recv().is_ok() {}
+        manager
+            .events_tx
+            .send(TransactionEvent::Error {
+                transaction_id: None,
+                error: "capacity-sentinel".into(),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            manager.send_response(
+                transaction.id(),
+                create_test_response(&request, StatusCode::Ok, Some("OK")),
+            ),
+        )
+        .await
+        .expect("response must not depend on draining the TU queue")?;
+
+        // Expire the compact retention while Completed is still waiting for
+        // primary capacity. The scheduler runs on another runtime thread.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            matches!(events.recv().await, Some(TransactionEvent::Error { error, .. })
+            if error == "capacity-sentinel")
+        );
+        let mut states = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match events.recv().await.expect("retained protocol event") {
+                    TransactionEvent::StateChanged {
+                        transaction_id,
+                        new_state,
+                        ..
+                    } => {
+                        assert_eq!(&transaction_id, transaction.id());
+                        states.push(new_state);
+                    }
+                    TransactionEvent::TransactionTerminated { transaction_id } => {
+                        assert_eq!(&transaction_id, transaction.id());
+                        break;
+                    }
+                    TransactionEvent::TimerTriggered { .. } => {}
+                    other => panic!("unexpected event: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("compact terminal publication");
+        assert_eq!(
+            states,
+            vec![TransactionState::Completed, TransactionState::Terminated]
+        );
+        assert_eq!(transport.get_sent_messages().await.len(), 1);
+        manager.shutdown().await;
+        assert!(matches!(
+            events.try_recv(),
+            Ok(TransactionEvent::ShutdownComplete)
+        ));
+        assert!(
+            events.try_recv().is_err(),
+            "terminal publication must not duplicate"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn compact_timer_j_is_visible_to_existence_kind_and_state_apis() -> Result<()> {
         let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));

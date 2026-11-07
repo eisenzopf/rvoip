@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### SIP
+
+- The transaction layer no longer deadlocks against a dialog handler under
+  load. The dialog manager drains the bounded transaction event queue and
+  can await `send_response` or `terminate_transaction` while it handles one
+  of that queue's events. A server transaction completed `send_response`
+  only after it had published the resulting `StateChanged`, so with the
+  queue full the runner waited for the handler and the handler waited for
+  the runner, with no timeout. `send_response` now completes once the
+  response is written, the state hook (Timer G/H/J/K) has run and the event
+  holds its place in the queue; the event is still delivered losslessly and
+  in order.
+
 ## 0.4.0 — 2026-10-11
 
 ### Highlights
