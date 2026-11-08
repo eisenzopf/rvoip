@@ -3161,6 +3161,20 @@ impl MediaSessionController {
         Ok(())
     }
 
+    /// Whether a media session is published for `dialog_id`, without
+    /// sampling RTP statistics (which locks the RTP session).
+    pub fn has_media_session(&self, dialog_id: &DialogId) -> bool {
+        self.sessions.contains_key(dialog_id)
+    }
+
+    /// The published configuration of a media session, without sampling RTP
+    /// statistics (which locks the RTP session).
+    pub fn get_session_config(&self, dialog_id: &DialogId) -> Option<MediaConfig> {
+        self.sessions
+            .get(dialog_id)
+            .map(|entry| entry.value().config.clone())
+    }
+
     /// Get information about a media session
     pub async fn get_session_info(&self, dialog_id: &DialogId) -> Option<MediaSessionInfo> {
         // Clone the MediaSessionInfo out of the shard, drop the
