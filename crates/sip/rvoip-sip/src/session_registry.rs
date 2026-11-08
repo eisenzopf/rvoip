@@ -6,7 +6,7 @@
 //! or generation policy of its own.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex as StdMutex, MutexGuard as StdMutexGuard};
 
 use rvoip_core_traits::identity::AuthenticatedPrincipal;
@@ -134,8 +134,44 @@ struct RegistryEntry {
     dialog_mutation_revision: u64,
     media_id: Option<MediaSessionId>,
     media_mutation_revision: u64,
+    /// Generation fence of the current `media_id` association (media
+    /// executor v2): true from the association's publication until it is
+    /// cleared, replaced, rolled back or its slot removed, and never true
+    /// again. See [`MediaIndexFence`].
+    media_live: Option<Arc<AtomicBool>>,
     pending: PendingInboundBundle,
     pending_mutation_revision: u64,
+}
+
+/// Point `entry` at `media_id`, closing the previous association's fence
+/// and opening a fresh one for the new association.
+fn set_media_association(entry: &mut RegistryEntry, media_id: Option<MediaSessionId>) {
+    close_media_fence(entry);
+    entry.media_live = media_id.is_some().then(|| Arc::new(AtomicBool::new(true)));
+    entry.media_id = media_id;
+}
+
+fn close_media_fence(entry: &mut RegistryEntry) {
+    if let Some(live) = entry.media_live.take() {
+        live.store(false, Ordering::Release);
+    }
+}
+
+/// The generation fence of one exact media association, resolved by
+/// [`SessionRegistry::media_index_fence_exact`] (media executor v2).
+#[derive(Clone)]
+pub(crate) struct MediaIndexFence {
+    live: Arc<AtomicBool>,
+    state: Arc<StdMutex<RegistryState>>,
+}
+
+impl MediaIndexFence {
+    /// The association still stands and the registry is not poisoned: the
+    /// conditions `get_media_handle_exact` adds to the authority check.
+    #[inline]
+    pub(crate) fn is_live(&self) -> bool {
+        self.live.load(Ordering::Acquire) && !self.state.is_poisoned()
+    }
 }
 
 #[derive(Default)]
@@ -486,6 +522,7 @@ impl SessionRegistry {
                 dialog_mutation_revision: 0,
                 media_id: None,
                 media_mutation_revision: 0,
+                media_live: None,
                 pending: PendingInboundBundle::default(),
                 pending_mutation_revision: 0,
             },
@@ -647,7 +684,7 @@ impl SessionRegistry {
             state.by_media.remove(expected_media_id);
         }
         let entry = Self::validate_entry_mut(&mut state, &handle.key, handle.slot_revision)?;
-        entry.media_id = None;
+        set_media_association(entry, None);
         entry.media_mutation_revision = mutation_revision;
         Ok(true)
     }
@@ -892,7 +929,7 @@ impl SessionRegistry {
                 },
             );
             let entry = Self::validate_entry_mut(&mut state, key, revision)?;
-            entry.media_id = Some(media_id.clone());
+            set_media_association(entry, Some(media_id.clone()));
             entry.media_mutation_revision = installed_revision;
             Ok((previous, previous_mutation_revision, installed_revision))
         })();
@@ -933,7 +970,7 @@ impl SessionRegistry {
                 );
             }
             let entry = Self::validate_entry_mut(state, &rollback_key, revision)?;
-            entry.media_id = restored;
+            set_media_association(entry, restored);
             entry.media_mutation_revision = previous_mutation_revision;
             Ok(())
         });
@@ -1339,6 +1376,41 @@ impl SessionRegistry {
             .then_some(media_id)
     }
 
+    /// [`Self::get_media_handle_exact`] plus the association's generation
+    /// fence and the lifetime's authority liveness, resolved once so a
+    /// per-frame caller (a cached TX path) can re-check them with atomic
+    /// loads. `None` exactly where `get_media_handle_exact` returns `None`.
+    pub(crate) fn media_index_fence_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Option<(
+        MediaSessionId,
+        MediaIndexFence,
+        crate::session_lifecycle::AuthorityLiveness,
+    )> {
+        // The authority fence first: it only ever closes, so if it is still
+        // open after the exact read below, that read is current.
+        let liveness = self.authority.liveness(handle.key())?;
+        let (media_id, live) = {
+            let state = self.lock_state().ok()?;
+            let entry = Self::validate_entry(&state, handle.key(), handle.slot_revision()).ok()?;
+            let media_id = entry.media_id.clone()?;
+            let live = Arc::clone(entry.media_live.as_ref()?);
+            let owned = state.by_media.get(&media_id).is_some_and(|owner| {
+                Self::owner_matches(owner, handle.key(), handle.slot_revision())
+            });
+            if !owned {
+                return None;
+            }
+            (media_id, live)
+        };
+        let fence = MediaIndexFence {
+            live,
+            state: Arc::clone(&self.state),
+        };
+        (fence.is_live() && liveness.is_current()).then_some((media_id, fence, liveness))
+    }
+
     /// Read the media association retained by one exact registry slot during
     /// lifecycle cleanup, after ordinary current-generation reads are closed.
     pub(crate) fn get_media_retained_exact(
@@ -1384,10 +1456,11 @@ impl SessionRegistry {
             self.remove_missing_total.fetch_add(1, Ordering::Relaxed);
             return Ok(false);
         }
-        let entry = state
+        let mut entry = state
             .entries
             .remove(key)
             .expect("entry was checked under the same mutex");
+        close_media_fence(&mut entry);
         if let Some(dialog_id) = entry.dialog_id {
             if state
                 .by_dialog
@@ -1549,6 +1622,10 @@ impl SessionRegistry {
             return;
         };
         let removed = state.entries.len() as u64;
+        // Every published association's fence closes with it.
+        for entry in state.entries.values_mut() {
+            close_media_fence(entry);
+        }
         state.entries.clear();
         state.by_dialog.clear();
         state.by_media.clear();
@@ -2326,6 +2403,74 @@ mod tests {
         assert_eq!(
             registry.get_key_by_media_exact(&replacement_media),
             Some(keys[0].clone())
+        );
+    }
+
+    /// The media index fence and authority liveness agree with
+    /// `get_media_handle_exact` and only ever close.
+    #[tokio::test]
+    async fn media_index_fences_close_on_withdrawal_replacement_removal_clear_and_retirement() {
+        let (fixture, keys) = Admitted::sessions(&["media-fence", "media-fence-removed"]);
+        let registry = &fixture.registry;
+        let revision = registry.register_exact(&keys[0]).expect("slot");
+        let handle = SessionRegistryHandle {
+            key: keys[0].clone(),
+            slot_revision: revision,
+        };
+        assert!(
+            registry.media_index_fence_exact(&handle).is_none(),
+            "nothing published"
+        );
+        let first = MediaSessionId::new_v4();
+        registry
+            .install_media_handle(&handle, first.clone())
+            .expect("install");
+        let (media, fence, liveness) = registry
+            .media_index_fence_exact(&handle)
+            .expect("published");
+        assert_eq!(media, first);
+        assert!(fence.is_live() && liveness.is_current());
+        assert!(registry
+            .clear_media_handle_retained(&handle, &first)
+            .expect("clear"));
+        assert!(!fence.is_live(), "withdrawal closes the fence");
+        assert_eq!(registry.get_media_handle_exact(&handle), None);
+        assert!(registry.media_index_fence_exact(&handle).is_none());
+        let replacement = MediaSessionId::new_v4();
+        registry
+            .install_media_handle(&handle, replacement.clone())
+            .expect("reinstall");
+        assert!(
+            !fence.is_live(),
+            "a later association never reopens an old fence"
+        );
+        let (media, fence, liveness) = registry
+            .media_index_fence_exact(&handle)
+            .expect("replacement");
+        assert_eq!(media, replacement);
+        assert!(fence.is_live());
+        assert_eq!(registry.get_media_handle_exact(&handle), Some(replacement));
+
+        // Removing the slot closes its fence.
+        let other_revision = registry.register_exact(&keys[1]).expect("slot");
+        let other = SessionRegistryHandle {
+            key: keys[1].clone(),
+            slot_revision: other_revision,
+        };
+        registry
+            .install_media_handle(&other, MediaSessionId::new_v4())
+            .expect("install");
+        let (_, other_fence, _) = registry.media_index_fence_exact(&other).expect("published");
+        assert!(registry.remove_handle(&other).expect("remove"));
+        assert!(!other_fence.is_live(), "removal closes the fence");
+
+        registry.clear().await;
+        assert!(!fence.is_live(), "clear closes every fence");
+        assert!(liveness.is_current(), "the lifetime itself is still active");
+        fixture.authority.retire(&keys[0]).expect("retire");
+        assert!(
+            !liveness.is_current(),
+            "leaving Active closes the authority fence"
         );
     }
 

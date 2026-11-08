@@ -14122,6 +14122,46 @@ impl UnifiedCoordinator {
             .await
     }
 
+    /// The current exact lifecycle handle of `session_id`.
+    pub(crate) fn media_lifecycle_handle(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<SessionRegistryHandle> {
+        self.media_adapter.lifecycle_handle(session_id)
+    }
+
+    /// The runtime of the lane that owns `session_id`'s RTP socket (media
+    /// executor v2), if its transport has one.
+    pub(crate) fn media_runtime_handle(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<tokio::runtime::Handle> {
+        self.media_adapter.media_runtime_handle(session_id)
+    }
+
+    /// The cached encoded G.711 TX path of `session_id`'s current media
+    /// lifetime (media executor v2; see `MediaAdapter::resolve_exact_g711_tx`).
+    pub(crate) fn resolve_current_g711_tx(
+        &self,
+        session_id: &SessionId,
+        format: rvoip_media_core::relay::controller::EncodedG711Format,
+        payload_type: u8,
+    ) -> Option<crate::adapters::media_adapter::ExactG711Tx> {
+        self.media_adapter
+            .resolve_current_g711_tx(session_id, format, payload_type)
+    }
+
+    /// The cached encoded G.711 TX path of one exact media lifetime.
+    pub(crate) fn resolve_exact_g711_tx(
+        &self,
+        handle: &SessionRegistryHandle,
+        format: rvoip_media_core::relay::controller::EncodedG711Format,
+        payload_type: u8,
+    ) -> Option<crate::adapters::media_adapter::ExactG711Tx> {
+        self.media_adapter
+            .resolve_exact_g711_tx(handle, format, payload_type)
+    }
+
     /// Fuse the reader of `session_id`'s decoded-audio channel onto the RTP
     /// socket owner (media executor v2; see
     /// `MediaAdapter::install_inline_audio_consumer`).

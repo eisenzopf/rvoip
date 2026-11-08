@@ -35,9 +35,7 @@ use rvoip_sip_core::sdp::SdpBuilder;
 use rvoip_sip_core::types::sdp::{CryptoAttribute, CryptoSuite, ParsedAttribute, SdpSession};
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
-#[cfg(test)]
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -1186,6 +1184,99 @@ struct MediaSessionResource {
     cleanup_media_session_removed_total: Arc<AtomicU64>,
     cleanup_audio_receiver_removed_total: Arc<AtomicU64>,
     released: Arc<tokio::sync::OnceCell<()>>,
+    /// Set (never cleared) when the `media_resources` binding that names
+    /// this resource is removed. A binding is only ever inserted into a
+    /// vacant slot, never replaced in place, so while this is false the
+    /// binding `media_for_handle_exact` checked still names this exact
+    /// resource. Shared by clones.
+    binding_withdrawn: Arc<AtomicBool>,
+}
+
+/// Mark the resource of a removed binding (see
+/// `MediaSessionResource::binding_withdrawn`).
+fn withdraw_binding(removed: Option<(SessionId, MediaSessionBinding)>) {
+    if let Some((_, binding)) = removed {
+        if let Some(resource) = binding.resource.upgrade() {
+            resource.binding_withdrawn.store(true, Ordering::Release);
+        }
+    }
+}
+
+/// The encoded G.711 TX path of one exact session lifetime, resolved once
+/// by [`MediaAdapter::resolve_exact_g711_tx`] (media executor v2).
+///
+/// Sending a frame through `send_audio_frame[_exact]` resolves the whole
+/// path again for every 20 ms frame: `media_for_handle_exact` twice
+/// (authority, registry and resource binding) and the controller's codec and
+/// RTP-session maps. Here each of those answers is captured once and guarded
+/// by a fence that only ever closes:
+/// - the lifetime is still `Active` and the authority healthy
+///   (`AuthorityLiveness`),
+/// - the registry's exact media association still stands
+///   (`MediaIndexFence`),
+/// - the resource binding was not removed (`binding_withdrawn`; the
+///   retained `Arc` keeps the resource itself alive and identical),
+/// - the codec generation, mute/direction state and comfort noise are
+///   unchanged (`PreparedG711Sender::is_current`).
+///
+/// While all hold, the per-frame resolution would return exactly the
+/// captured values, so [`Self::is_current`] (atomic loads) replaces it.
+pub(crate) struct ExactG711Tx {
+    exact: ExactMediaSession,
+    index: crate::session_registry::MediaIndexFence,
+    authority: crate::session_lifecycle::AuthorityLiveness,
+    sender: rvoip_media_core::relay::controller::PreparedG711Sender,
+    frames_total: Arc<AtomicU64>,
+    samples_total: Arc<AtomicU64>,
+}
+
+impl ExactG711Tx {
+    /// The session-level fences: the exact media session is still the one
+    /// `media_for_handle_exact` would resolve.
+    #[inline]
+    pub(crate) fn exact_is_current(&self) -> bool {
+        self.authority.is_current()
+            && self.index.is_live()
+            && !self
+                .exact
+                ._resource
+                .binding_withdrawn
+                .load(Ordering::Acquire)
+    }
+
+    /// Every fence holds for a frame of `format` and `payload_type`.
+    #[inline]
+    pub(crate) fn is_current(
+        &self,
+        format: rvoip_media_core::relay::controller::EncodedG711Format,
+        payload_type: u8,
+    ) -> bool {
+        self.exact_is_current() && self.sender.is_current(format, payload_type)
+    }
+
+    /// Send `frames` now; payloads must be canonical. Errors are those
+    /// `send_audio_frame` returns, built the same way.
+    pub(crate) fn try_send_now(
+        &self,
+        frames: &[rvoip_rtp_core::RtpFrameNow<'_>],
+        batch: bool,
+    ) -> std::result::Result<rvoip_media_core::relay::controller::G711SendNow, SessionError> {
+        self.sender
+            .try_send_now(frames, batch)
+            .map_err(Self::send_error)
+    }
+
+    /// Count one frame of `samples` as `send_audio_frame` counts it.
+    pub(crate) fn record_sent(&self, samples: usize) {
+        self.frames_total.fetch_add(1, Ordering::Relaxed);
+        self.samples_total
+            .fetch_add(samples as u64, Ordering::Relaxed);
+    }
+
+    /// `send_audio_frame`'s error for a failed RTP send.
+    pub(crate) fn send_error(error: rvoip_media_core::Error) -> SessionError {
+        SessionError::MediaError(format!("Failed to send audio frame via RTP: {error}"))
+    }
 }
 
 impl MediaSessionResource {
@@ -1213,6 +1304,7 @@ impl MediaSessionResource {
                 &adapter.cleanup_audio_receiver_removed_total,
             ),
             released: Arc::new(tokio::sync::OnceCell::new()),
+            binding_withdrawn: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -1261,9 +1353,9 @@ impl MediaSessionResource {
                     self.cleanup_audio_receiver_removed_total
                         .fetch_add(1, Ordering::Relaxed);
                 }
-                self.bindings.remove_if(session_id, |_, binding| {
+                withdraw_binding(self.bindings.remove_if(session_id, |_, binding| {
                     binding.matches(&self.handle, &self.dialog_id)
-                });
+                }));
                 self.create_reservations
                     .remove_if(session_id, |_, owner| owner == &self.handle);
 
@@ -1785,6 +1877,76 @@ impl MediaAdapter {
             ));
         }
         Ok(exact)
+    }
+
+    /// The current exact lifecycle handle of `session_id`, if one is
+    /// admitted.
+    pub(crate) fn lifecycle_handle(&self, session_id: &SessionId) -> Option<SessionRegistryHandle> {
+        self.store.lifecycle_handle(session_id)
+    }
+
+    /// The runtime of the lane that owns the RTP socket of `session_id`'s
+    /// current media lifetime, if its transport has one.
+    pub(crate) fn media_runtime_handle(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<tokio::runtime::Handle> {
+        let exact = self.current_media(session_id)?;
+        let runtime = self.controller.media_runtime_handle(&exact.dialog_id);
+        self.media_is_still_exact(&exact)
+            .then_some(runtime)
+            .flatten()
+    }
+
+    /// Resolve the encoded G.711 TX path of one exact session lifetime once
+    /// (exact media session, codec generation, RTP sender) together with the
+    /// generation fences that tell, with atomic loads, whether that
+    /// resolution still stands (see [`ExactG711Tx`]). `None` wherever
+    /// [`Self::send_audio_frame_exact`] would transform or not send the
+    /// frame's audio (muted, comfort noise, another codec) or would fail; the
+    /// caller then sends the decoded frame through that method.
+    pub(crate) fn resolve_exact_g711_tx(
+        &self,
+        handle: &SessionRegistryHandle,
+        format: rvoip_media_core::relay::controller::EncodedG711Format,
+        payload_type: u8,
+    ) -> Option<ExactG711Tx> {
+        // Fences first (they only ever close), then the exact resolution
+        // `media_for_handle_exact` performs; the fences still being open
+        // afterwards proves that resolution is the current one.
+        let (registry_media_id, index, authority) =
+            self.store.registry().media_index_fence_exact(handle)?;
+        let exact = self.media_for_handle_exact(handle)?;
+        if exact.dialog_id != registry_media_id {
+            return None;
+        }
+        let sender = self
+            .controller
+            .prepare_g711_sender(&exact.dialog_id, format, payload_type)
+            .ok()??;
+        let tx = ExactG711Tx {
+            exact,
+            index,
+            authority,
+            sender,
+            frames_total: Arc::clone(&self.audio_send_frames_total),
+            samples_total: Arc::clone(&self.audio_send_samples_total),
+        };
+        tx.is_current(format, payload_type).then_some(tx)
+    }
+
+    /// [`Self::resolve_exact_g711_tx`] for the lifetime
+    /// [`Self::send_audio_frame`] would resolve for `session_id` now. The
+    /// returned path's fences close when that lifetime retires, so while
+    /// they hold it is still the session's current one.
+    pub(crate) fn resolve_current_g711_tx(
+        &self,
+        session_id: &SessionId,
+        format: rvoip_media_core::relay::controller::EncodedG711Format,
+        payload_type: u8,
+    ) -> Option<ExactG711Tx> {
+        let handle = self.store.lifecycle_handle(session_id)?;
+        self.resolve_exact_g711_tx(&handle, format, payload_type)
     }
 
     /// Fuse the reader of `session_id`'s decoded-audio channel (the one
@@ -5462,8 +5624,10 @@ impl MediaAdapter {
         }
 
         let Some(dialog_id) = exact_media else {
-            self.media_resources
-                .remove_if(session_id, |_, binding| binding.handle == *handle);
+            withdraw_binding(
+                self.media_resources
+                    .remove_if(session_id, |_, binding| binding.handle == *handle),
+            );
             self.media_create_reservations
                 .remove_if(session_id, |_, owner| owner == handle);
             tracing::debug!(
@@ -5504,8 +5668,10 @@ impl MediaAdapter {
                 self.cleanup_audio_receiver_removed_total
                     .fetch_add(1, Ordering::Relaxed);
             }
-            self.media_resources
-                .remove_if(session_id, |_, binding| binding.handle == *handle);
+            withdraw_binding(
+                self.media_resources
+                    .remove_if(session_id, |_, binding| binding.handle == *handle),
+            );
             self.media_create_reservations
                 .remove_if(session_id, |_, owner| owner == handle);
             cleanup_session_diag::record_cleanup();
@@ -5609,8 +5775,10 @@ impl MediaAdapter {
         }
 
         if exact_media.is_none() {
-            self.media_resources
-                .remove_if(session_id, |_, binding| binding.handle == *handle);
+            withdraw_binding(
+                self.media_resources
+                    .remove_if(session_id, |_, binding| binding.handle == *handle),
+            );
             tracing::debug!(
                 session_id = %session_id,
                 "exact media cleanup was already completed for this session lifetime"
@@ -5664,8 +5832,10 @@ impl MediaAdapter {
             self.cleanup_audio_receiver_removed_total
                 .fetch_add(1, Ordering::Relaxed);
         }
-        self.media_resources
-            .remove_if(session_id, |_, binding| binding.handle == *handle);
+        withdraw_binding(
+            self.media_resources
+                .remove_if(session_id, |_, binding| binding.handle == *handle),
+        );
 
         // NEXT_STEPS B diag — bump a process-global counter so the
         // perf_listener example can poll cleanup throughput without
