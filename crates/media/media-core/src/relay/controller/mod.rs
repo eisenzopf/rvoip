@@ -1643,9 +1643,10 @@ fn deliver_due_audio_frame(
                     || state.decoded_audio_frame_count == 100
                     || state.decoded_audio_frame_count == 101
                 {
-                    info!(
+                    trace!(
                         "✅ Sent decoded audio frame #{} to callback for dialog {}",
-                        state.decoded_audio_frame_count, dialog_id
+                        state.decoded_audio_frame_count,
+                        dialog_id
                     );
                 }
             }
