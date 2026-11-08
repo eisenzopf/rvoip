@@ -785,6 +785,7 @@ fn reject_codes(r: &RejectReason) -> (u16, &'static str) {
         RejectReason::NotAcceptable => (488, "not-acceptable"),
         RejectReason::ServerError => (500, "internal"),
         RejectReason::Custom { .. } => (500, "custom"),
+        RejectReason::ServiceUnavailable { .. } => (503, "service-unavailable"),
     }
 }
 

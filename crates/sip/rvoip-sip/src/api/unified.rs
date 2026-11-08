@@ -451,6 +451,104 @@ impl SipNatConfig {
     }
 }
 
+/// Bounds on the SIP session cleanup the [`SipAdapter`](crate::adapter::SipAdapter)
+/// owns.
+///
+/// The defaults bound every wait an inbound `ConnectionAdapter::end` makes, so
+/// an ended call always hands its terminal to the orchestrator and leaves the
+/// session store even when its hangup cannot make progress. `None` restores
+/// the unbounded wait.
+///
+/// Only the adapter's waiter stops at a bound: the coordinator's retained
+/// hangup keeps running, and a call whose hangup failed is reclaimed by a
+/// bounded retained task that ends in a counted session-slot release (see
+/// [`crate::cleanup_diag::session_cleanup_counters`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SessionCleanupConfig {
+    /// Deadline on an inbound end's hangup join while no BYE transaction
+    /// exists yet. When it passes, the end delivers its terminal, returns an
+    /// error and hands the call to the retained reclaim. Once a BYE
+    /// transaction exists its own Timer F bounds the join, so this deadline
+    /// is waived. A deadline at or past [`Self::inbound_end_backstop`] never
+    /// applies. Default: `Some(5 s)`. Must be nonzero when set.
+    pub inline_hangup_deadline: Option<Duration>,
+
+    /// Absolute bound on an inbound end's hangup join, whether or not a BYE
+    /// transaction exists. When it passes, the end delivers its terminal,
+    /// returns an error and hands the call to the retained reclaim.
+    /// Default: `Some(10 s)`. Valid values are 1 s to 600 s.
+    pub inbound_end_backstop: Option<Duration>,
+
+    /// Arm the accepted-call watchdog for a local hangup that has to wait
+    /// for the ACK. A UAS that hangs up after its 200 OK and before the ACK
+    /// waits in `AnsweringHangupPending` before it may send BYE; with the ACK
+    /// lost, only this watchdog
+    /// ([`Config::setup_teardown_timeout_secs`]) ends the call and releases
+    /// its session and media port. `false` keeps the cancellation watchdog,
+    /// which does not watch that state. Default: `true`.
+    pub pending_hangup_watchdog: bool,
+}
+
+impl Default for SessionCleanupConfig {
+    fn default() -> Self {
+        Self {
+            inline_hangup_deadline: Some(Self::DEFAULT_INLINE_HANGUP_DEADLINE),
+            inbound_end_backstop: Some(Self::DEFAULT_INBOUND_END_BACKSTOP),
+            pending_hangup_watchdog: true,
+        }
+    }
+}
+
+impl SessionCleanupConfig {
+    /// Default [`Self::inline_hangup_deadline`].
+    pub const DEFAULT_INLINE_HANGUP_DEADLINE: Duration = Duration::from_secs(5);
+    /// Default [`Self::inbound_end_backstop`].
+    pub const DEFAULT_INBOUND_END_BACKSTOP: Duration = Duration::from_secs(10);
+    /// Smallest accepted [`Self::inbound_end_backstop`].
+    pub const MIN_INBOUND_END_BACKSTOP: Duration = Duration::from_secs(1);
+    /// Largest accepted [`Self::inbound_end_backstop`].
+    pub const MAX_INBOUND_END_BACKSTOP: Duration = Duration::from_secs(600);
+
+    /// Set or clear [`Self::inline_hangup_deadline`].
+    pub const fn with_inline_hangup_deadline(mut self, deadline: Option<Duration>) -> Self {
+        self.inline_hangup_deadline = deadline;
+        self
+    }
+
+    /// Set or clear [`Self::inbound_end_backstop`].
+    pub const fn with_inbound_end_backstop(mut self, backstop: Option<Duration>) -> Self {
+        self.inbound_end_backstop = backstop;
+        self
+    }
+
+    /// Set [`Self::pending_hangup_watchdog`].
+    pub const fn with_pending_hangup_watchdog(mut self, enabled: bool) -> Self {
+        self.pending_hangup_watchdog = enabled;
+        self
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.inline_hangup_deadline == Some(Duration::ZERO) {
+            return Err(SessionError::ConfigError(
+                "session_cleanup.inline_hangup_deadline must be nonzero when set".to_string(),
+            ));
+        }
+        if let Some(backstop) = self.inbound_end_backstop {
+            if !(Self::MIN_INBOUND_END_BACKSTOP..=Self::MAX_INBOUND_END_BACKSTOP)
+                .contains(&backstop)
+            {
+                return Err(SessionError::ConfigError(format!(
+                    "session_cleanup.inbound_end_backstop must be between {:?} and {:?} when set",
+                    Self::MIN_INBOUND_END_BACKSTOP,
+                    Self::MAX_INBOUND_END_BACKSTOP
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Construction-time options kept outside [`Config`].
 ///
 /// They were split out while `Config` could still be built with a struct
@@ -496,6 +594,26 @@ impl SipRuntimeConfig {
 enum SetupTeardownTimeoutTerminal {
     Cancelled,
     Failed,
+}
+
+/// The watchdog a local hangup arms once its transition has committed.
+///
+/// A UAS hangup after 200 OK waits in `AnsweringHangupPending` for the ACK
+/// before it may send BYE. That state needs the accepted-call watchdog (its
+/// `DialogTimeout` row ends the call and cleans dialog and media); every other
+/// non-terminal hangup outcome keeps the cancellation watchdog. With
+/// `pending_hangup_watchdog` off the cancellation watchdog is armed in every
+/// case, and it watches nothing in `AnsweringHangupPending`.
+fn local_hangup_watchdog_kind(
+    state_after_hangup: Option<CallState>,
+    pending_hangup_watchdog: bool,
+) -> SetupTeardownWatchdogKind {
+    match state_after_hangup {
+        Some(CallState::AnsweringHangupPending) if pending_hangup_watchdog => {
+            SetupTeardownWatchdogKind::AcceptedCall
+        }
+        _ => SetupTeardownWatchdogKind::Cancellation,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -584,6 +702,10 @@ impl Ord for SetupTeardownDeadline {
 struct SetupTeardownDeadlineQueue {
     deadlines: BinaryHeap<SetupTeardownDeadline>,
     live_sequences_by_lifetime: HashMap<SessionRegistryHandle, Vec<u64>>,
+    /// The number of live sequences across `live_sequences_by_lifetime`.
+    /// Every lifetime close consults it under the scheduler mutex, so it is
+    /// kept in step with the map instead of summed over every live call.
+    live_count: usize,
     cancelled_sequences: HashSet<u64>,
     closing_lifetimes: HashSet<SessionRegistryHandle>,
     next_sequence: u64,
@@ -595,6 +717,7 @@ impl Default for SetupTeardownDeadlineQueue {
         Self {
             deadlines: BinaryHeap::new(),
             live_sequences_by_lifetime: HashMap::new(),
+            live_count: 0,
             cancelled_sequences: HashSet::new(),
             closing_lifetimes: HashSet::new(),
             next_sequence: 0,
@@ -619,6 +742,7 @@ impl SetupTeardownDeadlineQueue {
             .entry(handle.clone())
             .or_default()
             .push(sequence);
+        self.live_count += 1;
         self.deadlines.push(SetupTeardownDeadline {
             deadline,
             sequence,
@@ -641,6 +765,7 @@ impl SetupTeardownDeadlineQueue {
             .remove(handle)
             .unwrap_or_default();
         let cancelled = sequences.len();
+        self.live_count -= cancelled;
         self.cancelled_sequences.extend(sequences);
         self.prune_cancelled_records();
         cancelled
@@ -670,11 +795,21 @@ impl SetupTeardownDeadlineQueue {
         if remove_lifetime {
             self.live_sequences_by_lifetime.remove(handle);
         }
+        if found {
+            self.live_count -= 1;
+        }
         found
     }
 
     fn live_deadline_count(&self) -> usize {
-        self.live_sequences_by_lifetime.values().map(Vec::len).sum()
+        debug_assert_eq!(
+            self.live_count,
+            self.live_sequences_by_lifetime
+                .values()
+                .map(Vec::len)
+                .sum::<usize>()
+        );
+        self.live_count
     }
 
     fn prune_cancelled_head(&mut self) {
@@ -740,6 +875,7 @@ impl SetupTeardownDeadlineQueue {
             }
         }
         self.live_sequences_by_lifetime.clear();
+        self.live_count = 0;
         self.cancelled_sequences.clear();
         self.closing_lifetimes.clear();
         live
@@ -3128,6 +3264,10 @@ pub struct Config {
     /// [`Config::MAX_SIP_ADAPTER_CALL_CAPACITY`].
     pub sip_adapter_call_capacity: Option<usize>,
 
+    /// Bounds on the SIP session cleanup the `SipAdapter` owns. See
+    /// [`SessionCleanupConfig`]; every bound is on by default.
+    pub session_cleanup: SessionCleanupConfig,
+
     /// Maximum active, quarantined, and retired SIP lifecycle records retained
     /// by the session authority.
     ///
@@ -3439,6 +3579,7 @@ impl std::fmt::Debug for Config {
             )
             .field("server_call_capacity", &self.server_call_capacity)
             .field("sip_adapter_call_capacity", &self.sip_adapter_call_capacity)
+            .field("session_cleanup", &self.session_cleanup)
             .field(
                 "server_retained_lifecycle_capacity",
                 &self.server_retained_lifecycle_capacity,
@@ -3653,6 +3794,7 @@ impl Config {
             session_event_dispatcher_channel_capacity: Self::DEFAULT_APP_EVENT_CHANNEL_CAPACITY,
             server_call_capacity: None,
             sip_adapter_call_capacity: None,
+            session_cleanup: SessionCleanupConfig::default(),
             server_retained_lifecycle_capacity: None,
             server_call_admission_limit: None,
             server_call_admission_soft_limit: None,
@@ -3796,6 +3938,7 @@ impl Config {
             session_event_dispatcher_channel_capacity: Self::DEFAULT_APP_EVENT_CHANNEL_CAPACITY,
             server_call_capacity: None,
             sip_adapter_call_capacity: None,
+            session_cleanup: SessionCleanupConfig::default(),
             server_retained_lifecycle_capacity: None,
             server_call_admission_limit: None,
             server_call_admission_soft_limit: None,
@@ -4528,6 +4671,13 @@ impl Config {
     /// See [`Config::sip_adapter_call_capacity`].
     pub fn with_sip_adapter_call_capacity(mut self, calls: usize) -> Self {
         self.sip_adapter_call_capacity = Some(calls);
+        self
+    }
+
+    /// Replace the SIP session cleanup bounds. See
+    /// [`Config::session_cleanup`].
+    pub fn with_session_cleanup(mut self, cleanup: SessionCleanupConfig) -> Self {
+        self.session_cleanup = cleanup;
         self
     }
 
@@ -5689,6 +5839,7 @@ impl Config {
                 "server_call_capacity must be at least 1 when set".to_string(),
             ));
         }
+        self.session_cleanup.validate()?;
         if let Some(calls) = self.sip_adapter_call_capacity {
             if calls == 0 || calls > Self::MAX_SIP_ADAPTER_CALL_CAPACITY {
                 return Err(SessionError::ConfigError(format!(
@@ -7171,6 +7322,213 @@ mod config_tests {
         assert!(registry.by_lifetime.is_empty());
     }
 
+    /// Only `AnsweringHangupPending` needs the accepted-call watchdog after a
+    /// local hangup, and turning the watchdog off restores the cancellation
+    /// watchdog.
+    #[test]
+    fn local_hangup_watchdog_kind_covers_pending_hangup() {
+        use super::local_hangup_watchdog_kind;
+        assert_eq!(
+            local_hangup_watchdog_kind(Some(CallState::AnsweringHangupPending), true),
+            SetupTeardownWatchdogKind::AcceptedCall
+        );
+        assert!(SetupTeardownWatchdogKind::AcceptedCall
+            .watched_states()
+            .contains(&CallState::AnsweringHangupPending));
+        assert!(!SetupTeardownWatchdogKind::Cancellation
+            .watched_states()
+            .contains(&CallState::AnsweringHangupPending));
+        assert_eq!(
+            local_hangup_watchdog_kind(Some(CallState::AnsweringHangupPending), false),
+            SetupTeardownWatchdogKind::Cancellation
+        );
+        for state in [
+            Some(CallState::CancelPending),
+            Some(CallState::Ringing),
+            Some(CallState::Terminating),
+            None,
+        ] {
+            assert_eq!(
+                local_hangup_watchdog_kind(state, true),
+                SetupTeardownWatchdogKind::Cancellation,
+                "{state:?}"
+            );
+        }
+    }
+
+    /// A setup abandoned after 200 OK: the local hangup moves the session to
+    /// `AnsweringHangupPending` and the ACK never comes. The accept watchdog
+    /// armed for `Answering` is stale after that transition, so the hangup's
+    /// own watchdog must end the call and return the session slot and its
+    /// media port.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pending_hangup_after_answer_is_released_with_its_media_port() {
+        let coordinator = UnifiedCoordinator::new(
+            Config::local("pending-hangup-watchdog", 0)
+                .with_setup_teardown_timeout_secs(1)
+                .with_media_ports(31_000, 31_400),
+        )
+        .await
+        .expect("start pending-hangup coordinator");
+        let store = Arc::clone(&coordinator.helpers.state_machine.store);
+        let ports_before = coordinator.allocated_media_port_count().await;
+        let session_id = SessionId("pending-hangup-watchdog".into());
+        store
+            .create_session(session_id.clone(), Role::UAS, false)
+            .await
+            .expect("admit inbound lifetime");
+        coordinator
+            .allocate_media_for_test(&session_id)
+            .await
+            .expect("allocate inbound media");
+        let handle = store
+            .lifecycle_handle(&session_id)
+            .expect("exact inbound lifetime");
+        store
+            .update_session_exact_with(&handle, None, |session| {
+                session.call_state = CallState::Answering;
+                session.entered_state_at = Instant::now();
+            })
+            .expect("place the lifetime in Answering");
+        assert!(coordinator.allocated_media_port_count().await > ports_before);
+        // What accepting the call arms after sending 200 OK.
+        coordinator
+            .schedule_setup_teardown_timeout_exact_if_current(
+                &handle,
+                SetupTeardownWatchdogKind::AcceptedCall,
+            )
+            .await;
+        let armed_before =
+            crate::cleanup_diag::session_cleanup_counters().pending_hangup_watchdogs_armed;
+
+        coordinator
+            .hangup_exact(&handle)
+            .await
+            .expect("local hangup before ACK is accepted");
+        assert_eq!(
+            store
+                .get_session_snapshot_exact(&handle)
+                .expect("lifetime waits for ACK")
+                .call_state,
+            CallState::AnsweringHangupPending
+        );
+        assert!(
+            crate::cleanup_diag::session_cleanup_counters().pending_hangup_watchdogs_armed
+                > armed_before
+        );
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while store.get_session_retained_snapshot_exact(&handle).is_ok() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the abandoned setup was not released");
+        assert_eq!(
+            coordinator.allocated_media_port_count().await,
+            ports_before,
+            "the abandoned setup's media port is returned"
+        );
+        assert!(coordinator.list_sessions().await.is_empty());
+        coordinator
+            .shutdown_gracefully(Some(Duration::ZERO))
+            .await
+            .expect("pending-hangup coordinator shut down");
+    }
+
+    #[test]
+    fn session_cleanup_bounds_default_on_and_are_validated() {
+        use super::SessionCleanupConfig;
+        let defaults = Config::local("session-cleanup-defaults", 0).session_cleanup;
+        assert_eq!(defaults, SessionCleanupConfig::default());
+        assert_eq!(
+            defaults.inline_hangup_deadline,
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(defaults.inbound_end_backstop, Some(Duration::from_secs(10)));
+        assert!(defaults.pending_hangup_watchdog);
+        assert!(
+            !defaults
+                .with_pending_hangup_watchdog(false)
+                .pending_hangup_watchdog
+        );
+        assert_eq!(Config::default().session_cleanup, defaults);
+
+        let validate = |cleanup: SessionCleanupConfig| {
+            Config::local("session-cleanup-validation", 0)
+                .with_session_cleanup(cleanup)
+                .validate()
+        };
+        assert!(validate(defaults).is_ok());
+        assert!(validate(
+            defaults
+                .with_inline_hangup_deadline(None)
+                .with_inbound_end_backstop(None)
+        )
+        .is_ok());
+        for backstop in [Duration::from_secs(1), Duration::from_secs(600)] {
+            assert!(validate(defaults.with_inbound_end_backstop(Some(backstop))).is_ok());
+        }
+        for backstop in [
+            Duration::ZERO,
+            Duration::from_millis(999),
+            Duration::from_millis(600_001),
+        ] {
+            assert!(
+                validate(defaults.with_inbound_end_backstop(Some(backstop))).is_err(),
+                "{backstop:?}"
+            );
+        }
+        assert!(validate(defaults.with_inline_hangup_deadline(Some(Duration::ZERO))).is_err());
+        assert!(
+            validate(defaults.with_inline_hangup_deadline(Some(Duration::from_millis(1)))).is_ok()
+        );
+    }
+
+    /// Ended lifetimes whose lower dialog/media cleanup never succeeded still
+    /// give their session-store slots back through the counted forced
+    /// release, and a repeat on an already-released lifetime is a no-op.
+    #[tokio::test]
+    async fn forced_slot_release_returns_store_to_zero_after_failed_cleanups() {
+        const BURST: usize = 32;
+        let store = Arc::new(SessionStore::new());
+        let mut handles = Vec::with_capacity(BURST);
+        for index in 0..BURST {
+            let session_id = SessionId(format!("forced-release-{index}"));
+            store
+                .create_session(session_id.clone(), Role::UAS, false)
+                .await
+                .expect("create ended lifetime");
+            handles.push(
+                store
+                    .lifecycle_handle(&session_id)
+                    .expect("capture exact lifetime"),
+            );
+        }
+        assert_eq!(store.sessions.len(), BURST);
+        let forced_before = crate::cleanup_diag::session_cleanup_counters().forced_session_releases;
+
+        for handle in &handles {
+            super::force_release_exact_session_slot(&store, None, None, handle, "test")
+                .await
+                .expect("an ended lifetime's slot must be released");
+        }
+        assert_eq!(
+            store.sessions.len(),
+            0,
+            "every slot returns after failed cleanups"
+        );
+        assert!(
+            crate::cleanup_diag::session_cleanup_counters().forced_session_releases
+                >= forced_before + BURST as u64
+        );
+
+        super::force_release_exact_session_slot(&store, None, None, &handles[0], "test")
+            .await
+            .expect("an already-released lifetime is idempotent success");
+        assert_eq!(store.sessions.len(), 0);
+    }
+
     #[test]
     fn exact_terminal_release_drains_generation_before_dialog_cleanup() {
         let source = include_str!("unified.rs");
@@ -7397,6 +7755,69 @@ mod config_tests {
             scheduler.fire_slots.available_permits(),
             SETUP_TEARDOWN_TIMEOUT_CONCURRENCY
         );
+    }
+
+    #[tokio::test]
+    async fn live_deadline_count_follows_push_close_fire_and_drain() {
+        let store = SessionStore::with_capacity(8);
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let session_id = SessionId::new();
+            store
+                .create_session(session_id.clone(), Role::UAS, false)
+                .await
+                .expect("create exact timeout fixture");
+            handles.push(
+                store
+                    .lifecycle_handle(&session_id)
+                    .expect("fixture lifecycle handle"),
+            );
+        }
+        let now = Instant::now();
+        let mut queue = SetupTeardownDeadlineQueue::default();
+        let sum = |queue: &SetupTeardownDeadlineQueue| {
+            queue
+                .live_sequences_by_lifetime
+                .values()
+                .map(Vec::len)
+                .sum::<usize>()
+        };
+        // Two deadlines on the first lifetime, one on each of the others.
+        for (index, handle) in handles.iter().enumerate() {
+            queue.push(
+                now + Duration::from_secs(1 + index as u64),
+                handle.clone(),
+                now,
+                SetupTeardownWatchdogKind::InboundSetup,
+            );
+        }
+        queue.push(
+            now + Duration::from_secs(10),
+            handles[0].clone(),
+            now,
+            SetupTeardownWatchdogKind::AcceptedCall,
+        );
+        assert_eq!(queue.live_count, 5);
+        assert_eq!(queue.live_count, sum(&queue));
+
+        // Closing a lifetime cancels both of its deadlines at once.
+        assert_eq!(queue.begin_lifetime_close(&handles[0]), 2);
+        assert_eq!(queue.live_count, 3);
+        assert_eq!(queue.live_count, sum(&queue));
+        // Closing it again, or closing a lifetime with none, cancels nothing.
+        assert_eq!(queue.begin_lifetime_close(&handles[0]), 0);
+        assert_eq!(queue.live_count, 3);
+
+        // A fired deadline leaves the live count; a cancelled one is skipped.
+        let due = queue.take_due(now + Duration::from_secs(2), 8);
+        assert_eq!(due.len(), 1);
+        assert_eq!(queue.live_count, 2);
+        assert_eq!(queue.live_count, sum(&queue));
+
+        let drained = queue.drain();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(queue.live_count, 0);
+        assert_eq!(queue.live_deadline_count(), 0);
     }
 
     #[tokio::test]
@@ -8070,6 +8491,81 @@ mod config_tests {
             SetupTeardownWatchdogKind::OutboundSetup,
         ));
         assert_eq!(coordinator.setup_teardown_scheduler.len(), 0);
+    }
+
+    /// A peer BYE holds the session lane while its CleanupMedia action stops
+    /// media; the media pump fails and its owner asks for a local hangup,
+    /// which reads the still-Active snapshot and queues on the lane. When the
+    /// lane is released the session is Terminated, HangupCall has no
+    /// transition and no BYE is sent. The hangup must finish at once instead
+    /// of waiting the non-INVITE timeout for a confirmation of that never-sent
+    /// BYE (which delays the call's terminal and keeps the setup/teardown
+    /// scheduler from draining at shutdown).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hangup_that_loses_the_lane_to_a_peer_bye_does_not_join_a_bye_it_never_sent() {
+        let coordinator = UnifiedCoordinator::new(Config::local("hangup-lost-lane", 0))
+            .await
+            .expect("start lost-lane hangup coordinator");
+        let store = Arc::clone(&coordinator.helpers.state_machine.store);
+        let session_id = SessionId::from("hangup-lost-lane-session");
+        let created = store
+            .create_session(session_id.clone(), Role::UAS, false)
+            .await
+            .expect("create lost-lane session");
+        let handle = created
+            .lifecycle_handle
+            .expect("capture lost-lane exact lifetime");
+        store
+            .update_session_exact_with(&handle, None, |session| {
+                session.call_state = CallState::Active;
+            })
+            .expect("place lost-lane session in Active");
+
+        // The peer BYE transition owns the lane.
+        let lane = store
+            .state_machine_lane_exact(&handle)
+            .expect("lost-lane exact state-machine lane");
+        let peer_bye = Arc::clone(&lane).lock_owned().await;
+        let idle_lane_refs = Arc::strong_count(&lane);
+
+        let hangup = tokio::spawn({
+            let coordinator = Arc::clone(&coordinator);
+            let handle = handle.clone();
+            async move { coordinator.hangup_exact(&handle).await }
+        });
+        // The hangup snapshots Active before it dispatches; a dispatch waiting
+        // for the lane holds its own reference to it. Forced ordering, no sleep.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while Arc::strong_count(&lane) == idle_lane_refs {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("hangup queued behind the peer BYE lane");
+
+        // The peer BYE commits Terminated, then releases the lane.
+        store
+            .update_session_exact_with(&handle, None, |session| {
+                session.call_state = CallState::Terminated;
+            })
+            .expect("commit the peer BYE terminal state");
+        drop(peer_bye);
+
+        let joined = tokio::time::timeout(Duration::from_secs(2), hangup).await;
+        assert!(
+            matches!(joined, Ok(Ok(Ok(())))),
+            "a no-op hangup joined a BYE it never sent: {joined:?}"
+        );
+        assert!(
+            !coordinator
+                .dialog_adapter
+                .has_outgoing_bye_after_exact(&handle, 0),
+            "the lost-lane hangup must not have dispatched a BYE"
+        );
+        coordinator
+            .shutdown_gracefully(Some(Duration::ZERO))
+            .await
+            .expect("no retained hangup task is left to drain");
     }
 
     #[tokio::test]
@@ -9345,16 +9841,106 @@ pub(crate) async fn release_exact_local_resources_with_retry(
         "exact terminal release failed; retrying the same retained lifetime"
     );
     tokio::task::yield_now().await;
-    release_exact_local_resources(
-        session_store,
+    let second = release_exact_local_resources(
+        Arc::clone(&session_store),
         helpers,
         dialog_adapter,
         media_adapter,
-        pending_exact_responses,
-        setup_teardown_deadlines,
-        handle,
+        pending_exact_responses.as_ref().map(Arc::clone),
+        setup_teardown_deadlines.clone(),
+        handle.clone(),
+    )
+    .await;
+    let Err(error) = second else {
+        return Ok(());
+    };
+    // Both bounded attempts failed. Without a later owner the ended lifetime
+    // would keep its session-store slot for good, and enough of them fill
+    // the admission limit.
+    force_release_exact_session_slot(
+        &session_store,
+        pending_exact_responses.as_deref(),
+        setup_teardown_deadlines.as_ref(),
+        &handle,
+        "terminal-release-retries-exhausted",
     )
     .await
+    .map_err(|_| error)
+}
+
+/// Release one ended lifetime's session-store slot after its bounded exact
+/// release attempts failed.
+///
+/// Teardown is idempotent (it joins or reports the finished one), so this
+/// quiesces once more and removes the retired lifetime without requiring the
+/// lower dialog/media cleanup to have succeeded; that cleanup was already
+/// attempted and its own timers bound what is left. A lifetime the authority
+/// will not retire stays put and is counted as a failed forced release. Every
+/// outcome is counted; logging is limited to one line per second.
+pub(crate) async fn force_release_exact_session_slot(
+    session_store: &SessionStore,
+    pending_exact_responses: Option<&PendingExactResponseRegistry>,
+    setup_teardown_deadlines: Option<&SetupTeardownDeadlineCancellation>,
+    handle: &SessionRegistryHandle,
+    reason: &'static str,
+) -> Result<()> {
+    // `Ok(true)`: this call removed the slot; `Ok(false)`: a racing exact
+    // owner already had, so nothing is counted.
+    let released = if session_store
+        .get_session_retained_snapshot_exact(handle)
+        .is_err()
+    {
+        Ok(false)
+    } else {
+        let quiesce = session_store.quiesce_session_exact(handle).await;
+        match session_store.remove_quiesced_session_exact(handle) {
+            Ok(()) => Ok(true),
+            Err(_)
+                if session_store
+                    .get_session_retained_snapshot_exact(handle)
+                    .is_err() =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(SessionError::InternalError(format!(
+                "forced session slot release failed (class=lifecycle, quiesced={}): {error}",
+                quiesce.is_ok()
+            ))),
+        }
+    };
+    match released {
+        Ok(removed) => {
+            if let Some(pending) = pending_exact_responses {
+                pending.finish_lifetime_close(handle);
+            }
+            if let Some(deadlines) = setup_teardown_deadlines {
+                deadlines.finish_lifetime_close(handle);
+            }
+            if removed {
+                if let Some(occurrences) = crate::cleanup_diag::record_forced_session_release() {
+                    tracing::warn!(
+                        session = %handle.session_id(),
+                        reason,
+                        occurrences,
+                        "ended SIP session slot force-released after bounded cleanup retries"
+                    );
+                }
+            }
+            Ok(())
+        }
+        Err(error) => {
+            if let Some(occurrences) = crate::cleanup_diag::record_forced_session_release_failed() {
+                tracing::error!(
+                    session = %handle.session_id(),
+                    reason,
+                    occurrences,
+                    %error,
+                    "ended SIP session slot could not be force-released"
+                );
+            }
+            Err(error)
+        }
+    }
 }
 
 /// Best-effort lower-resource cleanup remaining after authoritative session
@@ -9371,12 +9957,14 @@ pub(crate) struct ForcedLocalSessionCleanup {
 
 impl ForcedLocalSessionCleanup {
     /// Finish helper, dialog, and media cleanup without relaying lower errors.
+    /// The retrying release ends in a counted session-slot release, so a
+    /// failing lower cleanup cannot keep the reclaimed lifetime's slot.
     pub(crate) async fn finish(self) {
         let Some(handle) = self.handle else {
             tracing::debug!("forced local reclaim had no exact session owner");
             return;
         };
-        if release_exact_local_resources(
+        if release_exact_local_resources_with_retry(
             self.session_store,
             self.helpers,
             self.dialog_adapter,
@@ -10764,6 +11352,16 @@ impl UnifiedCoordinator {
         self.config.sip_adapter_call_capacity
     }
 
+    pub(crate) fn session_cleanup_config(&self) -> SessionCleanupConfig {
+        self.config.session_cleanup
+    }
+
+    /// The configured overload backoff, also stamped on application 503s so
+    /// every capacity rejection tells the caller when to retry.
+    pub(crate) fn server_overload_retry_after_secs(&self) -> Option<u32> {
+        self.config.server_overload_retry_after_secs
+    }
+
     pub(crate) async fn claim_session_control_events(
         &self,
     ) -> Result<mpsc::UnboundedReceiver<crate::adapters::SessionControlEvent>> {
@@ -11537,7 +12135,37 @@ impl UnifiedCoordinator {
         handle: &SessionRegistryHandle,
         reason: impl Into<String>,
     ) -> Result<()> {
-        let reason = reason.into();
+        self.hangup_exact_with_reason_reporting(handle, reason.into(), None)
+            .await
+    }
+
+    /// Exact local hangup that also reports, as soon as the session lane has
+    /// decided it, whether `HangupCall` took a transition. `false` means the
+    /// state it met under the lane had no hangup row (a peer BYE, CANCEL or
+    /// other terminal won the lane first) and this call sent nothing. The
+    /// sender is dropped without a value when this call joins another
+    /// retained hangup or dispatch fails, because then this call has no lane
+    /// outcome of its own. The returned future still joins the whole
+    /// operation (dispatch, wire confirmation, finalization).
+    pub(crate) async fn hangup_exact_reporting_dispatch(
+        &self,
+        handle: &SessionRegistryHandle,
+        dispatched: tokio::sync::oneshot::Sender<bool>,
+    ) -> Result<()> {
+        self.hangup_exact_with_reason_reporting(
+            handle,
+            "Local hangup".to_string(),
+            Some(dispatched),
+        )
+        .await
+    }
+
+    async fn hangup_exact_with_reason_reporting(
+        &self,
+        handle: &SessionRegistryHandle,
+        reason: String,
+        dispatched: Option<tokio::sync::oneshot::Sender<bool>>,
+    ) -> Result<()> {
         // One exact SessionStateCell owns one retained hangup operation. The
         // public caller is only a waiter: dropping it cannot cancel dispatch,
         // wire confirmation, or finalization, and another caller joins the
@@ -11562,6 +12190,9 @@ impl UnifiedCoordinator {
             })?;
         if !control.try_start() {
             drop(coordinator);
+            // Joining another owner's operation: this call has no lane
+            // outcome of its own, so release the reporter before waiting.
+            drop(dispatched);
             return shared_hangup_completion_result(control.wait_for_completion().await);
         }
 
@@ -11570,22 +12201,23 @@ impl UnifiedCoordinator {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         let completion_guard = RetainedHangupTaskCompletion::new(retained_control);
         let hangup_scheduler = Arc::clone(&self.setup_teardown_scheduler);
-        let spawned = hangup_scheduler.spawn_lifecycle_task(async move {
-            let mut completion_guard = completion_guard;
-            let result = match std::panic::AssertUnwindSafe(
-                coordinator.hangup_serialized_exact(&retained_handle, reason),
-            )
-            .catch_unwind()
-            .await
-            {
-                Ok(result) => result,
-                Err(_) => Err(SessionError::InternalError(
-                    "exact hangup operation stopped unexpectedly".to_string(),
-                )),
-            };
-            completion_guard.finish(result.is_ok());
-            let _ = result_tx.send(result);
-        });
+        let spawned =
+            hangup_scheduler.spawn_lifecycle_task(async move {
+                let mut completion_guard = completion_guard;
+                let result = match std::panic::AssertUnwindSafe(
+                    coordinator.hangup_serialized_exact(&retained_handle, reason, dispatched),
+                )
+                .catch_unwind()
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(SessionError::InternalError(
+                        "exact hangup operation stopped unexpectedly".to_string(),
+                    )),
+                };
+                completion_guard.finish(result.is_ok());
+                let _ = result_tx.send(result);
+            });
         if !spawned {
             return shared_hangup_completion_result(control.wait_for_completion().await);
         }
@@ -11600,6 +12232,7 @@ impl UnifiedCoordinator {
         &self,
         handle: &SessionRegistryHandle,
         reason: String,
+        dispatched: Option<tokio::sync::oneshot::Sender<bool>>,
     ) -> Result<()> {
         let _bye_wait_owner = self.dialog_adapter.begin_outgoing_bye_wait_exact(handle)?;
         let initial_state = self
@@ -11618,7 +12251,19 @@ impl UnifiedCoordinator {
             .dialog_adapter
             .outgoing_bye_generation_exact(handle)
             .unwrap_or(0);
-        let dispatch = self.helpers.hangup_exact(handle).await;
+        let dispatch = self.helpers.hangup_exact_transitioned(handle).await;
+        // `initial_state` is read before the session lane. A peer BYE that
+        // holds the lane can commit Terminated in between (its CleanupMedia
+        // action is what fails a media pump that then asks for this hangup);
+        // the queued HangupCall finds no transition and sends nothing.
+        // Joining a confirmation for that never-sent BYE would hold this
+        // retained operation, and every waiter's terminal publication, until
+        // the non-INVITE transaction timeout. The lane's own outcome decides.
+        let hangup_was_noop = matches!(dispatch, Ok(false));
+        if let (Some(dispatched), Ok(transitioned)) = (dispatched, dispatch.as_ref()) {
+            let _ = dispatched.send(*transitioned);
+        }
+        let dispatch = dispatch.map(|_| ());
         let retained_new_bye = matches!(initial_state, Some(CallState::Active))
             && self
                 .dialog_adapter
@@ -11643,7 +12288,7 @@ impl UnifiedCoordinator {
         // the dialog (the ordinary simultaneous-BYE race). The confirmation
         // helper always performs exact local reclamation on any other
         // timeout/non-2xx while preserving that wire failure for the caller.
-        if matches!(initial_state, Some(CallState::Active)) {
+        if matches!(initial_state, Some(CallState::Active)) && !hangup_was_noop {
             return complete_established_bye_dispatch(
                 dispatch,
                 retained_new_bye,
@@ -11660,12 +12305,38 @@ impl UnifiedCoordinator {
             self.release_after_observed_terminal_exact(handle).await;
             return Ok(());
         }
-        self.schedule_setup_teardown_timeout_exact_if_current(
-            handle,
-            SetupTeardownWatchdogKind::Cancellation,
-        )
-        .await;
+        // A hangup after 200 OK and before ACK moves the session to
+        // `AnsweringHangupPending`, which re-stamps `entered_state_at`. The
+        // accept watchdog armed for `Answering` then finds itself stale and
+        // disarms, and a cancellation watchdog does not watch this state, so
+        // with the ACK lost nothing would ever end the call or release its
+        // session and media port.
+        let state_after_hangup = self
+            .helpers
+            .state_machine
+            .store
+            .get_session_snapshot_exact(handle)
+            .ok()
+            .map(|session| session.call_state);
+        let watchdog = local_hangup_watchdog_kind(
+            state_after_hangup,
+            self.config.session_cleanup.pending_hangup_watchdog,
+        );
+        if watchdog == SetupTeardownWatchdogKind::AcceptedCall {
+            crate::cleanup_diag::record_pending_hangup_watchdog_armed();
+        }
+        self.schedule_setup_teardown_timeout_exact_if_current(handle, watchdog)
+            .await;
         Ok(())
+    }
+
+    /// Allocate real media (and so a media port) for a test lifetime.
+    #[cfg(test)]
+    pub(crate) async fn allocate_media_for_test(&self, session_id: &SessionId) -> Result<()> {
+        self.media_adapter
+            .create_session(session_id)
+            .await
+            .map(|_| ())
     }
 
     async fn release_after_observed_terminal(&self, session_id: &SessionId) {
@@ -12474,6 +13145,25 @@ impl UnifiedCoordinator {
     /// Retained adapter cleanup must use this entry point: resolving a raw
     /// identifier after a timeout could otherwise select a replacement
     /// lifetime admitted while the old cleanup was delayed.
+    /// Release one ended lifetime's session-store slot directly, for a
+    /// retained reclaim whose forced cleanup exceeded its bound. Counted and
+    /// rate-limited by [`force_release_exact_session_slot`].
+    pub(crate) async fn force_release_session_slot_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        reason: &'static str,
+    ) -> Result<()> {
+        let deadlines = self.setup_teardown_deadline_cancellation();
+        force_release_exact_session_slot(
+            &self.helpers.state_machine.store,
+            Some(self.pending_exact_responses.as_ref()),
+            Some(&deadlines),
+            handle,
+            reason,
+        )
+        .await
+    }
+
     pub(crate) async fn begin_force_reclaim_local_session_exact(
         &self,
         handle: &SessionRegistryHandle,

@@ -1006,3 +1006,72 @@ async fn challenge_builder_stamps_www_authenticate_on_wire() {
     let _ = tokio::time::timeout(Duration::from_secs(2), bob_task).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 }
+
+/// At the session-slot cap new INVITEs get 503 + Retry-After while the
+/// established call's in-dialog BYE still completes, and every ended
+/// lifetime gives its slot back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slot_cap_503_keeps_in_dialog_bye_working_and_drains_slots() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let alice_port = 17940;
+    let bob_port = 17941;
+
+    let bob_cfg = cfg("bob-slot-cap", bob_port)
+        .with_server_call_admission_limit(1)
+        .with_server_overload_retry_after_secs(3);
+    let bob = CallbackPeer::new(AcceptAll, bob_cfg).await.expect("bob");
+    let bob_coordinator = bob.coordinator().clone();
+    let bob_shutdown = bob.shutdown_handle();
+    let bob_task = tokio::spawn(async move {
+        let _ = bob.run().await;
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let alice = UnifiedCoordinator::new(cfg("alice-slot-cap", alice_port))
+        .await
+        .expect("alice");
+    let mut alice_events = alice.events().await.expect("alice events");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let target = format!("sip:bob@127.0.0.1:{bob_port}");
+    let first = alice
+        .invite(Some("sip:alice@127.0.0.1".to_string()), target.clone())
+        .send()
+        .await
+        .expect("first invite");
+    alice
+        .session(&first)
+        .wait_for_answered(Some(Duration::from_secs(8)))
+        .await
+        .expect("first call should be active");
+
+    // Bob's only slot is taken: the next new INVITE is shed with a backoff.
+    let _ = alice
+        .invite(Some("sip:alice@127.0.0.1".to_string()), target)
+        .send()
+        .await;
+    let raw = wait_for_inbound_response_status(&mut alice_events, "503", Duration::from_secs(8))
+        .await
+        .expect("alice did not see the slot-cap 503");
+    assert!(
+        raw.contains("Retry-After: 3"),
+        "expected the configured Retry-After on the slot-cap 503; got:\n{raw}"
+    );
+
+    // The established call's in-dialog BYE is still processed at the cap.
+    alice
+        .session(&first)
+        .hangup_and_wait(Some(Duration::from_secs(8)))
+        .await
+        .expect("an in-dialog BYE must complete while new INVITEs are shed");
+
+    // No ended lifetime keeps its slot once the server is quiet.
+    assert!(
+        wait_for_no_sessions(&bob_coordinator, Duration::from_secs(8)).await,
+        "bob's SIP session slots did not return to zero after the BYE"
+    );
+
+    bob_shutdown.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(2), bob_task).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
