@@ -419,7 +419,7 @@ impl PlayoutBuffer {
             self.consecutive_concealed = 0;
             self.advance(&frame);
             self.stats.frames_emitted += 1;
-            self.last_emitted = Some(frame.clone());
+            self.remember_frame(&frame);
             return Some(frame);
         }
 
@@ -445,7 +445,7 @@ impl PlayoutBuffer {
         // `last_emitted.clone()`, with the PCM copy taken from the pool when
         // it is enabled (same samples).
         let last = self.last_emitted.as_ref()?;
-        let template = AudioFrame {
+        let mut concealed = AudioFrame {
             samples: crate::pcm_pool::take_pcm_copy(&last.samples),
             sample_rate: last.sample_rate,
             channels: last.channels,
@@ -455,22 +455,20 @@ impl PlayoutBuffer {
         if self.consecutive_concealed >= self.config.max_consecutive_concealed {
             // Past this, the far end is gone rather than jittery. Emitting
             // silence is honest; repeating is a buzz that sounds like us.
-            let mut silence = template.clone();
-            silence.samples.iter_mut().for_each(|sample| *sample = 0);
-            silence.timestamp = expected;
+            concealed.samples.fill(0);
+            concealed.timestamp = expected;
             self.consecutive_concealed += 1;
             self.stats.frames_concealed += 1;
             self.stats.frames_emitted += 1;
-            self.advance(&silence);
-            self.last_emitted = Some(silence.clone());
-            return Some(silence);
+            self.advance(&concealed);
+            self.remember_frame(&concealed);
+            return Some(concealed);
         }
 
         // Repeat with a decaying gain: each successive loss is quieter, so a
         // burst fades out instead of stuttering the same 20 ms forever.
         let step = self.consecutive_concealed + 1;
         let gain = 1.0_f32 / (1.0 + step as f32);
-        let mut concealed = template;
         for sample in &mut concealed.samples {
             *sample = (f32::from(*sample) * gain) as i16;
         }
@@ -479,8 +477,25 @@ impl PlayoutBuffer {
         self.stats.frames_concealed += 1;
         self.stats.frames_emitted += 1;
         self.advance(&concealed);
-        self.last_emitted = Some(concealed.clone());
+        self.remember_frame(&concealed);
         Some(concealed)
+    }
+
+    /// Keep a copy of the emitted frame as the concealment template.
+    ///
+    /// Copies into the template's existing sample buffer, so steady-state
+    /// playout reuses one allocation instead of cloning a fresh frame per
+    /// emitted frame; only a larger frame grows it.
+    fn remember_frame(&mut self, frame: &AudioFrame) {
+        if let Some(previous) = self.last_emitted.as_mut() {
+            previous.samples.clone_from(&frame.samples);
+            previous.sample_rate = frame.sample_rate;
+            previous.channels = frame.channels;
+            previous.duration = frame.duration;
+            previous.timestamp = frame.timestamp;
+        } else {
+            self.last_emitted = Some(frame.clone());
+        }
     }
 
     /// Move the expected timestamp on by one frame.
@@ -593,6 +608,60 @@ mod tests {
             duration: Duration::from_millis(20),
             timestamp,
         }
+    }
+
+    #[test]
+    fn plc_template_reuses_storage_and_preserves_exact_decay() {
+        let mut playout = PlayoutBuffer::new(PlayoutConfig {
+            adaptive: false,
+            max_consecutive_concealed: 2,
+            ..PlayoutConfig::default()
+        });
+        let now = Instant::now();
+        playout.push(frame(0, 6_000), now);
+        playout.push(frame(160, -6_000), now);
+        let first = playout.pop().unwrap();
+        let retained = playout.last_emitted.as_ref().unwrap().samples.as_ptr();
+        let second = playout.pop().unwrap();
+        assert_eq!(
+            playout.last_emitted.as_ref().unwrap().samples.as_ptr(),
+            retained
+        );
+        // Frames already returned must not alias the retained template.
+        assert_eq!(first.samples, vec![6_000; SAMPLES]);
+        assert_eq!(second.samples, vec![-6_000; SAMPLES]);
+        // Decay halves, then thirds the previous output, then goes silent.
+        for (timestamp, level) in [(320, -3_000), (480, -1_000), (640, 0)] {
+            let output = playout.pop().unwrap();
+            assert_eq!(output.timestamp, timestamp);
+            assert_eq!(output.samples, vec![level; SAMPLES]);
+            assert_eq!(
+                playout.last_emitted.as_ref().unwrap().samples.as_ptr(),
+                retained
+            );
+        }
+    }
+
+    #[test]
+    fn reused_template_tracks_changed_format_and_frame_size() {
+        let (mut playout, _) = buffer();
+        playout.remember_frame(&frame(0, 1));
+        let changed = AudioFrame {
+            samples: vec![123; 1_920],
+            sample_rate: 48_000,
+            channels: 2,
+            duration: Duration::from_millis(20),
+            timestamp: u32::MAX - 100,
+        };
+        playout.remember_frame(&changed);
+        let output = playout.conceal(859).unwrap();
+        assert_eq!(output.samples, vec![61; 1_920]);
+        assert_eq!(output.sample_rate, 48_000);
+        assert_eq!(output.channels, 2);
+        assert_eq!(output.duration, changed.duration);
+        assert_eq!(output.timestamp, 859);
+        // 1,920 interleaved samples are 960 sample times in stereo.
+        assert_eq!(playout.next_timestamp, Some(859 + 960));
     }
 
     fn buffer() -> (PlayoutBuffer, Instant) {
