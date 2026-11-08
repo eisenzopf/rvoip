@@ -5,7 +5,7 @@
 //! `SessionKey` values; it deliberately has no tombstone, timeout, capacity,
 //! or generation policy of its own.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex as StdMutex, MutexGuard as StdMutexGuard};
 
@@ -127,9 +127,9 @@ struct RegistryEntry {
     mutation_gate: Arc<MutationGate>,
     dialog_id: Option<DialogId>,
     /// SIP wire Call-ID bound to `dialog_id` for optional observational
-    /// correlation. This is deliberately stored on the exact slot without a
-    /// second reverse index: signaling routes by Dialog-ID, while trace
-    /// reporting may scan the registry and fail closed on ambiguity.
+    /// correlation. Signaling routes by Dialog-ID; the `by_sip_call_id`
+    /// trace index keeps every exact owner and fails closed when a wire
+    /// Call-ID is ambiguous.
     sip_call_id: Option<String>,
     dialog_mutation_revision: u64,
     media_id: Option<MediaSessionId>,
@@ -179,6 +179,9 @@ struct RegistryState {
     entries: HashMap<SessionKey, RegistryEntry>,
     by_dialog: HashMap<DialogId, IndexOwner>,
     by_media: HashMap<MediaSessionId, IndexOwner>,
+    /// Every exact slot currently bound to a wire Call-ID. A set rather than
+    /// one owner: forked dialogs and delayed traces can share a Call-ID.
+    by_sip_call_id: HashMap<String, HashSet<SessionRegistryHandle>>,
     next_slot_revision: u64,
     next_mutation_revision: u64,
 }
@@ -220,6 +223,12 @@ type ExactMutationHook = Arc<dyn Fn() + Send + Sync>;
 pub struct SessionRegistry {
     authority: Arc<SessionLeaseAuthority>,
     state: Arc<StdMutex<RegistryState>>,
+    /// Read-side copy of each slot's canonical media association, keyed by
+    /// the exact slot (lifetime generation and slot revision). Published
+    /// under the state mutex only once the forward slot and reverse index
+    /// agree, and withdrawn before either changes, so per-frame lookups need
+    /// not take the registry mutex.
+    media_by_handle: Arc<dashmap::DashMap<SessionRegistryHandle, MediaSessionId>>,
     dialog_mapped_total: Arc<AtomicU64>,
     media_mapped_total: Arc<AtomicU64>,
     removed_total: Arc<AtomicU64>,
@@ -319,6 +328,7 @@ impl SessionRegistry {
         Self {
             authority,
             state: Arc::new(StdMutex::new(RegistryState::default())),
+            media_by_handle: Arc::new(dashmap::DashMap::new()),
             dialog_mapped_total: Arc::new(AtomicU64::new(0)),
             media_mapped_total: Arc::new(AtomicU64::new(0)),
             removed_total: Arc::new(AtomicU64::new(0)),
@@ -464,16 +474,48 @@ impl SessionRegistry {
         state: &RegistryState,
         sip_call_id: &str,
     ) -> Option<SessionRegistryHandle> {
-        let mut matches = state
-            .entries
-            .iter()
-            .filter(|&(_key, entry)| entry.sip_call_id.as_deref() == Some(sip_call_id))
-            .map(|(key, entry)| SessionRegistryHandle {
-                key: key.clone(),
-                slot_revision: entry.slot_revision,
-            });
-        let only = matches.next()?;
-        matches.next().is_none().then_some(only)
+        let owners = state.by_sip_call_id.get(sip_call_id)?;
+        if owners.len() != 1 {
+            return None;
+        }
+        let owner = owners.iter().next()?;
+        let entry = Self::validate_entry(state, &owner.key, owner.slot_revision).ok()?;
+        (entry.sip_call_id.as_deref() == Some(sip_call_id)).then(|| owner.clone())
+    }
+
+    /// Set an exact slot's wire Call-ID and its trace index entry under the
+    /// same mutex. Quiesced owners stay indexed until their slot is removed,
+    /// so a late trace never sees a falsely unambiguous Call-ID.
+    fn set_sip_call_id_locked(
+        state: &mut RegistryState,
+        key: &SessionKey,
+        revision: RegistrySlotRevision,
+        value: Option<String>,
+    ) -> Result<(), SessionRegistryError> {
+        let previous = Self::validate_entry_mut(state, key, revision)?
+            .sip_call_id
+            .take();
+        let owner = SessionRegistryHandle {
+            key: key.clone(),
+            slot_revision: revision,
+        };
+        if let Some(previous) = previous {
+            if let Some(owners) = state.by_sip_call_id.get_mut(&previous) {
+                owners.remove(&owner);
+                if owners.is_empty() {
+                    state.by_sip_call_id.remove(&previous);
+                }
+            }
+        }
+        if let Some(value) = &value {
+            state
+                .by_sip_call_id
+                .entry(value.clone())
+                .or_default()
+                .insert(owner);
+        }
+        Self::validate_entry_mut(state, key, revision)?.sip_call_id = value;
+        Ok(())
     }
 
     fn authority_start_error(error: SessionOperationError) -> SessionRegistryError {
@@ -638,9 +680,9 @@ impl SessionRegistry {
         {
             state.by_dialog.remove(&expected_dialog_id);
         }
+        Self::set_sip_call_id_locked(&mut state, &handle.key, handle.slot_revision, None)?;
         let entry = Self::validate_entry_mut(&mut state, &handle.key, handle.slot_revision)?;
         entry.dialog_id = None;
-        entry.sip_call_id = None;
         entry.dialog_mutation_revision = mutation_revision;
         Ok(true)
     }
@@ -676,6 +718,7 @@ impl SessionRegistry {
         }
 
         let mutation_revision = Self::allocate_mutation_revision_locked(&mut state)?;
+        self.media_by_handle.remove(handle);
         if state
             .by_media
             .get(expected_media_id)
@@ -801,9 +844,9 @@ impl SessionRegistry {
                     slot_revision: revision,
                 },
             );
+            Self::set_sip_call_id_locked(&mut state, key, revision, sip_call_id)?;
             let entry = Self::validate_entry_mut(&mut state, key, revision)?;
             entry.dialog_id = Some(dialog_id);
-            entry.sip_call_id = sip_call_id;
             entry.dialog_mutation_revision = installed_revision;
             Ok((
                 previous,
@@ -849,9 +892,9 @@ impl SessionRegistry {
                     },
                 );
             }
+            Self::set_sip_call_id_locked(state, &rollback_key, revision, previous_sip_call_id)?;
             let entry = Self::validate_entry_mut(state, &rollback_key, revision)?;
             entry.dialog_id = restored;
-            entry.sip_call_id = previous_sip_call_id;
             entry.dialog_mutation_revision = previous_mutation_revision;
             Ok(())
         });
@@ -912,6 +955,11 @@ impl SessionRegistry {
                 .map(|entry| (entry.media_id.clone(), entry.media_mutation_revision))
                 .expect("entry was validated under the same mutex");
             let installed_revision = Self::allocate_mutation_revision_locked(&mut state)?;
+            let handle = SessionRegistryHandle {
+                key: key.clone(),
+                slot_revision: revision,
+            };
+            self.media_by_handle.remove(&handle);
             if let Some(previous) = previous.as_ref().filter(|previous| *previous != &media_id) {
                 if state
                     .by_media
@@ -931,6 +979,7 @@ impl SessionRegistry {
             let entry = Self::validate_entry_mut(&mut state, key, revision)?;
             set_media_association(entry, Some(media_id.clone()));
             entry.media_mutation_revision = installed_revision;
+            self.media_by_handle.insert(handle, media_id.clone());
             Ok((previous, previous_mutation_revision, installed_revision))
         })();
         let (previous, previous_mutation_revision, installed_revision) = match mutation {
@@ -942,11 +991,17 @@ impl SessionRegistry {
         };
         self.media_mapped_total.fetch_add(1, Ordering::Relaxed);
         let rollback_key = key.clone();
+        let media_by_handle = Arc::clone(&self.media_by_handle);
         let result = self.finish_exact_mutation(guard, (), move |state| {
             let current = Self::validate_entry(state, &rollback_key, revision)?;
             if current.media_mutation_revision != installed_revision {
                 return Ok(());
             }
+            let handle = SessionRegistryHandle {
+                key: rollback_key.clone(),
+                slot_revision: revision,
+            };
+            media_by_handle.remove(&handle);
             if state
                 .by_media
                 .get(&media_id)
@@ -970,8 +1025,11 @@ impl SessionRegistry {
                 );
             }
             let entry = Self::validate_entry_mut(state, &rollback_key, revision)?;
-            set_media_association(entry, restored);
+            set_media_association(entry, restored.clone());
             entry.media_mutation_revision = previous_mutation_revision;
+            if let Some(media_id) = restored {
+                media_by_handle.insert(handle, media_id);
+            }
             Ok(())
         });
         drop(mutation_permit);
@@ -1043,9 +1101,9 @@ impl SessionRegistry {
                     slot_revision: revision,
                 },
             );
+            Self::set_sip_call_id_locked(&mut state, key, revision, Some(info.call_id.clone()))?;
             let entry = Self::validate_entry_mut(&mut state, key, revision)?;
             entry.dialog_id = Some(dialog_id);
-            entry.sip_call_id = Some(info.call_id.clone());
             entry.dialog_mutation_revision = installed_mutation_revision;
             entry.pending.info = Some(info);
             entry.pending_mutation_revision = installed_mutation_revision;
@@ -1138,10 +1196,12 @@ impl SessionRegistry {
         } else {
             None
         };
+        if rollback_dialog {
+            Self::set_sip_call_id_locked(&mut state, key, revision, previous_sip_call_id)?;
+        }
         let entry = Self::validate_entry_mut(&mut state, key, revision)?;
         if rollback_dialog {
             entry.dialog_id = restored_dialog;
-            entry.sip_call_id = previous_sip_call_id;
             entry.dialog_mutation_revision = previous_dialog_mutation_revision;
         }
         if rollback_pending {
@@ -1256,8 +1316,8 @@ impl SessionRegistry {
     ///
     /// Call-ID alone is not a signaling route: forked dialogs and delayed
     /// traces can legitimately make it ambiguous. The optional trace path
-    /// therefore scans retained exact slots instead of maintaining another
-    /// reverse index, returns no owner unless exactly one slot matches, and
+    /// therefore indexes every retained exact slot by Call-ID, returns no
+    /// owner unless exactly one slot matches, and
     /// then requires that same generation to remain current.
     pub(crate) fn get_handle_by_sip_call_id_exact(
         &self,
@@ -1359,21 +1419,21 @@ impl SessionRegistry {
 
     /// Resolve the canonical forward media association for one exact live
     /// slot, requiring the forward slot and reverse index to agree.
+    ///
+    /// Reads the association published at the commit boundary instead of
+    /// taking the registry mutex on every audio frame. Every mutation
+    /// withdraws it before changing canonical state and republishes it only
+    /// once the forward slot and reverse index agree. The authority check
+    /// and the fail-closed poison check remain.
     pub(crate) fn get_media_handle_exact(
         &self,
         handle: &SessionRegistryHandle,
     ) -> Option<MediaSessionId> {
-        if !self.authority.is_current(handle.key()) {
+        if self.state.is_poisoned() || !self.authority.is_current(handle.key()) {
             return None;
         }
-        let state = self.lock_state().ok()?;
-        let entry = Self::validate_entry(&state, handle.key(), handle.slot_revision()).ok()?;
-        let media_id = entry.media_id.clone()?;
-        state
-            .by_media
-            .get(&media_id)
-            .is_some_and(|owner| Self::owner_matches(owner, handle.key(), handle.slot_revision()))
-            .then_some(media_id)
+        let media_id = self.media_by_handle.get(handle)?.value().clone();
+        (!self.state.is_poisoned()).then_some(media_id)
     }
 
     /// [`Self::get_media_handle_exact`] plus the association's generation
@@ -1456,6 +1516,11 @@ impl SessionRegistry {
             self.remove_missing_total.fetch_add(1, Ordering::Relaxed);
             return Ok(false);
         }
+        self.media_by_handle.remove(&SessionRegistryHandle {
+            key: key.clone(),
+            slot_revision: revision,
+        });
+        Self::set_sip_call_id_locked(&mut state, key, revision, None)?;
         let mut entry = state
             .entries
             .remove(key)
@@ -1591,12 +1656,14 @@ impl SessionRegistry {
                 "entries": state.entries.len(),
                 "dialog_mappings": state.by_dialog.len(),
                 "media_mappings": state.by_media.len(),
+                "sip_call_id_mappings": state.by_sip_call_id.len(),
                 "lock_poisoned": false,
             }),
             Err(_) => serde_json::json!({
                 "entries": null,
                 "dialog_mappings": null,
                 "media_mappings": null,
+                "sip_call_id_mappings": null,
                 "lock_poisoned": true,
             }),
         }
@@ -1622,6 +1689,7 @@ impl SessionRegistry {
             return;
         };
         let removed = state.entries.len() as u64;
+        self.media_by_handle.clear();
         // Every published association's fence closes with it.
         for entry in state.entries.values_mut() {
             close_media_fence(entry);
@@ -1629,6 +1697,7 @@ impl SessionRegistry {
         state.entries.clear();
         state.by_dialog.clear();
         state.by_media.clear();
+        state.by_sip_call_id.clear();
         self.removed_total.fetch_add(removed, Ordering::Relaxed);
     }
 
@@ -1881,6 +1950,77 @@ mod tests {
         assert_eq!(registry.get_handle_by_sip_call_id_exact("wire-call"), None);
     }
 
+    /// The Call-ID index answers like the full scan it replaced (one owner,
+    /// or none when ambiguous) across rebinds, clears and slot removal, and
+    /// keeps no entry once its owners are gone.
+    #[test]
+    fn sip_call_id_index_tracks_owners_and_never_leaks() {
+        let (fixture, keys) = Admitted::sessions(&["index-a", "index-b", "index-c"]);
+        let registry = &fixture.registry;
+        let handles: Vec<_> = keys
+            .iter()
+            .map(|key| SessionRegistryHandle {
+                key: key.clone(),
+                slot_revision: registry.register_exact(key).expect("slot"),
+            })
+            .collect();
+        let dialogs: Vec<_> = (0..3).map(|_| DialogId::new()).collect();
+        for (index, call_id) in ["shared", "shared", "solo"].into_iter().enumerate() {
+            registry
+                .map_dialog_identity_handle(&handles[index], dialogs[index], call_id.into())
+                .expect("bind dialog identity");
+        }
+        let scan = |call_id: &str| {
+            let state = registry.state.lock().unwrap();
+            let mut owners = state
+                .entries
+                .iter()
+                .filter(|(_, entry)| entry.sip_call_id.as_deref() == Some(call_id))
+                .map(|(key, entry)| SessionRegistryHandle {
+                    key: key.clone(),
+                    slot_revision: entry.slot_revision,
+                });
+            let only = owners.next();
+            if owners.next().is_some() {
+                None
+            } else {
+                only
+            }
+        };
+        for call_id in ["shared", "solo", "absent"] {
+            assert_eq!(
+                registry.get_handle_by_sip_call_id_exact(call_id),
+                scan(call_id)
+            );
+        }
+        assert_eq!(registry.get_handle_by_sip_call_id_exact("shared"), None);
+        assert_eq!(
+            registry.get_handle_by_sip_call_id_exact("solo"),
+            Some(handles[2].clone())
+        );
+
+        // Clearing one shared owner makes the other unambiguous.
+        assert!(registry
+            .clear_dialog_handle_retained(&handles[0], dialogs[0])
+            .expect("clear dialog identity"));
+        assert_eq!(
+            registry.get_handle_by_sip_call_id_exact("shared"),
+            Some(handles[1].clone())
+        );
+        assert_eq!(scan("shared"), Some(handles[1].clone()));
+
+        // Removing slots drops their index entries.
+        for handle in &handles {
+            registry
+                .remove_if(handle.key(), handle.slot_revision())
+                .expect("remove exact slot");
+        }
+        for call_id in ["shared", "solo"] {
+            assert_eq!(registry.get_handle_by_sip_call_id_exact(call_id), None);
+        }
+        assert!(registry.state.lock().unwrap().by_sip_call_id.is_empty());
+    }
+
     #[test]
     fn outbound_dialog_identity_install_is_insert_only_for_one_exact_slot() {
         let (fixture, keys) = Admitted::sessions(&["dialog-install-only"]);
@@ -2076,6 +2216,7 @@ mod tests {
         let new_registry = SessionRegistry {
             authority: Arc::clone(&new_authority),
             state: Arc::clone(&old_registry.state),
+            media_by_handle: Arc::clone(&old_registry.media_by_handle),
             dialog_mapped_total: Arc::clone(&old_registry.dialog_mapped_total),
             media_mapped_total: Arc::clone(&old_registry.media_mapped_total),
             removed_total: Arc::clone(&old_registry.removed_total),
@@ -2533,6 +2674,7 @@ mod tests {
         let new_registry = SessionRegistry {
             authority: Arc::clone(&new_authority),
             state: Arc::clone(&old_registry.state),
+            media_by_handle: Arc::clone(&old_registry.media_by_handle),
             dialog_mapped_total: Arc::clone(&old_registry.dialog_mapped_total),
             media_mapped_total: Arc::clone(&old_registry.media_mapped_total),
             removed_total: Arc::clone(&old_registry.removed_total),
@@ -2600,6 +2742,16 @@ mod tests {
     #[test]
     fn poisoned_registry_fails_closed() {
         let (fixture, keys) = Admitted::sessions(&["poison"]);
+        let revision = fixture.registry.register_exact(&keys[0]).expect("slot");
+        let handle = SessionRegistryHandle {
+            key: keys[0].clone(),
+            slot_revision: revision,
+        };
+        fixture
+            .registry
+            .install_media_handle(&handle, MediaSessionId::new_v4())
+            .expect("publish media before poison");
+        assert!(fixture.registry.get_media_handle_exact(&handle).is_some());
         let state = Arc::clone(&fixture.registry.state);
         let _ = std::thread::spawn(move || {
             let _guard = state.lock().expect("initial lock");
@@ -2619,5 +2771,111 @@ mod tests {
             .registry
             .get_handle_by_sip_call_id_exact("poisoned-wire-call")
             .is_none());
+        assert!(fixture.registry.get_media_handle_exact(&handle).is_none());
+    }
+
+    /// A media publication that loses to an authority quiesce after its
+    /// commit is rolled back out of the read index as well as the
+    /// canonical maps.
+    #[tokio::test]
+    async fn media_publication_rolls_back_when_quiesce_wins_after_commit() {
+        let (fixture, keys) = Admitted::sessions(&["media-publish-quiesce"]);
+        let registry = &fixture.registry;
+        let key = &keys[0];
+        let revision = registry.register_exact(key).expect("slot");
+        let handle = SessionRegistryHandle {
+            key: key.clone(),
+            slot_revision: revision,
+        };
+        let media_id = MediaSessionId::new_v4();
+        let authority = Arc::clone(&fixture.authority);
+        let teardown_key = key.clone();
+        let teardown_slot = Arc::new(StdMutex::new(None));
+        let hook_slot = Arc::clone(&teardown_slot);
+        registry.set_after_exact_mutation_hook(Arc::new(move || {
+            let waiter = authority
+                .teardown(&teardown_key, std::time::Duration::from_secs(1))
+                .expect("quiesce after media publication");
+            *hook_slot.lock().expect("teardown slot") = Some(waiter);
+        }));
+        assert!(matches!(
+            registry.install_media_handle(&handle, media_id.clone()),
+            Err(SessionRegistryError::AuthorityOperation(_))
+        ));
+        assert!(registry.get_media_handle_exact(&handle).is_none());
+        assert!(registry.get_media_retained_exact(&handle).is_none());
+        assert!(registry.get_key_by_media_exact(&media_id).is_none());
+        assert!(
+            registry.media_by_handle.is_empty(),
+            "a rolled-back publication must not stay in the read index"
+        );
+        let waiter = teardown_slot
+            .lock()
+            .expect("teardown slot")
+            .take()
+            .expect("waiter");
+        waiter.wait().await.expect("finish quiesce");
+    }
+
+    /// The read index agrees with the canonical forward/reverse check it
+    /// replaced through install, clear, reinstall and slot removal.
+    #[test]
+    fn media_read_index_matches_canonical_association() {
+        let (fixture, keys) = Admitted::sessions(&["media-index"]);
+        let registry = &fixture.registry;
+        let revision = registry.register_exact(&keys[0]).expect("slot");
+        let handle = SessionRegistryHandle {
+            key: keys[0].clone(),
+            slot_revision: revision,
+        };
+        let canonical = |handle: &SessionRegistryHandle| {
+            let state = registry.state.lock().unwrap();
+            let entry =
+                SessionRegistry::validate_entry(&state, handle.key(), handle.slot_revision())
+                    .ok()?;
+            let media_id = entry.media_id.clone()?;
+            state
+                .by_media
+                .get(&media_id)
+                .is_some_and(|owner| {
+                    SessionRegistry::owner_matches(owner, handle.key(), handle.slot_revision())
+                })
+                .then_some(media_id)
+        };
+        assert_eq!(registry.get_media_handle_exact(&handle), None);
+        let first = MediaSessionId::new_v4();
+        let second = MediaSessionId::new_v4();
+        registry
+            .install_media_handle(&handle, first.clone())
+            .expect("install media");
+        assert_eq!(
+            registry.get_media_handle_exact(&handle),
+            Some(first.clone())
+        );
+        assert_eq!(registry.get_media_handle_exact(&handle), canonical(&handle));
+        // Installation is insert-only: clear the exact association first.
+        assert!(registry
+            .clear_media_handle_retained(&handle, &first)
+            .expect("clear media"));
+        assert_eq!(registry.get_media_handle_exact(&handle), None);
+        assert_eq!(canonical(&handle), None);
+        registry
+            .install_media_handle(&handle, second.clone())
+            .expect("install replacement media");
+        assert_eq!(
+            registry.get_media_handle_exact(&handle),
+            Some(second.clone())
+        );
+        assert_eq!(registry.get_media_handle_exact(&handle), canonical(&handle));
+        let stale = SessionRegistryHandle {
+            key: keys[0].clone(),
+            slot_revision: RegistrySlotRevision(revision.0 + 1),
+        };
+        assert_eq!(registry.get_media_handle_exact(&stale), None);
+        registry
+            .remove_if(handle.key(), handle.slot_revision())
+            .expect("remove slot");
+        assert_eq!(registry.get_media_handle_exact(&handle), None);
+        assert!(registry.media_by_handle.is_empty());
     }
 }

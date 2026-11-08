@@ -84,7 +84,7 @@ struct SrtpSessionKeys {
     rtp_enc_key: Vec<u8>,
 
     /// Key for RTP authentication
-    rtp_auth_key: Vec<u8>,
+    rtp_authenticator: super::auth::SrtpAuthenticator,
 
     /// Salt for RTP encryption
     rtp_salt: Vec<u8>,
@@ -135,11 +135,13 @@ impl SrtpCrypto {
     }
 
     /// Hot call state: the RTP session key material the packed SRTP block
-    /// copies, as (encryption key, salt, authentication key, tag length).
+    /// copies, as (encryption key, salt, keyed HMAC-SHA1 state, tag length).
     /// `None` unless the suite is AES-CM with HMAC-SHA1 and the keys are
     /// derived (every suite `SrtpCryptoSuite::validate` admits), so the block
     /// is only built where its path is the session-key path, byte for byte.
-    pub(crate) fn rtp_hot_material(&self) -> Option<(&[u8], &[u8], &[u8], usize)> {
+    pub(crate) fn rtp_hot_material(
+        &self,
+    ) -> Option<(&[u8], &[u8], &super::auth::HmacSha1Core, usize)> {
         if self.suite.encryption != SrtpEncryptionAlgorithm::AesCm
             || self.suite.authentication == SrtpAuthenticationAlgorithm::Null
         {
@@ -149,7 +151,7 @@ impl SrtpCrypto {
         Some((
             keys.rtp_enc_key.as_slice(),
             keys.rtp_salt.as_slice(),
-            keys.rtp_auth_key.as_slice(),
+            keys.rtp_authenticator.keyed_mac()?,
             self.suite.tag_length,
         ))
     }
@@ -211,7 +213,11 @@ impl SrtpCrypto {
         // Store the derived keys
         let session_keys = SrtpSessionKeys {
             rtp_enc_key,
-            rtp_auth_key,
+            rtp_authenticator: super::auth::SrtpAuthenticator::new(
+                self.suite.authentication,
+                rtp_auth_key,
+                self.suite.tag_length,
+            ),
             rtp_salt,
             rtcp_enc_key,
             rtcp_auth_key,
@@ -344,14 +350,9 @@ impl SrtpCrypto {
                 .session_keys
                 .as_ref()
                 .ok_or_else(|| Error::SrtpError("Session keys not derived".to_string()))?;
-            return super::auth::SrtpAuthenticator::append_auth_tag(
-                self.suite.authentication,
-                super::auth::HmacSha1Key::Raw(&session_keys.rtp_auth_key),
-                self.suite.tag_length,
-                buffer,
-                start,
-                roc,
-            );
+            return session_keys
+                .rtp_authenticator
+                .append_auth_tag(buffer, start, roc);
         }
         let session_keys = self
             .session_keys
@@ -376,14 +377,9 @@ impl SrtpCrypto {
             &iv,
         )?;
         if self.suite.authentication != SrtpAuthenticationAlgorithm::Null {
-            super::auth::SrtpAuthenticator::append_auth_tag(
-                self.suite.authentication,
-                super::auth::HmacSha1Key::Raw(&session_keys.rtp_auth_key),
-                self.suite.tag_length,
-                buffer,
-                start,
-                roc,
-            )?;
+            session_keys
+                .rtp_authenticator
+                .append_auth_tag(buffer, start, roc)?;
         }
         Ok(())
     }
@@ -402,15 +398,10 @@ impl SrtpCrypto {
             .as_ref()
             .ok_or_else(|| Error::SrtpError("Session keys not derived".to_string()))?;
 
-        // Create an authenticator
-        let authenticator = super::auth::SrtpAuthenticator::new(
-            self.suite.authentication,
-            session_keys.rtp_auth_key.clone(),
-            self.suite.tag_length,
-        );
-
         // Calculate the authentication tag
-        authenticator.calculate_auth_tag(packet_data, roc)
+        session_keys
+            .rtp_authenticator
+            .calculate_auth_tag(packet_data, roc)
     }
 
     /// Decrypt an SRTP packet in the initial rollover cycle.
@@ -461,15 +452,11 @@ impl SrtpCrypto {
 
         // Verify authentication if enabled
         if self.suite.authentication != SrtpAuthenticationAlgorithm::Null {
-            // Create an authenticator
-            let authenticator = super::auth::SrtpAuthenticator::new(
-                self.suite.authentication,
-                session_keys.rtp_auth_key.clone(),
-                self.suite.tag_length,
-            );
-
             // Verify the authentication tag
-            let is_valid = authenticator.verify_auth_tag(packet_data, auth_tag, roc)?;
+            let is_valid =
+                session_keys
+                    .rtp_authenticator
+                    .verify_auth_tag(packet_data, auth_tag, roc)?;
             if !is_valid {
                 return Err(Error::AuthenticationFailed(
                     "SRTP authentication tag mismatch".to_string(),
@@ -582,10 +569,7 @@ impl SrtpCrypto {
         let (packet_data, auth_tag) = data.split_at_mut(tag_start);
 
         if self.suite.authentication != SrtpAuthenticationAlgorithm::Null {
-            let is_valid = super::auth::SrtpAuthenticator::verify_auth_tag_in_place(
-                self.suite.authentication,
-                super::auth::HmacSha1Key::Raw(&session_keys.rtp_auth_key),
-                self.suite.tag_length,
+            let is_valid = session_keys.rtp_authenticator.verify_auth_tag_in_place(
                 packet_data,
                 auth_tag,
                 roc,

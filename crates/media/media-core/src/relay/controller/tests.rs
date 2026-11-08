@@ -125,6 +125,75 @@ mod tests {
         }
     }
 
+    /// Sends with an explicit payload type go through the handle captured
+    /// with the wrapper and complete while the RTP session mutex is held.
+    /// Default-payload sends still resolve the session's current payload
+    /// type, and removing the session stops typed sends.
+    #[tokio::test]
+    async fn typed_rtp_sends_skip_the_session_mutex_and_default_sends_stay_fresh() {
+        async fn next_rtp(peer: &tokio::net::UdpSocket) -> RtpPacket {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                let mut buffer = [0u8; 2048];
+                loop {
+                    let (size, _) = peer.recv_from(&mut buffer).await.unwrap();
+                    // Skip RTCP (packet types 192-223) sharing the RTP port.
+                    if size >= 2 && !(192..=223).contains(&buffer[1]) {
+                        return RtpPacket::parse(&buffer[..size]).unwrap();
+                    }
+                }
+            })
+            .await
+            .expect("no RTP packet reached the peer")
+        }
+
+        let controller = MediaSessionController::new();
+        let dialog = DialogId::new("typed-send");
+        let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut config = loopback_config();
+        config.remote_addr = Some(peer.local_addr().unwrap());
+        config.preferred_codec = Some("PCMU".to_string());
+        controller
+            .start_media(dialog.clone(), config)
+            .await
+            .unwrap();
+        let session = controller.get_rtp_session(&dialog).await.unwrap();
+
+        {
+            let _held = session.lock().await;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                controller.send_rtp_packet_with_payload_type(&dialog, vec![0x11; 160], 160, 0),
+            )
+            .await
+            .expect("a typed send must not wait for the RTP session mutex")
+            .unwrap();
+        }
+        let typed = next_rtp(&peer).await;
+        assert_eq!(typed.header.payload_type, 0);
+        assert_eq!(typed.header.timestamp, 160);
+        assert_eq!(typed.payload.as_ref(), &[0x11; 160]);
+
+        // The captured handle's default payload type is a construction-time
+        // snapshot; the default path must follow a later change instead.
+        session.lock().await.set_payload_type(8);
+        controller
+            .send_rtp_packet(&dialog, vec![0x22; 4], 320)
+            .await
+            .unwrap();
+        let untyped = next_rtp(&peer).await;
+        assert_eq!(untyped.header.payload_type, 8);
+        assert_eq!(
+            untyped.header.sequence_number,
+            typed.header.sequence_number.wrapping_add(1)
+        );
+
+        controller.stop_media(&dialog).await.unwrap();
+        assert!(controller
+            .send_rtp_packet_with_payload_type(&dialog, vec![0x33; 160], 480, 0)
+            .await
+            .is_err());
+    }
+
     #[tokio::test]
     async fn separate_rtcp_ports_are_paired_released_and_never_collide() {
         // An odd range start: pairs still begin on an even port.
@@ -520,6 +589,87 @@ mod tests {
         );
         assert_eq!(controller.get_session_id(&new_media), Some(session_id));
         assert_eq!(controller.get_session_id(&old_media), None);
+    }
+
+    #[tokio::test]
+    async fn cleanup_removes_all_exact_media_aliases_and_preserves_rebound_alias() {
+        let controller = MediaSessionController::new();
+        let old = DialogId::new("alias-old");
+        let new = DialogId::new("alias-new");
+        let unrelated = DialogId::new("alias-unrelated");
+        for name in ["first", "second", "rebound"] {
+            controller.store_session_mapping(name.into(), MediaSessionId::from_dialog(&old));
+        }
+        controller.store_session_mapping("rebound".into(), MediaSessionId::from_dialog(&new));
+        controller.store_session_mapping("other".into(), MediaSessionId::from_dialog(&unrelated));
+        // Cleanup is idempotent.
+        controller.cleanup_per_dialog_side_state(&old);
+        controller.cleanup_per_dialog_side_state(&old);
+        assert_eq!(controller.get_media_id("first"), None);
+        assert_eq!(controller.get_media_id("second"), None);
+        assert_eq!(
+            controller.get_media_id("rebound"),
+            Some(MediaSessionId::from_dialog(&new))
+        );
+        assert_eq!(
+            controller.get_media_id("other"),
+            Some(MediaSessionId::from_dialog(&unrelated))
+        );
+        assert_eq!(
+            controller.get_session_id(&MediaSessionId::from_dialog(&old)),
+            None
+        );
+        assert!(!controller
+            .session_mapping_owners
+            .lock()
+            .unwrap()
+            .contains_key(&MediaSessionId::from_dialog(&old)));
+    }
+
+    /// Concurrent rebinds of the same aliases between two media ids leave an
+    /// owner entry for every alias, so cleanup of each media removes exactly
+    /// its own aliases and both cleanups together leave nothing behind.
+    #[tokio::test]
+    async fn concurrent_mapping_rebinds_keep_all_cleanup_owners() {
+        let controller = MediaSessionController::new();
+        let old = DialogId::new("concurrent-alias-old");
+        let new = DialogId::new("concurrent-alias-new");
+        std::thread::scope(|scope| {
+            for writer in 0..4 {
+                let controller = &controller;
+                let old = &old;
+                let new = &new;
+                scope.spawn(move || {
+                    for iteration in 0..200 {
+                        controller.store_session_mapping(
+                            format!("alias-{}", iteration % 8),
+                            MediaSessionId::from_dialog(if (iteration + writer) % 2 == 0 {
+                                old
+                            } else {
+                                new
+                            }),
+                        );
+                    }
+                });
+            }
+        });
+        let expected_new: Vec<_> = controller
+            .session_to_media
+            .iter()
+            .filter(|entry| entry.value() == &MediaSessionId::from_dialog(&new))
+            .map(|entry| entry.key().clone())
+            .collect();
+        controller.cleanup_per_dialog_side_state(&old);
+        for alias in expected_new {
+            assert_eq!(
+                controller.get_media_id(&alias),
+                Some(MediaSessionId::from_dialog(&new))
+            );
+        }
+        controller.cleanup_per_dialog_side_state(&new);
+        assert!(controller.session_to_media.is_empty());
+        assert!(controller.media_to_session.is_empty());
+        assert!(controller.session_mapping_owners.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

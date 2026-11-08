@@ -530,7 +530,9 @@ pub struct RtpSessionWrapper {
     pub is_muted: bool,
     /// The session's RTP send handle, captured when the session started (it
     /// shares the session's sender, so it follows destination changes and
-    /// the sender's close).
+    /// the sender's close). Explicitly typed sends use it without locking
+    /// `session`; its default payload type is a construction-time snapshot,
+    /// so it is used only with an explicit payload type.
     pub(super) typed_send_handle: Option<rvoip_rtp_core::RtpSendHandle>,
     /// TX generation fence for senders cached outside this map
     /// ([`super::PreparedG711Sender`]). Bumped, under the shard guard,

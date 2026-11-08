@@ -14073,6 +14073,32 @@ impl UnifiedCoordinator {
         self.helpers.get_state(session_id).await
     }
 
+    /// Committed call-state changes of one exact session lifetime.
+    pub(crate) fn subscribe_call_state_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Option<tokio::sync::watch::Receiver<Option<CallState>>> {
+        self.helpers
+            .state_machine
+            .store
+            .subscribe_call_state_exact(handle)
+    }
+
+    /// The current exact lifetime of `session_id` and its committed
+    /// media-readiness changes.
+    pub(crate) fn subscribe_media_readiness(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<(
+        SessionRegistryHandle,
+        tokio::sync::watch::Receiver<Option<crate::session_store::state::MediaReadinessSignal>>,
+    )> {
+        let store = &self.helpers.state_machine.store;
+        let handle = store.lifecycle_handle(session_id)?;
+        let updates = store.subscribe_media_readiness_exact(&handle)?;
+        Some((handle, updates))
+    }
+
     pub(crate) async fn get_state_exact(
         &self,
         handle: &SessionRegistryHandle,
@@ -14222,17 +14248,11 @@ impl UnifiedCoordinator {
             .await
     }
 
-    /// Resolve the exact SDP-negotiated media format for a live session.
+    /// Resolve the exact SDP-negotiated media format for one exact live
+    /// session lifetime.
     ///
     /// This is crate-private because transport-neutral callers consume the
     /// resulting [`crate::media_stream::SipMediaStream`] codec descriptor.
-    pub(crate) async fn negotiated_media_config(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Option<(crate::session_store::state::NegotiatedConfig, u8)>> {
-        self.helpers.negotiated_media_config(session_id).await
-    }
-
     pub(crate) async fn negotiated_media_config_exact(
         &self,
         handle: &SessionRegistryHandle,
@@ -15058,9 +15078,9 @@ impl UnifiedCoordinator {
             .map_err(map_state_machine_dispatch_error)
     }
 
-    /// Crate-internal accessor: read the current `SessionState` snapshot for
-    /// the given session id. Used by refresh-style builders that need to
-    /// reuse registration / dialog identifiers from the original send.
+    /// Test accessor: read the current `SessionState` snapshot for the
+    /// given session id.
+    #[cfg(test)]
     pub(crate) async fn session_state(
         &self,
         session_id: &SessionId,

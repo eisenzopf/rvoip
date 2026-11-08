@@ -560,36 +560,13 @@ impl StateMachineHelpers {
             .call_state)
     }
 
-    /// Return the codec negotiated for one exact live session.
+    /// Return the codec negotiated for one exact live session lifetime.
     ///
     /// Media adapters use this retained session-state value instead of
     /// guessing PCMU before SDP negotiation has completed. A session whose
     /// SDP was supplied by the application without an anchored media
     /// negotiation cannot back a [`SipMediaStream`](crate::media_stream::SipMediaStream),
     /// so fail that case instead of leaving stream binding pending forever.
-    pub(crate) async fn negotiated_media_config(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Option<(crate::session_store::state::NegotiatedConfig, u8)>> {
-        let (negotiated_config, payload_type, sdp_negotiated) = self
-            .state_machine
-            .store
-            .with_session(session_id, |session| {
-                (
-                    session.negotiated_config.clone(),
-                    session.negotiated_payload_type(),
-                    session.sdp_negotiated,
-                )
-            })?;
-        match negotiated_config.zip(payload_type) {
-            Some(config) => Ok(Some(config)),
-            None if sdp_negotiated => Err(crate::errors::SessionError::MediaError(
-                "SDP was supplied without an anchored negotiated media configuration".to_string(),
-            )),
-            None => Ok(None),
-        }
-    }
-
     pub(crate) async fn negotiated_media_config_exact(
         &self,
         handle: &crate::session_registry::SessionRegistryHandle,

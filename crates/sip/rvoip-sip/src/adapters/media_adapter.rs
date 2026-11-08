@@ -2191,12 +2191,10 @@ impl MediaAdapter {
     ) -> Result<()> {
         let mut config = self
             .controller
-            .get_session_info(dialog_id)
-            .await
+            .get_session_config(dialog_id)
             .ok_or_else(|| {
                 SessionError::MediaError(format!("No media session for dialog {}", dialog_id))
-            })?
-            .config;
+            })?;
         config.remote_addr = Some(negotiated.remote_addr);
         config = config
             .with_negotiated_audio_codec(
@@ -2491,11 +2489,7 @@ impl MediaAdapter {
                 tracing::debug!("Media session already started for session {}", session_id.0);
                 return Ok(());
             }
-            let started = self
-                .controller
-                .get_session_info(&exact.dialog_id)
-                .await
-                .is_some();
+            let started = self.controller.has_media_session(&exact.dialog_id);
             if !self.media_is_still_exact(&exact) {
                 return Err(SessionError::SessionNotFound(format!(
                     "Media session lifetime changed for {}",
@@ -2720,10 +2714,11 @@ impl MediaAdapter {
     ) -> SrtpDetailedResult<NegotiatedConfig> {
         let session_id = session.session_id.clone();
         let negotiation_key = Self::media_negotiation_key(session)?;
-        // Parse remote SDP to extract IP and port
-        let (remote_ip, remote_port) = self.parse_sdp_connection(remote_sdp)?;
+        // Parse once for connection, codec and security validation, keeping
+        // the connection-extraction classification of a syntax failure.
         let parsed_answer = SdpSession::from_str(remote_sdp)
-            .map_err(|_| bounded_sdp_failure("remote-answer", "syntax"))?;
+            .map_err(|_| bounded_sdp_failure("connection-extract", "syntax"))?;
+        let (remote_ip, remote_port) = Self::sdp_connection(&parsed_answer)?;
         validate_rtcp_mux(&parsed_answer, self.rtcp_mux_required)?;
         let parsed_offer = exact_initial_uac_offer(session)
             .ok_or_else(|| bounded_sdp_failure("remote-answer", "missing-local-offer"))
@@ -2746,11 +2741,7 @@ impl MediaAdapter {
         let signaling_only_port = self.signaling_only_local_port();
         if signaling_only_port.is_none() {
             let exact_media = self.lane_owned_media(session)?;
-            if self
-                .controller
-                .get_session_info(&exact_media.dialog_id)
-                .await
-                .is_none()
+            if !self.controller.has_media_session(&exact_media.dialog_id)
                 || !self.media_is_still_exact(&exact_media)
             {
                 return Err(SessionError::InvalidTransition(
@@ -2951,7 +2942,7 @@ impl MediaAdapter {
     pub(crate) fn validate_local_sdp_offer(&self, local_sdp: &str) -> Result<()> {
         let parsed_offer = SdpSession::from_str(local_sdp)
             .map_err(|_| bounded_sdp_failure("local-offer", "syntax"))?;
-        self.parse_sdp_connection(local_sdp)?;
+        Self::sdp_connection(&parsed_offer)?;
         if !parsed_offer
             .media_descriptions
             .iter()
@@ -2970,7 +2961,7 @@ impl MediaAdapter {
         let parsed_offer = SdpSession::from_str(remote_sdp)
             .map_err(|_| bounded_sdp_failure("remote-offer", "syntax"))?;
         validate_rtcp_mux(&parsed_offer, self.rtcp_mux_required)?;
-        self.parse_sdp_connection(remote_sdp)?;
+        Self::sdp_connection(&parsed_offer)?;
 
         let offered_crypto = Self::extract_audio_crypto(&parsed_offer);
         #[cfg(feature = "dtls-srtp")]
@@ -3070,7 +3061,7 @@ impl MediaAdapter {
         let parsed_offer = SdpSession::from_str(remote_sdp)
             .map_err(|_| bounded_sdp_failure("remote-offer", "syntax"))?;
         validate_rtcp_mux(&parsed_offer, self.rtcp_mux_required)?;
-        let (remote_ip, remote_port) = self.parse_sdp_connection(remote_sdp)?;
+        let (remote_ip, remote_port) = Self::sdp_connection(&parsed_offer)?;
         // ICE (RFC 8839): honor the peer's offer when policy allows. A
         // detected mismatch means a middlebox rewrote the SDP after the
         // peer built it; ICE stands down for this call rather than fighting
@@ -3644,12 +3635,10 @@ impl MediaAdapter {
         let dialog_id = exact_media.dialog_id.clone();
         let previous_config = self
             .controller
-            .get_session_info(&dialog_id)
-            .await
+            .get_session_config(&dialog_id)
             .ok_or_else(|| {
                 SessionError::MediaError(format!("No media session for dialog {dialog_id}"))
-            })?
-            .config;
+            })?;
         if !self.media_is_still_exact(&exact_media) {
             return Err(SessionError::InvalidTransition(
                 "media resource changed before negotiated media commit".to_string(),
@@ -6005,7 +5994,12 @@ impl MediaAdapter {
     fn parse_sdp_connection(&self, sdp: &str) -> Result<(IpAddr, u16)> {
         let session = SdpSession::from_str(sdp)
             .map_err(|_| bounded_sdp_failure("connection-extract", "syntax"))?;
+        Self::sdp_connection(&session)
+    }
 
+    /// Extract the audio connection from SDP the caller already parsed, so
+    /// one negotiation step parses each SDP body once.
+    fn sdp_connection(session: &SdpSession) -> Result<(IpAddr, u16)> {
         let media = session
             .media_descriptions
             .iter()
@@ -6408,6 +6402,44 @@ mod sdp_format_tests {
     //! second fixture for that case.
 
     use super::*;
+
+    /// Connection extraction from already parsed SDP keeps the audio
+    /// section's c= over the session c=, ignores other media sections, and
+    /// rejects a missing or unparsable address and a missing audio section.
+    #[test]
+    fn parsed_sdp_connection_preserves_audio_precedence_and_missing_address_errors() {
+        let sdp = concat!(
+            "v=0\r\n",
+            "o=- 1 0 IN IP4 192.0.2.1\r\n",
+            "s=connection-validation\r\n",
+            "c=IN IP4 192.0.2.1\r\n",
+            "t=0 0\r\n",
+            "m=video 34000 RTP/AVP 96\r\n",
+            "c=IN IP4 192.0.2.10\r\n",
+            "a=rtpmap:96 VP8/90000\r\n",
+            "m=audio 42000 RTP/AVP 0\r\n",
+            "c=IN IP6 2001:db8::2\r\n",
+            "a=rtpmap:0 PCMU/8000\r\n",
+        );
+        let mut parsed = SdpSession::from_str(sdp).unwrap();
+        assert_eq!(
+            MediaAdapter::sdp_connection(&parsed).unwrap(),
+            ("2001:db8::2".parse::<IpAddr>().unwrap(), 42000)
+        );
+        parsed.media_descriptions[1].connection_info = None;
+        assert_eq!(
+            MediaAdapter::sdp_connection(&parsed).unwrap(),
+            ("192.0.2.1".parse::<IpAddr>().unwrap(), 42000)
+        );
+        parsed.connection_info.as_mut().unwrap().connection_address = "invalid-address".into();
+        assert!(MediaAdapter::sdp_connection(&parsed).is_err());
+        parsed.connection_info = None;
+        assert!(MediaAdapter::sdp_connection(&parsed).is_err());
+        parsed
+            .media_descriptions
+            .retain(|media| media.media != "audio");
+        assert!(MediaAdapter::sdp_connection(&parsed).is_err());
+    }
 
     #[test]
     fn inbound_trunk_policies_are_isolated_and_order_the_offered_intersection() {

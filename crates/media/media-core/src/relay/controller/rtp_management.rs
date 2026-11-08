@@ -18,7 +18,7 @@
 use bytes::Bytes;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::error::{Error, Result};
 use crate::types::{AudioFrame, DialogId, MediaDirection};
@@ -396,11 +396,11 @@ impl MediaSessionController {
 
     /// Send RTP packet for a dialog.
     ///
-    /// Snapshots the session's lock-free `RtpSendHandle` under a brief
-    /// lock, drops the session guard, then sends through the handle —
-    /// keeps the outer `Mutex<RtpSession>` available for other
-    /// per-dialog work (RTCP scheduler, set_remote_addr, etc.) during
-    /// the await on the mpsc enqueue.
+    /// The default-payload path snapshots the session's lock-free
+    /// `RtpSendHandle` under a brief session lock, then sends through it.
+    /// Sends with an explicit payload type (every encoded audio frame) use
+    /// the handle the wrapper captured at creation and never take the
+    /// session mutex. Neither path holds a map shard across an await.
     pub async fn send_rtp_packet(
         &self,
         dialog_id: &DialogId,
@@ -448,16 +448,23 @@ impl MediaSessionController {
         payload_type: Option<u8>,
         marker: bool,
     ) -> Result<()> {
-        let rtp_session = self
-            .get_rtp_session(dialog_id)
-            .await
-            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
-
         let payload_len = payload.len();
-        let send_handle = {
-            let session = rtp_session.lock().await;
-            session.send_handle()
+        let (mut send_handle, rtp_session) = {
+            let wrapper = self
+                .rtp_sessions
+                .get(dialog_id)
+                .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+            match (payload_type, wrapper.typed_send_handle.as_ref()) {
+                (Some(_), Some(handle)) => (Some(handle.clone()), None),
+                // The default payload type can change through the public RTP
+                // session API, so resolve it from the session itself rather
+                // than from the handle's construction-time snapshot.
+                _ => (None, Some(wrapper.session.clone())),
+            }
         };
+        if let Some(rtp_session) = rtp_session.as_ref() {
+            send_handle = rtp_session.lock().await.send_handle();
+        }
 
         let payload_bytes = Bytes::from(payload);
         if let Some(handle) = send_handle {
@@ -473,6 +480,9 @@ impl MediaSessionController {
             // Fallback: session has no scheduler (shouldn't happen in
             // production; see RtpSession::new). Lock and call send_packet
             // through the legacy path.
+            let rtp_session = rtp_session
+                .as_ref()
+                .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
             let session = rtp_session.lock().await;
             let result = if let Some(payload_type) = payload_type {
                 session
@@ -484,9 +494,11 @@ impl MediaSessionController {
             result.map_err(|e| Error::config(format!("Failed to send RTP packet: {}", e)))?;
         }
 
-        info!(
+        trace!(
             "📤 Sent RTP packet for dialog: {} (timestamp: {}, payload: {} bytes)",
-            dialog_id, timestamp, payload_len
+            dialog_id,
+            timestamp,
+            payload_len
         );
         Ok(())
     }
