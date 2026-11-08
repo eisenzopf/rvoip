@@ -1487,7 +1487,6 @@ pub struct Orchestrator {
     connection_id_budget: AtomicUsize,
     bounded_connection_lifecycles: AtomicBool,
     connection_lifecycle_started: AtomicBool,
-    lifecycle_reap_counter: AtomicUsize,
     connections: Arc<DashMap<ConnectionId, ConnectionEntry>>,
     /// Generation-checked setup commit barrier. Async setup can do slow work
     /// without holding a mutex, then atomically commit only if every source is
@@ -1993,7 +1992,6 @@ impl Orchestrator {
             connection_id_budget: AtomicUsize::new(DEFAULT_CONNECTION_ID_BUDGET),
             bounded_connection_lifecycles: AtomicBool::new(false),
             connection_lifecycle_started: AtomicBool::new(false),
-            lifecycle_reap_counter: AtomicUsize::new(0),
             connections: Arc::new(DashMap::new()),
             connection_lifecycles: Arc::new(DashMap::new()),
             adapter_cleanup_quarantines: Arc::new(DashMap::new()),
@@ -2086,7 +2084,6 @@ impl Orchestrator {
             connection_id_budget: AtomicUsize::new(DEFAULT_CONNECTION_ID_BUDGET),
             bounded_connection_lifecycles: AtomicBool::new(false),
             connection_lifecycle_started: AtomicBool::new(false),
-            lifecycle_reap_counter: AtomicUsize::new(0),
             connections: Arc::new(DashMap::new()),
             connection_lifecycles: Arc::new(DashMap::new()),
             adapter_cleanup_quarantines: Arc::new(DashMap::new()),
@@ -2751,21 +2748,6 @@ impl Orchestrator {
         self.bounded_connection_lifecycles.load(Ordering::Acquire)
     }
 
-    // Caller holds registry lock. Inactive records can be removed because the
-    // capability is retired first; stale queued IDs retain that retirement.
-    // Cleanup quarantines retain capacity until their route is conclusively gone.
-    fn reap_retired_connection_lifecycles_locked(&self) {
-        if !self.bounded_connection_lifecycles_enabled() {
-            return;
-        }
-        self.connection_lifecycles.retain(|id, state| {
-            let state = state.lock().unwrap_or_else(|p| p.into_inner());
-            !(state.retired
-                && id.lifecycle_reclaimable()
-                && !self.adapter_cleanup_quarantines.contains_key(id))
-        });
-    }
-
     fn adapter_identity_is_authoritative(&self, id: &ConnectionId) -> bool {
         if !self.bounded_connection_lifecycles_enabled() {
             return true;
@@ -2807,6 +2789,18 @@ impl Orchestrator {
             .connection_registry_lock
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+        self.reclaim_completed_connection_lifecycle_locked(id);
+    }
+
+    // Caller holds the registry lock. A bounded lifecycle row becomes
+    // reclaimable only when its cleanup completes (`finish_connection_teardown`,
+    // `reject_colliding_adapter_route`) or its adapter cleanup quarantine
+    // resolves, and each of those transitions reclaims its exact identity
+    // here. Admission therefore never scans, or locks, unrelated live
+    // lifecycles to recover capacity. Cleanup quarantines retain capacity
+    // until their route is conclusively gone, and the retired capability
+    // still fences queued clones after the row is removed.
+    fn reclaim_completed_connection_lifecycle_locked(&self, id: &ConnectionId) {
         self.connection_lifecycles.remove_if(id, |key, state| {
             let state = state.lock().unwrap_or_else(|p| p.into_inner());
             state.retired
@@ -3853,7 +3847,7 @@ impl Orchestrator {
                     current.key().complete_lifecycle_cleanup();
                 }
             }
-            self.reap_retired_connection_lifecycles_locked();
+            self.reclaim_completed_connection_lifecycle_locked(&connection_id);
         }
     }
 
@@ -3994,12 +3988,6 @@ impl Orchestrator {
                 || connection_id.lifecycle_retired()
             {
                 return false;
-            }
-            if self.lifecycle_reap_counter.fetch_add(1, Ordering::Relaxed) % 64 == 0
-                || self.connection_lifecycles.len()
-                    >= self.connection_id_budget.load(Ordering::Relaxed)
-            {
-                self.reap_retired_connection_lifecycles_locked();
             }
         }
         if let Some(state) = self.connection_lifecycles.get(connection_id) {
@@ -4209,7 +4197,6 @@ impl Orchestrator {
         self.connection_lifecycle_started
             .store(true, Ordering::Release);
         if self.bounded_connection_lifecycles_enabled() {
-            self.reap_retired_connection_lifecycles_locked();
             if !self.adapter_identity_is_authoritative(connection_id)
                 || connection_id.lifecycle_retired()
             {
@@ -5512,12 +5499,7 @@ impl Orchestrator {
             } else {
                 conn.complete_lifecycle_cleanup();
             }
-            self.connection_lifecycles.remove_if(conn, |id, state| {
-                let state = state.lock().unwrap_or_else(|p| p.into_inner());
-                state.retired
-                    && id.lifecycle_reclaimable()
-                    && !self.adapter_cleanup_quarantines.contains_key(id)
-            });
+            self.reclaim_completed_connection_lifecycle_locked(conn);
         }
         forgotten
     }
@@ -6325,7 +6307,7 @@ impl Orchestrator {
             .ok_or_else(|| RvoipError::SessionNotFound(session_id.clone()))?;
 
         let now = Utc::now();
-        let conv_id = {
+        let (conv_id, members) = {
             let mut sess = sess_arc.write().expect("session lock poisoned");
             if matches!(sess.state, SessionState::Ended | SessionState::Failed) {
                 return Ok(());
@@ -6333,13 +6315,25 @@ impl Orchestrator {
             sess.state = SessionState::Ended;
             sess.ended_at = Some(now);
             sess.end_reason = Some(reason);
-            sess.conversation_id.clone()
+            // Binding commits insert the membership and the reverse index
+            // together under this session lock and refuse an Ended session,
+            // so this snapshot covers every binding this session owns.
+            (
+                sess.conversation_id.clone(),
+                sess.connections.keys().cloned().collect::<Vec<_>>(),
+            )
         };
 
-        // Multi-party cleanup + reverse-index cleanup.
+        // Multi-party cleanup + reverse-index cleanup. Remove only this
+        // session's own bindings: ending one call must not scan, and
+        // write-lock, every other live call's reverse-index entry.
         self.drop_session_subscriptions(&session_id);
-        self.sessions_by_connection
-            .retain(|_, sid| sid != &session_id);
+        for connection_id in members {
+            // A concurrent detach and rebind may already have given the
+            // connection another owner; never remove that binding.
+            self.sessions_by_connection
+                .remove_if(&connection_id, |_, owner| owner == &session_id);
+        }
 
         // P3 — finalize the Session's vCon: convert into the canonical
         // model, validate, serialize, persist, then emit VconReady.
@@ -14099,5 +14093,233 @@ mod bounded_lifecycle_tests {
             assert_eq!(retained_rows(&core), (0, 0, 0));
             assert!(!core.conversations_by_tenant.contains_key(&tenant));
         }
+    }
+
+    fn assert_admission_does_not_lock_unrelated_lifecycle(outbound: bool) {
+        let core = Orchestrator::new(Config::default());
+        core.configure_bounded_connection_lifecycles(128).unwrap();
+        let survivor = ConnectionId::new();
+        assert!(core.track_connection(&survivor, Transport::Sip, None));
+        let state = Arc::clone(core.connection_lifecycles.get(&survivor).unwrap().value());
+        // Hold one unrelated live lifecycle's lock. Admission that scans the
+        // lifecycle table to recover capacity has to wait for it.
+        let held = state.lock().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let owner = Arc::clone(&core);
+        let admission = std::thread::spawn(move || {
+            // 65 admissions cross the former every-64 inbound sweep interval;
+            // outbound admission used to sweep on every claim.
+            let admitted = (0..65).all(|_| {
+                let id = ConnectionId::new();
+                if outbound {
+                    owner.claim_outbound_connection(&id, Transport::Sip).is_ok()
+                } else {
+                    owner.track_connection(&id, Transport::Sip, None)
+                }
+            });
+            sender.send(admitted).unwrap();
+        });
+        let progressed = receiver.recv_timeout(Duration::from_secs(1));
+        // Release and join before asserting so a scanning build fails cleanly.
+        drop(held);
+        admission.join().unwrap();
+        assert_eq!(
+            progressed,
+            Ok(true),
+            "admission scanned an unrelated live lifecycle"
+        );
+        assert_eq!(core.connection_id_budget_usage(), (66, 128));
+        assert!(core.capture_connection_lifecycles(&[survivor]).is_ok());
+    }
+
+    #[tokio::test]
+    async fn inbound_admission_does_not_scan_unrelated_live_lifecycles() {
+        assert_admission_does_not_lock_unrelated_lifecycle(false);
+    }
+
+    #[tokio::test]
+    async fn outbound_admission_does_not_scan_unrelated_live_lifecycles() {
+        assert_admission_does_not_lock_unrelated_lifecycle(true);
+    }
+
+    #[tokio::test]
+    async fn exact_reclamation_requires_both_cleanup_and_matching_quarantine_resolution() {
+        for cleanup_first in [false, true] {
+            let core = Orchestrator::new(Config::default());
+            core.configure_bounded_connection_lifecycles(1).unwrap();
+            let id = ConnectionId::new();
+            assert!(core.track_connection(&id, Transport::Sip, None));
+            core.adapter_cleanup_quarantines.insert(
+                id.clone(),
+                AdapterCleanupQuarantine {
+                    transport: Transport::Sip,
+                    lifecycle_generation: 1,
+                },
+            );
+            let ended =
+                core.begin_connection_teardown(&id, InboundAdmissionTermination::RemoteEnded);
+            assert!(!core.track_connection(&ConnectionId::new(), Transport::Sip, None));
+            assert!(core
+                .claim_outbound_connection(&ConnectionId::new(), Transport::Sip)
+                .is_err());
+            if cleanup_first {
+                core.finish_connection_teardown(&id, ended).await;
+                assert_eq!(core.connection_id_budget_usage(), (1, 1));
+                assert!(id.lifecycle_reclaimable());
+                // A stale generation must not release the quarantine.
+                core.resolve_adapter_cleanup_quarantine(&id, Transport::Sip, 2);
+                assert_eq!(core.adapter_cleanup_quarantine_count(), 1);
+                assert_eq!(core.connection_id_budget_usage(), (1, 1));
+                core.resolve_adapter_cleanup_quarantine(&id, Transport::Sip, 1);
+            } else {
+                core.resolve_adapter_cleanup_quarantine(&id, Transport::Sip, 1);
+                assert_eq!(core.adapter_cleanup_quarantine_count(), 0);
+                assert_eq!(core.connection_id_budget_usage(), (1, 1));
+                assert!(!id.lifecycle_reclaimable());
+                core.finish_connection_teardown(&id, ended).await;
+            }
+            assert_eq!(core.connection_id_budget_usage(), (0, 1));
+            assert!(!core.track_connection(&id, Transport::Sip, None));
+            assert!(core.claim_outbound_connection(&id, Transport::Sip).is_err());
+            let replacement = ConnectionId::new();
+            assert!(core.track_connection(&replacement, Transport::Sip, None));
+            // A duplicate completion for the retired identity cannot release
+            // the replacement's capacity or revive the stale capability.
+            core.resolve_adapter_cleanup_quarantine(&id, Transport::Sip, 1);
+            assert_eq!(core.connection_id_budget_usage(), (1, 1));
+            assert!(core.capture_connection_lifecycles(&[replacement]).is_ok());
+        }
+    }
+
+    fn bind_outbound(core: &Orchestrator, id: &ConnectionId, session: &SessionId) {
+        let ticket = core.claim_outbound_connection(id, Transport::Sip).unwrap();
+        core.commit_outbound_connection(&ticket, Transport::Sip, session, ParticipantId::new())
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn ending_session_removes_exact_members_and_preserves_rebound_owner() {
+        let core = Orchestrator::new(Config {
+            capture_session_vcon: false,
+            ..Config::default()
+        });
+        core.configure_bounded_connection_lifecycles(8).unwrap();
+        let conversation = core
+            .open_conversation(
+                TenantId::new(),
+                ConversationPolicy::Ephemeral {
+                    idle_close_secs: 30,
+                },
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        let first = core
+            .start_session(conversation.clone(), SessionMedium::Voice, Vec::new())
+            .await
+            .unwrap();
+        let other = core
+            .start_session(conversation, SessionMedium::Voice, Vec::new())
+            .await
+            .unwrap();
+        let own = ConnectionId::new();
+        let rebound = ConnectionId::new();
+        let unrelated = ConnectionId::new();
+        bind_outbound(&core, &own, &first);
+        bind_outbound(&core, &rebound, &first);
+        bind_outbound(&core, &unrelated, &other);
+        // Model a membership snapshot whose reverse-index entry has already
+        // moved to another owner. Terminal cleanup must be conditional.
+        core.sessions_by_connection
+            .insert(rebound.clone(), other.clone());
+        core.end_session(first.clone(), EndReason::Normal)
+            .await
+            .unwrap();
+        assert!(!core.sessions_by_connection.contains_key(&own));
+        assert_eq!(core.session_of(&rebound), Some(other.clone()));
+        assert_eq!(core.session_of(&unrelated), Some(other.clone()));
+        let session = core.sessions.get(&first).unwrap().clone();
+        assert_eq!(session.read().unwrap().state, SessionState::Ended);
+        assert_eq!(
+            session.read().unwrap().connections.len(),
+            2,
+            "historical membership stays available"
+        );
+        let late = ConnectionId::new();
+        let ticket = core
+            .claim_outbound_connection(&late, Transport::Sip)
+            .unwrap();
+        assert!(core
+            .commit_outbound_connection(&ticket, Transport::Sip, &first, ParticipantId::new())
+            .is_err());
+        assert!(!core.sessions_by_connection.contains_key(&late));
+        core.end_session(first, EndReason::Normal).await.unwrap();
+        assert_eq!(core.session_of(&rebound), Some(other));
+    }
+
+    #[tokio::test]
+    async fn ending_session_does_not_scan_unrelated_session_bindings() {
+        let core = Orchestrator::new(Config {
+            capture_session_vcon: false,
+            ..Config::default()
+        });
+        core.configure_bounded_connection_lifecycles(64).unwrap();
+        let conversation = core
+            .open_conversation(
+                TenantId::new(),
+                ConversationPolicy::Ephemeral {
+                    idle_close_secs: 30,
+                },
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        let ending = core
+            .start_session(conversation.clone(), SessionMedium::Voice, Vec::new())
+            .await
+            .unwrap();
+        let live = core
+            .start_session(conversation, SessionMedium::Voice, Vec::new())
+            .await
+            .unwrap();
+        let member = ConnectionId::new();
+        bind_outbound(&core, &member, &ending);
+        // Find another live call's binding in a different reverse-index shard
+        // than the ending session's member.
+        let unrelated = loop {
+            let candidate = ConnectionId::new();
+            bind_outbound(&core, &candidate, &live);
+            let held = core.sessions_by_connection.get(&candidate).unwrap();
+            let shares_shard = core.sessions_by_connection.try_get_mut(&member).is_locked();
+            drop(held);
+            if !shares_shard {
+                break candidate;
+            }
+        };
+        // Hold a reader on that unrelated binding. Ending the session must
+        // not need to write-lock the whole reverse index.
+        let held = core.sessions_by_connection.get(&unrelated).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let owner = Arc::clone(&core);
+        let ending_session = ending.clone();
+        let ender = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let ended = runtime.block_on(owner.end_session(ending_session, EndReason::Normal));
+            sender.send(ended.is_ok()).unwrap();
+        });
+        let progressed = receiver.recv_timeout(Duration::from_secs(1));
+        // Release and join before asserting so a scanning build fails cleanly.
+        drop(held);
+        ender.join().unwrap();
+        assert_eq!(
+            progressed,
+            Ok(true),
+            "ending one session scanned every live session binding"
+        );
+        assert!(!core.sessions_by_connection.contains_key(&member));
+        assert_eq!(core.session_of(&unrelated), Some(live));
     }
 }
