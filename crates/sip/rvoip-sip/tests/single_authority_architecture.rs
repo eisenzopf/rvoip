@@ -749,10 +749,19 @@ fn lifecycle_timeout_fire_paths_use_exact_dispatch() {
 
     let media_hangup = compact(function_source(
         &source,
-        "async fn hangup_exact_with_reason",
+        "async fn hangup_exact_with_reason(",
     ));
     assert!(
-        media_hangup.contains("coordinator.hangup_serialized_exact(&retained_handle,reason)"),
+        media_hangup.contains(".hangup_exact_with_reason_reporting(handle,reason.into(),None)"),
+        "automatic hangup must join the same reporting hangup operation as public hangup"
+    );
+    let reporting_hangup = compact(function_source(
+        &source,
+        "async fn hangup_exact_with_reason_reporting(",
+    ));
+    assert!(
+        reporting_hangup
+            .contains("coordinator.hangup_serialized_exact(&retained_handle,reason,dispatched)"),
         "automatic and public hangup must share the retained exact serialized operation"
     );
     assert!(

@@ -1068,6 +1068,32 @@ fn failed_inbound_termination(
     }
 }
 
+/// The end a failed media pump reports when signaling had already ended on
+/// its own and the route claim dropped that terminal's session event. The
+/// mapping mirrors `translate_api_event` (`CallEnded`, `CallCancelled`).
+///
+/// A recorded exact terminal fact is authoritative: the session layer records
+/// it before it releases the session, so it also covers a peer BYE that
+/// finished releasing before the media owner ran. Session state alone counts
+/// only when the owner's `HangupCall` met no transition under the lane
+/// (`lane_noop`): `Terminated` without a recorded fact yet is the peer BYE
+/// row itself (`DialogBYE` commits `Terminated` and publishes
+/// `CallTerminated`). Anything else keeps the media failure.
+fn signaling_end_before_media_failure(
+    snapshot: &crate::api::lifecycle::CallLifecycleSnapshot,
+    lane_noop: bool,
+) -> Option<EndReason> {
+    use crate::api::lifecycle::CallTerminalInfo;
+    match (&snapshot.terminal, snapshot.state) {
+        (Some(CallTerminalInfo::Ended { .. }), _) => Some(EndReason::Normal),
+        (Some(CallTerminalInfo::Cancelled), _) => Some(EndReason::Cancelled),
+        (Some(CallTerminalInfo::Failed { .. }), _) => None,
+        (None, Some(CallState::Terminated)) if lane_noop => Some(EndReason::Normal),
+        (None, Some(CallState::Cancelled)) if lane_noop => Some(EndReason::Cancelled),
+        (None, _) => None,
+    }
+}
+
 /// Issuer stamped on a principal admitted because its source address fell
 /// inside a configured trusted CIDR. Kept in sync with the app builder's
 /// `trusted_trunk_principal`.
@@ -2927,11 +2953,73 @@ impl SipAdapter {
         if !self.forget_epoch(epoch) {
             return;
         }
-        let hangup = tokio::time::timeout(
-            SIP_RETAINED_TASK_TIMEOUT,
-            coordinator.hangup_exact(&lifecycle_handle),
-        )
-        .await;
+        // The route is claimed, so the session layer's own terminal for this
+        // call is dropped from here on; this owner publishes the terminal the
+        // call actually reached. A peer BYE stops media from its CleanupMedia
+        // action while it still holds the session lane, before it commits
+        // Terminated, so a state read here would still see Active. The local
+        // HangupCall queued behind that lane is exact: when it meets no
+        // transition, signaling had already ended and the call ended
+        // normally rather than by media failure. When the BYE has already
+        // released the session there is no lane to queue on, and the hangup
+        // reports no outcome at all; the exact terminal fact recorded before
+        // that release decides instead, provided this owner has no outgoing
+        // BYE of its own (a dispatch error can still follow a sent BYE).
+        //
+        // The terminal is published once the lane has decided the dispatch
+        // and before the BYE confirmation is joined, so a genuine media
+        // failure does not hold the runtime's terminal for the non-INVITE
+        // round trip. As in the inbound end driver, local teardown is
+        // already engaged when the terminal is delivered. The retained
+        // coordinator operation confirms, finalizes and releases the dialog
+        // on its own, and this owner's bounded join and fallback still run.
+        let deadline = tokio::time::Instant::now() + SIP_RETAINED_TASK_TIMEOUT;
+        let bye_generation_before = coordinator
+            .dialog_adapter()
+            .outgoing_bye_generation_exact(&lifecycle_handle)
+            .unwrap_or(0);
+        let (dispatched_tx, mut dispatched_rx) = tokio::sync::oneshot::channel();
+        let hangup = coordinator.hangup_exact_reporting_dispatch(&lifecycle_handle, dispatched_tx);
+        tokio::pin!(hangup);
+        let mut joined = None;
+        // The coordinator reports (or drops) the lane outcome before the
+        // hangup can complete, so polling it first is ordered, not a race.
+        let transitioned = tokio::select! {
+            biased;
+            outcome = &mut dispatched_rx => outcome.ok(),
+            result = &mut hangup => {
+                joined = Some(result);
+                None
+            }
+            _ = tokio::time::sleep_until(deadline) => None,
+        };
+        // `Some(lane_noop)`: signaling may have ended first and the snapshot
+        // decides. `None`: this owner authored a hangup, so media failed first.
+        let signaling_evidence = match transitioned {
+            Some(true) => None,
+            Some(false) => Some(true),
+            None if coordinator
+                .dialog_adapter()
+                .has_outgoing_bye_after_exact(&lifecycle_handle, bye_generation_before) =>
+            {
+                None
+            }
+            None => Some(false),
+        };
+        let signaling_end = match signaling_evidence {
+            Some(lane_noop) => coordinator
+                .lifecycle_snapshot_exact(&lifecycle_handle)
+                .await
+                .ok()
+                .and_then(|snapshot| signaling_end_before_media_failure(&snapshot, lane_noop)),
+            None => None,
+        };
+        let (terminal, source) = self.failed_media_terminal(epoch, signaling_end);
+        self.deliver_terminal_event(terminal, source).await;
+        let hangup = match joined {
+            Some(result) => Ok(result),
+            None => tokio::time::timeout_at(deadline, &mut hangup).await,
+        };
         if !matches!(hangup, Ok(Ok(()))) {
             let _ = tokio::time::timeout(
                 SIP_RETAINED_TASK_TIMEOUT,
@@ -2939,14 +3027,44 @@ impl SipAdapter {
             )
             .await;
         }
-        self.deliver_terminal_event(
-            AdapterEvent::Failed {
-                connection_id: epoch.connection_id.clone(),
-                detail: "SIP media driver failed".to_string(),
-            },
-            "media-failed",
-        )
-        .await;
+    }
+
+    /// The terminal the failed-media owner publishes for `epoch`, and its
+    /// delivery source. `signaling_end` is the end signaling reached before
+    /// media failed, if any (see `signaling_end_before_media_failure`).
+    ///
+    /// The owner has claimed the route, so `translate_api_event` never
+    /// translates the session layer's own terminal for this call. Every
+    /// per-call adapter fact that translation would consult for a `CallEnded`
+    /// or `CallCancelled` must therefore be consulted, and consumed, here.
+    fn failed_media_terminal(
+        &self,
+        epoch: &SipRouteEpoch,
+        signaling_end: Option<EndReason>,
+    ) -> (AdapterEvent, &'static str) {
+        let connection_id = epoch.connection_id.clone();
+        match signaling_end {
+            Some(reason) => {
+                debug!(
+                    ?reason,
+                    "SipAdapter media stopped after signaling ended; reporting the signaling terminal"
+                );
+                (
+                    AdapterEvent::Ended {
+                        connection_id,
+                        reason,
+                    },
+                    "media-stopped-signaling-ended",
+                )
+            }
+            None => (
+                AdapterEvent::Failed {
+                    connection_id,
+                    detail: "SIP media driver failed".to_string(),
+                },
+                "media-failed",
+            ),
+        }
     }
 
     async fn translate_api_event(&self, event: ApiEvent) {
@@ -8913,6 +9031,297 @@ Signal=5\r\nDuration=160\r\n";
             .shutdown_gracefully(Some(Duration::from_secs(1)))
             .await
             .expect("shutdown");
+    }
+
+    /// Place an admitted UAS session in Active, map its adapter route, and
+    /// take the session lane as a peer BYE transition would. The failed media
+    /// owner is then started; it returns once its local hangup is queued
+    /// behind that lane (observed via the lane's Arc count, no sleep).
+    async fn start_failed_media_behind_peer_bye_lane(
+        coordinator: &Arc<UnifiedCoordinator>,
+        adapter: &Arc<SipAdapter>,
+        session_id: &SessionId,
+    ) -> (
+        SessionRegistryHandle,
+        ConnectionId,
+        tokio::sync::OwnedMutexGuard<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let handle = admit_test_session(coordinator, session_id).await;
+        let store = Arc::clone(&coordinator.helpers.state_machine.store);
+        store
+            .update_session_exact_with(&handle, None, |session| {
+                session.call_state = CallState::Active;
+            })
+            .expect("place failed-media session in Active");
+        let epoch = adapter
+            .ensure_mapped_epoch(session_id.clone())
+            .expect("failed-media route");
+        let connection_id = epoch.connection_id.clone();
+        let lane = store
+            .state_machine_lane_exact(&handle)
+            .expect("failed-media exact state-machine lane");
+        let peer_bye = Arc::clone(&lane).lock_owned().await;
+        let idle_lane_refs = Arc::strong_count(&lane);
+        let media_owner = tokio::spawn({
+            let adapter = Arc::clone(adapter);
+            let coordinator = Arc::clone(coordinator);
+            async move { adapter.terminate_failed_media(&epoch, coordinator).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while Arc::strong_count(&lane) == idle_lane_refs {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("failed-media hangup queued behind the peer BYE lane");
+        (handle, connection_id, peer_bye, media_owner)
+    }
+
+    /// A peer BYE's CleanupMedia fails the media pump while the BYE still
+    /// holds the session lane. The failed-media owner claims the route (so the
+    /// session layer's `CallEnded` is dropped) and its local hangup meets
+    /// Terminated with no transition. That is a normal remote hangup and must
+    /// reach the runtime as `Ended { Normal }`, not as a media `Failed`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_media_after_peer_bye_won_the_lane_reports_a_normal_end() {
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("failed-media-peer-bye", 0))
+            .await
+            .expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        let mut events = adapter
+            .try_subscribe_atomic_events()
+            .expect("atomic events");
+        let session_id = SessionId::from("failed-media-peer-bye-session".to_string());
+        let (handle, connection_id, peer_bye, media_owner) =
+            start_failed_media_behind_peer_bye_lane(&coordinator, &adapter, &session_id).await;
+
+        // The peer BYE commits Terminated, then releases the lane.
+        coordinator
+            .helpers
+            .state_machine
+            .store
+            .update_session_exact_with(&handle, None, |session| {
+                session.call_state = CallState::Terminated;
+            })
+            .expect("commit the peer BYE terminal state");
+        drop(peer_bye);
+
+        let terminal = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("signaling terminal is not held behind a hangup join")
+            .expect("terminal event");
+        assert!(
+            matches!(
+                &terminal,
+                OrchestratorAdapterEvent::Public(AdapterEvent::Ended {
+                    connection_id: id,
+                    reason: EndReason::Normal,
+                }) if *id == connection_id
+            ),
+            "a peer hangup that stopped media was reported as {terminal:?}"
+        );
+        tokio::time::timeout(Duration::from_secs(1), media_owner)
+            .await
+            .expect("failed-media owner finishes without a confirmation wait")
+            .expect("failed-media owner");
+        assert!(!adapter.by_session.contains_key(&session_id));
+        assert!(!adapter.by_connection.contains_key(&connection_id));
+        assert!(
+            !coordinator
+                .dialog_adapter()
+                .has_outgoing_bye_after_exact(&handle, 0),
+            "the failed-media hangup must not have dispatched a BYE"
+        );
+
+        drop(adapter);
+        coordinator
+            .shutdown_gracefully(Some(Duration::ZERO))
+            .await
+            .expect("no retained hangup task is left to drain");
+    }
+
+    /// The peer BYE's terminal release finished before the failed-media owner
+    /// ran, so its hangup has no exact session to queue on and reports no
+    /// lane outcome. The terminal fact the session layer recorded before that
+    /// release still proves a normal end.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_media_after_peer_bye_released_the_session_reports_a_normal_end() {
+        let coordinator =
+            UnifiedCoordinator::new(ApiConfig::local("failed-media-peer-bye-released", 0))
+                .await
+                .expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        let mut events = adapter
+            .try_subscribe_atomic_events()
+            .expect("atomic events");
+        let session_id = SessionId::from("failed-media-peer-bye-released-session".to_string());
+        let handle = admit_test_session(&coordinator, &session_id).await;
+        let epoch = adapter
+            .ensure_mapped_epoch(session_id.clone())
+            .expect("failed-media route");
+        let connection_id = epoch.connection_id.clone();
+        // The session layer's terminal release order: record the exact
+        // terminal fact, then release the session. Recording only the fact
+        // (not publishing it) keeps the adapter's own `CallEnded` translation
+        // out of this test, as the route claim does in production.
+        coordinator.lifecycle_index().record_event_exact(
+            &handle,
+            &ApiEvent::CallEnded {
+                call_id: session_id.clone(),
+                reason: "peer BYE".into(),
+            },
+        );
+        retire_test_session(&coordinator, &handle).await;
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            adapter.terminate_failed_media(&epoch, Arc::clone(&coordinator)),
+        )
+        .await
+        .expect("failed-media owner is bounded");
+        let terminal = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("terminal event delivered")
+            .expect("terminal event");
+        assert!(
+            matches!(
+                &terminal,
+                OrchestratorAdapterEvent::Public(AdapterEvent::Ended {
+                    connection_id: id,
+                    reason: EndReason::Normal,
+                }) if *id == connection_id
+            ),
+            "a peer hangup released before media failed was reported as {terminal:?}"
+        );
+        assert!(!adapter.by_session.contains_key(&session_id));
+        assert!(!adapter.by_connection.contains_key(&connection_id));
+
+        drop(adapter);
+        coordinator
+            .shutdown_gracefully(Some(Duration::from_secs(1)))
+            .await
+            .expect("shutdown");
+    }
+
+    /// Control for the tests above: when the lane is released with the call
+    /// still Active, the failed-media hangup takes its own transition, so
+    /// the media failure is genuine and stays `Failed`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_media_that_owns_the_hangup_transition_still_reports_failed() {
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("failed-media-own-hangup", 0))
+            .await
+            .expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        let mut events = adapter
+            .try_subscribe_atomic_events()
+            .expect("atomic events");
+        let session_id = SessionId::from("failed-media-own-hangup-session".to_string());
+        let (_handle, connection_id, lane, media_owner) =
+            start_failed_media_behind_peer_bye_lane(&coordinator, &adapter, &session_id).await;
+        drop(lane);
+
+        let terminal = tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("bounded failed-media terminal")
+            .expect("terminal event");
+        assert!(
+            matches!(
+                &terminal,
+                OrchestratorAdapterEvent::Public(AdapterEvent::Failed { connection_id: id, .. })
+                    if *id == connection_id
+            ),
+            "a genuine media failure was reported as {terminal:?}"
+        );
+        tokio::time::timeout(Duration::from_secs(10), media_owner)
+            .await
+            .expect("failed-media owner is bounded")
+            .expect("failed-media owner");
+        assert!(!adapter.by_session.contains_key(&session_id));
+
+        drop(adapter);
+        let _ = coordinator
+            .shutdown_gracefully(Some(Duration::from_secs(1)))
+            .await;
+    }
+
+    #[test]
+    fn failed_media_reports_the_terminal_signaling_reached_first() {
+        use crate::api::lifecycle::{CallLifecycleSnapshot, CallTerminalInfo};
+        let snapshot =
+            |state: Option<CallState>, terminal: Option<CallTerminalInfo>| CallLifecycleSnapshot {
+                call_id: SessionId::from("failed-media-terminal".to_string()),
+                state,
+                progress: Vec::new(),
+                answered: None,
+                media_security: None,
+                terminal,
+                latest_transfer_outcome: None,
+            };
+        let ended = || CallTerminalInfo::Ended {
+            reason: "Remote hangup".to_string(),
+        };
+        let failed = || CallTerminalInfo::Failed {
+            status_code: 500,
+            reason: "dialog failed".to_string(),
+        };
+        // `EndReason` has no `PartialEq`; its Debug form names the variant.
+        // Columns: snapshot, lane no-op, no lane outcome.
+        let cases = [
+            (
+                snapshot(Some(CallState::Terminated), None),
+                "Some(Normal)",
+                "None",
+            ),
+            (
+                snapshot(None, Some(ended())),
+                "Some(Normal)",
+                "Some(Normal)",
+            ),
+            (
+                snapshot(Some(CallState::Terminated), Some(ended())),
+                "Some(Normal)",
+                "Some(Normal)",
+            ),
+            (
+                snapshot(Some(CallState::Cancelled), None),
+                "Some(Cancelled)",
+                "None",
+            ),
+            (
+                snapshot(None, Some(CallTerminalInfo::Cancelled)),
+                "Some(Cancelled)",
+                "Some(Cancelled)",
+            ),
+            (snapshot(None, Some(failed())), "None", "None"),
+            (
+                snapshot(Some(CallState::Terminated), Some(failed())),
+                "None",
+                "None",
+            ),
+            (snapshot(Some(CallState::Active), None), "None", "None"),
+            (snapshot(Some(CallState::OnHold), None), "None", "None"),
+            (snapshot(Some(CallState::Terminating), None), "None", "None"),
+            (snapshot(None, None), "None", "None"),
+        ];
+        for (snapshot, lane_noop, no_outcome) in cases {
+            assert_eq!(
+                format!("{:?}", signaling_end_before_media_failure(&snapshot, true)),
+                lane_noop,
+                "lane no-op {snapshot:?}"
+            );
+            assert_eq!(
+                format!("{:?}", signaling_end_before_media_failure(&snapshot, false)),
+                no_outcome,
+                "no lane outcome {snapshot:?}"
+            );
+        }
     }
 
     #[test]

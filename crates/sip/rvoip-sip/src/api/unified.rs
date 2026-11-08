@@ -11612,7 +11612,37 @@ impl UnifiedCoordinator {
         handle: &SessionRegistryHandle,
         reason: impl Into<String>,
     ) -> Result<()> {
-        let reason = reason.into();
+        self.hangup_exact_with_reason_reporting(handle, reason.into(), None)
+            .await
+    }
+
+    /// Exact local hangup that also reports, as soon as the session lane has
+    /// decided it, whether `HangupCall` took a transition. `false` means the
+    /// state it met under the lane had no hangup row (a peer BYE, CANCEL or
+    /// other terminal won the lane first) and this call sent nothing. The
+    /// sender is dropped without a value when this call joins another
+    /// retained hangup or dispatch fails, because then this call has no lane
+    /// outcome of its own. The returned future still joins the whole
+    /// operation (dispatch, wire confirmation, finalization).
+    pub(crate) async fn hangup_exact_reporting_dispatch(
+        &self,
+        handle: &SessionRegistryHandle,
+        dispatched: tokio::sync::oneshot::Sender<bool>,
+    ) -> Result<()> {
+        self.hangup_exact_with_reason_reporting(
+            handle,
+            "Local hangup".to_string(),
+            Some(dispatched),
+        )
+        .await
+    }
+
+    async fn hangup_exact_with_reason_reporting(
+        &self,
+        handle: &SessionRegistryHandle,
+        reason: String,
+        dispatched: Option<tokio::sync::oneshot::Sender<bool>>,
+    ) -> Result<()> {
         // One exact SessionStateCell owns one retained hangup operation. The
         // public caller is only a waiter: dropping it cannot cancel dispatch,
         // wire confirmation, or finalization, and another caller joins the
@@ -11637,6 +11667,9 @@ impl UnifiedCoordinator {
             })?;
         if !control.try_start() {
             drop(coordinator);
+            // Joining another owner's operation: this call has no lane
+            // outcome of its own, so release the reporter before waiting.
+            drop(dispatched);
             return shared_hangup_completion_result(control.wait_for_completion().await);
         }
 
@@ -11645,22 +11678,23 @@ impl UnifiedCoordinator {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         let completion_guard = RetainedHangupTaskCompletion::new(retained_control);
         let hangup_scheduler = Arc::clone(&self.setup_teardown_scheduler);
-        let spawned = hangup_scheduler.spawn_lifecycle_task(async move {
-            let mut completion_guard = completion_guard;
-            let result = match std::panic::AssertUnwindSafe(
-                coordinator.hangup_serialized_exact(&retained_handle, reason),
-            )
-            .catch_unwind()
-            .await
-            {
-                Ok(result) => result,
-                Err(_) => Err(SessionError::InternalError(
-                    "exact hangup operation stopped unexpectedly".to_string(),
-                )),
-            };
-            completion_guard.finish(result.is_ok());
-            let _ = result_tx.send(result);
-        });
+        let spawned =
+            hangup_scheduler.spawn_lifecycle_task(async move {
+                let mut completion_guard = completion_guard;
+                let result = match std::panic::AssertUnwindSafe(
+                    coordinator.hangup_serialized_exact(&retained_handle, reason, dispatched),
+                )
+                .catch_unwind()
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(SessionError::InternalError(
+                        "exact hangup operation stopped unexpectedly".to_string(),
+                    )),
+                };
+                completion_guard.finish(result.is_ok());
+                let _ = result_tx.send(result);
+            });
         if !spawned {
             return shared_hangup_completion_result(control.wait_for_completion().await);
         }
@@ -11675,6 +11709,7 @@ impl UnifiedCoordinator {
         &self,
         handle: &SessionRegistryHandle,
         reason: String,
+        dispatched: Option<tokio::sync::oneshot::Sender<bool>>,
     ) -> Result<()> {
         let _bye_wait_owner = self.dialog_adapter.begin_outgoing_bye_wait_exact(handle)?;
         let initial_state = self
@@ -11702,6 +11737,9 @@ impl UnifiedCoordinator {
         // retained operation, and every waiter's terminal publication, until
         // the non-INVITE transaction timeout. The lane's own outcome decides.
         let hangup_was_noop = matches!(dispatch, Ok(false));
+        if let (Some(dispatched), Ok(transitioned)) = (dispatched, dispatch.as_ref()) {
+            let _ = dispatched.send(*transitioned);
+        }
         let dispatch = dispatch.map(|_| ());
         let retained_new_bye = matches!(initial_state, Some(CallState::Active))
             && self
