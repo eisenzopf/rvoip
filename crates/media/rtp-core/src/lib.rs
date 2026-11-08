@@ -72,6 +72,7 @@ mod error;
 
 // Main modules
 pub mod executor;
+pub mod hot_state;
 pub(crate) mod lane_clock;
 pub(crate) mod lane_poller;
 pub mod lane_tick;

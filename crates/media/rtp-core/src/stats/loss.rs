@@ -48,6 +48,11 @@ pub struct PacketLossTracker {
     /// Recent loss history (1=received, 0=lost) for burst detection
     loss_history: Vec<bool>,
 
+    /// Whether `loss_history` is maintained. Nothing reads it (burst
+    /// statistics come from `update_burst_stats`), so a hot-call-state
+    /// stream skips the per-packet shift and its heap line.
+    history_enabled: bool,
+
     /// Size of the loss history window
     history_size: usize,
 
@@ -78,6 +83,7 @@ impl PacketLossTracker {
             cycles: 0,
             received_window: HashSet::with_capacity(RECEIVED_WINDOW_SIZE as usize),
             loss_history: Vec::with_capacity(64),
+            history_enabled: true,
             history_size: 64,
             burst_count: 0,
             max_burst_length: 0,
@@ -96,7 +102,7 @@ impl PacketLossTracker {
             self.highest_seq = seq as i64;
             self.unique_received = 1;
             self.received_window.insert(seq as i64);
-            self.loss_history.push(true); // First packet is received
+            self.add_to_history(true); // First packet is received
             return PacketLossResult::FirstPacket { seq };
         }
 
@@ -297,8 +303,18 @@ impl PacketLossTracker {
             .retain(|received| *received >= oldest_tracked);
     }
 
+    /// Stop maintaining the write-only loss history (hot call state; see
+    /// `history_enabled`). Every statistic is unchanged.
+    pub(crate) fn disable_history(&mut self) {
+        self.history_enabled = false;
+        self.loss_history = Vec::new();
+    }
+
     /// Add a packet status to the loss history
     fn add_to_history(&mut self, received: bool) {
+        if !self.history_enabled {
+            return;
+        }
         if self.loss_history.len() >= self.history_size {
             self.loss_history.remove(0);
         }

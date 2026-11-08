@@ -234,11 +234,24 @@ impl OwnerSrtpRx {
 
     /// The inbound context for one datagram. Lock-free unless the installed
     /// context changed since the previous datagram.
-    #[inline]
+    #[cfg(test)]
     pub(crate) fn context(&mut self) -> Option<&mut SrtpContext> {
-        let epoch = self.shared.epoch();
-        if self.seen_epoch != Some(epoch) {
-            self.sync();
+        self.context_gated(true)
+    }
+
+    /// [`Self::context`] whose epoch load is skipped when `check` is false:
+    /// with hot call state the transport's doorbell has not rung since the
+    /// previous check, and every installation, replacement and rollback
+    /// rings it after it moves the epoch, so the skipped load would have
+    /// found the epoch this loop already synced to. Before the first sync
+    /// the epoch is always checked.
+    #[inline]
+    pub(crate) fn context_gated(&mut self, check: bool) -> Option<&mut SrtpContext> {
+        if check || self.seen_epoch.is_none() {
+            let epoch = self.shared.epoch();
+            if self.seen_epoch != Some(epoch) {
+                self.sync();
+            }
         }
         match self.held.as_mut() {
             Some((_, context)) => {
