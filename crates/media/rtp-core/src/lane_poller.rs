@@ -28,14 +28,32 @@
 //!
 //! A lane that is a multi-thread runtime gets one poller per worker and
 //! loops are assigned round-robin, so a lane keeps its parallelism.
+//!
+//! Lane tick ([`crate::lane_tick`]): on a dedicated current-thread lane the
+//! poller may run on a tick. After a pass it parks the lane thread until the
+//! next tick boundary instead of returning to `epoll_wait`, then yields once
+//! (Tokio polls the I/O and timer drivers with a zero timeout before
+//! re-polling a yielded task) and serves everything that became ready during
+//! the tick in one pass.
+//!
+//! Only the lane's own readiness and timers wait for the tick. Work handed
+//! over from another thread does not: a hosted loop woken from another
+//! thread (and a newly hosted loop) unparks the lane at once through the
+//! poller's [`TickWake`], and a non-hosted task on the lane woken from
+//! another thread (Tokio's injection queue) ends the sleep within
+//! [`TICK_SLICE`]: the lane sleeps in slices and checks the queue between
+//! them. A parked thread is not in `epoll_wait`, so Tokio's own cross-thread
+//! unpark cannot reach it; without this, waits on lane tasks from other
+//! threads (closing a stream, for one) would last up to a whole tick.
 
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
-use std::sync::OnceLock;
-use std::task::{Context, Poll};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Arc, OnceLock};
+use std::task::{Context, Poll, Waker};
 
 use futures::future::{AbortHandle, Abortable};
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -56,6 +74,85 @@ thread_local! {
     static LANE_DATAGRAMS: Cell<u64> = const { Cell::new(0) };
     /// Loop polls left in the current poller poll; `None` outside one.
     static LANE_POLL_BUDGET: Cell<Option<u32>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Poller passes run on this thread (one lane wakeup each), so a test
+    /// can count its own poller's wakeups exactly.
+    static TEST_PASSES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Lane tick: the longest single park of a ticking lane thread. Between
+/// slices the lane checks for work woken from other threads on non-hosted
+/// lane tasks (Tokio's injection queue), which cannot unpark it directly.
+pub(crate) const TICK_SLICE: std::time::Duration = std::time::Duration::from_micros(500);
+
+static NEXT_LANE_TOKEN: AtomicU64 = AtomicU64::new(1);
+
+thread_local! {
+    /// Lane tick: the token of the ticking poller running on this thread
+    /// (0: none).
+    static LANE_TOKEN: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Lane tick: the parent waker a ticking poller hands its hosted loops (in
+/// place of its task waker), and the handle that cuts its tick sleep short.
+///
+/// A wake on the lane's own thread (socket readiness dispatched by the
+/// lane's I/O driver, a loop waking itself) only wakes the poller task, as
+/// without the tick, and is served by the next tick. A wake from any other
+/// thread (a cross-thread hand-off, a cancellation, an abort) also unparks
+/// the lane thread, so it is served at once. Cross-thread wakes of hosted
+/// loops are control-plane rate (the media path of a lane is lane-local), so
+/// this does not bring back per-packet wakeups.
+pub(crate) struct TickWake {
+    task: futures::task::AtomicWaker,
+    poked: AtomicBool,
+    lane: u64,
+    thread: OnceLock<std::thread::Thread>,
+}
+
+impl TickWake {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            task: futures::task::AtomicWaker::new(),
+            poked: AtomicBool::new(false),
+            lane: NEXT_LANE_TOKEN.fetch_add(1, AtomicOrdering::Relaxed),
+            thread: OnceLock::new(),
+        })
+    }
+
+    /// The poller runs on this thread from now on.
+    fn bind_to_current_thread(&self) {
+        let _ = self.thread.set(std::thread::current());
+        LANE_TOKEN.with(|token| token.set(self.lane));
+    }
+
+    /// End a tick sleep now (or the next one, if the lane is not sleeping).
+    pub(crate) fn poke(&self) {
+        self.poked.store(true, AtomicOrdering::Release);
+        if let Some(thread) = self.thread.get() {
+            thread.unpark();
+        }
+    }
+
+    fn take_poke(&self) -> bool {
+        self.poked.swap(false, AtomicOrdering::AcqRel)
+    }
+}
+
+impl std::task::Wake for TickWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.task.wake();
+        if LANE_TOKEN.with(Cell::get) != self.lane {
+            self.poke();
+        }
+    }
 }
 
 /// A hosted receive loop received one datagram. Called only from loops that
@@ -116,14 +213,39 @@ impl Future for Budgeted {
 /// One poller task: hosts receive loops sent to it and polls the ready ones.
 pub(crate) struct LanePoller {
     jobs: mpsc::UnboundedSender<LaneFuture>,
+    /// Lane tick: published by a poller that ticks, so that a newly hosted
+    /// loop or task cuts a tick sleep short (call setup and first audio do
+    /// not wait for the quantum).
+    tick_wake: Arc<OnceLock<Arc<TickWake>>>,
 }
 
 impl LanePoller {
     /// Start a poller task on `runtime`.
     pub(crate) fn start(runtime: &Handle) -> Self {
         let (jobs, receiver) = mpsc::unbounded_channel();
-        drop(runtime.spawn(run_poller(receiver)));
-        Self { jobs }
+        let tick_wake = Arc::new(OnceLock::new());
+        drop(runtime.spawn(run_poller(receiver, Arc::clone(&tick_wake))));
+        Self { jobs, tick_wake }
+    }
+
+    /// Lane tick test seam: start a poller with an explicit tick scheduler
+    /// and lane-clock grid, on any runtime.
+    #[cfg(test)]
+    pub(crate) fn start_with_tick(
+        runtime: &Handle,
+        tick: crate::lane_tick::TickScheduler,
+        grid: Option<crate::lane_tick::TickGrid>,
+    ) -> Self {
+        let (jobs, receiver) = mpsc::unbounded_channel();
+        let tick_wake = Arc::new(OnceLock::new());
+        let published = Arc::clone(&tick_wake);
+        drop(runtime.spawn(async move {
+            let wake = TickWake::new();
+            wake.bind_to_current_thread();
+            let _ = published.set(Arc::clone(&wake));
+            run_poller_with(receiver, Some((tick, wake)), grid).await;
+        }));
+        Self { jobs, tick_wake }
     }
 
     /// Host `future` on this poller. When the poller is gone (its runtime
@@ -156,10 +278,17 @@ impl LanePoller {
             }
         });
         match self.jobs.send(hosted) {
-            Ok(()) => Ok(LaneTaskHandle {
-                abort,
-                done: done_rx,
-            }),
+            Ok(()) => {
+                if let Some(wake) = self.tick_wake.get() {
+                    // Lane tick: a ticking lane serves the new loop now, not
+                    // at the next boundary. Harmless when it is not parked.
+                    wake.poke();
+                }
+                Ok(LaneTaskHandle {
+                    abort,
+                    done: done_rx,
+                })
+            }
             Err(mpsc::error::SendError(hosted)) => Err(hosted),
         }
     }
@@ -170,69 +299,217 @@ impl LanePoller {
 /// when polling the woken futures took past the next deadline.
 const LANE_TIMER_ROUNDS_PER_WAKEUP: u32 = 4;
 
-async fn run_poller(mut jobs: mpsc::UnboundedReceiver<LaneFuture>) {
+/// What one poller pass asks the poller loop to do next.
+enum PassStep {
+    /// The job channel closed and no loop is hosted.
+    Finished,
+    /// Lane tick: run the next pass after one zero-timeout driver poll.
+    Continue,
+    /// Lane tick: park the lane thread until this tick boundary first.
+    Sleep(std::time::Instant),
+}
+
+async fn run_poller(
+    jobs: mpsc::UnboundedReceiver<LaneFuture>,
+    tick_slot: Arc<OnceLock<Arc<TickWake>>>,
+) {
+    // Lane tick: `Some` only with the tick active on a dedicated
+    // current-thread media lane; grid timers only for a poller that ticks.
+    let tick = crate::lane_tick::scheduler_for_current_lane().map(|scheduler| {
+        let wake = TickWake::new();
+        wake.bind_to_current_thread();
+        let _ = tick_slot.set(Arc::clone(&wake));
+        (scheduler, wake)
+    });
+    let grid = tick.as_ref().and_then(|_| crate::lane_tick::timer_grid());
+    run_poller_with(jobs, tick, grid).await;
+}
+
+/// Lane tick: whether a non-hosted task on this lane was woken from another
+/// thread (it waits in Tokio's injection queue).
+fn remote_work(metrics: Option<&tokio::runtime::RuntimeMetrics>) -> bool {
+    metrics.is_some_and(|metrics| metrics.global_queue_depth() > 0)
+}
+
+async fn run_poller_with(
+    mut jobs: mpsc::UnboundedReceiver<LaneFuture>,
+    tick: Option<(crate::lane_tick::TickScheduler, Arc<TickWake>)>,
+    grid: Option<crate::lane_tick::TickGrid>,
+) {
+    use crate::lane_tick::{PassReport, TickDecision};
+    let (mut tick, tick_wake) = match tick {
+        Some((scheduler, wake)) => (Some(scheduler), Some(wake)),
+        None => (None, None),
+    };
+    // Lane tick: the waker hosted loops see while ticking, and the lane
+    // runtime's injection-queue depth (both unused without the tick).
+    let tick_waker: Option<Waker> = tick_wake.as_ref().map(|wake| Waker::from(Arc::clone(wake)));
+    let lane_metrics = tick_wake
+        .as_ref()
+        .and_then(|_| Handle::try_current().ok())
+        .map(|handle| handle.metrics());
+    let ticking = tick.is_some();
     let mut loops: FuturesUnordered<Budgeted> = FuturesUnordered::new();
     let mut counters = LanePollerCounters::new();
     // The lane clock. Futures polled below file their deadlines in it
     // (through `media_clock::sleep_until`) instead of the runtime's timer
     // wheel when the lane timer is enabled; the poller arms one runtime timer
-    // at its earliest deadline. Without the switch the clock stays empty.
+    // at its earliest deadline (none while ticking: the tick serves it).
+    // Without the switch the clock stays empty. With grid timers the clock
+    // files deadlines on the tick grid.
     let lane_timer = crate::executor::lane_timer_enabled();
-    let mut clock = crate::lane_clock::LaneClockDriver::new();
+    let mut clock = crate::lane_clock::LaneClockDriver::with_grid(grid);
     let mut timer_counters = crate::executor::LaneTimerCounters::new();
+    let mut tick_counters = crate::lane_tick::LaneTickCounterBatch::new();
     let mut accepting = true;
-    std::future::poll_fn(|cx| {
-        LANE_DATAGRAMS.with(|count| count.set(0));
-        LANE_POLL_BUDGET.with(|budget| budget.set(Some(LANE_SOCKET_POLLS_PER_WAKEUP)));
-        let _current_clock = lane_timer.then(|| crate::lane_clock::enter(clock.clock()));
-        while accepting {
-            match jobs.poll_recv(cx) {
-                Poll::Ready(Some(job)) => loops.push(Budgeted { inner: job }),
-                Poll::Ready(None) => accepting = false,
-                Poll::Pending => break,
+    loop {
+        let step = std::future::poll_fn(|cx| {
+            #[cfg(test)]
+            TEST_PASSES.with(|passes| passes.set(passes.get() + 1));
+            // Lane tick: the pass's start.
+            let started = ticking.then(std::time::Instant::now);
+            if let Some(wake) = tick_wake.as_ref() {
+                wake.task.register(cx.waker());
+            }
+            if let (Some(scheduler), Some(started)) = (tick.as_mut(), started) {
+                if let Some(late) = scheduler.begin_pass(started) {
+                    tick_counters.lateness(late);
+                }
+            }
+            LANE_DATAGRAMS.with(|count| count.set(0));
+            LANE_POLL_BUDGET.with(|budget| budget.set(Some(LANE_SOCKET_POLLS_PER_WAKEUP)));
+            let _current_clock = lane_timer.then(|| crate::lane_clock::enter(clock.clock()));
+            while accepting {
+                match jobs.poll_recv(cx) {
+                    Poll::Ready(Some(job)) => loops.push(Budgeted { inner: job }),
+                    Poll::Ready(None) => accepting = false,
+                    Poll::Pending => break,
+                }
+            }
+            let mut rounds = 0;
+            let mut timer_wakes = 0;
+            let mut deadlines_left = false;
+            loop {
+                // Wake every lane-clock entry that is due, so its future is
+                // polled in this same pass.
+                let mut fired = false;
+                if lane_timer {
+                    let (wakes, arms) = clock.wake_due();
+                    timer_wakes += wakes;
+                    timer_counters.poll(false, wakes, arms);
+                }
+                // Each `Ready(Some(()))` is one loop that ended; keep serving
+                // the others. `Pending` means every ready loop was polled (or
+                // the poller must yield); `Ready(None)` means no loop is
+                // hosted.
+                match tick_waker.as_ref() {
+                    // Lane tick: hosted loops wake the poller through
+                    // `TickWake`, so a wake from another thread also cuts a
+                    // tick sleep short.
+                    Some(waker) => {
+                        let mut children = Context::from_waker(waker);
+                        while let Poll::Ready(Some(())) = loops.poll_next_unpin(&mut children) {}
+                    }
+                    None => while let Poll::Ready(Some(())) = loops.poll_next_unpin(cx) {},
+                }
+                if lane_timer {
+                    if ticking {
+                        // No runtime timer while ticking. A deadline that
+                        // fell due during this pass gets another round now;
+                        // later ones are served by a later tick.
+                        fired = clock.has_due(tokio::time::Instant::now());
+                    } else if clock.poll_timer(cx).is_ready() {
+                        fired = true;
+                    }
+                }
+                if !fired {
+                    break;
+                }
+                rounds += 1;
+                if rounds >= LANE_TIMER_ROUNDS_PER_WAKEUP {
+                    // Serve the rest on the next poll.
+                    if ticking {
+                        deadlines_left = true;
+                    } else {
+                        cx.waker().wake_by_ref();
+                    }
+                    break;
+                }
+            }
+            // Runtime timer expiries this pass, each counted once by the
+            // driver (also those whose entries `wake_due` served first).
+            for _ in 0..clock.take_expiries() {
+                timer_counters.poll(true, 0, 0);
+            }
+            let left = LANE_POLL_BUDGET.with(|budget| budget.replace(None));
+            let exhausted = left == Some(0);
+            let datagrams = LANE_DATAGRAMS.with(|count| count.replace(0));
+            counters.wakeup(datagrams, exhausted);
+            tick_counters.timers(clock.take_resets(), clock.clock().take_coalesced());
+            if !accepting && loops.is_empty() {
+                return Poll::Ready(PassStep::Finished);
+            }
+            let (Some(scheduler), Some(started)) = (tick.as_mut(), started) else {
+                return Poll::Pending;
+            };
+            let polled =
+                LANE_SOCKET_POLLS_PER_WAKEUP - left.unwrap_or(LANE_SOCKET_POLLS_PER_WAKEUP);
+            tick_counters.pass(polled > 0 || datagrams > 0 || timer_wakes > 0);
+            match scheduler.end_pass(PassReport {
+                started,
+                ended: std::time::Instant::now(),
+                hosting: !loops.is_empty(),
+                must_continue: exhausted || deadlines_left,
+            }) {
+                TickDecision::Park => {
+                    // Nothing hosted: park as without the tick. A lane clock
+                    // that still holds a deadline needs its runtime timer.
+                    if lane_timer && clock.poll_timer(cx).is_ready() {
+                        cx.waker().wake_by_ref();
+                    }
+                    Poll::Pending
+                }
+                TickDecision::Continue => {
+                    tick_counters.overrun();
+                    Poll::Ready(PassStep::Continue)
+                }
+                TickDecision::SleepUntil(at) => Poll::Ready(PassStep::Sleep(at)),
+            }
+        })
+        .await;
+        match step {
+            PassStep::Finished => break,
+            PassStep::Continue => tokio::task::yield_now().await,
+            PassStep::Sleep(until) => {
+                // The lane's own readiness events queue in the kernel until
+                // the boundary. Work from other threads ends the sleep: a
+                // hosted loop woken elsewhere (or a new one) pokes and
+                // unparks the thread; a non-hosted lane task woken elsewhere
+                // sits in Tokio's injection queue, checked between slices.
+                let wake = tick_wake.as_ref().expect("only a ticking poller sleeps");
+                let mut slices = 0u64;
+                let mut cut = false;
+                loop {
+                    if wake.take_poke() || remote_work(lane_metrics.as_ref()) {
+                        cut = true;
+                        break;
+                    }
+                    let Some(rest) = until
+                        .checked_duration_since(std::time::Instant::now())
+                        .filter(|rest| !rest.is_zero())
+                    else {
+                        break;
+                    };
+                    std::thread::park_timeout(rest.min(TICK_SLICE));
+                    slices += 1;
+                }
+                tick_counters.slept(slices, cut);
+                // Tokio polls its drivers with a zero timeout before it polls
+                // a yielded task again: one `epoll_wait` for the whole tick.
+                tokio::task::yield_now().await;
             }
         }
-        let mut rounds = 0;
-        loop {
-            // Wake every lane-clock entry that is due, so its future is
-            // polled in this same pass.
-            let mut fired = false;
-            if lane_timer {
-                let (wakes, arms) = clock.wake_due();
-                timer_counters.poll(false, wakes, arms);
-            }
-            // Each `Ready(Some(()))` is one loop that ended; keep serving the
-            // others. `Pending` means every ready loop was polled (or the
-            // poller must yield); `Ready(None)` means no loop is hosted.
-            while let Poll::Ready(Some(())) = loops.poll_next_unpin(cx) {}
-            if lane_timer && clock.poll_timer(cx).is_ready() {
-                fired = true;
-            }
-            if !fired {
-                break;
-            }
-            rounds += 1;
-            if rounds >= LANE_TIMER_ROUNDS_PER_WAKEUP {
-                // Serve the rest on the next poll.
-                cx.waker().wake_by_ref();
-                break;
-            }
-        }
-        // Runtime timer expiries this pass, each counted once by the driver
-        // (also those whose entries `wake_due` served first).
-        for _ in 0..clock.take_expiries() {
-            timer_counters.poll(true, 0, 0);
-        }
-        let exhausted = LANE_POLL_BUDGET.with(|budget| budget.replace(None)) == Some(0);
-        let datagrams = LANE_DATAGRAMS.with(|count| count.replace(0));
-        counters.wakeup(datagrams, exhausted);
-        if !accepting && loops.is_empty() {
-            Poll::Ready(())
-        } else {
-            Poll::Pending
-        }
-    })
-    .await;
+    }
 }
 
 struct LaneShards {
@@ -395,7 +672,10 @@ mod tests {
     async fn a_closed_poller_hands_the_loop_back() {
         let (jobs, receiver) = mpsc::unbounded_channel::<LaneFuture>();
         drop(receiver);
-        let poller = LanePoller { jobs };
+        let poller = LanePoller {
+            jobs,
+            tick_wake: Arc::default(),
+        };
         let back = poller.host(async {});
         assert!(back.is_err(), "the caller spawns it instead");
     }
@@ -533,6 +813,375 @@ mod tests {
             .ok()
             .expect("poller is running");
         assert_eq!(rx.await, Ok(false));
+    }
+
+    // ---- Lane tick: a ticking poller ----
+
+    fn ticking(quantum: Duration) -> crate::lane_tick::TickScheduler {
+        crate::lane_tick::TickScheduler::new(crate::lane_tick::TickGrid::process(quantum))
+    }
+
+    /// Host `streams` paced loops on `poller`, each waiting for ten 20 ms
+    /// deadlines (`media_clock::sleep_until`, so the lane clock under v2) at
+    /// phases 500 µs apart, and wait for them. Returns (poller passes run on
+    /// this thread meanwhile, deadlines observed early, worst lateness).
+    async fn serve_paced_streams(poller: LanePoller, streams: u64) -> (u64, usize, Duration) {
+        let passes_before = TEST_PASSES.with(Cell::get);
+        let start = tokio::time::Instant::now() + Duration::from_millis(10);
+        let early = Arc::new(AtomicUsize::new(0));
+        let worst_us = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for index in 0..streams {
+            let early = Arc::clone(&early);
+            let worst_us = Arc::clone(&worst_us);
+            handles.push(
+                poller
+                    .host(async move {
+                        for frame in 0..10u32 {
+                            let deadline = start
+                                + Duration::from_millis(20) * frame
+                                + Duration::from_micros(500 * index);
+                            crate::media_clock::sleep_until(deadline).await;
+                            let now = tokio::time::Instant::now();
+                            if now < deadline {
+                                early.fetch_add(1, Ordering::AcqRel);
+                            }
+                            worst_us
+                                .fetch_max((now - deadline).as_micros() as usize, Ordering::AcqRel);
+                        }
+                    })
+                    .ok()
+                    .expect("poller is running"),
+            );
+        }
+        for handle in handles {
+            tokio::time::timeout(Duration::from_secs(5), handle.join())
+                .await
+                .expect("every paced loop finishes");
+        }
+        drop(poller);
+        let passes = TEST_PASSES.with(Cell::get) - passes_before;
+        let worst = Duration::from_micros(worst_us.load(Ordering::Acquire) as u64);
+        (passes, early.load(Ordering::Acquire), worst)
+    }
+
+    #[tokio::test]
+    async fn a_ticking_poller_with_grid_timers_serves_paced_streams_in_far_fewer_wakeups() {
+        let _v2 = crate::executor::override_media_executor_config_on_this_thread(
+            crate::executor::MediaExecutorConfig::v2(),
+        );
+        if !crate::executor::lane_timer_enabled() {
+            return; // the process disabled the switch
+        }
+        let quantum = Duration::from_millis(5);
+        let tick_counters_before = crate::lane_tick::lane_tick_counters();
+        // This test thread is not a media lane, so `start` keeps immediate
+        // wakeups: one lane-clock expiry (and pass) per distinct deadline.
+        let (exact_passes, exact_early, _) =
+            serve_paced_streams(LanePoller::start(&Handle::current()), 40).await;
+        let grid = crate::lane_tick::TickGrid::process(quantum);
+        let (ticked_passes, ticked_early, worst) = serve_paced_streams(
+            LanePoller::start_with_tick(&Handle::current(), ticking(quantum), Some(grid)),
+            40,
+        )
+        .await;
+        assert_eq!(exact_early + ticked_early, 0, "never early");
+        // 400 deadlines over ~210 ms. Exact: an expiry per distinct
+        // millisecond (~200). Ticked: one pass per 5 ms boundary (~43), plus
+        // a few for hosting and the end.
+        assert!(
+            ticked_passes <= 80,
+            "ticked passes {ticked_passes} (exact {exact_passes})"
+        );
+        assert!(
+            exact_passes >= 2 * ticked_passes,
+            "the tick coalesces wakeups: exact {exact_passes} vs ticked {ticked_passes}"
+        );
+        // One quantum plus generous scheduling noise for a shared test host.
+        assert!(
+            worst < quantum + Duration::from_millis(25),
+            "worst lateness {worst:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let after = crate::lane_tick::lane_tick_counters();
+        assert!(after.tick_passes > tick_counters_before.tick_passes);
+        assert!(after.tick_sleeps > tick_counters_before.tick_sleeps);
+        assert!(
+            after.unsupported_lanes > tick_counters_before.unsupported_lanes,
+            "the non-lane poller was counted as unable to tick"
+        );
+    }
+
+    /// Real time with loose bounds (the exact bounds are proven against a
+    /// fake clock in `lane_tick`): hosted runtime timers complete never
+    /// early, and join after they return.
+    #[tokio::test]
+    async fn a_ticking_poller_serves_hosted_timers_on_ticks_and_never_early() {
+        let quantum = Duration::from_millis(2);
+        let before = crate::lane_tick::lane_tick_counters();
+        let poller = LanePoller::start_with_tick(&Handle::current(), ticking(quantum), None);
+        let start = tokio::time::Instant::now();
+        let early = Arc::new(AtomicUsize::new(0));
+        let worst_us = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for index in 0..20u64 {
+            let early = Arc::clone(&early);
+            let worst_us = Arc::clone(&worst_us);
+            handles.push(
+                poller
+                    .host(async move {
+                        for frame in 1..=10u64 {
+                            let deadline = start
+                                + Duration::from_millis(7 * frame)
+                                + Duration::from_micros(300 * index);
+                            tokio::time::sleep_until(deadline).await;
+                            let now = tokio::time::Instant::now();
+                            if now < deadline {
+                                early.fetch_add(1, Ordering::AcqRel);
+                            }
+                            worst_us
+                                .fetch_max((now - deadline).as_micros() as usize, Ordering::AcqRel);
+                        }
+                    })
+                    .ok()
+                    .expect("poller is running"),
+            );
+        }
+        for handle in handles {
+            tokio::time::timeout(Duration::from_secs(5), handle.join())
+                .await
+                .expect("every hosted loop finishes on a ticking lane");
+        }
+        assert_eq!(early.load(Ordering::Acquire), 0, "never early");
+        let worst = Duration::from_micros(worst_us.load(Ordering::Acquire) as u64);
+        assert!(
+            worst < quantum + Duration::from_millis(25),
+            "worst lateness {worst:?}"
+        );
+        drop(poller);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let after = crate::lane_tick::lane_tick_counters();
+        assert!(
+            after.tick_passes > before.tick_passes,
+            "passes ran as ticks"
+        );
+        assert!(
+            after.tick_sleeps > before.tick_sleeps,
+            "the lane thread slept between ticks"
+        );
+    }
+
+    #[tokio::test]
+    async fn abort_and_join_work_on_a_ticking_lane() {
+        let poller = LanePoller::start_with_tick(
+            &Handle::current(),
+            ticking(Duration::from_millis(5)),
+            None,
+        );
+        let owned = Arc::new(());
+        let held = Arc::clone(&owned);
+        let handle = poller
+            .host(async move {
+                let _held = held;
+                std::future::pending::<()>().await;
+            })
+            .ok()
+            .expect("poller is running");
+        tokio::time::sleep(Duration::from_millis(12)).await;
+        assert_eq!(Arc::strong_count(&owned), 2, "the loop is alive");
+        handle.abort();
+        tokio::time::timeout(Duration::from_secs(2), handle.join())
+            .await
+            .expect("join resolves after abort on a ticking lane");
+        assert_eq!(Arc::strong_count(&owned), 1);
+    }
+
+    #[test]
+    fn hosting_a_loop_cuts_a_tick_sleep_short() {
+        // A 50 ms quantum makes the effect unambiguous: a loop hosted 10 ms
+        // into a tick would otherwise wait for the 50 ms boundary.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let poller = Arc::new(runtime.block_on(async {
+            LanePoller::start_with_tick(
+                &Handle::current(),
+                ticking(Duration::from_millis(50)),
+                None,
+            )
+        }));
+        let (first_poll_tx, first_poll_rx) = std::sync::mpsc::channel::<std::time::Instant>();
+        let remote = Arc::clone(&poller);
+        let host = std::thread::spawn(move || {
+            // Keep the lane ticking, then host from another thread mid-tick.
+            let keep = remote
+                .host(std::future::pending::<()>())
+                .ok()
+                .expect("poller is running");
+            std::thread::sleep(Duration::from_millis(60));
+            let hosted_at = std::time::Instant::now();
+            let _probe = remote
+                .host(async move {
+                    let _ = first_poll_tx.send(std::time::Instant::now());
+                })
+                .ok()
+                .expect("poller is running");
+            std::thread::sleep(Duration::from_millis(200));
+            (hosted_at, keep)
+        });
+        // Drive the lane thread (it ticks inside this block_on).
+        let polled_at = runtime.block_on(async {
+            loop {
+                if let Ok(at) = first_poll_rx.try_recv() {
+                    break at;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+        let (hosted_at, keep) = host.join().unwrap();
+        keep.abort();
+        let waited = polled_at.saturating_duration_since(hosted_at);
+        assert!(
+            waited < Duration::from_millis(25),
+            "the new loop waited {waited:?}"
+        );
+        drop(poller);
+    }
+
+    /// The outcome of [`cross_thread_handoff`].
+    struct Handoff {
+        latencies: Vec<Duration>,
+        before: crate::lane_tick::LaneTickCounters,
+        after: crate::lane_tick::LaneTickCounters,
+    }
+
+    /// A producer on another thread hands five items, 37 ms apart, to a
+    /// consumer on a ticking lane with a 50 ms quantum. `hosted`: the
+    /// consumer is a loop hosted on the poller (woken through `TickWake`);
+    /// otherwise it is an ordinary task on the lane runtime (woken through
+    /// Tokio's injection queue).
+    fn cross_thread_handoff(hosted: bool) -> Handoff {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let poller = runtime.block_on(async {
+            LanePoller::start_with_tick(
+                &Handle::current(),
+                ticking(Duration::from_millis(50)),
+                None,
+            )
+        });
+        // A hosted loop that never ends keeps the lane ticking.
+        let keep = poller
+            .host(std::future::pending::<()>())
+            .ok()
+            .expect("poller is running");
+        let (items_tx, mut items_rx) = mpsc::unbounded_channel::<std::time::Instant>();
+        let (served_tx, mut served_rx) = mpsc::unbounded_channel::<Duration>();
+        let consumer = async move {
+            while let Some(sent) = items_rx.recv().await {
+                let _ = served_tx.send(sent.elapsed());
+            }
+        };
+        let _consumer = if hosted {
+            Some(poller.host(consumer).ok().expect("poller is running"))
+        } else {
+            drop(runtime.spawn(consumer));
+            None
+        };
+        let before = crate::lane_tick::lane_tick_counters();
+        let producer = std::thread::spawn(move || {
+            for _ in 0..5 {
+                std::thread::sleep(Duration::from_millis(37));
+                let _ = items_tx.send(std::time::Instant::now());
+            }
+        });
+        let latencies = runtime.block_on(async {
+            let mut latencies = Vec::new();
+            while latencies.len() < 5 {
+                let latency = tokio::time::timeout(Duration::from_secs(5), served_rx.recv())
+                    .await
+                    .expect("every hand-off is served")
+                    .expect("consumer alive");
+                latencies.push(latency);
+            }
+            latencies
+        });
+        producer.join().unwrap();
+        keep.abort();
+        drop(poller);
+        // Dropping the runtime drops the poller, which flushes its counters.
+        drop(runtime);
+        let after = crate::lane_tick::lane_tick_counters();
+        Handoff {
+            latencies,
+            before,
+            after,
+        }
+    }
+
+    fn assert_served_promptly_without_spinning(hosted: bool) {
+        let Handoff {
+            latencies,
+            before,
+            after,
+        } = cross_thread_handoff(hosted);
+        for latency in &latencies {
+            // Within one tick is the requirement; the lane does far better:
+            // it is unparked (hosted) or sees the injection queue within a
+            // 500 µs slice. Generous bounds for a shared test host.
+            assert!(
+                *latency < Duration::from_millis(20),
+                "hosted={hosted}: a hand-off waited {latency:?} on a 50 ms tick"
+            );
+        }
+        // Nearly every hand-off lands while the lane sleeps and cuts that
+        // sleep short (one landing mid-pass is served by that pass instead).
+        assert!(
+            after.tick_sleeps_cut >= before.tick_sleeps_cut + 3,
+            "hosted={hosted}: hand-offs cut tick sleeps short"
+        );
+        // No busy-wait: ~190 ms of a 50 ms tick is a few dozen passes and a
+        // few hundred 500 µs slices (other tests may add some); spinning
+        // would be hundreds of thousands.
+        let passes = after.tick_passes - before.tick_passes;
+        let slices = after.tick_slices - before.tick_slices;
+        assert!(passes < 2_000, "passes: {passes}");
+        assert!(slices < 5_000, "slices: {slices}");
+    }
+
+    #[test]
+    fn a_hosted_loop_woken_from_another_thread_is_served_without_waiting_for_the_tick() {
+        assert_served_promptly_without_spinning(true);
+    }
+
+    #[test]
+    fn a_lane_task_woken_from_another_thread_is_served_without_waiting_for_the_tick() {
+        assert_served_promptly_without_spinning(false);
+    }
+
+    #[test]
+    fn a_wake_on_the_lane_thread_does_not_unpark_it_but_a_foreign_one_does() {
+        let wake = TickWake::new();
+        wake.bind_to_current_thread();
+        let waker = Waker::from(Arc::clone(&wake));
+        waker.wake_by_ref();
+        assert!(
+            !wake.take_poke(),
+            "a wake on the lane's own thread waits for the tick"
+        );
+        let foreign = waker.clone();
+        std::thread::spawn(move || foreign.wake_by_ref())
+            .join()
+            .unwrap();
+        assert!(
+            wake.take_poke(),
+            "a wake from another thread cuts the sleep short"
+        );
+        assert!(!wake.take_poke());
+        LANE_TOKEN.with(|token| token.set(0));
     }
 
     #[test]

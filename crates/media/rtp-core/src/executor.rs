@@ -40,6 +40,10 @@
 //! - [`MediaExecutorConfig::pcm_pool`]: decoded and concealed PCM buffers on
 //!   the media path are reused through a small per-thread pool instead of
 //!   being allocated per frame.
+//! - [`MediaExecutorConfig::lane_tick`]: a lane poller on a dedicated
+//!   current-thread media lane serves its sockets and deadlines on a tick
+//!   grid instead of waking for every readiness event (see
+//!   [`crate::lane_tick`]). Needs the lane poller.
 //!
 //! Every decision is read when an object is built (a transport starts, a
 //! session or SRTP context is created, a poller starts), never per packet.
@@ -49,11 +53,15 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 
 use crate::packet::{RtpHeader, RtpPacket};
+
+// ---- Lane tick (wakeup and timer coalescing) ----
+pub use crate::lane_tick::LaneTick;
+// ---- End lane tick ----
 
 /// Which media executor the process runs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -149,6 +157,17 @@ pub struct MediaExecutorConfig {
     /// a small per-thread pool instead of being allocated per frame.
     pub pcm_pool: bool,
     // ---- End media-layer inline receive ----
+    // ---- Lane tick (wakeup and timer coalescing) ----
+    /// Lane pollers on [`MediaLanes::Dedicated`] lanes run on a tick of this
+    /// quantum: after a pass the lane thread sleeps to the next tick boundary
+    /// and serves every socket and deadline that became ready meanwhile in
+    /// one pass (see [`crate::lane_tick`]). `None`: every readiness event
+    /// wakes the lane. Needs [`Self::lane_poller`]; on a lane that is not a
+    /// dedicated current-thread lane it reads as off for that lane.
+    ///
+    /// [`MediaLanes::Dedicated`]: crate::task_runtime::MediaLanes::Dedicated
+    pub lane_tick: Option<LaneTick>,
+    // ---- End lane tick ----
 }
 
 impl Default for MediaExecutorConfig {
@@ -170,10 +189,13 @@ impl MediaExecutorConfig {
             // Media-layer inline receive.
             inline_decode: false,
             pcm_pool: false,
+            // Lane tick.
+            lane_tick: None,
         }
     }
 
-    /// The inline executor with every switch on.
+    /// The inline executor with every switch on, and a 2 ms lane tick with
+    /// grid timers.
     pub fn v2() -> Self {
         Self {
             mode: MediaExecutorMode::V2,
@@ -185,6 +207,8 @@ impl MediaExecutorConfig {
             // Media-layer inline receive.
             inline_decode: true,
             pcm_pool: true,
+            // Lane tick.
+            lane_tick: Some(LaneTick::new(Duration::from_millis(2)).with_grid_timers(true)),
         }
     }
 
@@ -240,6 +264,16 @@ impl MediaExecutorConfig {
 
     // ---- End media-layer inline receive ----
 
+    // ---- Lane tick ----
+
+    /// Set [`Self::lane_tick`].
+    pub fn with_lane_tick(mut self, tick: Option<LaneTick>) -> Self {
+        self.lane_tick = tick;
+        self
+    }
+
+    // ---- End lane tick ----
+
     /// Check the configuration without installing it.
     ///
     /// A switch whose prerequisite is off is not an error: it reads as off
@@ -247,6 +281,15 @@ impl MediaExecutorConfig {
     /// loops on their own tasks). Rules for switches that need a specific
     /// media runtime layout are checked here.
     pub fn validate(&self) -> Result<(), MediaExecutorConfigError> {
+        // ---- Lane tick ----
+        if let Some(tick) = self.lane_tick {
+            if !tick.has_valid_quantum() {
+                return Err(MediaExecutorConfigError::InvalidLaneTickQuantum {
+                    quantum: tick.quantum,
+                });
+            }
+        }
+        // ---- End lane tick ----
         Ok(())
     }
 
@@ -293,6 +336,23 @@ impl MediaExecutorConfig {
     }
 
     // ---- End media-layer inline receive ----
+
+    // ---- Lane tick ----
+
+    /// The lane tick lane pollers use, when one is configured and the lane
+    /// poller is active. A poller on a lane that is not a dedicated
+    /// current-thread lane still keeps immediate wakeups.
+    pub fn lane_tick_active(&self) -> Option<LaneTick> {
+        self.lane_tick.filter(|_| self.lane_poller_active())
+    }
+
+    /// Whether a ticking poller files lane-clock deadlines on the tick grid
+    /// ([`LaneTick::grid_timers`], which also needs the lane clock).
+    pub fn lane_tick_grid_timers_active(&self) -> bool {
+        self.lane_timer_active() && self.lane_tick_active().is_some_and(|tick| tick.grid_timers)
+    }
+
+    // ---- End lane tick ----
 }
 
 /// Why a [`MediaExecutorConfig`] was rejected.
@@ -315,6 +375,17 @@ pub enum MediaExecutorConfigError {
         /// The configuration in effect.
         active: Box<MediaExecutorConfig>,
     },
+    // ---- Lane tick ----
+    /// A [`LaneTick::quantum`] that does not divide the 20 ms media clock
+    /// at the runtime's 1 ms timer resolution.
+    #[error(
+        "the lane tick quantum must be 1, 2, 4 or 5 ms (a divisor of the 20 ms media clock), got {quantum:?}"
+    )]
+    InvalidLaneTickQuantum {
+        /// The rejected quantum.
+        quantum: Duration,
+    },
+    // ---- End lane tick ----
 }
 
 static PROCESS_CONFIG: OnceLock<MediaExecutorConfig> = OnceLock::new();
@@ -430,6 +501,23 @@ pub fn pcm_pool_enabled() -> bool {
 }
 
 // ---- End media-layer inline receive ----
+
+// ---- Lane tick ----
+
+/// The lane tick in effect on this thread
+/// ([`MediaExecutorConfig::lane_tick_active`]). Read when a lane poller or a
+/// paced queue is built.
+pub fn active_lane_tick() -> Option<LaneTick> {
+    with_config(MediaExecutorConfig::lane_tick_active)
+}
+
+/// Whether a ticking poller started now files lane-clock deadlines on the
+/// tick grid.
+pub fn lane_tick_grid_timers_enabled() -> bool {
+    with_config(MediaExecutorConfig::lane_tick_grid_timers_active)
+}
+
+// ---- End lane tick ----
 
 /// Restores the previous per-thread override when dropped.
 #[doc(hidden)]
@@ -1210,6 +1298,93 @@ mod tests {
         assert!(v2.pcm_pool_active());
         assert!(v2.validate().is_ok());
     }
+
+    // ---- Lane tick ----
+
+    #[test]
+    fn the_lane_tick_is_off_in_v1_and_a_2ms_grid_tick_in_v2() {
+        let v1 = MediaExecutorConfig::v1();
+        assert_eq!(v1.lane_tick, None);
+        assert_eq!(v1.lane_tick_active(), None);
+        assert!(!v1.lane_tick_grid_timers_active());
+
+        let v2 = MediaExecutorConfig::v2();
+        let tick = v2.lane_tick.expect("v2 ticks");
+        assert_eq!(tick.quantum, Duration::from_millis(2));
+        assert!(tick.grid_timers);
+        assert_eq!(v2.lane_tick_active(), Some(tick));
+        assert!(v2.lane_tick_grid_timers_active());
+
+        assert_eq!(
+            v2.clone()
+                .with_mode(MediaExecutorMode::V1)
+                .lane_tick_active(),
+            None,
+            "never under v1"
+        );
+        let no_poller = v2.clone().with_lane_poller(false);
+        assert!(
+            no_poller.validate().is_ok(),
+            "a tick without the poller reads as off"
+        );
+        assert_eq!(no_poller.lane_tick_active(), None);
+        assert!(!no_poller.lane_tick_grid_timers_active());
+        let no_clock = v2.clone().with_lane_timer(false);
+        assert_eq!(
+            no_clock.lane_tick_active(),
+            Some(tick),
+            "the tick needs no lane clock"
+        );
+        assert!(!no_clock.lane_tick_grid_timers_active(), "grid timers do");
+        let no_grid = v2
+            .clone()
+            .with_lane_tick(Some(LaneTick::new(Duration::from_millis(5))));
+        assert!(no_grid.validate().is_ok());
+        assert!(!no_grid.lane_tick_grid_timers_active());
+        assert_eq!(v2.with_lane_tick(None).lane_tick_active(), None);
+    }
+
+    #[test]
+    fn a_lane_tick_quantum_must_divide_the_media_clock() {
+        for ms in crate::lane_tick::LANE_TICK_QUANTA_MS {
+            let tick = LaneTick::new(Duration::from_millis(ms)).with_grid_timers(true);
+            assert!(MediaExecutorConfig::v2()
+                .with_lane_tick(Some(tick))
+                .validate()
+                .is_ok());
+        }
+        for quantum in [
+            Duration::ZERO,
+            Duration::from_micros(2_500),
+            Duration::from_millis(3),
+            Duration::from_millis(10),
+        ] {
+            let config = MediaExecutorConfig::v1().with_lane_tick(Some(LaneTick::new(quantum)));
+            assert_eq!(
+                config.validate(),
+                Err(MediaExecutorConfigError::InvalidLaneTickQuantum { quantum }),
+                "an invalid value is refused even where it would read as off"
+            );
+            let slot = OnceLock::new();
+            assert!(install_into(&slot, config).is_err());
+            assert!(slot.get().is_none(), "nothing was installed");
+        }
+        let lane_tick = |tick: Option<LaneTick>| {
+            let _guard = override_media_executor_config_on_this_thread(
+                MediaExecutorConfig::v2().with_lane_tick(tick),
+            );
+            (active_lane_tick(), lane_tick_grid_timers_enabled())
+        };
+        let tick = LaneTick::new(Duration::from_millis(4));
+        assert_eq!(lane_tick(Some(tick)), (Some(tick), false));
+        assert_eq!(
+            lane_tick(Some(tick.with_grid_timers(true))),
+            (Some(tick.with_grid_timers(true)), true)
+        );
+        assert_eq!(lane_tick(None), (None, false));
+    }
+
+    // ---- End lane tick ----
 
     #[test]
     fn switches_never_apply_under_v1_and_dependents_follow_the_lane_poller() {

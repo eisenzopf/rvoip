@@ -22,6 +22,12 @@
 //! found through a thread-local set for the duration of that poll); anywhere
 //! else `media_clock::sleep_until` keeps returning a Tokio `Sleep`. If the
 //! poller has gone away the sleep falls back to its own Tokio `Sleep`.
+//!
+//! Lane tick grid timers ([`crate::lane_tick`]): a clock built with a tick
+//! grid files each deadline under its tick boundary (the first boundary at or
+//! after it). A deadline that moves inside its tick files nothing new (it is
+//! counted as coalesced), and every entry due in one tick wakes together. A
+//! [`LaneSleep`] still completes only once its exact instant has passed.
 
 use std::cell::RefCell;
 use std::cmp::Reverse;
@@ -67,8 +73,12 @@ struct Entry {
     /// Bumped whenever the slot is released, so a heap item of a previous
     /// owner of the slot is recognised as stale.
     generation: u32,
-    /// The deadline the entry waits for (`None`: idle or already woken).
+    /// The filed key the entry waits for: its deadline, or (tick grid) the
+    /// tick boundary at or after it (`None`: idle or already woken).
     deadline: Option<Instant>,
+    /// The exact deadline behind `deadline`, to tell a move inside the tick
+    /// (coalesced) from a repeat of the same instant.
+    exact: Option<Instant>,
     waker: Option<Waker>,
     in_use: bool,
 }
@@ -83,6 +93,8 @@ struct ClockState {
     live: usize,
     /// Deadlines filed since the poller last read the counters.
     arms: u64,
+    /// Deadline moves that stayed inside their tick and filed nothing.
+    coalesced: u64,
 }
 
 impl ClockState {
@@ -112,13 +124,29 @@ impl ClockState {
 pub(crate) struct LaneClock {
     state: parking_lot::Mutex<ClockState>,
     closed: AtomicBool,
+    /// File deadlines on this tick grid (`None`: at their instant).
+    grid: Option<crate::lane_tick::TickGrid>,
 }
 
 impl LaneClock {
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
+        Self::with_grid(None)
+    }
+
+    pub(crate) fn with_grid(grid: Option<crate::lane_tick::TickGrid>) -> Self {
         Self {
             state: parking_lot::Mutex::new(ClockState::default()),
             closed: AtomicBool::new(false),
+            grid,
+        }
+    }
+
+    /// The key a deadline is filed under.
+    fn filed_at(&self, deadline: Instant) -> Instant {
+        match self.grid {
+            Some(grid) => Instant::from_std(grid.ceil(deadline.into_std())),
+            None => deadline,
         }
     }
 
@@ -158,6 +186,7 @@ impl LaneClock {
         state.entries.push(Entry {
             generation: 0,
             deadline: None,
+            exact: None,
             waker: None,
             in_use: true,
         });
@@ -175,6 +204,7 @@ impl LaneClock {
         entry.in_use = false;
         entry.generation = entry.generation.wrapping_add(1);
         entry.deadline = None;
+        entry.exact = None;
         entry.waker = None;
         state.live -= 1;
         state.free.push(slot);
@@ -182,9 +212,10 @@ impl LaneClock {
     }
 
     /// Wait for `deadline` with `waker`. Files a heap item only when the
-    /// deadline changed; refreshes the waker only when it would wake a
-    /// different task.
+    /// filed key changed (tick grid: when the deadline left its tick);
+    /// refreshes the waker only when it would wake a different task.
     fn arm(&self, slot: u32, generation: u32, deadline: Instant, waker: &Waker) {
+        let key = self.filed_at(deadline);
         let mut state = self.state.lock();
         let Some(entry) = state.entries.get_mut(slot as usize) else {
             return;
@@ -199,11 +230,17 @@ impl LaneClock {
         {
             entry.waker = Some(waker.clone());
         }
-        if entry.deadline != Some(deadline) {
-            entry.deadline = Some(deadline);
-            state.heap.push(Reverse((deadline, slot, generation)));
+        if entry.deadline != Some(key) {
+            entry.deadline = Some(key);
+            entry.exact = Some(deadline);
+            state.heap.push(Reverse((key, slot, generation)));
             state.arms += 1;
             state.compact_if_needed();
+        } else if entry.exact != Some(deadline) {
+            // The deadline moved inside its tick; the filed item still wakes
+            // it no earlier than the boundary, which is not before it.
+            entry.exact = Some(deadline);
+            state.coalesced += 1;
         }
     }
 
@@ -251,6 +288,14 @@ impl LaneClock {
             due += 1;
         }
         (due, std::mem::take(&mut state.arms))
+    }
+
+    /// Deadline moves coalesced inside their tick since the last call.
+    pub(crate) fn take_coalesced(&self) -> u64 {
+        if self.grid.is_none() {
+            return 0;
+        }
+        std::mem::take(&mut self.state.lock().coalesced)
     }
 
     #[cfg(test)]
@@ -341,18 +386,42 @@ pub(crate) struct LaneClockDriver {
     counted: Option<Instant>,
     /// Expiries of the runtime timer since the last read.
     expiries: u64,
+    /// Registrations of the runtime timer since the last read (timer
+    /// operations; counted with or without the lane tick).
+    resets: u64,
 }
 
 impl LaneClockDriver {
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
+        Self::with_grid(None)
+    }
+
+    /// A driver whose clock files deadlines on `grid` (lane tick grid
+    /// timers), or at their instant (`None`).
+    pub(crate) fn with_grid(grid: Option<crate::lane_tick::TickGrid>) -> Self {
         Self {
-            clock: Arc::new(LaneClock::new()),
+            clock: Arc::new(LaneClock::with_grid(grid)),
             sleep: None,
             armed: None,
             wakers: Vec::new(),
             counted: None,
             expiries: 0,
+            resets: 0,
         }
+    }
+
+    /// Lane tick: whether a live deadline is due at `now` (a ticking poller
+    /// arms no runtime timer, so it checks before it sleeps).
+    pub(crate) fn has_due(&self, now: Instant) -> bool {
+        self.clock
+            .next_deadline()
+            .is_some_and(|deadline| deadline <= now)
+    }
+
+    /// Runtime timer registrations since the last call.
+    pub(crate) fn take_resets(&mut self) -> u64 {
+        std::mem::take(&mut self.resets)
     }
 
     /// Count an expiry of the runtime timer, once. The expiry is what woke
@@ -410,6 +479,7 @@ impl LaneClockDriver {
             }
             self.armed = Some(next);
             self.counted = None;
+            self.resets += 1;
         }
         let sleep = self.sleep.as_mut().expect("armed above");
         match sleep.as_mut().poll(cx) {
@@ -657,5 +727,239 @@ mod tests {
             assert_eq!(driver.take_expiries(), 0, "and only once");
             drop(late);
         }
+    }
+
+    // ---- Lane tick: deadlines filed on the tick grid ----
+
+    fn ms(value: u64) -> Duration {
+        Duration::from_millis(value)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_grid_clock_files_a_deadline_once_per_tick_and_counts_moves_inside_it() {
+        let start = Instant::now();
+        let grid = crate::lane_tick::TickGrid::new(start.into_std(), ms(5));
+        let clock = Arc::new(LaneClock::with_grid(Some(grid)));
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut sleep = LaneSleep::new(Arc::clone(&clock), start + ms(31));
+        assert!(Pin::new(&mut sleep).poll(&mut cx).is_pending());
+        assert_eq!(
+            clock.next_deadline(),
+            Some(start + ms(35)),
+            "filed on its tick boundary"
+        );
+        // Moves inside the tick file nothing; repeating an instant is not a move.
+        for offset in [32, 34, 35, 35, 33] {
+            sleep.reset(start + ms(offset));
+            assert!(Pin::new(&mut sleep).poll(&mut cx).is_pending());
+        }
+        assert_eq!(clock.heap_len(), 1);
+        assert_eq!(clock.take_coalesced(), 4);
+        assert_eq!(clock.take_coalesced(), 0);
+        // Leaving the tick files once, under the new boundary.
+        sleep.reset(start + ms(36));
+        assert!(Pin::new(&mut sleep).poll(&mut cx).is_pending());
+        assert_eq!(clock.heap_len(), 2);
+        assert_eq!(
+            clock.next_deadline(),
+            Some(start + ms(40)),
+            "the 35 ms item is stale"
+        );
+        let mut wakers = Vec::new();
+        assert_eq!(
+            clock.take_due(start + ms(39), &mut wakers),
+            (0, 2),
+            "two filings, nothing due"
+        );
+        assert_eq!(clock.take_due(start + ms(40), &mut wakers), (1, 0));
+        // The sleep itself still waits for its exact instant.
+        tokio::time::sleep_until(start + ms(35)).await;
+        assert!(
+            Pin::new(&mut sleep).poll(&mut cx).is_pending(),
+            "never early"
+        );
+        tokio::time::sleep_until(start + ms(36)).await;
+        assert!(Pin::new(&mut sleep).poll(&mut cx).is_ready());
+        // Without a grid nothing is coalesced.
+        let plain = LaneClock::with_grid(None);
+        assert_eq!(plain.take_coalesced(), 0);
+        assert_eq!(plain.filed_at(start + ms(31)), start + ms(31));
+    }
+
+    /// Serve every deadline of `driver`'s clock as a non-ticking poller does
+    /// (arm the runtime timer, wait for it, wake what is due) and return
+    /// (runtime timer expiries, registrations, entries woken).
+    async fn serve_on_the_runtime_timer(driver: &mut LaneClockDriver) -> (u64, u64, u64) {
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut woken = 0;
+        for _ in 0..100 {
+            woken += driver.wake_due().0;
+            if driver.poll_timer(&mut cx).is_ready() {
+                continue;
+            }
+            let Some(next) = driver.clock().next_deadline() else {
+                break;
+            };
+            tokio::time::sleep_until(next).await;
+        }
+        (driver.take_expiries(), driver.take_resets(), woken)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn grid_timers_serve_the_deadlines_of_a_tick_with_one_runtime_timer_expiry() {
+        // Five calls whose next frames are due 1 ms apart inside one 5 ms
+        // tick: exact filing costs one runtime timer expiry and registration
+        // per deadline, grid filing one for the whole tick. Counted, not
+        // timed (paused clock).
+        let mut outcomes = Vec::new();
+        for use_grid in [false, true] {
+            let start = Instant::now();
+            let grid = use_grid.then(|| crate::lane_tick::TickGrid::new(start.into_std(), ms(5)));
+            let mut driver = LaneClockDriver::with_grid(grid);
+            let waker = futures::task::noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            let mut sleeps: Vec<LaneSleep> = (11..=15u64)
+                .map(|offset| LaneSleep::new(Arc::clone(driver.clock()), start + ms(offset)))
+                .collect();
+            for sleep in &mut sleeps {
+                assert!(Pin::new(sleep).poll(&mut cx).is_pending());
+            }
+            let outcome = serve_on_the_runtime_timer(&mut driver).await;
+            for sleep in &mut sleeps {
+                assert!(
+                    Pin::new(sleep).poll(&mut cx).is_ready(),
+                    "served, never early"
+                );
+            }
+            assert!(
+                Instant::now() <= start + ms(15),
+                "and never late on a boundary"
+            );
+            outcomes.push(outcome);
+        }
+        assert_eq!(outcomes[0], (5, 5, 5), "exact: one expiry per deadline");
+        assert_eq!(outcomes[1], (1, 1, 5), "grid: one expiry for the tick");
+    }
+
+    #[tokio::test]
+    async fn has_due_reports_a_due_live_deadline_only() {
+        let driver = LaneClockDriver::new();
+        let start = Instant::now();
+        assert!(!driver.has_due(start), "an empty clock has nothing due");
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut sleep = LaneSleep::new(Arc::clone(driver.clock()), start + ms(50));
+        assert!(Pin::new(&mut sleep).poll(&mut cx).is_pending());
+        assert!(!driver.has_due(start + ms(49)));
+        assert!(driver.has_due(start + ms(50)));
+        drop(sleep);
+        assert!(!driver.has_due(start + ms(50)), "a released entry is stale");
+    }
+
+    #[test]
+    fn grid_filing_serves_periodic_deadlines_on_their_tick_with_a_fake_clock() {
+        // 200 streams with 20 ms deadlines at random phases; each deadline is
+        // nudged twice by up to ±300 µs before it is due (a pacing
+        // correction). Driving `take_due` at every tick boundary of a fake
+        // clock, every entry is taken exactly at the first boundary at or
+        // after its final deadline (never before, less than a quantum
+        // after), and the grid files far fewer heap items than exact filing.
+        let base = Instant::now();
+        let quantum = ms(2);
+        let grid = crate::lane_tick::TickGrid::new(base.into_std(), quantum);
+        let ticked = LaneClock::with_grid(Some(grid));
+        let exact = LaneClock::with_grid(None);
+        let waker = futures::task::noop_waker();
+        let mut seed = 0x0e49_u64;
+        let mut random = move |bound: u64| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) % bound
+        };
+        struct Stream {
+            ticked: (u32, u32),
+            exact: (u32, u32),
+            period: u32,
+            due: Instant,
+            armed: bool,
+        }
+        let arm =
+            |stream: &mut Stream, base_deadline: Instant, random: &mut dyn FnMut(u64) -> u64| {
+                let mut deadline = base_deadline;
+                for nudge in 0..3 {
+                    if nudge > 0 {
+                        let offset = Duration::from_micros(random(600));
+                        deadline = base_deadline + Duration::from_micros(300) - offset;
+                    }
+                    ticked.arm(stream.ticked.0, stream.ticked.1, deadline, &waker);
+                    exact.arm(stream.exact.0, stream.exact.1, deadline, &waker);
+                }
+                stream.due = deadline;
+                stream.armed = true;
+            };
+        let phases: Vec<u64> = (0..200).map(|_| random(20_000)).collect();
+        let mut streams: Vec<Stream> = phases
+            .iter()
+            .map(|_| Stream {
+                ticked: ticked.allocate(),
+                exact: exact.allocate(),
+                period: 0,
+                due: base,
+                armed: false,
+            })
+            .collect();
+        let first = |phase: u64| base + ms(1) + Duration::from_micros(phase);
+        for (stream, phase) in streams.iter_mut().zip(&phases) {
+            arm(stream, first(*phase), &mut random);
+        }
+        let mut filed = 0;
+        let mut served = 0;
+        let mut wakers = Vec::new();
+        for tick in 0..=120u32 {
+            let now = base + quantum * tick;
+            let (due, arms) = ticked.take_due(now, &mut wakers);
+            filed += arms;
+            let mut taken = 0;
+            for (stream, phase) in streams.iter_mut().zip(&phases) {
+                let slot = stream.ticked.0 as usize;
+                if !stream.armed || ticked.state.lock().entries[slot].deadline.is_some() {
+                    continue;
+                }
+                assert!(now >= stream.due, "never before the deadline");
+                assert!(
+                    now - stream.due < quantum,
+                    "taken {:?} late",
+                    now - stream.due
+                );
+                assert_eq!(
+                    now.into_std(),
+                    grid.ceil(stream.due.into_std()),
+                    "on its own tick"
+                );
+                taken += 1;
+                stream.armed = false;
+                if stream.period < 9 {
+                    stream.period += 1;
+                    let next = first(*phase) + ms(20) * stream.period;
+                    arm(stream, next, &mut random);
+                }
+            }
+            assert_eq!(
+                taken, due,
+                "every due entry, and only those, at tick {tick}"
+            );
+            served += taken;
+        }
+        filed += ticked.take_due(base + ms(1_000), &mut wakers).1;
+        assert_eq!(served, 200 * 10, "every deadline served");
+        let exact_filed = exact.state.lock().arms;
+        assert!(
+            exact_filed > 2 * filed,
+            "grid filings {filed} vs exact {exact_filed}"
+        );
+        assert!(ticked.state.lock().coalesced > 0);
     }
 }
