@@ -180,8 +180,8 @@ pub(crate) fn create_srtp_iv_array(salt: &[u8], ssrc: u32, packet_index: u64) ->
             salt.len()
         )));
     }
-    let mut iv = [0u8; 16];
-    iv[..14].copy_from_slice(&salt[0..14]);
+    // The IV starts as the 14-byte session salt, zero-padded to 16 bytes.
+    let mut iv: [u8; 16] = std::array::from_fn(|i| salt.get(i).copied().unwrap_or(0));
     iv[4] ^= ((ssrc >> 24) & 0xFF) as u8;
     iv[5] ^= ((ssrc >> 16) & 0xFF) as u8;
     iv[6] ^= ((ssrc >> 8) & 0xFF) as u8;

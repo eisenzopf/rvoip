@@ -4736,10 +4736,19 @@ mod sync_tx_tests {
     const MEDIA_PT: u8 = 0;
     const EVENT_PT: u8 = 101;
 
+    /// One random SRTP master key and salt per test process: generated at
+    /// run time rather than hard-coded, and shared by every context a test
+    /// builds so both ends of a call agree.
+    fn test_srtp_key() -> &'static ([u8; 16], [u8; 14]) {
+        use rand::Rng;
+        static KEY: std::sync::OnceLock<([u8; 16], [u8; 14])> = std::sync::OnceLock::new();
+        KEY.get_or_init(|| (rand::thread_rng().gen(), rand::thread_rng().gen()))
+    }
+
     fn srtp_context() -> crate::srtp::SrtpContext {
         crate::srtp::SrtpContext::new(
             crate::srtp::SRTP_AES128_CM_SHA1_80,
-            crate::srtp::SrtpCryptoKey::new(vec![7u8; 16], vec![9u8; 14]),
+            crate::srtp::SrtpCryptoKey::new(test_srtp_key().0.to_vec(), test_srtp_key().1.to_vec()),
         )
         .unwrap()
     }

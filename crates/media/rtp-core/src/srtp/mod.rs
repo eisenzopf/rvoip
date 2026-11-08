@@ -936,12 +936,21 @@ mod tests {
             SRTP_AES256_CM_SHA1_32,
         ] {
             let key_len = suite.key_length;
+            // Random keys and salts per run, shared by both contexts.
+            let random = |len: usize| -> Vec<u8> {
+                use rand::RngCore;
+                let mut bytes = vec![0u8; len];
+                rand::thread_rng().fill_bytes(&mut bytes);
+                bytes
+            };
+            let (rtp_key, rtcp_key, rtp_salt, rtcp_salt) =
+                (random(key_len), random(key_len), random(14), random(14));
             let make = || {
                 SrtpContext::new_from_keys(
-                    vec![0x11; key_len],
-                    vec![0x33; key_len],
-                    vec![0x22; 14],
-                    vec![0x44; 14],
+                    rtp_key.clone(),
+                    rtcp_key.clone(),
+                    rtp_salt.clone(),
+                    rtcp_salt.clone(),
                     suite.clone(),
                 )
                 .unwrap()
