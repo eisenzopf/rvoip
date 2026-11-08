@@ -66,6 +66,59 @@ where
     runtime.spawn(future)
 }
 
+/// The memory accounting of `spawn_memory_tracked_on`, for a receive loop
+/// hosted on a lane poller instead of its own task.
+#[cfg(feature = "memory-diagnostics")]
+fn memory_tracked<F>(
+    kind: &'static str,
+    future: F,
+) -> impl std::future::Future<Output = F::Output> + Send + 'static
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let guard = rvoip_infra_common::memory_diagnostics::ObjectGuard::new(kind, 0);
+    async move {
+        let _guard = guard;
+        future.await
+    }
+}
+
+#[cfg(not(feature = "memory-diagnostics"))]
+fn memory_tracked<F>(_: &'static str, future: F) -> F
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    future
+}
+
+/// A transport receive loop: its own task (v1), or hosted on its lane's
+/// poller (executor v2 with the lane poller). Only touched on lifecycle.
+enum ReceiverTask {
+    Task(JoinHandle<()>),
+    Lane(crate::lane_poller::LaneTaskHandle),
+}
+
+impl ReceiverTask {
+    fn abort(&self) {
+        match self {
+            Self::Task(task) => task.abort(),
+            Self::Lane(hosted) => hosted.abort(),
+        }
+    }
+
+    /// Wait until the loop's future has been dropped.
+    async fn join(self) {
+        match self {
+            Self::Task(task) => {
+                let _ = task.await;
+            }
+            Self::Lane(hosted) => hosted.join().await,
+        }
+    }
+}
+
 /// Move a bound socket's readiness registration onto `runtime`'s reactor.
 ///
 /// Only the registration moves: the descriptor, its bound address and every
@@ -262,10 +315,222 @@ use super::symmetric::{SymmetricRtpDecision, SymmetricRtpLearner};
 use super::validation::PlatformSocketStrategy;
 use super::{RtpTransport, RtpTransportConfig, SymmetricRtpDiagnostics, SymmetricRtpPolicy};
 use crate::error::Error;
+use crate::executor::{
+    HandoffSlot, InlineOwnerCounters, InlineRtpIngress, InlineRtpPacket, OwnerTimer,
+    INLINE_DRAIN_BUDGET,
+};
 use crate::packet::rtcp::RtcpPacket;
 use crate::packet::RtpPacket;
 use crate::traits::RtpEvent;
 use crate::Result;
+
+/// Executor v2 state owned by the socket's receive loop: the session's
+/// inline ingress, the one owner timer that serves every inline deadline
+/// (reorder hold, decoded pacing, a consumer's playout clock), and the
+/// receive drain budget.
+///
+/// RTP datagrams are authenticated and decrypted in place in the receive
+/// loop's own buffer; there is no second owner buffer.
+struct InlineRx {
+    ingress: Box<dyn InlineRtpIngress>,
+    timer: OwnerTimer,
+    /// Receives taken back-to-back without parking on the socket.
+    drained: usize,
+    counters: InlineOwnerCounters,
+}
+
+/// What woke the inline receive loop.
+enum InlineWake {
+    Received(std::io::Result<(usize, SocketAddr)>),
+    /// An owner deadline was served; nothing was received.
+    Timer,
+}
+
+impl InlineRx {
+    fn new(ingress: Box<dyn InlineRtpIngress>) -> Self {
+        Self {
+            ingress,
+            timer: OwnerTimer::new(),
+            drained: 0,
+            counters: InlineOwnerCounters::new(),
+        }
+    }
+
+    /// Point the owner timer at the earliest inline deadline. The runtime
+    /// timer is re-registered only when that deadline moved earlier or the
+    /// timer fired (see `OwnerTimer`).
+    fn rearm(&mut self, now: Instant) {
+        let deadline = self.ingress.next_deadline(now);
+        let outcome = self.timer.arm(deadline, now);
+        self.counters.armed(outcome);
+    }
+
+    fn on_timer(&mut self) {
+        let now = Instant::now();
+        self.timer.fired();
+        self.counters.fire();
+        self.ingress.on_deadline(now);
+        self.rearm(now);
+    }
+
+    /// Wait for the next datagram or owner deadline.
+    ///
+    /// A ready datagram is taken with `try_recv_from` (no readiness
+    /// re-registration, no cooperative budget), at most
+    /// [`INLINE_DRAIN_BUDGET`] in a row; then the owner yields once and
+    /// serves a deadline that came due meanwhile. Only an empty socket parks
+    /// the loop, on the socket and the owner timer together. Receives win
+    /// ties.
+    async fn next_wake(&mut self, socket: &UdpSocket, buffer: &mut [u8]) -> InlineWake {
+        if self.drained >= INLINE_DRAIN_BUDGET {
+            self.drained = 0;
+            self.counters.budget_yield();
+            tokio::task::yield_now().await;
+            if self.timer.is_due(Instant::now()) {
+                self.on_timer();
+                return InlineWake::Timer;
+            }
+        }
+        match socket.try_recv_from(buffer) {
+            Ok(received) => {
+                self.drained += 1;
+                return InlineWake::Received(Ok(received));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => {
+                self.drained = 0;
+                return InlineWake::Received(Err(error));
+            }
+        }
+        self.drained = 0;
+        let received = match self.timer.armed_sleep() {
+            Some(timer) => tokio::select! {
+                biased;
+                received = socket.recv_from(buffer) => Some(received),
+                () = timer => None,
+            },
+            None => Some(socket.recv_from(buffer).await),
+        };
+        match received {
+            Some(received) => {
+                self.drained = 1;
+                InlineWake::Received(received)
+            }
+            None => {
+                self.on_timer();
+                InlineWake::Timer
+            }
+        }
+    }
+}
+
+/// The receive loop's symmetric-RTP handling of one authenticated RTP
+/// packet, shared by the v1 and inline paths: remember the stream's SSRC,
+/// latch or rebind the destination, count the decision. Returns whether the
+/// packet is admitted.
+#[allow(clippy::too_many_arguments)]
+fn admit_symmetric_rtp(
+    decision: SymmetricRtpDecision,
+    addr: SocketAddr,
+    ssrc: u32,
+    rtcp_mux: &AtomicBool,
+    latched: &AtomicBool,
+    latched_rtp_ssrc: &AtomicU64,
+    remote_rtp_addr: &ArcSwapOption<SocketAddr>,
+    remote_rtcp_addr: &ArcSwapOption<SocketAddr>,
+    counters: &SymmetricRtpCounters,
+) -> bool {
+    if matches!(
+        decision,
+        SymmetricRtpDecision::Accept
+            | SymmetricRtpDecision::LatchInitial
+            | SymmetricRtpDecision::Rebind
+    ) && latched_rtp_ssrc.load(Ordering::Relaxed) != u64::from(ssrc)
+    {
+        latched_rtp_ssrc.store(u64::from(ssrc), Ordering::Release);
+    }
+    match decision {
+        SymmetricRtpDecision::Accept => true,
+        SymmetricRtpDecision::LatchInitial => {
+            // Publish the guard first so an overlapping outbound send cannot
+            // restore its stale SDP destination after this store.
+            latched.store(true, Ordering::Release);
+            remote_rtp_addr.store(Some(Arc::new(addr)));
+            if rtcp_mux.load(Ordering::Acquire) {
+                remote_rtcp_addr.store(Some(Arc::new(addr)));
+            }
+            counters.destination_learned.store(true, Ordering::Relaxed);
+            true
+        }
+        SymmetricRtpDecision::Rebind => {
+            remote_rtp_addr.store(Some(Arc::new(addr)));
+            if rtcp_mux.load(Ordering::Acquire) {
+                remote_rtcp_addr.store(Some(Arc::new(addr)));
+            }
+            counters.accepted_rebindings.fetch_add(1, Ordering::Relaxed);
+            true
+        }
+        SymmetricRtpDecision::Probation => {
+            counters.probation_packets.fetch_add(1, Ordering::Relaxed);
+            false
+        }
+        SymmetricRtpDecision::Reject => {
+            counters.rejected_packets.fetch_add(1, Ordering::Relaxed);
+            false
+        }
+    }
+}
+
+/// Decode an RFC 4733 telephone-event body (the first four octets of
+/// `payload`; RFC 4733 lets a sender append more) into a typed DTMF event,
+/// with the RFC 4733 §2.5.1.3 retransmit dedup: a sender emits up to three
+/// identical end-of-event frames sharing `(ssrc, rtp_timestamp)`. Entries are
+/// keyed by `(peer_addr, ssrc, ts)` so two simultaneous DTMF streams from
+/// different peers fire independently, and stale entries are pruned on every
+/// end-of-event frame, so the map stays bounded. `None` is a suppressed
+/// retransmit.
+fn rfc4733_event(
+    payload: &[u8],
+    timestamp: u32,
+    ssrc: u32,
+    source: SocketAddr,
+    seen: &DashMap<(SocketAddr, u32, u32), Instant>,
+) -> Option<RtpEvent> {
+    let p = &payload[..4];
+    let event = p[0];
+    let byte1 = p[1];
+    let end_of_event = (byte1 & 0b1000_0000) != 0;
+    let volume = byte1 & 0b0011_1111;
+    let duration = u16::from_be_bytes([p[2], p[3]]);
+    if end_of_event {
+        let key = (source, ssrc, timestamp);
+        let now = Instant::now();
+        seen.retain(|_, seen_at| now.duration_since(*seen_at) < DTMF_DEDUP_TTL);
+        if seen.insert(key, now).is_some() {
+            return None;
+        }
+    }
+    Some(RtpEvent::DtmfEvent {
+        event,
+        end_of_event,
+        volume,
+        duration,
+        timestamp,
+        source,
+        ssrc,
+    })
+}
+
+/// Publish a DTMF event, logging a failure only when someone listens.
+fn publish_dtmf(event_tx: &broadcast::Sender<RtpEvent>, dtmf: RtpEvent) {
+    if event_tx.receiver_count() > 0 {
+        if let Err(e) = event_tx.send(dtmf) {
+            warn!("Failed to send DTMF event: {}", e);
+        }
+    } else {
+        let _ = event_tx.send(dtmf);
+    }
+}
 
 /// UDP transport for RTP/RTCP
 ///
@@ -461,9 +726,13 @@ pub struct UdpRtpTransport {
     /// receive tasks. Chosen once per transport, never per packet.
     media_runtime: tokio::runtime::Handle,
 
+    /// Executor v2: the session's inline ingress, handed once to the
+    /// receive loop. Never offered under v1.
+    inline_ingress: Arc<HandoffSlot<Box<dyn InlineRtpIngress>>>,
+
     /// Receiver task. Only touched on lifecycle (start/stop) so a
     /// `tokio::Mutex` is fine — never on the per-packet path.
-    receiver_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    receiver_tasks: Arc<Mutex<Vec<ReceiverTask>>>,
 
     /// Whether the transport is active. Polled once per recv-loop
     /// iteration, so an `AtomicBool` keeps that check off the
@@ -700,6 +969,7 @@ impl UdpRtpTransport {
             remote_rtcp_addr: Arc::new(ArcSwapOption::from(None)),
             event_tx,
             media_runtime,
+            inline_ingress: Arc::new(HandoffSlot::new()),
             receiver_tasks: Arc::new(Mutex::new(Vec::with_capacity(2))),
             active: Arc::new(AtomicBool::new(false)),
             secure_media_required: Arc::new(AtomicBool::new(false)),
@@ -740,6 +1010,19 @@ impl UdpRtpTransport {
         spawn_memory_tracked_on(&self.media_runtime, kind, future)
     }
 
+    /// Executor v2: whether no inline ingress has been offered yet.
+    pub(crate) fn inline_ingress_unclaimed(&self) -> bool {
+        !self.inline_ingress.is_claimed()
+    }
+
+    /// Executor v2: hand RTP media to `ingress` inline in the receive loop
+    /// instead of publishing `RtpEvent::MediaReceived`. Once per transport.
+    /// The loop adopts it before the next RTP packet; RTCP, DTMF, STUN, DTLS
+    /// and errors keep using the broadcast.
+    pub(crate) fn attach_inline_ingress(&self, ingress: Box<dyn InlineRtpIngress>) -> bool {
+        self.inline_ingress.offer(ingress).is_ok()
+    }
+
     /// Start the packet receiver task
     async fn start_receiver(&self) -> Result<()> {
         // Single CAS guards both the early-return and the activation —
@@ -774,8 +1057,15 @@ impl UdpRtpTransport {
         let rtp_diagnostics = rtp_diagnostics_enabled();
         let local_rtp_addr = rtp_socket.local_addr().ok();
         let recv_buffer_size = self.config.buffer_config.recv_buffer_size;
+        let inline_slot = self.inline_ingress.clone();
+        // Executor v2: the loop can adopt an inline ingress, and with the lane
+        // poller it runs inside its lane's poller task (one task wakeup
+        // serves every socket that became ready together).
+        let inline_capable =
+            crate::executor::media_executor_mode() == crate::executor::MediaExecutorMode::V2;
+        let on_lane = crate::executor::lane_poller_enabled();
 
-        let rtp_receiver = self.spawn_on_lane(
+        let rtp_receiver_future = memory_tracked(
             "rtp_core.udp_transport.rtp_receiver_task",
             async move {
                 let mut first_inbound_rtp_logged = false;
@@ -786,6 +1076,15 @@ impl UdpRtpTransport {
                 let mut observed_symmetric_generation =
                     symmetric_rtp_generation.load(Ordering::Acquire);
                 debug!("UDP receive loop started on {:?}", rtp_socket.local_addr());
+                // Executor v2 (None under v1): see `InlineRx`. The inline path
+                // authenticates and decrypts RTP in place in one reused
+                // buffer; v1 receives into a fresh buffer per datagram.
+                let mut inline: Option<InlineRx> = None;
+                let mut inline_storage = if inline_capable {
+                    vec![0u8; recv_buffer_size]
+                } else {
+                    Vec::new()
+                };
 
                 loop {
                     // Check if we should continue running
@@ -793,11 +1092,29 @@ impl UdpRtpTransport {
                         break;
                     }
 
-                    let mut buffer = vec![0u8; recv_buffer_size];
+                    let mut fresh;
+                    let buffer: &mut [u8] = if inline.is_some() {
+                        &mut inline_storage
+                    } else {
+                        fresh = vec![0u8; recv_buffer_size];
+                        &mut fresh
+                    };
 
                     // Receive packet
-                    match rtp_socket.recv_from(&mut buffer).await {
+                    let received = match inline.as_mut() {
+                        // The drain budget plus the one owner timer that
+                        // serves every inline deadline of the call.
+                        Some(rx) => match rx.next_wake(&rtp_socket, buffer).await {
+                            InlineWake::Received(received) => received,
+                            InlineWake::Timer => continue,
+                        },
+                        None => rtp_socket.recv_from(buffer).await,
+                    };
+                    match received {
                         Ok((size, addr)) => {
+                            if on_lane {
+                                crate::lane_poller::note_lane_datagram();
+                            }
                             trace!("UDP recv_from returned {} bytes from {}", size, addr);
 
                             let packet_class = classify_rtp_mux_packet(&buffer[..size]);
@@ -898,6 +1215,11 @@ impl UdpRtpTransport {
                                 } else {
                                     Bytes::copy_from_slice(&buffer[..size])
                                 };
+                                if let Some(rx) = inline.as_mut() {
+                                    if rx.ingress.on_rtcp(&rtcp_data, Instant::now()) {
+                                        continue;
+                                    }
+                                }
                                 let event = RtpEvent::RtcpReceived {
                                     data: rtcp_data,
                                     source: addr,
@@ -913,6 +1235,132 @@ impl UdpRtpTransport {
                                     let _ = event_tx.send(event);
                                 }
                             } else {
+                                // Executor v2: adopt the session's inline
+                                // ingress before the first RTP packet it can
+                                // own.
+                                if inline.is_none() && inline_slot.is_dirty() {
+                                    if let Some(ingress) = inline_slot.take() {
+                                        inline = Some(InlineRx::new(ingress));
+                                    }
+                                }
+                                if let Some(rx) = inline.as_mut() {
+                                    // Authenticate and decrypt in place in the
+                                    // receive buffer: no copy and no
+                                    // per-packet allocation.
+                                    let data = &mut buffer[..size];
+                                    let parsed = {
+                                        let mut srtp_guard = srtp_recv.lock();
+                                        if srtp_diagnostics && !first_inbound_rtp_logged {
+                                            info!(
+                                                "SRTP_DIAG inbound_rtp_first local={:?} source={} size={} srtp_context={}",
+                                                local_rtp_addr,
+                                                addr,
+                                                size,
+                                                srtp_guard.is_some()
+                                            );
+                                            first_inbound_rtp_logged = true;
+                                        }
+                                        if let Some(ctx) = srtp_guard.as_mut() {
+                                            match ctx.unprotect_in_place(data) {
+                                                Ok(bounds) => Ok(bounds),
+                                                Err(_) => {
+                                                    srtp_unprotect_failures += 1;
+                                                    if srtp_diagnostics
+                                                        && (srtp_unprotect_failures <= 5
+                                                            || srtp_unprotect_failures % 50 == 0)
+                                                    {
+                                                        info!(
+                                                            "SRTP_DIAG unprotect_failed local={:?} source={} size={} failures={}",
+                                                            local_rtp_addr,
+                                                            addr,
+                                                            size,
+                                                            srtp_unprotect_failures
+                                                        );
+                                                    }
+                                                    trace!(
+                                                        "SRTP unprotect failed; dropping packet"
+                                                    );
+                                                    continue;
+                                                }
+                                            }
+                                        } else if secure_media_required.load(Ordering::Acquire) {
+                                            trace!("SRTP is required but no receive context is installed; dropping packet");
+                                            continue;
+                                        } else {
+                                            RtpPacket::parse_bounds(data)
+                                        }
+                                    };
+                                    let bounds = match parsed {
+                                        Ok(bounds) => bounds,
+                                        Err(e) => {
+                                            malformed_rtp_drop_count =
+                                                malformed_rtp_drop_count.saturating_add(1);
+                                            log_malformed_rtp_packet(
+                                                rtp_diagnostics,
+                                                malformed_rtp_drop_count,
+                                                local_rtp_addr,
+                                                addr,
+                                                size,
+                                                &e,
+                                                Some(&*data),
+                                            );
+                                            continue;
+                                        }
+                                    };
+                                    let generation =
+                                        symmetric_rtp_generation.load(Ordering::Acquire);
+                                    if generation != observed_symmetric_generation {
+                                        symmetric_rtp.reset();
+                                        observed_symmetric_generation = generation;
+                                    }
+                                    let now = Instant::now();
+                                    let decision = symmetric_rtp.observe(
+                                        addr,
+                                        bounds.header.ssrc,
+                                        bounds.header.sequence_number,
+                                        now,
+                                    );
+                                    if !admit_symmetric_rtp(
+                                        decision,
+                                        addr,
+                                        bounds.header.ssrc,
+                                        &rtcp_mux,
+                                        &symmetric_rtp_latched,
+                                        &latched_rtp_ssrc,
+                                        &remote_rtp_addr,
+                                        &remote_rtcp_addr,
+                                        &symmetric_rtp_counters,
+                                    ) {
+                                        continue;
+                                    }
+                                    let payload = &data[bounds.payload.clone()];
+                                    if bounds.header.payload_type == 101 && payload.len() >= 4 {
+                                        // DTMF stays on the broadcast path.
+                                        if let Some(dtmf) = rfc4733_event(
+                                            payload,
+                                            bounds.header.timestamp,
+                                            bounds.header.ssrc,
+                                            addr,
+                                            &dtmf_seen,
+                                        ) {
+                                            publish_dtmf(&event_tx, dtmf);
+                                        }
+                                        continue;
+                                    }
+                                    let packet = InlineRtpPacket {
+                                        payload_type: bounds.header.payload_type,
+                                        sequence_number: bounds.header.sequence_number,
+                                        timestamp: bounds.header.timestamp,
+                                        marker: bounds.header.marker,
+                                        ssrc: bounds.header.ssrc,
+                                        padding_size: bounds.padding_size,
+                                        payload,
+                                        source: addr,
+                                    };
+                                    rx.ingress.on_rtp(&packet, now);
+                                    rx.rearm(now);
+                                    continue;
+                                }
                                 // SRTP unprotect (RFC 3711 §3.4) when an
                                 // inbound SrtpContext is configured. Auth
                                 // failures MUST be silently dropped — no
@@ -976,57 +1424,18 @@ impl UdpRtpTransport {
                                             packet.header.sequence_number,
                                             Instant::now(),
                                         );
-                                        if matches!(
+                                        if !admit_symmetric_rtp(
                                             decision,
-                                            SymmetricRtpDecision::Accept
-                                                | SymmetricRtpDecision::LatchInitial
-                                                | SymmetricRtpDecision::Rebind
-                                        ) && latched_rtp_ssrc.load(Ordering::Relaxed)
-                                            != u64::from(packet.header.ssrc)
-                                        {
-                                            latched_rtp_ssrc.store(
-                                                u64::from(packet.header.ssrc),
-                                                Ordering::Release,
-                                            );
-                                        }
-                                        match decision {
-                                            SymmetricRtpDecision::Accept => {}
-                                            SymmetricRtpDecision::LatchInitial => {
-                                                // Publish the guard first so an
-                                                // overlapping outbound send
-                                                // cannot restore its stale SDP
-                                                // destination after this store.
-                                                symmetric_rtp_latched
-                                                    .store(true, Ordering::Release);
-                                                remote_rtp_addr.store(Some(Arc::new(addr)));
-                                                if rtcp_mux.load(Ordering::Acquire) {
-                                                    remote_rtcp_addr.store(Some(Arc::new(addr)));
-                                                }
-                                                symmetric_rtp_counters
-                                                    .destination_learned
-                                                    .store(true, Ordering::Relaxed);
-                                            }
-                                            SymmetricRtpDecision::Rebind => {
-                                                remote_rtp_addr.store(Some(Arc::new(addr)));
-                                                if rtcp_mux.load(Ordering::Acquire) {
-                                                    remote_rtcp_addr.store(Some(Arc::new(addr)));
-                                                }
-                                                symmetric_rtp_counters
-                                                    .accepted_rebindings
-                                                    .fetch_add(1, Ordering::Relaxed);
-                                            }
-                                            SymmetricRtpDecision::Probation => {
-                                                symmetric_rtp_counters
-                                                    .probation_packets
-                                                    .fetch_add(1, Ordering::Relaxed);
-                                                continue;
-                                            }
-                                            SymmetricRtpDecision::Reject => {
-                                                symmetric_rtp_counters
-                                                    .rejected_packets
-                                                    .fetch_add(1, Ordering::Relaxed);
-                                                continue;
-                                            }
+                                            addr,
+                                            packet.header.ssrc,
+                                            &rtcp_mux,
+                                            &symmetric_rtp_latched,
+                                            &latched_rtp_ssrc,
+                                            &remote_rtp_addr,
+                                            &remote_rtcp_addr,
+                                            &symmetric_rtp_counters,
+                                        ) {
+                                            continue;
                                         }
 
                                         // Log packet reception at transport level (debug only)
@@ -1053,53 +1462,14 @@ impl UdpRtpTransport {
                                         if packet.header.payload_type == 101
                                             && packet.payload.len() >= 4
                                         {
-                                            let p = &packet.payload[..4];
-                                            let event = p[0];
-                                            let byte1 = p[1];
-                                            let end_of_event = (byte1 & 0b1000_0000) != 0;
-                                            let volume = byte1 & 0b0011_1111;
-                                            let duration = u16::from_be_bytes([p[2], p[3]]);
-
-                                            // RFC 4733 §2.5.1.3 retransmit dedup. The
-                                            // sender emits up to three identical E=1
-                                            // frames sharing `(ssrc, rtp_timestamp)`.
-                                            // Keyed by `(peer_addr, ssrc, ts)` so two
-                                            // simultaneous DTMF streams from
-                                            // different peers fire independently.
-                                            // Inline retain prunes stale entries on
-                                            // every fire — at one PT 101 frame per
-                                            // ~20 ms per active tone, this stays
-                                            // bounded.
-                                            if end_of_event {
-                                                let key = (
-                                                    addr,
-                                                    packet.header.ssrc,
-                                                    packet.header.timestamp,
-                                                );
-                                                let now = Instant::now();
-                                                dtmf_seen.retain(|_, seen_at| {
-                                                    now.duration_since(*seen_at) < DTMF_DEDUP_TTL
-                                                });
-                                                if dtmf_seen.insert(key, now).is_some() {
-                                                    continue; // retransmit — suppress
-                                                }
-                                            }
-
-                                            let dtmf = RtpEvent::DtmfEvent {
-                                                event,
-                                                end_of_event,
-                                                volume,
-                                                duration,
-                                                timestamp: packet.header.timestamp,
-                                                source: addr,
-                                                ssrc: packet.header.ssrc,
-                                            };
-                                            if event_tx.receiver_count() > 0 {
-                                                if let Err(e) = event_tx.send(dtmf) {
-                                                    warn!("Failed to send DTMF event: {}", e);
-                                                }
-                                            } else {
-                                                let _ = event_tx.send(dtmf);
+                                            if let Some(dtmf) = rfc4733_event(
+                                                &packet.payload,
+                                                packet.header.timestamp,
+                                                packet.header.ssrc,
+                                                addr,
+                                                &dtmf_seen,
+                                            ) {
+                                                publish_dtmf(&event_tx, dtmf);
                                             }
                                             continue;
                                         }
@@ -1159,6 +1529,15 @@ impl UdpRtpTransport {
                 }
             },
         );
+        let rtp_receiver = if on_lane {
+            match crate::lane_poller::host_on_lane(&self.media_runtime, rtp_receiver_future) {
+                Ok(hosted) => ReceiverTask::Lane(hosted),
+                // The lane's runtime is shutting down: run it as v1 does.
+                Err(future) => ReceiverTask::Task(self.media_runtime.spawn(future)),
+            }
+        } else {
+            ReceiverTask::Task(self.media_runtime.spawn(rtp_receiver_future))
+        };
 
         // Store task handle
         let mut receiver_tasks = self.receiver_tasks.lock().await;
@@ -1344,7 +1723,7 @@ impl UdpRtpTransport {
         let mut receiver_tasks = self.receiver_tasks.lock().await;
         for task in receiver_tasks.drain(..) {
             task.abort();
-            let _ = task.await;
+            task.join().await;
         }
 
         Ok(())
@@ -1732,6 +2111,10 @@ impl UdpRtpTransport {
 
 #[async_trait]
 impl RtpTransport for UdpRtpTransport {
+    fn media_runtime_handle(&self) -> Option<tokio::runtime::Handle> {
+        Some(self.media_runtime.clone())
+    }
+
     async fn send_stun_bytes(&self, payload: &[u8], destination: SocketAddr) -> Result<()> {
         UdpRtpTransport::send_stun_bytes(self, payload, destination).await
     }
@@ -3713,5 +4096,464 @@ mod tests {
             }
             other => panic!("expected plaintext MediaReceived, got {:?}", other),
         }
+    }
+}
+
+#[cfg(test)]
+mod inline_rx_tests {
+    //! Executor v2: the socket owner's drain budget and its one
+    //! owner timer, exercised directly on `InlineRx`.
+    use super::*;
+    use crate::executor::inline_executor_counters;
+    use std::sync::atomic::AtomicUsize;
+
+    /// Counts deadlines; reports one pending deadline until it is served.
+    struct DeadlineIngress {
+        next: Option<Instant>,
+        served: Arc<AtomicUsize>,
+    }
+
+    impl InlineRtpIngress for DeadlineIngress {
+        fn on_rtp(&mut self, _packet: &InlineRtpPacket<'_>, _now: Instant) {}
+
+        fn next_deadline(&mut self, _now: Instant) -> Option<Instant> {
+            self.next
+        }
+
+        fn on_deadline(&mut self, now: Instant) {
+            if self.next.is_some_and(|deadline| deadline <= now) {
+                self.next = None;
+                self.served.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+    }
+
+    fn inline_rx(next: Option<Instant>) -> (InlineRx, Arc<AtomicUsize>) {
+        let served = Arc::new(AtomicUsize::new(0));
+        let rx = InlineRx::new(Box::new(DeadlineIngress {
+            next,
+            served: Arc::clone(&served),
+        }));
+        (rx, served)
+    }
+
+    #[tokio::test]
+    async fn drain_budget_yields_every_fifty_back_to_back_receives_and_keeps_order() {
+        let before = inline_executor_counters();
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let destination = socket.local_addr().unwrap();
+        const BURST: usize = 2 * INLINE_DRAIN_BUDGET + 20;
+        for index in 0..BURST {
+            peer.send_to(&(index as u32).to_be_bytes(), destination)
+                .await
+                .unwrap();
+        }
+        // Let every datagram land in the receive queue before draining.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let (mut rx, _) = inline_rx(None);
+        let mut buffer = vec![0u8; 64];
+        for index in 0..BURST {
+            let wake =
+                tokio::time::timeout(Duration::from_secs(2), rx.next_wake(&socket, &mut buffer))
+                    .await
+                    .expect("queued datagrams are received");
+            match wake {
+                InlineWake::Received(Ok((size, source))) => {
+                    assert_eq!(size, 4);
+                    assert_eq!(source, peer.local_addr().unwrap());
+                    assert_eq!(&buffer[..4], &(index as u32).to_be_bytes());
+                }
+                InlineWake::Received(Err(error)) => panic!("receive failed: {error}"),
+                InlineWake::Timer => panic!("no deadline is armed"),
+            }
+            assert!(rx.drained <= INLINE_DRAIN_BUDGET);
+        }
+        drop(rx);
+        let after = inline_executor_counters();
+        assert!(
+            after.drain_budget_yields >= before.drain_budget_yields + 2,
+            "a {BURST}-datagram burst crosses the budget twice"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_owner_timer_serves_the_ingress_deadline_on_an_idle_socket() {
+        let before = inline_executor_counters();
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let start = Instant::now();
+        let deadline = start + Duration::from_millis(5);
+        let (mut rx, served) = inline_rx(Some(deadline));
+        rx.rearm(start);
+        assert_eq!(rx.timer.armed(), Some(deadline));
+        rx.rearm(start);
+        let mut buffer = vec![0u8; 64];
+        let wake = tokio::time::timeout(Duration::from_secs(2), rx.next_wake(&socket, &mut buffer))
+            .await
+            .expect("the owner timer fires");
+        assert!(matches!(wake, InlineWake::Timer));
+        assert!(Instant::now() >= deadline, "never early");
+        assert_eq!(served.load(Ordering::Acquire), 1);
+        assert_eq!(rx.timer.armed(), None, "nothing left to arm");
+        drop(rx);
+        let after = inline_executor_counters();
+        assert!(after.owner_timer_fires > before.owner_timer_fires);
+        assert!(after.owner_timer_resets > before.owner_timer_resets);
+    }
+
+    #[tokio::test]
+    async fn a_deadline_that_comes_due_during_a_burst_is_served_at_the_budget_yield() {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let destination = socket.local_addr().unwrap();
+        for index in 0..(INLINE_DRAIN_BUDGET + 5) {
+            peer.send_to(&(index as u32).to_be_bytes(), destination)
+                .await
+                .unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Already due: receives win ties while the socket is readable, and
+        // the budget yield is where the owner serves it.
+        let (mut rx, served) = inline_rx(Some(Instant::now()));
+        rx.rearm(Instant::now());
+        let mut buffer = vec![0u8; 64];
+        let mut received = 0;
+        let mut timer_at = None;
+        for wake_index in 0..(INLINE_DRAIN_BUDGET + 6) {
+            match tokio::time::timeout(Duration::from_secs(2), rx.next_wake(&socket, &mut buffer))
+                .await
+                .expect("wakes")
+            {
+                InlineWake::Received(Ok(_)) => received += 1,
+                InlineWake::Received(Err(error)) => panic!("receive failed: {error}"),
+                InlineWake::Timer => timer_at = Some(wake_index),
+            }
+        }
+        assert_eq!(received, INLINE_DRAIN_BUDGET + 5);
+        assert_eq!(served.load(Ordering::Acquire), 1);
+        let timer_at = timer_at.expect("the deadline was served");
+        assert!(
+            timer_at <= INLINE_DRAIN_BUDGET,
+            "served no later than the first budget yield"
+        );
+    }
+
+    /// Several deadlines falling due at the same instant (on
+    /// fire, serve all due work and re-arm once).
+    struct ManyDeadlines {
+        pending: Vec<Instant>,
+        served: Arc<AtomicUsize>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl InlineRtpIngress for ManyDeadlines {
+        fn on_rtp(&mut self, _packet: &InlineRtpPacket<'_>, _now: Instant) {}
+
+        fn next_deadline(&mut self, _now: Instant) -> Option<Instant> {
+            self.pending.iter().copied().min()
+        }
+
+        fn on_deadline(&mut self, now: Instant) {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            let before = self.pending.len();
+            self.pending.retain(|deadline| *deadline > now);
+            self.served
+                .fetch_add(before - self.pending.len(), Ordering::AcqRel);
+        }
+    }
+
+    #[tokio::test]
+    async fn one_fire_serves_every_due_deadline_and_rearms_once() {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let start = Instant::now();
+        let due = start + Duration::from_millis(5);
+        let next = start + Duration::from_millis(400);
+        let served = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut rx = InlineRx::new(Box::new(ManyDeadlines {
+            pending: vec![due, due, due, next],
+            served: Arc::clone(&served),
+            calls: Arc::clone(&calls),
+        }));
+        rx.rearm(start);
+        let mut buffer = vec![0u8; 64];
+        let wake = tokio::time::timeout(Duration::from_secs(2), rx.next_wake(&socket, &mut buffer))
+            .await
+            .expect("the owner timer fires");
+        assert!(matches!(wake, InlineWake::Timer));
+        assert_eq!(
+            served.load(Ordering::Acquire),
+            3,
+            "every due source served by one fire"
+        );
+        assert_eq!(calls.load(Ordering::Acquire), 1, "one service pass");
+        assert_eq!(
+            rx.timer.armed(),
+            Some(next),
+            "re-armed once, for the next deadline"
+        );
+        // A later deadline from the same owner extends rather than re-registers.
+        let later = next + Duration::from_millis(100);
+        assert_eq!(
+            rx.timer.arm(Some(later), Instant::now()),
+            crate::executor::ArmOutcome::Extended
+        );
+    }
+
+    /// The v2 receive loop's shape: wait with `next_wake`, log each datagram.
+    fn logging_loop(
+        id: usize,
+        socket: UdpSocket,
+        mut rx: InlineRx,
+        log: Arc<parking_lot::Mutex<Vec<(usize, u32)>>>,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        async move {
+            let mut buffer = vec![0u8; 64];
+            loop {
+                match rx.next_wake(&socket, &mut buffer).await {
+                    InlineWake::Received(Ok((size, _))) => {
+                        assert_eq!(size, 4);
+                        let value =
+                            u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
+                        log.lock().push((id, value));
+                    }
+                    // Never expected on loopback; ending the loop fails the
+                    // test's datagram count instead.
+                    InlineWake::Received(Err(_)) => break,
+                    InlineWake::Timer => {}
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lane_poller_serves_quiet_sockets_while_one_socket_bursts() {
+        // Socket 0 has three drain budgets queued; sockets 1 and 2 have one
+        // datagram each. All three loops share one lane poller task.
+        const BURST: usize = 3 * INLINE_DRAIN_BUDGET;
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut sockets = Vec::new();
+        for _ in 0..3 {
+            sockets.push(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        }
+        for index in 0..BURST {
+            peer.send_to(
+                &(index as u32).to_be_bytes(),
+                sockets[0].local_addr().unwrap(),
+            )
+            .await
+            .unwrap();
+        }
+        for (id, socket) in sockets.iter().enumerate().skip(1) {
+            peer.send_to(
+                &(1000 + id as u32).to_be_bytes(),
+                socket.local_addr().unwrap(),
+            )
+            .await
+            .unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let poller = crate::lane_poller::LanePoller::start(&tokio::runtime::Handle::current());
+        let log = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let mut handles = Vec::new();
+        for (id, socket) in sockets.into_iter().enumerate() {
+            let (rx, _) = inline_rx(None);
+            handles.push(
+                poller
+                    .host(logging_loop(id, socket, rx, Arc::clone(&log)))
+                    .ok()
+                    .expect("poller is running"),
+            );
+        }
+        let expected = BURST + 2;
+        for _ in 0..200 {
+            if log.lock().len() >= expected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let log = log.lock().clone();
+        assert_eq!(log.len(), expected, "every datagram was received");
+        let burst: Vec<u32> = log
+            .iter()
+            .filter(|(id, _)| *id == 0)
+            .map(|(_, v)| *v)
+            .collect();
+        assert_eq!(
+            burst,
+            (0..BURST as u32).collect::<Vec<_>>(),
+            "per-socket order kept"
+        );
+        let position = |wanted: usize| log.iter().position(|(id, _)| *id == wanted).unwrap();
+        let first_after_budget = log
+            .iter()
+            .enumerate()
+            .filter(|(_, (id, _))| *id == 0)
+            .nth(INLINE_DRAIN_BUDGET)
+            .map(|(index, _)| index)
+            .unwrap();
+        for quiet in [1, 2] {
+            assert!(
+                position(quiet) < first_after_budget,
+                "socket {quiet} waited behind more than one drain budget of the burst"
+            );
+        }
+        for handle in handles {
+            handle.abort();
+            tokio::time::timeout(Duration::from_secs(2), handle.join())
+                .await
+                .expect("aborted loops join");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_hosted_owner_serves_its_deadline_from_the_lane_poller() {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let start = Instant::now();
+        let (mut rx, served) = inline_rx(Some(start + Duration::from_millis(5)));
+        rx.rearm(start);
+        let poller = crate::lane_poller::LanePoller::start(&tokio::runtime::Handle::current());
+        let log = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let handle = poller
+            .host(logging_loop(0, socket, rx, log))
+            .ok()
+            .expect("poller is running");
+        for _ in 0..200 {
+            if served.load(Ordering::Acquire) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(served.load(Ordering::Acquire), 1);
+        assert!(Instant::now() >= start + Duration::from_millis(5));
+        handle.abort();
+        handle.join().await;
+    }
+
+    #[tokio::test]
+    async fn a_v2_transport_receives_on_its_lane_poller_and_close_releases_it() {
+        let before = inline_executor_counters();
+        let _v2 = crate::executor::override_media_executor_config_on_this_thread(
+            crate::executor::MediaExecutorConfig::v2(),
+        );
+        let transport = UdpRtpTransport::new(RtpTransportConfig {
+            local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+            local_rtcp_addr: None,
+            symmetric_rtp: false,
+            rtcp_mux: true,
+            session_id: Some("lane-hosted".to_string()),
+            use_port_allocator: false,
+            buffer_config: Default::default(),
+        })
+        .await
+        .unwrap();
+        {
+            let tasks = transport.receiver_tasks.lock().await;
+            assert_eq!(tasks.len(), 1);
+            assert!(
+                matches!(tasks[0], ReceiverTask::Lane(_)),
+                "v2 hosts the loop on its lane"
+            );
+        }
+        let mut events = transport.subscribe();
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let destination = transport.local_rtp_addr().unwrap();
+        let packet = RtpPacket::new(
+            crate::packet::RtpHeader::new(0, 7, 1120, 0x0102_0304),
+            Bytes::from_static(b"lane payload"),
+        );
+        peer.send_to(&packet.serialize().unwrap(), destination)
+            .await
+            .unwrap();
+        match tokio::time::timeout(Duration::from_secs(2), events.recv()).await {
+            Ok(Ok(RtpEvent::MediaReceived {
+                sequence_number,
+                payload,
+                ..
+            })) => {
+                assert_eq!(sequence_number, 7);
+                assert_eq!(&payload[..], b"lane payload");
+            }
+            other => panic!("expected MediaReceived from the hosted loop, got {other:?}"),
+        }
+        transport.close().await.unwrap();
+        assert!(transport.receiver_tasks.lock().await.is_empty());
+        assert!(!transport.active.load(Ordering::Acquire));
+        // The hosted loop is gone: nothing is received any more.
+        peer.send_to(&packet.serialize().unwrap(), destination)
+            .await
+            .ok();
+        let late = tokio::time::timeout(Duration::from_millis(100), events.recv()).await;
+        assert!(
+            !matches!(late, Ok(Ok(RtpEvent::MediaReceived { .. }))),
+            "{late:?}"
+        );
+        let after = inline_executor_counters();
+        assert!(after.lane_sockets > before.lane_sockets);
+    }
+
+    #[tokio::test]
+    async fn a_v2_receive_loop_is_hosted_on_its_transports_own_lane() {
+        let _v2 = crate::executor::override_media_executor_config_on_this_thread(
+            crate::executor::MediaExecutorConfig::v2(),
+        );
+        // Several transports, placed round robin on the media lanes: each
+        // loop is hosted by a poller of the lane its socket is registered on.
+        let mut transports = Vec::new();
+        for index in 0..4 {
+            let transport = UdpRtpTransport::new(RtpTransportConfig {
+                local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+                local_rtcp_addr: None,
+                symmetric_rtp: false,
+                rtcp_mux: true,
+                session_id: Some(format!("lane-placement-{index}")),
+                use_port_allocator: false,
+                buffer_config: Default::default(),
+            })
+            .await
+            .unwrap();
+            assert!(
+                matches!(
+                    transport.receiver_tasks.lock().await[0],
+                    ReceiverTask::Lane(_)
+                ),
+                "hosted on a lane poller"
+            );
+            let lane = transport
+                .media_runtime_handle()
+                .expect("a UDP transport has a lane");
+            assert_eq!(lane.id(), transport.media_runtime.id());
+            assert!(
+                crate::lane_poller::hosts_pollers_on(&lane),
+                "the poller runs on the transport's own lane"
+            );
+            transports.push(transport);
+        }
+        for transport in transports {
+            transport.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_v1_transport_keeps_its_own_receive_task() {
+        let _v1 = crate::executor::override_media_executor_config_on_this_thread(
+            crate::executor::MediaExecutorConfig::v1(),
+        );
+        let transport = UdpRtpTransport::new(RtpTransportConfig {
+            local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+            local_rtcp_addr: None,
+            symmetric_rtp: false,
+            rtcp_mux: true,
+            session_id: Some("v1-task".to_string()),
+            use_port_allocator: false,
+            buffer_config: Default::default(),
+        })
+        .await
+        .unwrap();
+        {
+            let tasks = transport.receiver_tasks.lock().await;
+            assert!(matches!(tasks[0], ReceiverTask::Task(_)));
+        }
+        transport.close().await.unwrap();
     }
 }

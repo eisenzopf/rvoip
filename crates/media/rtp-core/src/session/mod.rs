@@ -3,6 +3,7 @@
 //! This module provides functionality for managing RTP sessions, including
 //! configuration, packet sending/receiving, and jitter buffer management.
 
+mod inline;
 mod scheduling;
 mod stream;
 
@@ -1062,6 +1063,10 @@ pub struct RtpSession {
     /// of RTP port + 1 when reports leave from a separate RTCP socket.
     signalled_remote_rtcp_addr: parking_lot::Mutex<Option<SocketAddr>>,
 
+    /// Executor v2: the sink hand-off slot of the inline ingress running on
+    /// the socket owner. `None` under v1.
+    inline_sink_slot: Option<Arc<inline::InlineSinkSlot>>,
+
     #[cfg(feature = "memory-diagnostics")]
     _memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard,
     #[cfg(feature = "memory-diagnostics")]
@@ -1186,6 +1191,7 @@ impl RtpSession {
             UdpRtpTransport::new_with_symmetric_rtp_policy(transport_config, symmetric_rtp_policy)
                 .await?,
         );
+        let inline_transport = Arc::clone(&transport);
 
         // Create channels for receive-side internal communication.
         let (receiver_tx, receiver_rx) =
@@ -1268,6 +1274,7 @@ impl RtpSession {
             bandwidth_explicit: false,
             rtcp_mux,
             signalled_remote_rtcp_addr: parking_lot::Mutex::new(None),
+            inline_sink_slot: None,
             #[cfg(feature = "memory-diagnostics")]
             _memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
                 "rtp_core.rtp_session",
@@ -1291,10 +1298,75 @@ impl RtpSession {
             ),
         };
 
+        // Executor v2: account RTP inline on the socket owner. Attached
+        // before `start` subscribes the receive task, so no packet is split
+        // between the two paths.
+        if crate::executor::media_executor_mode() == crate::executor::MediaExecutorMode::V2 {
+            let receive_queue = receive_queue_enabled.then(|| receiver_tx.clone());
+            session.attach_inline_ingress(&inline_transport, receive_queue);
+        }
+        drop(inline_transport);
+
         // Start the session
         session.start(receiver_tx).await?;
 
         Ok(session)
+    }
+
+    fn attach_inline_ingress(
+        &mut self,
+        transport: &UdpRtpTransport,
+        receive_queue: Option<mpsc::Sender<RtpPacket>>,
+    ) {
+        if !transport.inline_ingress_unclaimed() {
+            return;
+        }
+        let sink_slot = Arc::new(inline::InlineSinkSlot::new());
+        let ingress = inline::InlineSessionIngress::new(
+            self.streams.clone(),
+            self.received_sender_reports.clone(),
+            self.clock_rate.clone(),
+            self.stats.clone(),
+            self.event_tx.clone(),
+            receive_queue,
+            sink_slot.clone(),
+        );
+        if transport.attach_inline_ingress(Box::new(ingress)) {
+            self.inline_sink_slot = Some(sink_slot);
+        }
+    }
+
+    /// The media runtime lane that owns this session's transport.
+    pub fn media_runtime_handle(&self) -> Option<tokio::runtime::Handle> {
+        self.transport.media_runtime_handle()
+    }
+
+    /// Whether this session's inbound RTP is accounted inline on the task
+    /// that owns its socket ([`MediaExecutorMode::V2`]).
+    ///
+    /// [`MediaExecutorMode::V2`]: crate::executor::MediaExecutorMode::V2
+    pub fn inline_rx_enabled(&self) -> bool {
+        self.inline_sink_slot.is_some()
+    }
+
+    /// Deliver this session's inbound RTP media to `sink`, run to completion
+    /// on the socket owner, instead of publishing
+    /// [`RtpSessionEvent::PacketReceived`].
+    ///
+    /// Call before media flows (before the SDP answer is sent). The sink is
+    /// adopted at the next packet only if no packet has been published to
+    /// v1 consumers yet; otherwise it is dropped on the owner and the session
+    /// stays on v1 (counted as a `late_install` fallback). Returns the sink
+    /// when this session has no inline ingress (v1) or a sink was already
+    /// offered. The sink is dropped on the owner when the transport closes.
+    pub fn install_inline_media_sink(
+        &self,
+        sink: Box<dyn crate::executor::InlineMediaSink>,
+    ) -> std::result::Result<(), Box<dyn crate::executor::InlineMediaSink>> {
+        match &self.inline_sink_slot {
+            Some(slot) => slot.offer(sink),
+            None => Err(sink),
+        }
     }
 
     /// Start the session tasks
@@ -4479,3 +4551,4 @@ mod tests {
         session.close().await.unwrap();
     }
 }
+
