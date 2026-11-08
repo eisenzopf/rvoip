@@ -1493,6 +1493,13 @@ pub struct SipAdapter {
     inbound_rejection_slots: Arc<tokio::sync::Semaphore>,
     /// Exact lifetimes whose rejection a retained task owns.
     inbound_rejections: Arc<DashMap<SessionRegistryHandle, ()>>,
+    /// Exact lifetimes with a retained reclaim in flight (an inbound end
+    /// reclaim or an orphan reclaim). The orphan sweeper treats them as owned.
+    session_reclaims: Arc<DashMap<SessionRegistryHandle, ()>>,
+    /// Bounds concurrent orphan reclaims; the rest wait for a later pass.
+    orphan_reclaim_slots: Arc<tokio::sync::Semaphore>,
+    /// Ownerless call sessions found by the last orphan sweep, by state.
+    orphan_sessions_by_state: StdMutex<Vec<(&'static str, u64)>>,
     draining: AtomicBool,
     drained: AtomicBool,
     /// The first destructive drain failure is sticky. Once route ownership
@@ -1523,6 +1530,19 @@ struct InboundRejectionOwner {
 }
 
 impl Drop for InboundRejectionOwner {
+    fn drop(&mut self) {
+        self.jobs.remove(&self.handle);
+    }
+}
+
+/// Marks one exact lifetime as having a retained reclaim in flight until
+/// dropped, so the orphan sweeper never races that reclaim's own bounds.
+struct SessionReclaimClaim {
+    jobs: Arc<DashMap<SessionRegistryHandle, ()>>,
+    handle: SessionRegistryHandle,
+}
+
+impl Drop for SessionReclaimClaim {
     fn drop(&mut self) {
         self.jobs.remove(&self.handle);
     }
@@ -1747,6 +1767,11 @@ impl SipAdapter {
                 SIP_INBOUND_REJECTION_CONCURRENCY,
             )),
             inbound_rejections: Arc::new(DashMap::new()),
+            session_reclaims: Arc::new(DashMap::new()),
+            orphan_reclaim_slots: Arc::new(tokio::sync::Semaphore::new(
+                crate::orphan_sweep::ORPHAN_RECLAIM_CONCURRENCY,
+            )),
+            orphan_sessions_by_state: StdMutex::new(Vec::new()),
             draining: AtomicBool::new(false),
             drained: AtomicBool::new(false),
             drain_failure: StdMutex::new(None),
@@ -1786,13 +1811,19 @@ impl SipAdapter {
             debug!("SipAdapter event translator stream ended");
         });
         debug_assert!(translator_spawned);
-        let reaper_spawned = adapter
-            .retained_tasks
-            .spawn(Self::run_pending_context_reaper(
-                Arc::downgrade(&adapter.inbound_contexts),
-                context_reaper_cancel_rx,
-                PENDING_SIP_INBOUND_CONTEXT_REAPER_INTERVAL,
-            ));
+        // The orphan sweeper shares the context reaper's retained task, so
+        // the adapter's permanent task count is unchanged.
+        let orphan_sweep = coordinator
+            .session_cleanup_config()
+            .orphan_session_ttl
+            .map(crate::orphan_sweep::OrphanSweepConfig::with_ttl);
+        let reaper_spawned = adapter.retained_tasks.spawn(Self::run_adapter_maintenance(
+            Arc::downgrade(&adapter),
+            Arc::downgrade(&adapter.inbound_contexts),
+            context_reaper_cancel_rx,
+            PENDING_SIP_INBOUND_CONTEXT_REAPER_INTERVAL,
+            orphan_sweep,
+        ));
         debug_assert!(reaper_spawned);
 
         Ok(adapter)
@@ -2387,14 +2418,30 @@ impl SipAdapter {
         Ok(())
     }
 
+    #[cfg(test)]
     async fn run_pending_context_reaper(
+        contexts: Weak<SipInboundContextStore>,
+        cancel: watch::Receiver<bool>,
+        interval: Duration,
+    ) {
+        Self::run_adapter_maintenance(Weak::new(), contexts, cancel, interval, None).await;
+    }
+
+    /// Purge expired inbound contexts every `interval` and, when the orphan
+    /// sweeper is on, run one orphan sweep pass every sweep interval.
+    async fn run_adapter_maintenance(
+        adapter: Weak<SipAdapter>,
         contexts: Weak<SipInboundContextStore>,
         mut cancel: watch::Receiver<bool>,
         interval: Duration,
+        orphan_sweep: Option<crate::orphan_sweep::OrphanSweepConfig>,
     ) {
         let mut tick = tokio::time::interval(interval);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         tick.tick().await;
+        let mut tracker = crate::orphan_sweep::OrphanTracker::default();
+        let mut next_sweep =
+            orphan_sweep.map(|config| tokio::time::Instant::now() + config.interval);
         loop {
             tokio::select! {
                 changed = cancel.changed() => {
@@ -2407,12 +2454,137 @@ impl SipAdapter {
                         break;
                     };
                     let removed = contexts.purge_expired();
+                    drop(contexts);
                     if removed > 0 {
                         debug!(removed, "SipAdapter purged expired inbound contexts");
+                    }
+                    let (Some(config), Some(due_at)) = (orphan_sweep, next_sweep) else {
+                        continue;
+                    };
+                    let now = tokio::time::Instant::now();
+                    if now < due_at {
+                        continue;
+                    }
+                    next_sweep = Some(now + config.interval);
+                    let Some(adapter) = adapter.upgrade() else {
+                        break;
+                    };
+                    if !adapter.is_draining() {
+                        adapter.orphan_sweep_pass(&mut tracker, now, config.ttl).await;
                     }
                 }
             }
         }
+    }
+
+    /// Whether a lifetime has an owner that will end it: a route (so an
+    /// orchestrator connection, or one being published or prepared), an
+    /// observed INVITE the translator has not mapped yet, an in-flight
+    /// rejection, or a retained reclaim.
+    fn session_has_owner(&self, session_id: &SessionId, handle: &SessionRegistryHandle) -> bool {
+        self.by_session.contains_key(session_id)
+            || self.inbound_rejections.contains_key(handle)
+            || self.session_reclaims.contains_key(handle)
+            || self.inbound_contexts.has_pending(session_id)
+    }
+
+    /// Ownerless call sessions found by the last orphan sweep, by lifecycle
+    /// state. Empty when the sweeper is off
+    /// ([`SessionCleanupConfig::orphan_session_ttl`](crate::api::unified::SessionCleanupConfig::orphan_session_ttl))
+    /// or has not run yet. A state that stays nonzero while the system is
+    /// idle names the path that leaks; the sweeper reclaims those sessions
+    /// once they pass the TTL.
+    pub fn orphan_sessions_by_state(&self) -> Vec<(&'static str, u64)> {
+        self.orphan_sessions_by_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// One orphan sweep pass. Classifies every session-store lifetime,
+    /// records the ownerless ones by state, and hands each lifetime that has
+    /// been ownerless for `ttl` with no new RTP to a bounded, retained
+    /// reclaim. Returns how many reclaims it started.
+    pub(crate) async fn orphan_sweep_pass(
+        &self,
+        tracker: &mut crate::orphan_sweep::OrphanTracker,
+        now: tokio::time::Instant,
+        ttl: Duration,
+    ) -> usize {
+        use crate::cleanup_diag::{
+            record_orphan_session_reclaim_outcome, record_orphan_session_reclaim_started,
+            OrphanSessionReclaimOutcome,
+        };
+        let rtp_coordinator = Arc::clone(&self.coordinator);
+        let pass = tracker
+            .pass(
+                self.coordinator.orphan_sweep_entries(),
+                now,
+                ttl,
+                |session_id: &SessionId, handle: &SessionRegistryHandle| {
+                    self.session_has_owner(session_id, handle)
+                },
+                |session_id: SessionId| {
+                    let coordinator = Arc::clone(&rtp_coordinator);
+                    async move { coordinator.orphan_rtp_packets_received(&session_id).await }
+                },
+            )
+            .await;
+        *self
+            .orphan_sessions_by_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = pass
+            .orphans_by_state
+            .iter()
+            .map(|(state, count)| (*state, *count))
+            .collect();
+        let orphans = pass.orphans();
+        let mut started = 0;
+        for (handle, state) in pass.due {
+            let Ok(permit) = Arc::clone(&self.orphan_reclaim_slots).try_acquire_owned() else {
+                break;
+            };
+            match self.session_reclaims.entry(handle.clone()) {
+                dashmap::mapref::entry::Entry::Occupied(_) => continue,
+                dashmap::mapref::entry::Entry::Vacant(entry) => {
+                    entry.insert(());
+                }
+            }
+            let claim = SessionReclaimClaim {
+                jobs: Arc::clone(&self.session_reclaims),
+                handle: handle.clone(),
+            };
+            tracker.forget(&handle);
+            let coordinator = Arc::clone(&self.coordinator);
+            let mut draining = self.translator_cancel.subscribe();
+            let reclaim_handle = handle.clone();
+            let spawned = self.retained_tasks.spawn(async move {
+                let (_permit, _claim) = (permit, claim);
+                // A drain stops only this waiter, as every other bound here does.
+                let outcome = tokio::select! {
+                    outcome = coordinator.reclaim_orphan_session_exact(&reclaim_handle) => outcome,
+                    _ = draining.wait_for(|draining| *draining) => {
+                        OrphanSessionReclaimOutcome::TimedOut
+                    }
+                };
+                record_orphan_session_reclaim_outcome(outcome);
+            });
+            if !spawned {
+                break;
+            }
+            started += 1;
+            if let Some(occurrences) = record_orphan_session_reclaim_started() {
+                warn!(
+                    session = %handle.session_id(),
+                    state = crate::orphan_sweep::state_label(state),
+                    ttl_ms = ttl.as_millis() as u64,
+                    orphans,
+                    occurrences,
+                    "SIP session had no owner and no media past the orphan TTL; reclaiming it and its media port"
+                );
+            }
+        }
+        started
     }
 
     /// Remove exactly one authority-qualified route while holding
@@ -2607,7 +2779,14 @@ impl SipAdapter {
         use crate::cleanup_diag::{record_inbound_end_reclaim_outcome, InboundEndReclaimOutcome};
         crate::cleanup_diag::record_inbound_end_reclaim();
         let coordinator = Arc::clone(&self.coordinator);
+        // The orphan sweeper must not race this reclaim's own bounds.
+        self.session_reclaims.insert(handle.clone(), ());
+        let claim = SessionReclaimClaim {
+            jobs: Arc::clone(&self.session_reclaims),
+            handle: handle.clone(),
+        };
         let spawned = self.retained_tasks.spawn(async move {
+            let _claim = claim;
             if wait_for_outbound_session_release(&coordinator, &handle).await {
                 record_inbound_end_reclaim_outcome(InboundEndReclaimOutcome::Released);
                 return;
@@ -11375,5 +11554,355 @@ mod inbound_end_bound_tests {
             join_inbound_hangup(hangup, None, None, || false).await,
             InboundHangupJoin::Completed(Err(()))
         );
+    }
+}
+
+#[cfg(test)]
+mod orphan_sweep_tests {
+    use super::*;
+    use crate::api::unified::SessionCleanupConfig;
+    use crate::orphan_sweep::OrphanTracker;
+    use crate::state_table::types::Role;
+
+    const TTL: Duration = Duration::from_secs(6);
+
+    async fn coordinator(name: &str, media_start: u16) -> Arc<UnifiedCoordinator> {
+        UnifiedCoordinator::new(
+            ApiConfig::local(name, 0).with_media_ports(media_start, media_start + 600),
+        )
+        .await
+        .expect("orphan sweep coordinator")
+    }
+
+    /// One lifetime with real media (and so a media port), moved to `state`.
+    async fn lifetime(
+        coordinator: &UnifiedCoordinator,
+        session_id: &SessionId,
+        state: CallState,
+    ) -> SessionRegistryHandle {
+        let store = &coordinator.helpers.state_machine.store;
+        store
+            .create_session(session_id.clone(), Role::UAS, false)
+            .await
+            .expect("admit lifetime");
+        let handle = store.lifecycle_handle(session_id).expect("exact lifetime");
+        coordinator
+            .allocate_media_for_test(session_id)
+            .await
+            .expect("allocate media");
+        store
+            .update_session_exact_with(&handle, None, |session| {
+                session.call_state = state;
+                session.entered_state_at = std::time::Instant::now();
+            })
+            .expect("move lifetime");
+        handle
+    }
+
+    fn present(coordinator: &UnifiedCoordinator, handle: &SessionRegistryHandle) -> bool {
+        coordinator
+            .helpers
+            .state_machine
+            .store
+            .get_session_retained_snapshot_exact(handle)
+            .is_ok()
+    }
+
+    async fn wait_for_sessions(coordinator: &UnifiedCoordinator, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while coordinator.list_sessions().await.len() != expected {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("session count did not reach {expected}"));
+    }
+
+    /// A reclaim's claim drops after its outcome is counted.
+    async fn wait_for_reclaims(adapter: &SipAdapter) {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !adapter.session_reclaims.is_empty() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("orphan reclaims finished");
+    }
+
+    async fn release(coordinator: &UnifiedCoordinator, handle: &SessionRegistryHandle) {
+        coordinator
+            .begin_force_reclaim_local_session_exact(handle)
+            .await
+            .finish()
+            .await;
+    }
+
+    /// A setup abandoned after its route was retired has no owner left: no
+    /// route, no rejection, no reclaim, no RTP and no watchdog. With the
+    /// sweeper on (default TTL shortened to the minimum), the adapter's own
+    /// maintenance task returns the session slot and its media port.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn abandoned_setup_is_swept_with_its_media_port_after_the_ttl() {
+        let coordinator =
+            UnifiedCoordinator::new(
+                ApiConfig::local("orphan-sweep-abandoned", 0)
+                    .with_media_ports(35_000, 35_100)
+                    .with_session_cleanup(SessionCleanupConfig::default().with_orphan_session_ttl(
+                        Some(SessionCleanupConfig::MIN_ORPHAN_SESSION_TTL),
+                    )),
+            )
+            .await
+            .expect("orphan sweep coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        let ports_before = coordinator.allocated_media_port_count().await;
+        let reclaims_before =
+            crate::cleanup_diag::session_cleanup_counters().orphan_session_reclaims;
+
+        let session_id = SessionId::new();
+        let handle = lifetime(&coordinator, &session_id, CallState::AnsweringHangupPending).await;
+        let epoch = adapter
+            .ensure_mapped_epoch(session_id)
+            .expect("the setup had a route");
+        assert!(
+            adapter.forget_epoch(&epoch),
+            "the abandoned setup's route is retired"
+        );
+        assert!(coordinator.allocated_media_port_count().await > ports_before);
+
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while present(&coordinator, &handle) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the abandoned setup was not released");
+        assert_eq!(
+            coordinator.allocated_media_port_count().await,
+            ports_before,
+            "the abandoned setup's media port is returned"
+        );
+        assert!(coordinator.list_sessions().await.is_empty());
+        assert!(
+            crate::cleanup_diag::session_cleanup_counters().orphan_session_reclaims
+                > reclaims_before
+        );
+        drop(adapter);
+        coordinator
+            .shutdown_gracefully(Some(Duration::from_secs(1)))
+            .await
+            .expect("shutdown");
+    }
+
+    /// The sweeper reclaims a lifetime that has had no route for the TTL, and
+    /// only then. A live call with a route and a registration lifetime with
+    /// none are never touched.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sweeper_reclaims_an_ownerless_session_after_the_ttl_and_spares_owned_ones() {
+        let coordinator = coordinator("orphan-sweep-ttl", 33_000).await;
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        let ports_before = coordinator.allocated_media_port_count().await;
+
+        let active_id = SessionId::new();
+        let active = lifetime(&coordinator, &active_id, CallState::Active).await;
+        let active_epoch = adapter
+            .ensure_mapped_epoch(active_id)
+            .expect("active call route");
+        let orphan_id = SessionId::new();
+        let orphan = lifetime(&coordinator, &orphan_id, CallState::AnsweringHangupPending).await;
+        let registration_id = SessionId::new();
+        let registration = lifetime(&coordinator, &registration_id, CallState::Registered).await;
+        let ports_with_calls = coordinator.allocated_media_port_count().await;
+        assert!(ports_with_calls > ports_before);
+        let before = crate::cleanup_diag::session_cleanup_counters();
+
+        let mut tracker = OrphanTracker::default();
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            adapter.orphan_sweep_pass(&mut tracker, started, TTL).await,
+            0
+        );
+        assert_eq!(tracker.tracked(), 1, "only the routeless call is an orphan");
+        assert_eq!(
+            adapter.orphan_sessions_by_state(),
+            vec![("AnsweringHangupPending", 1)]
+        );
+        assert_eq!(
+            adapter
+                .orphan_sweep_pass(&mut tracker, started + TTL / 2, TTL)
+                .await,
+            0,
+            "nothing is reclaimed before the TTL"
+        );
+        assert!(present(&coordinator, &orphan));
+        assert_eq!(
+            adapter
+                .orphan_sweep_pass(&mut tracker, started + TTL, TTL)
+                .await,
+            1
+        );
+
+        wait_for_sessions(&coordinator, 2).await;
+        assert!(!present(&coordinator, &orphan));
+        assert!(
+            present(&coordinator, &active),
+            "a call with a route is never reclaimed"
+        );
+        assert!(
+            present(&coordinator, &registration),
+            "registration lifetimes are never swept"
+        );
+        assert!(coordinator.allocated_media_port_count().await < ports_with_calls);
+        wait_for_reclaims(&adapter).await;
+        let after = crate::cleanup_diag::session_cleanup_counters();
+        assert!(after.orphan_session_reclaims > before.orphan_session_reclaims);
+        assert!(after.orphan_session_reclaims_forced > before.orphan_session_reclaims_forced);
+
+        // Later passes leave the live call and the registration alone.
+        assert_eq!(
+            adapter
+                .orphan_sweep_pass(&mut tracker, started + TTL * 3, TTL)
+                .await,
+            0
+        );
+        assert_eq!(tracker.tracked(), 0);
+        assert!(adapter.orphan_sessions_by_state().is_empty());
+
+        assert!(adapter.forget_epoch(&active_epoch));
+        release(&coordinator, &active).await;
+        release(&coordinator, &registration).await;
+        assert!(coordinator.list_sessions().await.is_empty());
+        assert_eq!(coordinator.allocated_media_port_count().await, ports_before);
+        drop(adapter);
+        coordinator
+            .shutdown_gracefully(Some(Duration::from_secs(1)))
+            .await
+            .expect("shutdown");
+    }
+
+    /// A lifetime whose retained reclaim is already running (the inbound end
+    /// reclaim) is owned: the sweeper never starts a second one for it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sweeper_skips_a_session_whose_reclaim_is_in_flight() {
+        let coordinator = coordinator("orphan-sweep-claimed", 36_000).await;
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        let session_id = SessionId::new();
+        let handle = lifetime(&coordinator, &session_id, CallState::Terminated).await;
+        let claim = SessionReclaimClaim {
+            jobs: Arc::clone(&adapter.session_reclaims),
+            handle: handle.clone(),
+        };
+        adapter.session_reclaims.insert(handle.clone(), ());
+
+        let mut tracker = OrphanTracker::default();
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            adapter.orphan_sweep_pass(&mut tracker, started, TTL).await,
+            0
+        );
+        assert_eq!(
+            adapter
+                .orphan_sweep_pass(&mut tracker, started + TTL * 2, TTL)
+                .await,
+            0
+        );
+        assert_eq!(tracker.tracked(), 0);
+        assert!(present(&coordinator, &handle));
+
+        // Once the claim drops, the lifetime is ownerless and its clock starts.
+        drop(claim);
+        assert!(adapter.session_reclaims.is_empty());
+        assert_eq!(
+            adapter
+                .orphan_sweep_pass(&mut tracker, started + TTL * 3, TTL)
+                .await,
+            0
+        );
+        assert_eq!(
+            adapter
+                .orphan_sweep_pass(&mut tracker, started + TTL * 4, TTL)
+                .await,
+            1
+        );
+        wait_for_sessions(&coordinator, 0).await;
+        wait_for_reclaims(&adapter).await;
+        drop(adapter);
+        coordinator
+            .shutdown_gracefully(Some(Duration::from_secs(1)))
+            .await
+            .expect("shutdown");
+    }
+
+    /// A burst of failed and abandoned setups, in every state a signaling
+    /// overload can leave them: never routed (rejected or dropped before the
+    /// translator mapped them) or routed and then retired (`reject`, inbound
+    /// `end`). Session and media-port counts return to their starting values
+    /// within one TTL plus a pass.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_and_port_counts_return_to_zero_after_a_failed_setup_burst() {
+        const BURST: usize = 48;
+        let coordinator = coordinator("orphan-sweep-burst", 34_000).await;
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        let ports_before = coordinator.allocated_media_port_count().await;
+        let states = [
+            CallState::Ringing,
+            CallState::Answering,
+            CallState::AnsweringHangupPending,
+            CallState::Terminated,
+        ];
+        for index in 0..BURST {
+            let session_id = SessionId::new();
+            lifetime(&coordinator, &session_id, states[index % states.len()]).await;
+            if index % 2 == 0 {
+                let epoch = adapter.ensure_mapped_epoch(session_id).expect("route");
+                assert!(
+                    adapter.forget_epoch(&epoch),
+                    "the failed setup's route is retired"
+                );
+            }
+        }
+        assert_eq!(coordinator.list_sessions().await.len(), BURST);
+        assert!(coordinator.allocated_media_port_count().await >= ports_before + BURST);
+
+        let mut tracker = OrphanTracker::default();
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            adapter.orphan_sweep_pass(&mut tracker, started, TTL).await,
+            0
+        );
+        assert_eq!(tracker.tracked(), BURST);
+        assert_eq!(
+            adapter
+                .orphan_sweep_pass(&mut tracker, started + TTL, TTL)
+                .await,
+            BURST
+        );
+
+        wait_for_sessions(&coordinator, 0).await;
+        wait_for_reclaims(&adapter).await;
+        assert_eq!(coordinator.allocated_media_port_count().await, ports_before);
+        assert!(adapter.session_reclaims.is_empty());
+        assert_eq!(
+            adapter.orphan_reclaim_slots.available_permits(),
+            crate::orphan_sweep::ORPHAN_RECLAIM_CONCURRENCY
+        );
+        assert_eq!(
+            adapter
+                .orphan_sweep_pass(&mut tracker, started + TTL * 2, TTL)
+                .await,
+            0
+        );
+        drop(adapter);
+        coordinator
+            .shutdown_gracefully(Some(Duration::from_secs(1)))
+            .await
+            .expect("shutdown");
     }
 }
