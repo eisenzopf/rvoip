@@ -510,7 +510,7 @@ impl Drop for DedicatedLane {
     }
 }
 
-struct MediaRuntimePool {
+pub(crate) struct MediaRuntimePool {
     lanes: Vec<MediaRuntimeLane>,
     next_task: AtomicUsize,
     next_io: AtomicUsize,
@@ -526,7 +526,7 @@ fn lane_thread_name(lane: usize, lanes: usize) -> String {
 }
 
 impl MediaRuntimePool {
-    fn from_config(config: &MediaRuntimeConfig, parallelism: usize) -> Self {
+    pub(crate) fn from_config(config: &MediaRuntimeConfig, parallelism: usize) -> Self {
         match &config.lanes {
             MediaLanes::Dedicated { cpus } => {
                 config
@@ -607,7 +607,7 @@ impl MediaRuntimePool {
         lane.handle()
     }
 
-    fn snapshot(&self) -> Vec<MediaLaneSnapshot> {
+    pub(crate) fn snapshot(&self) -> Vec<MediaLaneSnapshot> {
         self.lanes
             .iter()
             .map(|lane| MediaLaneSnapshot {
