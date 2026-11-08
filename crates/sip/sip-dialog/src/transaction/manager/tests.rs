@@ -9553,4 +9553,360 @@ mod tests {
         manager.shutdown().await;
         Ok(())
     }
+
+    fn sent_503s(sent: &[(Message, SocketAddr)]) -> Vec<Response> {
+        sent.iter()
+            .filter_map(|(message, _)| match message {
+                Message::Response(response)
+                    if response.status() == StatusCode::ServiceUnavailable =>
+                {
+                    Some(response.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn retry_after_of(response: &Response) -> Option<String> {
+        response
+            .header(&HeaderName::RetryAfter)
+            .map(|header| header.to_string())
+    }
+
+    fn ack_for_rejection(invite: &Request, rejection: &Response) -> Request {
+        let tag = rejection
+            .to()
+            .and_then(|to| to.tag())
+            .expect("rejection To tag")
+            .to_owned();
+        let branch = invite
+            .first_via()
+            .and_then(|via| via.branch().map(str::to_owned))
+            .expect("INVITE branch");
+        SimpleRequestBuilder::new(Method::Ack, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("alice-tag"))
+            .to("Bob", "sip:bob@example.com", Some(&tag))
+            .call_id(invite.call_id().unwrap().as_str())
+            .cseq(101)
+            .via("127.0.0.1:5060", "TCP", Some(&branch))
+            .max_forwards(70)
+            .build()
+    }
+
+    /// An enforcing gate answers a new INVITE with a stateless 503 and
+    /// `Retry-After` before any transaction exists, answers its
+    /// retransmission identically, absorbs the ACK for that 503, and never
+    /// touches in-dialog requests or outstanding client transactions.
+    #[tokio::test]
+    async fn enforced_admission_rejects_new_invite_statelessly_and_absorbs_its_ack() -> Result<()> {
+        use crate::transaction::{AdmissionLevel, AdmissionMode};
+
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (manager, mut event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(32)).await?;
+
+        // A written client INVITE waiting for its final response.
+        let peer: SocketAddr = "192.0.2.130:5060".parse().unwrap();
+        let outbound = create_test_invite_with_identity(
+            "admission-outbound",
+            "z9hG4bK.admission-outbound",
+            "UDP",
+        )
+        .map_err(|error| Error::Other(error.to_string()))?;
+        let outbound_key = manager
+            .create_client_transaction_on_route(
+                outbound.clone(),
+                TransportRoute::new(peer).with_transport_type(TransportType::Udp),
+            )
+            .await?;
+        manager.send_request(&outbound_key).await?;
+        assert!(
+            manager
+                .wait_for_transaction_state(
+                    &outbound_key,
+                    TransactionState::Calling,
+                    Duration::from_secs(1),
+                )
+                .await?
+        );
+
+        let gate = manager.new_call_admission();
+        assert_eq!(gate.mode(), AdmissionMode::Off);
+        gate.set_mode(AdmissionMode::Enforce);
+        gate.set_level(AdmissionLevel::closed(Some(9)));
+
+        let invite =
+            create_test_invite_with_identity("admission-reject", "z9hG4bK.admission-reject", "TCP")
+                .map_err(|error| Error::Other(error.to_string()))?;
+        let invite_key = TransactionKey::from_request(&invite)
+            .ok_or_else(|| Error::Other("INVITE transaction key missing".to_string()))?;
+        for _ in 0..2 {
+            manager
+                .handle_transport_event(dispatch_event(Message::Request(invite.clone())))
+                .await?;
+        }
+        let rejections = sent_503s(&transport.get_sent_messages().await);
+        assert_eq!(rejections.len(), 2, "each copy of the INVITE gets a 503");
+        let tag = rejections[0]
+            .to()
+            .and_then(|to| to.tag())
+            .map(str::to_owned);
+        assert!(tag.as_deref().is_some_and(
+            |tag| tag.starts_with(crate::transaction::overload::OVERLOAD_TO_TAG_PREFIX)
+        ));
+        assert_eq!(
+            rejections[1]
+                .to()
+                .and_then(|to| to.tag())
+                .map(str::to_owned),
+            tag,
+            "a retransmission must get an identical 503"
+        );
+        assert!(retry_after_of(&rejections[0]).is_some_and(|value| value.contains('9')));
+        assert!(!manager.server_transactions.contains_key(&invite_key));
+        assert!(
+            drain_for_request_event(&mut event_rx, Duration::from_millis(50))
+                .await
+                .is_none(),
+            "a rejected INVITE must not reach the transaction user"
+        );
+
+        manager
+            .handle_transport_event(dispatch_event(Message::Request(ack_for_rejection(
+                &invite,
+                &rejections[0],
+            ))))
+            .await?;
+        let leaked = drain_events_for(&mut event_rx, Duration::from_millis(100)).await;
+        assert!(
+            !leaked.iter().any(|event| matches!(
+                event,
+                TransactionEvent::AckRequest { .. }
+                    | TransactionEvent::StrayAckRequest { .. }
+                    | TransactionEvent::StrayAck { .. }
+                    | TransactionEvent::AckReceived { .. }
+            )),
+            "the ACK for a stateless 503 must be absorbed: {leaked:?}"
+        );
+
+        let bye = create_dispatch_request(Method::Bye, "z9hG4bK.admission-in-dialog-bye", 2)
+            .map_err(|error| Error::Other(error.to_string()))?;
+        manager
+            .handle_transport_event(dispatch_event(Message::Request(bye)))
+            .await?;
+        assert!(
+            matches!(
+                drain_for_request_event(&mut event_rx, Duration::from_millis(250)).await,
+                Some(TransactionEvent::NonInviteRequest { .. })
+            ),
+            "an in-dialog BYE is never decided by the gate"
+        );
+
+        let stats = gate.stats();
+        assert_eq!(stats.decisions, 2);
+        assert_eq!(stats.rejected, 2);
+        assert_eq!(stats.acks_absorbed, 1);
+        assert_eq!(stats.reject_sends_dropped, 0);
+        assert_eq!(stats.tls_ingress_rejected, 0);
+
+        // The outstanding client INVITE was never touched and still
+        // completes on its own final response.
+        assert!(manager.client_transactions.contains_key(&outbound_key));
+        let unavailable = SimpleResponseBuilder::response_from_request(
+            &outbound,
+            StatusCode::ServiceUnavailable,
+            Some("Service Unavailable"),
+        )
+        .to("Bob", "sip:bob@example.com", Some("bob-admission"))
+        .build();
+        manager
+            .handle_transport_event(dispatch_udp_event_from(
+                Message::Response(unavailable),
+                peer,
+            ))
+            .await?;
+        let final_response = manager
+            .wait_for_final_response(&outbound_key, Duration::from_secs(2))
+            .await?
+            .expect("the outstanding INVITE receives its final response");
+        assert_eq!(final_response.status(), StatusCode::ServiceUnavailable);
+
+        // Off again: a new INVITE reaches the transaction user.
+        gate.set_mode(AdmissionMode::Off);
+        let admitted =
+            create_test_invite_with_identity("admission-off", "z9hG4bK.admission-off", "TCP")
+                .map_err(|error| Error::Other(error.to_string()))?;
+        manager
+            .handle_transport_event(dispatch_event(Message::Request(admitted)))
+            .await?;
+        assert!(matches!(
+            drain_for_request_event(&mut event_rx, Duration::from_millis(250)).await,
+            Some(TransactionEvent::InviteRequest { .. })
+        ));
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    /// A TLS INVITE that already passed the gate on its connection reader is
+    /// not decided a second time by the transaction layer.
+    #[tokio::test]
+    async fn tls_invite_admitted_at_ingress_is_not_decided_again() -> Result<()> {
+        use crate::transaction::{AdmissionLevel, AdmissionMode};
+
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5061"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (manager, mut event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(32)).await?;
+        let gate = Arc::clone(manager.new_call_admission());
+        gate.set_mode(AdmissionMode::Enforce);
+        let _hook = gate.tls_ingress_hook();
+        gate.set_level(AdmissionLevel::closed(None));
+
+        let invite =
+            create_test_invite_with_identity("admission-tls", "z9hG4bK.admission-tls", "TLS")
+                .map_err(|error| Error::Other(error.to_string()))?;
+        manager
+            .handle_transport_event(TransportEvent::MessageReceived {
+                message: Message::Request(invite),
+                source: "127.0.0.1:5070".parse().unwrap(),
+                destination: "127.0.0.1:5061".parse().unwrap(),
+                transport_type: TransportType::Tls,
+                flow_id: None,
+                raw_bytes: None,
+                timing: None,
+                connection_metadata: None,
+            })
+            .await?;
+        assert!(matches!(
+            drain_for_request_event(&mut event_rx, Duration::from_millis(250)).await,
+            Some(TransactionEvent::InviteRequest { .. })
+        ));
+        assert_eq!(gate.stats().decisions, 0);
+        assert!(sent_503s(&transport.get_sent_messages().await).is_empty());
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    /// At the TU's session-slot cap a new INVITE gets a stateless 503 with
+    /// `Retry-After` before any transaction exists, while an in-dialog BYE is
+    /// still admitted and published to the TU.
+    #[tokio::test]
+    async fn slot_cap_rejects_new_invite_with_503_retry_after_while_bye_processes() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (manager, mut event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(32)).await?;
+        manager.set_stateless_overload_retry_after_secs(7);
+        let slots_full = Arc::new(AtomicBool::new(true));
+        assert!(
+            manager.set_new_dialog_capacity_guard(super::super::NewDialogCapacityGuard::new({
+                let slots_full = Arc::clone(&slots_full);
+                move || slots_full.load(Ordering::Acquire)
+            }))
+        );
+        assert!(
+            !manager
+                .set_new_dialog_capacity_guard(super::super::NewDialogCapacityGuard::new(|| false)),
+            "one probe per manager"
+        );
+
+        let invite = create_test_invite().map_err(|error| Error::Other(error.to_string()))?;
+        let invite_key = TransactionKey::from_request(&invite)
+            .ok_or_else(|| Error::Other("INVITE transaction key missing".to_string()))?;
+        manager
+            .handle_transport_event(dispatch_event(Message::Request(invite)))
+            .await?;
+        let rejection = sent_503s(&transport.get_sent_messages().await)
+            .into_iter()
+            .next()
+            .expect("a new INVITE at the slot cap must be answered with 503");
+        assert!(
+            retry_after_of(&rejection).is_some_and(|value| value.contains('7')),
+            "configured backoff missing: {rejection:?}"
+        );
+        assert!(
+            !manager.server_transactions.contains_key(&invite_key),
+            "a slot-cap rejection must not allocate a server transaction"
+        );
+        assert!(
+            drain_for_request_event(&mut event_rx, Duration::from_millis(50))
+                .await
+                .is_none(),
+            "a rejected INVITE must not reach the transaction user"
+        );
+        assert_eq!(
+            manager.slot_cleanup_stats().new_invite_capacity_rejections,
+            1
+        );
+        assert_eq!(
+            manager.new_call_admission().stats().decisions,
+            0,
+            "the slot cap applies while the gate is off"
+        );
+
+        let bye = create_dispatch_request(Method::Bye, "z9hG4bK.slot-cap-in-dialog-bye", 2)
+            .map_err(|error| Error::Other(error.to_string()))?;
+        manager
+            .handle_transport_event(dispatch_event(Message::Request(bye)))
+            .await?;
+        assert!(
+            matches!(
+                drain_for_request_event(&mut event_rx, Duration::from_millis(250)).await,
+                Some(TransactionEvent::NonInviteRequest { .. })
+            ),
+            "an in-dialog BYE must still reach the transaction user at the cap"
+        );
+
+        // A freed slot admits new INVITEs again; the guard holds no state.
+        slots_full.store(false, Ordering::Release);
+        let next =
+            create_test_invite_with_identity("slot-cap-after", "z9hG4bK.slot-cap-after", "UDP")
+                .map_err(|error| Error::Other(error.to_string()))?;
+        manager
+            .handle_transport_event(dispatch_event(Message::Request(next)))
+            .await?;
+        assert!(matches!(
+            drain_for_request_event(&mut event_rx, Duration::from_millis(250)).await,
+            Some(TransactionEvent::InviteRequest { .. })
+        ));
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    /// Once admission has closed, a new INVITE is answered with 503 and
+    /// `Retry-After` instead of being dropped with an error the caller never
+    /// sees. Other requests keep the existing error.
+    #[tokio::test]
+    async fn draining_manager_answers_new_invite_with_503_retry_after() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(32)).await?;
+        manager.set_stateless_overload_retry_after_secs(4);
+        assert!(manager.admission_lifecycle.begin_draining());
+
+        let invite = create_test_invite().map_err(|error| Error::Other(error.to_string()))?;
+        manager
+            .handle_transport_event(dispatch_event(Message::Request(invite)))
+            .await?;
+        let rejections = sent_503s(&transport.get_sent_messages().await);
+        assert_eq!(rejections.len(), 1);
+        assert!(retry_after_of(&rejections[0]).is_some_and(|value| value.contains('4')));
+        assert_eq!(manager.slot_cleanup_stats().draining_invite_rejections, 1);
+
+        let options = create_dispatch_request(Method::Options, "z9hG4bK.draining-options", 1)
+            .map_err(|error| Error::Other(error.to_string()))?;
+        assert!(manager
+            .handle_transport_event(dispatch_event(Message::Request(options)))
+            .await
+            .is_err());
+        assert_eq!(sent_503s(&transport.get_sent_messages().await).len(), 1);
+
+        manager.shutdown().await;
+        Ok(())
+    }
 }

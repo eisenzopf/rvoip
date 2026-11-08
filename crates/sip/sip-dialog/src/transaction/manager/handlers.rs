@@ -979,6 +979,54 @@ impl TransactionManager {
     ///
     /// # Returns
     /// * `Result<()>` - Success or error depending on request processing outcome
+    /// Decide whether a new dialog-forming INVITE is refused before any
+    /// state exists. Returns the 503's `Retry-After` when it is.
+    fn new_dialog_invite_rejection(
+        &self,
+        request: &Request,
+        ingress_context: &SipRequestIngressContext,
+    ) -> Option<Option<u32>> {
+        use crate::transaction::overload::AdmissionDecision;
+
+        // A TLS request has already passed the gate on its connection reader
+        // when the gate's ingress hook is attached; deciding again would
+        // charge the rate limit twice.
+        let gate = &self.new_call_admission;
+        let decided_at_tls_ingress =
+            ingress_context.transport_type == TransportType::Tls && gate.tls_ingress_attached();
+        if !decided_at_tls_ingress {
+            match gate.decide(crate::transaction::overload::call_id_of(request)) {
+                AdmissionDecision::Admit => {}
+                AdmissionDecision::Reject { retry_after_secs } => return Some(retry_after_secs),
+            }
+        }
+        // At the TU's session-slot cap the INVITE is refused whatever the
+        // gate's mode. In-dialog requests never consult the guard.
+        if self.new_dialog_capacity_exhausted() {
+            self.slot_cleanup.record_new_invite_capacity_rejection();
+            return Some(Some(self.stateless_overload_retry_after()));
+        }
+        None
+    }
+
+    async fn send_new_dialog_invite_rejection(
+        &self,
+        request: &Request,
+        ingress_context: &SipRequestIngressContext,
+        retry_after_secs: Option<u32>,
+    ) {
+        let sent = crate::transaction::overload::send_overload_reject(
+            request,
+            ingress_context.response_route_for_request(request),
+            &self.transport,
+            retry_after_secs,
+        )
+        .await;
+        if !sent {
+            self.new_call_admission.record_reject_send_dropped();
+        }
+    }
+
     async fn handle_request(
         &self,
         request: Request,
@@ -1088,13 +1136,43 @@ impl TransactionManager {
             return Ok(());
         }
 
+        // A new dialog-forming INVITE that matched no transaction above may be
+        // refused here with a stateless 503, before any transaction, dialog,
+        // session or media state is allocated. Retransmissions of admitted
+        // INVITEs matched their transaction above.
+        let new_dialog_invite = crate::transaction::overload::is_new_dialog_invite(&request);
+        if new_dialog_invite {
+            if let Some(retry_after_secs) =
+                self.new_dialog_invite_rejection(&request, ingress_context)
+            {
+                self.send_new_dialog_invite_rejection(&request, ingress_context, retry_after_secs)
+                    .await;
+                return Ok(());
+            }
+        }
+
         // Keep shutdown's in-flight fence continuously held across creation,
         // authorization/rejection and primary TU handoff. The nested create
         // guard protects its own map publication; this outer guard prevents a
         // slow authorizer from resuming after shutdown has force-cleared maps.
-        let _staged_operation = self.admission_lifecycle.try_enter().ok_or_else(|| {
-            Error::Other("transaction manager is draining; inbound request rejected".into())
-        })?;
+        let Some(_staged_operation) = self.admission_lifecycle.try_enter() else {
+            if new_dialog_invite {
+                // A draining manager can no longer admit the call. Tell the
+                // caller to back off and retry instead of letting it
+                // retransmit into silence until its Timer B fires.
+                self.slot_cleanup.record_draining_invite_rejection();
+                self.send_new_dialog_invite_rejection(
+                    &request,
+                    ingress_context,
+                    Some(self.stateless_overload_retry_after()),
+                )
+                .await;
+                return Ok(());
+            }
+            return Err(Error::Other(
+                "transaction manager is draining; inbound request rejected".into(),
+            ));
+        };
 
         let wire_key = wire_key.ok_or_else(|| {
             Error::Other("Missing RFC 3261 transaction key in inbound request".into())
@@ -1582,6 +1660,13 @@ impl TransactionManager {
         ingress_context: &SipRequestIngressContext,
     ) -> Result<()> {
         debug!("Processing ACK request with dialog-based matching");
+
+        // The ACK for a stateless overload 503 belongs to no transaction and
+        // must not reach the TU; its To tag identifies it.
+        if crate::transaction::overload::is_overload_reject_ack(&request) {
+            self.new_call_admission.record_ack_absorbed();
+            return Ok(());
+        }
 
         // First try direct branch-based matching for non-2xx ACKs. Only a
         // server INVITE in Completed/Confirmed owns such an ACK. Treating an

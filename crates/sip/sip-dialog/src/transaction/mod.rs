@@ -96,6 +96,7 @@ pub mod event_sender;
 pub mod key;
 mod lifecycle_scheduler;
 pub mod logic;
+pub mod overload;
 pub mod runner;
 pub mod safe_diagnostics;
 pub(crate) mod slot_cleanup;
@@ -121,6 +122,10 @@ pub use completion::{
 pub use error::{Error as TransactionError, Result as TransactionResult};
 pub use event::*;
 pub use key::*;
+pub use overload::{
+    AdmissionDecision, AdmissionLevel, AdmissionMode, NewCallAdmission, NewCallAdmissionConfig,
+    NewCallAdmissionStats, NewCallRateLimit,
+};
 pub use slot_cleanup::SlotCleanupStats;
 pub use state::*;
 
@@ -139,8 +144,8 @@ pub use authorization::{
     SipRequestRejection,
 };
 pub use manager::{
-    CancelInviteTransactionDispatch, TransactionManager, TransactionUserMode,
-    DEFAULT_INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK,
+    CancelInviteTransactionDispatch, NewDialogCapacityGuard, TransactionManager,
+    TransactionUserMode, DEFAULT_INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK,
     DEFAULT_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX, MAX_TRANSACTION_DISPATCH_WORKERS,
 };
 

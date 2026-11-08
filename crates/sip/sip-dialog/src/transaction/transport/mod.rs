@@ -99,6 +99,17 @@ pub struct TransportManagerConfig {
     /// reads while the transaction layer catches up, `TCP_NODELAY` on, no
     /// hook.
     pub tls_flow: rvoip_sip_transport::TlsFlowConfig,
+    /// Initial configuration of the new-call admission gate shared with the
+    /// transaction manager built from this transport manager. Default:
+    /// [`AdmissionMode::Off`](crate::transaction::AdmissionMode::Off).
+    ///
+    /// When the mode is not `Off` and [`Self::tls_flow`] carries no ingress
+    /// hook of its own, every TLS transport applies the gate on its reader
+    /// (see [`NewCallAdmission::tls_ingress_hook`]). Other transports apply
+    /// it on the transaction dispatch path.
+    ///
+    /// [`NewCallAdmission::tls_ingress_hook`]: crate::transaction::NewCallAdmission::tls_ingress_hook
+    pub new_call_admission: crate::transaction::overload::NewCallAdmissionConfig,
 }
 
 impl Default for TransportManagerConfig {
@@ -137,6 +148,7 @@ impl Default for TransportManagerConfig {
                 rvoip_sip_transport::transport::tls::TlsServerClientAuthConfig::default(),
             tls_insecure_skip_verify: false,
             tls_flow: rvoip_sip_transport::TlsFlowConfig::default(),
+            new_call_admission: crate::transaction::overload::NewCallAdmissionConfig::default(),
         }
     }
 }
@@ -349,6 +361,8 @@ pub struct TransportManager {
     running: Arc<Mutex<bool>>,
     /// Optional SIP trace publisher shared with the transaction manager.
     sip_trace: Option<Arc<SipTraceRuntime>>,
+    /// New-call admission gate shared with the transaction manager.
+    new_call_admission: Arc<crate::transaction::overload::NewCallAdmission>,
 }
 
 impl TransportManager {
@@ -361,6 +375,9 @@ impl TransportManager {
         let (control_event_tx, control_event_rx) = mpsc::channel(control_capacity);
 
         let transports = Arc::new(Mutex::new(HashMap::new()));
+        let new_call_admission = Arc::new(crate::transaction::overload::NewCallAdmission::new(
+            config.new_call_admission,
+        ));
         let manager = Self {
             config,
             transports,
@@ -371,9 +388,28 @@ impl TransportManager {
             control_event_rx: Arc::new(Mutex::new(Some(control_event_rx))),
             running: Arc::new(Mutex::new(false)),
             sip_trace: None,
+            new_call_admission,
         };
 
         Ok((manager, event_rx))
+    }
+
+    /// The new-call admission gate shared with the transaction manager built
+    /// from this transport manager.
+    pub fn new_call_admission(&self) -> Arc<crate::transaction::overload::NewCallAdmission> {
+        Arc::clone(&self.new_call_admission)
+    }
+
+    /// TLS flow configuration for a new TLS transport: the configured flow,
+    /// plus the admission gate's ingress hook when admission is enabled and
+    /// the application did not supply a hook of its own.
+    fn tls_flow_config(&self) -> rvoip_sip_transport::TlsFlowConfig {
+        let flow = self.config.tls_flow.clone();
+        if flow.ingress_admission.is_none() && self.config.new_call_admission.is_enabled() {
+            flow.with_ingress_admission(self.new_call_admission.tls_ingress_hook())
+        } else {
+            flow
+        }
     }
 
     /// Take the single consumer for the reserved lifecycle/control lane.
@@ -676,7 +712,7 @@ impl TransportManager {
                     Some(self.control_event_tx.clone()),
                     client_cfg,
                     HandshakeAdmissionConfig::default(),
-                    self.config.tls_flow.clone(),
+                    self.tls_flow_config(),
                 )
                 .await
                 .map_err(|e| {
@@ -702,7 +738,7 @@ impl TransportManager {
                         self.config.tls_server_client_auth.clone(),
                         self.config.tls_role,
                         HandshakeAdmissionConfig::default(),
-                        self.config.tls_flow.clone(),
+                        self.tls_flow_config(),
                     )
                     .await;
                     result.map_err(|e| {
@@ -1337,6 +1373,44 @@ mod tests {
             TlsReceiveBackpressurePolicy::Close
         );
         assert!(!tuned.tls_flow.tcp_nodelay);
+    }
+
+    #[tokio::test]
+    async fn new_call_admission_rides_on_the_tls_ingress_hook_only_when_enabled() {
+        use crate::transaction::{AdmissionMode, NewCallAdmissionConfig};
+        use rvoip_sip_transport::{IngressAdmissionHook, IngressVerdict, TlsFlowConfig};
+
+        // Default: admission off, no hook, gate untouched.
+        let (manager, _rx) = TransportManager::new(TransportManagerConfig::default())
+            .await
+            .unwrap();
+        assert_eq!(manager.new_call_admission().mode(), AdmissionMode::Off);
+        assert!(manager.tls_flow_config().ingress_admission.is_none());
+        assert!(!manager.new_call_admission().stats().tls_ingress_attached);
+
+        // Enabled: TLS flows carry the gate's hook.
+        let (manager, _rx) = TransportManager::new(TransportManagerConfig {
+            new_call_admission: NewCallAdmissionConfig::new(AdmissionMode::Enforce),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert_eq!(manager.new_call_admission().mode(), AdmissionMode::Enforce);
+        assert!(manager.tls_flow_config().ingress_admission.is_some());
+        assert!(manager.new_call_admission().stats().tls_ingress_attached);
+
+        // An application hook wins; the gate then decides TLS requests on
+        // the transaction dispatch path like every other transport.
+        let (manager, _rx) = TransportManager::new(TransportManagerConfig {
+            new_call_admission: NewCallAdmissionConfig::new(AdmissionMode::Enforce),
+            tls_flow: TlsFlowConfig::default()
+                .with_ingress_admission(IngressAdmissionHook::new(|_, _| IngressVerdict::Pass)),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert!(manager.tls_flow_config().ingress_admission.is_some());
+        assert!(!manager.new_call_admission().stats().tls_ingress_attached);
     }
 
     #[tokio::test]

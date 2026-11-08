@@ -28,6 +28,12 @@ pub struct SlotCleanupStats {
     /// Times the manager closed new-transaction admission because a terminal
     /// event could not reach the TU at all (its receiver was closed).
     pub admission_fail_closed: u64,
+    /// New dialog-forming INVITEs answered with a stateless 503 because the
+    /// TU reported its session slots full.
+    pub new_invite_capacity_rejections: u64,
+    /// New dialog-forming INVITEs answered with a stateless 503 while the
+    /// manager was draining, instead of being dropped unanswered.
+    pub draining_invite_rejections: u64,
 }
 
 #[derive(Debug, Default)]
@@ -35,6 +41,8 @@ pub(crate) struct SlotCleanupCounters {
     terminal_publication_handoffs: AtomicU64,
     terminal_publications_detached: AtomicU64,
     admission_fail_closed: AtomicU64,
+    new_invite_capacity_rejections: AtomicU64,
+    draining_invite_rejections: AtomicU64,
 }
 
 impl SlotCleanupCounters {
@@ -62,6 +70,16 @@ impl SlotCleanupCounters {
         self.admission_fail_closed.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub(crate) fn record_new_invite_capacity_rejection(&self) {
+        self.new_invite_capacity_rejections
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_draining_invite_rejection(&self) {
+        self.draining_invite_rejections
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     pub(crate) fn snapshot(&self) -> SlotCleanupStats {
         SlotCleanupStats {
             terminal_publication_handoffs: self
@@ -69,6 +87,10 @@ impl SlotCleanupCounters {
                 .load(Ordering::Relaxed),
             terminal_publications_detached: self.terminal_publications_detached(),
             admission_fail_closed: self.admission_fail_closed.load(Ordering::Relaxed),
+            new_invite_capacity_rejections: self
+                .new_invite_capacity_rejections
+                .load(Ordering::Relaxed),
+            draining_invite_rejections: self.draining_invite_rejections.load(Ordering::Relaxed),
         }
     }
 }
