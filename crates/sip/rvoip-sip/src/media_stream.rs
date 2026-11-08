@@ -23,7 +23,7 @@ use bytes::Bytes;
 use chrono::Utc;
 use std::sync::Mutex;
 use tokio::sync::{mpsc, watch, Mutex as AsyncMutex};
-use tokio::task::AbortHandle;
+use tokio::task::JoinHandle;
 
 use rvoip_core::capability::CodecInfo;
 use rvoip_core::connection::Direction;
@@ -426,7 +426,10 @@ struct SipMediaStreamInner {
     peer_out_tx: mpsc::Sender<PeerMediaFrame>,
     peer_out_rx: Mutex<Option<mpsc::Receiver<PeerMediaFrame>>>,
     bind_target: Mutex<Option<SipMediaBindTarget>>,
-    driver_abort: Mutex<Option<AbortHandle>>,
+    /// The media driver task. `close` awaits it and `Drop` aborts it. The
+    /// slot is cleared only once the driver has completed, because a
+    /// `JoinHandle` must not be polled after that.
+    driver: Mutex<Option<JoinHandle<()>>>,
     lifecycle_gate: AsyncMutex<()>,
     lifecycle: Arc<SipMediaLifecycleState>,
     outbound_writes_activated: AtomicBool,
@@ -631,7 +634,7 @@ impl SipMediaStream {
                 peer_out_tx,
                 peer_out_rx: Mutex::new(Some(peer_out_rx)),
                 bind_target: Mutex::new(None),
-                driver_abort: Mutex::new(None),
+                driver: Mutex::new(None),
                 lifecycle_gate: AsyncMutex::new(()),
                 lifecycle: Arc::new(SipMediaLifecycleState::new()),
                 outbound_writes_activated: AtomicBool::new(outbound_writes_activated),
@@ -781,11 +784,9 @@ impl SipMediaStream {
                     ));
                     *self
                         .inner
-                        .driver_abort
+                        .driver
                         .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                        Some(driver.abort_handle());
-                    drop(driver);
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(driver);
                 }
                 SipMediaLifecycle::Binding | SipMediaLifecycle::Bound => {}
                 SipMediaLifecycle::Failed => {
@@ -896,38 +897,60 @@ impl SipMediaStream {
         }
         self.request_close();
 
-        let driver_abort = self
-            .inner
-            .driver_abort
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        if let Some(abort) = driver_abort {
-            if tokio::time::timeout(std::time::Duration::from_secs(1), async {
-                while !abort.is_finished() {
-                    tokio::task::yield_now().await;
-                }
-            })
+        if !self
+            .wait_for_driver(std::time::Duration::from_secs(1))
             .await
-            .is_err()
+        {
+            if let Some(driver) = self
+                .inner
+                .driver
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
             {
-                abort.abort();
-                if tokio::time::timeout(std::time::Duration::from_secs(1), async {
-                    while !abort.is_finished() {
-                        tokio::task::yield_now().await;
-                    }
-                })
+                driver.abort();
+            }
+            if !self
+                .wait_for_driver(std::time::Duration::from_secs(1))
                 .await
-                .is_err()
-                {
-                    return Err(RvoipError::Adapter(
-                        "SIP media driver did not terminate after abort".to_string(),
-                    ));
-                }
+            {
+                return Err(RvoipError::Adapter(
+                    "SIP media driver did not terminate after abort".to_string(),
+                ));
             }
         }
         self.inner.lifecycle.mark_closed();
         Ok(())
+    }
+
+    /// Wait up to `limit` for the media driver to end; `true` once it has
+    /// (or none was started).
+    ///
+    /// The driver usually runs on another runtime, so this awaits its
+    /// `JoinHandle` rather than polling `is_finished`, which kept a signaling
+    /// worker spinning for as long as that runtime took to run the driver's
+    /// cancellation. The handle is polled in place: a wait that times out or
+    /// is cancelled leaves it in its slot, where `Drop` can still abort it.
+    /// Callers hold `lifecycle_gate`, so the handle has a single waiter.
+    async fn wait_for_driver(&self, limit: std::time::Duration) -> bool {
+        let driver_ended = std::future::poll_fn(|cx| {
+            let mut slot = self
+                .inner
+                .driver
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(driver) = slot.as_mut() else {
+                return std::task::Poll::Ready(());
+            };
+            match std::future::Future::poll(std::pin::Pin::new(driver), cx) {
+                std::task::Poll::Ready(_) => {
+                    *slot = None;
+                    std::task::Poll::Ready(())
+                }
+                std::task::Poll::Pending => std::task::Poll::Pending,
+            }
+        });
+        tokio::time::timeout(limit, driver_ended).await.is_ok()
     }
 }
 
@@ -957,7 +980,7 @@ impl Drop for SipMediaStream {
             .take();
         if let Some(driver) = self
             .inner
-            .driver_abort
+            .driver
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
@@ -2497,7 +2520,7 @@ mod receiver_ownership_tests {
         assert_eq!(stream.inner.lifecycle.current(), SipMediaLifecycle::Dormant);
         assert!(stream
             .inner
-            .driver_abort
+            .driver
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .is_none());
@@ -2530,7 +2553,7 @@ mod receiver_ownership_tests {
         );
         assert!(stream
             .inner
-            .driver_abort
+            .driver
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .is_none());
@@ -2578,10 +2601,9 @@ mod receiver_ownership_tests {
             let abort = driver.abort_handle();
             *stream
                 .inner
-                .driver_abort
+                .driver
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(abort.clone());
-            drop(driver);
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(driver);
 
             drop(stream);
             tokio::time::timeout(std::time::Duration::from_secs(1), async {
@@ -2675,6 +2697,83 @@ mod receiver_ownership_tests {
         }
     }
 
+    /// `close` awaits the driver's end instead of polling `is_finished` in a
+    /// yield loop. The driver here, a stand-in for one on another runtime,
+    /// ends 50 ms after cancellation; the close future is polled a handful of
+    /// times in that window, not thousands.
+    #[tokio::test]
+    async fn close_awaits_the_driver_without_spinning() {
+        use std::future::Future as _;
+        let stream = SipMediaStream::dormant(Direction::Outbound);
+        assert!(stream.inner.lifecycle.begin_binding());
+        let mut cancelled = stream.inner.cancel.subscribe();
+        let driver = tokio::spawn(async move {
+            wait_for_media_cancel(&mut cancelled).await;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        });
+        *stream
+            .inner
+            .driver
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(driver);
+        let started = tokio::time::Instant::now();
+        let mut close = Box::pin(Arc::clone(&stream).close());
+        let mut polls = 0u32;
+        std::future::poll_fn(|cx| {
+            polls += 1;
+            close.as_mut().poll(cx)
+        })
+        .await
+        .expect("stream close");
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(50),
+            "close waited for the driver"
+        );
+        assert!(
+            polls <= 8,
+            "close was polled {polls} times: it must await, not spin"
+        );
+        assert_eq!(stream.inner.lifecycle.current(), SipMediaLifecycle::Closed);
+        assert!(stream
+            .inner
+            .driver
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_none());
+    }
+
+    /// A cancelled `close` leaves the driver in the stream's slot, where
+    /// `Drop` can still abort it and a later `close` still awaits it.
+    #[tokio::test]
+    async fn cancelled_close_keeps_the_driver_owned() {
+        let stream = SipMediaStream::dormant(Direction::Outbound);
+        assert!(stream.inner.lifecycle.begin_binding());
+        let driver = tokio::spawn(std::future::pending::<()>());
+        let abort = driver.abort_handle();
+        *stream
+            .inner
+            .driver
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(driver);
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            Arc::clone(&stream).close()
+        )
+        .await
+        .is_err());
+        assert!(!abort.is_finished());
+        assert!(stream
+            .inner
+            .driver
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some());
+        abort.abort();
+        Arc::clone(&stream).close().await.expect("stream close");
+        assert!(abort.is_finished());
+        assert_eq!(stream.inner.lifecycle.current(), SipMediaLifecycle::Closed);
+    }
+
     #[tokio::test]
     async fn closed_is_published_only_after_driver_termination() {
         let stream = SipMediaStream::dormant(Direction::Outbound);
@@ -2683,10 +2782,9 @@ mod receiver_ownership_tests {
         let abort = driver.abort_handle();
         *stream
             .inner
-            .driver_abort
+            .driver
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(abort.clone());
-        drop(driver);
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(driver);
 
         let closing_stream = Arc::clone(&stream);
         let close = tokio::spawn(async move { closing_stream.close().await });

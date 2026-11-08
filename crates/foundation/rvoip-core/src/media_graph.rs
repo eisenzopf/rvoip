@@ -36,7 +36,7 @@ use rvoip_media_core::processing::format::{ConversionParams, FormatConverter};
 use rvoip_media_core::types::SampleRate;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, watch, Notify};
-use tokio::task::AbortHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -248,12 +248,26 @@ impl RouteDelivery {
         let delivered = self.delivered.fetch_add(1, Ordering::AcqRel) + 1;
         self.changed.send_replace(delivered);
     }
+
+    /// Wait until this route's delivery task has ended, without polling: its
+    /// [`DeliveryPumpGuard`] bumps `changed` after setting `pump_finished`.
+    async fn wait_pump_finished(&self) {
+        let mut changed = self.changed.subscribe();
+        while !self.pump_finished.load(Ordering::SeqCst) {
+            if changed.changed().await.is_err() {
+                return;
+            }
+        }
+    }
 }
 
 struct DeliveryPumpGuard(Arc<RouteDelivery>);
 impl Drop for DeliveryPumpGuard {
     fn drop(&mut self) {
         self.0.pump_finished.store(true, Ordering::SeqCst);
+        // Wake `wait_pump_finished`. Delivery observers re-check their own
+        // counter, so the unchanged value is only a wake-up.
+        self.0.changed.send_modify(|_| {});
     }
 }
 
@@ -634,7 +648,8 @@ enum Command {
 }
 
 type RetainedSnapshot = Arc<StdRwLock<Arc<MediaGraphSnapshot>>>;
-type SinkTaskRegistry = Arc<Mutex<Vec<AbortHandle>>>;
+/// Sink delivery tasks by join handle, so graph teardown can await their exit.
+type SinkTaskRegistry = Arc<Mutex<Vec<JoinHandle<()>>>>;
 type RouteStatusRegistry = Arc<Mutex<HashMap<MediaRouteId, watch::Sender<MediaGraphRouteState>>>>;
 
 #[derive(Default)]
@@ -810,6 +825,10 @@ pub struct MediaGraphHandle {
     graph_id: MediaGraphId,
     commands: mpsc::Sender<Command>,
     abort: AbortHandle,
+    /// The actor's join handle, shared by every clone of this handle. A
+    /// waiter awaits it under the lock and clears the slot once it has
+    /// completed, because a `JoinHandle` must not be polled after that.
+    actor_join: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
     latest_snapshot: RetainedSnapshot,
     snapshot_in_flight: Arc<AtomicBool>,
     completion: watch::Receiver<Option<MediaGraphSourceState>>,
@@ -1244,7 +1263,6 @@ impl MediaGraphHandle {
 
     async fn wait_closed_unbounded(&self) -> Result<MediaGraphSourceState> {
         let mut completion = self.completion.clone();
-        let actor = self.abort.clone();
         let state = loop {
             if let Some(state) = *completion.borrow() {
                 break state;
@@ -1254,8 +1272,14 @@ impl MediaGraphHandle {
                 .await
                 .map_err(|_| RvoipError::InvalidState("media graph completion was dropped"))?;
         };
-        while !actor.is_finished() {
-            tokio::task::yield_now().await;
+        // Await the actor's exit rather than spinning on `is_finished`: the
+        // actor may run on another runtime, and the spin kept this worker busy
+        // for as long as that runtime took to finish it. Cancel-safe: the
+        // handle stays in its slot until it has completed.
+        let mut actor = self.actor_join.lock().await;
+        if let Some(join) = actor.as_mut() {
+            let _ = join.await;
+            *actor = None;
         }
         Ok(state)
     }
@@ -2234,7 +2258,7 @@ impl Drop for SnapshotTerminalGuard {
         };
         terminate_all_routes(&self.route_statuses, reason);
 
-        let mut sink_tasks = self
+        let sink_tasks = self
             .sink_tasks
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -2244,14 +2268,15 @@ impl Drop for SnapshotTerminalGuard {
             task.abort();
         }
         let completion = self.completion.clone();
-        if sink_tasks.iter().all(AbortHandle::is_finished) {
+        if sink_tasks.iter().all(JoinHandle::is_finished) {
             let _ = completion.send(Some(terminal_state));
         } else if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
-                while sink_tasks.iter().any(|task| !task.is_finished()) {
-                    tokio::task::yield_now().await;
+                // Await each aborted task's exit instead of spinning on
+                // `is_finished` with `yield_now`.
+                for task in sink_tasks {
+                    let _ = task.await;
                 }
-                sink_tasks.clear();
                 let _ = completion.send(Some(terminal_state));
             });
         } else {
@@ -2470,11 +2495,12 @@ fn start_media_graph_with_activity_interval(
                                     }
                                 }
                             });
+                            let task_abort = task.abort_handle();
                             prune_sink_tasks(&sink_tasks_for_actor);
                             sink_tasks_for_actor
                                 .lock()
                                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                                .push(task.abort_handle());
+                                .push(task);
                             let mut group_key = CodecGroupKey::new(&codec, target_pt);
                             if queue.peer_ticket.is_some() {
                                 group_key.peer_route = Some(route_id.clone());
@@ -2499,7 +2525,7 @@ fn start_media_graph_with_activity_interval(
                                     target_clock_rate_hz,
                                 ),
                                 queue,
-                                task: task.abort_handle(),
+                                task: task_abort,
                                 warmup_since: None,
                                 history: VecDeque::new(),
                                 rolling_drops: 0,
@@ -2937,9 +2963,11 @@ fn start_media_graph_with_activity_interval(
         for sink in sinks.values() {
             sink.queue.seal();
         }
+        // Wait for the draining delivery tasks to end (their guards signal
+        // it) instead of polling them every millisecond.
         let _ = tokio::time::timeout(Duration::from_secs(2), async {
-            while sinks.values().any(|sink| !sink.task.is_finished()) {
-                tokio::time::sleep(Duration::from_millis(1)).await;
+            for sink in sinks.values() {
+                sink.delivery.wait_pump_finished().await;
             }
         })
         .await;
@@ -2966,6 +2994,7 @@ fn start_media_graph_with_activity_interval(
         graph_id,
         commands: command_tx,
         abort: task.abort_handle(),
+        actor_join: Arc::new(tokio::sync::Mutex::new(Some(task))),
         latest_snapshot,
         snapshot_in_flight,
         completion: completion_rx,
@@ -3261,13 +3290,9 @@ fn rebuild_transcoders(
 }
 
 async fn wait_for_recording_delivery(sink: &SinkRuntime) -> bool {
-    if tokio::time::timeout(Duration::from_secs(2), async {
-        while !sink.task.is_finished() {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    })
-    .await
-    .is_err()
+    if tokio::time::timeout(Duration::from_secs(2), sink.delivery.wait_pump_finished())
+        .await
+        .is_err()
     {
         return false;
     }
@@ -6290,5 +6315,139 @@ mod tests {
         }
         assert_eq!(graph.snapshot().await.source_frames, 20);
         graph.shutdown();
+    }
+
+    /// Counts how often the wrapped future is polled.
+    struct Polls<F> {
+        inner: std::pin::Pin<Box<F>>,
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl<F: std::future::Future> std::future::Future for Polls<F> {
+        type Output = F::Output;
+
+        fn poll(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<F::Output> {
+            self.polls.fetch_add(1, Ordering::Relaxed);
+            self.inner.as_mut().poll(cx)
+        }
+    }
+
+    /// Teardown awaited from another runtime awaits the graph actor and its
+    /// delivery tasks: with the graph's runtime blocked for 60 ms, the waiter
+    /// is polled a handful of times, never in a `yield_now` loop.
+    #[tokio::test]
+    async fn teardown_from_another_runtime_awaits_without_spinning() {
+        let graph_runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("graph runtime");
+        let (source_tx, source_rx) = mpsc::channel(4);
+        let graph = {
+            let _graph_runtime = graph_runtime.enter();
+            start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap()
+        };
+        let (target_tx, _target_rx) = mpsc::channel(1);
+        let route = graph
+            .add_managed_sink(codec("pcmu", 8_000), target_tx)
+            .unwrap();
+        route.wait_active().await.unwrap();
+        // Fill the target so the delivery task is parked in a send.
+        for value in 1..=3u8 {
+            source_tx.send(frame(value)).await.unwrap();
+        }
+        let (blocked_tx, blocked_rx) = std::sync::mpsc::channel();
+        graph_runtime.spawn(async move {
+            blocked_tx.send(()).expect("signal");
+            std::thread::sleep(Duration::from_millis(60));
+        });
+        blocked_rx.recv().expect("graph runtime is blocked");
+        let polls = Arc::new(AtomicUsize::new(0));
+        let waiting = Polls {
+            inner: Box::pin(graph.shutdown_and_wait()),
+            polls: Arc::clone(&polls),
+        };
+        assert_eq!(waiting.await.unwrap(), MediaGraphSourceState::Shutdown);
+        let polls = polls.load(Ordering::Relaxed);
+        assert!(polls <= 16, "teardown was polled {polls} times");
+        assert!(graph.abort_handle().is_finished());
+        assert_eq!(
+            graph.wait_closed().await.unwrap(),
+            MediaGraphSourceState::Shutdown,
+            "a later waiter finds the actor already joined"
+        );
+        drop(route);
+        drop(source_tx);
+        graph_runtime.shutdown_background();
+    }
+
+    /// A recording drain waits for its delivery task's exit signal instead
+    /// of polling the task every millisecond: while a slow consumer drains
+    /// the queue, the graph's runtime wakes for the room the consumer frees,
+    /// not once per millisecond. Covers an explicit drain and source EOF.
+    #[tokio::test]
+    async fn recording_drains_wait_for_the_delivery_task_without_polling() {
+        const FRAMES: u8 = 5;
+        for explicit_drain in [true, false] {
+            let wakeups = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&wakeups);
+            let graph_runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .on_thread_unpark(move || {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                })
+                .build()
+                .expect("graph runtime");
+            let (source_tx, source_rx) = mpsc::channel(8);
+            let graph = {
+                let _graph_runtime = graph_runtime.enter();
+                start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap()
+            };
+            let (target, mut output) = mpsc::channel(1);
+            let route = graph
+                .add_recording_sink(codec("pcmu", 8_000), target)
+                .unwrap();
+            route.wait_active().await.unwrap();
+            for value in 1..=FRAMES {
+                source_tx.send(frame(value)).await.unwrap();
+            }
+            while graph.snapshot().await.source_frames < u64::from(FRAMES) {
+                tokio::task::yield_now().await;
+            }
+            // About 120 ms of draining: one frame per 20 ms, then the close.
+            let consume = async {
+                let mut received = 0u8;
+                loop {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    match output.recv().await {
+                        Some(_) => received += 1,
+                        None => break received,
+                    }
+                }
+            };
+            wakeups.store(0, Ordering::Relaxed);
+            if explicit_drain {
+                let (drained, received) = tokio::join!(route.drain(), consume);
+                assert!(drained.unwrap(), "every queued frame was delivered");
+                assert_eq!(received, FRAMES);
+            } else {
+                drop(source_tx);
+                let (closed, received) = tokio::join!(graph.wait_closed(), consume);
+                assert_eq!(closed.unwrap(), MediaGraphSourceState::Closed);
+                assert_eq!(received, FRAMES);
+            }
+            let wakeups = wakeups.load(Ordering::Relaxed);
+            assert!(
+                wakeups <= 20,
+                "the graph runtime woke {wakeups} times during the drain \
+                 (explicit_drain={explicit_drain})"
+            );
+            graph.shutdown_and_wait().await.unwrap();
+            graph_runtime.shutdown_background();
+        }
     }
 }
