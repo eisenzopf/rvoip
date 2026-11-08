@@ -555,6 +555,7 @@ pub struct MediaGraphSnapshot {
     pub recent_evictions: Vec<MediaGraphEvictionSnapshot>,
 }
 
+#[derive(Clone)]
 pub(crate) enum MediaSinkTarget {
     Legacy(mpsc::Sender<MediaFrame>),
     Peer(mpsc::Sender<rvoip_core_traits::peer_media::PeerMediaFrame>),
@@ -562,6 +563,22 @@ pub(crate) enum MediaSinkTarget {
     /// [`GatedFrameInput`]), so a frame goes straight into the consumer's
     /// channel instead of through the stream's own input pump.
     Gated(Arc<dyn GatedFrameInput>),
+}
+
+/// What an attempt to deliver a frame without waiting did (see
+/// [`MediaSinkTarget::try_send_now`]).
+enum InlineSend {
+    /// The target took the frame. `true` when it crossed every fence (a
+    /// delivery), `false` when a fence retired it, as the delivery task's
+    /// `Ok(false)`.
+    Delivered(bool),
+    /// The route's peer generation does not own delivery: as a suppressed
+    /// offer, nothing is counted.
+    Suppressed,
+    /// No room: the frame goes back to the caller, for the route's queue.
+    Full(MediaFrame),
+    /// The target is gone.
+    Closed,
 }
 
 impl MediaSinkTarget {
@@ -586,6 +603,64 @@ impl MediaSinkTarget {
             Self::Gated(input) => {
                 input.channel().is_closed() || input.admission() == GatedFrameAdmission::Closed
             }
+        }
+    }
+
+    /// Deliver without waiting, under the same fences as [`Self::send`]: the
+    /// peer switch, the cutover gate and the target's own gate. A lane
+    /// graph's actor uses it while the route's queue is idle, so frames keep
+    /// the queue's order.
+    fn try_send_now(
+        &self,
+        frame: MediaFrame,
+        ticket: Option<&crate::bridge::peer_switch::PeerRouteTicket>,
+        forwarding: &RouteForwardingGate,
+    ) -> InlineSend {
+        use crate::bridge::peer_switch::PeerTryReserve;
+        match (self, ticket) {
+            (Self::Legacy(tx), Some(ticket)) => match ticket.try_reserve(tx) {
+                PeerTryReserve::Ready(permit) => {
+                    permit.send(frame);
+                    InlineSend::Delivered(true)
+                }
+                PeerTryReserve::Inactive => InlineSend::Suppressed,
+                PeerTryReserve::Full => InlineSend::Full(frame),
+                PeerTryReserve::Closed => InlineSend::Closed,
+            },
+            (Self::Legacy(tx), None) => forwarding.try_publish_now(tx, frame),
+            (Self::Peer(tx), Some(ticket)) => match ticket.try_reserve(tx) {
+                PeerTryReserve::Ready(permit) => {
+                    permit.send(rvoip_core_traits::peer_media::PeerMediaFrame::new(
+                        frame,
+                        ticket.clone(),
+                    ));
+                    InlineSend::Delivered(true)
+                }
+                PeerTryReserve::Inactive => InlineSend::Suppressed,
+                PeerTryReserve::Full => InlineSend::Full(frame),
+                PeerTryReserve::Closed => InlineSend::Closed,
+            },
+            (Self::Peer(_), None) => InlineSend::Closed,
+            (Self::Gated(input), Some(ticket)) => {
+                if !ticket.is_active() {
+                    return InlineSend::Suppressed;
+                }
+                match input.admission() {
+                    GatedFrameAdmission::Closed => return InlineSend::Closed,
+                    GatedFrameAdmission::Discard => return InlineSend::Delivered(true),
+                    GatedFrameAdmission::Open => {}
+                }
+                match ticket.try_reserve(input.channel()) {
+                    PeerTryReserve::Ready(permit) => {
+                        permit.commit_with(|permit| input.commit(permit, frame));
+                        InlineSend::Delivered(true)
+                    }
+                    PeerTryReserve::Inactive => InlineSend::Suppressed,
+                    PeerTryReserve::Full => InlineSend::Full(frame),
+                    PeerTryReserve::Closed => InlineSend::Closed,
+                }
+            }
+            (Self::Gated(input), None) => forwarding.try_publish_gated(input.as_ref(), frame),
         }
     }
 
@@ -854,6 +929,64 @@ impl RouteForwardingGate {
         }
         input.commit(permit, frame);
         Ok(true)
+    }
+
+    /// [`Self::publish_fenced`] without waiting.
+    fn try_publish_now(&self, target: &mpsc::Sender<MediaFrame>, frame: MediaFrame) -> InlineSend {
+        if self.buffer_while_disabled {
+            return match target.try_send(frame) {
+                Ok(()) => InlineSend::Delivered(true),
+                Err(mpsc::error::TrySendError::Full(frame)) => InlineSend::Full(frame),
+                Err(mpsc::error::TrySendError::Closed(_)) => InlineSend::Closed,
+            };
+        }
+        if !self.is_enabled() {
+            return InlineSend::Delivered(false);
+        }
+        let permit = match target.try_reserve() {
+            Ok(permit) => permit,
+            Err(mpsc::error::TrySendError::Full(())) => return InlineSend::Full(frame),
+            Err(mpsc::error::TrySendError::Closed(())) => return InlineSend::Closed,
+        };
+        let _cutover = self
+            .cutover
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !self.enabled.load(Ordering::Acquire) {
+            return InlineSend::Delivered(false);
+        }
+        permit.send(frame);
+        InlineSend::Delivered(true)
+    }
+
+    /// [`Self::publish_gated`] without waiting.
+    fn try_publish_gated(&self, input: &dyn GatedFrameInput, frame: MediaFrame) -> InlineSend {
+        match input.admission() {
+            GatedFrameAdmission::Closed => return InlineSend::Closed,
+            GatedFrameAdmission::Discard => return InlineSend::Delivered(true),
+            GatedFrameAdmission::Open => {}
+        }
+        if !self.buffer_while_disabled && !self.is_enabled() {
+            return InlineSend::Delivered(false);
+        }
+        let permit = match input.channel().try_reserve() {
+            Ok(permit) => permit,
+            Err(mpsc::error::TrySendError::Full(())) => return InlineSend::Full(frame),
+            Err(mpsc::error::TrySendError::Closed(())) => return InlineSend::Closed,
+        };
+        if self.buffer_while_disabled {
+            input.commit(permit, frame);
+            return InlineSend::Delivered(true);
+        }
+        let _cutover = self
+            .cutover
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !self.enabled.load(Ordering::Acquire) {
+            return InlineSend::Delivered(false);
+        }
+        input.commit(permit, frame);
+        InlineSend::Delivered(true)
     }
 }
 
@@ -1449,6 +1582,9 @@ async fn await_update(done: oneshot::Receiver<Result<()>>) -> Result<()> {
 struct SinkQueueState {
     frames: VecDeque<MediaFrame>,
     closed: bool,
+    /// The delivery task holds a frame it took from this queue and has not
+    /// settled yet. Only tracked for a route with an inline target.
+    in_flight: bool,
 }
 
 struct SinkQueue {
@@ -1456,6 +1592,10 @@ struct SinkQueue {
     capacity: usize,
     state: Mutex<SinkQueueState>,
     notify: Notify,
+    /// The route's target, for the graph actor to deliver to directly while
+    /// this queue is idle (a lane-inline graph). `None` for every route of
+    /// any other graph.
+    inline_target: Option<MediaSinkTarget>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1472,9 +1612,18 @@ impl SinkQueue {
         Self::with_peer_ticket(capacity, None)
     }
 
+    #[cfg(test)]
     fn with_peer_ticket(
         capacity: usize,
         peer_ticket: Option<crate::bridge::peer_switch::PeerRouteTicket>,
+    ) -> Self {
+        Self::with_inline_target(capacity, peer_ticket, None)
+    }
+
+    fn with_inline_target(
+        capacity: usize,
+        peer_ticket: Option<crate::bridge::peer_switch::PeerRouteTicket>,
+        inline_target: Option<MediaSinkTarget>,
     ) -> Self {
         let capacity = capacity.max(1);
         Self {
@@ -1483,8 +1632,29 @@ impl SinkQueue {
             state: Mutex::new(SinkQueueState {
                 frames: VecDeque::with_capacity(capacity),
                 closed: false,
+                in_flight: false,
             }),
             notify: Notify::new(),
+            inline_target,
+        }
+    }
+
+    /// Nothing queued and nothing being delivered, so a frame the actor
+    /// delivers directly now cannot overtake an earlier one. Only the actor
+    /// adds frames, so the answer cannot go stale towards "idle".
+    fn is_idle(&self) -> bool {
+        let state = self.state.lock().expect("media sink queue poisoned");
+        !state.closed && !state.in_flight && state.frames.is_empty()
+    }
+
+    /// The delivery task settled the frame it took (delivered, retired by a
+    /// fence, or skipped).
+    fn finish_delivery(&self) {
+        if self.inline_target.is_some() {
+            self.state
+                .lock()
+                .expect("media sink queue poisoned")
+                .in_flight = false;
         }
     }
 
@@ -1536,6 +1706,9 @@ impl SinkQueue {
             let closed = {
                 let mut state = self.state.lock().expect("media sink queue poisoned");
                 if let Some(frame) = state.frames.pop_front() {
+                    if self.inline_target.is_some() {
+                        state.in_flight = true;
+                    }
                     return Some(frame);
                 }
                 state.closed
@@ -2282,6 +2455,10 @@ struct GraphStats {
     transcode_operations: u64,
     transcode_errors: u64,
     recent_evictions: VecDeque<MediaGraphEvictionSnapshot>,
+    /// Lane-inline graphs only: offers the actor delivered directly, and
+    /// offers that found the target full and went through the queue.
+    inline_deliveries: u64,
+    inline_fallbacks: u64,
 }
 
 impl GraphStats {
@@ -2470,11 +2647,75 @@ pub fn start_media_graph(
     )
 }
 
+/// [`start_media_graph`] with the graph's actor, and the route delivery tasks
+/// it spawns, on `runtime` instead of the caller's runtime.
+///
+/// `runtime` is typically a stream's media lane (see
+/// [`crate::stream::MediaStream::media_lane`]): the runtime that owns the
+/// socket the graph reads from or writes to. This is placement only: the
+/// graph behaves exactly as one started by [`start_media_graph`], and `None`
+/// is [`start_media_graph`]. If `runtime` shuts down under a running graph,
+/// the graph aborts and its routes terminate as for any aborted graph.
+pub fn start_media_graph_on(
+    source: mpsc::Receiver<MediaFrame>,
+    source_codec: CodecInfo,
+    policy: MediaGraphPolicy,
+    runtime: Option<&tokio::runtime::Handle>,
+) -> Result<MediaGraphHandle> {
+    start_media_graph_placed(
+        source,
+        source_codec,
+        policy,
+        MEDIA_GRAPH_ACTIVITY_OBSERVATION_INTERVAL,
+        runtime,
+        false,
+    )
+}
+
+/// [`start_media_graph_on`] for a bridge graph with lane-inline delivery
+/// (see [`crate::Config::lane_inline_graph_delivery`]): the actor delivers a
+/// routed frame to its target itself while the route's queue is idle, and
+/// the route's delivery task only drains a backlog. What a target receives,
+/// in which order and under which fences, is unchanged.
+pub(crate) fn start_media_graph_lane_inline(
+    source: mpsc::Receiver<MediaFrame>,
+    source_codec: CodecInfo,
+    policy: MediaGraphPolicy,
+    runtime: &tokio::runtime::Handle,
+) -> Result<MediaGraphHandle> {
+    start_media_graph_placed(
+        source,
+        source_codec,
+        policy,
+        MEDIA_GRAPH_ACTIVITY_OBSERVATION_INTERVAL,
+        Some(runtime),
+        true,
+    )
+}
+
 fn start_media_graph_with_activity_interval(
+    source: mpsc::Receiver<MediaFrame>,
+    source_codec: CodecInfo,
+    policy: MediaGraphPolicy,
+    activity_observation_interval: Duration,
+) -> Result<MediaGraphHandle> {
+    start_media_graph_placed(
+        source,
+        source_codec,
+        policy,
+        activity_observation_interval,
+        None,
+        false,
+    )
+}
+
+fn start_media_graph_placed(
     mut source: mpsc::Receiver<MediaFrame>,
     source_codec: CodecInfo,
     policy: MediaGraphPolicy,
     activity_observation_interval: Duration,
+    runtime: Option<&tokio::runtime::Handle>,
+    lane_inline: bool,
 ) -> Result<MediaGraphHandle> {
     let graph_id = MediaGraphId::new();
     validate_media_graph_codec(&source_codec)?;
@@ -2524,7 +2765,7 @@ fn start_media_graph_with_activity_interval(
         completion: completion_tx,
         route_statuses: Arc::clone(&route_statuses_for_actor),
     };
-    let task = tokio::spawn(async move {
+    let actor = async move {
         let _terminal_guard = terminal_guard;
         let mut aggregate_metrics = AggregateMetricsGuard::new();
         let mut source_codec = source_codec;
@@ -2593,7 +2834,11 @@ fn start_media_graph_with_activity_interval(
                             let first_sink = !source_routing_started;
                             let target_clock_rate_hz = codec.clock_rate_hz;
                             let status_route_id = route_id.clone();
-                            let queue = Arc::new(SinkQueue::with_peer_ticket(policy.sink_queue_frames, peer_ticket.clone()));
+                            let queue = Arc::new(SinkQueue::with_inline_target(
+                                policy.sink_queue_frames,
+                                peer_ticket.clone(),
+                                lane_inline.then(|| target.clone()),
+                            ));
                             let queue_for_task = Arc::clone(&queue);
                             let forwarding_for_task = Arc::clone(&forwarding);
                             let delivery_for_task = Arc::clone(&delivery);
@@ -2603,18 +2848,30 @@ fn start_media_graph_with_activity_interval(
                             let task = tokio::spawn(async move {
                                 let _guard = delivery_guard;
                                 while let Some(frame) = queue_for_task.receive().await {
-                                    if forwarding_for_task.accepts_while_disabled() {
+                                    let result = if forwarding_for_task.accepts_while_disabled() {
                                         forwarding_for_task.wait_until_enabled().await;
-                                    } else if !forwarding_for_task.is_enabled() {
-                                        continue;
-                                    }
-                                    let result = target
-                                        .send(frame, peer_ticket.as_ref(), &forwarding_for_task)
-                                        .await;
+                                        Some(
+                                            target
+                                                .send(frame, peer_ticket.as_ref(), &forwarding_for_task)
+                                                .await,
+                                        )
+                                    } else if forwarding_for_task.is_enabled() {
+                                        Some(
+                                            target
+                                                .send(frame, peer_ticket.as_ref(), &forwarding_for_task)
+                                                .await,
+                                        )
+                                    } else {
+                                        None
+                                    };
+                                    // The frame taken from the queue is
+                                    // settled: the actor may deliver
+                                    // directly again once the queue is empty.
+                                    queue_for_task.finish_delivery();
                                     match result {
-                                        Ok(true) => delivery_for_task.record_delivery(),
-                                        Ok(false) => {}
-                                        Err(_) => {
+                                        Some(Ok(true)) => delivery_for_task.record_delivery(),
+                                        Some(Ok(false)) | None => {}
+                                        Some(Err(_)) => {
                                             let _ = event_tx.send(route_for_task.clone()).await;
                                             return;
                                         }
@@ -3115,8 +3372,21 @@ fn start_media_graph_with_activity_interval(
                 &stats,
             )),
         );
+        if lane_inline {
+            // Once per graph, not per frame.
+            metrics::counter!("rvoip_media_graph_inline_deliveries_total")
+                .increment(stats.inline_deliveries);
+            metrics::counter!("rvoip_media_graph_inline_fallbacks_total")
+                .increment(stats.inline_fallbacks);
+        }
         debug!(graph_id = %graph_id_for_task, ?source_state, "rvoip media graph stopped");
-    });
+    };
+    // The route delivery tasks are spawned from inside the actor, so they run
+    // on the actor's runtime too.
+    let task = match runtime {
+        Some(runtime) => runtime.spawn(actor),
+        None => tokio::spawn(actor),
+    };
 
     Ok(MediaGraphHandle {
         graph_id,
@@ -3315,7 +3585,32 @@ fn route_source_frame(
                     // must not all land on one instant.
                     routed.timestamp_rtp = sink.clock.translate(produced.timestamp_rtp);
                 }
-                let offer = sink.queue.offer(routed);
+                // A lane-inline route takes the frame directly while its queue
+                // is idle (the delivery task holds nothing, so the order is
+                // the queue's); a full target hands it back to the queue.
+                let mut delivered_inline = false;
+                let offer = match sink.queue.inline_target.as_ref() {
+                    Some(target) if sink.forwarding.is_enabled() && sink.queue.is_idle() => {
+                        match target.try_send_now(
+                            routed,
+                            sink.queue.peer_ticket.as_ref(),
+                            &sink.forwarding,
+                        ) {
+                            InlineSend::Delivered(delivered) => {
+                                stats.inline_deliveries = stats.inline_deliveries.saturating_add(1);
+                                delivered_inline = delivered;
+                                OfferResult::Enqueued
+                            }
+                            InlineSend::Suppressed => OfferResult::Suppressed,
+                            InlineSend::Full(frame) => {
+                                stats.inline_fallbacks = stats.inline_fallbacks.saturating_add(1);
+                                sink.queue.offer(frame)
+                            }
+                            InlineSend::Closed => OfferResult::Closed,
+                        }
+                    }
+                    _ => sink.queue.offer(routed),
+                };
                 if offer == OfferResult::Suppressed {
                     continue;
                 }
@@ -3336,6 +3631,11 @@ fn route_source_frame(
                 }
                 if sink.record_offer(now, dropped, policy) {
                     evict.push(route_id.clone());
+                }
+                if delivered_inline {
+                    // After the offer is counted, as a delivery task records
+                    // a delivery only after the actor's offer.
+                    sink.delivery.record_delivery();
                 }
             }
         }
@@ -7150,5 +7450,838 @@ mod tests {
             )),
             5
         );
+    }
+
+    // ---- Placement on a media lane (`start_media_graph_on`) ----
+
+    const TEST_LANE_THREAD: &str = "rvoip-test-media-lane";
+
+    /// A current-thread runtime on its own named thread, standing in for a
+    /// stream's media lane.
+    struct TestLane {
+        handle: tokio::runtime::Handle,
+        stop: Option<oneshot::Sender<()>>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl TestLane {
+        fn start() -> Self {
+            let (handle_tx, handle_rx) = std::sync::mpsc::channel();
+            let (stop_tx, stop_rx) = oneshot::channel::<()>();
+            let thread = std::thread::Builder::new()
+                .name(TEST_LANE_THREAD.to_string())
+                .spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("lane runtime");
+                    handle_tx
+                        .send(runtime.handle().clone())
+                        .expect("lane handle");
+                    runtime.block_on(async move {
+                        let _ = stop_rx.await;
+                    });
+                })
+                .expect("lane thread");
+            let handle = handle_rx.recv().expect("lane started");
+            Self {
+                handle,
+                stop: Some(stop_tx),
+                thread: Some(thread),
+            }
+        }
+
+        /// Stop the lane, as at process shutdown, and wait for its thread.
+        fn stop(&mut self) {
+            if let Some(stop) = self.stop.take() {
+                let _ = stop.send(());
+            }
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    impl Drop for TestLane {
+        fn drop(&mut self) {
+            self.stop();
+        }
+    }
+
+    /// Where a frame was written into its target from.
+    #[derive(Clone, Debug)]
+    struct Landing {
+        runtime: tokio::runtime::Id,
+        thread: Option<String>,
+        task: Option<tokio::task::Id>,
+    }
+
+    impl Landing {
+        fn here() -> Self {
+            Self {
+                runtime: tokio::runtime::Handle::current().id(),
+                thread: std::thread::current().name().map(str::to_owned),
+                task: tokio::task::try_id(),
+            }
+        }
+    }
+
+    /// An always-open gated input that records where each frame was
+    /// committed from.
+    struct LandingProbe {
+        channel: mpsc::Sender<MediaFrame>,
+        landings: Mutex<Vec<Landing>>,
+    }
+
+    impl LandingProbe {
+        fn new(channel: mpsc::Sender<MediaFrame>) -> Arc<Self> {
+            Arc::new(Self {
+                channel,
+                landings: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn landings(&self) -> Vec<Landing> {
+            self.landings.lock().unwrap().clone()
+        }
+    }
+
+    impl GatedFrameInput for LandingProbe {
+        fn channel(&self) -> &mpsc::Sender<MediaFrame> {
+            &self.channel
+        }
+
+        fn admission(&self) -> GatedFrameAdmission {
+            if self.channel.is_closed() {
+                GatedFrameAdmission::Closed
+            } else {
+                GatedFrameAdmission::Open
+            }
+        }
+
+        fn left_open(
+            &self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            Box::pin(std::future::pending())
+        }
+
+        fn commit(&self, permit: mpsc::Permit<'_, MediaFrame>, frame: MediaFrame) -> bool {
+            self.landings.lock().unwrap().push(Landing::here());
+            permit.send(frame);
+            true
+        }
+    }
+
+    /// A placed graph's routes write into their targets from the lane, for
+    /// plain and peer-switched routes alike; an unplaced graph's from the
+    /// caller's runtime.
+    #[tokio::test]
+    async fn a_graph_on_a_media_lane_runs_its_deliveries_on_the_lane() {
+        let lane = TestLane::start();
+        let caller = tokio::runtime::Handle::current().id();
+        for placed in [false, true] {
+            for peer in [false, true] {
+                let (source_tx, source_rx) = mpsc::channel(16);
+                let graph = start_media_graph_on(
+                    source_rx,
+                    codec("pcmu", 8_000),
+                    Default::default(),
+                    placed.then_some(&lane.handle),
+                )
+                .unwrap();
+                let (probe_tx, mut probe_rx) = mpsc::channel(16);
+                let probe = LandingProbe::new(probe_tx);
+                let route = add_route(
+                    &graph,
+                    codec("pcmu", 8_000),
+                    MediaSinkTarget::Gated(probe.clone()),
+                    peer,
+                );
+                route.wait_active().await.unwrap();
+                for value in 1..=5u8 {
+                    source_tx.send(frame(value)).await.unwrap();
+                }
+                assert_eq!(collect_quiet(&mut probe_rx).await.len(), 5);
+                let landings = probe.landings();
+                assert_eq!(landings.len(), 5);
+                for landing in landings {
+                    if placed {
+                        assert_eq!(landing.runtime, lane.handle.id(), "peer={peer}");
+                        assert_eq!(landing.thread.as_deref(), Some(TEST_LANE_THREAD));
+                    } else {
+                        assert_eq!(landing.runtime, caller, "peer={peer}");
+                        assert_ne!(landing.thread.as_deref(), Some(TEST_LANE_THREAD));
+                    }
+                }
+                graph.shutdown_and_wait().await.unwrap();
+            }
+        }
+    }
+
+    async fn route_through_graph(
+        runtime: Option<&tokio::runtime::Handle>,
+        source_codec: CodecInfo,
+        sink_codec: CodecInfo,
+        frames: Vec<MediaFrame>,
+    ) -> Delivered {
+        let (source_tx, source_rx) = mpsc::channel(64);
+        let graph =
+            start_media_graph_on(source_rx, source_codec, Default::default(), runtime).unwrap();
+        let (target_tx, mut target_rx) = mpsc::channel(64);
+        let route = graph.add_managed_sink(sink_codec, target_tx).unwrap();
+        route.wait_active().await.unwrap();
+        // Fewer frames than the sink queue and the target hold: nothing can
+        // be dropped whatever the relative speed of the two threads.
+        for frame in frames {
+            source_tx.send(frame).await.unwrap();
+        }
+        let delivered = collect_quiet(&mut target_rx).await;
+        assert_eq!(route.delivered_frames(), delivered.len() as u64);
+        graph.shutdown_and_wait().await.unwrap();
+        delivered
+    }
+
+    /// Caller audio to an AI (8 kHz G.711 up to 16 kHz PCM) and AI audio to
+    /// the caller (down again), each with a timestamp gap: a graph on a
+    /// media lane delivers exactly what the same graph delivers on the
+    /// caller's runtime.
+    #[tokio::test]
+    async fn graph_on_a_media_lane_delivers_what_the_callers_runtime_delivers() {
+        let lane = TestLane::start();
+        let rx: Vec<MediaFrame> = (0..12u8)
+            .map(|value| {
+                let gap = if value >= 6 { 4_000 } else { 0 };
+                pcmu_audio(value, u32::from(value) * 160 + gap)
+            })
+            .collect();
+        let tx: Vec<MediaFrame> = (0..12u8)
+            .map(|value| {
+                let gap = if value >= 6 { 8_000 } else { 0 };
+                pcm16_audio(value, u32::from(value) * 320 + gap)
+            })
+            .collect();
+        for (source_codec, sink_codec, frames) in [
+            (codec("pcmu", 8_000), codec("pcm_s16le", 16_000), rx),
+            (codec("pcm_s16le", 16_000), codec("pcmu", 8_000), tx),
+        ] {
+            let here = route_through_graph(
+                None,
+                source_codec.clone(),
+                sink_codec.clone(),
+                frames.clone(),
+            )
+            .await;
+            let there =
+                route_through_graph(Some(&lane.handle), source_codec, sink_codec, frames).await;
+            assert_eq!(here.len(), 12, "the transcoded route lost frames");
+            assert_eq!(here, there, "placement changed what the sink received");
+        }
+    }
+
+    /// Barge-in on a lane graph, queued or inline: a flush discards exactly
+    /// the queued frames, only the oldest frames escape it, in order, and
+    /// audio flows after it.
+    #[tokio::test]
+    async fn flush_on_a_media_lane_discards_exactly_the_queued_frames() {
+        let lane = TestLane::start();
+        for (runtime, inline) in [
+            (None, false),
+            (Some(&lane.handle), false),
+            (Some(&lane.handle), true),
+        ] {
+            let (source_tx, source_rx) = mpsc::channel(16);
+            let graph = start_placed(
+                source_rx,
+                codec("pcmu", 8_000),
+                Default::default(),
+                runtime,
+                inline,
+            );
+            // A one-slot target nobody reads yet: the delivery task delivers
+            // at most one frame and holds at most one more; the rest queue.
+            let (target_tx, mut target_rx) = mpsc::channel(1);
+            let route = graph
+                .add_managed_sink(codec("pcmu", 8_000), target_tx)
+                .unwrap();
+            route.wait_active().await.unwrap();
+            for value in 1..=6u8 {
+                source_tx.send(frame(value)).await.unwrap();
+            }
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while graph.snapshot().await.source_frames < 6 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("graph did not take the frames");
+            let dropped = graph.flush_sinks_and_wait().await.unwrap();
+            source_tx.send(frame(7)).await.unwrap();
+            let mut received = Vec::new();
+            while let Ok(Some(frame)) =
+                tokio::time::timeout(Duration::from_millis(300), target_rx.recv()).await
+            {
+                received.push(frame.payload[0]);
+            }
+            assert_eq!(received.last(), Some(&7), "post-flush audio still flows");
+            let before_flush = &received[..received.len() - 1];
+            assert!(
+                before_flush
+                    .iter()
+                    .copied()
+                    .eq(1..=before_flush.len() as u8),
+                "only the oldest frames escape a flush, in order: {received:?}"
+            );
+            assert_eq!(
+                before_flush.len() + dropped,
+                6,
+                "every frame is delivered or flushed"
+            );
+            graph.shutdown_and_wait().await.unwrap();
+        }
+    }
+
+    /// A lane graph tears down like any other when its source closes, and
+    /// still converges, with its routes terminated, when the lane itself
+    /// stops under it.
+    #[tokio::test]
+    async fn a_graph_on_a_media_lane_tears_down_like_any_other() {
+        let mut lane = TestLane::start();
+        let (source_tx, source_rx) = mpsc::channel(4);
+        let graph = start_media_graph_on(
+            source_rx,
+            codec("pcmu", 8_000),
+            Default::default(),
+            Some(&lane.handle),
+        )
+        .unwrap();
+        let (target_tx, mut target_rx) = mpsc::channel(4);
+        let route = graph
+            .add_managed_sink(codec("pcmu", 8_000), target_tx)
+            .unwrap();
+        route.wait_active().await.unwrap();
+        source_tx.send(frame(1)).await.unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(2), target_rx.recv())
+            .await
+            .expect("lane graph delivered")
+            .expect("target open");
+        assert_eq!(first.payload[0], 1);
+        drop(source_tx);
+        assert_eq!(
+            graph.wait_closed().await.unwrap(),
+            MediaGraphSourceState::Closed
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), route.status().wait_terminal())
+                .await
+                .expect("route terminal"),
+            MediaGraphRouteTerminalReason::SourceClosed
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), target_rx.recv())
+                .await
+                .expect("target released")
+                .is_none(),
+            "the delivery task released its target"
+        );
+
+        let (source_tx, source_rx) = mpsc::channel(4);
+        let graph = start_media_graph_on(
+            source_rx,
+            codec("pcmu", 8_000),
+            Default::default(),
+            Some(&lane.handle),
+        )
+        .unwrap();
+        let (target_tx, mut target_rx) = mpsc::channel(4);
+        let route = graph
+            .add_managed_sink(codec("pcmu", 8_000), target_tx)
+            .unwrap();
+        route.wait_active().await.unwrap();
+        lane.stop();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(7), graph.wait_closed())
+                .await
+                .is_ok(),
+            "teardown converges after the lane stopped"
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), route.status().wait_terminal())
+                .await
+                .expect("route terminal"),
+            MediaGraphRouteTerminalReason::GraphAborted
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), target_rx.recv())
+                .await
+                .expect("target released")
+                .is_none()
+        );
+        drop(source_tx);
+    }
+
+    // ---- Lane-inline delivery ----
+
+    fn start_placed(
+        source: mpsc::Receiver<MediaFrame>,
+        source_codec: CodecInfo,
+        policy: MediaGraphPolicy,
+        runtime: Option<&tokio::runtime::Handle>,
+        inline: bool,
+    ) -> MediaGraphHandle {
+        start_media_graph_placed(
+            source,
+            source_codec,
+            policy,
+            MEDIA_GRAPH_ACTIVITY_OBSERVATION_INTERVAL,
+            runtime,
+            inline,
+        )
+        .unwrap()
+    }
+
+    /// Route `frames` through a graph on `lane` to a plain route, a
+    /// peer-switched route (a bridge's kind) and a peer-switched gated input
+    /// (an in-process AI behind a bridge). Returns what each received and
+    /// the delivery accounting.
+    async fn route_three_ways(
+        lane: &tokio::runtime::Handle,
+        inline: bool,
+        source_codec: CodecInfo,
+        sink_codec: CodecInfo,
+        frames: Vec<MediaFrame>,
+    ) -> (Delivered, Delivered, Delivered, u64) {
+        let (source_tx, source_rx) = mpsc::channel(64);
+        let graph = start_placed(
+            source_rx,
+            source_codec,
+            Default::default(),
+            Some(lane),
+            inline,
+        );
+        let (plain_tx, mut plain_rx) = mpsc::channel(64);
+        let plain = add_route(
+            &graph,
+            sink_codec.clone(),
+            MediaSinkTarget::Legacy(plain_tx),
+            false,
+        );
+        let (peer_tx, mut peer_rx) = mpsc::channel(64);
+        let peer = add_route(
+            &graph,
+            sink_codec.clone(),
+            MediaSinkTarget::Legacy(peer_tx),
+            true,
+        );
+        let (gated_tx, mut gated_rx) = mpsc::channel(64);
+        let gated = add_route(
+            &graph,
+            sink_codec,
+            MediaSinkTarget::Gated(TestGate::new(gated_tx)),
+            true,
+        );
+        for route in [&plain, &peer, &gated] {
+            route.wait_active().await.unwrap();
+        }
+        // Fewer frames than any queue or channel: nothing can be dropped.
+        for frame in frames {
+            source_tx.send(frame).await.unwrap();
+        }
+        let plain_got = collect_quiet(&mut plain_rx).await;
+        let peer_got = collect_quiet(&mut peer_rx).await;
+        let gated_got = collect_quiet(&mut gated_rx).await;
+        let delivered =
+            plain.delivered_frames() + peer.delivered_frames() + gated.delivered_frames();
+        assert_eq!(graph.snapshot().await.dropped_frames, 0);
+        graph.shutdown_and_wait().await.unwrap();
+        (plain_got, peer_got, gated_got, delivered)
+    }
+
+    /// Caller audio to an AI and AI audio to the caller, each with a
+    /// timestamp gap: an inline lane graph delivers exactly what the queued
+    /// lane graph delivers, to every kind of route, with the same accounting.
+    #[tokio::test]
+    async fn inline_lane_graph_delivers_exactly_what_the_queued_graph_delivers() {
+        let lane = TestLane::start();
+        let rx: Vec<MediaFrame> = (0..12u8)
+            .map(|value| {
+                let gap = if value >= 6 { 4_000 } else { 0 };
+                pcmu_audio(value, u32::from(value) * 160 + gap)
+            })
+            .collect();
+        let tx: Vec<MediaFrame> = (0..12u8)
+            .map(|value| {
+                let gap = if value >= 6 { 8_000 } else { 0 };
+                pcm16_audio(value, u32::from(value) * 320 + gap)
+            })
+            .collect();
+        for (source_codec, sink_codec, frames) in [
+            (codec("pcmu", 8_000), codec("pcm_s16le", 16_000), rx),
+            (codec("pcm_s16le", 16_000), codec("pcmu", 8_000), tx),
+        ] {
+            let queued = route_three_ways(
+                &lane.handle,
+                false,
+                source_codec.clone(),
+                sink_codec.clone(),
+                frames.clone(),
+            )
+            .await;
+            let inline =
+                route_three_ways(&lane.handle, true, source_codec, sink_codec, frames).await;
+            assert_eq!(queued.0.len(), 12, "every frame reached the plain route");
+            assert_eq!(queued.0, queued.1, "both route kinds got the same frames");
+            assert_eq!(queued.0, queued.2, "the gated input got the same frames");
+            assert_eq!(
+                inline.0, queued.0,
+                "inline delivery changed the plain route"
+            );
+            assert_eq!(inline.1, queued.1, "inline delivery changed the peer route");
+            assert_eq!(
+                inline.2, queued.2,
+                "inline delivery changed the gated input"
+            );
+            assert_eq!(inline.3, queued.3, "delivery accounting differs");
+            assert_eq!(inline.3, 36);
+        }
+    }
+
+    /// With room in the target, a lane-inline graph's actor writes every
+    /// frame into the target itself, on the lane; a queued lane graph's
+    /// delivery task does it, on the same lane.
+    #[tokio::test]
+    async fn inline_delivery_runs_in_the_graph_actor_on_the_lane() {
+        let lane = TestLane::start();
+        for inline in [false, true] {
+            for peer in [false, true] {
+                let (source_tx, source_rx) = mpsc::channel(16);
+                let graph = start_placed(
+                    source_rx,
+                    codec("pcmu", 8_000),
+                    Default::default(),
+                    Some(&lane.handle),
+                    inline,
+                );
+                let actor = graph.abort_handle().id();
+                let (probe_tx, mut probe_rx) = mpsc::channel(16);
+                let probe = LandingProbe::new(probe_tx);
+                let route = add_route(
+                    &graph,
+                    codec("pcmu", 8_000),
+                    MediaSinkTarget::Gated(probe.clone()),
+                    peer,
+                );
+                route.wait_active().await.unwrap();
+                for value in 1..=5u8 {
+                    source_tx.send(frame(value)).await.unwrap();
+                }
+                assert_eq!(collect_quiet(&mut probe_rx).await.len(), 5);
+                assert_eq!(route.delivered_frames(), 5);
+                let landings = probe.landings();
+                assert_eq!(landings.len(), 5);
+                for landing in landings {
+                    assert_eq!(landing.runtime, lane.handle.id());
+                    assert_eq!(landing.thread.as_deref(), Some(TEST_LANE_THREAD));
+                    assert!(landing.task.is_some());
+                    assert_eq!(
+                        landing.task == Some(actor),
+                        inline,
+                        "inline={inline} peer={peer}: written from {landing:?}, actor {actor:?}"
+                    );
+                }
+                graph.shutdown_and_wait().await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn inline_delivery_keeps_order_when_the_target_fills_and_drains() {
+        let lane = TestLane::start();
+        let (source_tx, source_rx) = mpsc::channel(64);
+        let graph = start_placed(
+            source_rx,
+            codec("pcmu", 8_000),
+            Default::default(),
+            Some(&lane.handle),
+            true,
+        );
+        // Two slots nobody reads yet: two frames go inline, the rest queue
+        // behind them (the default queue holds 25), then inline resumes.
+        let (target_tx, mut target_rx) = mpsc::channel(2);
+        let route = graph
+            .add_managed_sink(codec("pcmu", 8_000), target_tx)
+            .unwrap();
+        route.wait_active().await.unwrap();
+        for value in 1..=12u8 {
+            source_tx.send(frame(value)).await.unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while graph.snapshot().await.source_frames < 12 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("graph took the frames");
+        let mut received = Vec::new();
+        for _ in 0..12 {
+            let frame = tokio::time::timeout(Duration::from_secs(2), target_rx.recv())
+                .await
+                .expect("frame delivered")
+                .expect("target open");
+            received.push(frame.payload[0]);
+        }
+        // Inline again once the queue drained, still in order.
+        for value in 13..=20u8 {
+            source_tx.send(frame(value)).await.unwrap();
+            let frame = tokio::time::timeout(Duration::from_secs(2), target_rx.recv())
+                .await
+                .expect("frame delivered")
+                .expect("target open");
+            received.push(frame.payload[0]);
+        }
+        assert_eq!(
+            received,
+            (1..=20u8).collect::<Vec<_>>(),
+            "order or completeness changed"
+        );
+        // The delivery counter advances after the target accepts a frame, on
+        // the lane thread, so the last frame can reach this receiver first.
+        wait_until(|| route.delivered_frames() >= 20).await;
+        assert_eq!(graph.snapshot().await.dropped_frames, 0);
+        assert_eq!(route.delivered_frames(), 20);
+        graph.shutdown_and_wait().await.unwrap();
+        assert_eq!(route.delivered_frames(), 20, "a frame was counted twice");
+        assert!(target_rx.try_recv().is_err(), "a frame was delivered twice");
+    }
+
+    /// No extra latency: on one current-thread runtime the inline path needs
+    /// no more scheduler turns than the queued path from source send to
+    /// target receipt (it skips the delivery task's turn).
+    #[tokio::test(flavor = "current_thread")]
+    async fn inline_delivery_adds_no_scheduler_turns() {
+        let mut turns = Vec::new();
+        for inline in [false, true] {
+            let (source_tx, source_rx) = mpsc::channel(8);
+            let graph = start_placed(
+                source_rx,
+                codec("pcmu", 8_000),
+                Default::default(),
+                None,
+                inline,
+            );
+            let (target_tx, mut target_rx) = mpsc::channel(8);
+            let route = graph
+                .add_managed_sink(codec("pcmu", 8_000), target_tx)
+                .unwrap();
+            route.wait_active().await.unwrap();
+            let mut samples = Vec::new();
+            for value in 1..=5u8 {
+                source_tx.send(frame(value)).await.unwrap();
+                let mut yields = 0u32;
+                loop {
+                    match target_rx.try_recv() {
+                        Ok(frame) => {
+                            assert_eq!(frame.payload[0], value);
+                            break;
+                        }
+                        Err(_) => {
+                            yields += 1;
+                            assert!(yields < 10_000, "frame never arrived");
+                            tokio::task::yield_now().await;
+                        }
+                    }
+                }
+                samples.push(yields);
+            }
+            turns.push(samples.into_iter().max().unwrap_or(0));
+            graph.shutdown_and_wait().await.unwrap();
+        }
+        assert!(
+            turns[1] <= turns[0],
+            "inline delivery took more scheduler turns ({}) than the queued path ({})",
+            turns[1],
+            turns[0]
+        );
+    }
+
+    /// Open, paused (hold), reopened and stopped gate, through one route.
+    /// Returns what crossed and the delivery count after each phase.
+    async fn gate_scenario(
+        lane: Option<&tokio::runtime::Handle>,
+        inline: bool,
+        peer: bool,
+    ) -> (Delivered, Vec<u64>, MediaGraphRouteTerminalReason) {
+        let (source_tx, source_rx) = mpsc::channel(64);
+        let graph = start_placed(
+            source_rx,
+            codec("pcmu", 8_000),
+            Default::default(),
+            lane,
+            inline,
+        );
+        let (gate_tx, mut gate_rx) = mpsc::channel(64);
+        let gate = TestGate::new(gate_tx);
+        let route = add_route(
+            &graph,
+            codec("pcm_s16le", 16_000),
+            MediaSinkTarget::Gated(gate.clone()),
+            peer,
+        );
+        route.wait_active().await.unwrap();
+        let mut crossed = Vec::new();
+        let mut counts = Vec::new();
+        for value in 0..10u8 {
+            source_tx
+                .send(pcmu_audio(value, u32::from(value) * 160))
+                .await
+                .unwrap();
+        }
+        crossed.extend(collect_quiet(&mut gate_rx).await);
+        counts.push(route.delivered_frames());
+
+        gate.set(TestGate::PAUSED).await;
+        for value in 20..23u8 {
+            source_tx
+                .send(pcmu_audio(value, u32::from(value) * 160))
+                .await
+                .unwrap();
+        }
+        wait_until(|| route.delivered_frames() == 13).await;
+        crossed.extend(collect_quiet(&mut gate_rx).await);
+        counts.push(route.delivered_frames());
+
+        gate.set(TestGate::OPEN).await;
+        source_tx.send(pcmu_audio(30, 30 * 160)).await.unwrap();
+        crossed.extend(collect_quiet(&mut gate_rx).await);
+        counts.push(route.delivered_frames());
+
+        gate.set(TestGate::STOPPED).await;
+        source_tx.send(pcmu_audio(31, 31 * 160)).await.unwrap();
+        let terminal = tokio::time::timeout(Duration::from_secs(2), route.status().wait_terminal())
+            .await
+            .expect("route terminal");
+        counts.push(route.delivered_frames());
+        graph.shutdown_and_wait().await.unwrap();
+        (crossed, counts, terminal)
+    }
+
+    /// The AI's input gate makes the same decisions inline on a lane as
+    /// through the queued path: the same frames cross while open, held audio
+    /// is taken and discarded, audio flows again after resume, and a stopped
+    /// gate ends the route.
+    #[tokio::test]
+    async fn inline_gated_delivery_makes_the_same_gate_decisions() {
+        let lane = TestLane::start();
+        for peer in [false, true] {
+            let queued = gate_scenario(None, false, peer).await;
+            assert_eq!(queued.0.len(), 11, "peer={peer}");
+            assert_eq!(queued.1, vec![10, 13, 14, 14], "peer={peer}");
+            assert_eq!(queued.2, MediaGraphRouteTerminalReason::TargetClosed);
+            let inline = gate_scenario(Some(&lane.handle), true, peer).await;
+            assert_eq!(inline, queued, "peer={peer}");
+        }
+    }
+
+    /// A peer-switch commit fences an inline route exactly as a queued one:
+    /// once a successor owns delivery, the retired generation delivers and
+    /// counts nothing more.
+    #[tokio::test]
+    async fn inline_delivery_honours_a_peer_switch_commit() {
+        let lane = TestLane::start();
+        let mut outcomes = Vec::new();
+        for inline in [false, true] {
+            let (source_tx, source_rx) = mpsc::channel(16);
+            let graph = start_placed(
+                source_rx,
+                codec("pcmu", 8_000),
+                Default::default(),
+                Some(&lane.handle),
+                inline,
+            );
+            let ticket = crate::bridge::peer_switch::PeerRouteTicket::initial();
+            let (target_tx, mut target_rx) = mpsc::channel(16);
+            let route = graph
+                .add_peer_sink_target(
+                    codec("pcmu", 8_000),
+                    MediaSinkTarget::Legacy(target_tx),
+                    ticket.clone(),
+                )
+                .unwrap();
+            route.wait_active().await.unwrap();
+            for value in 1..=3u8 {
+                source_tx.send(frame(value)).await.unwrap();
+            }
+            let before = collect_quiet(&mut target_rx).await;
+            let successor = ticket.stage().expect("stage");
+            let quiesced = ticket.quiesce().await.expect("quiesce");
+            assert!(successor.commit_from(&ticket));
+            drop(quiesced);
+            for value in 4..=6u8 {
+                source_tx.send(frame(value)).await.unwrap();
+            }
+            wait_until(|| graph.latest_snapshot().source_frames == 6).await;
+            let after = collect_quiet(&mut target_rx).await;
+            let offers = graph.snapshot().await.sink_offers;
+            outcomes.push((before, after, route.delivered_frames(), offers));
+            graph.shutdown_and_wait().await.unwrap();
+        }
+        assert_eq!(outcomes[0].0.len(), 3);
+        assert!(outcomes[0].1.is_empty(), "a retired generation delivered");
+        assert_eq!(outcomes[0].2, 3);
+        assert_eq!(
+            outcomes[1], outcomes[0],
+            "inline delivery changed the fence"
+        );
+    }
+
+    /// Teardown of a lane graph, queued or inline, awaits the actor and its
+    /// delivery tasks: a waiter on another runtime is polled a handful of
+    /// times while the lane is busy, never in a `yield_now` loop.
+    #[tokio::test]
+    async fn lane_graph_teardown_awaits_without_spinning() {
+        for inline in [false, true] {
+            let lane = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .expect("lane runtime");
+            let (source_tx, source_rx) = mpsc::channel(4);
+            let graph = start_placed(
+                source_rx,
+                codec("pcmu", 8_000),
+                Default::default(),
+                Some(lane.handle()),
+                inline,
+            );
+            let (target_tx, _target_rx) = mpsc::channel(1);
+            let route = graph
+                .add_managed_sink(codec("pcmu", 8_000), target_tx)
+                .unwrap();
+            route.wait_active().await.unwrap();
+            // Fill the target so the delivery task is parked in a send.
+            for value in 1..=3u8 {
+                source_tx.send(frame(value)).await.unwrap();
+            }
+            let (blocked_tx, blocked_rx) = std::sync::mpsc::channel();
+            lane.spawn(async move {
+                blocked_tx.send(()).expect("signal");
+                std::thread::sleep(Duration::from_millis(60));
+            });
+            blocked_rx.recv().expect("lane is blocked");
+            let polls = Arc::new(AtomicUsize::new(0));
+            let waiting = Polls {
+                inner: Box::pin(graph.shutdown_and_wait()),
+                polls: Arc::clone(&polls),
+            };
+            assert_eq!(waiting.await.unwrap(), MediaGraphSourceState::Shutdown);
+            let polls = polls.load(Ordering::Relaxed);
+            assert!(
+                polls <= 16,
+                "teardown was polled {polls} times (inline={inline})"
+            );
+            assert!(graph.abort_handle().is_finished());
+            drop(route);
+            drop(source_tx);
+            lane.shutdown_background();
+        }
     }
 }

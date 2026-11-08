@@ -331,6 +331,7 @@ fn log_malformed_rtp_packet(
 }
 
 use super::allocator::{GlobalPortAllocator, PairingStrategy, PortAllocator};
+use super::rx_hot::{RxHot, RxHotVerdict};
 use super::srtp_rx::{OwnerSrtpRx, PreviousRecv, SrtpRecvShared, SrtpRecvSlot};
 use super::symmetric::{SymmetricRtpDecision, SymmetricRtpLearner};
 use super::validation::PlatformSocketStrategy;
@@ -340,6 +341,7 @@ use crate::executor::{
     HandoffSlot, InlineOwnerCounters, InlineRtpIngress, InlineRtpPacket, OwnerTimer,
     INLINE_DRAIN_BUDGET,
 };
+use crate::hot_state::HotDoorbell;
 use crate::packet::rtcp::RtcpPacket;
 use crate::packet::RtpPacket;
 use crate::traits::RtpEvent;
@@ -393,6 +395,10 @@ impl InlineRx {
         self.timer.fired();
         self.counters.fire();
         self.ingress.on_deadline(now);
+        // Hot call state: once per expiry, not per packet. The address the
+        // lane clock prefetches when the next deadline falls due (0 unless
+        // hot state is on).
+        self.timer.set_prefetch_hint(self.ingress.prefetch_hint());
         self.rearm(now);
     }
 
@@ -472,10 +478,13 @@ enum RecvContext<'a> {
 }
 
 impl<'a> RecvContext<'a> {
+    /// `check` false (hot call state): the transport's doorbell has not rung
+    /// since the owner last checked the inbound SRTP epoch, so the epoch load
+    /// is skipped (see `OwnerSrtpRx::context_gated`).
     #[inline]
-    fn open(owner: &'a mut Option<OwnerSrtpRx>, shared: &'a SrtpRecvShared) -> Self {
+    fn open(owner: &'a mut Option<OwnerSrtpRx>, shared: &'a SrtpRecvShared, check: bool) -> Self {
         match owner {
-            Some(owner) => Self::Owner(owner.context()),
+            Some(owner) => Self::Owner(owner.context_gated(check)),
             None => Self::Shared(shared.lock()),
         }
     }
@@ -489,13 +498,48 @@ impl<'a> RecvContext<'a> {
     }
 }
 
+/// The receive loop's symmetric-RTP decision for one authenticated RTP
+/// packet, shared by the v1 and inline paths: a new signalled destination
+/// (generation) restarts the learner, then the learner observes the packet.
+/// With hot call state (`rx_hot`) the generation is loaded only when the
+/// transport's doorbell moved, and the latched SSRC is remembered.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn observe_symmetric_rtp(
+    rx_hot: Option<&mut RxHot>,
+    bell: u64,
+    generation: &AtomicU64,
+    learner: &mut SymmetricRtpLearner,
+    observed_generation: &mut u64,
+    source: SocketAddr,
+    ssrc: u32,
+    sequence: u16,
+    now: Instant,
+) -> RxHotVerdict {
+    if let Some(hot) = rx_hot {
+        return hot.observe(bell, generation, source, ssrc, sequence, now);
+    }
+    let current = generation.load(Ordering::Acquire);
+    if current != *observed_generation {
+        learner.reset();
+        *observed_generation = current;
+    }
+    RxHotVerdict {
+        decision: learner.observe(source, ssrc, sequence, now),
+        latched_ssrc_known: false,
+    }
+}
+
 /// The receive loop's symmetric-RTP handling of one authenticated RTP
 /// packet, shared by the v1 and inline paths: remember the stream's SSRC,
 /// latch or rebind the destination, count the decision. Returns whether the
-/// packet is admitted.
+/// packet is admitted. With hot call state, `verdict.latched_ssrc_known`
+/// skips the latched-SSRC load (this loop is its only writer) and the
+/// doorbell rings after a latch or rebind (the TX destination cache re-reads
+/// the destination and the latch).
 #[allow(clippy::too_many_arguments)]
 fn admit_symmetric_rtp(
-    decision: SymmetricRtpDecision,
+    verdict: RxHotVerdict,
     addr: SocketAddr,
     ssrc: u32,
     rtcp_mux: &AtomicBool,
@@ -504,13 +548,16 @@ fn admit_symmetric_rtp(
     remote_rtp_addr: &ArcSwapOption<SocketAddr>,
     remote_rtcp_addr: &ArcSwapOption<SocketAddr>,
     counters: &SymmetricRtpCounters,
+    doorbell: Option<&HotDoorbell>,
 ) -> bool {
+    let decision = verdict.decision;
     if matches!(
         decision,
         SymmetricRtpDecision::Accept
             | SymmetricRtpDecision::LatchInitial
             | SymmetricRtpDecision::Rebind
-    ) && latched_rtp_ssrc.load(Ordering::Relaxed) != u64::from(ssrc)
+    ) && !verdict.latched_ssrc_known
+        && latched_rtp_ssrc.load(Ordering::Relaxed) != u64::from(ssrc)
     {
         latched_rtp_ssrc.store(u64::from(ssrc), Ordering::Release);
     }
@@ -524,6 +571,9 @@ fn admit_symmetric_rtp(
             if rtcp_mux.load(Ordering::Acquire) {
                 remote_rtcp_addr.store(Some(Arc::new(addr)));
             }
+            if let Some(doorbell) = doorbell {
+                doorbell.ring();
+            }
             counters.destination_learned.store(true, Ordering::Relaxed);
             true
         }
@@ -531,6 +581,9 @@ fn admit_symmetric_rtp(
             remote_rtp_addr.store(Some(Arc::new(addr)));
             if rtcp_mux.load(Ordering::Acquire) {
                 remote_rtcp_addr.store(Some(Arc::new(addr)));
+            }
+            if let Some(doorbell) = doorbell {
+                doorbell.ring();
             }
             counters.accepted_rebindings.fetch_add(1, Ordering::Relaxed);
             true
@@ -776,6 +829,12 @@ pub struct UdpRtpTransport {
     /// receive task starts a fresh latch for a re-INVITE or ICE-less endpoint
     /// update.
     symmetric_rtp_generation: Arc<AtomicU64>,
+
+    /// Hot call state (`None` when off): rung after every store the receive
+    /// loop or the TX destination cache must observe (`active`, the
+    /// symmetric-RTP generation and latch, the remote RTP address, the
+    /// inbound SRTP context). See [`crate::hot_state`].
+    hot_doorbell: Option<Arc<HotDoorbell>>,
 
     /// Remote RTP address. `ArcSwapOption` so per-packet `send_rtp_bytes`
     /// can update the cached symmetric-RTP target with a single atomic
@@ -1034,6 +1093,8 @@ impl UdpRtpTransport {
             symmetric_rtp_counters: Arc::new(SymmetricRtpCounters::default()),
             symmetric_rtp_latched: Arc::new(AtomicBool::new(false)),
             symmetric_rtp_generation: Arc::new(AtomicU64::new(0)),
+            hot_doorbell: crate::executor::hot_state_enabled()
+                .then(|| Arc::new(HotDoorbell::new())),
             remote_rtp_addr: Arc::new(ArcSwapOption::from(None)),
             remote_rtcp_addr: Arc::new(ArcSwapOption::from(None)),
             event_tx,
@@ -1048,7 +1109,9 @@ impl UdpRtpTransport {
             refused_rtp_datagrams: AtomicU64::new(0),
             srtp_send: Arc::new(parking_lot::Mutex::new(None)),
             srtp_recv: Arc::new(SrtpRecvShared::new()),
-            dtmf_seen: Arc::new(DashMap::new()),
+            dtmf_seen: Arc::new(DashMap::with_shard_amount(
+                crate::session::PER_SESSION_MAP_SHARDS,
+            )),
             #[cfg(feature = "dtls-webrtc")]
             dtls_tx: Arc::new(parking_lot::Mutex::new(None)),
             #[cfg(feature = "memory-diagnostics")]
@@ -1120,6 +1183,8 @@ impl UdpRtpTransport {
         let remote_rtcp_addr = self.remote_rtcp_addr.clone();
         let rtcp_mux = self.rtcp_mux.clone();
         let latched_rtp_ssrc = self.latched_rtp_ssrc.clone();
+        // Hot call state: the doorbell gates the per-datagram control loads.
+        let hot_doorbell = self.hot_doorbell.clone();
         #[cfg(feature = "dtls-webrtc")]
         let dtls_tx = self.dtls_tx.clone();
         let srtp_diagnostics = srtp_diagnostics_enabled();
@@ -1130,8 +1195,6 @@ impl UdpRtpTransport {
         // Executor v2: the loop can adopt an inline ingress, and with the lane
         // poller it runs inside its lane's poller task (one task wakeup
         // serves every socket that became ready together).
-        let inline_capable =
-            crate::executor::media_executor_mode() == crate::executor::MediaExecutorMode::V2;
         let on_lane = crate::executor::lane_poller_enabled();
         // The loop owns the inbound SRTP context when it is that context's
         // only datagram user: no separate RTCP socket, whose receive task
@@ -1150,34 +1213,38 @@ impl UdpRtpTransport {
                 let mut observed_symmetric_generation =
                     symmetric_rtp_generation.load(Ordering::Acquire);
                 debug!("UDP receive loop started on {:?}", rtp_socket.local_addr());
-                // Executor v2 (None under v1): see `InlineRx`. The inline path
-                // authenticates and decrypts RTP in place in one reused
-                // buffer; v1 receives into a fresh buffer per datagram.
+                // Executor v2 (None under v1): see `InlineRx`.
                 let mut inline: Option<InlineRx> = None;
                 // The inbound SRTP context this loop holds (`None` under v1
                 // or without `owner_srtp`). Dropped with the loop, which gives
                 // the context back to the transport.
                 let mut owner_rx: Option<OwnerSrtpRx> =
                     owner_srtp.then(|| OwnerSrtpRx::new(srtp_recv.clone()));
-                let mut inline_storage = if inline_capable {
-                    vec![0u8; recv_buffer_size]
-                } else {
-                    Vec::new()
-                };
+                // Hot call state (`None` when off): the per-check doorbell
+                // snapshots and the symmetric-RTP learner, in the lane's slab
+                // when this loop runs on a dedicated current-thread lane.
+                // Placed on the first poll, on the thread that polls the loop.
+                let mut rx_hot: Option<RxHot> = hot_doorbell
+                    .as_ref()
+                    .map(|_| RxHot::new(symmetric_rtp_policy));
+                // One receive buffer serves the whole loop. The inline path
+                // authenticates and decrypts RTP in place in it; on the v1
+                // path every event copies the bytes it keeps, and each
+                // iteration reads only the `size` bytes recv_from returned.
+                let mut storage = vec![0u8; recv_buffer_size];
 
                 loop {
-                    // Check if we should continue running
-                    if !active_state.load(Ordering::Acquire) {
+                    // Check if we should continue running (hot call state:
+                    // only when the doorbell rang since the last check).
+                    let check_active = match (rx_hot.as_mut(), hot_doorbell.as_deref()) {
+                        (Some(hot), Some(doorbell)) => hot.gate_top(doorbell.read()),
+                        _ => true,
+                    };
+                    if check_active && !active_state.load(Ordering::Acquire) {
                         break;
                     }
 
-                    let mut fresh;
-                    let buffer: &mut [u8] = if inline.is_some() {
-                        &mut inline_storage
-                    } else {
-                        fresh = vec![0u8; recv_buffer_size];
-                        &mut fresh
-                    };
+                    let buffer: &mut [u8] = &mut storage;
 
                     // Receive packet
                     let received = match inline.as_mut() {
@@ -1194,6 +1261,10 @@ impl UdpRtpTransport {
                             if on_lane {
                                 crate::lane_poller::note_lane_datagram();
                             }
+                            // Hot call state: one doorbell read per datagram,
+                            // after it was received; each gated check below
+                            // compares it with its own snapshot.
+                            let bell = hot_doorbell.as_deref().map_or(0, HotDoorbell::read);
                             trace!("UDP recv_from returned {} bytes from {}", size, addr);
 
                             let packet_class = classify_rtp_mux_packet(&buffer[..size]);
@@ -1277,7 +1348,11 @@ impl UdpRtpTransport {
                                 }
                                 debug!("Received RTCP packet, type: {}", buffer[1] & 0x7F);
                                 let rtcp_data = if secure_media_required.load(Ordering::Acquire) {
-                                    let mut recv = RecvContext::open(&mut owner_rx, &srtp_recv);
+                                    let mut recv = RecvContext::open(
+                                        &mut owner_rx,
+                                        &srtp_recv,
+                                        rx_hot.as_mut().is_none_or(|hot| hot.gate_srtp(bell)),
+                                    );
                                     let Some(context) = recv.get() else {
                                         trace!("SRTCP is required but no receive context is installed; dropping packet");
                                         continue;
@@ -1327,8 +1402,11 @@ impl UdpRtpTransport {
                                     // per-packet allocation.
                                     let data = &mut buffer[..size];
                                     let parsed = {
-                                        let mut srtp_guard =
-                                            RecvContext::open(&mut owner_rx, &srtp_recv);
+                                        let mut srtp_guard = RecvContext::open(
+                                            &mut owner_rx,
+                                            &srtp_recv,
+                                            rx_hot.as_mut().is_none_or(|hot| hot.gate_srtp(bell)),
+                                        );
                                         if srtp_diagnostics && !first_inbound_rtp_logged {
                                             info!(
                                                 "SRTP_DIAG inbound_rtp_first local={:?} source={} size={} srtp_context={}",
@@ -1386,24 +1464,23 @@ impl UdpRtpTransport {
                                             continue;
                                         }
                                     };
-                                    let generation =
-                                        symmetric_rtp_generation.load(Ordering::Acquire);
-                                    if generation != observed_symmetric_generation {
-                                        symmetric_rtp.reset();
-                                        observed_symmetric_generation = generation;
-                                    }
                                     // One pass reading for the datagrams of
                                     // a lane pass (bounded staleness; see
                                     // `lane_clock`), else a clock read.
                                     let now = crate::media_clock::now_std();
-                                    let decision = symmetric_rtp.observe(
+                                    let verdict = observe_symmetric_rtp(
+                                        rx_hot.as_mut(),
+                                        bell,
+                                        &symmetric_rtp_generation,
+                                        &mut symmetric_rtp,
+                                        &mut observed_symmetric_generation,
                                         addr,
                                         bounds.header.ssrc,
                                         bounds.header.sequence_number,
                                         now,
                                     );
                                     if !admit_symmetric_rtp(
-                                        decision,
+                                        verdict,
                                         addr,
                                         bounds.header.ssrc,
                                         &rtcp_mux,
@@ -1412,6 +1489,7 @@ impl UdpRtpTransport {
                                         &remote_rtp_addr,
                                         &remote_rtcp_addr,
                                         &symmetric_rtp_counters,
+                                        hot_doorbell.as_deref(),
                                     ) {
                                         continue;
                                     }
@@ -1449,7 +1527,11 @@ impl UdpRtpTransport {
                                 // event, no warn-level log — to avoid
                                 // leaking timing or distinguishing failure
                                 // modes to a network attacker.
-                                let mut srtp_guard = RecvContext::open(&mut owner_rx, &srtp_recv);
+                                let mut srtp_guard = RecvContext::open(
+                                    &mut owner_rx,
+                                    &srtp_recv,
+                                    rx_hot.as_mut().is_none_or(|hot| hot.gate_srtp(bell)),
+                                );
                                 if srtp_diagnostics && !first_inbound_rtp_logged {
                                     info!(
                                     "SRTP_DIAG inbound_rtp_first local={:?} source={} size={} srtp_context={}",
@@ -1494,20 +1576,19 @@ impl UdpRtpTransport {
                                 drop(srtp_guard);
                                 match parse_result {
                                     Ok(packet) => {
-                                        let generation =
-                                            symmetric_rtp_generation.load(Ordering::Acquire);
-                                        if generation != observed_symmetric_generation {
-                                            symmetric_rtp.reset();
-                                            observed_symmetric_generation = generation;
-                                        }
-                                        let decision = symmetric_rtp.observe(
+                                        let verdict = observe_symmetric_rtp(
+                                            rx_hot.as_mut(),
+                                            bell,
+                                            &symmetric_rtp_generation,
+                                            &mut symmetric_rtp,
+                                            &mut observed_symmetric_generation,
                                             addr,
                                             packet.header.ssrc,
                                             packet.header.sequence_number,
                                             Instant::now(),
                                         );
                                         if !admit_symmetric_rtp(
-                                            decision,
+                                            verdict,
                                             addr,
                                             packet.header.ssrc,
                                             &rtcp_mux,
@@ -1516,6 +1597,7 @@ impl UdpRtpTransport {
                                             &remote_rtp_addr,
                                             &remote_rtcp_addr,
                                             &symmetric_rtp_counters,
+                                            hot_doorbell.as_deref(),
                                         ) {
                                             continue;
                                         }
@@ -1665,13 +1747,13 @@ impl UdpRtpTransport {
         self.spawn_on_lane("rtp_core.udp_transport.rtcp_receiver_task", async move {
             let mut observed_generation = symmetric_rtp_generation.load(Ordering::Acquire);
             let mut rtcp_moves = 0_u8;
+            // Reused across datagrams, as in the RTP receive loop.
+            let mut buffer = vec![0u8; rtcp_recv_buffer_size];
             loop {
                 // Check if we should continue running
                 if !active_state.load(Ordering::Acquire) {
                     break;
                 }
-
-                let mut buffer = vec![0u8; rtcp_recv_buffer_size];
 
                 // Receive packet
                 match rtcp_socket.recv_from(&mut buffer).await {
@@ -1794,6 +1876,7 @@ impl UdpRtpTransport {
     pub async fn stop_receiver(&self) -> Result<()> {
         // Set inactive state
         self.active.store(false, Ordering::Release);
+        self.ring_hot_doorbell();
 
         let rtcp_task = self.rtcp_receiver_task.lock().take();
         if let Some(task) = rtcp_task {
@@ -1816,6 +1899,16 @@ impl UdpRtpTransport {
         self.symmetric_rtp_latched.store(false, Ordering::Release);
         self.remote_rtp_addr.store(Some(Arc::new(addr)));
         self.symmetric_rtp_generation.fetch_add(1, Ordering::AcqRel);
+        self.ring_hot_doorbell();
+    }
+
+    /// Hot call state: ring the doorbell after a store the receive loop or
+    /// the TX destination cache must observe (no-op when hot state is off).
+    #[inline]
+    fn ring_hot_doorbell(&self) {
+        if let Some(doorbell) = self.hot_doorbell.as_deref() {
+            doorbell.ring();
+        }
     }
 
     /// Set the remote RTCP address
@@ -1998,6 +2091,9 @@ impl UdpRtpTransport {
             // An owning receive loop adopts the new context before its next
             // datagram and gives the old one back unchanged.
             let previous_recv = self.srtp_recv.install(&mut recv_slot, recv);
+            // Hot call state: after the epoch moved, so the receive loop
+            // re-checks it.
+            self.ring_hot_doorbell();
             self.srtp_context_generation
                 .store(installed_generation, Ordering::Release);
             (previous_send, previous_recv, installed_generation)
@@ -2046,6 +2142,7 @@ impl UdpRtpTransport {
         *send_guard = rollback.previous_send;
         self.srtp_recv
             .restore(&mut recv_slot, rollback.previous_recv);
+        self.ring_hot_doorbell();
         self.srtp_context_generation
             .store(retired_generation, Ordering::Release);
         self.secure_media_required
@@ -2142,7 +2239,10 @@ impl UdpRtpTransport {
             // Seed the pre-latch target for callers that send before media is
             // received. Once a validated inbound tuple is latched, outbound
             // calls must not restore a stale SDP destination.
-            seed_prelatch_destination(&self.remote_rtp_addr, dest);
+            if seed_prelatch_destination(&self.remote_rtp_addr, dest) {
+                // Hot call state: only a changed destination rings.
+                self.ring_hot_doorbell();
+            }
         }
 
         let sent_bytes = match self.rtp_socket.send_to(bytes, dest).await {
@@ -2412,6 +2512,68 @@ pub(crate) fn write_datagrams_now<W: DatagramWriter + ?Sized>(
 /// Most packets one synchronous call protects and sends.
 pub(crate) const MAX_TX_BATCH: usize = 16;
 
+/// Hot call state: a packet writer's cached remote RTP address and latch
+/// state, valid while the transport's doorbell still reads `bell`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TxDestCache {
+    bell: u64,
+    dest: Option<SocketAddr>,
+    latched: bool,
+}
+
+impl TxDestCache {
+    pub(crate) fn new() -> Self {
+        Self {
+            bell: crate::hot_state::NEVER_SEEN,
+            dest: None,
+            latched: false,
+        }
+    }
+}
+
+impl Default for TxDestCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl UdpRtpTransport {
+    /// The remote RTP address ([`Self::current_remote_rtp_addr`]) and, with
+    /// hot call state, the symmetric-RTP latch state, served from `cache`
+    /// while the doorbell has not rung since the cache was filled (the
+    /// address's two pointer hops and the latch's own line saved per frame).
+    /// Every writer of the address or the latch rings after its store. With
+    /// hot state off: the plain address and no latch hint.
+    pub(crate) fn remote_rtp_now_cached(
+        &self,
+        cache: &mut TxDestCache,
+    ) -> (Option<SocketAddr>, Option<bool>) {
+        let Some(doorbell) = self.hot_doorbell.as_deref() else {
+            return (self.current_remote_rtp_addr(), None);
+        };
+        let bell = doorbell.read();
+        if cache.bell == bell {
+            if let Some(dest) = cache.dest {
+                return (Some(dest), Some(cache.latched));
+            }
+        }
+        let dest = self.current_remote_rtp_addr();
+        let latched = self.symmetric_rtp_latched.load(Ordering::Acquire);
+        *cache = TxDestCache {
+            bell,
+            dest,
+            latched,
+        };
+        (dest, Some(latched))
+    }
+
+    /// Test seam: whether this transport has a doorbell (hot call state).
+    #[cfg(test)]
+    pub(crate) fn hot_state_enabled(&self) -> bool {
+        self.hot_doorbell.is_some()
+    }
+}
+
 impl UdpRtpTransport {
     /// Protect and send `packets` (one stream, consecutive sequence numbers
     /// from `first_sequence`, in order) from the caller's thread, without
@@ -2436,14 +2598,22 @@ impl UdpRtpTransport {
         dest: SocketAddr,
         arena: &mut Vec<u8>,
         batch: bool,
+        latched_hint: Option<bool>,
     ) -> Option<TxNowOutcome> {
         let packets = &packets[..packets.len().min(MAX_TX_BATCH)];
         if packets.is_empty() {
             return Some(TxNowOutcome::default());
         }
-        if self.config.symmetric_rtp && !self.symmetric_rtp_latched.load(Ordering::Acquire) {
+        // Hot call state: `latched_hint` is the latch state the caller's
+        // destination cache read under an unchanged doorbell
+        // (`remote_rtp_now_cached`).
+        if self.config.symmetric_rtp
+            && !latched_hint.unwrap_or_else(|| self.symmetric_rtp_latched.load(Ordering::Acquire))
+        {
             // As `send_rtp_wire_bytes_unchecked`: seed the pre-latch target.
-            seed_prelatch_destination(&self.remote_rtp_addr, dest);
+            if seed_prelatch_destination(&self.remote_rtp_addr, dest) {
+                self.ring_hot_doorbell();
+            }
         }
         let mut srtp_guard = self.srtp_send.lock();
         arena.clear();
@@ -2679,6 +2849,7 @@ impl RtpTransport for UdpRtpTransport {
 impl Drop for UdpRtpTransport {
     fn drop(&mut self) {
         self.active.store(false, Ordering::Release);
+        self.ring_hot_doorbell();
         if let Ok(mut tasks) = self.receiver_tasks.try_lock() {
             for task in tasks.drain(..) {
                 task.abort();
@@ -3147,6 +3318,141 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(transport.remote_rtp_addr().await, Some(other_addr));
+    }
+
+    fn hot_config(session: &str) -> RtpTransportConfig {
+        RtpTransportConfig {
+            local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+            local_rtcp_addr: None,
+            symmetric_rtp: true,
+            rtcp_mux: true,
+            session_id: Some(session.to_string()),
+            use_port_allocator: false,
+            buffer_config: Default::default(),
+        }
+    }
+
+    /// Hot call state: a transport has a doorbell only when it was built
+    /// with hot state on (v2), and every control-plane store the receive loop
+    /// or the TX destination cache checks rings it after the store; a
+    /// pre-latch seed of an unchanged destination does not.
+    #[tokio::test]
+    async fn every_control_plane_writer_rings_the_hot_state_doorbell() {
+        for config in [
+            crate::executor::MediaExecutorConfig::v1().with_hot_state(true),
+            crate::executor::MediaExecutorConfig::v2().with_hot_state(false),
+        ] {
+            let _config = crate::executor::override_media_executor_config_on_this_thread(config);
+            let transport = UdpRtpTransport::new(hot_config("hot-off")).await.unwrap();
+            assert!(!transport.hot_state_enabled());
+        }
+        let _v2 = crate::executor::override_media_executor_config_on_this_thread(
+            crate::executor::MediaExecutorConfig::v2(),
+        );
+        let transport = UdpRtpTransport::new(hot_config("hot-doorbell"))
+            .await
+            .unwrap();
+        assert!(transport.hot_state_enabled());
+        let bell = || transport.hot_doorbell.as_deref().unwrap().read();
+        let mut last = bell();
+        let mut rang = |what: &str, expected: bool| {
+            let now = bell();
+            assert_eq!(now > last, expected, "{what}");
+            last = now;
+        };
+        let signalled = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let other = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let a = signalled.local_addr().unwrap();
+        let b = other.local_addr().unwrap();
+        transport.set_remote_rtp_addr(a).await;
+        rang("a signalled destination", true);
+        transport
+            .send_rtp_bytes(b"\x80\x00\x00\x01payload", a)
+            .await
+            .unwrap();
+        rang("a pre-latch seed of the same destination", false);
+        transport
+            .send_rtp_bytes(b"\x80\x00\x00\x02payload", b)
+            .await
+            .unwrap();
+        rang("a pre-latch seed of a new destination", true);
+        // The receive loop latches an inbound source.
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let packet = RtpPacket::new(
+            crate::packet::RtpHeader::new(0, 1, 160, 0x0bad_f00d),
+            Bytes::from_static(b"latch me"),
+        );
+        peer.send_to(
+            &packet.serialize().unwrap(),
+            transport.local_rtp_addr().unwrap(),
+        )
+        .await
+        .unwrap();
+        let latched = peer.local_addr().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while transport.current_remote_rtp_addr() != Some(latched) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the receive loop latches the inbound source");
+        rang("a latch", true);
+        transport
+            .send_rtp_bytes(b"\x80\x00\x00\x03payload", b)
+            .await
+            .unwrap();
+        rang("a send after the latch seeds nothing", false);
+        let (send, recv) = make_srtp_ctx_pair();
+        let rollback = transport.replace_srtp_contexts(send, recv).await.unwrap();
+        rang("an SRTP installation", true);
+        transport.rollback_srtp_contexts(rollback).await.unwrap();
+        rang("an SRTP rollback", true);
+        transport.stop_receiver().await.unwrap();
+        rang("stopping the receiver", true);
+    }
+
+    /// Hot call state: on a current-thread runtime (a dedicated media lane)
+    /// the receive loop keeps its control entry in the lane's slab, and
+    /// closing the transport releases it.
+    #[tokio::test]
+    async fn a_hot_receive_loop_keeps_its_entry_in_the_lane_slab_until_close() {
+        let _local = crate::task_runtime::MediaTasksOnCurrentRuntime::enter();
+        let _v2 = crate::executor::override_media_executor_config_on_this_thread(
+            crate::executor::MediaExecutorConfig::v2(),
+        );
+        let before = super::super::rx_hot::lane_rx_entries();
+        let transport = UdpRtpTransport::new(hot_config("hot-lane-entry"))
+            .await
+            .unwrap();
+        let mut events = transport.subscribe();
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let packet = RtpPacket::new(
+            crate::packet::RtpHeader::new(0, 7, 1120, 0x0102_0304),
+            Bytes::from_static(b"lane payload"),
+        );
+        peer.send_to(
+            &packet.serialize().unwrap(),
+            transport.local_rtp_addr().unwrap(),
+        )
+        .await
+        .unwrap();
+        match tokio::time::timeout(Duration::from_secs(2), events.recv()).await {
+            Ok(Ok(RtpEvent::MediaReceived {
+                sequence_number, ..
+            })) => assert_eq!(sequence_number, 7),
+            other => panic!("expected MediaReceived, got {other:?}"),
+        }
+        assert_eq!(
+            super::super::rx_hot::lane_rx_entries(),
+            before + 1,
+            "the loop's entry is in this lane's slab"
+        );
+        transport.close().await.unwrap();
+        assert_eq!(
+            super::super::rx_hot::lane_rx_entries(),
+            before,
+            "close released the entry"
+        );
     }
 
     #[tokio::test]
@@ -4121,6 +4427,77 @@ mod tests {
         assert_eq!(recovered.payload, valid_packet.payload);
 
         transport.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn receive_scratch_reuse_preserves_owned_packets_and_lengths() {
+        for rtcp_mux in [true, false] {
+            let receiver = UdpRtpTransport::new(RtpTransportConfig {
+                local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+                local_rtcp_addr: (!rtcp_mux).then(|| "127.0.0.1:0".parse().unwrap()),
+                symmetric_rtp: false,
+                rtcp_mux,
+                session_id: Some(format!("scratch-reuse-{rtcp_mux}")),
+                use_port_allocator: false,
+                buffer_config: Default::default(),
+            })
+            .await
+            .unwrap();
+            let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let rtp_destination = receiver.local_rtp_addr().unwrap();
+            let rtcp_destination = if rtcp_mux {
+                rtp_destination
+            } else {
+                receiver
+                    .rtcp_socket
+                    .load_full()
+                    .unwrap()
+                    .local_addr()
+                    .unwrap()
+            };
+            let mut events = receiver.subscribe();
+            let mut retained = Vec::new();
+            // Long datagrams followed by short ones: a reused buffer must
+            // never leak the tail of an earlier, longer datagram.
+            for (seq, len) in [1024, 1, 160, 3].into_iter().enumerate() {
+                let payload = Bytes::from(vec![seq as u8 + 1; len]);
+                let packet = RtpPacket::new(
+                    RtpHeader::new(0, seq as u16, seq as u32 * 160, 123),
+                    payload.clone(),
+                )
+                .serialize()
+                .unwrap();
+                sender.send_to(&packet, rtp_destination).await.unwrap();
+                match tokio::time::timeout(Duration::from_secs(2), events.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                {
+                    RtpEvent::MediaReceived {
+                        payload: actual, ..
+                    } => retained.push((actual, payload)),
+                    other => panic!("unexpected {other:?}"),
+                }
+                // Valid RTCP APP packets of alternating length share the RTP
+                // buffer with rtcp-mux and use the RTCP buffer without it.
+                let words = if seq % 2 == 0 { 128 } else { 3 };
+                let mut rtcp = vec![seq as u8 + 10; words * 4];
+                rtcp[..4].copy_from_slice(&[0x80, 204, 0, (words - 1) as u8]);
+                sender.send_to(&rtcp, rtcp_destination).await.unwrap();
+                match tokio::time::timeout(Duration::from_secs(2), events.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                {
+                    RtpEvent::RtcpReceived { data, .. } => retained.push((data, Bytes::from(rtcp))),
+                    other => panic!("unexpected {other:?}"),
+                }
+            }
+            for (actual, expected) in retained {
+                assert_eq!(actual, expected);
+            }
+            receiver.close().await.unwrap();
+        }
     }
 
     #[tokio::test]

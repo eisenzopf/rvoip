@@ -193,6 +193,33 @@ impl SessionStore {
         .then(|| cell.hangup_control())
     }
 
+    /// Subscribe to committed call-state changes of one exact lifetime. The
+    /// receiver holds no session-map entry and cannot follow raw-ID reuse.
+    pub(crate) fn subscribe_call_state_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Option<tokio::sync::watch::Receiver<Option<CallState>>> {
+        let cell = self.cell_for_handle(handle)?;
+        let _update = cell.lock_update();
+        if !self.authority.is_current(handle.key()) || !self.map_owns_cell(handle, &cell) {
+            return None;
+        }
+        Some(cell.subscribe_call_state())
+    }
+
+    /// Subscribe to committed media-readiness changes of one exact lifetime.
+    pub(crate) fn subscribe_media_readiness_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Option<tokio::sync::watch::Receiver<Option<super::state::MediaReadinessSignal>>> {
+        let cell = self.cell_for_handle(handle)?;
+        let _update = cell.lock_update();
+        if !self.authority.is_current(handle.key()) || !self.map_owns_cell(handle, &cell) {
+            return None;
+        }
+        Some(cell.subscribe_media_readiness())
+    }
+
     /// Resolve the async state-machine lane for this exact current lifetime.
     ///
     /// Callers retain both the generation-qualified handle and lane while
@@ -737,6 +764,7 @@ impl SessionStore {
         let (previous, published) = cell.publish(session);
         match guard.finish() {
             Ok(()) => {
+                cell.notify_state_committed(published.state());
                 debug!(session_id = %handle.session_id(), "updated exact SIP session lifetime");
                 Ok(published)
             }
@@ -862,10 +890,11 @@ impl SessionStore {
             self.index_delta_committed();
         }
 
-        let (previous, _published) = cell.publish(session);
+        let (previous, published) = cell.publish(session);
 
         match guard.finish() {
             Ok(()) => {
+                cell.notify_state_committed(published.state());
                 debug!(session_id = %handle.session_id(), "updated exact SIP session lifetime");
                 Ok(result)
             }
@@ -931,6 +960,7 @@ impl SessionStore {
             .remove_if(handle.session_id(), |_, candidate| {
                 Arc::ptr_eq(candidate, &cell)
             });
+        cell.close_call_state_updates();
         self.remove_indexes_for_session(snapshot.state(), handle);
         self.removed_total.fetch_add(1, Ordering::Relaxed);
         #[cfg(feature = "perf-infra-memory-diagnostics")]
@@ -1162,6 +1192,124 @@ pub struct SessionStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn media_readiness_retains_committed_owner_and_negotiation_without_unrelated_wakes() {
+        let store = SessionStore::new();
+        let id = SessionId::new();
+        let handle = store
+            .create_session(id.clone(), Role::UAS, false)
+            .await
+            .unwrap()
+            .lifecycle_handle
+            .unwrap();
+        let mut readiness = store.subscribe_media_readiness_exact(&handle).unwrap();
+        assert!(!readiness.borrow().unwrap().owner_ready);
+        store
+            .update_session_with(&id, |state| state.media_session_ready = true)
+            .await
+            .unwrap();
+        assert!(
+            !readiness.has_changed().unwrap(),
+            "revisions that keep readiness must not wake the media driver"
+        );
+        store
+            .update_session_with(&id, |state| {
+                state.media_session_id = Some(MediaSessionId::new("readiness-owner"));
+                state.sdp_negotiated = true;
+            })
+            .await
+            .unwrap();
+        readiness.changed().await.unwrap();
+        let committed = readiness.borrow_and_update().unwrap();
+        assert!(committed.owner_ready && committed.negotiation_decided && !committed.terminal);
+        // A subscriber arriving after the commit starts from the ready value.
+        let late = store.subscribe_media_readiness_exact(&handle).unwrap();
+        assert_eq!(*late.borrow(), Some(committed));
+        store
+            .update_session_with(&id, |state| state.call_state = CallState::Terminating)
+            .await
+            .unwrap();
+        readiness.changed().await.unwrap();
+        assert!(readiness.borrow_and_update().unwrap().terminal);
+        store.remove_session_exact(&handle).await.unwrap();
+        assert_eq!(*readiness.borrow_and_update(), None);
+        assert!(store.subscribe_media_readiness_exact(&handle).is_none());
+    }
+
+    #[tokio::test]
+    async fn call_state_subscription_retains_transitions_and_ignores_unrelated_updates() {
+        let store = SessionStore::new();
+        let id = SessionId::new();
+        let created = store
+            .create_session(id.clone(), Role::UAS, false)
+            .await
+            .unwrap();
+        let handle = created.lifecycle_handle.unwrap();
+        let mut states = store.subscribe_call_state_exact(&handle).unwrap();
+        assert_eq!(*states.borrow_and_update(), Some(CallState::Idle));
+
+        store
+            .update_session_with(&id, |state| state.call_state = CallState::Answering)
+            .await
+            .unwrap();
+        // The ACK can commit before the accept task next polls its receiver.
+        store
+            .update_session_with(&id, |state| state.call_state = CallState::Active)
+            .await
+            .unwrap();
+        states.changed().await.unwrap();
+        assert_eq!(*states.borrow_and_update(), Some(CallState::Active));
+        assert!(!states.has_changed().unwrap());
+
+        store
+            .update_session_with(&id, |state| state.media_session_ready = true)
+            .await
+            .unwrap();
+        assert!(
+            !states.has_changed().unwrap(),
+            "revisions that keep the call state must not wake ACK waiters"
+        );
+        let late = store.subscribe_call_state_exact(&handle).unwrap();
+        assert_eq!(*late.borrow(), Some(CallState::Active));
+
+        let mut terminal = store.get_session(&id).await.unwrap();
+        terminal.call_state = CallState::Terminating;
+        store.update_session(terminal).await.unwrap();
+        states.changed().await.unwrap();
+        assert_eq!(*states.borrow_and_update(), Some(CallState::Terminating));
+    }
+
+    #[tokio::test]
+    async fn call_state_subscription_closes_with_its_exact_session() {
+        let store = SessionStore::new();
+        let id = SessionId::new();
+        let created = store
+            .create_session(id.clone(), Role::UAS, false)
+            .await
+            .unwrap();
+        let handle = created.lifecycle_handle.unwrap();
+        let mut states = store.subscribe_call_state_exact(&handle).unwrap();
+        store.remove_session_exact(&handle).await.unwrap();
+        assert_eq!(*states.borrow_and_update(), None);
+        assert!(states.changed().await.is_err());
+        assert!(store.subscribe_call_state_exact(&handle).is_none());
+
+        let other = SessionId::new();
+        store
+            .create_session(other.clone(), Role::UAS, false)
+            .await
+            .unwrap();
+        store
+            .update_session_with(&other, |state| state.call_state = CallState::Active)
+            .await
+            .unwrap();
+        assert_eq!(
+            *states.borrow(),
+            None,
+            "another lifetime must not wake a retired receiver"
+        );
+    }
 
     #[test]
     fn configured_capacity_is_logical_and_store_indexes_reserve_lazily() {

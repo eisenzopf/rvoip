@@ -236,9 +236,9 @@ pub(crate) const WHEEL_RESOLUTION: Duration = Duration::from_millis(1);
 
 /// End of a bucket list.
 const NIL: u32 = u32::MAX;
-/// `Entry::bucket`: not in the wheel.
+/// [`WheelLinks::bucket`]: not in the wheel.
 const UNFILED: u32 = u32::MAX;
-/// `Entry::bucket`: waiting in the overflow heap.
+/// [`WheelLinks::bucket`]: waiting in the overflow heap.
 const IN_OVERFLOW: u32 = u32::MAX - 1;
 
 /// Timing-wheel operations since the last read.
@@ -257,7 +257,47 @@ pub(crate) struct WheelOps {
     pub(crate) slot_scans: u64,
 }
 
-/// A single-level timing wheel over the clock's entry slab.
+/// Where a filed entry sits in a [`Wheel`] ([`UNFILED`], [`IN_OVERFLOW`] or
+/// a bucket index) and its neighbours in that bucket's list. Kept by every
+/// slab a wheel serves (the lane clock's sleeps, the lane table's call
+/// entries).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WheelLinks {
+    pub(crate) bucket: u32,
+    pub(crate) prev: u32,
+    pub(crate) next: u32,
+}
+
+impl WheelLinks {
+    pub(crate) const UNFILED: Self = Self {
+        bucket: UNFILED,
+        prev: NIL,
+        next: NIL,
+    };
+
+    /// Filed in a bucket or in the overflow heap.
+    #[inline]
+    pub(crate) fn is_filed(&self) -> bool {
+        self.bucket != UNFILED
+    }
+}
+
+/// One slot of a slab a [`Wheel`] is threaded through. The wheel
+/// reads the filed key, the slot's generation and liveness (to tell a stale
+/// overflow item) and owns the links. Implemented by the lane clock's
+/// entries and by the lane table's call entries (`crate::lane_table`), so
+/// both file, cancel and take deadlines by the same code.
+pub(crate) trait WheelEntry {
+    fn links(&self) -> &WheelLinks;
+    fn links_mut(&mut self) -> &mut WheelLinks;
+    /// The key the slot is filed under (`None`: not waiting).
+    fn filed_key(&self) -> Option<Instant>;
+    fn generation(&self) -> u32;
+    fn in_use(&self) -> bool;
+}
+
+/// A single-level timing wheel over a slab of [`WheelEntry`] slots (the
+/// clock's entries, or a lane table's call entries).
 ///
 /// Invariants: every linked entry's tick is below `cursor + WHEEL_SPAN`;
 /// its bucket is that of `max(tick, cursor)` (deadlines filed at or after
@@ -266,7 +306,7 @@ pub(crate) struct WheelOps {
 /// `floor` is at most every key in it (`None` iff the bucket is empty) and
 /// `floor_count` counts the keys equal to it, or is 0 when the floor is
 /// only a lower bound.
-struct Wheel {
+pub(crate) struct Wheel {
     origin: Instant,
     resolution_ns: u64,
     cursor: u64,
@@ -278,12 +318,12 @@ struct Wheel {
     overflow: BinaryHeap<Reverse<(Instant, u32, u32)>>,
     overflow_live: usize,
     /// Scratch for one `take_due` (kept to reuse its allocation).
-    due: Vec<(Instant, u32)>,
+    pub(crate) due: Vec<(Instant, u32)>,
     ops: WheelOps,
 }
 
 impl Wheel {
-    fn new(origin: Instant, resolution: Duration) -> Self {
+    pub(crate) fn new(origin: Instant, resolution: Duration) -> Self {
         Self {
             origin,
             resolution_ns: u64::try_from(resolution.as_nanos())
@@ -347,17 +387,17 @@ impl Wheel {
 
     /// Link `slot` (filed under `key`) at the head of its bucket and keep
     /// the bucket's floor.
-    fn link(&mut self, entries: &mut [Entry], slot: u32, key: Instant) {
+    fn link<E: WheelEntry>(&mut self, entries: &mut [E], slot: u32, key: Instant) {
         let bucket = self.bucket_of(self.tick_of(key));
         let head = self.heads[bucket];
         {
-            let entry = &mut entries[slot as usize];
-            entry.bucket = bucket as u32;
-            entry.prev = NIL;
-            entry.next = head;
+            let links = entries[slot as usize].links_mut();
+            links.bucket = bucket as u32;
+            links.prev = NIL;
+            links.next = head;
         }
         if head != NIL {
-            entries[head as usize].prev = slot;
+            entries[head as usize].links_mut().prev = slot;
         }
         self.heads[bucket] = slot;
         match self.floor[bucket] {
@@ -378,24 +418,22 @@ impl Wheel {
         self.len += 1;
     }
 
-    /// Unlink `slot` from its bucket (`entry.bucket` names it). The floor
-    /// is left to the caller.
-    fn unlink(&mut self, entries: &mut [Entry], slot: u32) -> usize {
+    /// Unlink `slot` from its bucket (its links name it). The floor is left
+    /// to the caller.
+    fn unlink<E: WheelEntry>(&mut self, entries: &mut [E], slot: u32) -> usize {
         let (bucket, prev, next) = {
-            let entry = &mut entries[slot as usize];
-            let links = (entry.bucket as usize, entry.prev, entry.next);
-            entry.bucket = UNFILED;
-            entry.prev = NIL;
-            entry.next = NIL;
-            links
+            let links = entries[slot as usize].links_mut();
+            let taken = (links.bucket as usize, links.prev, links.next);
+            *links = WheelLinks::UNFILED;
+            taken
         };
         if prev != NIL {
-            entries[prev as usize].next = next;
+            entries[prev as usize].links_mut().next = next;
         } else {
             self.heads[bucket] = next;
         }
         if next != NIL {
-            entries[next as usize].prev = prev;
+            entries[next as usize].links_mut().prev = prev;
         }
         self.len -= 1;
         bucket
@@ -403,11 +441,17 @@ impl Wheel {
 
     /// File `slot` under `key`: in its bucket, or in the overflow heap when
     /// beyond the span.
-    fn file(&mut self, entries: &mut [Entry], slot: u32, generation: u32, key: Instant) {
+    pub(crate) fn file<E: WheelEntry>(
+        &mut self,
+        entries: &mut [E],
+        slot: u32,
+        generation: u32,
+        key: Instant,
+    ) {
         if self.tick_of(key) >= self.cursor.saturating_add(WHEEL_SPAN) {
             self.overflow.push(Reverse((key, slot, generation)));
             self.overflow_live += 1;
-            entries[slot as usize].bucket = IN_OVERFLOW;
+            entries[slot as usize].links_mut().bucket = IN_OVERFLOW;
             self.ops.far_inserts += 1;
         } else {
             self.link(entries, slot, key);
@@ -417,11 +461,16 @@ impl Wheel {
 
     /// Remove `slot`'s filing (keyed `key`) wherever it is. O(1): an
     /// overflow item is left behind stale.
-    fn cancel(&mut self, entries: &mut [Entry], slot: u32, key: Option<Instant>) {
-        match entries[slot as usize].bucket {
+    pub(crate) fn cancel<E: WheelEntry>(
+        &mut self,
+        entries: &mut [E],
+        slot: u32,
+        key: Option<Instant>,
+    ) {
+        match entries[slot as usize].links().bucket {
             UNFILED => return,
             IN_OVERFLOW => {
-                entries[slot as usize].bucket = UNFILED;
+                entries[slot as usize].links_mut().bucket = UNFILED;
                 self.overflow_live -= 1;
             }
             _ => {
@@ -438,28 +487,28 @@ impl Wheel {
         self.ops.cancels += 1;
     }
 
-    fn overflow_item_is_current(
-        entries: &[Entry],
+    fn overflow_item_is_current<E: WheelEntry>(
+        entries: &[E],
         key: Instant,
         slot: u32,
         generation: u32,
     ) -> bool {
         entries.get(slot as usize).is_some_and(|entry| {
-            entry.in_use
-                && entry.generation == generation
-                && entry.deadline == Some(key)
-                && entry.bucket == IN_OVERFLOW
+            entry.in_use()
+                && entry.generation() == generation
+                && entry.filed_key() == Some(key)
+                && entry.links().bucket == IN_OVERFLOW
         })
     }
 
     /// Rescan `bucket` for its exact floor and how many keys sit on it.
-    fn refresh_floor(&mut self, entries: &[Entry], bucket: usize) {
+    fn refresh_floor<E: WheelEntry>(&mut self, entries: &[E], bucket: usize) {
         let mut floor: Option<Instant> = None;
         let mut count = 0;
         let mut slot = self.heads[bucket];
         while slot != NIL {
             let entry = &entries[slot as usize];
-            if let Some(key) = entry.deadline {
+            if let Some(key) = entry.filed_key() {
                 match floor {
                     Some(current) if current < key => {}
                     Some(current) if current == key => count += 1,
@@ -469,14 +518,14 @@ impl Wheel {
                     }
                 }
             }
-            slot = entry.next;
+            slot = entry.links().next;
         }
         self.floor[bucket] = floor;
         self.floor_count[bucket] = count;
     }
 
     /// The earliest filed key (stale overflow items are discarded).
-    fn next_deadline(&mut self, entries: &[Entry]) -> Option<Instant> {
+    pub(crate) fn next_deadline<E: WheelEntry>(&mut self, entries: &[E]) -> Option<Instant> {
         if self.len > 0 {
             if let Some(offset) = self.next_occupied(self.cursor, WHEEL_SPAN) {
                 let bucket = ((self.cursor + offset) & WHEEL_MASK) as usize;
@@ -497,7 +546,7 @@ impl Wheel {
 
     /// Unfile every entry whose key is at or before `now` and append
     /// `(key, slot)` for each to `self.due`, unsorted.
-    fn collect_due(&mut self, entries: &mut [Entry], now: Instant) {
+    pub(crate) fn collect_due<E: WheelEntry>(&mut self, entries: &mut [E], now: Instant) {
         let now_tick = self.tick_of(now);
         if now_tick > self.cursor {
             // Every bucket before the current tick is due whole: its keys
@@ -510,13 +559,11 @@ impl Wheel {
                 let mut slot = self.heads[bucket];
                 while slot != NIL {
                     let entry = &mut entries[slot as usize];
-                    let next = entry.next;
-                    if let Some(key) = entry.deadline {
+                    let next = entry.links().next;
+                    if let Some(key) = entry.filed_key() {
                         self.due.push((key, slot));
                     }
-                    entry.bucket = UNFILED;
-                    entry.prev = NIL;
-                    entry.next = NIL;
+                    *entry.links_mut() = WheelLinks::UNFILED;
                     self.len -= 1;
                     slot = next;
                 }
@@ -547,8 +594,8 @@ impl Wheel {
             self.ops.slot_scans += 1;
             let mut slot = self.heads[bucket];
             while slot != NIL {
-                let next = entries[slot as usize].next;
-                if let Some(key) = entries[slot as usize].deadline.filter(|key| *key <= now) {
+                let next = entries[slot as usize].links().next;
+                if let Some(key) = entries[slot as usize].filed_key().filter(|key| *key <= now) {
                     self.unlink(entries, slot);
                     self.due.push((key, slot));
                 }
@@ -563,11 +610,9 @@ impl Wheel {
     }
 
     /// Empty the wheel (the poller ended).
-    fn clear(&mut self, entries: &mut [Entry]) {
+    pub(crate) fn clear<E: WheelEntry>(&mut self, entries: &mut [E]) {
         for entry in entries.iter_mut() {
-            entry.bucket = UNFILED;
-            entry.prev = NIL;
-            entry.next = NIL;
+            *entry.links_mut() = WheelLinks::UNFILED;
         }
         for bucket in 0..WHEEL_SLOTS {
             self.clear_bucket(bucket);
@@ -579,17 +624,30 @@ impl Wheel {
 
     /// Rebuild the overflow heap once stale items dominate (a far deadline
     /// that keeps moving cannot grow it without bound).
-    fn compact_if_needed(&mut self, entries: &[Entry]) {
+    pub(crate) fn compact_if_needed<E: WheelEntry>(&mut self, entries: &[E]) {
         if self.overflow.len() <= 64 + 4 * self.overflow_live {
             return;
         }
         let mut overflow = BinaryHeap::with_capacity(self.overflow_live);
         for (slot, entry) in entries.iter().enumerate() {
-            if let (true, IN_OVERFLOW, Some(key)) = (entry.in_use, entry.bucket, entry.deadline) {
-                overflow.push(Reverse((key, slot as u32, entry.generation)));
+            if let (true, IN_OVERFLOW, Some(key)) =
+                (entry.in_use(), entry.links().bucket, entry.filed_key())
+            {
+                overflow.push(Reverse((key, slot as u32, entry.generation())));
             }
         }
         self.overflow = overflow;
+    }
+
+    /// Wheel operations since the last call.
+    pub(crate) fn take_ops(&mut self) -> WheelOps {
+        std::mem::take(&mut self.ops)
+    }
+
+    /// Test view: (entries linked in buckets, overflow heap items).
+    #[cfg(test)]
+    pub(crate) fn lengths(&self) -> (usize, usize) {
+        (self.len, self.overflow.len())
     }
 }
 
@@ -606,11 +664,39 @@ struct Entry {
     exact: Option<Instant>,
     waker: Option<Waker>,
     in_use: bool,
-    /// Timing wheel: the bucket holding the entry ([`UNFILED`], [`IN_OVERFLOW`]
-    /// or a bucket index) and its neighbours in that bucket's list.
-    bucket: u32,
-    prev: u32,
-    next: u32,
+    /// Timing wheel: the bucket holding the entry and its neighbours there.
+    links: WheelLinks,
+    /// Hot call state: cache lines to prefetch when the entry falls due (the
+    /// sleep's own place in its future, and one address its owner chose; 0:
+    /// none).
+    hints: [usize; 2],
+}
+
+impl WheelEntry for Entry {
+    #[inline]
+    fn links(&self) -> &WheelLinks {
+        &self.links
+    }
+
+    #[inline]
+    fn links_mut(&mut self) -> &mut WheelLinks {
+        &mut self.links
+    }
+
+    #[inline]
+    fn filed_key(&self) -> Option<Instant> {
+        self.deadline
+    }
+
+    #[inline]
+    fn generation(&self) -> u32 {
+        self.generation
+    }
+
+    #[inline]
+    fn in_use(&self) -> bool {
+        self.in_use
+    }
 }
 
 #[derive(Default)]
@@ -671,6 +757,9 @@ pub(crate) struct LaneClock {
     closed: AtomicBool,
     /// File deadlines on this tick grid (`None`: at their instant).
     grid: Option<crate::lane_tick::TickGrid>,
+    /// Hot call state: keep prefetch hints per entry and hand them out with
+    /// the due wakers.
+    prefetch: bool,
 }
 
 impl LaneClock {
@@ -714,6 +803,7 @@ impl LaneClock {
             }),
             closed: AtomicBool::new(false),
             grid,
+            prefetch: crate::executor::hot_state_enabled(),
         }
     }
 
@@ -772,9 +862,8 @@ impl LaneClock {
             exact: None,
             waker: None,
             in_use: true,
-            bucket: UNFILED,
-            prev: NIL,
-            next: NIL,
+            links: WheelLinks::UNFILED,
+            hints: [0; 2],
         });
         (slot, 0)
     }
@@ -795,6 +884,7 @@ impl LaneClock {
         entry.deadline = None;
         entry.exact = None;
         entry.waker = None;
+        entry.hints = [0; 2];
         state.live -= 1;
         state.free.push(slot);
         state.compact_if_needed();
@@ -803,8 +893,23 @@ impl LaneClock {
     /// Wait for `deadline` with `waker`. Files a heap item (timing wheel:
     /// links the entry into its bucket) only when the filed key changed (tick
     /// grid: when the deadline left its tick); refreshes the waker only when
-    /// it would wake a different task.
+    /// it would wake a different task. With hot state the entry keeps
+    /// `hints` for the round that wakes it.
+    #[cfg(test)]
     fn arm(&self, slot: u32, generation: u32, deadline: Instant, waker: &Waker) {
+        self.arm_with_hints(slot, generation, deadline, waker, [0; 2]);
+    }
+
+    /// [`Self::arm`] that also files the entry's prefetch hints (kept only
+    /// with hot call state).
+    fn arm_with_hints(
+        &self,
+        slot: u32,
+        generation: u32,
+        deadline: Instant,
+        waker: &Waker,
+        hints: [usize; 2],
+    ) {
         let key = self.filed_at(deadline);
         let mut guard = self.state.lock();
         let state = &mut *guard;
@@ -813,6 +918,9 @@ impl LaneClock {
         };
         if !entry.in_use || entry.generation != generation {
             return;
+        }
+        if self.prefetch {
+            entry.hints = hints;
         }
         if !entry
             .waker
@@ -876,6 +984,17 @@ impl LaneClock {
     /// Returns how many entries were due and how many deadlines were filed
     /// since the last call.
     pub(crate) fn take_due(&self, now: Instant, wakers: &mut Vec<Waker>) -> (u64, u64) {
+        self.take_due_with_hints(now, wakers, None)
+    }
+
+    /// [`Self::take_due`] that also collects the due entries' prefetch hints
+    /// (hot call state), in wake order; nothing else differs.
+    pub(crate) fn take_due_with_hints(
+        &self,
+        now: Instant,
+        wakers: &mut Vec<Waker>,
+        mut hints: Option<&mut Vec<usize>>,
+    ) -> (u64, u64) {
         let mut state = self.state.lock();
         let mut due = 0;
         if state.wheel.is_some() {
@@ -890,6 +1009,9 @@ impl LaneClock {
                 entry.deadline = None;
                 if let Some(waker) = entry.waker.take() {
                     wakers.push(waker);
+                    if let Some(hints) = hints.as_deref_mut() {
+                        hints.extend(entry.hints.iter().copied().filter(|&line| line != 0));
+                    }
                 }
                 due += 1;
             }
@@ -907,6 +1029,9 @@ impl LaneClock {
             entry.deadline = None;
             if let Some(waker) = entry.waker.take() {
                 wakers.push(waker);
+                if let Some(hints) = hints.as_deref_mut() {
+                    hints.extend(entry.hints.iter().copied().filter(|&line| line != 0));
+                }
             }
             due += 1;
         }
@@ -958,6 +1083,9 @@ pub struct LaneSleep {
     deadline: Instant,
     /// Used only when the clock's poller has gone away.
     fallback: Option<Pin<Box<Sleep>>>,
+    /// Hot call state: an address the owner wants prefetched when this sleep
+    /// falls due (0: none), filed with the deadline.
+    hint: usize,
 }
 
 impl LaneSleep {
@@ -969,7 +1097,14 @@ impl LaneSleep {
             generation,
             deadline,
             fallback: None,
+            hint: 0,
         }
+    }
+
+    /// Hot call state: prefetch `address` too when this sleep falls due
+    /// (filed at the next poll that files the deadline).
+    pub(crate) fn set_prefetch_hint(&mut self, address: usize) {
+        self.hint = address;
     }
 
     /// Move the deadline. Takes effect at the next poll, which files it.
@@ -1003,8 +1138,16 @@ impl Future for LaneSleep {
             this.clock.disarm(this.slot, this.generation);
             return Poll::Ready(());
         }
-        this.clock
-            .arm(this.slot, this.generation, this.deadline, cx.waker());
+        // Hot call state: the sleep lives inside its (pinned) future, so its
+        // own address is a line of that future's state.
+        let own_line = &*this as *const LaneSleep as usize;
+        this.clock.arm_with_hints(
+            this.slot,
+            this.generation,
+            this.deadline,
+            cx.waker(),
+            [own_line, this.hint],
+        );
         Poll::Pending
     }
 }
@@ -1025,6 +1168,8 @@ pub(crate) struct LaneClockDriver {
     /// to fire.
     armed: Option<Instant>,
     wakers: Vec<Waker>,
+    /// Hot call state: prefetch hints of the entries in `wakers` (reused).
+    hints: Vec<usize>,
     /// The armed instant whose expiry was already counted, so that one
     /// expiry is counted once whoever observes it first.
     counted: Option<Instant>,
@@ -1049,6 +1194,7 @@ impl LaneClockDriver {
             sleep: None,
             armed: None,
             wakers: Vec::new(),
+            hints: Vec::new(),
             counted: None,
             expiries: 0,
             resets: 0,
@@ -1106,7 +1252,22 @@ impl LaneClockDriver {
     /// filed since the previous call).
     pub(crate) fn wake_due_at(&mut self, now: Instant) -> (u64, u64) {
         self.note_expiry();
-        let (due, arms) = self.clock.take_due(now, &mut self.wakers);
+        let (due, arms) = if self.clock.prefetch {
+            // Hot call state: every future due in this round is known before
+            // any is polled; start their first cache lines loading now, in
+            // poll order, so the misses overlap instead of one per poll.
+            let taken =
+                self.clock
+                    .take_due_with_hints(now, &mut self.wakers, Some(&mut self.hints));
+            for &line in &self.hints {
+                crate::hot_state::prefetch_read(line);
+            }
+            crate::hot_state::record_hot_prefetches(self.hints.len() as u64);
+            self.hints.clear();
+            taken
+        } else {
+            self.clock.take_due(now, &mut self.wakers)
+        };
         for waker in self.wakers.drain(..) {
             waker.wake();
         }
@@ -1208,6 +1369,111 @@ mod tests {
             "never before its instant"
         );
         assert_eq!(clock.next_deadline(), Some(late_at));
+    }
+
+    /// Hot call state: a clock built with it hands out each due entry's
+    /// hints (the sleep's own line, then its owner's address) in wake order,
+    /// with the heap and the timing wheel alike, and wakes the same entries
+    /// as without hints; without hot state it keeps none.
+    #[tokio::test]
+    async fn due_entries_hand_out_their_prefetch_hints_in_wake_order() {
+        for wheel in [false, true] {
+            for hot in [true, false] {
+                let clock = {
+                    let _config = crate::executor::override_media_executor_config_on_this_thread(
+                        crate::executor::MediaExecutorConfig::v2().with_hot_state(hot),
+                    );
+                    Arc::new(LaneClock::with_timers(None, wheel))
+                };
+                assert_eq!(clock.prefetch, hot);
+                let start = Instant::now();
+                let waker = futures::task::noop_waker();
+                let mut cx = Context::from_waker(&waker);
+                let mut first = Box::pin(LaneSleep::new(
+                    Arc::clone(&clock),
+                    start + Duration::from_millis(30),
+                ));
+                let mut second = Box::pin(LaneSleep::new(
+                    Arc::clone(&clock),
+                    start + Duration::from_millis(40),
+                ));
+                let mut idle = Box::pin(LaneSleep::new(
+                    Arc::clone(&clock),
+                    start + Duration::from_secs(60),
+                ));
+                second.as_mut().get_mut().set_prefetch_hint(0x1000);
+                assert!(second.as_mut().poll(&mut cx).is_pending());
+                assert!(first.as_mut().poll(&mut cx).is_pending());
+                assert!(idle.as_mut().poll(&mut cx).is_pending());
+                let mut wakers = Vec::new();
+                let mut hints = Vec::new();
+                let (due, arms) = clock.take_due_with_hints(
+                    start + Duration::from_millis(50),
+                    &mut wakers,
+                    Some(&mut hints),
+                );
+                assert_eq!((due, arms), (2, 3), "wheel={wheel} hot={hot}");
+                assert_eq!(wakers.len(), 2);
+                if hot {
+                    let first_line = &*first as *const LaneSleep as usize;
+                    let second_line = &*second as *const LaneSleep as usize;
+                    assert_eq!(
+                        hints,
+                        vec![first_line, second_line, 0x1000],
+                        "deadline order, wheel={wheel}"
+                    );
+                } else {
+                    assert!(hints.is_empty());
+                }
+                assert_eq!(clock.next_deadline(), Some(start + Duration::from_secs(60)));
+                // A released entry's hints are gone with it.
+                drop(idle);
+                assert_eq!(clock.next_deadline(), None);
+                assert!(
+                    clock
+                        .take_due_with_hints(
+                            start + Duration::from_secs(61),
+                            &mut wakers,
+                            Some(&mut hints)
+                        )
+                        .0
+                        == 0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prefetching_a_round_is_counted_once_per_line() {
+        let before = crate::hot_state::hot_state_counters().prefetches;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut driver = {
+                let _hot = crate::executor::override_media_executor_config_on_this_thread(
+                    crate::executor::MediaExecutorConfig::v2(),
+                );
+                LaneClockDriver::new()
+            };
+            let woke = Arc::new(AtomicUsize::new(0));
+            let waker = counting_waker(Arc::clone(&woke));
+            let mut cx = Context::from_waker(&waker);
+            let deadline = Instant::now() + Duration::from_millis(5);
+            let mut sleep = Box::pin(LaneSleep::new(Arc::clone(driver.clock()), deadline));
+            sleep.as_mut().get_mut().set_prefetch_hint(0x2000);
+            assert!(sleep.as_mut().poll(&mut cx).is_pending());
+            tokio::time::sleep_until(deadline).await;
+            assert_eq!(driver.wake_due().0, 1);
+            assert_eq!(
+                woke.load(Ordering::Acquire),
+                1,
+                "the wake itself is unchanged"
+            );
+            assert!(driver.hints.is_empty(), "the hint buffer is reused");
+        });
+        assert!(crate::hot_state::hot_state_counters().prefetches >= before + 2);
     }
 
     #[tokio::test]
@@ -1671,6 +1937,11 @@ mod tests {
     }
 
     /// A heap clock and a wheel clock driven with the same operations.
+    /// The two (non-zero) prefetch hints the twin files for `slot`.
+    fn twin_hints(slot: u32) -> [usize; 2] {
+        [0x1000 + slot as usize, 0x4000_0000 + slot as usize]
+    }
+
     struct Twin {
         heap: LaneClock,
         wheel: LaneClock,
@@ -1680,6 +1951,11 @@ mod tests {
 
     impl Twin {
         fn new(grid: Option<crate::lane_tick::TickGrid>, base: Instant) -> Self {
+            // Hot call state on: both clocks keep prefetch hints, which must
+            // come out of the wheel exactly as out of the heap.
+            let _hot = crate::executor::override_media_executor_config_on_this_thread(
+                crate::executor::MediaExecutorConfig::v2(),
+            );
             Self {
                 heap: LaneClock::with_timers_at(grid, false, base),
                 wheel: LaneClock::with_timers_at(grid, true, base),
@@ -1695,17 +1971,19 @@ mod tests {
         }
 
         fn arm(&self, (slot, generation): (u32, u32), deadline: Instant) {
-            self.heap.arm(
+            self.heap.arm_with_hints(
                 slot,
                 generation,
                 deadline,
                 &logging_waker(slot, Arc::clone(&self.heap_log)),
+                twin_hints(slot),
             );
-            self.wheel.arm(
+            self.wheel.arm_with_hints(
                 slot,
                 generation,
                 deadline,
                 &logging_waker(slot, Arc::clone(&self.wheel_log)),
+                twin_hints(slot),
             );
         }
 
@@ -1724,12 +2002,22 @@ mod tests {
         fn take_due(&self, now: Instant) -> Vec<u32> {
             let mut heap_wakers = Vec::new();
             let mut wheel_wakers = Vec::new();
-            let heap = self.heap.take_due(now, &mut heap_wakers);
-            let wheel = self.wheel.take_due(now, &mut wheel_wakers);
+            let mut heap_hints = Vec::new();
+            let mut wheel_hints = Vec::new();
+            let heap = self
+                .heap
+                .take_due_with_hints(now, &mut heap_wakers, Some(&mut heap_hints));
+            let wheel =
+                self.wheel
+                    .take_due_with_hints(now, &mut wheel_wakers, Some(&mut wheel_hints));
             assert_eq!(wheel, heap, "(due, arms) at {now:?}");
             let heap_ids = woken_ids(&mut heap_wakers, &self.heap_log);
             let wheel_ids = woken_ids(&mut wheel_wakers, &self.wheel_log);
             assert_eq!(wheel_ids, heap_ids, "firing order at {now:?}");
+            // Each woken entry's hints, in wake order.
+            assert_eq!(wheel_hints, heap_hints, "prefetch hints at {now:?}");
+            let expected: Vec<usize> = heap_ids.iter().flat_map(|&id| twin_hints(id)).collect();
+            assert_eq!(heap_hints, expected, "hints follow the wakers at {now:?}");
             heap_ids
         }
 

@@ -14073,6 +14073,32 @@ impl UnifiedCoordinator {
         self.helpers.get_state(session_id).await
     }
 
+    /// Committed call-state changes of one exact session lifetime.
+    pub(crate) fn subscribe_call_state_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Option<tokio::sync::watch::Receiver<Option<CallState>>> {
+        self.helpers
+            .state_machine
+            .store
+            .subscribe_call_state_exact(handle)
+    }
+
+    /// The current exact lifetime of `session_id` and its committed
+    /// media-readiness changes.
+    pub(crate) fn subscribe_media_readiness(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<(
+        SessionRegistryHandle,
+        tokio::sync::watch::Receiver<Option<crate::session_store::state::MediaReadinessSignal>>,
+    )> {
+        let store = &self.helpers.state_machine.store;
+        let handle = store.lifecycle_handle(session_id)?;
+        let updates = store.subscribe_media_readiness_exact(&handle)?;
+        Some((handle, updates))
+    }
+
     pub(crate) async fn get_state_exact(
         &self,
         handle: &SessionRegistryHandle,
@@ -14122,6 +14148,62 @@ impl UnifiedCoordinator {
             .await
     }
 
+    /// The current exact lifecycle handle of `session_id`.
+    pub(crate) fn media_lifecycle_handle(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<SessionRegistryHandle> {
+        self.media_adapter.lifecycle_handle(session_id)
+    }
+
+    /// The runtime of the lane that owns `session_id`'s RTP socket (media
+    /// executor v2), if its transport has one.
+    pub(crate) fn media_runtime_handle(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<tokio::runtime::Handle> {
+        self.media_adapter.media_runtime_handle(session_id)
+    }
+
+    /// The cached encoded G.711 TX path of `session_id`'s current media
+    /// lifetime (media executor v2; see `MediaAdapter::resolve_exact_g711_tx`).
+    pub(crate) fn resolve_current_g711_tx(
+        &self,
+        session_id: &SessionId,
+        format: rvoip_media_core::relay::controller::EncodedG711Format,
+        payload_type: u8,
+    ) -> Option<crate::adapters::media_adapter::ExactG711Tx> {
+        self.media_adapter
+            .resolve_current_g711_tx(session_id, format, payload_type)
+    }
+
+    /// The cached encoded G.711 TX path of one exact media lifetime.
+    pub(crate) fn resolve_exact_g711_tx(
+        &self,
+        handle: &SessionRegistryHandle,
+        format: rvoip_media_core::relay::controller::EncodedG711Format,
+        payload_type: u8,
+    ) -> Option<crate::adapters::media_adapter::ExactG711Tx> {
+        self.media_adapter
+            .resolve_exact_g711_tx(handle, format, payload_type)
+    }
+
+    /// Fuse the reader of `session_id`'s decoded-audio channel onto the RTP
+    /// socket owner (media executor v2; see
+    /// `MediaAdapter::install_inline_audio_consumer`).
+    pub(crate) fn install_inline_audio_consumer(
+        &self,
+        session_id: &SessionId,
+        consumer: Box<dyn rvoip_media_core::relay::controller::InlineAudioConsumer>,
+        backlog: &mut dyn FnMut() -> Option<AudioFrame>,
+    ) -> std::result::Result<
+        rvoip_media_core::relay::controller::InlineAudioConsumerGuard,
+        Box<dyn rvoip_media_core::relay::controller::InlineAudioConsumer>,
+    > {
+        self.media_adapter
+            .install_inline_audio_consumer(session_id, consumer, backlog)
+    }
+
     pub(crate) async fn subscribe_to_audio_exact(
         &self,
         handle: &SessionRegistryHandle,
@@ -14166,17 +14248,11 @@ impl UnifiedCoordinator {
             .await
     }
 
-    /// Resolve the exact SDP-negotiated media format for a live session.
+    /// Resolve the exact SDP-negotiated media format for one exact live
+    /// session lifetime.
     ///
     /// This is crate-private because transport-neutral callers consume the
     /// resulting [`crate::media_stream::SipMediaStream`] codec descriptor.
-    pub(crate) async fn negotiated_media_config(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Option<(crate::session_store::state::NegotiatedConfig, u8)>> {
-        self.helpers.negotiated_media_config(session_id).await
-    }
-
     pub(crate) async fn negotiated_media_config_exact(
         &self,
         handle: &SessionRegistryHandle,
@@ -14981,9 +15057,9 @@ impl UnifiedCoordinator {
             .map_err(map_state_machine_dispatch_error)
     }
 
-    /// Crate-internal accessor: read the current `SessionState` snapshot for
-    /// the given session id. Used by refresh-style builders that need to
-    /// reuse registration / dialog identifiers from the original send.
+    /// Test accessor: read the current `SessionState` snapshot for the
+    /// given session id.
+    #[cfg(test)]
     pub(crate) async fn session_state(
         &self,
         session_id: &SessionId,

@@ -17,8 +17,8 @@
 //! Use `set_audio_muted()` and `is_audio_muted()` for muting functionality.
 
 use dashmap::DashMap;
-use std::collections::{BTreeMap, VecDeque};
-use std::sync::{Arc, OnceLock};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, trace, warn};
@@ -1416,6 +1416,7 @@ pub use inline_rx::{
     inline_rx_counters, InlineAudioConsumer, InlineAudioConsumerGuard, InlineAudioDelivery,
     InlineRxCounters,
 };
+pub use rtp_management::{EncodedG711Format, G711SendNow, PreparedG711Sender};
 pub use types::{
     AdvancedProcessorConfig, AdvancedProcessorSet, MediaConfig, MediaSessionEvent,
     MediaSessionInfo, MediaSessionStatus, AMR_DTX_PARAMETER, NEGOTIATED_FMTP_PARAMETER,
@@ -1423,7 +1424,7 @@ pub use types::{
     RTCP_SEPARATE_PORT_PARAMETER, RTCP_XR_PARAMETER,
 };
 
-use types::RtpSessionWrapper;
+use types::{DialogTxGate, RtpSessionWrapper};
 
 #[cfg(feature = "memory-diagnostics")]
 fn spawn_memory_tracked<F>(kind: &'static str, future: F) -> tokio::task::JoinHandle<F::Output>
@@ -1642,9 +1643,10 @@ fn deliver_due_audio_frame(
                     || state.decoded_audio_frame_count == 100
                     || state.decoded_audio_frame_count == 101
                 {
-                    info!(
+                    trace!(
                         "✅ Sent decoded audio frame #{} to callback for dialog {}",
-                        state.decoded_audio_frame_count, dialog_id
+                        state.decoded_audio_frame_count,
+                        dialog_id
                     );
                 }
             }
@@ -1710,6 +1712,11 @@ pub struct MediaSessionController {
     session_to_media: Arc<DashMap<String, MediaSessionId>>,
     /// Media to session mapping
     media_to_session: Arc<DashMap<MediaSessionId, String>>,
+    /// Every forward alias currently bound to each media id, so cleanup
+    /// visits only that media's aliases instead of scanning every active
+    /// session. Mapping writers and cleanup commit under this lock; lookups
+    /// stay on the DashMaps.
+    session_mapping_owners: Arc<Mutex<HashMap<MediaSessionId, HashSet<String>>>>,
     /// Audio mixer for conference calls
     pub(super) audio_mixer: Option<Arc<AudioMixer>>,
     /// Conference mixing configuration
@@ -1939,6 +1946,7 @@ impl MediaSessionController {
             event_hub: Arc::new(RwLock::new(None)),
             session_to_media: Arc::new(DashMap::with_capacity(capacity_hint)),
             media_to_session: Arc::new(DashMap::with_capacity(capacity_hint)),
+            session_mapping_owners: Arc::new(Mutex::new(HashMap::with_capacity(capacity_hint))),
             audio_mixer: None,
             conference_config: ConferenceMixingConfig::default(),
             conference_event_tx,
@@ -2008,8 +2016,29 @@ impl MediaSessionController {
 
     /// Store session to media mapping
     pub fn store_session_mapping(&self, session_id: String, media_id: MediaSessionId) {
-        self.session_to_media
-            .insert(session_id.clone(), media_id.clone());
+        let mut owners = self
+            .session_mapping_owners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(previous_media) = self
+            .session_to_media
+            .insert(session_id.clone(), media_id.clone())
+        {
+            if previous_media != media_id {
+                if let Some(previous_owners) = owners.get_mut(&previous_media) {
+                    previous_owners.remove(&session_id);
+                    if previous_owners.is_empty() {
+                        owners.remove(&previous_media);
+                    }
+                }
+            }
+        }
+        owners
+            .entry(media_id.clone())
+            .or_default()
+            .insert(session_id.clone());
+        // The previous media keeps its reverse entry until its own cleanup,
+        // so callers can still resolve the retiring media's session.
         self.media_to_session.insert(media_id, session_id);
     }
 
@@ -2267,6 +2296,7 @@ impl MediaSessionController {
             event_hub: Arc::new(RwLock::new(None)),
             session_to_media: Arc::new(DashMap::new()),
             media_to_session: Arc::new(DashMap::new()),
+            session_mapping_owners: Arc::new(Mutex::new(HashMap::new())),
             audio_mixer: Some(audio_mixer),
             conference_config,
             conference_event_tx,
@@ -2488,6 +2518,7 @@ impl MediaSessionController {
         let inline_lease = self.offer_inline_rx(&dialog_id, &rtp_session, &codec_runtime);
 
         // Wrap RTP session
+        let typed_send_handle = rtp_session.send_handle();
         let rtp_wrapper = RtpSessionWrapper {
             session: Arc::new(tokio::sync::Mutex::new(rtp_session)),
             update_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -2497,6 +2528,8 @@ impl MediaSessionController {
             audio_transmitter: None,
             transmission_enabled: true, // Enable transmission by default
             is_muted: false,
+            typed_send_handle,
+            tx_gate: Arc::new(DialogTxGate::default()),
             #[cfg(feature = "memory-diagnostics")]
             memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
                 "media_core.rtp_session_wrapper",
@@ -2791,10 +2824,18 @@ impl MediaSessionController {
         self.audio_frame_callbacks.remove(dialog_id);
         self.dtmf_callbacks.remove(dialog_id);
         self.cn_gate_state.remove(dialog_id);
-        self.codec_runtimes.remove(dialog_id);
+        if let Some((_, runtime)) = self.codec_runtimes.remove(dialog_id) {
+            runtime
+                .encoded_generation_live
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
         self.retire_inline_lease(dialog_id);
 
         let media_id = MediaSessionId::from_dialog(dialog_id);
+        let mut owners = self
+            .session_mapping_owners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some((_, session_id)) = self.media_to_session.remove(&media_id) {
             // A raw session identifier can be rebound to a newer media
             // generation before delayed cleanup of the old reverse entry is
@@ -2804,20 +2845,12 @@ impl MediaSessionController {
                 .remove_if(&session_id, |_, mapped| mapped == &media_id);
         }
 
-        let stale_session_ids: Vec<String> = self
-            .session_to_media
-            .iter()
-            .filter_map(|entry| {
-                if entry.value() == &media_id {
-                    Some(entry.key().clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for session_id in stale_session_ids {
-            self.session_to_media
-                .remove_if(&session_id, |_, mapped| mapped == &media_id);
+        // Only this media's own aliases, never a scan of every session.
+        if let Some(session_ids) = owners.remove(&media_id) {
+            for session_id in session_ids {
+                self.session_to_media
+                    .remove_if(&session_id, |_, mapped| mapped == &media_id);
+            }
         }
     }
 
@@ -2860,6 +2893,8 @@ impl MediaSessionController {
         // shard, drop the guard, then close the underlying session
         // outside the map's locking territory.
         if let Some((_, mut rtp_wrapper)) = self.rtp_sessions.remove(dialog_id) {
+            // No cached TX sender may use this dialog again.
+            rtp_wrapper.tx_gate.retire();
             if let Some(transmitter) = rtp_wrapper.audio_transmitter.take() {
                 transmitter.stop().await;
             }
@@ -3056,6 +3091,10 @@ impl MediaSessionController {
         if let Some(runtime) = replacement_runtime.as_ref() {
             self.codec_runtimes
                 .insert(dialog_id.clone(), Arc::clone(runtime));
+            // TX paths cached for the previous generation fall back now.
+            old_runtime
+                .encoded_generation_live
+                .store(false, std::sync::atomic::Ordering::Release);
             self.resync_inline_lease(&dialog_id);
         }
         if let Some(mut entry) = self.rtp_sessions.get_mut(&dialog_id) {
@@ -3121,6 +3160,20 @@ impl MediaSessionController {
         }
 
         Ok(())
+    }
+
+    /// Whether a media session is published for `dialog_id`, without
+    /// sampling RTP statistics (which locks the RTP session).
+    pub fn has_media_session(&self, dialog_id: &DialogId) -> bool {
+        self.sessions.contains_key(dialog_id)
+    }
+
+    /// The published configuration of a media session, without sampling RTP
+    /// statistics (which locks the RTP session).
+    pub fn get_session_config(&self, dialog_id: &DialogId) -> Option<MediaConfig> {
+        self.sessions
+            .get(dialog_id)
+            .map(|entry| entry.value().config.clone())
     }
 
     /// Get information about a media session

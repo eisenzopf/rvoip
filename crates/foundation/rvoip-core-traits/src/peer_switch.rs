@@ -215,6 +215,29 @@ impl PeerRouteTicket {
         Ok(true)
     }
 
+    /// [`Self::forward`] without waiting.
+    ///
+    /// Admission, the capacity check and the send all happen under the switch
+    /// lock, so a frame sent through the returned permit cannot overlap a
+    /// commit of the switch, exactly as with `forward`. `Full` and `Closed`
+    /// leave the caller's frame with the caller. The permit holds the switch
+    /// lock until it is used or dropped, so use it right away and never hold
+    /// it across an `.await`.
+    pub fn try_reserve<'a, T>(&'a self, target: &'a mpsc::Sender<T>) -> PeerTryReserve<'a, T> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.retired || state.paused || state.current != self.generation {
+            return PeerTryReserve::Inactive;
+        }
+        match target.try_reserve() {
+            Ok(permit) => PeerTryReserve::Ready(PeerForwardPermit {
+                _switch: state,
+                permit,
+            }),
+            Err(mpsc::error::TrySendError::Full(())) => PeerTryReserve::Full,
+            Err(mpsc::error::TrySendError::Closed(())) => PeerTryReserve::Closed,
+        }
+    }
+
     /// [`Self::forward`] for a producer that commits through its own gate.
     ///
     /// Capacity is reserved without the switch lock while racing a switch
@@ -258,6 +281,46 @@ impl PeerRouteTicket {
     }
 }
 
+/// A channel permit reserved under an active peer switch (see
+/// [`PeerRouteTicket::try_reserve`]).
+///
+/// The switch lock is held until the permit is used or dropped, so a commit
+/// of the switch waits for it. Keep it short-lived.
+#[must_use = "the permit holds the peer switch lock until it is used or dropped"]
+pub struct PeerForwardPermit<'a, T> {
+    _switch: std::sync::MutexGuard<'a, State>,
+    permit: mpsc::Permit<'a, T>,
+}
+
+impl<'a, T> PeerForwardPermit<'a, T> {
+    /// Send `value` and release the switch lock.
+    pub fn send(self, value: T) {
+        self.commit_with(|permit| permit.send(value));
+    }
+
+    /// Run `commit` with the channel permit while the switch lock is still
+    /// held, then release it. `commit` must not block.
+    pub fn commit_with<R>(self, commit: impl FnOnce(mpsc::Permit<'a, T>) -> R) -> R {
+        let PeerForwardPermit { _switch, permit } = self;
+        let result = commit(permit);
+        drop(_switch);
+        result
+    }
+}
+
+/// Outcome of [`PeerRouteTicket::try_reserve`].
+#[must_use]
+pub enum PeerTryReserve<'a, T> {
+    /// This generation owns delivery and the target has room.
+    Ready(PeerForwardPermit<'a, T>),
+    /// This generation does not own delivery (staged, paused or retired).
+    Inactive,
+    /// The target has no room right now.
+    Full,
+    /// The target's receiver is gone.
+    Closed,
+}
+
 /// Outcome of [`PeerRouteTicket::forward_with`].
 #[derive(Debug, PartialEq, Eq)]
 pub enum PeerForwarded<R> {
@@ -274,6 +337,46 @@ pub enum PeerForwarded<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn try_reserve_is_forward_without_waiting() {
+        let ticket = PeerRouteTicket::initial();
+        let (tx, mut rx) = mpsc::channel::<u8>(1);
+        match ticket.try_reserve(&tx) {
+            PeerTryReserve::Ready(permit) => permit.send(1),
+            _ => panic!("an active ticket with room is ready"),
+        }
+        assert!(matches!(ticket.try_reserve(&tx), PeerTryReserve::Full));
+        assert_eq!(rx.recv().await, Some(1));
+        let staged = ticket.stage().unwrap();
+        assert!(matches!(staged.try_reserve(&tx), PeerTryReserve::Inactive));
+        // The permit holds the switch lock: a commit cannot overlap it.
+        let permit = match ticket.try_reserve(&tx) {
+            PeerTryReserve::Ready(permit) => permit,
+            _ => panic!("ready"),
+        };
+        assert!(
+            ticket.state.try_lock().is_err(),
+            "the permit holds the switch lock"
+        );
+        let crossed = permit.commit_with(|permit| {
+            permit.send(2);
+            true
+        });
+        assert!(crossed);
+        assert_eq!(rx.recv().await, Some(2));
+        // Paused (quiescing) and retired generations are inactive too.
+        let quiesced = ticket.quiesce().await.expect("quiesce");
+        assert!(matches!(ticket.try_reserve(&tx), PeerTryReserve::Inactive));
+        drop(quiesced);
+        assert!(matches!(ticket.try_reserve(&tx), PeerTryReserve::Ready(_)));
+        assert!(staged.commit_from(&ticket));
+        assert!(matches!(ticket.try_reserve(&tx), PeerTryReserve::Inactive));
+        drop(rx);
+        assert!(matches!(staged.try_reserve(&tx), PeerTryReserve::Closed));
+        assert!(staged.retire_if_current());
+        assert!(matches!(staged.try_reserve(&tx), PeerTryReserve::Inactive));
+    }
 
     #[tokio::test]
     async fn forward_with_commits_abandons_and_fences() {

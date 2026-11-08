@@ -528,9 +528,53 @@ pub struct RtpSessionWrapper {
     /// replaced with silence. This maintains RTP flow for NAT traversal
     /// and prevents remote endpoint timeouts.
     pub is_muted: bool,
+    /// The session's RTP send handle, captured when the session started (it
+    /// shares the session's sender, so it follows destination changes and
+    /// the sender's close). Explicitly typed sends use it without locking
+    /// `session`; its default payload type is a construction-time snapshot,
+    /// so it is used only with an explicit payload type.
+    pub(super) typed_send_handle: Option<rvoip_rtp_core::RtpSendHandle>,
+    /// TX generation fence for senders cached outside this map
+    /// ([`super::PreparedG711Sender`]). Bumped, under the shard guard,
+    /// whenever `transmission_enabled` or `is_muted` changes; retired when
+    /// the wrapper is removed.
+    pub(super) tx_gate: Arc<DialogTxGate>,
 
     #[cfg(feature = "memory-diagnostics")]
     pub memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard,
+}
+
+/// Per-dialog TX generation. A cached sender is valid only while the epoch
+/// it captured is current.
+#[derive(Debug, Default)]
+pub struct DialogTxGate {
+    epoch: std::sync::atomic::AtomicU64,
+}
+
+impl DialogTxGate {
+    const RETIRED: u64 = u64::MAX;
+
+    /// The TX state of the dialog changed.
+    pub(super) fn bump(&self) {
+        // 2^64 - 1 changes never happen, so this never reaches RETIRED.
+        self.epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    /// The dialog's RTP wrapper is gone: no cached sender is valid again.
+    pub(super) fn retire(&self) {
+        self.epoch
+            .store(Self::RETIRED, std::sync::atomic::Ordering::Release);
+    }
+
+    #[inline]
+    pub(super) fn epoch(&self) -> u64 {
+        self.epoch.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    #[inline]
+    pub(super) fn is_retired_epoch(epoch: u64) -> bool {
+        epoch == Self::RETIRED
+    }
 }
 
 #[cfg(test)]

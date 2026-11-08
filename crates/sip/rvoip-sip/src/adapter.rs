@@ -1202,6 +1202,86 @@ struct PendingSipInboundObservation {
     context_error: Option<InboundContextError>,
 }
 
+/// Pending inbound observations with a lower bound on their oldest
+/// `observed_at`, so an INVITE only scans for expired entries when at least
+/// one can have expired, instead of on every insert.
+///
+/// The watermark may be older than the true oldest entry (removing the
+/// oldest does not recompute it), which can cost an extra scan but never
+/// misses an expired entry. It keeps no expiry queue, so churn cannot grow
+/// retained state.
+#[derive(Default)]
+struct PendingSipInboundObservations {
+    entries: HashMap<SessionId, PendingSipInboundObservation>,
+    oldest_observed_at: Option<Instant>,
+    #[cfg(test)]
+    expiry_scans: usize,
+}
+
+impl PendingSipInboundObservations {
+    /// Remove every entry older than `ttl`, returning how many were removed.
+    fn purge_expired(&mut self, now: Instant, ttl: Duration) -> usize {
+        if self
+            .oldest_observed_at
+            .is_none_or(|oldest| now.saturating_duration_since(oldest) <= ttl)
+        {
+            return 0;
+        }
+        #[cfg(test)]
+        {
+            self.expiry_scans += 1;
+        }
+        let before = self.entries.len();
+        let mut oldest: Option<Instant> = None;
+        self.entries.retain(|_, observation| {
+            let fresh = now.saturating_duration_since(observation.observed_at) <= ttl;
+            if fresh {
+                oldest = Some(oldest.map_or(observation.observed_at, |at| {
+                    at.min(observation.observed_at)
+                }));
+            }
+            fresh
+        });
+        self.oldest_observed_at = oldest;
+        before - self.entries.len()
+    }
+
+    fn insert(&mut self, session_id: SessionId, observation: PendingSipInboundObservation) {
+        self.oldest_observed_at = Some(
+            self.oldest_observed_at
+                .map_or(observation.observed_at, |at| {
+                    at.min(observation.observed_at)
+                }),
+        );
+        self.entries.insert(session_id, observation);
+    }
+
+    fn remove(&mut self, session_id: &SessionId) -> Option<PendingSipInboundObservation> {
+        let removed = self.entries.remove(session_id);
+        if self.entries.is_empty() {
+            self.oldest_observed_at = None;
+        }
+        removed
+    }
+
+    fn get(&self, session_id: &SessionId) -> Option<&PendingSipInboundObservation> {
+        self.entries.get(session_id)
+    }
+
+    fn contains_key(&self, session_id: &SessionId) -> bool {
+        self.entries.contains_key(session_id)
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.oldest_observed_at = None;
+    }
+}
+
 enum SipInboundContextState {
     // Boxed: the context carries fenced lifecycle identities and is far
     // larger than the data-free `Consumed` marker kept for every call.
@@ -1242,7 +1322,7 @@ impl SipInboundLimits {
 }
 
 struct SipInboundContextStore {
-    pending_by_session: StdMutex<HashMap<SessionId, PendingSipInboundObservation>>,
+    pending_by_session: StdMutex<PendingSipInboundObservations>,
     by_connection: DashMap<ConnectionId, SipInboundContextState>,
     max_pending: usize,
     pending_ttl: Duration,
@@ -1251,7 +1331,7 @@ struct SipInboundContextStore {
 impl Default for SipInboundContextStore {
     fn default() -> Self {
         Self {
-            pending_by_session: StdMutex::new(HashMap::new()),
+            pending_by_session: StdMutex::new(PendingSipInboundObservations::default()),
             by_connection: DashMap::new(),
             max_pending: MAX_PENDING_SIP_INBOUND_CONTEXTS,
             pending_ttl: PENDING_SIP_INBOUND_CONTEXT_TTL,
@@ -1299,9 +1379,7 @@ impl SipInboundContextStore {
             .pending_by_session
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        pending.retain(|_, observation| {
-            now.saturating_duration_since(observation.observed_at) <= self.pending_ttl
-        });
+        pending.purge_expired(now, self.pending_ttl);
         if pending.contains_key(&session_id) {
             return true;
         }
@@ -1400,11 +1478,7 @@ impl SipInboundContextStore {
             .pending_by_session
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let before = pending.len();
-        pending.retain(|_, observation| {
-            now.saturating_duration_since(observation.observed_at) <= self.pending_ttl
-        });
-        before.saturating_sub(pending.len())
+        pending.purge_expired(now, self.pending_ttl)
     }
 
     fn take(&self, connection_id: &ConnectionId) -> Option<InboundConnectionContext> {
@@ -5050,6 +5124,21 @@ impl ConnectionAdapter for SipAdapter {
                     .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?,
             )
         };
+        // Subscribe before the 200 OK can reach the peer: its ACK may commit
+        // before accept returns, and the watch retains that committed state.
+        let mut inbound_states = match inbound_epoch.as_ref() {
+            Some(epoch) => Some(
+                self.coordinator
+                    .subscribe_call_state_exact(epoch.admitted_handle().ok_or(
+                        RvoipError::InvalidState(
+                            "SIP inbound route has no exact lifecycle authority",
+                        ),
+                    )?)
+                    .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?,
+            ),
+            None => None,
+        };
+        let mut draining = self.translator_cancel.subscribe();
         let session_id = inbound_epoch
             .as_ref()
             .map(|epoch| epoch.session_id.clone())
@@ -5106,16 +5195,25 @@ impl ConnectionAdapter for SipAdapter {
         // event is emitted for an inbound ACK. Waiting here keeps that
         // protocol distinction out of the public event stream and lets the
         // adapter publish exactly the transport-neutral Connected event at
-        // the real establishment boundary.
-        let deadline = Instant::now() + self.coordinator.setup_teardown_timeout_duration();
+        // the real establishment boundary. The wait wakes on committed
+        // call-state changes of this exact lifetime, drain, or the deadline,
+        // instead of polling the session map every 10 ms.
+        let Some(states) = inbound_states.as_mut() else {
+            return Err(RvoipError::InvalidState(
+                "SIP inbound route has no exact lifecycle authority",
+            ));
+        };
+        let deadline = tokio::time::sleep(self.coordinator.setup_teardown_timeout_duration());
+        tokio::pin!(deadline);
         loop {
             if self.draining.load(Ordering::Acquire) {
                 return Err(RvoipError::AdmissionRejected(
                     "SIP adapter began draining while an inbound accept awaited ACK",
                 ));
             }
-            match self.coordinator.get_state(&session_id).await {
-                Ok(CallState::Active | CallState::Bridged) => {
+            let state = *states.borrow_and_update();
+            match state {
+                Some(CallState::Active | CallState::Bridged) => {
                     let epoch = self
                         .existing_mapped_epoch(&session_id)
                         .filter(|epoch| epoch.connection_id == conn)
@@ -5137,23 +5235,32 @@ impl ConnectionAdapter for SipAdapter {
                     ));
                     return Ok(());
                 }
-                Ok(state) if state.is_final() || state == CallState::Terminating => {
+                Some(state) if state.is_final() || state == CallState::Terminating => {
                     return Err(RvoipError::InvalidState(
                         "SIP inbound session ended before ACK establishment",
                     ));
                 }
-                Ok(_) => {}
-                Err(_) if self.lookup_session(&conn).is_err() => {
-                    return Err(RvoipError::ConnectionNotFound(conn));
+                Some(_) => {}
+                // The exact lifetime was removed.
+                None => return Err(RvoipError::ConnectionNotFound(conn)),
+            }
+            tokio::select! {
+                changed = states.changed() => {
+                    if changed.is_err() {
+                        return Err(RvoipError::ConnectionNotFound(conn));
+                    }
                 }
-                Err(_) => {}
+                _ = draining.changed() => {
+                    return Err(RvoipError::AdmissionRejected(
+                        "SIP adapter began draining while an inbound accept awaited ACK",
+                    ));
+                }
+                () = &mut deadline => {
+                    return Err(RvoipError::AdmissionRejected(
+                        "SIP inbound accept timed out awaiting ACK",
+                    ));
+                }
             }
-            if Instant::now() >= deadline {
-                return Err(RvoipError::AdmissionRejected(
-                    "SIP inbound accept timed out awaiting ACK",
-                ));
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
@@ -9421,6 +9528,65 @@ Signal=5\r\nDuration=160\r\n";
         std::thread::sleep(Duration::from_millis(5));
         assert!(expiring.observe(third, Some(principal("tenant-a")), None));
         assert_eq!(expiring.pending_len(), 1);
+    }
+
+    /// Inserting while nothing can have expired never scans the pending
+    /// map; once the oldest entry expires, one scan removes exactly the
+    /// expired entries, as the per-insert retain did.
+    #[test]
+    fn pending_observations_scan_only_when_an_entry_can_have_expired() {
+        let ttl = Duration::from_secs(10);
+        let start = Instant::now();
+        let observation = |observed_at| PendingSipInboundObservation {
+            observed_at,
+            principal: None,
+            context: None,
+            context_error: None,
+        };
+        let mut pending = PendingSipInboundObservations::default();
+        let mut sessions = Vec::new();
+        for offset in 0..100_u64 {
+            let session = SessionId::new();
+            assert_eq!(
+                pending.purge_expired(start + Duration::from_millis(offset), ttl),
+                0
+            );
+            pending.insert(
+                session.clone(),
+                observation(start + Duration::from_millis(offset)),
+            );
+            sessions.push(session);
+        }
+        assert_eq!(pending.expiry_scans, 0, "no insert scanned the map");
+
+        // Removing the oldest keeps a conservative watermark: one extra scan
+        // may run, and it finds nothing to remove.
+        pending.remove(&sessions[0]);
+        assert_eq!(
+            pending.purge_expired(start + ttl + Duration::from_millis(1), ttl),
+            0
+        );
+        assert_eq!(pending.len(), 99);
+
+        // Exactly the entries older than the TTL go, matching `retain`.
+        let now = start + ttl + Duration::from_millis(50);
+        let expected: usize = (1..100_u64).filter(|offset| *offset < 50).count();
+        assert_eq!(pending.purge_expired(now, ttl), expected);
+        assert_eq!(pending.len(), 99 - expected);
+        for (offset, session) in sessions.iter().enumerate().skip(1) {
+            assert_eq!(pending.contains_key(session), offset >= 50);
+        }
+        let scans = pending.expiry_scans;
+        assert_eq!(pending.purge_expired(now, ttl), 0);
+        assert_eq!(
+            pending.expiry_scans, scans,
+            "the watermark is exact after a scan"
+        );
+
+        for session in &sessions {
+            pending.remove(session);
+        }
+        assert_eq!(pending.oldest_observed_at, None);
     }
 
     #[tokio::test]
