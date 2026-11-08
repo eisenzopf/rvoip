@@ -267,6 +267,40 @@ async fn call_media_flows_both_ways_on_executor_v2() {
         table_after.unsupported_lanes, table_before.unsupported_lanes,
         "every lane could keep one"
     );
+    // Each endpoint's receive loop moved into its lane's table once it
+    // owned its call state (v2's `callback_rx_kernel`) and, on Linux, read
+    // its socket on the lane epoll's reports (`lane_rx_readiness`). Table
+    // counters are published every 64 passes of a lane, and these lanes
+    // keep ticking while they host the call: wait for the batch.
+    let linux = cfg!(target_os = "linux");
+    let waited = std::time::Instant::now();
+    let rx_after = loop {
+        let now = callback_lane_counters();
+        let graduated = now.rx_installs >= table_before.rx_installs + 2;
+        let read = !linux || now.rx_readable_calls > table_before.rx_readable_calls;
+        if (graduated && read) || waited.elapsed() > Duration::from_secs(30) {
+            break now;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(
+        rx_after.rx_installs >= table_before.rx_installs + 2,
+        "both receive loops graduated into lane tables: {table_before:?} -> {rx_after:?}"
+    );
+    if linux {
+        assert!(
+            rx_after.rx_epoll_registered >= table_before.rx_epoll_registered + 2,
+            "both sockets registered with their lane epolls: {rx_after:?}"
+        );
+        assert!(
+            rx_after.rx_readable_calls > table_before.rx_readable_calls,
+            "the call's RTP was read on lane epoll reports: {rx_after:?}"
+        );
+    }
+    assert_eq!(
+        rx_after.rx_poisoned, table_before.rx_poisoned,
+        "no receive entry panicked"
+    );
 
     // Each session's periodic RTCP task runs on its socket's lane poller,
     // and its socket owner publishes the receive statistics.
