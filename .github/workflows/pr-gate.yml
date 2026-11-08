@@ -164,7 +164,11 @@ jobs:
     name: Specialty ${{ matrix.gate }}
     needs: plan
     if: needs.plan.outputs.specialty_count != '0'
-    runs-on: ubuntu-latest
+    # The rustdoc gate builds rvoip-webrtc's `client-video-vp8` bindings
+    # through env-libvpx-sys, whose bindgen 0.68 emits field-less opaque
+    # structs under libclang 19+ (rust-bindgen#2824). ubuntu-latest moved to
+    # 26.04 and its newer clang; 24.04's default clang 18 still works.
+    runs-on: ${{ matrix.gate == 'rustdoc' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     timeout-minutes: 45
     strategy:
       fail-fast: false

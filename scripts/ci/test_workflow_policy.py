@@ -149,6 +149,17 @@ class WorkflowPolicyTests(unittest.TestCase):
                 self.assertEqual(len(step), 2)
                 self.assertIn("if: matrix.gate == 'rustdoc'", step[1][:200])
                 self.assertIn("libvpx-dev", step[1][:200])
+                # env-libvpx-sys's bindgen 0.68 breaks under libclang 19+
+                # (rust-bindgen#2824), so the gate stays on 24.04's clang 18.
+                self.assertIn(
+                    "runs-on: ${{ matrix.gate == 'rustdoc' && 'ubuntu-24.04' "
+                    "|| 'ubuntu-latest' }}",
+                    re.split(r"\n  (?=\S)", specialty, maxsplit=1)[0],
+                )
+        qualify = (ROOT / ".github/workflows/release-qualify.yml").read_text()
+        hosted = qualify.split("\n  gate-hosted:\n", maxsplit=1)[1]
+        hosted = re.split(r"\n  (?=\S)", hosted, maxsplit=1)[0]
+        self.assertIn("runs-on: ubuntu-24.04", hosted)
 
     def test_every_rustdoc_included_document_selects_the_rustdoc_gate(self) -> None:
         # A file pulled into rustdoc with `doc = include_str!(...)` is rendered

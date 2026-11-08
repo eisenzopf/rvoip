@@ -225,7 +225,12 @@ jobs:
     name: ${{ matrix.resource_class }} / ${{ matrix.id }}
     if: needs.plan.outputs.hosted_shard_count != '0'
     needs: plan
-    runs-on: ubuntu-latest
+    # Hosted shards build `--all-features`, including rvoip-webrtc's
+    # `client-video-vp8` bindings through env-libvpx-sys, whose bindgen 0.68
+    # emits field-less opaque structs under libclang 19+ (rust-bindgen#2824).
+    # ubuntu-latest moved to 26.04 and its newer clang; 24.04's default
+    # clang 18 still works.
+    runs-on: ubuntu-24.04
     timeout-minutes: 360
     strategy:
       fail-fast: false
