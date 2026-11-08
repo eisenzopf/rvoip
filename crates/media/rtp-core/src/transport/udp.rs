@@ -331,6 +331,7 @@ fn log_malformed_rtp_packet(
 }
 
 use super::allocator::{GlobalPortAllocator, PairingStrategy, PortAllocator};
+use super::srtp_rx::{OwnerSrtpRx, PreviousRecv, SrtpRecvShared, SrtpRecvSlot};
 use super::symmetric::{SymmetricRtpDecision, SymmetricRtpLearner};
 use super::validation::PlatformSocketStrategy;
 use super::{RtpTransport, RtpTransportConfig, SymmetricRtpDiagnostics, SymmetricRtpPolicy};
@@ -442,6 +443,34 @@ impl InlineRx {
                 self.on_timer();
                 InlineWake::Timer
             }
+        }
+    }
+}
+
+/// The inbound SRTP/SRTCP context for one datagram: held by the receive loop
+/// itself ([`MediaExecutorConfig::owner_srtp`], no lock), or taken under the
+/// transport's lock (v1, and every other user).
+///
+/// [`MediaExecutorConfig::owner_srtp`]: crate::executor::MediaExecutorConfig::owner_srtp
+enum RecvContext<'a> {
+    Owner(Option<&'a mut crate::srtp::SrtpContext>),
+    Shared(parking_lot::MutexGuard<'a, SrtpRecvSlot>),
+}
+
+impl<'a> RecvContext<'a> {
+    #[inline]
+    fn open(owner: &'a mut Option<OwnerSrtpRx>, shared: &'a SrtpRecvShared) -> Self {
+        match owner {
+            Some(owner) => Self::Owner(owner.context()),
+            None => Self::Shared(shared.lock()),
+        }
+    }
+
+    #[inline]
+    fn get(&mut self) -> Option<&mut crate::srtp::SrtpContext> {
+        match self {
+            Self::Owner(context) => context.as_deref_mut(),
+            Self::Shared(slot) => slot.home.as_mut(),
         }
     }
 }
@@ -680,7 +709,9 @@ impl Drop for PortAllocationCancellationGuard {
 /// successful context installation. Dropping it commits the replacement.
 pub struct SrtpContextRollback {
     previous_send: Option<crate::srtp::SrtpContext>,
-    previous_recv: Option<crate::srtp::SrtpContext>,
+    /// The displaced inbound context, or the identity of the one the
+    /// owning receive loop held, which it gives back unchanged.
+    previous_recv: PreviousRecv,
     previous_secure_media_required: bool,
     installed_generation: u64,
 }
@@ -790,11 +821,13 @@ pub struct UdpRtpTransport {
     /// would be pure tax.
     srtp_send: Arc<parking_lot::Mutex<Option<crate::srtp::SrtpContext>>>,
 
-    /// Inbound SRTP context. When `Some`, every received RTP datagram
-    /// (non-RTCP) is fed through `SrtpContext::unprotect`; auth
-    /// failures are silently dropped per RFC 3711 §3.4. Same
-    /// `parking_lot::Mutex` rationale as [`Self::srtp_send`].
-    srtp_recv: Arc<parking_lot::Mutex<Option<crate::srtp::SrtpContext>>>,
+    /// Inbound SRTP context. When installed, every received RTP datagram
+    /// (non-RTCP) is fed through `SrtpContext::unprotect`; auth failures are
+    /// silently dropped per RFC 3711 §3.4. Used under a `parking_lot::Mutex`
+    /// (same rationale as [`Self::srtp_send`]), except that with
+    /// `MediaExecutorConfig::owner_srtp` the receive loop checks it out and
+    /// uses it without the lock (see `transport::srtp_rx`).
+    srtp_recv: Arc<SrtpRecvShared>,
 
     /// RFC 4733 §2.5.1.3 retransmit dedup state, keyed on
     /// `(peer_addr, ssrc, rtp_timestamp)`. The first end-of-event
@@ -1000,7 +1033,7 @@ impl UdpRtpTransport {
             allocator_release_started: AtomicBool::new(false),
             refused_rtp_datagrams: AtomicU64::new(0),
             srtp_send: Arc::new(parking_lot::Mutex::new(None)),
-            srtp_recv: Arc::new(parking_lot::Mutex::new(None)),
+            srtp_recv: Arc::new(SrtpRecvShared::new()),
             dtmf_seen: Arc::new(DashMap::new()),
             #[cfg(feature = "dtls-webrtc")]
             dtls_tx: Arc::new(parking_lot::Mutex::new(None)),
@@ -1086,6 +1119,11 @@ impl UdpRtpTransport {
         let inline_capable =
             crate::executor::media_executor_mode() == crate::executor::MediaExecutorMode::V2;
         let on_lane = crate::executor::lane_poller_enabled();
+        // The loop owns the inbound SRTP context when it is that context's
+        // only datagram user: no separate RTCP socket, whose receive task
+        // unprotects SRTCP with the same context. A transport only ever loses
+        // its RTCP socket, so this cannot become wrong later.
+        let owner_srtp = crate::executor::owner_srtp_enabled() && self.rtcp_socket.load().is_none();
 
         let rtp_receiver_future = memory_tracked(
             "rtp_core.udp_transport.rtp_receiver_task",
@@ -1102,6 +1140,11 @@ impl UdpRtpTransport {
                 // authenticates and decrypts RTP in place in one reused
                 // buffer; v1 receives into a fresh buffer per datagram.
                 let mut inline: Option<InlineRx> = None;
+                // The inbound SRTP context this loop holds (`None` under v1
+                // or without `owner_srtp`). Dropped with the loop, which gives
+                // the context back to the transport.
+                let mut owner_rx: Option<OwnerSrtpRx> =
+                    owner_srtp.then(|| OwnerSrtpRx::new(srtp_recv.clone()));
                 let mut inline_storage = if inline_capable {
                     vec![0u8; recv_buffer_size]
                 } else {
@@ -1220,8 +1263,8 @@ impl UdpRtpTransport {
                                 }
                                 debug!("Received RTCP packet, type: {}", buffer[1] & 0x7F);
                                 let rtcp_data = if secure_media_required.load(Ordering::Acquire) {
-                                    let mut guard = srtp_recv.lock();
-                                    let Some(context) = guard.as_mut() else {
+                                    let mut recv = RecvContext::open(&mut owner_rx, &srtp_recv);
+                                    let Some(context) = recv.get() else {
                                         trace!("SRTCP is required but no receive context is installed; dropping packet");
                                         continue;
                                     };
@@ -1271,18 +1314,19 @@ impl UdpRtpTransport {
                                     // per-packet allocation.
                                     let data = &mut buffer[..size];
                                     let parsed = {
-                                        let mut srtp_guard = srtp_recv.lock();
+                                        let mut srtp_guard =
+                                            RecvContext::open(&mut owner_rx, &srtp_recv);
                                         if srtp_diagnostics && !first_inbound_rtp_logged {
                                             info!(
                                                 "SRTP_DIAG inbound_rtp_first local={:?} source={} size={} srtp_context={}",
                                                 local_rtp_addr,
                                                 addr,
                                                 size,
-                                                srtp_guard.is_some()
+                                                srtp_guard.get().is_some()
                                             );
                                             first_inbound_rtp_logged = true;
                                         }
-                                        if let Some(ctx) = srtp_guard.as_mut() {
+                                        if let Some(ctx) = srtp_guard.get() {
                                             match ctx.unprotect_in_place(data) {
                                                 Ok(bounds) => Ok(bounds),
                                                 Err(_) => {
@@ -1392,19 +1436,19 @@ impl UdpRtpTransport {
                                 // event, no warn-level log — to avoid
                                 // leaking timing or distinguishing failure
                                 // modes to a network attacker.
-                                let mut srtp_guard = srtp_recv.lock();
+                                let mut srtp_guard = RecvContext::open(&mut owner_rx, &srtp_recv);
                                 if srtp_diagnostics && !first_inbound_rtp_logged {
                                     info!(
                                     "SRTP_DIAG inbound_rtp_first local={:?} source={} size={} srtp_context={}",
                                     local_rtp_addr,
                                     addr,
                                     size,
-                                    srtp_guard.is_some()
+                                    srtp_guard.get().is_some()
                                 );
                                     first_inbound_rtp_logged = true;
                                 }
                                 let parse_result: Result<RtpPacket> = if let Some(ctx) =
-                                    srtp_guard.as_mut()
+                                    srtp_guard.get()
                                 {
                                     match ctx.unprotect(&buffer[0..size]) {
                                         Ok(packet) => Ok(packet),
@@ -1621,7 +1665,7 @@ impl UdpRtpTransport {
                     Ok((size, addr)) => {
                         let rtcp_data = if secure_media_required.load(Ordering::Acquire) {
                             let mut guard = srtp_recv.lock();
-                            let Some(context) = guard.as_mut() else {
+                            let Some(context) = guard.home.as_mut() else {
                                 trace!("SRTCP is required but no receive context is installed; dropping packet");
                                 continue;
                             };
@@ -1772,6 +1816,14 @@ impl UdpRtpTransport {
         self.remote_rtp_addr.load().as_deref().copied()
     }
 
+    /// Test seam: (the receive loop holds the installed inbound context, a
+    /// context is installed at home).
+    #[cfg(test)]
+    pub(crate) fn srtp_recv_location(&self) -> (bool, bool) {
+        let slot = self.srtp_recv.lock();
+        (slot.owned_by_receiver(), slot.home.is_some())
+    }
+
     /// The remote RTP and RTCP addresses as they change, for a reader that
     /// must not keep the transport alive.
     pub(crate) fn remote_peer_addrs(&self) -> RemotePeerAddrs {
@@ -1916,7 +1968,7 @@ impl UdpRtpTransport {
         }
         let (previous_send, previous_recv, installed_generation) = {
             let mut send_guard = self.srtp_send.lock();
-            let mut recv_guard = self.srtp_recv.lock();
+            let mut recv_slot = self.srtp_recv.lock();
             let current_generation = self.srtp_context_generation.load(Ordering::Acquire);
             if current_generation.checked_add(2).is_none() {
                 // As with validation failure, an exhausted replacement must
@@ -1930,7 +1982,9 @@ impl UdpRtpTransport {
             }
             let installed_generation = current_generation + 1;
             let previous_send = std::mem::replace(&mut *send_guard, Some(send));
-            let previous_recv = std::mem::replace(&mut *recv_guard, Some(recv));
+            // An owning receive loop adopts the new context before its next
+            // datagram and gives the old one back unchanged.
+            let previous_recv = self.srtp_recv.install(&mut recv_slot, recv);
             self.srtp_context_generation
                 .store(installed_generation, Ordering::Release);
             (previous_send, previous_recv, installed_generation)
@@ -1955,7 +2009,7 @@ impl UdpRtpTransport {
     pub async fn rollback_srtp_contexts(&self, rollback: SrtpContextRollback) -> Result<()> {
         let _update_guard = self.srtp_context_update.lock();
         let mut send_guard = self.srtp_send.lock();
-        let mut recv_guard = self.srtp_recv.lock();
+        let mut recv_slot = self.srtp_recv.lock();
         if self.srtp_context_generation.load(Ordering::Acquire) != rollback.installed_generation {
             return Err(Error::InvalidState(
                 "SRTP rollback token was superseded by a later context replacement".to_string(),
@@ -1965,8 +2019,20 @@ impl UdpRtpTransport {
             .installed_generation
             .checked_add(1)
             .ok_or_else(|| Error::InvalidState("SRTP context generation exhausted".to_string()))?;
+        if !self
+            .srtp_recv
+            .can_restore(&recv_slot, &rollback.previous_recv)
+        {
+            // Unreachable for a current token (the owning receive loop keeps
+            // or gives back the context it held); fail without changing state.
+            return Err(Error::InvalidState(
+                "SRTP rollback cannot restore the receive context the receive loop held"
+                    .to_string(),
+            ));
+        }
         *send_guard = rollback.previous_send;
-        *recv_guard = rollback.previous_recv;
+        self.srtp_recv
+            .restore(&mut recv_slot, rollback.previous_recv);
         self.srtp_context_generation
             .store(retired_generation, Ordering::Release);
         self.secure_media_required
@@ -1985,11 +2051,7 @@ impl UdpRtpTransport {
             .lock()
             .as_ref()
             .is_some_and(|context| context.validate_for_secure_transport().is_ok())
-            && self
-                .srtp_recv
-                .lock()
-                .as_ref()
-                .is_some_and(|context| context.validate_for_secure_transport().is_ok())
+            && self.srtp_recv.lock().installed_valid()
     }
 
     /// Irreversibly require authenticated RTP and RTCP on this transport.
@@ -2473,7 +2535,14 @@ impl RtpTransport for UdpRtpTransport {
 
         let plaintext = {
             let mut guard = self.srtp_recv.lock();
-            let context = guard.as_mut().ok_or_else(|| {
+            if guard.owned_by_receiver() {
+                // The transport's own receive loop holds the inbound context
+                // (and reads this socket itself).
+                return Err(Error::InvalidState(
+                    "the inbound SRTP context is owned by the transport's receive loop".to_string(),
+                ));
+            }
+            let context = guard.home.as_mut().ok_or_else(|| {
                 Error::InvalidState(
                     "secure media is required but no receive context is installed".to_string(),
                 )
@@ -3808,7 +3877,7 @@ mod tests {
         assert!(matches!(error, Error::InvalidState(_)));
         assert!(!transport.srtp_enabled().await);
         assert!(transport.srtp_send.lock().is_none());
-        assert!(transport.srtp_recv.lock().is_none());
+        assert!(transport.srtp_recv.lock().home.is_none());
     }
 
     #[tokio::test]

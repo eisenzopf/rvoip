@@ -50,6 +50,9 @@
 //! - [`MediaExecutorConfig::lane_pass_clock`]: a lane poller pass reads the
 //!   clock once and the futures it polls read that value through
 //!   [`crate::media_clock::now`]. Needs the lane poller.
+//! - [`MediaExecutorConfig::owner_srtp`]: the receive loop checks the
+//!   transport's inbound SRTP context out and uses it without the context
+//!   lock, which it takes again only after a rekey, rollback or removal.
 //!
 //! Every decision is read when an object is built (a transport starts, a
 //! session or SRTP context is created, a poller starts), never per packet.
@@ -188,6 +191,10 @@ pub struct MediaExecutorConfig {
     /// Needs [`Self::lane_poller`]; without it, it reads as off.
     pub lane_pass_clock: bool,
     // ---- End lane timing wheel and pass clock ----
+    /// The receive loop owns the transport's inbound SRTP/SRTCP context and
+    /// uses it without the context lock. A transport with a separate RTCP
+    /// socket (whose own receive task also unprotects SRTCP) keeps the lock.
+    pub owner_srtp: bool,
 }
 
 impl Default for MediaExecutorConfig {
@@ -214,6 +221,7 @@ impl MediaExecutorConfig {
             // Lane timing wheel and pass clock.
             lane_timer_wheel: false,
             lane_pass_clock: false,
+            owner_srtp: false,
         }
     }
 
@@ -235,6 +243,7 @@ impl MediaExecutorConfig {
             // Lane timing wheel and pass clock.
             lane_timer_wheel: true,
             lane_pass_clock: true,
+            owner_srtp: true,
         }
     }
 
@@ -315,6 +324,12 @@ impl MediaExecutorConfig {
     }
 
     // ---- End lane timing wheel and pass clock ----
+
+    /// Set [`Self::owner_srtp`].
+    pub fn with_owner_srtp(mut self, enabled: bool) -> Self {
+        self.owner_srtp = enabled;
+        self
+    }
 
     /// Check the configuration without installing it.
     ///
@@ -411,6 +426,10 @@ impl MediaExecutorConfig {
     }
 
     // ---- End lane timing wheel and pass clock ----
+    /// Whether receive loops started now own the inbound SRTP context.
+    pub fn owner_srtp_active(&self) -> bool {
+        self.is_v2() && self.owner_srtp
+    }
 }
 
 /// Why a [`MediaExecutorConfig`] was rejected.
@@ -594,6 +613,12 @@ pub fn lane_pass_clock_enabled() -> bool {
 }
 
 // ---- End lane timing wheel and pass clock ----
+
+/// Whether a receive loop started now owns its transport's inbound SRTP
+/// context. Read when a transport starts.
+pub fn owner_srtp_enabled() -> bool {
+    with_config(MediaExecutorConfig::owner_srtp_active)
+}
 
 /// Restores the previous per-thread override when dropped.
 #[doc(hidden)]
@@ -850,6 +875,9 @@ static TX_SYNC_DEFERRED: AtomicU64 = AtomicU64::new(0);
 static TX_BATCHES: AtomicU64 = AtomicU64::new(0);
 static TX_BATCHED_PACKETS: AtomicU64 = AtomicU64::new(0);
 static TX_BATCH_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+static OWNER_SRTP_LOOPS: AtomicU64 = AtomicU64::new(0);
+static OWNER_SRTP_HANDOFFS: AtomicU64 = AtomicU64::new(0);
+static SRTP_LOCKS_AVOIDED: AtomicU64 = AtomicU64::new(0);
 
 /// Media executor totals for this process since start. Each field is
 /// individually atomic; the set is not a transaction.
@@ -914,6 +942,14 @@ pub struct InlineExecutorCounters {
     /// Batches (or batch remainders) sent packet by packet because
     /// `sendmmsg` is unavailable or returned short.
     pub tx_batch_fallbacks: u64,
+    /// Receive loops that own their transport's inbound SRTP context.
+    pub owner_srtp_loops: u64,
+    /// Times an owning receive loop adopted or gave back the context (the
+    /// first check-out, a rekey, a rollback, a removal).
+    pub owner_srtp_handoffs: u64,
+    /// Inbound SRTP/SRTCP datagrams authenticated without taking the
+    /// context lock.
+    pub srtp_locks_avoided: u64,
 }
 
 /// The media executor totals since start.
@@ -940,6 +976,9 @@ pub fn inline_executor_counters() -> InlineExecutorCounters {
         tx_batches: TX_BATCHES.load(Ordering::Relaxed),
         tx_batched_packets: TX_BATCHED_PACKETS.load(Ordering::Relaxed),
         tx_batch_fallbacks: TX_BATCH_FALLBACKS.load(Ordering::Relaxed),
+        owner_srtp_loops: OWNER_SRTP_LOOPS.load(Ordering::Relaxed),
+        owner_srtp_handoffs: OWNER_SRTP_HANDOFFS.load(Ordering::Relaxed),
+        srtp_locks_avoided: SRTP_LOCKS_AVOIDED.load(Ordering::Relaxed),
     }
 }
 
@@ -1471,6 +1510,48 @@ impl Drop for TxPathCounters {
     }
 }
 
+/// Count one receive loop that owns its inbound SRTP context.
+pub(crate) fn record_owner_srtp_loop() {
+    OWNER_SRTP_LOOPS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Count one adoption or return of the inbound SRTP context by its owner.
+/// Rekey rate.
+pub(crate) fn record_owner_srtp_handoff() {
+    OWNER_SRTP_HANDOFFS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Lock-free SRTP datagrams of one owning receive loop, published in
+/// batches.
+#[derive(Default)]
+pub(crate) struct SrtpOwnerCounters {
+    pending: u64,
+}
+
+impl SrtpOwnerCounters {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    #[inline]
+    pub(crate) fn lock_avoided(&mut self) {
+        self.pending += 1;
+        if self.pending >= FLUSH_EVERY {
+            self.flush();
+        }
+    }
+
+    pub(crate) fn flush(&mut self) {
+        publish(&SRTP_LOCKS_AVOIDED, &mut self.pending);
+    }
+}
+
+impl Drop for SrtpOwnerCounters {
+    fn drop(&mut self) {
+        self.flush();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1487,6 +1568,7 @@ mod tests {
         assert!(!v1.fast_ssrc_hash_active());
         assert!(!v1.inline_decode_active());
         assert!(!v1.pcm_pool_active());
+        assert!(!v1.owner_srtp_active());
 
         let v2 = MediaExecutorConfig::v2();
         assert_eq!(v2.mode, MediaExecutorMode::V2);
@@ -1497,6 +1579,7 @@ mod tests {
         assert!(v2.fast_ssrc_hash_active());
         assert!(v2.inline_decode_active());
         assert!(v2.pcm_pool_active());
+        assert!(v2.owner_srtp_active());
         assert!(v2.validate().is_ok());
     }
 
@@ -1693,6 +1776,7 @@ mod tests {
         assert!(!v1_with_switches.fast_ssrc_hash_active(), "never under v1");
         assert!(!v1_with_switches.inline_decode_active(), "never under v1");
         assert!(!v1_with_switches.pcm_pool_active(), "never under v1");
+        assert!(!v1_with_switches.owner_srtp_active(), "never under v1");
 
         let no_poller = MediaExecutorConfig::v2().with_lane_poller(false);
         assert!(no_poller.validate().is_ok());
@@ -1721,17 +1805,41 @@ mod tests {
         assert!(MediaExecutorConfig::v2()
             .with_inline_decode(false)
             .pcm_pool_active());
+        assert!(
+            no_poller.owner_srtp_active(),
+            "a receive task owns its context as well as a hosted loop"
+        );
 
         let one_off = MediaExecutorConfig::v2()
             .with_lane_timer(false)
             .with_lane_tx(false)
             .with_tx_batch(false)
-            .with_fast_ssrc_hash(false);
+            .with_fast_ssrc_hash(false)
+            .with_owner_srtp(false);
         assert!(one_off.lane_poller_active());
         assert!(!one_off.lane_timer_active());
         assert!(!one_off.lane_tx_active());
         assert!(!one_off.tx_batch_active());
         assert!(!one_off.fast_ssrc_hash_active());
+        assert!(!one_off.owner_srtp_active());
+    }
+
+    #[test]
+    fn owner_srtp_counters_reach_the_totals() {
+        let before = inline_executor_counters();
+        let mut counters = SrtpOwnerCounters::new();
+        for _ in 0..(FLUSH_EVERY + 2) {
+            counters.lock_avoided();
+        }
+        let flushed = inline_executor_counters();
+        assert!(flushed.srtp_locks_avoided >= before.srtp_locks_avoided + FLUSH_EVERY);
+        drop(counters);
+        record_owner_srtp_loop();
+        record_owner_srtp_handoff();
+        let after = inline_executor_counters();
+        assert!(after.srtp_locks_avoided >= before.srtp_locks_avoided + FLUSH_EVERY + 2);
+        assert!(after.owner_srtp_loops > before.owner_srtp_loops);
+        assert!(after.owner_srtp_handoffs > before.owner_srtp_handoffs);
     }
 
     #[test]

@@ -630,6 +630,189 @@ mod tests {
         session.close().await.unwrap();
     }
 
+    // ---- Owner SRTP: v1/v2 equivalence through the transport's real API ---
+
+    /// The keys a rekey moves to: a second random master key and salt per
+    /// test process, independent of [`test_srtp_key`].
+    fn rekeyed_context() -> SrtpContext {
+        use rand::Rng;
+        static KEY: std::sync::OnceLock<([u8; 16], [u8; 14])> = std::sync::OnceLock::new();
+        let (key, salt) = KEY.get_or_init(|| (rand::thread_rng().gen(), rand::thread_rng().gen()));
+        SrtpContext::new(
+            SRTP_AES128_CM_SHA1_80,
+            SrtpCryptoKey::new(key.to_vec(), salt.to_vec()),
+        )
+        .unwrap()
+    }
+
+    fn udp(session: &RtpSession) -> &UdpRtpTransport {
+        session
+            .transport
+            .as_any()
+            .downcast_ref::<UdpRtpTransport>()
+            .expect("UDP session transport")
+    }
+
+    fn protected(sender: &mut SrtpContext, seq: u16) -> Vec<u8> {
+        sender
+            .protect(&media_packet(seq))
+            .unwrap()
+            .serialize()
+            .unwrap()
+            .to_vec()
+    }
+
+    async fn publish_all(
+        events: &mut broadcast::Receiver<RtpSessionEvent>,
+        count: usize,
+        published: &mut Vec<u16>,
+    ) {
+        for _ in 0..count {
+            let packet = next_published(events).await;
+            assert_eq!(packet, media_packet(packet.header.sequence_number));
+            published.push(packet.header.sequence_number);
+        }
+    }
+
+    /// Rekey mid-stream through the transport's control API, then roll back:
+    /// old keys after the rekey, cross-key and same-key replays, and a replay
+    /// after the rollback must all be rejected, identically.
+    async fn run_srtp_rekey(mode: MediaExecutorMode) -> Observed {
+        let mut session = session_in(mode).await;
+        udp(&session)
+            .set_srtp_contexts(srtp_context(), srtp_context())
+            .await
+            .unwrap();
+        let mut events = session.subscribe();
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let destination = session.local_addr().unwrap();
+        let mut a = srtp_context();
+        let mut b = rekeyed_context();
+        let mut published = Vec::new();
+
+        let a_wires: Vec<Vec<u8>> = (1..=8).map(|seq| protected(&mut a, seq)).collect();
+        for wire in &a_wires[..3] {
+            peer.send_to(wire, destination).await.unwrap();
+        }
+        publish_all(&mut events, 3, &mut published).await;
+        assert_eq!(
+            udp(&session).srtp_recv_location(),
+            (mode == MediaExecutorMode::V2, mode == MediaExecutorMode::V1),
+            "{mode:?}: the v2 receive loop holds the context"
+        );
+
+        let rollback = udp(&session)
+            .replace_srtp_contexts(rekeyed_context(), rekeyed_context())
+            .await
+            .unwrap();
+        // Old key after the rekey, then the new key.
+        peer.send_to(&a_wires[3], destination).await.unwrap();
+        for seq in [5_u16, 6] {
+            peer.send_to(&protected(&mut b, seq), destination)
+                .await
+                .unwrap();
+        }
+        publish_all(&mut events, 2, &mut published).await;
+
+        udp(&session)
+            .rollback_srtp_contexts(rollback)
+            .await
+            .unwrap();
+        // A replay of an A packet accepted before the rekey (A's window is
+        // the one frozen at the rekey), a B packet after the rollback, then
+        // A continues.
+        peer.send_to(&a_wires[1], destination).await.unwrap();
+        peer.send_to(&protected(&mut b, 7), destination)
+            .await
+            .unwrap();
+        peer.send_to(&a_wires[7], destination).await.unwrap();
+        publish_all(&mut events, 1, &mut published).await;
+        assert_nothing_more_published(&mut events).await;
+        assert!(udp(&session).srtp_enabled().await);
+
+        let observed = observe(&session, published).await;
+        let transport = session.transport.clone();
+        session.close().await.unwrap();
+        let transport = transport
+            .as_any()
+            .downcast_ref::<UdpRtpTransport>()
+            .expect("UDP session transport");
+        assert_eq!(
+            transport.srtp_recv_location(),
+            (false, true),
+            "after close the inbound context is back home, never lost"
+        );
+        observed
+    }
+
+    #[tokio::test]
+    async fn srtp_rekey_and_rollback_mid_stream_match_v1() {
+        let before = inline_executor_counters();
+        let v1 = run_srtp_rekey(MediaExecutorMode::V1).await;
+        let v2 = run_srtp_rekey(MediaExecutorMode::V2).await;
+        assert_eq!(v1, v2);
+        assert_eq!(v2.published, vec![1, 2, 3, 5, 6, 8]);
+        let after = inline_executor_counters();
+        assert!(after.owner_srtp_loops > before.owner_srtp_loops);
+        // The first check-out, the rekey and the rollback.
+        assert!(after.owner_srtp_handoffs >= before.owner_srtp_handoffs + 3);
+        assert!(after.srtp_locks_avoided >= before.srtp_locks_avoided);
+    }
+
+    #[tokio::test]
+    async fn owner_srtp_can_be_switched_off_and_never_applies_with_a_separate_rtcp_socket() {
+        // Switched off: v2 receive, but the context stays behind the lock.
+        let session = {
+            let _off = override_media_executor_config_on_this_thread(
+                MediaExecutorConfig::v2().with_owner_srtp(false),
+            );
+            RtpSession::new_event_driven(RtpSessionConfig {
+                local_addr: "127.0.0.1:0".parse().unwrap(),
+                ..RtpSessionConfig::default()
+            })
+            .await
+            .unwrap()
+        };
+        // A separate RTCP socket: its receive task unprotects SRTCP with the
+        // same context, so the RTP loop must not own it.
+        let rtcp_port = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let rtcp_addr = rtcp_port.local_addr().unwrap();
+        drop(rtcp_port);
+        let non_mux = {
+            let _v2 = override_media_executor_config_on_this_thread(MediaExecutorConfig::v2());
+            RtpSession::new_event_driven_with_rtcp_socket(
+                RtpSessionConfig {
+                    local_addr: "127.0.0.1:0".parse().unwrap(),
+                    ..RtpSessionConfig::default()
+                },
+                crate::transport::SymmetricRtpPolicy::default(),
+                rtcp_addr,
+            )
+            .await
+            .unwrap()
+        };
+        for mut session in [session, non_mux] {
+            assert!(session.inline_rx_enabled());
+            udp(&session)
+                .set_srtp_contexts(srtp_context(), srtp_context())
+                .await
+                .unwrap();
+            let mut events = session.subscribe();
+            let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let mut sender = srtp_context();
+            for seq in [1_u16, 2] {
+                peer.send_to(&protected(&mut sender, seq), session.local_addr().unwrap())
+                    .await
+                    .unwrap();
+            }
+            let mut published = Vec::new();
+            publish_all(&mut events, 2, &mut published).await;
+            assert_eq!(published, vec![1, 2]);
+            assert_eq!(udp(&session).srtp_recv_location(), (false, true));
+            session.close().await.unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn v1_sessions_never_offer_an_inline_seam() {
         let session = session_in(MediaExecutorMode::V1).await;
