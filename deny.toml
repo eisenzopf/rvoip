@@ -52,6 +52,10 @@ ignore = [
     # `rsa` — RustSec reports no fixed upgrade. Transitive via users-core
     # RS256/JWK support and webauthn-rs crypto-glue.
     "RUSTSEC-2023-0071",
+    # `crypto-bigint` 0.5 — transitive via the RustCrypto elliptic-curve 0.13
+    # stack (p256/p384/p521, webauthn-rs crypto-glue). The fix ships only in
+    # 0.7.6, which needs elliptic-curve 0.14. Revisit with that upgrade.
+    "RUSTSEC-2026-0387",
     # `rustls-webpki` — transitive via the rustls stack. Revisit on the fixed line.
     "RUSTSEC-2026-0104",
     "RUSTSEC-2026-0098",
