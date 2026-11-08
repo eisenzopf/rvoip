@@ -2200,6 +2200,22 @@ mod tests {
         assert!(inline_executor_counters().inline_sinks > before.inline_sinks);
     }
 
+    /// Hot call state changes where the socket owner keeps its per-packet
+    /// state and how it checks its fences, never what reaches the playout:
+    /// a real v2 dialog decodes and plays out the same frames and digits with
+    /// it on as off.
+    #[tokio::test]
+    async fn a_real_dialog_plays_out_identically_with_hot_state_on_and_off() {
+        let (off_frames, off_digits, off_inline) =
+            real_dialog_run(MediaExecutorConfig::v2().with_hot_state(false)).await;
+        let (on_frames, on_digits, on_inline) = real_dialog_run(MediaExecutorConfig::v2()).await;
+        assert!(off_inline && on_inline);
+        assert_eq!(on_digits, off_digits);
+        assert_eq!(on_frames, off_frames);
+        let timestamps: Vec<u32> = on_frames.iter().map(|(timestamp, _)| *timestamp).collect();
+        assert_eq!(timestamps, (1..=13).map(timestamp).collect::<Vec<_>>());
+    }
+
     #[tokio::test]
     async fn v2_without_inline_decode_keeps_the_v1_handler() {
         let controller = MediaSessionController::new();
