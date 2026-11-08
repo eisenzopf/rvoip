@@ -53,6 +53,30 @@ mod source_timeline;
 const RTP_REORDER_HOLD: Duration = Duration::from_millis(45);
 const RTP_REORDER_MAX_PACKETS: usize = 64;
 const RTP_MAX_CONCEALMENT_PACKETS: u16 = 8;
+/// Longest single concealment frame, in seconds of audio. Recovery work needs
+/// a memory bound that does not depend on peer timestamps: one second is
+/// generous for one lost packet, and a larger discontinuity keeps the media
+/// that was received without synthesizing a giant frame for it.
+const RTP_MAX_CONCEALMENT_SECONDS: usize = 1;
+/// RTP timestamp differences at or beyond half the 32-bit space are backward
+/// steps, not elapsed time.
+const RTP_TIMESTAMP_HALF_RANGE: u32 = 1 << 31;
+
+/// Interleaved sample count for one concealment frame, or `None` when the
+/// frame would be empty or longer than [`RTP_MAX_CONCEALMENT_SECONDS`].
+fn concealment_sample_count(
+    samples_per_channel: usize,
+    clock_rate: u32,
+    channels: u8,
+) -> Option<usize> {
+    let maximum = usize::try_from(clock_rate)
+        .ok()?
+        .checked_mul(RTP_MAX_CONCEALMENT_SECONDS)?;
+    if samples_per_channel == 0 || samples_per_channel > maximum || channels == 0 {
+        return None;
+    }
+    samples_per_channel.checked_mul(usize::from(channels))
+}
 
 #[derive(Debug)]
 struct PendingRtpPacket {
@@ -151,6 +175,23 @@ impl RtpPlayoutBuffer {
         self.drain_ready(now)
     }
 
+    /// When a startup hold or a gap hold expires, if one is pending after
+    /// `after`. An expired gap that cannot advance (for example, one with no
+    /// timestamp progression) needs another packet to supply information;
+    /// polling it again cannot help, so it arms nothing.
+    fn next_deadline(&self, after: Instant) -> Option<Instant> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        let started = if self.expected_sequence.is_none() {
+            self.startup_started_at
+        } else {
+            self.gap_started_at
+        }?;
+        let deadline = started + RTP_REORDER_HOLD;
+        (deadline > after).then_some(deadline)
+    }
+
     /// True when the pending packets form one unbroken sequence run.
     fn pending_is_contiguous(&self) -> bool {
         let Some(oldest) = self.oldest_pending_sequence() else {
@@ -207,16 +248,27 @@ impl RtpPlayoutBuffer {
             }
 
             let Some(step) = self.timestamp_step.or_else(|| {
-                self.last_timestamp.map(|previous| {
-                    nearest_packet
+                self.last_timestamp.and_then(|previous| {
+                    let elapsed = nearest_packet
                         .packet
                         .header
                         .timestamp
-                        .wrapping_sub(previous)
-                        / u32::from(distance)
+                        .wrapping_sub(previous);
+                    // `distance` counts the missing packets after the last
+                    // played one; the received successor spans one more
+                    // interval than that.
+                    (elapsed < RTP_TIMESTAMP_HALF_RANGE)
+                        .then_some(elapsed / (u32::from(distance) + 1))
                 })
             }) else {
-                break;
+                // A backward or discontinuous timestamp cannot size the gap,
+                // and dividing it by the distance once asked for a ~2^32
+                // sample frame. Resume at the received media and learn the
+                // cadence again from what follows.
+                self.expected_sequence = Some(nearest_sequence);
+                self.gap_started_at = None;
+                self.last_timestamp = None;
+                continue;
             };
             if step == 0 {
                 break;
@@ -229,7 +281,11 @@ impl RtpPlayoutBuffer {
             self.last_timestamp = Some(timestamp);
             self.timestamp_step = Some(step);
             self.expected_sequence = Some(expected.wrapping_add(1));
-            self.gap_started_at = None;
+            // The hold is per gap, not per missing packet: the next missing
+            // packet of the same gap has waited as long as this one, so it is
+            // concealed in this pass. Restarting the hold here held every
+            // packet behind an N-packet loss for N holds (five lost packets
+            // kept the stream 225 ms late).
             ready.push(RtpPlayoutItem::Gap {
                 sequence_number: expected,
                 timestamp,
@@ -244,7 +300,7 @@ impl RtpPlayoutBuffer {
             let step = timestamp.wrapping_sub(previous);
             // A backward clock step on the same SSRC is not a frame size; a
             // concealment frame sized from it would be gigabytes of silence.
-            if step > 0 && step < (1 << 31) {
+            if step > 0 && step < RTP_TIMESTAMP_HALF_RANGE {
                 self.timestamp_step = Some(step);
             }
         }
@@ -252,9 +308,29 @@ impl RtpPlayoutBuffer {
     }
 }
 
+/// Paces frames that the reorder window releases together (a held gap and the
+/// packets queued behind it) one frame duration apart.
+///
+/// Pacing alone cannot drain a backlog while the stream keeps arriving: live
+/// frames arrive one frame duration apart and the paced head leaves one frame
+/// duration apart, so a batch of N frames would stay N - 1 frames deep, and
+/// add that latency, for the rest of the call. A playout clock downstream
+/// keeps its own schedule, so that standing delay turns every later frame
+/// into a late frame there: one lost inbound packet silenced the caller's
+/// audio for the rest of the call. A frame queued at a later instant than the
+/// previous one while a backlog is waiting is therefore live media behind
+/// paced media, and earns one extra delivery that does not move the paced
+/// schedule. A batch queued at one instant is still paced; a backlog drains
+/// at two frames per frame duration and the queue converges back to
+/// delivering every frame on arrival.
 struct DecodedPlayoutQueue {
     pending: VecDeque<AudioFrame>,
     next_delivery_at: Option<Instant>,
+    /// When the newest queued frame was pushed.
+    last_push_at: Option<Instant>,
+    /// Deliveries owed to live arrivals that found a backlog. Never more
+    /// than the frames queued ahead of them.
+    catch_up: usize,
     /// Frames dropped on overflow. The first drop is logged; the rest are
     /// counted so a burst does not flood the log.
     dropped_frames: u64,
@@ -265,6 +341,8 @@ impl DecodedPlayoutQueue {
         Self {
             pending: VecDeque::new(),
             next_delivery_at: None,
+            last_push_at: None,
+            catch_up: 0,
             dropped_frames: 0,
         }
     }
@@ -276,12 +354,28 @@ impl DecodedPlayoutQueue {
         if self.next_delivery_at.is_none() {
             self.next_delivery_at = Some(now);
         }
+        if !self.pending.is_empty() && self.last_push_at.is_some_and(|last| now > last) {
+            self.catch_up = (self.catch_up + 1).min(self.pending.len());
+        }
+        self.last_push_at = Some(now);
         self.pending.push_back(frame);
         true
     }
 
     fn pop_due(&mut self, now: Instant) -> Option<AudioFrame> {
         let deadline = self.next_delivery_at?;
+        if self.catch_up > 0 {
+            if let Some(frame) = self.pending.pop_front() {
+                // Owed to a live arrival: the paced schedule stays as it is.
+                self.catch_up -= 1;
+                if self.pending.is_empty() {
+                    self.next_delivery_at = None;
+                    self.catch_up = 0;
+                }
+                return Some(frame);
+            }
+            self.catch_up = 0;
+        }
         if now < deadline {
             return None;
         }
@@ -290,7 +384,25 @@ impl DecodedPlayoutQueue {
             .pending
             .front()
             .map(|_| now + frame.duration.max(Duration::from_millis(1)));
+        if self.pending.is_empty() {
+            self.catch_up = 0;
+        }
         Some(frame)
+    }
+
+    /// When the next frame is due, while any frame is queued. A delivery
+    /// owed to a live arrival is due as soon as that arrival was queued.
+    fn next_deadline(&self) -> Option<Instant> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        if self.catch_up > 0 {
+            return match (self.next_delivery_at, self.last_push_at) {
+                (Some(paced), Some(owed)) => Some(paced.min(owed)),
+                (paced, owed) => paced.or(owed),
+            };
+        }
+        self.next_delivery_at
     }
 }
 
@@ -337,6 +449,42 @@ mod rtp_playout_tests {
                 sequence_number, ..
             } => *sequence_number,
         }
+    }
+
+    #[test]
+    fn reorder_deadline_exists_only_while_a_gap_can_wait() {
+        let start = Instant::now();
+        let mut buffer = RtpPlayoutBuffer::new();
+        assert_eq!(buffer.next_deadline(start), None);
+        buffer.push(packet(100), start);
+        buffer.push(packet(101), start + Duration::from_millis(20));
+        assert_eq!(
+            buffer.next_deadline(start + Duration::from_millis(20)),
+            None
+        );
+        let gap_at = start + Duration::from_millis(40);
+        assert!(buffer.push(packet(103), gap_at).is_empty());
+        assert_eq!(
+            buffer.next_deadline(gap_at),
+            Some(gap_at + RTP_REORDER_HOLD)
+        );
+        let ready = buffer.tick(gap_at + RTP_REORDER_HOLD);
+        assert_eq!(ready.iter().map(sequence).collect::<Vec<_>>(), [102, 103]);
+        assert_eq!(buffer.next_deadline(gap_at + RTP_REORDER_HOLD), None);
+    }
+
+    #[test]
+    fn expired_gap_without_timestamp_progress_does_not_rearm_a_busy_timer() {
+        let start = Instant::now();
+        let mut buffer = RtpPlayoutBuffer::new();
+        let mut first = packet(100);
+        first.header.timestamp = 0;
+        buffer.push(first, start);
+        let mut next = packet(102);
+        next.header.timestamp = 0;
+        assert!(buffer.push(next, start).is_empty());
+        assert!(buffer.tick(start + RTP_REORDER_HOLD).is_empty());
+        assert_eq!(buffer.next_deadline(start + RTP_REORDER_HOLD), None);
     }
 
     #[test]
@@ -448,6 +596,205 @@ mod rtp_playout_tests {
     }
 
     #[test]
+    fn backward_step_before_cadence_is_learned_does_not_size_a_gap() {
+        // Only one packet has played when the gap is confirmed, so no
+        // timestamp step is known yet and the gap is sized from the
+        // successor. Its timestamp is behind the last played one (a same-SSRC
+        // clock reset), and dividing that backward step by the distance asked
+        // for a concealment frame of about 2^32 samples: an 8.6 GiB zeroed
+        // allocation downstream. Inspect metadata only, so this test never
+        // allocates the frame it guards against.
+        let start = Instant::now();
+        let mut buffer = RtpPlayoutBuffer::new();
+        let mut first = packet(100);
+        first.header.timestamp = 16_000;
+        assert_eq!(
+            buffer
+                .push(first, start)
+                .iter()
+                .map(sequence)
+                .collect::<Vec<_>>(),
+            [100]
+        );
+        let mut successor = packet(102);
+        successor.header.timestamp = 0;
+        let lost_at = start + Duration::from_millis(40);
+        assert!(buffer.push(successor, lost_at).is_empty());
+        let ready = buffer.tick(lost_at + RTP_REORDER_HOLD);
+        for item in &ready {
+            if let RtpPlayoutItem::Gap {
+                samples_per_channel,
+                ..
+            } = item
+            {
+                assert!(
+                    *samples_per_channel <= 8_000,
+                    "unbounded concealment frame: {samples_per_channel} samples"
+                );
+            }
+        }
+        // Received media resumes at the successor. Nothing is synthesized for
+        // a gap whose duration the timestamps cannot establish.
+        assert_eq!(ready.iter().map(sequence).collect::<Vec<_>>(), [102]);
+        assert!(matches!(&ready[0], RtpPlayoutItem::Packet(_)));
+        // The cadence is learned again from the media that follows.
+        let mut next = packet(103);
+        next.header.timestamp = 160;
+        assert_eq!(
+            buffer
+                .push(next, lost_at + Duration::from_millis(60))
+                .iter()
+                .map(sequence)
+                .collect::<Vec<_>>(),
+            [103]
+        );
+    }
+
+    #[test]
+    fn first_gap_infers_duration_from_missing_and_received_intervals() {
+        // 101 is lost before any step is known. The received successor is two
+        // intervals after the last played packet, not one, so the concealment
+        // frame is one interval long and does not reuse the successor's
+        // timestamp.
+        let start = Instant::now();
+        let mut buffer = RtpPlayoutBuffer::new();
+        buffer.push(packet(100), start);
+        buffer.push(packet(102), start);
+        let released = buffer.tick(start + RTP_REORDER_HOLD);
+        assert_eq!(
+            released.iter().map(sequence).collect::<Vec<_>>(),
+            [101, 102]
+        );
+        assert!(matches!(
+            &released[0],
+            RtpPlayoutItem::Gap {
+                timestamp: 16_160,
+                samples_per_channel: 160,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn forward_timestamp_wrap_preserves_normal_concealment() {
+        let start = Instant::now();
+        let mut buffer = RtpPlayoutBuffer::new();
+        let mut first = packet(100);
+        first.header.timestamp = u32::MAX - 159;
+        buffer.push(first, start);
+        let mut successor = packet(102);
+        successor.header.timestamp = 160;
+        buffer.push(successor, start);
+        let released = buffer.tick(start + RTP_REORDER_HOLD);
+        assert!(matches!(
+            &released[0],
+            RtpPlayoutItem::Gap {
+                timestamp: 0,
+                samples_per_channel: 160,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn concealment_allocation_is_bounded_by_negotiated_audio_format() {
+        assert_eq!(concealment_sample_count(160, 8_000, 1), Some(160));
+        assert_eq!(concealment_sample_count(960, 48_000, 2), Some(1_920));
+        assert_eq!(concealment_sample_count(8_000, 8_000, 1), Some(8_000));
+        assert_eq!(concealment_sample_count(4_294_967_136, 8_000, 1), None);
+        assert_eq!(concealment_sample_count(1_000_000_000, 48_000, 2), None);
+        assert_eq!(concealment_sample_count(8_001, 8_000, 1), None);
+        assert_eq!(concealment_sample_count(0, 8_000, 1), None);
+        assert_eq!(concealment_sample_count(160, 8_000, 0), None);
+    }
+
+    #[tokio::test]
+    async fn oversized_gap_does_not_prevent_following_real_g711_audio() {
+        // A concealment request longer than the bound is refused without
+        // allocating it, and the received packet behind it still plays.
+        for codec in ["PCMU", "PCMA"] {
+            let config = MediaConfig {
+                local_addr: "127.0.0.1:0".parse().expect("local addr"),
+                remote_addr: None,
+                preferred_codec: Some(codec.to_string()),
+                parameters: std::collections::HashMap::new(),
+            };
+            let format = codec_runtime::resolve_codec(&config).expect("G.711 resolves");
+            let payload_type = format.payload_type;
+            let runtime =
+                Arc::new(codec_runtime::DialogCodecRuntime::new(format).expect("codec runtime"));
+            let mut real = packet(11);
+            real.header.payload_type = payload_type;
+            let mut queue = DecodedPlayoutQueue::new();
+            let now = Instant::now();
+            let terminate = enqueue_rtp_playout_items(
+                vec![
+                    RtpPlayoutItem::Gap {
+                        sequence_number: 10,
+                        timestamp: 1_600,
+                        samples_per_channel: 8_001,
+                    },
+                    RtpPlayoutItem::Packet(real),
+                ],
+                &runtime,
+                &DialogId::new("bounded-concealment"),
+                &mut queue,
+                &mut source_timeline::SourceTimeline::default(),
+                now,
+            )
+            .await;
+            assert!(!terminate, "{codec}");
+            assert_eq!(queue.pending.len(), 1, "{codec}: only received media");
+            let frame = queue
+                .pop_due(now)
+                .expect("received media survives a refused concealment");
+            assert_eq!(frame.samples.len(), 160, "{codec}");
+            assert_eq!(frame.timestamp, 1_760, "{codec}");
+        }
+    }
+
+    #[test]
+    fn consecutive_losses_are_concealed_after_one_hold() {
+        // 102, 103 and 104 are lost. One hold after the gap opened, the whole
+        // gap is concealed and 105 leaves with it. Restarting the hold for
+        // each missing packet made 105 wait three holds.
+        let start = Instant::now();
+        let mut buffer = RtpPlayoutBuffer::new();
+        buffer.push(packet(100), start);
+        buffer.push(packet(101), start + Duration::from_millis(20));
+        let gap_at = start + Duration::from_millis(80);
+        assert!(buffer.push(packet(105), gap_at).is_empty());
+        let ready = buffer.tick(gap_at + RTP_REORDER_HOLD);
+        assert_eq!(
+            ready.iter().map(sequence).collect::<Vec<_>>(),
+            [102, 103, 104, 105]
+        );
+        let concealed: Vec<u32> = ready
+            .iter()
+            .filter_map(|item| match item {
+                RtpPlayoutItem::Gap { timestamp, .. } => Some(*timestamp),
+                RtpPlayoutItem::Packet(_) => None,
+            })
+            .collect();
+        assert_eq!(concealed, [102 * 160, 103 * 160, 104 * 160]);
+        assert_eq!(buffer.next_deadline(gap_at + RTP_REORDER_HOLD), None);
+        // The next gap waits its own hold again.
+        let second_gap = gap_at + Duration::from_millis(100);
+        assert!(buffer.push(packet(107), second_gap).is_empty());
+        assert!(buffer
+            .tick(second_gap + Duration::from_millis(44))
+            .is_empty());
+        assert_eq!(
+            buffer
+                .tick(second_gap + RTP_REORDER_HOLD)
+                .iter()
+                .map(sequence)
+                .collect::<Vec<_>>(),
+            [106, 107]
+        );
+    }
+
+    #[test]
     fn duplicate_and_late_packets_do_not_reenter_playout() {
         let start = Instant::now();
         let mut buffer = RtpPlayoutBuffer::new();
@@ -466,7 +813,12 @@ mod rtp_playout_tests {
         for timestamp in [0, 160, 320] {
             assert!(playout.push(AudioFrame::new(vec![0; 160], 8_000, 1, timestamp), start,));
         }
+        assert_eq!(playout.next_deadline(), Some(start));
         assert_eq!(playout.pop_due(start).expect("first frame").timestamp, 0);
+        assert_eq!(
+            playout.next_deadline(),
+            Some(start + Duration::from_millis(20))
+        );
         assert!(playout.pop_due(start + Duration::from_millis(19)).is_none());
         assert_eq!(
             playout
@@ -475,6 +827,128 @@ mod rtp_playout_tests {
                 .timestamp,
             160
         );
+    }
+
+    #[test]
+    fn decoded_playout_does_not_keep_a_reorder_batch_as_standing_latency() {
+        // One lost inbound packet. The reorder window holds the packets
+        // behind it for RTP_REORDER_HOLD and releases the gap and those
+        // packets together, while live packets keep arriving every 20 ms.
+        // Driven the way the receive loop drives it (one due frame on every
+        // packet and on every armed deadline), the batch must drain and every
+        // later frame must again leave on arrival. Pacing alone kept the batch
+        // queued for the rest of the call, so every later frame reached the
+        // application's playout clock about 60 ms late.
+        let start = Instant::now();
+        let frame_interval = Duration::from_millis(20);
+        let arrival = |sequence: u16| {
+            start + frame_interval * u32::from(sequence - 100) + Duration::from_millis(5)
+        };
+        let decoded = |item: RtpPlayoutItem| match item {
+            RtpPlayoutItem::Packet(packet) => {
+                AudioFrame::new(vec![0; 160], 8_000, 1, packet.header.timestamp)
+            }
+            RtpPlayoutItem::Gap { timestamp, .. } => {
+                AudioFrame::new(vec![0; 160], 8_000, 1, timestamp)
+            }
+        };
+        let lost = 110_u16;
+        let mut reorder = RtpPlayoutBuffer::new();
+        let mut playout = DecodedPlayoutQueue::new();
+        let mut delivered: Vec<(u32, Instant)> = Vec::new();
+        let mut now = start;
+        for sequence in 100_u16..200 {
+            let next_arrival = arrival(sequence);
+            // Serve every deadline armed before this arrival, as the timer would.
+            for _ in 0..1_000 {
+                let deadline = match (reorder.next_deadline(now), playout.next_deadline()) {
+                    (Some(reorder_at), Some(audio_at)) => Some(reorder_at.min(audio_at)),
+                    (reorder_at, audio_at) => reorder_at.or(audio_at),
+                };
+                let Some(deadline) = deadline.filter(|deadline| *deadline < next_arrival) else {
+                    break;
+                };
+                now = now.max(deadline);
+                for item in reorder.tick(now) {
+                    assert!(playout.push(decoded(item), now));
+                }
+                if let Some(frame) = playout.pop_due(now) {
+                    delivered.push((frame.timestamp, now));
+                }
+            }
+            now = next_arrival;
+            if sequence == lost {
+                continue;
+            }
+            for item in reorder.push(packet(sequence), now) {
+                assert!(playout.push(decoded(item), now));
+            }
+            if let Some(frame) = playout.pop_due(now) {
+                delivered.push((frame.timestamp, now));
+            }
+        }
+
+        // Every frame once, in order; the lost one as its concealment.
+        let timestamps: Vec<u32> = delivered.iter().map(|(timestamp, _)| *timestamp).collect();
+        let expected: Vec<u32> = (100_u32..200).map(|sequence| sequence * 160).collect();
+        assert_eq!(timestamps, expected);
+        // Once the batch is spent, frames leave on arrival again, so the
+        // stream carries no standing delay into the playout clock.
+        for (timestamp, at) in &delivered {
+            let sequence = u16::try_from(*timestamp / 160).expect("sequence");
+            if sequence >= lost + 10 {
+                assert_eq!(
+                    *at,
+                    arrival(sequence),
+                    "frame {sequence} left {:?} after it arrived",
+                    at.saturating_duration_since(arrival(sequence))
+                );
+            }
+        }
+        assert!(playout.pending.is_empty());
+    }
+
+    #[test]
+    fn decoded_playout_catch_up_never_reorders_or_outruns_the_queue() {
+        // A live arrival behind a paced batch earns one delivery; a batch
+        // queued at one instant earns none, and owed deliveries never exceed
+        // the frames queued ahead.
+        let start = Instant::now();
+        let mut playout = DecodedPlayoutQueue::new();
+        for timestamp in [0, 160, 320] {
+            assert!(playout.push(AudioFrame::new(vec![0; 160], 8_000, 1, timestamp), start));
+        }
+        assert_eq!(playout.catch_up, 0, "one batch is paced, not caught up");
+        assert_eq!(playout.pop_due(start).expect("head").timestamp, 0);
+        let live = start + Duration::from_millis(5);
+        assert!(playout.push(AudioFrame::new(vec![0; 160], 8_000, 1, 480), live));
+        assert_eq!(
+            playout.next_deadline(),
+            Some(live),
+            "an owed delivery is due now"
+        );
+        assert_eq!(playout.pop_due(live).expect("owed").timestamp, 160);
+        assert!(
+            playout.pop_due(live).is_none(),
+            "the paced schedule (start + 20 ms) is not moved by the owed delivery"
+        );
+        assert_eq!(
+            playout
+                .pop_due(start + Duration::from_millis(20))
+                .expect("paced")
+                .timestamp,
+            320
+        );
+        assert_eq!(
+            playout
+                .pop_due(start + Duration::from_millis(40))
+                .expect("paced")
+                .timestamp,
+            480
+        );
+        assert!(playout.pending.is_empty());
+        assert_eq!(playout.catch_up, 0);
+        assert_eq!(playout.next_deadline(), None);
     }
 
     #[test]
@@ -844,6 +1318,22 @@ async fn enqueue_rtp_playout_items(
                 timestamp,
                 samples_per_channel,
             } => {
+                let Some(sample_count) = concealment_sample_count(
+                    samples_per_channel,
+                    codec_runtime.format.clock_rate,
+                    codec_runtime.format.channels,
+                ) else {
+                    warn!(
+                        %dialog_id,
+                        sequence_number,
+                        timestamp,
+                        samples_per_channel,
+                        clock_rate = codec_runtime.format.clock_rate,
+                        channels = codec_runtime.format.channels,
+                        "refusing an unbounded RTP concealment frame; received media continues"
+                    );
+                    continue;
+                };
                 warn!(
                     %dialog_id,
                     sequence_number,
@@ -852,7 +1342,7 @@ async fn enqueue_rtp_playout_items(
                     "concealing confirmed missing RTP audio packet"
                 );
                 AudioFrame::new(
-                    vec![0; samples_per_channel * usize::from(codec_runtime.format.channels)],
+                    vec![0; sample_count],
                     codec_runtime.format.clock_rate,
                     codec_runtime.format.channels,
                     timeline.map_gap(timestamp),
@@ -2499,48 +2989,69 @@ impl MediaSessionController {
             let mut metrics_ssrc = None;
             let mut decoded_playout = DecodedPlayoutQueue::new();
             let mut delivery_state = RtpDeliveryState::default();
-            let mut playout_tick = tokio::time::interval(Duration::from_millis(5));
-            playout_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // A fixed 5 ms poll woke every session 200 times per second, even
+            // before its first audio packet and after its queue emptied. Keep
+            // one reusable timer and arm it only at the next reorder or audio
+            // deadline. Channel closure and lifecycle cancellation still own
+            // termination of this task.
+            let playout_timer = tokio::time::sleep(Duration::from_secs(86_400));
+            tokio::pin!(playout_timer);
+            let mut armed_deadline = None;
 
             'events: loop {
-                let received = tokio::select! {
-                    event = rtp_events.recv() => Some(event),
-                    _ = playout_tick.tick() => None,
-                };
-                if received.is_none() {
-                    let now = Instant::now();
-                    let items = rtp_playout.tick(now);
-                    if !items.is_empty() {
-                        if let Some(codec_runtime) = codec_runtimes
-                            .get(&dialog_id)
-                            .map(|entry| entry.value().clone())
+                let now = Instant::now();
+                let items = rtp_playout.tick(now);
+                if !items.is_empty() {
+                    if let Some(codec_runtime) = codec_runtimes
+                        .get(&dialog_id)
+                        .map(|entry| entry.value().clone())
+                    {
+                        if enqueue_rtp_playout_items(
+                            items,
+                            &codec_runtime,
+                            &dialog_id,
+                            &mut decoded_playout,
+                            &mut source_timeline,
+                            now,
+                        )
+                        .await
                         {
-                            if enqueue_rtp_playout_items(
-                                items,
-                                &codec_runtime,
-                                &dialog_id,
-                                &mut decoded_playout,
-                                &mut source_timeline,
-                                now,
-                            )
-                            .await
-                            {
-                                break 'events;
-                            }
+                            break 'events;
                         }
                     }
-                    if deliver_due_audio_frame(
-                        now,
-                        &mut decoded_playout,
-                        &dialog_id,
-                        &media_directions,
-                        &audio_frame_callbacks,
-                        collect_audio_quality,
-                        skip_audio_frame_delivery,
-                        &mut delivery_state,
-                    ) {
-                        break 'events;
+                }
+                if deliver_due_audio_frame(
+                    now,
+                    &mut decoded_playout,
+                    &dialog_id,
+                    &media_directions,
+                    &audio_frame_callbacks,
+                    collect_audio_quality,
+                    skip_audio_frame_delivery,
+                    &mut delivery_state,
+                ) {
+                    break 'events;
+                }
+                let deadline = match (
+                    rtp_playout.next_deadline(now),
+                    decoded_playout.next_deadline(),
+                ) {
+                    (Some(reorder), Some(audio)) => Some(reorder.min(audio)),
+                    (reorder, audio) => reorder.or(audio),
+                };
+                if deadline != armed_deadline {
+                    if let Some(deadline) = deadline {
+                        playout_timer
+                            .as_mut()
+                            .reset(tokio::time::Instant::from_std(deadline));
                     }
+                    armed_deadline = deadline;
+                }
+                let received = tokio::select! {
+                    event = rtp_events.recv() => Some(event),
+                    _ = &mut playout_timer, if deadline.is_some() => None,
+                };
+                if received.is_none() {
                     continue;
                 }
                 match received.expect("received event checked above") {
