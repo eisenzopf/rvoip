@@ -2808,3 +2808,31 @@ mod tests {
         assert!(summary.contains("global_publish=[count=1"));
     }
 }
+
+/// Log thinning for failure storms at one call site.
+///
+/// Counts every occurrence in `counter` and returns the running count when
+/// this occurrence should be logged: the first ten, then every power of two,
+/// then every 10,000th. A transport or overload failure that repeats at call
+/// rate would otherwise flood the log (one 1,000 CPS overload produced about
+/// twelve million identical lines) and make the overload worse.
+pub(crate) fn thin_log(counter: &AtomicU64) -> Option<u64> {
+    let occurrences = counter.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+    (occurrences <= 10 || occurrences.is_power_of_two() || occurrences % 10_000 == 0)
+        .then_some(occurrences)
+}
+
+#[cfg(test)]
+mod thin_log_tests {
+    use super::*;
+
+    #[test]
+    fn thin_log_keeps_early_power_of_two_and_periodic_occurrences() {
+        let counter = AtomicU64::new(0);
+        let logged: Vec<u64> = (0..20_000).filter_map(|_| thin_log(&counter)).collect();
+        assert_eq!(&logged[..10], &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        assert!(logged.contains(&16) && logged.contains(&16_384) && logged.contains(&20_000));
+        assert!(logged.len() < 30, "{logged:?}");
+        assert_eq!(counter.load(Ordering::Relaxed), 20_000);
+    }
+}

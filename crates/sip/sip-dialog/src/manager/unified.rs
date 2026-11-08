@@ -3071,10 +3071,14 @@ impl UnifiedDialogManager {
             .cancel_invite_transaction_with_dialog_and_extras(&invite_tx_id, extra_headers)
             .await
             .map_err(|_error| {
-                error!(
-                    "Failed to cancel INVITE transaction for dialog {}",
-                    dialog_id
-                );
+                static FAILURES: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(0);
+                if let Some(occurrences) = crate::diagnostics::thin_log(&FAILURES) {
+                    error!(
+                        occurrences,
+                        "Failed to cancel INVITE transaction for dialog {}", dialog_id
+                    );
+                }
                 ApiError::Dialog {
                     message: "INVITE cancellation failed".to_string(),
                 }

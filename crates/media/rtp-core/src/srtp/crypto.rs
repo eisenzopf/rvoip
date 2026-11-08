@@ -306,6 +306,72 @@ impl SrtpCrypto {
         Ok((encrypted_packet, auth_tag))
     }
 
+    /// Executor v2 twin of [`Self::encrypt_rtp_with_roc`] for an unpadded
+    /// packet already serialised at `buffer[start..]` (a header of
+    /// `header_size` bytes, then the payload): the payload is encrypted in
+    /// place and the authentication tag appended, so the bytes from `start`
+    /// equal `ProtectedRtpPacket::serialize` of the allocating path.
+    pub(crate) fn encrypt_rtp_in_place_with_roc(
+        &self,
+        buffer: &mut Vec<u8>,
+        start: usize,
+        header_size: usize,
+        ssrc: u32,
+        sequence: u16,
+        roc: u32,
+    ) -> Result<()> {
+        if self.suite.encryption == SrtpEncryptionAlgorithm::Null {
+            if self.suite.authentication == SrtpAuthenticationAlgorithm::Null {
+                return Ok(());
+            }
+            let session_keys = self
+                .session_keys
+                .as_ref()
+                .ok_or_else(|| Error::SrtpError("Session keys not derived".to_string()))?;
+            return super::auth::SrtpAuthenticator::append_auth_tag(
+                self.suite.authentication,
+                &session_keys.rtp_auth_key,
+                self.suite.tag_length,
+                buffer,
+                start,
+                roc,
+            );
+        }
+        let session_keys = self
+            .session_keys
+            .as_ref()
+            .ok_or_else(|| Error::SrtpError("Session keys not derived".to_string()))?;
+        let packet_index = (roc as u64) << 16 | u64::from(sequence);
+        let iv = match self.suite.encryption {
+            SrtpEncryptionAlgorithm::AesCm => super::key_derivation::create_srtp_iv_array(
+                &session_keys.rtp_salt,
+                ssrc,
+                packet_index,
+            )?,
+            _ => {
+                return Err(Error::SrtpError(
+                    "Unsupported encryption algorithm".to_string(),
+                ))
+            }
+        };
+        aes_cm_encrypt(
+            &mut buffer[start + header_size..],
+            &session_keys.rtp_enc_key,
+            &iv,
+        )?;
+        if self.suite.authentication != SrtpAuthenticationAlgorithm::Null {
+            super::auth::SrtpAuthenticator::append_auth_tag(
+                self.suite.authentication,
+                &session_keys.rtp_auth_key,
+                self.suite.tag_length,
+                buffer,
+                start,
+                roc,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Calculate authentication tag for a packet
     fn calculate_auth_tag(&self, packet_data: &[u8], roc: u32) -> Result<Vec<u8>> {
         if self.suite.authentication == SrtpAuthenticationAlgorithm::Null {
@@ -460,6 +526,115 @@ impl SrtpCrypto {
         Ok(RtpPacket {
             header,
             payload: decrypted_payload.slice(..payload_end),
+            padding_size,
+        })
+    }
+
+    /// In-place twin of [`Self::decrypt_rtp_with_roc`] for the executor v2
+    /// inline receive path. The tag is verified over `data` and the payload is
+    /// decrypted inside `data`; the result points into it. Every check, its
+    /// order and its error are the same as the allocating path. `data` is
+    /// left modified only when this returns `Ok` or fails after
+    /// authentication (decrypted padding errors).
+    pub(crate) fn decrypt_rtp_in_place_with_roc(
+        &self,
+        data: &mut [u8],
+        roc: u32,
+    ) -> Result<crate::packet::rtp::RtpPacketBounds> {
+        if self.suite.encryption == SrtpEncryptionAlgorithm::Null
+            && self.suite.authentication == SrtpAuthenticationAlgorithm::Null
+        {
+            return RtpPacket::parse_bounds(data);
+        }
+
+        let session_keys = self
+            .session_keys
+            .as_ref()
+            .ok_or_else(|| Error::SrtpError("Session keys not derived".to_string()))?;
+
+        let auth_tag_size = if self.suite.authentication != SrtpAuthenticationAlgorithm::Null {
+            self.suite.tag_length
+        } else {
+            0
+        };
+        if auth_tag_size > 0 && data.len() < auth_tag_size {
+            return Err(Error::SrtpError(
+                "Packet too short to contain authentication tag".to_string(),
+            ));
+        }
+        let tag_start = data.len() - auth_tag_size;
+        let (packet_data, auth_tag) = data.split_at_mut(tag_start);
+
+        if self.suite.authentication != SrtpAuthenticationAlgorithm::Null {
+            let is_valid = super::auth::SrtpAuthenticator::verify_auth_tag_in_place(
+                self.suite.authentication,
+                &session_keys.rtp_auth_key,
+                self.suite.tag_length,
+                packet_data,
+                auth_tag,
+                roc,
+            )?;
+            if !is_valid {
+                return Err(Error::AuthenticationFailed(
+                    "SRTP authentication tag mismatch".to_string(),
+                ));
+            }
+        }
+
+        if self.suite.encryption == SrtpEncryptionAlgorithm::Null {
+            return RtpPacket::parse_bounds(packet_data);
+        }
+
+        let (header, header_size) = crate::packet::RtpHeader::parse_without_consuming(packet_data)?;
+        let ssrc = header.ssrc;
+        let sequence = header.sequence_number as u64;
+        let packet_index = (roc as u64) << 16 | sequence;
+        let iv = match self.suite.encryption {
+            SrtpEncryptionAlgorithm::AesCm => super::key_derivation::create_srtp_iv_array(
+                &session_keys.rtp_salt,
+                ssrc,
+                packet_index,
+            )?,
+            _ => {
+                return Err(Error::SrtpError(
+                    "Unsupported encryption algorithm".to_string(),
+                ))
+            }
+        };
+
+        let encrypted = &mut packet_data[header_size..];
+        match self.suite.encryption {
+            SrtpEncryptionAlgorithm::AesCm => {
+                aes_cm_decrypt(encrypted, &session_keys.rtp_enc_key, &iv)?;
+            }
+            _ => {
+                return Err(Error::SrtpError(
+                    "Unsupported encryption algorithm".to_string(),
+                ))
+            }
+        }
+
+        let decrypted: &[u8] = encrypted;
+        let padding_size = if header.padding {
+            let Some(&padding_size) = decrypted.last() else {
+                return Err(Error::InvalidPacket(
+                    "decrypted RTP padding flag is set but no padding is present".to_string(),
+                ));
+            };
+            if padding_size == 0 || usize::from(padding_size) > decrypted.len() {
+                return Err(Error::InvalidPacket(format!(
+                    "invalid decrypted RTP padding length {padding_size} for {} payload octets",
+                    decrypted.len()
+                )));
+            }
+            padding_size
+        } else {
+            0
+        };
+        let payload_end = header_size + decrypted.len() - usize::from(padding_size);
+        Ok(crate::packet::rtp::RtpPacketBounds {
+            header,
+            payload: header_size..payload_end,
             padding_size,
         })
     }

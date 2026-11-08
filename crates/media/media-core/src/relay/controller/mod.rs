@@ -48,6 +48,7 @@ use rvoip_rtp_core::{
 };
 
 mod codec_runtime;
+mod inline_rx;
 mod source_timeline;
 
 const RTP_REORDER_HOLD: Duration = Duration::from_millis(45);
@@ -123,6 +124,14 @@ impl RtpPlayoutBuffer {
     }
 
     fn push(&mut self, packet: RtpPacket, now: Instant) -> Vec<RtpPlayoutItem> {
+        let mut ready = Vec::new();
+        self.push_into(packet, now, &mut ready);
+        ready
+    }
+
+    /// [`Self::push`], appending the released items to `ready`, so the
+    /// inline receive path reuses one buffer instead of a `Vec` per release.
+    fn push_into(&mut self, packet: RtpPacket, now: Instant, ready: &mut Vec<RtpPlayoutItem>) {
         let ssrc = packet.header.ssrc;
         if self.active_ssrc.is_some_and(|active| active != ssrc) {
             // A re-INVITE can replace a temporary media relay with the final
@@ -142,20 +151,27 @@ impl RtpPlayoutBuffer {
         if self.expected_sequence.is_some_and(|expected| {
             sequence != expected && sequence.wrapping_sub(expected) >= 32_768
         }) {
-            return Vec::new();
+            return;
         }
         self.pending
             .entry(sequence)
             .or_insert(PendingRtpPacket { packet });
         self.startup_started_at.get_or_insert(now);
 
-        self.tick(now)
+        self.tick_into(now, ready)
     }
 
     fn tick(&mut self, now: Instant) -> Vec<RtpPlayoutItem> {
+        let mut ready = Vec::new();
+        self.tick_into(now, &mut ready);
+        ready
+    }
+
+    /// [`Self::tick`], appending the released items to `ready`.
+    fn tick_into(&mut self, now: Instant, ready: &mut Vec<RtpPlayoutItem>) {
         if self.expected_sequence.is_none() {
             let Some(started_at) = self.startup_started_at else {
-                return Vec::new();
+                return;
             };
             // Hold the stream start only while the pending packets show a
             // gap. An unbroken run carries no evidence of reordering, and
@@ -167,12 +183,12 @@ impl RtpPlayoutBuffer {
                 && startup_elapsed < RTP_REORDER_HOLD
                 && self.pending.len() < RTP_REORDER_MAX_PACKETS
             {
-                return Vec::new();
+                return;
             }
             self.expected_sequence = self.oldest_pending_sequence();
         }
 
-        self.drain_ready(now)
+        self.drain_ready_into(now, ready)
     }
 
     /// When a startup hold or a gap hold expires, if one is pending after
@@ -209,8 +225,7 @@ impl RtpPlayoutBuffer {
         })
     }
 
-    fn drain_ready(&mut self, now: Instant) -> Vec<RtpPlayoutItem> {
-        let mut ready = Vec::new();
+    fn drain_ready_into(&mut self, now: Instant, ready: &mut Vec<RtpPlayoutItem>) {
         loop {
             let Some(expected) = self.expected_sequence else {
                 break;
@@ -292,7 +307,6 @@ impl RtpPlayoutBuffer {
                 samples_per_channel: step as usize,
             });
         }
-        ready
     }
 
     fn observe_timestamp(&mut self, timestamp: u32) {
@@ -305,6 +319,42 @@ impl RtpPlayoutBuffer {
             }
         }
         self.last_timestamp = Some(timestamp);
+    }
+
+    /// Inline receive fast path. True when [`Self::push`] of this packet
+    /// would return exactly `[Packet(this)]` and leave nothing pending: the
+    /// same SSRC, the expected sequence and an empty reorder window. The
+    /// caller may then decode straight from its receive buffer and apply
+    /// [`Self::release_in_order`] instead of building an owned packet.
+    fn releases_immediately(&self, ssrc: u32, sequence: u16) -> bool {
+        self.active_ssrc == Some(ssrc)
+            && self.expected_sequence == Some(sequence)
+            && self.pending.is_empty()
+    }
+
+    /// The exact state change `push` and `drain_ready_into` make for a
+    /// packet that [`Self::releases_immediately`] accepted.
+    fn release_in_order(&mut self, sequence: u16, timestamp: u32, now: Instant) {
+        self.startup_started_at.get_or_insert(now);
+        self.observe_timestamp(timestamp);
+        self.expected_sequence = Some(sequence.wrapping_add(1));
+        self.gap_started_at = None;
+    }
+
+    /// Inline receive demotion: hand back the packets held for reordering,
+    /// oldest first, so the v1 handler can continue the stream.
+    fn take_pending_in_order(&mut self) -> Vec<RtpPacket> {
+        let base = self
+            .expected_sequence
+            .or_else(|| self.oldest_pending_sequence());
+        let mut held: Vec<RtpPacket> = std::mem::take(&mut self.pending)
+            .into_values()
+            .map(|pending| pending.packet)
+            .collect();
+        if let Some(base) = base {
+            held.sort_by_key(|packet| packet.header.sequence_number.wrapping_sub(base));
+        }
+        held
     }
 }
 
@@ -334,6 +384,12 @@ struct DecodedPlayoutQueue {
     /// Frames dropped on overflow. The first drop is logged; the rest are
     /// counted so a burst does not flood the log.
     dropped_frames: u64,
+    /// Pace the next frame from the deadline just served rather than from
+    /// the time it was served. On when the lane tick is active
+    /// (`rvoip_rtp_core::lane_tick`), where deadlines are served up to one
+    /// quantum late; identical to the other rule when a deadline is served
+    /// on time.
+    anchored: bool,
 }
 
 impl DecodedPlayoutQueue {
@@ -344,11 +400,15 @@ impl DecodedPlayoutQueue {
             last_push_at: None,
             catch_up: 0,
             dropped_frames: 0,
+            anchored: rvoip_rtp_core::lane_tick::lane_tick_pacing_enabled(),
         }
     }
 
     fn push(&mut self, frame: AudioFrame, now: Instant) -> bool {
         if self.pending.len() >= RTP_REORDER_MAX_PACKETS {
+            // The dropped frame's PCM goes back to the pool (simply dropped,
+            // as before, while the pool is off).
+            crate::pcm_pool::recycle_pcm_buffer(frame.samples);
             return false;
         }
         if self.next_delivery_at.is_none() {
@@ -380,10 +440,17 @@ impl DecodedPlayoutQueue {
             return None;
         }
         let frame = self.pending.pop_front()?;
-        self.next_delivery_at = self
-            .pending
-            .front()
-            .map(|_| now + frame.duration.max(Duration::from_millis(1)));
+        let step = frame.duration.max(Duration::from_millis(1));
+        // A lane tick serves a deadline up to one quantum late; pacing from
+        // the served deadline keeps that from accumulating frame after
+        // frame. A wake later than a whole frame (a stall) still restarts the
+        // schedule from now, so a stall never becomes a burst.
+        let base = if self.anchored && now.saturating_duration_since(deadline) < step {
+            deadline
+        } else {
+            now
+        };
+        self.next_delivery_at = self.pending.front().map(|_| base + step);
         if self.pending.is_empty() {
             self.catch_up = 0;
         }
@@ -972,6 +1039,128 @@ mod rtp_playout_tests {
         );
     }
 
+    /// Lane tick: a paced batch whose deadlines are served on lane ticks
+    /// (each at the first boundary of a fake-clock grid at or after it, plus
+    /// the lane thread's wake-up latency) delivers the same frames in the
+    /// same order. Anchored pacing keeps every delivery within one quantum
+    /// plus that latency of the exact schedule; pacing from the wake time
+    /// drifts by up to a quantum per frame.
+    #[test]
+    fn tick_served_pacing_stays_within_one_quantum_only_when_anchored() {
+        let start = Instant::now();
+        let wake = Duration::from_micros(60);
+        let frames = 12u32;
+        let deliver = |anchored: bool, quantum: Option<Duration>| -> Vec<(u32, Instant)> {
+            let mut playout = DecodedPlayoutQueue::new();
+            playout.anchored = anchored;
+            for index in 0..frames {
+                let samples = vec![index as i16; 160];
+                assert!(playout.push(AudioFrame::new(samples, 8_000, 1, index * 160), start));
+            }
+            // A grid whose boundaries are 0.7 ms out of phase with the batch.
+            let grid = quantum.map(|quantum| {
+                rvoip_rtp_core::lane_tick::TickGrid::new(
+                    start - Duration::from_micros(700),
+                    quantum,
+                )
+            });
+            let mut delivered = Vec::new();
+            let mut now = start;
+            for _ in 0..1_000 {
+                while let Some(frame) = playout.pop_due(now) {
+                    assert!(frame
+                        .samples
+                        .iter()
+                        .all(|sample| *sample == (frame.timestamp / 160) as i16));
+                    delivered.push((frame.timestamp, now));
+                }
+                let Some(deadline) = playout.next_deadline() else {
+                    break;
+                };
+                now = match grid {
+                    Some(grid) => grid.ceil(deadline) + wake,
+                    None => deadline,
+                };
+            }
+            delivered
+        };
+        let exact = deliver(false, None);
+        assert_eq!(
+            exact,
+            deliver(true, None),
+            "anchoring changes nothing on time"
+        );
+        let timestamps: Vec<u32> = (0..frames).map(|index| index * 160).collect();
+        assert_eq!(
+            exact
+                .iter()
+                .map(|(timestamp, _)| *timestamp)
+                .collect::<Vec<_>>(),
+            timestamps
+        );
+        for quantum_ms in rvoip_rtp_core::lane_tick::LANE_TICK_QUANTA_MS {
+            let quantum = Duration::from_millis(quantum_ms);
+            let ticked = deliver(true, Some(quantum));
+            assert_eq!(
+                ticked
+                    .iter()
+                    .map(|(timestamp, _)| *timestamp)
+                    .collect::<Vec<_>>(),
+                timestamps,
+                "same frames, same order"
+            );
+            for ((_, on_time), (_, served)) in exact.iter().zip(&ticked) {
+                assert!(served >= on_time, "never early");
+                let late = served.saturating_duration_since(*on_time);
+                assert!(late <= quantum + wake, "Q={quantum:?}: {late:?} late");
+            }
+            let drifting = deliver(false, Some(quantum));
+            let worst = exact
+                .iter()
+                .zip(&drifting)
+                .map(|((_, on_time), (_, served))| served.saturating_duration_since(*on_time))
+                .max()
+                .unwrap();
+            assert!(
+                worst > quantum + wake,
+                "Q={quantum:?}: wake-time pacing drifts ({worst:?})"
+            );
+        }
+        // A stall longer than a frame restarts the schedule from now: no burst.
+        let mut playout = DecodedPlayoutQueue::new();
+        playout.anchored = true;
+        for timestamp in [0, 160, 320] {
+            assert!(playout.push(AudioFrame::new(vec![0; 160], 8_000, 1, timestamp), start));
+        }
+        assert!(playout.pop_due(start).is_some());
+        let stalled = start + Duration::from_millis(70);
+        assert!(playout.pop_due(stalled).is_some());
+        assert!(
+            playout.pop_due(stalled).is_none(),
+            "one frame per deadline after a stall"
+        );
+        assert_eq!(
+            playout.next_deadline(),
+            Some(stalled + Duration::from_millis(20))
+        );
+    }
+
+    #[test]
+    fn decoded_pacing_is_anchored_only_while_the_lane_tick_is_active() {
+        use rvoip_rtp_core::executor::{
+            override_media_executor_config_on_this_thread, MediaExecutorConfig,
+        };
+        for (config, anchored) in [
+            (MediaExecutorConfig::v1(), false),
+            (MediaExecutorConfig::v2(), true),
+            (MediaExecutorConfig::v2().with_lane_tick(None), false),
+            (MediaExecutorConfig::v2().with_lane_poller(false), false),
+        ] {
+            let _guard = override_media_executor_config_on_this_thread(config.clone());
+            assert_eq!(DecodedPlayoutQueue::new().anchored, anchored, "{config:?}");
+        }
+    }
+
     #[tokio::test]
     async fn decoded_playout_overflow_drops_frames_but_keeps_the_receive_loop_alive() {
         // A bridge that releases media buffered until commit, or any producer
@@ -1237,6 +1426,10 @@ mod tests;
 // Re-export important types
 pub use audio_generation::{AudioSource, AudioTransmitterConfig};
 pub use bridge::{BridgeError, BridgeHandle};
+pub use inline_rx::{
+    inline_rx_counters, InlineAudioConsumer, InlineAudioConsumerGuard, InlineAudioDelivery,
+    InlineRxCounters,
+};
 pub use types::{
     AdvancedProcessorConfig, AdvancedProcessorSet, MediaConfig, MediaSessionEvent,
     MediaSessionInfo, MediaSessionStatus, AMR_DTX_PARAMETER, NEGOTIATED_FMTP_PARAMETER,
@@ -1623,6 +1816,12 @@ pub struct MediaSessionController {
     /// receive paths.
     codec_runtimes: Arc<DashMap<DialogId, Arc<codec_runtime::DialogCodecRuntime>>>,
 
+    /// Inline receive leases (media executor v2): per-dialog control state
+    /// mirrored for the inline sink on the socket owner. Empty unless
+    /// `MediaExecutorConfig::inline_decode` is active; touched only at
+    /// control-plane events, never per packet.
+    inline_leases: Arc<DashMap<DialogId, Arc<inline_rx::DialogInlineLease>>>,
+
     /// RTP session queue sizing for new sessions.
     rtp_session_buffer_config: RtpSessionBufferConfig,
 
@@ -1747,6 +1946,7 @@ impl MediaSessionController {
             comfort_noise_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             media_directions: Arc::new(DashMap::with_capacity(capacity_hint)),
             codec_runtimes: Arc::new(DashMap::with_capacity(capacity_hint)),
+            inline_leases: Arc::new(DashMap::new()),
             rtp_session_buffer_config,
             rtp_transport_buffer_config,
             symmetric_rtp_policy: SymmetricRtpPolicy::default(),
@@ -1882,6 +2082,7 @@ impl MediaSessionController {
             "cn_gate_state": self.cn_gate_state.len(),
             "advanced_processors": self.advanced_processors.len(),
             "media_directions": self.media_directions.len(),
+            "inline_rx_leases": self.inline_leases.len(),
         });
         #[cfg(feature = "memory-diagnostics")]
         if let Some(obj) = value.as_object_mut() {
@@ -2073,6 +2274,7 @@ impl MediaSessionController {
             comfort_noise_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             media_directions: Arc::new(DashMap::new()),
             codec_runtimes: Arc::new(DashMap::new()),
+            inline_leases: Arc::new(DashMap::new()),
             rtp_session_buffer_config: RtpSessionBufferConfig::default(),
             rtp_transport_buffer_config: RtpTransportBufferConfig::default(),
             symmetric_rtp_policy: SymmetricRtpPolicy::default(),
@@ -2265,6 +2467,11 @@ impl MediaSessionController {
         let rtp_events = rtp_session.subscribe();
         diagnostics::record_rtp_event_subscription(subscribe_started.elapsed());
 
+        // Media executor v2: offer the inline receive sink before any media
+        // can flow. The v1 handler below is still spawned: it serves DTMF and
+        // stream events, and takes over if the dialog is ever demoted.
+        let inline_lease = self.offer_inline_rx(&dialog_id, &rtp_session, &codec_runtime);
+
         // Wrap RTP session
         let rtp_wrapper = RtpSessionWrapper {
             session: Arc::new(tokio::sync::Mutex::new(rtp_session)),
@@ -2307,6 +2514,9 @@ impl MediaSessionController {
         self.sessions.insert(dialog_id.clone(), session_info);
         self.rtp_sessions.insert(dialog_id.clone(), rtp_wrapper);
         self.codec_runtimes.insert(dialog_id.clone(), codec_runtime);
+        if let Some(lease) = inline_lease.as_ref() {
+            self.publish_inline_lease(&dialog_id, lease);
+        }
         // The controller maps now own the RTP session and stop_media owns the
         // matching allocator release.
         reservation_guard.disarm();
@@ -2319,7 +2529,12 @@ impl MediaSessionController {
 
         // Spawn task to handle RTP events for this session
         let handler_started = Instant::now();
-        self.spawn_rtp_event_handler(dialog_id.clone(), rtp_events, payload_type);
+        self.spawn_rtp_event_handler_with_inline(
+            dialog_id.clone(),
+            rtp_events,
+            payload_type,
+            inline_lease,
+        );
         diagnostics::record_rtp_event_handler_spawn(handler_started.elapsed());
 
         info!(
@@ -2726,6 +2941,7 @@ impl MediaSessionController {
         self.dtmf_callbacks.remove(dialog_id);
         self.cn_gate_state.remove(dialog_id);
         self.codec_runtimes.remove(dialog_id);
+        self.retire_inline_lease(dialog_id);
 
         let media_id = MediaSessionId::from_dialog(dialog_id);
         if let Some((_, session_id)) = self.media_to_session.remove(&media_id) {
@@ -2989,6 +3205,7 @@ impl MediaSessionController {
         if let Some(runtime) = replacement_runtime.as_ref() {
             self.codec_runtimes
                 .insert(dialog_id.clone(), Arc::clone(runtime));
+            self.resync_inline_lease(&dialog_id);
         }
         if let Some(mut entry) = self.rtp_sessions.get_mut(&dialog_id) {
             entry.value_mut().remote_addr = config.remote_addr;
@@ -3084,6 +3301,7 @@ impl MediaSessionController {
         sender: mpsc::Sender<AudioFrame>,
     ) -> Result<()> {
         self.audio_frame_callbacks.insert(dialog_id.clone(), sender);
+        self.resync_inline_lease(&dialog_id);
         info!("🔊 Set audio frame callback for dialog: {}", dialog_id);
         Ok(())
     }
@@ -3093,6 +3311,7 @@ impl MediaSessionController {
         if self.audio_frame_callbacks.remove(dialog_id).is_some() {
             debug!("🔇 Removed audio frame callback for dialog: {}", dialog_id);
         }
+        self.resync_inline_lease(dialog_id);
         Ok(())
     }
 
@@ -3143,11 +3362,32 @@ impl MediaSessionController {
     }
 
     /// Spawn a task to handle RTP events and decode audio
+    #[cfg(test)]
     fn spawn_rtp_event_handler(
+        &self,
+        dialog_id: DialogId,
+        rtp_events: tokio::sync::broadcast::Receiver<rtp_core::session::RtpSessionEvent>,
+        expected_payload_type: u8,
+    ) {
+        self.spawn_rtp_event_handler_with_inline(
+            dialog_id,
+            rtp_events,
+            expected_payload_type,
+            None,
+        );
+    }
+
+    /// The v1 RTP event handler. With an inline receive lease (media
+    /// executor v2), media packets normally bypass it: it still serves DTMF
+    /// and stream events, takes over after a demotion (continuing the inline
+    /// sink's source timeline), and leaves its loop when the inline sink saw
+    /// the audio channel close, the point where it would have stopped itself.
+    fn spawn_rtp_event_handler_with_inline(
         &self,
         dialog_id: DialogId,
         mut rtp_events: tokio::sync::broadcast::Receiver<rtp_core::session::RtpSessionEvent>,
         _expected_payload_type: u8,
+        inline_lease: Option<Arc<inline_rx::DialogInlineLease>>,
     ) {
         let audio_frame_callbacks = self.audio_frame_callbacks.clone();
         let dtmf_callbacks = self.dtmf_callbacks.clone();
@@ -3188,6 +3428,12 @@ impl MediaSessionController {
             let mut armed_deadline = None;
 
             'events: loop {
+                if inline_lease
+                    .as_ref()
+                    .is_some_and(|lease| lease.inline_stopped())
+                {
+                    break 'events;
+                }
                 let now = Instant::now();
                 let items = rtp_playout.tick(now);
                 if !items.is_empty() {
@@ -3243,10 +3489,26 @@ impl MediaSessionController {
                 if received.is_none() {
                     continue;
                 }
+                if inline_lease
+                    .as_ref()
+                    .is_some_and(|lease| lease.inline_stopped())
+                {
+                    break 'events;
+                }
                 match received.expect("received event checked above") {
                     Ok(event) => {
                         match event {
                             rtp_core::session::RtpSessionEvent::PacketReceived(packet) => {
+                                // A demoted inline sink hands over the source
+                                // timeline it built, so decoded timestamps stay
+                                // on the same call timeline across the switch.
+                                if let Some(handoff) = inline_lease
+                                    .as_ref()
+                                    .and_then(|lease| lease.take_v1_handoff())
+                                {
+                                    source_timeline = handoff.source_timeline;
+                                    receive_codec = handoff.receive_codec;
+                                }
                                 rtp_count += 1;
                                 let packet_arrival = collect_audio_quality.then(Instant::now);
                                 let Some(codec_runtime) = codec_runtimes

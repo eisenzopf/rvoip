@@ -38,6 +38,14 @@ impl Default for RtpTransportBufferConfig {
 /// Trait for RTP transport implementations
 #[async_trait]
 pub trait RtpTransport: Send + Sync {
+    /// The media runtime lane that owns this transport's sockets, when it is
+    /// placed on one. Work that must run next to the socket (a paced TX
+    /// task, an inline consumer) is spawned there. Transports without a lane
+    /// return `None`.
+    fn media_runtime_handle(&self) -> Option<tokio::runtime::Handle> {
+        None
+    }
+
     /// Get the local address for RTP
     fn local_rtp_addr(&self) -> Result<SocketAddr>;
 
@@ -162,6 +170,7 @@ pub use security_transport::SecurityRtpTransport;
 pub use symmetric::{SymmetricRtpDiagnostics, SymmetricRtpPolicy};
 pub use tcp::TcpRtpTransport;
 pub use udp::{set_diagnostics as set_udp_diagnostics, SrtpContextRollback, UdpRtpTransport};
+pub(crate) use udp::{TxPayload, MAX_TX_BATCH};
 pub use validation::{PlatformSocketStrategy, PlatformType, RtpSocketValidator};
 
 #[cfg(test)]

@@ -35,8 +35,9 @@ use rvoip_core::{
     Config, DataMessage, DataReliability, DirectionalMediaBridgePlan, Orchestrator, RvoipError,
 };
 use rvoip_harness::{
-    AsrConfig, AsrProvider, AsrResult, AsrStream, DialogAction, DialogManager, ListenOnlyDialog,
-    NoOpTtsProvider, TtsAudioFormat, TtsPlayback, TtsProvider, TtsRequest, VecRecordingSink,
+    AsrConfig, AsrProvider, AsrResult, AsrStream, DialogAction, DialogManager, InProcessAiAdapter,
+    InProcessAiConfig, ListenOnlyDialog, NoOpTtsProvider, TtsAudioFormat, TtsPlayback, TtsProvider,
+    TtsRequest, VecRecordingSink,
 };
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::{mpsc, Barrier, Notify};
@@ -1081,6 +1082,161 @@ async fn bridge_passes_frames_through_when_codecs_match() {
         received.push(frame.payload[0]);
     }
     assert_eq!(received, (0u8..5).collect::<Vec<_>>());
+}
+
+/// 20 ms of G.711 µ-law caller audio, distinct per frame.
+fn caller_pcmu(stream_id: StreamId, value: u8) -> MediaFrame {
+    MediaFrame {
+        stream_id,
+        kind: StreamKind::Audio,
+        payload: Bytes::from(
+            (0..160u32)
+                .map(|index| (u32::from(value) * 13 + index * 7) as u8 | 0x10)
+                .collect::<Vec<u8>>(),
+        ),
+        timestamp_rtp: u32::from(value) * 160,
+        captured_at: Utc::now(),
+        payload_type: Some(0),
+    }
+}
+
+/// Bridge a SIP-like caller leg to an in-process echo AI, run caller audio
+/// through a hold and a resume, end the AI, and return what the caller heard
+/// back (payload and RTP timestamp, in order).
+async fn run_caller_to_echo_ai_bridge(gated_input: bool) -> Vec<(Vec<u8>, u32)> {
+    let sip_adapter = MockAdapter::new(Transport::Sip);
+    let ingress = ConnectionId::new();
+    let caller = MockMediaStream::new(DEFAULT_TEST_CODEC);
+    sip_adapter.register_connection(ingress.clone(), Arc::clone(&caller));
+    let ai_adapter =
+        InProcessAiAdapter::echo(InProcessAiConfig::default().with_gated_input(gated_input))
+            .expect("echo AI adapter");
+    let orchestrator = Orchestrator::new(Config::default());
+    orchestrator
+        .register(sip_adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .expect("register SIP adapter");
+    orchestrator
+        .register(Arc::clone(&ai_adapter) as Arc<dyn ConnectionAdapter>)
+        .expect("register in-process AI adapter");
+    let conversation = orchestrator
+        .open_conversation(
+            rvoip_core::TenantId::new(),
+            rvoip_core::conversation::ConversationPolicy::default(),
+            std::collections::HashMap::new(),
+        )
+        .await
+        .expect("open conversation");
+    let session = orchestrator
+        .start_session(
+            conversation,
+            rvoip_core::session::SessionMedium::Voice,
+            vec![],
+        )
+        .await
+        .expect("start voice session");
+    sip_adapter.announce(ingress.clone(), session.clone()).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let prepared = orchestrator
+        .prepare_outbound_connection(
+            OriginateRequest::new(
+                session,
+                ParticipantId::new(),
+                "echo-assistant",
+                Direction::Outbound,
+                ai_adapter.capabilities(),
+            )
+            .with_transport(Transport::InProcessAi),
+        )
+        .await
+        .expect("prepare AI connection");
+    let ai = prepared.connection_id().clone();
+    prepared.commit().await.expect("commit AI connection");
+    let ai_stream = ai_adapter
+        .streams(ai.clone())
+        .await
+        .expect("AI streams")
+        .into_iter()
+        .next()
+        .expect("AI audio stream");
+    assert_eq!(ai_stream.try_gated_frames_out().is_some(), gated_input);
+
+    let mut heard = caller.take_external_out();
+    orchestrator
+        .bridge_connections(ingress.clone(), ai.clone())
+        .await
+        .expect("bridge caller to AI");
+    let graph = orchestrator
+        .media_graph_for_connection(ingress.clone())
+        .await
+        .expect("caller graph");
+    let mut echoed = Vec::new();
+    async fn echo_of(heard: &mut mpsc::Receiver<MediaFrame>) -> (Vec<u8>, u32) {
+        let frame = tokio::time::timeout(Duration::from_secs(2), heard.recv())
+            .await
+            .expect("echo deadline")
+            .expect("caller output open");
+        (frame.payload.to_vec(), frame.timestamp_rtp)
+    }
+
+    for value in 0..8u8 {
+        caller.inject(caller_pcmu(caller.id(), value)).await;
+        echoed.push(echo_of(&mut heard).await);
+    }
+
+    // Held: the route still takes caller audio, and the AI gate discards it.
+    ai_adapter.hold(ai.clone()).await.expect("hold AI");
+    for value in 8..12u8 {
+        caller.inject(caller_pcmu(caller.id(), value)).await;
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let snapshot = graph.snapshot().await;
+            if snapshot.sinks[0].offered_frames >= 12 && snapshot.sinks[0].queue_depth == 0 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("held audio offered to the AI route");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), heard.recv())
+            .await
+            .is_err(),
+        "a held AI echoed caller audio"
+    );
+
+    ai_adapter.resume(ai.clone()).await.expect("resume AI");
+    for value in 12..16u8 {
+        caller.inject(caller_pcmu(caller.id(), value)).await;
+        echoed.push(echo_of(&mut heard).await);
+    }
+
+    orchestrator
+        .end_connection(ai, AdapterEndReason::Normal)
+        .await
+        .expect("end AI");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while ai_adapter.resource_snapshot() != Default::default() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("AI route released every resource");
+    echoed
+}
+
+/// An in-process AI bridged to a caller hears the same caller audio, in the
+/// same order and with the same hold/resume behaviour, whether its stream
+/// offers the gated input (no input pump per frame) or not, and both tear
+/// down cleanly.
+#[tokio::test]
+async fn in_process_ai_gated_input_matches_its_input_pump_through_a_bridge() {
+    let pumped = run_caller_to_echo_ai_bridge(false).await;
+    let gated = run_caller_to_echo_ai_bridge(true).await;
+    assert_eq!(pumped.len(), 12);
+    assert_eq!(gated, pumped);
 }
 
 #[tokio::test]

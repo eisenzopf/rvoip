@@ -24,6 +24,15 @@ pub struct RtpPacket {
     pub padding_size: u8,
 }
 
+/// Header and payload bounds of an RTP packet that stays in the caller's
+/// buffer (executor v2 inline receive). `payload` excludes RTP padding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RtpPacketBounds {
+    pub(crate) header: RtpHeader,
+    pub(crate) payload: std::ops::Range<usize>,
+    pub(crate) padding_size: u8,
+}
+
 impl RtpPacket {
     /// Create a new RTP packet with the given header and payload
     pub fn new(header: RtpHeader, payload: Bytes) -> Self {
@@ -137,6 +146,24 @@ impl RtpPacket {
         debug!("Extracted payload of size {}", payload.len());
 
         Ok(Self {
+            header,
+            payload,
+            padding_size,
+        })
+    }
+
+    /// Validate an RTP packet exactly like [`Self::parse`] but leave the
+    /// payload in `data`: no allocation and no copy. Used by the executor v2
+    /// inline receive path, which reads the payload from its owned buffer.
+    pub(crate) fn parse_bounds(data: &[u8]) -> Result<RtpPacketBounds> {
+        let (header, header_size) = RtpHeader::parse_without_consuming(data)?;
+        let (payload_end, padding_size) = Self::payload_bounds(data, header_size, header.padding)?;
+        let payload = if payload_end > header_size {
+            header_size..payload_end
+        } else {
+            header_size..header_size
+        };
+        Ok(RtpPacketBounds {
             header,
             payload,
             padding_size,
@@ -296,6 +323,31 @@ mod tests {
         let parsed_from_bytes = RtpPacket::parse_from_bytes(serialized).unwrap();
 
         assert_eq!(parsed_from_bytes, parsed_from_slice);
+    }
+
+    #[test]
+    fn parse_bounds_matches_parse_without_copying() {
+        let mut padded =
+            RtpPacket::new_with_payload(0, 7, 160, 0x0102_0304, Bytes::from_static(b"pcmu"));
+        padded.set_padding(3);
+        let empty = RtpPacket::new_with_payload(0, 8, 320, 0x0102_0304, Bytes::new());
+        for packet in [padded, empty] {
+            let wire = packet.serialize().unwrap();
+            let parsed = RtpPacket::parse(&wire).unwrap();
+            let bounds = RtpPacket::parse_bounds(&wire).unwrap();
+            assert_eq!(bounds.header, parsed.header);
+            assert_eq!(&wire[bounds.payload.clone()], &parsed.payload[..]);
+            assert_eq!(bounds.padding_size, parsed.padding_size);
+        }
+        // Malformed padding is rejected identically.
+        let mut bad = RtpPacket::new_with_payload(0, 9, 480, 1, Bytes::from_static(b"x"))
+            .serialize()
+            .unwrap()
+            .to_vec();
+        bad[0] |= 0x20;
+        *bad.last_mut().unwrap() = 0;
+        assert!(RtpPacket::parse(&bad).is_err());
+        assert!(RtpPacket::parse_bounds(&bad).is_err());
     }
 
     #[test]
