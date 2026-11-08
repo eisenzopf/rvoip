@@ -71,6 +71,13 @@
 mod error;
 
 // Main modules
+pub mod executor;
+pub(crate) mod lane_clock;
+pub(crate) mod lane_poller;
+pub mod media_clock;
+pub(crate) mod ssrc_hash;
+#[cfg(target_os = "linux")]
+mod sys_mmsg;
 pub mod packet;
 pub mod session;
 pub mod srtp;
