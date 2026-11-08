@@ -1028,13 +1028,6 @@ enum InboundPumpEvent {
     PlayoutTick,
 }
 
-async fn wait_for_playout(deadline: Option<std::time::Instant>) {
-    match deadline {
-        Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
-        None => std::future::pending::<()>().await,
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn run_media_driver(
     lifecycle: Arc<SipMediaLifecycleState>,
@@ -1310,26 +1303,43 @@ async fn run_inbound_pump(
             Err(_) => return "sip-codec-reconfigure-failed",
         };
     let mut reported = std::time::Instant::now();
+    // Packet waiters live as long as what they wait for, not one packet. The
+    // codec-change waiter spans a codec epoch and the playout timer is
+    // re-armed only when its deadline moves, so a packet or timer wakeup
+    // never cancels and re-registers either of them.
+    let mut codec_changed = Box::pin(codec_updates.changed());
+    let playout_timer = tokio::time::sleep_until(tokio::time::Instant::now());
+    tokio::pin!(playout_timer);
+    let mut armed_deadline = None;
 
     loop {
+        let deadline = playout.as_ref().and_then(PlayoutBuffer::next_deadline);
+        if deadline != armed_deadline {
+            if let Some(deadline) = deadline {
+                playout_timer.as_mut().reset(deadline.into());
+            }
+            armed_deadline = deadline;
+        }
         let event = tokio::select! {
             biased;
-            changed = codec_updates.changed() => {
+            changed = &mut codec_changed => {
                 if changed.is_err() {
                     return "sip-codec-update-channel-closed";
                 }
                 InboundPumpEvent::CodecChanged
             }
             frame = subscriber.receiver.recv() => InboundPumpEvent::Audio(frame),
-            () = wait_for_playout(playout.as_ref().and_then(PlayoutBuffer::next_deadline)) => {
-                InboundPumpEvent::PlayoutTick
-            }
+            () = &mut playout_timer, if deadline.is_some() => InboundPumpEvent::PlayoutTick,
         };
 
         let mut ready = Vec::new();
         match event {
             InboundPumpEvent::CodecChanged => {
-                let Some(updated) = codec_updates.borrow_and_update().clone() else {
+                // The completed waiter is replaced for the next codec epoch.
+                drop(codec_changed);
+                let updated = codec_updates.borrow_and_update().clone();
+                codec_changed = Box::pin(codec_updates.changed());
+                let Some(updated) = updated else {
                     continue;
                 };
                 encoder = match SipPayloadCodec::from_negotiated(
@@ -1427,13 +1437,19 @@ async fn run_outbound_pump(
     let mut channels = runtime.negotiated.channels.max(1);
     let mut outbound_clock = OutboundRtpClock::default();
     let mut telephone_events = TelephoneEventTracker::default();
+    // One codec-change waiter per codec epoch, not one per outbound frame.
+    let mut codec_changed = Box::pin(codec_updates.changed());
     loop {
         let (media_frame, mut delivery_guard) = tokio::select! {
-            changed = codec_updates.changed() => {
+            changed = &mut codec_changed => {
                 if changed.is_err() {
                     return "sip-codec-update-channel-closed";
                 }
-                let Some(updated) = codec_updates.borrow_and_update().clone() else {
+                // The completed waiter is replaced for the next codec epoch.
+                drop(codec_changed);
+                let updated = codec_updates.borrow_and_update().clone();
+                codec_changed = Box::pin(codec_updates.changed());
+                let Some(updated) = updated else {
                     continue;
                 };
                 decoder = match SipPayloadCodec::from_negotiated(
@@ -1898,6 +1914,76 @@ mod negotiated_codec_tests {
 
         drop(audio_tx);
         assert_eq!(pump.await.expect("pump task"), "sip-audio-source-closed");
+    }
+
+    #[tokio::test]
+    async fn inbound_pump_rearms_its_codec_waiter_for_every_codec_epoch() {
+        let session_id = SessionId::new();
+        let (audio_tx, audio_rx) = mpsc::channel(4);
+        let subscriber = crate::types::AudioFrameSubscriber::new(session_id, audio_rx);
+        let (frames_tx, mut frames_rx) = mpsc::channel(4);
+        let runtime = |codec: &str, payload_type| SipMediaCodecRuntime {
+            negotiated: negotiated(codec, 8_000, 1),
+            payload_type,
+        };
+        let (codec_tx, codec_rx) = watch::channel(Some(runtime("PCMU", 0)));
+        let pump = tokio::spawn(run_inbound_pump(
+            subscriber,
+            runtime("PCMU", 0),
+            codec_rx,
+            StreamId::new(),
+            frames_tx,
+            None,
+        ));
+        let mut timestamp = 0;
+        async fn next_payload_type(
+            audio_tx: &mpsc::Sender<AudioFrame>,
+            frames_rx: &mut mpsc::Receiver<MediaFrame>,
+            timestamp: &mut u32,
+        ) -> Option<u8> {
+            audio_tx
+                .send(AudioFrame::new(vec![1_000; 160], 8_000, 1, *timestamp))
+                .await
+                .expect("source frame");
+            *timestamp += 160;
+            frames_rx.recv().await.expect("graph frame").payload_type
+        }
+
+        // Many frames within one epoch, then each change applies to the very
+        // next frame: the waiter outlives frames and is renewed per epoch.
+        for _ in 0..32 {
+            assert_eq!(
+                next_payload_type(&audio_tx, &mut frames_rx, &mut timestamp).await,
+                Some(0)
+            );
+        }
+        codec_tx.send_replace(Some(runtime("PCMA", 8)));
+        assert_eq!(
+            next_payload_type(&audio_tx, &mut frames_rx, &mut timestamp).await,
+            Some(8)
+        );
+        assert_eq!(
+            next_payload_type(&audio_tx, &mut frames_rx, &mut timestamp).await,
+            Some(8)
+        );
+        // An update without a codec keeps the current one...
+        codec_tx.send_replace(None);
+        assert_eq!(
+            next_payload_type(&audio_tx, &mut frames_rx, &mut timestamp).await,
+            Some(8)
+        );
+        // ...and the waiter is still armed for the next real change.
+        codec_tx.send_replace(Some(runtime("PCMU", 0)));
+        assert_eq!(
+            next_payload_type(&audio_tx, &mut frames_rx, &mut timestamp).await,
+            Some(0)
+        );
+
+        drop(codec_tx);
+        assert_eq!(
+            pump.await.expect("pump task"),
+            "sip-codec-update-channel-closed"
+        );
     }
 
     #[tokio::test]
