@@ -172,4 +172,58 @@ mod tests {
         assert_eq!(codec_mu.info().payload_type, Some(0));
         assert_eq!(codec_a.info().payload_type, Some(8));
     }
+
+    /// Every codec entry point (vector, per-variant and buffer APIs) gives
+    /// the reference encoder's code for all 65,536 PCM samples and the
+    /// reference decoder's sample for all 256 wire bytes, and the buffer
+    /// APIs leave bytes past the input untouched.
+    #[test]
+    fn table_backed_codec_matches_reference_over_entire_domains() {
+        let samples: Vec<i16> = (0..=u16::MAX).map(u16::cast_signed).collect();
+        let bytes: Vec<u8> = (0..=u8::MAX).collect();
+        for variant in [G711Variant::MuLaw, G711Variant::ALaw] {
+            let (expected_codes, expected_samples): (Vec<u8>, Vec<i16>) = match variant {
+                G711Variant::MuLaw => (
+                    samples.iter().map(|&s| ulaw_compress(s)).collect(),
+                    bytes.iter().map(|&b| ulaw_expand(b)).collect(),
+                ),
+                G711Variant::ALaw => (
+                    samples.iter().map(|&s| alaw_compress(s)).collect(),
+                    bytes.iter().map(|&b| alaw_expand(b)).collect(),
+                ),
+            };
+            let mut codec = G711Codec::new(variant);
+
+            assert_eq!(codec.compress(&samples).unwrap(), expected_codes);
+            assert_eq!(codec.encode(&samples).unwrap(), expected_codes);
+            assert_eq!(codec.expand(&bytes).unwrap(), expected_samples);
+            assert_eq!(codec.decode(&bytes).unwrap(), expected_samples);
+            let (per_variant_codes, per_variant_samples) = match variant {
+                G711Variant::MuLaw => (
+                    codec.compress_ulaw(&samples).unwrap(),
+                    codec.expand_ulaw(&bytes).unwrap(),
+                ),
+                G711Variant::ALaw => (
+                    codec.compress_alaw(&samples).unwrap(),
+                    codec.expand_alaw(&bytes).unwrap(),
+                ),
+            };
+            assert_eq!(per_variant_codes, expected_codes);
+            assert_eq!(per_variant_samples, expected_samples);
+
+            let mut encoded = vec![0x5a; samples.len() + 7];
+            assert_eq!(
+                codec.encode_to_buffer(&samples, &mut encoded).unwrap(),
+                samples.len()
+            );
+            assert_eq!(&encoded[..samples.len()], expected_codes.as_slice());
+            assert_eq!(&encoded[samples.len()..], &[0x5a; 7]);
+            let mut decoded = [123_i16; 263];
+            assert_eq!(codec.decode_to_buffer(&bytes, &mut decoded).unwrap(), 256);
+            assert_eq!(&decoded[..256], expected_samples.as_slice());
+            assert_eq!(&decoded[256..], &[123; 7]);
+            assert!(codec.encode_to_buffer(&samples[..2], &mut [0; 1]).is_err());
+            assert!(codec.decode_to_buffer(&bytes[..2], &mut [0; 1]).is_err());
+        }
+    }
 }
