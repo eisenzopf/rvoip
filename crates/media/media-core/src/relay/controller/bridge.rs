@@ -211,6 +211,10 @@ impl MediaSessionController {
             let guard = b_session_arc.lock().await;
             guard.subscribe()
         };
+        // Media executor v2: the forwarders consume `PacketReceived`, so both
+        // legs leave the inline receive path before their next packet.
+        self.request_inline_demotion(&a);
+        self.request_inline_demotion(&b);
 
         let cancel = Arc::new(AtomicBool::new(false));
 

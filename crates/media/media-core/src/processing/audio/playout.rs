@@ -247,6 +247,9 @@ impl PlayoutBuffer {
                 if self.stream_fell_behind(arrived_at) {
                     self.delay_clock_behind(&frame, next, arrived_at);
                 }
+                // The discarded PCM goes back to the pool (dropped, as
+                // before, while the pool is off).
+                crate::pcm_pool::recycle_pcm_buffer(frame.samples);
                 return;
             }
         }
@@ -254,6 +257,7 @@ impl PlayoutBuffer {
         self.last_late_arrival = None;
         if self.pending.contains_key(&frame.timestamp) {
             self.stats.frames_duplicate += 1;
+            crate::pcm_pool::recycle_pcm_buffer(frame.samples);
             return;
         }
         self.pending.insert(frame.timestamp, frame);
@@ -262,7 +266,9 @@ impl PlayoutBuffer {
         // by waiting; release the oldest rather than growing latency.
         while self.pending.len() > self.config.max_depth_frames {
             if let Some(oldest) = self.oldest_pending_timestamp() {
-                self.pending.remove(&oldest);
+                if let Some(evicted) = self.pending.remove(&oldest) {
+                    crate::pcm_pool::recycle_pcm_buffer(evicted.samples);
+                }
                 self.stats.frames_late += 1;
             }
         }
@@ -436,7 +442,16 @@ impl PlayoutBuffer {
 
     /// Synthesize the frame that should have arrived.
     fn conceal(&mut self, expected: u32) -> Option<AudioFrame> {
-        let template = self.last_emitted.clone()?;
+        // `last_emitted.clone()`, with the PCM copy taken from the pool when
+        // it is enabled (same samples).
+        let last = self.last_emitted.as_ref()?;
+        let template = AudioFrame {
+            samples: crate::pcm_pool::take_pcm_copy(&last.samples),
+            sample_rate: last.sample_rate,
+            channels: last.channels,
+            duration: last.duration,
+            timestamp: last.timestamp,
+        };
         if self.consecutive_concealed >= self.config.max_consecutive_concealed {
             // Past this, the far end is gone rather than jittery. Emitting
             // silence is honest; repeating is a buzz that sounds like us.
