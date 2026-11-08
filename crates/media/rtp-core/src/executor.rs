@@ -33,6 +33,13 @@
 //! - [`MediaExecutorConfig::fast_ssrc_hash`]: SSRC-keyed maps on the packet
 //!   path (SRTP rollover and replay state, session streams) use a keyed
 //!   SplitMix64 hasher instead of SipHash.
+//! - [`MediaExecutorConfig::inline_decode`]: the media layer installs an
+//!   [`InlineMediaSink`] on each dialog it can decode synchronously (G.711),
+//!   so reorder, decode and pacing run on the socket owner too, instead of on
+//!   the dialog's own receive task.
+//! - [`MediaExecutorConfig::pcm_pool`]: decoded and concealed PCM buffers on
+//!   the media path are reused through a small per-thread pool instead of
+//!   being allocated per frame.
 //!
 //! Every decision is read when an object is built (a transport starts, a
 //! session or SRTP context is created, a poller starts), never per packet.
@@ -133,6 +140,15 @@ pub struct MediaExecutorConfig {
     pub tx_batch: bool,
     /// SSRC-keyed maps on the packet path use the keyed fast hasher.
     pub fast_ssrc_hash: bool,
+    // ---- Media-layer inline receive (decode and PCM reuse on the owner) ----
+    /// The media layer decodes, reorders and paces a G.711 dialog's inbound
+    /// audio inline on the socket owner, through the session's
+    /// [`InlineMediaSink`], instead of on the dialog's receive task.
+    pub inline_decode: bool,
+    /// Decoded and concealed PCM buffers on the media path are reused through
+    /// a small per-thread pool instead of being allocated per frame.
+    pub pcm_pool: bool,
+    // ---- End media-layer inline receive ----
 }
 
 impl Default for MediaExecutorConfig {
@@ -151,6 +167,9 @@ impl MediaExecutorConfig {
             lane_tx: false,
             tx_batch: false,
             fast_ssrc_hash: false,
+            // Media-layer inline receive.
+            inline_decode: false,
+            pcm_pool: false,
         }
     }
 
@@ -163,6 +182,9 @@ impl MediaExecutorConfig {
             lane_tx: true,
             tx_batch: true,
             fast_ssrc_hash: true,
+            // Media-layer inline receive.
+            inline_decode: true,
+            pcm_pool: true,
         }
     }
 
@@ -202,6 +224,22 @@ impl MediaExecutorConfig {
         self
     }
 
+    // ---- Media-layer inline receive ----
+
+    /// Set [`Self::inline_decode`].
+    pub fn with_inline_decode(mut self, enabled: bool) -> Self {
+        self.inline_decode = enabled;
+        self
+    }
+
+    /// Set [`Self::pcm_pool`].
+    pub fn with_pcm_pool(mut self, enabled: bool) -> Self {
+        self.pcm_pool = enabled;
+        self
+    }
+
+    // ---- End media-layer inline receive ----
+
     /// Check the configuration without installing it.
     ///
     /// A switch whose prerequisite is off is not an error: it reads as off
@@ -240,6 +278,21 @@ impl MediaExecutorConfig {
     pub fn fast_ssrc_hash_active(&self) -> bool {
         self.is_v2() && self.fast_ssrc_hash
     }
+
+    // ---- Media-layer inline receive ----
+
+    /// Whether the media layer offers an inline decoding sink to new
+    /// sessions.
+    pub fn inline_decode_active(&self) -> bool {
+        self.is_v2() && self.inline_decode
+    }
+
+    /// Whether the media path reuses PCM buffers through the per-thread pool.
+    pub fn pcm_pool_active(&self) -> bool {
+        self.is_v2() && self.pcm_pool
+    }
+
+    // ---- End media-layer inline receive ----
 }
 
 /// Why a [`MediaExecutorConfig`] was rejected.
@@ -358,6 +411,25 @@ pub fn tx_batch_enabled() -> bool {
 pub fn fast_ssrc_hash_enabled() -> bool {
     with_config(MediaExecutorConfig::fast_ssrc_hash_active)
 }
+
+// ---- Media-layer inline receive ----
+
+/// Whether the media layer should offer an inline decoding sink to a session
+/// it is setting up. Read when the media session starts.
+pub fn inline_decode_enabled() -> bool {
+    with_config(MediaExecutorConfig::inline_decode_active)
+}
+
+/// Whether the media path reuses PCM buffers through the per-thread pool.
+///
+/// Unlike the other switches this one is consulted per buffer (a
+/// thread-local flag and one load of the installed configuration), because a
+/// buffer can be returned by a different object than the one that took it.
+pub fn pcm_pool_enabled() -> bool {
+    with_config(MediaExecutorConfig::pcm_pool_active)
+}
+
+// ---- End media-layer inline receive ----
 
 /// Restores the previous per-thread override when dropped.
 #[doc(hidden)]
@@ -1124,6 +1196,8 @@ mod tests {
         assert!(!v1.lane_tx_active());
         assert!(!v1.tx_batch_active());
         assert!(!v1.fast_ssrc_hash_active());
+        assert!(!v1.inline_decode_active());
+        assert!(!v1.pcm_pool_active());
 
         let v2 = MediaExecutorConfig::v2();
         assert_eq!(v2.mode, MediaExecutorMode::V2);
@@ -1132,6 +1206,8 @@ mod tests {
         assert!(v2.lane_tx_active());
         assert!(v2.tx_batch_active());
         assert!(v2.fast_ssrc_hash_active());
+        assert!(v2.inline_decode_active());
+        assert!(v2.pcm_pool_active());
         assert!(v2.validate().is_ok());
     }
 
@@ -1142,6 +1218,8 @@ mod tests {
         assert!(!v1_with_switches.lane_timer_active(), "never under v1");
         assert!(!v1_with_switches.tx_batch_active(), "never under v1");
         assert!(!v1_with_switches.fast_ssrc_hash_active(), "never under v1");
+        assert!(!v1_with_switches.inline_decode_active(), "never under v1");
+        assert!(!v1_with_switches.pcm_pool_active(), "never under v1");
 
         let no_poller = MediaExecutorConfig::v2().with_lane_poller(false);
         assert!(no_poller.validate().is_ok());
@@ -1155,6 +1233,21 @@ mod tests {
         );
         assert!(no_poller.tx_batch_active());
         assert!(no_poller.fast_ssrc_hash_active());
+        assert!(
+            no_poller.inline_decode_active() && no_poller.pcm_pool_active(),
+            "inline decode and the PCM pool do not need the poller"
+        );
+
+        let no_inline = MediaExecutorConfig::v2()
+            .with_inline_decode(false)
+            .with_pcm_pool(false);
+        assert!(no_inline.validate().is_ok());
+        assert!(!no_inline.inline_decode_active());
+        assert!(!no_inline.pcm_pool_active());
+        assert!(no_inline.lane_poller_active() && no_inline.tx_batch_active());
+        assert!(MediaExecutorConfig::v2()
+            .with_inline_decode(false)
+            .pcm_pool_active());
 
         let one_off = MediaExecutorConfig::v2()
             .with_lane_timer(false)
@@ -1200,6 +1293,7 @@ mod tests {
         assert_eq!(media_executor_mode(), MediaExecutorMode::V2);
         assert!(lane_poller_enabled() && lane_timer_enabled() && lane_tx_enabled());
         assert!(tx_batch_enabled() && fast_ssrc_hash_enabled());
+        assert!(inline_decode_enabled() && pcm_pool_enabled());
         {
             let _inner = override_media_executor_config_on_this_thread(
                 MediaExecutorConfig::v2().with_lane_poller(false),
@@ -1210,6 +1304,7 @@ mod tests {
             let _v1 = override_media_executor_config_on_this_thread(MediaExecutorConfig::v1());
             assert_eq!(media_executor_mode(), MediaExecutorMode::V1);
             assert!(!tx_batch_enabled());
+            assert!(!inline_decode_enabled() && !pcm_pool_enabled());
         }
         assert_eq!(media_executor_config(), MediaExecutorConfig::v2());
         drop(outer);
